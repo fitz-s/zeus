@@ -2932,8 +2932,12 @@ class TestForwardMarketSubstrateProducer:
     def test_snapshot_refresh_writes_book_hash_transition_on_same_trade_substrate(self):
         conn = _make_persisted_substrate_conn()
         captured_at = datetime(2026, 5, 20, 12, 2, tzinfo=timezone.utc)
+        ms._prev_orderbook_hash_by_market.pop("cond-transition", None)
 
         class SideChangingClob:
+            def __init__(self) -> None:
+                self.orderbook_calls = 0
+
             def get_clob_market_info(self, condition_id: str) -> dict:
                 return {
                     "condition_id": condition_id,
@@ -2945,13 +2949,15 @@ class TestForwardMarketSubstrateProducer:
                 }
 
             def get_orderbook_snapshot(self, token_id: str) -> dict:
+                self.orderbook_calls += 1
+                ask = "0.42" if self.orderbook_calls == 1 else "0.43"
                 return {
                     "asset_id": token_id,
                     "tick_size": "0.01",
                     "min_order_size": "5",
                     "neg_risk": True,
                     "bids": [{"price": "0.41", "size": "100"}],
-                    "asks": [{"price": "0.42", "size": "100"}],
+                    "asks": [{"price": ask, "size": "100"}],
                 }
 
             def get_fee_rate(self, token_id: str) -> float:
@@ -2997,17 +3003,28 @@ class TestForwardMarketSubstrateProducer:
             ],
         }
 
-        summary = ms.refresh_executable_market_substrate_snapshots(
+        clob = SideChangingClob()
+        first_summary = ms.refresh_executable_market_substrate_snapshots(
             conn,
             markets=[market],
-            clob=SideChangingClob(),
+            clob=clob,
             captured_at=captured_at,
-            max_outcomes=2,
+            max_outcomes=1,
+        )
+        second_summary = ms.refresh_executable_market_substrate_snapshots(
+            conn,
+            markets=[market],
+            clob=clob,
+            captured_at=captured_at + timedelta(seconds=1),
+            max_outcomes=1,
         )
 
-        assert summary["attempted"] == 2
-        assert summary["inserted"] == 2
-        assert summary["failed"] == 0
+        assert first_summary["attempted"] == 1
+        assert first_summary["inserted"] == 1
+        assert first_summary["failed"] == 0
+        assert second_summary["attempted"] == 1
+        assert second_summary["inserted"] == 1
+        assert second_summary["failed"] == 0
         assert conn.execute(
             "SELECT COUNT(*) FROM executable_market_snapshots WHERE condition_id = 'cond-transition'"
         ).fetchone()[0] == 2

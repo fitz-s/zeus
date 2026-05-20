@@ -1887,6 +1887,13 @@ files:
     write_routes: []
     downstream:
     - src/state/db.py
+  src/state/schema/book_hash_transitions_schema.py:
+    zone: K2_runtime
+    authority_role: book_hash_transition_schema_owner
+    why: "Phase 2 T1 schema owner for book_hash_transitions DDL. Active owner is trade DB via init_schema_trade_only; init_schema still creates a world legacy ghost shell until cleanup so existing production DBs remain readable."
+    downstream:
+    - src/state/db.py
+    - src/state/book_hash_transitions.py
   src/state/decision_events.py:
     zone: K2_runtime
     authority_role: decision_event_instrumentation

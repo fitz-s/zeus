@@ -4,7 +4,7 @@
 """Antibody test: INV-book-hash-transitions-completeness
 
 Invariant: every `raw_orderbook_hash` change observed in active
-`executable_market_snapshots` (trade DB) since T1_LAUNCH_DATE has a
+`executable_market_snapshots` (trade DB) since T1_LAUNCH_AT has a
 corresponding `book_hash_transitions` row.
 
 Specifically: for each market in the last 24h of executable snapshots, count
@@ -23,9 +23,10 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-# T1_LAUNCH_DATE: set to 2026-05-21 (production-pass activation date).
-# Antibody looks back from this date; production pass updates this constant.
-T1_LAUNCH_DATE = "2026-05-21"
+# T1_LAUNCH_AT: production-pass activation boundary. The antibody does not
+# scan pre-launch executable snapshots, where book_hash transition persistence
+# was not yet part of the live contract.
+T1_LAUNCH_AT = datetime(2026, 5, 20, tzinfo=timezone.utc)
 
 # 24h window for antibody check
 LOOKBACK_HOURS = 24
@@ -38,10 +39,9 @@ def test_inv_book_hash_transitions_completeness() -> None:
     Single trade-DB path; no ATTACH (INV-37 trivially honored).
     backfill rows (cycle_id IS NULL) and live rows both satisfy the invariant.
 
-    Invariant check uses a direct sqlite3.connect() so the test runs even
-    when the production wrappers (get_world_connection_read_only) are not
-    fully wired. The xfail fires because book_hash_transitions does not exist
-    until the production pass wires db.py + migration script.
+    Invariant check uses a direct read-only sqlite3 URI against the trade DB
+    so the live-only antibody can skip cleanly when the DB is absent. The table
+    must exist once init_schema_trade_only() or the operator migration has run.
     """
     from src.config import STATE_DIR
 
@@ -60,9 +60,11 @@ def test_inv_book_hash_transitions_completeness() -> None:
     # Both market_price_history.recorded_at and book_hash_transitions.observed_at
     # are written as ISO-8601 (e.g. "2026-05-20T12:34:56+00:00"). SQLite
     # datetime('now', ...) returns "YYYY-MM-DD HH:MM:SS" which sorts differently.
-    _cutoff_iso = (
-        datetime.now(tz=timezone.utc) - timedelta(hours=LOOKBACK_HOURS)
-    ).isoformat()
+    _cutoff = max(
+        datetime.now(tz=timezone.utc) - timedelta(hours=LOOKBACK_HOURS),
+        T1_LAUNCH_AT,
+    )
+    _cutoff_iso = _cutoff.isoformat()
 
     try:
         # Count distinct raw_orderbook_hash values per market in last 24h.
