@@ -1008,6 +1008,24 @@ tables:
       book_hash_transitions ownership moved to trade DB to co-locate with the
       executable_market_snapshots writer used by market_discovery.
 
+  - name: no_trade_events
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: "db.py:init_schema (daemon boot, SCHEMA_VERSION 15) + migration_script_no_trade_events_create_2026_05_21 (operator one-shot fallback)"
+    pk_col: "[market_slug, temperature_metric, target_date, observation_time, decision_seq]"
+    notes: >
+      Phase 2 T2 (PHASE_2_ULTRAPLAN.md v3.1 §5.2, sha 00c2399742, SCAFFOLD 2026-05-20):
+      instrumentation table for no-trade decisions. Columns per §5.2: market_slug,
+      temperature_metric, target_date, observation_time, decision_seq, reason
+      (NoTradeReason CHECK), reason_detail TEXT, observed_at, schema_version.
+      PK matches decision_events natural key for FK-like joins.
+      SCHEMA_VERSION 14→15 (production pass). writer/reader in
+      src/state/no_trade_events.py (write_no_trade_event(natural_key: DecisionNaturalKey, reason: NoTradeReason, reason_detail: Optional[str], observed_at: str, *, conn: sqlite3.Connection) — conn REQUIRED, INV-37);
+      producer wired at 69 evaluator.py callsites replacing raw rejection_reasons=[...]
+      strings/f-strings with NoTradeReason enum refs + reason_detail capture.
+      SCAFFOLD only — no production bodies until T2 production pass.
+
   - name: db_chunk_boundary_events
     db: world
     schema_class: world_class

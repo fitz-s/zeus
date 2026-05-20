@@ -1,0 +1,284 @@
+# Lifecycle: created=2026-05-20; last_reviewed=2026-05-20; last_reused=never
+# Purpose: Regression — cross-table decision_seq collision guard (BUG 1 fix).
+# Reuse: Verify allocate_decision_seq UNION logic; re-run after any change to either writer.
+# Authority basis: PHASE_2_ULTRAPLAN.md v3.1 §5.2 (sha 00c2399742); bot review BUG 1
+
+"""Regression test: write_no_trade_event + write_decision_event for the same 4-tuple
+must produce non-colliding decision_seq values.
+
+Scenario:
+  1. write_no_trade_event for 4-tuple A → expect seq=0
+  2. write_decision_event for SAME 4-tuple A → expect seq=1
+  3. INTERSECT on full 5-tuple PK across both tables → expect empty set (mutual exclusion)
+
+Uses real on-disk temp DBs (PRAGMA database_list check requires a real path).
+Monkeypatches ZEUS_WORLD_DB_PATH and db_writer_lock (no-op lock for test isolation).
+"""
+
+from __future__ import annotations
+
+import sqlite3
+from contextlib import contextmanager
+from pathlib import Path
+from typing import Generator
+from unittest.mock import patch
+
+import pytest
+
+from src.contracts.decision_natural_key import make_decision_natural_key
+from src.contracts.execution_intent import DecisionSourceContext
+from src.contracts.no_trade_reason import NoTradeReason
+from src.state.decision_events import write_decision_event
+from src.state.no_trade_events import write_no_trade_event
+
+
+# ---------------------------------------------------------------------------
+# DDL helpers
+# ---------------------------------------------------------------------------
+
+_DECISION_EVENTS_DDL = """
+CREATE TABLE decision_events (
+    market_slug         TEXT NOT NULL,
+    temperature_metric  TEXT NOT NULL,
+    target_date         TEXT NOT NULL,
+    observation_time    TEXT NOT NULL,
+    decision_seq        INTEGER NOT NULL,
+    condition_id        TEXT,
+    decision_event_id   TEXT,
+    decision_time       TEXT NOT NULL,
+    outcome             TEXT NOT NULL,
+    side                TEXT NOT NULL,
+    strategy_key        TEXT NOT NULL,
+    cycle_id            TEXT,
+    cycle_iteration     INTEGER,
+    p_posterior         REAL,
+    edge                REAL,
+    target_size_usd     REAL,
+    target_price        REAL,
+    forecast_time              TEXT,
+    provider_reported_time     TEXT,
+    observation_available_at   TEXT NOT NULL,
+    polymarket_end_anchor_source TEXT NOT NULL,
+    first_member_observed_time TEXT,
+    run_complete_time          TEXT,
+    zeus_submit_intent_time    TEXT,
+    venue_ack_time             TEXT,
+    first_inclusion_block_time TEXT,
+    finality_confirmed_time    TEXT,
+    clock_skew_estimate_ms_at_submit INTEGER,
+    raw_orderbook_hash_transition_delta_ms INTEGER,
+    schema_version INTEGER NOT NULL,
+    source         TEXT NOT NULL,
+    PRIMARY KEY (market_slug, temperature_metric, target_date, observation_time, decision_seq)
+);
+"""
+
+_NO_TRADE_EVENTS_DDL = """
+CREATE TABLE no_trade_events (
+    market_slug         TEXT NOT NULL,
+    temperature_metric  TEXT NOT NULL,
+    target_date         TEXT NOT NULL,
+    observation_time    TEXT NOT NULL,
+    decision_seq        INTEGER NOT NULL,
+    reason              TEXT NOT NULL,
+    reason_detail       TEXT,
+    observed_at         TEXT NOT NULL,
+    schema_version      INTEGER NOT NULL,
+    PRIMARY KEY (market_slug, temperature_metric, target_date, observation_time, decision_seq)
+);
+"""
+
+
+def _make_world_db(tmp_path: Path) -> tuple[Path, sqlite3.Connection]:
+    """Create a real on-disk world DB with both tables.
+
+    Returns (db_path, connection). Caller is responsible for closing.
+    """
+    db_path = tmp_path / "zeus-world.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    conn.execute(_DECISION_EVENTS_DDL)
+    conn.execute(_NO_TRADE_EVENTS_DDL)
+    conn.commit()
+    return db_path, conn
+
+
+@contextmanager
+def _noop_lock(*_args, **_kwargs) -> Generator[None, None, None]:
+    """No-op replacement for db_writer_lock (eliminates flock dependency in tests)."""
+    yield
+
+
+def _minimal_dsc() -> DecisionSourceContext:
+    """Minimal DecisionSourceContext satisfying all NOT NULL enforcements."""
+    return DecisionSourceContext(
+        first_member_observed_time="2026-05-20T00:00:00Z",
+        run_complete_time="2026-05-20T00:30:00Z",
+        zeus_submit_intent_time="2026-05-20T01:00:00Z",
+        venue_ack_time="2026-05-20T01:00:01Z",
+        observation_available_at="2026-05-19T12:00:00Z",
+        polymarket_end_anchor_source="gamma_explicit",
+        observation_time="2026-05-19T12:00:00Z",
+        decision_time="2026-05-20T01:00:00Z",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Tests
+# ---------------------------------------------------------------------------
+
+_MARKET_SLUG = "chicago-high-2026-06-15"
+_TEMP_METRIC = "high"
+_TARGET_DATE = "2026-06-15"
+_OBS_TIME = "2026-05-20T12:00:00Z"
+_OBS_AT = "2026-05-20T13:00:00Z"
+
+
+class TestCrossTableDecisionSeqNoCollision:
+    """decision_seq must never collide across decision_events and no_trade_events
+    for the same 4-tuple when using the shared allocate_decision_seq UNION allocator.
+    """
+
+    def test_no_trade_then_decision_seq_increments(self, tmp_path: Path) -> None:
+        """write_no_trade_event → seq=0, write_decision_event → seq=1 for same 4-tuple."""
+        db_path, conn = _make_world_db(tmp_path)
+
+        nk_placeholder = make_decision_natural_key(
+            market_slug=_MARKET_SLUG,
+            temperature_metric=_TEMP_METRIC,
+            target_date=_TARGET_DATE,
+            observation_time=_OBS_TIME,
+            decision_seq=0,  # ignored — overwritten by allocator
+        )
+
+        with patch("src.state.db.ZEUS_WORLD_DB_PATH", db_path), \
+             patch("src.state.db_writer_lock.db_writer_lock", _noop_lock):
+
+            # Step 1: write a no-trade rejection → expect seq=0
+            returned_key = write_no_trade_event(
+                nk_placeholder,
+                NoTradeReason.OBSERVATION_QUALITY_REJECTED,
+                "raw detail string",
+                _OBS_AT,
+                conn=conn,
+            )
+            assert returned_key[4] == 0, f"Expected no_trade seq=0, got {returned_key[4]}"
+
+            # Step 2: write a decision_event for SAME 4-tuple → expect seq=1
+            dsc = _minimal_dsc()
+            write_decision_event(
+                nk_placeholder,
+                dsc,
+                None,  # ekc not needed for seq allocation test
+                direction="YES",
+                strategy_key="center_buy",
+                target_size_usd=50.0,
+                limit_price=0.55,
+                conn=conn,
+            )
+
+            # Verify decision_seq in decision_events is 1 (not 0)
+            de_rows = conn.execute(
+                "SELECT decision_seq FROM decision_events WHERE market_slug=?",
+                (_MARKET_SLUG,),
+            ).fetchall()
+            assert len(de_rows) == 1
+            assert de_rows[0]["decision_seq"] == 1, (
+                f"Expected decision_events seq=1, got {de_rows[0]['decision_seq']}"
+            )
+
+        conn.close()
+
+    def test_mutual_exclusion_no_5tuple_overlap(self, tmp_path: Path) -> None:
+        """After writing one no-trade and one decision for same 4-tuple, INTERSECT on
+        full 5-tuple PK returns empty set (mutual exclusion invariant).
+        """
+        db_path, conn = _make_world_db(tmp_path)
+
+        nk_placeholder = make_decision_natural_key(
+            market_slug=_MARKET_SLUG,
+            temperature_metric=_TEMP_METRIC,
+            target_date=_TARGET_DATE,
+            observation_time=_OBS_TIME,
+            decision_seq=0,
+        )
+
+        with patch("src.state.db.ZEUS_WORLD_DB_PATH", db_path), \
+             patch("src.state.db_writer_lock.db_writer_lock", _noop_lock):
+
+            write_no_trade_event(
+                nk_placeholder,
+                NoTradeReason.OBSERVATION_QUALITY_REJECTED,
+                "detail",
+                _OBS_AT,
+                conn=conn,
+            )
+            dsc = _minimal_dsc()
+            write_decision_event(
+                nk_placeholder,
+                dsc,
+                None,
+                direction="YES",
+                strategy_key="center_buy",
+                target_size_usd=50.0,
+                limit_price=0.55,
+                conn=conn,
+            )
+
+            overlap = conn.execute(
+                """
+                SELECT market_slug, temperature_metric, target_date,
+                       observation_time, decision_seq
+                FROM decision_events
+                INTERSECT
+                SELECT market_slug, temperature_metric, target_date,
+                       observation_time, decision_seq
+                FROM no_trade_events
+                """
+            ).fetchall()
+
+        assert len(overlap) == 0, (
+            f"Mutual exclusion violated: {len(overlap)} 5-tuple(s) appear in both tables: "
+            + str([tuple(r) for r in overlap])
+        )
+        conn.close()
+
+    def test_decision_then_no_trade_seq_increments(self, tmp_path: Path) -> None:
+        """Reverse order: write_decision_event → seq=0, write_no_trade_event → seq=1."""
+        db_path, conn = _make_world_db(tmp_path)
+
+        nk_placeholder = make_decision_natural_key(
+            market_slug=_MARKET_SLUG,
+            temperature_metric=_TEMP_METRIC,
+            target_date=_TARGET_DATE,
+            observation_time=_OBS_TIME,
+            decision_seq=0,
+        )
+
+        with patch("src.state.db.ZEUS_WORLD_DB_PATH", db_path), \
+             patch("src.state.db_writer_lock.db_writer_lock", _noop_lock):
+
+            dsc = _minimal_dsc()
+            write_decision_event(
+                nk_placeholder,
+                dsc,
+                None,
+                direction="YES",
+                strategy_key="center_buy",
+                target_size_usd=50.0,
+                limit_price=0.55,
+                conn=conn,
+            )
+
+            returned_key = write_no_trade_event(
+                nk_placeholder,
+                NoTradeReason.OBSERVATION_QUALITY_REJECTED,
+                "detail after decision",
+                _OBS_AT,
+                conn=conn,
+            )
+            assert returned_key[4] == 1, (
+                f"Expected no_trade seq=1 (after decision seq=0), got {returned_key[4]}"
+            )
+
+        conn.close()

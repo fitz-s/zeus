@@ -3088,6 +3088,61 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                 _phase_value = candidate.market_phase.value
                 for _d in decisions:
                     _d.market_phase = _phase_value
+            # Phase 2 T2: write no_trade_events rows for rejected decisions.
+            # Fail-soft: logging/learning infrastructure must not crash the cycle.
+            # INV-37: caller opens the world-DB connection (conn required on writer).
+            if decisions:
+                _obs_time_for_no_trade: str = ""
+                if candidate.observation is not None:
+                    if isinstance(candidate.observation, dict):
+                        _obs_time_for_no_trade = str(
+                            candidate.observation.get("observation_time", "") or ""
+                        )
+                    else:
+                        _obs_time_for_no_trade = str(
+                            getattr(candidate.observation, "observation_time", "") or ""
+                        )
+                _no_trade_conn = None
+                try:
+                    from src.state.db import get_world_connection
+                    from src.state.db_writer_lock import WriteClass
+                    from src.state.no_trade_events import write_no_trade_event
+                    from src.contracts.decision_natural_key import make_decision_natural_key
+                    _no_trade_conn = get_world_connection(write_class=WriteClass.LIVE)
+                    for _nd in decisions:
+                        _enum = getattr(_nd, "rejection_reason_enum", None)
+                        if _enum is not None:
+                            try:
+                                _nte_key = make_decision_natural_key(
+                                    market_slug=str(candidate.slug or ""),
+                                    temperature_metric=str(candidate.temperature_metric or ""),
+                                    target_date=str(candidate.target_date or ""),
+                                    observation_time=_obs_time_for_no_trade,
+                                    decision_seq=0,  # overwritten by allocate_decision_seq inside writer
+                                )
+                                write_no_trade_event(
+                                    _nte_key,
+                                    _enum,
+                                    getattr(_nd, "rejection_reason_detail", None),
+                                    decision_time.isoformat(),
+                                    conn=_no_trade_conn,
+                                )
+                            except Exception as _nte_exc:
+                                logger.warning(
+                                    "[NO_TRADE_EVENT_WRITE_FAILED] slug=%s reason=%s exc=%s",
+                                    candidate.slug,
+                                    _enum,
+                                    _nte_exc,
+                                )
+                except Exception as _nte_conn_exc:
+                    logger.warning(
+                        "[NO_TRADE_EVENT_CONN_FAILED] slug=%s exc=%s",
+                        candidate.slug,
+                        _nte_conn_exc,
+                    )
+                finally:
+                    if _no_trade_conn is not None:
+                        _no_trade_conn.close()
             if decisions:
                 # Accumulate FDR health metrics into cycle summary
                 if any(getattr(d, "fdr_fallback_fired", False) for d in decisions):
