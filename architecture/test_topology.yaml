@@ -439,6 +439,8 @@ test_trust_policy:
     tests/test_lifecycle_pending_exit_guard.py: {created: "2026-05-19", last_used: "2026-05-19"}
     # 2026-05-19 codereview-may19-2 P0-1: entry gate consults full blocker set via `entries_blocked_reason`, not just risk/heartbeat/ws/quarantine subset.
     tests/test_entry_gate_authority_promotion.py: {created: "2026-05-19", last_used: "2026-05-19"}
+    # 2026-05-19 codereview-may19.md P0-1 structural refactor: _discovery_gates_allow_entries() is kwargs-only single authority; block_registry authoritative; fail-closed on registry-unavailable.
+    tests/test_cycle_runner_discovery_gate_authority.py: {created: "2026-05-19", last_used: "2026-05-19"}
     # 2026-05-19 codereview-may19-2 P0-2: executable forecast reader enforces source-clock causality (source_available_at/captured_at <= decision_time).
     tests/test_forecast_decision_time_causality.py: {created: "2026-05-19", last_used: "2026-05-19"}
     # 2026-05-19 codereview-may19-2 P1-1: ACK facts durable post-SDK-submit, independent of outer cycle commit.
@@ -635,6 +637,7 @@ categories:
     - tests/test_evaluator_metric_normalizer_failclosed.py
     - tests/test_execution_intent_typed_slippage.py
     - tests/test_entry_gate_authority_promotion.py
+    - tests/test_cycle_runner_discovery_gate_authority.py
     - tests/test_forecast_decision_time_causality.py
     - tests/test_lifecycle_pending_exit_guard.py
     - tests/test_lifecycle_terminal_predicate.py
