@@ -177,6 +177,11 @@ def get_trade_connection(
     return _connect(_zeus_trade_db_path(), write_class=write_class)
 
 
+def get_trade_connection_read_only() -> sqlite3.Connection:
+    """Read-only trade DB connection (write_class=None)."""
+    return get_trade_connection(write_class=None)
+
+
 def get_world_connection(
     *, write_class: WriteClass | str | None = None,
 ) -> sqlite3.Connection:
@@ -3287,7 +3292,9 @@ def init_schema_world_only(conn: Optional[sqlite3.Connection] = None) -> None:
 # ---------------------------------------------------------------------------
 _TRADE_CLASS_TABLES: frozenset[str] = frozenset({
     "_migrations_applied",
+    "book_hash_transitions",
     "execution_fact",
+    "executable_market_snapshots",
     "position_current",
     "position_events",
     "position_lots",
@@ -3768,6 +3775,12 @@ def init_schema_trade_only(conn: sqlite3.Connection) -> None:
 
     # Create the trade runtime tables (IF NOT EXISTS — idempotent).
     conn.executescript(_TRADE_CLASS_DDL)
+    # Executable market substrate is live execution evidence. The market
+    # discovery scheduler passes this same trade connection to snapshot_repo and
+    # book_hash_transitions so snapshot rows and hash transitions commit together.
+    init_snapshot_schema(conn)
+    from src.state.schema.book_hash_transitions_schema import ensure_table as _ensure_book_hash_transitions_table
+    _ensure_book_hash_transitions_table(conn)
     try:
         conn.execute("ALTER TABLE trade_decisions ADD COLUMN env TEXT NOT NULL DEFAULT 'live';")
     except sqlite3.OperationalError:

@@ -1883,7 +1883,7 @@ files:
   src/state/book_hash_transitions.py:
     zone: K2_runtime
     authority_role: book_hash_transition_persistence
-    why: "Phase 2 T1 (PHASE_2_ULTRAPLAN.md v3.1 §4, sha 00c2399742): orderbook microstructure transition log writer/reader for book_hash_transitions table (world DB). INV-37 honored — writer takes *, conn (single-conn path; no internal open). PRODUCTION: write_transition + read_transitions_by_market bodies filled; ensure_table wired into db.py init_schema; producer wired at market_scanner.py inside if _current_hash != _prior_hash block (SCHEMA_VERSION 14, PR #220)."
+    why: "Phase 2 T1 repaired 2026-05-20: orderbook microstructure transition log writer/reader for book_hash_transitions table co-located with active executable_market_snapshots on trade DB. INV-37 honored — writer takes *, conn (single-conn path; no internal open). ensure_table wired into db.py init_schema_trade_only; producer wired at market_scanner.py inside if _current_hash != _prior_hash block."
     write_routes: []
     downstream:
     - src/state/db.py

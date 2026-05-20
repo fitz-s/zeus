@@ -2408,7 +2408,7 @@ def capture_executable_market_snapshot(
             # deltas; book_hash_transitions CHECK (delta_ms >= 0) would reject
             # a negative value causing snapshot capture to abort.
             _hash_delta_ms = max(0, int((_now_ts - _prior_ts) * 1000))
-            # INV-37: conn is the world connection held by the caller (same conn
+            # INV-37: conn is the trade substrate connection held by the caller (same conn
             # as insert_snapshot above). No lock acquisition here; process-level
             # serialization is the caller's responsibility (ingest_main subprocess
             # lock chain). SAVEPOINT in write_transition provides within-connection

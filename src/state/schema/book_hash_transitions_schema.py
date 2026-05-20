@@ -1,7 +1,7 @@
 # Created: 2026-05-20
 # Last reused or audited: 2026-05-20
 # Authority basis: PHASE_2_ULTRAPLAN.md v3.1 §4.3 (sha 00c2399742)
-"""T1 — CREATE TABLE DDL for book_hash_transitions (world DB, production pass 2026-05-20).
+"""T1 — CREATE TABLE DDL for book_hash_transitions (trade DB, production pass 2026-05-20).
 
 Per §4.3: composite PK (market_slug, observed_at, transition_seq),
 CHECK (new_hash != prev_hash), CHECK (delta_ms >= 0),
@@ -44,7 +44,7 @@ def ensure_table(conn: sqlite3.Connection) -> None:
     """Create book_hash_transitions table + indices if they do not exist.
 
     Idempotent (IF NOT EXISTS). Called from two paths:
-      1. db.py init_schema (daemon boot, world DB) — wired at Phase 2 T1 production pass
+      1. db.py init_schema_trade_only (daemon boot, trade DB) — live substrate owner
       2. scripts/migrate_book_hash_transitions_create_2026_05_21.py — operator one-shot migration
     """
     conn.execute(CREATE_TABLE_SQL)

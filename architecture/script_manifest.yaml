@@ -1217,17 +1217,18 @@ scripts:
     dangerous_if_run: false
     dry_run_default: true
     apply_flag: "--apply"
-    target_db: state/zeus-world.db
+    target_db: state/zeus_trades.db
     read_targets: []
-    write_targets: [state/zeus-world.db]
+    write_targets: [state/zeus_trades.db]
     canonical_command: "python3 scripts/migrate_book_hash_transitions_create_2026_05_21.py [--db PATH] [--dry-run | --apply]"
     external_inputs: []
     delete_policy: retain_until_superseded
     reuse_when: >
-      Phase 2 T1 one-shot: idempotent CREATE TABLE + 2 indexes for
-      book_hash_transitions in world DB. Run once per DB that was deployed
-      before SCHEMA_VERSION 14 (daemon boot also calls ensure_table, but
-      this script is the operator-facing fallback). Safe to re-run; IF NOT EXISTS guards.
+      Live substrate repair one-shot: idempotent CREATE TABLE + 2 indexes for
+      book_hash_transitions in trade DB, co-located with active
+      executable_market_snapshots. Daemon boot also calls ensure_table through
+      init_schema_trade_only; this script is the operator-facing fallback.
+      Safe to re-run; IF NOT EXISTS guards.
     do_not_use_when: "Table and indexes already present (IF NOT EXISTS is idempotent; safe to re-run regardless)."
     promotion_barrier: "Requires explicit --apply flag; dry-run default shows what would be created."
     unguarded_write_rationale: "DDL only (CREATE TABLE IF NOT EXISTS); no data written; no PRAGMA user_version bump; idempotent."

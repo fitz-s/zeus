@@ -19,14 +19,11 @@ from typing import Any, Optional
 
 from src.contracts.executable_market_snapshot_v2 import ExecutableMarketSnapshotV2
 
-from src.state.connection_pair import WorldConnection
-
-
 SNAPSHOT_TABLE = "executable_market_snapshots"
 ABSENT_ORDERBOOK_SIDE = "ABSENT"
 
 
-def init_snapshot_schema(conn: WorldConnection) -> None:
+def init_snapshot_schema(conn: sqlite3.Connection) -> None:
     """Create the U1 append-only executable-market snapshot table."""
 
     conn.executescript(
@@ -96,7 +93,7 @@ def init_snapshot_schema(conn: WorldConnection) -> None:
             )
 
 
-def insert_snapshot(conn: WorldConnection, snapshot: ExecutableMarketSnapshotV2) -> None:
+def insert_snapshot(conn: sqlite3.Connection, snapshot: ExecutableMarketSnapshotV2) -> None:
     """Persist one immutable executable market snapshot."""
 
     conn.execute(
@@ -130,7 +127,7 @@ def insert_snapshot(conn: WorldConnection, snapshot: ExecutableMarketSnapshotV2)
 
 
 def get_snapshot(
-    conn: WorldConnection,
+    conn: sqlite3.Connection,
     snapshot_id: str,
 ) -> Optional[ExecutableMarketSnapshotV2]:
     """Return a snapshot by id or None when absent."""
@@ -148,7 +145,7 @@ def get_snapshot(
 
 
 def latest_snapshot_for_market(
-    conn: WorldConnection,
+    conn: sqlite3.Connection,
     condition_id: str,
     fresh_as_of: datetime,
 ) -> Optional[ExecutableMarketSnapshotV2]:

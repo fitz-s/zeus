@@ -51,6 +51,7 @@ from src.state.db import (
     log_market_source_contract_topology_facts,
 )
 from src.state.schema.v2_schema import apply_v2_schema
+from src.state.schema.book_hash_transitions_schema import ensure_table as ensure_book_hash_table
 from src.state.snapshot_repo import init_snapshot_schema, insert_snapshot
 
 
@@ -277,6 +278,7 @@ def _make_forward_substrate_conn() -> sqlite3.Connection:
 def _make_persisted_substrate_conn() -> sqlite3.Connection:
     conn = _make_forward_substrate_conn()
     init_snapshot_schema(conn)
+    ensure_book_hash_table(conn)
     return conn
 
 
@@ -2926,6 +2928,99 @@ class TestExecutableConditionIdsForUserChannelWS:
 
 class TestForwardMarketSubstrateProducer:
     """Forward substrate writer is explicit, authority-gated, and idempotent."""
+
+    def test_snapshot_refresh_writes_book_hash_transition_on_same_trade_substrate(self):
+        conn = _make_persisted_substrate_conn()
+        captured_at = datetime(2026, 5, 20, 12, 2, tzinfo=timezone.utc)
+
+        class SideChangingClob:
+            def get_clob_market_info(self, condition_id: str) -> dict:
+                return {
+                    "condition_id": condition_id,
+                    "tokens": [
+                        {"token_id": "cond-transition-yes"},
+                        {"token_id": "cond-transition-no"},
+                    ],
+                    "feesEnabled": True,
+                }
+
+            def get_orderbook_snapshot(self, token_id: str) -> dict:
+                return {
+                    "asset_id": token_id,
+                    "tick_size": "0.01",
+                    "min_order_size": "5",
+                    "neg_risk": True,
+                    "bids": [{"price": "0.41", "size": "100"}],
+                    "asks": [{"price": "0.42", "size": "100"}],
+                }
+
+            def get_fee_rate(self, token_id: str) -> float:
+                return 0
+
+        market = {
+            "event_id": "transition-event",
+            "slug": "highest-temperature-in-transition-on-may-22-2026",
+            "outcomes": [
+                {
+                    "title": "transition bin",
+                    "token_id": "cond-transition-yes",
+                    "no_token_id": "cond-transition-no",
+                    "market_id": "cond-transition",
+                    "condition_id": "cond-transition",
+                    "question_id": "cond-transition-question",
+                    "gamma_market_id": "cond-transition-gamma",
+                    "range_low": 1,
+                    "range_high": 2,
+                    "executable": True,
+                    "active": True,
+                    "closed": False,
+                    "accepting_orders": True,
+                    "enable_orderbook": True,
+                    "market_start_at": "2026-05-20T04:00:00+00:00",
+                    "market_end_at": "2026-05-22T12:00:00+00:00",
+                    "raw_gamma_payload_hash": "c" * 64,
+                    "token_map_raw": {
+                        "clobTokenIds": ["cond-transition-yes", "cond-transition-no"],
+                        "outcomes": ["Yes", "No"],
+                    },
+                    "gamma_market_raw": {
+                        "id": "cond-transition-gamma",
+                        "conditionId": "cond-transition",
+                        "questionID": "cond-transition-question",
+                        "active": True,
+                        "closed": False,
+                        "acceptingOrders": True,
+                        "enableOrderBook": True,
+                        "clobTokenIds": ["cond-transition-yes", "cond-transition-no"],
+                    },
+                }
+            ],
+        }
+
+        summary = ms.refresh_executable_market_substrate_snapshots(
+            conn,
+            markets=[market],
+            clob=SideChangingClob(),
+            captured_at=captured_at,
+            max_outcomes=2,
+        )
+
+        assert summary["attempted"] == 2
+        assert summary["inserted"] == 2
+        assert summary["failed"] == 0
+        assert conn.execute(
+            "SELECT COUNT(*) FROM executable_market_snapshots WHERE condition_id = 'cond-transition'"
+        ).fetchone()[0] == 2
+        transition = conn.execute(
+            """
+            SELECT market_slug, prev_hash, new_hash, delta_ms
+              FROM book_hash_transitions
+             WHERE market_slug = 'highest-temperature-in-transition-on-may-22-2026'
+            """
+        ).fetchone()
+        assert transition is not None
+        assert transition["prev_hash"] != transition["new_hash"]
+        assert transition["delta_ms"] >= 0
 
     def test_snapshot_refresh_budget_skips_expired_child_markets(self):
         conn = _make_persisted_substrate_conn()

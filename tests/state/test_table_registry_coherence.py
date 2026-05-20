@@ -43,7 +43,9 @@ import pytest
 _REPO_ROOT = Path(__file__).parent.parent.parent
 
 EXPECTED_RUNTIME_TRADE_TABLES = frozenset({
+    "book_hash_transitions",
     "execution_fact",
+    "executable_market_snapshots",
     "position_current",
     "position_events",
     "position_lots",
@@ -715,7 +717,8 @@ class TestA4ManifestReadyForBootWiring:
         from src.state.table_registry import DBIdentity, SchemaClass, _REGISTRY
 
         trade_table_names = frozenset({
-            "execution_fact", "position_current", "position_events",
+            "book_hash_transitions", "execution_fact", "executable_market_snapshots",
+            "position_current", "position_events",
             "position_lots", "settlement_command_events", "settlement_commands",
             "trade_decisions", "venue_command_events", "venue_commands",
             "venue_order_facts", "venue_submission_envelopes", "venue_trade_facts",
