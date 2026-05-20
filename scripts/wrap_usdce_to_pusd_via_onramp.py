@@ -10,10 +10,10 @@ CORRECT path discovered:
   Owner = 0x47ebfac3353314c788b96cdcbf41daadfe03629c (same as pUSD owner)
   USDCE NOT paused. eth_call simulation from Safe succeeded.
 
-Differs from Zeus's existing src/venue/polymarket_v2_adapter.py:_build_wrap_calldata
-which uses:
-  - selector 0xbf376c7a (wrap(address,uint256)) — wrong signature
+src/venue/polymarket_v2_adapter.py:_build_wrap_calldata previously used:
+  - selector 0xbf376c7a (wrap(address,uint256)) — wrong signature (V1, now deprecated)
   - target POLYGON_PUSD_WRAPPER_ADDRESS = 0x3A3BD7bb... (WCOL, V1 artifact, owner-locked)
+  Both replaced by this commit; kept as deprecated stubs in adapter for back-compat.
 
 This script:
   1. APPROVE USDCE → Onramp for amount
@@ -183,7 +183,7 @@ def main():
     pusd_post = erc20_balance(PUSD, safe)
     usdce_post = erc20_balance(USDCE, safe)
     delta_pusd = pusd_post - pusd_pre
-    delta_usdce = usdce_pre = usdce_bal - usdce_post
+    delta_usdce = usdce_bal - usdce_post
     print(f"  POST: USDC.e={usdce_post} pUSD={pusd_post}")
     print(f"  DELTA: USDC.e={-delta_usdce:+d}, pUSD={delta_pusd:+d}")
 
