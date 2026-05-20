@@ -1,10 +1,7 @@
 # Created: 2026-05-20
 # Last reused or audited: 2026-05-20
 # Authority basis: PHASE_2_ULTRAPLAN.md v3.1 §4.3 (sha 00c2399742)
-"""T1 SCAFFOLD — CREATE TABLE DDL for book_hash_transitions (world DB).
-
-DO NOT call from src/state/db.py in SCAFFOLD (production pass wires this).
-SCHEMA_VERSION bump (13→14) is a production-pass responsibility.
+"""T1 — CREATE TABLE DDL for book_hash_transitions (world DB, production pass 2026-05-20).
 
 Per §4.3: composite PK (market_slug, observed_at, transition_seq),
 CHECK (new_hash != prev_hash), CHECK (delta_ms >= 0),
@@ -13,6 +10,9 @@ schema_version CHECK (13, 14).
 from __future__ import annotations
 
 import sqlite3
+
+# Schema version stamped into each row; stays in sync with db.py SCHEMA_VERSION.
+SCHEMA_VERSION = 14
 
 
 CREATE_TABLE_SQL = """

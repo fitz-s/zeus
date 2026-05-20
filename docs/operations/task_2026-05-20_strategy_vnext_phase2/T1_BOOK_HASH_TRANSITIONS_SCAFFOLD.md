@@ -117,7 +117,7 @@ required.
 
 1. **SCHEMA_VERSION 13 → 14**: increment in `src/state/db.py` (world DB version constant). Verify current value is 13 before incrementing.
 2. **Wire `ensure_table(conn)`**: call `ensure_table(world_conn)` from `init_schema(conn)` in `src/state/db.py` world DB init path. Import from `src.state.schema.book_hash_transitions_schema`.
-3. **Fill `write_transition` body**: INSERT with all 8 columns; `transition_seq` derived atomically (MAX + 1 under caller-provided conn or separate SELECT FOR UPDATE equivalent).
+3. **Fill `write_transition` body**: INSERT with all 8 columns; `transition_seq` derived atomically via SAVEPOINT + `SELECT COALESCE(MAX(transition_seq), 0) + 1` under caller-provided conn (SQLite has no SELECT FOR UPDATE; SAVEPOINT is the native atomicity mechanism).
 4. **Fill `read_transitions_by_market` body**: SELECT ordered by `(observed_at, transition_seq) ASC`; `conn=None` path opens `get_world_connection_read_only()`.
 5. **Wire producer**: add `write_transition` call inside the `if _current_hash != _prior_hash:` block at lines **2170-2186** (see §3 for full sample call with correct `market_slug=snapshot.event_slug`, `observed_at` from `_now_ts`, and `delta_ms`).
 6. **Migration script**: `scripts/migrate_book_hash_transitions_create_2026_05_21.py` — idempotent CREATE TABLE + indexes, targets ZEUS_WORLD_DB_PATH.

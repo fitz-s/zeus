@@ -843,7 +843,7 @@ def get_connection(
 # CI hook scripts/check_schema_version.py diffs the sqlite_master hash of
 # a fresh-init DB against tests/state/_schema_pinned_hash.txt and fails
 # the PR if SCHEMA_VERSION did not change in lockstep.
-SCHEMA_VERSION = 13  # 2026-05-19 T1: decision_events table + backstop trigger + 3 indices (Path D natural-key, deid_v1_ namespace); polymarket_end_anchor_source DEFAULT 'unknown_legacy'
+SCHEMA_VERSION = 14  # 2026-05-20 T1: book_hash_transitions table + 2 indices (Phase 2 T1)
 
 
 def init_schema(
@@ -2456,6 +2456,10 @@ def init_schema(
     # to avoid DDL duplication — same pattern as SETTLEMENT_COMMAND_SCHEMA above.
     from src.state.chunk_boundary_events import ensure_table as _ensure_chunk_boundary_table
     _ensure_chunk_boundary_table(conn)
+
+    # Phase 2 T1 (2026-05-20): book_hash_transitions table + indices.
+    from src.state.schema.book_hash_transitions_schema import ensure_table as _ensure_book_hash_transitions_table
+    _ensure_book_hash_transitions_table(conn)
 
     # Phase 2: apply v2 schema (idempotent — safe to run on every boot).
     from src.state.schema.v2_schema import apply_v2_schema as _apply_v2_schema

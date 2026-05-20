@@ -14,9 +14,6 @@ transition row).
 Single world-DB read path (no ATTACH); INV-37 trivially honored.
 backfill-aware: `cycle_id IS NULL` rows are backfill; live rows carry a
 cycle_id. Both satisfy the completeness invariant.
-
-T1 SCAFFOLD: xfail because book_hash_transitions table does not exist
-until production pass wires db.py + migration script.
 """
 from __future__ import annotations
 
@@ -32,7 +29,6 @@ T1_LAUNCH_DATE = "2026-05-21"
 LOOKBACK_HOURS = 24
 
 
-@pytest.mark.xfail(reason="T1 SCAFFOLD — production pass implements")
 def test_inv_book_hash_transitions_completeness() -> None:
     """For every market with raw_orderbook_hash changes in the last 24h,
     book_hash_transitions must carry (distinct_raw_hash_count - 1) rows.
@@ -47,10 +43,13 @@ def test_inv_book_hash_transitions_completeness() -> None:
     """
     from src.state.db import ZEUS_WORLD_DB_PATH
 
-    # Open world DB directly (read-only URI). If the DB file is absent in
-    # this environment, sqlite3 will raise OperationalError on the first
-    # query — that is a legitimate xfail trigger (SCAFFOLD: table doesn't exist).
-    conn = sqlite3.connect(f"file:{ZEUS_WORLD_DB_PATH}?mode=ro", uri=True)
+    # Open world DB directly (read-only URI). Skip if DB absent (CI / worktree
+    # environment without a live world DB). This is a production-environment
+    # antibody only.
+    try:
+        conn = sqlite3.connect(f"file:{ZEUS_WORLD_DB_PATH}?mode=ro", uri=True)
+    except sqlite3.OperationalError:
+        pytest.skip("world DB not present in this environment — live-only antibody")
     conn.row_factory = sqlite3.Row
 
     try:
@@ -105,3 +104,86 @@ def test_inv_book_hash_transitions_completeness() -> None:
 
     finally:
         conn.close()
+
+
+def test_write_read_roundtrip_integration() -> None:
+    """Roundtrip: write_transition + read_transitions_by_market on in-memory DB.
+
+    Uses ensure_table to set up schema; exercises the full writer/reader path
+    without requiring the live world DB.
+    """
+    from src.state.book_hash_transitions import read_transitions_by_market, write_transition
+    from src.state.schema.book_hash_transitions_schema import SCHEMA_VERSION, ensure_table
+
+    conn = sqlite3.connect(":memory:")
+    ensure_table(conn)
+
+    write_transition(
+        market_slug="test-market-slug",
+        prev_hash="aaa",
+        new_hash="bbb",
+        observed_at="2026-05-21T00:00:00+00:00",
+        delta_ms=1500,
+        cycle_id=None,
+        conn=conn,
+    )
+
+    rows = read_transitions_by_market(
+        "test-market-slug",
+        since="2026-05-20T00:00:00+00:00",
+        conn=conn,
+    )
+
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["market_slug"] == "test-market-slug"
+    assert row["prev_hash"] == "aaa"
+    assert row["new_hash"] == "bbb"
+    assert row["transition_seq"] == 1
+    assert row["delta_ms"] == 1500
+    assert row["cycle_id"] is None
+    assert row["schema_version"] == SCHEMA_VERSION
+
+    conn.close()
+
+
+def test_write_transition_noop_on_same_hash() -> None:
+    """write_transition with prev_hash == new_hash must insert nothing."""
+    from src.state.book_hash_transitions import write_transition
+    from src.state.schema.book_hash_transitions_schema import ensure_table
+
+    conn = sqlite3.connect(":memory:")
+    ensure_table(conn)
+
+    write_transition(
+        market_slug="test-market",
+        prev_hash="same",
+        new_hash="same",
+        observed_at="2026-05-21T00:00:00+00:00",
+        delta_ms=0,
+        conn=conn,
+    )
+
+    count = conn.execute("SELECT COUNT(*) FROM book_hash_transitions").fetchone()[0]
+    assert count == 0, "no-op: prev_hash == new_hash must not insert"
+    conn.close()
+
+
+def test_write_transition_seq_increments() -> None:
+    """Two transitions at the same (market_slug, observed_at) get seq 1 and 2."""
+    from src.state.book_hash_transitions import write_transition
+    from src.state.schema.book_hash_transitions_schema import ensure_table
+
+    conn = sqlite3.connect(":memory:")
+    ensure_table(conn)
+
+    ts = "2026-05-21T00:00:00+00:00"
+    write_transition("m", "a", "b", ts, delta_ms=100, conn=conn)
+    write_transition("m", "b", "c", ts, delta_ms=200, conn=conn)
+
+    rows = conn.execute(
+        "SELECT transition_seq, prev_hash, new_hash FROM book_hash_transitions ORDER BY transition_seq"
+    ).fetchall()
+    assert rows[0] == (1, "a", "b")
+    assert rows[1] == (2, "b", "c")
+    conn.close()

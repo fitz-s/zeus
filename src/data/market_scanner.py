@@ -30,6 +30,7 @@ from src.contracts.executable_market_snapshot_v2 import (
     canonicalize_legacy_fee_rate_value,
     canonicalize_fee_details,
 )
+from src.state.book_hash_transitions import write_transition as _write_book_hash_transition
 from src.state.snapshot_repo import insert_snapshot
 from src.types import Bin
 from src.types.market import BinTopologyError, validate_bin_topology
@@ -2176,6 +2177,20 @@ def capture_executable_market_snapshot(
         _prior_hash, _prior_ts = _prior
         if _current_hash != _prior_hash:
             _hash_delta_ms = int((_now_ts - _prior_ts) * 1000)
+            # INV-37: conn is the world connection held by the caller (same conn
+            # as insert_snapshot above). No lock acquisition here; process-level
+            # serialization is the caller's responsibility (ingest_main subprocess
+            # lock chain). SAVEPOINT in write_transition provides within-connection
+            # atomicity for transition_seq assignment.
+            _write_book_hash_transition(
+                market_slug=snapshot.event_slug,
+                prev_hash=_prior_hash,
+                new_hash=_current_hash,
+                observed_at=datetime.fromtimestamp(_now_ts, tz=timezone.utc).isoformat(),
+                delta_ms=_hash_delta_ms,
+                cycle_id=None,
+                conn=conn,
+            )
     _prev_orderbook_hash_by_market[condition_id] = (_current_hash, _now_ts)
     return {
         "executable_snapshot_id": snapshot.snapshot_id,
