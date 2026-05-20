@@ -113,6 +113,7 @@ def read_transitions_by_market(
         from src.state.db import get_world_connection_read_only
         conn = get_world_connection_read_only()
 
+    prior_row_factory = conn.row_factory
     try:
         conn.row_factory = sqlite3.Row
         cursor = conn.execute(
@@ -125,7 +126,9 @@ def read_transitions_by_market(
             """,
             (market_slug, since),
         )
-        return [dict(row) for row in cursor.fetchall()]
+        rows = [dict(row) for row in cursor.fetchall()]
     finally:
+        conn.row_factory = prior_row_factory
         if own_conn:
             conn.close()
+    return rows

@@ -18,6 +18,7 @@ cycle_id. Both satisfy the completeness invariant.
 from __future__ import annotations
 
 import sqlite3
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -52,6 +53,15 @@ def test_inv_book_hash_transitions_completeness() -> None:
         pytest.skip("world DB not present in this environment — live-only antibody")
     conn.row_factory = sqlite3.Row
 
+    # Compute ISO-8601 cutoff in Python to avoid datetime('now',...) vs
+    # ISO-8601 TEXT format mismatch in SQLite lexicographic compare.
+    # Both market_price_history.recorded_at and book_hash_transitions.observed_at
+    # are written as ISO-8601 (e.g. "2026-05-20T12:34:56+00:00"). SQLite
+    # datetime('now', ...) returns "YYYY-MM-DD HH:MM:SS" which sorts differently.
+    _cutoff_iso = (
+        datetime.now(tz=timezone.utc) - timedelta(hours=LOOKBACK_HOURS)
+    ).isoformat()
+
     try:
         # Count distinct raw_orderbook_hash values per market in last 24h.
         # market_price_history.raw_orderbook_hash is TEXT (nullable pre-PR6 rows).
@@ -59,12 +69,12 @@ def test_inv_book_hash_transitions_completeness() -> None:
             """
             SELECT market_slug, COUNT(DISTINCT raw_orderbook_hash) AS distinct_count
             FROM market_price_history
-            WHERE recorded_at >= datetime('now', :lookback)
+            WHERE recorded_at >= :cutoff
               AND raw_orderbook_hash IS NOT NULL
             GROUP BY market_slug
             HAVING COUNT(DISTINCT raw_orderbook_hash) > 1
             """,
-            {"lookback": f"-{LOOKBACK_HOURS} hours"},
+            {"cutoff": _cutoff_iso},
         ).fetchall()
 
         if not hash_counts:
@@ -75,7 +85,6 @@ def test_inv_book_hash_transitions_completeness() -> None:
 
         # For each market, verify transitions count = distinct_count - 1.
         # book_hash_transitions table must exist (production pass wires this).
-        # SCAFFOLD: this query raises OperationalError "no such table" — xfail fires.
         missing: list[str] = []
         for row in hash_counts:
             market_slug = row["market_slug"]
@@ -86,9 +95,9 @@ def test_inv_book_hash_transitions_completeness() -> None:
                 SELECT COUNT(*) AS cnt
                 FROM book_hash_transitions
                 WHERE market_slug = ?
-                  AND observed_at >= datetime('now', ?)
+                  AND observed_at >= ?
                 """,
-                (market_slug, f"-{LOOKBACK_HOURS} hours"),
+                (market_slug, _cutoff_iso),
             ).fetchone()["cnt"]
 
             if transition_count < expected:

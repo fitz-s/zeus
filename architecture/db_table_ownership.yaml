@@ -997,17 +997,17 @@ tables:
     db: world
     schema_class: world_class
     schema_version_owner: SCHEMA_VERSION
-    created_by: migration_script_book_hash_transitions_create_2026_05_21
+    created_by: "db.py:init_schema (daemon boot, SCHEMA_VERSION 14) + migration_script_book_hash_transitions_create_2026_05_21 (operator one-shot fallback)"
     pk_col: "[market_slug, observed_at, transition_seq]"
     notes: >
-      Phase 2 T1 (PHASE_2_ULTRAPLAN.md v3 §4, sha 99875d4781): orderbook
+      Phase 2 T1 (PHASE_2_ULTRAPLAN.md v3.1 §4, sha 00c2399742, PR #220): orderbook
       microstructure transition log. Records prev_hash→new_hash with
       observed_at + transition_seq + delta_ms. Co-locates with
       market_price_history.raw_orderbook_hash (world DB) for single-DB
-      antibody read. SCHEMA_VERSION 13→14 (production pass). SCAFFOLD:
-      table DDL in src/state/schema/book_hash_transitions_schema.py;
-      writer/reader in src/state/book_hash_transitions.py (bodies=NotImplemented).
-      cycle_id=NULL for backfill rows; live rows carry cycle_id.
+      antibody read. SCHEMA_VERSION 13→14 (production pass complete).
+      writer/reader in src/state/book_hash_transitions.py (production bodies);
+      producer wired in market_scanner.py inside if _current_hash != _prior_hash block.
+      cycle_id=NULL for scanner-path rows; live cycle rows carry cycle_id.
 
   - name: db_chunk_boundary_events
     db: world

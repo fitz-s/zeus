@@ -43,11 +43,9 @@ CREATE INDEX IF NOT EXISTS idx_book_hash_transitions_new_hash
 def ensure_table(conn: sqlite3.Connection) -> None:
     """Create book_hash_transitions table + indices if they do not exist.
 
-    Idempotent (IF NOT EXISTS). Called by production-pass migration script
-    and by db.py init (production pass wires this — DO NOT call from db.py
-    in SCAFFOLD).
-
-    T1 SCAFFOLD — production pass wires the call site in db.py.
+    Idempotent (IF NOT EXISTS). Called from two paths:
+      1. db.py init_schema (daemon boot, world DB) — wired at Phase 2 T1 production pass
+      2. scripts/migrate_book_hash_transitions_create_2026_05_21.py — operator one-shot migration
     """
     conn.execute(CREATE_TABLE_SQL)
     conn.execute(CREATE_INDEX_MARKET_TIME_SQL)
