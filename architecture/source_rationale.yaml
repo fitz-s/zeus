@@ -1880,6 +1880,13 @@ files:
     - calibration_persistence_write
     downstream:
     - src/state/db.py
+  src/state/book_hash_transitions.py:
+    zone: K2_runtime
+    authority_role: book_hash_transition_persistence
+    why: "Phase 2 T1 (PHASE_2_ULTRAPLAN.md v3 §4, sha 99875d4781): orderbook microstructure transition log writer/reader for book_hash_transitions table (world DB). INV-37 honored — writer takes *, conn (single-conn path; no internal open). SCAFFOLD: bodies=NotImplementedError; production pass fills bodies + wires db.py + migration script. NOT_DAEMON_WIRED: producer wiring (market_scanner.py PR 6 delta block) deferred to production pass."
+    write_routes: []
+    downstream:
+    - src/state/db.py
   src/state/decision_events.py:
     zone: K2_runtime
     authority_role: decision_event_instrumentation

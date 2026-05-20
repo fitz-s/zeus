@@ -993,6 +993,22 @@ tables:
       Re-owned trade per 2026-05-17 audit. Writer:
       src/state/venue_command_repo.py:1869.
 
+  - name: book_hash_transitions
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: migration_script_book_hash_transitions_create_2026_05_21
+    pk_col: "[market_slug, observed_at, transition_seq]"
+    notes: >
+      Phase 2 T1 (PHASE_2_ULTRAPLAN.md v3 §4, sha 99875d4781): orderbook
+      microstructure transition log. Records prev_hash→new_hash with
+      observed_at + transition_seq + delta_ms. Co-locates with
+      market_price_history.raw_orderbook_hash (world DB) for single-DB
+      antibody read. SCHEMA_VERSION 13→14 (production pass). SCAFFOLD:
+      table DDL in src/state/schema/book_hash_transitions_schema.py;
+      writer/reader in src/state/book_hash_transitions.py (bodies=NotImplemented).
+      cycle_id=NULL for backfill rows; live rows carry cycle_id.
+
   - name: db_chunk_boundary_events
     db: world
     schema_class: world_class
