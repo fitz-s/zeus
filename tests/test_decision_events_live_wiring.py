@@ -101,9 +101,26 @@ def _noop_lock(*_args, **_kwargs) -> Generator[None, None, None]:
     yield
 
 
+_NO_TRADE_EVENTS_DDL = """
+CREATE TABLE no_trade_events (
+    market_slug         TEXT NOT NULL,
+    temperature_metric  TEXT NOT NULL,
+    target_date         TEXT NOT NULL,
+    observation_time    TEXT NOT NULL,
+    decision_seq        INTEGER NOT NULL,
+    reason              TEXT NOT NULL,
+    reason_detail       TEXT,
+    observed_at         TEXT NOT NULL,
+    schema_version      INTEGER NOT NULL,
+    PRIMARY KEY (market_slug, temperature_metric, target_date, observation_time, decision_seq)
+);
+"""
+
+
 def _setup_world_db(world_db_path: Path) -> None:
     conn = sqlite3.connect(str(world_db_path))
     conn.execute(_DECISION_EVENTS_DDL)
+    conn.execute(_NO_TRADE_EVENTS_DDL)
     conn.commit()
     conn.close()
 

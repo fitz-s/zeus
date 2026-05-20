@@ -771,6 +771,8 @@ SQLITE_CONNECT_ALLOWLIST: frozenset[str] = frozenset(
         # --- PR #219 V2 wrap path correction scripts (2026-05-20) ---
         "scripts/run_redeem_reconcile_with_onchain_proof.py",  # operator_invoked: one-shot Karachi redeem reconciliation; writes REDEEM_CONFIRMED to zeus_trades.db via with conn:
         "scripts/wrap_usdce_to_pusd_via_onramp.py",           # operator_invoked: one-shot standalone wrap runner; no DB writes (on-chain only)
+        # --- T2 Phase-2 no_trade_events scripts (2026-05-20) ---
+        "scripts/migrate_no_trade_events_create_2026_05_21.py",            # operator_invoked: idempotent CREATE TABLE/INDEX only; no PRAGMA user_version bump; not daemon path
     }
 )
 

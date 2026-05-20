@@ -2254,3 +2254,22 @@ CREATE INDEX idx_book_hash_transitions_market_time
 -- index: idx_book_hash_transitions_new_hash
 CREATE INDEX idx_book_hash_transitions_new_hash
     ON book_hash_transitions(new_hash);
+-- table: no_trade_events
+CREATE TABLE no_trade_events (
+    market_slug         TEXT NOT NULL,
+    temperature_metric  TEXT NOT NULL,
+    target_date         TEXT NOT NULL,
+    observation_time    TEXT NOT NULL,
+    decision_seq        INTEGER NOT NULL,
+    reason              TEXT NOT NULL CHECK (reason IN ('day0_observation_unavailable', 'day0_low_observation_unavailable', 'day0_current_obs_unavailable', 'day0_no_forecast_hours_remain', 'day0_low_causality_rejected', 'day0_forecast_insufficient_members', 'solar_dst_context_unavailable', 'observation_source_unauthorized', 'observation_quality_rejected', 'entry_forecast_rollout_blocked', 'invalid_support_index', 'support_index_mismatch', 'insufficient_bins', 'bin_topology_invalid', 'no_executable_bins', 'entry_forecast_reader_db_unavailable', 'entry_forecast_reader_rejected', 'ens_source_not_enabled', 'ens_fetch_failed', 'ens_fetch_insufficient_members', 'ens_insufficient_required_hour_members', 'ens_times_parse_error', 'ens_signal_construction_failed', 'ens_snapshot_persistence_failed', 'ens_snapshot_p_raw_persistence_failed', 'forecast_source_degraded', 'forecast_evidence_incomplete', 'unknown_forecast_source_family', 'forecast_provenance_incomplete', 'forecast_provenance_inconsistent', 'p_raw_invalid', 'dt7_boundary_day_ambiguous', 'executable_forecast_members_unit_mismatch', 'executable_forecast_member_extrema_invalid', 'authority_gate_db_fault', 'insufficient_verified_calibration', 'unsupported_calibration_source_id', 'p_cal_invalid', 'calibration_maturity_invalid', 'calibration_immature_no_platt', 'native_multibin_buy_no_flag_invalid', 'market_empty_orderbook', 'market_liquidity_error', 'crosscheck_unavailable', 'gfs_crosscheck_unavailable', 'model_conflict', 'alpha_target_mismatch', 'authority_violation', 'selected_edge_missing_support_index', 'selected_edge_no_token_payload', 'strategy_key_unclassified', 'confidence_band_insufficient', 'center_buy_ultra_low_price', 'reentry_blocked', 'token_cooldown', 'already_held_same_token', 'oracle_blacklisted', 'ddd_fail_closed', 'ddd_rail1_halt', 'kelly_sizing_error', 'policy_gated', 'execution_price_fee_rate_unavailable', 'execution_price_sizing_error', 'size_below_minimum', 'risk_limits_exceeded', 'uncategorized')),
+    reason_detail       TEXT,
+    observed_at         TEXT NOT NULL,
+    schema_version      INTEGER NOT NULL CHECK (schema_version IN (14, 15)),
+    PRIMARY KEY (market_slug, temperature_metric, target_date, observation_time, decision_seq)
+);
+-- index: idx_no_trade_events_market_time
+CREATE INDEX idx_no_trade_events_market_time
+    ON no_trade_events(market_slug, observed_at);
+-- index: idx_no_trade_events_reason
+CREATE INDEX idx_no_trade_events_reason
+    ON no_trade_events(reason);

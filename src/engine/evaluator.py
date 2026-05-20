@@ -119,6 +119,8 @@ from src.types.metric_identity import MetricIdentity
 from src.state.db import log_selection_family_fact, log_selection_hypothesis_fact
 from src.contracts.boundary_policy import boundary_ambiguous_refuses_signal
 from src.contracts.decision_evidence import DecisionEvidence
+from src.contracts.no_trade_reason import NoTradeReason
+from src.observability.counters import increment as _cnt_inc
 from src.contracts.ensemble_snapshot_provenance import assert_data_version_allowed, validate_members_unit
 from src.contracts.executable_market_snapshot_v2 import (
     MarketSnapshotMismatchError,
@@ -283,6 +285,14 @@ class EdgeDecision:
     # test fixtures — the sidecar key is omitted in that case.
     decision_evidence: Optional[DecisionEvidence] = None
 
+    # T2 Phase 2: no_trade instrumentation fields.
+    # rejection_reason_enum: NoTradeReason CATEGORY — set by _make_rejection_decision.
+    # rejection_reason_detail: free-form diagnostic — original f-string / str(exc) content.
+    # Both None on trade paths (should_trade=True) and pre-T2 callsites not yet migrated.
+    # Persisted to no_trade_events by cycle_runtime after evaluate_candidate returns.
+    rejection_reason_enum: Optional["NoTradeReason"] = None
+    rejection_reason_detail: Optional[str] = None
+
     def __post_init__(self) -> None:
         if self.decision_snapshot_id is None:
             raise ValueError(
@@ -304,8 +314,15 @@ def _make_rejection_decision(
     applied_validations: list[str],
     availability_status: str = "",
     p_raw=None,
+    rejection_reason_enum: Optional[NoTradeReason] = None,
+    rejection_reason_detail: Optional[str] = None,
 ) -> "EdgeDecision":
-    """Canonical ctor for pre-snapshot rejections. Stamps DSI sentinel."""
+    """Canonical ctor for pre-snapshot rejections. Stamps DSI sentinel.
+
+    rejection_reason_enum: NoTradeReason CATEGORY for no_trade_events persistence.
+    rejection_reason_detail: free-form diagnostic (original string / f-string content).
+    Both forwarded to EdgeDecision for cycle_runtime to persist after evaluate_candidate.
+    """
     return EdgeDecision(
         False,
         decision_id=_decision_id(),
@@ -316,6 +333,8 @@ def _make_rejection_decision(
         availability_status=availability_status,
         p_raw=p_raw,
         decision_snapshot_id=_PRE_SNAPSHOT_DSI_SENTINEL,
+        rejection_reason_enum=rejection_reason_enum,
+        rejection_reason_detail=rejection_reason_detail,
     )
 
 
@@ -1900,10 +1919,12 @@ def evaluate_candidate(
     if is_day0_mode and candidate.observation is None:
         return [_make_rejection_decision(
             rejection_stage="SIGNAL_QUALITY",
-            rejection_reasons=["Day0 observation unavailable"],
+            rejection_reasons=[NoTradeReason.DAY0_OBSERVATION_UNAVAILABLE.value],
             availability_status="DATA_UNAVAILABLE",
             selected_method=selected_method,
             applied_validations=["day0_observation"],
+            rejection_reason_enum=NoTradeReason.DAY0_OBSERVATION_UNAVAILABLE,
+            rejection_reason_detail="Day0 observation unavailable",
         )]
 
     if is_day0_mode:
@@ -1913,10 +1934,12 @@ def evaluate_candidate(
         if source_rejection_reason is not None:
             return [_make_rejection_decision(
                 rejection_stage="OBSERVATION_SOURCE_UNAUTHORIZED",
-                rejection_reasons=[source_rejection_reason],
+                rejection_reasons=[NoTradeReason.OBSERVATION_SOURCE_UNAUTHORIZED.value],
                 availability_status="DATA_UNAVAILABLE",
                 selected_method=selected_method,
                 applied_validations=["day0_observation", "observation_source_policy"],
+                rejection_reason_enum=NoTradeReason.OBSERVATION_SOURCE_UNAUTHORIZED,
+                rejection_reason_detail=source_rejection_reason,
             )]
         observation_quality_rejection = _day0_observation_quality_rejection_reason(
             city,
@@ -1933,10 +1956,12 @@ def evaluate_candidate(
             )
             return [_make_rejection_decision(
                 rejection_stage="SIGNAL_QUALITY",
-                rejection_reasons=[observation_quality_rejection],
+                rejection_reasons=[NoTradeReason.OBSERVATION_QUALITY_REJECTED.value],
                 availability_status=availability_status,
                 selected_method=selected_method,
                 applied_validations=["day0_observation", "observation_quality_gate"],
+                rejection_reason_enum=NoTradeReason.OBSERVATION_QUALITY_REJECTED,
+                rejection_reason_detail=observation_quality_rejection,
             )]
 
     entry_forecast_cfg: EntryForecastConfig | None = None
@@ -1947,10 +1972,12 @@ def evaluate_candidate(
         if live_entry_forecast_blocker is not None:
             return [_make_rejection_decision(
                 rejection_stage="SIGNAL_QUALITY",
-                rejection_reasons=[live_entry_forecast_blocker],
+                rejection_reasons=[NoTradeReason.ENTRY_FORECAST_ROLLOUT_BLOCKED.value],
                 availability_status="DATA_UNAVAILABLE",
                 selected_method=selected_method,
                 applied_validations=["entry_forecast_rollout", "legacy_entry_primary_fetch_blocked"],
+                rejection_reason_enum=NoTradeReason.ENTRY_FORECAST_ROLLOUT_BLOCKED,
+                rejection_reason_detail=live_entry_forecast_blocker,
             )]
 
     # Build the complete support vector first. Closed/non-accepting shoulder
@@ -1970,18 +1997,27 @@ def evaluate_candidate(
             try:
                 declared_support_index = int(declared_support_index)
             except (TypeError, ValueError):
+                _invalid_si_detail = f"invalid support_index for {o.get('title', '')!r}"
                 return [_make_rejection_decision(
                     rejection_stage="MARKET_FILTER",
-                    rejection_reasons=[f"invalid support_index for {o.get('title', '')!r}"],
+                    rejection_reasons=[NoTradeReason.INVALID_SUPPORT_INDEX.value],
                     selected_method=selected_method,
                     applied_validations=["market_filter", "support_topology"],
+                    rejection_reason_enum=NoTradeReason.INVALID_SUPPORT_INDEX,
+                    rejection_reason_detail=_invalid_si_detail,
                 )]
             if declared_support_index != support_index:
+                _si_mismatch_detail = (
+                    f"support_index mismatch for {o.get('title', '')!r}: "
+                    f"declared {declared_support_index}, expected {support_index}"
+                )
                 return [_make_rejection_decision(
                     rejection_stage="MARKET_FILTER",
-                    rejection_reasons=[ f"support_index mismatch for {o.get('title', '')!r}: " f"declared {declared_support_index}, expected {support_index}" ],
+                    rejection_reasons=[NoTradeReason.SUPPORT_INDEX_MISMATCH.value],
                     selected_method=selected_method,
                     applied_validations=["market_filter", "support_topology"],
+                    rejection_reason_enum=NoTradeReason.SUPPORT_INDEX_MISMATCH,
+                    rejection_reason_detail=_si_mismatch_detail,
                 )]
 
         bins.append(Bin(low=low, high=high, label=o["title"], unit=city.settlement_unit))
@@ -2013,9 +2049,11 @@ def evaluate_candidate(
     if len(bins) < 3:
         return [_make_rejection_decision(
             rejection_stage="MARKET_FILTER",
-            rejection_reasons=["< 3 parseable bins"],
+            rejection_reasons=[NoTradeReason.INSUFFICIENT_BINS.value],
             selected_method=selected_method,
             applied_validations=["market_filter"],
+            rejection_reason_enum=NoTradeReason.INSUFFICIENT_BINS,
+            rejection_reason_detail="< 3 parseable bins",
         )]
 
     try:
@@ -2023,18 +2061,22 @@ def evaluate_candidate(
     except BinTopologyError as e:
         return [_make_rejection_decision(
             rejection_stage="MARKET_FILTER",
-            rejection_reasons=[f"bin topology: {e}"],
+            rejection_reasons=[NoTradeReason.BIN_TOPOLOGY_INVALID.value],
             selected_method=selected_method,
             applied_validations=["validate_bin_topology"],
+            rejection_reason_enum=NoTradeReason.BIN_TOPOLOGY_INVALID,
+            rejection_reason_detail=f"bin topology: {e}",
         )]
     executable_mask = np.asarray(executable_mask_values, dtype=bool)
     executable_count = int(np.count_nonzero(executable_mask))
     if executable_count < 1:
         return [_make_rejection_decision(
             rejection_stage="MARKET_FILTER",
-            rejection_reasons=["support topology has no executable bins"],
+            rejection_reasons=[NoTradeReason.NO_EXECUTABLE_BINS.value],
             selected_method=selected_method,
             applied_validations=["market_filter", "support_topology"],
+            rejection_reason_enum=NoTradeReason.NO_EXECUTABLE_BINS,
+            rejection_reason_detail="support topology has no executable bins",
         )]
     p_raw_topology = {
         "schema_version": 1,
@@ -2107,10 +2149,12 @@ def evaluate_candidate(
         if conn is None or not hasattr(conn, "execute"):
             return [_make_rejection_decision(
                 rejection_stage="SIGNAL_QUALITY",
-                rejection_reasons=["ENTRY_FORECAST_READER_DB_UNAVAILABLE"],
+                rejection_reasons=[NoTradeReason.ENTRY_FORECAST_READER_DB_UNAVAILABLE.value],
                 availability_status="DATA_UNAVAILABLE",
                 selected_method=selected_method,
                 applied_validations=["entry_forecast_reader", "legacy_entry_primary_fetch_blocked"],
+                rejection_reason_enum=NoTradeReason.ENTRY_FORECAST_READER_DB_UNAVAILABLE,
+                rejection_reason_detail="ENTRY_FORECAST_READER_DB_UNAVAILABLE",
             )]
         decision_instant = decision_time or datetime.now(timezone.utc)
         track = track_for_metric(entry_forecast_cfg, temperature_metric.temperature_metric)
@@ -2137,10 +2181,12 @@ def evaluate_candidate(
         if not reader_result.ok or reader_result.bundle is None:
             return [_make_rejection_decision(
                 rejection_stage="SIGNAL_QUALITY",
-                rejection_reasons=[reader_result.reason_code],
+                rejection_reasons=[NoTradeReason.ENTRY_FORECAST_READER_REJECTED.value],
                 availability_status="DATA_UNAVAILABLE",
                 selected_method=selected_method,
                 applied_validations=["entry_forecast_reader", "legacy_entry_primary_fetch_blocked"],
+                rejection_reason_enum=NoTradeReason.ENTRY_FORECAST_READER_REJECTED,
+                rejection_reason_detail=reader_result.reason_code,
             )]
         ens_result = reader_result.bundle.to_ens_result()
     else:
@@ -2156,44 +2202,58 @@ def evaluate_candidate(
         except SourceNotEnabled as e:
             return [_make_rejection_decision(
                 rejection_stage="SIGNAL_QUALITY",
-                rejection_reasons=[str(e)],
+                rejection_reasons=[NoTradeReason.ENS_SOURCE_NOT_ENABLED.value],
                 availability_status="DATA_STALE",
                 selected_method=selected_method,
                 applied_validations=["ens_fetch", "forecast_source_policy"],
+                rejection_reason_enum=NoTradeReason.ENS_SOURCE_NOT_ENABLED,
+                rejection_reason_detail=str(e),
             )]
         except Exception as e:
             return [_make_rejection_decision(
                 rejection_stage="SIGNAL_QUALITY",
-                rejection_reasons=[str(e)],
+                rejection_reasons=[NoTradeReason.ENS_FETCH_FAILED.value],
                 availability_status=_availability_status_for_error(e),
                 selected_method=selected_method,
                 applied_validations=["ens_fetch"],
+                rejection_reason_enum=NoTradeReason.ENS_FETCH_FAILED,
+                rejection_reason_detail=str(e),
             )]
     if ens_result is None:
         return [_make_rejection_decision(
             rejection_stage="SIGNAL_QUALITY",
-            rejection_reasons=["ENS fetch failed or < 51 members"],
+            rejection_reasons=[NoTradeReason.ENS_FETCH_INSUFFICIENT_MEMBERS.value],
             availability_status="DATA_UNAVAILABLE",
             selected_method=selected_method,
             applied_validations=["ens_fetch"],
+            rejection_reason_enum=NoTradeReason.ENS_FETCH_INSUFFICIENT_MEMBERS,
+            rejection_reason_detail="ENS fetch failed or < 51 members",
         )]
     n_members_meta = ens_result.get("n_members")
     _n_members_floor = settings["ensemble"].get("min_members_floor", ensemble_member_count())
     if n_members_meta is not None and int(n_members_meta) < _n_members_floor:
         return [_make_rejection_decision(
             rejection_stage="SIGNAL_QUALITY",
-            rejection_reasons=["ENS fetch failed or < 51 members"],
+            rejection_reasons=[NoTradeReason.ENS_FETCH_INSUFFICIENT_MEMBERS.value],
             availability_status="DATA_UNAVAILABLE",
             selected_method=selected_method,
             applied_validations=["ens_fetch"],
+            rejection_reason_enum=NoTradeReason.ENS_FETCH_INSUFFICIENT_MEMBERS,
+            rejection_reason_detail="ENS fetch failed or < 51 members",
         )]
     if ens_result.get("degradation_level") == "DEGRADED_FORECAST_FALLBACK":
+        _degraded_src = ens_result.get('source_id', 'unknown')
         return [_make_rejection_decision(
             rejection_stage="SIGNAL_QUALITY",
-            rejection_reasons=[ f"Forecast source {ens_result.get('source_id', 'unknown')} is " "DEGRADED_FORECAST_FALLBACK; entry requires primary forecast authority" ],
+            rejection_reasons=[NoTradeReason.FORECAST_SOURCE_DEGRADED.value],
             availability_status="DATA_STALE",
             selected_method=selected_method,
             applied_validations=["ens_fetch", "forecast_source_policy"],
+            rejection_reason_enum=NoTradeReason.FORECAST_SOURCE_DEGRADED,
+            rejection_reason_detail=(
+                f"Forecast source {_degraded_src} is "
+                "DEGRADED_FORECAST_FALLBACK; entry requires primary forecast authority"
+            ),
         )]
     forecast_evidence_errors = _entry_forecast_evidence_errors(
         ens_result,
@@ -2203,10 +2263,15 @@ def evaluate_candidate(
     if forecast_evidence_errors:
         return [_make_rejection_decision(
             rejection_stage="SIGNAL_QUALITY",
-            rejection_reasons=[ "Forecast source evidence incomplete for executable entry: " + ", ".join(forecast_evidence_errors) ],
+            rejection_reasons=[NoTradeReason.FORECAST_EVIDENCE_INCOMPLETE.value],
             availability_status="DATA_UNAVAILABLE",
             selected_method=selected_method,
             applied_validations=["ens_fetch", "forecast_source_evidence"],
+            rejection_reason_enum=NoTradeReason.FORECAST_EVIDENCE_INCOMPLETE,
+            rejection_reason_detail=(
+                "Forecast source evidence incomplete for executable entry: "
+                + ", ".join(forecast_evidence_errors)
+            ),
         )]
     period_extrema_members = ens_result.get("period_extrema_members")
     using_period_extrema = period_extrema_members is not None
@@ -2219,10 +2284,12 @@ def evaluate_candidate(
         except (KeyError, TypeError) as e:
             return [_make_rejection_decision(
                 rejection_stage="SIGNAL_QUALITY",
-                rejection_reasons=[str(e)],
+                rejection_reasons=[NoTradeReason.ENS_TIMES_PARSE_ERROR.value],
                 availability_status="DATA_STALE",
                 selected_method=selected_method,
                 applied_validations=["ens_fetch"],
+                rejection_reason_enum=NoTradeReason.ENS_TIMES_PARSE_ERROR,
+                rejection_reason_detail=str(e),
             )]
         try:
             ens_tz_hours = select_hours_for_target_date(
@@ -2239,10 +2306,12 @@ def evaluate_candidate(
         if day0_temporal_context is None:
             return [_make_rejection_decision(
                 rejection_stage="SIGNAL_QUALITY",
-                rejection_reasons=["Solar/DST context unavailable for Day0"],
+                rejection_reasons=[NoTradeReason.SOLAR_DST_CONTEXT_UNAVAILABLE.value],
                 availability_status="DATA_STALE",
                 selected_method=selected_method,
                 applied_validations=["day0_observation", "solar_context"],
+                rejection_reason_enum=NoTradeReason.SOLAR_DST_CONTEXT_UNAVAILABLE,
+                rejection_reason_detail="Solar/DST context unavailable for Day0",
             )]
         if ens_tz_hours is not None:
             required_hour_indices = _remaining_hour_indices_for_day0(
@@ -2254,10 +2323,12 @@ def evaluate_candidate(
             if len(required_hour_indices) == 0:
                 return [_make_rejection_decision(
                     rejection_stage="SIGNAL_QUALITY",
-                    rejection_reasons=["No Day0 forecast hours remain for target date"],
+                    rejection_reasons=[NoTradeReason.DAY0_NO_FORECAST_HOURS_REMAIN.value],
                     availability_status="DATA_STALE",
                     selected_method=selected_method,
                     applied_validations=["day0_observation", "ens_fetch"],
+                    rejection_reason_enum=NoTradeReason.DAY0_NO_FORECAST_HOURS_REMAIN,
+                    rejection_reason_detail="No Day0 forecast hours remain for target date",
                 )]
     if not using_period_extrema and not _validate_ensemble_for_required_hours(
         ens_result,
@@ -2265,10 +2336,12 @@ def evaluate_candidate(
     ):
         return [_make_rejection_decision(
             rejection_stage="SIGNAL_QUALITY",
-            rejection_reasons=["ENS fetch failed, < 51 members, or insufficient finite required-hour members"],
+            rejection_reasons=[NoTradeReason.ENS_INSUFFICIENT_REQUIRED_HOUR_MEMBERS.value],
             availability_status="DATA_UNAVAILABLE",
             selected_method=selected_method,
             applied_validations=["ens_fetch"],
+            rejection_reason_enum=NoTradeReason.ENS_INSUFFICIENT_REQUIRED_HOUR_MEMBERS,
+            rejection_reason_detail="ENS fetch failed, < 51 members, or insufficient finite required-hour members",
         )]
 
     epistemic = EpistemicContext.enter_cycle(fallback_override=decision_time)
@@ -2289,10 +2362,12 @@ def evaluate_candidate(
         except ValueError as e:
             return [_make_rejection_decision(
                 rejection_stage="SIGNAL_QUALITY",
-                rejection_reasons=[str(e)],
+                rejection_reasons=[NoTradeReason.ENS_SIGNAL_CONSTRUCTION_FAILED.value],
                 availability_status="DATA_STALE",
                 selected_method=selected_method,
                 applied_validations=["ens_fetch"],
+                rejection_reason_enum=NoTradeReason.ENS_SIGNAL_CONSTRUCTION_FAILED,
+                rejection_reason_detail=str(e),
             )]
 
     decision_reference = ens_result.get("fetch_time")
@@ -2312,19 +2387,23 @@ def evaluate_candidate(
         if extrema is None:
             return [_make_rejection_decision(
                 rejection_stage="SIGNAL_QUALITY",
-                rejection_reasons=["No Day0 forecast hours remain for target date"],
+                rejection_reasons=[NoTradeReason.DAY0_NO_FORECAST_HOURS_REMAIN.value],
                 availability_status="DATA_STALE",
                 selected_method=selected_method,
                 applied_validations=["day0_observation", "ens_fetch"],
+                rejection_reason_enum=NoTradeReason.DAY0_NO_FORECAST_HOURS_REMAIN,
+                rejection_reason_detail="No Day0 forecast hours remain for target date",
             )]
 
         if temperature_metric.is_low() and candidate.observation.low_so_far is None:
             return [_make_rejection_decision(
                 rejection_stage="OBSERVATION_UNAVAILABLE_LOW",
-                rejection_reasons=["Day0 low observation unavailable"],
+                rejection_reasons=[NoTradeReason.DAY0_LOW_OBSERVATION_UNAVAILABLE.value],
                 availability_status="DATA_UNAVAILABLE",
                 selected_method=selected_method,
                 applied_validations=["day0_observation", "ens_fetch"],
+                rejection_reason_enum=NoTradeReason.DAY0_LOW_OBSERVATION_UNAVAILABLE,
+                rejection_reason_detail="Day0 low observation unavailable",
             )]
 
         # P10D S1 / INV-16: thread causality_status from the current Day0
@@ -2350,12 +2429,18 @@ def evaluate_candidate(
         # an explicit evaluator-level rejection_stage for audit and operator clarity.
         _LOW_ALLOWED_CAUSALITY = frozenset({"OK", "N/A_CAUSAL_DAY_ALREADY_STARTED"})
         if temperature_metric.is_low() and causality_status not in _LOW_ALLOWED_CAUSALITY:
+            _causality_detail = (
+                f"Day0 low slot rejected: causality_status={causality_status!r} "
+                f"not in allowed set {sorted(_LOW_ALLOWED_CAUSALITY)} (INV-16)"
+            )
             return [_make_rejection_decision(
                 rejection_stage="CAUSAL_SLOT_NOT_OK",
-                rejection_reasons=[ f"Day0 low slot rejected: causality_status={causality_status!r} " f"not in allowed set {sorted(_LOW_ALLOWED_CAUSALITY)} (INV-16)" ],
+                rejection_reasons=[NoTradeReason.DAY0_LOW_CAUSALITY_REJECTED.value],
                 availability_status="DATA_AVAILABLE",
                 selected_method=selected_method,
                 applied_validations=["day0_observation", "ens_fetch", "causality_gate"],
+                rejection_reason_enum=NoTradeReason.DAY0_LOW_CAUSALITY_REJECTED,
+                rejection_reason_detail=_causality_detail,
             )]
 
         observed_high_so_far = _finite_day0_observation_float(
@@ -2373,10 +2458,12 @@ def evaluate_candidate(
         if current_temp is None:
             return [_make_rejection_decision(
                 rejection_stage="SIGNAL_QUALITY",
-                rejection_reasons=["Day0 current observation became unavailable before signal routing"],
+                rejection_reasons=[NoTradeReason.DAY0_CURRENT_OBS_UNAVAILABLE.value],
                 availability_status="DATA_UNAVAILABLE",
                 selected_method=selected_method,
                 applied_validations=["day0_observation", "observation_quality_gate"],
+                rejection_reason_enum=NoTradeReason.DAY0_CURRENT_OBS_UNAVAILABLE,
+                rejection_reason_detail="Day0 current observation became unavailable before signal routing",
             )]
 
         day0 = Day0Router.route(Day0SignalInputs(
@@ -2456,6 +2543,7 @@ def evaluate_candidate(
                                 temperature_metric.temperature_metric,
                                 _nowcast_write_exc,
                             )
+                            _cnt_inc("day0_nowcast_write_failed_total")
                 except _NowcastNotApplicableHorizon:
                     pass  # horizon guard fired; no write
         raw_arr = extrema.maxes if extrema.maxes is not None else extrema.mins
@@ -2463,10 +2551,12 @@ def evaluate_candidate(
         if raw_arr is None or np.count_nonzero(np.isfinite(raw_arr)) < required_member_floor:
             return [_make_rejection_decision(
                 rejection_stage="SIGNAL_QUALITY",
-                rejection_reasons=["Day0 forecast has insufficient finite remaining ensemble members"],
+                rejection_reasons=[NoTradeReason.DAY0_FORECAST_INSUFFICIENT_MEMBERS.value],
                 availability_status="DATA_UNAVAILABLE",
                 selected_method=selected_method,
                 applied_validations=["day0_observation", "ens_fetch"],
+                rejection_reason_enum=NoTradeReason.DAY0_FORECAST_INSUFFICIENT_MEMBERS,
+                rejection_reason_detail="Day0 forecast has insufficient finite remaining ensemble members",
             )]
         ensemble_spread = TemperatureDelta(
             float(np.std(raw_arr)), city.settlement_unit
@@ -2482,10 +2572,12 @@ def evaluate_candidate(
             if ens_result.get("members_unit") != expected_members_unit:
                 return [_make_rejection_decision(
                     rejection_stage="SIGNAL_QUALITY",
-                    rejection_reasons=["EXECUTABLE_FORECAST_MEMBERS_UNIT_MISMATCH"],
+                    rejection_reasons=[NoTradeReason.EXECUTABLE_FORECAST_MEMBERS_UNIT_MISMATCH.value],
                     availability_status="DATA_UNAVAILABLE",
                     selected_method=selected_method,
                     applied_validations=["entry_forecast_reader", "members_unit"],
+                    rejection_reason_enum=NoTradeReason.EXECUTABLE_FORECAST_MEMBERS_UNIT_MISMATCH,
+                    rejection_reason_detail="EXECUTABLE_FORECAST_MEMBERS_UNIT_MISMATCH",
                 )]
             member_extrema = np.asarray(period_extrema_members, dtype=float)
             _extrema_floor = settings["ensemble"].get("min_members_floor", ensemble_member_count())
@@ -2496,10 +2588,12 @@ def evaluate_candidate(
             ):
                 return [_make_rejection_decision(
                     rejection_stage="SIGNAL_QUALITY",
-                    rejection_reasons=["EXECUTABLE_FORECAST_MEMBER_EXTREMA_INVALID"],
+                    rejection_reasons=[NoTradeReason.EXECUTABLE_FORECAST_MEMBER_EXTREMA_INVALID.value],
                     availability_status="DATA_UNAVAILABLE",
                     selected_method=selected_method,
                     applied_validations=["entry_forecast_reader", "period_extrema_members_adapter"],
+                    rejection_reason_enum=NoTradeReason.EXECUTABLE_FORECAST_MEMBER_EXTREMA_INVALID,
+                    rejection_reason_detail="EXECUTABLE_FORECAST_MEMBER_EXTREMA_INVALID",
                 )]
             p_raw = p_raw_vector_from_maxes(
                 member_extrema,
@@ -2531,10 +2625,12 @@ def evaluate_candidate(
     if not _valid_probability_vector(p_raw, len(bins)):
         return [_make_rejection_decision(
             rejection_stage="SIGNAL_QUALITY",
-            rejection_reasons=["P_raw is non-finite, negative, non-normalized, out of [0,1], or has wrong bin cardinality"],
+            rejection_reasons=[NoTradeReason.P_RAW_INVALID.value],
             availability_status="DATA_UNAVAILABLE",
             selected_method=selected_method,
             applied_validations=entry_validations,
+            rejection_reason_enum=NoTradeReason.P_RAW_INVALID,
+            rejection_reason_detail="P_raw is non-finite, negative, non-normalized, out of [0,1], or has wrong bin cardinality",
         )]
 
     # Store ENS snapshot AFTER all semantic gates pass (#67 — no write-before-validate).
@@ -2548,11 +2644,13 @@ def evaluate_candidate(
     if not snapshot_id:
         return [_make_rejection_decision(
             rejection_stage="SIGNAL_QUALITY",
-            rejection_reasons=["ENS snapshot persistence failed: decision_snapshot_id unavailable"],
+            rejection_reasons=[NoTradeReason.ENS_SNAPSHOT_PERSISTENCE_FAILED.value],
             availability_status="DATA_UNAVAILABLE",
             selected_method=selected_method,
             applied_validations=[*entry_validations, "ens_snapshot_persistence"],
             p_raw=p_raw,
+            rejection_reason_enum=NoTradeReason.ENS_SNAPSHOT_PERSISTENCE_FAILED,
+            rejection_reason_detail="ENS snapshot persistence failed: decision_snapshot_id unavailable",
         )]
 
     v2_snapshot_meta = _read_v2_snapshot_metadata(
@@ -2567,12 +2665,14 @@ def evaluate_candidate(
             False,
             decision_id=_decision_id(),
             rejection_stage="MARKET_FILTER",
-            rejection_reasons=["DT7_boundary_day_ambiguous"],
+            rejection_reasons=[NoTradeReason.DT7_BOUNDARY_DAY_AMBIGUOUS.value],
             availability_status="DATA_AVAILABLE",
             selected_method=selected_method,
             applied_validations=[*entry_validations, "dt7_boundary_day_gate"],
             decision_snapshot_id=snapshot_id,
             p_raw=p_raw,
+            rejection_reason_enum=NoTradeReason.DT7_BOUNDARY_DAY_AMBIGUOUS,
+            rejection_reason_detail="DT7_boundary_day_ambiguous",
         )]
 
     if using_period_extrema:
@@ -2593,12 +2693,14 @@ def evaluate_candidate(
             False,
             decision_id=_decision_id(),
             rejection_stage="SIGNAL_QUALITY",
-            rejection_reasons=["ENS snapshot p_raw persistence failed: canonical p_raw unavailable"],
+            rejection_reasons=[NoTradeReason.ENS_SNAPSHOT_P_RAW_PERSISTENCE_FAILED.value],
             availability_status="DATA_UNAVAILABLE",
             selected_method=selected_method,
             applied_validations=[*entry_validations, "ens_snapshot_p_raw_persistence"],
             p_raw=p_raw,
             decision_snapshot_id=snapshot_id,
+            rejection_reason_enum=NoTradeReason.ENS_SNAPSHOT_P_RAW_PERSISTENCE_FAILED,
+            rejection_reason_detail="ENS snapshot p_raw persistence failed: canonical p_raw unavailable",
         )]
 
     # Calibration
@@ -2635,27 +2737,32 @@ def evaluate_candidate(
                 edge=None,
                 size_usd=0.0,
                 should_trade=False,
-                rejection_reasons=["authority gate failed due to DB query fault"],
+                rejection_reasons=[NoTradeReason.AUTHORITY_GATE_DB_FAULT.value],
                 rejection_stage="AUTHORITY_GATE",
                 availability_status="DATA_UNAVAILABLE",
                 decision_snapshot_id=snapshot_id,
                 selected_method="unknown",
+                rejection_reason_enum=NoTradeReason.AUTHORITY_GATE_DB_FAULT,
+                rejection_reason_detail="authority gate failed due to DB query fault",
             )]
         if _unverified_pairs:
+            _insuf_cal_detail = (
+                f"insufficient_verified_calibration: "
+                f"{len(_unverified_pairs)} UNVERIFIED calibration rows present "
+                f"for {city.name}/{_cal_season}"
+            )
             return [EdgeDecision(
                 False,
                 decision_id=_decision_id(),
                 rejection_stage="AUTHORITY_GATE",
-                rejection_reasons=[
-                    f"insufficient_verified_calibration: "
-                    f"{len(_unverified_pairs)} UNVERIFIED calibration rows present "
-                    f"for {city.name}/{_cal_season}"
-                ],
+                rejection_reasons=[NoTradeReason.INSUFFICIENT_VERIFIED_CALIBRATION.value],
                 availability_status="DATA_STALE",
                 selected_method=selected_method,
                 applied_validations=entry_validations,
                 decision_snapshot_id=snapshot_id,
                 p_raw=p_raw,
+                rejection_reason_enum=NoTradeReason.INSUFFICIENT_VERIFIED_CALIBRATION,
+                rejection_reason_detail=_insuf_cal_detail,
             )]
         _authority_verified = True  # K1/#68: gate ran and no UNVERIFIED rows found
     # L3 Phase 9C: metric-aware calibrator lookup. `temperature_metric` is
@@ -2692,20 +2799,23 @@ def evaluate_candidate(
         )
         _dv_family = source_family_from_data_version(_phase2_data_version)
         if _dv_family is None:
+            _unknown_src_family_detail = (
+                f"forecast data_version {_phase2_data_version!r} does not "
+                "resolve to a registered source_family (tigge/ecmwf_opendata); "
+                "calibrator routing would silently mis-match the bucket"
+            )
             return [EdgeDecision(
                 False,
                 decision_id=_decision_id(),
                 rejection_stage="UNKNOWN_FORECAST_SOURCE_FAMILY",
-                rejection_reasons=[
-                    f"forecast data_version {_phase2_data_version!r} does not "
-                    "resolve to a registered source_family (tigge/ecmwf_opendata); "
-                    "calibrator routing would silently mis-match the bucket"
-                ],
+                rejection_reasons=[NoTradeReason.UNKNOWN_FORECAST_SOURCE_FAMILY.value],
                 availability_status="DATA_UNAVAILABLE",
                 selected_method=selected_method,
                 applied_validations=entry_validations,
                 decision_snapshot_id=snapshot_id,
                 p_raw=p_raw,
+                rejection_reason_enum=NoTradeReason.UNKNOWN_FORECAST_SOURCE_FAMILY,
+                rejection_reason_detail=_unknown_src_family_detail,
             )]
         # Phase 2.6 (2026-05-04, critic-opus MAJOR 8): cross-field consistency.
         # If ens_result carries BOTH source_id and data_version, their
@@ -2723,39 +2833,44 @@ def evaluate_candidate(
         except (TypeError, AttributeError):
             _sid_for_consistency = None
         if _sid_for_consistency is None:
+            _prov_incomplete_detail = (
+                f"forecast data_version {_phase2_data_version!r} was present "
+                "without source_id; calibration bucket identity cannot be proven"
+            )
             return [EdgeDecision(
                 False,
                 decision_id=_decision_id(),
                 rejection_stage="FORECAST_PROVENANCE_INCOMPLETE",
-                rejection_reasons=[
-                    f"forecast data_version {_phase2_data_version!r} was present "
-                    "without source_id; calibration bucket identity cannot be "
-                    "proven"
-                ],
+                rejection_reasons=[NoTradeReason.FORECAST_PROVENANCE_INCOMPLETE.value],
                 availability_status="DATA_UNAVAILABLE",
                 selected_method=selected_method,
                 applied_validations=entry_validations,
                 decision_snapshot_id=snapshot_id,
                 p_raw=p_raw,
+                rejection_reason_enum=NoTradeReason.FORECAST_PROVENANCE_INCOMPLETE,
+                rejection_reason_detail=_prov_incomplete_detail,
             )]
         if _sid_for_consistency is not None:
             _sid_family = source_family_from_source_id(_sid_for_consistency)
             if _sid_family is not None and _sid_family != _dv_family:
+                _prov_inconsistent_detail = (
+                    f"ens_result source_id={_sid_for_consistency!r} "
+                    f"(family={_sid_family!r}) disagrees with "
+                    f"data_version={_phase2_data_version!r} "
+                    f"(family={_dv_family!r}); ingest writer mismatch"
+                )
                 return [EdgeDecision(
                     False,
                     decision_id=_decision_id(),
                     rejection_stage="FORECAST_PROVENANCE_INCONSISTENT",
-                    rejection_reasons=[
-                        f"ens_result source_id={_sid_for_consistency!r} "
-                        f"(family={_sid_family!r}) disagrees with "
-                        f"data_version={_phase2_data_version!r} "
-                        f"(family={_dv_family!r}); ingest writer mismatch"
-                    ],
+                    rejection_reasons=[NoTradeReason.FORECAST_PROVENANCE_INCONSISTENT.value],
                     availability_status="DATA_UNAVAILABLE",
                     selected_method=selected_method,
                     applied_validations=entry_validations,
                     decision_snapshot_id=snapshot_id,
                     p_raw=p_raw,
+                    rejection_reason_enum=NoTradeReason.FORECAST_PROVENANCE_INCONSISTENT,
+                    rejection_reason_detail=_prov_inconsistent_detail,
                 )]
     # Copilot review #4 + Codex P1 #7 (2026-05-04): use shared helper that
     # handles datetime issue_time AND derives horizon_profile from cycle when
@@ -2772,20 +2887,23 @@ def evaluate_candidate(
     if _raw_phase2_source_id is not None:
         _phase2_source_id = calibration_source_id_for_lookup(_raw_phase2_source_id)
         if _phase2_source_id is None:
+            _unsupported_cal_detail = (
+                f"forecast source_id={_raw_phase2_source_id!r} has no "
+                "registered calibration bucket source_id; refusing Platt "
+                "lookup instead of using schema defaults or legacy fallback"
+            )
             return [EdgeDecision(
                 False,
                 decision_id=_decision_id(),
                 rejection_stage="UNSUPPORTED_CALIBRATION_SOURCE_ID",
-                rejection_reasons=[
-                    f"forecast source_id={_raw_phase2_source_id!r} has no "
-                    "registered calibration bucket source_id; refusing Platt "
-                    "lookup instead of using schema defaults or legacy fallback"
-                ],
+                rejection_reasons=[NoTradeReason.UNSUPPORTED_CALIBRATION_SOURCE_ID.value],
                 availability_status="DATA_UNAVAILABLE",
                 selected_method=selected_method,
                 applied_validations=entry_validations,
                 decision_snapshot_id=snapshot_id,
                 p_raw=p_raw,
+                rejection_reason_enum=NoTradeReason.UNSUPPORTED_CALIBRATION_SOURCE_ID,
+                rejection_reason_detail=_unsupported_cal_detail,
             )]
 
     # Phase 2 (2026-05-04, may4math.md F1): cycle-stratified Platt bucket
@@ -2823,29 +2941,34 @@ def evaluate_candidate(
             False,
             decision_id=_decision_id(),
             rejection_stage="SIGNAL_QUALITY",
-            rejection_reasons=["P_cal is non-finite, negative, non-normalized, out of [0,1], or has wrong bin cardinality"],
+            rejection_reasons=[NoTradeReason.P_CAL_INVALID.value],
             availability_status="DATA_UNAVAILABLE",
             selected_method=selected_method,
             applied_validations=entry_validations,
             decision_snapshot_id=snapshot_id,
             p_raw=p_raw,
             p_cal=p_cal,
+            rejection_reason_enum=NoTradeReason.P_CAL_INVALID,
+            rejection_reason_detail="P_cal is non-finite, negative, non-normalized, out of [0,1], or has wrong bin cardinality",
         )]
 
     try:
         maturity_multiplier = edge_threshold_multiplier(cal_level)
     except Exception as exc:
+        _cal_maturity_detail = f"invalid calibration maturity level {cal_level!r}: {exc}"
         return [EdgeDecision(
             False,
             decision_id=_decision_id(),
             rejection_stage="CALIBRATION_IMMATURE",
-            rejection_reasons=[f"invalid calibration maturity level {cal_level!r}: {exc}"],
+            rejection_reasons=[NoTradeReason.CALIBRATION_MATURITY_INVALID.value],
             availability_status="DATA_UNAVAILABLE",
             selected_method=selected_method,
             applied_validations=[*entry_validations, "calibration_maturity_invalid"],
             decision_snapshot_id=snapshot_id,
             p_raw=p_raw,
             p_cal=p_cal,
+            rejection_reason_enum=NoTradeReason.CALIBRATION_MATURITY_INVALID,
+            rejection_reason_detail=_cal_maturity_detail,
         )]
     maturity_validation = [
         f"calibration_maturity_level_{cal_level}",
@@ -2853,20 +2976,23 @@ def evaluate_candidate(
     ]
     entry_validations.extend(maturity_validation)
     if cal is None or cal_level >= 4:
+        _cal_immature_detail = (
+            "calibration_level=4 has no Platt model; raw-probability entries "
+            f"are blocked before edge/FDR selection (required_threshold={maturity_multiplier:g}x)"
+        )
         return [EdgeDecision(
             False,
             decision_id=_decision_id(),
             rejection_stage="CALIBRATION_IMMATURE",
-            rejection_reasons=[
-                "calibration_level=4 has no Platt model; raw-probability entries "
-                f"are blocked before edge/FDR selection (required_threshold={maturity_multiplier:g}x)"
-            ],
+            rejection_reasons=[NoTradeReason.CALIBRATION_IMMATURE_NO_PLATT.value],
             availability_status="DATA_UNAVAILABLE",
             selected_method=selected_method,
             applied_validations=[*entry_validations, "raw_probability_entry_blocked"],
             decision_snapshot_id=snapshot_id,
             p_raw=p_raw,
             p_cal=p_cal,
+            rejection_reason_enum=NoTradeReason.CALIBRATION_IMMATURE_NO_PLATT,
+            rejection_reason_detail=_cal_immature_detail,
         )]
 
     # Market prices via VWMP
@@ -2883,13 +3009,15 @@ def evaluate_candidate(
             False,
             decision_id=_decision_id(),
             rejection_stage="RISK_REJECTED",
-            rejection_reasons=[str(exc)],
+            rejection_reasons=[NoTradeReason.NATIVE_MULTIBIN_BUY_NO_FLAG_INVALID.value],
             availability_status="CONFIG_INVALID",
             selected_method=selected_method,
             applied_validations=[*entry_validations, "native_multibin_buy_no_flag_invalid"],
             decision_snapshot_id=snapshot_id,
             p_raw=p_raw,
             p_cal=p_cal,
+            rejection_reason_enum=NoTradeReason.NATIVE_MULTIBIN_BUY_NO_FLAG_INVALID,
+            rejection_reason_detail=str(exc),
         )]
     native_no_quote_unavailable_labels: list[str] = []
     for i, o in enumerate(outcomes):
@@ -2962,7 +3090,7 @@ def evaluate_candidate(
                     False,
                     decision_id=_decision_id(),
                     rejection_stage="MARKET_LIQUIDITY",
-                    rejection_reasons=[str(e)],
+                    rejection_reasons=[NoTradeReason.MARKET_EMPTY_ORDERBOOK.value],
                     availability_status="DATA_UNAVAILABLE",
                     selected_method=selected_method,
                     applied_validations=entry_validations,
@@ -2970,12 +3098,14 @@ def evaluate_candidate(
                     p_raw=p_raw,
                     p_cal=p_cal,
                     p_market=p_market,
+                    rejection_reason_enum=NoTradeReason.MARKET_EMPTY_ORDERBOOK,
+                    rejection_reason_detail=str(e),
                 )]
             return [EdgeDecision(
                 False,
                 decision_id=_decision_id(),
                 rejection_stage="MARKET_LIQUIDITY",
-                rejection_reasons=[str(e)],
+                rejection_reasons=[NoTradeReason.MARKET_LIQUIDITY_ERROR.value],
                 availability_status=_availability_status_for_error(e),
                 selected_method=selected_method,
                 applied_validations=entry_validations,
@@ -2983,6 +3113,8 @@ def evaluate_candidate(
                 p_raw=p_raw,
                 p_cal=p_cal,
                 p_market=p_market,
+                rejection_reason_enum=NoTradeReason.MARKET_LIQUIDITY_ERROR,
+                rejection_reason_detail=str(e),
             )]
 
     agreement = "AGREE"
@@ -3001,7 +3133,7 @@ def evaluate_candidate(
                 False,
                 decision_id=_decision_id(),
                 rejection_stage="SIGNAL_QUALITY",
-                rejection_reasons=[f"{crosscheck_model} crosscheck unavailable: {e}"],
+                rejection_reasons=[NoTradeReason.CROSSCHECK_UNAVAILABLE.value],
                 availability_status=_availability_status_for_error(e),
                 selected_method=selected_method,
                 applied_validations=[*entry_validations, "crosscheck_unavailable"],
@@ -3010,6 +3142,8 @@ def evaluate_candidate(
                 p_cal=p_cal,
                 p_market=p_market,
                 agreement="CROSSCHECK_UNAVAILABLE",
+                rejection_reason_enum=NoTradeReason.CROSSCHECK_UNAVAILABLE,
+                rejection_reason_detail=f"{crosscheck_model} crosscheck unavailable: {e}",
             )]
         if crosscheck_result is None or not validate_ensemble(
             crosscheck_result,
@@ -3019,7 +3153,7 @@ def evaluate_candidate(
                 False,
                 decision_id=_decision_id(),
                 rejection_stage="SIGNAL_QUALITY",
-                rejection_reasons=[f"{crosscheck_model} crosscheck unavailable"],
+                rejection_reasons=[NoTradeReason.CROSSCHECK_UNAVAILABLE.value],
                 availability_status="DATA_UNAVAILABLE",
                 selected_method=selected_method,
                 applied_validations=[*entry_validations, "crosscheck_unavailable"],
@@ -3028,6 +3162,8 @@ def evaluate_candidate(
                 p_cal=p_cal,
                 p_market=p_market,
                 agreement="CROSSCHECK_UNAVAILABLE",
+                rejection_reason_enum=NoTradeReason.CROSSCHECK_UNAVAILABLE,
+                rejection_reason_detail=f"{crosscheck_model} crosscheck unavailable",
             )]
         try:
             gfs_tz_hours = select_hours_for_target_date(
@@ -3044,7 +3180,7 @@ def evaluate_candidate(
                     False,
                     decision_id=_decision_id(),
                     rejection_stage="SIGNAL_QUALITY",
-                    rejection_reasons=["GFS crosscheck unavailable"],
+                    rejection_reasons=[NoTradeReason.GFS_CROSSCHECK_UNAVAILABLE.value],
                     availability_status="DATA_UNAVAILABLE",
                     selected_method=selected_method,
                     applied_validations=[*entry_validations, "gfs_crosscheck_unavailable"],
@@ -3053,6 +3189,8 @@ def evaluate_candidate(
                     p_cal=p_cal,
                     p_market=p_market,
                     agreement="CROSSCHECK_UNAVAILABLE",
+                    rejection_reason_enum=NoTradeReason.GFS_CROSSCHECK_UNAVAILABLE,
+                    rejection_reason_detail="GFS crosscheck unavailable",
                 )]
             gfs_metric_values = (
                 crosscheck_result["members_hourly"][:, gfs_tz_hours].min(axis=1)
@@ -3079,7 +3217,7 @@ def evaluate_candidate(
                 False,
                 decision_id=_decision_id(),
                 rejection_stage="SIGNAL_QUALITY",
-                rejection_reasons=[f"{crosscheck_model} crosscheck unavailable: {e}"],
+                rejection_reasons=[NoTradeReason.CROSSCHECK_UNAVAILABLE.value],
                 availability_status="DATA_UNAVAILABLE",
                 selected_method=selected_method,
                 applied_validations=[*entry_validations, "crosscheck_unavailable"],
@@ -3088,6 +3226,8 @@ def evaluate_candidate(
                 p_cal=p_cal,
                 p_market=p_market,
                 agreement="CROSSCHECK_UNAVAILABLE",
+                rejection_reason_enum=NoTradeReason.CROSSCHECK_UNAVAILABLE,
+                rejection_reason_detail=f"{crosscheck_model} crosscheck unavailable: {e}",
             )]
 
     if agreement == "CONFLICT":
@@ -3095,7 +3235,7 @@ def evaluate_candidate(
             False,
             decision_id=_decision_id(),
             rejection_stage="SIGNAL_QUALITY",
-            rejection_reasons=[f"{primary_model}/{crosscheck_model} CONFLICT"],
+            rejection_reasons=[NoTradeReason.MODEL_CONFLICT.value],
             selected_method=selected_method,
             applied_validations=[*entry_validations, "model_agreement"],
             decision_snapshot_id=snapshot_id,
@@ -3103,6 +3243,8 @@ def evaluate_candidate(
             p_cal=p_cal,
             p_market=p_market,
             agreement=agreement,
+            rejection_reason_enum=NoTradeReason.MODEL_CONFLICT,
+            rejection_reason_detail=f"{primary_model}/{crosscheck_model} CONFLICT",
         )]
 
     # Compute alpha — UNION resolution: K4.5 authority_verified gate (worktree)
@@ -3123,7 +3265,7 @@ def evaluate_candidate(
             False,
             decision_id=_decision_id(),
             rejection_stage="SIGNAL_QUALITY",
-            rejection_reasons=[f"ALPHA_TARGET_MISMATCH:{exc}"],
+            rejection_reasons=[NoTradeReason.ALPHA_TARGET_MISMATCH.value],
             availability_status="DATA_UNAVAILABLE",
             selected_method=selected_method,
             applied_validations=[*entry_validations, "alpha_target_contract"],
@@ -3132,13 +3274,15 @@ def evaluate_candidate(
             p_cal=p_cal,
             p_market=p_market,
             agreement=agreement,
+            rejection_reason_enum=NoTradeReason.ALPHA_TARGET_MISMATCH,
+            rejection_reason_detail=f"ALPHA_TARGET_MISMATCH:{exc}",
         )]
     except AuthorityViolation as exc:
         return [EdgeDecision(
             False,
             decision_id=_decision_id(),
             rejection_stage="AUTHORITY_GATE",
-            rejection_reasons=[f"AUTHORITY_VIOLATION:{exc}"],
+            rejection_reasons=[NoTradeReason.AUTHORITY_VIOLATION.value],
             availability_status="DATA_STALE",
             selected_method=selected_method,
             applied_validations=[*entry_validations, "authority_contract"],
@@ -3147,6 +3291,8 @@ def evaluate_candidate(
             p_cal=p_cal,
             p_market=p_market,
             agreement=agreement,
+            rejection_reason_enum=NoTradeReason.AUTHORITY_VIOLATION,
+            rejection_reason_detail=f"AUTHORITY_VIOLATION:{exc}",
         )]
     if not is_day0_mode:
         entry_validations.append("model_agreement")
@@ -3405,10 +3551,12 @@ def evaluate_candidate(
                 edge=edge,
                 decision_id=_decision_id(),
                 rejection_stage="FDR_SELECTION_UNEXECUTABLE",
-                rejection_reasons=["selected edge is missing canonical support_index"],
+                rejection_reasons=[NoTradeReason.SELECTED_EDGE_MISSING_SUPPORT_INDEX.value],
                 selected_method=selected_method,
                 applied_validations=[*decision_validations, "support_topology"],
                 decision_snapshot_id=snapshot_id,
+                rejection_reason_enum=NoTradeReason.SELECTED_EDGE_MISSING_SUPPORT_INDEX,
+                rejection_reason_detail="selected edge is missing canonical support_index",
             ))
             continue
         bin_idx = int(edge.support_index)
@@ -3418,10 +3566,12 @@ def evaluate_candidate(
                 edge=edge,
                 decision_id=_decision_id(),
                 rejection_stage="FDR_SELECTION_UNEXECUTABLE",
-                rejection_reasons=[f"selected support index {bin_idx} has no executable token payload"],
+                rejection_reasons=[NoTradeReason.SELECTED_EDGE_NO_TOKEN_PAYLOAD.value],
                 selected_method=selected_method,
                 applied_validations=[*decision_validations, "support_topology"],
                 decision_snapshot_id=snapshot_id,
+                rejection_reason_enum=NoTradeReason.SELECTED_EDGE_NO_TOKEN_PAYLOAD,
+                rejection_reason_detail=f"selected support index {bin_idx} has no executable token payload",
             ))
             continue
         tokens = token_map[bin_idx]
@@ -3433,11 +3583,13 @@ def evaluate_candidate(
                 edge=edge,
                 decision_id=_decision_id(),
                 rejection_stage="SIGNAL_QUALITY",
-                rejection_reasons=["strategy_key_unclassified"],
+                rejection_reasons=[NoTradeReason.STRATEGY_KEY_UNCLASSIFIED.value],
                 selected_method=selected_method,
                 applied_validations=[*decision_validations, "strategy_key_classification"],
                 decision_snapshot_id=snapshot_id,
                 edge_source=edge_source,
+                rejection_reason_enum=NoTradeReason.STRATEGY_KEY_UNCLASSIFIED,
+                rejection_reason_detail="strategy_key_unclassified",
             ))
             continue
         ci_rejection_reason = _entry_ci_rejection_reason(candidate, edge)
@@ -3447,12 +3599,14 @@ def evaluate_candidate(
                 edge=edge,
                 decision_id=_decision_id(),
                 rejection_stage="EDGE_INSUFFICIENT",
-                rejection_reasons=[ci_rejection_reason],
+                rejection_reasons=[NoTradeReason.CONFIDENCE_BAND_INSUFFICIENT.value],
                 selected_method=selected_method,
                 applied_validations=[*decision_validations, "confidence_band_guard"],
                 decision_snapshot_id=snapshot_id,
                 edge_source=edge_source,
                 strategy_key=strategy_key,
+                rejection_reason_enum=NoTradeReason.CONFIDENCE_BAND_INSUFFICIENT,
+                rejection_reason_detail=ci_rejection_reason,
             ))
             continue
         # B091: strategy-policy time reference. Same contract as the
@@ -3483,12 +3637,14 @@ def evaluate_candidate(
                 edge=edge,
                 decision_id=_decision_id(),
                 rejection_stage="MARKET_FILTER",
-                rejection_reasons=[ultra_low_price_reason],
+                rejection_reasons=[NoTradeReason.CENTER_BUY_ULTRA_LOW_PRICE.value],
                 selected_method=selected_method,
                 applied_validations=[*decision_validations, "center_buy_ultra_low_price_guard"],
                 decision_snapshot_id=snapshot_id,
                 edge_source=edge_source,
                 strategy_key=strategy_key,
+                rejection_reason_enum=NoTradeReason.CENTER_BUY_ULTRA_LOW_PRICE,
+                rejection_reason_detail=ultra_low_price_reason,
             ))
             continue
 
@@ -3499,12 +3655,14 @@ def evaluate_candidate(
                 edge=edge,
                 decision_id=_decision_id(),
                 rejection_stage="ANTI_CHURN",
-                rejection_reasons=["REENTRY_BLOCKED"],
+                rejection_reasons=[NoTradeReason.REENTRY_BLOCKED.value],
                 selected_method=selected_method,
                 applied_validations=[*decision_validations, "anti_churn"],
                 decision_snapshot_id=snapshot_id,
                 edge_source=edge_source,
                 strategy_key=strategy_key,
+                rejection_reason_enum=NoTradeReason.REENTRY_BLOCKED,
+                rejection_reason_detail="REENTRY_BLOCKED",
             ))
             continue
         check_token = tokens["token_id"] if edge.direction == "buy_yes" else tokens["no_token_id"]
@@ -3514,12 +3672,14 @@ def evaluate_candidate(
                 edge=edge,
                 decision_id=_decision_id(),
                 rejection_stage="ANTI_CHURN",
-                rejection_reasons=["TOKEN_COOLDOWN"],
+                rejection_reasons=[NoTradeReason.TOKEN_COOLDOWN.value],
                 selected_method=selected_method,
                 applied_validations=[*decision_validations, "anti_churn"],
                 decision_snapshot_id=snapshot_id,
                 edge_source=edge_source,
                 strategy_key=strategy_key,
+                rejection_reason_enum=NoTradeReason.TOKEN_COOLDOWN,
+                rejection_reason_detail="TOKEN_COOLDOWN",
             ))
             continue
         # Layer 7 (v2): token-keyed dedup gate with decision-time DB read.
@@ -3531,12 +3691,14 @@ def evaluate_candidate(
                 edge=edge,
                 decision_id=_decision_id(),
                 rejection_stage="ANTI_CHURN",
-                rejection_reasons=["ALREADY_HELD_SAME_TOKEN"],
+                rejection_reasons=[NoTradeReason.ALREADY_HELD_SAME_TOKEN.value],
                 selected_method=selected_method,
                 applied_validations=[*decision_validations, "anti_churn"],
                 decision_snapshot_id=snapshot_id,
                 edge_source=edge_source,
                 strategy_key=strategy_key,
+                rejection_reason_enum=NoTradeReason.ALREADY_HELD_SAME_TOKEN,
+                rejection_reason_detail="ALREADY_HELD_SAME_TOKEN",
             ))
             continue
 
@@ -3549,14 +3711,14 @@ def evaluate_candidate(
                 edge=edge,
                 decision_id=_decision_id(),
                 rejection_stage="ORACLE_BLACKLISTED",
-                rejection_reasons=[
-                    f"oracle_error_rate={oracle.error_rate:.1%} > 10% — city blacklisted"
-                ],
+                rejection_reasons=[NoTradeReason.ORACLE_BLACKLISTED.value],
                 selected_method=selected_method,
                 applied_validations=[*decision_validations, "oracle_penalty"],
                 decision_snapshot_id=snapshot_id,
                 edge_source=edge_source,
                 strategy_key=strategy_key,
+                rejection_reason_enum=NoTradeReason.ORACLE_BLACKLISTED,
+                rejection_reason_detail=f"oracle_error_rate={oracle.error_rate:.1%} > 10% — city blacklisted",
             ))
             continue
 
@@ -3598,31 +3760,36 @@ def evaluate_candidate(
                     edge=edge,
                     decision_id=_decision_id(),
                     rejection_stage=exc.code,
-                    rejection_reasons=[str(exc)],
+                    rejection_reasons=[NoTradeReason.DDD_FAIL_CLOSED.value],
                     selected_method=selected_method,
                     applied_validations=[*decision_validations, "ddd_v2_fail_closed"],
                     decision_snapshot_id=snapshot_id,
                     edge_source=edge_source,
                     strategy_key=strategy_key,
+                    rejection_reason_enum=NoTradeReason.DDD_FAIL_CLOSED,
+                    rejection_reason_detail=str(exc),
                 ))
                 continue
 
             if ddd_result.action == "HALT":
+                _ddd_halt_detail = (
+                    f"DDD Rail 1 HALT: cov={ddd_result.diagnostic.get('current_cov'):.3f} "
+                    f"< 0.35 with window_elapsed="
+                    f"{ddd_result.diagnostic.get('window_elapsed'):.2f}"
+                )
                 decisions.append(EdgeDecision(
                     False,
                     edge=edge,
                     decision_id=_decision_id(),
                     rejection_stage="DDD_HALT",
-                    rejection_reasons=[
-                        f"DDD Rail 1 HALT: cov={ddd_result.diagnostic.get('current_cov'):.3f} "
-                        f"< 0.35 with window_elapsed="
-                        f"{ddd_result.diagnostic.get('window_elapsed'):.2f}"
-                    ],
+                    rejection_reasons=[NoTradeReason.DDD_RAIL1_HALT.value],
                     selected_method=selected_method,
                     applied_validations=[*decision_validations, "ddd_v2_halt"],
                     decision_snapshot_id=snapshot_id,
                     edge_source=edge_source,
                     strategy_key=strategy_key,
+                    rejection_reason_enum=NoTradeReason.DDD_RAIL1_HALT,
+                    rejection_reason_detail=_ddd_halt_detail,
                 ))
                 continue
 
@@ -3680,12 +3847,14 @@ def evaluate_candidate(
                 edge=edge,
                 decision_id=_decision_id(),
                 rejection_stage="SIZING_ERROR",
-                rejection_reasons=[str(exc)],
+                rejection_reasons=[NoTradeReason.KELLY_SIZING_ERROR.value],
                 selected_method=selected_method,
                 applied_validations=list(decision_validations),
                 decision_snapshot_id=snapshot_id,
                 edge_source=edge_source,
                 strategy_key=strategy_key,
+                rejection_reason_enum=NoTradeReason.KELLY_SIZING_ERROR,
+                rejection_reason_detail=str(exc),
             ))
             continue
         if policy.gated or policy.exit_only:
@@ -3697,12 +3866,14 @@ def evaluate_candidate(
                 edge=edge,
                 decision_id=_decision_id(),
                 rejection_stage="RISK_REJECTED",
-                rejection_reasons=[reason],
+                rejection_reasons=[NoTradeReason.POLICY_GATED.value],
                 selected_method=selected_method,
                 applied_validations=list(decision_validations),
                 decision_snapshot_id=snapshot_id,
                 edge_source=edge_source,
                 strategy_key=strategy_key,
+                rejection_reason_enum=NoTradeReason.POLICY_GATED,
+                rejection_reason_detail=reason,
             ))
             continue
         # A6 phase-aware Kelly resolver (PLAN.md §A6 + PLAN_v3 §6.P5).
@@ -3792,13 +3963,15 @@ def evaluate_candidate(
                 edge=edge,
                 decision_id=_decision_id(),
                 rejection_stage="EXECUTION_PRICE_UNAVAILABLE",
-                rejection_reasons=[str(exc)],
+                rejection_reasons=[NoTradeReason.EXECUTION_PRICE_FEE_RATE_UNAVAILABLE.value],
                 availability_status="DATA_UNAVAILABLE",
                 selected_method=selected_method,
                 applied_validations=list(decision_validations),
                 decision_snapshot_id=snapshot_id,
                 edge_source=edge_source,
                 strategy_key=strategy_key,
+                rejection_reason_enum=NoTradeReason.EXECUTION_PRICE_FEE_RATE_UNAVAILABLE,
+                rejection_reason_detail=str(exc),
             ))
             continue
         try:
@@ -3824,12 +3997,14 @@ def evaluate_candidate(
                 edge=edge,
                 decision_id=_decision_id(),
                 rejection_stage="SIZING_ERROR",
-                rejection_reasons=[str(exc)],
+                rejection_reasons=[NoTradeReason.EXECUTION_PRICE_SIZING_ERROR.value],
                 selected_method=selected_method,
                 applied_validations=list(decision_validations),
                 decision_snapshot_id=snapshot_id,
                 edge_source=edge_source,
                 strategy_key=strategy_key,
+                rejection_reason_enum=NoTradeReason.EXECUTION_PRICE_SIZING_ERROR,
+                rejection_reason_detail=str(exc),
             ))
             continue
         if policy.allocation_multiplier != 1.0:
@@ -3842,12 +4017,14 @@ def evaluate_candidate(
                 edge=edge,
                 decision_id=_decision_id(),
                 rejection_stage="SIZING_TOO_SMALL",
-                rejection_reasons=[f"${size:.2f} < ${limits.min_order_usd} (throttled: {risk_throttle})"],
+                rejection_reasons=[NoTradeReason.SIZE_BELOW_MINIMUM.value],
                 selected_method=selected_method,
                 applied_validations=list(decision_validations),
                 decision_snapshot_id=snapshot_id,
                 edge_source=edge_source,
                 strategy_key=strategy_key,
+                rejection_reason_enum=NoTradeReason.SIZE_BELOW_MINIMUM,
+                rejection_reason_detail=f"${size:.2f} < ${limits.min_order_usd} (throttled: {risk_throttle})",
             ))
             continue
 
@@ -3870,12 +4047,14 @@ def evaluate_candidate(
                 edge=edge,
                 decision_id=_decision_id(),
                 rejection_stage="RISK_REJECTED",
-                rejection_reasons=[reason],
+                rejection_reasons=[NoTradeReason.RISK_LIMITS_EXCEEDED.value],
                 selected_method=selected_method,
                 applied_validations=list(decision_validations),
                 decision_snapshot_id=snapshot_id,
                 edge_source=edge_source,
                 strategy_key=strategy_key,
+                rejection_reason_enum=NoTradeReason.RISK_LIMITS_EXCEEDED,
+                rejection_reason_detail=reason,
             ))
             continue
 
