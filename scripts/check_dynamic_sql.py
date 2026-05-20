@@ -171,7 +171,14 @@ _BASELINE_PER_FILE: dict[str, int] = {
     # queries build placeholder strings from local set cardinality only; eight
     # SAVEPOINT statements use uuid-derived names; the journal query is internal
     # table/fact plumbing. No user-controlled SQL identifier is interpolated.
-    "src/execution/exchange_reconcile.py": 12,
+    # 2026-05-20 +1 site from fix/lifecycle pending_exit guard (d1f03437a2):
+    # SAVEPOINT name generated from secrets.token_hex() — no user input.
+    "src/execution/exchange_reconcile.py": 13,
+    # 2026-05-20 auto-wrap PR #219: 2 IN-list sites in enqueue_wrap_if_balance_above_threshold
+    # and list_pending_wrap_commands. Both build `?,?,?` placeholders from
+    # len(pending_states) where pending_states is derived exclusively from the
+    # closed WrapUnwrapState enum — no user-controlled input. Audited safe.
+    "src/execution/wrap_unwrap_commands.py": 2,
     "src/execution/exit_lifecycle.py": 1,
     # 2026-05-18 PR #140 review: main already had 23 sites. Table-name sites are
     # reached through closed internal callers / schema probes, and SAVEPOINT
