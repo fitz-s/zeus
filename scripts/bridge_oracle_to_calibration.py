@@ -34,6 +34,7 @@ import sys
 from collections import defaultdict
 from datetime import date
 from pathlib import Path
+from types import SimpleNamespace
 
 # Fitz Rule: Authority before reuse. Scripts must import existing laws.
 _REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -46,6 +47,8 @@ from src.data.tier_resolver import (
     allowed_sources_for_city,
     expected_source_for_city,
 )
+from src.contracts.settlement_semantics import SettlementSemantics
+from src.config import runtime_cities_by_name
 
 logging.basicConfig(
     level=logging.INFO,
@@ -148,6 +151,47 @@ def _snapshot_daily_high(snap: dict) -> float | None:
     return None
 
 
+def _settlement_semantics_for(city_name: str, settle: dict) -> SettlementSemantics:
+    """Return the canonical rounding contract for this settlement row.
+
+    The bridge compares oracle snapshots to already-settled PM bins, so it must
+    honor the settlement row's unit/source_type instead of guessing from the
+    snapshot source. Current city config supplies station metadata when it
+    matches the row; historical rows fall back to a minimal city-shaped object.
+    """
+
+    unit = str(settle.get("unit") or "").upper()
+    source_type = str(settle.get("source_type") or "wu_icao")
+    city = runtime_cities_by_name().get(city_name)
+    if (
+        city is not None
+        and city.settlement_unit == unit
+        and city.settlement_source_type == source_type
+    ):
+        return SettlementSemantics.for_city(city)
+
+    return SettlementSemantics.for_city(
+        SimpleNamespace(
+            name=city_name,
+            settlement_unit=unit,
+            settlement_source_type=source_type,
+            wu_station=getattr(city, "wu_station", city_name),
+        )
+    )
+
+
+def _snapshot_settlement_value(city_name: str, snap: dict, settle: dict, snap_high: float) -> float:
+    """Convert a snapshot daily high into the PM settlement value space."""
+
+    snap_val = float(snap_high)
+    if settle["unit"] == "C" and snap.get("source") == "wu_icao_history":
+        # WU shadow snapshots store daily_high_f. Convert the physical value
+        # to Celsius, then let SettlementSemantics choose WMO vs oracle rules.
+        snap_val = (snap_val - 32.0) * 5.0 / 9.0
+
+    return _settlement_semantics_for(city_name, settle).round_single(snap_val)
+
+
 def _in_bin(value: float, bin_lo: float | None, bin_hi: float | None) -> bool:
     """Check if a value falls within PM settlement bin."""
     if bin_lo is not None and value < bin_lo:
@@ -237,15 +281,12 @@ def bridge(dry_run: bool = False) -> dict:
                 if snap_high is None:
                     continue
 
-                # Convert WU °F snapshot to °C if settlement is °C
-                snap_val = snap_high
-                if settle["unit"] == "C" and snap.get("source") == "wu_icao_history":
-                    # WU returns °F, need to convert to integer °C
-                    # DANGER: oracle_truncate — PM's UMA voters use floor()
-                    # for decimal °C (truncation bias). 仅限 oracle 对比使用！
-                    import math
-                    snap_val = (snap_high - 32) * 5 / 9
-                    snap_val = math.floor(snap_val)  # oracle_truncate semantics
+                snap_val = _snapshot_settlement_value(
+                    city_name,
+                    snap,
+                    settle,
+                    snap_high,
+                )
 
                 in_bin = _in_bin(
                     snap_val,
