@@ -2575,3 +2575,53 @@ test_metadata:
       get_trades enumeration. Operator path (e) is the direct resolve_finding() API.
     created: 2026-05-19
     last_reused_or_audited: 2026-05-19
+
+  tests/test_decision_events_live_wiring.py:
+    modules: [state, engine, contracts]
+    category: core_law_antibody
+    profile: p13_decision_events_live_wiring
+    blocks_commit: true
+    asserted_invariants:
+      - P1-3-DECISION-EVENTS-PRIMITIVE-SIGNATURE
+      - P1-3-DECISION-EVENTS-WRITE-REACHES-TABLE
+      - P1-3-DECISION-EVENTS-FAIL-SOFT-NO-DSC
+    source_under_test:
+      - src/state/decision_events.py
+      - src/engine/cycle_runtime.py
+    law_dependencies:
+      - codereview-may19-2.md P1-3
+    notes: >
+      Closes the "write_decision_event implemented but never called" defect (P1-3).
+      Asserts: (1) write_decision_event accepts primitive fields (direction,
+      target_size_usd, limit_price, edge, p_posterior) rather than an
+      ExecutionIntent object, decoupling it from FinalExecutionIntent field names;
+      (2) a write with conn=None produces a readable row in the world DB;
+      (3) missing decision_source_context on FinalExecutionIntent causes no write
+      and no crash (fail-soft guard in cycle_runtime.py).
+    created: 2026-05-19
+    last_reused_or_audited: 2026-05-19
+
+  tests/test_decision_seq_lock_path.py:
+    modules: [state, contracts]
+    category: core_law_antibody
+    profile: p14_decision_seq_lock_path
+    blocks_commit: true
+    asserted_invariants:
+      - P1-4-DECISION-SEQ-NON-WORLD-CONN-REJECTED
+      - P1-4-DECISION-SEQ-INCREMENTS-SEQUENTIALLY
+    source_under_test:
+      - src/state/decision_events.py
+    law_dependencies:
+      - codereview-may19-2.md P1-4
+    notes: >
+      Closes the db_writer_lock/conn lock-path coupling defect (P1-4). The lock
+      was acquired on ZEUS_WORLD_DB_PATH but MAX+1 executed on caller-supplied
+      conn. If conn was the trade DB, the lock did not serialise the target table.
+      Fix: AssertionError raised immediately when conn is not None and
+      PRAGMA database_list returns a path not ending in 'zeus-world.db'.
+      Asserts: (1) trade-DB or arbitrary-path conn raises AssertionError with
+      "world DB connection" in the message before any INSERT; (2) no decision_events
+      table exists in the non-world DB after the rejected call; (3) two sequential
+      conn=None calls increment decision_seq 0 → 1.
+    created: 2026-05-19
+    last_reused_or_audited: 2026-05-19
