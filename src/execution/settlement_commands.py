@@ -209,7 +209,22 @@ def _build_redeem_execution_capability(
     return proof
 
 
-def init_settlement_command_schema(conn: sqlite3.Connection) -> None:
+class SettlementSchemaNotReadyError(RuntimeError):
+    """Raised by assert_settlement_schema_ready when the schema has not been
+    initialized on the connection.  Hot-path callers must not run DDL;
+    call ensure_settlement_schema_ready(conn) at boot before entering the
+    live scheduler loop."""
+
+
+def ensure_settlement_schema_ready(conn: sqlite3.Connection) -> None:
+    """Boot/migration path: create tables, run idempotent ALTER migrations.
+
+    Must be called once at daemon startup on the shared trade connection,
+    BEFORE any hot-path calls to request_redeem / submit_redeem /
+    reconcile_pending_redeems. Hot-path callers use assert_settlement_schema_ready
+    (PRAGMA-only check, no DDL) to avoid schema-lock and transaction-boundary
+    risk on every tick.
+    """
     conn.executescript(SETTLEMENT_COMMAND_SCHEMA)
     # PR 3 (2026-05-19): idempotent ADD COLUMN migrations for new fields.
     # "duplicate column" is expected on already-migrated databases; ignore it.
@@ -240,28 +255,94 @@ def init_settlement_command_schema(conn: sqlite3.Connection) -> None:
     # so downstream causal-evidence consumers can distinguish "verified
     # Gamma-explicit anchor" from "unknown legacy fabrication".
     #
-    # Idempotency: keyed off PRAGMA user_version. Set to 13 only after the
-    # update has run; subsequent boots see user_version=13 and skip. Real
-    # live callers passing an explicit 'gamma_explicit' value (Gamma's actual
-    # endDate as the verified anchor) write rows AFTER this boot, so the
-    # one-shot does not corrupt verified rows.
+    # Idempotency: tracked via a dedicated settlement_schema_migrations table
+    # (NOT PRAGMA user_version — that is owned by db.py's init_schema and
+    # collides with SCHEMA_VERSION=13). A single row with key 'v13_gamma_backfill'
+    # marks completion; subsequent boots skip. Real live callers passing an
+    # explicit 'gamma_explicit' value (Gamma's actual endDate as the verified
+    # anchor) write rows AFTER this boot, so the one-shot does not corrupt
+    # verified rows.
     try:
-        current_version = int(conn.execute("PRAGMA user_version").fetchone()[0])
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS settlement_schema_migrations (
+              migration_key TEXT PRIMARY KEY,
+              applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        already_run = conn.execute(
+            "SELECT 1 FROM settlement_schema_migrations WHERE migration_key = 'v13_gamma_backfill'"
+        ).fetchone()
     except Exception:
-        current_version = 0
-    if current_version < 13:
+        already_run = True  # fail-safe: if we can't check, skip
+
+    if not already_run:
         try:
             conn.execute(
                 "UPDATE settlement_commands SET polymarket_end_anchor_source = 'unknown_legacy' "
                 "WHERE polymarket_end_anchor_source = 'gamma_explicit'"
             )
-            conn.execute("PRAGMA user_version = 13")
+            conn.execute(
+                "INSERT OR IGNORE INTO settlement_schema_migrations (migration_key) "
+                "VALUES ('v13_gamma_backfill')"
+            )
         except Exception as exc:
             logger.warning(
                 "[V13_BACKFILL_GAMMA_EXPLICIT_FAILED] exc=%s; legacy rows may "
                 "retain fabricated authority. Investigate before next boot.",
                 exc,
             )
+
+
+# Backward-compatibility alias: db.py and external callers that import this
+# name continue to work. New code should call ensure_settlement_schema_ready
+# at boot and assert_settlement_schema_ready at hot-path sites.
+init_settlement_command_schema = ensure_settlement_schema_ready
+
+
+# Expected columns after ensure_settlement_schema_ready has run.
+_REQUIRED_SETTLEMENT_COLUMNS: frozenset[str] = frozenset({
+    "command_id", "state", "condition_id", "market_id", "payout_asset",
+    "pusd_amount_micro", "token_amounts_json", "winning_index_set",
+    "tx_hash", "block_number", "confirmation_count",
+    "requested_at", "submitted_at", "terminal_at", "error_payload",
+    "polymarket_end_anchor_source",
+})
+
+
+def assert_settlement_schema_ready(conn: sqlite3.Connection) -> None:
+    """Hot-path assertion: verify the schema is present via PRAGMA (no DDL).
+
+    Raises SettlementSchemaNotReadyError if settlement_commands is missing or
+    lacks required columns.  Fast (single PRAGMA query); never runs executescript
+    or ALTER TABLE — safe on read-only connections and inside open transactions.
+
+    Usage: call at the top of request_redeem / submit_redeem /
+    reconcile_pending_redeems / get_command / list_commands instead of
+    init_settlement_command_schema to avoid DDL in the live hot path.
+    """
+    try:
+        rows = conn.execute(
+            "PRAGMA table_info(settlement_commands)"
+        ).fetchall()
+    except Exception as exc:
+        raise SettlementSchemaNotReadyError(
+            f"PRAGMA table_info(settlement_commands) failed: {exc}; "
+            "call ensure_settlement_schema_ready at boot"
+        ) from exc
+    if not rows:
+        raise SettlementSchemaNotReadyError(
+            "settlement_commands table not found; "
+            "call ensure_settlement_schema_ready at boot"
+        )
+    present = {row[1] if isinstance(row, (list, tuple)) else row["name"] for row in rows}
+    missing = _REQUIRED_SETTLEMENT_COLUMNS - present
+    if missing:
+        raise SettlementSchemaNotReadyError(
+            f"settlement_commands missing columns {sorted(missing)}; "
+            "call ensure_settlement_schema_ready at boot to run migrations"
+        )
 
 
 def request_redeem(
@@ -309,7 +390,7 @@ def request_redeem(
 
         conn = get_trade_connection_with_world()
     assert conn is not None
-    init_settlement_command_schema(conn)
+    assert_settlement_schema_ready(conn)
 
     existing = conn.execute(
         """
@@ -464,7 +545,7 @@ def submit_redeem(
             conn.execute("ATTACH DATABASE ? AS world", (str(_WORLD_PATH),))
         except sqlite3.OperationalError as _att_exc:
             logger.warning("[SUBMIT_REDEEM_ATTACH_WORLD_FAILED] exc=%r", _att_exc)
-    init_settlement_command_schema(conn)
+    assert_settlement_schema_ready(conn)
     submitted_at_s = _coerce_time(submitted_at)
 
     try:
@@ -1004,24 +1085,53 @@ def _lookup_market_neg_risk_authoritative(
 
 
 def reconcile_pending_redeems(web3: Any, conn: sqlite3.Connection) -> list[SettlementResult]:
-    """Follow chain receipts for tx-hashed redeem commands to terminal state."""
+    """Follow chain receipts for tx-hashed redeem commands to terminal state.
+
+    P1-4 (codereview-may19.md): bounded execution via batch cap, per-call CLOB
+    result cache, and wall-clock budget to prevent N×5s unbounded blocking.
+      ZEUS_REDEEM_RECONCILE_BATCH_CAP  — max rows per call (default 50)
+      ZEUS_REDEEM_RECONCILE_BUDGET_S   — wall-clock budget in seconds (default 60)
+    """
+    import time as _time
 
     from src.venue.polymarket_v2_adapter import (
         POLYGON_CTF_ADDRESS,
         POLYGON_NEGRISK_ADAPTER_ADDRESS,
     )
 
-    init_settlement_command_schema(conn)
+    assert_settlement_schema_ready(conn)
+
+    # P1-4 (a): batch cap — avoid processing unbounded rows per tick.
+    _batch_cap = int(os.environ.get("ZEUS_REDEEM_RECONCILE_BATCH_CAP", "50") or "50")
+    # P1-4 (c): wall-clock budget.
+    _budget_s = float(os.environ.get("ZEUS_REDEEM_RECONCILE_BUDGET_S", "60") or "60")
+    _t_start = _time.monotonic()
+
     rows = conn.execute(
         """
         SELECT * FROM settlement_commands
          WHERE state = ? AND tx_hash IS NOT NULL
          ORDER BY requested_at, command_id
+         LIMIT ?
         """,
-        (SettlementState.REDEEM_TX_HASHED.value,),
+        (SettlementState.REDEEM_TX_HASHED.value, _batch_cap),
     ).fetchall()
+
+    # P1-4 (b): per-call CLOB result cache keyed by condition_id.
+    # Avoids repeated 5-second Gamma HTTP calls for the same market within
+    # a single reconcile invocation.
+    _negrisk_cache: dict[str, Optional[bool]] = {}
+
     results: list[SettlementResult] = []
     for row in rows:
+        # P1-4 (c): budget check — break before fetching next receipt.
+        if _time.monotonic() - _t_start > _budget_s:
+            logger.warning(
+                "[RECONCILE_REDEEM_BUDGET_EXCEEDED] budget_s=%s processed=%d remaining>=1 "
+                "— deferring rest to next tick",
+                _budget_s, len(results),
+            )
+            break
         tx_hash = str(row["tx_hash"])
         receipt = _get_receipt(web3, tx_hash)
         if receipt is None:
@@ -1037,9 +1147,14 @@ def reconcile_pending_redeems(web3: Any, conn: sqlite3.Connection) -> list[Settl
             # logs[*].address for every log whose topic[0] == PayoutRedemption.
             # Root cause: Karachi c8c220f5 tx 0x0c85d9… — StandardCTF emitted
             # PayoutRedemption (logs[1].address = 0x4d97…) for a negRisk market.
-            is_negrisk_market = _lookup_market_neg_risk_authoritative(
-                conn, str(row["condition_id"])
-            )
+            _cond_key = str(row["condition_id"])
+            if _cond_key in _negrisk_cache:
+                is_negrisk_market = _negrisk_cache[_cond_key]
+            else:
+                is_negrisk_market = _lookup_market_neg_risk_authoritative(
+                    conn, _cond_key
+                )
+                _negrisk_cache[_cond_key] = is_negrisk_market
             if is_negrisk_market is None:
                 # Unknown — all three lookup sources failed (world.db empty, trades.db miss,
                 # Gamma unreachable).  Defer terminal transition; will retry next tick.
@@ -1158,6 +1273,165 @@ def reconcile_pending_redeems(web3: Any, conn: sqlite3.Connection) -> list[Settl
                     )
                 )
                 continue
+
+            if is_negrisk_market:
+                # Compute best-effort expected amount for cross-check.
+                # Unlike submit_redeem (which has the full neg_risk_row with
+                # yes/no token IDs), reconcile only has token_amounts_json.
+                # Use the single-entry heuristic: if the map has exactly one
+                # key, that value is the winning-slot amount. Multi-entry maps
+                # (or None) set amount_per_slot=None to skip the cross-check.
+                _reconcile_amount_per_slot: Optional[int] = None
+                _ta_json = row["token_amounts_json"]
+                if _ta_json:
+                    try:
+                        _ta = json.loads(_ta_json)
+                        if isinstance(_ta, dict) and len(_ta) == 1:
+                            from decimal import Decimal, ROUND_HALF_UP
+                            _reconcile_amount_per_slot = int(
+                                (Decimal(str(next(iter(_ta.values())))) * Decimal(1_000_000))
+                                .quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+                            )
+                    except Exception:
+                        pass
+
+                # Payout proof (P1-2, codereview-may19-2.md):
+                # Routing presence alone does not prove the payout was correct.
+                # Parse the NegRiskAdapter PayoutRedemption event from receipt logs
+                # to verify: (1) condition_id matches, (2) payout > 0,
+                # (3) payout amount plausibly matches token_amounts_json.
+                #
+                # NegRiskAdapter event signature (NegRiskAdapter.sol INegRiskAdapterEE):
+                #   event PayoutRedemption(
+                #     address indexed redeemer,
+                #     bytes32 indexed conditionId,
+                #     uint256[] amounts,
+                #     uint256 payout
+                #   )
+                # ABI encoding:
+                #   topics[0] = 0x9140a6a270ef945260c03894b3c6b3b2695e9d5101feef0ff24fec960cfd3224
+                #   topics[1] = redeemer (indexed address, 32-byte padded)
+                #   topics[2] = conditionId (indexed bytes32)
+                #   data      = ABI(uint256[] amounts, uint256 payout):
+                #     bytes 0-31:  offset pointer to amounts array (= 0x40)
+                #     bytes 32-63: payout (static uint256, SECOND word)
+                #     bytes 64-95: array length
+                #     bytes 96+:   array items
+                #
+                # Fail-closed: if the topic is not found or decode fails,
+                # classify as REDEEM_NEGRISK_REVIEW_REQUIRED.
+                _NEGRISK_REDEMPTION_TOPIC = (
+                    "0x9140a6a270ef945260c03894b3c6b3b2695e9d5101feef0ff24fec960cfd3224"
+                )
+                _command_condition_id = str(row["condition_id"]).lower()
+                _proof_error_code: Optional[str] = None
+                _proof_payout: Optional[int] = None
+                _proof_condition_matched: bool = False
+
+                for _log in receipt_payload.get("logs", []):
+                    _addr = _to_hex_str(_log.get("address") or "")
+                    if _addr != _negrisk_addr:
+                        continue
+                    _topics = _log.get("topics") or []
+                    if not _topics or _to_hex_str(_topics[0]) != _NEGRISK_REDEMPTION_TOPIC:
+                        continue
+                    # topics[2] = conditionId (indexed bytes32)
+                    if len(_topics) < 3:
+                        _proof_error_code = "REDEEM_NEGRISK_REVIEW_REQUIRED"
+                        break
+                    try:
+                        _log_condition_id = _to_hex_str(_topics[2])
+                        if _log_condition_id != _command_condition_id:
+                            # Different condition_id — unrelated adapter activity in
+                            # the same tx. Classify as wrong-condition per P1-2 spec.
+                            _proof_error_code = "REDEEM_NEGRISK_WRONG_CONDITION"
+                            break
+                        _proof_condition_matched = True
+                    except Exception:
+                        _proof_error_code = "REDEEM_NEGRISK_REVIEW_REQUIRED"
+                        break
+
+                    # Decode payout from log data (second 32-byte word).
+                    _raw_data = _log.get("data") or ""
+                    try:
+                        _data_hex = _to_hex_str(_raw_data).lstrip("0x") if _raw_data else ""
+                        if len(_data_hex) < 128:
+                            # Fewer than 2 full 32-byte words — cannot decode payout.
+                            _proof_error_code = "REDEEM_NEGRISK_REVIEW_REQUIRED"
+                            break
+                        _payout_word = _data_hex[64:128]  # second 32-byte word
+                        _proof_payout = int(_payout_word, 16)
+                        if _proof_payout == 0:
+                            _proof_error_code = "REDEEM_NEGRISK_ZERO_PAYOUT"
+                            break
+                    except Exception:
+                        _proof_error_code = "REDEEM_NEGRISK_REVIEW_REQUIRED"
+                        break
+
+                    # Amount cross-check against token_amounts_json (in micro-units).
+                    # _reconcile_amount_per_slot is None when the row predates the
+                    # computation or the token map could not be resolved — skip, not reject.
+                    if _reconcile_amount_per_slot is not None and _reconcile_amount_per_slot > 0:
+                        _diff = abs(_proof_payout - _reconcile_amount_per_slot)
+                        _tolerance = max(1, int(_reconcile_amount_per_slot * 0.001))  # 0.1% or 1
+                        if _diff > _tolerance:
+                            _proof_error_code = "REDEEM_NEGRISK_AMOUNT_MISMATCH"
+                            logger.warning(
+                                "[REDEEM_NEGRISK_AMOUNT_MISMATCH] command_id=%s "
+                                "condition_id=%s payout_from_receipt=%s "
+                                "expected_amount_per_slot=%s diff=%s tolerance=%s",
+                                row["command_id"], row["condition_id"],
+                                _proof_payout, _reconcile_amount_per_slot, _diff, _tolerance,
+                            )
+                            break
+                    # All checks passed for this log — route confirmed with proof.
+                    break
+
+                if not _proof_condition_matched and _proof_error_code is None:
+                    # NegRiskAdapter was in logs but emitted no PayoutRedemption for
+                    # this condition — possible unrelated adapter activity in the tx.
+                    _proof_error_code = "REDEEM_NEGRISK_REVIEW_REQUIRED"
+
+                if _proof_error_code is not None:
+                    _review_error: dict[str, Any] = {
+                        "errorCode": _proof_error_code,
+                        "condition_id": str(row["condition_id"]),
+                        "payout_from_receipt": _proof_payout,
+                        "expected_amount_per_slot": _reconcile_amount_per_slot,
+                        "tx_hash": tx_hash,
+                    }
+                    logger.warning(
+                        "[%s] command_id=%s condition_id=%s "
+                        "payout_from_receipt=%s expected=%s tx_hash=%s",
+                        _proof_error_code,
+                        row["command_id"], row["condition_id"],
+                        _proof_payout, _reconcile_amount_per_slot, tx_hash,
+                    )
+                    with _savepoint(conn):
+                        _transition(
+                            conn,
+                            str(row["command_id"]),
+                            SettlementState.REDEEM_REVIEW_REQUIRED,
+                            payload=receipt_payload,
+                            block_number=block_number,
+                            confirmation_count=confirmation_count,
+                            error_payload=_review_error,
+                            terminal=True,
+                            recorded_at=_coerce_time(None),
+                        )
+                    results.append(
+                        SettlementResult(
+                            str(row["command_id"]),
+                            SettlementState.REDEEM_REVIEW_REQUIRED,
+                            tx_hash=tx_hash,
+                            block_number=block_number,
+                            confirmation_count=confirmation_count,
+                            error_payload=_review_error,
+                            raw_response=receipt_payload,
+                        )
+                    )
+                    continue
+
             state_after = SettlementState.REDEEM_CONFIRMED
             error_payload = None
         elif status in {0, "0", False, "failed", "FAILED"}:
@@ -1192,12 +1466,12 @@ def reconcile_pending_redeems(web3: Any, conn: sqlite3.Connection) -> list[Settl
 
 
 def get_command(conn: sqlite3.Connection, command_id: str) -> dict[str, Any]:
-    init_settlement_command_schema(conn)
+    assert_settlement_schema_ready(conn)
     return dict(_get_row(conn, command_id))
 
 
 def list_commands(conn: sqlite3.Connection, *, state: SettlementState | str | None = None) -> list[dict[str, Any]]:
-    init_settlement_command_schema(conn)
+    assert_settlement_schema_ready(conn)
     if state is None:
         rows = conn.execute("SELECT * FROM settlement_commands ORDER BY requested_at, command_id").fetchall()
     else:

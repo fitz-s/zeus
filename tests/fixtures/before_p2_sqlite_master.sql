@@ -1341,6 +1341,11 @@ CREATE TABLE settlement_commands (
   terminal_at TEXT,
   error_payload TEXT
 );
+-- table: settlement_schema_migrations
+CREATE TABLE settlement_schema_migrations (
+  migration_key TEXT PRIMARY KEY,
+  applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
 -- table: settlements
 CREATE TABLE settlements (
             id INTEGER PRIMARY KEY AUTOINCREMENT,

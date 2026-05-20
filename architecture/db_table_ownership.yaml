@@ -382,6 +382,19 @@ tables:
     pk_col: null
     notes: Ghost shell on world.db. Authoritative on trade.db. Drop after 2026-08-15.
 
+  - name: settlement_schema_migrations
+    db: world
+    schema_class: legacy_archived
+    schema_version_owner: SCHEMA_VERSION
+    created_by: ensure_settlement_schema_ready
+    pk_col: migration_key
+    notes: >
+      Internal migration-tracking table for ensure_settlement_schema_ready.
+      Tracks one-shot backfills (e.g. v13_gamma_backfill) to avoid PRAGMA
+      user_version collision with db.py's SCHEMA_VERSION. Created alongside
+      settlement_commands on any DB that calls init_schema or
+      ensure_settlement_schema_ready. 2026-05-19 P1-3.
+
   - name: settlement_command_events
     db: world
     schema_class: legacy_archived
@@ -807,6 +820,18 @@ tables:
       - {name: zeus_submit_intent_time, type: TEXT, nullable: true, pr: PR6}
       - {name: venue_ack_time, type: TEXT, nullable: true, pr: PR6}
       - {name: clock_skew_estimate_ms_at_submit, type: INTEGER, nullable: true, pr: PR6}
+
+  - name: settlement_schema_migrations
+    db: trade
+    schema_class: trade_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: ensure_settlement_schema_ready
+    pk_col: migration_key
+    notes: >
+      Internal migration-tracking table for ensure_settlement_schema_ready.
+      Tracks one-shot backfills to avoid PRAGMA user_version collision with
+      db.py SCHEMA_VERSION. Created on trade.db alongside settlement_commands.
+      2026-05-19 P1-3.
 
   - name: shadow_signals
     db: world

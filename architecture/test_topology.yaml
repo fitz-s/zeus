@@ -2625,3 +2625,86 @@ test_metadata:
       conn=None calls increment decision_seq 0 → 1.
     created: 2026-05-19
     last_reused_or_audited: 2026-05-19
+
+  tests/test_negrisk_redeem_payout_proof.py:
+    modules: [execution]
+    category: core_law_antibody
+    profile: p12_negrisk_payout_proof
+    blocks_commit: true
+    asserted_invariants:
+      - REDEEM_NEGRISK_WRONG_CONDITION
+      - REDEEM_NEGRISK_ZERO_PAYOUT
+      - REDEEM_NEGRISK_AMOUNT_MISMATCH
+      - REDEEM_NEGRISK_REVIEW_REQUIRED
+    source_under_test:
+      - src/execution/settlement_commands.py
+    law_dependencies:
+      - codereview-may19-2.md P1-2
+    notes: >
+      NegRisk redeem confirmation requires parsing the NegRiskAdapter PayoutRedemption
+      event from receipt logs: conditionId must match, payout must be > 0, and payout
+      amount must match token_amounts_json within 0.1% tolerance. Error codes gate
+      the confirmed path; mismatches route to REDEEM_REVIEW_REQUIRED.
+    created: 2026-05-19
+    last_reused_or_audited: 2026-05-19
+
+  tests/test_settlement_schema_runtime_no_ddl.py:
+    modules: [execution]
+    category: core_law_antibody
+    profile: p12_settlement_schema_no_ddl
+    blocks_commit: true
+    asserted_invariants:
+      - SETTLEMENT_SCHEMA_DDL_HOT_PATH_BANNED
+    source_under_test:
+      - src/execution/settlement_commands.py
+    law_dependencies:
+      - codereview-may19.md P1-2
+    notes: >
+      DDL (CREATE TABLE, ALTER TABLE, DROP) must not run on the hot path.
+      ensure_settlement_schema_ready is boot-only; assert_settlement_schema_ready
+      is the hot-path guard (PRAGMA table_info only). Antibody verifies that
+      submit_redeem, reconcile_pending_redeems, and list_commands emit zero DDL
+      on an already-initialized schema.
+    created: 2026-05-19
+    last_reused_or_audited: 2026-05-19
+
+  tests/test_reconcile_pending_redeems_batch_cap.py:
+    modules: [execution]
+    category: core_law_antibody
+    profile: p14_reconcile_batch_cap
+    blocks_commit: true
+    asserted_invariants:
+      - RECONCILE_REDEEM_BATCH_CAP_ENFORCED
+      - RECONCILE_REDEEM_BUDGET_EXCEEDED
+      - RECONCILE_REDEEM_CLOB_CACHE_DEDUPLICATES
+    source_under_test:
+      - src/execution/settlement_commands.py
+    law_dependencies:
+      - codereview-may19.md P1-4
+    notes: >
+      reconcile_pending_redeems must respect ZEUS_REDEEM_RECONCILE_BATCH_CAP (default 50),
+      a wall-clock budget ZEUS_REDEEM_RECONCILE_BUDGET_S (default 60s), and a per-call
+      CLOB cache to avoid repeated Gamma HTTP lookups for the same condition_id within
+      one reconcile tick. Antibody: C1 cap=5/20 rows processed ≤5; C2 budget=0s logs
+      RECONCILE_REDEEM_BUDGET_EXCEEDED; C3 3 rows same condition → lookup called ≤1 time.
+    created: 2026-05-19
+    last_reused_or_audited: 2026-05-19
+
+  tests/test_settlement_migration_unknown_legacy_default.py:
+    modules: [execution]
+    category: core_law_antibody
+    profile: p13_settlement_migration_legacy_default
+    blocks_commit: true
+    asserted_invariants:
+      - SETTLEMENT_LEGACY_SOURCE_BACKFILLED
+    source_under_test:
+      - src/execution/settlement_commands.py
+    law_dependencies:
+      - codereview-may19.md P1-3
+    notes: >
+      Pre-migration rows with polymarket_end_anchor_source='gamma_explicit' must
+      be converted to 'unknown_legacy' by ensure_settlement_schema_ready (V13
+      backfill). New rows without explicit source get 'unknown_legacy'. New rows
+      with explicit 'gamma_explicit' are retained unchanged.
+    created: 2026-05-19
+    last_reused_or_audited: 2026-05-19

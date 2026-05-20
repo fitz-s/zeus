@@ -135,7 +135,25 @@ class _StubWeb3:
 def _karachi_correct_receipt():
     """Karachi-shape receipt: routes through NegRiskAdapter (log[7]) AND
     Standard CTF emits PayoutRedemption (log[4]) because NegRiskAdapter
-    internally calls Standard CTF."""
+    internally calls Standard CTF.
+
+    NegRiskAdapter log includes full ABI-encoded topics and data (P1-2
+    payout-proof extension, codereview-may19-2.md):
+      topics[0] = NegRisk PayoutRedemption topic hash
+      topics[1] = redeemer address (32-byte padded)
+      topics[2] = conditionId (32-byte hex = KARACHI_COND)
+      data      = ABI(uint256[] amounts, uint256 payout):
+        word0 (offset=0x40), word1 (payout=1_000_000), word2 (len=1), word3 (amount=1_000_000)
+    """
+    # ABI-encoded (uint256[] amounts, uint256 payout) with payout=1_000_000 (1 USDC micro)
+    _PAYOUT_MICRO = 1_000_000
+    _w0 = "0000000000000000000000000000000000000000000000000000000000000040"  # offset to array
+    _w1 = f"{_PAYOUT_MICRO:064x}"  # payout = second word
+    _w2 = "0000000000000000000000000000000000000000000000000000000000000001"  # array len=1
+    _w3 = f"{_PAYOUT_MICRO:064x}"  # amounts[0]
+    _data = "0x" + _w0 + _w1 + _w2 + _w3
+    # redeemer address padded to 32 bytes (topics[1])
+    _redeemer_topic = "0x000000000000000000000000b19ce122089237025ad046a0ea61e66a5fa4cc8b"
     return {
         "status": 1,
         "transactionHash": KARACHI_TX,
@@ -157,8 +175,11 @@ def _karachi_correct_receipt():
             },
             {
                 # log[7]: NegRiskAdapter emits its OWN redemption event
+                # with full payout proof (topics[1]=redeemer, topics[2]=conditionId,
+                # data=ABI(amounts[], payout)).
                 "address": POLYGON_NEGRISK_ADAPTER_ADDRESS.lower(),
-                "topics": [_NEGRISK_REDEMPTION_TOPIC],
+                "topics": [_NEGRISK_REDEMPTION_TOPIC, _redeemer_topic, KARACHI_COND],
+                "data": _data,
             },
         ],
     }
