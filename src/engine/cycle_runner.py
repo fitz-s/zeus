@@ -343,17 +343,53 @@ def _risk_allows_new_entries(risk_level: RiskLevel) -> bool:
 
 
 def _discovery_gates_allow_entries(
+    *,
     risk_level: RiskLevel,
     heartbeat_status: dict,
     ws_gap_status: dict,
-    *,
+    cutover_summary: dict,
+    governor_status: dict,
+    current_posture: str,
+    chain_ready: bool,
     has_quarantine: bool,
+    force_exit: bool,
+    entry_bankroll,
+    exposure_gate_hit: bool,
+    entries_paused: bool,
+    block_registry,
 ) -> bool:
+    """Return True only when ALL entry-blocking conditions are clear.
+
+    Authority semantics (codereview-may19.md P0-1 + codereview-may19-2.md P0-1):
+    This function is the SINGLE authority surface for the discovery gate. Every
+    condition that can block entries is checked here. The `entries_blocked_reason`
+    string computed in run_cycle() is operator-facing observability that MIRRORS
+    this decision; it does not preempt it.
+
+    Fail-closed rules:
+    - Any non-GREEN risk_level → blocked (fails closed on unknown future levels).
+    - block_registry is None (construction failed) → blocked. Registry-unavailable
+      is treated as is_clear=False to preserve the fail-closed contract. This is
+      intentional: a broken safety registry is itself a blocking condition.
+    - block_registry.is_clear(BlockStage.DISCOVERY) is False → blocked.
+    - Status dicts missing the "entry" key default to not allowing submit.
+    """
+    if block_registry is None or not block_registry.is_clear(BlockStage.DISCOVERY):
+        return False
     return (
-        not has_quarantine
+        chain_ready
+        and not has_quarantine
+        and not force_exit
+        and not entries_paused
+        and current_posture == "NORMAL"
+        and entry_bankroll is not None
+        and entry_bankroll > 0
+        and not exposure_gate_hit
         and _risk_allows_new_entries(risk_level)
-        and heartbeat_status.get("entry", {}).get("allow_submit", False)
-        and ws_gap_status.get("entry", {}).get("allow_submit", False)
+        and bool((cutover_summary.get("entry") or {}).get("allow_submit", False))
+        and bool((heartbeat_status.get("entry") or {}).get("allow_submit", False))
+        and bool((ws_gap_status.get("entry") or {}).get("allow_submit", False))
+        and bool((governor_status.get("entry") or {}).get("allow_submit", True))
     )
 
 
@@ -881,7 +917,10 @@ def run_cycle(mode: DiscoveryMode) -> dict:
         summary["portfolio_quarantined"] = True
 
     entries_paused = is_entries_paused()
-    # entries_blocked_reason — observability only; not consulted by the short-circuit below (gate-purge 2026-05-04).
+    # entries_blocked_reason: operator-facing observability string mirroring the
+    # gate decision. Computed here first so all known blockers surface in the
+    # cycle JSON. Authority is _discovery_gates_allow_entries() below — both
+    # objects must agree; the gate is the canonical decision-maker.
     if entries_paused and entries_blocked_reason is None:
         entries_blocked_reason = "entries_paused"
     if entries_blocked_reason is None and not bool((_cutover_summary.get("entry") or {}).get("allow_submit", False)):
@@ -897,12 +936,13 @@ def run_cycle(mode: DiscoveryMode) -> dict:
     # posture surfaces only when it is the *sole* block.
     if entries_blocked_reason is None and _current_posture != "NORMAL":
         entries_blocked_reason = f"posture={_current_posture}"
-    # ── REGISTRY-GUARDED SHORT-CIRCUIT (2026-05-04 antibody) ─────────────────
-    # Phase 1: observational only.  Snapshot all 13 entries-block gates so
-    # a single cycle JSON record answers "why are entries blocked right now?"
-    # without grepping 5 modules.  CI gate
-    # `tests/test_no_unregistered_block_predicate.py` enforces that any new
-    # boolean appearing in the line below is also registered as an adapter.
+    # ── BLOCK-REGISTRY BUILD (codereview-may19.md P0-1) ─────────────────────
+    # Build registry first; _block_registry=None means construction failed and
+    # the gate FAIL-CLOSES (registry-unavailable is itself a blocking condition).
+    # Snapshot is written to summary JSON for diagnostics regardless of gate outcome.
+    # CI gate `tests/test_no_unregistered_block_predicate.py` enforces all block
+    # predicates are registered adapters.
+    _block_registry = None  # fail-closed default; set below on success
     try:
         import os as _os
         from pathlib import Path as _Path
@@ -936,7 +976,8 @@ def run_cycle(mode: DiscoveryMode) -> dict:
         )
         summary["block_registry"] = [b.to_dict() for b in _block_snapshot]
     except Exception as _registry_exc:  # noqa: BLE001
-        # Registry must never break the cycle — fail soft, log, continue.
+        # Registry construction failed — _block_registry stays None.
+        # The gate will fail-closed: _block_registry=None → gate returns False.
         logger.warning(
             "ENTRIES_BLOCK_REGISTRY_SNAPSHOT_FAILED cycle=%s exc=%s: %s",
             summary.get("cycle_id", "?"),
@@ -945,26 +986,25 @@ def run_cycle(mode: DiscoveryMode) -> dict:
             exc_info=True,
         )
         summary["block_registry_error"] = f"{type(_registry_exc).__name__}: {_registry_exc}"
-    # Fail-CLOSED defaults (Ask 1 fix-up post critic-opus PR #54): if a
-    # status dict is missing the "entry" key (contract not guaranteed by
-    # heartbeat_supervisor.summary / ws_gap_guard.summary), default to
-    # not allowing submit so we mirror the explicit fail-closed paths at
-    # cycle_runner.py:752,754 above.
-    #
-    # P0-1 codereview-may19-2 (2026-05-19): promote `entries_blocked_reason`
-    # from observability to authority. Pre-fix, the gate only consulted
-    # risk/heartbeat/ws/quarantine, while the daemon separately recorded
-    # `entries_blocked_reason` for chain_ready/force_exit/entry_bankroll/
-    # exposure_gate/entries_paused/cutover/portfolio_governor/posture. That
-    # split let `_execute_discovery_phase()` run with operators seeing
-    # "blocked: X" — safety object and observability object were architecturally
-    # divided. Now the gate requires `entries_blocked_reason is None` AND
-    # the original fail-closed contract on dict shape.
-    if entries_blocked_reason is None and _discovery_gates_allow_entries(
-        risk_level,
-        _heartbeat_status,
-        _ws_gap_status,
+    # ── DISCOVERY GATE (codereview-may19.md P0-1 structural fix) ─────────────
+    # _discovery_gates_allow_entries() is the SINGLE authority for entry dispatch.
+    # It consumes all known blockers as explicit kwargs. Status dicts missing the
+    # "entry" key default to not allowing submit (fail-closed per PR #54 fix-up).
+    # _block_registry=None (construction failed above) → gate fails closed.
+    if _discovery_gates_allow_entries(
+        risk_level=risk_level,
+        heartbeat_status=_heartbeat_status,
+        ws_gap_status=_ws_gap_status,
+        cutover_summary=_cutover_summary,
+        governor_status=_governor_status,
+        current_posture=_current_posture,
+        chain_ready=chain_ready,
         has_quarantine=has_quarantine,
+        force_exit=force_exit,
+        entry_bankroll=entry_bankroll,
+        exposure_gate_hit=exposure_gate_hit,
+        entries_paused=entries_paused,
+        block_registry=_block_registry,
     ):
         try:
             p_dirty, t_dirty = _execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mode, summary, entry_bankroll, decision_time, env=get_mode())
