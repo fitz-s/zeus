@@ -4,7 +4,7 @@
 """INV-nowcast-horizon-bound antibody.
 
 Invariant: Day0HighNowcastSignal.__init__ MUST raise NotApplicableHorizon when
-Day0SignalInputs.hours_remaining > 6.
+Day0SignalInputs.hours_remaining > 6 OR hours_remaining < 0.
 
 xfail-strict rationale:
     SCAFFOLD stub: Day0HighNowcastSignal.__init__ raises NotApplicableHorizon
@@ -77,3 +77,21 @@ def test_day0_nowcast_horizon_bound_allows_within_ceiling():
         hours_remaining=inputs.hours_remaining,
     )
     assert signal.hours_remaining == 6.0
+
+
+def test_day0_nowcast_horizon_bound_rejects_negative():
+    """Patch 3 (SEV-2 #2): hours_remaining < 0 must also raise NotApplicableHorizon.
+
+    Negative hours_remaining is physically impossible and indicates a data error
+    (e.g., clock skew, timestamp inversion). Fail-closed: reject rather than produce
+    nonsensical nowcast output from a negative horizon covariate.
+    """
+    inputs = _make_inputs(hours_remaining=-0.5)
+
+    with pytest.raises(NotApplicableHorizon):
+        Day0HighNowcastSignal(
+            observed_high_so_far=inputs.observed_high_so_far,
+            member_maxes_remaining=inputs.member_maxes_remaining,
+            current_temp=inputs.current_temp,
+            hours_remaining=inputs.hours_remaining,
+        )

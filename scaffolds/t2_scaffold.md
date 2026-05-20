@@ -1,10 +1,10 @@
 <!-- Created: 2026-05-19 -->
 <!-- Last reused or audited: 2026-05-19 -->
-<!-- Authority basis: docs/operations/task_2026-05-19_strategy_vnext_phase1/PHASE_1_ULTRAPLAN.md §5 (Option B pivot, v2) -->
+<!-- Authority basis: docs/operations/task_2026-05-19_strategy_vnext_phase1/PHASE_1_ULTRAPLAN.md §5 (Option B pivot, v3) -->
 
-# T2 SCAFFOLD v2 — Day0HighNowcastSignal mirror class + shared HorizonPlattFit
+# T2 SCAFFOLD v3 — Day0HighNowcastSignal + bin_grid_id + one-hot daypart + fit_run_id
 
-**Status**: SCAFFOLD v2 (Option B pivot per critic round-1 SEV-1 #1; pending round-2 critic)
+**Status**: SCAFFOLD v3 (critic round-2 light patches applied; proceeding to production)
 **Author**: sonnet executor, worktree `phase1-t2-day0-nowcast-20260520`
 **Entry SHA**: origin/main = `649f73d865` (PR-T1-B merged; T1 complete)
 
@@ -28,21 +28,21 @@ was impossible; real migration would touch 150+ LOC across 3+ callers with regre
   AND `Day0HighNowcastSignal` (nowcast path, side-write to `day0_nowcast_runs`) in parallel.
   LOW branch unchanged. Router return type unchanged: `Day0HighSignal | Day0LowNowcastSignal`.
 
-**HIGH-side nowcast insertion point** (`day0_router.py:92-103`):
+**Router wiring — Option (c): caller-site, NOT Day0Router** (per critic round-2 verdict):
+`Day0Router.route()` stays PURE — no DB connection parameter, no side effects.
+HIGH-branch nowcast invocation happens at the 2 caller sites that already have
+a DB connection in scope:
+- `src/engine/evaluator.py:2363` area — after `Day0Router.route()` returns `day0`
+- `src/engine/monitor_refresh.py:838` area — after `Day0Router.route()` returns `day0`
+
+Pattern at each caller site:
 ```python
-# After constructing Day0HighSignal (the returned signal), optionally construct and invoke:
-if inputs.hours_remaining <= 6.0:
+if temperature_metric.is_high() and hours_remaining <= 6.0:
     try:
-        nowcast = Day0HighNowcastSignal(
-            observed_high_so_far=inputs.observed_high_so_far,
-            member_maxes_remaining=inputs.member_maxes_remaining,
-            current_temp=inputs.current_temp,
-            hours_remaining=inputs.hours_remaining,
-            ...
-        )
-        # write nowcast output to day0_nowcast_runs (production pass)
+        nowcast = Day0HighNowcastSignal(...)
+        # write p_vector output to day0_nowcast_runs via day0_nowcast_store.write_nowcast_run()
     except NotApplicableHorizon:
-        pass  # should not fire — guard above matches
+        pass  # guard triggered, skip — no write
 ```
 Router still returns `Day0HighSignal` (ensemble path). Nowcast is a parallel write lane.
 
@@ -82,13 +82,15 @@ Namespace: `nei_v1_` — DISTINCT from T1's `deid_v1_` and calibration's `dgid_v
 Writer-side hash (Option β, mirrors T1). AFTER INSERT trigger backstop:
 sentinel `'nei_v1_BACKSTOP_NULL_WRITER_BYPASS'`.
 
-### §3.3 Column sketch
+### §3.3 Column sketch (v3 — bin_grid_id added, fit_run_id, one-hot daypart)
 
 ```sql
 CREATE TABLE IF NOT EXISTS day0_nowcast_runs (
     -- Natural key (PK)
     market_slug         TEXT NOT NULL,
     temperature_metric  TEXT NOT NULL CHECK (temperature_metric IN ('high', 'low')),
+    bin_grid_id         TEXT NOT NULL,             -- maps p_nowcast_json[i] to (low,high) bin range
+    bin_schema_version  TEXT NOT NULL,             -- matches ensemble_snapshots_v2.bin_schema_version
     target_date         TEXT NOT NULL,
     observation_time    TEXT NOT NULL,
     run_seq             INTEGER NOT NULL,
@@ -97,15 +99,15 @@ CREATE TABLE IF NOT EXISTS day0_nowcast_runs (
     nowcast_event_id    TEXT,                      -- nei_v1_ prefix; trigger backstop on NULL
 
     -- HorizonPlattFit reference (FK to day0_horizon_platt_fits)
-    fit_id              TEXT NOT NULL,             -- references day0_horizon_platt_fits.fit_id
+    fit_run_id          TEXT NOT NULL,             -- references day0_horizon_platt_fits.fit_run_id
 
-    -- Platt model output (per-bin p_nowcast stored separately — see §3.4)
+    -- Platt model output (per-bin — see §3.4)
     p_nowcast_json      TEXT,                      -- JSON array of per-bin P_nowcast values
     p_now_raw_json      TEXT,                      -- JSON array of per-bin P_now_raw values
 
-    -- Horizon covariates (inputs logged for diagnostics)
-    hours_remaining     REAL NOT NULL,             -- canonical field from Day0SignalInputs
-    daypart             TEXT NOT NULL,             -- pre_sunrise|morning|afternoon|post_peak
+    -- Horizon covariates
+    hours_remaining     REAL NOT NULL,
+    daypart             TEXT NOT NULL CHECK (daypart IN ('pre_sunrise','morning','afternoon','post_peak')),
 
     -- Provenance
     schema_version      INTEGER NOT NULL CHECK (schema_version IN (3, 4)),
@@ -115,8 +117,12 @@ CREATE TABLE IF NOT EXISTS day0_nowcast_runs (
 );
 ```
 
-**NOT NULL columns (9)**: market_slug, temperature_metric, target_date, observation_time,
-run_seq, fit_id, hours_remaining, daypart, schema_version, source.
+**NOT NULL columns (11)**: market_slug, temperature_metric, bin_grid_id, bin_schema_version,
+target_date, observation_time, run_seq, fit_run_id, hours_remaining, daypart, schema_version, source
+— 12 total (NOT NULL count is 12; written as 11 in v2 due to counting error, now corrected).
+
+`bin_grid_id` pattern from `src/state/schema/v2_schema.py:133-134` (ensemble_snapshots_v2).
+Ensures p_nowcast_json[i] can always be reconstructed to its (low, high) bin bounds.
 
 **p_fused NOT stored here** — evaluator computes element-wise fusion per-bin and stores
 result in `decision_events.p_posterior`. Nowcast runs table stores only nowcast output.
@@ -143,15 +149,22 @@ CREATE INDEX IF NOT EXISTS idx_day0_nowcast_runs_event_id
 
 ## §4. Schema — `day0_horizon_platt_fits` (forecasts DB)
 
-Coefficients change rarely. Storing α/β/γ/δ/ε per nowcast_run row = waste.
-Separate table: one row per fit, referenced via `fit_id`.
+Coefficients change rarely. Storing per nowcast_run row = waste.
+Separate table: one row per fit execution, referenced via `fit_run_id`.
+
+`fit_version` is stable across re-runs of the same algorithm ("hpf_v1").
+`fit_run_id` is a per-execution UUID4 (non-deterministic = better: no hash stability issues).
 
 ```sql
 CREATE TABLE IF NOT EXISTS day0_horizon_platt_fits (
-    fit_id              TEXT PRIMARY KEY,          -- hash of coefficients + fit_date
+    fit_run_id          TEXT PRIMARY KEY,          -- uuid4 per fit execution
+    fit_version         TEXT NOT NULL,             -- semantic version, e.g. "hpf_v1"
     alpha               REAL NOT NULL,
     beta                REAL NOT NULL,
-    gamma               REAL NOT NULL,
+    -- One-hot daypart (pre_sunrise is reference category, no coefficient)
+    gamma_morning       REAL NOT NULL,
+    gamma_afternoon     REAL NOT NULL,
+    gamma_post_peak     REAL NOT NULL,
     delta               REAL NOT NULL,
     epsilon             REAL NOT NULL,
     fit_date            TEXT NOT NULL,
@@ -165,18 +178,21 @@ CREATE TABLE IF NOT EXISTS day0_horizon_platt_fits (
 
 ---
 
-## §5. Math sketch — single horizon-aware Platt fit (unchanged)
+## §5. Math sketch — single horizon-aware Platt fit (v3: one-hot daypart)
 
 ```
 logit(P_nowcast) = α · logit(P_now_raw)
                  + β · hours_remaining
-                 + γ · daypart_dummy
+                 + γ_morning   · [daypart=='morning']
+                 + γ_afternoon · [daypart=='afternoon']
+                 + γ_post_peak · [daypart=='post_peak']
                  + δ · temperature_metric_indicator
                  + ε
 ```
 
-`daypart_dummy`: from `Day0ObservationContext.daypart` (`src/contracts/day0_observation_context.py:133`).
-Encoding: pre_sunrise=0, morning=1, afternoon=2, post_peak=3 (4-way, verified).
+`daypart`: from `Day0ObservationContext.daypart` (`src/contracts/day0_observation_context.py:133`).
+4-way: pre_sunrise (reference, no coefficient), morning, afternoon, post_peak.
+One-hot avoids false ordinal assumption (pre_sunrise < morning < ... is not meaningful).
 
 `temperature_metric_indicator`: 0=low, 1=high. Single cross-metric fit (coefficients
 shared; δ captures the HIGH/LOW mean difference).
@@ -212,11 +228,12 @@ NotImplementedError race.
 NOT a phantom `market.max_hours_to_resolution` field.
 
 **Test status**: STRICT PASS in SCAFFOLD (guard fires immediately in __init__).
-Two tests in `tests/test_inv_nowcast_horizon_bound.py`:
+Three tests in `tests/test_inv_nowcast_horizon_bound.py`:
 1. `test_day0_nowcast_horizon_bound_enforces_6h_ceiling`: hours_remaining=8.0 → raises
 2. `test_day0_nowcast_horizon_bound_allows_within_ceiling`: hours_remaining=6.0 → OK
+3. `test_day0_nowcast_horizon_bound_rejects_negative`: hours_remaining=-0.5 → raises
 
-Both pass today (verified: `2 passed in 0.71s`).
+All 3 pass (verified: `3 passed in 0.74s`).
 
 ---
 
@@ -238,18 +255,19 @@ This surface documented here for W3 closure-critic validation.
 
 ---
 
-## §10. PR plan — PR-T2 (single PR, ~360 LOC)
+## §10. PR plan — PR-T2 (single PR, ~420 LOC)
 
 | Component | Files | LOC est. |
 |---|---|---|
-| HIGH nowcast signal | `src/signal/day0_high_nowcast_signal.py` (new) | ~130 |
-| Calibration | `src/calibration/day0_horizon_calibration.py` (updated) | ~120 |
-| Storage writer | `src/state/day0_nowcast_store.py` (new) | ~50 |
-| Router HIGH-branch wire | `src/signal/day0_router.py` (modified) | ~20 |
-| DB schema | `src/state/db.py` (SCHEMA_FORECASTS_VERSION bump + 2 CREATE TABLEs) | ~60 |
-| Migration script | `scripts/migrate_day0_nowcast_runs_2026_05_19.py` (new) | ~40 |
-| Antibody tests | `tests/test_inv_nowcast_horizon_bound.py` (updated) | ~60 |
-| **Total** | | **~480 LOC** |
+| HIGH nowcast signal | `src/signal/day0_high_nowcast_signal.py` (new) | ~160 |
+| Calibration | `src/calibration/day0_horizon_calibration.py` (updated) | ~130 |
+| Storage writer | `src/state/day0_nowcast_store.py` (new) | ~60 |
+| Caller-site wiring | `src/engine/evaluator.py` + `monitor_refresh.py` (modified) | ~40 |
+| DB schema | `src/state/db.py` (SCHEMA_FORECASTS_VERSION bump + 2 CREATE TABLEs) | ~70 |
+| Migration script | `scripts/migrate_day0_nowcast_create_2026_05_20.py` (new) | ~40 |
+| Antibody tests | `tests/test_inv_nowcast_horizon_bound.py` (updated) | ~70 |
+| Manifest | `architecture/db_table_ownership.yaml` (2 entries) | ~20 |
+| **Total** | | **~590 LOC** |
 
 LOW class untouched. No §6.2 regression test needed.
 
@@ -268,7 +286,7 @@ day0_nowcast_runs:
 day0_horizon_platt_fits:
   db: forecasts
   schema_class: forecast_class
-  pk_col: fit_id
+  pk_col: fit_run_id
   writer: src/state/day0_nowcast_store.py
   created: 2026-05-19
 ```
@@ -284,25 +302,14 @@ CHECK constraint widened to `IN (3, 4)` during migration window (Fix 3).
 
 ---
 
-## §13. Ambiguities for wave-critic round 2
+## §13. Decisions locked in SCAFFOLD v3 (no further critic round)
 
-**#1 — Storage writer module**: `src/state/day0_nowcast_store.py` proposed.
-Confirm fits K1 topology (forecasts-DB writer in `src/state/` mirrors T1 pattern
-`src/state/decision_events.py`).
+**#1 resolved**: Storage writer = `src/state/day0_nowcast_store.py` (mirrors T1 pattern).
+**#2 resolved**: bin_grid_id + bin_schema_version columns added (Patch 1 SEV-1).
+  p_nowcast_json is reconstructable given bin_grid_id; bins-snapshot not separately needed
+  because bin_grid_id is the stable key into the existing bin registry.
+**#3 resolved**: Caller-site wiring, not router side-effect (Option c per critic round-2).
+**#4 resolved**: One-hot daypart encoding (3 columns: γ_morning, γ_afternoon, γ_post_peak;
+  pre_sunrise = reference category).
 
-**#2 — p_nowcast_json per-bin storage**: storing `np.ndarray` as JSON array avoids
-one-row-per-bin complexity. Critic should confirm JSON array is the right format
-(vs. msgpack, vs. one row per bin). Also: bin count varies by market — is
-`p_nowcast_json` sufficient to reconstruct without a separate bins-snapshot reference?
-
-**#3 — Router wiring side-effect pattern**: production pass has `Day0Router.route()`
-either (a) perform the nowcast write as a side effect or (b) return a richer object
-carrying both the ensemble signal and an optional nowcast result. Option (a) requires
-the router to take a DB connection; Option (b) requires changing the return type.
-Critic should adjudicate before production pass locks the interface.
-
-**#4 — daypart_dummy encoding in HorizonPlattFit**: 4-way encoding (pre_sunrise=0,
-morning=1, afternoon=2, post_peak=3) is ordinal but the categories are not truly
-ordered. One-hot encoding (3 dummy variables) is statistically cleaner. Production
-pass should decide ordinal vs. one-hot before fitting; scalar γ in current spec
-assumes ordinal. Critic should flag if one-hot is preferred (changes model shape).
+Proceeding to production pass.

@@ -77,9 +77,10 @@ class Day0HighNowcastSignal:
         round_fn: "Callable | None" = None,
         precision: float = 1.0,
     ) -> None:
-        if float(hours_remaining) > 6.0:
+        _hr = float(hours_remaining)
+        if _hr > 6.0 or _hr < 0.0:
             raise NotApplicableHorizon(
-                f"Day0HighNowcastSignal requires hours_remaining <= 6; "
+                f"Day0HighNowcastSignal requires 0 <= hours_remaining <= 6; "
                 f"got {hours_remaining}. Use Day0HighSignal for longer horizons."
             )
         if observed_high_so_far is None:
@@ -103,6 +104,16 @@ class Day0HighNowcastSignal:
         self._precision = precision
         if temporal_context is not None:
             self._current_utc_timestamp = temporal_context.current_utc_timestamp.isoformat()
+
+    def _remaining_weight(self) -> float:
+        """HIGH-equivalent of LOW's _remaining_weight.
+
+        HIGH semantics: high cannot fall below observed_high_so_far (floor, not ceiling).
+        Weight structure mirrors LOW: base on hours_remaining proportion, modulated by
+        nowcast blend_weight from day0_nowcast_context().
+        """
+        base = max(0.10, min(0.95, self.hours_remaining / 24.0))
+        return base * (1.0 - self._nowcast_context()["blend_weight"])
 
     def _nowcast_context(self) -> dict:
         """Delegate to preserved day0_nowcast_context() helper from forecast_uncertainty."""
@@ -164,15 +175,23 @@ class Day0HighNowcastSignal:
         return np.asarray(probs, dtype=np.float64)
 
     def forecast_context(self) -> dict:
-        """Diagnostic context dict. Mirrors Day0LowNowcastSignal.forecast_context shape."""
+        """Diagnostic context dict.
+
+        Key structure matches Day0LowNowcastSignal.forecast_context (lines 143-157):
+        {"observation_weight", "temporal_closure_weight", "backbone": {...}}
+        Evaluator at evaluator.py:2384 calls day0.forecast_context() and expects this shape.
+        """
         nowcast = self._nowcast_context()
         return {
-            "temperature_metric": "high",
-            "hours_remaining": self.hours_remaining,
-            "observation_source": self._observation_source,
-            "observation_time": self._observation_time,
-            "current_utc_timestamp": self._current_utc_timestamp,
-            "observed_high": self.obs_floor,
-            "current_temp": self.current_temp,
-            "nowcast": nowcast,
+            "observation_weight": 1.0 - self._remaining_weight(),
+            "temporal_closure_weight": 1.0 - max(0.0, min(1.0, self.hours_remaining / 24.0)),
+            "backbone": {
+                "observation_source": self._observation_source,
+                "observation_time": self._observation_time,
+                "current_utc_timestamp": self._current_utc_timestamp,
+                "observed_high": self.obs_floor,
+                "current_temp": self.current_temp,
+                "backbone_high": float(np.max(self.settlement_samples())),
+                "nowcast": nowcast,
+            },
         }
