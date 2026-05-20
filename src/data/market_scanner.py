@@ -2483,6 +2483,57 @@ def _update_event_timing_from_snapshot(
         event["hours_to_resolution"] = (end_at - now).total_seconds() / 3600.0
 
 
+def _snapshot_outcome_side(snapshot: dict[str, Any]) -> Literal["YES", "NO"] | None:
+    label = str(snapshot.get("outcome_label") or "").strip().upper()
+    if label == "YES":
+        return "YES"
+    if label == "NO":
+        return "NO"
+    selected_token = str(snapshot.get("selected_outcome_token_id") or "")
+    if selected_token and selected_token == str(snapshot.get("yes_token_id") or ""):
+        return "YES"
+    if selected_token and selected_token == str(snapshot.get("no_token_id") or ""):
+        return "NO"
+    return None
+
+
+def _latest_snapshot(*snapshots: dict[str, Any] | None) -> dict[str, Any] | None:
+    latest: dict[str, Any] | None = None
+    latest_at: datetime | None = None
+    for snapshot in snapshots:
+        if snapshot is None:
+            continue
+        captured_at = _parse_snapshot_time(snapshot.get("captured_at"))
+        if captured_at is None:
+            continue
+        if latest is None or latest_at is None or captured_at > latest_at:
+            latest = snapshot
+            latest_at = captured_at
+    return latest
+
+
+def _snapshot_is_executable(snapshot: dict[str, Any] | None) -> bool:
+    if snapshot is None:
+        return False
+    selected_token = str(snapshot.get("selected_outcome_token_id") or "")
+    return bool(
+        snapshot.get("active")
+        and not snapshot.get("closed")
+        and snapshot.get("enable_orderbook")
+        and snapshot.get("accepting_orders")
+        and selected_token
+    )
+
+
+def _snapshot_top_ask(snapshot: dict[str, Any] | None) -> float | None:
+    if snapshot is None:
+        return None
+    value = snapshot.get("orderbook_top_ask")
+    if value in (None, ""):
+        return None
+    return float(value)
+
+
 def _city_from_name(city_name: str) -> City | str:
     return cities_by_name.get(city_name) or city_name
 
@@ -2613,7 +2664,7 @@ def read_persisted_weather_markets(
         return MarketSnapshot(events=[], authority="NEVER_FETCHED")
 
     latest_seen: datetime | None = None
-    latest_by_condition: dict[str, dict[str, Any]] = {}
+    latest_by_condition: dict[str, dict[str, dict[str, Any]]] = {}
     for row in snapshot_rows:
         data = dict(row)
         captured_at = _parse_snapshot_time(data.get("captured_at"))
@@ -2623,10 +2674,14 @@ def read_persisted_weather_markets(
         condition_id = str(data.get("condition_id") or "").strip()
         if not condition_id or captured_at < cutoff:
             continue
-        current = latest_by_condition.get(condition_id)
+        side = _snapshot_outcome_side(data)
+        if side is None:
+            continue
+        side_snapshots = latest_by_condition.setdefault(condition_id, {})
+        current = side_snapshots.get(side)
         current_at = _parse_snapshot_time(current.get("captured_at")) if current else None
         if current is None or current_at is None or captured_at > current_at:
-            latest_by_condition[condition_id] = data
+            side_snapshots[side] = data
 
     if not latest_by_condition:
         age = (now - latest_seen).total_seconds() if latest_seen is not None else None
@@ -2656,7 +2711,10 @@ def read_persisted_weather_markets(
         data = dict(row)
         slug = str(data.get("market_slug") or "")
         condition_id = str(data.get("condition_id") or "").strip()
-        snapshot = latest_by_condition.get(condition_id)
+        snapshots_by_side = latest_by_condition.get(condition_id, {})
+        yes_snapshot = snapshots_by_side.get("YES")
+        no_snapshot = snapshots_by_side.get("NO")
+        timing_snapshot = _latest_snapshot(yes_snapshot, no_snapshot)
         event = events_by_slug.setdefault(
             slug,
             {
@@ -2694,43 +2752,43 @@ def read_persisted_weather_markets(
             "no_price": None,
             "executable": False,
         }
-        if snapshot is not None:
-            _update_event_timing_from_snapshot(event, snapshot, now=now)
-            selected_token = str(snapshot.get("selected_outcome_token_id") or "")
-            yes_token = str(snapshot.get("yes_token_id") or "")
-            no_token = str(snapshot.get("no_token_id") or "")
+        if timing_snapshot is not None:
+            _update_event_timing_from_snapshot(event, timing_snapshot, now=now)
+            token_snapshot = yes_snapshot or no_snapshot or timing_snapshot
+            yes_token = str(token_snapshot.get("yes_token_id") or "")
+            no_token = str(token_snapshot.get("no_token_id") or "")
+            yes_executable = _snapshot_is_executable(yes_snapshot)
+            no_executable = _snapshot_is_executable(no_snapshot)
             outcome.update(
                 {
                     "token_id": yes_token,
                     "no_token_id": no_token,
-                    "question_id": str(snapshot.get("question_id") or ""),
-                    "gamma_market_id": str(snapshot.get("gamma_market_id") or ""),
-                    "price": float(snapshot["orderbook_top_ask"])
-                    if snapshot.get("orderbook_top_ask") not in (None, "")
-                    else None,
-                    "market_start_at": snapshot.get("market_start_at"),
-                    "market_end_at": snapshot.get("market_end_at"),
-                    "market_close_at": snapshot.get("market_close_at"),
-                    "sports_start_at": snapshot.get("sports_start_at"),
-                    "executable": bool(
-                        snapshot.get("active")
-                        and not snapshot.get("closed")
-                        and snapshot.get("enable_orderbook")
-                        and snapshot.get("accepting_orders")
-                        and selected_token
+                    "question_id": str(token_snapshot.get("question_id") or ""),
+                    "gamma_market_id": str(token_snapshot.get("gamma_market_id") or ""),
+                    "price": _snapshot_top_ask(yes_snapshot),
+                    "no_price": _snapshot_top_ask(no_snapshot),
+                    "market_start_at": timing_snapshot.get("market_start_at"),
+                    "market_end_at": timing_snapshot.get("market_end_at"),
+                    "market_close_at": timing_snapshot.get("market_close_at"),
+                    "sports_start_at": timing_snapshot.get("sports_start_at"),
+                    "executable": bool(yes_executable or no_executable),
+                    "executable_snapshot_id": str(
+                        (yes_snapshot or {}).get("snapshot_id") or ""
                     ),
-                    "executable_snapshot_id": str(snapshot.get("snapshot_id") or ""),
-                    "executable_snapshot_min_tick_size": snapshot.get("min_tick_size"),
-                    "executable_snapshot_min_order_size": snapshot.get("min_order_size"),
-                    "executable_snapshot_neg_risk": bool(snapshot.get("neg_risk")),
+                    "no_executable_snapshot_id": str(
+                        (no_snapshot or {}).get("snapshot_id") or ""
+                    ),
+                    "executable_snapshot_min_tick_size": token_snapshot.get("min_tick_size"),
+                    "executable_snapshot_min_order_size": token_snapshot.get("min_order_size"),
+                    "executable_snapshot_neg_risk": bool(token_snapshot.get("neg_risk")),
                     "gamma_market_raw": {
-                        "id": snapshot.get("gamma_market_id"),
-                        "active": bool(snapshot.get("active")),
-                        "closed": bool(snapshot.get("closed")),
-                        "enable_orderbook": bool(snapshot.get("enable_orderbook")),
-                        "acceptingOrders": bool(snapshot.get("accepting_orders")),
+                        "id": token_snapshot.get("gamma_market_id"),
+                        "active": bool(token_snapshot.get("active")),
+                        "closed": bool(token_snapshot.get("closed")),
+                        "enable_orderbook": bool(token_snapshot.get("enable_orderbook")),
+                        "acceptingOrders": bool(token_snapshot.get("accepting_orders")),
                     },
-                    "token_map_raw": _json_object(snapshot.get("token_map_json")),
+                    "token_map_raw": _json_object(token_snapshot.get("token_map_json")),
                 }
             )
             if outcome["executable"]:

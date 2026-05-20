@@ -4371,7 +4371,10 @@ def _insert_forward_market_event(conn: sqlite3.Connection, values: dict) -> str:
         existing_values = dict(zip(_FORWARD_MARKET_EVENT_COLUMNS, tuple(existing)))
         if _forward_existing_outcome_is_resolved(existing_values):
             return "resolved_existing"
-        if _forward_existing_matches(existing_values, values, ignore={"recorded_at", "outcome"}):
+        ignored = {"recorded_at", "outcome"}
+        if _forward_clean_str(existing_values.get("created_at")) is None:
+            ignored.add("created_at")
+        if _forward_existing_matches(existing_values, values, ignore=ignored):
             return "unchanged"
         return "conflict"
 
