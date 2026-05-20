@@ -1,17 +1,18 @@
 # Created: 2026-05-20
 # Last reused or audited: 2026-05-20
-# Authority basis: PHASE_2_ULTRAPLAN.md v3.1 §4.4 (sha 00c2399742)
+# Authority basis: 2026-05-20 live substrate repair; trade-owned executable snapshot substrate
 """Antibody test: INV-book-hash-transitions-completeness
 
-Invariant: every `raw_orderbook_hash` change observed in `market_price_history`
-(world DB) since T1_LAUNCH_DATE has a corresponding `book_hash_transitions` row.
+Invariant: every `raw_orderbook_hash` change observed in active
+`executable_market_snapshots` (trade DB) since T1_LAUNCH_AT has a
+corresponding `book_hash_transitions` row.
 
-Specifically: for each market in the last 24h of market_price_history, count
+Specifically: for each market in the last 24h of executable snapshots, count
 distinct `raw_orderbook_hash` values; the corresponding transitions count
 must equal distinct_count - 1 (the first hash has no prior state, so no
 transition row).
 
-Single world-DB read path (no ATTACH); INV-37 trivially honored.
+Single trade-DB read path (no ATTACH); INV-37 trivially honored.
 backfill-aware: `cycle_id IS NULL` rows are backfill; live rows carry a
 cycle_id. Both satisfy the completeness invariant.
 """
@@ -22,9 +23,10 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-# T1_LAUNCH_DATE: set to 2026-05-21 (production-pass activation date).
-# Antibody looks back from this date; production pass updates this constant.
-T1_LAUNCH_DATE = "2026-05-21"
+# T1_LAUNCH_AT: production-pass activation boundary. The antibody does not
+# scan pre-launch executable snapshots, where book_hash transition persistence
+# was not yet part of the live contract.
+T1_LAUNCH_AT = datetime(2026, 5, 20, tzinfo=timezone.utc)
 
 # 24h window for antibody check
 LOOKBACK_HOURS = 24
@@ -34,23 +36,23 @@ def test_inv_book_hash_transitions_completeness() -> None:
     """For every market with raw_orderbook_hash changes in the last 24h,
     book_hash_transitions must carry (distinct_raw_hash_count - 1) rows.
 
-    Single world-DB path; no ATTACH (INV-37 trivially honored).
+    Single trade-DB path; no ATTACH (INV-37 trivially honored).
     backfill rows (cycle_id IS NULL) and live rows both satisfy the invariant.
 
-    Invariant check uses a direct sqlite3.connect() so the test runs even
-    when the production wrappers (get_world_connection_read_only) are not
-    fully wired. The xfail fires because book_hash_transitions does not exist
-    until the production pass wires db.py + migration script.
+    Invariant check uses a direct read-only sqlite3 URI against the trade DB
+    so the live-only antibody can skip cleanly when the DB is absent. The table
+    must exist once init_schema_trade_only() or the operator migration has run.
     """
-    from src.state.db import ZEUS_WORLD_DB_PATH
+    from src.config import STATE_DIR
 
-    # Open world DB directly (read-only URI). Skip if DB absent (CI / worktree
-    # environment without a live world DB). This is a production-environment
+    trade_db_path = STATE_DIR / "zeus_trades.db"
+    # Open trade DB directly (read-only URI). Skip if DB absent (CI / worktree
+    # environment without a live trade DB). This is a production-environment
     # antibody only.
     try:
-        conn = sqlite3.connect(f"file:{ZEUS_WORLD_DB_PATH}?mode=ro", uri=True)
+        conn = sqlite3.connect(f"file:{trade_db_path}?mode=ro", uri=True)
     except sqlite3.OperationalError:
-        pytest.skip("world DB not present in this environment — live-only antibody")
+        pytest.skip("trade DB not present in this environment — live-only antibody")
     conn.row_factory = sqlite3.Row
 
     # Compute ISO-8601 cutoff in Python to avoid datetime('now',...) vs
@@ -58,20 +60,22 @@ def test_inv_book_hash_transitions_completeness() -> None:
     # Both market_price_history.recorded_at and book_hash_transitions.observed_at
     # are written as ISO-8601 (e.g. "2026-05-20T12:34:56+00:00"). SQLite
     # datetime('now', ...) returns "YYYY-MM-DD HH:MM:SS" which sorts differently.
-    _cutoff_iso = (
-        datetime.now(tz=timezone.utc) - timedelta(hours=LOOKBACK_HOURS)
-    ).isoformat()
+    _cutoff = max(
+        datetime.now(tz=timezone.utc) - timedelta(hours=LOOKBACK_HOURS),
+        T1_LAUNCH_AT,
+    )
+    _cutoff_iso = _cutoff.isoformat()
 
     try:
         # Count distinct raw_orderbook_hash values per market in last 24h.
-        # market_price_history.raw_orderbook_hash is TEXT (nullable pre-PR6 rows).
+        # executable_market_snapshots.raw_orderbook_hash is TEXT NOT NULL.
         hash_counts = conn.execute(
             """
-            SELECT market_slug, COUNT(DISTINCT raw_orderbook_hash) AS distinct_count
-            FROM market_price_history
-            WHERE recorded_at >= :cutoff
+            SELECT event_slug AS market_slug, COUNT(DISTINCT raw_orderbook_hash) AS distinct_count
+            FROM executable_market_snapshots
+            WHERE captured_at >= :cutoff
               AND raw_orderbook_hash IS NOT NULL
-            GROUP BY market_slug
+            GROUP BY event_slug
             HAVING COUNT(DISTINCT raw_orderbook_hash) > 1
             """,
             {"cutoff": _cutoff_iso},

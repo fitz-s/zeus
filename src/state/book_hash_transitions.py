@@ -5,7 +5,7 @@
 
 INV-37 honored: writer takes `*, conn` (sanctioned single-conn path).
 
-Table: book_hash_transitions (world DB, world_class)
+Table: book_hash_transitions (trade DB, trade_class)
   PK: (market_slug, observed_at, transition_seq)
   Writer: write_transition(market_slug, prev_hash, new_hash, observed_at,
                            delta_ms, cycle_id=None, *, conn)
@@ -41,7 +41,7 @@ def write_transition(
 ) -> None:
     """Insert a book_hash_transitions row for a hash change event.
 
-    INV-37: caller provides `conn` (world DB connection). No internal
+    INV-37: caller provides `conn` (trade DB connection). No internal
     connection open; caller is responsible for transaction semantics.
 
     No-op if prev_hash == new_hash (no transition occurred).
@@ -106,12 +106,12 @@ def read_transitions_by_market(
     """Read book_hash_transitions rows for a market since a given ISO-8601 timestamp.
 
     Returns rows as dicts ordered by (observed_at, transition_seq) ASC.
-    conn=None -> opens a read-only world connection (auto-closed after query).
+    conn=None -> opens a read-only trade connection (auto-closed after query).
     """
     own_conn = conn is None
     if own_conn:
-        from src.state.db import get_world_connection_read_only
-        conn = get_world_connection_read_only()
+        from src.state.db import get_trade_connection_read_only
+        conn = get_trade_connection_read_only()
 
     prior_row_factory = conn.row_factory
     try:

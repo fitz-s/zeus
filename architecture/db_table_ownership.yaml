@@ -559,8 +559,8 @@ tables:
 
   - name: executable_market_snapshots
     db: world
-    schema_class: world_class
-    schema_version_owner: SCHEMA_VERSION
+    schema_class: legacy_archived
+    schema_version_owner: null
     created_by: init_schema
     pk_col: null
     pr2_fields_added: "2026-05-19"
@@ -571,6 +571,10 @@ tables:
       PR 2 (phase0-pr27): added wide_spread_display_substitution (BOOL/INT) and
       depth_at_best_ask (INT) via idempotent ALTER TABLE ADD COLUMN in
       init_snapshot_schema(). spread_observed_window_ms deferred (Finding #8 decision-a).
+    notes: >
+      Legacy ghost on world DB after 2026-05-20 live substrate repair. Active
+      executable-market snapshot substrate is trade DB because market_discovery
+      writes through get_trade_connection(write_class="live").
 
   - name: execution_fact
     db: trade
@@ -995,19 +999,14 @@ tables:
 
   - name: book_hash_transitions
     db: world
-    schema_class: world_class
-    schema_version_owner: SCHEMA_VERSION
+    schema_class: legacy_archived
+    schema_version_owner: null
     created_by: "db.py:init_schema (daemon boot, SCHEMA_VERSION 14) + migration_script_book_hash_transitions_create_2026_05_21 (operator one-shot fallback)"
     pk_col: "[market_slug, observed_at, transition_seq]"
     notes: >
-      Phase 2 T1 (PHASE_2_ULTRAPLAN.md v3.1 §4, sha 00c2399742, PR #220): orderbook
-      microstructure transition log. Records prev_hash→new_hash with
-      observed_at + transition_seq + delta_ms. Co-locates with
-      market_price_history.raw_orderbook_hash (world DB) for single-DB
-      antibody read. SCHEMA_VERSION 13→14 (production pass complete).
-      writer/reader in src/state/book_hash_transitions.py (production bodies);
-      producer wired in market_scanner.py inside if _current_hash != _prior_hash block.
-      cycle_id=NULL for scanner-path rows; live cycle rows carry cycle_id.
+      Legacy ghost on world DB after 2026-05-20 live substrate repair. Active
+      book_hash_transitions ownership moved to trade DB to co-locate with the
+      executable_market_snapshots writer used by market_discovery.
 
   - name: db_chunk_boundary_events
     db: world
@@ -1366,14 +1365,32 @@ tables:
 
   - name: executable_market_snapshots
     db: trade
-    schema_class: legacy_archived
-    schema_version_owner: null
-    created_by: init_schema_pre_pr_s4b
+    schema_class: trade_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema_trade_only
     pk_col: null
-    notes: Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Drop after 2026-08-09.
+    notes: >
+      Active executable-market substrate for live market_discovery and venue
+      command submission. Re-owned trade on 2026-05-20 because
+      src/main.py::_market_discovery_cycle passes get_trade_connection(write_class="live")
+      into refresh_executable_market_substrate_snapshots.
     pr2_notes: >
-      PR 2 (phase0-pr27): new columns NOT applied to this ghost table (trade db, legacy_archived).
-      ALTER TABLE only runs on world.db via init_snapshot_schema() in snapshot_repo.py.
+      PR 2 (phase0-pr27): wide_spread_display_substitution and depth_at_best_ask
+      are applied by init_snapshot_schema() in snapshot_repo.py on the trade
+      substrate connection.
+
+  - name: book_hash_transitions
+    db: trade
+    schema_class: trade_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: "db.py:init_schema_trade_only + src.state.schema.book_hash_transitions_schema.ensure_table"
+    pk_col: "[market_slug, observed_at, transition_seq]"
+    notes: >
+      Orderbook microstructure transition log co-located with active
+      executable_market_snapshots on trade DB. Records prev_hash→new_hash with
+      observed_at + transition_seq + delta_ms. Writer/reader in
+      src/state/book_hash_transitions.py; producer wired in market_scanner.py.
+      cycle_id=NULL for scanner-path rows; live cycle rows carry cycle_id.
 
   - name: exit_mutex_holdings
     db: trade

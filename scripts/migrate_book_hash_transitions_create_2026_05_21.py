@@ -1,34 +1,38 @@
 # Created: 2026-05-20
 # Last reused or audited: 2026-05-20
-# Authority basis: PHASE_2_ULTRAPLAN.md v3.1 §4 (sha 00c2399742); Phase 2 T1 production pass
-"""Idempotent CREATE TABLE migration for book_hash_transitions (world DB).
+# Authority basis: 2026-05-20 live substrate repair; trade-owned executable snapshot substrate
+"""Idempotent CREATE TABLE migration for book_hash_transitions (trade DB).
 
 Creates the book_hash_transitions table and its two indexes if they do not
 already exist.  Safe to run on any DB — all statements use IF NOT EXISTS.
 
-This migration does NOT bump PRAGMA user_version; that is handled by
-db.py init_schema (SCHEMA_VERSION 14) on next daemon start.
+This migration does NOT bump PRAGMA user_version; live boot creates the same
+table through db.py init_schema_trade_only before registry assertion.
 
 Usage
 -----
-    python scripts/migrate_book_hash_transitions_create_2026_05_21.py [--dry-run] [--db PATH]
+    python scripts/migrate_book_hash_transitions_create_2026_05_21.py [--dry-run | --apply] [--db PATH]
 
---dry-run: print DDL without touching the DB.
---db PATH: override world DB path (default: from src.config STATE_DIR).
+Default is dry-run. Use --apply to modify the DB.
+--db PATH: override trade DB path (default: from src.config STATE_DIR).
 """
 from __future__ import annotations
 
 import argparse
 import logging
 import sqlite3
+import sys
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 
 def _get_default_db_path() -> Path:
     from src.config import STATE_DIR
-    return STATE_DIR / "zeus-world.db"
+    return STATE_DIR / "zeus_trades.db"
 
 
 def run(db_path: Path, dry_run: bool = False) -> None:
@@ -64,12 +68,14 @@ def run(db_path: Path, dry_run: bool = False) -> None:
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--dry-run", action="store_true")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--dry-run", action="store_true")
+    mode.add_argument("--apply", action="store_true")
     parser.add_argument("--db", type=Path, default=None)
     args = parser.parse_args()
 
     db_path = args.db or _get_default_db_path()
-    run(db_path=db_path, dry_run=args.dry_run)
+    run(db_path=db_path, dry_run=not args.apply)
 
 
 if __name__ == "__main__":

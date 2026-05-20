@@ -2749,9 +2749,9 @@ test_metadata:
       - docs/operations/task_2026-05-20_strategy_vnext_phase2/T1_BOOK_HASH_TRANSITIONS_SCAFFOLD.md
       - docs/operations/task_2026-05-20_strategy_vnext_phase2/PHASE_2_ULTRAPLAN.md
     notes: >
-      Live-only antibody (skips in CI when world DB absent). Asserts:
+      Live-only antibody (skips in CI when trade DB absent). Asserts:
       for every market with >1 distinct raw_orderbook_hash in the last 24h of
-      market_price_history, book_hash_transitions must carry (distinct_count - 1)
+      executable_market_snapshots, book_hash_transitions must carry (distinct_count - 1)
       rows in the same window. Three :memory: roundtrip/noop/seq-increment tests
       run in all environments. ISO-8601 cutoff computed in Python to avoid
       datetime('now',...) vs ISO TEXT format mismatch in SQLite comparisons.
