@@ -1,5 +1,5 @@
 # Created: 2026-04-27
-# Lifecycle: created=2026-04-27; last_reviewed=2026-05-15; last_reused=2026-05-20
+# Lifecycle: created=2026-04-27; last_reviewed=2026-05-20; last_reused=2026-05-20
 # Purpose: U1 snapshot antibodies plus pricing-semantics contract scaffolding.
 # Reuse: Run when executable snapshots, venue_commands gating, or V2 market preflight semantics change.
 # Authority basis: docs/operations/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md
@@ -38,6 +38,7 @@ from src.contracts.execution_intent import (
     FinalExecutionIntent,
     simulate_clob_sweep,
 )
+from src.engine.evaluator import _effective_min_order_usd_for_entry
 from src.state.db import init_schema
 from src.state.snapshot_repo import get_snapshot, insert_snapshot
 from src.state.venue_command_repo import insert_command
@@ -331,6 +332,28 @@ def test_capture_executable_snapshot_persists_verified_gamma_and_clob_facts(conn
     assert fields["executable_snapshot_min_tick_size"] == "0.01"
     assert fields["executable_snapshot_min_order_size"] == "5"
     assert fields["executable_snapshot_neg_risk"] is False
+
+
+def test_entry_sizing_minimum_uses_snapshot_shares_not_global_usd_floor():
+    effective_min, authority = _effective_min_order_usd_for_entry(
+        tokens={"executable_snapshot_min_order_size": "5"},
+        entry_price=0.002,
+        fallback_min_order_usd=1.0,
+    )
+
+    assert authority == "executable_snapshot_min_order_size"
+    assert effective_min == pytest.approx(0.01)
+
+
+def test_entry_sizing_minimum_falls_back_without_snapshot_authority():
+    effective_min, authority = _effective_min_order_usd_for_entry(
+        tokens={},
+        entry_price=0.002,
+        fallback_min_order_usd=1.0,
+    )
+
+    assert authority == "settings_min_order_usd"
+    assert effective_min == pytest.approx(1.0)
 
 
 def test_capture_sell_exit_snapshot_preserves_bid_only_book_without_fabricating_ask(conn):
@@ -1468,6 +1491,40 @@ def test_passive_limit_candidate_cost_basis_requires_maker_only_submit_intent():
             order_type="GTC",
             post_only=False,
         )
+
+
+def test_low_price_notional_order_passes_snapshot_share_minimum():
+    snapshot = _snapshot(
+        min_tick_size=Decimal("0.001"),
+        min_order_size=Decimal("5"),
+        orderbook_top_bid=Decimal("0.002"),
+        orderbook_top_ask=Decimal("0.007"),
+        orderbook_depth_jsonb='{"asks":[["0.007","100"]],"bids":[["0.002","100"]]}',
+    )
+    cost_basis = ExecutableCostBasis.from_snapshot(
+        snapshot=snapshot,
+        direction="buy_yes",
+        order_policy="post_only_passive_limit",
+        requested_size_kind="notional_usd",
+        requested_size_value=Decimal("0.06"),
+        final_limit_price=Decimal("0.002"),
+        expected_fill_price_before_fee=Decimal("0.002"),
+        fee_adjusted_execution_price=None,
+        depth_status="NOT_MARKETABLE_PASSIVE_LIMIT",
+    )
+    hypothesis = _hypothesis(cost_basis)
+
+    final_intent = FinalExecutionIntent.from_hypothesis_and_cost_basis(
+        hypothesis=hypothesis,
+        cost_basis=cost_basis,
+        order_type="GTC",
+        post_only=True,
+    )
+
+    assert final_intent.size_kind == "notional_usd"
+    assert final_intent.size_value == Decimal("0.06")
+    assert final_intent.submitted_shares == Decimal("30")
+    assert final_intent.min_order_size == Decimal("5")
 
 
 def test_executable_hypothesis_identity_includes_snapshot_and_cost_hash():

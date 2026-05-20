@@ -1,7 +1,7 @@
 # Created: 2026-05-03
-# Last reused/audited: 2026-05-15
+# Last reused/audited: 2026-05-20
 # Authority basis: RERUN_PLAN_v2.md §5 D-E (live wiring) + F2 (fail-CLOSED)
-# Lifecycle: created=2026-05-03; last_reviewed=2026-05-04; last_reused=2026-05-04
+# Lifecycle: created=2026-05-03; last_reviewed=2026-05-20; last_reused=2026-05-20
 # Purpose: DDD live wiring coverage, including may4math F4 city-timezone window elapsed refinement.
 # Reuse: Verify DDD v2 config fixtures and city timezone semantics before relying on these tests.
 """Tests for src.engine.ddd_wiring (live DDD evaluator helper).
@@ -469,6 +469,36 @@ def test_rail2_zero_discount_when_full_cov(conn, floors_and_nstar):
     )
     assert result.action == "DISCOUNT"
     assert result.discount == pytest.approx(0.0)
+
+
+def test_future_target_zero_observation_rows_defer_density_discount(conn, floors_and_nstar):
+    """Future opening candidates must not treat target-day WU absence as an outage."""
+    conn.execute(
+        """INSERT INTO platt_models_v2
+           (model_key, temperature_metric, cluster, season, data_version,
+            n_samples, fitted_at)
+           VALUES (?,?,?,?,?,?,?)""",
+        ("k1", "high", "NYC", "MAM", "tigge_mx2t6_local_calendar_day_max_v1",
+         500, "2026-04-01"),
+    )
+    decision = datetime(2026, 5, 1, 12, 0, tzinfo=timezone.utc)
+    result = evaluate_ddd_for_decision(
+        conn=conn,
+        city="NYC",
+        target_date="2026-05-03",
+        metric="high",
+        peak_hour=15.0,
+        season="MAM",
+        mismatch_rate=0.0,
+        decision_time=decision,
+    )
+
+    assert result.action == "DISCOUNT"
+    assert result.rail is None
+    assert result.discount == 0.0
+    assert result.diagnostic["current_cov"] == 0.0
+    assert result.diagnostic["final_discount_pre_mismatch"] == 0.0
+    assert result.diagnostic["discount_deferred_reason"] == "observation_window_not_half_elapsed"
 
 
 def test_lagos_zero_cov_halts(conn, floors_and_nstar):
