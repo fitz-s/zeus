@@ -142,8 +142,8 @@ class FakeOpenOrdersClient:
     def __init__(self):
         self.calls = []
 
-    def get_open_orders(self):
-        self.calls.append(("get_open_orders",))
+    def get_open_orders(self, **kwargs):
+        self.calls.append(("get_open_orders", kwargs))
         return [{"orderID": "ord-open", "status": "LIVE"}]
 
 
@@ -151,9 +151,18 @@ class FakeLegacyGetOrdersClient:
     def __init__(self):
         self.calls = []
 
-    def get_orders(self):
-        self.calls.append(("get_orders",))
+    def get_orders(self, **kwargs):
+        self.calls.append(("get_orders", kwargs))
         return {"data": [{"id": "ord-legacy", "state": "LIVE"}]}
+
+
+class FakeTradesClient:
+    def __init__(self):
+        self.calls = []
+
+    def get_trades(self, **kwargs):
+        self.calls.append(("get_trades", kwargs))
+        return [{"id": "trade-open", "status": "MATCHED"}]
 
 
 class FakeCancelOrderClient:
@@ -830,7 +839,7 @@ def test_get_open_orders_uses_sdk_get_open_orders_surface(tmp_path):
 
     orders = adapter.get_open_orders()
 
-    assert fake.calls == [("get_open_orders",)]
+    assert fake.calls == [("get_open_orders", {"only_first_page": False})]
     assert len(orders) == 1
     assert orders[0].order_id == "ord-open"
     assert orders[0].status == "LIVE"
@@ -841,10 +850,20 @@ def test_get_open_orders_keeps_legacy_get_orders_fallback(tmp_path):
 
     orders = adapter.get_open_orders()
 
-    assert fake.calls == [("get_orders",)]
+    assert fake.calls == [("get_orders", {"only_first_page": False})]
     assert len(orders) == 1
     assert orders[0].order_id == "ord-legacy"
     assert orders[0].status == "LIVE"
+
+
+def test_get_trades_requests_all_pages_from_sdk(tmp_path):
+    adapter, fake = _adapter(tmp_path, FakeTradesClient())
+
+    trades = adapter.get_trades()
+
+    assert fake.calls == [("get_trades", {"only_first_page": False})]
+    assert len(trades) == 1
+    assert trades[0].raw["id"] == "trade-open"
 
 
 def test_submit_limit_order_rejects_before_sdk_submit_when_fee_bps_missing(tmp_path):

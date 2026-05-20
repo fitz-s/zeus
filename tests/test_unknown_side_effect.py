@@ -1487,3 +1487,111 @@ def test_reconciliation_finding_no_order_within_window_permits_safe_replay(conn)
         price=0.55,
         size=18.19,
     ) is None
+
+
+def test_unknown_without_idempotency_lookup_uses_authenticated_absence_before_safe_replay(conn):
+    from src.execution.command_recovery import reconcile_unresolved_commands
+    from src.state.venue_command_repo import find_unknown_command_by_economic_intent
+
+    old = NOW - timedelta(minutes=30)
+    _insert_unknown_side_effect(conn, idem="4" * 32, created_at=old)
+
+    class AuthenticatedReadClient:
+        venue_reads_are_complete = True
+
+        def get_open_orders(self):
+            return [{"id": "unrelated-open", "asset_id": "other-token", "status": "LIVE"}]
+
+        def get_trades(self):
+            return [{"id": "old-trade", "asset_id": "tok-m2", "match_time": "1"}]
+
+    summary = reconcile_unresolved_commands(conn, AuthenticatedReadClient())
+
+    cmd = _command(conn)
+    assert summary["advanced"] == 1
+    assert summary["errors"] == 0
+    assert cmd["state"] == "SUBMIT_REJECTED"
+    events = conn.execute(
+        "SELECT event_type, payload_json FROM venue_command_events WHERE command_id = ? ORDER BY sequence_no",
+        (cmd["command_id"],),
+    ).fetchall()
+    payload = json.loads(events[-1]["payload_json"])
+    assert payload["reason"] == "safe_replay_permitted_no_order_found"
+    assert payload["lookup_method"] == "authenticated_venue_absence"
+    assert payload["venue_absence_proof"]["open_orders_query_complete"] is True
+    assert payload["venue_absence_proof"]["trades_query_complete"] is True
+    assert payload["venue_absence_proof"]["matching_open_order_count"] == 0
+    assert payload["venue_absence_proof"]["matching_trade_count"] == 0
+    assert find_unknown_command_by_economic_intent(
+        conn,
+        intent_kind="ENTRY",
+        token_id="tok-m2",
+        side="BUY",
+        price=0.55,
+        size=18.19,
+    ) is None
+
+
+def test_unknown_without_idempotency_lookup_requires_complete_venue_absence_reads(conn):
+    from src.execution.command_recovery import reconcile_unresolved_commands
+
+    old = NOW - timedelta(minutes=30)
+    _insert_unknown_side_effect(conn, idem="6" * 32, created_at=old)
+
+    class SingleCallClient:
+        def get_open_orders(self):
+            return []
+
+        def get_trades(self):
+            return []
+
+    summary = reconcile_unresolved_commands(conn, SingleCallClient())
+
+    cmd = _command(conn)
+    assert summary["advanced"] == 0
+    assert summary["errors"] == 1
+    assert cmd["state"] == "SUBMIT_UNKNOWN_SIDE_EFFECT"
+    events = conn.execute(
+        "SELECT event_type FROM venue_command_events WHERE command_id = ? ORDER BY sequence_no",
+        (cmd["command_id"],),
+    ).fetchall()
+    assert "SUBMIT_REJECTED" not in [row["event_type"] for row in events]
+
+
+def test_unknown_without_idempotency_lookup_does_not_release_when_venue_reads_match(conn):
+    from src.execution.command_recovery import reconcile_unresolved_commands
+
+    old = NOW - timedelta(minutes=30)
+    _insert_unknown_side_effect(conn, idem="5" * 32, created_at=old)
+
+    class MatchingTradeClient:
+        venue_reads_are_complete = True
+
+        def get_open_orders(self):
+            return []
+
+        def get_trades(self):
+            return [
+                {
+                    "id": "trade-match",
+                    "asset_id": "tok-m2",
+                    "price": "0.55",
+                    "size": "18.19",
+                    "side": "BUY",
+                    "match_time": str((NOW + timedelta(seconds=1)).timestamp()),
+                }
+            ]
+
+    summary = reconcile_unresolved_commands(conn, MatchingTradeClient())
+
+    cmd = _command(conn)
+    assert summary["advanced"] == 0
+    assert summary["errors"] == 1
+    assert cmd["state"] == "SUBMIT_UNKNOWN_SIDE_EFFECT"
+    events = conn.execute(
+        "SELECT event_type FROM venue_command_events WHERE command_id = ? ORDER BY sequence_no",
+        (cmd["command_id"],),
+    ).fetchall()
+    event_types = [row["event_type"] for row in events]
+    assert "PARTIAL_FILL_OBSERVED" not in event_types
+    assert "SUBMIT_REJECTED" not in event_types

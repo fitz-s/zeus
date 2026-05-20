@@ -523,7 +523,10 @@ class PolymarketV2Adapter:
                 "SDK client exposes neither get_open_orders nor get_orders; "
                 "open-order absence is unknown"
             )
-        raw = get_orders()
+        try:
+            raw = get_orders(only_first_page=False)
+        except TypeError:
+            raw = get_orders()
         if isinstance(raw, dict):
             raw = raw.get("data", []) or []
         return [OrderState(order_id=_extract_order_id(item) or "", status=str(item.get("status") or item.get("state") or "UNKNOWN"), raw=dict(item)) for item in raw]
@@ -532,7 +535,10 @@ class PolymarketV2Adapter:
         get_trades = getattr(self._sdk_client(), "get_trades", None)
         if not callable(get_trades):
             raise V2ReadUnavailable("SDK client does not expose get_trades; trade absence is unknown")
-        raw = get_trades() or []
+        try:
+            raw = get_trades(only_first_page=False) or []
+        except TypeError:
+            raw = get_trades() or []
         return [TradeFact(raw=dict(item)) for item in raw]
 
     def get_positions(self) -> list[PositionFact]:

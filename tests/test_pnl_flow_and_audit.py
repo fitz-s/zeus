@@ -1523,6 +1523,10 @@ def test_inv_write_status_preserves_cycle_when_refreshing_without_summary(monkey
 
 def test_write_cycle_pulse_refreshes_timestamp_without_full_status_read_model(monkeypatch, tmp_path):
     status_path = tmp_path / "status_summary.json"
+    db_path = tmp_path / "zeus.db"
+    conn = get_connection(db_path)
+    init_schema(conn)
+    conn.close()
     status_path.write_text(
         json.dumps(
             {
@@ -1557,7 +1561,14 @@ def test_write_cycle_pulse_refreshes_timestamp_without_full_status_read_model(mo
     monkeypatch.setattr(
         status_summary_module,
         "get_trade_connection_with_world",
-        lambda: (_ for _ in ()).throw(AssertionError("cycle pulse must not query DB read model")),
+        lambda: get_connection(db_path),
+    )
+    monkeypatch.setattr(
+        status_summary_module,
+        "query_execution_event_summary",
+        lambda conn, not_before=None: (_ for _ in ()).throw(
+            AssertionError("cycle pulse must not run the full execution read model")
+        ),
     )
 
     status_summary_module.write_cycle_pulse({"mode": "opening_hunt", "candidates": 3})
@@ -1568,6 +1579,8 @@ def test_write_cycle_pulse_refreshes_timestamp_without_full_status_read_model(mo
     assert refreshed["cycle"] == {"mode": "opening_hunt", "candidates": 3}
     assert refreshed["execution_capability"]["entry"]["global_allow_submit"] is True
     assert refreshed["execution_capability"]["entry"]["blocked_components"] == []
+    assert refreshed["execution"]["current_open_entry_orders"]["status"] == "ok"
+    assert refreshed["execution"]["current_open_entry_orders"]["count"] == 0
     assert refreshed["truth"]["authority"] == "VERIFIED"
 
 
@@ -1989,6 +2002,140 @@ def test_inv_recommended_commands_from_status_builds_explicit_control_actions():
             "note": "recommended_by=edge_compression",
         },
     ]
+
+
+def test_status_summary_cycle_pulse_refreshes_current_open_entry_orders(monkeypatch, tmp_path):
+    """RELATIONSHIP: a fresh cycle pulse cannot preserve stale open-order truth."""
+
+    status_path = tmp_path / "status_summary.json"
+    db_path = tmp_path / "zeus.db"
+    conn = get_connection(db_path)
+    init_schema(conn)
+    now = datetime.now(timezone.utc).isoformat()
+    status_path.write_text(
+        json.dumps(
+            {
+                "timestamp": "2026-05-20T00:00:00+00:00",
+                "execution": {
+                    "current_open_entry_orders": {
+                        "status": "ok",
+                        "authority": "derived_operator_visibility",
+                        "source": "venue_commands+position_current+venue_order_facts",
+                        "count": 0,
+                        "pending_entry_count": 0,
+                        "by_strategy": {},
+                        "orders": [],
+                    }
+                },
+                "cycle": {"mode": "opening_hunt", "entry_orders_submitted": 0},
+            }
+        )
+    )
+    _insert_position_current_row(
+        conn,
+        position_id="pos-pulse-open",
+        strategy_key="opening_inertia",
+        phase="pending_entry",
+        target_date="2026-05-20",
+        city="Tokyo",
+        bin_label="11C",
+        size_usd=0.13,
+        order_id="ord-pulse-live",
+        order_status="pending",
+    )
+    conn.execute(
+        """
+        INSERT INTO venue_commands (
+            command_id, snapshot_id, envelope_id, position_id, decision_id,
+            idempotency_key, intent_kind, market_id, token_id, side, size, price,
+            venue_order_id, state, last_event_id, created_at, updated_at,
+            review_required_reason
+        ) VALUES (?, ?, ?, ?, ?, ?, 'ENTRY', 'm-pulse', 'tok-yes', 'BUY', 66.87, 0.002,
+                  ?, 'ACKED', NULL, ?, ?, NULL)
+        """,
+        (
+            "cmd-pulse-open",
+            "snap-pulse-open",
+            "env-pulse-open",
+            "pos-pulse-open",
+            "decision-pulse-open",
+            "idem-pulse-open",
+            "ord-pulse-live",
+            now,
+            now,
+        ),
+    )
+    conn.execute(
+        """
+        INSERT INTO venue_order_facts (
+            venue_order_id, command_id, state, remaining_size, matched_size,
+            source, observed_at, venue_timestamp, ingested_at, local_sequence,
+            raw_payload_hash, raw_payload_json
+        ) VALUES (?, ?, 'LIVE', '66.87', '0', 'REST', ?, ?, ?, 1, ?, '{}')
+        """,
+        ("ord-pulse-live", "cmd-pulse-open", now, now, now, "p" * 64),
+    )
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setattr(status_summary_module, "STATUS_PATH", status_path)
+    monkeypatch.setattr(status_summary_module, "get_trade_connection_with_world", lambda: get_connection(db_path))
+    monkeypatch.setattr(
+        status_summary_module,
+        "_get_execution_capability_status",
+        lambda: {"schema_version": 1, "entry": {"status": "requires_intent"}},
+    )
+
+    status_summary_module.write_cycle_pulse({"mode": "day0_capture", "entry_orders_submitted": 0})
+    status = json.loads(status_path.read_text())
+
+    assert status["cycle"]["mode"] == "day0_capture"
+    open_orders = status["execution"]["current_open_entry_orders"]
+    assert open_orders["status"] == "ok"
+    assert open_orders["count"] == 1
+    assert open_orders["pending_entry_count"] == 1
+    assert open_orders["orders"][0]["command_id"] == "cmd-pulse-open"
+
+
+def test_status_summary_cycle_pulse_marks_open_order_projection_query_error(monkeypatch, tmp_path):
+    """RELATIONSHIP: pulse refresh failure must not present stale open-order truth as OK."""
+
+    status_path = tmp_path / "status_summary.json"
+    status_path.write_text(
+        json.dumps(
+            {
+                "timestamp": "2026-05-20T00:00:00+00:00",
+                "execution": {
+                    "current_open_entry_orders": {
+                        "status": "ok",
+                        "authority": "derived_operator_visibility",
+                        "source": "venue_commands+position_current+venue_order_facts",
+                        "count": 0,
+                        "pending_entry_count": 0,
+                        "by_strategy": {},
+                        "orders": [],
+                    }
+                },
+            }
+        )
+    )
+    monkeypatch.setattr(status_summary_module, "STATUS_PATH", status_path)
+    monkeypatch.setattr(
+        status_summary_module,
+        "get_trade_connection_with_world",
+        lambda: (_ for _ in ()).throw(RuntimeError("db busy")),
+    )
+    monkeypatch.setattr(
+        status_summary_module,
+        "_get_execution_capability_status",
+        lambda: {"schema_version": 1, "entry": {"status": "requires_intent"}},
+    )
+
+    status_summary_module.write_cycle_pulse({"mode": "day0_capture"})
+    status = json.loads(status_path.read_text())
+
+    assert status["execution"]["current_open_entry_orders"]["status"] == "query_error"
+    assert status["execution"]["current_open_entry_orders"]["count"] == 0
 
 
 def test_inv_recommended_autosafe_commands_excludes_review_required_strategy_gates():

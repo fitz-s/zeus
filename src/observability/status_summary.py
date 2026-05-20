@@ -127,8 +127,43 @@ def write_cycle_pulse(cycle_summary: dict | None = None) -> None:
                 "blocked_components": ["execution_capability_pulse"],
             },
         }
+    _refresh_current_open_entry_orders_for_status(status)
     status = annotate_truth_payload(status, STATUS_PATH, generated_at=generated_at, authority="VERIFIED")
     _atomic_write_status_payload(status)
+
+
+def _refresh_current_open_entry_orders_for_status(status: dict) -> None:
+    """Refresh the cheap order-truth slice when a pulse marks status fresh."""
+
+    conn = None
+    try:
+        conn = get_trade_connection_with_world()
+        current_open_entry_orders = _query_current_open_entry_orders(conn)
+    except Exception as exc:
+        logger.warning(
+            "status_summary: current_open_entry_orders pulse refresh failed: %s",
+            exc,
+            exc_info=True,
+        )
+        prior_execution = status.get("execution") if isinstance(status.get("execution"), dict) else {}
+        prior_open_orders = (
+            prior_execution.get("current_open_entry_orders")
+            if isinstance(prior_execution.get("current_open_entry_orders"), dict)
+            else _query_current_open_entry_orders(None)
+        )
+        current_open_entry_orders = {
+            **prior_open_orders,
+            "status": "query_error",
+        }
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+    execution = status.setdefault("execution", {})
+    if isinstance(execution, dict):
+        execution["current_open_entry_orders"] = current_open_entry_orders
 
 
 def _enum_text(value, default: str) -> str:
