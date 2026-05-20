@@ -1,6 +1,6 @@
 # Created: 2026-05-20
 # Last reused or audited: 2026-05-20
-# Authority basis: PHASE_2_ULTRAPLAN.md v3 §4.4 (sha 99875d4781)
+# Authority basis: PHASE_2_ULTRAPLAN.md v3.1 §4.4 (sha 00c2399742)
 """Antibody test: INV-book-hash-transitions-completeness
 
 Invariant: every `raw_orderbook_hash` change observed in `market_price_history`

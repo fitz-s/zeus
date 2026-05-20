@@ -1,6 +1,6 @@
 # Created: 2026-05-20
 # Last reused or audited: 2026-05-20
-# Authority basis: PHASE_2_ULTRAPLAN.md v3 §4.3 (sha 99875d4781)
+# Authority basis: PHASE_2_ULTRAPLAN.md v3.1 §4.3 (sha 00c2399742)
 """T1 SCAFFOLD — CREATE TABLE DDL for book_hash_transitions (world DB).
 
 DO NOT call from src/state/db.py in SCAFFOLD (production pass wires this).
