@@ -29,6 +29,7 @@ import logging
 import os
 import signal
 import sys
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -41,6 +42,7 @@ logger = logging.getLogger("zeus.ingest")
 # ---------------------------------------------------------------------------
 _scheduler: Any | None = None
 FORECAST_LIVE_OWNER_ENV = "ZEUS_FORECAST_LIVE_OWNER"
+_ORACLE_BRIDGE_LOCK = threading.Lock()
 
 # SIGTERM-unif (WAVE-4): captured at module load so the forensic elapsed
 # computed in _graceful_shutdown matches what src/main.py and
@@ -1101,24 +1103,99 @@ def _bridge_oracle_tick():
 
     Runs on default executor (low frequency; subprocess, not DB writer).
     """
-    venv_python = _etl_subprocess_python()
-    script = Path(__file__).parent.parent / "scripts" / "bridge_oracle_to_calibration.py"
-    if not script.exists():
-        logger.warning("ingest_oracle_bridge: script not found at %s", script)
-        return
-    import subprocess
-    r = subprocess.run(
-        [venv_python, str(script)],
-        capture_output=True, text=True, timeout=300,
-    )
-    stdout_tail = r.stdout[-500:] if r.stdout else ""
-    if r.returncode != 0:
-        logger.warning(
-            "[BRIDGE_ORACLE_TICK] FAILED (exit=%d): %s",
-            r.returncode, r.stderr[-500:] if r.stderr else "",
+    _run_bridge_oracle_script()
+
+
+def _run_bridge_oracle_script() -> str:
+    """Run the oracle bridge subprocess once."""
+    if not _ORACLE_BRIDGE_LOCK.acquire(blocking=False):
+        logger.info("[BRIDGE_ORACLE_TICK] skipped lock_held")
+        return "skipped_lock_held"
+    try:
+        venv_python = _etl_subprocess_python()
+        script = Path(__file__).parent.parent / "scripts" / "bridge_oracle_to_calibration.py"
+        if not script.exists():
+            logger.warning("ingest_oracle_bridge: script not found at %s", script)
+            return "missing_script"
+        import subprocess
+        r = subprocess.run(
+            [venv_python, str(script)],
+            capture_output=True, text=True, timeout=300,
         )
-    else:
+        stdout_tail = r.stdout[-500:] if r.stdout else ""
+        if r.returncode != 0:
+            logger.warning(
+                "[BRIDGE_ORACLE_TICK] FAILED (exit=%d): %s",
+                r.returncode, r.stderr[-500:] if r.stderr else "",
+            )
+            return "failed_subprocess"
         logger.info("[BRIDGE_ORACLE_TICK] OK (exit=0) stdout=%r", stdout_tail)
+        return "ok"
+    except Exception:
+        logger.exception("[BRIDGE_ORACLE_TICK] FAILED exception")
+        return "failed_exception"
+    finally:
+        _ORACLE_BRIDGE_LOCK.release()
+
+
+def _latest_oracle_snapshot_mtime() -> float | None:
+    """Return latest oracle shadow snapshot mtime, or None when no snapshots exist."""
+    try:
+        from src.state.paths import oracle_snapshot_dir
+        snapshot_dir = oracle_snapshot_dir()
+        if not snapshot_dir.exists():
+            return None
+        latest: float | None = None
+        for snapshot in snapshot_dir.glob("*/*.json"):
+            try:
+                mtime = snapshot.stat().st_mtime
+            except OSError:
+                continue
+            latest = mtime if latest is None else max(latest, mtime)
+        return latest
+    except Exception as exc:
+        logger.warning("ingest_oracle_bridge_startup: snapshot freshness check failed: %s", exc)
+        return None
+
+
+def _oracle_bridge_artifact_mtimes() -> tuple[float, ...]:
+    """Return mtimes for all bridge outputs that must be current together."""
+    try:
+        from src.state.paths import oracle_artifact_heartbeat_path, oracle_error_rates_path
+        mtimes: list[float] = []
+        for artifact in (oracle_error_rates_path(), oracle_artifact_heartbeat_path()):
+            try:
+                mtimes.append(artifact.stat().st_mtime)
+            except OSError:
+                continue
+        return tuple(mtimes)
+    except Exception as exc:
+        logger.warning("ingest_oracle_bridge_startup: artifact freshness check failed: %s", exc)
+        return ()
+
+
+def _oracle_bridge_artifact_lags_snapshots() -> bool:
+    """True when snapshots exist and the bridge artifact is absent or older."""
+    latest_snapshot = _latest_oracle_snapshot_mtime()
+    if latest_snapshot is None:
+        return False
+    artifact_mtimes = _oracle_bridge_artifact_mtimes()
+    if len(artifact_mtimes) < 2:
+        return True
+    return any(mtime < latest_snapshot for mtime in artifact_mtimes)
+
+
+@_scheduler_job("ingest_oracle_bridge_startup_catch_up")
+def _bridge_oracle_startup_catch_up():
+    """Run oracle bridge at daemon boot if the daily cron was missed."""
+    if not _oracle_bridge_artifact_lags_snapshots():
+        logger.info("[BRIDGE_ORACLE_STARTUP] skip artifact_current")
+        return {"status": "skipped_current"}
+    logger.info("[BRIDGE_ORACLE_STARTUP] running bridge because snapshots are newer than artifact")
+    bridge_status = _run_bridge_oracle_script()
+    if bridge_status != "ok":
+        return {"status": bridge_status}
+    return {"status": "ran"}
 
 
 # ---------------------------------------------------------------------------
@@ -1522,12 +1599,21 @@ def main() -> None:
     )
 
     # F35: Oracle bridge — daily at 10:05 UTC.
-    # Writes data/oracle_error_rates.json (file-only); plain subprocess, no write-class lock.
+    # Writes data/oracle_error_rates.json (file-only); runs on the "fast"
+    # executor so the subprocess cannot starve DB-writing ingest jobs.
     # Eliminates the cross-repo cron entry that would otherwise be required.
     _scheduler.add_job(
         _bridge_oracle_tick, "cron",
         hour=10, minute=5, id="ingest_oracle_bridge",
         max_instances=1, coalesce=True, misfire_grace_time=600,
+        executor="fast",
+    )
+    _scheduler.add_job(
+        _bridge_oracle_startup_catch_up, "date",
+        run_date=_dt_now.now(),
+        id="ingest_oracle_bridge_startup_catch_up",
+        max_instances=1, coalesce=True, misfire_grace_time=None,
+        executor="fast",
     )
 
     # F9: Calibration auto-promote — weekly Sunday 04:30 UTC.

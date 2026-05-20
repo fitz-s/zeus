@@ -187,6 +187,14 @@ def native_multibin_buy_no_live_enabled() -> bool:
     return live_enabled
 
 
+def _directional_executable_tokens(tokens: dict, direction: str) -> dict:
+    """Return execution tokens with the snapshot id matching the selected side."""
+    selected = dict(tokens or {})
+    if direction == "buy_no" and selected.get("no_executable_snapshot_id"):
+        selected["executable_snapshot_id"] = str(selected["no_executable_snapshot_id"])
+    return selected
+
+
 @dataclass
 class MarketCandidate:
     """A market discovered by the scanner, ready for evaluation."""
@@ -1998,6 +2006,9 @@ def evaluate_candidate(
             executable_snapshot_id = o.get("executable_snapshot_id") or o.get("snapshot_id")
             if executable_snapshot_id:
                 token_payload["executable_snapshot_id"] = str(executable_snapshot_id)
+            no_executable_snapshot_id = o.get("no_executable_snapshot_id")
+            if no_executable_snapshot_id:
+                token_payload["no_executable_snapshot_id"] = str(no_executable_snapshot_id)
             executable_tick = o.get("executable_snapshot_min_tick_size", o.get("min_tick_size"))
             if executable_tick is not None:
                 token_payload["executable_snapshot_min_tick_size"] = executable_tick
@@ -3424,7 +3435,7 @@ def evaluate_candidate(
                 decision_snapshot_id=snapshot_id,
             ))
             continue
-        tokens = token_map[bin_idx]
+        tokens = _directional_executable_tokens(token_map[bin_idx], edge.direction)
         edge_source = _edge_source_for(candidate, edge)
         strategy_key = _strategy_key_for(candidate, edge)
         if strategy_key is None:

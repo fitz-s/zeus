@@ -3290,6 +3290,161 @@ class TestForwardMarketSubstrateProducer:
         assert market["hours_to_resolution"] == 1.9166666666666667
         assert market["hours_since_open"] == 26.083333333333332
 
+    def test_persisted_reader_preserves_yes_and_no_quote_sides_when_no_is_newer(self):
+        """RELATIONSHIP: per-side snapshots must not collapse into one condition quote."""
+        conn = _make_persisted_substrate_conn()
+        for condition_id, label, low, high, token in (
+            ("cond-low", "35°F or lower", None, 35.0, "yes-low"),
+            ("cond-mid", "36-37°F", 36.0, 37.0, "yes-mid"),
+            ("cond-high", "38°F or higher", 38.0, None, "yes-high"),
+        ):
+            conn.execute(
+                """
+                INSERT INTO market_events_v2 (
+                    market_slug, city, target_date, temperature_metric,
+                    condition_id, token_id, range_label, range_low,
+                    range_high, recorded_at
+                ) VALUES (?, 'Chicago', '2026-04-30', 'low', ?, ?, ?, ?, ?,
+                    '2026-05-20T09:59:00+00:00')
+                """,
+                (
+                    "lowest-temperature-in-chicago-on-april-30-2026",
+                    condition_id,
+                    token,
+                    label,
+                    low,
+                    high,
+                ),
+            )
+        _insert_persisted_reader_snapshot(conn)
+        conn.execute(
+            """
+            INSERT INTO executable_market_snapshots (
+                snapshot_id, gamma_market_id, event_id, event_slug, condition_id,
+                question_id, yes_token_id, no_token_id, selected_outcome_token_id,
+                outcome_label, enable_orderbook, active, closed, accepting_orders,
+                min_tick_size, min_order_size, fee_details_json, token_map_json,
+                neg_risk, orderbook_top_bid, orderbook_top_ask,
+                orderbook_depth_json, market_start_at, market_end_at,
+                market_close_at, sports_start_at, raw_gamma_payload_hash,
+                raw_clob_market_info_hash, raw_orderbook_hash, authority_tier,
+                captured_at, freshness_deadline
+            ) VALUES (
+                'snap-mid-no', 'gamma-mid', 'event-persisted',
+                'lowest-temperature-in-chicago-on-april-30-2026', 'cond-mid',
+                'question-mid', 'yes-mid', 'no-mid', 'no-mid', 'NO',
+                1, 1, 0, 1, '0.01', '5', '{}',
+                '{"clobTokenIds":["yes-mid","no-mid"],"outcomes":["Yes","No"]}',
+                1, '0.55', '0.57', '{}',
+                '2026-05-19T08:00:00+00:00',
+                '2026-05-20T12:00:00+00:00',
+                '2026-05-20T12:00:00+00:00',
+                '2026-05-20T12:00:00+00:00',
+                'gamma-hash', 'clob-hash',
+                'book-hash-no', 'CLOB',
+                '2026-05-20T10:00:03+00:00',
+                '2026-05-20T10:15:03+00:00'
+            )
+            """
+        )
+        conn.commit()
+
+        snapshot = ms.read_persisted_weather_markets(
+            conn,
+            now_utc=datetime(2026, 5, 20, 10, 5, tzinfo=timezone.utc),
+            max_age_seconds=900,
+        )
+
+        executable = [
+            o for o in snapshot.events[0]["outcomes"] if o["condition_id"] == "cond-mid"
+        ][0]
+        assert executable["price"] == pytest.approx(0.43)
+        assert executable["no_price"] == pytest.approx(0.57)
+        assert executable["executable_snapshot_id"] == "snap-mid"
+        assert executable["no_executable_snapshot_id"] == "snap-mid-no"
+
+    def test_buy_no_direction_uses_no_side_executable_snapshot_id(self):
+        """RELATIONSHIP: BUY_NO reprice authority must bind the NO snapshot id."""
+        import src.engine.evaluator as evaluator_module
+
+        token_payload = {
+            "token_id": "yes-token",
+            "no_token_id": "no-token",
+            "market_id": "condition-1",
+            "executable_snapshot_id": "snap-yes",
+            "no_executable_snapshot_id": "snap-no",
+        }
+
+        buy_no = evaluator_module._directional_executable_tokens(token_payload, "buy_no")
+        buy_yes = evaluator_module._directional_executable_tokens(token_payload, "buy_yes")
+
+        assert buy_no["token_id"] == "yes-token"
+        assert buy_no["no_token_id"] == "no-token"
+        assert buy_no["executable_snapshot_id"] == "snap-no"
+        assert buy_yes["executable_snapshot_id"] == "snap-yes"
+        assert token_payload["executable_snapshot_id"] == "snap-yes"
+
+    def test_persisted_reader_keeps_no_only_snapshot_executable_for_buy_no(self):
+        """RELATIONSHIP: NO-only executable evidence must remain reachable."""
+        conn = _make_persisted_substrate_conn()
+        conn.execute(
+            """
+            INSERT INTO market_events_v2 (
+                market_slug, city, target_date, temperature_metric,
+                condition_id, token_id, range_label, range_low,
+                range_high, recorded_at
+            ) VALUES (
+                'lowest-temperature-in-chicago-on-april-30-2026',
+                'Chicago', '2026-04-30', 'low', 'cond-mid', 'yes-mid',
+                '36-37°F', 36.0, 37.0, '2026-05-20T09:59:00+00:00'
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO executable_market_snapshots (
+                snapshot_id, gamma_market_id, event_id, event_slug, condition_id,
+                question_id, yes_token_id, no_token_id, selected_outcome_token_id,
+                outcome_label, enable_orderbook, active, closed, accepting_orders,
+                min_tick_size, min_order_size, fee_details_json, token_map_json,
+                neg_risk, orderbook_top_bid, orderbook_top_ask,
+                orderbook_depth_json, market_start_at, market_end_at,
+                market_close_at, sports_start_at, raw_gamma_payload_hash,
+                raw_clob_market_info_hash, raw_orderbook_hash, authority_tier,
+                captured_at, freshness_deadline
+            ) VALUES (
+                'snap-mid-no-only', 'gamma-mid', 'event-persisted',
+                'lowest-temperature-in-chicago-on-april-30-2026', 'cond-mid',
+                'question-mid', 'yes-mid', 'no-mid', 'no-mid', 'NO',
+                1, 1, 0, 1, '0.01', '5', '{}',
+                '{"clobTokenIds":["yes-mid","no-mid"],"outcomes":["Yes","No"]}',
+                1, '0.55', '0.57', '{}',
+                '2026-05-19T08:00:00+00:00',
+                '2026-05-20T12:00:00+00:00',
+                '2026-05-20T12:00:00+00:00',
+                '2026-05-20T12:00:00+00:00',
+                'gamma-hash', 'clob-hash',
+                'book-hash-no', 'CLOB',
+                '2026-05-20T10:00:03+00:00',
+                '2026-05-20T10:15:03+00:00'
+            )
+            """
+        )
+        conn.commit()
+
+        snapshot = ms.read_persisted_weather_markets(
+            conn,
+            now_utc=datetime(2026, 5, 20, 10, 5, tzinfo=timezone.utc),
+            max_age_seconds=900,
+        )
+
+        outcome = snapshot.events[0]["outcomes"][0]
+        assert outcome["executable"] is True
+        assert outcome["price"] is None
+        assert outcome["no_price"] == pytest.approx(0.57)
+        assert outcome["executable_snapshot_id"] == ""
+        assert outcome["no_executable_snapshot_id"] == "snap-mid-no-only"
+
     def test_persisted_sibling_reader_reconstructs_support_without_network_scan(self, monkeypatch):
         conn = _make_persisted_substrate_conn()
         for condition_id, label, low, high, token in (
@@ -4048,6 +4203,99 @@ class TestForwardMarketSubstrateProducer:
         assert result["outcomes_skipped_with_outcome_fact"] == 0
         assert conn.execute("SELECT COUNT(*) FROM market_events_v2").fetchone()[0] == 1
         assert conn.execute("SELECT COUNT(*) FROM market_price_history").fetchone()[0] == 2
+
+    def test_forward_substrate_does_not_conflict_on_missing_existing_created_at(
+        self, tmp_path, request
+    ):
+        """RELATIONSHIP: incomplete event metadata must not block fresh price facts."""
+        db_path, conn = _make_forward_substrate_db(tmp_path, request)
+        conn.execute(
+            """
+            INSERT INTO market_events_v2 (
+                market_slug, city, target_date, temperature_metric,
+                condition_id, token_id, range_label, range_low, range_high,
+                outcome, created_at, recorded_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "lowest-temperature-in-chicago-on-april-30-2026",
+                "Chicago",
+                "2026-04-30",
+                "low",
+                "cond-low-shoulder",
+                "yes-low-shoulder",
+                "35°F or lower",
+                None,
+                35.0,
+                None,
+                None,
+                "2026-04-29T15:00:00Z",
+            ),
+        )
+        conn.commit()
+        market = _forward_market()
+        market["outcomes"] = [market["outcomes"][0]]
+
+        result = log_forward_market_substrate(
+            markets=[market],
+            recorded_at="2026-04-29T16:00:00Z",
+            scan_authority="VERIFIED",
+            _db_path=db_path,
+        )
+
+        assert result["status"] == "written"
+        assert result["market_events_unchanged"] == 1
+        assert result["market_events_conflicted"] == 0
+        assert result["price_rows_inserted"] == 2
+        assert conn.execute("SELECT COUNT(*) FROM market_events_v2").fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM market_price_history").fetchone()[0] == 2
+
+    def test_forward_substrate_conflicts_on_different_existing_created_at(
+        self, tmp_path, request
+    ):
+        """RELATIONSHIP: non-null created_at remains an event consistency signal."""
+        db_path, conn = _make_forward_substrate_db(tmp_path, request)
+        conn.execute(
+            """
+            INSERT INTO market_events_v2 (
+                market_slug, city, target_date, temperature_metric,
+                condition_id, token_id, range_label, range_low, range_high,
+                outcome, created_at, recorded_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "lowest-temperature-in-chicago-on-april-30-2026",
+                "Chicago",
+                "2026-04-30",
+                "low",
+                "cond-low-shoulder",
+                "yes-low-shoulder",
+                "35°F or lower",
+                None,
+                35.0,
+                None,
+                "2026-04-28T12:00:00Z",
+                "2026-04-29T15:00:00Z",
+            ),
+        )
+        conn.commit()
+        market = _forward_market()
+        market["outcomes"] = [market["outcomes"][0]]
+
+        result = log_forward_market_substrate(
+            markets=[market],
+            recorded_at="2026-04-29T16:00:00Z",
+            scan_authority="VERIFIED",
+            _db_path=db_path,
+        )
+
+        assert result["status"] == "written_with_conflicts"
+        assert result["market_events_conflicted"] == 1
+        assert result["price_rows_inserted"] == 0
+        assert conn.execute("SELECT COUNT(*) FROM market_events_v2").fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM market_price_history").fetchone()[0] == 0
 
     def test_forward_substrate_does_not_append_prices_for_event_identity_conflicts(self, tmp_path, request):
         """Rejected event identity conflicts cannot create orphan price facts."""

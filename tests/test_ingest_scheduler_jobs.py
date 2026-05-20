@@ -1,11 +1,12 @@
 # Created: 2026-05-17
-# Last reused or audited: 2026-05-17
+# Last reused or audited: 2026-05-20
 # Authority basis: F35 + F9 structural fixes — oracle bridge and calibration
 #                  auto-promote jobs added to ingest_main APScheduler.
 """Tests for F35 + F9 ingest_main scheduler job registration and tick behaviour.
 
 Antibody coverage:
   F35 — assert ingest_oracle_bridge job is registered after main() builds the scheduler.
+        assert boot catch-up runs bridge when snapshots are newer than the artifact.
   F9  — (a) auto-promote tick does NOT call promote when inspect exits non-zero (NOT READY)
         (b) auto-promote tick DOES call promote when inspect exits 0 (READY)
 """
@@ -29,15 +30,17 @@ if str(PROJECT_ROOT) not in sys.path:
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _build_scheduler_jobs() -> list[str]:
+def _build_scheduler_jobs(*, return_jobs: bool = False):
     """Run main() with BlockingScheduler.start patched to a no-op, return job IDs."""
     from apscheduler.schedulers.blocking import BlockingScheduler
 
     job_ids: list[str] = []
+    jobs_by_id: dict[str, Any] = {}
 
     def _noop_start(self: Any) -> None:  # noqa: ANN001
-        nonlocal job_ids
+        nonlocal job_ids, jobs_by_id
         job_ids = [j.id for j in self.get_jobs()]
+        jobs_by_id = {j.id: j for j in self.get_jobs()}
 
     with (
         patch.object(BlockingScheduler, "start", _noop_start),
@@ -47,6 +50,8 @@ def _build_scheduler_jobs() -> list[str]:
         import src.ingest_main as im
         im.main()
 
+    if return_jobs:
+        return job_ids, jobs_by_id
     return job_ids
 
 
@@ -57,10 +62,111 @@ def _build_scheduler_jobs() -> list[str]:
 class TestF35OracleBridgeRegistered:
     def test_ingest_oracle_bridge_job_registered(self) -> None:
         """ingest_oracle_bridge must appear in the scheduler job list at startup."""
-        job_ids = _build_scheduler_jobs()
+        job_ids, jobs = _build_scheduler_jobs(return_jobs=True)
         assert "ingest_oracle_bridge" in job_ids, (
             f"Expected ingest_oracle_bridge in scheduler jobs; got: {job_ids}"
         )
+        assert jobs["ingest_oracle_bridge"].executor == "fast"
+
+    def test_ingest_oracle_bridge_startup_catch_up_registered(self) -> None:
+        """Boot catch-up must be registered so missed daily cron ticks recover."""
+        job_ids, jobs = _build_scheduler_jobs(return_jobs=True)
+        assert "ingest_oracle_bridge_startup_catch_up" in job_ids, (
+            f"Expected ingest_oracle_bridge_startup_catch_up in scheduler jobs; got: {job_ids}"
+        )
+        assert jobs["ingest_oracle_bridge_startup_catch_up"].executor == "fast"
+
+    def test_startup_catch_up_runs_when_snapshots_newer_than_artifact(self) -> None:
+        """RELATIONSHIP: newer oracle snapshots at daemon boot -> bridge writer runs."""
+        import src.ingest_main as im
+
+        with (
+            patch("src.ingest_main._latest_oracle_snapshot_mtime", return_value=200.0),
+            patch("src.ingest_main._oracle_bridge_artifact_mtimes", return_value=(100.0, 100.0)),
+            patch("src.ingest_main._run_bridge_oracle_script", return_value="ok") as mock_bridge,
+        ):
+            result = im._bridge_oracle_startup_catch_up.__wrapped__()
+
+        assert result == {"status": "ran"}
+        mock_bridge.assert_called_once_with()
+
+    def test_startup_catch_up_skips_when_artifact_current(self) -> None:
+        """RELATIONSHIP: current oracle artifact at daemon boot -> no bridge run."""
+        import src.ingest_main as im
+
+        with (
+            patch("src.ingest_main._latest_oracle_snapshot_mtime", return_value=100.0),
+            patch("src.ingest_main._oracle_bridge_artifact_mtimes", return_value=(200.0, 200.0)),
+            patch("src.ingest_main._run_bridge_oracle_script") as mock_bridge,
+        ):
+            result = im._bridge_oracle_startup_catch_up.__wrapped__()
+
+        assert result == {"status": "skipped_current"}
+        mock_bridge.assert_not_called()
+
+    def test_startup_catch_up_runs_when_only_heartbeat_is_current(self) -> None:
+        """RELATIONSHIP: heartbeat freshness cannot mask stale oracle_error_rates."""
+        import src.ingest_main as im
+
+        with (
+            patch("src.ingest_main._latest_oracle_snapshot_mtime", return_value=200.0),
+            patch("src.ingest_main._oracle_bridge_artifact_mtimes", return_value=(100.0, 300.0)),
+            patch("src.ingest_main._run_bridge_oracle_script", return_value="ok") as mock_bridge,
+        ):
+            result = im._bridge_oracle_startup_catch_up.__wrapped__()
+
+        assert result == {"status": "ran"}
+        mock_bridge.assert_called_once_with()
+
+    def test_startup_catch_up_runs_when_required_artifact_is_missing(self) -> None:
+        """RELATIONSHIP: both oracle JSON and heartbeat must exist before skip."""
+        import src.ingest_main as im
+
+        with (
+            patch("src.ingest_main._latest_oracle_snapshot_mtime", return_value=200.0),
+            patch("src.ingest_main._oracle_bridge_artifact_mtimes", return_value=(300.0,)),
+            patch("src.ingest_main._run_bridge_oracle_script", return_value="ok") as mock_bridge,
+        ):
+            result = im._bridge_oracle_startup_catch_up.__wrapped__()
+
+        assert result == {"status": "ran"}
+        mock_bridge.assert_called_once_with()
+
+    def test_oracle_bridge_subprocess_is_single_writer(self) -> None:
+        """RELATIONSHIP: concurrent oracle bridge ticks cannot launch two writers."""
+        import src.ingest_main as im
+
+        assert im._ORACLE_BRIDGE_LOCK.acquire(blocking=False)
+        try:
+            assert im._run_bridge_oracle_script() == "skipped_lock_held"
+        finally:
+            im._ORACLE_BRIDGE_LOCK.release()
+
+    def test_startup_catch_up_reports_lock_held(self) -> None:
+        """RELATIONSHIP: boot catch-up reports lock contention instead of double-running."""
+        import src.ingest_main as im
+
+        with (
+            patch("src.ingest_main._latest_oracle_snapshot_mtime", return_value=200.0),
+            patch("src.ingest_main._oracle_bridge_artifact_mtimes", return_value=(100.0, 100.0)),
+            patch("src.ingest_main._run_bridge_oracle_script", return_value="skipped_lock_held"),
+        ):
+            result = im._bridge_oracle_startup_catch_up.__wrapped__()
+
+        assert result == {"status": "skipped_lock_held"}
+
+    def test_startup_catch_up_reports_subprocess_failure(self) -> None:
+        """RELATIONSHIP: bridge failures must not be mislabeled as lock contention."""
+        import src.ingest_main as im
+
+        with (
+            patch("src.ingest_main._latest_oracle_snapshot_mtime", return_value=200.0),
+            patch("src.ingest_main._oracle_bridge_artifact_mtimes", return_value=(100.0, 100.0)),
+            patch("src.ingest_main._run_bridge_oracle_script", return_value="failed_subprocess"),
+        ):
+            result = im._bridge_oracle_startup_catch_up.__wrapped__()
+
+        assert result == {"status": "failed_subprocess"}
 
 
 # ---------------------------------------------------------------------------
