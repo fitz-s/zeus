@@ -440,6 +440,45 @@ def test_geoblock_polyapi_exception_creates_terminal_rejection(conn):
     assert "SUBMIT_TIMEOUT_UNKNOWN" not in [row["event_type"] for row in events]
 
 
+def test_marketable_buy_min_size_polyapi_exception_creates_terminal_rejection(conn):
+    from src.execution.executor import _live_order
+
+    class PolyApiException(Exception):
+        pass
+
+    intent = _make_entry_intent(conn, price=0.01)
+    mock_client = MagicMock()
+    mock_client.v2_preflight.return_value = None
+    mock_client.place_limit_order.side_effect = PolyApiException(
+        "PolyApiException[status_code=400, error_message={'error': "
+        "'invalid amount for a marketable BUY order ($0.03), min size: $1'}]"
+    )
+
+    with patch("src.data.polymarket_client.PolymarketClient", return_value=mock_client):
+        result = _live_order(
+            "trade-m2-marketable-buy-min",
+            intent,
+            shares=3.0,
+            conn=conn,
+            decision_id="dec-m2-marketable-buy-min",
+        )
+
+    cmd = _command(conn)
+    assert result.status == "rejected"
+    assert "venue_rejected_invalid_amount_400" in (result.reason or "")
+    assert cmd["state"] == "REJECTED"
+    events = conn.execute(
+        "SELECT event_type, payload_json FROM venue_command_events WHERE command_id = ? ORDER BY sequence_no",
+        (cmd["command_id"],),
+    ).fetchall()
+    assert [row["event_type"] for row in events][-1] == "SUBMIT_REJECTED"
+    payload = json.loads(events[-1]["payload_json"])
+    assert payload["reason"] == "venue_rejected_invalid_amount_400"
+    assert payload["proof_class"] == "deterministic_venue_invalid_amount_400"
+    assert payload["venue_order_created"] is False
+    assert "SUBMIT_TIMEOUT_UNKNOWN" not in [row["event_type"] for row in events]
+
+
 def test_pre_post_signing_exception_safe_to_retry(conn):
     from src.data.polymarket_client import V2PreflightError
     from src.execution.executor import _live_order
