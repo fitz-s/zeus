@@ -848,7 +848,7 @@ def get_connection(
 # CI hook scripts/check_schema_version.py diffs the sqlite_master hash of
 # a fresh-init DB against tests/state/_schema_pinned_hash.txt and fails
 # the PR if SCHEMA_VERSION did not change in lockstep.
-SCHEMA_VERSION = 14  # 2026-05-20 T1: book_hash_transitions table + 2 indices (Phase 2 T1)
+SCHEMA_VERSION = 15  # 2026-05-20 T2: no_trade_events table + 2 indices (Phase 2 T2)
 
 
 def init_schema(
@@ -2465,6 +2465,10 @@ def init_schema(
     # Phase 2 T1 (2026-05-20): book_hash_transitions table + indices.
     from src.state.schema.book_hash_transitions_schema import ensure_table as _ensure_book_hash_transitions_table
     _ensure_book_hash_transitions_table(conn)
+
+    # Phase 2 T2 (2026-05-20): no_trade_events table + indices (SCHEMA_VERSION 15).
+    from src.state.schema.no_trade_events_schema import ensure_table as _ensure_no_trade_events_table
+    _ensure_no_trade_events_table(conn)
 
     # Phase 2: apply v2 schema (idempotent — safe to run on every boot).
     from src.state.schema.v2_schema import apply_v2_schema as _apply_v2_schema

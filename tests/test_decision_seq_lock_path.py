@@ -80,11 +80,27 @@ _TRADE_DDL = """
 CREATE TABLE orders (id INTEGER PRIMARY KEY);
 """
 
+_NO_TRADE_EVENTS_DDL = """
+CREATE TABLE no_trade_events (
+    market_slug         TEXT NOT NULL,
+    temperature_metric  TEXT NOT NULL,
+    target_date         TEXT NOT NULL,
+    observation_time    TEXT NOT NULL,
+    decision_seq        INTEGER NOT NULL,
+    reason              TEXT NOT NULL,
+    reason_detail       TEXT,
+    observed_at         TEXT NOT NULL,
+    schema_version      INTEGER NOT NULL,
+    PRIMARY KEY (market_slug, temperature_metric, target_date, observation_time, decision_seq)
+);
+"""
+
 
 def _world_conn_in_memory(path_suffix: str = "zeus-world.db") -> sqlite3.Connection:
     """Return an in-memory connection whose PRAGMA database_list path ends with path_suffix."""
     conn = sqlite3.connect(":memory:")
     conn.execute(_WORLD_DDL)
+    conn.execute(_NO_TRADE_EVENTS_DDL)
     conn.row_factory = sqlite3.Row
     # Override PRAGMA database_list so the path check works on in-memory conn.
     # We do this by using a named file-based temp DB instead of :memory:.
@@ -234,6 +250,7 @@ class TestDecisionSeqAutoIncrement:
         world_db_path = tmp_path / "zeus-world.db"
         world_conn_1 = sqlite3.connect(str(world_db_path))
         world_conn_1.execute(_WORLD_DDL)
+        world_conn_1.execute(_NO_TRADE_EVENTS_DDL)
         world_conn_1.commit()
         world_conn_1.close()
 

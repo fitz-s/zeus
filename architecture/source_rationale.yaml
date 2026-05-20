@@ -1894,6 +1894,20 @@ files:
     downstream:
     - src/state/db.py
     - src/state/book_hash_transitions.py
+  src/contracts/no_trade_reason.py:
+    zone: K1_contracts
+    authority_role: no_trade_reason_enum
+    why: "Phase 2 T2 (PHASE_2_ULTRAPLAN.md v3.1 §5.2, sha 00c2399742): StrEnum (66 members) covering all 69 rejection_reasons=[...] callsites in evaluator.py. Two-tier model: reason=CATEGORY (enum CHECK), reason_detail=free-form diagnostic. UNCATEGORIZED is the §13 fallback. Production wiring complete (T2 production pass)."
+    write_routes: []
+    downstream:
+    - src/state/no_trade_events.py
+  src/state/no_trade_events.py:
+    zone: K2_runtime
+    authority_role: no_trade_event_instrumentation
+    why: "Phase 2 T2 (PHASE_2_ULTRAPLAN.md v3.1 §5.2, sha 00c2399742): writer/reader for no_trade_events table (world DB). INV-37 honored — write_no_trade_event(natural_key: DecisionNaturalKey, reason: NoTradeReason, reason_detail: Optional[str], observed_at: str, *, conn: sqlite3.Connection) requires caller-provided conn (no auto-open on write path). Reader read_no_trade_events_by_market auto-opens if conn=None. PK=(market_slug, temperature_metric, target_date, observation_time, decision_seq) — FK-like joinable with decision_events. decision_seq derived via allocate_decision_seq (UNION of both tables under db_writer_lock) to prevent cross-table collision. Production pass complete (SCHEMA_VERSION 14→15)."
+    write_routes: []
+    downstream:
+    - src/state/db.py
   src/state/decision_events.py:
     zone: K2_runtime
     authority_role: decision_event_instrumentation

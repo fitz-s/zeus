@@ -119,6 +119,42 @@ class DecisionEventRow:
         )
 
 
+def allocate_decision_seq(
+    market_slug: str,
+    temperature_metric: str,
+    target_date: str,
+    observation_time: str,
+    *,
+    conn: sqlite3.Connection,
+) -> int:
+    """Return the next available decision_seq for a 4-tuple identity.
+
+    Queries the UNION of decision_events AND no_trade_events so that sequences
+    are collision-free across both tables.
+
+    CALLER MUST hold db_writer_lock before calling this function.
+    The lock ensures atomicity between this SELECT and the subsequent INSERT.
+    """
+    return conn.execute(
+        """
+        SELECT COALESCE(MAX(decision_seq), -1) + 1
+        FROM (
+            SELECT decision_seq FROM decision_events
+            WHERE market_slug = ? AND temperature_metric = ?
+              AND target_date = ? AND observation_time = ?
+            UNION ALL
+            SELECT decision_seq FROM no_trade_events
+            WHERE market_slug = ? AND temperature_metric = ?
+              AND target_date = ? AND observation_time = ?
+        )
+        """,
+        (
+            market_slug, temperature_metric, target_date, observation_time,
+            market_slug, temperature_metric, target_date, observation_time,
+        ),
+    ).fetchone()[0]
+
+
 def write_decision_event(
     natural_key: DecisionNaturalKey,
     ctx: "DecisionSourceContext",
@@ -197,16 +233,13 @@ def write_decision_event(
 
     try:
         with db_writer_lock(ZEUS_WORLD_DB_PATH, WriteClass.LIVE):
-            # Derive decision_seq atomically under the LIVE lock
-            row_seq = conn.execute(
-                """
-                SELECT COALESCE(MAX(decision_seq), -1) + 1
-                FROM decision_events
-                WHERE market_slug = ? AND temperature_metric = ?
-                  AND target_date = ? AND observation_time = ?
-                """,
-                (market_slug, temperature_metric, target_date, observation_time),
-            ).fetchone()[0]
+            # Derive decision_seq atomically under the LIVE lock.
+            # Uses allocate_decision_seq (UNION of decision_events + no_trade_events)
+            # so sequences are collision-free across both tables for the same 4-tuple.
+            row_seq = allocate_decision_seq(
+                market_slug, temperature_metric, target_date, observation_time,
+                conn=conn,
+            )
 
             deid = decision_event_id_v1_hash(
                 market_slug=market_slug,
