@@ -86,17 +86,23 @@ AUTONOMOUS_REDEEM_DRY_RUN_ENV = "ZEUS_AUTONOMOUS_REDEEM_DRY_RUN"
 # USDC.e ERC-20 on Polygon mainnet.
 # Source: Polygon bridge canonical address; on-chain bytecode verified 2026-05-19.
 POLYGON_USDCE_ADDRESS = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
-# pUSD wrapper ("Wrapped Collateral") on Polygon mainnet.
-# NOTE: POLYGON_PUSD_ADDRESS (0xC011...) = "Polymarket USD" CTF collateral token — DIFFERENT.
-# This address (0x3A3BD7bb) = pUSD ERC-4626-style wrapper; wrap() deposits USDC.e, mints pUSD.
-# wrap(address,uint256) selector = 0xbf376c7a (verified via on-chain bytecode scan 2026-05-19).
-# UNVERIFIED: arg-0 assumed = `to` recipient per ERC-4626 convention;
-#   first live tx must verify pUSD lands at safe_address.
-POLYGON_PUSD_WRAPPER_ADDRESS = "0x3A3BD7bb9528E159577F7C2e685CC81A765002E2"
+# V2 CollateralOnramp on Polygon mainnet (post-2026-04-28 architecture).
+# Owner = 0x47ebfac3353314c788b96cdcbf41daadfe03629c (same as pUSD owner — confirms legitimacy).
+# wrap(address _asset, address _to, uint256 _amount) selector 0x62355638.
+# VERIFIED on-chain: tx 0x62da84b7b9287680d4af727caaed732e4d6875341893626587dc3e20471dff3a
+#   block 87167823, 1.587297 USDC.e → 1.587297 pUSD at Safe. arg layout confirmed.
+POLYGON_COLLATERAL_ONRAMP_ADDRESS = "0x93070a847efEf7F70739046A929D47a521F5B8ee"
+# Deprecated V1 WCOL wrapper — owner-locked to NegRiskAdapter; direct user calls revert
+# with custom error 0x5fc483c5 (GS013 on every estimateGas). Left for back-compat only.
+# Reference tx proving V1 broken: every estimateGas → GS013 (2026-05-20).
+POLYGON_PUSD_WRAPPER_ADDRESS = "0x3A3BD7bb9528E159577F7C2e685CC81A765002E2"  # Deprecated V1 — use POLYGON_COLLATERAL_ONRAMP_ADDRESS
 # ERC-20 approve(spender,amount) selector.
 ERC20_APPROVE_SELECTOR = "0x095ea7b3"
-# pUSD wrap(address to, uint256 amount) selector, verified on-chain 2026-05-19.
-PUSD_WRAP_SELECTOR = "0xbf376c7a"
+# CollateralOnramp wrap(address _asset, address _to, uint256 _amount) selector.
+# VERIFIED on-chain 2026-05-20 via tx 0x62da84b7b9287680d4af727caaed732e4d6875341893626587dc3e20471dff3a.
+COLLATERAL_ONRAMP_WRAP_SELECTOR = "0x62355638"
+# Deprecated V1 selector — kept to avoid breaking any stale import references.
+PUSD_WRAP_SELECTOR = "0xbf376c7a"  # Deprecated V1 — use COLLATERAL_ONRAMP_WRAP_SELECTOR
 # Kill switch for autonomous wrap. Default OFF (empty string → dry_run=False = live).
 # Set ZEUS_AUTONOMOUS_WRAP_DRY_RUN=1 to enable dry-run (build+sign, skip broadcast).
 AUTONOMOUS_WRAP_DRY_RUN_ENV = "ZEUS_AUTONOMOUS_WRAP_DRY_RUN"
@@ -1747,11 +1753,12 @@ class PolymarketV2Adapter:
     ) -> dict[str, Any]:
         """Safe v1.3.0 execTransaction for USDC.e → pUSD two-step wrapping.
 
-        tx_kind="APPROVE": calls USDC.e.approve(POLYGON_PUSD_WRAPPER_ADDRESS, amount_micro)
-        tx_kind="WRAP":    calls pUSD.wrap(safe_address, amount_micro)
+        tx_kind="APPROVE": calls USDC.e.approve(POLYGON_COLLATERAL_ONRAMP_ADDRESS, amount_micro)
+        tx_kind="WRAP":    calls CollateralOnramp.wrap(USDCE, safe_address, amount_micro)
 
-        UNVERIFIED: wrap(address,uint256) arg-0 assumed = `to` recipient per ERC-4626
-        convention; first live tx must verify pUSD lands at safe_address.
+        VERIFIED on-chain 2026-05-20: wrap(address _asset, address _to, uint256 _amount)
+        arg layout confirmed via tx 0x62da84b7b9287680d4af727caaed732e4d6875341893626587dc3e20471dff3a
+        (block 87167823). pUSD landed at safe_address. V1 WCOL path (0x3A3BD7bb) deprecated.
 
         Returns dict with:
           success=True, tx_hash=<str>                       (live broadcast)
@@ -1892,7 +1899,7 @@ class PolymarketV2Adapter:
             }
         inner_data = bytes.fromhex(inner_calldata_hex.removeprefix("0x"))
         inner_to = (
-            POLYGON_USDCE_ADDRESS if tx_kind == "APPROVE" else POLYGON_PUSD_WRAPPER_ADDRESS
+            POLYGON_USDCE_ADDRESS if tx_kind == "APPROVE" else POLYGON_COLLATERAL_ONRAMP_ADDRESS
         )
 
         # ── Build Safe tx hash + sign ─────────────────────────────────────────
@@ -2539,27 +2546,27 @@ def _build_negrisk_redeem_calldata(
 def _build_wrap_calldata(tx_kind: str, safe_address: str, amount_micro: int) -> str:
     """Build inner calldata for one step of the USDC.e → pUSD two-step wrap.
 
-    tx_kind="APPROVE": ERC-20 approve(POLYGON_PUSD_WRAPPER_ADDRESS, amount_micro)
+    tx_kind="APPROVE": ERC-20 approve(POLYGON_COLLATERAL_ONRAMP_ADDRESS, amount_micro)
       ABI-encoded: approve(address spender, uint256 value)
       selector: 0x095ea7b3
-      args: [spender=POLYGON_PUSD_WRAPPER_ADDRESS padded to 32B, value padded to 32B]
+      args: [spender=POLYGON_COLLATERAL_ONRAMP_ADDRESS padded to 32B, value padded to 32B]
 
-    tx_kind="WRAP": pUSD.wrap(safe_address, amount_micro)
-      ABI-encoded: wrap(address to, uint256 amount)
-      selector: 0xbf376c7a
-      args: [to=safe_address padded to 32B, amount padded to 32B]
-      UNVERIFIED: arg-0 assumed = `to` recipient; first live tx must confirm.
+    tx_kind="WRAP": CollateralOnramp.wrap(USDCE, safe_address, amount_micro)
+      ABI-encoded: wrap(address _asset, address _to, uint256 _amount)
+      selector: 0x62355638
+      args: [_asset=POLYGON_USDCE_ADDRESS, _to=safe_address, _amount=amount_micro]
+      VERIFIED on-chain 2026-05-20: tx 0x62da84b7b9287680d4af727caaed732e4d6875341893626587dc3e20471dff3a
+        block 87167823. pUSD landed at safe_address. arg layout confirmed.
     """
     import eth_abi  # type: ignore[import]
 
     if tx_kind == "APPROVE":
         selector = bytes.fromhex(ERC20_APPROVE_SELECTOR.removeprefix("0x"))
-        encoded_args = eth_abi.encode(["address", "uint256"], [POLYGON_PUSD_WRAPPER_ADDRESS, amount_micro])
+        encoded_args = eth_abi.encode(["address", "uint256"], [POLYGON_COLLATERAL_ONRAMP_ADDRESS, amount_micro])
     elif tx_kind == "WRAP":
-        selector = bytes.fromhex(PUSD_WRAP_SELECTOR.removeprefix("0x"))
-        # arg-0 = to (recipient = safe, wrapping USDC.e FOR the safe)
-        # arg-1 = amount in USDC.e micro-units
-        encoded_args = eth_abi.encode(["address", "uint256"], [safe_address, amount_micro])
+        selector = bytes.fromhex(COLLATERAL_ONRAMP_WRAP_SELECTOR.removeprefix("0x"))
+        # _asset = USDC.e source token, _to = recipient safe, _amount = micro-units
+        encoded_args = eth_abi.encode(["address", "address", "uint256"], [POLYGON_USDCE_ADDRESS, safe_address, amount_micro])
     else:
         raise ValueError(f"tx_kind must be APPROVE or WRAP, got {tx_kind!r}")
     return "0x" + (selector + encoded_args).hex()

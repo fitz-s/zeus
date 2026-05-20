@@ -213,45 +213,54 @@ def test_wrap_dry_run_payload_has_fingerprint(tx_kind):
     _assert_payload_has_fingerprint(result)
 
 
-def test_wrap_calldata_approve_first_arg_is_pusd_wrapper():
-    """Assert APPROVE calldata arg-0 encodes to POLYGON_PUSD_WRAPPER_ADDRESS.
+def test_wrap_calldata_approve_first_arg_is_onramp():
+    """Assert APPROVE calldata arg-0 encodes to POLYGON_COLLATERAL_ONRAMP_ADDRESS (V2).
+
+    Updated 2026-05-20: V1 WCOL (POLYGON_PUSD_WRAPPER_ADDRESS) deprecated; spender
+    is now CollateralOnramp. Reference tx for V1 failure: GS013 on every estimateGas.
+    Reference tx for V2 success: 0x62da84b7b9287680d4af727caaed732e4d6875341893626587dc3e20471dff3a
 
     Sed-flip: change APPROVE selector or spender address → this test turns RED.
     """
     from src.venue.polymarket_v2_adapter import (
-        POLYGON_PUSD_WRAPPER_ADDRESS,
+        POLYGON_COLLATERAL_ONRAMP_ADDRESS,
         _build_wrap_calldata,
     )
     import eth_abi
-    from eth_utils import to_checksum_address
 
     calldata = _build_wrap_calldata("APPROVE", "0x6a096d5042cba434521E2cdb95A1fBa789a09b7f", 1_000_000)
     assert calldata.startswith("0x095ea7b3"), f"APPROVE selector wrong: {calldata[:10]}"
     decoded = eth_abi.decode(["address", "uint256"], bytes.fromhex(calldata[10:]))
-    assert decoded[0].lower() == POLYGON_PUSD_WRAPPER_ADDRESS.lower(), (
-        f"APPROVE calldata arg-0={decoded[0]} != POLYGON_PUSD_WRAPPER_ADDRESS={POLYGON_PUSD_WRAPPER_ADDRESS}"
+    assert decoded[0].lower() == POLYGON_COLLATERAL_ONRAMP_ADDRESS.lower(), (
+        f"APPROVE calldata arg-0={decoded[0]} != POLYGON_COLLATERAL_ONRAMP_ADDRESS={POLYGON_COLLATERAL_ONRAMP_ADDRESS}"
     )
     assert decoded[1] == 1_000_000
 
 
-def test_wrap_calldata_wrap_first_arg_is_safe_address():
-    """Assert WRAP calldata arg-0 encodes to safe_address (recipient).
+def test_wrap_calldata_wrap_v2_encoding():
+    """Assert WRAP calldata uses V2 CollateralOnramp encoding: wrap(asset, to, amount).
 
-    This is the 'UNVERIFIED' assumption: wrap(address to, uint256 amount).
-    This test makes the assumption explicit and verifiable.
+    Updated 2026-05-20: V1 selector 0xbf376c7a (wrap(address,uint256)) deprecated.
+    V2 selector 0x62355638 (wrap(address _asset, address _to, uint256 _amount)).
+    VERIFIED on-chain: tx 0x62da84b7b9287680d4af727caaed732e4d6875341893626587dc3e20471dff3a
+    block 87167823. pUSD landed at safe_address.
 
-    Sed-flip: change wrap arg encoding order → this test turns RED.
+    Sed-flip: change wrap selector or arg encoding order → this test turns RED.
     """
-    from src.venue.polymarket_v2_adapter import _build_wrap_calldata
+    from src.venue.polymarket_v2_adapter import (
+        POLYGON_USDCE_ADDRESS,
+        _build_wrap_calldata,
+    )
     import eth_abi
 
     safe_addr = "0x6a096d5042cba434521E2cdb95A1fBa789a09b7f"
     calldata = _build_wrap_calldata("WRAP", safe_addr, 1_500_000)
-    assert calldata.startswith("0xbf376c7a"), f"WRAP selector wrong: {calldata[:10]}"
-    decoded = eth_abi.decode(["address", "uint256"], bytes.fromhex(calldata[10:]))
-    assert decoded[0].lower() == safe_addr.lower(), (
-        f"WRAP calldata arg-0={decoded[0]} != safe_addr={safe_addr}. "
-        f"If first live tx shows pUSD did NOT land at safe_addr, update this test "
-        f"AND the encoder in _build_wrap_calldata."
+    assert calldata.startswith("0x62355638"), f"WRAP selector wrong: {calldata[:10]}"
+    decoded = eth_abi.decode(["address", "address", "uint256"], bytes.fromhex(calldata[10:]))
+    assert decoded[0].lower() == POLYGON_USDCE_ADDRESS.lower(), (
+        f"WRAP calldata arg-0 (_asset)={decoded[0]} != POLYGON_USDCE_ADDRESS={POLYGON_USDCE_ADDRESS}"
     )
-    assert decoded[1] == 1_500_000
+    assert decoded[1].lower() == safe_addr.lower(), (
+        f"WRAP calldata arg-1 (_to)={decoded[1]} != safe_addr={safe_addr}"
+    )
+    assert decoded[2] == 1_500_000
