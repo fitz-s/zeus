@@ -214,12 +214,16 @@ class CrossMarketCorrelationHedge(BaseStrategyCandidate):
         try:
             store = RegimeCorrelationStore(conn)
             corr_matrix = store.get(regime, stored_cities)
-        except KeyError as exc:
+        except Exception as exc:
+            # Catch KeyError (regime not fitted), json.JSONDecodeError (corrupt cache),
+            # ValueError/IndexError (unexpected matrix shape), or any other store failure.
+            # All map to CORR_HEDGE_REGIME_UNAVAILABLE to preserve fail-open contract.
             decision = CandidateDecision(
                 outcome="no_trade",
                 reason=NoTradeReason.CORR_HEDGE_REGIME_UNAVAILABLE,
                 reason_detail=(
-                    f"cross_market_correlation_hedge: store.get raised KeyError: {exc}"
+                    f"cross_market_correlation_hedge: store.get failed "
+                    f"({type(exc).__name__}): {exc}"
                 ),
             )
             write_candidate_no_trade_row(conn, context, decision)
