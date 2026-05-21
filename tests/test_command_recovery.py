@@ -486,6 +486,8 @@ def _insert_decision_log_trade_case_for_recovery(
     trade_id="pos-001",
     token_id="tok-001",
     no_token_id="tok-001-no",
+    strategy_key="opening_inertia",
+    edge_source="opening_inertia",
 ):
     artifact = {
         "mode": "opening_hunt",
@@ -507,8 +509,8 @@ def _insert_decision_log_trade_case_for_recovery(
                 "size_usd": 1.70,
                 "entry_price": 0.34,
                 "p_posterior": 0.91,
-                "strategy_key": "opening_inertia",
-                "edge_source": "opening_inertia",
+                "strategy_key": strategy_key,
+                "edge_source": edge_source,
                 "decision_snapshot_id": "forecast-snap-001",
                 "selected_method": "ens_member_counting",
                 "settlement_semantics_json": json.dumps({"measurement_unit": "C"}),
@@ -1851,6 +1853,75 @@ class TestRecoveryResolutionTable:
             "advanced": 0,
             "stayed": 0,
             "errors": 0,
+        }
+
+    def test_terminal_filled_entry_repair_canonicalizes_legacy_imminent_strategy_key(
+        self,
+        conn,
+        mock_client,
+    ):
+        _insert(conn, size=5.0, price=0.34)
+        _advance_to_acked(conn, venue_order_id="ord-001")
+        from src.state.venue_command_repo import append_event
+
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="FILL_CONFIRMED",
+            occurred_at="2026-04-26T00:06:00Z",
+            payload={"venue_order_id": "ord-001", "venue_status": "MATCHED"},
+        )
+        _append_trade_fact(
+            conn,
+            state="MATCHED",
+            filled_size="5",
+            fill_price="0.34",
+        )
+        _insert_decision_log_trade_case_for_recovery(
+            conn,
+            strategy_key="imminent_open_capture",
+            edge_source="imminent_open_capture",
+        )
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["filled_entry_projection_repair"] == {
+            "scanned": 1,
+            "advanced": 1,
+            "stayed": 0,
+            "errors": 0,
+        }
+        current = conn.execute(
+            """
+            SELECT phase, shares, cost_basis_usd, entry_price, order_status,
+                   strategy_key
+              FROM position_current
+             WHERE position_id = 'pos-001'
+            """
+        ).fetchone()
+        assert dict(current) == {
+            "phase": "active",
+            "shares": 5.0,
+            "cost_basis_usd": 1.7,
+            "entry_price": 0.34,
+            "order_status": "filled",
+            "strategy_key": "opening_inertia",
+        }
+        event = conn.execute(
+            """
+            SELECT event_type, strategy_key, command_id, order_id
+              FROM position_events
+             WHERE position_id = 'pos-001'
+               AND event_type = 'ENTRY_ORDER_FILLED'
+            """
+        ).fetchone()
+        assert dict(event) == {
+            "event_type": "ENTRY_ORDER_FILLED",
+            "strategy_key": "opening_inertia",
+            "command_id": "cmd-001",
+            "order_id": "ord-001",
         }
 
     def test_live_acked_entry_order_without_pending_projection_recovers_position(

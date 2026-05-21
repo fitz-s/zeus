@@ -1,6 +1,10 @@
 # Created: 2026-05-02
-# Last reused/audited: 2026-05-02
-# Authority basis: PR44 review comment 3177316079 / 3177317099 strategy_key unclassified fail-closed contract.
+# Last reused/audited: 2026-05-21
+# Lifecycle: created=2026-05-02; last_reviewed=2026-05-21; last_reused=2026-05-21
+# Purpose: Lock durable strategy_key classification and fail-closed behavior across evaluator/runtime persistence boundaries.
+# Reuse: Run before changing evaluator strategy_key mapping, discovery-mode classification, or strategy_key DB persistence.
+# Authority basis: PR44 review comment 3177316079 / 3177317099 strategy_key unclassified fail-closed contract;
+#                  2026-05-21 live CHECK repair: discovery modes must not invent strategy_key values.
 
 from __future__ import annotations
 
@@ -32,14 +36,14 @@ def _city() -> City:
     )
 
 
-def _candidate() -> MarketCandidate:
+def _candidate(discovery_mode: str = DiscoveryMode.UPDATE_REACTION.value) -> MarketCandidate:
     return MarketCandidate(
         city=_city(),
         target_date="2026-05-03",
         outcomes=[],
         hours_since_open=30.0,
         temperature_metric="high",
-        discovery_mode=DiscoveryMode.UPDATE_REACTION.value,
+        discovery_mode=discovery_mode,
     )
 
 
@@ -137,3 +141,33 @@ def test_dormant_inverse_quadrants_do_not_masquerade_as_live_strategy_keys() -> 
     assert _strategy_key_for_hypothesis(candidate, _hypothesis(direction="buy_yes", is_shoulder=False)) == "center_buy"
     assert _strategy_key_for_hypothesis(candidate, _hypothesis(direction="buy_yes", is_shoulder=True)) is None
     assert _strategy_key_for_hypothesis(candidate, _hypothesis(direction="buy_no", is_shoulder=False)) is None
+
+
+def test_imminent_open_capture_maps_to_canonical_opening_inertia_strategy_key() -> None:
+    """Discovery mode is not a governance strategy key.
+
+    Live durable tables constrain strategy_key to the canonical four strategy
+    families. `imminent_open_capture` is a cycle/discovery mode inside the
+    opening-inertia family, so evaluator output must use `opening_inertia` for
+    durable facts, position projection, and risk attribution.
+    """
+    candidate = _candidate(DiscoveryMode.IMMINENT_OPEN_CAPTURE.value)
+    edge = _shoulder_buy_edge()
+
+    assert _edge_source_for(candidate, edge) == "imminent_open_capture"
+    assert _strategy_key_for(candidate, edge) == "opening_inertia"
+    assert (
+        cycle_runner._classify_strategy(
+            DiscoveryMode.IMMINENT_OPEN_CAPTURE,
+            edge,
+            "imminent_open_capture",
+        )
+        == "opening_inertia"
+    )
+    assert (
+        _strategy_key_for_hypothesis(
+            candidate,
+            _hypothesis(direction="buy_yes", is_shoulder=True),
+        )
+        == "opening_inertia"
+    )

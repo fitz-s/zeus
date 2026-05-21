@@ -79,7 +79,7 @@ test_trust_policy:
     tests/test_ensemble_snapshots_v2_executable_schema.py: {created: "2026-05-03", last_used: "2026-05-03"}
     tests/test_ensemble_snapshots_bias_corrected_schema.py: {created: "2026-04-26", last_used: "2026-04-26"}
     tests/test_evaluator_explicit_n_mc.py: {created: "2026-04-30", last_used: "2026-05-08"}
-    tests/test_evaluator_strategy_key_failclosed.py: {created: "2026-05-02", last_used: "2026-05-02"}
+    tests/test_evaluator_strategy_key_failclosed.py: {created: "2026-05-02", last_used: "2026-05-21"}
     tests/test_evaluator_metric_normalizer_failclosed.py: {created: "2026-04-26", last_used: "2026-04-26"}
     tests/test_execution_intent_typed_slippage.py: {created: "2026-04-26", last_used: "2026-04-26"}
     tests/test_lifecycle_terminal_predicate.py: {created: "2026-04-26", last_used: "2026-04-26"}
@@ -217,7 +217,7 @@ test_trust_policy:
     tests/test_command_grammar_amendment.py: {created: "2026-04-27", last_used: "2026-04-27"}
     tests/test_riskguard_red_durable_cmd.py: {created: "2026-04-27", last_used: "2026-04-27"}
     tests/test_command_bus_types.py: {created: "2026-04-26", last_used: "2026-04-27"}
-    tests/test_command_recovery.py: {created: "2026-04-26", last_used: "2026-05-18"}
+    tests/test_command_recovery.py: {created: "2026-04-26", last_used: "2026-05-21"}
     tests/test_venue_command_repo.py: {created: "2026-04-26", last_used: "2026-04-27"}
     tests/test_unknown_side_effect.py: {created: "2026-04-27", last_used: "2026-04-30"}
     tests/test_user_channel_ingest.py: {created: "2026-04-27", last_used: "2026-04-27"}
@@ -283,7 +283,9 @@ test_trust_policy:
     tests/test_auto_pause_hardening.py: {created: "2026-05-01", last_used: "2026-05-04"}
     tests/test_backfill_harvester_settlements_isolation.py: {created: "2026-05-11", last_used: "2026-05-11"}
     tests/test_backtest_runs_schema_lane_allowlist.py: {created: "2026-05-07", last_used: "2026-05-07"}
-    tests/test_bridge_oracle_to_calibration.py: {created: "2026-05-02", last_used: "2026-05-04"}
+    tests/test_bridge_oracle_to_calibration.py: {created: "2026-05-02", last_used: "2026-05-21"}
+    # 2026-05-21 P0 live-money antibody: mutually-exclusive weather family bins must not emit independent live orders.
+    tests/test_inv_family_exclusive_sizing.py: {created: "2026-05-20", last_used: "2026-05-21"}
     tests/test_calibration_pin_eligibility.py: {created: "2026-05-07", last_used: "2026-05-07"}
     tests/test_calibration_read_path_asymmetry_fixes_2026_05_06.py: {created: "2026-05-06", last_used: "2026-05-06"}
     tests/test_calibration_serving_status.py: {created: "2026-05-09", last_used: "2026-05-09"}
@@ -482,6 +484,7 @@ categories:
     - tests/test_runtime_n_mc_floor.py
     - tests/test_evaluator_explicit_n_mc.py
     - tests/test_evaluator_strategy_key_failclosed.py
+    - tests/test_inv_family_exclusive_sizing.py
     - tests/test_cross_module_invariants.py
     - tests/test_cross_module_relationships.py
     - tests/test_data_rebuild_relationships.py
