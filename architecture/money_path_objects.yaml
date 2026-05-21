@@ -150,6 +150,36 @@ state_machines:
     invariant_tests:
       - tests/test_lifecycle_terminal_predicate.py
       - tests/test_exchange_reconcile.py
+  position_event:
+    owner: src/engine/lifecycle_events.py
+    description: >
+      Canonical world-position lifecycle event_type values from
+      architecture/2026_04_02_architecture_kernel.sql. These are not command
+      states; they are append-only position event grammar used by projections
+      and execution-fact repair.
+    states:
+      - POSITION_OPEN_INTENT
+      - ENTRY_ORDER_POSTED
+      - ENTRY_ORDER_FILLED
+      - ENTRY_ORDER_VOIDED
+      - ENTRY_ORDER_REJECTED
+      - DAY0_WINDOW_ENTERED
+      - CHAIN_SYNCED
+      - CHAIN_SIZE_CORRECTED
+      - CHAIN_QUARANTINED
+      - MONITOR_REFRESHED
+      - EXIT_INTENT
+      - EXIT_ORDER_POSTED
+      - EXIT_ORDER_FILLED
+      - EXIT_ORDER_VOIDED
+      - EXIT_ORDER_REJECTED
+      - SETTLED
+      - ADMIN_VOIDED
+      - MANUAL_OVERRIDE_APPLIED
+    invariant_tests:
+      - tests/test_command_recovery.py
+      - tests/test_exchange_reconcile.py
+      - tests/test_lifecycle_terminal_predicate.py
   shoulder_readiness:
     owner: scripts/shoulder_shadow_readiness_report.py
     description: >
