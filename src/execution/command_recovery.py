@@ -665,8 +665,10 @@ def _stale_local_orphan_terminal_no_fill_candidates(conn: sqlite3.Connection) ->
         return []
     states = tuple(sorted(_TERMINAL_NO_FILL_ORDER_FACT_STATES))
     sources = tuple(sorted(_LIVE_TERMINAL_ORDER_FACT_SOURCES))
+    state_placeholders = ",".join("?" for _ in states)
+    source_placeholders = ",".join("?" for _ in sources)
     rows = conn.execute(
-        """
+        f"""
         WITH latest_order_fact AS (
             SELECT command_id, MAX(local_sequence) AS max_sequence
               FROM venue_order_facts
@@ -704,8 +706,8 @@ def _stale_local_orphan_terminal_no_fill_candidates(conn: sqlite3.Connection) ->
            AND pc.phase = 'voided'
            AND CAST(COALESCE(pc.shares, '0') AS REAL) = 0
            AND CAST(COALESCE(pc.cost_basis_usd, '0') AS REAL) = 0
-           AND fact.state IN (?, ?, ?)
-           AND fact.source IN (?, ?, ?, ?, ?)
+           AND fact.state IN ({state_placeholders})
+           AND fact.source IN ({source_placeholders})
            AND CAST(COALESCE(fact.matched_size, '0') AS REAL) = 0
          ORDER BY finding.recorded_at, finding.finding_id
         """,
