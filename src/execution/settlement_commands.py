@@ -453,9 +453,9 @@ def request_redeem(
 
     own_conn = conn is None
     if own_conn:
-        from src.state.db import get_trade_connection_with_world
+        from src.state.db import get_trade_connection_with_world_required
 
-        conn = get_trade_connection_with_world()
+        conn = get_trade_connection_with_world_required(write_class="live")
     assert conn is not None
     assert_settlement_schema_ready(conn)
 
@@ -595,9 +595,9 @@ def submit_redeem(
     command_id = _require_nonempty("command_id", command_id)
     own_conn = conn is None
     if own_conn:
-        from src.state.db import get_trade_connection_with_world
+        from src.state.db import get_trade_connection_with_world_required
 
-        conn = get_trade_connection_with_world()
+        conn = get_trade_connection_with_world_required(write_class="live")
     assert conn is not None
     # INV-37 (ATTACH guard): callers may pass an external trade connection that
     # lacks the world schema (e.g. main.py's scheduler conn opened via
@@ -611,7 +611,9 @@ def submit_redeem(
         try:
             conn.execute("ATTACH DATABASE ? AS world", (str(_WORLD_PATH),))
         except sqlite3.OperationalError as _att_exc:
-            logger.warning("[SUBMIT_REDEEM_ATTACH_WORLD_FAILED] exc=%r", _att_exc)
+            raise SettlementCommandStateError(
+                "submit_redeem requires world ATTACH before live side-effect boundary"
+            ) from _att_exc
     assert_settlement_schema_ready(conn)
     submitted_at_s = _coerce_time(submitted_at)
 
@@ -645,8 +647,11 @@ def submit_redeem(
                 submitted_at=submitted_at_s,
                 recorded_at=submitted_at_s,
             )
-        if own_conn:
-            conn.commit()
+        # submit_redeem is the on-chain side-effect boundary. REDEEM_SUBMITTED
+        # must be durable before any adapter contact even when the caller passed
+        # an external connection; otherwise crash/rollback can erase the local
+        # anchor after a Safe/NegRisk tx was broadcast.
+        conn.commit()
 
         try:
             # PR-I.5.c (2026-05-18): parse JSON-encoded winning_index_set
@@ -685,8 +690,8 @@ def submit_redeem(
             )
 
             # negRisk routing: look up neg_risk flag + token IDs from world
-            # snapshot table. get_trade_connection_with_world() ATTACHes the
-            # world schema so the query MUST use the qualified name
+            # snapshot table. Live callers must provide or open a connection
+            # with world ATTACHed, so the query MUST use the qualified name
             # world.executable_market_snapshots. The main connection is
             # zeus_trades.db; unqualified reads would hit any legacy ghost row
             # in the trade DB, not the authoritative world snapshot.
@@ -833,8 +838,7 @@ def submit_redeem(
                     error_payload=error_payload,
                     recorded_at=_coerce_time(None),
                 )
-            if own_conn:
-                conn.commit()
+            conn.commit()
             return SettlementResult(command_id, SettlementState.REDEEM_RETRYING, error_payload=error_payload)
 
         raw_payload = _raw_dict(raw)
@@ -904,8 +908,7 @@ def submit_redeem(
                     terminal=terminal_flag,
                     recorded_at=_coerce_time(None),
                 )
-            if own_conn:
-                conn.commit()
+            conn.commit()
             # SCAFFOLD §K.3 v5 atomicity contract: alert fires AFTER the
             # savepoint+commit completes (best-effort, not part of transaction).
             # Heartbeat-sensor (Finding #10 path) picks up the
@@ -936,8 +939,7 @@ def submit_redeem(
                 terminal=state_after in _TERMINAL_STATES,
                 recorded_at=_coerce_time(None),
             )
-        if own_conn:
-            conn.commit()
+        conn.commit()
         return SettlementResult(
             command_id,
             state_after,

@@ -1,9 +1,10 @@
 # Created: 2026-05-05
-# Last reused or audited: 2026-05-18
-# Lifecycle: created=2026-05-05; last_reviewed=2026-05-18; last_reused=2026-05-18
+# Last reused or audited: 2026-05-21
+# Lifecycle: created=2026-05-05; last_reviewed=2026-05-21; last_reused=2026-05-21
 # Purpose: Guard narrow ATTACH exception handling in trade/world connection helpers.
 # Reuse: Run when connection helper signatures or ATTACH behavior changes.
 # Authority basis: docs/operations/task_2026-05-04_zeus_may3_review_remediation/phases/T2I/phase.json; K1 typed connection API accepts write_class.
+#                  + docs/operations/task_2026-05-21_live_side_effect_risk_boundaries/task.md P2-1 required live ATTACH seam.
 """Tests for T2I Deliverable A: ATTACH narrow-except in cycle_runner + db.py.
 
 Invariants asserted:
@@ -135,6 +136,32 @@ def test_db_py_attach_oe_swallowed_returns_unattached_conn_caller_can_detect_via
     assert "world" not in names, (
         "After OperationalError on ATTACH, 'world' must NOT be in PRAGMA database_list"
     )
+
+
+def test_db_py_required_attach_oe_raises_and_closes(monkeypatch):
+    """Required trade/world helper fails closed when ATTACH cannot prove authority joins."""
+    exc = sqlite3.OperationalError("unable to open database file")
+    mock_conn = _make_fake_conn(attach_side_effect=exc)
+
+    monkeypatch.setattr(db_module, "get_trade_connection", lambda **_kwargs: mock_conn)
+
+    with pytest.raises(sqlite3.OperationalError, match="unable to open database file"):
+        db_module.get_trade_connection_with_world_required()
+
+    mock_conn.close.assert_called_once()
+
+
+def test_db_py_required_attach_sqlite_error_raises_and_closes(monkeypatch):
+    """Required helper also closes on broader sqlite failures before re-raising."""
+    exc = sqlite3.DatabaseError("database disk image is malformed")
+    mock_conn = _make_fake_conn(attach_side_effect=exc)
+
+    monkeypatch.setattr(db_module, "get_trade_connection", lambda **_kwargs: mock_conn)
+
+    with pytest.raises(sqlite3.DatabaseError, match="database disk image"):
+        db_module.get_trade_connection_with_world_required()
+
+    mock_conn.close.assert_called_once()
 
 
 # ---------------------------------------------------------------------------

@@ -37,7 +37,7 @@ from src.runtime import bankroll_provider
 from src.state.db import (
     RISK_DB_PATH,
     get_connection,
-    get_trade_connection_with_world,
+    get_trade_connection_with_world_required,
     query_authoritative_settlement_rows,
     query_portfolio_loader_view,
     query_strategy_health_snapshot,
@@ -86,7 +86,7 @@ def _get_runtime_trade_connection() -> sqlite3.Connection:
     # v4 plan §AX3: riskguard runtime = LIVE class.
     if get_connection.__module__ != "src.state.db":
         return get_connection()
-    return get_trade_connection_with_world(write_class="live")
+    return get_trade_connection_with_world_required(write_class="live")
 
 
 def _load_riskguard_capital_metadata() -> tuple[PortfolioState, str]:

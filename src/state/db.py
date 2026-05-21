@@ -295,10 +295,10 @@ def get_backtest_connection(
     return _connect(ZEUS_BACKTEST_DB_PATH, write_class=write_class)
 
 
-def get_trade_connection_with_world(
+def get_trade_connection_with_world_optional(
     *, write_class: WriteClass | str | None = None,
 ) -> sqlite3.Connection:
-    """Trade connection with shared DB ATTACHed for cross-DB joins.
+    """Trade connection with shared DB ATTACH attempted for optional joins.
 
     v4 plan §3.1.3: when an explicit ``write_class`` is supplied, the
     helper records ATTACH order under the canonical alphabetical sort
@@ -336,6 +336,51 @@ def get_trade_connection_with_world(
         except sqlite3.OperationalError as exc:
             logger.warning("ATTACH forecasts failed (non-fatal): %r", exc)
     return conn
+
+
+def get_trade_connection_with_world_required(
+    *, write_class: WriteClass | str | None = None,
+) -> sqlite3.Connection:
+    """Trade connection with world/forecasts ATTACHed or fail closed.
+
+    Live money authority paths use this flavor because a returned connection
+    without ``world`` or ``forecasts`` can silently route around canonical
+    market/order/position truth.  Diagnostics and read-only compatibility paths
+    may still use ``get_trade_connection_with_world_optional``.
+    """
+    from src.state.db_writer_lock import canonical_lock_order
+
+    resolved = _resolve_write_class(write_class)
+    conn = get_trade_connection(write_class=resolved)
+    try:
+        attached = {row[1] for row in conn.execute("PRAGMA database_list").fetchall()}
+        if "world" not in attached:
+            if resolved is not None:
+                _ = canonical_lock_order([_zeus_trade_db_path(), ZEUS_WORLD_DB_PATH])
+                _cnt_inc("db_trade_with_world_canonical_order_total")
+            conn.execute("ATTACH DATABASE ? AS world", (str(ZEUS_WORLD_DB_PATH),))
+            attached.add("world")
+        if "forecasts" not in attached:
+            conn.execute("ATTACH DATABASE ? AS forecasts", (str(ZEUS_FORECASTS_DB_PATH),))
+            attached.add("forecasts")
+        return conn
+    except Exception:
+        try:
+            conn.close()
+        except Exception:  # noqa: BLE001
+            pass
+        raise
+
+
+def get_trade_connection_with_world(
+    *, write_class: WriteClass | str | None = None,
+) -> sqlite3.Connection:
+    """Backward-compatible optional ATTACH helper.
+
+    New live-money authority paths should call
+    :func:`get_trade_connection_with_world_required`.
+    """
+    return get_trade_connection_with_world_optional(write_class=write_class)
 
 
 @contextlib.contextmanager

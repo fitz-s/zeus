@@ -34,7 +34,6 @@ from src.contracts import (
     ExecutionIntent,
     EdgeContext,
     FinalExecutionIntent,
-    DecisionSourceContext,
     Direction,
     simulate_clob_sweep,
 )
@@ -44,7 +43,11 @@ from src.contracts.execution_price import (
 )
 from src.types import BinEdge
 from src.architecture.decorators import capability, protects
-from src.state.db import get_connection, get_trade_connection_with_world
+from src.state.db import (
+    get_connection,
+    get_trade_connection_with_world,
+    get_trade_connection_with_world_required,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1218,6 +1221,86 @@ def _submit_result_review_required_payload(
     return payload
 
 
+def _current_command_state_value(conn: sqlite3.Connection, command_id: str) -> str | None:
+    try:
+        row = conn.execute(
+            "SELECT state FROM venue_commands WHERE command_id = ?",
+            (command_id,),
+        ).fetchone()
+    except Exception:
+        return None
+    if row is None:
+        return None
+    try:
+        return str(row["state"])
+    except Exception:
+        return str(row[0])
+
+
+def _mark_post_submit_persistence_failure(
+    conn: sqlite3.Connection,
+    *,
+    command_id: str,
+    order_id: str | None,
+    occurred_at: str,
+    reason: str,
+    detail: str,
+    idempotency_key: str,
+    order_role: str,
+) -> str | None:
+    """Persist REVIEW_REQUIRED after SDK success but ACK facts failed.
+
+    At this point the venue side effect may have happened. Any half-written ACK
+    transaction must be rolled back before writing the minimal durable review
+    event; returning a normal pending/filled result would make memory outrank
+    canonical command truth.
+    """
+
+    from src.state.venue_command_repo import append_event
+
+    try:
+        conn.rollback()
+    except Exception as rollback_exc:
+        logger.error(
+            "%s ACK persistence rollback failed (command_id=%s order_id=%s): %s",
+            order_role,
+            command_id,
+            order_id,
+            rollback_exc,
+        )
+    try:
+        append_event(
+            conn,
+            command_id=command_id,
+            event_type="REVIEW_REQUIRED",
+            occurred_at=occurred_at,
+            payload={
+                "reason": reason,
+                "detail": detail,
+                "venue_order_id": order_id or "",
+                "idempotency_key": idempotency_key,
+                "side_effect_boundary_crossed": True,
+                "sdk_submit_returned_order_id": bool(order_id),
+                "requires_recovery": True,
+            },
+        )
+        conn.commit()
+    except Exception as review_exc:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        logger.error(
+            "%s REVIEW_REQUIRED event failed after ACK persistence failure "
+            "(command_id=%s order_id=%s): %s",
+            order_role,
+            command_id,
+            order_id,
+            review_exc,
+        )
+    return _current_command_state_value(conn, command_id)
+
+
 @dataclass
 class OrderResult:
     """Result of an order attempt."""
@@ -1634,7 +1717,7 @@ def _final_intent_snapshot_metadata(
     from src.state.snapshot_repo import get_snapshot
 
     own_conn = conn is None
-    lookup_conn = get_trade_connection_with_world() if own_conn else conn
+    lookup_conn = get_trade_connection_with_world_required() if own_conn else conn
     try:
         snapshot = get_snapshot(lookup_conn, intent.snapshot_id)
     finally:
@@ -1837,6 +1920,15 @@ def execute_intent(
 
     from src.architecture.gate_runtime import check as _gate_runtime_check
     _gate_runtime_check("live_venue_submit")
+    if not (
+        os.environ.get("ZEUS_ALLOW_LEGACY_EXECUTION_INTENT") == "1"
+        and os.environ.get("ZEUS_LEGACY_EXECUTION_INTENT_SCOPE", "").strip().lower()
+        == "paper"
+    ):
+        raise RuntimeError(
+            "LEGACY_EXECUTION_INTENT_LIVE_BLOCKED: live entry must use "
+            "FinalExecutionIntent via execute_final_intent"
+        )
     trade_id = str(uuid.uuid4())[:12]
 
     limit_price = intent.limit_price
@@ -2071,7 +2163,7 @@ def execute_exit_order(
     # try/finally below so the fallback connection is always closed.
     _own_conn = conn is None
     if _own_conn:
-        conn = get_trade_connection_with_world()
+        conn = get_trade_connection_with_world_required()
     if not decision_id:
         logger.warning(
             "EXECUTOR: synthetic decision_id %s — retry-idempotency NOT guaranteed; "
@@ -2743,6 +2835,31 @@ def execute_exit_order(
                 "execute_exit_order: SUBMIT_ACKED append_event failed (command_id=%s order_id=%s): %s",
                 command_id, order_id, inner,
             )
+            durable_state = _mark_post_submit_persistence_failure(
+                conn,
+                command_id=command_id,
+                order_id=order_id,
+                occurred_at=ack_time,
+                reason="exit_ack_persistence_failed_after_side_effect",
+                detail=str(inner),
+                idempotency_key=idem.value,
+                order_role="exit_order",
+            )
+            return OrderResult(
+                trade_id=intent.trade_id,
+                status="unknown_side_effect",
+                reason=f"exit_ack_persistence_failed_after_side_effect: {inner}",
+                order_id=order_id,
+                submitted_price=limit_price,
+                shares=shares,
+                order_role="exit",
+                intent_id=intent.intent_id,
+                external_order_id=order_id,
+                command_id=command_id,
+                venue_status=str(result.get("status") or "placed"),
+                idempotency_key=idem.value,
+                command_state=durable_state,
+            )
 
         result_obj = OrderResult(
             trade_id=intent.trade_id,
@@ -2879,7 +2996,7 @@ def _live_order(
     # Wrapped in try/finally so the fallback connection is always closed.
     _own_conn = conn is None
     if _own_conn:
-        conn = get_trade_connection_with_world()
+        conn = get_trade_connection_with_world_required()
     if not decision_id:
         logger.warning(
             "EXECUTOR: synthetic decision_id %s — retry-idempotency NOT guaranteed; "
@@ -3753,6 +3870,32 @@ def _live_order(
             logger.error(
                 "_live_order: SUBMIT_ACKED append_event failed (command_id=%s order_id=%s): %s",
                 command_id, order_id, inner,
+            )
+            durable_state = _mark_post_submit_persistence_failure(
+                conn,
+                command_id=command_id,
+                order_id=order_id,
+                occurred_at=ack_time,
+                reason="entry_ack_persistence_failed_after_side_effect",
+                detail=str(inner),
+                idempotency_key=idem.value,
+                order_role="entry_order",
+            )
+            return OrderResult(
+                trade_id=trade_id,
+                status="unknown_side_effect",
+                reason=f"entry_ack_persistence_failed_after_side_effect: {inner}",
+                order_id=order_id,
+                submitted_price=intent.limit_price,
+                shares=shares,
+                order_role="entry",
+                external_order_id=order_id,
+                venue_status=str(result.get("status") or "placed"),
+                idempotency_key=idem.value,
+                command_state=durable_state,
+                command_id=command_id,
+                zeus_submit_intent_time=zeus_submit_intent_time,
+                venue_ack_time=ack_time,
             )
 
         result_obj = OrderResult(

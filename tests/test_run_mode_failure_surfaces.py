@@ -1,7 +1,8 @@
 # Created: 2026-05-19
-# Last reused or audited: 2026-05-19
+# Last reused or audited: 2026-05-21
 # Authority basis: codereview-may19-2.md relationship F
-# Lifecycle: created=2026-05-19; last_reviewed=2026-05-19; last_reused=never
+#                  + docs/operations/task_2026-05-21_live_side_effect_risk_boundaries/task.md P1-1
+# Lifecycle: created=2026-05-19; last_reviewed=2026-05-21; last_reused=2026-05-21
 # Purpose: Relationship-F antibody — assert that compute_composite_live_health()
 #   surfaces DEGRADED when run_mode has failed or status_summary is stale, even
 #   when the heartbeat is OK (closing the "scheduler alive but not trading" gap).
@@ -71,11 +72,12 @@ def _setup_healthy_state(sd: Path, offset_seconds: int = -30) -> None:
                 "mode": "opening_hunt",
                 "started_at": cycle_time,
                 "completed_at": cycle_time,
-                "candidates": 0,
+                "candidates": 1,
                 "entry_orders_submitted": 0,
                 "trades": 0,
                 "exits": 0,
-                "no_trades": 0,
+                "no_trades": 1,
+                "top_no_trade_reasons": {"EDGE_INSUFFICIENT": 1},
                 "command_recovery": {"scanned": 0, "advanced": 0},
                 "chain_sync": {"synced": 0},
             },
@@ -326,6 +328,136 @@ def test_business_plane_skipped_cycle_yields_degraded(tmp_path: Path) -> None:
 
     assert result["status"] == "DEGRADED"
     assert result["surfaces"]["business_plane"]["issue"] == "CYCLE_SKIPPED: cycle_lock_held"
+
+
+def test_business_plane_zero_candidates_without_proof_yields_degraded(tmp_path: Path) -> None:
+    """Zero candidates needs explicit no-market/source-freshness proof."""
+    sd = tmp_path / "state"
+    sd.mkdir()
+    _setup_healthy_state(sd)
+    _write(
+        sd / "status_summary.json",
+        {
+            "timestamp": _now_iso(-30),
+            "cycle": {
+                "mode": "opening_hunt",
+                "completed_at": _now_iso(-30),
+                "candidates": 0,
+            },
+        },
+    )
+
+    result = compute_composite_live_health(state_dir=sd)
+
+    assert result["status"] == "DEGRADED"
+    assert result["surfaces"]["business_plane"]["issue"] == (
+        "ZERO_CANDIDATES_WITHOUT_SOURCE_OR_NO_MARKET_PROOF"
+    )
+
+
+def test_business_plane_candidates_without_final_intent_need_no_trade_reasons(tmp_path: Path) -> None:
+    sd = tmp_path / "state"
+    sd.mkdir()
+    _setup_healthy_state(sd)
+    _write(
+        sd / "status_summary.json",
+        {
+            "timestamp": _now_iso(-30),
+            "cycle": {
+                "mode": "opening_hunt",
+                "completed_at": _now_iso(-30),
+                "candidates": 3,
+                "final_intents_built": 0,
+                "no_trades": 3,
+            },
+        },
+    )
+
+    result = compute_composite_live_health(state_dir=sd)
+
+    assert result["status"] == "DEGRADED"
+    assert result["surfaces"]["business_plane"]["issue"] == (
+        "CANDIDATES_WITHOUT_FINAL_INTENTS_OR_NO_TRADE_REASONS"
+    )
+
+
+def test_business_plane_final_intents_without_submit_attempts_yields_degraded(tmp_path: Path) -> None:
+    sd = tmp_path / "state"
+    sd.mkdir()
+    _setup_healthy_state(sd)
+    _write(
+        sd / "status_summary.json",
+        {
+            "timestamp": _now_iso(-30),
+            "cycle": {
+                "mode": "opening_hunt",
+                "completed_at": _now_iso(-30),
+                "candidates": 3,
+                "final_intents_built": 1,
+                "entry_orders_submitted": 0,
+            },
+        },
+    )
+
+    result = compute_composite_live_health(state_dir=sd)
+
+    assert result["status"] == "DEGRADED"
+    assert result["surfaces"]["business_plane"]["issue"] == (
+        "FINAL_INTENTS_WITHOUT_SUBMIT_ATTEMPTS"
+    )
+
+
+def test_business_plane_submit_without_ack_or_rejection_yields_degraded(tmp_path: Path) -> None:
+    sd = tmp_path / "state"
+    sd.mkdir()
+    _setup_healthy_state(sd)
+    _write(
+        sd / "status_summary.json",
+        {
+            "timestamp": _now_iso(-30),
+            "cycle": {
+                "mode": "opening_hunt",
+                "completed_at": _now_iso(-30),
+                "candidates": 3,
+                "final_intents_built": 1,
+                "entry_orders_submitted": 1,
+                "venue_acks": 0,
+            },
+        },
+    )
+
+    result = compute_composite_live_health(state_dir=sd)
+
+    assert result["status"] == "DEGRADED"
+    assert result["surfaces"]["business_plane"]["issue"] == (
+        "SUBMIT_ATTEMPTS_WITHOUT_ACK_OR_DETERMINISTIC_REJECTION"
+    )
+
+
+def test_business_plane_submit_without_ack_allows_deterministic_rejection(tmp_path: Path) -> None:
+    sd = tmp_path / "state"
+    sd.mkdir()
+    _setup_healthy_state(sd)
+    _write(
+        sd / "status_summary.json",
+        {
+            "timestamp": _now_iso(-30),
+            "cycle": {
+                "mode": "opening_hunt",
+                "completed_at": _now_iso(-30),
+                "candidates": 3,
+                "final_intents_built": 1,
+                "entry_orders_submitted": 1,
+                "venue_acks": 0,
+                "deterministic_rejections": {"invalid_amount_precision": 1},
+            },
+        },
+    )
+
+    result = compute_composite_live_health(state_dir=sd)
+
+    assert result["status"] == "HEALTHY"
+    assert result["surfaces"]["business_plane"]["progress"]["deterministic_rejection_observed"] is True
 
 
 def test_business_plane_exposes_entry_and_reconcile_progress_counters(tmp_path: Path) -> None:

@@ -171,9 +171,25 @@ state_machines:
       CI treats new all-caps runtime authority as explicit, not accidental.
     states:
       - ZEUS_LIVE_FAMILY_EXECUTABLE_FALLBACK_CANDIDATES
+      - ZEUS_ALLOW_LEGACY_EXECUTION_INTENT
+      - ZEUS_LEGACY_EXECUTION_INTENT_SCOPE
     invariant_tests:
       - tests/test_inv_family_exclusive_sizing.py
       - tests/test_inv_family_exclusive_cross_module_integration.py
+      - tests/test_executor.py
+  business_plane_health:
+    owner: src/control/live_health.py
+    description: >
+      Composite live-health business-plane degradation reasons. These are
+      operator-facing state labels for process-alive but trading-progress-dead
+      conditions; they do not mutate command, lifecycle, or settlement truth.
+    states:
+      - ZERO_CANDIDATES_WITHOUT_SOURCE_OR_NO_MARKET_PROOF
+      - CANDIDATES_WITHOUT_FINAL_INTENTS_OR_NO_TRADE_REASONS
+      - FINAL_INTENTS_WITHOUT_SUBMIT_ATTEMPTS
+      - SUBMIT_ATTEMPTS_WITHOUT_ACK_OR_DETERMINISTIC_REJECTION
+    invariant_tests:
+      - tests/test_run_mode_failure_surfaces.py
 
 schema_objects:
   authority_fabricating_defaults:

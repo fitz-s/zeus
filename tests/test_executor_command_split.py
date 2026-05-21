@@ -1,10 +1,11 @@
-# Lifecycle: created=2026-04-26; last_reviewed=2026-05-15; last_reused=2026-05-17
+# Lifecycle: created=2026-04-26; last_reviewed=2026-05-21; last_reused=2026-05-21
 # Purpose: Lock executor command split phase ordering and ACK invariants.
 # Reuse: Run when venue command persistence, live order submission, or ACK handling changes.
 # Created: 2026-04-26
 # Last reused/audited: 2026-05-20
 # Authority basis: docs/operations/task_2026-04-26_execution_state_truth_p1_command_bus/implementation_plan.md §P1.S3
 #                  + docs/operations/task_2026-05-15_live_order_e2e_goal/LIVE_ORDER_E2E_GOAL_PLAN.md
+#                  + docs/operations/task_2026-05-21_live_side_effect_risk_boundaries/task.md P1-4 legacy execute_intent override.
 """INV-30 relationship tests: executor split build/persist/submit/ack.
 
 Each test names the relationship it locks, not just the function.
@@ -43,6 +44,8 @@ def mem_conn():
 @pytest.fixture(autouse=True)
 def _cutover_guard_live_enabled(monkeypatch):
     """This file tests command-journal ordering, not cutover gating."""
+    monkeypatch.setenv("ZEUS_ALLOW_LEGACY_EXECUTION_INTENT", "1")
+    monkeypatch.setenv("ZEUS_LEGACY_EXECUTION_INTENT_SCOPE", "paper")
     monkeypatch.setattr("src.control.cutover_guard.assert_submit_allowed", lambda *args, **kwargs: None)
     monkeypatch.setattr("src.control.heartbeat_supervisor.assert_heartbeat_allows_order_type", lambda *args, **kwargs: None)
     monkeypatch.setattr("src.state.collateral_ledger.assert_buy_preflight", lambda *args, **kwargs: None)
@@ -617,6 +620,7 @@ class TestLiveOrderCommandSplit:
             return conn
 
         monkeypatch.setattr(executor_module, "get_trade_connection_with_world", _trade_conn)
+        monkeypatch.setattr(executor_module, "get_trade_connection_with_world_required", _trade_conn)
         monkeypatch.setattr(executor_module, "_assert_risk_allocator_allows_submit", lambda *args, **kwargs: None)
         monkeypatch.setattr(executor_module, "_select_risk_allocator_order_type", lambda *args, **kwargs: "GTC")
         monkeypatch.setattr(

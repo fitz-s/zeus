@@ -1,9 +1,11 @@
-# Lifecycle: created=2026-04-27; last_reviewed=2026-05-15; last_reused=2026-05-15
+# Lifecycle: created=2026-04-27; last_reviewed=2026-05-21; last_reused=2026-05-21
 # Purpose: Regression coverage for executor and portfolio mechanics under R3 cutover preflight opt-outs.
 # Reuse: Run when executor order submission or portfolio save/load mechanics change.
 # Created: 2026-04-27
-# Last reused/audited: 2026-05-15
+# Last reused/audited: 2026-05-21
 # Authority basis: docs/operations/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md; R3 Z1 cutover guard audit.
+#                  + docs/operations/task_2026-05-21_live_side_effect_risk_boundaries/task.md P0-1 side-effect boundary fault injection.
+#                  + docs/operations/task_2026-05-21_live_side_effect_risk_boundaries/task.md P2-1 required live ATTACH seam.
 """Tests for executor and portfolio."""
 
 import sqlite3
@@ -48,7 +50,7 @@ _DEFAULT_DECISION_SOURCE = object()
 def _mem_conn(monkeypatch):
     """Inject an in-memory DB into executor fallback connection.
 
-    execute_exit_order and _live_order now call get_trade_connection_with_world()
+    execute_exit_order and _live_order now call get_trade_connection_with_world_required()
     when no explicit conn is provided. Supply an in-memory DB with schema so
     unit tests don't depend on on-disk DB state.
     """
@@ -61,6 +63,7 @@ def _mem_conn(monkeypatch):
     global _TEST_CONN
     _TEST_CONN = mem
     monkeypatch.setattr("src.execution.executor.get_trade_connection_with_world", lambda: mem)
+    monkeypatch.setattr("src.execution.executor.get_trade_connection_with_world_required", lambda **_kwargs: mem)
     monkeypatch.setattr("src.control.cutover_guard.assert_submit_allowed", lambda *args, **kwargs: None)
     monkeypatch.setattr("src.control.heartbeat_supervisor.assert_heartbeat_allows_order_type", lambda *args, **kwargs: None)
     monkeypatch.setattr("src.state.collateral_ledger.assert_buy_preflight", lambda *args, **kwargs: None)
@@ -233,6 +236,7 @@ def _final_execution_intent(
     raw_orderbook_hash: str = "c" * 64,
     ask_size: str = "100",
     bid_size: str = "100",
+    passive_maker_context=None,
 ) -> FinalExecutionIntent:
     if cancel_after is None:
         cancel_after = datetime.now(timezone.utc) + timedelta(hours=1)
@@ -256,6 +260,17 @@ def _final_execution_intent(
         event_id = snapshot.event_id
     if expected_fill_price_before_fee is None:
         expected_fill_price_before_fee = final_limit_price
+    if order_policy == "post_only_passive_limit" and passive_maker_context is None:
+        from src.contracts.execution_intent import PassiveMakerExecutionContext
+
+        passive_maker_context = PassiveMakerExecutionContext(
+            spread_usd=Decimal("0.01"),
+            quote_age_ms=100,
+            expected_fill_probability=Decimal("0.50"),
+            queue_depth_ahead=Decimal("0"),
+            adverse_selection_score=Decimal("0.10"),
+            orderbook_hash_age_ms=100,
+        )
     if submitted_shares is None:
         if size_kind == "shares":
             submitted_shares = size_value
@@ -297,6 +312,7 @@ def _final_execution_intent(
             if decision_source_context is _DEFAULT_DECISION_SOURCE
             else decision_source_context
         ),
+        passive_maker_context=passive_maker_context,
     )
 
 
@@ -724,6 +740,37 @@ class TestExecutor:
             == 0
         )
 
+    def test_execute_intent_legacy_entry_path_blocked_for_live(self, monkeypatch):
+        intent = ExecutionIntent(
+            direction=Direction.YES,
+            target_size_usd=5.0,
+            limit_price=0.50,
+            toxicity_budget=0.05,
+            max_slippage=SlippageBps(value_bps=200, direction="adverse"),
+            is_sandbox=False,
+            market_id="gamma-legacy-blocked",
+            token_id="yes-token-legacy-blocked",
+            timeout_seconds=3600,
+        )
+        gate_calls = []
+
+        class FailingClient:
+            def __init__(self):
+                raise AssertionError("legacy execute_intent must not reach venue client")
+
+        monkeypatch.delenv("ZEUS_ALLOW_LEGACY_EXECUTION_INTENT", raising=False)
+        monkeypatch.delenv("ZEUS_LEGACY_EXECUTION_INTENT_SCOPE", raising=False)
+        monkeypatch.setattr(
+            "src.architecture.gate_runtime.check",
+            lambda capability: gate_calls.append(capability),
+        )
+        monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", FailingClient)
+
+        with pytest.raises(RuntimeError, match="LEGACY_EXECUTION_INTENT_LIVE_BLOCKED"):
+            execute_intent(intent, edge_vwmp=0.50, label="legacy-live-blocked", conn=_TEST_CONN)
+
+        assert gate_calls == ["live_venue_submit"]
+
     def test_execute_final_intent_allows_stricter_fok_when_a2_selected_resting_maker(self, monkeypatch):
         final_intent = _final_execution_intent(order_type="FOK")
         captured = {}
@@ -751,6 +798,50 @@ class TestExecutor:
 
         assert result.status == "pending"
         assert captured["order_type"] == "FOK"
+
+    def test_entry_ack_persistence_failure_returns_unknown_not_pending(self, monkeypatch):
+        final_intent = _final_execution_intent()
+
+        class DummyClient:
+            def __init__(self):
+                self.bound_envelope = None
+
+            def bind_submission_envelope(self, envelope):
+                self.bound_envelope = envelope
+
+            def v2_preflight(self):
+                return None
+
+            def place_limit_order(self, *, token_id, price, size, side, order_type="GTC"):
+                return _final_submit_result(self.bound_envelope, order_id="ack-fail-buy-1")
+
+        def fail_order_fact(*_args, **_kwargs):
+            raise sqlite3.OperationalError("simulated order fact write failure")
+
+        monkeypatch.setattr("src.execution.executor._assert_risk_allocator_allows_submit", lambda intent: None)
+        monkeypatch.setattr("src.execution.executor._select_risk_allocator_order_type", lambda conn, snapshot_id: "GTC")
+        monkeypatch.setattr("src.control.ws_gap_guard.assert_ws_allows_submit", lambda *args, **kwargs: None)
+        monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", DummyClient)
+        monkeypatch.setattr("src.state.venue_command_repo.append_order_fact", fail_order_fact)
+
+        result = execute_final_intent(final_intent, conn=_TEST_CONN, decision_id="decision-ack-fail")
+
+        assert result.status == "unknown_side_effect"
+        assert result.command_state == "REVIEW_REQUIRED"
+        assert result.reason.startswith("entry_ack_persistence_failed_after_side_effect:")
+        command = _TEST_CONN.execute(
+            "SELECT command_id, state, venue_order_id FROM venue_commands WHERE decision_id = ?",
+            ("decision-ack-fail",),
+        ).fetchone()
+        assert command["state"] == "REVIEW_REQUIRED"
+        assert command["venue_order_id"] == "ack-fail-buy-1"
+        assert (
+            _TEST_CONN.execute(
+                "SELECT COUNT(*) FROM venue_order_facts WHERE command_id = ?",
+                (command["command_id"],),
+            ).fetchone()[0]
+            == 0
+        )
 
     def test_execute_final_intent_rejects_resting_intent_when_a2_requires_taker(self, monkeypatch):
         final_intent = _final_execution_intent(
@@ -1309,7 +1400,8 @@ class TestExecutor:
                 current_price=0.50,
                 best_bid=0.49,
                 **_snapshot_kwargs("yes-token"),
-            )
+            ),
+            conn=_TEST_CONN,
         )
 
         assert result.status == "pending"
@@ -1322,6 +1414,52 @@ class TestExecutor:
             "side": "SELL",
             "order_type": "GTC",
         }
+
+    def test_exit_ack_persistence_failure_returns_unknown_not_pending(self, monkeypatch):
+        class DummyClient:
+            def __init__(self):
+                self.bound_envelope = None
+
+            def bind_submission_envelope(self, envelope):
+                self.bound_envelope = envelope
+
+            def place_limit_order(self, *, token_id, price, size, side, order_type="GTC"):
+                return _final_submit_result(self.bound_envelope, order_id="ack-fail-sell-1")
+
+        def fail_order_fact(*_args, **_kwargs):
+            raise sqlite3.OperationalError("simulated exit order fact write failure")
+
+        monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", DummyClient)
+        monkeypatch.setattr("src.state.venue_command_repo.append_order_fact", fail_order_fact)
+
+        result = execute_exit_order(
+            create_exit_order_intent(
+                trade_id="trade-exit-ack-fail",
+                token_id="yes-token",
+                shares=12.349,
+                current_price=0.50,
+                best_bid=0.49,
+                **_snapshot_kwargs("yes-token"),
+            ),
+            conn=_TEST_CONN,
+        )
+
+        assert result.status == "unknown_side_effect"
+        assert result.command_state == "REVIEW_REQUIRED"
+        assert result.reason.startswith("exit_ack_persistence_failed_after_side_effect:")
+        command = _TEST_CONN.execute(
+            "SELECT command_id, state, venue_order_id FROM venue_commands WHERE position_id = ?",
+            ("trade-exit-ack-fail",),
+        ).fetchone()
+        assert command["state"] == "REVIEW_REQUIRED"
+        assert command["venue_order_id"] == "ack-fail-sell-1"
+        assert (
+            _TEST_CONN.execute(
+                "SELECT COUNT(*) FROM venue_order_facts WHERE command_id = ?",
+                (command["command_id"],),
+            ).fetchone()[0]
+            == 0
+        )
 
     def test_execute_exit_order_rejects_missing_order_id_response(self, monkeypatch):
         class DummyClient:

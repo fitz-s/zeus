@@ -102,6 +102,37 @@ def _marketable_buy_min_notional_usd(final_intent_context: dict) -> Decimal:
     return value
 
 
+def _record_submitted_shoulder_exposure(
+    *,
+    conn,
+    city_name: str,
+    target_date: str,
+    decision,
+    observed_at: datetime,
+    source: str,
+) -> str | None:
+    """Record shoulder exposure only after a final runtime submit survives gates."""
+
+    edge = getattr(decision, "edge", None)
+    if edge is None:
+        return None
+    try:
+        from src.engine.evaluator import _record_accepted_shoulder_exposure
+
+        return _record_accepted_shoulder_exposure(
+            conn=conn,
+            city_name=city_name,
+            target_date=target_date,
+            edge=edge,
+            notional_usd=float(getattr(decision, "size_usd", 0.0) or 0.0),
+            decision_event_id=str(getattr(decision, "decision_id", "") or ""),
+            observed_at=observed_at,
+            source=source,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return f"shoulder_exposure_ledger_write_failed: {exc}"
+
+
 # D4: exit triggers whose statistical burden (2 consecutive negative cycles,
 # no FDR correction) is weaker than the entry-side burden (bootstrap CI +
 # BH-FDR). These are statistical hypotheses; force-majeure exits are excluded
@@ -3797,8 +3828,10 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
 
                 _family_exposure_conn = None
                 try:
-                    from src.state.db import get_trade_connection_with_world
-                    _family_exposure_conn = get_trade_connection_with_world()
+                    from src.state.db import get_trade_connection_with_world_required
+                    _family_exposure_conn = get_trade_connection_with_world_required(
+                        write_class="live"
+                    )
                     _family_exposures = resolve_weather_family_exposures(
                         trade_conn=_family_exposure_conn,
                         portfolio=portfolio,
@@ -4597,6 +4630,25 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                             )
                         )
                         continue
+                    if family_fallback_attempt_accepted:
+                        shoulder_ledger_error = _record_submitted_shoulder_exposure(
+                            conn=conn,
+                            city_name=city.name,
+                            target_date=candidate.target_date,
+                            decision=d,
+                            observed_at=decision_time,
+                            source=d.selected_method or selected_method,
+                        )
+                        if shoulder_ledger_error:
+                            deps.logger.warning(
+                                "shoulder exposure ledger write failed after submit "
+                                "decision_id=%s: %s",
+                                d.decision_id,
+                                shoulder_ledger_error,
+                            )
+                            summary["degraded"] = True
+                            if isinstance(getattr(d, "tokens", None), dict):
+                                d.tokens.setdefault("shoulder_exposure_ledger_error", shoulder_ledger_error)
                     artifact.add_trade(
                         {
                             "decision_id": d.decision_id,
