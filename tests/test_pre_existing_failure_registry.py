@@ -1,3 +1,8 @@
+# Lifecycle: created=2026-05-21; last_reviewed=2026-05-21; last_reused=never
+# Purpose: Guard the pre-existing failure registry against permanent,
+#   non-actionable, or expired exception entries.
+# Reuse: Run when updating architecture/pre_existing_failure_registry.yaml or
+#   CI policy around pre-existing failures.
 # Created: 2026-05-21
 # Last reused or audited: 2026-05-21
 # Authority basis: docs/operations/task_2026-05-21_live_release_proof_p0p3/task.md P3-2
@@ -19,7 +24,7 @@ def test_pre_existing_failure_registry_entries_are_actionable() -> None:
     assert registry["schema_version"] == 1
     assert registry["entries"], "registry must not exist as an empty placeholder"
 
-    today = date(2026, 5, 21)
+    today = date.today()
     forbidden_statuses = {"permanent", "ignored", "wontfix"}
     seen: set[str] = set()
     for entry in registry["entries"]:

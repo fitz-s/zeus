@@ -1,3 +1,8 @@
+# Lifecycle: created=2026-05-21; last_reviewed=2026-05-21; last_reused=never
+# Purpose: Runtime-to-registry assertions for live-release money-path schema
+#   columns that must remain visible to future agents and gates.
+# Reuse: Run when changing DB schema columns, db_table_ownership.yaml, or
+#   live-release registry assertions.
 # Created: 2026-05-21
 # Last reused or audited: 2026-05-21
 # Authority basis: docs/operations/task_2026-05-21_live_release_proof_p0p3/task.md P2-2

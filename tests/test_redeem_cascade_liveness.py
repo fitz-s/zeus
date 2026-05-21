@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-05-16; last_reviewed=2026-05-16; last_reused=never
+# Lifecycle: created=2026-05-16; last_reviewed=2026-05-21; last_reused=never
 # Purpose: Regression coverage for F14 cascade-liveness fix — verifies
 #   submit_redeem stub-detect branch transitions to REDEEM_OPERATOR_REQUIRED
 #   (not REDEEM_REVIEW_REQUIRED catch-all), atomicity contract that
@@ -287,3 +287,133 @@ def test_atomic_transition_succeeds_when_state_guard_matches(conn, monkeypatch):
     assert row["state"] == "REDEEM_TX_HASHED"
     assert row["tx_hash"] == "0x" + "b" * 64
     assert row["submitted_at"] == NOW.isoformat()
+
+
+def test_transition_preserves_autoretry_eligibility_when_unspecified(conn, monkeypatch):
+    """Omitting autoretry_eligible preserves the current review flag.
+
+    The primitive's None value means "not part of this transition", while an
+    explicit False is the only generic way to clear an existing retry flag.
+    """
+    from src.contracts.fx_classification import FXClassification
+    from src.execution.settlement_commands import (
+        SettlementState,
+        _coerce_time,
+        _savepoint,
+        _transition,
+        request_redeem,
+    )
+
+    monkeypatch.setenv("ZEUS_PUSD_FX_CLASSIFIED", FXClassification.FX_LINE_ITEM.value)
+    command_id = request_redeem(
+        "c-test-preserve",
+        "pUSD",
+        market_id="m-test-preserve",
+        pusd_amount_micro=1,
+        conn=conn,
+        requested_at=NOW,
+    )
+    with _savepoint(conn):
+        _transition(
+            conn,
+            command_id,
+            SettlementState.REDEEM_OPERATOR_REQUIRED,
+            payload={"reason": "seed_autoretry"},
+            autoretry_eligible=True,
+            recorded_at=_coerce_time(None),
+        )
+        _transition(
+            conn,
+            command_id,
+            SettlementState.REDEEM_REVIEW_REQUIRED,
+            payload={"reason": "preserve_flag"},
+            recorded_at=_coerce_time(None),
+        )
+    row = conn.execute(
+        "SELECT state, autoretry_eligible FROM settlement_commands WHERE command_id = ?",
+        (command_id,),
+    ).fetchone()
+    assert row["state"] == "REDEEM_REVIEW_REQUIRED"
+    assert row["autoretry_eligible"] == 1
+
+    with _savepoint(conn):
+        _transition(
+            conn,
+            command_id,
+            SettlementState.REDEEM_FAILED,
+            payload={"reason": "explicit_clear"},
+            autoretry_eligible=False,
+            terminal=True,
+            recorded_at=_coerce_time(None),
+        )
+    row = conn.execute(
+        "SELECT state, autoretry_eligible FROM settlement_commands WHERE command_id = ?",
+        (command_id,),
+    ).fetchone()
+    assert row["state"] == "REDEEM_FAILED"
+    assert row["autoretry_eligible"] == 0
+
+
+def test_atomic_transition_preserves_autoretry_eligibility_when_unspecified(conn, monkeypatch):
+    """The cross-process transition helper must not clear review flags by default."""
+    from src.contracts.fx_classification import FXClassification
+    from src.execution.settlement_commands import (
+        SettlementState,
+        _atomic_transition,
+        _coerce_time,
+        _savepoint,
+        _transition,
+        request_redeem,
+    )
+
+    monkeypatch.setenv("ZEUS_PUSD_FX_CLASSIFIED", FXClassification.FX_LINE_ITEM.value)
+    command_id = request_redeem(
+        "c-test-atomic-preserve",
+        "pUSD",
+        market_id="m-test-atomic-preserve",
+        pusd_amount_micro=1,
+        conn=conn,
+        requested_at=NOW,
+    )
+    with _savepoint(conn):
+        _transition(
+            conn,
+            command_id,
+            SettlementState.REDEEM_OPERATOR_REQUIRED,
+            payload={"reason": "seed_autoretry"},
+            autoretry_eligible=True,
+            recorded_at=_coerce_time(None),
+        )
+    conn.commit()
+
+    assert _atomic_transition(
+        conn,
+        command_id,
+        from_state=SettlementState.REDEEM_OPERATOR_REQUIRED,
+        to_state=SettlementState.REDEEM_REVIEW_REQUIRED,
+        payload={"actor": "test"},
+        recorded_at=NOW.isoformat(),
+    )
+    row = conn.execute(
+        "SELECT state, autoretry_eligible FROM settlement_commands WHERE command_id = ?",
+        (command_id,),
+    ).fetchone()
+    assert row["state"] == "REDEEM_REVIEW_REQUIRED"
+    assert row["autoretry_eligible"] == 1
+
+    assert _atomic_transition(
+        conn,
+        command_id,
+        from_state=SettlementState.REDEEM_REVIEW_REQUIRED,
+        to_state=SettlementState.REDEEM_FAILED,
+        autoretry_eligible=False,
+        terminal_at=NOW.isoformat(),
+        payload={"actor": "test"},
+        recorded_at=NOW.isoformat(),
+    )
+    row = conn.execute(
+        "SELECT state, autoretry_eligible FROM settlement_commands WHERE command_id = ?",
+        (command_id,),
+    ).fetchone()
+    assert row["state"] == "REDEEM_FAILED"
+    assert row["autoretry_eligible"] == 0

@@ -1,3 +1,8 @@
+# Lifecycle: created=2026-05-21; last_reviewed=2026-05-21; last_reused=never
+# Purpose: Integrated money-path lifecycle replay across command, order, trade,
+#   position, settlement, redeem, and telemetry crash/restart boundaries.
+# Reuse: Run before live-money release claims or when touching execution,
+#   recovery, reconcile, settlement, decision-event, or no-trade state.
 # Created: 2026-05-21
 # Last reused/audited: 2026-05-21
 # Authority basis: docs/operations/task_2026-05-21_live_release_proof_p0p3/task.md P0-4

@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# Lifecycle: created=2026-05-21; last_reviewed=2026-05-21; last_reused=never
+# Purpose: Read-only release gate proving loaded SHA, schema, order/redeem state,
+#   freshness, and paper proof before any live-money enablement claim.
+# Reuse: Run before live-release claims or when touching money-path release gates.
 # Created: 2026-05-21
 # Last reused or audited: 2026-05-21
 # Authority basis: docs/operations/task_2026-05-21_live_release_proof_p0p3/task.md P0-1/P1-2/P1-7
@@ -124,7 +128,16 @@ def _current_git_sha(repo: Path = ROOT) -> str:
 
 
 def _check_loaded_sha(expected_sha: str, loaded_sha_file: Path | None) -> GateResult:
-    expected = expected_sha.strip() or _current_git_sha()
+    expected = expected_sha.strip()
+    if not expected:
+        try:
+            expected = _current_git_sha()
+        except (OSError, subprocess.CalledProcessError) as exc:
+            return GateResult(
+                "loaded_sha",
+                FAIL,
+                f"expected_sha_unavailable:{type(exc).__name__}:{exc}",
+            )
     payload = _json_load(loaded_sha_file) if loaded_sha_file else {}
     loaded = (
         payload.get("loaded_sha")

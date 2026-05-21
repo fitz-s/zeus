@@ -1601,12 +1601,12 @@ def _transition(
     recorded_at: str,
 ) -> None:
     terminal_at = recorded_at if terminal else None
-    autoretry_value = int(bool(autoretry_eligible)) if autoretry_eligible is not None else 0
+    autoretry_value = int(bool(autoretry_eligible)) if autoretry_eligible is not None else None
     conn.execute(
         """
         UPDATE settlement_commands
            SET state = ?,
-               autoretry_eligible = ?,
+               autoretry_eligible = COALESCE(?, autoretry_eligible),
                tx_hash = COALESCE(?, tx_hash),
                block_number = COALESCE(?, block_number),
                confirmation_count = COALESCE(?, confirmation_count),
@@ -1665,12 +1665,12 @@ def _atomic_transition(
     """
     from_value = from_state.value if isinstance(from_state, SettlementState) else from_state
     to_value = to_state.value if isinstance(to_state, SettlementState) else to_state
-    autoretry_value = int(bool(autoretry_eligible)) if autoretry_eligible is not None else 0
+    autoretry_value = int(bool(autoretry_eligible)) if autoretry_eligible is not None else None
     cur = conn.execute(
         """
         UPDATE settlement_commands
            SET state = ?,
-               autoretry_eligible = ?,
+               autoretry_eligible = COALESCE(?, autoretry_eligible),
                tx_hash = COALESCE(?, tx_hash),
                submitted_at = COALESCE(?, submitted_at),
                terminal_at = COALESCE(?, terminal_at),

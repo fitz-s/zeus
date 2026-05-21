@@ -1,3 +1,8 @@
+# Lifecycle: created=2026-05-21; last_reviewed=2026-05-21; last_reused=never
+# Purpose: Relationship tests for the read-only live release gate and its
+#   fail-closed proof requirements.
+# Reuse: Run when changing scripts/check_live_release_gate.py or live release
+#   money-path proof requirements.
 # Created: 2026-05-21
 # Last reused/audited: 2026-05-21
 # Authority basis: docs/operations/task_2026-05-21_live_release_proof_p0p3/task.md P0-1/P1-2/P1-7
@@ -6,9 +11,10 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import subprocess
 from pathlib import Path
 
-from scripts.check_live_release_gate import PAPER_PROOF_KEYS, PASS, evaluate_release_gate, parse_args
+from scripts.check_live_release_gate import PAPER_PROOF_KEYS, FAIL, PASS, _check_loaded_sha, evaluate_release_gate, parse_args
 from src.state.db import SCHEMA_VERSION, init_schema
 
 
@@ -150,3 +156,16 @@ def test_release_gate_rejects_paper_proof_claiming_live_eligibility(tmp_path: Pa
         result.name == "paper_money_path_proof" and result.status == "FAIL"
         for result in report.results
     )
+
+
+def test_loaded_sha_gate_fails_cleanly_when_git_sha_unavailable(monkeypatch) -> None:
+    def _raise_git_error() -> str:
+        raise subprocess.CalledProcessError(128, ["git", "rev-parse", "HEAD"])
+
+    monkeypatch.setattr("scripts.check_live_release_gate._current_git_sha", _raise_git_error)
+
+    result = _check_loaded_sha("", None)
+
+    assert result.name == "loaded_sha"
+    assert result.status == FAIL
+    assert "expected_sha_unavailable" in result.detail
