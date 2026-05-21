@@ -25,6 +25,7 @@ from types import SimpleNamespace
 from typing import Any, Literal, Optional
 
 from src.contracts import ExecutionIntent
+from src.contracts.freshness_registry import FreshnessLevel, registry as _freshness_registry
 from src.contracts.fx_classification import (
     FXClassification,
     FXClassificationPending,
@@ -721,7 +722,7 @@ def _assert_snapshot_fresh(snapshot: CollateralSnapshot) -> None:
         )
     if age_seconds < 0:
         return
-    if age_seconds > COLLATERAL_SNAPSHOT_MAX_AGE_SECONDS:
+    if _freshness_registry.evaluate("collateral_snapshot", age_seconds) >= FreshnessLevel.STALE:
         raise CollateralInsufficient(
             "collateral_snapshot_stale: "
             f"age_seconds={age_seconds:.1f} "

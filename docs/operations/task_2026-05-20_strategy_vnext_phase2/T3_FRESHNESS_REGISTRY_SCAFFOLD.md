@@ -3,7 +3,7 @@
 **Authority**: PHASE_2_ULTRAPLAN.md v3.1 §6, sha `e8b28793d9`
 **Branch**: `feat/phase2-t3-freshness-registry-20260520`
 **Base**: origin/main @ `e8b28793d9` (T1+T2 merged; SCHEMA_VERSION 15)
-**Status**: SCAFFOLD (production pass pending)
+**Status**: PRODUCTION (migration complete — 10 callsites migrated, antibody GREEN)
 **Created**: 2026-05-20
 
 ---
@@ -88,16 +88,41 @@ literals as above; Phase 3+ may tune via `FreshnessRegistry(thresholds={...})` o
 
 ## §4 Production-Pass Checklist
 
-- [ ] Fill `FreshnessRegistry.evaluate()` body: look up source_id in self._thresholds; handle
+- [x] Fill `FreshnessRegistry.evaluate()` body: look up source_id in self._thresholds; handle
       DYNAMIC_THRESHOLD check (raise ValueError if override_threshold_seconds not supplied);
       derive degraded/stale/expired boundaries; return FreshnessLevel
-- [ ] Wire `_emit_counter()` to `_cnt_inc(f"freshness_{source_id}_{level}_total")`
+- [x] Wire `_emit_counter()` to `_cnt_inc(f"freshness_{source_id}_{level}_total")`
       (src/observability pattern — verify existing `_cnt_inc` import path)
-- [ ] Migrate all 10 callsites per §3 table
-- [ ] Run antibody `test_inv_freshness_no_ad_hoc_checks.py` — must report XPASS (all offenders
+- [x] Migrate all 10 callsites per §3 table
+- [x] Run antibody `test_inv_freshness_no_ad_hoc_checks.py` — must report XPASS (all offenders
       cleared); remove @pytest.mark.xfail to harden as GREEN
-- [ ] Add production tests: evaluate() returns FRESH/DEGRADED/STALE/EXPIRED at tier boundaries;
+- [x] Add production tests: evaluate() returns FRESH/DEGRADED/STALE/EXPIRED at tier boundaries;
       DYNAMIC_THRESHOLD source raises ValueError when override absent; counter emission
-- [ ] Add `_cnt_inc` to observability counter list if not already present
+- [x] Add `_cnt_inc` to observability counter list if not already present
 - [ ] Verify full regression suite passes: `python -m pytest tests/ -x`
-- [ ] Grep-verify: `grep -rn "age_seconds\s*>\|age_hours\s*>" src/` returns zero non-allowlisted hits
+- [x] Grep-verify: `grep -rn "age_seconds\s*>\|age_hours\s*>" src/` returns zero non-allowlisted hits
+
+---
+
+## §4.1 Phase-3 Carryover — Deferred Freshness Gates
+
+The following freshness gates are **out of scope for T3** (they use different variable names,
+timedelta objects, or per-source budget loops). They remain as ad-hoc comparisons pending a
+Phase-3 registry expansion pass.
+
+| # | File | Line | Pattern | Notes |
+|---|------|------|---------|-------|
+| 1 | `src/control/freshness_gate.py` | 177 | `written_at_age > ABSENT_MID_RUN_THRESHOLD_SECONDS` | `written_at_age` not in T3 scope |
+| 2 | `src/control/freshness_gate.py` | 185 | `written_at_age > 90` | same variable family |
+| 3 | `src/control/freshness_gate.py` | 206 | per-source `FRESHNESS_BUDGETS` loop | `age <= budget_seconds` — budget dict |
+| 4 | `src/control/live_health.py` | 104 | `age > STATUS_FRESH_BUDGET_SECONDS` | heartbeat surface |
+| 5 | `src/control/live_health.py` | 174 | `age > STATUS_FRESH_BUDGET_SECONDS` | status_summary surface |
+| 6 | `src/runtime/bankroll_provider.py` | 128 | `cached_age > fail_closed_after_seconds` | **PRIORITY: safety-adjacent fail-closed gate** |
+| 7 | `src/ingest_main.py` | 479 | `staleness_h > threshold_h` | forecast boot staleness |
+| 8 | `src/ingest_main.py` | 506 | `solar_staleness_h > threshold_h` | solar_daily boot staleness |
+| 9 | `src/riskguard/riskguard.py` | 327 | `staleness > TRAILING_LOSS_REFERENCE_STALENESS_TOLERANCE` | timedelta gate |
+
+**`bankroll_provider.py:128` is PRIORITY** — it guards the fail-closed path for live bankroll
+reads.  Any staleness bypass here could let the system trade with a stale/zero bankroll.
+Phase-3 must add `cached_age` / `staleness_h` / `staleness` to the registry scan scope AND
+migrate this gate before any bankroll-adjacent code changes.

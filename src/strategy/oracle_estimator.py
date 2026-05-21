@@ -89,6 +89,7 @@ from scipy.stats import beta
 # imports from this module, and a return type of OracleStatus would
 # create the cycle.
 from src.strategy.oracle_status import OracleStatus
+from src.contracts.freshness_registry import FreshnessLevel, registry as _freshness_registry
 
 PRIOR_ALPHA: int = 1
 PRIOR_BETA: int = 1
@@ -159,7 +160,7 @@ def classify(
     rationale for the m=0 vs m≥1 split.
     """
     _validate_counts(m, n)
-    if artifact_age_hours is not None and artifact_age_hours > STALE_AGE_HOURS:
+    if artifact_age_hours is not None and _freshness_registry.evaluate("oracle_artifact", artifact_age_hours * 3600.0) >= FreshnessLevel.STALE:
         return OracleStatus.STALE
     if n == 0:
         return OracleStatus.MISSING

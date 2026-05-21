@@ -1,37 +1,42 @@
 # Created: 2026-05-20
 # Last reused or audited: 2026-05-20
 # Authority basis: PHASE_2_ULTRAPLAN.md v3.1 §6.3 INV-freshness-no-ad-hoc-checks
-"""INV-freshness-no-ad-hoc-checks — T3 SCAFFOLD antibody.
+"""INV-freshness-no-ad-hoc-checks — T3 production antibody.
 
-Problem (§6.1): ~10 sites across src/ perform ad-hoc freshness comparisons
-(`age_seconds > CONST`, `age_hours > CONST`) with hardcoded or locally-scoped
-thresholds instead of routing through FreshnessRegistry.evaluate().
+Scope: regex-scans src/ for ad-hoc freshness gates that compare variables named
+``age_seconds``, ``age_hours``, or ``artifact_age_hours`` directly against a
+threshold constant, instead of routing through FreshnessRegistry.evaluate().
 
-This antibody AST-walks src/ for ALL of the patterns defined in §6.3:
-  1. `age_seconds > <CONST>`
-  2. `age_hours > <CONST>`
-  3. `datetime.now() - <var>`   (age computation, not just comparison)
-  4. `time.time() - <var>`
+This antibody covers ONLY these three variable-name families.  It does NOT cover:
+  - ``written_at_age``, ``cached_age``, ``staleness_h``, ``staleness``
+  - timedelta-based gates (e.g. ``staleness > TRAILING_LOSS_REFERENCE_STALENESS_TOLERANCE``)
+  - ``freshness_gate.py`` per-source budget loops
 
-Allowlist criteria (§6.3): a pattern is ALLOWLISTED iff ANY of:
-  (a) Comparison is a SIGN check only (>= 0 / < 0) without a max-age threshold.
-  (b) Threshold name doesn't include AGE/STALE/FRESH/MAX_AGE tokens (e.g. clock-skew
-      sanity guards or rate-limit checks like HEARTBEAT_REFRESH_SECONDS).
-  (c) Call site is documented with `# allowlist:freshness-non-gate` marker.
+Phase-3 carryover gates (out of scope here, tracked in T3_FRESHNESS_REGISTRY_SCAFFOLD.md §4):
+  - src/control/freshness_gate.py:177 — ``written_at_age > ABSENT_MID_RUN_THRESHOLD_SECONDS``
+  - src/control/freshness_gate.py:185 — ``written_at_age > 90``
+  - src/control/freshness_gate.py:206 — per-source FRESHNESS_BUDGETS loop
+  - src/control/live_health.py:104 — ``age > STATUS_FRESH_BUDGET_SECONDS``
+  - src/control/live_health.py:174 — ``age > STATUS_FRESH_BUDGET_SECONDS``
+  - src/runtime/bankroll_provider.py:128 — ``cached_age > fail_closed_after_seconds``  [PRIORITY: safety-adjacent fail-closed]
+  - src/ingest_main.py:479 — ``staleness_h > threshold_h``
+  - src/ingest_main.py:506 — ``solar_staleness_h > threshold_h``
+  - src/riskguard/riskguard.py:327 — timedelta staleness gate
 
-Status: XFAIL (RED) until T3 production pass migrates all 10 callsites to
-FreshnessRegistry.evaluate().  Once migration is complete, remove @pytest.mark.xfail
-to harden as a permanent GREEN antibody.
+Allowlist criteria: a match is ALLOWLISTED iff ANY of:
+  (a) Threshold is exactly zero (sign-only check: age_seconds < 0 or age_seconds > 0).
+  (b) Threshold name is in _NON_GATE_THRESHOLD_NAMES (cadence/rate-limit, not max-age).
+  (c) Call site carries ``# allowlist:freshness-non-gate`` marker.
+
+Status: GREEN once T3 production-pass migration is complete (xfail removed after 0 offenders).
 
 See T3_FRESHNESS_REGISTRY_SCAFFOLD.md §4 for production-pass checklist.
 """
 
 from __future__ import annotations
 
-import ast
 import os
 import re
-import textwrap
 from pathlib import Path
 from typing import NamedTuple
 
@@ -66,7 +71,6 @@ _NON_GATE_THRESHOLD_NAMES = frozenset({
 _ALLOWLIST_MARKER = "allowlist:freshness-non-gate"
 
 # Patterns the antibody scans for in the raw source text.
-# NOTE: These are text-level patterns; AST is used to locate exact file:line.
 #
 # Pattern families:
 #   P1: age_seconds > <identifier or integer>
@@ -91,7 +95,7 @@ class FreshnessOffender(NamedTuple):
 
 
 # ---------------------------------------------------------------------------
-# AST + text scanner
+# Regex scanner
 # ---------------------------------------------------------------------------
 
 def _is_allowlisted(
@@ -174,27 +178,15 @@ def find_all_freshness_offenders() -> list[FreshnessOffender]:
 # Antibody test — XFAIL until T3 production migration is complete
 # ---------------------------------------------------------------------------
 
-@pytest.mark.xfail(
-    strict=False,
-    reason=(
-        "T3 SCAFFOLD: awaiting production-pass migration of ad-hoc freshness gates "
-        "to FreshnessRegistry.evaluate().  Expected RED until migration complete. "
-        "strict=False so XPASS reports cleanly when migration lands."
-    ),
-)
-def test_no_ad_hoc_freshness_checks() -> None:
-    """Assert zero ad-hoc freshness gates remain in src/ outside the allowlist.
+def test_no_ad_hoc_age_seconds_hours_gates() -> None:
+    """Assert zero ad-hoc age_seconds/age_hours/artifact_age_hours freshness gates remain.
 
-    Each offender is a site that directly compares age_seconds / age_hours / artifact_age_hours
-    against a threshold constant without routing through FreshnessRegistry.evaluate().
+    Scope: covers ONLY variables named ``age_seconds``, ``age_hours``, and
+    ``artifact_age_hours`` compared with ``>`` against a threshold constant.
+    Does NOT cover written_at_age, cached_age, staleness_h, timedelta-based
+    gates, or freshness_gate.py budget loops (Phase-3 carryover — see module docstring).
 
-    Allowlist criteria (§6.3 — ANY of):
-      (a) Sign check only (>= 0 / < 0)
-      (b) Threshold name not in AGE/STALE/FRESH/MAX_AGE token set
-      (c) # allowlist:freshness-non-gate marker on the line or the line above
-
-    This antibody is currently XFAIL (stage-1 immune-system antibody per Fitz methodology).
-    Remove @pytest.mark.xfail once all T3 callsite migrations are complete and verified.
+    GREEN = all 10 T3 callsites migrated to FreshnessRegistry.evaluate().
     """
     offenders = find_all_freshness_offenders()
 

@@ -35,10 +35,10 @@ Sources whose threshold is dynamic (heartbeat_status, executable_snapshot) carry
 
 from __future__ import annotations
 
-from enum import auto
+from enum import StrEnum, auto
 from typing import Optional
 
-from enum import StrEnum
+from src.observability.counters import increment as _cnt_inc
 
 
 # ---------------------------------------------------------------------------
@@ -165,35 +165,65 @@ class FreshnessRegistry:
             age_seconds: Age of the data in seconds (non-negative; negative values
                 are clock-skew artifacts and should be handled by the caller before
                 calling evaluate).
-            override_threshold_seconds: For DYNAMIC_THRESHOLD sources, the caller
-                must supply the effective STALE boundary.  The DEGRADED and EXPIRED
-                tiers are derived as 0.75× and 2.0× of this value respectively.
-                Ignored for sources with a static threshold in the table.
+            override_threshold_seconds: Per-call STALE boundary in seconds.
+                When supplied, overrides the table value (both DYNAMIC and static
+                sources).  DEGRADED and EXPIRED tiers are derived as 0.75× and 2.0×
+                of this value respectively.  Required for DYNAMIC_THRESHOLD sources;
+                optional for static sources whose effective threshold varies per-call
+                (e.g. heartbeat_restart_seed, strategy_health).
 
         Returns:
             FreshnessLevel indicating FRESH / DEGRADED / STALE / EXPIRED.
 
         Raises:
-            NotImplementedError: SCAFFOLD placeholder — production pass fills body.
             KeyError: If source_id is not registered in the threshold table.
             ValueError: If source has DYNAMIC_THRESHOLD and override_threshold_seconds
                 is not supplied.
         """
-        raise NotImplementedError(
-            "FreshnessRegistry.evaluate() is a SCAFFOLD skeleton. "
-            "Production pass (T3 migration) fills this body. "
-            f"Called with source_id={source_id!r}, age_seconds={age_seconds}"
-        )
+        tiers = self._thresholds.get(source_id)
+        if tiers is None:
+            raise KeyError(f"Unknown freshness source_id: {source_id!r}")
+
+        stale_s = tiers["stale_seconds"]
+        if override_threshold_seconds is not None:
+            # Caller-supplied override takes precedence for both DYNAMIC and static sources.
+            stale_s = float(override_threshold_seconds)
+            degraded_s = stale_s * 0.75
+            expired_s = stale_s * 2.0
+        elif stale_s == DYNAMIC_THRESHOLD:
+            raise ValueError(
+                f"source_id={source_id!r} has DYNAMIC_THRESHOLD; "
+                "override_threshold_seconds must be supplied"
+            )
+        else:
+            degraded_s = tiers["degraded_seconds"]
+            expired_s = tiers["expired_seconds"]
+
+        if age_seconds > expired_s:  # allowlist:freshness-non-gate (registry internal)
+            level = FreshnessLevel.EXPIRED
+        elif age_seconds > stale_s:  # allowlist:freshness-non-gate (registry internal)
+            level = FreshnessLevel.STALE
+        elif age_seconds > degraded_s:  # allowlist:freshness-non-gate (registry internal)
+            level = FreshnessLevel.DEGRADED
+        else:
+            level = FreshnessLevel.FRESH
+
+        self._emit_counter(source_id, level)
+        return level
 
     # ------------------------------------------------------------------
     # Observability (production pass wires these to _cnt_inc counters)
     # ------------------------------------------------------------------
 
-    def _emit_counter(self, source_id: str, level: FreshnessLevel) -> None:  # noqa: ARG002
-        """Emit observability counter ``freshness_<source>_<level>_total``.
+    def _emit_counter(self, source_id: str, level: FreshnessLevel) -> None:
+        """Emit observability counter ``freshness_<source>_<level>_total``."""
+        _cnt_inc(f"freshness_{source_id}_{level.value.lower()}_total")
 
-        Production pass implementation calls _cnt_inc from src/observability/.
-        SCAFFOLD: no-op.
-        """
-        # TODO(T3-production): wire to _cnt_inc(f"freshness_{source_id}_{level}_total")
-        pass
+
+# ---------------------------------------------------------------------------
+# Module-level singleton — production callsites use this directly
+# ---------------------------------------------------------------------------
+
+#: Shared registry instance.  Callsites ``from src.contracts.freshness_registry
+#: import registry, FreshnessLevel`` and call registry.evaluate(source_id, age).
+registry: FreshnessRegistry = FreshnessRegistry()

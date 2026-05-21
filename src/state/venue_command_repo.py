@@ -36,6 +36,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any, Iterable, Iterator, Mapping, Optional
 
 from src.architecture.decorators import capability, protects
+from src.contracts.freshness_registry import FreshnessLevel, registry as _freshness_registry
 
 UNRESOLVED_SIDE_EFFECT_STATES: tuple[str, ...] = (
     "SUBMIT_UNKNOWN_SIDE_EFFECT",
@@ -1305,7 +1306,7 @@ def _validate_review_no_exposure_payload(
     if observed_at is None or cleared_at is None:
         raise ValueError("review no-exposure clearance requires observed_at and cleared_at")
     age_seconds = (cleared_at - observed_at).total_seconds()
-    if age_seconds < -5 or age_seconds > 60:
+    if age_seconds < -5 or _freshness_registry.evaluate("venue_clearance", age_seconds) >= FreshnessLevel.STALE:
         raise ValueError("review no-exposure clearance venue proof is stale")
     if venue_proof.get("open_orders_checked") is not True:
         raise ValueError("review no-exposure clearance requires open_orders_checked=true")
@@ -1522,7 +1523,7 @@ def _validate_review_cancel_unknown_no_fill_payload(
     ):
         raise ValueError("cancel-unknown no-fill clearance requires parseable proof times")
     age_seconds = (cleared_at - observed_at).total_seconds()
-    if age_seconds < -5 or age_seconds > 60:
+    if age_seconds < -5 or _freshness_registry.evaluate("venue_clearance", age_seconds) >= FreshnessLevel.STALE:
         raise ValueError("cancel-unknown no-fill venue proof is stale")
     if window_start > command_created_at or window_end < observed_at:
         raise ValueError("cancel-unknown no-fill time window does not cover command through venue read")
