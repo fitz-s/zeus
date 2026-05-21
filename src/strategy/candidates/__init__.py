@@ -201,6 +201,9 @@ def write_candidate_no_trade_row(
             context.observed_at,
             conn=conn,
             allow_schema_compatibility_downgrade=False,
+            strategy_key=candidate_strategy_key,
+            event_source="shadow_decision",
+            shadow_runtime=True,
         )
         return
 
@@ -209,7 +212,28 @@ def write_candidate_no_trade_row(
             str(row[1])
             for row in conn.execute("PRAGMA table_info(no_trade_events)").fetchall()
         }
-        if "schema_compatibility" in columns:
+        if {"schema_compatibility", "strategy_key", "event_source", "shadow_runtime"} <= columns:
+            conn.execute(
+                """
+                INSERT INTO no_trade_events (
+                    market_slug, temperature_metric, target_date, observation_time, decision_seq,
+                    reason, reason_detail, strategy_key, event_source, shadow_runtime,
+                    observed_at, schema_version, schema_compatibility
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    market_slug, temperature_metric, target_date, observation_time, seq,
+                    decision.reason.value if decision.reason is not None else "uncategorized",
+                    reason_detail,
+                    candidate_strategy_key,
+                    "shadow_decision",
+                    1,
+                    context.observed_at,
+                    SCHEMA_VERSION,
+                    "current",
+                ),
+            )
+        elif "schema_compatibility" in columns:
             conn.execute(
                 """
                 INSERT INTO no_trade_events (

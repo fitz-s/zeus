@@ -211,6 +211,8 @@ def test_stage1_taxonomy_rollback_boundary_is_runtime_live_allowlist():
         "opening_inertia",
         "imminent_open_capture",
     })
+    control_plane._control_state["live_allowed_strategies"] = strategy_profile.live_allowed_keys()
+    control_plane._control_state["live_allowed_strategies_status"] = "ok"
     assert control_plane.is_strategy_enabled("settlement_capture") is True
     assert control_plane.is_strategy_enabled("center_buy") is True
     assert control_plane.is_strategy_enabled("opening_inertia") is True

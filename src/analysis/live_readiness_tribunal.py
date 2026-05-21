@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from enum import Enum
 from typing import Optional
 
@@ -282,19 +281,16 @@ def _write_verdict_row(
             f"{tier.name} (>= LIVE_PILOT_TINY) requires a non-empty operator_ref. "
             "The Tribunal proposes; an operator must approve live-tier promotions."
         )
-    assigned_at = datetime.now(tz=timezone.utc).isoformat()
-    conn.execute(
-        """
-        INSERT INTO evidence_tier_assignments
-            (strategy_id, tier, assigned_at, rationale, operator_ref, verdict_reason)
-        VALUES (?, ?, ?, ?, ?, ?)
-        """,
-        (
-            strategy_id,
-            int(tier),
-            assigned_at,
-            f"Tribunal verdict: {tier.name}",
-            operator_ref,
-            verdict_reason,
-        ),
+    from src.state.evidence_tier_assignments import record_evidence_tier_assignment
+
+    record_evidence_tier_assignment(
+        conn,
+        strategy_id=strategy_id,
+        tier=tier,
+        rationale=f"Tribunal verdict: {tier.name}",
+        operator_ref=operator_ref,
+        verdict_reason=verdict_reason,
+        assignment_source="tribunal",
+        verdict_kind=verdict_kind.value,
+        commit=True,
     )

@@ -1989,6 +1989,14 @@ files:
     write_routes: []
     downstream:
     - src/state/db.py
+  src/state/evidence_tier_assignments.py:
+    zone: K2_runtime
+    authority_role: evidence_tier_assignment_reducer
+    why: "2026-05-21 evidence-tier governance follow-up: validated writer and deterministic current-state reducer for evidence_tier_assignments. Static strategy_profile registry is baseline; DB operator_override outranks tribunal rows, then migration rows. Used by live_allowed_keys(conn=...) so tribunal/operator evidence-tier assignments can affect runtime strategy eligibility without becoming free-form SQL."
+    write_routes: []
+    downstream:
+    - src/strategy/strategy_profile.py
+    - src/analysis/live_readiness_tribunal.py
   src/state/decision_events.py:
     zone: K2_runtime
     authority_role: decision_event_instrumentation

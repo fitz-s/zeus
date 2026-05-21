@@ -432,13 +432,38 @@ def is_strategy_enabled(strategy: str) -> bool:
     """
     if not strategy:
         return True
-    from src.strategy.strategy_profile import live_allowed_keys
-    if strategy not in live_allowed_keys():
+    if _control_state.get("live_allowed_strategies_status") != "ok":
+        logger.error(
+            "Strategy evidence-tier authority unavailable; failing closed for %s",
+            strategy,
+        )
+        return False
+    allowed = frozenset(_control_state.get("live_allowed_strategies", frozenset()))
+    if strategy not in allowed:
         return False
     decision = strategy_gates().get(strategy)
     if decision is None:
         return True
     return decision.enabled
+
+
+def _refresh_live_allowed_strategy_cache(conn=None) -> None:
+    """Refresh the evidence-tier live-allowed cache without touching gates."""
+    own_conn = conn is None
+    try:
+        if conn is None:
+            from src.state.db import get_world_connection_read_only
+            conn = get_world_connection_read_only()
+        from src.strategy.strategy_profile import live_allowed_keys
+        _control_state["live_allowed_strategies"] = live_allowed_keys(conn=conn)
+        _control_state["live_allowed_strategies_status"] = "ok"
+    except Exception:
+        logger.exception("Strategy evidence-tier authority unavailable")
+        _control_state["live_allowed_strategies"] = frozenset()
+        _control_state["live_allowed_strategies_status"] = "query_error"
+    finally:
+        if own_conn and conn is not None:
+            conn.close()
 
 
 
@@ -468,12 +493,15 @@ def refresh_control_state() -> None:
     try:
         conn = get_world_connection()
         durable_state = query_control_override_state(conn)
+        _refresh_live_allowed_strategy_cache(conn)
     except Exception:
         durable_state = {
             "status": "query_error",
             "entries_paused": True,
             "edge_threshold_multiplier": float(TIGHTENED_EDGE_THRESHOLD_MULTIPLIER)
         }
+        _control_state["live_allowed_strategies"] = frozenset()
+        _control_state["live_allowed_strategies_status"] = "query_error"
     finally:
         if conn is not None:
             conn.close()

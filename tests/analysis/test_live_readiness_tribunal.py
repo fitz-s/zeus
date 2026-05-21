@@ -16,6 +16,10 @@ from src.analysis.live_readiness_tribunal import (
     adjudicate,
 )
 from src.contracts.evidence_tier import EvidenceTier
+from src.state.evidence_tier_assignments import (
+    current_evidence_tier_assignment,
+    record_evidence_tier_assignment,
+)
 from src.state.db import init_schema
 
 
@@ -178,6 +182,130 @@ def test_t4_promote_writes_row(world_conn) -> None:
     assert row[1] == int(EvidenceTier.SHADOW_PASS)  # 2 → 3
     assert row[2] is not None and len(row[2]) > 0
     assert row[3] == "op_test_ref"
+
+
+def test_t4_promote_write_is_durable_before_return(tmp_path) -> None:
+    """PROMOTE returns only after the evidence_tier_assignments row is committed."""
+    db_path = tmp_path / "world.db"
+    conn = sqlite3.connect(db_path)
+    init_schema(conn)
+    report = _make_report(
+        strategy_id="center_sell",
+        tier_observed=EvidenceTier.REPLAY_PASS,
+        n_settled=80,
+        n_wins=55,
+        ci_lower=0.60,
+        ci_upper=0.75,
+        breakeven_win_rate=0.55,
+    )
+    verdict = adjudicate(
+        report,
+        EvidenceTier.LIVE_LIMITED_HAIRCUT,
+        conn=conn,
+        operator_ref="op_durable_test",
+    )
+    assert verdict.verdict == VerdictKind.PROMOTE
+
+    second = sqlite3.connect(db_path)
+    try:
+        row = second.execute(
+            "SELECT tier, operator_ref FROM evidence_tier_assignments WHERE strategy_id=?",
+            ("center_sell",),
+        ).fetchone()
+        assert row is not None
+        assert row[0] == int(EvidenceTier.SHADOW_PASS)
+        assert row[1] == "op_durable_test"
+    finally:
+        second.close()
+        conn.close()
+
+
+def test_t4_assignment_schema_rejects_invalid_tier(world_conn) -> None:
+    """evidence_tier_assignments rejects malformed tier authority rows."""
+    with pytest.raises(sqlite3.IntegrityError):
+        world_conn.execute(
+            """
+            INSERT INTO evidence_tier_assignments (
+                strategy_id, tier, assigned_at, schema_version,
+                assignment_source, verdict_kind
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "shoulder_sell",
+                999,
+                datetime.now(timezone.utc).isoformat(),
+                26,
+                "tribunal",
+                "PROMOTE",
+            ),
+        )
+
+
+def test_t4_init_schema_rebuilds_legacy_assignment_table() -> None:
+    """Legacy evidence_tier_assignments tables get reducer-required columns."""
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE evidence_tier_assignments (
+            strategy_id TEXT NOT NULL,
+            tier INTEGER NOT NULL,
+            assigned_at TEXT NOT NULL,
+            rationale TEXT,
+            operator_ref TEXT,
+            verdict_reason TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO evidence_tier_assignments (
+            strategy_id, tier, assigned_at, rationale, operator_ref, verdict_reason
+        ) VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "shoulder_sell",
+            int(EvidenceTier.SHADOW_PASS),
+            datetime.now(timezone.utc).isoformat(),
+            "legacy",
+            None,
+            "legacy",
+        ),
+    )
+    init_schema(conn)
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(evidence_tier_assignments)")}
+    assert {"id", "schema_version", "assignment_source", "verdict_kind"} <= columns
+    assignment = current_evidence_tier_assignment(conn, "shoulder_sell")
+    assert assignment is not None
+    assert assignment.tier == EvidenceTier.SHADOW_PASS
+    assert assignment.assignment_source == "migration"
+
+
+def test_t4_current_assignment_reducer_operator_override_outranks_tribunal(world_conn) -> None:
+    """Reducer has deterministic authority order: operator_override > tribunal."""
+    record_evidence_tier_assignment(
+        world_conn,
+        strategy_id="shoulder_sell",
+        tier=EvidenceTier.LIVE_LIMITED_HAIRCUT,
+        rationale="operator override",
+        operator_ref="op_override",
+        verdict_reason="manual approval",
+        assignment_source="operator_override",
+        verdict_kind="OPERATOR_OVERRIDE",
+    )
+    record_evidence_tier_assignment(
+        world_conn,
+        strategy_id="shoulder_sell",
+        tier=EvidenceTier.REPLAY_PASS,
+        rationale="tribunal demotion",
+        operator_ref=None,
+        verdict_reason="underperformed",
+        assignment_source="tribunal",
+        verdict_kind="DEMOTE",
+    )
+    assignment = current_evidence_tier_assignment(world_conn, "shoulder_sell")
+    assert assignment is not None
+    assert assignment.tier == EvidenceTier.LIVE_LIMITED_HAIRCUT
+    assert assignment.assignment_source == "operator_override"
 
 
 # ---------------------------------------------------------------------------
@@ -428,6 +556,64 @@ def test_t4_winning_cohort_is_promote_eligible(world_conn) -> None:
         conn=world_conn, operator_ref="op_regression_test",
     )
     assert verdict.verdict == VerdictKind.PROMOTE
+
+
+def test_t4_evidence_report_counts_structured_no_trade_rows(world_conn) -> None:
+    """EvidenceReport counts no_trade_events by structured strategy_key."""
+    world_conn.execute(
+        """
+        INSERT INTO no_trade_events (
+            market_slug, temperature_metric, target_date, observation_time,
+            decision_seq, reason, reason_detail, strategy_key, event_source,
+            shadow_runtime, observed_at, schema_version, schema_compatibility
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "market-a",
+            "high",
+            "2026-05-01",
+            "2026-05-01T12:00:00Z",
+            0,
+            "uncategorized",
+            "structured",
+            "shoulder_sell",
+            "shadow_decision",
+            1,
+            "2026-05-01T12:00:00Z",
+            26,
+            "current",
+        ),
+    )
+    world_conn.execute(
+        """
+        INSERT INTO no_trade_events (
+            market_slug, temperature_metric, target_date, observation_time,
+            decision_seq, reason, reason_detail, strategy_key, event_source,
+            shadow_runtime, observed_at, schema_version, schema_compatibility
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "market-b",
+            "high",
+            "2026-05-01",
+            "2026-05-01T13:00:00Z",
+            0,
+            "uncategorized",
+            "degraded compatibility",
+            "shoulder_sell",
+            "shadow_decision",
+            1,
+            "2026-05-01T13:00:00Z",
+            26,
+            "degraded",
+        ),
+    )
+    report = build_evidence_report(
+        "shoulder_sell",
+        EvidenceTier.SHADOW_PASS,
+        conn=world_conn,
+    )
+    assert report.n_no_trades == 1
 
 
 def test_t4_losing_cohort_is_demote(world_conn) -> None:

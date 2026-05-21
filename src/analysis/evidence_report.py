@@ -49,8 +49,9 @@ class EvidenceReport:
     n_wins:
         Decisions with positive realized edge (win-rate numerator).
     n_no_trades:
-        No-trade events logged. Currently always 0 — no_trade_events has no
-        strategy_key column; future path is a join via decision_events.
+        Structured no-trade events logged for this strategy. Current schema
+        stores strategy_key directly; older compatibility rows are counted only
+        when they carry the candidate_strategy_key marker in reason_detail.
     n_settled:
         Settled decisions (subset of n_decisions with known outcome).
     mean_regret_usd:
@@ -112,6 +113,7 @@ def build_evidence_report(
 
     Queries:
       - decision_events: authoritative n_decisions denominator (strategy_key filter)
+      - no_trade_events: structured strategy_key count, excluding degraded rows
       - regret_decompositions: n_settled, n_wins (total_regret_usd > 0 = WIN),
         mean_regret (supplemental; may lag decision_events)
 
@@ -157,9 +159,41 @@ def build_evidence_report(
     mean_regret_usd = float(regret_row[2] or 0.0)
     n_settled = int(regret_row[0] or 0)  # rows with settled regret outcomes
 
-    # no_trade_events does not have a strategy_key column; n_no_trades is
-    # supplemental and always 0 for now (future: join via decision_events).
-    n_no_trades = 0
+    if "no_trade_events" in tables:
+        no_trade_columns = {
+            row[1]
+            for row in conn.execute("PRAGMA table_info(no_trade_events)").fetchall()
+        }
+        if "strategy_key" in no_trade_columns:
+            if "schema_compatibility" in no_trade_columns:
+                n_no_trade_row = conn.execute(
+                    """
+                    SELECT COUNT(*) FROM no_trade_events
+                    WHERE strategy_key = ?
+                      AND schema_compatibility = 'current'
+                    """,
+                    (strategy_id,),
+                ).fetchone()
+            else:
+                n_no_trade_row = conn.execute(
+                    """
+                    SELECT COUNT(*) FROM no_trade_events
+                    WHERE strategy_key = ?
+                    """,
+                    (strategy_id,),
+                ).fetchone()
+            n_no_trades = int(n_no_trade_row[0] or 0)
+        else:
+            n_no_trade_row = conn.execute(
+                """
+                SELECT COUNT(*) FROM no_trade_events
+                WHERE reason_detail LIKE ?
+                """,
+                (f"%candidate_strategy_key={strategy_id};%",),
+            ).fetchone()
+            n_no_trades = int(n_no_trade_row[0] or 0)
+    else:
+        n_no_trades = 0
 
     # Bayesian CI
     ci_lower: Optional[float] = None
