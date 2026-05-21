@@ -46,6 +46,7 @@ from __future__ import annotations
 import logging
 import types
 from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Optional
 from unittest.mock import MagicMock
 
@@ -248,6 +249,7 @@ def test_gate_on_collapses_family_to_single_best_through_execute_discovery_phase
     as a SIDE EFFECT of execute_discovery_phase, proving the cross-module wiring.
     """
     monkeypatch.setenv("ZEUS_LIVE_MAX_ONE_ENTRY_PER_WEATHER_FAMILY", "1")
+    monkeypatch.setenv("ZEUS_LIVE_MARKET_SUBSTRATE_READER", "0")
 
     decisions = _three_family_decisions()
     deps, captured, artifact, portfolio, summary = _build_harness(decisions)
@@ -368,6 +370,193 @@ def test_gate_disabled_all_three_decisions_reach_execution_layer(
         MUTUALLY_EXCLUSIVE_FAMILY_DEDUP not in (d.rejection_reasons or [])
         for d in post_dedup
     ), "gate-disabled path must not stamp any dedup rejection reason"
+
+
+def test_live_family_fallback_tries_second_leg_when_primary_reprice_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    """RELATIONSHIP: ranked family candidates fallback before live submit.
+
+    The primary family leg can fail executable reprice after preselection. That
+    must not turn the whole family into no-trade while a ranked sibling has
+    valid executable authority. Once one sibling submits, later siblings must be
+    skipped by the same family gate.
+    """
+    from src.state.db import get_connection, init_schema
+
+    monkeypatch.setenv("ZEUS_LIVE_MAX_ONE_ENTRY_PER_WEATHER_FAMILY", "1")
+    monkeypatch.setenv("ZEUS_LIVE_MARKET_SUBSTRATE_READER", "0")
+
+    decisions = _three_family_decisions()
+    for rank, decision in enumerate(decisions, start=1):
+        decision.strategy_key = "center_buy"
+        decision.family_fallback_rank = rank
+        decision.family_fallback_candidate_count = len(decisions)
+        decision.tokens.update(
+            {
+                "market_id": f"market-{rank}",
+                "token_id": f"token-{rank}",
+                "no_token_id": f"no-token-{rank}",
+            }
+        )
+
+    conn = get_connection(tmp_path / "family-fallback-live.db")
+    init_schema(conn)
+    deps, captured, artifact, portfolio, summary = _build_harness(decisions)
+    deps.select_final_order_type = lambda conn, snapshot_id: "FOK"
+    reprice_attempts: list[str] = []
+    submitted: list[str] = []
+
+    def _capture_snapshot(conn, *, market, decision, clob, captured_at, scan_authority):
+        rank = int(getattr(decision, "family_fallback_rank", 0) or 0)
+        return {
+            "executable_snapshot_id": f"snap-rank-{rank}",
+            "condition_id": f"condition-rank-{rank}",
+            "executable_snapshot_min_tick_size": "0.01",
+            "executable_snapshot_min_order_size": "1",
+            "executable_snapshot_neg_risk": False,
+        }
+
+    def _reprice(conn, decision, snapshot_fields, final_intent_context):
+        reprice_attempts.append(str(decision.decision_id))
+        if getattr(decision, "family_fallback_rank", 0) == 1:
+            raise ValueError("primary_leg_no_executable_book")
+        hypothesis_id = f"intent-{decision.decision_id}"
+        decision.final_execution_intent = types.SimpleNamespace(
+            hypothesis_id=hypothesis_id,
+            order_policy="limit_may_take_conservative",
+            final_limit_price=Decimal("0.45"),
+            direction=decision.edge.direction,
+            size_value=Decimal("1"),
+            decision_source_context=None,
+        )
+        decision.tokens["executable_snapshot_reprice"] = {
+            "live_submit_authority": True,
+            "final_execution_intent_id": hypothesis_id,
+            "corrected_candidate_limit_price": "0.45",
+            "corrected_pricing_shadow": {
+                "sweep_submitted_shares": "1",
+                "sweep_filled_shares": "1",
+            },
+        }
+        return Decimal("0.45")
+
+    def _execute_final(final_intent, **kwargs):
+        submitted.append(str(kwargs.get("decision_id") or ""))
+        return types.SimpleNamespace(
+            trade_id=f"trade-{kwargs.get('decision_id')}",
+            status="pending",
+            command_state="SUBMITTING",
+        )
+
+    deps.capture_executable_market_snapshot = _capture_snapshot
+    deps.reprice_from_snapshot = _reprice
+    deps.execute_final_intent = _execute_final
+
+    execute_discovery_phase(
+        conn=conn,
+        clob=MagicMock(),
+        portfolio=portfolio,
+        artifact=artifact,
+        tracker=MagicMock(),
+        limits=MagicMock(),
+        mode=DiscoveryMode.UPDATE_REACTION,
+        summary=summary,
+        entry_bankroll=5000.0,
+        decision_time=datetime(2026, 6, 14, 12, 0, 0, tzinfo=timezone.utc),
+        env="live",
+        deps=deps,
+    )
+
+    assert len(captured) == 1
+    assert reprice_attempts == [decisions[0].decision_id, decisions[1].decision_id]
+    assert submitted == [decisions[1].decision_id]
+    assert len(artifact.trade_cases) == 1
+    assert artifact.trade_cases[0]["decision_id"] == decisions[1].decision_id
+    assert summary["family_fallback_selected_rank"] == 2
+    skipped = [
+        ntc for ntc in artifact.no_trade_cases
+        if "mutually_exclusive_family_fallback_not_attempted_after_submit"
+        in ntc.rejection_reasons
+    ]
+    assert len(skipped) == 1
+    assert skipped[0].decision_id == decisions[2].decision_id
+
+
+def test_paper_family_fallback_executes_at_most_one_ranked_leg(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    """RELATIONSHIP: family fallback is an execution invariant in every env."""
+
+    from src.state.db import get_connection, init_schema
+
+    monkeypatch.setenv("ZEUS_LIVE_MAX_ONE_ENTRY_PER_WEATHER_FAMILY", "1")
+    monkeypatch.setenv("ZEUS_LIVE_MARKET_SUBSTRATE_READER", "0")
+
+    decisions = _three_family_decisions()
+    for rank, decision in enumerate(decisions, start=1):
+        decision.strategy_key = "center_buy"
+        decision.family_fallback_rank = rank
+        decision.family_fallback_candidate_count = len(decisions)
+        decision.tokens.update(
+            {
+                "market_id": f"market-{rank}",
+                "token_id": f"token-{rank}",
+                "no_token_id": f"no-token-{rank}",
+            }
+        )
+
+    conn = get_connection(tmp_path / "family-fallback-paper.db")
+    init_schema(conn)
+    deps, captured, artifact, portfolio, summary = _build_harness(decisions)
+    created: list[str] = []
+    executed: list[str] = []
+
+    def _create_execution_intent(**kwargs):
+        created.append(str(kwargs.get("token_id") or ""))
+        return types.SimpleNamespace(intent_id=f"intent-{kwargs.get('token_id')}")
+
+    def _execute_intent(intent, *args, decision_id="", **kwargs):
+        executed.append(str(decision_id))
+        return types.SimpleNamespace(
+            trade_id=f"paper-trade-{decision_id}",
+            status="pending",
+            command_state="SUBMITTING",
+        )
+
+    deps.create_execution_intent = _create_execution_intent
+    deps.execute_intent = _execute_intent
+
+    execute_discovery_phase(
+        conn=conn,
+        clob=MagicMock(),
+        portfolio=portfolio,
+        artifact=artifact,
+        tracker=MagicMock(),
+        limits=MagicMock(),
+        mode=DiscoveryMode.UPDATE_REACTION,
+        summary=summary,
+        entry_bankroll=5000.0,
+        decision_time=datetime(2026, 6, 14, 12, 0, 0, tzinfo=timezone.utc),
+        env="paper",
+        deps=deps,
+    )
+
+    assert len(captured) == 1
+    assert created == ["token-1"]
+    assert executed == [decisions[0].decision_id]
+    assert len(artifact.trade_cases) == 1
+    skipped = [
+        ntc for ntc in artifact.no_trade_cases
+        if "mutually_exclusive_family_fallback_not_attempted_after_submit"
+        in ntc.rejection_reasons
+    ]
+    assert [ntc.decision_id for ntc in skipped] == [
+        decisions[1].decision_id,
+        decisions[2].decision_id,
+    ]
 
 
 def test_structural_sentinel_dedup_called_from_cycle_runtime() -> None:

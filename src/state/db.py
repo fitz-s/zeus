@@ -2468,8 +2468,8 @@ def init_schema(
     _ensure_book_hash_transitions_table(conn)
 
     # Phase 2 T2 (2026-05-20): no_trade_events table + indices (SCHEMA_VERSION 15).
-    from src.state.schema.no_trade_events_schema import ensure_table as _ensure_no_trade_events_table
-    _ensure_no_trade_events_table(conn)
+    from src.state.schema.no_trade_events_schema import migrate_no_trade_events_schema as _migrate_no_trade_events_schema
+    _migrate_no_trade_events_schema(conn)
 
     # Phase 3 T2 (2026-05-21): tail_stress_scenarios table (SCHEMA_VERSION 16).
     from src.state.schema.tail_stress_scenarios_schema import ensure_table as _ensure_tail_stress_scenarios_table

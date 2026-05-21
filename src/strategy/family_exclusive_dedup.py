@@ -138,10 +138,13 @@ class ExclusiveOutcomePortfolio:
     leg_weights: tuple[float, ...] = ()
     expected_log_growth: float = 0.0
     max_loss_usd: float = 0.0
+    fallback_candidate_legs: tuple[Any, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.selected_legs:
             object.__setattr__(self, "selected_legs", (self.selected_leg,))
+        if not self.fallback_candidate_legs:
+            object.__setattr__(self, "fallback_candidate_legs", self.selected_legs)
 
 
 @dataclass(frozen=True)
@@ -980,13 +983,20 @@ def build_weather_family_decision(
     gate_enabled = family_gate_enabled() if enabled is None else enabled
     if not gate_enabled:
         return None
+    candidate_edges = list(edges)
 
     try:
         max_legs = int(os.environ.get("ZEUS_LIVE_FAMILY_PORTFOLIO_MAX_LEGS", "1"))
     except ValueError:
         max_legs = 1
+    try:
+        fallback_candidate_count = int(
+            os.environ.get("ZEUS_LIVE_FAMILY_EXECUTABLE_FALLBACK_CANDIDATES", "3")
+        )
+    except ValueError:
+        fallback_candidate_count = 3
     portfolio = optimize_exclusive_outcome_portfolio(
-        list(edges),
+        candidate_edges,
         city=city,
         target_date=target_date,
         temperature_metric=temperature_metric,
@@ -994,10 +1004,36 @@ def build_weather_family_decision(
     )
     if portfolio is None:
         return None
-    selected_set = set(id(edge) for edge in portfolio.selected_legs)
-    kept_bin = ",".join(_edge_bin_label(edge) for edge in portfolio.selected_legs)
+    ranked_edges = sorted(candidate_edges, key=_edge_preselection_key, reverse=True)
+    primary = portfolio.selected_leg
+    fallback_candidates = [primary]
+    fallback_candidates.extend(edge for edge in ranked_edges if edge is not primary)
+    fallback_candidates = fallback_candidates[: max(1, min(fallback_candidate_count, len(fallback_candidates)))]
+    portfolio = ExclusiveOutcomePortfolio(
+        family_key=portfolio.family_key,
+        selected_leg=portfolio.selected_leg,
+        selected_legs=portfolio.selected_legs,
+        fallback_candidate_legs=tuple(fallback_candidates),
+        candidate_legs=portfolio.candidate_legs,
+        candidate_leg_descriptors=portfolio.candidate_leg_descriptors,
+        selection_score=portfolio.selection_score,
+        expected_net_profit_usd=portfolio.expected_net_profit_usd,
+        expected_fill_probability=portfolio.expected_fill_probability,
+        objective=(
+            f"{portfolio.objective}:ranked_executable_fallback_top_"
+            f"{len(fallback_candidates)}"
+        ),
+        payoff_matrix=portfolio.payoff_matrix,
+        posterior_vector=portfolio.posterior_vector,
+        cost_vector=portfolio.cost_vector,
+        leg_weights=portfolio.leg_weights,
+        expected_log_growth=portfolio.expected_log_growth,
+        max_loss_usd=portfolio.max_loss_usd,
+    )
+    selected_set = set(id(edge) for edge in portfolio.fallback_candidate_legs)
+    kept_bin = ",".join(_edge_bin_label(edge) for edge in portfolio.fallback_candidate_legs)
     dropped: list[FamilyPreselectionDrop] = []
-    for edge in edges:
+    for edge in candidate_edges:
         if id(edge) in selected_set:
             continue
         dropped.append(
@@ -1133,6 +1169,20 @@ def dedup_mutually_exclusive_families(
         if len(idxs) < 2:
             # Single-bin (or single-entry) family: untouched — byte-identical
             # to the legacy per-edge path. No regression.
+            continue
+        if all(
+            int(getattr(decisions[i], "family_fallback_candidate_count", 0) or 0) > 1
+            for i in idxs
+        ):
+            for i in idxs:
+                validations = getattr(decisions[i], "applied_validations", None)
+                if isinstance(validations, list) and "family_ranked_executable_fallback" not in validations:
+                    validations.append("family_ranked_executable_fallback")
+            logger.info(
+                "[MUTUALLY_EXCLUSIVE_FAMILY_FALLBACK_CANDIDATES] family=%s candidate_count=%d",
+                "|".join(key),
+                len(idxs),
+            )
             continue
         best_i = _pick_best_index(decisions, idxs)
         best = decisions[best_i]

@@ -3613,6 +3613,60 @@ class TestRecoveryResolutionTable:
         assert event_payload["positive_fill_trade_fact_count"] == 1
         assert event_payload["positive_fill_size"] == "1.25"
 
+    def test_partial_remainder_uses_canonical_trade_fact_over_later_weaker_fact(
+        self,
+        conn,
+        mock_client,
+    ):
+        """Relationship: a later weak trade fact cannot hide positive fill truth."""
+        _insert(conn, size=5.0)
+        _advance_to_partial(conn, venue_order_id="ord-partial")
+        _append_trade_fact(
+            conn,
+            order_id="ord-partial",
+            trade_id="trade-partial",
+            state="CONFIRMED",
+            filled_size="1.25",
+            fill_price="0.50",
+        )
+        _append_trade_fact(
+            conn,
+            order_id="ord-partial",
+            trade_id="trade-partial",
+            state="FAILED",
+            filled_size="0",
+            fill_price="0.50",
+        )
+        _seed_pending_entry_projection(conn, order_id="ord-partial")
+        mock_client.get_open_orders.return_value = []
+        mock_client.get_order.return_value = {"orderID": "ord-partial", "status": "EXPIRED"}
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["partial_remainders"] == {
+            "scanned": 1,
+            "advanced": 1,
+            "stayed": 0,
+            "errors": 0,
+        }
+        order_fact = conn.execute(
+            """
+            SELECT matched_size, raw_payload_json
+              FROM venue_order_facts
+             WHERE command_id = 'cmd-001'
+             ORDER BY local_sequence DESC
+             LIMIT 1
+            """
+        ).fetchone()
+        payload = json.loads(order_fact["raw_payload_json"])
+        assert order_fact["matched_size"] == "1.25"
+        assert payload["matched_size"] == "1.25"
+        event_payload = json.loads(_get_events(conn, "cmd-001")[-1]["payload_json"])
+        assert event_payload["positive_fill_trade_fact_count"] == 1
+        assert event_payload["positive_fill_size"] == "1.25"
+
     def test_legacy_filled_command_with_partial_economic_coverage_records_terminal_remainder_fact(
         self,
         conn,

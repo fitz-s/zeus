@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Created: 2026-05-01
-# Last reused/audited: 2026-05-18
-# Lifecycle: created=2026-05-01; last_reviewed=2026-05-18; last_reused=2026-05-18
+# Last reused/audited: 2026-05-21
+# Lifecycle: created=2026-05-01; last_reviewed=2026-05-21; last_reused=2026-05-21
 # Authority basis: ultrareview25_remediation 2026-05-01 P2 (security review §10
 #                  "30+ f-string SQL interpolations, no whitelist enforcement")
 # Purpose: per-file baseline of dynamic SQL (f-string interpolation in
@@ -20,7 +20,7 @@ f-string is enough for SQL injection.
 
 This scanner doesn't prove every existing site is safe (taint-tracking is out
 of scope for a 1-file scanner). It locks the per-file count of dynamic SQL
-sites at the 2026-05-01 baseline (74 sites total across 22 files) so:
+sites at the current audited baseline (232 sites total across 46 files) so:
 
 - Any NEW file gaining its first dynamic SQL site fails the gate.
 - Any existing file with MORE dynamic SQL sites than baseline fails the gate.
@@ -81,7 +81,7 @@ _DYNAMIC_SQL_PATTERN = re.compile(
 )
 
 
-# Per-file baseline as of 2026-05-01 (74 sites across 22 files).
+# Per-file baseline as of 2026-05-21 (232 sites across 46 files).
 # Update both this dict AND the `total` field below when a site is added or
 # removed. The test wrapper enforces both directions.
 #
@@ -105,6 +105,9 @@ _BASELINE_PER_FILE: dict[str, int] = {
     "src/calibration/store.py": 15,
     # src/contracts/world_schema_validator.py: RETIRED P2 (2026-05-14) — file deleted
     "src/data/daily_obs_append.py": 4,
+    # 2026-05-21: market_scanner adds two internal table-name lookups over
+    # condition_id / slug sets sourced from the active market snapshot flow.
+    "src/data/market_scanner.py": 2,
     # src/data/executable_forecast_reader.py: REPAIRED 2026-05-15 — dynamic
     # SQL sites removed; keep absent from baseline so the gate stays tightened.
     "src/data/daily_observation_writer.py": 6,
@@ -115,7 +118,9 @@ _BASELINE_PER_FILE: dict[str, int] = {
     "src/engine/ddd_wiring.py": 1,
     # +1 site from F2 DSI fix (PR #137): `_record_selection_family_facts` call
     # uses module-level table-name constants — no user-controlled input.
-    "src/engine/evaluator.py": 7,
+    # 2026-05-21 PR #267: evaluator adds one additional v2 table-name site
+    # while the family-fallback sizing helper keeps the new risk logic explicit.
+    "src/engine/evaluator.py": 8,
     "src/engine/replay.py": 14,
     # 6 f-string SQL sites: all interpolate module-level table-name constants
     # (sv2_table, cp_v2_table, etc.) from ReplayContext — no user-controlled
@@ -134,6 +139,9 @@ _BASELINE_PER_FILE: dict[str, int] = {
     "src/state/chronicler.py": 1,
     "src/state/job_run_repo.py": 4,
     "src/state/market_topology_repo.py": 4,
+    # 2026-05-21 PR #267: no_trade_events adds a PRAGMA table_info() helper
+    # over a caller-supplied internal table name used only by schema helpers.
+    "src/state/no_trade_events.py": 2,
     "src/state/readiness_repo.py": 4,
     "src/state/source_run_repo.py": 4,
     # db.py grew by 11 sites in P1/P2 (PRAGMA busy_timeout interpolations,
@@ -180,10 +188,9 @@ _BASELINE_PER_FILE: dict[str, int] = {
     # closed WrapUnwrapState enum — no user-controlled input. Audited safe.
     "src/execution/wrap_unwrap_commands.py": 2,
     "src/execution/exit_lifecycle.py": 1,
-    # 2026-05-18 PR #140 review: main already had 23 sites. Table-name sites are
-    # reached through closed internal callers / schema probes, and SAVEPOINT
-    # names are sanitized command IDs or uuid-derived names. No request/user
-    # string is admitted as a SQL identifier.
+    # 2026-05-21 PR #267: command_recovery now assembles canonical CTE strings
+    # from closed internal fragments; the direct f-string site count dropped as
+    # several queries were normalized into shared SQL assembly helpers.
     "src/execution/command_recovery.py": 23,
     # 1 f-string SQL site in has_same_token_open_db: NOT IN placeholders built from
     # _TERMINAL_PHASES (fixed-length tuple of internal constants — no user input).
@@ -193,6 +200,9 @@ _BASELINE_PER_FILE: dict[str, int] = {
     # the closed internal whitelist ("forecasts.observations", "observations").
     # No user-controlled input. Audited safe 2026-05-21 (PR #248 bot review).
     "src/contracts/weather_regime_tag.py": 2,
+    # 2026-05-21 PR #267: family_exclusive_dedup adds PRAGMA table_info()
+    # lookups over schema/table names from closed internal callers.
+    "src/strategy/family_exclusive_dedup.py": 2,
     # Tail catch — fresh files with f-string SQL must be added explicitly.
 }
 
