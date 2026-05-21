@@ -91,10 +91,10 @@ from src.riskguard.policy import StrategyPolicy, resolve_strategy_policy
 from src.signal.model_agreement import model_agreement
 from src.state.portfolio import (
     PortfolioState,
+    INACTIVE_RUNTIME_STATES,
     city_exposure_for_bankroll,
     cluster_exposure_for_bankroll,
     has_same_token_open,
-    has_same_token_open_db,
     has_inflight_exit_for_token,
     is_reentry_blocked,
     is_token_on_cooldown,
@@ -1889,6 +1889,145 @@ def _get_day0_temporal_context(city: City, target_date: date, observation: "Opti
         return None
 
 
+_ENTRY_COMMAND_TERMINAL_NO_FILL_STATES = frozenset(
+    {"CANCELLED", "EXPIRED", "SUBMIT_REJECTED", "REJECTED"}
+)
+_ENTRY_ORDER_FACT_TERMINAL_NO_FILL_STATES = frozenset(
+    {"CANCEL_CONFIRMED", "EXPIRED", "VENUE_WIPED"}
+)
+_ENTRY_DEDUP_TERMINAL_PHASES = tuple(sorted(INACTIVE_RUNTIME_STATES))
+
+
+def _has_positive_trade_fact_for_command(conn, command_id: str) -> bool:
+    row = conn.execute(
+        """
+        SELECT 1
+          FROM venue_trade_facts
+         WHERE command_id = ?
+           AND CAST(filled_size AS REAL) > 0
+         LIMIT 1
+        """,
+        (command_id,),
+    ).fetchone()
+    return row is not None
+
+
+def _has_positive_trade_fact_for_position_or_order(
+    conn,
+    *,
+    position_id: str,
+    order_id: str,
+) -> bool:
+    row = conn.execute(
+        """
+        SELECT 1
+          FROM venue_trade_facts vtf
+          JOIN venue_commands vc ON vc.command_id = vtf.command_id
+         WHERE CAST(vtf.filled_size AS REAL) > 0
+           AND (
+                vc.position_id = ?
+                OR (? != '' AND vc.venue_order_id = ?)
+           )
+         LIMIT 1
+        """,
+        (position_id, order_id, order_id),
+    ).fetchone()
+    return row is not None
+
+
+def _has_terminal_no_fill_order_fact_for_command(conn, command_id: str) -> bool:
+    row = conn.execute(
+        """
+        SELECT state, matched_size
+          FROM venue_order_facts
+         WHERE command_id = ?
+         ORDER BY local_sequence DESC, observed_at DESC
+         LIMIT 1
+        """,
+        (command_id,),
+    ).fetchone()
+    if row is None:
+        return False
+    state = str(row["state"] if hasattr(row, "keys") else row[0] or "").upper()
+    if state not in _ENTRY_ORDER_FACT_TERMINAL_NO_FILL_STATES:
+        return False
+    matched_size = row["matched_size"] if hasattr(row, "keys") else row[1]
+    try:
+        return Decimal(str(matched_size or "0")) == Decimal("0")
+    except (InvalidOperation, ValueError):
+        return False
+
+
+def _latest_entry_command_for_position(conn, *, position_id: str, order_id: str) -> dict | None:
+    row = conn.execute(
+        """
+        SELECT command_id, state, intent_kind, venue_order_id
+          FROM venue_commands
+         WHERE intent_kind = 'ENTRY'
+           AND (
+                position_id = ?
+                OR (? != '' AND venue_order_id = ?)
+           )
+         ORDER BY updated_at DESC, created_at DESC
+         LIMIT 1
+        """,
+        (position_id, order_id, order_id),
+    ).fetchone()
+    if row is None:
+        return None
+    if hasattr(row, "keys"):
+        return {key: row[key] for key in row.keys()}
+    return {
+        "command_id": row[0],
+        "state": row[1],
+        "intent_kind": row[2],
+        "venue_order_id": row[3],
+    }
+
+
+def _pending_entry_terminal_no_fill_cleared(conn, row) -> bool:
+    phase = str(row["phase"] if hasattr(row, "keys") else row[1] or "").lower()
+    if phase != "pending_entry":
+        return False
+    position_id = str(row["position_id"] if hasattr(row, "keys") else row[0] or "")
+    order_id = str(row["order_id"] if hasattr(row, "keys") else row[2] or "")
+    try:
+        shares = Decimal(str(row["shares"] if hasattr(row, "keys") else row[3] or "0"))
+        cost_basis = Decimal(str(row["cost_basis_usd"] if hasattr(row, "keys") else row[4] or "0"))
+    except (InvalidOperation, ValueError):
+        return False
+    if shares != Decimal("0") or cost_basis != Decimal("0"):
+        return False
+    command = _latest_entry_command_for_position(conn, position_id=position_id, order_id=order_id)
+    if command is None:
+        return False
+    state = str(command.get("state") or "").upper()
+    if state not in _ENTRY_COMMAND_TERMINAL_NO_FILL_STATES:
+        return False
+    if _has_positive_trade_fact_for_position_or_order(conn, position_id=position_id, order_id=order_id):
+        return False
+    command_id = str(command.get("command_id") or "")
+    return (
+        not _has_positive_trade_fact_for_command(conn, command_id)
+        and _has_terminal_no_fill_order_fact_for_command(conn, command_id)
+    )
+
+
+def _has_same_token_blocking_open_db(conn, token_id: str) -> bool:
+    rows = conn.execute(
+        """SELECT position_id, phase, order_id, shares, cost_basis_usd
+            FROM position_current
+            WHERE (token_id = ? OR no_token_id = ?)
+            AND phase NOT IN (?,?,?,?,?)""",
+        (token_id, token_id, *_ENTRY_DEDUP_TERMINAL_PHASES),
+    ).fetchall()
+    for row in rows:
+        if _pending_entry_terminal_no_fill_cleared(conn, row):
+            continue
+        return True
+    return False
+
+
 def _layer7_dedup_fires(conn, portfolio: "PortfolioState", token_id: str) -> bool:
     """Layer 7 (v2) dedup gate: returns True if a new entry for token_id should be rejected.
 
@@ -1908,7 +2047,7 @@ def _layer7_dedup_fires(conn, portfolio: "PortfolioState", token_id: str) -> boo
     """
     if conn is not None:
         return (
-            has_same_token_open_db(conn, token_id)
+            _has_same_token_blocking_open_db(conn, token_id)
             or has_inflight_exit_for_token(conn, token_id)
         )
     return has_same_token_open(portfolio, token_id)

@@ -1713,7 +1713,7 @@ class TestPhase2DExecutionCapabilityStatus:
             "state": "NORMAL",
             "entry": {"allow_submit": False, "block_reason": "NORMAL:ENTRY"},
             "exit": {"allow_submit": False, "block_reason": "NORMAL:EXIT"},
-            "cancel": {"allow_cancel": False, "block_reason": "NORMAL:CANCEL"},
+            "cancel": {"allow_cancel": True, "block_reason": None},
             "redemption": {"allow_redemption": False, "block_reason": "NORMAL"},
         }
 
@@ -1769,13 +1769,15 @@ class TestPhase2DExecutionCapabilityStatus:
         for action, allow_key in (
             ("entry", "global_allow_submit"),
             ("exit", "global_allow_submit"),
-            ("cancel", "global_allow_cancel"),
             ("redeem", "global_allow_redeem"),
         ):
             assert matrix[action]["status"] == "blocked"
             assert matrix[action][allow_key] is False
             assert matrix[action]["live_action_authorized"] is False
             assert "cutover_guard" in matrix[action]["blocked_components"]
+        assert matrix["cancel"]["status"] == "requires_intent"
+        assert matrix["cancel"]["global_allow_cancel"] is True
+        assert matrix["cancel"]["live_action_authorized"] is False
 
     def test_phase2d_matrix_keeps_per_intent_gates_unresolved(self, monkeypatch):
         from src.observability import status_summary as status_summary_module

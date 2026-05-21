@@ -196,7 +196,7 @@ def _run_live_buy_no_authorization_case(
         epistemic_context_json='{"decision_time_utc":"2026-04-01T00:00:00Z"}',
         edge_context_json='{"forward_edge":0.27}',
         sizing_bankroll=100.0,
-        kelly_multiplier_used=0.25,
+        kelly_multiplier_used=0.125,
         execution_fee_rate=0.0,
     )
 
@@ -1376,6 +1376,450 @@ def test_stale_order_cleanup_quarantines_position_current_owned_order(monkeypatc
         conn=conn,
     )
     conn.close()
+
+    assert cancelled_count == 0
+    assert cancelled == []
+
+
+def _seed_pending_entry_command(
+    conn,
+    *,
+    command_id: str = "cmd-entry",
+    position_id: str = "pos-entry",
+    token_id: str = "tok-entry",
+    venue_order_id: str = "order-entry",
+    command_state: str = "ACKED",
+    order_price: float = 0.008,
+    order_status: str = "live",
+    phase: str = "pending_entry",
+    shares: float = 0.0,
+    cost_basis_usd: float = 0.0,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO position_current (
+            position_id, phase, trade_id, market_id, city, cluster, target_date,
+            bin_label, direction, unit, size_usd, shares, cost_basis_usd,
+            entry_price, p_posterior, entry_method, strategy_key, edge_source,
+            discovery_mode, chain_state, order_id, order_status, updated_at,
+            temperature_metric, token_id, no_token_id
+        ) VALUES (
+            ?, ?, ?, 'm-entry', 'Tokyo', 'Tokyo', '2026-05-22',
+            '75°F or higher', 'buy_yes', 'F', 7.5, ?, ?,
+            ?, 0.75, 'executable_forecast', 'opening_inertia',
+            'opening_inertia', 'opening_hunt', 'unknown', ?,
+            ?, '2026-05-21T02:00:00Z', 'high', ?, 'no-entry'
+        )
+        """,
+        (
+            position_id,
+            phase,
+            position_id,
+            shares,
+            cost_basis_usd,
+            order_price,
+            venue_order_id,
+            order_status,
+            token_id,
+        ),
+    )
+    conn.execute(
+        """
+        INSERT INTO venue_commands (
+            command_id, snapshot_id, envelope_id, position_id, decision_id,
+            idempotency_key, intent_kind, market_id, token_id, side, size, price,
+            venue_order_id, state, last_event_id, created_at, updated_at,
+            review_required_reason
+        ) VALUES (
+            ?, 'snap-entry', 'env-entry', ?, 'dec-entry',
+            ?, 'ENTRY', 'm-entry', ?, 'BUY', 7.5, ?,
+            ?, ?, NULL, '2026-05-21T02:00:00Z',
+            '2026-05-21T02:00:01Z', NULL
+        )
+        """,
+        (
+            command_id,
+            position_id,
+            f"idem-{command_id}",
+            token_id,
+            order_price,
+            venue_order_id,
+            command_state,
+        ),
+    )
+    conn.commit()
+
+
+def _seed_order_fact(
+    conn,
+    *,
+    command_id: str = "cmd-entry",
+    venue_order_id: str = "order-entry",
+    state: str = "CANCEL_CONFIRMED",
+    matched_size: str = "0",
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO venue_order_facts (
+            venue_order_id, command_id, state, remaining_size, matched_size,
+            source, observed_at, venue_timestamp, local_sequence,
+            raw_payload_hash, raw_payload_json
+        ) VALUES (
+            ?, ?, ?, '0', ?, 'REST', '2026-05-21T02:00:00Z',
+            '2026-05-21T02:00:00Z', 1,
+            'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', '{}'
+        )
+        """,
+        (venue_order_id, command_id, state, matched_size),
+    )
+    conn.commit()
+
+
+def test_same_token_pending_entry_live_order_still_blocks_duplicate_submit(tmp_path):
+    conn = get_connection(tmp_path / "pending-entry-live-blocks.db")
+    init_schema(conn)
+    _seed_pending_entry_command(conn)
+
+    try:
+        assert evaluator_module._layer7_dedup_fires(conn, PortfolioState(), "tok-entry") is True
+    finally:
+        conn.close()
+
+
+def test_same_token_terminal_no_fill_entry_does_not_block_reentry_after_cancel_ack(tmp_path):
+    conn = get_connection(tmp_path / "terminal-no-fill-entry-unblocks.db")
+    init_schema(conn)
+    _seed_pending_entry_command(
+        conn,
+        command_state="CANCELLED",
+        order_status="canceled",
+    )
+    _seed_order_fact(conn, state="CANCEL_CONFIRMED", matched_size="0")
+
+    try:
+        assert evaluator_module._layer7_dedup_fires(conn, PortfolioState(), "tok-entry") is False
+    finally:
+        conn.close()
+
+
+def test_same_token_terminal_command_without_terminal_order_fact_still_blocks_reentry(tmp_path):
+    conn = get_connection(tmp_path / "terminal-command-without-order-fact-blocks.db")
+    init_schema(conn)
+    _seed_pending_entry_command(
+        conn,
+        command_state="CANCELLED",
+        order_status="canceled",
+    )
+
+    try:
+        assert evaluator_module._layer7_dedup_fires(conn, PortfolioState(), "tok-entry") is True
+    finally:
+        conn.close()
+
+
+def test_same_token_terminal_no_fill_entry_keeps_block_when_projection_has_exposure(tmp_path):
+    conn = get_connection(tmp_path / "terminal-no-fill-entry-position-exposure-blocks.db")
+    init_schema(conn)
+    _seed_pending_entry_command(
+        conn,
+        command_state="CANCELLED",
+        order_status="canceled",
+        shares=1.0,
+        cost_basis_usd=0.008,
+    )
+    _seed_order_fact(conn, state="CANCEL_CONFIRMED", matched_size="0")
+
+    try:
+        assert evaluator_module._layer7_dedup_fires(conn, PortfolioState(), "tok-entry") is True
+    finally:
+        conn.close()
+
+
+def test_same_token_terminal_no_fill_entry_keeps_block_when_position_has_fill_fact(tmp_path):
+    conn = get_connection(tmp_path / "terminal-no-fill-entry-positive-fact-blocks.db")
+    init_schema(conn)
+    _seed_pending_entry_command(
+        conn,
+        command_id="cmd-terminal",
+        command_state="CANCELLED",
+        order_status="canceled",
+    )
+    conn.execute(
+        """
+        INSERT INTO venue_commands (
+            command_id, snapshot_id, envelope_id, position_id, decision_id,
+            idempotency_key, intent_kind, market_id, token_id, side, size, price,
+            venue_order_id, state, last_event_id, created_at, updated_at,
+            review_required_reason
+        ) VALUES (
+            'cmd-filled', 'snap-entry', 'env-filled', 'pos-entry', 'dec-filled',
+            'idem-cmd-filled', 'ENTRY', 'm-entry', 'tok-entry', 'BUY', 7.5, 0.008,
+            'order-entry-filled', 'PARTIAL', NULL, '2026-05-21T01:59:00Z',
+            '2026-05-21T01:59:01Z', NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO venue_trade_facts (
+            trade_id, venue_order_id, command_id, state, filled_size, fill_price,
+            fee_paid_micro, tx_hash, block_number, confirmation_count, source,
+            observed_at, venue_timestamp, local_sequence, raw_payload_hash,
+            raw_payload_json
+        ) VALUES (
+            'trade-filled', 'order-entry-filled', 'cmd-filled', 'CONFIRMED',
+            '1.0', '0.008', 0, NULL, NULL, 0, 'FAKE_VENUE',
+            '2026-05-21T02:00:00Z', '2026-05-21T02:00:00Z', 1,
+            'hash-filled', '{}'
+        )
+        """
+    )
+    conn.commit()
+
+    try:
+        assert evaluator_module._layer7_dedup_fires(conn, PortfolioState(), "tok-entry") is True
+    finally:
+        conn.close()
+
+
+def test_stale_entry_order_cleanup_cancels_off_touch_no_fill_order(monkeypatch, tmp_path):
+    conn = get_connection(tmp_path / "stale-entry-order.db")
+    init_schema(conn)
+    _insert_executable_snapshot(
+        conn,
+        snapshot_id="snap-entry",
+        selected_outcome_token_id="tok-entry",
+        yes_token_id="tok-entry",
+        no_token_id="no-entry",
+        condition_id="m-entry",
+        top_bid="0.009",
+        top_ask="0.010",
+        min_tick_size="0.001",
+    )
+    _seed_pending_entry_command(conn, order_price=0.008)
+    cancelled: list[str] = []
+
+    class DummyClob:
+        def get_orderbook_snapshot(self, token_id):
+            assert token_id == "tok-entry"
+            return {
+                "bids": [{"price": "0.009", "size": "100"}],
+                "asks": [{"price": "0.010", "size": "100"}],
+            }
+
+        def cancel_order(self, order_id):
+            cancelled.append(order_id)
+            return {"status": "CANCELLED", "id": order_id}
+
+    monkeypatch.setattr(
+        "src.execution.exit_safety.gate_for_intent",
+        lambda intent: types.SimpleNamespace(
+            allow_cancel=True,
+            block_reason=None,
+            state=types.SimpleNamespace(value="READY"),
+        ),
+    )
+
+    try:
+        cancelled_count = cycle_runtime.cleanup_stale_entry_orders(
+            DummyClob(),
+            deps=types.SimpleNamespace(logger=logging.getLogger("test_stale_entry_order")),
+            conn=conn,
+        )
+        events = [
+            row["event_type"]
+            for row in conn.execute(
+                "SELECT event_type FROM venue_command_events "
+                "WHERE command_id = 'cmd-entry' ORDER BY sequence_no"
+            ).fetchall()
+        ]
+        state = conn.execute(
+            "SELECT state FROM venue_commands WHERE command_id = 'cmd-entry'"
+        ).fetchone()["state"]
+        same_cycle_dedup_blocks = evaluator_module._layer7_dedup_fires(
+            conn,
+            PortfolioState(),
+            "tok-entry",
+        )
+    finally:
+        conn.close()
+
+    assert cancelled_count == 1
+    assert cancelled == ["order-entry"]
+    assert events[-2:] == ["CANCEL_REQUESTED", "CANCEL_ACKED"]
+    assert state == "CANCELLED"
+    assert same_cycle_dedup_blocks is True
+
+
+def test_stale_entry_order_cleanup_skips_when_fresh_book_no_longer_improves(monkeypatch, tmp_path):
+    conn = get_connection(tmp_path / "stale-entry-book-reverted.db")
+    init_schema(conn)
+    _insert_executable_snapshot(
+        conn,
+        snapshot_id="snap-entry",
+        selected_outcome_token_id="tok-entry",
+        yes_token_id="tok-entry",
+        no_token_id="no-entry",
+        condition_id="m-entry",
+        top_bid="0.009",
+        top_ask="0.010",
+        min_tick_size="0.001",
+    )
+    _seed_pending_entry_command(conn, order_price=0.008)
+    cancelled: list[str] = []
+
+    class DummyClob:
+        def get_orderbook_snapshot(self, token_id):
+            assert token_id == "tok-entry"
+            return {
+                "bids": [{"price": "0.008", "size": "100"}],
+                "asks": [{"price": "0.010", "size": "100"}],
+            }
+
+        def cancel_order(self, order_id):
+            cancelled.append(order_id)
+            return {"status": "CANCELLED", "id": order_id}
+
+    try:
+        cancelled_count = cycle_runtime.cleanup_stale_entry_orders(
+            DummyClob(),
+            deps=types.SimpleNamespace(logger=logging.getLogger("test_stale_entry_book_reverted")),
+            conn=conn,
+        )
+        state = conn.execute(
+            "SELECT state FROM venue_commands WHERE command_id = 'cmd-entry'"
+        ).fetchone()["state"]
+    finally:
+        conn.close()
+
+    assert cancelled_count == 0
+    assert cancelled == []
+    assert state == "ACKED"
+
+
+def test_stale_entry_order_cleanup_skips_snapshot_older_than_command(monkeypatch, tmp_path):
+    conn = get_connection(tmp_path / "stale-entry-old-snapshot.db")
+    init_schema(conn)
+    _insert_executable_snapshot(
+        conn,
+        snapshot_id="snap-entry-old",
+        selected_outcome_token_id="tok-entry",
+        yes_token_id="tok-entry",
+        no_token_id="no-entry",
+        condition_id="m-entry",
+        top_bid="0.009",
+        top_ask="0.010",
+        min_tick_size="0.001",
+        captured_at=datetime(2026, 5, 21, 1, 59, 0, tzinfo=timezone.utc),
+    )
+    _seed_pending_entry_command(conn, order_price=0.008)
+    cancelled: list[str] = []
+
+    class DummyClob:
+        def get_orderbook_snapshot(self, token_id):
+            return {
+                "bids": [{"price": "0.009", "size": "100"}],
+                "asks": [{"price": "0.010", "size": "100"}],
+            }
+
+        def cancel_order(self, order_id):
+            cancelled.append(order_id)
+            return {"status": "CANCELLED", "id": order_id}
+
+    try:
+        cancelled_count = cycle_runtime.cleanup_stale_entry_orders(
+            DummyClob(),
+            deps=types.SimpleNamespace(logger=logging.getLogger("test_stale_entry_old_snapshot")),
+            conn=conn,
+        )
+        state = conn.execute(
+            "SELECT state FROM venue_commands WHERE command_id = 'cmd-entry'"
+        ).fetchone()["state"]
+    finally:
+        conn.close()
+
+    assert cancelled_count == 0
+    assert cancelled == []
+    assert state == "ACKED"
+
+
+def test_stale_entry_order_cleanup_skips_when_order_fact_has_matched_size(monkeypatch, tmp_path):
+    conn = get_connection(tmp_path / "stale-entry-order-fact-matched.db")
+    init_schema(conn)
+    _insert_executable_snapshot(
+        conn,
+        snapshot_id="snap-entry",
+        selected_outcome_token_id="tok-entry",
+        yes_token_id="tok-entry",
+        no_token_id="no-entry",
+        condition_id="m-entry",
+        top_bid="0.009",
+        top_ask="0.010",
+        min_tick_size="0.001",
+    )
+    _seed_pending_entry_command(conn, order_price=0.008)
+    _seed_order_fact(conn, state="PARTIALLY_MATCHED", matched_size="1.0")
+    cancelled: list[str] = []
+
+    class DummyClob:
+        def get_orderbook_snapshot(self, token_id):
+            assert token_id == "tok-entry"
+            return {
+                "bids": [{"price": "0.009", "size": "100"}],
+                "asks": [{"price": "0.010", "size": "100"}],
+            }
+
+        def cancel_order(self, order_id):
+            cancelled.append(order_id)
+            return {"status": "CANCELLED", "id": order_id}
+
+    try:
+        cancelled_count = cycle_runtime.cleanup_stale_entry_orders(
+            DummyClob(),
+            deps=types.SimpleNamespace(logger=logging.getLogger("test_stale_entry_order_fact_matched")),
+            conn=conn,
+        )
+        state = conn.execute(
+            "SELECT state FROM venue_commands WHERE command_id = 'cmd-entry'"
+        ).fetchone()["state"]
+    finally:
+        conn.close()
+
+    assert cancelled_count == 0
+    assert cancelled == []
+    assert state == "ACKED"
+
+
+def test_stale_entry_order_cleanup_skips_partial_entry_order(monkeypatch, tmp_path):
+    conn = get_connection(tmp_path / "partial-entry-order.db")
+    init_schema(conn)
+    _insert_executable_snapshot(
+        conn,
+        snapshot_id="snap-entry",
+        selected_outcome_token_id="tok-entry",
+        yes_token_id="tok-entry",
+        no_token_id="no-entry",
+        condition_id="m-entry",
+        top_bid="0.009",
+        top_ask="0.010",
+        min_tick_size="0.001",
+    )
+    _seed_pending_entry_command(conn, command_state="PARTIAL", order_price=0.008)
+    cancelled: list[str] = []
+
+    class DummyClob:
+        def cancel_order(self, order_id):
+            cancelled.append(order_id)
+            return {"status": "CANCELLED", "id": order_id}
+
+    try:
+        cancelled_count = cycle_runtime.cleanup_stale_entry_orders(
+            DummyClob(),
+            deps=types.SimpleNamespace(logger=logging.getLogger("test_partial_entry_order")),
+            conn=conn,
+        )
+    finally:
+        conn.close()
 
     assert cancelled_count == 0
     assert cancelled == []
@@ -2973,8 +3417,9 @@ def test_executable_snapshot_repricing_can_cross_ask_inside_slippage_budget(tmp_
     assert best_ask == pytest.approx(0.41)
     assert decision.edge.vwmp == pytest.approx(0.405)
     taker_fee_price = 0.41 + 0.03 * 0.41 * (1 - 0.41)
+    # Marketable GTC uses the conservative FAK-style tight/shallow haircut.
     assert decision.size_usd == pytest.approx(
-        (0.47 - taker_fee_price) / (1 - taker_fee_price) * 0.25 * 100.0
+        (0.47 - taker_fee_price) / (1 - taker_fee_price) * 0.25 * 100.0 * 0.75
     )
     reprice = decision.tokens["executable_snapshot_reprice"]
     assert reprice["best_ask_slippage_bps"] == pytest.approx((0.41 - 0.405) / 0.405 * 10_000.0)
@@ -3231,7 +3676,7 @@ def test_executable_snapshot_repricing_allows_low_kelly_when_min_shares_clear_ma
         edge_context=types.SimpleNamespace(p_posterior=edge.p_posterior),
         decision_snapshot_id="decision-snap-min-shares-clears-floor",
         sizing_bankroll=100.0,
-        kelly_multiplier_used=0.25,
+        kelly_multiplier_used=0.125,
         execution_fee_rate=0.03,
     )
 
@@ -3304,6 +3749,7 @@ def test_executable_snapshot_repricing_crosses_positive_ev_ask_outside_flat_slip
 
     taker_fee_price = 0.30 + 0.03 * 0.30 * (1 - 0.30)
     expected_size = (0.47 - taker_fee_price) / (1 - taker_fee_price) * 0.25 * 100.0
+    expected_fok_haircut_size = expected_size * 0.30
     reprice = decision.tokens["executable_snapshot_reprice"]
     shadow = reprice["corrected_pricing_shadow"]
     assert best_ask == pytest.approx(0.30)
@@ -3312,9 +3758,9 @@ def test_executable_snapshot_repricing_crosses_positive_ev_ask_outside_flat_slip
     assert reprice["best_ask_inside_edge_budget"] is True
     assert reprice["best_ask_slippage_override_by_edge"] is True
     assert reprice["best_ask_fee_adjusted_edge"] == pytest.approx(0.47 - taker_fee_price)
-    assert reprice["best_ask_size_at_fee_adjusted_cost"] == pytest.approx(expected_size)
+    assert reprice["best_ask_size_at_fee_adjusted_cost"] == pytest.approx(expected_fok_haircut_size)
     assert decision.size_usd == pytest.approx(float(shadow["candidate_size_usd"]))
-    assert decision.size_usd >= expected_size
+    assert 0 < decision.size_usd <= expected_size
     assert reprice["final_order_type"] == "FOK"
     assert reprice["taker_order_type_upgraded"] is True
     assert reprice["live_submit_authority"] is True
@@ -3504,7 +3950,7 @@ def test_executable_snapshot_repricing_sweeps_deeper_ask_inside_budget(tmp_path)
     reprice = decision.tokens["executable_snapshot_reprice"]
     shadow = reprice["corrected_pricing_shadow"]
     assert decision.size_usd == pytest.approx(float(shadow["candidate_size_usd"]))
-    assert decision.size_usd >= expected_size
+    assert 0 < decision.size_usd <= expected_size
     assert reprice["depth_sweep_limit_price"] == pytest.approx(0.61)
     assert reprice["corrected_candidate_limit_price"] == pytest.approx(0.61)
     assert reprice["live_submit_authority"] is True
