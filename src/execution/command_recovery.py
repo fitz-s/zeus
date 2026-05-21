@@ -2152,6 +2152,29 @@ def reconcile_filled_entry_execution_fact_repairs(conn: sqlite3.Connection) -> d
         conn.execute("SAVEPOINT filled_entry_execfact_repair")
         try:
             _log_filled_entry_trade_candidate_execution_fact(conn, candidate=candidate)
+            verified = conn.execute(
+                """
+                SELECT terminal_exec_status, venue_status, command_id
+                  FROM execution_fact
+                 WHERE intent_id = ?
+                   AND order_role = 'entry'
+                 LIMIT 1
+                """,
+                (f"{candidate.get('position_id')}:entry",),
+            ).fetchone()
+            if verified is None:
+                raise RuntimeError("filled entry execution_fact repair missing post-write row")
+            if (
+                str(verified["command_id"] or "") != command_id
+                or str(verified["terminal_exec_status"] or "") != "filled"
+                or str(verified["venue_status"] or "") != "FILLED"
+            ):
+                raise RuntimeError(
+                    "filled entry execution_fact repair postcondition failed "
+                    f"command_id={command_id} persisted_command={verified['command_id']!r} "
+                    f"venue_status={verified['venue_status']!r} "
+                    f"terminal_exec_status={verified['terminal_exec_status']!r}"
+                )
             conn.execute("RELEASE SAVEPOINT filled_entry_execfact_repair")
             summary["advanced"] += 1
         except Exception as exc:

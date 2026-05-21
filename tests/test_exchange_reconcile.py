@@ -3452,6 +3452,132 @@ def test_completed_partial_order_fact_repairs_execution_fact_to_filled(conn):
     assert repair == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
     fact = conn.execute(
         """
+        SELECT command_id, venue_status, terminal_exec_status, shares, fill_price, filled_at
+          FROM execution_fact
+         WHERE intent_id = 'pos-m5:entry'
+        """
+    ).fetchone()
+    assert dict(fact) == {
+        "command_id": "cmd-m5",
+        "venue_status": "FILLED",
+        "terminal_exec_status": "filled",
+        "shares": 40.29,
+        "fill_price": 0.01,
+        "filled_at": NOW.isoformat(),
+    }
+
+
+def test_recorded_maker_reprojection_preserves_terminal_execution_fact(conn):
+    from src.execution.command_recovery import (
+        reconcile_completed_partial_order_facts,
+        reconcile_filled_entry_execution_fact_repairs,
+    )
+    from src.execution.exchange_reconcile import reconcile_recorded_maker_fill_economics
+    from src.state.db import log_execution_fact
+    from src.state.venue_command_repo import (
+        append_order_fact,
+        append_position_lot,
+        append_trade_fact as append_venue_trade_fact,
+    )
+
+    seed_command(conn, state="PARTIAL", size=40.3, price=0.01)
+    seed_position_baseline(conn)
+    seed_trade_decision_runtime_alias(conn)
+    raw = {
+        "id": "trade-terminal-maker-fill",
+        "status": "CONFIRMED",
+        "taker_order_id": "foreign-taker",
+        "size": "40.29",
+        "price": "0.99",
+        "maker_orders": [
+            {
+                "order_id": "ord-m5",
+                "matched_amount": "40.29",
+                "price": "0.01",
+                "asset_id": YES_TOKEN,
+                "side": "BUY",
+            }
+        ],
+    }
+    trade_fact_id = append_venue_trade_fact(
+        conn,
+        trade_id="trade-terminal-maker-fill",
+        venue_order_id="ord-m5",
+        command_id="cmd-m5",
+        state="CONFIRMED",
+        filled_size="40.29",
+        fill_price="0.01",
+        source="WS_USER",
+        observed_at=NOW,
+        raw_payload_hash=hashlib.sha256(b"terminal-maker-fill").hexdigest(),
+        raw_payload_json=raw,
+    )
+    append_position_lot(
+        conn,
+        position_id=1,
+        state="CONFIRMED_EXPOSURE",
+        shares="40.29",
+        entry_price_avg="0.01",
+        source_command_id="cmd-m5",
+        source_trade_fact_id=trade_fact_id,
+        captured_at=NOW.isoformat(),
+        state_changed_at=NOW.isoformat(),
+        source="WS_USER",
+        observed_at=NOW.isoformat(),
+        raw_payload_hash=hashlib.sha256(b"terminal-maker-lot").hexdigest(),
+        raw_payload_json={"source": "test_terminal_maker_lot"},
+    )
+    log_execution_fact(
+        conn,
+        intent_id="pos-m5:entry",
+        position_id="pos-m5",
+        decision_id="dec-cmd-m5",
+        command_id="cmd-m5",
+        order_role="entry",
+        strategy_key="opening_inertia",
+        posted_at=NOW.isoformat(),
+        filled_at=NOW.isoformat(),
+        submitted_price=0.01,
+        fill_price=0.01,
+        shares=40.29,
+        venue_status="PARTIAL",
+        terminal_exec_status="partial",
+    )
+    append_order_fact(
+        conn,
+        venue_order_id="ord-m5",
+        command_id="cmd-m5",
+        state="MATCHED",
+        remaining_size="0",
+        matched_size="40.29",
+        source="WS_USER",
+        observed_at=NOW + timedelta(seconds=1),
+        raw_payload_hash=hashlib.sha256(b"terminal-maker-order").hexdigest(),
+        raw_payload_json={"status": "MATCHED", "matched_size": "40.29", "remaining_size": "0"},
+    )
+
+    assert reconcile_completed_partial_order_facts(conn) == {
+        "scanned": 1,
+        "advanced": 1,
+        "stayed": 0,
+        "errors": 0,
+    }
+    assert reconcile_filled_entry_execution_fact_repairs(conn) == {
+        "scanned": 1,
+        "advanced": 1,
+        "stayed": 0,
+        "errors": 0,
+    }
+    assert reconcile_recorded_maker_fill_economics(conn, observed_at=NOW + timedelta(seconds=5)) == {
+        "scanned": 1,
+        "corrected": 0,
+        "projected": 1,
+        "stayed": 0,
+        "errors": 0,
+    }
+
+    fact = conn.execute(
+        """
         SELECT command_id, venue_status, terminal_exec_status, shares, fill_price
           FROM execution_fact
          WHERE intent_id = 'pos-m5:entry'
