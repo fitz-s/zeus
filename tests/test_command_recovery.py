@@ -2623,6 +2623,24 @@ class TestRecoveryResolutionTable:
             "terminal_exec_status": "partial",
         }
 
+    def test_entry_execution_fact_repair_treats_malformed_remainder_as_partial(self):
+        from src.execution.command_recovery import _entry_execution_fact_terminal_status
+
+        base_candidate = {
+            "cmd_state": "FILLED",
+            "order_fact_state": "MATCHED",
+        }
+
+        assert _entry_execution_fact_terminal_status(
+            {**base_candidate, "order_fact_remaining_size": "0"}
+        ) == "filled"
+        assert _entry_execution_fact_terminal_status(
+            {**base_candidate, "order_fact_remaining_size": ""}
+        ) == "partial"
+        assert _entry_execution_fact_terminal_status(
+            {**base_candidate, "order_fact_remaining_size": "not-a-number"}
+        ) == "partial"
+
     def test_acked_exit_order_fact_with_point_order_matched_records_pending_exit(
         self,
         conn,

@@ -2149,12 +2149,12 @@ def _log_filled_entry_trade_candidate_execution_fact(
 
 
 def _entry_execution_fact_terminal_status(candidate: Mapping[str, object]) -> str:
-    remaining = _positive_decimal_or_none(candidate.get("order_fact_remaining_size"))
+    remaining = _decimal_or_none(candidate.get("order_fact_remaining_size"))
     order_state = str(candidate.get("order_fact_state") or "").upper()
     command_state = str(candidate.get("cmd_state") or candidate.get("state") or "").upper()
     if (
         command_state == CommandState.FILLED.value
-        and remaining is None
+        and remaining == 0
         and order_state in {"MATCHED", "FILLED"}
     ):
         return "filled"
