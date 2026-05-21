@@ -1917,6 +1917,18 @@ def _emit_day0_window_entered_canonical_if_available(
     from src.state.db import append_many_and_project
 
     try:
+        existing_day0 = conn.execute(
+            """
+            SELECT 1
+              FROM position_events
+             WHERE position_id = ?
+               AND event_type = 'DAY0_WINDOW_ENTERED'
+             LIMIT 1
+            """,
+            (getattr(pos, "trade_id", ""),),
+        ).fetchone()
+        if existing_day0 is not None:
+            return False
         # Query next sequence_no for this position (same pattern as
         # fill_tracker._mark_entry_filled at src/execution/fill_tracker.py:156).
         # Position may already have POSITION_OPEN_INTENT / ENTRY_ORDER_POSTED /

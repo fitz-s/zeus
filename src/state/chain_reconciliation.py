@@ -302,6 +302,27 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
             return False
         return parsed.is_finite() and parsed > 0
 
+    def _canonical_current_shares(position_id: str) -> float | None:
+        if conn is None:
+            return None
+        try:
+            row = conn.execute(
+                "SELECT shares FROM position_current WHERE position_id = ?",
+                (position_id,),
+            ).fetchone()
+        except Exception:
+            return None
+        if row is None:
+            return None
+        value = row["shares"] if hasattr(row, "keys") else row[0]
+        try:
+            parsed = Decimal(str(value))
+        except (InvalidOperation, ValueError):
+            return None
+        if not parsed.is_finite():
+            return None
+        return float(parsed)
+
     def _pending_entry_has_durable_command(position: Position) -> bool:
         if conn is None:
             return False
@@ -929,8 +950,16 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
                 )
             stats["voided"] += 1
         else:
-            local_shares = pos.effective_shares
+            runtime_local_shares = pos.effective_shares
+            canonical_local_shares = _canonical_current_shares(pos.trade_id)
+            local_shares = (
+                canonical_local_shares
+                if canonical_local_shares is not None
+                else runtime_local_shares
+            )
             corrected = replace(pos)
+            if canonical_local_shares is not None:
+                corrected.shares = canonical_local_shares
             corrected.chain_state = "synced"
             corrected.chain_shares = chain.size
             corrected.chain_verified_at = now

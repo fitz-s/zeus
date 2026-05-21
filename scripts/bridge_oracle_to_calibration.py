@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Lifecycle: created=2026-04-16; last_reviewed=2026-05-21; last_reused=2026-05-21
 # Purpose: Bridge canonical oracle evidence into the reviewed oracle error-rate config artifact.
-# Reuse: Review canonical observation/settlement routing and high-track settlement filtering before applying output.
+# Reuse: Review canonical observation/settlement routing and metric-specific settlement filtering before applying output.
 # Authority basis: docs/operations/task_2026-05-04_oracle_kelly_evidence_rebuild/PLAN.md §A2; 2026-05-21 live oracle-penalty P0 wiring repair.
 """Bridge oracle evidence to calibration data.
 
@@ -44,6 +44,7 @@ if str(_REPO_ROOT) not in sys.path:
 
 # _MIN_HOURS_PER_DAY = 22
 from scripts.fill_obs_v2_dst_gaps import _MIN_HOURS_PER_DAY
+_SHARED_CITY_ORACLE_SOURCE_ROLE = "shared_city_oracle_source_proxy"
 from src.data.tier_resolver import (
     allowed_sources_for_city,
     expected_source_for_city,
@@ -79,30 +80,24 @@ from src.state.paths import (  # noqa: E402  (path-bootstrap above must run firs
 # get_forecasts_connection_with_world() — K1 fix F40 2026-05-17
 
 
-def _load_settlements(conn: sqlite3.Connection) -> dict[tuple[str, str], dict]:
-    """Load all VERIFIED settlements keyed by (city, target_date)."""
-    # 2026-05-05 (architect): LOW track is intentionally NOT bridged here.
-    # Load-bearing fail-closed gate is src/strategy/oracle_penalty.py:472 — LOW
-    # metric routes to OracleStatus.METRIC_UNSUPPORTED → multiplier 0.0 → no LOW
-    # Kelly bets execute. LOW bridge would require upstream `_snapshot_daily_low`
-    # listener (HKO CLMMINT, WU daily_low_f) that does not exist yet. HKO LOW
-    # rounding/timing semantics differ from CLMMAXT — mirror-HIGH symmetry is
-    # unsafe without dedicated listener audit. Revisit when LOW listener PR ships.
+def _load_settlements(conn: sqlite3.Connection) -> dict[tuple[str, str, str], dict]:
+    """Load all VERIFIED settlements keyed by (city, target_date, temperature_metric)."""
     rows = conn.execute("""
-        SELECT city, target_date, settlement_value, pm_bin_lo, pm_bin_hi,
+        SELECT city, target_date, temperature_metric, settlement_value, pm_bin_lo, pm_bin_hi,
                settlement_source_type, unit
         FROM settlements
         WHERE authority = 'VERIFIED'
-          AND temperature_metric = 'high'
+          AND temperature_metric IN ('high', 'low')
     """).fetchall()
     result = {}
     for r in rows:
-        result[(r[0], r[1])] = {
-            "value": r[2],
-            "bin_lo": r[3],
-            "bin_hi": r[4],
-            "source_type": r[5],
-            "unit": r[6],
+        result[(r[0], r[1], r[2])] = {
+            "temperature_metric": r[2],
+            "value": r[3],
+            "bin_lo": r[4],
+            "bin_hi": r[5],
+            "source_type": r[6],
+            "unit": r[7],
         }
     return result
 
@@ -162,7 +157,7 @@ def _settlement_semantics_for(city_name: str, settle: dict) -> SettlementSemanti
     """
 
     unit = str(settle.get("unit") or "").upper()
-    source_type = str(settle.get("source_type") or "wu_icao")
+    source_type = str(settle.get("source_type") or "wu_icao").strip().lower()
     city = runtime_cities_by_name().get(city_name)
     if (
         city is not None
@@ -207,12 +202,13 @@ def _coerce_observation_to_settlement_unit(value: float, obs_unit: str, settleme
     return val
 
 
-def _canonical_observation_daily_high(
+def _canonical_observation_daily_metric(
     conn: sqlite3.Connection,
     city_name: str,
     target_date: str,
+    temperature_metric: str,
 ) -> dict | None:
-    """Read the canonical verified daily high from ``world.observation_instants_v2``.
+    """Read the canonical verified daily metric from ``world.observation_instants_v2``.
 
     The old bridge treated sparse shadow snapshots as the authority surface,
     which made normal cities look ``INSUFFICIENT_SAMPLE`` even when the K1 DBs
@@ -220,6 +216,10 @@ def _canonical_observation_daily_high(
     the current canonical ``world.observation_instants_v2`` table first and keeps the existing
     primary/fallback source coverage rule.
     """
+    if temperature_metric not in {"high", "low"}:
+        raise ValueError(f"unsupported temperature_metric={temperature_metric!r}")
+    aggregate = "MAX(COALESCE(running_max, temp_current))" if temperature_metric == "high" else "MIN(COALESCE(running_min, temp_current))"
+    value_key = "daily_high" if temperature_metric == "high" else "daily_low"
     primary_source = expected_source_for_city(city_name)
     allowed_sources = allowed_sources_for_city(city_name)
     source_order = [primary_source, *[s for s in allowed_sources if s != primary_source]]
@@ -229,7 +229,7 @@ def _canonical_observation_daily_high(
             """
             SELECT
                 COUNT(DISTINCT utc_timestamp) AS hours,
-                MAX(COALESCE(running_max, temp_current)) AS daily_high,
+                {aggregate} AS daily_value,
                 COALESCE(
                     MAX(CASE WHEN temp_unit IS NOT NULL AND temp_unit <> '' THEN temp_unit END),
                     'F'
@@ -239,20 +239,82 @@ def _canonical_observation_daily_high(
               AND target_date = ?
               AND source = ?
               AND authority = 'VERIFIED'
-              AND COALESCE(running_max, temp_current) IS NOT NULL
-            """,
+              AND COALESCE({value_column}, temp_current) IS NOT NULL
+            """.format(
+                aggregate=aggregate,
+                value_column="running_max" if temperature_metric == "high" else "running_min",
+            ),
             (city_name, target_date, source),
         ).fetchone()
         hours = int(row[0] or 0) if row is not None else 0
-        daily_high = row[1] if row is not None else None
-        if hours >= _MIN_HOURS_PER_DAY and daily_high is not None:
+        daily_value = row[1] if row is not None else None
+        if hours >= _MIN_HOURS_PER_DAY and daily_value is not None:
             return {
-                "daily_high": float(daily_high),
+                value_key: float(daily_value),
                 "source": source,
                 "unit": str(row[2] or "F").upper(),
                 "hours": hours,
             }
+    daily_column = "high_temp" if temperature_metric == "high" else "low_temp"
+    row = conn.execute(
+        f"""
+        SELECT {daily_column} AS daily_value,
+               COALESCE(
+                   MAX(CASE WHEN unit IS NOT NULL AND unit <> '' THEN unit END),
+                   'F'
+               ) AS temp_unit,
+               MAX(source) AS source
+          FROM observations
+         WHERE city = ?
+           AND target_date = ?
+           AND authority = 'VERIFIED'
+           AND {daily_column} IS NOT NULL
+        """,
+        (city_name, target_date),
+    ).fetchone()
+    if row is not None and row[0] is not None:
+        return {
+            value_key: float(row[0]),
+            "source": str(row[2] or "observations"),
+            "unit": str(row[1] or "F").upper(),
+            "hours": 24,
+        }
     return None
+
+
+def _metric_observation_support(
+    conn: sqlite3.Connection,
+    city_name: str,
+    temperature_metric: str,
+) -> dict:
+    """Return verified daily support for a city/metric observation history."""
+
+    if temperature_metric not in {"high", "low"}:
+        raise ValueError(f"unsupported temperature_metric={temperature_metric!r}")
+    value_column = "running_max" if temperature_metric == "high" else "running_min"
+    allowed_sources = sorted(allowed_sources_for_city(city_name))
+    if not allowed_sources:
+        return {"days": 0, "last_date": ""}
+    placeholders = ",".join(["?"] * len(allowed_sources))
+    rows = conn.execute(
+        f"""
+        SELECT target_date, MAX(hours) AS best_hours
+          FROM (
+                SELECT target_date, source, COUNT(DISTINCT utc_timestamp) AS hours
+                  FROM world.observation_instants_v2
+                 WHERE city = ?
+                   AND source IN ({placeholders})
+                   AND authority = 'VERIFIED'
+                   AND {value_column} IS NOT NULL
+                 GROUP BY target_date, source
+               )
+         GROUP BY target_date
+        HAVING best_hours >= ?
+        """,
+        (city_name, *allowed_sources, _MIN_HOURS_PER_DAY),
+    ).fetchall()
+    dates = [str(row[0]) for row in rows if row[0]]
+    return {"days": len(dates), "last_date": max(dates) if dates else ""}
 
 
 def _canonical_observation_settlement_value(
@@ -260,9 +322,11 @@ def _canonical_observation_settlement_value(
     observation: dict,
     settle: dict,
 ) -> float:
-    """Convert a canonical observation high into PM settlement value space."""
+    """Convert a canonical observation metric into PM settlement value space."""
+    metric = str(settle.get("temperature_metric") or "high")
+    value_key = "daily_low" if metric == "low" else "daily_high"
     obs_val = _coerce_observation_to_settlement_unit(
-        float(observation["daily_high"]),
+        float(observation[value_key]),
         str(observation.get("unit") or ""),
         str(settle.get("unit") or ""),
     )
@@ -344,14 +408,19 @@ def bridge(dry_run: bool = False) -> dict:
             with open(oracle_file) as f:
                 existing = json.load(f)
 
-        city_stats: dict[str, dict] = {}
+        city_stats: dict[tuple[str, str], dict] = {}
 
-        for (city_name, target_date), settle in sorted(settlements.items()):
+        for (city_name, target_date, temperature_metric), settle in sorted(settlements.items()):
             matches = 0
             mismatches = 0
             mismatch_dates = []
             dates_compared = []
-            observation = _canonical_observation_daily_high(conn, city_name, target_date)
+            observation = _canonical_observation_daily_metric(
+                conn,
+                city_name,
+                target_date,
+                temperature_metric,
+            )
             if observation is None:
                 continue
 
@@ -366,7 +435,7 @@ def bridge(dry_run: bool = False) -> dict:
                     "MISMATCH %s %s: canonical_obs=%s%s → %s, PM value=%s bin=[%s,%s]",
                     city_name,
                     target_date,
-                    observation["daily_high"],
+                    observation["daily_low" if temperature_metric == "low" else "daily_high"],
                     observation.get("unit", ""),
                     obs_val,
                     settle.get("value"),
@@ -377,7 +446,7 @@ def bridge(dry_run: bool = False) -> dict:
             total = matches + mismatches
             if total > 0:
                 stats = city_stats.setdefault(
-                    city_name,
+                    (city_name, temperature_metric),
                     {
                         "snapshot_comparisons": 0,
                         "snapshot_match": 0,
@@ -387,6 +456,7 @@ def bridge(dry_run: bool = False) -> dict:
                         "snapshot_mismatch_dates": [],
                         "snapshot_dates": [],
                         "source_role": "canonical_observation_instants_v2",
+                        "temperature_metric": temperature_metric,
                     },
                 )
                 stats["snapshot_comparisons"] += total
@@ -407,10 +477,10 @@ def bridge(dry_run: bool = False) -> dict:
             dates_compared = []
 
             for target_date, snap in sorted(date_snaps.items()):
-                key = (city_name, target_date)
+                key = (city_name, target_date, "high")
                 if key not in settlements:
                     continue
-                if city_name in city_stats and target_date in set(city_stats[city_name].get("snapshot_dates", [])):
+                if (city_name, "high") in city_stats and target_date in set(city_stats[(city_name, "high")].get("snapshot_dates", [])):
                     continue
 
                 # S2 R4 P10C: Coverage filter. Ignore thin days to keep oracle stats clean.
@@ -451,7 +521,7 @@ def bridge(dry_run: bool = False) -> dict:
             if total > 0:
                 error_rate = mismatches / total
                 stats = city_stats.setdefault(
-                    city_name,
+                    (city_name, "high"),
                     {
                         "snapshot_comparisons": 0,
                         "snapshot_match": 0,
@@ -461,6 +531,7 @@ def bridge(dry_run: bool = False) -> dict:
                         "snapshot_mismatch_dates": [],
                         "snapshot_dates": [],
                         "source_role": "oracle_shadow_snapshot",
+                        "temperature_metric": "high",
                     },
                 )
                 stats["snapshot_comparisons"] += total
@@ -480,14 +551,33 @@ def bridge(dry_run: bool = False) -> dict:
                     city_name, matches, total, skipped_low_coverage, error_rate * 100,
                 )
 
-        # Merge snapshot results into existing oracle error rates.
+        # LOW daily observations are populated for normal cities even when the
+        # settlement table has not yet accumulated enough LOW Polymarket rows
+        # for a direct mismatch series. Oracle reliability is a city/source
+        # property; a city with HIGH settlement-comparison evidence and verified
+        # LOW observation coverage should be penalty/no-penalty, not MISSING.
+        for (city_name, metric), high_stats in list(city_stats.items()):
+            if metric != "high" or (city_name, "low") in city_stats:
+                continue
+            support = _metric_observation_support(conn, city_name, "low")
+            if int(support.get("days") or 0) < 10:
+                continue
+            city_stats[(city_name, "low")] = {
+                **high_stats,
+                "source_role": _SHARED_CITY_ORACLE_SOURCE_ROLE,
+                "temperature_metric": "low",
+                "source_metric": "high",
+                "observation_support_days": int(support["days"]),
+                "observation_last_date": str(support.get("last_date") or ""),
+            }
+
+        # Merge results into existing oracle error rates.
         # S2 R4 P10B: write nested {city: {high: {...}, low: {...}}} shape.
-        # This bridge only measures HIGH track (daily_high snapshots), so only
-        # the "high" subkey is updated here. LOW starts empty and is populated
-        # when LOW oracle snapshot infrastructure is added (future phase).
+        # Canonical observation evidence is metric-specific and covers both
+        # HIGH and LOW; shadow snapshots remain HIGH-only fallback evidence.
         from src.strategy.oracle_penalty import summarize_oracle_posterior
 
-        for city_name, snap_stats in city_stats.items():
+        for (city_name, metric), snap_stats in city_stats.items():
             if city_name not in existing:
                 existing[city_name] = {}
 
@@ -504,11 +594,11 @@ def bridge(dry_run: bool = False) -> dict:
                     "snapshot_data": legacy_snap_data,
                 }
 
-            # Ensure "high" subkey exists
-            if "high" not in city_entry:
-                city_entry["high"] = {}
+            # Ensure metric subkey exists.
+            if metric not in city_entry:
+                city_entry[metric] = {}
 
-            city_entry["high"]["snapshot_data"] = snap_stats
+            city_entry[metric]["snapshot_data"] = snap_stats
 
             # PLAN.md §A3: write raw counts at the top level so the reader
             # can compute the Beta-binomial posterior. Pre-A3 the bridge
@@ -520,9 +610,9 @@ def bridge(dry_run: bool = False) -> dict:
             # run.
             n = int(snap_stats["snapshot_comparisons"])
             m = int(snap_stats["snapshot_mismatch"])
-            city_entry["high"]["n"] = n
-            city_entry["high"]["mismatches"] = m
-            city_entry["high"]["last_observed_date"] = (
+            city_entry[metric]["n"] = n
+            city_entry[metric]["mismatches"] = m
+            city_entry[metric]["last_observed_date"] = (
                 max(snap_stats["snapshot_dates"]) if snap_stats.get("snapshot_dates") else None
             )
 
@@ -531,17 +621,17 @@ def bridge(dry_run: bool = False) -> dict:
             # raw rate when triaging. ``error_rate = m/n`` is the maximum-
             # likelihood estimate; the posterior_mean lives in the reader.
             snap_rate = snap_stats["snapshot_error_rate"]
-            city_entry["high"]["oracle_error_rate"] = round(snap_rate, 4)
+            city_entry[metric]["oracle_error_rate"] = round(snap_rate, 4)
             posterior = summarize_oracle_posterior(
                 n=n,
                 mismatches=m,
-                metric="high",
+                metric=metric,
                 source_role=snap_stats.get("source_role", "oracle_shadow_snapshot"),
-                last_date=city_entry["high"]["last_observed_date"] or "",
+                last_date=city_entry[metric]["last_observed_date"] or "",
                 city=city_name,
             )
-            city_entry["high"].update({
-                "metric": "high",
+            city_entry[metric].update({
+                "metric": metric,
                 "source_role": posterior.source_role,
                 "posterior_mean": round(posterior.posterior_mean, 6),
                 "posterior_upper_95": round(posterior.posterior_upper_95, 6),
@@ -555,11 +645,18 @@ def bridge(dry_run: bool = False) -> dict:
             # `get_oracle_info` call — operators changing thresholds in code
             # should NOT need a bridge re-run. We still emit a status hint
             # for human readability of the JSON dump.
-            city_entry["high"]["status_hint"] = posterior.status.value
+            city_entry[metric]["status_hint"] = posterior.status.value
             # Drop the old top-level "status" field; the reader's classify()
             # is the authority. Keep a one-cycle compat shim so anything
             # ad-hoc reading the JSON doesn't crash on missing key.
-            city_entry["high"]["status"] = city_entry["high"]["status_hint"]
+            city_entry[metric]["status"] = city_entry[metric]["status_hint"]
+            for support_key in (
+                "source_metric",
+                "observation_support_days",
+                "observation_last_date",
+            ):
+                if support_key in snap_stats:
+                    city_entry[metric][support_key] = snap_stats[support_key]
 
         if not dry_run:
             # Atomic write + heartbeat (PLAN.md §A2 + D-10). The previous

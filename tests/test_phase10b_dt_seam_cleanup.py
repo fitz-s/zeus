@@ -131,11 +131,9 @@ class TestRCMOraclePenaltyCityMetricKeying:
     def test_r_cm_1_high_seed_does_not_contaminate_low(self, tmp_path, monkeypatch):
         """R-CM.1: HIGH penalty entry is isolated from LOW.
 
-        Post-A3 (PLAN.md §A3 + Bug review Finding C): LOW always returns
-        METRIC_UNSUPPORTED until a LOW snapshot bridge ships. The seam-
-        isolation property still holds — reading HIGH does not affect
-        what LOW reports — but the LOW status is METRIC_UNSUPPORTED, not
-        the legacy default-OK.
+        Post 2026-05-21 live repair: LOW is no longer a permanent metric ban.
+        The seam-isolation property still holds — reading HIGH does not affect
+        what LOW reports — but absent LOW evidence is MISSING, not silent OK.
         """
         import src.strategy.oracle_penalty as op
         op._reset_for_test()
@@ -157,23 +155,16 @@ class TestRCMOraclePenaltyCityMetricKeying:
         assert info_high.status.value == "BLACKLIST", (
             "chicago HIGH should be BLACKLIST (n=25 m=10 → posterior_upper_95 > 0.10)"
         )
-        # Post-A3 (PLAN.md §A3 + Bug review Finding C): LOW always returns
-        # METRIC_UNSUPPORTED until a LOW oracle bridge ships. Seam isolation
-        # is preserved (HIGH=BLACKLIST does not flip LOW), but the LOW
-        # status reflects the missing-bridge reality, not silent OK.
-        assert info_low.status.value == "METRIC_UNSUPPORTED", (
-            "chicago LOW must be METRIC_UNSUPPORTED until LOW oracle bridge ships"
+        assert info_low.status.value == "MISSING", (
+            "chicago LOW has no low record, so it must be MISSING rather than inheriting HIGH"
         )
-        assert info_low.penalty_multiplier == 0.0
+        assert info_low.penalty_multiplier == 0.5
 
     def test_r_cm_2_invalidating_high_does_not_evict_low(self, tmp_path, monkeypatch):
         """R-CM.2: (city, 'high') and (city, 'low') are independent cache keys.
 
-        Post-A3: LOW is METRIC_UNSUPPORTED regardless of cache contents
-        (computed at get_oracle_info time, not at load). The seam-
-        isolation property is now stronger — even if the cache is
-        fully populated for both metrics, LOW never inherits HIGH's
-        status.
+        LOW uses its own cache key. If the low record is populated it should
+        classify independently; invalidating HIGH must not evict LOW.
         """
         import src.strategy.oracle_penalty as op
         op._reset_for_test()
@@ -184,25 +175,28 @@ class TestRCMOraclePenaltyCityMetricKeying:
         json_path.write_text(json.dumps({
             "london": {
                 "high": {"n": 100, "mismatches": 4},  # CAUTION (p95 ~ 0.090)
-                "low": {"n": 100, "mismatches": 0},   # would be OK if not METRIC_UNSUPPORTED
+                "low": {
+                    "n": 100,
+                    "mismatches": 0,
+                    "source_role": "canonical_observation_instants_v2",
+                },
             }
         }))
         monkeypatch.setenv("ZEUS_STORAGE_ROOT", str(tmp_path))
 
-        # Load both. LOW gets METRIC_UNSUPPORTED short-circuit.
         info_high = op.get_oracle_info("london", "high")
         info_low_first = op.get_oracle_info("london", "low")
 
         assert info_high.status.value == "CAUTION"
-        assert info_low_first.status.value == "METRIC_UNSUPPORTED"
+        assert info_low_first.status.value == "OK"
 
         # Simulate "invalidating" HIGH by deleting from raw cache.
         if op._cache is not None:
             op._cache.pop(("london", "high"), None)
 
-        # LOW must still report METRIC_UNSUPPORTED — independent of HIGH cache.
+        # LOW must still report OK — independent of HIGH cache.
         info_low_after = op.get_oracle_info("london", "low")
-        assert info_low_after.status.value == "METRIC_UNSUPPORTED", (
+        assert info_low_after.status.value == "OK", (
             "Evicting (london, high) must not affect what LOW reports"
         )
 

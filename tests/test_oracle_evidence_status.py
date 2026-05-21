@@ -15,9 +15,9 @@ These tests pin the contract that A3 ships:
   upper-95 at N=12 m=0 is ~0.21 — wide. The right call is
   INSUFFICIENT_SAMPLE, not OK (Bug review Finding B).
 
-- LOW track is METRIC_UNSUPPORTED until a LOW snapshot bridge ships
-  (PLAN.md D-3 + Bug review Finding C). Bridge today only measures
-  ``temperature_metric='high'``.
+- LOW track uses its own evidence record once the bridge writes canonical
+  low observations. Missing low evidence is MISSING, not inherited HIGH and
+  not a permanent metric-level ban.
 
 - Malformed JSON degrades the reader to MALFORMED with carry-over of
   the last good multiplier × 0.7 — never raises (PR #40 removed the
@@ -104,26 +104,33 @@ def test_OK2_unknown_city_in_existing_file_yields_missing(tmp_path):
     assert info.penalty_multiplier == 0.5
 
 
-def test_OK3_low_metric_is_metric_unsupported_with_zero_multiplier(tmp_path):
-    """Bug review Finding C + PLAN.md D-3: LOW track has no oracle
-    snapshot bridge today. Returns METRIC_UNSUPPORTED with mult=0
-    (no live entries on LOW).
+def test_OK3_low_metric_uses_metric_specific_oracle_record(tmp_path):
+    """LOW is an evidence-bearing metric once the bridge writes low records.
+
+    Missing low evidence must remain MISSING, but a populated low record must
+    not be discarded as METRIC_UNSUPPORTED. This protects the live seam where
+    normal low candidates were structurally zeroed despite canonical data.
     """
-    # Even with a fully populated oracle file for the city, LOW must
-    # fail the metric gate.
     _write_oracle(
         tmp_path,
         {
             "NYC": {
                 "high": {"n": 100, "mismatches": 0},
-                "low": {"n": 100, "mismatches": 0},  # bridge would never write this today
+                "low": {
+                    "n": 100,
+                    "mismatches": 0,
+                    "source_role": "canonical_observation_instants_v2",
+                },
             }
         },
     )
     info = oracle_penalty.get_oracle_info("NYC", "low")
-    assert info.status == OracleStatus.METRIC_UNSUPPORTED
-    assert info.penalty_multiplier == 0.0
-    assert info.block_reason and "LOW oracle bridge" in info.block_reason
+    assert info.status == OracleStatus.OK
+    assert info.penalty_multiplier == 1.0
+
+    missing = oracle_penalty.get_oracle_info("Unknown_City", "low")
+    assert missing.status == OracleStatus.MISSING
+    assert missing.penalty_multiplier == 0.5
 
 
 def test_OK4_malformed_json_degrades_to_malformed_with_carryover(tmp_path):

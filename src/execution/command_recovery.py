@@ -546,6 +546,21 @@ def _positive_decimal_or_none(value: object) -> Decimal | None:
     return parsed if parsed is not None and parsed > 0 else None
 
 
+def _float_or_none(value: object) -> float | None:
+    parsed = _decimal_or_none(value)
+    return float(parsed) if parsed is not None else None
+
+
+def _position_strategy_key(conn: sqlite3.Connection, position_id: str) -> str | None:
+    if not _table_exists(conn, "position_current"):
+        return None
+    row = conn.execute(
+        "SELECT strategy_key FROM position_current WHERE position_id = ?",
+        (position_id,),
+    ).fetchone()
+    return str(row["strategy_key"] or "") if row and row["strategy_key"] else None
+
+
 def _latest_terminal_order_fact_candidates(conn: sqlite3.Connection) -> list[dict]:
     if not _table_exists(conn, "venue_order_facts"):
         return []
@@ -1575,6 +1590,37 @@ def _entry_recovery_event(
     }
 
 
+def _log_filled_entry_execution_fact(
+    conn: sqlite3.Connection,
+    *,
+    position: SimpleNamespace,
+    candidate: dict,
+) -> None:
+    """Keep recovered position truth and execution_fact on the same fill facts."""
+
+    from src.state.db import log_execution_fact
+
+    position_id = str(position.trade_id)
+    filled_at = str(candidate.get("fill_observed_at") or position.entered_at or _now_iso())
+    posted_at = str(position.order_posted_at or candidate.get("created_at") or filled_at)
+    log_execution_fact(
+        conn,
+        intent_id=f"{position_id}:entry",
+        position_id=position_id,
+        decision_id=str(position.decision_id or "") or None,
+        command_id=str(position.command_id or "") or None,
+        order_role="entry",
+        strategy_key=str(position.strategy_key or "") or None,
+        posted_at=posted_at,
+        filled_at=filled_at,
+        submitted_price=_float_or_none(candidate.get("price")),
+        fill_price=_float_or_none(position.entry_price),
+        shares=_float_or_none(position.shares),
+        venue_status=str(position.fill_states or "FILLED"),
+        terminal_exec_status="filled",
+    )
+
+
 def _append_filled_entry_projection_repair(
     conn: sqlite3.Connection,
     *,
@@ -1606,6 +1652,7 @@ def _append_filled_entry_projection_repair(
     ).fetchone()
     if existing_fill is not None:
         upsert_position_current(conn, projection)
+        _log_filled_entry_execution_fact(conn, position=position, candidate=candidate)
         return
     if _latest_position_sequence(conn, position_id) != 0:
         raise ValueError(
@@ -1643,6 +1690,7 @@ def _append_filled_entry_projection_repair(
         ),
     ]
     append_many_and_project(conn, events, projection)
+    _log_filled_entry_execution_fact(conn, position=position, candidate=candidate)
 
 
 def _append_live_entry_projection_repair(
@@ -1775,6 +1823,26 @@ def _filled_entry_lot_materialization_candidates(conn: sqlite3.Connection) -> li
             SELECT command_id, trade_id, MAX(local_sequence) AS max_sequence
               FROM venue_trade_facts
              GROUP BY command_id, trade_id
+        ),
+        entry_fill AS (
+            SELECT fact.command_id,
+                   COUNT(*) AS fill_fact_count,
+                   SUM(CAST(fact.filled_size AS REAL)) AS filled_size,
+                   SUM(CAST(fact.filled_size AS REAL) * CAST(fact.fill_price AS REAL))
+                       / SUM(CAST(fact.filled_size AS REAL)) AS fill_price,
+                   MAX(fact.observed_at) AS observed_at,
+                   MAX(fact.venue_timestamp) AS venue_timestamp,
+                   GROUP_CONCAT(DISTINCT fact.state) AS fill_states,
+                   MAX(fact.trade_fact_id) AS trade_fact_id
+              FROM venue_trade_facts fact
+              JOIN latest_trade_fact latest
+                ON latest.command_id = fact.command_id
+               AND latest.trade_id = fact.trade_id
+               AND latest.max_sequence = fact.local_sequence
+             WHERE fact.state IN ('MATCHED', 'MINED', 'CONFIRMED')
+               AND CAST(COALESCE(fact.filled_size, '0') AS REAL) > 0
+               AND CAST(COALESCE(fact.fill_price, '0') AS REAL) > 0
+             GROUP BY fact.command_id
         )
         SELECT cmd.command_id,
                cmd.position_id,
@@ -1783,6 +1851,9 @@ def _filled_entry_lot_materialization_candidates(conn: sqlite3.Connection) -> li
                cmd.side,
                cmd.market_id,
                cmd.token_id,
+               cmd.size AS cmd_size,
+               cmd.price AS cmd_price,
+               cmd.created_at AS cmd_created_at,
                fact.trade_fact_id,
                fact.trade_id,
                fact.state AS trade_state,
@@ -1879,7 +1950,164 @@ def _append_filled_entry_position_lot_repair(
             "token_id": str(candidate.get("token_id") or ""),
         },
     )
+    _log_filled_entry_trade_candidate_execution_fact(conn, candidate=candidate)
     return True
+
+
+def _filled_entry_execution_fact_repair_candidates(conn: sqlite3.Connection) -> list[dict]:
+    required = {
+        "venue_commands",
+        "venue_trade_facts",
+        "position_lots",
+        "execution_fact",
+        "trade_decisions",
+    }
+    if not all(_table_exists(conn, table) for table in required):
+        return []
+    rows = conn.execute(
+        """
+        WITH latest_trade_fact AS (
+            SELECT command_id, trade_id, MAX(local_sequence) AS max_sequence
+              FROM venue_trade_facts
+             GROUP BY command_id, trade_id
+        ),
+        entry_fill AS (
+            SELECT fact.command_id,
+                   COUNT(*) AS fill_fact_count,
+                   SUM(CAST(fact.filled_size AS REAL)) AS filled_size,
+                   SUM(CAST(fact.filled_size AS REAL) * CAST(fact.fill_price AS REAL))
+                       / SUM(CAST(fact.filled_size AS REAL)) AS fill_price,
+                   MAX(fact.observed_at) AS observed_at,
+                   MAX(fact.venue_timestamp) AS venue_timestamp,
+                   GROUP_CONCAT(DISTINCT fact.state) AS fill_states,
+                   MAX(fact.trade_fact_id) AS trade_fact_id
+              FROM venue_trade_facts fact
+              JOIN latest_trade_fact latest
+                ON latest.command_id = fact.command_id
+               AND latest.trade_id = fact.trade_id
+               AND latest.max_sequence = fact.local_sequence
+             WHERE fact.state IN ('MATCHED', 'MINED', 'CONFIRMED')
+               AND CAST(COALESCE(fact.filled_size, '0') AS REAL) > 0
+               AND CAST(COALESCE(fact.fill_price, '0') AS REAL) > 0
+             GROUP BY fact.command_id
+        )
+        SELECT cmd.command_id,
+               cmd.position_id,
+               cmd.decision_id,
+               cmd.intent_kind,
+               cmd.side,
+               cmd.market_id,
+               cmd.token_id,
+               cmd.size AS cmd_size,
+               cmd.price AS cmd_price,
+               cmd.created_at AS cmd_created_at,
+               entry_fill.trade_fact_id,
+               NULL AS trade_id,
+               entry_fill.fill_states AS trade_state,
+               entry_fill.filled_size,
+               entry_fill.fill_price,
+               'REST' AS source,
+               entry_fill.observed_at,
+               entry_fill.venue_timestamp,
+               ef.command_id AS ef_command_id,
+               ef.shares AS ef_shares,
+               ef.fill_price AS ef_fill_price,
+               ef.terminal_exec_status AS ef_terminal_exec_status
+          FROM venue_commands cmd
+          JOIN entry_fill
+            ON entry_fill.command_id = cmd.command_id
+          LEFT JOIN execution_fact ef
+            ON ef.intent_id = cmd.position_id || ':entry'
+           AND ef.order_role = 'entry'
+         WHERE cmd.intent_kind = 'ENTRY'
+           AND cmd.side = 'BUY'
+           AND cmd.state = 'FILLED'
+           AND EXISTS (
+               SELECT 1
+                 FROM position_lots lot
+                WHERE lot.source_command_id = cmd.command_id
+                  AND lot.state IN ('OPTIMISTIC_EXPOSURE', 'CONFIRMED_EXPOSURE')
+           )
+           AND EXISTS (
+               SELECT 1
+                 FROM trade_decisions td
+                WHERE td.runtime_trade_id = cmd.position_id
+                   OR CAST(td.trade_id AS TEXT) = cmd.position_id
+                   OR CAST(td.trade_id AS TEXT) = cmd.decision_id
+           )
+           AND (
+               ef.intent_id IS NULL
+               OR COALESCE(ef.command_id, '') != cmd.command_id
+               OR ABS(COALESCE(CAST(ef.shares AS REAL), 0.0) - CAST(entry_fill.filled_size AS REAL)) > 0.000001
+               OR ABS(COALESCE(CAST(ef.fill_price AS REAL), 0.0) - CAST(entry_fill.fill_price AS REAL)) > 0.000001
+               OR COALESCE(ef.terminal_exec_status, '') NOT IN ('filled', 'partial')
+           )
+         ORDER BY entry_fill.observed_at, entry_fill.trade_fact_id
+        """
+    ).fetchall()
+    return [_dict_row(row) for row in rows]
+
+
+def _log_filled_entry_trade_candidate_execution_fact(
+    conn: sqlite3.Connection,
+    *,
+    candidate: dict,
+) -> None:
+    from src.state.db import log_execution_fact
+
+    filled_size = _positive_decimal_or_none(candidate.get("filled_size"))
+    command_size = _positive_decimal_or_none(candidate.get("cmd_size") or candidate.get("size"))
+    terminal_status = (
+        "filled"
+        if filled_size is not None
+        and command_size is not None
+        and filled_size >= command_size
+        else "partial"
+    )
+    position_id = str(candidate.get("position_id") or "")
+    observed_at = str(candidate.get("observed_at") or _now_iso())
+    log_execution_fact(
+        conn,
+        intent_id=f"{position_id}:entry",
+        position_id=position_id,
+        decision_id=str(candidate.get("decision_id") or "") or None,
+        command_id=str(candidate.get("command_id") or "") or None,
+        order_role="entry",
+        strategy_key=_position_strategy_key(conn, position_id),
+        posted_at=str(candidate.get("cmd_created_at") or "") or None,
+        filled_at=observed_at,
+        submitted_price=_float_or_none(candidate.get("cmd_price") or candidate.get("price")),
+        fill_price=_float_or_none(candidate.get("fill_price")),
+        shares=_float_or_none(candidate.get("filled_size")),
+        venue_status="FILLED" if terminal_status == "filled" else "PARTIAL",
+        terminal_exec_status=terminal_status,
+    )
+
+
+def reconcile_filled_entry_execution_fact_repairs(conn: sqlite3.Connection) -> dict:
+    """Repair stale execution_fact rows when filled entry lot truth already exists."""
+
+    summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+    for candidate in _filled_entry_execution_fact_repair_candidates(conn):
+        summary["scanned"] += 1
+        command_id = str(candidate.get("command_id") or "")
+        fact_id = str(candidate.get("trade_fact_id") or "")
+        conn.execute("SAVEPOINT filled_entry_execfact_repair")
+        try:
+            _log_filled_entry_trade_candidate_execution_fact(conn, candidate=candidate)
+            conn.execute("RELEASE SAVEPOINT filled_entry_execfact_repair")
+            summary["advanced"] += 1
+        except Exception as exc:
+            conn.execute("ROLLBACK TO SAVEPOINT filled_entry_execfact_repair")
+            conn.execute("RELEASE SAVEPOINT filled_entry_execfact_repair")
+            logger.error(
+                "recovery: filled entry execution fact repair failed for command %s trade_fact %s: %s",
+                command_id,
+                fact_id,
+                exc,
+            )
+            summary["errors"] += 1
+    return summary
 
 
 def reconcile_filled_entry_position_lot_repairs(conn: sqlite3.Connection) -> dict:
@@ -4677,6 +4905,12 @@ def reconcile_unresolved_commands(
         summary["advanced"] += filled_entry_lot_summary["advanced"]
         summary["stayed"] += filled_entry_lot_summary["stayed"]
         summary["errors"] += filled_entry_lot_summary["errors"]
+
+        filled_entry_execution_fact_summary = reconcile_filled_entry_execution_fact_repairs(conn)
+        summary["filled_entry_execution_fact_repair"] = filled_entry_execution_fact_summary
+        summary["advanced"] += filled_entry_execution_fact_summary["advanced"]
+        summary["stayed"] += filled_entry_execution_fact_summary["stayed"]
+        summary["errors"] += filled_entry_execution_fact_summary["errors"]
 
         exit_pending_summary = reconcile_exit_pending_projections(conn)
         summary["exit_pending_projections"] = exit_pending_summary
