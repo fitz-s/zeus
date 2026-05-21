@@ -1097,6 +1097,52 @@ tables:
       fit(UNKNOWN) raises ValueError (Phase 3 R-1 antibody).
       SCHEMA_VERSION 23→24.
 
+  - name: shadow_experiments
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: "db.py:init_schema (daemon boot, SCHEMA_VERSION 25)"
+    pk_col: experiment_id
+    notes: >
+      Phase 6 T2 (2026-05-21): immutable shadow experiment registry. Columns:
+      experiment_id (TEXT PK, SHA-256 of strategy+config+started_at), strategy_id,
+      config_hash, started_at, closed_at, cohort_tag, immutable (INTEGER DEFAULT 1).
+      DDL owner: src/state/schema/phase6_evidence_schema.py.
+      Writer/reader: src/state/shadow_experiment_registry.py, INV-37 (caller-supplied conn).
+      SCHEMA_VERSION 24→25.
+
+  - name: evidence_tier_assignments
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: "db.py:init_schema (daemon boot, SCHEMA_VERSION 25)"
+    pk_col: null
+    notes: >
+      Phase 6 T2 (2026-05-21): tier assignment audit trail for evidence ladder.
+      Columns: strategy_id, tier (INTEGER), assigned_at, rationale, operator_ref,
+      verdict_reason. Index: idx_eta_strategy_assigned (strategy_id, assigned_at DESC).
+      Latest tier = MAX(assigned_at) row. Written by LiveReadinessTribunal on
+      PROMOTE/DEMOTE verdicts; src/analysis/live_readiness_tribunal.py.
+      DDL owner: src/state/schema/phase6_evidence_schema.py. INV-37.
+      SCHEMA_VERSION 24→25.
+
+  - name: regret_decompositions
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: "db.py:init_schema (daemon boot, SCHEMA_VERSION 25)"
+    pk_col: id
+    notes: >
+      Phase 6 T3 (2026-05-21): per-trade 7-component regret decomposition records.
+      Columns: id (AUTOINCREMENT PK), experiment_id (FK→shadow_experiments),
+      decision_event_id, forecast_error_usd, observation_error_usd, quote_error_usd,
+      non_fill_error_usd, fee_error_usd, timing_error_usd,
+      settlement_ambiguity_error_usd, total_regret_usd, computed_at.
+      Sum invariant: 7 components == total_regret_usd within 1e-9.
+      DDL owner: src/state/schema/phase6_evidence_schema.py.
+      Writer: src/analysis/regret_decomposer.write_regret_decomposition(), INV-37.
+      SCHEMA_VERSION 24→25.
+
   - name: db_chunk_boundary_events
     db: world
     schema_class: world_class

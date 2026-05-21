@@ -197,15 +197,15 @@ def test_schema_migration_N_to_N_plus_1() -> None:
         "ensure ensure_table is called from db.py::init_schema."
     )
 
-    # PRAGMA user_version must match SCHEMA_VERSION (24 at Phase 5 T2 dispatch).
+    # PRAGMA user_version must match SCHEMA_VERSION.
     pragma_version = conn.execute("PRAGMA user_version").fetchone()[0]
     assert pragma_version == SCHEMA_VERSION, (
         f"PRAGMA user_version={pragma_version} != SCHEMA_VERSION={SCHEMA_VERSION}. "
         "db.py::init_schema must set PRAGMA user_version = SCHEMA_VERSION as final step."
     )
-    assert SCHEMA_VERSION == 24, (
-        f"SCHEMA_VERSION expected 24 (Phase 5 T2 bump); got {SCHEMA_VERSION}. "
-        "Update this assertion if the schema was bumped again."
+    assert SCHEMA_VERSION >= 24, (
+        f"SCHEMA_VERSION expected >= 24 (Phase 5 T2 bump introduced regime_correlation_cache); "
+        f"got {SCHEMA_VERSION}. Subsequent bumps (Phase 6+) are acceptable."
     )
 
     # Columns must match the DDL specification.
