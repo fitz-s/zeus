@@ -2955,6 +2955,80 @@ def test_reconciliation_size_correction_path_writes_canonical_rows_when_prior_hi
     conn.close()
 
 
+def test_reconciliation_size_correction_uses_canonical_current_to_avoid_repeated_correction_storm():
+    from src.engine.lifecycle_events import (
+        build_chain_size_corrected_canonical_write,
+        build_entry_canonical_write,
+    )
+    from src.state.chain_reconciliation import ChainPosition, reconcile
+    from src.state.db import append_many_and_project, apply_architecture_kernel_schema
+    from src.state.portfolio import PortfolioState
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    apply_architecture_kernel_schema(conn)
+
+    stale_pos = _runtime_position(state="entered", chain_state="unknown")
+    stale_pos.token_id = "tok-1"
+    stale_pos.shares = 20.0
+    entry_events, entry_projection = build_entry_canonical_write(
+        stale_pos,
+        decision_id="dec-1",
+        source_module="src.engine.cycle_runtime",
+    )
+    append_many_and_project(conn, entry_events, entry_projection)
+
+    corrected_pos = _runtime_position(state="entered", chain_state="synced")
+    corrected_pos.token_id = "tok-1"
+    corrected_pos.shares = 22.0
+    corrected_pos.chain_shares = 22.0
+    corrected_pos.chain_verified_at = "2026-04-03T00:20:00Z"
+    corrected_pos.cost_basis_usd = 11.0
+    corrected_pos.size_usd = 11.0
+    corrected_events, corrected_projection = build_chain_size_corrected_canonical_write(
+        corrected_pos,
+        local_shares_before=20.0,
+        sequence_no=4,
+        source_module="src.state.chain_reconciliation",
+    )
+    append_many_and_project(conn, corrected_events, corrected_projection)
+
+    portfolio = PortfolioState(positions=[stale_pos])
+    chain_positions = [
+        ChainPosition(
+            token_id="tok-1",
+            size=22.0,
+            avg_price=0.44,
+            cost=11.0,
+            condition_id="cond-1",
+        )
+    ]
+
+    stats = reconcile(portfolio, chain_positions, conn=conn)
+
+    rows = conn.execute(
+        "SELECT event_type, sequence_no FROM position_events WHERE position_id = 'rt-pos-1' ORDER BY sequence_no"
+    ).fetchall()
+    projection_row = conn.execute(
+        "SELECT phase, shares, cost_basis_usd, size_usd FROM position_current WHERE position_id = 'rt-pos-1'"
+    ).fetchone()
+    assert stats["updated"] == 0
+    assert [(row["event_type"], row["sequence_no"]) for row in rows] == [
+        ("POSITION_OPEN_INTENT", 1),
+        ("ENTRY_ORDER_POSTED", 2),
+        ("ENTRY_ORDER_FILLED", 3),
+        ("CHAIN_SIZE_CORRECTED", 4),
+    ]
+    assert dict(projection_row) == {
+        "phase": "active",
+        "shares": 22.0,
+        "cost_basis_usd": 11.0,
+        "size_usd": 11.0,
+    }
+    assert portfolio.positions[0].shares == 22.0
+    conn.close()
+
+
 @pytest.mark.skip(reason="P9: legacy position_events vocabulary eliminated")
 def test_reconciliation_size_correction_path_preserves_legacy_behavior_on_legacy_db():
     from src.state.chain_reconciliation import ChainPosition, reconcile

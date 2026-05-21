@@ -1847,6 +1847,21 @@ class TestRecoveryResolutionTable:
                 "order_id": "ord-001",
             },
         ]
+        execution = conn.execute(
+            """
+            SELECT command_id, shares, fill_price, venue_status, terminal_exec_status
+              FROM execution_fact
+             WHERE intent_id = 'pos-001:entry'
+            """
+        ).fetchone()
+        assert execution is not None
+        assert dict(execution) == {
+            "command_id": "cmd-001",
+            "shares": 5.0,
+            "fill_price": 0.34,
+            "venue_status": "FILLED",
+            "terminal_exec_status": "filled",
+        }
         second_summary = reconcile_unresolved_commands(conn, mock_client)
         assert second_summary["filled_entry_projection_repair"] == {
             "scanned": 0,
@@ -2196,12 +2211,248 @@ class TestRecoveryResolutionTable:
             "source_trade_fact_id": trade_fact_id,
             "source": "REST",
         }
+        execution = conn.execute(
+            """
+            SELECT command_id, shares, fill_price, venue_status, terminal_exec_status
+              FROM execution_fact
+             WHERE intent_id = 'pos-001:entry'
+            """
+        ).fetchone()
+        assert execution is not None
+        assert dict(execution) == {
+            "command_id": "cmd-001",
+            "shares": 5.0,
+            "fill_price": 0.34,
+            "venue_status": "FILLED",
+            "terminal_exec_status": "filled",
+        }
         second_summary = reconcile_unresolved_commands(conn, mock_client)
         assert second_summary["filled_entry_position_lot_repair"] == {
             "scanned": 0,
             "advanced": 0,
             "stayed": 0,
             "errors": 0,
+        }
+
+    def test_existing_entry_lot_repairs_stale_execution_fact(
+        self,
+        conn,
+        mock_client,
+    ):
+        _insert(conn, size=5.0, price=0.34)
+        _advance_to_acked(conn, venue_order_id="ord-001")
+        _seed_pending_entry_projection(conn)
+        conn.execute(
+            """
+            UPDATE position_current
+               SET phase = 'active',
+                   shares = 5.116278,
+                   cost_basis_usd = 2.2,
+                   entry_price = 0.43,
+                   order_status = 'filled',
+                   updated_at = '2026-04-26T00:06:00Z'
+             WHERE position_id = 'pos-001'
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO trade_decisions (
+                market_id, bin_label, direction, size_usd, price, timestamp,
+                p_raw, p_posterior, edge, ci_lower, ci_upper, kelly_fraction,
+                status, runtime_trade_id
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "condition-test",
+                "Karachi high",
+                "buy_yes",
+                2.2,
+                0.43,
+                "2026-04-26T00:06:00Z",
+                0.6,
+                0.6,
+                0.1,
+                0.05,
+                0.15,
+                0.0,
+                "entered",
+                "pos-001",
+            ),
+        )
+        from src.state.venue_command_repo import append_event
+
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="FILL_CONFIRMED",
+            occurred_at="2026-04-26T00:06:00Z",
+            payload={"venue_order_id": "ord-001", "venue_status": "CONFIRMED"},
+        )
+        _append_trade_fact(
+            conn,
+            state="CONFIRMED",
+            filled_size="5.116278",
+            fill_price="0.429999894454523",
+        )
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        first_summary = reconcile_unresolved_commands(conn, mock_client)
+        assert first_summary["filled_entry_position_lot_repair"]["advanced"] == 1
+        conn.execute(
+            """
+            UPDATE execution_fact
+               SET shares = 5.0,
+                   command_id = NULL,
+                   terminal_exec_status = 'filled',
+                   venue_status = 'matched'
+             WHERE intent_id = 'pos-001:entry'
+            """
+        )
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["filled_entry_execution_fact_repair"] == {
+            "scanned": 1,
+            "advanced": 1,
+            "stayed": 0,
+            "errors": 0,
+        }
+        execution = conn.execute(
+            """
+            SELECT command_id, shares, fill_price, venue_status, terminal_exec_status
+              FROM execution_fact
+             WHERE intent_id = 'pos-001:entry'
+            """
+        ).fetchone()
+        assert dict(execution) == {
+            "command_id": "cmd-001",
+            "shares": 5.116278,
+            "fill_price": 0.429999894454523,
+            "venue_status": "FILLED",
+            "terminal_exec_status": "filled",
+        }
+        second_summary = reconcile_unresolved_commands(conn, mock_client)
+        assert second_summary["filled_entry_execution_fact_repair"] == {
+            "scanned": 0,
+            "advanced": 0,
+            "stayed": 0,
+            "errors": 0,
+        }
+
+    def test_existing_entry_lot_execution_fact_repair_aggregates_split_fills(
+        self,
+        conn,
+        mock_client,
+    ):
+        _insert(conn, size=5.0, price=0.50)
+        _advance_to_acked(conn, venue_order_id="ord-001")
+        _seed_pending_entry_projection(conn)
+        conn.execute(
+            """
+            UPDATE position_current
+               SET phase = 'active',
+                   shares = 5.0,
+                   cost_basis_usd = 2.3,
+                   entry_price = 0.46,
+                   order_status = 'filled',
+                   updated_at = '2026-04-26T00:06:00Z'
+             WHERE position_id = 'pos-001'
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO trade_decisions (
+                market_id, bin_label, direction, size_usd, price, timestamp,
+                p_raw, p_posterior, edge, ci_lower, ci_upper, kelly_fraction,
+                status, runtime_trade_id
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "condition-test",
+                "Karachi high",
+                "buy_yes",
+                2.3,
+                0.46,
+                "2026-04-26T00:06:00Z",
+                0.6,
+                0.6,
+                0.1,
+                0.05,
+                0.15,
+                0.0,
+                "entered",
+                "pos-001",
+            ),
+        )
+        first_fact = _append_trade_fact(
+            conn,
+            state="CONFIRMED",
+            trade_id="trade-split-1",
+            filled_size="2",
+            fill_price="0.40",
+        )
+        second_fact = _append_trade_fact(
+            conn,
+            state="CONFIRMED",
+            trade_id="trade-split-2",
+            filled_size="3",
+            fill_price="0.50",
+        )
+        conn.execute(
+            """
+            UPDATE venue_commands
+               SET state = 'FILLED',
+                   updated_at = '2026-04-26T00:06:00Z'
+             WHERE command_id = 'cmd-001'
+            """
+        )
+        from src.state.venue_command_repo import append_position_lot
+
+        for lot_id, fact_id, shares, price in (
+            (7001, first_fact, "2", "0.40"),
+            (7002, second_fact, "3", "0.50"),
+        ):
+            append_position_lot(
+                conn,
+                position_id=lot_id,
+                state="CONFIRMED_EXPOSURE",
+                shares=shares,
+                entry_price_avg=price,
+                source_command_id="cmd-001",
+                source_trade_fact_id=fact_id,
+                captured_at="2026-04-26T00:06:00Z",
+                state_changed_at="2026-04-26T00:06:00Z",
+                source="REST",
+                observed_at="2026-04-26T00:06:00Z",
+                raw_payload_json={"source": "test_split_fill_lot"},
+            )
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["filled_entry_execution_fact_repair"] == {
+            "scanned": 1,
+            "advanced": 1,
+            "stayed": 0,
+            "errors": 0,
+        }
+        execution = conn.execute(
+            """
+            SELECT command_id, shares, fill_price, venue_status, terminal_exec_status
+              FROM execution_fact
+             WHERE intent_id = 'pos-001:entry'
+            """
+        ).fetchone()
+        assert dict(execution) == {
+            "command_id": "cmd-001",
+            "shares": 5.0,
+            "fill_price": pytest.approx(0.46),
+            "venue_status": "FILLED",
+            "terminal_exec_status": "filled",
         }
 
     def test_acked_exit_order_fact_with_point_order_matched_records_pending_exit(

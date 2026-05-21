@@ -651,7 +651,7 @@ def test_maker_order_trade_links_to_local_command_and_uses_maker_fill_economics(
 
     execution = conn.execute(
         """
-        SELECT filled_at, fill_price, shares, venue_status, terminal_exec_status
+        SELECT filled_at, fill_price, shares, venue_status, terminal_exec_status, command_id
           FROM execution_fact
          WHERE intent_id = 'pos-m5:entry'
         """
@@ -662,6 +662,7 @@ def test_maker_order_trade_links_to_local_command_and_uses_maker_fill_economics(
     assert Decimal(str(execution["shares"])) == Decimal("1.5873")
     assert execution["venue_status"] == "PARTIAL"
     assert execution["terminal_exec_status"] == "partial"
+    assert execution["command_id"] == "cmd-m5"
 
     lot = conn.execute(
         """
@@ -752,7 +753,7 @@ def test_entry_fill_projection_aggregates_multiple_trade_facts(conn):
 
     execution = conn.execute(
         """
-        SELECT fill_price, shares, terminal_exec_status
+        SELECT fill_price, shares, terminal_exec_status, command_id
           FROM execution_fact
          WHERE intent_id = 'pos-m5:entry'
         """
@@ -760,6 +761,7 @@ def test_entry_fill_projection_aggregates_multiple_trade_facts(conn):
     assert Decimal(str(execution["shares"])) == Decimal("7")
     assert Decimal(str(execution["fill_price"])) == Decimal("0.3142857142857143")
     assert execution["terminal_exec_status"] == "partial"
+    assert execution["command_id"] == "cmd-m5"
 
 
 def test_recorded_maker_fill_economic_drift_appends_correction_and_reprojects(conn):
@@ -846,6 +848,20 @@ def test_recorded_maker_fill_economic_drift_appends_correction_and_reprojects(co
     }
     assert Decimal(str(projection["entry_price"])) == Decimal("0.01")
     assert Decimal(str(projection["cost_basis_usd"])) == Decimal("1.00")
+    execution = conn.execute(
+        """
+        SELECT command_id, shares, fill_price, terminal_exec_status
+          FROM execution_fact
+         WHERE intent_id = 'pos-m5:entry'
+        """
+    ).fetchone()
+    assert execution is not None
+    assert dict(execution) == {
+        "command_id": "cmd-m5",
+        "shares": 100.0,
+        "fill_price": 0.01,
+        "terminal_exec_status": "partial",
+    }
 
     lot = conn.execute(
         """

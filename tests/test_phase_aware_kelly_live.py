@@ -354,9 +354,8 @@ def test_resolver_blacklisted_oracle_short_circuits(tmp_path):
     assert mult == 0.0
 
 
-def test_resolver_low_metric_unsupported_returns_zero(tmp_path):
-    """temperature_metric=low → oracle returns METRIC_UNSUPPORTED with
-    penalty_multiplier=0; resolver short-circuits to 0 (PLAN.md D-3)."""
+def test_resolver_low_metric_missing_applies_half_kelly(tmp_path):
+    """temperature_metric=low without a low record uses MISSING evidence."""
     _write_oracle_high(tmp_path, "NYC", n=200, m=0)
     nyc = _City(name="NYC", timezone="America/New_York")
     decision = datetime(2026, 5, 8, 16, 0, 0, tzinfo=timezone.utc)
@@ -369,7 +368,7 @@ def test_resolver_low_metric_unsupported_returns_zero(tmp_path):
         target_local_date=date(2026, 5, 8),
         phase_source="verified_gamma",
     )
-    assert mult == 0.0
+    assert mult == 0.25
 
 
 def test_resolver_missing_oracle_applies_half_kelly(tmp_path):

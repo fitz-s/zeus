@@ -3155,6 +3155,7 @@ def test_day0_transition_emits_durable_lifecycle_event(monkeypatch, tmp_path):
         order_status="filled",
         strategy_key="center_buy",
         bin_label="50-51°F",
+        condition_id="0xday0db100000000000000000000000000000000000000000000000000000001",
     )
     log_trade_entry(conn, pos)
     # Seed canonical entry baseline so the Day0 canonical emission is not
@@ -3243,6 +3244,73 @@ def test_day0_transition_emits_durable_lifecycle_event(monkeypatch, tmp_path):
     assert details.get("phase_after") == "day0_window"
     assert details.get("day0_entered_at") == "2026-04-02T02:00:00+00:00"
     assert day0_event["timestamp"] == "2026-04-02T02:00:00+00:00"
+
+
+def test_day0_canonical_emit_is_idempotent_when_monitor_replays_same_position(tmp_path):
+    """Repeated monitor passes must not re-append DAY0_WINDOW_ENTERED."""
+    from src.contracts import EntryMethod
+    from src.engine import cycle_runtime
+    from src.engine.lifecycle_events import (
+        build_day0_window_entered_canonical_write,
+        build_entry_canonical_write,
+    )
+    from src.state.db import append_many_and_project, get_connection, init_schema
+
+    conn = get_connection(tmp_path / "day0-idempotent.db")
+    init_schema(conn)
+    pos = _make_position(
+        trade_id="day0-idem-1",
+        state="holding",
+        city="Chicago",
+        target_date="2026-04-01",
+        order_id="o-day0-idem",
+        entry_order_id="o-day0-idem",
+        entry_fill_verified=True,
+        entered_at="2026-04-01T04:00:00Z",
+        order_status="filled",
+        strategy_key="center_buy",
+        bin_label="50-51°F",
+        selected_method=EntryMethod.ENS_MEMBER_COUNTING,
+        condition_id="0xday0idem00000000000000000000000000000000000000000000000000000001",
+    )
+    entry_events, entry_projection = build_entry_canonical_write(
+        pos,
+        decision_id="decision-day0-idem-seed",
+        source_module="tests/test_day0_canonical_emit_is_idempotent",
+    )
+    append_many_and_project(conn, entry_events, entry_projection)
+    pos.state = "day0_window"
+    pos.day0_entered_at = "2026-04-02T02:00:00+00:00"
+    day0_events, day0_projection = build_day0_window_entered_canonical_write(
+        pos,
+        day0_entered_at="2026-04-02T02:00:00+00:00",
+        sequence_no=4,
+        previous_phase="active",
+        source_module="tests/test_day0_canonical_emit_is_idempotent",
+    )
+    append_many_and_project(conn, day0_events, day0_projection)
+
+    deps = type(
+        "Deps",
+        (),
+        {"logger": logging.getLogger("test_day0_idempotent")},
+    )
+
+    assert cycle_runtime._emit_day0_window_entered_canonical_if_available(
+        conn,
+        pos,
+        day0_entered_at="2026-04-02T02:10:00+00:00",
+        previous_phase="active",
+        deps=deps,
+    ) is False
+    assert (
+        conn.execute(
+            "SELECT COUNT(*) FROM position_events WHERE position_id = ? AND event_type = 'DAY0_WINDOW_ENTERED'",
+            ("day0-idem-1",),
+        ).fetchone()[0]
+        == 1
+    )
+    conn.close()
 
 
 def test_same_cycle_day0_crossing_refreshes_through_day0_semantics(monkeypatch):

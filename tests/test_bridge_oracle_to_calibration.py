@@ -39,7 +39,19 @@ def mock_db(tmp_path):
             authority TEXT,
             temp_current REAL,
             running_max REAL,
+            running_min REAL,
             temp_unit TEXT
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE observations (
+            city TEXT,
+            target_date TEXT,
+            source TEXT,
+            high_temp REAL,
+            low_temp REAL,
+            unit TEXT,
+            authority TEXT
         )
     """)
     conn.commit()
@@ -76,8 +88,8 @@ def _insert_verified_hours(conn, city, target_date, source, count=22):
         conn.execute(
             """
             INSERT INTO world.observation_instants_v2
-                (city, target_date, source, utc_timestamp, authority, temp_current, running_max, temp_unit)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                (city, target_date, source, utc_timestamp, authority, temp_current, running_max, running_min, temp_unit)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 city,
@@ -87,6 +99,7 @@ def _insert_verified_hours(conn, city, target_date, source, count=22):
                 "VERIFIED",
                 70.0,
                 75.0,
+                70.0,
                 "F",
             ),
         )
@@ -98,8 +111,8 @@ def _insert_verified_high_hours(conn, city, target_date, source, high, *, unit="
         conn.execute(
             """
             INSERT INTO world.observation_instants_v2
-                (city, target_date, source, utc_timestamp, authority, temp_current, running_max, temp_unit)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                (city, target_date, source, utc_timestamp, authority, temp_current, running_max, running_min, temp_unit)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 city,
@@ -107,6 +120,30 @@ def _insert_verified_high_hours(conn, city, target_date, source, high, *, unit="
                 source,
                 f"{target_date}T{i:02d}:00:00Z",
                 "VERIFIED",
+                value,
+                value,
+                None,
+                unit,
+            ),
+        )
+
+
+def _insert_verified_low_hours(conn, city, target_date, source, low, *, unit="F", count=22):
+    for i in range(count):
+        value = float(low) if i == 0 else float(low) + 3.0
+        conn.execute(
+            """
+            INSERT INTO world.observation_instants_v2
+                (city, target_date, source, utc_timestamp, authority, temp_current, running_max, running_min, temp_unit)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                city,
+                target_date,
+                source,
+                f"{target_date}T{i:02d}:00:00Z",
+                "VERIFIED",
+                value,
                 value,
                 value,
                 unit,
@@ -249,7 +286,7 @@ def test_bridge_keeps_hko_oracle_truncate_for_celsius_snapshots(
         INSERT INTO settlements
             (city, target_date, settlement_value, pm_bin_lo, pm_bin_hi,
              settlement_source_type, unit, authority, temperature_metric)
-        VALUES (?, ?, 28.0, 28.0, 28.0, 'hko', 'C', 'VERIFIED', 'high')
+        VALUES (?, ?, 28.0, 28.0, 28.0, 'HKO', 'C', 'VERIFIED', 'high')
         """,
         (city, target_date),
     )
@@ -365,3 +402,163 @@ def test_bridge_uses_verified_settlement_value_when_legacy_bin_units_drift(
     high = artifact[city]["high"]
     assert high["n"] == 1
     assert high["mismatches"] == 0
+
+
+@patch("scripts.bridge_oracle_to_calibration.get_forecasts_connection_with_world")
+def test_bridge_writes_low_metric_from_canonical_observation_history(
+    mock_helper, mock_db, monkeypatch, tmp_path
+):
+    """Relationship: LOW canonical evidence must not collapse to metric-unsupported.
+
+    Settlements and observation_instants_v2 carry enough low-track truth for
+    normal cities. The bridge must write a low metric record so the evaluator
+    sees penalty/no-penalty evidence rather than a structural zero multiplier.
+    """
+    db_path, conn = mock_db
+    monkeypatch.setenv("ZEUS_STORAGE_ROOT", str(tmp_path))
+
+    @contextmanager
+    def fake_ctx(*args, **kwargs):
+        yield conn
+
+    mock_helper.side_effect = fake_ctx
+
+    city = "London"
+    for day in range(1, 61):
+        target_date = f"2026-04-{day:02d}" if day <= 30 else f"2026-05-{day - 30:02d}"
+        conn.execute(
+            """
+            INSERT INTO settlements
+                (city, target_date, settlement_value, pm_bin_lo, pm_bin_hi,
+                 settlement_source_type, unit, authority, temperature_metric)
+            VALUES (?, ?, 9.0, 9.0, 9.0, 'wu_icao', 'C', 'VERIFIED', 'low')
+            """,
+            (city, target_date),
+        )
+        _insert_verified_low_hours(conn, city, target_date, "wu_icao_history", 9.0, unit="C")
+    conn.commit()
+
+    stats = bridge(dry_run=False)
+
+    assert stats == {"cities": 1, "comparisons": 60, "mismatches": 0}
+    artifact = json.loads((tmp_path / "data" / "oracle_error_rates.json").read_text())
+    low = artifact[city]["low"]
+    assert low["metric"] == "low"
+    assert low["n"] == 60
+    assert low["mismatches"] == 0
+    assert low["source_role"] == "canonical_observation_instants_v2"
+    assert low["status"] == "OK"
+    assert low["penalty_multiplier"] == 1.0
+
+    from src.strategy.oracle_penalty import get_oracle_info, reload
+    from src.strategy.oracle_status import OracleStatus
+
+    reload()
+    info = get_oracle_info(city, "low")
+    assert info.status == OracleStatus.OK
+    assert info.penalty_multiplier == 1.0
+
+
+@patch("scripts.bridge_oracle_to_calibration.get_forecasts_connection_with_world")
+def test_bridge_writes_low_proxy_when_low_observations_exist_but_low_settlements_are_sparse(
+    mock_helper, mock_db, monkeypatch, tmp_path
+):
+    """Relationship: LOW coverage plus city oracle evidence is not MISSING.
+
+    Low markets can have sparse settlement history while the hourly observation
+    store already has verified LOW support. In that case the bridge carries the
+    city/source oracle verdict across metrics instead of injecting a MISSING
+    penalty into every normal LOW candidate.
+    """
+    db_path, conn = mock_db
+    monkeypatch.setenv("ZEUS_STORAGE_ROOT", str(tmp_path))
+
+    @contextmanager
+    def fake_ctx(*args, **kwargs):
+        yield conn
+
+    mock_helper.side_effect = fake_ctx
+
+    city = "Chicago"
+    for day in range(1, 61):
+        target_date = f"2026-04-{day:02d}" if day <= 30 else f"2026-05-{day - 30:02d}"
+        conn.execute(
+            """
+            INSERT INTO settlements
+                (city, target_date, settlement_value, pm_bin_lo, pm_bin_hi,
+                 settlement_source_type, unit, authority, temperature_metric)
+            VALUES (?, ?, 75.0, 75.0, 75.0, 'wu_icao', 'F', 'VERIFIED', 'high')
+            """,
+            (city, target_date),
+        )
+        _insert_verified_high_hours(conn, city, target_date, "wu_icao_history", 75.0)
+        _insert_verified_low_hours(conn, city, target_date, "wu_icao_history", 55.0)
+    conn.commit()
+
+    stats = bridge(dry_run=False)
+
+    assert stats == {"cities": 2, "comparisons": 120, "mismatches": 0}
+    artifact = json.loads((tmp_path / "data" / "oracle_error_rates.json").read_text())
+    low = artifact[city]["low"]
+    assert low["metric"] == "low"
+    assert low["n"] == 60
+    assert low["mismatches"] == 0
+    assert low["source_role"] == "shared_city_oracle_source_proxy"
+    assert low["source_metric"] == "high"
+    assert low["observation_support_days"] == 60
+    assert low["status"] == "OK"
+    assert low["penalty_multiplier"] == 1.0
+
+
+@patch("scripts.bridge_oracle_to_calibration.get_forecasts_connection_with_world")
+def test_bridge_uses_verified_daily_observations_when_hourly_metric_table_is_empty(
+    mock_helper, mock_db, monkeypatch, tmp_path
+):
+    """Relationship: daily canonical observations are valid oracle evidence."""
+    db_path, conn = mock_db
+    monkeypatch.setenv("ZEUS_STORAGE_ROOT", str(tmp_path))
+
+    @contextmanager
+    def fake_ctx(*args, **kwargs):
+        yield conn
+
+    mock_helper.side_effect = fake_ctx
+
+    city = "Hong Kong"
+    for day in range(1, 31):
+        target_date = f"2026-04-{day:02d}"
+        conn.execute(
+            """
+            INSERT INTO settlements
+                (city, target_date, settlement_value, pm_bin_lo, pm_bin_hi,
+                 settlement_source_type, unit, authority, temperature_metric)
+            VALUES (?, ?, 28.0, 28.0, 28.0, 'HKO', 'C', 'VERIFIED', 'high')
+            """,
+            (city, target_date),
+        )
+        conn.execute(
+            """
+            INSERT INTO settlements
+                (city, target_date, settlement_value, pm_bin_lo, pm_bin_hi,
+                 settlement_source_type, unit, authority, temperature_metric)
+            VALUES (?, ?, 22.0, 22.0, 22.0, 'HKO', 'C', 'VERIFIED', 'low')
+            """,
+            (city, target_date),
+        )
+        conn.execute(
+            """
+            INSERT INTO observations
+                (city, target_date, source, high_temp, low_temp, unit, authority)
+            VALUES (?, ?, 'hko_daily_api', 28.7, 22.9, 'C', 'VERIFIED')
+            """,
+            (city, target_date),
+        )
+    conn.commit()
+
+    stats = bridge(dry_run=False)
+
+    assert stats == {"cities": 2, "comparisons": 60, "mismatches": 0}
+    artifact = json.loads((tmp_path / "data" / "oracle_error_rates.json").read_text())
+    assert artifact[city]["high"]["status"] == "OK"
+    assert artifact[city]["low"]["status"] == "OK"
+    assert artifact[city]["low"]["source_role"] == "canonical_observation_instants_v2"

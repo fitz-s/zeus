@@ -2271,6 +2271,7 @@ def _apply_entry_fill_projection_and_execution_fact(
             intent_id=f"{position_id}:entry",
             position_id=position_id,
             decision_id=str(command.get("decision_id") or "") or None,
+            command_id=str(command.get("command_id") or "") or None,
             order_role="entry",
             strategy_key=str(getattr(position, "strategy_key", "") or "") or None,
             posted_at=(

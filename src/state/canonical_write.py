@@ -134,11 +134,19 @@ def transition_phase(
         from src.state.db import append_many_and_project
         from src.state.lifecycle_manager import (
             fold_lifecycle_phase,
+            is_terminal_state,
             phase_for_runtime_position,
         )
 
         trade_id = str(getattr(position, "trade_id", "") or "")
         if not trade_id:
+            return False
+        current_row = conn.execute(
+            "SELECT phase FROM position_current WHERE position_id = ?",
+            (trade_id,),
+        ).fetchone()
+        current_phase = str(current_row[0] or "").strip().lower() if current_row is not None else ""
+        if is_terminal_state(current_phase) or current_phase == "economically_closed":
             return False
         sequence_no_row = conn.execute(
             "SELECT COALESCE(MAX(sequence_no), 0) FROM position_events WHERE position_id = ?",

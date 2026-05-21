@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import ast
 import inspect
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -230,6 +231,82 @@ def test_dual_write_shim_routes_to_transition_phase():
         "actual Call node targeting transition_phase; if a parallel writer "
         "is reintroduced the K decision regresses"
     )
+
+
+def test_transition_phase_is_noop_when_position_is_already_economically_closed():
+    """A closed position must not re-enter pending_exit on retry/replay."""
+    from src.engine.lifecycle_events import build_entry_canonical_write
+    from src.state.canonical_write import transition_phase
+    from src.state.db import append_many_and_project, apply_architecture_kernel_schema
+    from src.state.lifecycle_manager import LifecyclePhase
+    from src.state.portfolio import Position
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    apply_architecture_kernel_schema(conn)
+    pos = Position(
+        trade_id="closed-retry-1",
+        market_id="mkt-closed-1",
+        city="Chicago",
+        cluster="Great Lakes",
+        target_date="2026-05-21",
+        bin_label="50-51°F",
+        direction="buy_yes",
+        unit="F",
+        shares=10.0,
+        cost_basis_usd=5.0,
+        entry_price=0.5,
+        p_posterior=0.7,
+        state="entered",
+        strategy_key="center_buy",
+        token_id="tok-closed-1",
+        temperature_metric="high",
+        condition_id="0xclosedretry000000000000000000000000000000000000000000000000000001",
+        entered_at="2026-05-21T00:00:00+00:00",
+        order_posted_at="2026-05-21T00:00:00+00:00",
+        env="live",
+    )
+    entry_events, entry_projection = build_entry_canonical_write(
+        pos,
+        decision_id="dec-closed-1",
+        source_module="tests/state/test_transition_phase_invariant.py",
+    )
+    append_many_and_project(conn, entry_events, entry_projection)
+    conn.execute(
+        """
+        UPDATE position_current
+           SET phase = ?, updated_at = '2026-05-21T00:00:00+00:00'
+         WHERE position_id = ?
+        """,
+        (LifecyclePhase.ECONOMICALLY_CLOSED.value, pos.trade_id),
+    )
+
+    pos.pre_exit_state = "holding"
+    pos.exit_state = "retry_pending"
+    assert transition_phase(
+        conn,
+        pos,
+        event_type="EXIT_ORDER_REJECTED",
+        reason="retry_after_close",
+        error="should-not-write",
+        source_module="tests/state/test_transition_phase_invariant.py",
+    ) is False
+
+    assert (
+        conn.execute(
+            "SELECT phase FROM position_current WHERE position_id = ?",
+            (pos.trade_id,),
+        ).fetchone()[0]
+        == LifecyclePhase.ECONOMICALLY_CLOSED.value
+    )
+    assert (
+        conn.execute(
+            "SELECT COUNT(*) FROM position_events WHERE position_id = ? AND event_type = 'EXIT_ORDER_REJECTED'",
+            (pos.trade_id,),
+        ).fetchone()[0]
+        == 0
+    )
+    conn.close()
 
 
 # ---------------------------------------------------------------------------

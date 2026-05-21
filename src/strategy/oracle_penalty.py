@@ -34,11 +34,11 @@ Classification (computed at ``get_oracle_info`` time, not at load):
 
 Other statuses set by load/reload paths:
 
-    metric == "low"                        → METRIC_UNSUPPORTED (mult 0.0)
     JSON parse error during reload         → MALFORMED          (mult prev × 0.7)
 
-LOW track is METRIC_UNSUPPORTED until a LOW oracle snapshot bridge ships
-(PLAN.md D-3) — bridge today only measures ``temperature_metric='high'``.
+LOW track is evidence-bearing when the bridge writes a ``low`` record from
+canonical observation_instants_v2 + settlements. A missing low record remains
+MISSING, but LOW is not a permanent metric-level ban.
 
 Reload error handling
 ---------------------
@@ -81,6 +81,7 @@ from src.strategy.oracle_status import OracleStatus
 logger = logging.getLogger(__name__)
 
 CANONICAL_OBSERVATION_SOURCE_ROLE = "canonical_observation_instants_v2"
+SHARED_CITY_ORACLE_SOURCE_ROLE = "shared_city_oracle_source_proxy"
 
 # Re-export for callers that imported from oracle_penalty pre-A3
 # (e.g. ``from src.strategy.oracle_penalty import OracleStatus``).
@@ -159,13 +160,17 @@ def _classify_oracle_evidence(
     city with enough comparisons and zero mismatches is not "missing" or
     "insufficient"; it is normal operation with no penalty.
     """
+    evidence_bearing_source = source_role in {
+        CANONICAL_OBSERVATION_SOURCE_ROLE,
+        SHARED_CITY_ORACLE_SOURCE_ROLE,
+    }
     if (
-        source_role == CANONICAL_OBSERVATION_SOURCE_ROLE
+        evidence_bearing_source
         and artifact_age_hours is not None
         and artifact_age_hours > 24 * 7
     ):
         return OracleStatus.STALE
-    if source_role == CANONICAL_OBSERVATION_SOURCE_ROLE and n >= 10 and mismatches == 0:
+    if evidence_bearing_source and n >= 10 and mismatches == 0:
         return OracleStatus.OK
     return _estimator_classify(mismatches, n, artifact_age_hours=artifact_age_hours)
 
@@ -495,25 +500,14 @@ def get_oracle_info(city_name: str, temperature_metric: str = "high") -> OracleI
 
     Order of resolution:
 
-    1. ``temperature_metric == "low"``  → METRIC_UNSUPPORTED (mult 0)
-       (PLAN.md D-3: bridge measures HIGH only; LOW oracle bridge is its
-       own future PR.)
-    2. Cache empty / load failed         → MISSING (mult 0.5) or MALFORMED
+    1. Cache empty / load failed         → MISSING (mult 0.5) or MALFORMED
                                            depending on global cache state.
-    3. (city, metric) absent from cache  → MISSING (mult 0.5)
-    4. Otherwise classify via ``oracle_estimator`` and return full record.
+    2. (city, metric) absent from cache  → MISSING (mult 0.5)
+    3. Otherwise classify via ``oracle_estimator`` and return full record.
     """
     global _cache
     if _cache is None:
         reload()
-
-    if temperature_metric == "low":
-        return _empty_info(
-            city_name,
-            temperature_metric,
-            status=OracleStatus.METRIC_UNSUPPORTED,
-            block_reason="LOW oracle bridge not yet shipped (PLAN.md D-3)",
-        )
 
     if _cache_status == OracleStatus.MALFORMED:
         return _empty_info(

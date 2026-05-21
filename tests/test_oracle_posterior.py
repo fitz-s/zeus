@@ -1,8 +1,8 @@
 # Created: 2026-05-04
-# Last reused/audited: 2026-05-04
-# Authority basis: may4math F3 oracle beta-binomial posterior
-# Lifecycle: created=2026-05-04; last_reviewed=2026-05-04; last_reused=2026-05-04
-# Purpose: Protect beta-binomial oracle posterior policy for missing, low-N, unsupported, and blacklist cases.
+# Last reused/audited: 2026-05-21
+# Authority basis: may4math F3 oracle beta-binomial posterior; 2026-05-21 live oracle-penalty P0 canonical low evidence repair.
+# Lifecycle: created=2026-05-04; last_reviewed=2026-05-21; last_reused=2026-05-21
+# Purpose: Protect beta-binomial oracle posterior policy for missing, low-N, metric-specific evidence, and blacklist cases.
 # Reuse: Confirm oracle_penalty posterior thresholds before changing Kelly or DDD oracle uncertainty semantics.
 """Oracle posterior policy tests."""
 
@@ -55,12 +55,12 @@ def test_missing_artifact_is_not_ok(monkeypatch, tmp_path) -> None:
     assert info.penalty_multiplier < 1.0
 
 
-def test_low_track_without_low_measurement_is_metric_unsupported(monkeypatch, tmp_path) -> None:
+def test_low_track_without_low_measurement_is_missing(monkeypatch, tmp_path) -> None:
     path = _redirect_storage(monkeypatch, tmp_path)
     path.write_text(json.dumps({"Tokyo": {"high": {"n": 200, "mismatches": 0}}}))
     oracle_penalty._reset_for_test()
 
     info = oracle_penalty.get_oracle_info("Tokyo", "low")
 
-    assert info.status == oracle_penalty.OracleStatus.METRIC_UNSUPPORTED
+    assert info.status == oracle_penalty.OracleStatus.MISSING
     assert info.penalty_multiplier < 1.0
