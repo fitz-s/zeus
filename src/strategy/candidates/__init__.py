@@ -82,13 +82,15 @@ class CandidateDecision:
     """Discriminated result of BaseStrategyCandidate.evaluate().
 
     outcome="enter": candidate recommends entering a position.
-      Required fields: side, target_price, target_size_usd, edge, p_posterior.
-      Caller writes decision_events row via canonical writer using strategy_key
-      from the originating candidate's metadata.
+      Required field (enforced): side.
+      Optional fields for shadow candidates: target_price, target_size_usd, edge,
+      p_posterior. Shadow candidates do not have live sizing; these may be None.
+      Live-promoted candidates must populate all sizing fields before writing
+      through the canonical write_decision_event path.
 
     outcome="no_trade": candidate recommends not trading.
-      Required fields: reason (NoTradeReason), reason_detail.
-      Caller writes no_trade_events row via canonical writer.
+      Required field (enforced): reason (NoTradeReason).
+      Optional: reason_detail (human-readable context).
 
     Neither variant is None. A candidate that has no opinion emits no_trade
     with an appropriate reason rather than returning None or raising.
@@ -124,6 +126,21 @@ class CandidateDecision:
             raise ValueError(f"CandidateDecision.outcome must be 'enter' or 'no_trade'; got {self.outcome!r}")
 
 
+def _is_world_db_conn(conn: sqlite3.Connection) -> bool:
+    """Return True when *conn* targets zeus-world.db (not an in-memory DB).
+
+    Detected via PRAGMA database_list: the 'main' database file path ends with
+    'zeus-world.db'. In-memory connections return an empty string for the path.
+    """
+    from src.state.db import ZEUS_WORLD_DB_PATH
+    rows = conn.execute("PRAGMA database_list").fetchall()
+    for _seq, _name, path in rows:
+        if _name == "main" and path:
+            from pathlib import Path
+            return Path(path).resolve() == Path(ZEUS_WORLD_DB_PATH).resolve()
+    return False
+
+
 def write_candidate_no_trade_row(
     conn: sqlite3.Connection,
     context: "CandidateContext",
@@ -131,50 +148,50 @@ def write_candidate_no_trade_row(
 ) -> None:
     """Write a no_trade_events row for a candidate no-trade decision.
 
-    Direct INSERT (bypasses write_no_trade_event's world-DB path assertion
-    so that shadow candidates work in test in-memory DBs and research environments
-    without requiring a real zeus-world.db connection).
+    On world-DB connections, acquires db_writer_lock(LIVE) around seq allocation
+    + INSERT to prevent PRIMARY KEY races with other decision/no-trade writers.
+    On in-memory (test) connections, inserts directly without the lock (the
+    world-DB path assertion in write_no_trade_event would fail in-memory anyway).
 
     This is the canonical write path for candidate no_trade outcomes in shadow
     mode. Live promotion of any candidate must route through the canonical
     write_no_trade_event writer with a real world-DB connection.
     """
-    from src.state.db import SCHEMA_VERSION
+    from src.state.db import SCHEMA_VERSION, ZEUS_WORLD_DB_PATH
+    from src.state.decision_events import allocate_decision_seq
 
     market_slug, temperature_metric, target_date, observation_time, _ = context.natural_key
-    row = conn.execute(
-        """
-        SELECT COALESCE(MAX(seq), -1) FROM (
-            SELECT decision_seq AS seq FROM decision_events
-             WHERE market_slug=? AND temperature_metric=? AND target_date=? AND observation_time=?
-            UNION ALL
-            SELECT decision_seq AS seq FROM no_trade_events
-             WHERE market_slug=? AND temperature_metric=? AND target_date=? AND observation_time=?
-        )
-        """,
-        (
-            market_slug, temperature_metric, target_date, observation_time,
-            market_slug, temperature_metric, target_date, observation_time,
-        ),
-    ).fetchone()
-    seq = (row[0] if row else -1) + 1
 
-    conn.execute(
-        """
-        INSERT INTO no_trade_events (
-            market_slug, temperature_metric, target_date, observation_time, decision_seq,
-            reason, reason_detail, observed_at, schema_version
-        ) VALUES (?,?,?,?,?,?,?,?,?)
-        """,
-        (
-            market_slug, temperature_metric, target_date, observation_time, seq,
-            decision.reason.value if decision.reason is not None else "uncategorized",
-            decision.reason_detail,
-            context.observed_at,
-            SCHEMA_VERSION,
-        ),
-    )
-    conn.commit()
+    def _do_insert(seq: int) -> None:
+        conn.execute(
+            """
+            INSERT INTO no_trade_events (
+                market_slug, temperature_metric, target_date, observation_time, decision_seq,
+                reason, reason_detail, observed_at, schema_version
+            ) VALUES (?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                market_slug, temperature_metric, target_date, observation_time, seq,
+                decision.reason.value if decision.reason is not None else "uncategorized",
+                decision.reason_detail,
+                context.observed_at,
+                SCHEMA_VERSION,
+            ),
+        )
+        conn.commit()
+
+    if _is_world_db_conn(conn):
+        from src.state.db_writer_lock import WriteClass, db_writer_lock
+        with db_writer_lock(ZEUS_WORLD_DB_PATH, WriteClass.LIVE):
+            seq = allocate_decision_seq(
+                market_slug, temperature_metric, target_date, observation_time, conn=conn
+            )
+            _do_insert(seq)
+    else:
+        seq = allocate_decision_seq(
+            market_slug, temperature_metric, target_date, observation_time, conn=conn
+        )
+        _do_insert(seq)
 
 
 @dataclass(frozen=True)
@@ -220,6 +237,7 @@ from .cross_market_correlation_hedge import CrossMarketCorrelationHedge
 from .liquidity_provision_with_heartbeat import LiquidityProvisionWithHeartbeat
 
 __all__ = [
+    "_is_world_db_conn",
     "BaseStrategyCandidate",
     "CandidateContext",
     "CandidateDecision",

@@ -238,7 +238,7 @@ class TestBHPartitionAntibody:
         # So tight ps 0.03..0.07 pass under m=20 but NOT under m=100.
         tight_ps  = [0.003 * (i + 1) for i in range(20)]   # 0.003..0.060
         medium_ps = [0.50 + 0.01 * i for i in range(40)]   # 0.50..0.89 (noise)
-        wide_ps   = [0.70 + 0.01 * i for i in range(40)]   # 0.70..1.09 (noise)
+        wide_ps   = [min(0.99, 0.70 + 0.01 * i) for i in range(40)]   # 0.70..0.99 (noise, capped)
 
         # Partitioned: tight bucket has m=20, its own threshold
         rows_partitioned = self._build_rows({"tight": tight_ps, "medium": medium_ps, "wide": wide_ps})
