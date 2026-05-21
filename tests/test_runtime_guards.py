@@ -3267,7 +3267,8 @@ def test_forward_price_linkage_non_success_statuses_degrade_cycle(status):
     assert cycle_runtime._forward_price_linkage_status_degraded(status) is True
 
 
-def test_live_entry_final_intent_receives_executable_snapshot_fields(tmp_path):
+def test_live_entry_final_intent_receives_executable_snapshot_fields(tmp_path, monkeypatch):
+    monkeypatch.setenv("ZEUS_LIVE_MARKET_SUBSTRATE_READER", "0")
     conn = get_connection(tmp_path / "thread-executable-identity.db")
     init_schema(conn)
     artifact = CycleArtifact(mode=DiscoveryMode.UPDATE_REACTION.value, started_at="2026-04-03T00:00:00Z")
@@ -3327,6 +3328,7 @@ def test_live_entry_final_intent_receives_executable_snapshot_fields(tmp_path):
         edge=_edge(),
         tokens={
             "market_id": "m1",
+            "condition_id": "m1",
             "token_id": "yes1",
             "no_token_id": "no1",
             "executable_snapshot_id": "snap-entry-1",
@@ -3407,14 +3409,182 @@ def test_live_entry_final_intent_receives_executable_snapshot_fields(tmp_path):
     assert final_intent.order_type == "FOK"
     assert final_intent.cancel_after == decision_time + timedelta(seconds=60 * 60)
     assert final_intent.event_id == "evt-snapshot"
-    assert final_intent.resolution_window == "2026-04-01"
-    assert final_intent.correlation_key == "NYC:2026-04-01"
+    assert final_intent.resolution_window == "2026-06-01"
+    assert final_intent.correlation_key == "NYC:2026-06-01"
     assert captured["kwargs"]["conn"] is conn
     assert captured["kwargs"]["snapshot_conn"] is conn
     decision_source_context = final_intent.decision_source_context
     assert decision_source_context.source_id == "tigge"
     assert decision_source_context.model_family == "ecmwf_ifs025"
     assert decision_source_context.integrity_errors() == ()
+    assert summary["final_intent_attempts"] == 1
+    assert summary["final_intents_built"] == 1
+    assert summary["submit_attempts"] == 1
+    assert summary["venue_acks"] == 1
+    frontier = summary["final_intent_frontier"]
+    assert [event["outcome"] for event in frontier["attempts"]] == [
+        "built",
+        "submitted",
+        "venue_ack",
+    ]
+    assert frontier["attempts"][0]["stage"] == "final_intent_contract"
+    assert frontier["attempts"][0]["family_key"] == "NYC|2026-06-01|high|evt-snapshot"
+    assert frontier["attempts"][0]["executable_snapshot_id"] == "snap-entry-1"
+
+
+def test_live_reprice_failure_records_final_intent_frontier_reason(tmp_path, monkeypatch):
+    monkeypatch.setenv("ZEUS_LIVE_MARKET_SUBSTRATE_READER", "0")
+    conn = get_connection(tmp_path / "thread-reprice-frontier.db")
+    init_schema(conn)
+    artifact = CycleArtifact(mode=DiscoveryMode.UPDATE_REACTION.value, started_at="2026-04-03T00:00:00Z")
+    summary = {"candidates": 0, "no_trades": 0}
+    decision_time = datetime(2026, 4, 3, 2, 0, tzinfo=timezone.utc)
+    market = {
+        "city": NYC,
+        "target_date": "2026-06-01",
+        "hours_since_open": 12.0,
+        "hours_to_resolution": 24.0,
+        "event_id": "evt-frontier",
+        "slug": "slug-frontier",
+        "temperature_metric": "high",
+        "outcomes": [
+            {
+                "title": "39-40°F",
+                "range_low": 39,
+                "range_high": 40,
+                "token_id": "yes1",
+                "no_token_id": "no1",
+                "market_id": "m1",
+            },
+        ],
+    }
+    _insert_executable_snapshot(
+        conn,
+        snapshot_id="snap-frontier-1",
+        selected_outcome_token_id="yes1",
+        outcome_label="YES",
+        yes_token_id="yes1",
+        no_token_id="no1",
+        event_id="evt-frontier",
+        condition_id="m1",
+        top_bid="0.25",
+        top_ask="0.26",
+    )
+    decision = EdgeDecision(
+        should_trade=True,
+        edge=_edge(),
+        tokens={
+            "market_id": "m1",
+            "condition_id": "m1",
+            "token_id": "yes1",
+            "no_token_id": "no1",
+            "executable_snapshot_id": "snap-frontier-1",
+            "executable_snapshot_min_tick_size": "0.01",
+            "executable_snapshot_min_order_size": "5",
+            "executable_snapshot_neg_risk": False,
+        },
+        size_usd=0.25,
+        decision_id="d-reprice-frontier",
+        selected_method="ens_member_counting",
+        applied_validations=["ens_fetch"],
+        decision_snapshot_id="model-snap-frontier",
+        edge_source="center_buy",
+        strategy_key="center_buy",
+        edge_context=None,
+        sizing_bankroll=100.0,
+        kelly_multiplier_used=0.25,
+        execution_fee_rate=0.0,
+        family_fallback_rank=1,
+        family_fallback_candidate_count=3,
+    )
+
+    def _reprice_fails(*args, **kwargs):
+        raise ValueError(
+            "EXECUTABLE_ASK_ONLY_MARKETABLE_BUY_BELOW_MIN_NOTIONAL_NO_PASSIVE_BID:"
+            " submitted_notional=0.25 floor=1.00"
+        )
+
+    deps = types.SimpleNamespace(
+        MODE_PARAMS={DiscoveryMode.UPDATE_REACTION: {}},
+        find_weather_markets=lambda **kwargs: [market],
+        get_last_scan_authority=lambda: "VERIFIED",
+        DiscoveryMode=DiscoveryMode,
+        logger=types.SimpleNamespace(warning=lambda *args, **kwargs: None, error=lambda *args, **kwargs: None),
+        NoTradeCase=NoTradeCase,
+        MarketCandidate=MarketCandidate,
+        evaluate_candidate=lambda *args, **kwargs: [decision],
+        is_strategy_enabled=lambda _strategy: True,
+        _classify_edge_source=lambda _mode, _edge: "center_buy",
+        reprice_from_snapshot=_reprice_fails,
+        execute_final_intent=lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("reprice failure must not submit")
+        ),
+        create_execution_intent=lambda **kwargs: (_ for _ in ()).throw(
+            AssertionError("live final-intent path must not create legacy intent")
+        ),
+        execute_intent=lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("live final-intent path must not submit legacy intent")
+        ),
+        select_final_order_type=lambda conn, snapshot_id: "FOK",
+    )
+
+    cycle_runtime.execute_discovery_phase(
+        conn,
+        clob=None,
+        portfolio=PortfolioState(),
+        artifact=artifact,
+        tracker=StrategyTracker(),
+        limits=types.SimpleNamespace(),
+        mode=DiscoveryMode.UPDATE_REACTION,
+        summary=summary,
+        entry_bankroll=100.0,
+        decision_time=decision_time,
+        env="live",
+        deps=deps,
+    )
+    conn.close()
+
+    assert summary["no_trades"] == 1
+    assert summary["final_intent_attempts"] == 1
+    assert summary["final_intent_reprice_failed"] == 1
+    assert summary["final_intent_reprice_failed_by_reason"] == {
+        "EXECUTABLE_ASK_ONLY_MARKETABLE_BUY_BELOW_MIN_NOTIONAL_NO_PASSIVE_BID": 1
+    }
+    assert "final_intents_built" not in summary
+    frontier = summary["final_intent_frontier"]
+    assert frontier["rejections_by_stage"] == {"reprice": 1}
+    assert frontier["rejections_by_reason"] == {
+        "EXECUTABLE_ASK_ONLY_MARKETABLE_BUY_BELOW_MIN_NOTIONAL_NO_PASSIVE_BID": 1
+    }
+    assert frontier["attempts"] == [
+        {
+            "family_key": "NYC|2026-06-01|high|evt-frontier",
+            "city": "NYC",
+            "target_date": "2026-06-01",
+            "temperature_metric": "high",
+            "decision_id": "d-reprice-frontier",
+            "rank": 1,
+            "family_fallback_candidate_count": 3,
+            "bin": "39-40°F",
+            "direction": "buy_yes",
+            "strategy_key": "center_buy",
+            "stage": "reprice",
+            "outcome": "reprice_failed",
+            "reason": (
+                "EXECUTABLE_ASK_ONLY_MARKETABLE_BUY_BELOW_MIN_NOTIONAL_NO_PASSIVE_BID:"
+                " submitted_notional=0.25 floor=1.00"
+            ),
+            "reason_prefix": "EXECUTABLE_ASK_ONLY_MARKETABLE_BUY_BELOW_MIN_NOTIONAL_NO_PASSIVE_BID",
+            "executable_snapshot_id": "snap-frontier-1",
+            "book_semantics": "",
+            "market_prior_status": "",
+        }
+    ]
+    assert artifact.no_trade_cases[0].rejection_reasons == [
+        "executable_snapshot_reprice_failed:"
+        "EXECUTABLE_ASK_ONLY_MARKETABLE_BUY_BELOW_MIN_NOTIONAL_NO_PASSIVE_BID:"
+        " submitted_notional=0.25 floor=1.00"
+    ]
 
 
 def test_live_decision_source_context_enriched_with_submit_result_timing():
