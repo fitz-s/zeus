@@ -237,3 +237,49 @@ class TestWorldSchemaReadyCheck:
         assert row is not None
         assert row[0] == db_module.SCHEMA_VERSION
         assert tail == (1,)
+
+    def test_init_schema_commits_pre_v2_schema_transaction_boundary(
+        self, tmp_path, monkeypatch
+    ):
+        """Pre-v2 idempotent schema repairs must not poison the v2 transaction.
+
+        Live boot runs ``init_schema()`` against existing world DBs. Several
+        idempotent schema helpers before ``apply_v2_schema()`` may perform DML
+        when upgrading a legacy DB, while ``apply_v2_schema()`` owns an explicit
+        transaction. The boundary must be clean before control passes to v2.
+        """
+        import sqlite3
+
+        import src.state.db as db_module
+        import src.state.schema.tail_stress_scenarios_schema as tail_schema
+        import src.state.schema.v2_schema as v2_schema
+
+        db_path = tmp_path / "legacy-world.db"
+        conn = sqlite3.connect(db_path)
+        try:
+
+            def dirty_schema_helper(helper_conn):
+                helper_conn.execute(
+                    "CREATE TABLE IF NOT EXISTS pre_v2_dirty_helper (id INTEGER PRIMARY KEY)"
+                )
+                helper_conn.execute("INSERT INTO pre_v2_dirty_helper DEFAULT VALUES")
+
+            def v2_requires_clean_transaction(helper_conn, *, forecast_tables=True):
+                assert helper_conn.in_transaction is False
+                helper_conn.execute("BEGIN")
+                helper_conn.execute(
+                    "CREATE TABLE IF NOT EXISTS v2_transaction_probe (id INTEGER PRIMARY KEY)"
+                )
+                helper_conn.execute("COMMIT")
+
+            monkeypatch.setattr(tail_schema, "ensure_table", dirty_schema_helper)
+            monkeypatch.setattr(v2_schema, "apply_v2_schema", v2_requires_clean_transaction)
+
+            db_module.init_schema(conn)
+
+            assert conn.execute("SELECT COUNT(*) FROM pre_v2_dirty_helper").fetchone()[0] == 1
+            assert conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='v2_transaction_probe'"
+            ).fetchone() == (1,)
+        finally:
+            conn.close()
