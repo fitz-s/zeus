@@ -1,7 +1,7 @@
 # Strategy Profile Registry
 #
 # Created: 2026-05-04
-# Last reused/audited: 2026-05-04
+# Last reused/audited: 2026-05-21
 # Authority basis: docs/operations/task_2026-05-04_oracle_kelly_evidence_rebuild/PLAN.md §A4
 #                  + Bug review §D (KNOWN_STRATEGIES / STRATEGY_KELLY_MULTIPLIERS scattered)
 #                  + Bug review §E (LIVE_SAFE_STRATEGIES vs _LIVE_ALLOWED_STRATEGIES divergence).
@@ -114,6 +114,9 @@ settlement_capture:
     is the observation itself, not the model. Alpha decays slowly
     (observation-speed, not market-competition-speed).
   live_status: live
+  evidence_tier: LIVE_NORMAL
+  evidence_tier_required_for_live: LIVE_PILOT_TINY
+  promotion_blockers: []
   allowed_market_phases: [settlement_day]
   allowed_discovery_modes: [day0_capture]
   cycle_axis_dispatch_mode: day0_capture
@@ -143,6 +146,9 @@ center_buy:
     Edge source is calibrated probability beating the market mid;
     alpha decays fast as competing bots arbitrage the same signal.
   live_status: live
+  evidence_tier: LIVE_NORMAL
+  evidence_tier_required_for_live: LIVE_PILOT_TINY
+  promotion_blockers: []
   allowed_market_phases: [pre_settlement_day, settlement_day]
   allowed_discovery_modes: [opening_hunt, update_reaction]
   cycle_axis_dispatch_mode: update_reaction
@@ -172,6 +178,9 @@ opening_inertia:
     delta between market open and bot arbitrage. Alpha is the fastest
     of all four strategies — edge halves within ~24h of open.
   live_status: live
+  evidence_tier: LIVE_LIMITED_HAIRCUT
+  evidence_tier_required_for_live: LIVE_PILOT_TINY
+  promotion_blockers: []
   allowed_market_phases: [pre_settlement_day]
   allowed_discovery_modes: [opening_hunt]
   cycle_axis_dispatch_mode: opening_hunt
@@ -203,6 +212,11 @@ shoulder_sell:
     accumulates — pre-A4 this was the LIVE_SAFE / _LIVE_ALLOWED
     divergence flagged by Bug review §E.
   live_status: shadow
+  evidence_tier: SHADOW_PASS
+  evidence_tier_required_for_live: LIVE_LIMITED_HAIRCUT
+  promotion_blockers:
+    - "shadow_pass requires N=100 decisions; observed N<100"
+    - "tail stress scenarios not yet replay-verified across regimes"
   allowed_market_phases: [pre_settlement_day, settlement_day]
   allowed_discovery_modes: [opening_hunt, update_reaction]
   cycle_axis_dispatch_mode: update_reaction
@@ -235,6 +249,9 @@ imminent_open_capture:
     vs market price; alpha window is narrow so sizing is conservative.
     Approved operator urgency: Polymarket May 20-21 re-opens (2026-05-19).
   live_status: live
+  evidence_tier: LIVE_LIMITED_HAIRCUT
+  evidence_tier_required_for_live: LIVE_PILOT_TINY
+  promotion_blockers: []
   allowed_market_phases: [pre_settlement_day, settlement_day]
   allowed_discovery_modes: [imminent_open_capture]
   cycle_axis_dispatch_mode: imminent_open_capture
@@ -264,6 +281,11 @@ shoulder_buy:
     symmetric to shoulder_sell but unproven; dormant pending
     research. Pre-A4 not in any allowlist (BLOCKED both gates).
   live_status: blocked
+  evidence_tier: IDEA
+  evidence_tier_required_for_live: LIVE_LIMITED_HAIRCUT
+  promotion_blockers:
+    - "no replay evidence; research not started"
+    - "symmetric to shoulder_sell but unproven correlation"
   allowed_market_phases: []
   allowed_discovery_modes: []
   cycle_axis_dispatch_mode: null
@@ -288,6 +310,11 @@ center_sell:
     symmetric to center_buy but unproven; dormant pending research.
     Pre-A4 not in any allowlist (BLOCKED both gates).
   live_status: blocked
+  evidence_tier: IDEA
+  evidence_tier_required_for_live: LIVE_LIMITED_HAIRCUT
+  promotion_blockers:
+    - "no replay evidence; research not started"
+    - "symmetric to center_buy but unproven correlation"
   allowed_market_phases: []
   allowed_discovery_modes: []
   cycle_axis_dispatch_mode: null
@@ -320,6 +347,10 @@ stale_quote_detector:
     event signals the resting quote has not been refreshed and may be
     fill-infeasible at the posted price. Shadow research phase only.
   live_status: shadow
+  evidence_tier: SHADOW_PASS
+  evidence_tier_required_for_live: LIVE_LIMITED_HAIRCUT
+  promotion_blockers:
+    - "Phase 4 shadow candidate; insufficient settled decisions"
   allowed_market_phases: [pre_settlement_day, settlement_day]
   allowed_discovery_modes: [opening_hunt, update_reaction]
   cycle_axis_dispatch_mode: null
@@ -346,6 +377,10 @@ resolution_window_maker:
     reflected in the Polymarket price, a maker entry on the converging side
     captures the settlement discount. Shadow research phase only.
   live_status: shadow
+  evidence_tier: SHADOW_PASS
+  evidence_tier_required_for_live: LIVE_LIMITED_HAIRCUT
+  promotion_blockers:
+    - "Phase 4 shadow candidate; insufficient settled decisions"
   allowed_market_phases: [settlement_day]
   allowed_discovery_modes: [update_reaction]
   cycle_axis_dispatch_mode: null
@@ -372,6 +407,10 @@ liquidity_provision_with_heartbeat:
     of the next batch window. Edge source: fill_probability evidence from
     prior command history. Shadow research phase only.
   live_status: shadow
+  evidence_tier: SHADOW_PASS
+  evidence_tier_required_for_live: LIVE_LIMITED_HAIRCUT
+  promotion_blockers:
+    - "Phase 4 shadow candidate; insufficient settled decisions"
   allowed_market_phases: [pre_settlement_day, settlement_day]
   allowed_discovery_modes: [opening_hunt, update_reaction]
   cycle_axis_dispatch_mode: null
@@ -398,6 +437,10 @@ weather_event_arbitrage:
     corresponding Polymarket market may not have repriced yet. Edge source:
     trusted alert feed lag vs. market price. Shadow research phase only.
   live_status: shadow
+  evidence_tier: SHADOW_PASS
+  evidence_tier_required_for_live: LIVE_LIMITED_HAIRCUT
+  promotion_blockers:
+    - "Phase 4 shadow candidate; insufficient settled decisions"
   allowed_market_phases: [pre_settlement_day, settlement_day]
   allowed_discovery_modes: [opening_hunt, update_reaction]
   cycle_axis_dispatch_mode: null

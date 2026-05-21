@@ -49,6 +49,7 @@ from typing import Optional
 
 import yaml
 
+from src.contracts.evidence_tier import EvidenceTier
 from src.state.paths import REPO_ROOT
 
 logger = logging.getLogger(__name__)
@@ -112,6 +113,10 @@ class StrategyProfile:
     min_shadow_decisions: int
     min_settled_decisions: int
     promotion_evidence_ref: Optional[str]
+    # Phase 6 T1: evidence ladder fields
+    evidence_tier: EvidenceTier = EvidenceTier.IDEA
+    evidence_tier_required_for_live: EvidenceTier = EvidenceTier.LIVE_PILOT_TINY
+    promotion_blockers: tuple[str, ...] = ()
     min_entry_price: float = 0.05
     min_strategy_notional_usd: float = 1.0
     min_expected_profit_usd: float = 0.05
@@ -123,8 +128,14 @@ class StrategyProfile:
     def is_runtime_live(self) -> bool:
         """True iff entries placed by this strategy hit the live order book.
 
-        Equivalent to the pre-A4 ``key in _LIVE_ALLOWED_STRATEGIES``."""
-        return self.live_status == "live"
+        Phase 6: requires BOTH live_status=="live" AND evidence_tier>=LIVE_PILOT_TINY.
+        Strategies with tier < LIVE_PILOT_TINY are blocked regardless of live_status.
+        Equivalent pre-Phase-6: live_status == "live" only.
+        """
+        return (
+            self.live_status == "live"
+            and self.evidence_tier >= EvidenceTier.LIVE_PILOT_TINY
+        )
 
     def is_boot_allowed(self) -> bool:
         """True iff the daemon may have this strategy enabled at boot.
@@ -290,6 +301,10 @@ _OPTIONAL_FIELDS = {
     "partial_source_run_allowed",
     "complete_required_for_tail_orders",
     "partial_run_kelly_haircut",
+    # Phase 6 T1: evidence ladder fields (optional for backward compat)
+    "evidence_tier",
+    "evidence_tier_required_for_live",
+    "promotion_blockers",
 }
 
 
@@ -366,6 +381,40 @@ def _build_profile(key: str, raw: dict) -> StrategyProfile:
         upper_bound=1.0,
     )
 
+    # Phase 6 T1: evidence tier parsing (optional; default IDEA for backward compat)
+    _raw_tier = raw.get("evidence_tier", None)
+    if _raw_tier is None:
+        evidence_tier = EvidenceTier.IDEA
+    else:
+        try:
+            evidence_tier = EvidenceTier[str(_raw_tier)]
+        except KeyError:
+            raise RegistrySchemaError(
+                f"{key}.evidence_tier={_raw_tier!r}: unknown tier; "
+                f"must be one of {[t.name for t in EvidenceTier]}"
+            )
+    _raw_tier_req = raw.get("evidence_tier_required_for_live", None)
+    if _raw_tier_req is None:
+        evidence_tier_required_for_live = EvidenceTier.LIVE_PILOT_TINY
+    else:
+        try:
+            evidence_tier_required_for_live = EvidenceTier[str(_raw_tier_req)]
+        except KeyError:
+            raise RegistrySchemaError(
+                f"{key}.evidence_tier_required_for_live={_raw_tier_req!r}: unknown tier; "
+                f"must be one of {[t.name for t in EvidenceTier]}"
+            )
+    _raw_blockers = raw.get("promotion_blockers", None)
+    if _raw_blockers is None:
+        promotion_blockers: tuple[str, ...] = ()
+    elif isinstance(_raw_blockers, list):
+        promotion_blockers = tuple(str(b) for b in _raw_blockers)
+    else:
+        raise RegistrySchemaError(
+            f"{key}.promotion_blockers: must be a list of strings, "
+            f"got {type(_raw_blockers).__name__}"
+        )
+
     cycle_axis_mode = raw["cycle_axis_dispatch_mode"]
     if cycle_axis_mode is not None:
         if not isinstance(cycle_axis_mode, str):
@@ -405,6 +454,9 @@ def _build_profile(key: str, raw: dict) -> StrategyProfile:
             None if raw["promotion_evidence_ref"] in (None, "null", "")
             else str(raw["promotion_evidence_ref"])
         ),
+        evidence_tier=evidence_tier,
+        evidence_tier_required_for_live=evidence_tier_required_for_live,
+        promotion_blockers=promotion_blockers,
         min_entry_price=min_entry_price,
         min_strategy_notional_usd=min_strategy_notional_usd,
         min_expected_profit_usd=min_expected_profit_usd,
