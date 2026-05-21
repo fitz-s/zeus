@@ -37,7 +37,7 @@ import sqlite3
 from src.contracts.no_trade_reason import NoTradeReason
 
 # Schema version stamped into each row; stays in sync with db.py SCHEMA_VERSION.
-SCHEMA_VERSION = 20
+SCHEMA_VERSION = 21
 
 # Enum CHECK: every valid NoTradeReason value, joined for SQL IN clause.
 _REASON_VALUES_SQL = ", ".join(f"'{r.value}'" for r in NoTradeReason)
@@ -52,7 +52,7 @@ CREATE TABLE IF NOT EXISTS no_trade_events (
     reason              TEXT NOT NULL CHECK (reason IN ({_REASON_VALUES_SQL})),
     reason_detail       TEXT,
     observed_at         TEXT NOT NULL,
-    schema_version      INTEGER NOT NULL CHECK (schema_version IN (14, 15, 16, 17, 18, 19, 20)),
+    schema_version      INTEGER NOT NULL CHECK (schema_version IN (14, 15, 16, 17, 18, 19, 20, 21)),
     schema_compatibility TEXT NOT NULL DEFAULT 'current'
         CHECK (schema_compatibility IN ('current', 'degraded')),
     PRIMARY KEY (market_slug, temperature_metric, target_date, observation_time, decision_seq)
@@ -69,7 +69,7 @@ CREATE TABLE no_trade_events_new (
     reason              TEXT NOT NULL CHECK (reason IN ({_REASON_VALUES_SQL})),
     reason_detail       TEXT,
     observed_at         TEXT NOT NULL,
-    schema_version      INTEGER NOT NULL CHECK (schema_version IN (14, 15, 16, 17, 18, 19, 20)),
+    schema_version      INTEGER NOT NULL CHECK (schema_version IN (14, 15, 16, 17, 18, 19, 20, 21)),
     schema_compatibility TEXT NOT NULL DEFAULT 'current'
         CHECK (schema_compatibility IN ('current', 'degraded')),
     PRIMARY KEY (market_slug, temperature_metric, target_date, observation_time, decision_seq)

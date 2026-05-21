@@ -33,6 +33,7 @@ from src.state.no_trade_events import (
     NoTradeEventsSchemaCompatibilityError,
     write_no_trade_event,
 )
+from src.state.db import SCHEMA_VERSION
 from src.state.schema.no_trade_events_schema import ensure_table as ensure_no_trade_events_table
 
 
@@ -118,7 +119,7 @@ def _make_world_db(tmp_path: Path) -> tuple[Path, sqlite3.Connection]:
     conn.row_factory = sqlite3.Row
     conn.execute(_DECISION_EVENTS_DDL)
     ensure_no_trade_events_table(conn)
-    conn.execute("PRAGMA user_version = 20")
+    conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
     conn.commit()
     return db_path, conn
 

@@ -29,7 +29,7 @@ runtime/code findings are handled.
 | P0-1 | §5 P0-1, §15, §16 step 1/6/7 | Hard release gate proving loaded SHA, DB schema/hash, clean command/redeem state, source/forecast/snapshot freshness, and paper lifecycle proof before live entries | FIXED | 2026-05-21 §5 P0-1 / §15 / §16 step 7 | Added `scripts/check_live_release_gate.py`, required `money-path-release-gate` workflow, focused tests, and self-test fixture. Gate always reports `live_entries_allowed=false`; PASS only means release-proof blockers are absent |
 | P0-2 | §5 P0-2, §8 row #184/#186/#199 vs #252/#253, §16 step 1 | Unified negRisk tradeability object across scanner, snapshot assertion, persisted reader, executor preflight | FIXED | 2026-05-21 §5 P0-2 | `ExecutableTradeabilityStatus` persisted as `tradeability_status_json`; scanner capture builds it from parent/child Gamma + CLOB facts; submit gate uses `executable_allowed`; focused tests green |
 | P0-3 | §5 P0-3, §10, §16 step 2 | Live schema fail-closed; only paper/backfill may downgrade no-trade reasons as degraded/excluded from live trust | FIXED | 2026-05-21 §5 P0-3 / §10 | Live writer asserts current no_trade_events schema; compatibility downgrade is explicit opt-in and writes `schema_compatibility='degraded'`; schema bumped to 20 |
-| P0-4 | §5 P0-4, §11, §14, §16 step 3 | Integrated crash/recovery/redeem replay across command/order/trade/position/redeem lifecycle | OPEN | pending | Add deterministic replay harness/test |
+| P0-4 | §5 P0-4, §11, §14, §16 step 3 | Integrated crash/recovery/redeem replay across command/order/trade/position/redeem lifecycle | FIXED | 2026-05-21 §5 P0-4 / §11 / §14 / §16 step 3 | Added `tests/test_money_path_lifecycle_replay.py`: decision/no-trade, command submit unknown, ack/order fact, partial fill/trade fact/position lot, cancel remainder terminal truth, redeem request, tx hash, receipt reconcile, with DB close/reopen crash boundaries. Replay exposed and fixed `decision_events` schema-version CHECK drift by bumping schema to 21 |
 | P1-1 | §6 P1-1 | Align decision/no-trade failure policy: live fail-closed, paper/backfill degrade with marking | FIXED | 2026-05-21 §6 P1-1 | Implemented with P0-3: default writer path is live fail-closed; degraded compatibility requires opt-in |
 | P1-2 | §6 P1-2 | Live executable entry requires fresh CLOB/orderbook; discovery fallback cannot authorize live execution | FIXED | 2026-05-21 §6 P1-2 / §15 | P0-2 prevents raw Gamma routing labels from authorizing executable submit, and P0-1 release gate requires fresh runtime status/source evidence before live promotion |
 | P1-3 | §6 P1-3, §16 step 4 | Split `REDEEM_OPERATOR_REQUIRED` semantic overload or add `autoretry_eligible` | OPEN | pending | Inspect settlement command schema/state transitions |
@@ -41,7 +41,7 @@ runtime/code findings are handled.
 | P2-2 | §7 topology registries | Runtime-to-registry assertion in CI | OPEN | pending | Add focused registry assertion if no existing one |
 | P2-3 | §7 monitor nowcast fail-soft | Counter/alert on persistent nowcast write failures | OPEN | pending | Inspect monitor nowcast writer |
 | P2-4 | §7 hardcoded strategy/cluster maps | Move risk metadata to reviewed config with tests | OPEN | pending | Inspect current maps; avoid broad refactor if already config-backed |
-| P3-1 | §7 sed-revert antibodies | Convert key antibodies to relationship/replay tests | IN_PROGRESS | §14 | Covered by P0/P1 replay tests as they land |
+| P3-1 | §7 sed-revert antibodies | Convert key antibodies to relationship/replay tests | IN_PROGRESS | §14 | P0-4 now has an integrated lifecycle replay; remaining P1/P2 findings still need relationship tests |
 | P3-2 | §7 pre-existing failures | Track failure IDs centrally | OPEN | pending | Add/update failure registry only if routed |
 
 ## Work Order
@@ -68,6 +68,11 @@ runtime/code findings are handled.
 | 2026-05-21 | `python3 scripts/topology_doctor.py --map-maintenance --map-maintenance-mode advisory ...` | PASS |
 | 2026-05-21 | `python3 scripts/topology_doctor.py --scripts --json` | FAIL: pre-existing unrelated script-manifest debt; new `check_live_release_gate.py` is registered |
 | 2026-05-21 | `python3 scripts/topology_doctor.py --tests --json` | FAIL: pre-existing unrelated test-topology/law-gate debt; new `tests/test_live_release_gate.py` is trusted and categorized |
+| 2026-05-21 | `/Users/leofitz/.openclaw/workspace-venus/zeus/.venv/bin/python -m pytest tests/test_money_path_lifecycle_replay.py -q --no-header` | PASS: 1 passed |
+| 2026-05-21 | `python3 scripts/check_schema_version.py --write-pin && python3 scripts/check_schema_version.py` | PASS: schema hash pinned for `SCHEMA_VERSION=21` |
+| 2026-05-21 | `/Users/leofitz/.openclaw/workspace-venus/zeus/.venv/bin/python -m pytest tests/test_live_release_gate.py tests/test_money_path_lifecycle_replay.py tests/test_executable_market_snapshot_v2.py tests/test_market_scanner_negrisk.py tests/test_decision_seq_cross_table_no_collision.py tests/test_no_trade_events_check_accepts_all_shoulder_reasons.py tests/state/test_schema_current_invariant.py tests/test_shoulder_strategy_vnext.py::test_p_3_5_schema_version_is_21 -q --no-header` | PASS: 118 passed, 2 skipped |
+| 2026-05-21 | `python3 scripts/topology_doctor.py --planning-lock ... --plan-evidence docs/operations/task_2026-05-21_live_release_proof_p0p3/task.md` | PASS |
+| 2026-05-21 | `python3 scripts/topology_doctor.py --map-maintenance --map-maintenance-mode advisory ...` | PASS |
 | 2026-05-21 | `python3 scripts/topology_doctor.py --planning-lock ... --plan-evidence docs/operations/task_2026-05-21_live_release_proof_p0p3/task.md` | PASS |
 | 2026-05-21 | `python3 scripts/topology_doctor.py --map-maintenance --map-maintenance-mode advisory ...` | PASS |
 | 2026-05-21 | `python3 scripts/check_schema_version.py --write-pin && python3 scripts/check_schema_version.py` | PASS: schema hash pinned for `SCHEMA_VERSION=20` |

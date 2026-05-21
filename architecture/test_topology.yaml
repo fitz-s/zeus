@@ -462,6 +462,8 @@ test_trust_policy:
     tests/test_auto_wrap_dry_run_no_raw_tx_leak.py: {created: "2026-05-19", last_used: "2026-05-20"}
     # 2026-05-21 live release proof P0-1/P1-2/P1-7: loaded SHA/schema/state/freshness/paper proof gate.
     tests/test_live_release_gate.py: {created: "2026-05-21", last_used: "2026-05-21"}
+    # 2026-05-21 live release proof P0-4: integrated crash/restart money-path lifecycle replay.
+    tests/test_money_path_lifecycle_replay.py: {created: "2026-05-21", last_used: "2026-05-21"}
 
 categories:
   core_law_antibody:
@@ -535,6 +537,7 @@ categories:
     - tests/test_risk_allocator.py
     - tests/test_live_readiness_gates.py
     - tests/test_live_release_gate.py
+    - tests/test_money_path_lifecycle_replay.py
     - tests/test_entry_forecast_config.py
     - tests/test_entry_forecast_promotion_evidence_io.py
     - tests/test_entry_readiness_writer.py
