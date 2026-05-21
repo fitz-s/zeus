@@ -1031,7 +1031,7 @@ tables:
     created_by: "db.py:init_schema (daemon boot, SCHEMA_VERSION 15) + migration_script_no_trade_events_create_2026_05_21 (operator one-shot fallback)"
     pk_col: "[market_slug, temperature_metric, target_date, observation_time, decision_seq]"
     notes: >
-      Phase 2 T2 (PHASE_2_ULTRAPLAN.md v3.1 §5.2, sha 00c2399742, SCAFFOLD 2026-05-20):
+      Phase 2 T2 (PHASE_2_ULTRAPLAN.md v3.1 §5.2, sha 00c2399742, PRODUCTION 2026-05-20):
       instrumentation table for no-trade decisions. Columns per §5.2: market_slug,
       temperature_metric, target_date, observation_time, decision_seq, reason
       (NoTradeReason CHECK), reason_detail TEXT, observed_at, schema_version.
@@ -1040,7 +1040,7 @@ tables:
       src/state/no_trade_events.py (write_no_trade_event(natural_key: DecisionNaturalKey, reason: NoTradeReason, reason_detail: Optional[str], observed_at: str, *, conn: sqlite3.Connection) — conn REQUIRED, INV-37);
       producer wired at 69 evaluator.py callsites replacing raw rejection_reasons=[...]
       strings/f-strings with NoTradeReason enum refs + reason_detail capture.
-      SCAFFOLD only — no production bodies until T2 production pass.
+      Production — no_trade_events table writes from cycle_runtime evaluate_cycle path via NoTradeReason enum (PR #222, commit ce4862a4d2).
 
   - name: db_chunk_boundary_events
     db: world
