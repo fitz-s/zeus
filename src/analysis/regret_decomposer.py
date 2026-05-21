@@ -2,30 +2,36 @@
 # Last reused or audited: 2026-05-21
 # Authority basis: docs/operations/task_2026-05-21_strategy_vnext_phase6_evidence_ladder/PHASE_6_PLAN.md §T3
 #                  + docs/operations/task_2026-05-21_mainline_completion_authority/07_PHASE_6_EVIDENCE_LADDER.md §Object model
-"""RegretDecomposer — 7-component per-trade regret attribution.
+"""RegretDecomposer — 7-component per-trade realized-advantage decomposer.
 
-Decomposes realized regret (realized_pnl − counterfactual_pnl) into 7 components
-per dossier §6.6:
+Decomposes realized advantage (realized_pnl − counterfactual_pnl) into 7 components
+per dossier §6.6.  This module is a SUM-VERIFIER: callers supply all 7 component
+values; the function verifies they sum to (realized_pnl − counterfactual_pnl) within
+1e-9.  It does NOT attribute the split among components.
 
-  1. forecast_error_usd          — regret from forecast/belief error at decision time
-  2. observation_error_usd       — regret from observation/source error
-  3. quote_error_usd             — regret from market quote error (mid vs fill)
-  4. non_fill_error_usd          — regret from non-fill (order not executed)
-  5. fee_error_usd               — regret from fee/spread estimation error
-  6. timing_error_usd            — regret from alpha decay / timing error
-  7. settlement_ambiguity_error_usd — regret from settlement source/oracle ambiguity
-                                     at DECISION TIME (not general settlement deviation)
+Sign convention (SEV2-1 canonical):
+  total_regret_usd = realized_pnl − counterfactual_pnl
+  POSITIVE  ⇒ realized > counterfactual = realized advantage / WIN
+  NEGATIVE  ⇒ realized < counterfactual = underperformance vs best alternative
 
-Sum invariant: sum(7 components) == realized_pnl - counterfactual_pnl within 1e-9.
+  Components follow the same sign convention.  A positive forecast_error_usd means
+  the forecast error contributed positively to the realized outcome (i.e., a "lucky"
+  error).  Callers must be consistent; the sum invariant enforces it.
 
-Design notes
-------------
-- Components are signed USD values; positive = regret (cost); negative = gain vs counterfactual.
-- The decomposition is additive by construction: callers provide the 7 component values
-  and the total is verified; if not balanced, the caller must adjust one component
-  (typically the residual / catch-all).
-- ``settlement_ambiguity_error_usd`` captures uncertainty about which settlement source
-  applies AT THE MOMENT OF DECISION, not ex-post settlement deviation from prediction.
+  evidence_report.py n_wins counts rows where total_regret_usd > 0 (wins); this is
+  intentional and consistent with the POSITIVE = WIN convention above.
+
+Components:
+  1. forecast_error_usd          — contribution from forecast/belief error at decision time
+  2. observation_error_usd       — contribution from observation/source measurement error
+  3. quote_error_usd             — contribution from market quote error (mid vs fill)
+  4. non_fill_error_usd          — contribution from non-fill (order not executed)
+  5. fee_error_usd               — contribution from fee/spread estimation error
+  6. timing_error_usd            — contribution from alpha decay / timing / residual
+  7. settlement_ambiguity_error_usd — contribution from settlement source/oracle ambiguity
+                                     AT DECISION TIME (not ex-post settlement deviation)
+
+Sum invariant: sum(7 components) == realized_pnl − counterfactual_pnl within 1e-9.
 
 INV-37: DB-writing functions accept a ``conn`` argument (caller-supplied).
 """
@@ -43,11 +49,13 @@ from typing import Optional
 
 @dataclass(frozen=True)
 class RegretComponents:
-    """7-component decomposition of per-trade regret.
+    """7-component decomposition of per-trade realized advantage vs counterfactual.
 
-    All values in USD (signed; positive = cost/regret, negative = gain vs counterfactual).
+    All values in USD (signed).  Sign convention: POSITIVE = realized advantage / win
+    (realized > counterfactual); NEGATIVE = underperformance vs counterfactual.
 
     Sum invariant: sum of all 7 components == total_regret_usd within 1e-9.
+    total_regret_usd = realized_pnl − counterfactual_pnl (positive = WIN).
     """
     forecast_error_usd: float
     observation_error_usd: float
@@ -97,27 +105,29 @@ def decompose_regret(
     """Construct a RegretComponents and verify the sum invariant.
 
     total_regret_usd = realized_pnl_usd - counterfactual_pnl_usd.
+    POSITIVE = realized advantage / win; NEGATIVE = underperformance.
 
-    The 7 components must sum to total_regret_usd within 1e-9. If they do not,
-    ValueError is raised. Callers should allocate the residual to whichever
-    component is the catch-all for that trade (typically timing_error_usd).
+    This function is a SUM-VERIFIER: it does not attribute the split among the
+    7 components; callers supply all component values.  The 7 components must sum
+    to total_regret_usd within 1e-9.  If they do not, ValueError is raised.
+    Callers should allocate the residual to the catch-all (typically timing_error_usd).
 
     Parameters
     ----------
     forecast_error_usd:
-        Regret attributable to forecast/belief error at decision time.
+        Contribution from forecast/belief error at decision time (positive = helped).
     observation_error_usd:
-        Regret attributable to observation/source measurement error.
+        Contribution from observation/source measurement error.
     quote_error_usd:
-        Regret attributable to market quote error (mid vs actual fill).
+        Contribution from market quote error (mid vs actual fill).
     non_fill_error_usd:
-        Regret attributable to non-fill (order not executed when it should be).
+        Contribution from non-fill (order not executed).
     fee_error_usd:
-        Regret attributable to fee/spread estimation error.
+        Contribution from fee/spread estimation error.
     timing_error_usd:
-        Regret attributable to alpha decay / timing / residual.
+        Contribution from alpha decay / timing / residual.
     settlement_ambiguity_error_usd:
-        Regret attributable to settlement source/oracle ambiguity AT DECISION TIME.
+        Contribution from settlement source/oracle ambiguity AT DECISION TIME.
     realized_pnl_usd:
         Actual realized PnL for this trade.
     counterfactual_pnl_usd:
