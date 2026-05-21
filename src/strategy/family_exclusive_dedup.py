@@ -523,9 +523,14 @@ def _weather_family_exposures_from_trade_db_impl(conn: Any) -> list[WeatherFamil
         {snapshot_join}
         JOIN {market_table} me
           ON (
-              {me_condition} = COALESCE({env_condition}, {snap_condition}, {vc_market_id})
-              OR {me_token} = COALESCE({env_token}, {snap_token}, {vc_token_id})
-              OR {me_slug} = COALESCE({snap_slug}, {vc_market_id})
+              ({env_condition} IS NOT NULL AND {me_condition} = {env_condition})
+              OR ({snap_condition} IS NOT NULL AND {me_condition} = {snap_condition})
+              OR ({vc_market_id} IS NOT NULL AND {me_condition} = {vc_market_id})
+              OR ({env_token} IS NOT NULL AND {me_token} = {env_token})
+              OR ({snap_token} IS NOT NULL AND {me_token} = {snap_token})
+              OR ({vc_token_id} IS NOT NULL AND {me_token} = {vc_token_id})
+              OR ({snap_slug} IS NOT NULL AND {me_slug} = {snap_slug})
+              OR ({vc_market_id} IS NOT NULL AND {me_slug} = {vc_market_id})
           )
         WHERE vc.intent_kind = 'ENTRY'
           AND (

@@ -103,6 +103,42 @@ CREATE UNIQUE INDEX IF NOT EXISTS ux_findings_unresolved_subject
 """
 
 
+def _canonical_trade_fact_cte(cte_name: str = "canonical_trade_fact") -> str:
+    """Rank trade facts by proof strength before local_sequence recency."""
+
+    return f"""
+        {cte_name} AS (
+            SELECT ranked.*
+              FROM (
+                    SELECT scored.*,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY command_id, trade_id
+                               ORDER BY proof_rank DESC, local_sequence DESC
+                           ) AS canonical_rank
+                      FROM (
+                            SELECT fact.*,
+                                   CASE
+                                       WHEN UPPER(COALESCE(fact.state, '')) = 'CONFIRMED'
+                                            AND CAST(COALESCE(fact.filled_size, '0') AS REAL) > 0
+                                       THEN 500
+                                       WHEN UPPER(COALESCE(fact.state, '')) = 'MINED'
+                                            AND CAST(COALESCE(fact.filled_size, '0') AS REAL) > 0
+                                       THEN 450
+                                       WHEN UPPER(COALESCE(fact.state, '')) = 'MATCHED'
+                                            AND CAST(COALESCE(fact.filled_size, '0') AS REAL) > 0
+                                       THEN 400
+                                       WHEN CAST(COALESCE(fact.filled_size, '0') AS REAL) > 0
+                                       THEN 300
+                                       ELSE 100
+                                   END AS proof_rank
+                              FROM venue_trade_facts fact
+                           ) scored
+                   ) ranked
+             WHERE ranked.canonical_rank = 1
+        )
+    """
+
+
 @dataclass(frozen=True)
 class ReconcileFinding:
     finding_id: str
@@ -597,12 +633,7 @@ def reconcile_recorded_maker_fill_economics(
         return summary
     observed = _coerce_dt(observed_at)
     rows = conn.execute(
-        """
-        WITH latest_trade_fact AS (
-            SELECT trade_id, MAX(local_sequence) AS local_sequence
-              FROM venue_trade_facts
-             GROUP BY trade_id
-        )
+        "WITH " + _canonical_trade_fact_cte() + """
         SELECT
             tf.*,
             cmd.snapshot_id AS cmd_snapshot_id,
@@ -620,10 +651,7 @@ def reconcile_recorded_maker_fill_economics(
             cmd.state AS cmd_state,
             cmd.created_at AS cmd_created_at,
             cmd.updated_at AS cmd_updated_at
-          FROM venue_trade_facts tf
-          JOIN latest_trade_fact latest
-            ON latest.trade_id = tf.trade_id
-           AND latest.local_sequence = tf.local_sequence
+          FROM canonical_trade_fact tf
           JOIN venue_commands cmd
             ON cmd.command_id = tf.command_id
          WHERE tf.state IN ('MATCHED', 'MINED', 'CONFIRMED')
@@ -708,12 +736,7 @@ def _reconcile_recorded_exit_fill_projections(
 
     summary = {"scanned": 0, "projected": 0, "stayed": 0, "errors": 0}
     rows = conn.execute(
-        """
-        WITH latest_trade_fact AS (
-            SELECT trade_id, MAX(local_sequence) AS local_sequence
-              FROM venue_trade_facts
-             GROUP BY trade_id
-        )
+        "WITH " + _canonical_trade_fact_cte() + """
         SELECT
             tf.*,
             cmd.snapshot_id AS cmd_snapshot_id,
@@ -732,10 +755,7 @@ def _reconcile_recorded_exit_fill_projections(
             cmd.created_at AS cmd_created_at,
             cmd.updated_at AS cmd_updated_at,
             pc.phase AS position_phase
-          FROM venue_trade_facts tf
-          JOIN latest_trade_fact latest
-            ON latest.trade_id = tf.trade_id
-           AND latest.local_sequence = tf.local_sequence
+          FROM canonical_trade_fact tf
           JOIN venue_commands cmd
             ON cmd.command_id = tf.command_id
           JOIN position_current pc
@@ -2146,21 +2166,13 @@ def _entry_fill_economics_for_command(
     """Aggregate latest authoritative trade facts for an entry command."""
 
     rows = conn.execute(
-        """
+        "WITH " + _canonical_trade_fact_cte() + """
         SELECT tf.state, tf.filled_size, tf.fill_price
-          FROM venue_trade_facts tf
-          JOIN (
-                SELECT trade_id, MAX(local_sequence) AS local_sequence
-                  FROM venue_trade_facts
-                 WHERE command_id = ?
-                 GROUP BY trade_id
-               ) latest
-            ON latest.trade_id = tf.trade_id
-           AND latest.local_sequence = tf.local_sequence
+          FROM canonical_trade_fact tf
          WHERE tf.command_id = ?
            AND tf.state IN ('MATCHED', 'MINED', 'CONFIRMED')
         """,
-        (command_id, command_id),
+        (command_id,),
     ).fetchall()
     shares = Decimal("0")
     cost_basis = Decimal("0")
@@ -2320,21 +2332,13 @@ def _exit_fill_economics_for_command(
     fallback_fill_price: str,
 ) -> tuple[Decimal, Decimal] | None:
     rows = conn.execute(
-        """
+        "WITH " + _canonical_trade_fact_cte() + """
         SELECT tf.state, tf.filled_size, tf.fill_price
-          FROM venue_trade_facts tf
-          JOIN (
-                SELECT trade_id, MAX(local_sequence) AS local_sequence
-                  FROM venue_trade_facts
-                 WHERE command_id = ?
-                 GROUP BY trade_id
-               ) latest
-            ON latest.trade_id = tf.trade_id
-           AND latest.local_sequence = tf.local_sequence
+          FROM canonical_trade_fact tf
          WHERE tf.command_id = ?
            AND tf.state IN ('MATCHED', 'MINED', 'CONFIRMED')
         """,
-        (command_id, command_id),
+        (command_id,),
     ).fetchall()
     shares = Decimal("0")
     proceeds = Decimal("0")
@@ -2474,22 +2478,14 @@ def _append_entry_position_lots_for_command(
     if position_lot_id is None:
         return
     rows = conn.execute(
-        """
+        "WITH " + _canonical_trade_fact_cte() + """
         SELECT tf.*
-          FROM venue_trade_facts tf
-          JOIN (
-                SELECT trade_id, MAX(local_sequence) AS local_sequence
-                  FROM venue_trade_facts
-                 WHERE command_id = ?
-                 GROUP BY trade_id
-               ) latest
-            ON latest.trade_id = tf.trade_id
-           AND latest.local_sequence = tf.local_sequence
+          FROM canonical_trade_fact tf
          WHERE tf.command_id = ?
            AND tf.state IN ('MATCHED', 'MINED', 'CONFIRMED')
          ORDER BY tf.observed_at, tf.trade_fact_id
         """,
-        (str(command.get("command_id") or ""), str(command.get("command_id") or "")),
+        (str(command.get("command_id") or ""),),
     ).fetchall()
     for row in rows:
         if _positive_decimal_or_none(row["filled_size"]) is None:
@@ -2681,12 +2677,10 @@ def _float_or_none(value: Any) -> float | None:
 
 def _latest_trade_fact_for_trade_id(conn: sqlite3.Connection, trade_id: str) -> dict[str, Any] | None:
     row = conn.execute(
-        """
+        "WITH " + _canonical_trade_fact_cte() + """
         SELECT *
-          FROM venue_trade_facts
+          FROM canonical_trade_fact
          WHERE trade_id = ?
-         ORDER BY local_sequence DESC, trade_fact_id DESC
-         LIMIT 1
         """,
         (trade_id,),
     ).fetchone()

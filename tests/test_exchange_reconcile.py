@@ -701,6 +701,145 @@ def test_maker_order_trade_links_to_local_command_and_uses_maker_fill_economics(
     assert findings(conn) == []
 
 
+def test_maker_fill_economics_repair_uses_canonical_trade_fact_over_later_weaker_fact(conn):
+    from src.execution.exchange_reconcile import reconcile_recorded_maker_fill_economics
+    from src.state.venue_command_repo import append_trade_fact as append
+
+    seed_command(conn, size=5.17, price=0.37)
+    seed_position_baseline(conn)
+    seed_trade_decision_runtime_alias(conn)
+    raw = {
+        "id": "trade-maker-late-weaker",
+        "taker_order_id": "ord-other-taker",
+        "status": "CONFIRMED",
+        "size": "1.5873",
+        "price": "0.63",
+        "transaction_hash": "0xabc",
+        "maker_orders": [
+            {
+                "order_id": "ord-m5",
+                "matched_amount": "1.5873",
+                "price": "0.37",
+                "asset_id": YES_TOKEN,
+                "side": "BUY",
+            }
+        ],
+    }
+    append(
+        conn,
+        trade_id="trade-maker-late-weaker",
+        venue_order_id="ord-m5",
+        command_id="cmd-m5",
+        state="CONFIRMED",
+        filled_size="1.5873",
+        fill_price="0.63",
+        source="REST",
+        observed_at=NOW,
+        raw_payload_hash=hashlib.sha256(json.dumps(raw, sort_keys=True).encode()).hexdigest(),
+        raw_payload_json=raw,
+    )
+    append(
+        conn,
+        trade_id="trade-maker-late-weaker",
+        venue_order_id="ord-m5",
+        command_id="cmd-m5",
+        state="FAILED",
+        filled_size="0",
+        fill_price="0",
+        source="REST",
+        observed_at=NOW + timedelta(seconds=1),
+        raw_payload_hash=hashlib.sha256(b"late-weaker-maker-fill-failed").hexdigest(),
+        raw_payload_json={"id": "trade-maker-late-weaker", "status": "FAILED"},
+    )
+
+    summary = reconcile_recorded_maker_fill_economics(conn, observed_at=NOW + timedelta(seconds=2))
+
+    assert summary["scanned"] == 1
+    assert summary["corrected"] == 1
+    assert summary["projected"] == 1
+    projection = conn.execute(
+        "SELECT phase, order_status, shares, entry_price, cost_basis_usd FROM position_current WHERE position_id = 'pos-m5'"
+    ).fetchone()
+    assert projection["phase"] == "active"
+    assert projection["order_status"] == "partial"
+    assert Decimal(str(projection["shares"])) == Decimal("1.5873")
+    assert Decimal(str(projection["entry_price"])) == Decimal("0.37")
+    assert Decimal(str(projection["cost_basis_usd"])) == Decimal("0.587301")
+    execution = conn.execute(
+        "SELECT fill_price, shares, terminal_exec_status, command_id FROM execution_fact WHERE intent_id = 'pos-m5:entry'"
+    ).fetchone()
+    assert dict(execution) == {
+        "fill_price": 0.37,
+        "shares": 1.5873,
+        "terminal_exec_status": "partial",
+        "command_id": "cmd-m5",
+    }
+
+
+def test_entry_fill_economics_uses_canonical_trade_fact_over_later_weaker_fact(conn):
+    from src.execution.exchange_reconcile import _entry_fill_economics_for_command
+
+    seed_command(conn)
+    append_trade_fact(
+        conn,
+        trade_id="trade-entry-canonical",
+        size="2.5",
+        fill_price="0.40",
+        state="CONFIRMED",
+    )
+    append_trade_fact(
+        conn,
+        trade_id="trade-entry-canonical",
+        size="0",
+        fill_price="0.40",
+        state="FAILED",
+    )
+
+    assert _entry_fill_economics_for_command(
+        conn,
+        command_id="cmd-m5",
+        fallback_filled_size="1",
+        fallback_fill_price="0.99",
+    ) == (Decimal("2.5"), Decimal("0.40"), Decimal("1.000"))
+
+
+def test_exit_fill_economics_uses_canonical_trade_fact_over_later_weaker_fact(conn):
+    from src.execution.exchange_reconcile import _exit_fill_economics_for_command
+
+    seed_command(
+        conn,
+        command_id="cmd-exit-canonical",
+        venue_order_id="ord-exit-canonical",
+        side="SELL",
+        position_id="pos-exit-canonical",
+    )
+    append_trade_fact(
+        conn,
+        command_id="cmd-exit-canonical",
+        venue_order_id="ord-exit-canonical",
+        trade_id="trade-exit-canonical",
+        size="3",
+        fill_price="0.25",
+        state="CONFIRMED",
+    )
+    append_trade_fact(
+        conn,
+        command_id="cmd-exit-canonical",
+        venue_order_id="ord-exit-canonical",
+        trade_id="trade-exit-canonical",
+        size="0",
+        fill_price="0.25",
+        state="FAILED",
+    )
+
+    assert _exit_fill_economics_for_command(
+        conn,
+        command_id="cmd-exit-canonical",
+        fallback_filled_size="1",
+        fallback_fill_price="0.99",
+    ) == (Decimal("3"), Decimal("0.25"))
+
+
 def test_entry_fill_projection_aggregates_multiple_trade_facts(conn):
     from src.execution.exchange_reconcile import run_reconcile_sweep
 
