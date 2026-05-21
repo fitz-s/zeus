@@ -1808,7 +1808,9 @@ def _edge_source_for(candidate: MarketCandidate, edge: BinEdge) -> str:
         return "opening_inertia"
     if candidate.discovery_mode == DiscoveryMode.IMMINENT_OPEN_CAPTURE.value:
         return "imminent_open_capture"
-    if edge.direction == "buy_no" and edge.bin.is_shoulder:
+    from src.strategy.strategy_profile import _classify_via_registry
+    _ctx = SimpleNamespace(edge=edge, candidate=candidate, market_phase=None, conn=None)
+    if _classify_via_registry("shoulder_sell", _ctx) is not None:
         return "shoulder_sell"
     if edge.direction == "buy_yes" and not edge.bin.is_shoulder:
         return "center_buy"
@@ -1824,7 +1826,9 @@ def _strategy_key_for(candidate: MarketCandidate, edge: BinEdge) -> str | None:
         return "opening_inertia"
     if candidate.discovery_mode == DiscoveryMode.IMMINENT_OPEN_CAPTURE.value:
         return "opening_inertia"
-    if edge.direction == "buy_no" and edge.bin.is_shoulder:
+    from src.strategy.strategy_profile import _classify_via_registry
+    _ctx = SimpleNamespace(edge=edge, candidate=candidate, market_phase=None, conn=None)
+    if _classify_via_registry("shoulder_sell", _ctx) is not None:
         return "shoulder_sell"
     if edge.direction == "buy_yes" and not edge.bin.is_shoulder:
         return "center_buy"
@@ -1840,7 +1844,11 @@ def _strategy_key_for_hypothesis(candidate: MarketCandidate, hypothesis: FullFam
         return "opening_inertia"
     if candidate.discovery_mode == DiscoveryMode.IMMINENT_OPEN_CAPTURE.value:
         return "opening_inertia"
-    if hypothesis.direction == "buy_no" and hypothesis.is_shoulder:
+    from src.strategy.strategy_profile import _classify_via_registry
+    _hyp_bin = SimpleNamespace(is_shoulder=hypothesis.is_shoulder)
+    _hyp_edge = SimpleNamespace(direction=hypothesis.direction, bin=_hyp_bin)
+    _ctx = SimpleNamespace(edge=_hyp_edge, candidate=candidate, market_phase=None, conn=None)
+    if _classify_via_registry("shoulder_sell", _ctx) is not None:
         return "shoulder_sell"
     if hypothesis.direction == "buy_yes" and not hypothesis.is_shoulder:
         return "center_buy"

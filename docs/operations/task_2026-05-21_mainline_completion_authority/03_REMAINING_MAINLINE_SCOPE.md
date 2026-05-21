@@ -10,7 +10,7 @@ Each surface below: (a) v4 §M scope label verbatim, (b) dossier intent §/objec
 
 **v4 §M**: line 1100 "Phases 2-7 (... Shoulder ...)"
 
-**Dossier intent §7**: shoulder is open-ended tail exposure, not bin alpha. Sell-shoulder is short-vol/short-tail; buy-shoulder is regime-dependent long-tail; center-vs-shoulder is family-relative pair trade; tail-hedged basket is research-only; shoulder no-trade gate is mandatory. Requires `ShoulderStrategyVNext` 20-field object (§7.3), 5 strategy variants (§7.4), separate `hypothesis_family_id` + Kelly haircut 0.05-0.20 + cluster cap (§7.5), Day0-bound interaction logic (§7.6).
+**Dossier intent §7**: shoulder is open-ended tail exposure, not bin alpha. Sell-shoulder is short-vol/short-tail; buy-shoulder is regime-dependent long-tail; center-vs-shoulder is family-relative pair trade; tail-hedged basket is research-only; shoulder no-trade gate is mandatory. Requires `ShoulderStrategyVNext` 21-field object (§7.3; verifier recount 2026-05-21: 21 enumerated rows — row count is authoritative over original "20" header), 5 strategy variants (§7.4), separate `hypothesis_family_id` + Kelly haircut 0.05-0.20 + cluster cap (§7.5), Day0-bound interaction logic (§7.6).
 
 **Current `origin/main` state** (re-grep before locking):
 - `architecture/strategy_profile_registry.yaml` declares `shoulder_sell` strategy (live_status to verify).

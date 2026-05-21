@@ -8,10 +8,10 @@ Created 2026-05-21 after orchestrator drift incident in session `4beb2fa4`. Purp
 2. `02_MAIN_STATE_INVENTORY.md` — every Phase 0/1/2 deliverable currently on `origin/main` with merge sha + tag. Single source of truth for "what is already shipped".
 3. `03_REMAINING_MAINLINE_SCOPE.md` — five remaining structural surfaces (`Phase 3..7` per v4 §M enum), current code state, intent from GPT Round 1 dossier, file-likelihood map.
 4. `04_PHASE_3_SHOULDER.md` — `ShoulderStrategyVNext` substantive design. Math + portfolio rules + DB schema delta.
-5. `05_PHASE_4_FDR_FAMILY.md` — FDR family-ID `spread_bucket` extension + hypothesis-family-id widening per v4 §M line 1101 + dossier §2.5.
-6. `06_PHASE_5_WEATHER_REGIME.md` — `WeatherRegimeTag` + correlation-matrix-via-shrinkage (math spec §15.4) + cluster cap.
+5. `05_PHASE_4_FDR_FAMILY_CANDIDATES.md` — FDR family-ID `spread_bucket` extension + hypothesis-family-id widening per v4 §M line 1101 + dossier §2.5.
+6. `06_PHASE_5_WEATHER_REGIME_CORRELATION.md` — `WeatherRegimeTag` + correlation-matrix-via-shrinkage (math spec §15.4) + cluster cap.
 7. `07_PHASE_6_EVIDENCE_LADDER.md` — `EvidenceLadder` tiers + `PromotionStatus` + `ShadowExperimentRegistry` per dossier §9 + §13.5.
-8. `08_PHASE_7_SETTLEMENT_GATE.md` — settlement social→type-gate migration per v4 §M line 1104 + `umaResolutionStatus` typing in current `resolution_era.py`.
+8. `08_PHASE_7_SETTLEMENT_TYPE_GATE.md` — settlement social→type-gate migration per v4 §M line 1104 + `umaResolutionStatus` typing in current `resolution_era.py`.
 9. `09_WORKFLOW.md` — SCAFFOLD → wave-critic → production → silent PR fix-loop → merge → tag. Includes opus/sonnet/haiku tier routing per `~/.claude/skills/orchestrator-delivery/SKILL.md`.
 10. `10_VERIFIER_PROBES.md` — third-party verifier probe list per phase. Each phase has 10+ concrete assertions (file:line, query, antibody name) for an external opus verifier to confirm/dispute.
 
@@ -25,7 +25,7 @@ These are derived from the May 2026 mainline run lessons. They are **structural*
 
 3. **Code paths in archived dossiers WILL be stale.** GPT Round 1 dossier was written multiple PR cycles ago. Every file:line citation must be re-grepped against `git show origin/main:<path>` within 10 min of plan lock. Two paths in v4 had already rotted by the time Phase 0 dispatched; expect more rot after every merge wave.
 
-4. **Authority over file:line for dossier intent**: dossier defines OBJECTS (`Day0BoundState` 5-class enum, `ShoulderStrategyVNext` 20-field record, `EffectiveKellyContext` 12-cell property). Files implementing them can move. Object semantics + invariants are the durable surface.
+4. **Authority over file:line for dossier intent**: dossier defines OBJECTS (`Day0BoundState` 6-class enum per §6.2, `ShoulderStrategyVNext` 21-field record per §7.3 verifier recount 2026-05-21, `EffectiveKellyContext` 12-cell property). Files implementing them can move. Object semantics + invariants are the durable surface.
 
 5. **Substantive shoulder + tail content is bounded by physics + math.** `open_shoulder` payoff is open-ended; Kelly haircut must reflect tail-correlation. Day0 high vs low cannot share router (high resolves afternoon, low resolves morning + can reset). DST handling uses `ZoneInfo`, never `timedelta(hours=…)`. Settlement rounding is WMO half-up; calibrated p_market vs `1-YES` complement are different objects. These are not preferences — they're domain-correctness gates.
 

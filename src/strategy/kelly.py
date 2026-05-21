@@ -267,7 +267,16 @@ def phase_aware_kelly_multiplier(
 
     m_phase_source = FALLBACK_F1_HAIRCUT if phase_source == "fallback_f1" else 1.0
 
-    return m_strategy_phase * m_oracle * m_observed_fraction * m_phase_source
+    result = m_strategy_phase * m_oracle * m_observed_fraction * m_phase_source
+    # Phase 3 T2: shoulder Kelly clamp [0.05, 0.20] per dossier §7.5 AR2/G4.
+    # Guard: fires ONLY when live_status == "shadow" AND kelly_default_multiplier > 0.0.
+    # R-3: current shoulder_sell default mult = 0.0 → clamp is a no-op today;
+    # activates when operator promotes mult > 0.0 for shadow-stage entry.
+    if strategy_key in ("shoulder_sell", "shoulder_buy"):
+        from src.strategy.strategy_profile import kelly_default_multiplier as _kdm
+        if profile.live_status == "shadow" and _kdm(strategy_key) > 0.0:
+            result = max(0.05, min(0.20, result))
+    return result
 
 
 # Per-city Kelly multiplier (asymmetric-loss policy layer, 2026-05-03).

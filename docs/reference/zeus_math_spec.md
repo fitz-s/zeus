@@ -692,9 +692,9 @@ where `D` is the diagonal matrix formed from the diagonal entries of the sample 
 - `γ` = squared Frobenius distance between the sample covariance matrix `S` and the diagonal target `D` (measures how far the sample matrix is from diagonal)
 - `n` = number of observations
 
-`δ*` is the analytically optimal convex-combination weight that minimises the expected mean-squared error of the estimator over the class `(1-δ)·S + δ·D, δ ∈ [0,1]`.
+`δ*` is the analytically optimal convex-combination weight that minimises the expected mean-squared error of the estimator over the class `(1-δ)·S + δ·D, δ ∈ [0,1]`. Implementation MUST clip `δ*` to `[0, 1]` before applying — raw `π / (γ × n)` can exceed 1 on degenerate inputs (e.g. near-diagonal S), which would violate the convex-combination property and produce a non-PSD estimate.
 
-**Verification cohort (back-test design)**: synthetic AR(1) temperature-residual sequences of increasing length `n ∈ {50, 100, 250, 500, 1000}` across `p = 20` city series with known underlying diagonal-dominant true covariance. The fitted `δ*` must converge toward 0 as `n → ∞` (sample covariance becomes reliable) and remain bounded away from 0 for `n < p`. Test harness: `tests/test_correlation_shrinkage.py::test_intensity_converges_diagonal_target`.
+**Verification cohort (back-test design, planned Phase 5 test harness)**: synthetic AR(1) temperature-residual sequences of increasing length `n ∈ {50, 100, 250, 500, 1000}` across `p = 20` city series with known underlying diagonal-dominant true covariance. The fitted `δ*` must converge toward 0 as `n → ∞` (sample covariance becomes reliable) and remain bounded away from 0 for `n < p`. Planned test name: `tests/test_correlation_shrinkage.py::test_intensity_converges_diagonal_target` (does not exist yet; ships with Phase 5 shrinkage estimator).
 
 ### 15.5 Day0 two-stage residual model
 When a position is in day0 window, the observed running max `R` is a hard floor:

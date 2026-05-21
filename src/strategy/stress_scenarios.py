@@ -116,6 +116,17 @@ def run_stress_tests(
     Fail-closed: if ENS member count < min_members, returns NaN for that
     scenario → SHOULDER_STRESS_FAIL per §5 R-4.
 
-    SCAFFOLD — production logic in T2 production pass.
+    T2 thin mode: tail_probability_calibrated is nan on all Pattern-B candidates
+    (conn=None path or SHOULDER_NO_TRADE_GATE). Caller derives
+    tail_probability_stressed = max(values.values()); nan propagates to
+    SHOULDER_STRESS_FAIL per R-4. Full perturbation math deferred to T3.
     """
-    raise NotImplementedError("T2 production pass owns run_stress_tests body")
+    _scenarios = scenarios if scenarios is not None else ALL_SCENARIOS
+    # Thin fail-closed: if calibrated probability unavailable, all scenarios NaN.
+    # R-4: NaN propagates → tail_probability_stressed = max(...) = NaN → SHOULDER_STRESS_FAIL.
+    p_cal = getattr(candidate, "tail_probability_calibrated", float("nan"))
+    if p_cal != p_cal:  # NaN check (math.isnan not imported here intentionally)
+        return {s.scenario_id: float("nan") for s in _scenarios}
+    # Full perturbation math (T3+: when sigma is plumbed from ensemble context).
+    # Phase 3 T2 thin mode: sigma unavailable from BinEdge alone → fail-closed NaN.
+    return {s.scenario_id: float("nan") for s in _scenarios}

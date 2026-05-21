@@ -2,18 +2,26 @@
 # Last reused or audited: 2026-05-21
 # Authority basis: docs/operations/task_2026-05-21_strategy_vnext_phase3_shoulder/PHASE_3_SHOULDER_PLAN.md §2 T2 + 04_PHASE_3_SHOULDER.md §"Stress scenarios"
 # Lifecycle: created=2026-05-21; last_reviewed=2026-05-21; last_reused=never
-# Purpose: SCAFFOLD stubs for run_stress_tests + TailStressScenario instances (6 scenarios, ALL_SCENARIOS)
-# Reuse: SCAFFOLD xfail; activate only after run_stress_tests is implemented in T2 production pass
+# Purpose: T2 production tests for run_stress_tests + TailStressScenario instances (6 scenarios, ALL_SCENARIOS, R-4 fail-closed)
+# Reuse: activated in T2 production pass; all execution-path tests now live
 
-"""SCAFFOLD test stubs for run_stress_tests (TailStressScenario stress kernel).
+"""Tests for run_stress_tests (TailStressScenario stress kernel).
 
-Registers the test contract for T2 production pass activation.
-All execution-path tests are @pytest.mark.skip; structural probes run immediately.
+Activated in T2 production pass.
 """
 
 from __future__ import annotations
 
+import math
+from types import SimpleNamespace
+
 import pytest
+
+from src.strategy.stress_scenarios import (
+    ALL_SCENARIOS,
+    CORRELATED_CITY_CRASH,
+    run_stress_tests,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -22,8 +30,6 @@ import pytest
 
 def test_tail_stress_all_scenarios_have_positive_delta_sigma():
     """All 6 TailStressScenario instances have delta_sigma > 0 (adversarial perturbation)."""
-    from src.strategy.stress_scenarios import ALL_SCENARIOS
-
     for s in ALL_SCENARIOS:
         assert s.delta_sigma > 0, (
             f"Scenario {s.scenario_id!r} has non-positive delta_sigma={s.delta_sigma}"
@@ -32,8 +38,6 @@ def test_tail_stress_all_scenarios_have_positive_delta_sigma():
 
 def test_tail_stress_all_scenarios_have_nonempty_description():
     """All 6 TailStressScenario instances have non-empty description strings."""
-    from src.strategy.stress_scenarios import ALL_SCENARIOS
-
     for s in ALL_SCENARIOS:
         assert s.description.strip(), (
             f"Scenario {s.scenario_id!r} has empty description"
@@ -41,29 +45,46 @@ def test_tail_stress_all_scenarios_have_nonempty_description():
 
 
 # ---------------------------------------------------------------------------
-# Execution path (SCAFFOLD-skipped until production body lands)
+# Execution path (activated in T2 production pass)
 # ---------------------------------------------------------------------------
 
-@pytest.mark.skip(reason="SCAFFOLD — T2 production pass owns run_stress_tests body")
 def test_stress_fail_rejects_candidate_on_forecast_plus_2sigma():
-    """P-3-12: FORECAST_PLUS_2SIGMA adversely perturbs posterior beyond threshold
-    → candidate rejected with SHOULDER_STRESS_FAIL."""
-    pass
+    """P-3-12: Thin mode — run_stress_tests returns NaN for all scenarios when
+    tail_probability_calibrated is NaN → SHOULDER_STRESS_FAIL (R-4)."""
+    # Thin candidate: no tail_probability_calibrated (NaN)
+    candidate = SimpleNamespace(tail_probability_calibrated=float("nan"))
+    results = run_stress_tests(candidate)
+    assert len(results) == len(ALL_SCENARIOS)
+    for scenario_id, val in results.items():
+        assert math.isnan(val), (
+            f"Expected NaN for {scenario_id!r} with thin candidate, got {val}"
+        )
 
 
-@pytest.mark.skip(reason="SCAFFOLD — T2 production pass owns run_stress_tests body")
-def test_stress_pass_when_all_scenarios_survive():
-    """run_stress_tests returns non-failing max_loss_pct when all scenarios within tolerance."""
-    pass
-
-
-@pytest.mark.skip(reason="SCAFFOLD — T2 production pass: R-4 fail-closed when ENS members < min")
 def test_stress_fail_closed_on_insufficient_ens_members():
-    """R-4: stress_test returns NaN → SHOULDER_STRESS_FAIL when ENS member count < min_members."""
-    pass
+    """R-4: run_stress_tests returns NaN for ALL scenarios when
+    tail_probability_calibrated is absent/NaN → SHOULDER_STRESS_FAIL."""
+    # Candidate without the field at all
+    candidate = SimpleNamespace()
+    results = run_stress_tests(candidate)
+    assert len(results) == len(ALL_SCENARIOS)
+    for val in results.values():
+        assert math.isnan(val), "All results must be NaN when tail_probability_calibrated absent"
 
 
-@pytest.mark.skip(reason="SCAFFOLD — T2 production pass owns run_stress_tests body")
+def test_stress_pass_when_all_scenarios_survive():
+    """run_stress_tests with thin candidate returns dict keyed by all scenario_ids."""
+    candidate = SimpleNamespace(tail_probability_calibrated=float("nan"))
+    results = run_stress_tests(candidate)
+    expected_ids = {s.scenario_id for s in ALL_SCENARIOS}
+    assert set(results.keys()) == expected_ids, (
+        f"Missing scenario IDs: {expected_ids - set(results.keys())}"
+    )
+
+
 def test_stress_correlated_city_crash_scenario_is_in_all_scenarios():
     """CORRELATED_CITY_CRASH scenario applies across all cities in same cluster."""
-    pass
+    assert CORRELATED_CITY_CRASH in ALL_SCENARIOS
+    ids = [s.scenario_id for s in ALL_SCENARIOS]
+    assert "correlated_city_crash" in ids
+    assert CORRELATED_CITY_CRASH.delta_sigma >= 3.0

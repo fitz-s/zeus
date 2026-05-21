@@ -452,7 +452,10 @@ def _classify_edge_source(mode: DiscoveryMode, edge) -> str:
         return "opening_inertia"
     if mode == DiscoveryMode.IMMINENT_OPEN_CAPTURE:
         return "imminent_open_capture"
-    if edge.direction == "buy_no" and edge.bin.is_shoulder:
+    from src.strategy.strategy_profile import _classify_via_registry
+    from types import SimpleNamespace as _SimpleNamespace
+    _ctx = _SimpleNamespace(edge=edge, candidate=None, market_phase=None, conn=None)
+    if _classify_via_registry("shoulder_sell", _ctx) is not None:
         return "shoulder_sell"
     if edge.direction == "buy_yes" and not edge.bin.is_shoulder:
         return "center_buy"
