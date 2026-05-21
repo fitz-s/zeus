@@ -1392,10 +1392,14 @@ def _validate_review_cancel_unknown_no_fill_payload(
     missing = [name for name in required_true if required_predicates.get(name) is not True]
     if missing:
         raise ValueError(f"cancel-unknown no-fill predicates are not proven true: {missing}")
+    if payload.get("side_effect_boundary_crossed") != "unknown":
+        raise ValueError("cancel-unknown no-fill clearance requires side_effect_boundary_crossed=unknown")
+    if payload.get("sdk_submit_attempted") != "unknown":
+        raise ValueError("cancel-unknown no-fill clearance requires sdk_submit_attempted=unknown")
     with _row_factory_as(conn, sqlite3.Row):
         command = conn.execute(
             """
-            SELECT command_id, position_id, venue_order_id
+            SELECT command_id, position_id, decision_id, market_id, token_id, side, price, size, created_at, venue_order_id
               FROM venue_commands
              WHERE command_id = ?
             """,
@@ -1422,12 +1426,22 @@ def _validate_review_cancel_unknown_no_fill_payload(
         ).fetchone()
         fact = conn.execute(
             """
-            SELECT state, matched_size
+            SELECT fact_id, venue_order_id, state, matched_size, local_sequence
               FROM venue_order_facts
              WHERE fact_id = ?
                AND command_id = ?
             """,
             (payload.get("terminal_order_fact_id"), command_id),
+        ).fetchone()
+        latest_fact = conn.execute(
+            """
+            SELECT fact_id, venue_order_id, state, matched_size, local_sequence
+              FROM venue_order_facts
+             WHERE command_id = ?
+             ORDER BY local_sequence DESC
+             LIMIT 1
+            """,
+            (command_id,),
         ).fetchone()
     if command is None or not str(command["venue_order_id"] or "").strip():
         raise ValueError("cancel-unknown no-fill clearance requires command venue_order_id")
@@ -1456,6 +1470,10 @@ def _validate_review_cancel_unknown_no_fill_payload(
         raise ValueError("cancel-unknown no-fill latest payload must be CANCEL_UNKNOWN")
     if fact is None:
         raise ValueError("cancel-unknown no-fill clearance requires terminal order fact")
+    if latest_fact is None or int(fact["fact_id"]) != int(latest_fact["fact_id"]):
+        raise ValueError("cancel-unknown no-fill terminal order fact must be latest")
+    if str(fact["venue_order_id"] or "") != str(command["venue_order_id"] or ""):
+        raise ValueError("cancel-unknown no-fill terminal order fact venue_order_id mismatch")
     if str(fact["state"] or "") not in {"CANCEL_CONFIRMED", "EXPIRED", "VENUE_WIPED"}:
         raise ValueError("cancel-unknown no-fill terminal order fact state is invalid")
     try:
@@ -1480,20 +1498,40 @@ def _validate_review_cancel_unknown_no_fill_payload(
     if int(venue_proof.get("matching_trade_count", -1)) != 0:
         raise ValueError("cancel-unknown no-fill clearance found matching trades")
     for key in ("command_id", "market_id", "token_id", "side"):
-        if not str(venue_proof.get(key) or "").strip():
-            raise ValueError(f"cancel-unknown no-fill clearance venue proof missing {key}")
+        if str(venue_proof.get(key) or "") != str(command[key] or ""):
+            raise ValueError(f"cancel-unknown no-fill venue_absence_proof {key} does not match command")
+    for key in ("price", "size"):
+        try:
+            proof_value = Decimal(str(venue_proof.get(key)))
+            command_value = Decimal(str(command[key]))
+        except (InvalidOperation, TypeError):
+            raise ValueError(f"cancel-unknown no-fill venue_absence_proof {key} is invalid")
+        if proof_value != command_value:
+            raise ValueError(f"cancel-unknown no-fill venue_absence_proof {key} does not match command")
     observed_at = _review_clearance_parse_utc(venue_proof.get("observed_at"))
     cleared_at = _review_clearance_parse_utc(payload.get("cleared_at"))
-    if observed_at is None or cleared_at is None:
-        raise ValueError("cancel-unknown no-fill clearance requires observed_at and cleared_at")
+    window_start = _review_clearance_parse_utc(venue_proof.get("time_window_start"))
+    window_end = _review_clearance_parse_utc(venue_proof.get("time_window_end"))
+    command_created_at = _review_clearance_parse_utc(command["created_at"])
+    if (
+        observed_at is None
+        or cleared_at is None
+        or window_start is None
+        or window_end is None
+        or command_created_at is None
+    ):
+        raise ValueError("cancel-unknown no-fill clearance requires parseable proof times")
     age_seconds = (cleared_at - observed_at).total_seconds()
     if age_seconds < -5 or age_seconds > 60:
         raise ValueError("cancel-unknown no-fill venue proof is stale")
+    if window_start > command_created_at or window_end < observed_at:
+        raise ValueError("cancel-unknown no-fill time window does not cover command through venue read")
     source = payload.get("source_proof")
     if not isinstance(source, dict):
         raise ValueError("cancel-unknown no-fill clearance requires source_proof")
-    if not str(source.get("source_function") or "").strip():
-        raise ValueError("cancel-unknown no-fill source_function is required")
+    for key in ("source_commit", "source_function", "source_reason"):
+        if not str(source.get(key) or "").strip():
+            raise ValueError(f"cancel-unknown no-fill source_proof missing {key}")
     if source.get("source_reason") != "cancel_unknown_point_order_terminal_no_fill":
         raise ValueError("cancel-unknown no-fill source_reason is unsupported")
 

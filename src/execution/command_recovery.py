@@ -701,6 +701,20 @@ def _fill_trade_fact_count(conn: sqlite3.Connection, command_id: str) -> int:
     return int((_dict_row(row).get("count") if row else 0) or 0)
 
 
+def _trade_fact_count(conn: sqlite3.Connection, command_id: str) -> int:
+    if not _table_exists(conn, "venue_trade_facts"):
+        return 0
+    row = conn.execute(
+        """
+        SELECT COUNT(*) AS count
+          FROM venue_trade_facts
+         WHERE command_id = ?
+        """,
+        (command_id,),
+    ).fetchone()
+    return int((_dict_row(row).get("count") if row else 0) or 0)
+
+
 def _latest_matched_order_fact_candidates(conn: sqlite3.Connection) -> list[dict]:
     if not _table_exists(conn, "venue_order_facts"):
         return []
@@ -2558,10 +2572,15 @@ def _client_open_orders(client) -> list:
     return list(get_open_orders() or [])
 
 
-def _matching_open_orders_for_command(client, command: dict) -> list[dict]:
+def _matching_open_orders_for_command(
+    client,
+    command: dict,
+    *,
+    open_orders: list | None = None,
+) -> list[dict]:
     venue_order_id = str(command.get("venue_order_id") or "")
     matches: list[dict] = []
-    for order in _client_open_orders(client):
+    for order in (_client_open_orders(client) if open_orders is None else open_orders):
         raw = _raw_payload(order)
         order_id = _open_order_id(order) or _extract_order_id(raw)
         if (venue_order_id and order_id == venue_order_id) or _raw_matches_command_exposure(raw, command):
@@ -2569,10 +2588,15 @@ def _matching_open_orders_for_command(client, command: dict) -> list[dict]:
     return matches
 
 
-def _matching_trades_for_command(client, command: dict) -> list[dict]:
+def _matching_trades_for_command(
+    client,
+    command: dict,
+    *,
+    trades: list | None = None,
+) -> list[dict]:
     created_epoch = _epoch_seconds(command.get("created_at")) or 0.0
     matches: list[dict] = []
-    for trade in _client_trades(client):
+    for trade in (_client_trades(client) if trades is None else trades):
         raw = _raw_payload(trade)
         if not _raw_matches_command_exposure(raw, command):
             continue
@@ -2707,7 +2731,7 @@ def _append_point_order_terminal_no_fill_fact(
         "required_predicates": {
             "point_order_terminal_no_fill": True,
             "point_order_matched_size_zero": True,
-            "no_local_trade_facts": _fill_trade_fact_count(conn, command_id) == 0,
+            "no_local_trade_facts": _trade_fact_count(conn, command_id) == 0,
             "no_matching_open_orders": len(matching_open_orders) == 0,
             "no_matching_trades": len(matching_trades) == 0,
         },
@@ -2801,8 +2825,11 @@ def _terminal_point_order_candidates(conn: sqlite3.Connection) -> list[dict]:
     if not _table_exists(conn, "venue_order_facts"):
         return []
     command_states = tuple(sorted(_ACKED_ORDER_STATES))
+    if not command_states:
+        return []
+    state_placeholders = ",".join("?" for _ in command_states)
     rows = conn.execute(
-        """
+        f"""
         WITH latest_order_fact AS (
             SELECT command_id, MAX(local_sequence) AS max_sequence
               FROM venue_order_facts
@@ -2826,7 +2853,7 @@ def _terminal_point_order_candidates(conn: sqlite3.Connection) -> list[dict]:
           JOIN position_current pc
             ON pc.position_id = cmd.position_id
          WHERE cmd.intent_kind = 'ENTRY'
-           AND cmd.state IN (?, ?)
+           AND cmd.state IN ({state_placeholders})
            AND COALESCE(cmd.venue_order_id, '') != ''
            AND pc.phase = 'pending_entry'
            AND CAST(COALESCE(pc.shares, '0') AS REAL) = 0
@@ -2847,12 +2874,22 @@ def reconcile_terminal_point_orders(conn: sqlite3.Connection, client) -> dict:
     get_order = getattr(client, "get_order", None)
     if not callable(get_order):
         return summary
-    for row in _terminal_point_order_candidates(conn):
+    candidates = _terminal_point_order_candidates(conn)
+    if not candidates:
+        return summary
+    try:
+        open_orders = _client_open_orders(client)
+        trades = _client_trades(client)
+    except Exception as exc:
+        logger.error("recovery: terminal point-order account truth enumeration failed: %s", exc)
+        summary["errors"] += len(candidates)
+        return summary
+    for row in candidates:
         summary["scanned"] += 1
         command_id = str(row.get("command_id") or "")
         venue_order_id = str(row.get("venue_order_id") or "")
         try:
-            if _fill_trade_fact_count(conn, command_id) > 0:
+            if _trade_fact_count(conn, command_id) > 0:
                 summary["stayed"] += 1
                 continue
             point_order = _venue_order_payload(get_order(venue_order_id))
@@ -2871,8 +2908,8 @@ def reconcile_terminal_point_orders(conn: sqlite3.Connection, client) -> dict:
             if _is_positive_decimal(matched_size):
                 summary["stayed"] += 1
                 continue
-            matching_open_orders = _matching_open_orders_for_command(client, row)
-            matching_trades = _matching_trades_for_command(client, row)
+            matching_open_orders = _matching_open_orders_for_command(client, row, open_orders=open_orders)
+            matching_trades = _matching_trades_for_command(client, row, trades=trades)
             if matching_open_orders or matching_trades:
                 summary["stayed"] += 1
                 continue
@@ -3225,7 +3262,7 @@ def _review_required_cancel_unknown_live_order_recovery(
             order_id == venue_order_id
             and fact_state is not None
             and not _is_positive_decimal(_point_order_matched_size(order, fallback=matched_size))
-            and _fill_trade_fact_count(conn, cmd.command_id) == 0
+            and _trade_fact_count(conn, cmd.command_id) == 0
         ):
             command = _dict_row(
                 conn.execute(
