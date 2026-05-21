@@ -583,10 +583,13 @@ tables:
     pr2_columns:
       - wide_spread_display_substitution
       - depth_at_best_ask
+      - tradeability_status_json
     pr2_notes: >
       PR 2 (phase0-pr27): added wide_spread_display_substitution (BOOL/INT) and
       depth_at_best_ask (INT) via idempotent ALTER TABLE ADD COLUMN in
-      init_snapshot_schema(). spread_observed_window_ms deferred (Finding #8 decision-a).
+      init_snapshot_schema(). P0-2 live release proof adds tradeability_status_json
+      so negRisk parent/child routing labels do not act as executable authority.
+      spread_observed_window_ms deferred (Finding #8 decision-a).
     notes: >
       Legacy ghost on world DB after 2026-05-20 live substrate repair. Active
       executable-market snapshot substrate is trade DB because market_discovery
@@ -1426,7 +1429,8 @@ tables:
     pr2_notes: >
       PR 2 (phase0-pr27): wide_spread_display_substitution and depth_at_best_ask
       are applied by init_snapshot_schema() in snapshot_repo.py on the trade
-      substrate connection.
+      substrate connection. P0-2 live release proof adds tradeability_status_json
+      under SCHEMA_VERSION 19 for scanner/snapshot/submit tradeability alignment.
 
   - name: book_hash_transitions
     db: trade

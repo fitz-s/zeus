@@ -27,11 +27,11 @@ runtime/code findings are handled.
 | ID | Source section | Required action | Status | Last source re-read | Evidence / next action |
 | --- | --- | --- | --- | --- | --- |
 | P0-1 | §5 P0-1, §15, §16 step 1/6/7 | Hard release gate proving loaded SHA, DB schema/hash, clean command/redeem state, source/forecast/snapshot freshness, and paper lifecycle proof before live entries | OPEN | pending | Implement release smoke/gate with tests |
-| P0-2 | §5 P0-2, §8 row #184/#186/#199 vs #252/#253, §16 step 1 | Unified negRisk tradeability object across scanner, snapshot assertion, persisted reader, executor preflight | OPEN | pending | Add contract object + E2E tests |
+| P0-2 | §5 P0-2, §8 row #184/#186/#199 vs #252/#253, §16 step 1 | Unified negRisk tradeability object across scanner, snapshot assertion, persisted reader, executor preflight | FIXED | 2026-05-21 §5 P0-2 | `ExecutableTradeabilityStatus` persisted as `tradeability_status_json`; scanner capture builds it from parent/child Gamma + CLOB facts; submit gate uses `executable_allowed`; focused tests green |
 | P0-3 | §5 P0-3, §10, §16 step 2 | Live schema fail-closed; only paper/backfill may downgrade no-trade reasons as degraded/excluded from live trust | OPEN | pending | Add live-mode schema guard and tests |
 | P0-4 | §5 P0-4, §11, §14, §16 step 3 | Integrated crash/recovery/redeem replay across command/order/trade/position/redeem lifecycle | OPEN | pending | Add deterministic replay harness/test |
 | P1-1 | §6 P1-1 | Align decision/no-trade failure policy: live fail-closed, paper/backfill degrade with marking | BLOCKED_BY_P0-3 | pending | Implement with P0-3 |
-| P1-2 | §6 P1-2 | Live executable entry requires fresh CLOB/orderbook; discovery fallback cannot authorize live execution | BLOCKED_BY_P0-2 | pending | Implement with P0-2 |
+| P1-2 | §6 P1-2 | Live executable entry requires fresh CLOB/orderbook; discovery fallback cannot authorize live execution | PARTIAL_WITH_P0-2 | 2026-05-21 §5 P0-2 | Snapshot capture/submit now requires CLOB-backed tradeability status; discovery fallback policy still needs live release gate coverage |
 | P1-3 | §6 P1-3, §16 step 4 | Split `REDEEM_OPERATOR_REQUIRED` semantic overload or add `autoretry_eligible` | OPEN | pending | Inspect settlement command schema/state transitions |
 | P1-4 | §6 P1-4, §8 family row | Canonical `WeatherFamilyExposure` reducer consumed by evaluator/runtime/no-trade | OPEN | pending | Inspect current family reducer after #252/#253 |
 | P1-5 | §6 P1-5, §13, §16 step 5 | Dynamic EffectiveKellyContext proof across live modes/order types | OPEN | pending | Add integration matrix tests |
@@ -59,3 +59,7 @@ runtime/code findings are handled.
 | Timestamp | Command | Result |
 | --- | --- | --- |
 | pending | pending | pending |
+| 2026-05-21 | `python3 scripts/check_schema_version.py --write-pin && python3 scripts/check_schema_version.py` | PASS: schema hash pinned for `SCHEMA_VERSION=19` |
+| 2026-05-21 | `/Users/leofitz/.openclaw/workspace-venus/zeus/.venv/bin/python -m pytest tests/test_executable_market_snapshot_v2.py tests/test_market_scanner_negrisk.py -q --no-header` | PASS: 94 passed |
+| 2026-05-21 | `python3 scripts/topology_doctor.py --planning-lock ... --plan-evidence docs/operations/task_2026-05-21_live_release_proof_p0p3/task.md` | PASS |
+| 2026-05-21 | `python3 scripts/topology_doctor.py --map-maintenance --map-maintenance-mode advisory ...` | PASS |

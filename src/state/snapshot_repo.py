@@ -17,7 +17,10 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any, Optional
 
-from src.contracts.executable_market_snapshot_v2 import ExecutableMarketSnapshotV2
+from src.contracts.executable_market_snapshot_v2 import (
+    ExecutableMarketSnapshotV2,
+    ExecutableTradeabilityStatus,
+)
 
 SNAPSHOT_TABLE = "executable_market_snapshots"
 ABSENT_ORDERBOOK_SIDE = "ABSENT"
@@ -62,6 +65,7 @@ def init_snapshot_schema(conn: sqlite3.Connection) -> None:
           authority_tier TEXT NOT NULL CHECK (authority_tier IN ('GAMMA','DATA','CLOB','CHAIN')),
           captured_at TEXT NOT NULL,
           freshness_deadline TEXT NOT NULL,
+          tradeability_status_json TEXT NOT NULL DEFAULT '{}',
           UNIQUE (snapshot_id)
         );
         CREATE INDEX IF NOT EXISTS idx_snapshots_condition_captured
@@ -81,6 +85,7 @@ def init_snapshot_schema(conn: sqlite3.Connection) -> None:
     for _ddl in (
         "ALTER TABLE executable_market_snapshots ADD COLUMN wide_spread_display_substitution INTEGER NOT NULL DEFAULT 0 CHECK (wide_spread_display_substitution IN (0,1))",
         "ALTER TABLE executable_market_snapshots ADD COLUMN depth_at_best_ask INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE executable_market_snapshots ADD COLUMN tradeability_status_json TEXT NOT NULL DEFAULT '{}'",
     ):
         try:
             conn.execute(_ddl)
@@ -108,7 +113,8 @@ def insert_snapshot(conn: sqlite3.Connection, snapshot: ExecutableMarketSnapshot
           orderbook_depth_json, raw_gamma_payload_hash,
           raw_clob_market_info_hash, raw_orderbook_hash, authority_tier,
           captured_at, freshness_deadline,
-          wide_spread_display_substitution, depth_at_best_ask
+          wide_spread_display_substitution, depth_at_best_ask,
+          tradeability_status_json
         ) VALUES (
           :snapshot_id, :gamma_market_id, :event_id, :event_slug, :condition_id,
           :question_id, :yes_token_id, :no_token_id, :selected_outcome_token_id,
@@ -119,7 +125,8 @@ def insert_snapshot(conn: sqlite3.Connection, snapshot: ExecutableMarketSnapshot
           :orderbook_depth_json, :raw_gamma_payload_hash,
           :raw_clob_market_info_hash, :raw_orderbook_hash, :authority_tier,
           :captured_at, :freshness_deadline,
-          :wide_spread_display_substitution, :depth_at_best_ask
+          :wide_spread_display_substitution, :depth_at_best_ask,
+          :tradeability_status_json
         )
         """,
         _row_from_snapshot(snapshot),
@@ -207,6 +214,9 @@ def _row_from_snapshot(snapshot: ExecutableMarketSnapshotV2) -> dict[str, Any]:
         # PR 2 microstructure fields
         "wide_spread_display_substitution": int(snapshot.wide_spread_display_substitution),
         "depth_at_best_ask": snapshot.depth_at_best_ask,
+        "tradeability_status_json": _json(snapshot.tradeability_status.to_json_dict())
+        if snapshot.tradeability_status is not None
+        else "{}",
     }
 
 
@@ -248,6 +258,30 @@ def _snapshot_from_row(row: sqlite3.Row) -> ExecutableMarketSnapshotV2:
         # PR 2 microstructure fields — default 0 for pre-PR2 legacy rows
         wide_spread_display_substitution=bool(row["wide_spread_display_substitution"] or 0),
         depth_at_best_ask=int(row["depth_at_best_ask"] or 0),
+        tradeability_status=_tradeability_status_from_row(row),
+    )
+
+
+def _tradeability_status_from_row(row: sqlite3.Row) -> ExecutableTradeabilityStatus:
+    try:
+        raw = row["tradeability_status_json"]
+    except (IndexError, KeyError):
+        raw = None
+    payload: dict[str, Any] = {}
+    if raw:
+        try:
+            parsed = json.loads(str(raw))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            parsed = {}
+        if isinstance(parsed, dict):
+            payload = parsed
+    if payload:
+        return ExecutableTradeabilityStatus.from_mapping(payload)
+    return ExecutableTradeabilityStatus.from_legacy_snapshot_flags(
+        active=bool(row["active"]),
+        closed=bool(row["closed"]),
+        accepting_orders=_bool_or_none(row["accepting_orders"]),
+        enable_orderbook=bool(row["enable_orderbook"]),
     )
 
 

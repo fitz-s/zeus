@@ -849,7 +849,7 @@ def get_connection(
 # CI hook scripts/check_schema_version.py diffs the sqlite_master hash of
 # a fresh-init DB against tests/state/_schema_pinned_hash.txt and fails
 # the PR if SCHEMA_VERSION did not change in lockstep.
-SCHEMA_VERSION = 18  # 2026-05-21 Phase 3 T2: tail_stress_scenarios table + no_trade_events rebuild (6 SHOULDER_* members)
+SCHEMA_VERSION = 19  # 2026-05-21 P0-2: executable snapshot tradeability_status_json authority evidence
 
 
 def init_schema(
