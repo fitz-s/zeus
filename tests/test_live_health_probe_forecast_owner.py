@@ -165,6 +165,47 @@ def test_data_ingest_support_daemon_required_even_when_forecast_live_owner_alive
     assert "forecast_live_dead" not in out
 
 
+def test_live_probe_alerts_on_degraded_business_plane_composite(
+    tmp_path, monkeypatch, capsys
+):
+    module = _load_module()
+    root = tmp_path / "zeus"
+    _healthy_state(root)
+    _write_json(
+        root / "state" / "live_health_composite.json",
+        {
+            "healthy": False,
+            "status": "DEGRADED",
+            "failing_surfaces": ["business_plane"],
+            "surfaces": {
+                "business_plane": {
+                    "ok": False,
+                    "issue": "CYCLE_IN_PROGRESS_NO_COMPLETED_AT",
+                }
+            },
+        },
+    )
+    _configure(
+        module,
+        monkeypatch,
+        root,
+        tmp_path / "snapshot.json",
+        {
+            "src.main": [101],
+            "src.ingest.forecast_live_daemon": [202],
+            "src.ingest_main": [404],
+            "src.riskguard": [303],
+        },
+    )
+
+    module.main()
+
+    out = capsys.readouterr().out
+    assert out.startswith("ALERT")
+    assert "LIVE_HEALTH_BUSINESS_PLANE=CYCLE_IN_PROGRESS_NO_COMPLETED_AT" in out
+    assert "flags=all_healthy" not in out
+
+
 def test_alive_matches_python_module_not_shell_text(monkeypatch):
     module = _load_module()
 

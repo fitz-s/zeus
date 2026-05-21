@@ -3451,19 +3451,29 @@ class TestForwardMarketSubstrateProducer:
     def test_persisted_reader_keeps_no_only_snapshot_executable_for_buy_no(self):
         """RELATIONSHIP: NO-only executable evidence must remain reachable."""
         conn = _make_persisted_substrate_conn()
-        conn.execute(
-            """
-            INSERT INTO market_events_v2 (
-                market_slug, city, target_date, temperature_metric,
-                condition_id, token_id, range_label, range_low,
-                range_high, recorded_at
-            ) VALUES (
-                'lowest-temperature-in-chicago-on-april-30-2026',
-                'Chicago', '2026-04-30', 'low', 'cond-mid', 'yes-mid',
-                '36-37°F', 36.0, 37.0, '2026-05-20T09:59:00+00:00'
+        for condition_id, label, low, high, token in (
+            ("cond-low", "35°F or lower", None, 35.0, "yes-low"),
+            ("cond-mid", "36-37°F", 36.0, 37.0, "yes-mid"),
+            ("cond-high", "38°F or higher", 38.0, None, "yes-high"),
+        ):
+            conn.execute(
+                """
+                INSERT INTO market_events_v2 (
+                    market_slug, city, target_date, temperature_metric,
+                    condition_id, token_id, range_label, range_low,
+                    range_high, recorded_at
+                ) VALUES (?, 'Chicago', '2026-04-30', 'low', ?, ?, ?, ?, ?,
+                    '2026-05-20T09:59:00+00:00')
+                """,
+                (
+                    "lowest-temperature-in-chicago-on-april-30-2026",
+                    condition_id,
+                    token,
+                    label,
+                    low,
+                    high,
+                ),
             )
-            """
-        )
         conn.execute(
             """
             INSERT INTO executable_market_snapshots (
@@ -3502,7 +3512,9 @@ class TestForwardMarketSubstrateProducer:
             max_age_seconds=900,
         )
 
-        outcome = snapshot.events[0]["outcomes"][0]
+        outcome = [
+            o for o in snapshot.events[0]["outcomes"] if o["condition_id"] == "cond-mid"
+        ][0]
         assert outcome["executable"] is True
         assert outcome["price"] is None
         assert outcome["no_price"] == pytest.approx(0.57)

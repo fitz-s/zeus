@@ -792,6 +792,244 @@ def _stub_full_family_scan(monkeypatch) -> None:
     monkeypatch.setattr(evaluator_module, "scan_full_hypothesis_family", _scan)
 
 
+def test_entry_evaluator_uses_ask_only_buy_quote_when_yes_bid_is_absent(monkeypatch):
+    """RELATIONSHIP: persisted executable BUY support must not require a YES bid."""
+
+    monkeypatch.setattr(evaluator_module, "get_mode", lambda: "test")
+    _set_native_multibin_buy_no_flags(monkeypatch, shadow=False, live=False)
+    captured: dict[str, object] = {}
+
+    candidate = MarketCandidate(
+        city=NYC,
+        target_date="2026-04-01",
+        outcomes=[
+            {
+                "title": "38°F or lower",
+                "range_low": None,
+                "range_high": 38,
+                "token_id": "yes0",
+                "no_token_id": "no0",
+                "market_id": "m0",
+                "executable": True,
+            },
+            {
+                "title": "39-40°F",
+                "range_low": 39,
+                "range_high": 40,
+                "token_id": "yes1",
+                "no_token_id": "no1",
+                "market_id": "m1",
+                "executable": True,
+            },
+            {
+                "title": "41°F or higher",
+                "range_low": 41,
+                "range_high": None,
+                "token_id": "yes2",
+                "no_token_id": "no2",
+                "market_id": "m2",
+                "executable": True,
+            },
+        ],
+        hours_since_open=8.0,
+        hours_to_resolution=24.0,
+        discovery_mode=DiscoveryMode.OPENING_HUNT.value,
+    )
+
+    class DummyEnsembleSignal:
+        def __init__(self, *args, **kwargs):
+            self.member_maxes = np.full(51, 40.0)
+            self.member_extrema = self.member_maxes
+            self.bias_corrected = False
+
+        def p_raw_vector(self, bins, n_mc=None):
+            return np.array([0.20, 0.60, 0.20])
+
+        def spread(self):
+            return TemperatureDelta(1.0, "F")
+
+        def spread_float(self):
+            return 1.0
+
+        def is_bimodal(self):
+            return False
+
+    class DummyAnalysis:
+        def __init__(self, **kwargs):
+            captured["p_market"] = list(kwargs["p_market"])
+            captured["executable_mask"] = list(kwargs["executable_mask"])
+
+        def find_edges(self, n_bootstrap=500):
+            return []
+
+        def sigma_context(self):
+            return {"base_sigma": 0.5, "lead_multiplier": 1.0, "spread_multiplier": 1.0, "final_sigma": 0.5}
+
+        def mean_context(self):
+            return {"offset": 0.0, "lead_days": 1.0}
+
+    class AskOnlyClob:
+        def get_best_bid_ask(self, token_id):
+            from src.contracts.exceptions import EmptyOrderbookError
+
+            raise EmptyOrderbookError(f"No executable top book for {token_id}: CLOB orderbook missing bids")
+
+        def get_best_ask(self, token_id):
+            return {"yes0": (0.12, 25.0), "yes1": (0.35, 40.0), "yes2": (0.53, 10.0)}[token_id]
+
+    monkeypatch.setattr(
+        evaluator_module,
+        "fetch_ensemble",
+        lambda city, forecast_days=2, model=None, role=None, **kwargs: {
+            "members_hourly": np.ones((51, 24)) * 40.0,
+            "times": [
+                datetime(2026, 4, 1, hour, 0, tzinfo=timezone.utc).isoformat()
+                for hour in range(24)
+            ],
+            **_entry_forecast_evidence(
+                model=model or "ecmwf_ifs025",
+                issue_time=datetime(2026, 4, 1, 0, 0, tzinfo=timezone.utc),
+                first_valid_time=datetime(2026, 4, 1, 0, 0, tzinfo=timezone.utc),
+                fetch_time=datetime(2026, 4, 1, 4, 0, tzinfo=timezone.utc),
+            ),
+        },
+    )
+    monkeypatch.setattr(evaluator_module, "validate_ensemble", lambda result, expected_members=51: result is not None)
+    monkeypatch.setattr(evaluator_module, "EnsembleSignal", DummyEnsembleSignal)
+    monkeypatch.setattr(evaluator_module, "_store_ens_snapshot", lambda *args, **kwargs: "snap-ask-only")
+    monkeypatch.setattr(evaluator_module, "_store_snapshot_p_raw", lambda *args, **kwargs: None)
+    _patch_mature_calibration(monkeypatch)
+    monkeypatch.setattr(evaluator_module, "MarketAnalysis", DummyAnalysis)
+    _stub_full_family_scan(monkeypatch)
+    monkeypatch.setattr(evaluator_module, "fdr_filter", lambda edges, fdr_alpha=0.10: list(edges))
+    monkeypatch.setattr(evaluator_module, "model_agreement", lambda *args, **kwargs: "AGREE")
+
+    decisions = evaluator_module.evaluate_candidate(
+        candidate,
+        conn=None,
+        portfolio=PortfolioState(bankroll=211.37),
+        clob=AskOnlyClob(),
+        limits=evaluator_module.RiskLimits(),
+        decision_time=datetime(2026, 4, 1, 4, 0, tzinfo=timezone.utc),
+    )
+
+    assert captured["p_market"] == pytest.approx([0.12, 0.35, 0.53])
+    assert captured["executable_mask"] == [True, True, True]
+    assert len(decisions) == 1
+    assert decisions[0].should_trade is False
+    assert decisions[0].rejection_reason_enum is not evaluator_module.NoTradeReason.MARKET_EMPTY_ORDERBOOK
+
+
+def test_entry_evaluator_missing_ask_still_fails_closed(monkeypatch):
+    """RELATIONSHIP: ask-only fallback must not make missing asks executable."""
+
+    monkeypatch.setattr(evaluator_module, "get_mode", lambda: "test")
+    _set_native_multibin_buy_no_flags(monkeypatch, shadow=False, live=False)
+
+    candidate = MarketCandidate(
+        city=NYC,
+        target_date="2026-04-01",
+        outcomes=[
+            {
+                "title": "38°F or lower",
+                "range_low": None,
+                "range_high": 38,
+                "token_id": "yes0",
+                "no_token_id": "no0",
+                "market_id": "m0",
+                "executable": True,
+            },
+            {
+                "title": "39-40°F",
+                "range_low": 39,
+                "range_high": 40,
+                "token_id": "yes1",
+                "no_token_id": "no1",
+                "market_id": "m1",
+                "executable": True,
+            },
+            {
+                "title": "41°F or higher",
+                "range_low": 41,
+                "range_high": None,
+                "token_id": "yes2",
+                "no_token_id": "no2",
+                "market_id": "m2",
+                "executable": True,
+            },
+        ],
+        hours_since_open=8.0,
+        hours_to_resolution=24.0,
+        discovery_mode=DiscoveryMode.OPENING_HUNT.value,
+    )
+
+    class DummyEnsembleSignal:
+        def __init__(self, *args, **kwargs):
+            self.member_maxes = np.full(51, 40.0)
+            self.member_extrema = self.member_maxes
+            self.bias_corrected = False
+
+        def p_raw_vector(self, bins, n_mc=None):
+            return np.array([0.20, 0.60, 0.20])
+
+        def spread(self):
+            return TemperatureDelta(1.0, "F")
+
+        def spread_float(self):
+            return 1.0
+
+        def is_bimodal(self):
+            return False
+
+    class MissingAskClob:
+        def get_best_bid_ask(self, token_id):
+            from src.contracts.exceptions import EmptyOrderbookError
+
+            raise EmptyOrderbookError(f"No executable top book for {token_id}: CLOB orderbook missing asks")
+
+        def get_best_ask(self, token_id):
+            raise AssertionError("missing-ask failures must not use ask-only fallback")
+
+    monkeypatch.setattr(
+        evaluator_module,
+        "fetch_ensemble",
+        lambda city, forecast_days=2, model=None, role=None, **kwargs: {
+            "members_hourly": np.ones((51, 24)) * 40.0,
+            "times": [
+                datetime(2026, 4, 1, hour, 0, tzinfo=timezone.utc).isoformat()
+                for hour in range(24)
+            ],
+            **_entry_forecast_evidence(
+                model=model or "ecmwf_ifs025",
+                issue_time=datetime(2026, 4, 1, 0, 0, tzinfo=timezone.utc),
+                first_valid_time=datetime(2026, 4, 1, 0, 0, tzinfo=timezone.utc),
+                fetch_time=datetime(2026, 4, 1, 4, 0, tzinfo=timezone.utc),
+            ),
+        },
+    )
+    monkeypatch.setattr(evaluator_module, "validate_ensemble", lambda result, expected_members=51: result is not None)
+    monkeypatch.setattr(evaluator_module, "EnsembleSignal", DummyEnsembleSignal)
+    monkeypatch.setattr(evaluator_module, "_store_ens_snapshot", lambda *args, **kwargs: "snap-missing-ask")
+    monkeypatch.setattr(evaluator_module, "_store_snapshot_p_raw", lambda *args, **kwargs: None)
+    _patch_mature_calibration(monkeypatch)
+    monkeypatch.setattr(evaluator_module, "model_agreement", lambda *args, **kwargs: "AGREE")
+
+    decisions = evaluator_module.evaluate_candidate(
+        candidate,
+        conn=None,
+        portfolio=PortfolioState(bankroll=211.37),
+        clob=MissingAskClob(),
+        limits=evaluator_module.RiskLimits(),
+        decision_time=datetime(2026, 4, 1, 4, 0, tzinfo=timezone.utc),
+    )
+
+    assert len(decisions) == 1
+    assert decisions[0].should_trade is False
+    assert decisions[0].rejection_stage == "MARKET_LIQUIDITY"
+    assert decisions[0].rejection_reason_enum is evaluator_module.NoTradeReason.MARKET_EMPTY_ORDERBOOK
+    assert "missing asks" in decisions[0].rejection_reason_detail
+
+
 @pytest.mark.parametrize("observation_source", ["iem_asos", "openmeteo_hourly"])
 def test_day0_fallback_observation_source_rejected_before_signal_path(observation_source):
     candidate = MarketCandidate(
