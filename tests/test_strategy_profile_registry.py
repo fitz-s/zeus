@@ -58,7 +58,7 @@ def _force_fresh_registry():
 # ── pre-A4 behavior equivalence ─────────────────────────────────────── #
 
 
-def test_all_six_strategies_are_registered():
+def test_all_registered_strategies():
     keys = sp.all_keys()
     assert keys == frozenset({
         "settlement_capture",
@@ -68,6 +68,11 @@ def test_all_six_strategies_are_registered():
         "shoulder_buy",
         "center_sell",
         "imminent_open_capture",  # added 2026-05-19: D+1 / re-opened market capture
+        # Phase 4 shadow candidates (T2/T3) — added 2026-05-21
+        "stale_quote_detector",
+        "resolution_window_maker",
+        "liquidity_provision_with_heartbeat",
+        "weather_event_arbitrage",
     })
 
 
@@ -109,6 +114,11 @@ def test_live_safe_keys_match_pre_A4_LIVE_SAFE_STRATEGIES():
         "settlement_capture",
         "shoulder_sell",
         "imminent_open_capture",  # added 2026-05-19
+        # Phase 4 shadow candidates boot-allowed (live_status: shadow) — added 2026-05-21
+        "stale_quote_detector",
+        "resolution_window_maker",
+        "liquidity_provision_with_heartbeat",
+        "weather_event_arbitrage",
     })
 
 
