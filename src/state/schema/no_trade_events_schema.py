@@ -1,6 +1,6 @@
 # Created: 2026-05-20
-# Last reused or audited: 2026-05-20
-# Authority basis: PHASE_2_ULTRAPLAN.md v3.1 §5.2 (sha 00c2399742)
+# Last reused or audited: 2026-05-21
+# Authority basis: PHASE_2_ULTRAPLAN.md v3.1 §5.2 (sha 00c2399742) + Phase 3 T2 (2026-05-21): schema_version CHECK extended to 18 + 6 SHOULDER_* NoTradeReason members
 
 """T2 — CREATE TABLE DDL for no_trade_events (world DB).
 
@@ -13,9 +13,18 @@ PK: (market_slug, temperature_metric, target_date, observation_time, decision_se
   — matches decision_events natural key for FK-like joins (§5.2 "decision_natural_key
   FK-like reference"). decision_seq shared counter scope.
 
-schema_version CHECK includes 14 and 15 (production pass bumps 14→15).
+schema_version CHECK includes 14, 15, 16, 17, 18:
+  - 14: original scaffold
+  - 15: P2 T2 production pass
+  - 16: MUTUALLY_EXCLUSIVE_FAMILY_DEDUP added (PR #249, 2026-05-21)
+  - 17: live-money no_trade reason taxonomy (PR #253, 2026-05-21)
+  - 18: Phase 3 T2 (2026-05-21) — 6 SHOULDER_* NoTradeReason members added;
+        table-rebuild migration under ATTACH+SAVEPOINT per INV-37 in
+        scripts/migrate_no_trade_events_rebuild_phase3_t2.py.
 
-SCAFFOLD — ensure_table wiring into db.py init_schema happens at T2 production pass.
+Note: _REASON_VALUES_SQL is enum-derived (iterates NoTradeReason) so adding
+SHOULDER_* members to the enum automatically extends the reason CHECK constraint —
+no hardcoded value list needed here.
 """
 
 from __future__ import annotations
@@ -25,7 +34,7 @@ import sqlite3
 from src.contracts.no_trade_reason import NoTradeReason
 
 # Schema version stamped into each row; stays in sync with db.py SCHEMA_VERSION.
-SCHEMA_VERSION = 17
+SCHEMA_VERSION = 18
 
 # Enum CHECK: every valid NoTradeReason value, joined for SQL IN clause.
 _REASON_VALUES_SQL = ", ".join(f"'{r.value}'" for r in NoTradeReason)
@@ -40,7 +49,7 @@ CREATE TABLE IF NOT EXISTS no_trade_events (
     reason              TEXT NOT NULL CHECK (reason IN ({_REASON_VALUES_SQL})),
     reason_detail       TEXT,
     observed_at         TEXT NOT NULL,
-    schema_version      INTEGER NOT NULL CHECK (schema_version IN (14, 15, 16, 17)),
+    schema_version      INTEGER NOT NULL CHECK (schema_version IN (14, 15, 16, 17, 18)),
     PRIMARY KEY (market_slug, temperature_metric, target_date, observation_time, decision_seq)
 )
 """
@@ -55,7 +64,7 @@ CREATE TABLE no_trade_events_new (
     reason              TEXT NOT NULL CHECK (reason IN ({_REASON_VALUES_SQL})),
     reason_detail       TEXT,
     observed_at         TEXT NOT NULL,
-    schema_version      INTEGER NOT NULL CHECK (schema_version IN (14, 15, 16, 17)),
+    schema_version      INTEGER NOT NULL CHECK (schema_version IN (14, 15, 16, 17, 18)),
     PRIMARY KEY (market_slug, temperature_metric, target_date, observation_time, decision_seq)
 )
 """
@@ -85,15 +94,24 @@ def ensure_table(conn: sqlite3.Connection) -> None:
 
 
 def _rebuild_stale_no_trade_events_table(conn: sqlite3.Connection) -> None:
-    """Upgrade stale CHECK constraints on existing no_trade_events tables."""
+    """Upgrade stale CHECK constraints on existing no_trade_events tables.
 
+    Fires when the existing table SQL is missing:
+    - MUTUALLY_EXCLUSIVE_FAMILY_DEDUP (v16 expansion), OR
+    - SHOULDER_STRESS_FAIL (v18 expansion — Phase 3 T2), OR
+    - schema_version IN (14, 15, 16, 17, 18) check.
+
+    The rebuild is idempotent: if both flags and version range are present,
+    returns immediately without touching the table.
+    """
     row = conn.execute(
         "SELECT sql FROM sqlite_master WHERE type='table' AND name='no_trade_events'"
     ).fetchone()
     table_sql = str(row[0] if row else "")
     if (
         NoTradeReason.MUTUALLY_EXCLUSIVE_FAMILY_DEDUP.value in table_sql
-        and "17" in table_sql
+        and NoTradeReason.SHOULDER_STRESS_FAIL.value in table_sql
+        and "14, 15, 16, 17, 18" in table_sql
     ):
         return
 
@@ -114,8 +132,8 @@ def _rebuild_stale_no_trade_events_table(conn: sqlite3.Connection) -> None:
             reason_detail,
             observed_at,
             CASE
-                WHEN schema_version IN (14, 15, 16, 17) THEN schema_version
-                ELSE 17
+                WHEN schema_version IN (14, 15, 16, 17, 18) THEN schema_version
+                ELSE 18
             END
         FROM no_trade_events
         """
