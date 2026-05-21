@@ -3335,9 +3335,13 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                     entry_bankroll=entry_bankroll,
                     decision_time=decision_time,
                     microstructure_sink=_record_microstructure,
+                    use_forecasts_live_snapshot_store=True,
                 )
             except TypeError as exc:
-                if "microstructure_sink" not in str(exc):
+                if (
+                    "microstructure_sink" not in str(exc)
+                    and "use_forecasts_live_snapshot_store" not in str(exc)
+                ):
                     raise
                 decisions = deps.evaluate_candidate(
                     candidate, conn, portfolio, clob, limits,

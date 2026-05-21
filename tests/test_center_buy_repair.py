@@ -1,12 +1,17 @@
 # Created: 2026-04-29
-# Last reused/audited: 2026-05-02
-# Authority basis: docs/operations/task_2026-04-29_design_simplification_audit Phase 1A/1B evaluator gates
+# Last reused/audited: 2026-05-21
+# Lifecycle: created=2026-04-29; last_reviewed=2026-05-21; last_reused=2026-05-21
+# Purpose: Guard evaluator center-buy repair, forecast evidence causality, and snapshot persistence boundaries.
+# Reuse: Run when changing evaluator forecast evidence validation or ENS snapshot/p_raw persistence routing.
+# Authority basis: phase 1K live decision snapshot causality gate
 from __future__ import annotations
 
 import json
+import sqlite3
 from datetime import datetime, timezone
 
 import numpy as np
+import pytest
 
 import src.engine.evaluator as evaluator_module
 from src.config import City
@@ -68,7 +73,11 @@ def _patch_evaluator(
     snapshot_id: str = "snap-1",
     ens_overrides: dict | None = None,
     store_calls: list[str] | None = None,
+    store_conn_calls: list[object] | None = None,
+    metadata_conn_calls: list[object] | None = None,
+    p_raw_store_conn_calls: list[object] | None = None,
     p_raw_store_result=None,
+    real_snapshot_helpers: bool = False,
 ):
     class DummyEnsembleSignal:
         def __init__(self, members_hourly, times, city, target_d, settlement_semantics=None, decision_time=None, **kwargs):
@@ -152,15 +161,51 @@ def _patch_evaluator(
         return result
 
     monkeypatch.setattr(evaluator_module, "fetch_ensemble", _fetch)
+    monkeypatch.setattr(evaluator_module, "_live_entry_forecast_config_or_blocker", lambda: (None, None))
     monkeypatch.setattr(evaluator_module, "validate_ensemble", lambda result, expected_members=51: result is not None)
-    monkeypatch.setattr(evaluator_module, "EnsembleSignal", DummyEnsembleSignal)
-    def _store(*args, **kwargs):
-        if store_calls is not None:
-            store_calls.append("called")
-        return snapshot_id
+    if real_snapshot_helpers:
+        class SnapshotReadyEnsembleSignal(DummyEnsembleSignal):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self.temperature_metric = evaluator_module.MetricIdentity.for_high_localday_max("ecmwf_opendata")
 
-    monkeypatch.setattr(evaluator_module, "_store_ens_snapshot", _store)
-    monkeypatch.setattr(evaluator_module, "_store_snapshot_p_raw", lambda *args, **kwargs: p_raw_store_result)
+        monkeypatch.setattr(evaluator_module, "EnsembleSignal", SnapshotReadyEnsembleSignal)
+    else:
+        monkeypatch.setattr(evaluator_module, "EnsembleSignal", DummyEnsembleSignal)
+
+    if real_snapshot_helpers:
+        if store_calls is not None:
+            original_store = evaluator_module._store_ens_snapshot
+
+            def _store_real(*args, **kwargs):
+                store_calls.append("called")
+                return original_store(*args, **kwargs)
+
+            monkeypatch.setattr(evaluator_module, "_store_ens_snapshot", _store_real)
+    else:
+        def _store(*args, **kwargs):
+            if store_calls is not None:
+                store_calls.append("called")
+            if store_conn_calls is not None:
+                store_conn_calls.append(args[0])
+            return snapshot_id
+
+        monkeypatch.setattr(evaluator_module, "_store_ens_snapshot", _store)
+
+    if metadata_conn_calls is not None and not real_snapshot_helpers:
+        def _read_metadata(*args, **kwargs):
+            metadata_conn_calls.append(args[0])
+            return {}
+
+        monkeypatch.setattr(evaluator_module, "_read_v2_snapshot_metadata", _read_metadata)
+
+    if not real_snapshot_helpers:
+        def _store_p_raw(*args, **kwargs):
+            if p_raw_store_conn_calls is not None:
+                p_raw_store_conn_calls.append(args[0])
+            return p_raw_store_result
+
+        monkeypatch.setattr(evaluator_module, "_store_snapshot_p_raw", _store_p_raw)
     calibrator = object() if calibration_level < 4 else None
     monkeypatch.setattr(
         evaluator_module,
@@ -223,7 +268,8 @@ def test_center_buy_rejects_ultra_low_price_buy_yes_cohort(monkeypatch):
     assert decisions[0].should_trade is False
     assert decisions[0].strategy_key == "center_buy"
     assert decisions[0].rejection_stage == "MARKET_FILTER"
-    assert decisions[0].rejection_reasons == ["CENTER_BUY_ULTRA_LOW_PRICE(0.0100<=0.02)"]
+    assert decisions[0].rejection_reasons == ["center_buy_ultra_low_price"]
+    assert decisions[0].rejection_reason_detail == "CENTER_BUY_ULTRA_LOW_PRICE(0.0100<=0.02)"
     assert "center_buy_ultra_low_price_guard" in decisions[0].applied_validations
 
 
@@ -282,7 +328,8 @@ def test_missing_forecast_evidence_blocks_before_snapshot_persistence(monkeypatc
     assert decisions[0].strategy_key == ""
     assert decisions[0].rejection_stage == "SIGNAL_QUALITY"
     assert decisions[0].availability_status == "DATA_UNAVAILABLE"
-    assert "forecast_evidence_missing_raw_payload_hash" in decisions[0].rejection_reasons[0]
+    assert decisions[0].rejection_reasons == ["forecast_evidence_incomplete"]
+    assert "forecast_evidence_missing_raw_payload_hash" in decisions[0].rejection_reason_detail
     assert "forecast_source_evidence" in decisions[0].applied_validations
     assert store_calls == []
 
@@ -308,7 +355,8 @@ def test_missing_available_at_blocks_before_snapshot_persistence(monkeypatch):
     assert len(decisions) == 1
     assert decisions[0].should_trade is False
     assert decisions[0].rejection_stage == "SIGNAL_QUALITY"
-    assert "forecast_evidence_missing_available_at" in decisions[0].rejection_reasons[0]
+    assert decisions[0].rejection_reasons == ["forecast_evidence_incomplete"]
+    assert "forecast_evidence_missing_available_at" in decisions[0].rejection_reason_detail
     assert store_calls == []
 
 
@@ -336,10 +384,41 @@ def test_future_forecast_evidence_blocks_before_snapshot_persistence(monkeypatch
     assert len(decisions) == 1
     assert decisions[0].should_trade is False
     assert decisions[0].rejection_stage == "SIGNAL_QUALITY"
-    assert "forecast_evidence_fetch_after_decision" in decisions[0].rejection_reasons[0]
-    assert "forecast_evidence_available_after_decision" in decisions[0].rejection_reasons[0]
+    assert decisions[0].rejection_reasons == ["forecast_evidence_incomplete"]
+    assert "forecast_evidence_fetch_after_decision" not in decisions[0].rejection_reason_detail
+    assert "forecast_evidence_available_after_decision" in decisions[0].rejection_reason_detail
     assert "forecast_source_evidence" in decisions[0].applied_validations
     assert store_calls == []
+
+
+def test_available_forecast_before_decision_permits_late_local_fetch_time(monkeypatch):
+    store_calls: list[str] = []
+    clob = _patch_evaluator(
+        monkeypatch,
+        entry_price=0.01,
+        ens_overrides={
+            "issue_time": datetime(2026, 4, 2, 6, 0, tzinfo=timezone.utc),
+            "available_at": datetime(2026, 4, 2, 6, 5, tzinfo=timezone.utc),
+            "fetch_time": datetime(2026, 4, 2, 12, 5, tzinfo=timezone.utc),
+        },
+        store_calls=store_calls,
+    )
+
+    decisions = evaluator_module.evaluate_candidate(
+        _candidate(discovery_mode=DiscoveryMode.OPENING_HUNT.value),
+        conn=None,
+        portfolio=PortfolioState(bankroll=211.37),
+        clob=clob,
+        limits=evaluator_module.RiskLimits(min_order_usd=1.0),
+        decision_time=TEST_DECISION_TIME,
+    )
+
+    assert len(decisions) == 1
+    assert decisions[0].should_trade is True
+    assert store_calls == ["called"]
+    forecast_context = json.loads(decisions[0].epistemic_context_json)["forecast_context"]
+    assert forecast_context["forecast_available_at"] == "2026-04-02T06:05:00+00:00"
+    assert forecast_context["forecast_fetch_time"] == "2026-04-02T12:05:00+00:00"
 
 
 def test_available_at_before_issue_blocks_before_snapshot_persistence(monkeypatch):
@@ -367,8 +446,233 @@ def test_available_at_before_issue_blocks_before_snapshot_persistence(monkeypatc
     assert len(decisions) == 1
     assert decisions[0].should_trade is False
     assert decisions[0].rejection_stage == "SIGNAL_QUALITY"
-    assert "forecast_evidence_issue_after_available_at" in decisions[0].rejection_reasons[0]
+    assert decisions[0].rejection_reasons == ["forecast_evidence_incomplete"]
+    assert "forecast_evidence_issue_after_available_at" in decisions[0].rejection_reason_detail
     assert store_calls == []
+
+
+def test_forecast_snapshot_persistence_uses_forecasts_owned_boundary(monkeypatch):
+    store_conn_calls: list[object] = []
+    metadata_conn_calls: list[object] = []
+    p_raw_store_conn_calls: list[object] = []
+    trade_rooted_cycle_conn = sqlite3.connect(":memory:")
+    trade_rooted_cycle_conn.row_factory = sqlite3.Row
+    monkeypatch.setattr(evaluator_module, "_layer7_dedup_fires", lambda *args, **kwargs: False)
+    monkeypatch.setattr(
+        evaluator_module,
+        "evaluate_ddd_for_decision",
+        lambda **kwargs: evaluator_module.SimpleNamespace(
+            action="PASS",
+            diagnostic={"final_discount_pre_mismatch": 0.0},
+        ),
+    )
+    clob = _patch_evaluator(
+        monkeypatch,
+        entry_price=0.01,
+        store_conn_calls=store_conn_calls,
+        metadata_conn_calls=metadata_conn_calls,
+        p_raw_store_conn_calls=p_raw_store_conn_calls,
+    )
+
+    decisions = evaluator_module.evaluate_candidate(
+        _candidate(discovery_mode=DiscoveryMode.OPENING_HUNT.value),
+        conn=trade_rooted_cycle_conn,
+        portfolio=PortfolioState(bankroll=211.37),
+        clob=clob,
+        limits=evaluator_module.RiskLimits(min_order_usd=1.0),
+        decision_time=TEST_DECISION_TIME,
+        use_forecasts_live_snapshot_store=True,
+    )
+
+    assert len(decisions) == 1
+    assert decisions[0].should_trade is True
+    assert store_conn_calls == [None]
+    assert metadata_conn_calls == [None]
+    assert p_raw_store_conn_calls == [None]
+    trade_rooted_cycle_conn.close()
+
+
+def test_forecast_snapshot_persistence_respects_caller_owned_connection_by_default(monkeypatch):
+    store_conn_calls: list[object] = []
+    metadata_conn_calls: list[object] = []
+    p_raw_store_conn_calls: list[object] = []
+    audit_conn = sqlite3.connect(":memory:")
+    audit_conn.row_factory = sqlite3.Row
+    monkeypatch.setattr(evaluator_module, "_layer7_dedup_fires", lambda *args, **kwargs: False)
+    monkeypatch.setattr(
+        evaluator_module,
+        "evaluate_ddd_for_decision",
+        lambda **kwargs: evaluator_module.SimpleNamespace(
+            action="PASS",
+            diagnostic={"final_discount_pre_mismatch": 0.0},
+        ),
+    )
+    clob = _patch_evaluator(
+        monkeypatch,
+        entry_price=0.01,
+        store_conn_calls=store_conn_calls,
+        metadata_conn_calls=metadata_conn_calls,
+        p_raw_store_conn_calls=p_raw_store_conn_calls,
+    )
+
+    decisions = evaluator_module.evaluate_candidate(
+        _candidate(discovery_mode=DiscoveryMode.OPENING_HUNT.value),
+        conn=audit_conn,
+        portfolio=PortfolioState(bankroll=211.37),
+        clob=clob,
+        limits=evaluator_module.RiskLimits(min_order_usd=1.0),
+        decision_time=TEST_DECISION_TIME,
+    )
+
+    assert len(decisions) == 1
+    assert decisions[0].should_trade is True
+    assert store_conn_calls == [audit_conn]
+    assert metadata_conn_calls == [audit_conn]
+    assert p_raw_store_conn_calls == [audit_conn]
+    audit_conn.close()
+
+
+def test_forecast_snapshot_real_helpers_round_trip_forecasts_db(monkeypatch, tmp_path):
+    import src.state.db as db_module
+
+    forecasts_db = tmp_path / "zeus-forecasts.db"
+    monkeypatch.setattr(db_module, "ZEUS_FORECASTS_DB_PATH", forecasts_db)
+    monkeypatch.setenv("ZEUS_DB_MMAP_BYTES", "0")
+    forecast_conn = db_module.get_forecasts_connection(write_class=None)
+    db_module.init_schema_forecasts(forecast_conn)
+    forecast_conn.close()
+
+    trade_rooted_cycle_conn = sqlite3.connect(":memory:")
+    trade_rooted_cycle_conn.row_factory = sqlite3.Row
+    db_module.init_schema(trade_rooted_cycle_conn)
+    monkeypatch.setattr(evaluator_module, "_layer7_dedup_fires", lambda *args, **kwargs: False)
+    monkeypatch.setattr(
+        evaluator_module,
+        "evaluate_ddd_for_decision",
+        lambda **kwargs: evaluator_module.SimpleNamespace(
+            action="PASS",
+            diagnostic={"final_discount_pre_mismatch": 0.0},
+        ),
+    )
+    clob = _patch_evaluator(
+        monkeypatch,
+        entry_price=0.01,
+        real_snapshot_helpers=True,
+    )
+
+    decisions = evaluator_module.evaluate_candidate(
+        _candidate(discovery_mode=DiscoveryMode.OPENING_HUNT.value),
+        conn=trade_rooted_cycle_conn,
+        portfolio=PortfolioState(bankroll=211.37),
+        clob=clob,
+        limits=evaluator_module.RiskLimits(min_order_usd=1.0),
+        decision_time=TEST_DECISION_TIME,
+        use_forecasts_live_snapshot_store=True,
+    )
+
+    assert len(decisions) == 1
+    assert decisions[0].should_trade is True
+    snapshot_id = decisions[0].decision_snapshot_id
+    assert snapshot_id
+    if trade_rooted_cycle_conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='ensemble_snapshots_v2'"
+    ).fetchone():
+        assert trade_rooted_cycle_conn.execute(
+            "SELECT COUNT(*) FROM ensemble_snapshots_v2 WHERE snapshot_id = ?",
+            (snapshot_id,),
+        ).fetchone()[0] == 0
+    forecast_conn = db_module.get_forecasts_connection(write_class=None)
+    try:
+        row = forecast_conn.execute(
+            """
+            SELECT snapshot_id, city, target_date, temperature_metric, p_raw_json, bin_grid_id
+              FROM ensemble_snapshots_v2
+             WHERE snapshot_id = ?
+            """,
+            (snapshot_id,),
+        ).fetchone()
+        assert row is not None
+        assert row["city"] == "NYC"
+        assert row["target_date"] == "2026-04-03"
+        assert row["temperature_metric"] == "high"
+        assert json.loads(row["p_raw_json"]) == [0.6, 0.25, 0.15]
+        metadata = evaluator_module._read_v2_snapshot_metadata(
+            None,
+            "NYC",
+            "2026-04-03",
+            "high",
+            snapshot_id=snapshot_id,
+        )
+        assert str(metadata["snapshot_id"]) == snapshot_id
+        assert metadata["bin_grid_id"] == row["bin_grid_id"]
+    finally:
+        forecast_conn.close()
+        trade_rooted_cycle_conn.close()
+
+
+class _OperationalErrorConn:
+    def __init__(self, message: str, *, fail_on_table_discovery: bool = False):
+        self.message = message
+        self.fail_on_table_discovery = fail_on_table_discovery
+        self.rolled_back = False
+
+    def execute(self, *args, **kwargs):
+        sql = str(args[0])
+        if "sqlite_master" in sql and not self.fail_on_table_discovery:
+            return _FetchOne(row=object())
+        raise sqlite3.OperationalError(self.message)
+
+    def rollback(self):
+        self.rolled_back = True
+
+
+class _DatabaseErrorConn(_OperationalErrorConn):
+    def execute(self, *args, **kwargs):
+        raise sqlite3.DatabaseError(self.message)
+
+
+class _FetchOne:
+    def __init__(self, row):
+        self.row = row
+
+    def fetchone(self):
+        return self.row
+
+
+def test_snapshot_p_raw_lock_defers_but_corruption_fails_closed():
+    p_raw = np.array([0.60, 0.25, 0.15])
+
+    locked_conn = _OperationalErrorConn("database is locked")
+    corrupt_conn = _OperationalErrorConn("database disk image is malformed")
+    discovery_locked_conn = _OperationalErrorConn("database is locked", fail_on_table_discovery=True)
+
+    assert evaluator_module._store_snapshot_p_raw(locked_conn, "snap-1", p_raw) is None
+    assert locked_conn.rolled_back is True
+    assert evaluator_module._store_snapshot_p_raw(discovery_locked_conn, "snap-1", p_raw) is None
+    assert discovery_locked_conn.rolled_back is True
+    with pytest.raises(sqlite3.OperationalError, match="database disk image is malformed"):
+        evaluator_module._store_snapshot_p_raw(corrupt_conn, "snap-1", p_raw)
+    assert corrupt_conn.rolled_back is True
+
+
+def test_snapshot_storage_database_error_is_not_reported_as_missing_snapshot():
+    p_raw = np.array([0.60, 0.25, 0.15])
+    corrupt_snapshot_conn = _DatabaseErrorConn("database disk image is malformed")
+    corrupt_p_raw_conn = _DatabaseErrorConn("database disk image is malformed")
+
+    with pytest.raises(sqlite3.DatabaseError, match="database disk image is malformed"):
+        evaluator_module._store_ens_snapshot(
+            corrupt_snapshot_conn,
+            NYC,
+            "2026-04-03",
+            object(),
+            {},
+        )
+    assert corrupt_snapshot_conn.rolled_back is True
+
+    with pytest.raises(sqlite3.DatabaseError, match="database disk image is malformed"):
+        evaluator_module._store_snapshot_p_raw(corrupt_p_raw_conn, "snap-1", p_raw)
+    assert corrupt_p_raw_conn.rolled_back is True
 
 
 def test_level4_raw_probability_entry_blocks_before_edge_selection(monkeypatch):
@@ -411,9 +715,8 @@ def test_empty_decision_snapshot_id_blocks_before_edge_selection(monkeypatch):
     assert decisions[0].strategy_key == ""
     assert decisions[0].rejection_stage == "SIGNAL_QUALITY"
     assert decisions[0].availability_status == "DATA_UNAVAILABLE"
-    assert decisions[0].rejection_reasons == [
-        "ENS snapshot persistence failed: decision_snapshot_id unavailable"
-    ]
+    assert decisions[0].rejection_reasons == ["ens_snapshot_persistence_failed"]
+    assert decisions[0].rejection_reason_detail == "ENS snapshot persistence failed: decision_snapshot_id unavailable"
     assert "ens_snapshot_persistence" in decisions[0].applied_validations
 
 
@@ -440,7 +743,6 @@ def test_snapshot_p_raw_persistence_failure_blocks_before_edge_selection(monkeyp
     assert decisions[0].strategy_key == ""
     assert decisions[0].rejection_stage == "SIGNAL_QUALITY"
     assert decisions[0].availability_status == "DATA_UNAVAILABLE"
-    assert decisions[0].rejection_reasons == [
-        "ENS snapshot p_raw persistence failed: canonical p_raw unavailable"
-    ]
+    assert decisions[0].rejection_reasons == ["ens_snapshot_p_raw_persistence_failed"]
+    assert decisions[0].rejection_reason_detail == "ENS snapshot p_raw persistence failed: canonical p_raw unavailable"
     assert "ens_snapshot_p_raw_persistence" in decisions[0].applied_validations

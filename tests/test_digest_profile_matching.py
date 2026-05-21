@@ -145,6 +145,7 @@ def test_b0_oracle_evidence_bridge_routes_to_dedicated_profile():
         "source_type normalize",
         [
             "scripts/bridge_oracle_to_calibration.py",
+            "src/strategy/oracle_penalty.py",
             "tests/test_bridge_oracle_to_calibration.py",
         ],
         intent="modify_existing",
@@ -154,6 +155,7 @@ def test_b0_oracle_evidence_bridge_routes_to_dedicated_profile():
     assert digest["profile"] == "oracle evidence bridge implementation"
     assert digest["admission"]["status"] == "admitted"
     assert "scripts/bridge_oracle_to_calibration.py" in digest["admission"]["admitted_files"]
+    assert "src/strategy/oracle_penalty.py" in digest["admission"]["admitted_files"]
     assert "tests/test_bridge_oracle_to_calibration.py" in digest["admission"]["admitted_files"]
 
 
@@ -164,6 +166,7 @@ def test_b2_weather_family_exposure_gate_routes_to_dedicated_profile():
         [
             "src/engine/cycle_runtime.py",
             "src/strategy/family_exclusive_dedup.py",
+            "tests/test_inv_family_exclusive_cross_module_integration.py",
             "tests/test_inv_family_exclusive_sizing.py",
         ],
         intent="modify_existing",
@@ -174,6 +177,7 @@ def test_b2_weather_family_exposure_gate_routes_to_dedicated_profile():
     assert digest["admission"]["status"] == "admitted"
     assert "src/engine/cycle_runtime.py" in digest["admission"]["admitted_files"]
     assert "src/strategy/family_exclusive_dedup.py" in digest["admission"]["admitted_files"]
+    assert "tests/test_inv_family_exclusive_cross_module_integration.py" in digest["admission"]["admitted_files"]
     assert "tests/test_inv_family_exclusive_sizing.py" in digest["admission"]["admitted_files"]
 
 

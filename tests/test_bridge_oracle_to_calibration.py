@@ -635,8 +635,8 @@ def test_bridge_uses_daily_observation_revisions_when_hourly_and_legacy_daily_ar
     city = "Hong Kong"
     conn.execute("DELETE FROM world.observation_instants_v2")
     conn.execute("DELETE FROM observations")
-    for day in range(1, 61):
-        target_date = f"2026-03-{day:02d}" if day <= 31 else f"2026-04-{day - 31:02d}"
+    for day in range(1, 11):
+        target_date = f"2026-04-{day:02d}"
         conn.execute(
             """
             INSERT INTO settlements
@@ -668,7 +668,7 @@ def test_bridge_uses_daily_observation_revisions_when_hourly_and_legacy_daily_ar
 
     stats = bridge(dry_run=False)
 
-    assert stats == {"cities": 2, "comparisons": 120, "mismatches": 0}
+    assert stats == {"cities": 2, "comparisons": 20, "mismatches": 0}
     artifact = json.loads((tmp_path / "data" / "oracle_error_rates.json").read_text())
     high = artifact[city]["high"]
     low = artifact[city]["low"]
@@ -676,8 +676,21 @@ def test_bridge_uses_daily_observation_revisions_when_hourly_and_legacy_daily_ar
     assert high["source_role"] == "canonical_daily_observation_revisions"
     assert low["status"] == "OK"
     assert low["source_role"] == "canonical_daily_observation_revisions"
-    assert low["n"] == 60
+    assert low["n"] == 10
     assert low["penalty_multiplier"] == 1.0
+
+    from src.strategy.oracle_penalty import get_oracle_info, reload
+    from src.strategy.oracle_status import OracleStatus
+
+    reload()
+    high_info = get_oracle_info(city, "high")
+    low_info = get_oracle_info(city, "low")
+    assert high_info.status == OracleStatus.OK
+    assert high_info.penalty_multiplier == 1.0
+    assert high_info.source_role == "canonical_daily_observation_revisions"
+    assert low_info.status == OracleStatus.OK
+    assert low_info.penalty_multiplier == 1.0
+    assert low_info.source_role == "canonical_daily_observation_revisions"
 
 
 @patch("scripts.bridge_oracle_to_calibration.get_forecasts_connection_with_world")

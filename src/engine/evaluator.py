@@ -1,6 +1,6 @@
 # Created: prior
-# Last reused/audited: 2026-05-20
-# Authority basis: docs/operations/task_2026-05-14_data_daemon_live_efficiency/DATA_DAEMON_LIVE_EFFICIENCY_REFACTOR_PLAN.md
+# Last reused/audited: 2026-05-21
+# Authority basis: phase 1K live decision snapshot causality gate
 #   Phase 3 live evaluator consumes forecast producer readiness instead of direct-fetching OpenData.
 """Evaluator: takes a market candidate, returns an EdgeDecision or NoTradeCase.
 
@@ -16,6 +16,7 @@ import os
 import sqlite3
 import uuid
 from collections import defaultdict
+from contextlib import contextmanager
 from dataclasses import dataclass, field, fields, is_dataclass
 from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
@@ -376,6 +377,21 @@ def _read_v2_snapshot_metadata(
     if not snapshot_id:
         return {}
 
+    if conn is None:
+        from src.state.db import get_forecasts_connection_read_only
+
+        forecasts_conn = get_forecasts_connection_read_only()
+        try:
+            return _read_v2_snapshot_metadata(
+                forecasts_conn,
+                city_name,
+                target_date,
+                temperature_metric,
+                snapshot_id=snapshot_id,
+            )
+        finally:
+            forecasts_conn.close()
+
     # Resolve schema prefix. Forecast-live owns the executable snapshot table
     # when attached; world/main are legacy or test fallback surfaces.
     import sqlite3
@@ -421,7 +437,11 @@ def _read_v2_snapshot_metadata(
                     }
                 except sqlite3.OperationalError:
                     continue
+                except sqlite3.DatabaseError:
+                    raise
             continue
+        except sqlite3.DatabaseError:
+            raise
         except Exception:
             return {}
         if row is None:
@@ -1152,8 +1172,9 @@ def _entry_forecast_evidence_errors(
     if decision_time_dt is not None:
         if issue_time_dt is not None and issue_time_dt > decision_time_dt:
             errors.append("forecast_evidence_issue_after_decision")
-        if fetch_time_dt is not None and fetch_time_dt > decision_time_dt:
-            errors.append("forecast_evidence_fetch_after_decision")
+        # `fetch_time` is local retrieval evidence. Causality is established by
+        # source-owned `issue_time` and `available_at`, so a frozen cycle may
+        # legitimately ingest an already-available forecast after decision_time.
         if available_time_dt is not None and available_time_dt > decision_time_dt:
             errors.append("forecast_evidence_available_after_decision")
 
@@ -2091,6 +2112,7 @@ def evaluate_candidate(
     entry_bankroll: Optional[float] = None,
     decision_time: Optional[datetime] = None,
     microstructure_sink=None,
+    use_forecasts_live_snapshot_store: bool = False,
 ) -> list[EdgeDecision]:
     """Evaluate a market candidate through the full signal pipeline."""
 
@@ -2846,11 +2868,18 @@ def evaluate_candidate(
     # Store ENS snapshot AFTER all semantic gates pass (#67 — no write-before-validate).
     # Executable reader rows already have an audited ensemble_snapshots_v2 id;
     # reuse it instead of writing a second legacy snapshot for the same source run.
+    snapshot_persistence_conn = None if use_forecasts_live_snapshot_store else conn
     if using_period_extrema:
         snapshot_id = str(ens_result.get("executable_snapshot_id") or "")
     else:
         assert ens is not None
-        snapshot_id = _store_ens_snapshot(conn, city, target_date, ens, ens_result)
+        snapshot_id = _store_ens_snapshot(
+            snapshot_persistence_conn,
+            city,
+            target_date,
+            ens,
+            ens_result,
+        )
     if not snapshot_id:
         return [_make_rejection_decision(
             rejection_stage="SIGNAL_QUALITY",
@@ -2864,7 +2893,7 @@ def evaluate_candidate(
         )]
 
     v2_snapshot_meta = _read_v2_snapshot_metadata(
-        conn,
+        snapshot_persistence_conn,
         city.name,
         target_date,
         temperature_metric.temperature_metric,
@@ -2926,7 +2955,7 @@ def evaluate_candidate(
         p_raw_persisted = None
     else:
         p_raw_persisted = _store_snapshot_p_raw(
-            conn,
+            snapshot_persistence_conn,
             snapshot_id,
             p_raw,
             bias_corrected=bool(getattr(ens, "bias_corrected", False)),
@@ -4442,9 +4471,44 @@ def _ensemble_snapshots_v2_table(conn) -> str:
         row = conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'ensemble_snapshots_v2'"
         ).fetchone()
+    except sqlite3.OperationalError as exc:
+        if _sqlite_operational_error_is_lock(exc):
+            raise
+        return ""
+    except sqlite3.DatabaseError:
+        raise
     except Exception:
         return ""
     return "ensemble_snapshots_v2" if row is not None else ""
+
+
+def _sqlite_operational_error_is_lock(exc: sqlite3.OperationalError) -> bool:
+    text = str(exc).lower()
+    return "database is locked" in text or "database table is locked" in text
+
+
+@contextmanager
+def _snapshot_forecasts_live_write_connection(conn):
+    """Yield the write connection for snapshot evidence.
+
+    Caller-owned test connections are preserved. Live evaluator calls pass
+    ``None`` so forecast-class snapshot evidence is written under the
+    forecasts DB LIVE flock, with the flock acquired before opening the
+    SQLite connection.
+    """
+    if conn is not None:
+        yield conn
+        return
+
+    from src.state.db import ZEUS_FORECASTS_DB_PATH, get_forecasts_connection
+    from src.state.db_writer_lock import WriteClass, db_writer_lock
+
+    with db_writer_lock(ZEUS_FORECASTS_DB_PATH, WriteClass.LIVE):
+        forecasts_conn = get_forecasts_connection(write_class=WriteClass.LIVE)
+        try:
+            yield forecasts_conn
+        finally:
+            forecasts_conn.close()
 
 
 def _members_unit_for_snapshot(city, ens_result: dict) -> str:
@@ -4487,7 +4551,8 @@ def _snapshot_identity_matches(
 def _store_ens_snapshot(conn, city, target_date, ens, ens_result) -> str:
     """Store every ENS fetch and return the snapshot_id."""
 
-    try:
+    with _snapshot_forecasts_live_write_connection(conn) as conn:
+      try:
         v2_table = _ensemble_snapshots_v2_table(conn)
         issue_time_value = _snapshot_issue_time_value(ens_result)
         valid_time_value = _snapshot_valid_time_value(target_date, ens_result)
@@ -4671,7 +4736,22 @@ def _store_ens_snapshot(conn, city, target_date, ens, ens_result) -> str:
             )
         conn.commit()
         return snapshot_id
-    except Exception as e:
+      except sqlite3.OperationalError as e:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        if _sqlite_operational_error_is_lock(e):
+            logger.warning("Failed to store ENS snapshot: %s", e)
+            return ""
+        raise
+      except sqlite3.DatabaseError:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise
+      except Exception as e:
         try:
             conn.rollback()
         except Exception:
@@ -4687,15 +4767,16 @@ def _store_snapshot_p_raw(
     *,
     bias_corrected: bool = False,
     p_raw_topology: dict | None = None,
-) -> bool:
-    """Persist the decision-time p_raw vector and bias_corrected flag onto the snapshot row."""
+) -> bool | None:
+    """Persist p_raw; return None when a lock defers persistence."""
 
     if not snapshot_id:
         return False
 
     import json
 
-    try:
+    with _snapshot_forecasts_live_write_connection(conn) as conn:
+      try:
         p_raw_json = json.dumps(p_raw.tolist())
         topology_payload = None
         if p_raw_topology is not None:
@@ -4813,21 +4894,26 @@ def _store_snapshot_p_raw(
             )
         conn.commit()
         return True
-    except sqlite3.OperationalError as e:
+      except sqlite3.OperationalError as e:
         try:
             conn.rollback()
         except Exception:
             pass
-        if str(e).startswith("database is locked"):
+        if _sqlite_operational_error_is_lock(e):
             logger.warning(
                 "Deferred snapshot p_raw persistence for %s: %s",
                 snapshot_id,
                 e,
             )
             return None
-        logger.warning("Failed to store snapshot p_raw for %s: %s", snapshot_id, e)
-        return False
-    except Exception as e:
+        raise
+      except sqlite3.DatabaseError:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise
+      except Exception as e:
         try:
             conn.rollback()
         except Exception:

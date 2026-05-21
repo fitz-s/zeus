@@ -866,7 +866,9 @@ def test_day0_entry_rejects_settlement_types_without_executable_source_policy(se
     assert len(decisions) == 1
     assert decisions[0].should_trade is False
     assert decisions[0].rejection_stage == "OBSERVATION_SOURCE_UNAUTHORIZED"
-    assert "source role is not authorized" in decisions[0].rejection_reasons[0]
+    assert decisions[0].rejection_reasons == ["observation_source_unauthorized"]
+    assert decisions[0].rejection_reason_detail is not None
+    assert "source role is not authorized" in decisions[0].rejection_reason_detail
     assert "observation_source_policy" in decisions[0].applied_validations
 
 
@@ -909,7 +911,9 @@ def test_day0_entry_rejects_stale_epoch_observation_before_signal_path(monkeypat
     assert decisions[0].rejection_stage == "SIGNAL_QUALITY"
     assert decisions[0].availability_status == "DATA_STALE"
     assert "observation_quality_gate" in decisions[0].applied_validations
-    assert "stale" in decisions[0].rejection_reasons[0]
+    assert decisions[0].rejection_reasons == ["observation_quality_rejected"]
+    assert decisions[0].rejection_reason_detail is not None
+    assert "stale" in decisions[0].rejection_reason_detail
 
 
 def test_day0_entry_rejects_nonfinite_observation_before_signal_path(monkeypatch):
@@ -949,7 +953,9 @@ def test_day0_entry_rejects_nonfinite_observation_before_signal_path(monkeypatch
     assert decisions[0].rejection_stage == "SIGNAL_QUALITY"
     assert decisions[0].availability_status == "DATA_UNAVAILABLE"
     assert "observation_quality_gate" in decisions[0].applied_validations
-    assert "non-finite" in decisions[0].rejection_reasons[0]
+    assert decisions[0].rejection_reasons == ["observation_quality_rejected"]
+    assert decisions[0].rejection_reason_detail is not None
+    assert "non-finite" in decisions[0].rejection_reason_detail
 
 
 def test_chain_reconciliation_updates_live_position_from_chain(monkeypatch, tmp_path):
