@@ -48,11 +48,24 @@ PROCESS_CODE_SURFACES = {
     "live_trading": (
         "src/main.py",
         "src/engine/cycle_runner.py",
+        "src/engine/evaluator.py",
+        "src/contracts/no_trade_reason.py",
+        "src/contracts/executable_market_snapshot_v2.py",
+        "src/contracts/execution_intent.py",
         "src/control/ws_gap_guard.py",
+        "src/data/market_scanner.py",
+        "src/data/polymarket_client.py",
         "src/execution/command_recovery.py",
         "src/execution/exchange_reconcile.py",
         "src/execution/executor.py",
         "src/execution/harvester_pnl_resolver.py",
+        "src/strategy/selection_family.py",
+        "src/strategy/family_exclusive_dedup.py",
+        "src/strategy/candidates/__init__.py",
+        "src/strategy/candidates/liquidity_provision_with_heartbeat.py",
+        "src/strategy/candidates/resolution_window_maker.py",
+        "src/strategy/candidates/stale_quote_detector.py",
+        "src/strategy/candidates/weather_event_arbitrage.py",
     ),
     "data_ingest": (
         "src/ingest_main.py",
@@ -334,6 +347,39 @@ def _process_loaded_code_status(launchd_contracts: dict, *, root: Path | None = 
     }
 
 
+def _status_process_contract(status: dict, *, launchd_pid: int | None) -> dict:
+    """Ensure fresh status_summary was written by the current live daemon pid."""
+
+    process = status.get("process") if isinstance(status, dict) else None
+    if not isinstance(process, dict) or "pid" not in process:
+        return {"ok": True, "issue": None, "pid": None, "expected_pid": launchd_pid}
+    try:
+        status_pid = int(process.get("pid") or 0)
+    except (TypeError, ValueError):
+        return {
+            "ok": False,
+            "issue": "STATUS_SUMMARY_PROCESS_PID_INVALID",
+            "pid": process.get("pid"),
+            "expected_pid": launchd_pid,
+        }
+    expected_pid = int(launchd_pid or 0)
+    if status_pid <= 0:
+        return {
+            "ok": False,
+            "issue": "STATUS_SUMMARY_PROCESS_PID_INVALID",
+            "pid": status_pid,
+            "expected_pid": expected_pid,
+        }
+    if expected_pid > 0 and status_pid != expected_pid:
+        return {
+            "ok": False,
+            "issue": "STATUS_SUMMARY_PROCESS_PID_MISMATCH",
+            "pid": status_pid,
+            "expected_pid": expected_pid,
+        }
+    return {"ok": True, "issue": None, "pid": status_pid, "expected_pid": expected_pid}
+
+
 def _live_db_holder_status() -> dict:
     db_path = _trade_db_path()
     db_paths = [db_path, db_path.with_name(f"{db_path.name}-wal"), db_path.with_name(f"{db_path.name}-shm")]
@@ -482,6 +528,7 @@ def _launchctl_loaded_contract(
     item: dict = {
         "ok": False,
         "issues": [],
+        "historical_issues": [],
     }
     try:
         ps = subprocess.run(
@@ -539,10 +586,16 @@ def _launchctl_loaded_contract(
         item["issues"].append("loaded_plist_path_mismatch")
     if state != "running" or pid <= 0:
         item["issues"].append("loaded_job_not_running")
-    # F86: flag prior non-clean exit (SIGTERM = -15; crash = positive int).
-    # "0" and "" (never exited) are clean; anything else warrants operator attention.
+    # F86: preserve prior non-clean exit evidence.  A historical prior exit is
+    # not itself current contract drift once launchd has a running pid again;
+    # heartbeat/source freshness and process attestation decide current health.
+    # If the job is not running, the prior exit remains actionable.
     if last_exit_code and last_exit_code not in ("0", "(never exited)"):
-        item["issues"].append(f"loaded_prior_exit_code_{last_exit_code.replace('-', 'neg')}")
+        prior_exit_issue = f"loaded_prior_exit_code_{last_exit_code.replace('-', 'neg')}"
+        if state == "running" and pid > 0:
+            item["historical_issues"].append(prior_exit_issue)
+        else:
+            item["issues"].append(prior_exit_issue)
     if "keepalive" not in properties:
         item["issues"].append("loaded_keepalive_not_true")
     if "runatload" not in properties:
@@ -1216,6 +1269,17 @@ def check() -> dict:
                 result["action_required"] = False
                 result["auto_action_available"] = False
             result["last_cycle"] = status.get("timestamp", "unknown")
+            result["status_process_contract"] = _status_process_contract(
+                status,
+                launchd_pid=result.get("pid"),
+            )
+            result["status_process_contract_ok"] = bool(result["status_process_contract"].get("ok"))
+            result["status_process_pid"] = result["status_process_contract"].get("pid")
+            if not result["status_process_contract_ok"]:
+                result["status_process_contract_issue"] = (
+                    result["status_process_contract"].get("issue")
+                    or "STATUS_SUMMARY_PROCESS_CONTRACT"
+                )
             risk = status.get("risk", {}) if isinstance(status.get("risk", {}), dict) else {}
             result["risk_level"] = risk.get("level", "UNKNOWN")
             result["infrastructure_level"] = risk.get("infrastructure_level")
@@ -1287,6 +1351,7 @@ def check() -> dict:
         result["db_lock_status"] = {"ok": True, "locks": [], "issue": None}
         result["db_lock_ok"] = True
         result["entry_execution_capability_ok"] = False
+        result["status_process_contract_ok"] = False
 
     risk_state_path = _risk_state_path()
     result["risk_state_path"] = str(risk_state_path)
@@ -1409,6 +1474,7 @@ def check() -> dict:
         bool(result.get("daemon_alive"))
         and bool(result.get("status_fresh"))
         and bool(result.get("status_contract_valid"))
+        and bool(result.get("status_process_contract_ok", True))
         and bool(result.get("riskguard_alive"))
         and bool(result.get("data_ingest_alive"))
         and bool(result.get("riskguard_fresh"))

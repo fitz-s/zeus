@@ -40,7 +40,12 @@ PROCESS_CODE_SURFACES = {
     "daemon": (
         "src/main.py",
         "src/engine/cycle_runner.py",
+        "src/engine/evaluator.py",
+        "src/contracts/no_trade_reason.py",
+        "src/contracts/executable_market_snapshot_v2.py",
+        "src/contracts/execution_intent.py",
         "src/control/ws_gap_guard.py",
+        "src/data/market_scanner.py",
         "src/execution/command_recovery.py",
         "src/execution/exchange_reconcile.py",
         "src/execution/executor.py",
@@ -253,6 +258,36 @@ def _settlement_truth_status(root=ROOT):
         "issue": issue,
     }
 
+def _status_process_contract(status, daemon_pids):
+    process = status.get("process") if isinstance(status, dict) else None
+    if not isinstance(process, dict) or "pid" not in process:
+        return {"ok": True, "issue": None, "pid": None, "daemon_pids": list(daemon_pids or [])}
+    try:
+        status_pid = int(process.get("pid") or 0)
+    except (TypeError, ValueError):
+        return {
+            "ok": False,
+            "issue": "STATUS_SUMMARY_PROCESS_PID_INVALID",
+            "pid": process.get("pid"),
+            "daemon_pids": list(daemon_pids or []),
+        }
+    live_pids = [int(pid) for pid in (daemon_pids or []) if int(pid) > 0]
+    if status_pid <= 0:
+        return {
+            "ok": False,
+            "issue": "STATUS_SUMMARY_PROCESS_PID_INVALID",
+            "pid": status_pid,
+            "daemon_pids": live_pids,
+        }
+    if live_pids and status_pid not in live_pids:
+        return {
+            "ok": False,
+            "issue": "STATUS_SUMMARY_PROCESS_PID_MISMATCH",
+            "pid": status_pid,
+            "daemon_pids": live_pids,
+        }
+    return {"ok": True, "issue": None, "pid": status_pid, "daemon_pids": live_pids}
+
 def _process_liveness():
     forecast_live = _alive("src.ingest.forecast_live_daemon")
     legacy_ingest = _alive("src.ingest_main")
@@ -381,6 +416,9 @@ def _classify_alerts(report, ss_age):
     settlement_truth = report.get("settlement_truth", {})
     if settlement_truth.get("ok") is not True:
         alerts.append(settlement_truth.get("issue") or "SETTLEMENT_TRUTH_UNHEALTHY")
+    status_process = report.get("status_process", {})
+    if status_process.get("ok") is False:
+        alerts.append(status_process.get("issue") or "STATUS_SUMMARY_PROCESS_CONTRACT")
     composite = report.get("live_health_composite") or {}
     if composite.get("status") == "DEGRADED" or composite.get("healthy") is False:
         surfaces = composite.get("surfaces") if isinstance(composite.get("surfaces"), dict) else {}
@@ -445,6 +483,10 @@ def main():
         risk = ss.get("risk", {})
         funnel = ss.get("lifecycle_funnel", {})
         ws = cycle.get("ws_user_channel", {})
+        report["status_process"] = _status_process_contract(
+            ss,
+            report.get("procs", {}).get("daemon") or [],
+        )
         report["cycle"] = {
             "mode": cycle.get("mode"),
             "started": cycle.get("started_at"),
