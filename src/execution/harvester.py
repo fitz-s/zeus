@@ -28,6 +28,7 @@ from src.calibration.store import add_calibration_pair_v2
 from src.types.metric_identity import HIGH_LOCALDAY_MAX, LOW_LOCALDAY_MIN, MetricIdentity
 from src.config import City, cities_by_name, get_mode
 from src.contracts.settlement_semantics import SettlementSemantics
+from src.contracts.settlement_outcome import SettlementOutcome, classify_settlement_outcome
 from src.contracts.exceptions import SettlementPrecisionError
 from src.data.market_scanner import _match_city, _parse_temp_range, infer_temperature_metric, GAMMA_BASE
 from src.state.chronicler import log_event
@@ -1094,7 +1095,15 @@ def _extract_resolved_market_outcomes(event: dict) -> list[ResolvedMarketOutcome
     """
     resolved: list[ResolvedMarketOutcome] = []
     for market in event.get("markets", []) or []:
-        if market.get("umaResolutionStatus") != "resolved":
+        # T2: typed gate replaces raw umaResolutionStatus string comparison.
+        # classify_settlement_outcome is fail-closed: ambiguous prices → SOURCE_PUBLISHED_VENUE_UNRESOLVED.
+        # Allow only the two resolved-with-direction outcomes; REDEEMED excluded because
+        # classify_settlement_outcome() never returns REDEEMED from venue JSON alone.
+        _outcome_cls = classify_settlement_outcome(market)
+        if _outcome_cls not in {
+            SettlementOutcome.VENUE_RESOLVED_WIN,
+            SettlementOutcome.VENUE_RESOLVED_LOSE,
+        }:
             continue
 
         prices = _json_list(market.get("outcomePrices"))
@@ -1164,7 +1173,7 @@ def _find_winning_bin(event: dict) -> tuple[Optional[float], Optional[float]]:
     Returns: (pm_bin_lo, pm_bin_hi) of the YES-won market, or (None, None).
 
     Gate (P-D §6.1 + §5.3 non-reversal attestation against R3-09):
-      - ``umaResolutionStatus == 'resolved'`` (terminal UMA DVM state)
+      - ``classify_settlement_outcome(market)`` returns VENUE_RESOLVED_WIN or VENUE_RESOLVED_LOSE (typed gate, Phase 7 T2; replaces raw umaResolutionStatus string check)
       - ``outcomes`` map one token to Yes and one token to No (unexpected
         labels → fail closed)
       - the Yes-labeled token has resolution price 1.0 (YES-won per UMA's

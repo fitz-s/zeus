@@ -220,6 +220,28 @@ state_machines:
       - SUBMIT_ATTEMPTS_WITHOUT_ACK_OR_DETERMINISTIC_REJECTION
     invariant_tests:
       - tests/test_run_mode_failure_surfaces.py
+  settlement_outcome:
+    owner: src/contracts/settlement_outcome.py
+    description: >
+      Phase 7 settlement lifecycle enum (SettlementOutcome IntEnum). 10-state
+      typed gate replacing social umaResolutionStatus string comparisons.
+      Position.lifecycle_state field; settlements_v2.outcome_type column.
+      Transitions are monotonic-forward; OBSERVATION_REVISED routes only to
+      SOURCE_REVISION or DISPUTED.
+    states:
+      - UNRESOLVED
+      - PHYSICALLY_CONFIRMED
+      - SOURCE_PUBLISHED_VENUE_UNRESOLVED
+      - VENUE_RESOLVED_WIN
+      - VENUE_RESOLVED_LOSE
+      - REDEEMED
+      - OBSERVATION_REVISED
+      - DISPUTED
+      - UMA_UNKNOWN_50_50
+      - SOURCE_REVISION
+    invariant_tests:
+      - tests/contracts/test_settlement_outcome.py
+      - tests/test_position_lifecycle_state.py
 
 schema_objects:
   authority_fabricating_defaults:

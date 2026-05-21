@@ -42,6 +42,7 @@ def _create_settlements_v2(conn: sqlite3.Connection) -> None:
                 CHECK (authority IN ('VERIFIED', 'UNVERIFIED', 'QUARANTINED')),
             provenance_json TEXT NOT NULL DEFAULT '{}',
             recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            outcome_type INTEGER,
             UNIQUE(city, target_date, temperature_metric)
         )
     """)
@@ -335,6 +336,45 @@ def _create_calibration_pairs_v2(conn: sqlite3.Connection) -> None:
     """)
 
 
+def _create_settlement_capture_verifications(conn: sqlite3.Connection) -> None:
+    """Create settlement_capture_verifications table + index. Idempotent.
+
+    K1 forecast-class only table. NOT in world_src.sqlite_master — always
+    created via this static helper (same pattern as _create_market_microstructure_snapshots).
+
+    Phase 7 T3 — SCHEMA_FORECASTS_VERSION 6 (2026-05-21).
+    One row per (city, target_date, temperature_metric) with 3-valued
+    coherence_verdict: COHERENT | INCOHERENT | INCOMPLETE.
+    """
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS settlement_capture_verifications (
+            verification_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            city TEXT NOT NULL,
+            target_date TEXT NOT NULL,
+            temperature_metric TEXT NOT NULL
+                CHECK (temperature_metric IN ('high', 'low')),
+            fact_known_time TEXT,
+            source_published_time TEXT,
+            venue_resolved_time TEXT,
+            redeemed_time TEXT,
+            coherence_verdict TEXT NOT NULL
+                CHECK (coherence_verdict IN ('COHERENT', 'INCOHERENT', 'INCOMPLETE')),
+            incoherence_reason TEXT,
+            evidence_tier TEXT,
+            recorded_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+            UNIQUE(city, target_date, temperature_metric)
+        )
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_scv_city_date_metric
+            ON settlement_capture_verifications(city, target_date, temperature_metric)
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_scv_verdict
+            ON settlement_capture_verifications(coherence_verdict)
+    """)
+
+
 def apply_v2_schema(conn: sqlite3.Connection, *, forecast_tables: bool = True) -> None:
     """Apply the Zeus World DB v2 schema to *conn*.
 
@@ -390,6 +430,14 @@ def apply_v2_schema(conn: sqlite3.Connection, *, forecast_tables: bool = True) -
             # settlements_v2  (K1 forecast-class: moves to zeus-forecasts.db)
             # ----------------------------------------------------------------
             _create_settlements_v2(conn)
+            # Phase 7 T1 — ALTER for existing settlements_v2 rows on migrated DBs.
+            # _create_settlements_v2 adds outcome_type only in CREATE TABLE IF NOT EXISTS;
+            # existing DBs need an explicit ALTER. Guard for duplicate column.
+            try:
+                conn.execute("ALTER TABLE settlements_v2 ADD COLUMN outcome_type INTEGER")
+            except Exception as exc:
+                if "duplicate column" not in str(exc).lower():
+                    raise
 
             # ----------------------------------------------------------------
             # market_events_v2  (K1 forecast-class: moves to zeus-forecasts.db)

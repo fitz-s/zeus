@@ -779,6 +779,8 @@ SQLITE_CONNECT_ALLOWLIST: frozenset[str] = frozenset(
         # --- Phase 3 T3 (2026-05-21) ---
         "scripts/shoulder_shadow_readiness_report.py",   # read_only: SELECT-only aggregate; NEVER mutates live_status; operator promotion gate
         "scripts/rollback_phase3_t3.py",                 # operator_invoked: SCAFFOLD stub; run() raises NotImplementedError until T3 production pass
+        # --- Phase 7 T4 (2026-05-21) ---
+        "scripts/backfill_settlement_outcome_type.py",   # operator_invoked: backfills settlements_v2.outcome_type; writes under SAVEPOINT chunks when not --dry-run
     }
 )
 

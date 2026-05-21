@@ -2724,7 +2724,7 @@ def assert_schema_current(conn: sqlite3.Connection) -> None:
 # SCHEMA_FORECASTS_VERSION: bumped whenever forecast-authority DDL changes.
 # Owned tables include the 7 K1 forecast-class tables, the live source
 # authority chain tables, producer readiness_state, and forecast-live job_run.
-SCHEMA_FORECASTS_VERSION: int = 5  # T4 microstructure + bin_grid_id retrofit (2026-05-21)
+SCHEMA_FORECASTS_VERSION: int = 6  # Phase 7 T1+T3: settlements_v2.outcome_type + settlement_capture_verifications (2026-05-21)
 
 
 def _create_settlements(conn: sqlite3.Connection) -> None:
@@ -3150,6 +3150,8 @@ _FORECAST_TABLES = (
     "day0_nowcast_runs",
     # T4 MarketAnalysisVNext — SCHEMA_FORECASTS_VERSION 5 (2026-05-21)
     "market_microstructure_snapshots",
+    # Phase 7 T3 — SCHEMA_FORECASTS_VERSION 6 (2026-05-21)
+    "settlement_capture_verifications",
 )
 
 
@@ -3520,6 +3522,20 @@ def init_schema_forecasts(conn: sqlite3.Connection) -> None:
                 raise
 
     _create_market_microstructure_snapshots(conn)
+
+    # Phase 7 T1 — SCHEMA_FORECASTS_VERSION 6 (2026-05-21).
+    # Add outcome_type column to settlements_v2; guard for already-migrated DBs.
+    try:
+        conn.execute("ALTER TABLE settlements_v2 ADD COLUMN outcome_type INTEGER")
+    except sqlite3.OperationalError as _exc:
+        if "duplicate column" not in str(_exc).lower():
+            raise
+
+    # Phase 7 T3 — SCHEMA_FORECASTS_VERSION 6 (2026-05-21).
+    # settlement_capture_verifications: forecasts-only, not in world_src.sqlite_master.
+    # Follow _create_market_microstructure_snapshots precedent: static helper, no registry add.
+    from src.state.schema.v2_schema import _create_settlement_capture_verifications as _create_scv
+    _create_scv(conn)
 
     # Mark schema current — MUST be last (partial failure must not mark ready).
     conn.execute(f"PRAGMA user_version = {SCHEMA_FORECASTS_VERSION}")

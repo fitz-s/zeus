@@ -31,6 +31,7 @@ from src.contracts import (
     ExpiringAssumption,
 )
 from src.contracts.semantic_types import ChainState, Direction, DirectionAlias, ExitState, LifecycleState
+from src.contracts.settlement_outcome import SettlementOutcome
 from src.contracts.hold_value import HoldValue
 from src.strategy.correlation import get_correlation
 from src.state.lifecycle_manager import (
@@ -439,6 +440,11 @@ class Position:
     # Default None preserves backward-compat with v1-vintage positions.json.
     market_slug: Optional[str] = None
 
+    # Settlement lifecycle state (JSON-only — Phase 7 T1; NO SQL ALTER, NO SCHEMA_VERSION bump).
+    # Typed enum tracks the settlement lifecycle from UNRESOLVED through REDEEMED.
+    # Default UNRESOLVED preserves backward-compat with pre-Phase-7 positions.json.
+    lifecycle_state: SettlementOutcome = SettlementOutcome.UNRESOLVED
+
     def __post_init__(self):
         """CRITICAL: Enforce Enum strictness via coercion."""
         # S3 R5 P10B: runtime enforcement of Literal["high", "low"] at entry point
@@ -455,6 +461,8 @@ class Position:
             self.exit_state = ExitState(self.exit_state)
         if self.pre_exit_state:
             self.pre_exit_state = LifecycleState(self.pre_exit_state).value
+        if not isinstance(self.lifecycle_state, SettlementOutcome):
+            self.lifecycle_state = SettlementOutcome(int(self.lifecycle_state))
 
 
     @property
