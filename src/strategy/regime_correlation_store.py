@@ -47,6 +47,29 @@ if TYPE_CHECKING:
     pass
 
 
+def _validate_correlation_matrix(cities: list[str], matrix: np.ndarray) -> None:
+    if len(cities) != len(set(cities)):
+        raise ValueError("correlation matrix cities must be unique")
+    arr = np.array(matrix, dtype=float)
+    if arr.ndim != 2 or arr.shape[0] != arr.shape[1]:
+        raise ValueError(f"correlation matrix must be square, got shape={arr.shape}")
+    if arr.shape[0] != len(cities):
+        raise ValueError(
+            f"correlation matrix dimension {arr.shape[0]} does not match cities length {len(cities)}"
+        )
+    if not np.all(np.isfinite(arr)):
+        raise ValueError("correlation matrix contains NaN or infinite values")
+    if not np.allclose(np.diag(arr), 1.0, atol=1e-8):
+        raise ValueError("correlation matrix diagonal must be 1")
+    if not np.allclose(arr, arr.T, atol=1e-8):
+        raise ValueError("correlation matrix must be symmetric")
+    if np.any(arr < -1.0 - 1e-8) or np.any(arr > 1.0 + 1e-8):
+        raise ValueError("correlation matrix values must be in [-1, 1]")
+    eigenvalues = np.linalg.eigvalsh(arr)
+    if float(np.min(eigenvalues)) < -1e-8:
+        raise ValueError("correlation matrix must be positive semidefinite")
+
+
 @contextmanager
 def _savepoint_atomic(conn: sqlite3.Connection) -> Iterator[None]:
     """SAVEPOINT-based atomic region that nests inside outer transactions.
@@ -127,6 +150,7 @@ class RegimeCorrelationStore:
                 f"cities length ({len(cities)}) must match residuals columns "
                 f"({est.p_dimensions})."
             )
+        _validate_correlation_matrix(cities, est.shrunk_correlation)
 
         fitted_at = datetime.now(timezone.utc).isoformat()
         cities_json = json.dumps(cities)
@@ -182,6 +206,7 @@ class RegimeCorrelationStore:
 
         stored_cities: list[str] = json.loads(row[0])
         matrix: np.ndarray = np.array(json.loads(row[1]))
+        _validate_correlation_matrix(stored_cities, matrix)
 
         city_index = {c: i for i, c in enumerate(stored_cities)}
         try:

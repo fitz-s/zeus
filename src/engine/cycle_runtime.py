@@ -117,9 +117,9 @@ def _record_submitted_shoulder_exposure(
     if edge is None:
         return None
     try:
-        from src.engine.evaluator import _record_accepted_shoulder_exposure
+        from src.strategy.shoulder_cluster_cap import record_accepted_shoulder_exposure
 
-        return _record_accepted_shoulder_exposure(
+        return record_accepted_shoulder_exposure(
             conn=conn,
             city_name=city_name,
             target_date=target_date,
@@ -131,6 +131,27 @@ def _record_submitted_shoulder_exposure(
         )
     except Exception as exc:  # noqa: BLE001
         return f"shoulder_exposure_ledger_write_failed: {exc}"
+
+
+def _freeze_entries_after_shoulder_ledger_failure(error: str, *, logger) -> str | None:
+    """Pause entries when accepted shoulder exposure cannot reach its risk ledger."""
+
+    try:
+        from src.control.control_plane import pause_entries
+
+        pause_entries(
+            "shoulder_exposure_ledger_write_failed_after_submit",
+            issued_by="system_auto_pause",
+        )
+        return None
+    except Exception as exc:  # noqa: BLE001
+        logger.error(
+            "failed to pause entries after shoulder ledger write failure: %s; ledger_error=%s",
+            exc,
+            error,
+            exc_info=True,
+        )
+        return f"entries_pause_failed_after_shoulder_ledger_error: {exc}"
 
 
 # D4: exit triggers whose statistical burden (2 consecutive negative cycles,
@@ -4647,8 +4668,20 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                                 shoulder_ledger_error,
                             )
                             summary["degraded"] = True
+                            summary["entries_paused"] = True
+                            pause_error = _freeze_entries_after_shoulder_ledger_failure(
+                                shoulder_ledger_error,
+                                logger=deps.logger,
+                            )
+                            if pause_error:
+                                summary["degraded"] = True
+                                summary["shoulder_exposure_pause_error"] = pause_error
                             if isinstance(getattr(d, "tokens", None), dict):
                                 d.tokens.setdefault("shoulder_exposure_ledger_error", shoulder_ledger_error)
+                                d.tokens.setdefault(
+                                    "entries_pause_reason",
+                                    "shoulder_exposure_ledger_write_failed_after_submit",
+                                )
                     artifact.add_trade(
                         {
                             "decision_id": d.decision_id,

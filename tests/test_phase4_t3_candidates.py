@@ -63,7 +63,7 @@ CREATE TABLE IF NOT EXISTS decision_events (
     forecast_time              TEXT,
     provider_reported_time     TEXT,
     observation_available_at   TEXT NOT NULL DEFAULT '',
-    polymarket_end_anchor_source TEXT NOT NULL DEFAULT 'gamma_explicit',
+    polymarket_end_anchor_source TEXT NOT NULL DEFAULT 'unknown_legacy',
     first_member_observed_time TEXT,
     run_complete_time          TEXT,
     zeus_submit_intent_time    TEXT,
@@ -89,6 +89,7 @@ CREATE TABLE IF NOT EXISTS no_trade_events (
     reason_detail       TEXT,
     observed_at         TEXT NOT NULL,
     schema_version      INTEGER NOT NULL,
+    schema_compatibility TEXT NOT NULL DEFAULT 'current',
     PRIMARY KEY (market_slug, temperature_metric, target_date, observation_time, decision_seq)
 )
 """
@@ -183,11 +184,32 @@ class TestLiquidityProvisionWithHeartbeatRelationship:
         assert decision.outcome == "enter", f"Expected enter, got {decision.outcome}"
 
         rows = conn.execute(
-            "SELECT strategy_key FROM decision_events WHERE market_slug=?",
+            "SELECT strategy_key, source FROM decision_events WHERE market_slug=?",
             (ctx.natural_key[0],),
         ).fetchall()
         assert len(rows) == 1, f"Expected 1 decision_events row, got {len(rows)}"
         assert rows[0]["strategy_key"] == "liquidity_provision_with_heartbeat"
+        assert rows[0]["source"] == "shadow_decision"
+
+    def test_enter_path_missing_anchor_records_unknown_legacy_not_gamma_explicit(self):
+        conn = _make_conn()
+        candidate = LiquidityProvisionWithHeartbeat()
+        metrics = _make_metrics(depth_at_best_ask=8, polymarket_end_anchor_source=None)
+        analysis = SimpleNamespace(
+            metrics=metrics,
+            passive_maker_estimate=_make_passive_estimate(Decimal("0.55")),
+        )
+        ctx = _make_context(conn, analysis)
+
+        decision = candidate.evaluate(context=ctx, conn=conn, decision_time=_DECISION_TIME)
+
+        assert decision.outcome == "enter"
+        row = conn.execute(
+            "SELECT source, polymarket_end_anchor_source FROM decision_events WHERE market_slug=?",
+            (ctx.natural_key[0],),
+        ).fetchone()
+        assert row["source"] == "shadow_decision"
+        assert row["polymarket_end_anchor_source"] == "unknown_legacy"
 
     def test_no_trade_path_writes_no_trade_events_row_with_correct_reason(self):
         """No-trade path: fill_prob below minimum → no_trade_events row with LIQPROV_HEARTBEAT_ABSENT."""
@@ -207,11 +229,17 @@ class TestLiquidityProvisionWithHeartbeatRelationship:
         assert decision.reason == NoTradeReason.LIQPROV_HEARTBEAT_ABSENT
 
         rows = conn.execute(
-            "SELECT reason FROM no_trade_events WHERE market_slug=?",
+            "SELECT reason, schema_compatibility, reason_detail FROM no_trade_events WHERE market_slug=?",
             (ctx.natural_key[0],),
         ).fetchall()
         assert len(rows) == 1, f"Expected 1 no_trade_events row, got {len(rows)}"
         assert rows[0]["reason"] == NoTradeReason.LIQPROV_HEARTBEAT_ABSENT.value
+        assert rows[0]["schema_compatibility"] == "current"
+        assert "shadow_runtime=true" in rows[0]["reason_detail"]
+        assert (
+            "candidate_strategy_key=liquidity_provision_with_heartbeat"
+            in rows[0]["reason_detail"]
+        )
 
     def test_missing_field_guard_passive_estimate_absent_writes_no_trade_row(self):
         """T3 required missing-field guard: passive_maker_estimate absent → LIQPROV_HEARTBEAT_ABSENT.
@@ -236,9 +264,16 @@ class TestLiquidityProvisionWithHeartbeatRelationship:
             f"Expected 'fill_probability absent' in reason_detail; got {decision.reason_detail!r}"
         )
 
-        rows = conn.execute("SELECT reason FROM no_trade_events").fetchall()
+        rows = conn.execute(
+            "SELECT reason, schema_compatibility, reason_detail FROM no_trade_events"
+        ).fetchall()
         assert len(rows) == 1
         assert rows[0]["reason"] == NoTradeReason.LIQPROV_HEARTBEAT_ABSENT.value
+        assert rows[0]["schema_compatibility"] == "current"
+        assert (
+            "candidate_strategy_key=liquidity_provision_with_heartbeat"
+            in rows[0]["reason_detail"]
+        )
 
     def test_neither_path_silently_drops(self):
         conn = _make_conn()
@@ -322,11 +357,13 @@ class TestWeatherEventArbitrageRelationship:
         assert decision.reason == NoTradeReason.WEATHER_ALERT_SOURCE_UNTRUSTED
 
         rows = conn.execute(
-            "SELECT reason FROM no_trade_events WHERE market_slug=?",
+            "SELECT reason, schema_compatibility, reason_detail FROM no_trade_events WHERE market_slug=?",
             (ctx.natural_key[0],),
         ).fetchall()
         assert len(rows) == 1
         assert rows[0]["reason"] == NoTradeReason.WEATHER_ALERT_SOURCE_UNTRUSTED.value
+        assert rows[0]["schema_compatibility"] == "current"
+        assert "candidate_strategy_key=weather_event_arbitrage" in rows[0]["reason_detail"]
 
     def test_missing_field_guard_alert_source_absent_writes_no_trade_row(self):
         """T3 required missing-field guard: alert_source absent → WEATHER_ALERT_SOURCE_UNTRUSTED.
@@ -350,9 +387,13 @@ class TestWeatherEventArbitrageRelationship:
             f"Expected 'not wired' in reason_detail; got {decision.reason_detail!r}"
         )
 
-        rows = conn.execute("SELECT reason FROM no_trade_events").fetchall()
+        rows = conn.execute(
+            "SELECT reason, schema_compatibility, reason_detail FROM no_trade_events"
+        ).fetchall()
         assert len(rows) == 1
         assert rows[0]["reason"] == NoTradeReason.WEATHER_ALERT_SOURCE_UNTRUSTED.value
+        assert rows[0]["schema_compatibility"] == "current"
+        assert "candidate_strategy_key=weather_event_arbitrage" in rows[0]["reason_detail"]
 
     def test_neither_path_silently_drops(self):
         conn = _make_conn()

@@ -760,16 +760,32 @@ class TestExecutor:
 
         monkeypatch.delenv("ZEUS_ALLOW_LEGACY_EXECUTION_INTENT", raising=False)
         monkeypatch.delenv("ZEUS_LEGACY_EXECUTION_INTENT_SCOPE", raising=False)
-        monkeypatch.setattr(
-            "src.architecture.gate_runtime.check",
-            lambda capability: gate_calls.append(capability),
-        )
+        monkeypatch.setattr("src.architecture.gate_runtime.check", lambda capability: gate_calls.append(capability))
         monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", FailingClient)
 
         with pytest.raises(RuntimeError, match="LEGACY_EXECUTION_INTENT_LIVE_BLOCKED"):
             execute_intent(intent, edge_vwmp=0.50, label="legacy-live-blocked", conn=_TEST_CONN)
 
-        assert gate_calls == ["live_venue_submit"]
+        assert gate_calls == []
+
+    def test_execute_intent_env_override_still_blocked_for_live(self, monkeypatch):
+        intent = ExecutionIntent(
+            direction=Direction.YES,
+            target_size_usd=5.0,
+            limit_price=0.50,
+            toxicity_budget=0.05,
+            max_slippage=SlippageBps(value_bps=200, direction="adverse"),
+            is_sandbox=False,
+            market_id="gamma-legacy-env-blocked",
+            token_id="yes-token-legacy-env-blocked",
+            timeout_seconds=3600,
+        )
+
+        monkeypatch.setenv("ZEUS_ALLOW_LEGACY_EXECUTION_INTENT", "1")
+        monkeypatch.setenv("ZEUS_LEGACY_EXECUTION_INTENT_SCOPE", "paper")
+        with pytest.raises(RuntimeError, match="LEGACY_EXECUTION_INTENT_LIVE_BLOCKED"):
+            execute_intent(intent, edge_vwmp=0.50, label="legacy-live-blocked", conn=_TEST_CONN)
+        assert _TEST_CONN.execute("SELECT COUNT(*) FROM venue_commands").fetchone()[0] == 0
 
     def test_execute_final_intent_allows_stricter_fok_when_a2_selected_resting_maker(self, monkeypatch):
         final_intent = _final_execution_intent(order_type="FOK")
@@ -1489,6 +1505,121 @@ class TestExecutor:
         assert result.reason == "missing_order_id"
         assert result.order_id in (None, "")
         assert result.order_id != "trade-1"
+
+    def test_entry_terminal_rejection_persistence_failure_returns_unknown(self, monkeypatch):
+        final_intent = _final_execution_intent()
+
+        class RejectingClient:
+            def __init__(self):
+                self.bound_envelope = None
+
+            def bind_submission_envelope(self, envelope):
+                self.bound_envelope = envelope
+
+            def v2_preflight(self):
+                return None
+
+            def place_limit_order(self, *, token_id, price, size, side, order_type="GTC"):
+                final = self.bound_envelope.with_updates(
+                    raw_response_json='{"success":false,"errorCode":"bad_order"}',
+                    order_id=None,
+                )
+                return {
+                    "success": False,
+                    "errorCode": "bad_order",
+                    "status": "REJECTED",
+                    "_venue_submission_envelope": final.to_dict(),
+                }
+
+        from src.state import venue_command_repo
+
+        real_append_event = venue_command_repo.append_event
+        failed = {"done": False}
+
+        def fail_first_rejection(conn, *, command_id, event_type, occurred_at, payload):
+            if event_type == "SUBMIT_REJECTED" and not failed["done"]:
+                failed["done"] = True
+                raise sqlite3.OperationalError("simulated terminal rejection persistence failure")
+            return real_append_event(
+                conn,
+                command_id=command_id,
+                event_type=event_type,
+                occurred_at=occurred_at,
+                payload=payload,
+            )
+
+        monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", RejectingClient)
+        monkeypatch.setattr("src.state.venue_command_repo.append_event", fail_first_rejection)
+
+        result = execute_final_intent(final_intent, conn=_TEST_CONN, decision_id="decision-terminal-reject-fail")
+
+        assert result.status == "unknown_side_effect"
+        assert result.command_state == "REVIEW_REQUIRED"
+        command = _TEST_CONN.execute(
+            "SELECT state FROM venue_commands WHERE command_id = ?",
+            (result.command_id,),
+        ).fetchone()
+        assert command["state"] == "REVIEW_REQUIRED"
+
+    def test_exit_terminal_rejection_persistence_failure_returns_unknown(self, monkeypatch):
+        class RejectingClient:
+            def __init__(self):
+                self.bound_envelope = None
+
+            def bind_submission_envelope(self, envelope):
+                self.bound_envelope = envelope
+
+            def place_limit_order(self, *, token_id, price, size, side, order_type="GTC"):
+                final = self.bound_envelope.with_updates(
+                    raw_response_json='{"success":false,"errorCode":"bad_exit"}',
+                    order_id=None,
+                )
+                return {
+                    "success": False,
+                    "errorCode": "bad_exit",
+                    "status": "REJECTED",
+                    "_venue_submission_envelope": final.to_dict(),
+                }
+
+        from src.state import venue_command_repo
+
+        real_append_event = venue_command_repo.append_event
+        failed = {"done": False}
+
+        def fail_first_rejection(conn, *, command_id, event_type, occurred_at, payload):
+            if event_type == "SUBMIT_REJECTED" and not failed["done"]:
+                failed["done"] = True
+                raise sqlite3.OperationalError("simulated exit terminal rejection persistence failure")
+            return real_append_event(
+                conn,
+                command_id=command_id,
+                event_type=event_type,
+                occurred_at=occurred_at,
+                payload=payload,
+            )
+
+        monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", RejectingClient)
+        monkeypatch.setattr("src.state.venue_command_repo.append_event", fail_first_rejection)
+
+        result = execute_exit_order(
+            create_exit_order_intent(
+                trade_id="trade-exit-terminal-reject-fail",
+                token_id="yes-token",
+                shares=12.349,
+                current_price=0.50,
+                best_bid=0.49,
+                **_snapshot_kwargs("yes-token"),
+            ),
+            conn=_TEST_CONN,
+        )
+
+        assert result.status == "unknown_side_effect"
+        assert result.command_state == "REVIEW_REQUIRED"
+        command = _TEST_CONN.execute(
+            "SELECT state FROM venue_commands WHERE command_id = ?",
+            (result.command_id,),
+        ).fetchone()
+        assert command["state"] == "REVIEW_REQUIRED"
 
     def test_execute_exit_order_rejects_missing_token(self):
         result = execute_exit_order(

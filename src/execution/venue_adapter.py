@@ -1,5 +1,5 @@
 # Created: 2026-05-06
-# Last reused or audited: 2026-05-06
+# Last reused or audited: 2026-05-21
 # Authority basis: IMPLEMENTATION_PLAN §6 days 56-60 (Gate 2);
 #                  architecture/capabilities.yaml live_venue_submit hard_kernel_paths
 
@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from src.architecture.decorators import capability
 from src.execution.live_executor import LiveAuthToken, LiveExecutor
 
 # Re-export for caller convenience (capabilities.yaml routes callers here).
@@ -33,6 +34,7 @@ class VenueAdapterExecutor(LiveExecutor):
     mints a LiveAuthToken, then calls _do_submit with the validated token.
     """
 
+    @capability("live_venue_submit", lease=True)
     def _do_submit(self, order: Any, token: LiveAuthToken) -> Any:
         """Delegate to the existing executor path after gate checks pass.
 
@@ -40,16 +42,17 @@ class VenueAdapterExecutor(LiveExecutor):
         reconstruct or bypass the token -- it is proof the live path was taken.
         """
         # Lazy import to avoid circular deps at module load time.
-        from src.execution.executor import execute_intent, execute_final_intent
+        from src.execution.executor import execute_final_intent
         from src.contracts import FinalExecutionIntent, ExecutionIntent
 
         if isinstance(order, FinalExecutionIntent):
             return execute_final_intent(order)
         if isinstance(order, ExecutionIntent):
-            # Legacy path: edge_vwmp not available here; caller should use
-            # execute_final_intent for new code.  Provide a sentinel float.
-            return execute_intent(order, edge_vwmp=float(order.limit_price), label="venue_adapter")
+            raise RuntimeError(
+                "LEGACY_EXECUTION_INTENT_LIVE_BLOCKED: VenueAdapterExecutor "
+                "accepts only FinalExecutionIntent for live submissions"
+            )
         raise TypeError(
             f"VenueAdapterExecutor._do_submit: unsupported order type {type(order).__name__}. "
-            "Use FinalExecutionIntent or ExecutionIntent."
+            "Use FinalExecutionIntent."
         )

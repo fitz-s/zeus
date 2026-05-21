@@ -6,6 +6,7 @@
 # Created: 2026-05-21
 # Last reused or audited: 2026-05-21
 # Authority basis: docs/operations/task_2026-05-21_strategy_vnext_phase5_regime_correlation/PHASE_5_PLAN.md §Track3 acceptance tests
+#                  + task_2026-05-21_live_authority_shadow_risk_followup Finding 6
 
 """Phase 5 T3 acceptance tests for variance-based cluster_exposure_for_bankroll.
 
@@ -26,7 +27,10 @@ import pytest
 
 from src.contracts.weather_regime_tag import WeatherRegimeTag
 from src.state.db import init_schema
-from src.state.portfolio import cluster_exposure_for_bankroll
+from src.state.portfolio import (
+    cluster_exposure_for_bankroll,
+    cluster_exposure_result_for_bankroll,
+)
 from src.strategy.regime_correlation_store import RegimeCorrelationStore
 
 
@@ -149,13 +153,13 @@ def test_heat_dome_under_allocates_vs_normal() -> None:
     heat_store = _make_store_with_regime(WeatherRegimeTag.HEAT_DOME, cities, 0.8, seed=1)
     normal_store = _make_store_with_regime(WeatherRegimeTag.NORMAL, cities, 0.05, seed=2)
 
-    heat_exp = cluster_exposure_for_bankroll(
+    heat_struct = cluster_exposure_result_for_bankroll(
         state, "east_cluster", bankroll,
         regime_correlation_store=heat_store,
         regime=WeatherRegimeTag.HEAT_DOME,
         cities=cities,
     )
-    normal_exp = cluster_exposure_for_bankroll(
+    normal_struct = cluster_exposure_result_for_bankroll(
         state, "east_cluster", bankroll,
         regime_correlation_store=normal_store,
         regime=WeatherRegimeTag.NORMAL,
@@ -163,14 +167,17 @@ def test_heat_dome_under_allocates_vs_normal() -> None:
     )
 
     # HEAT_DOME (high correlation) → larger variance exposure than NORMAL (low correlation).
-    assert heat_exp > normal_exp, (
-        f"Expected HEAT_DOME exposure ({heat_exp:.4f}) > NORMAL ({normal_exp:.4f}). "
+    assert heat_struct.variance_heat is not None
+    assert normal_struct.variance_heat is not None
+    assert heat_struct.variance_heat > normal_struct.variance_heat, (
+        f"Expected HEAT_DOME variance ({heat_struct.variance_heat:.4f}) > "
+        f"NORMAL ({normal_struct.variance_heat:.4f}). "
         "Higher correlation must produce higher variance-based cluster exposure."
     )
 
-    # Both must be positive.
-    assert heat_exp > 0.0
-    assert normal_exp > 0.0
+    # Policy heat remains conservative gross-vs-variance max, not variance substitution.
+    assert heat_struct.policy_heat >= heat_struct.gross_heat
+    assert normal_struct.policy_heat >= normal_struct.gross_heat
 
 
 # ---------------------------------------------------------------------------
@@ -254,25 +261,25 @@ def test_variance_cap_equals_notional_uncorrelated() -> None:
         "Expected near-identity shrunk matrix for iid n=5000 data."
     )
 
-    result = cluster_exposure_for_bankroll(
+    structured = cluster_exposure_result_for_bankroll(
         state, "cluster_x", bankroll,
         regime_correlation_store=store,
         regime=WeatherRegimeTag.SHOULDER_SEASON,
         cities=cities,
     )
 
-    # Expected: sqrt(wᵀ Σ_shrunk w) where Σ_shrunk ≈ I.
+    # Expected variance heat: sqrt(wᵀ Σ_shrunk w) where Σ_shrunk ≈ I.
     w = np.array([notional_each / bankroll] * 4)
-    expected = math.sqrt(float(w @ est.shrunk_correlation @ w))
-    assert result == pytest.approx(expected, rel=1e-9), (
-        f"Variance cap with near-identity Σ: expected {expected:.6f}, got {result:.6f}"
+    expected_variance = math.sqrt(float(w @ est.shrunk_correlation @ w))
+    assert structured.variance_heat == pytest.approx(expected_variance, rel=1e-9), (
+        f"Variance heat with near-identity Σ: expected {expected_variance:.6f}, "
+        f"got {structured.variance_heat:.6f}"
     )
 
-    # Verify it's less than the notional-sum cap (Cauchy-Schwarz).
+    # Verify policy heat does not replace/loosen the gross notional cap.
     notional_cap = sum(notional_each for _ in cities) / bankroll
-    assert result <= notional_cap + 1e-9, (
-        f"Variance cap {result:.6f} must be ≤ notional cap {notional_cap:.6f}."
-    )
+    assert structured.gross_heat == pytest.approx(notional_cap, rel=1e-9)
+    assert structured.policy_heat == pytest.approx(notional_cap, rel=1e-9)
 
 
 # ---------------------------------------------------------------------------
@@ -347,7 +354,7 @@ def test_city_order_alignment_in_variance_path() -> None:
     store = RegimeCorrelationStore(conn)
     est = store.fit(WeatherRegimeTag.NORMAL, residuals, cities=fit_cities)
 
-    result = cluster_exposure_for_bankroll(
+    structured = cluster_exposure_result_for_bankroll(
         state, "test_cluster", bankroll,
         regime_correlation_store=store,
         regime=WeatherRegimeTag.NORMAL,
@@ -359,7 +366,58 @@ def test_city_order_alignment_in_variance_path() -> None:
     sigma = est.shrunk_correlation  # shape (2,2), fitted in [B,A] order
     expected = math.sqrt(float(w_cities @ sigma @ w_cities))
 
-    assert result == pytest.approx(expected, rel=1e-9), (
-        f"City-order alignment: expected {expected:.8f}, got {result:.8f}. "
+    assert structured.variance_heat == pytest.approx(expected, rel=1e-9), (
+        f"City-order alignment: expected {expected:.8f}, got {structured.variance_heat:.8f}. "
         "w must be indexed by cities list order, not state.positions order."
     )
+
+
+def test_policy_heat_uses_gross_when_variance_would_not_throttle() -> None:
+    """Gross heat and variance heat are separate; policy uses the conservative max."""
+
+    cities = ["A", "B"]
+    bankroll = 1000.0
+    state = _MockPortfolioState([
+        _make_position("A", "cluster_gross", 70.0),
+        _make_position("B", "cluster_gross", 70.0),
+    ])
+    conn = _world_conn()
+    store = RegimeCorrelationStore(conn)
+    conn.execute(
+        """
+        INSERT INTO regime_correlation_cache
+            (regime, cities_json, matrix_json, fitted_at, n_observations, intensity, schema_version)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            str(WeatherRegimeTag.NORMAL),
+            '["A","B"]',
+            '[[1.0,0.0],[0.0,1.0]]',
+            "2026-05-21T00:00:00+00:00",
+            100,
+            0.0,
+            24,
+        ),
+    )
+
+    structured = cluster_exposure_result_for_bankroll(
+        state,
+        "cluster_gross",
+        bankroll,
+        regime_correlation_store=store,
+        regime=WeatherRegimeTag.NORMAL,
+        cities=cities,
+    )
+
+    assert structured.gross_heat == pytest.approx(0.14)
+    assert structured.variance_heat == pytest.approx(math.sqrt(0.07**2 + 0.07**2))
+    assert structured.variance_heat < 0.10
+    assert structured.policy_heat == pytest.approx(0.14)
+    assert cluster_exposure_for_bankroll(
+        state,
+        "cluster_gross",
+        bankroll,
+        regime_correlation_store=store,
+        regime=WeatherRegimeTag.NORMAL,
+        cities=cities,
+    ) == pytest.approx(0.14)

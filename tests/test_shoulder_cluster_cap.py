@@ -279,9 +279,9 @@ def _shoulder_edge() -> BinEdge:
 
 def test_evaluator_shoulder_cap_missing_ledger_table_fails_closed_with_db_conn() -> None:
     conn = sqlite3.connect(":memory:")
-    from src.engine.evaluator import _shoulder_cluster_cap_rejection
+    from src.strategy.shoulder_cluster_cap import shoulder_cluster_cap_rejection
 
-    reason = _shoulder_cluster_cap_rejection(
+    reason = shoulder_cluster_cap_rejection(
         conn=conn,
         city_name="Atlanta",
         target_date="2026-07-15",
@@ -328,6 +328,32 @@ def test_runtime_submitted_shoulder_decision_writes_exposure_ledger_row() -> Non
         250.0,
         "decision-shoulder-ledger-1",
     )
+
+
+def test_runtime_shoulder_ledger_failure_freezes_entries(monkeypatch) -> None:
+    from src.engine.cycle_runtime import _freeze_entries_after_shoulder_ledger_failure
+
+    calls = []
+
+    def fake_pause(reason_code: str, *, issued_by: str = "system_auto_pause", effective_until=None):
+        calls.append((reason_code, issued_by, effective_until))
+
+    monkeypatch.setattr("src.control.control_plane.pause_entries", fake_pause)
+    logger = SimpleNamespace(error=lambda *args, **kwargs: None)
+
+    error = _freeze_entries_after_shoulder_ledger_failure(
+        "shoulder_exposure_ledger_write_failed: simulated",
+        logger=logger,
+    )
+
+    assert error is None
+    assert calls == [
+        (
+            "shoulder_exposure_ledger_write_failed_after_submit",
+            "system_auto_pause",
+            None,
+        )
+    ]
 
 
 # ---------------------------------------------------------------------------

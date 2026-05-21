@@ -603,7 +603,7 @@ class TestLiveOrderCommandSplit:
     def test_own_connection_commits_pre_submit_rows_before_sdk_submit(self, tmp_path, monkeypatch):
         """Own-connection live entry must make command/envelope durable before SDK contact."""
         import src.execution.executor as executor_module
-        from src.execution.executor import execute_intent
+        from src.execution.executor import _live_order
         from src.state.db import get_connection, init_schema
 
         token_id = "tok-" + "2" * 36
@@ -681,10 +681,10 @@ class TestLiveOrderCommandSplit:
                 }
 
         with patch("src.data.polymarket_client.PolymarketClient", return_value=DurableVisibilityClient()):
-            result = execute_intent(
-                intent,
-                edge_vwmp=0.35,
-                label="39-40°F",
+            result = _live_order(
+                trade_id="trd-entry-durable",
+                intent=intent,
+                shares=18.19,
                 decision_id="dec-entry-durable",
             )
 

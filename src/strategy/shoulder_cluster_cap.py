@@ -20,13 +20,148 @@ INV-37: caller supplies conn when the ledger check is needed.
 
 from __future__ import annotations
 
+import logging
 import sqlite3
+from dataclasses import dataclass
+from datetime import date, datetime
 from typing import Optional
+
+from src.types import BinEdge
 
 # Hard dollar cap per cluster per side.
 # Operator-tunable post-T3 via config; defaulting to a conservative value.
 # This cap is secondary to the cross-city presence gate (Gate 1).
 SHOULDER_CLUSTER_HARD_CAP_USD: float = 2000.0
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class ShoulderClusterContext:
+    cluster_id: str
+    side: str
+    regime: str
+
+
+def shoulder_cluster_context_for_edge(
+    *,
+    city_name: str,
+    target_date: str,
+    edge: BinEdge,
+) -> ShoulderClusterContext | None:
+    """Return the canonical shoulder risk context for an edge, if applicable."""
+
+    if not getattr(edge.bin, "is_shoulder", False):
+        return None
+    try:
+        from src.contracts.weather_regime_tag import WeatherRegimeTag
+        from src.strategy.correlation_cluster import tail_correlation_cluster_for
+
+        regime = getattr(edge, "tail_regime_tag", WeatherRegimeTag.UNKNOWN)
+        if isinstance(regime, str):
+            try:
+                regime = WeatherRegimeTag(regime)
+            except ValueError:
+                regime = WeatherRegimeTag.UNKNOWN
+        target = date.fromisoformat(str(target_date))
+        cluster_id = tail_correlation_cluster_for(city_name, regime, target)
+        if not cluster_id:
+            return None
+        side = "sell" if edge.direction == "buy_no" else "buy"
+        return ShoulderClusterContext(
+            cluster_id=cluster_id,
+            side=side,
+            regime=str(getattr(regime, "value", regime)),
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "shoulder cluster context unavailable for city=%s target_date=%s: %s",
+            city_name,
+            target_date,
+            exc,
+        )
+        return None
+
+
+def shoulder_cluster_cap_rejection(
+    *,
+    conn: sqlite3.Connection | None,
+    city_name: str,
+    target_date: str,
+    edge: BinEdge,
+    proposed_notional: float,
+) -> str | None:
+    """Return a rejection reason when shoulder cluster cap blocks the edge."""
+
+    context = shoulder_cluster_context_for_edge(
+        city_name=city_name,
+        target_date=target_date,
+        edge=edge,
+    )
+    if context is None:
+        return None
+    if conn is None:
+        logger.warning(
+            "shoulder_cluster_cap skipped without DB conn (paper/shadow path): "
+            "cluster=%s side=%s proposed_notional=%.4f",
+            context.cluster_id,
+            context.side,
+            proposed_notional,
+        )
+        return None
+    try:
+        cap_ok, cap_reason = check_shoulder_cluster_cap(
+            cluster=context.cluster_id,
+            side=context.side,
+            proposed_notional=float(proposed_notional),
+            conn=conn,
+            proposing_city=city_name,
+        )
+    except (sqlite3.OperationalError, AttributeError, ImportError) as exc:
+        return f"shoulder_cluster_cap_unavailable: {exc}"
+    if not cap_ok:
+        return cap_reason
+    return None
+
+
+def record_accepted_shoulder_exposure(
+    *,
+    conn: sqlite3.Connection | None,
+    city_name: str,
+    target_date: str,
+    edge: BinEdge,
+    notional_usd: float,
+    decision_event_id: str,
+    observed_at: datetime,
+    source: str,
+) -> str | None:
+    """Append accepted shoulder exposure into the risk ledger."""
+
+    context = shoulder_cluster_context_for_edge(
+        city_name=city_name,
+        target_date=target_date,
+        edge=edge,
+    )
+    if context is None or conn is None:
+        return None
+    try:
+        from src.state.shoulder_exposure_ledger import write_shoulder_exposure_entry
+
+        write_shoulder_exposure_entry(
+            shoulder_side=context.side,
+            weather_system_cluster=context.cluster_id,
+            city=city_name,
+            target_date=target_date,
+            source=source or "evaluator",
+            regime=context.regime,
+            notional_usd=float(notional_usd),
+            decision_event_id=decision_event_id,
+            observed_at=observed_at.isoformat(),
+            conn=conn,
+        )
+    except (sqlite3.OperationalError, AttributeError, ImportError) as exc:
+        return f"shoulder_exposure_ledger_write_failed: {exc}"
+    return None
 
 
 def check_shoulder_cluster_cap(

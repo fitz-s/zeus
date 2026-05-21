@@ -894,7 +894,7 @@ def get_connection(
 # CI hook scripts/check_schema_version.py diffs the sqlite_master hash of
 # a fresh-init DB against tests/state/_schema_pinned_hash.txt and fails
 # the PR if SCHEMA_VERSION did not change in lockstep.
-SCHEMA_VERSION = 24  # 2026-05-21 Phase 5 T2: regime_correlation_cache table
+SCHEMA_VERSION = 25  # 2026-05-21 shadow decision provenance in decision_events
 
 
 def init_schema(
@@ -1382,7 +1382,7 @@ def init_schema(
             provider_reported_time     TEXT,
             observation_available_at   TEXT NOT NULL,
             polymarket_end_anchor_source TEXT NOT NULL CHECK (
-                polymarket_end_anchor_source IN ('gamma_explicit', 'f1_12z_fallback')
+                polymarket_end_anchor_source IN ('gamma_explicit', 'f1_12z_fallback', 'unknown_legacy')
             ),
             first_member_observed_time TEXT,
             run_complete_time          TEXT,
@@ -1392,8 +1392,8 @@ def init_schema(
             finality_confirmed_time    TEXT,
             clock_skew_estimate_ms_at_submit INTEGER,
             raw_orderbook_hash_transition_delta_ms INTEGER,
-            schema_version INTEGER NOT NULL CHECK (schema_version IN (12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24)),
-            source         TEXT NOT NULL CHECK (source IN ('phase0_backfill', 'live_decision')),
+            schema_version INTEGER NOT NULL CHECK (schema_version IN (12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25)),
+            source         TEXT NOT NULL CHECK (source IN ('phase0_backfill', 'live_decision', 'shadow_decision')),
             PRIMARY KEY (market_slug, temperature_metric, target_date, observation_time, decision_seq)
         );
         CREATE INDEX IF NOT EXISTS idx_decision_events_slug_date

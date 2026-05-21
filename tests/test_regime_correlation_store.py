@@ -6,6 +6,7 @@
 # Created: 2026-05-21
 # Last reused or audited: 2026-05-21
 # Authority basis: docs/operations/task_2026-05-21_strategy_vnext_phase5_regime_correlation/PHASE_5_PLAN.md §Track2 acceptance tests
+#                  + task_2026-05-21_live_authority_shadow_risk_followup Finding 7
 
 """Phase 5 T2 acceptance tests for RegimeCorrelationStore.
 
@@ -175,7 +176,7 @@ def test_cache_round_trip() -> None:
 # ---------------------------------------------------------------------------
 
 def test_schema_migration_N_to_N_plus_1() -> None:
-    """A fresh init_schema DB has regime_correlation_cache + PRAGMA user_version=24.
+    """A fresh init_schema DB has regime_correlation_cache + current PRAGMA user_version.
 
     Plan §T2 acceptance test 4 (verbatim):
       "pre-migration world DB at version N gains regime_correlation_cache table;
@@ -197,15 +198,11 @@ def test_schema_migration_N_to_N_plus_1() -> None:
         "ensure ensure_table is called from db.py::init_schema."
     )
 
-    # PRAGMA user_version must match SCHEMA_VERSION (24 at Phase 5 T2 dispatch).
+    # PRAGMA user_version must match current global SCHEMA_VERSION.
     pragma_version = conn.execute("PRAGMA user_version").fetchone()[0]
     assert pragma_version == SCHEMA_VERSION, (
         f"PRAGMA user_version={pragma_version} != SCHEMA_VERSION={SCHEMA_VERSION}. "
         "db.py::init_schema must set PRAGMA user_version = SCHEMA_VERSION as final step."
-    )
-    assert SCHEMA_VERSION == 24, (
-        f"SCHEMA_VERSION expected 24 (Phase 5 T2 bump); got {SCHEMA_VERSION}. "
-        "Update this assertion if the schema was bumped again."
     )
 
     # Columns must match the DDL specification.
@@ -218,3 +215,50 @@ def test_schema_migration_N_to_N_plus_1() -> None:
     assert expected_cols <= col_names, (
         f"Missing columns: {expected_cols - col_names}"
     )
+
+
+@pytest.mark.parametrize(
+    ("cities_json", "matrix_json", "message"),
+    [
+        ('["A","B"]', '[[1.0,0.2,0.3],[0.2,1.0,0.3]]', "square"),
+        ('["A","B"]', '[[1.0,0.2],[0.2,1.0],[0.2,0.2]]', "square"),
+        ('["A","B"]', '[[1.0,"NaN"],["NaN",1.0]]', "NaN|infinite"),
+        ('["A","B"]', '[[1.0,0.2],[0.2,0.9]]', "diagonal"),
+        ('["A","B"]', '[[1.0,0.2],[0.3,1.0]]', "symmetric"),
+        ('["A","B"]', '[[1.0,1.2],[1.2,1.0]]', "\\[-1, 1\\]"),
+        ('["A","B"]', '[[1.0,1.5],[1.5,1.0]]', "\\[-1, 1\\]"),
+        ('["A","B","C"]', '[[1.0,0.9,0.9],[0.9,1.0,-0.9],[0.9,-0.9,1.0]]', "positive semidefinite"),
+        ('["A","A"]', '[[1.0,0.0],[0.0,1.0]]', "unique"),
+    ],
+)
+def test_get_rejects_invalid_persisted_matrix(cities_json: str, matrix_json: str, message: str) -> None:
+    conn = _world_conn()
+    conn.execute(
+        """
+        INSERT INTO regime_correlation_cache
+            (regime, cities_json, matrix_json, fitted_at, n_observations, intensity, schema_version)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            str(WeatherRegimeTag.NORMAL),
+            cities_json,
+            matrix_json,
+            "2026-05-21T00:00:00+00:00",
+            100,
+            0.0,
+            24,
+        ),
+    )
+    store = RegimeCorrelationStore(conn)
+
+    with pytest.raises(ValueError, match=message):
+        store.get(WeatherRegimeTag.NORMAL, ["A"])
+
+
+def test_fit_rejects_repeated_cities() -> None:
+    conn = _world_conn()
+    store = RegimeCorrelationStore(conn)
+    residuals = np.random.default_rng(0).standard_normal((50, 2))
+
+    with pytest.raises(ValueError, match="unique"):
+        store.fit(WeatherRegimeTag.NORMAL, residuals, cities=["A", "A"])
