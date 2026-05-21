@@ -900,9 +900,23 @@ class TestRecoveryResolutionTable:
         assert payload["required_predicates"]["point_order_status_live"] is True
 
     def test_cancel_unknown_review_required_terminal_no_fill_expires_entry(self, conn, mock_client):
+        from src.execution.exchange_reconcile import list_unresolved_findings, record_finding
+
         _insert(conn, intent_kind="ENTRY", side="BUY", size=11.62, price=0.02)
         _advance_to_cancel_unknown_review_required(conn, venue_order_id="ord-terminal")
         _seed_pending_entry_projection(conn, order_id="ord-terminal")
+        finding = record_finding(
+            conn,
+            kind="local_orphan_order",
+            subject_id="ord-terminal",
+            context="ws_gap",
+            evidence={
+                "reason": "local_open_order_absent_from_exchange_open_orders",
+                "exchange_open_order_ids": [],
+                "trade_enumeration_available": True,
+            },
+            recorded_at="2026-04-26T00:06:00Z",
+        )
         mock_client.get_order.return_value = {
             "orderID": "ord-terminal",
             "status": "CANCELLED",
@@ -924,6 +938,16 @@ class TestRecoveryResolutionTable:
         assert payload["required_predicates"]["point_order_terminal_no_fill"] is True
         assert payload["required_predicates"]["no_matching_open_orders"] is True
         assert payload["required_predicates"]["no_matching_trades"] is True
+        assert payload["resolved_m5_local_orphan_findings"] == 1
+        assert [row.finding_id for row in list_unresolved_findings(conn)] == []
+        resolved = conn.execute(
+            "SELECT resolution, resolved_by FROM exchange_reconcile_findings WHERE finding_id = ?",
+            (finding.finding_id,),
+        ).fetchone()
+        assert dict(resolved) == {
+            "resolution": "command_recovery_terminal_no_fill",
+            "resolved_by": "src.execution.command_recovery",
+        }
 
         current = conn.execute(
             "SELECT phase, shares, cost_basis_usd, order_status FROM position_current WHERE position_id='pos-001'"
@@ -933,6 +957,56 @@ class TestRecoveryResolutionTable:
             "shares": 0.0,
             "cost_basis_usd": 0.0,
             "order_status": "canceled",
+        }
+
+    def test_expired_terminal_no_fill_entry_resolves_late_m5_local_orphan_finding(self, conn, mock_client):
+        from src.execution.exchange_reconcile import list_unresolved_findings, record_finding
+
+        _insert(conn, intent_kind="ENTRY", side="BUY", size=11.62, price=0.02)
+        _advance_to_cancel_unknown_review_required(conn, venue_order_id="ord-terminal")
+        _seed_pending_entry_projection(conn, order_id="ord-terminal")
+        mock_client.get_order.return_value = {
+            "orderID": "ord-terminal",
+            "status": "CANCELLED",
+            "matched_size": "0",
+        }
+        mock_client.get_open_orders.return_value = []
+        mock_client.get_trades.return_value = []
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+        first_summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert _get_state(conn, "cmd-001") == "EXPIRED"
+        assert first_summary["advanced"] == 1
+        finding = record_finding(
+            conn,
+            kind="local_orphan_order",
+            subject_id="ord-terminal",
+            context="ws_gap",
+            evidence={
+                "reason": "local_open_order_absent_from_exchange_open_orders",
+                "exchange_open_order_ids": [],
+                "trade_enumeration_available": True,
+            },
+            recorded_at="2026-04-26T00:07:00Z",
+        )
+
+        second_summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert second_summary["stale_terminal_no_fill_findings"] == {
+            "scanned": 1,
+            "advanced": 1,
+            "stayed": 0,
+            "errors": 0,
+        }
+        assert [row.finding_id for row in list_unresolved_findings(conn)] == []
+        resolved = conn.execute(
+            "SELECT resolution, resolved_by FROM exchange_reconcile_findings WHERE finding_id = ?",
+            (finding.finding_id,),
+        ).fetchone()
+        assert dict(resolved) == {
+            "resolution": "command_recovery_terminal_no_fill",
+            "resolved_by": "src.execution.command_recovery",
         }
 
     def test_cancel_unknown_review_required_terminal_with_trade_match_stays_blocked(self, conn, mock_client):
