@@ -2014,12 +2014,11 @@ def _pending_entry_terminal_no_fill_cleared(conn, row) -> bool:
 
 
 def _has_same_token_blocking_open_db(conn, token_id: str) -> bool:
-    placeholders = ",".join("?" * len(_ENTRY_DEDUP_TERMINAL_PHASES))
     rows = conn.execute(
-        f"""SELECT position_id, phase, order_id, shares, cost_basis_usd
+        """SELECT position_id, phase, order_id, shares, cost_basis_usd
             FROM position_current
             WHERE (token_id = ? OR no_token_id = ?)
-            AND phase NOT IN ({placeholders})""",
+            AND phase NOT IN (?,?,?,?,?)""",
         (token_id, token_id, *_ENTRY_DEDUP_TERMINAL_PHASES),
     ).fetchall()
     for row in rows:

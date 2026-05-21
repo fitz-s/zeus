@@ -1697,6 +1697,52 @@ def test_stale_entry_order_cleanup_skips_when_fresh_book_no_longer_improves(monk
     assert state == "ACKED"
 
 
+def test_stale_entry_order_cleanup_skips_snapshot_older_than_command(monkeypatch, tmp_path):
+    conn = get_connection(tmp_path / "stale-entry-old-snapshot.db")
+    init_schema(conn)
+    _insert_executable_snapshot(
+        conn,
+        snapshot_id="snap-entry-old",
+        selected_outcome_token_id="tok-entry",
+        yes_token_id="tok-entry",
+        no_token_id="no-entry",
+        condition_id="m-entry",
+        top_bid="0.009",
+        top_ask="0.010",
+        min_tick_size="0.001",
+        captured_at=datetime(2026, 5, 21, 1, 59, 0, tzinfo=timezone.utc),
+    )
+    _seed_pending_entry_command(conn, order_price=0.008)
+    cancelled: list[str] = []
+
+    class DummyClob:
+        def get_orderbook_snapshot(self, token_id):
+            return {
+                "bids": [{"price": "0.009", "size": "100"}],
+                "asks": [{"price": "0.010", "size": "100"}],
+            }
+
+        def cancel_order(self, order_id):
+            cancelled.append(order_id)
+            return {"status": "CANCELLED", "id": order_id}
+
+    try:
+        cancelled_count = cycle_runtime.cleanup_stale_entry_orders(
+            DummyClob(),
+            deps=types.SimpleNamespace(logger=logging.getLogger("test_stale_entry_old_snapshot")),
+            conn=conn,
+        )
+        state = conn.execute(
+            "SELECT state FROM venue_commands WHERE command_id = 'cmd-entry'"
+        ).fetchone()["state"]
+    finally:
+        conn.close()
+
+    assert cancelled_count == 0
+    assert cancelled == []
+    assert state == "ACKED"
+
+
 def test_stale_entry_order_cleanup_skips_when_order_fact_has_matched_size(monkeypatch, tmp_path):
     conn = get_connection(tmp_path / "stale-entry-order-fact-matched.db")
     init_schema(conn)

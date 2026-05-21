@@ -1407,6 +1407,18 @@ def _decimal_or_none(value) -> Decimal | None:
         return None
 
 
+def _parse_utc_timestamp(value) -> datetime | None:
+    if value in (None, ""):
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
 def _entry_command_has_positive_trade_fact(conn, command_id: str) -> bool:
     row = conn.execute(
         """
@@ -1470,6 +1482,8 @@ def cleanup_stale_entry_orders(clob, *, deps, conn=None) -> int:
                    vc.price,
                    vc.venue_order_id,
                    vc.state,
+                   vc.created_at,
+                   vc.updated_at,
                    pc.phase,
                    pc.shares,
                    pc.cost_basis_usd
@@ -1494,9 +1508,11 @@ def cleanup_stale_entry_orders(clob, *, deps, conn=None) -> int:
         token_id = str(row["token_id"] if hasattr(row, "keys") else row[2])
         side = str(row["side"] if hasattr(row, "keys") else row[3]).upper()
         order_price = _decimal_or_none(row["price"] if hasattr(row, "keys") else row[4])
-        phase = str(row["phase"] if hasattr(row, "keys") else row[7] or "").lower()
-        shares = _decimal_or_none(row["shares"] if hasattr(row, "keys") else row[8]) or Decimal("0")
-        cost_basis = _decimal_or_none(row["cost_basis_usd"] if hasattr(row, "keys") else row[9]) or Decimal("0")
+        command_created_at = row["created_at"] if hasattr(row, "keys") else row[7]
+        command_updated_at = row["updated_at"] if hasattr(row, "keys") else row[8]
+        phase = str(row["phase"] if hasattr(row, "keys") else row[9] or "").lower()
+        shares = _decimal_or_none(row["shares"] if hasattr(row, "keys") else row[10]) or Decimal("0")
+        cost_basis = _decimal_or_none(row["cost_basis_usd"] if hasattr(row, "keys") else row[11]) or Decimal("0")
         if side != "BUY" or order_price is None:
             continue
         if phase != "pending_entry" or shares != Decimal("0") or cost_basis != Decimal("0"):
@@ -1516,6 +1532,17 @@ def cleanup_stale_entry_orders(clob, *, deps, conn=None) -> int:
             (token_id,),
         ).fetchone()
         if snapshot is None:
+            continue
+        snapshot_captured_at = _parse_utc_timestamp(
+            snapshot["captured_at"] if hasattr(snapshot, "keys") else snapshot[3]
+        )
+        command_observed_at = (
+            _parse_utc_timestamp(command_updated_at)
+            or _parse_utc_timestamp(command_created_at)
+        )
+        if snapshot_captured_at is None or command_observed_at is None:
+            continue
+        if snapshot_captured_at <= command_observed_at:
             continue
         best_bid = _decimal_or_none(snapshot["orderbook_top_bid"] if hasattr(snapshot, "keys") else snapshot[0])
         if best_bid is None or best_bid <= order_price:
