@@ -118,6 +118,7 @@ def _rebuild_stale_no_trade_events_table(conn: sqlite3.Connection) -> None:
     Fires when the existing table SQL is missing:
     - MUTUALLY_EXCLUSIVE_FAMILY_DEDUP (v16 expansion), OR
     - SHOULDER_STRESS_FAIL (v18 expansion — Phase 3 T2), OR
+    - CORR_HEDGE_REGIME_UNAVAILABLE (Phase 4 T4 expansion), OR
     - current schema_version CHECK range including v23, OR
     - schema_compatibility marker column.
 
@@ -131,6 +132,7 @@ def _rebuild_stale_no_trade_events_table(conn: sqlite3.Connection) -> None:
     current_version_check = "14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24"
     if (
         NoTradeReason.MUTUALLY_EXCLUSIVE_FAMILY_DEDUP.value in table_sql
+        and NoTradeReason.CORR_HEDGE_REGIME_UNAVAILABLE.value in table_sql
         and current_version_check in table_sql
         and "schema_compatibility" in table_sql
     ):

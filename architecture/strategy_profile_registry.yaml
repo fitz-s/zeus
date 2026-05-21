@@ -416,3 +416,56 @@ weather_event_arbitrage:
   min_shadow_decisions: 100
   min_settled_decisions: 0
   promotion_evidence_ref: docs/operations/task_2026-05-21_mainline_completion_authority/05_PHASE_4_FDR_FAMILY_CANDIDATES.md
+
+cross_market_correlation_hedge:
+  thesis: >
+    Shadow candidate: cross-market correlation hedge using regime-conditional
+    shrunk correlation matrices (Phase 5 Ledoit-Wolf shrinkage). Edge source:
+    cross-city same-weather-system correlation under WeatherRegimeTag. Requires
+    Phase 3 regime_tag_for + Phase 5 RegimeCorrelationStore. Shadow research only.
+  live_status: shadow
+  allowed_market_phases: [pre_settlement_day, settlement_day]
+  allowed_discovery_modes: [opening_hunt, update_reaction]
+  cycle_axis_dispatch_mode: null
+  allowed_directions: [buy_yes]
+  allowed_bin_topology: [finite_range]
+  metric_support:
+    high: shadow
+    low:  shadow
+  kelly_default_multiplier: 0.0
+  kelly_phase_overrides:
+    pre_trading: 0.0
+    pre_settlement_day: 0.0
+    settlement_day: 0.0
+    post_trading: 0.0
+    resolved: 0.0
+  min_shadow_decisions: 100
+  min_settled_decisions: 0
+  promotion_evidence_ref: docs/operations/task_2026-05-21_mainline_completion_authority/05_PHASE_4_FDR_FAMILY_CANDIDATES.md
+
+neg_risk_basket:
+  thesis: >
+    Shadow candidate: negRisk family completeness basket arbitrage. Edge source:
+    sum of YES ask prices across full negRisk token book vs theoretical 1.0 total.
+    When the full per-family token book is available and the sum of YES asks is
+    below the basket arb threshold, a shadow buy_yes entry is logged. Requires
+    negRisk metadata audit (future phase). Shadow research only.
+  live_status: shadow
+  allowed_market_phases: [pre_settlement_day, settlement_day]
+  allowed_discovery_modes: [opening_hunt, update_reaction]
+  cycle_axis_dispatch_mode: null
+  allowed_directions: [buy_yes]
+  allowed_bin_topology: [finite_range]
+  metric_support:
+    high: shadow
+    low:  shadow
+  kelly_default_multiplier: 0.0
+  kelly_phase_overrides:
+    pre_trading: 0.0
+    pre_settlement_day: 0.0
+    settlement_day: 0.0
+    post_trading: 0.0
+    resolved: 0.0
+  min_shadow_decisions: 100
+  min_settled_decisions: 0
+  promotion_evidence_ref: docs/operations/task_2026-05-21_mainline_completion_authority/05_PHASE_4_FDR_FAMILY_CANDIDATES.md

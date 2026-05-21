@@ -73,6 +73,9 @@ def test_all_registered_strategies():
         "resolution_window_maker",
         "liquidity_provision_with_heartbeat",
         "weather_event_arbitrage",
+        # Phase 4 shadow candidates (T4) — added 2026-05-21
+        "cross_market_correlation_hedge",
+        "neg_risk_basket",
     })
 
 
@@ -119,6 +122,9 @@ def test_live_safe_keys_match_pre_A4_LIVE_SAFE_STRATEGIES():
         "resolution_window_maker",
         "liquidity_provision_with_heartbeat",
         "weather_event_arbitrage",
+        # Phase 4 shadow candidates (T4) — added 2026-05-21
+        "cross_market_correlation_hedge",
+        "neg_risk_basket",
     })
 
 
