@@ -41,13 +41,6 @@ import sqlite3
 import pytest
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T4 production pending; settlement_commands.polymarket_end_anchor_source='unknown_legacy' "
-        "expected until market_end_anchor_source() wired at execution_intent.py:~673 (SCAFFOLD)"
-    ),
-)
 def test_inv_anchor_source_real_value() -> None:
     """INV-anchor-source-real-value: zero 'unknown_legacy' rows in
     settlement_commands for commands created after T4_MERGE_DATE.
@@ -55,12 +48,10 @@ def test_inv_anchor_source_real_value() -> None:
     Trade-DB read path only (settlement_commands on zeus_trades.db). No ATTACH.
     Skips when trade DB absent or when T4_MERGE_DATE is still the placeholder.
 
-    SCAFFOLD: fires xfail because the writer still falls back to 'unknown_legacy'
-    via `polymarket_end_anchor_source or "unknown_legacy"` in settlement_commands.py:482.
-
-    Production assertion (activated in T4 production pass when T4_MERGE_DATE
-    is set to the real merge ISO timestamp):
-      COUNT(*) of 'unknown_legacy' rows after T4_MERGE_DATE must be 0.
+    Production wire (PR #238 2026-05-21): anchor-source flows via
+    harvester.enqueue_redeem_command → world decision_events lookup → request_redeem.
+    Post-merge rows must carry 'gamma_explicit' or 'f1_12z_fallback' (not 'unknown_legacy').
+    T4_MERGE_DATE guard and DB-absent skip handle pre-live and CI environments.
     """
     from src.analysis.market_analysis_vnext import T4_MERGE_DATE
     from src.state.db import _zeus_trade_db_path

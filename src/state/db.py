@@ -2948,6 +2948,8 @@ _FORECAST_TABLES = (
     # T2 Day0Nowcast — SCHEMA_FORECASTS_VERSION 4 (2026-05-19)
     "day0_horizon_platt_fits",
     "day0_nowcast_runs",
+    # T4 MarketAnalysisVNext — SCHEMA_FORECASTS_VERSION 5 (2026-05-21)
+    "market_microstructure_snapshots",
 )
 
 
@@ -3048,7 +3050,7 @@ def _create_day0_horizon_platt_fits(conn: sqlite3.Connection) -> None:
             n_obs               INTEGER NOT NULL,
             sample_period_start TEXT,
             sample_period_end   TEXT,
-            schema_version      INTEGER NOT NULL CHECK (schema_version IN (3, 4)),
+            schema_version      INTEGER NOT NULL CHECK (schema_version IN (3, 4, 5)),
             source              TEXT NOT NULL CHECK (source IN ('live_fit', 'replay_fit'))
         )
     """)
@@ -3079,7 +3081,7 @@ def _create_day0_nowcast_runs(conn: sqlite3.Connection) -> None:
             hours_remaining     REAL NOT NULL,
             daypart             TEXT NOT NULL
                 CHECK (daypart IN ('pre_sunrise','morning','afternoon','post_peak')),
-            schema_version      INTEGER NOT NULL CHECK (schema_version IN (3, 4)),
+            schema_version      INTEGER NOT NULL CHECK (schema_version IN (3, 4, 5)),
             source              TEXT NOT NULL CHECK (source IN ('live_nowcast', 'replay')),
             PRIMARY KEY (market_slug, temperature_metric, target_date, observation_time, run_seq)
         )
@@ -3122,7 +3124,7 @@ def _create_market_microstructure_snapshots(conn: sqlite3.Connection) -> None:
     conn.execute("""
         CREATE TABLE IF NOT EXISTS market_microstructure_snapshots (
             id                              INTEGER PRIMARY KEY AUTOINCREMENT,
-            snapshot_id                     TEXT NOT NULL,
+            snapshot_id                     TEXT NOT NULL UNIQUE,
             event_slug                      TEXT NOT NULL,
             condition_id                    TEXT NOT NULL,
             captured_at_iso                 TEXT NOT NULL,
@@ -3132,6 +3134,8 @@ def _create_market_microstructure_snapshots(conn: sqlite3.Connection) -> None:
             polymarket_end_anchor_source    TEXT NOT NULL DEFAULT 'unknown_legacy',
             bin_grid_id                     TEXT,
             bin_schema_version              TEXT,
+            schema_version                  INTEGER NOT NULL DEFAULT 5
+                CHECK (schema_version IN (5)),
             recorded_at                     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
         )
     """)
@@ -3311,7 +3315,7 @@ def init_schema_forecasts(conn: sqlite3.Connection) -> None:
     ):
         try:
             conn.execute(_alter_sql)
-        except Exception as _exc:
+        except sqlite3.OperationalError as _exc:
             if "duplicate column" not in str(_exc).lower():
                 raise
 

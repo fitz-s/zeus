@@ -3,8 +3,9 @@
 **Authority**: PHASE_2_ULTRAPLAN.md v3.1 §7, sha `00c2399742`
 **Branch**: `feat/phase2-t4-market-analysis-vnext-20260520`
 **Base**: origin/main @ `9b63ec1cc8`
-**Status**: SCAFFOLD (production pass pending)
+**Status**: PRODUCTION — shipped in PR #238 (2026-05-21)
 **Created**: 2026-05-20
+**Production merge**: 2026-05-21
 
 ---
 

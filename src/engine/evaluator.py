@@ -392,7 +392,34 @@ def _read_v2_snapshot_metadata(
                 """,
                 (city_name, target_date, temperature_metric, snapshot_id),
             ).fetchone()
-        except sqlite3.OperationalError:
+        except sqlite3.OperationalError as _oe:
+            # Column bin_grid_id may not exist on older/test schemas (added via
+            # ALTER TABLE in SCHEMA_FORECASTS_VERSION 5). Fall back to query
+            # without bin_grid_id so boundary_ambiguous/causality_status still work.
+            if "bin_grid_id" in str(_oe).lower() or "no such column" in str(_oe).lower():
+                try:
+                    row = conn.execute(
+                        f"""
+                        SELECT boundary_ambiguous, causality_status, snapshot_id
+                        FROM {sp}ensemble_snapshots_v2
+                        WHERE city = ?
+                          AND target_date = ?
+                          AND temperature_metric = ?
+                          AND snapshot_id = ?
+                        LIMIT 1
+                        """,
+                        (city_name, target_date, temperature_metric, snapshot_id),
+                    ).fetchone()
+                    if row is None:
+                        return {}
+                    return {
+                        "boundary_ambiguous": bool(row["boundary_ambiguous"]),
+                        "causality_status": str(row["causality_status"]),
+                        "snapshot_id": row["snapshot_id"],
+                        "bin_grid_id": None,  # column absent in this schema version
+                    }
+                except sqlite3.OperationalError:
+                    continue
             continue
         except Exception:
             return {}
@@ -2859,22 +2886,37 @@ def evaluate_candidate(
 
     # T4 F4: deferred Day0 nowcast write — now that v2_snapshot_meta has bin_grid_id.
     # _nowcast_write_params is None unless Day0 high-mode path stashed params above.
+    # SEV-1: refuse write when bin_grid_id is None — writing NULL violates the
+    # JOIN-MATCH antibody (test_inv_bin_grid_propagation). Increment dedicated counter
+    # so the gap is observable in monitoring without silently corrupting the table.
     if _nowcast_write_params is not None:
-        try:
-            from src.state.day0_nowcast_store import write_nowcast_run
-            write_nowcast_run(
-                **_nowcast_write_params,
-                bin_grid_id=v2_snapshot_meta.get("bin_grid_id"),
-                conn=None,  # acquires own forecasts conn; world conn must not be passed
-            )
-        except Exception as _nowcast_write_exc:
+        _bin_grid_id_for_write = v2_snapshot_meta.get("bin_grid_id")
+        if _bin_grid_id_for_write is None:
             logger.warning(
-                "[DAY0_NOWCAST_WRITE_FAILED] slug=%s metric=%s exc=%s",
+                "[DAY0_NOWCAST_WRITE_SKIPPED_NO_BIN_GRID_ID] slug=%s metric=%s "
+                "snapshot_id=%s — bin_grid_id missing from v2_snapshot_meta; "
+                "refusing write to preserve JOIN-MATCH invariant",
                 _nowcast_write_params.get("market_slug"),
                 _nowcast_write_params.get("temperature_metric"),
-                _nowcast_write_exc,
+                snapshot_id,
             )
-            _cnt_inc("day0_nowcast_write_failed_total")
+            _cnt_inc("day0_nowcast_write_skipped_no_bin_grid_id_total")
+        else:
+            try:
+                from src.state.day0_nowcast_store import write_nowcast_run
+                write_nowcast_run(
+                    **_nowcast_write_params,
+                    bin_grid_id=_bin_grid_id_for_write,
+                    conn=None,  # acquires own forecasts conn; world conn must not be passed
+                )
+            except Exception as _nowcast_write_exc:
+                logger.warning(
+                    "[DAY0_NOWCAST_WRITE_FAILED] slug=%s metric=%s exc=%s",
+                    _nowcast_write_params.get("market_slug"),
+                    _nowcast_write_params.get("temperature_metric"),
+                    _nowcast_write_exc,
+                )
+                _cnt_inc("day0_nowcast_write_failed_total")
 
     if using_period_extrema:
         # Executable forecast-reader rows are forecast-authority inputs. The

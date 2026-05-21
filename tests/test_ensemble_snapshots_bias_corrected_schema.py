@@ -257,4 +257,5 @@ def test_read_v2_snapshot_metadata_prefers_attached_forecasts_schema():
         "boundary_ambiguous": True,
         "causality_status": "BOUNDARY_AMBIGUOUS",
         "snapshot_id": 888,
+        "bin_grid_id": None,  # column absent in this test fixture schema (pre-v5); fallback path
     }

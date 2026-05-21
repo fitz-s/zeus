@@ -39,6 +39,7 @@ from src.state.decision_chain import (
 from src.state.db import (
     get_forecasts_connection,
     get_trade_connection,
+    get_world_connection,
     log_market_event_outcomes_v2,
     log_settlement_event,
     log_settlement_v2,
@@ -588,26 +589,33 @@ def enqueue_redeem_command(
         resolved_market_id = market_id or condition_id
         assert_settlement_schema_ready(conn)
 
-        # T4: look up anchor source from decision_events (world ATTACH on conn).
+        # T4: look up anchor source from decision_events (world-class table).
+        # decision_events lives on zeus-world.db, NOT on trade_conn. Must open
+        # world connection directly — querying via trade_conn raises
+        # "no such table: decision_events" (swallowed by broad except, silently dead).
         # decision_events.condition_id is nullable; IS NOT NULL guard required.
         _anchor_source = ""
         if condition_id:
             try:
-                _anchor_row = conn.execute(
-                    """
-                    SELECT polymarket_end_anchor_source
-                    FROM decision_events
-                    WHERE condition_id = ?
-                      AND polymarket_end_anchor_source IS NOT NULL
-                    ORDER BY decision_time DESC
-                    LIMIT 1
-                    """,
-                    (condition_id,),
-                ).fetchone()
-                if _anchor_row is not None:
-                    _anchor_source = str(_anchor_row[0] or "")
-            except Exception:
-                pass  # table absent in test envs or partial schema; fall back to ""
+                _world_conn = get_world_connection(write_class=None)
+                try:
+                    _anchor_row = _world_conn.execute(
+                        """
+                        SELECT polymarket_end_anchor_source
+                        FROM decision_events
+                        WHERE condition_id = ?
+                          AND polymarket_end_anchor_source IS NOT NULL
+                        ORDER BY decision_time DESC
+                        LIMIT 1
+                        """,
+                        (condition_id,),
+                    ).fetchone()
+                    if _anchor_row is not None:
+                        _anchor_source = str(_anchor_row[0] or "")
+                finally:
+                    _world_conn.close()
+            except sqlite3.OperationalError:
+                pass  # world DB absent or decision_events missing in test envs; fall back to ""
 
         existing = conn.execute(
             """

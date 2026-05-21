@@ -2273,3 +2273,28 @@ CREATE INDEX idx_no_trade_events_market_time
 -- index: idx_no_trade_events_reason
 CREATE INDEX idx_no_trade_events_reason
     ON no_trade_events(reason);
+-- table: market_microstructure_snapshots
+CREATE TABLE market_microstructure_snapshots (
+            id                              INTEGER PRIMARY KEY AUTOINCREMENT,
+            snapshot_id                     TEXT NOT NULL UNIQUE,
+            event_slug                      TEXT NOT NULL,
+            condition_id                    TEXT NOT NULL,
+            captured_at_iso                 TEXT NOT NULL,
+            wide_spread_display_substitution INTEGER NOT NULL CHECK (wide_spread_display_substitution IN (0, 1)),
+            spread_observed_window_ms       INTEGER,
+            depth_at_best_ask               INTEGER NOT NULL DEFAULT 0,
+            polymarket_end_anchor_source    TEXT NOT NULL DEFAULT 'unknown_legacy',
+            bin_grid_id                     TEXT,
+            bin_schema_version              TEXT,
+            schema_version                  INTEGER NOT NULL DEFAULT 5
+                CHECK (schema_version IN (5)),
+            recorded_at                     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        );
+-- index: idx_mms_snapshot_id
+CREATE INDEX idx_mms_snapshot_id
+            ON market_microstructure_snapshots(snapshot_id)
+    ;
+-- index: idx_mms_event_slug_captured
+CREATE INDEX idx_mms_event_slug_captured
+            ON market_microstructure_snapshots(event_slug, captured_at_iso)
+    ;
