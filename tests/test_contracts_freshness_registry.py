@@ -1,5 +1,6 @@
-# Created: 2026-05-21
-# Last reused or audited: 2026-05-21
+# Lifecycle: created=2026-05-21; last_reviewed=2026-05-21; last_reused=never
+# Purpose: Production tests for FreshnessRegistry.evaluate() — tier boundaries, DYNAMIC, counters
+# Reuse: Run after any changes to freshness_registry.py; all tests must pass GREEN
 # Authority basis: PHASE_2_ULTRAPLAN.md v3.1 §6.2 (T3 FreshnessRegistry — production tests)
 """Production tests for FreshnessRegistry.evaluate().
 
@@ -67,6 +68,14 @@ class TestEvaluateBoundaries:
         # At exact stale boundary: returns DEGRADED, so >= STALE is False
         assert result == FreshnessLevel.DEGRADED
         assert not (result >= FreshnessLevel.STALE)
+
+    def test_enum_severity_ordering(self) -> None:
+        """EXPIRED > STALE > DEGRADED > FRESH in numeric rank (IntEnum, NOT lexicographic)."""
+        assert FreshnessLevel.EXPIRED > FreshnessLevel.STALE
+        assert FreshnessLevel.STALE > FreshnessLevel.DEGRADED
+        assert FreshnessLevel.DEGRADED > FreshnessLevel.FRESH
+        # Critical: EXPIRED >= STALE must be True for fail-closed gates to work
+        assert FreshnessLevel.EXPIRED >= FreshnessLevel.STALE
 
 
 # ---------------------------------------------------------------------------
@@ -159,6 +168,7 @@ class TestCounterEmission:
         reg = FreshnessRegistry()
         reg.evaluate("riskguard_last_check", 0.0)
         assert len(emitted) == 1
+        # Counter uses .name.lower() so it stays "fresh" regardless of enum backing type.
         assert emitted[0] == "freshness_riskguard_last_check_fresh_total"
 
     def test_emit_counter_stale_level(self, monkeypatch: pytest.MonkeyPatch) -> None:

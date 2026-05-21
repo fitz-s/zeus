@@ -2165,15 +2165,16 @@ files:
       Centralized per-source freshness gate replacing 10 ad-hoc age_seconds/age_hours
       threshold checks scattered across collateral_ledger, evaluator, oracle_estimator,
       riskguard, heartbeat_supervisor, db, venue_command_repo, polymarket_v2_adapter.
-      FreshnessLevel enum (FRESH/DEGRADED/STALE/EXPIRED) + SOURCE_THRESHOLDS table +
-      evaluate(source_id, age_seconds) -> FreshnessLevel.
-      Phase 2 T3. Code-only — NO DB table, NO SCHEMA_VERSION bump.
-      SCAFFOLD pass: skeleton + xfail antibody. Production pass fills evaluate() body
-      + migrates 10 callsites per T3_FRESHNESS_REGISTRY_SCAFFOLD.md §3.
+      FreshnessLevel(IntEnum) with explicit integer ranks (FRESH=0, DEGRADED=1, STALE=2,
+      EXPIRED=3) ensures >= comparisons use severity order, not lexicographic string order.
+      evaluate(source_id, age_seconds) -> FreshnessLevel. Module-level `registry` singleton.
+      Phase 2 T3 production pass complete — 10 callsites migrated, antibody GREEN.
+      Code-only — NO DB table, NO SCHEMA_VERSION bump.
     hazards:
-    - SCAFFOLD_BODY_NOT_IMPLEMENTED  # evaluate() raises NotImplementedError until production pass
+    - FRESHNESS_ENUM_MUST_BE_INTENUM  # StrEnum breaks >= semantics; do not change to StrEnum
     downstream:
     - tests/test_inv_freshness_no_ad_hoc_checks.py
+    - tests/test_contracts_freshness_registry.py
     track: T3
     phase: Phase2
 

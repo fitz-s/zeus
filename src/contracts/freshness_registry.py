@@ -11,11 +11,7 @@ constants.  This scatters freshness policy and makes system-wide freshness tunin
 impossible without grep-and-patch.
 
 Solution: one registry, one `evaluate(source_id, age_seconds) -> FreshnessLevel`
-call per gate.  Production pass replaces all 10 ad-hoc callsites.
-
-NOTE (SCAFFOLD): `evaluate()` body is NotImplementedError.  The threshold table
-and enum are concrete — they carry the existing callsite literals so the production
-pass can migrate them one-for-one.
+call per gate.  Production pass (T3) replaces all 10 ad-hoc callsites.
 
 Per-source threshold table keys (source_id strings):
   collateral_snapshot          — collateral_ledger.py gate
@@ -35,7 +31,7 @@ Sources whose threshold is dynamic (heartbeat_status, executable_snapshot) carry
 
 from __future__ import annotations
 
-from enum import StrEnum, auto
+from enum import IntEnum
 from typing import Optional
 
 from src.observability.counters import increment as _cnt_inc
@@ -45,12 +41,20 @@ from src.observability.counters import increment as _cnt_inc
 # FreshnessLevel enum
 # ---------------------------------------------------------------------------
 
-class FreshnessLevel(StrEnum):
-    """Ordered freshness verdict returned by FreshnessRegistry.evaluate()."""
-    FRESH = auto()      # age < DEGRADED threshold
-    DEGRADED = auto()   # age in [DEGRADED, STALE) — proceed with warning
-    STALE = auto()      # age in [STALE, EXPIRED) — degraded-mode allowed
-    EXPIRED = auto()    # age >= EXPIRED threshold — reject / fail-closed
+class FreshnessLevel(IntEnum):
+    """Ordered freshness verdict returned by FreshnessRegistry.evaluate().
+
+    Integer ranks ensure severity ordering is correct for ``>=`` comparisons:
+      FRESH(0) < DEGRADED(1) < STALE(2) < EXPIRED(3)
+
+    Call sites use ``level >= FreshnessLevel.STALE`` to gate degraded/expired data.
+    DO NOT use StrEnum here — lexicographic ordering ("expired" < "stale") inverts
+    the expected severity rank.
+    """
+    FRESH = 0      # age < DEGRADED threshold
+    DEGRADED = 1   # age in [DEGRADED, STALE) — proceed with warning
+    STALE = 2      # age in [STALE, EXPIRED) — degraded-mode allowed
+    EXPIRED = 3    # age >= EXPIRED threshold — reject / fail-closed
 
 
 # ---------------------------------------------------------------------------
@@ -217,7 +221,7 @@ class FreshnessRegistry:
 
     def _emit_counter(self, source_id: str, level: FreshnessLevel) -> None:
         """Emit observability counter ``freshness_<source>_<level>_total``."""
-        _cnt_inc(f"freshness_{source_id}_{level.value.lower()}_total")
+        _cnt_inc(f"freshness_{source_id}_{level.name.lower()}_total")
 
 
 # ---------------------------------------------------------------------------

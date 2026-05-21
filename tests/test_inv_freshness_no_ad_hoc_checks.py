@@ -1,5 +1,6 @@
-# Created: 2026-05-20
-# Last reused or audited: 2026-05-20
+# Lifecycle: created=2026-05-20; last_reviewed=2026-05-21; last_reused=never
+# Purpose: Antibody — assert zero ad-hoc age_seconds/age_hours/artifact_age_hours gates in src/
+# Reuse: Run after any src/ edits that add freshness comparisons; GREEN = 0 offenders
 # Authority basis: PHASE_2_ULTRAPLAN.md v3.1 §6.3 INV-freshness-no-ad-hoc-checks
 """INV-freshness-no-ad-hoc-checks — T3 production antibody.
 
@@ -51,17 +52,13 @@ _SRC_ROOT = Path(__file__).parent.parent / "src"
 
 # Names that indicate a SIGN check (criterion a): the comparison direction
 # means "negative age / not-yet-captured" rather than "too old".
-_SIGN_CHECK_TOKENS = frozenset({"< 0", ">= 0", "< -", "<= 0", "> -"})
-
-# Threshold name tokens that indicate a staleness-max-age gate (NOT allowlisted).
-# Any threshold that includes these tokens IS a freshness gate.
-_GATE_TOKENS_RE = re.compile(
-    r"(?i)(MAX_AGE|STALE|FRESH|AGE_HOURS|AGE_SECONDS|_MAX_|_LIMIT_)",
-    re.IGNORECASE,
-)
+# NOTE: "> 0" is included because `age_seconds > 0` is a sign-only check
+# (it checks that the age is positive, not that it exceeds a max-age threshold).
+_SIGN_CHECK_TOKENS = frozenset({"< 0", ">= 0", "< -", "<= 0", "> -", "> 0", "> 0.0"})
 
 # Threshold names that are explicitly NOT max-age staleness gates (criterion b).
 # These are cadence / rate-limit / clock-drift bounds — not "is the data too old?".
+# Add entries here as discovered; document rationale next to each entry.
 _NON_GATE_THRESHOLD_NAMES = frozenset({
     "COLLATERAL_HEARTBEAT_REFRESH_SECONDS",
     # Add more here as discovered; document rationale next to each entry.
@@ -191,10 +188,10 @@ def test_no_ad_hoc_age_seconds_hours_gates() -> None:
     offenders = find_all_freshness_offenders()
 
     if offenders:
-        lines = [
-            f"  {o.path}:{o.lineno}  {o.text.strip()!r}",
-            f"    -> {o.reason}",
-        ]
+        lines = []
+        for o in offenders:
+            lines.append(f"  {o.path}:{o.lineno}  {o.text.strip()!r}")
+            lines.append(f"    -> {o.reason}")
         detail = "\n".join(lines)
         pytest.fail(
             f"Found {len(offenders)} ad-hoc freshness gate(s) not routed through "

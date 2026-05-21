@@ -49,12 +49,13 @@ venue_command_repo:1308/1525 (two sites, not one). Total confirmed freshness gat
 
 | Artifact | Path | Type |
 |---|---|---|
-| Registry + Enum (SCAFFOLD skeleton) | `src/contracts/freshness_registry.py` (new) | `FreshnessRegistry` class + `FreshnessLevel(StrEnum)` + SOURCE_THRESHOLDS table + `evaluate(source_id, age_seconds) -> FreshnessLevel` |
-| Antibody | `tests/test_inv_freshness_no_ad_hoc_checks.py` (new) | AST-walk + xfail RED until production migration |
+| Registry + Enum (PRODUCTION) | `src/contracts/freshness_registry.py` | `FreshnessRegistry` class + `FreshnessLevel(IntEnum)` + SOURCE_THRESHOLDS table + `evaluate(source_id, age_seconds) -> FreshnessLevel` |
+| Antibody (GREEN) | `tests/test_inv_freshness_no_ad_hoc_checks.py` | Regex scan, xfail removed, 0 offenders — permanent GREEN antibody |
+| Production tests | `tests/test_contracts_freshness_registry.py` | 23 tests: tier boundaries, DYNAMIC ValueError, counter emission |
 | Schema bump | **NONE** — code-only, no DB surface | N/A |
-| Manifest | `architecture/source_rationale.yaml` stub | T3 entry (code-only, no db_table_ownership entry) |
+| Manifest | `architecture/source_rationale.yaml` | T3 entry (production, no db_table_ownership) |
 
-**No callsite migrations in SCAFFOLD pass** — §6 defers all 10 migrations to production pass.
+**All 10 callsite migrations complete** — see §3 for replacement patterns.
 
 ---
 
