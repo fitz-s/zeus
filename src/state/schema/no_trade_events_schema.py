@@ -56,7 +56,7 @@ CREATE TABLE IF NOT EXISTS no_trade_events (
     reason              TEXT NOT NULL CHECK (reason IN ({_REASON_VALUES_SQL})),
     reason_detail       TEXT,
     observed_at         TEXT NOT NULL,
-    schema_version      INTEGER NOT NULL CHECK (schema_version IN (14, 15, 16, 17, 18, 19, 20, 21, 22, 23)),
+    schema_version      INTEGER NOT NULL CHECK (schema_version IN (14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24)),
     schema_compatibility TEXT NOT NULL DEFAULT 'current'
         CHECK (schema_compatibility IN ('current', 'degraded')),
     PRIMARY KEY (market_slug, temperature_metric, target_date, observation_time, decision_seq)
@@ -73,7 +73,7 @@ CREATE TABLE no_trade_events_new (
     reason              TEXT NOT NULL CHECK (reason IN ({_REASON_VALUES_SQL})),
     reason_detail       TEXT,
     observed_at         TEXT NOT NULL,
-    schema_version      INTEGER NOT NULL CHECK (schema_version IN (14, 15, 16, 17, 18, 19, 20, 21, 22, 23)),
+    schema_version      INTEGER NOT NULL CHECK (schema_version IN (14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24)),
     schema_compatibility TEXT NOT NULL DEFAULT 'current'
         CHECK (schema_compatibility IN ('current', 'degraded')),
     PRIMARY KEY (market_slug, temperature_metric, target_date, observation_time, decision_seq)
@@ -128,7 +128,7 @@ def _rebuild_stale_no_trade_events_table(conn: sqlite3.Connection) -> None:
         "SELECT sql FROM sqlite_master WHERE type='table' AND name='no_trade_events'"
     ).fetchone()
     table_sql = str(row[0] if row else "")
-    current_version_check = "14, 15, 16, 17, 18, 19, 20, 21, 22, 23"
+    current_version_check = "14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24"
     if (
         NoTradeReason.MUTUALLY_EXCLUSIVE_FAMILY_DEDUP.value in table_sql
         and current_version_check in table_sql
@@ -161,8 +161,8 @@ def _rebuild_stale_no_trade_events_table(conn: sqlite3.Connection) -> None:
             reason_detail,
             observed_at,
             CASE
-                WHEN schema_version IN (14, 15, 16, 17, 18, 19, 20, 21, 22, 23) THEN schema_version
-                ELSE 23
+                WHEN schema_version IN (14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24) THEN schema_version
+                ELSE 24
             END,
             schema_compatibility
         FROM no_trade_events

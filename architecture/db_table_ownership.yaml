@@ -1081,6 +1081,22 @@ tables:
       assert_db_matches_registry(conn, DBIdentity.WORLD) daemon boot on
       SCHEMA_VERSION 23.
 
+  - name: regime_correlation_cache
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: "db.py:init_schema (daemon boot, SCHEMA_VERSION 24)"
+    pk_col: regime
+    notes: >
+      Phase 5 T2 (2026-05-21): per-regime Ledoit-Wolf shrunk correlation matrix cache.
+      Columns: regime (TEXT PK), cities_json, matrix_json, fitted_at, n_observations,
+      intensity, schema_version CHECK (24).
+      DDL owner: src/state/schema/regime_correlation_cache_schema.py.
+      Writer/reader: src/strategy/regime_correlation_store.py (RegimeCorrelationStore),
+      with caller-supplied world DB connection per INV-37.
+      fit(UNKNOWN) raises ValueError (Phase 3 R-1 antibody).
+      SCHEMA_VERSION 23→24.
+
   - name: db_chunk_boundary_events
     db: world
     schema_class: world_class
