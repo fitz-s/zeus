@@ -1090,17 +1090,17 @@ def _source_quality_context(ens_result: dict | None) -> SimpleNamespace:
         result.get("source_run_status")
         or get_attr(evidence, "source_run_status", "")
         or ""
-    )
+    ).upper()
     source_run_completeness = str(
         result.get("source_run_completeness_status")
         or get_attr(evidence, "source_run_completeness_status", "")
         or ""
-    )
+    ).upper()
     coverage_completeness = str(
         result.get("coverage_completeness_status")
         or get_attr(evidence, "coverage_completeness_status", "")
         or ""
-    )
+    ).upper()
     try:
         expected_members = int(result.get("expected_members") or get_attr(evidence, "expected_members", 0) or 0)
     except (TypeError, ValueError):
@@ -1109,10 +1109,13 @@ def _source_quality_context(ens_result: dict | None) -> SimpleNamespace:
         observed_members = int(result.get("observed_members") or get_attr(evidence, "observed_members", 0) or 0)
     except (TypeError, ValueError):
         observed_members = 0
-    partial = (
+    members_complete = expected_members > 0 and observed_members >= expected_members
+    per_scope_complete = coverage_completeness in {"COMPLETE", "FULL", "OK"} and members_complete
+    partial = not per_scope_complete and (
         source_run_status == "PARTIAL"
         or source_run_completeness == "PARTIAL"
         or coverage_completeness == "PARTIAL"
+        or (expected_members > 0 and observed_members < expected_members)
     )
     return SimpleNamespace(
         partial=partial,

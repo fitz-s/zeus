@@ -156,7 +156,7 @@ def _append_risk_state(path, *, checked_at=None, level="GREEN", details=None):
     conn.close()
 
 
-def _status_payload(*, timestamp=None, risk=None, portfolio=None, cycle=None, execution=None, strategy=None, learning=None, control=None, runtime=None, execution_capability=None):
+def _status_payload(*, timestamp=None, risk=None, portfolio=None, cycle=None, execution=None, strategy=None, learning=None, control=None, runtime=None, execution_capability=None, process=None):
     payload = {
         "timestamp": timestamp or datetime.now(timezone.utc).isoformat(),
         "risk": risk or {"level": "GREEN", "details": {
@@ -181,6 +181,7 @@ def _status_payload(*, timestamp=None, risk=None, portfolio=None, cycle=None, ex
             "recommended_commands": [],
         },
         "runtime": runtime or {"unverified_entries": 0, "day0_positions": 0},
+        "process": process or {},
         "truth": {"source_path": "status.json", "deprecated": False},
     }
     if execution_capability is not None:
@@ -332,6 +333,7 @@ def _launchctl_print_output(
     pid=1234,
     working_directory=None,
     pythonpath=None,
+    last_exit_code="",
 ):
     properties = []
     if keep_alive:
@@ -361,6 +363,7 @@ def _launchctl_print_output(
 
 \tminimum runtime = {minimum_runtime}
 \tpid = {pid}
+\tlast exit code = {last_exit_code}
 \tproperties = {" | ".join(properties)}
 }}
 """
@@ -406,6 +409,68 @@ def test_launchd_contracts_require_restart_policy_and_repo_identity(monkeypatch,
         "com.zeus.riskguard-live",
         "com.zeus.forecast-live",
     }
+
+
+def test_launchd_contracts_treat_running_forecast_prior_exit_as_historical(monkeypatch, tmp_path):
+    root = tmp_path / "zeus"
+    launchagents = tmp_path / "LaunchAgents"
+    monkeypatch.setenv("ZEUS_MODE", "live")
+    specs = {}
+    for label, module in (
+        ("com.zeus.live-trading", "src.main"),
+        ("com.zeus.data-ingest", "src.ingest_main"),
+        ("com.zeus.riskguard-live", "src.riskguard.riskguard"),
+        ("com.zeus.forecast-live", "src.ingest.forecast_live_daemon"),
+    ):
+        plist_path = _write_launchd_plist(launchagents, label=label, module=module, root=root)
+        specs[label] = _launchctl_print_output(
+            label=label,
+            module=module,
+            root=root,
+            plist_path=plist_path,
+            last_exit_code="1" if label == "com.zeus.forecast-live" else "",
+        )
+    _mock_launchctl_loaded_contracts(monkeypatch, specs)
+
+    result = _ORIGINAL_LAUNCHD_CONTRACTS(launchagents, root=root)
+
+    assert result["ok"] is True
+    forecast_item = next(item for item in result["items"] if item["label"] == "com.zeus.forecast-live")
+    assert forecast_item["loaded"]["last_exit_code"] == "1"
+    assert "loaded_prior_exit_code_1" not in forecast_item["issues"]
+    assert "loaded_prior_exit_code_1" not in forecast_item["loaded"]["issues"]
+    assert forecast_item["loaded"]["historical_issues"] == ["loaded_prior_exit_code_1"]
+
+
+def test_launchd_contracts_reject_prior_exit_when_job_not_running(monkeypatch, tmp_path):
+    root = tmp_path / "zeus"
+    launchagents = tmp_path / "LaunchAgents"
+    monkeypatch.setenv("ZEUS_MODE", "live")
+    specs = {}
+    for label, module in (
+        ("com.zeus.live-trading", "src.main"),
+        ("com.zeus.data-ingest", "src.ingest_main"),
+        ("com.zeus.riskguard-live", "src.riskguard.riskguard"),
+        ("com.zeus.forecast-live", "src.ingest.forecast_live_daemon"),
+    ):
+        plist_path = _write_launchd_plist(launchagents, label=label, module=module, root=root)
+        specs[label] = _launchctl_print_output(
+            label=label,
+            module=module,
+            root=root,
+            plist_path=plist_path,
+            state="exited" if label == "com.zeus.forecast-live" else "running",
+            pid=0 if label == "com.zeus.forecast-live" else 1234,
+            last_exit_code="1" if label == "com.zeus.forecast-live" else "",
+        )
+    _mock_launchctl_loaded_contracts(monkeypatch, specs)
+
+    result = _ORIGINAL_LAUNCHD_CONTRACTS(launchagents, root=root)
+
+    assert result["ok"] is False
+    forecast_item = next(item for item in result["items"] if item["label"] == "com.zeus.forecast-live")
+    assert "loaded_job_not_running" in forecast_item["issues"]
+    assert "loaded_prior_exit_code_1" in forecast_item["issues"]
 
 
 def test_launchd_contracts_reject_non_restartable_live_trading(monkeypatch, tmp_path):
@@ -714,9 +779,21 @@ def test_process_loaded_code_status_rejects_pid_started_before_source_mtime(monk
 def test_live_process_loaded_code_surface_includes_recovery_and_m5_paths():
     live_paths = set(healthcheck.PROCESS_CODE_SURFACES["live_trading"])
 
+    assert "src/engine/evaluator.py" in live_paths
+    assert "src/contracts/executable_market_snapshot_v2.py" in live_paths
+    assert "src/contracts/execution_intent.py" in live_paths
+    assert "src/data/market_scanner.py" in live_paths
+    assert "src/data/polymarket_client.py" in live_paths
     assert "src/control/ws_gap_guard.py" in live_paths
     assert "src/execution/command_recovery.py" in live_paths
     assert "src/execution/exchange_reconcile.py" in live_paths
+    assert "src/strategy/selection_family.py" in live_paths
+    assert "src/strategy/family_exclusive_dedup.py" in live_paths
+    assert "src/strategy/candidates/__init__.py" in live_paths
+    assert "src/strategy/candidates/liquidity_provision_with_heartbeat.py" in live_paths
+    assert "src/strategy/candidates/resolution_window_maker.py" in live_paths
+    assert "src/strategy/candidates/stale_quote_detector.py" in live_paths
+    assert "src/strategy/candidates/weather_event_arbitrage.py" in live_paths
 
 
 def test_settlement_truth_status_rejects_stale_settled_at(tmp_path):
@@ -1464,6 +1541,61 @@ def test_healthcheck_is_not_healthy_when_process_loaded_code_is_stale(monkeypatc
     assert result["process_code_issue"] == "PROCESS_LOADED_CODE_STALE"
     assert result["healthy"] is False
     assert healthcheck.exit_code_for(result) == 1
+
+
+def test_healthcheck_is_not_healthy_when_status_summary_process_pid_is_stale(monkeypatch, tmp_path):
+    """Relationship: fresh status JSON is not current truth if another pid wrote it."""
+    status_path = tmp_path / "status_summary.json"
+    risk_path = tmp_path / "risk_state.db"
+    zeus_db_path = tmp_path / "zeus.db"
+    status_path.write_text(json.dumps(_status_payload(process={"pid": 11111})))
+    _write_risk_state(risk_path)
+    _write_no_trade_artifact(zeus_db_path)
+
+    monkeypatch.setenv("ZEUS_MODE", "live")
+    monkeypatch.setattr(healthcheck, "_status_path", lambda: status_path)
+    monkeypatch.setattr(healthcheck, "_risk_state_path", lambda: risk_path)
+    monkeypatch.setattr(healthcheck, "_zeus_db_path", lambda: zeus_db_path)
+
+    class _Result:
+        returncode = 0
+        stdout = "123\t0\tcom.zeus.live-trading\n"
+
+    monkeypatch.setattr(healthcheck.subprocess, "run", lambda *args, **kwargs: _Result())
+
+    result = healthcheck.check()
+
+    assert result["pid"] == 123
+    assert result["status_process_pid"] == 11111
+    assert result["status_process_contract_ok"] is False
+    assert result["status_process_contract_issue"] == "STATUS_SUMMARY_PROCESS_PID_MISMATCH"
+    assert result["healthy"] is False
+    assert healthcheck.exit_code_for(result) == 1
+
+
+def test_healthcheck_accepts_status_summary_process_pid_matching_launchd(monkeypatch, tmp_path):
+    status_path = tmp_path / "status_summary.json"
+    risk_path = tmp_path / "risk_state.db"
+    zeus_db_path = tmp_path / "zeus.db"
+    status_path.write_text(json.dumps(_status_payload(process={"pid": 123})))
+    _write_risk_state(risk_path)
+    _write_no_trade_artifact(zeus_db_path)
+
+    monkeypatch.setenv("ZEUS_MODE", "live")
+    monkeypatch.setattr(healthcheck, "_status_path", lambda: status_path)
+    monkeypatch.setattr(healthcheck, "_risk_state_path", lambda: risk_path)
+    monkeypatch.setattr(healthcheck, "_zeus_db_path", lambda: zeus_db_path)
+
+    class _Result:
+        returncode = 0
+        stdout = "123\t0\tcom.zeus.live-trading\n"
+
+    monkeypatch.setattr(healthcheck.subprocess, "run", lambda *args, **kwargs: _Result())
+
+    result = healthcheck.check()
+
+    assert result["status_process_contract_ok"] is True
+    assert result["healthy"] is True
 
 
 def test_healthcheck_is_not_healthy_when_settlement_truth_is_stale(monkeypatch, tmp_path):

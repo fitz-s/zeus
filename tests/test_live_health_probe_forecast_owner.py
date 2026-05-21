@@ -43,6 +43,10 @@ def test_live_probe_loaded_code_surface_includes_recovery_and_m5_paths():
     module = _load_module()
     daemon_paths = set(module.PROCESS_CODE_SURFACES["daemon"])
 
+    assert "src/engine/evaluator.py" in daemon_paths
+    assert "src/contracts/executable_market_snapshot_v2.py" in daemon_paths
+    assert "src/contracts/execution_intent.py" in daemon_paths
+    assert "src/data/market_scanner.py" in daemon_paths
     assert "src/control/ws_gap_guard.py" in daemon_paths
     assert "src/execution/command_recovery.py" in daemon_paths
     assert "src/execution/exchange_reconcile.py" in daemon_paths
@@ -203,6 +207,55 @@ def test_live_probe_alerts_on_degraded_business_plane_composite(
     out = capsys.readouterr().out
     assert out.startswith("ALERT")
     assert "LIVE_HEALTH_BUSINESS_PLANE=CYCLE_IN_PROGRESS_NO_COMPLETED_AT" in out
+    assert "flags=all_healthy" not in out
+
+
+def test_live_probe_alerts_when_status_summary_process_pid_is_stale(
+    tmp_path, monkeypatch, capsys
+):
+    module = _load_module()
+    root = tmp_path / "zeus"
+    _healthy_state(root)
+    _write_json(
+        root / "state" / "status_summary.json",
+        {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "process": {"pid": 999, "mode": "live"},
+            "cycle": {
+                "mode": "opening_hunt",
+                "risk_level": "GREEN",
+                "ws_user_channel": {"connected": True, "subscription_state": "SUBSCRIBED"},
+                "block_registry": [],
+            },
+            "risk": {"level": "GREEN"},
+            "lifecycle_funnel": {"counts": {"evaluated": 1, "selected": 0, "filled": 0}},
+            "execution_capability": {
+                "entry": {
+                    "status": "requires_intent",
+                    "global_allow_submit": True,
+                    "live_action_authorized": False,
+                }
+            },
+        },
+    )
+    _configure(
+        module,
+        monkeypatch,
+        root,
+        tmp_path / "snapshot.json",
+        {
+            "src.main": [101],
+            "src.ingest.forecast_live_daemon": [202],
+            "src.ingest_main": [404],
+            "src.riskguard": [303],
+        },
+    )
+
+    module.main()
+
+    out = capsys.readouterr().out
+    assert out.startswith("ALERT")
+    assert "STATUS_SUMMARY_PROCESS_PID_MISMATCH" in out
     assert "flags=all_healthy" not in out
 
 
