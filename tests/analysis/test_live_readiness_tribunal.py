@@ -201,7 +201,7 @@ def test_t4_live_normal_not_auto_demoted() -> None:
 
 
 def test_t4_live_normal_demoted_with_operator_override(world_conn) -> None:
-    """LIVE_NORMAL IS demoted when allow_live_normal_demote=True."""
+    """LIVE_NORMAL IS demoted when allow_live_normal_demote=True + operator_ref supplied."""
     report = _make_report(
         tier_observed=EvidenceTier.LIVE_NORMAL,
         n_settled=50,
@@ -213,6 +213,7 @@ def test_t4_live_normal_demoted_with_operator_override(world_conn) -> None:
     verdict = adjudicate(
         report, EvidenceTier.LIVE_NORMAL,
         conn=world_conn, allow_live_normal_demote=True,
+        operator_ref="op_demote_live_normal",
     )
     assert verdict.verdict == VerdictKind.DEMOTE
     assert verdict.tier_target == EvidenceTier.LIVE_LIMITED_HAIRCUT  # 7 → 6
@@ -249,3 +250,164 @@ def test_t4_demote_requires_conn() -> None:
     )
     with pytest.raises(RuntimeError, match="conn is required"):
         adjudicate(report, EvidenceTier.LIVE_LIMITED_HAIRCUT, conn=None)
+
+
+# ---------------------------------------------------------------------------
+# T4-8: operator-gate guard — live-tier PROMOTE requires operator_ref (SEV2-2)
+# ---------------------------------------------------------------------------
+
+def test_t4_promote_to_live_tier_requires_operator_ref(world_conn) -> None:
+    """PROMOTE targeting tier >= LIVE_PILOT_TINY without operator_ref raises ValueError.
+
+    SEV2-2: prevents a future auto-apply reader from silently promoting a strategy
+    into live execution without an explicit operator trace.
+    """
+    report = _make_report(
+        strategy_id="shoulder_sell",
+        tier_observed=EvidenceTier.PAPER_COHORT,   # tier 4 < required 5
+        n_settled=100,
+        n_wins=70,
+        ci_lower=0.65,
+        ci_upper=0.80,
+        breakeven_win_rate=0.55,
+    )
+    # tier_target would be LIVE_PILOT_TINY (tier 5) — requires operator_ref
+    with pytest.raises(ValueError, match="operator_ref"):
+        adjudicate(
+            report, EvidenceTier.LIVE_PILOT_TINY,
+            conn=world_conn,
+            operator_ref=None,  # explicitly absent
+        )
+
+
+def test_t4_promote_to_live_tier_with_operator_ref_succeeds(world_conn) -> None:
+    """PROMOTE targeting tier >= LIVE_PILOT_TINY succeeds when operator_ref is supplied."""
+    report = _make_report(
+        strategy_id="shoulder_sell",
+        tier_observed=EvidenceTier.PAPER_COHORT,
+        n_settled=100,
+        n_wins=70,
+        ci_lower=0.65,
+        ci_upper=0.80,
+        breakeven_win_rate=0.55,
+    )
+    verdict = adjudicate(
+        report, EvidenceTier.LIVE_PILOT_TINY,
+        conn=world_conn,
+        operator_ref="op_approve_phase6_test",
+    )
+    assert verdict.verdict == VerdictKind.PROMOTE
+    assert verdict.tier_target == EvidenceTier.LIVE_PILOT_TINY
+
+
+# ---------------------------------------------------------------------------
+# T4-9: regression — winning cohort → ci_lower > breakeven (PROMOTE-eligible)
+#                  — losing cohort → DEMOTE  (SEV2-1 regression guard)
+# ---------------------------------------------------------------------------
+
+def test_t4_winning_cohort_is_promote_eligible(world_conn) -> None:
+    """Winning cohort: Beta(2,2) CI lower > breakeven → adjudicate proposes PROMOTE.
+
+    Regression guard for SEV2-1: verifies that positive total_regret_usd (realized > counterfactual)
+    correctly maps to n_wins, and the Beta(2,2) CI lower exceeds breakeven for a strong winner.
+    """
+    from src.analysis.evidence_report import build_evidence_report
+    from src.state.shadow_experiment_registry import register_shadow_experiment
+    from src.analysis.regret_decomposer import decompose_regret, write_regret_decomposition
+    from datetime import datetime, timezone
+
+    started_at = datetime(2026, 5, 1, tzinfo=timezone.utc)
+    exp_id = register_shadow_experiment(
+        "shoulder_sell", {"kelly": 0.5}, "winning_cohort",
+        started_at=started_at, conn=world_conn,
+    )
+    # Insert 80 winning trades (positive total_regret_usd = win)
+    for i in range(80):
+        components = decompose_regret(
+            forecast_error_usd=0.10,
+            observation_error_usd=0.02,
+            quote_error_usd=0.01,
+            non_fill_error_usd=0.0,
+            fee_error_usd=-0.01,
+            timing_error_usd=0.0,
+            settlement_ambiguity_error_usd=0.0,
+            realized_pnl_usd=0.12,
+            counterfactual_pnl_usd=0.0,  # realized(0.12) > counterfactual(0) → WIN
+        )
+        write_regret_decomposition(exp_id, f"evt_win_{i}", components, conn=world_conn)
+    # Insert 20 losing trades
+    for i in range(20):
+        components = decompose_regret(
+            forecast_error_usd=-0.05,
+            observation_error_usd=0.0,
+            quote_error_usd=0.0,
+            non_fill_error_usd=0.0,
+            fee_error_usd=-0.01,
+            timing_error_usd=-0.04,
+            settlement_ambiguity_error_usd=0.0,
+            realized_pnl_usd=-0.10,
+            counterfactual_pnl_usd=0.0,  # realized < counterfactual → LOSS
+        )
+        write_regret_decomposition(exp_id, f"evt_loss_{i}", components, conn=world_conn)
+
+    report = build_evidence_report(
+        "shoulder_sell", EvidenceTier.SHADOW_PASS,
+        conn=world_conn, breakeven_win_rate=0.55,
+    )
+    assert report.n_settled == 100
+    assert report.n_wins == 80
+    assert report.ci_lower is not None
+    assert report.ci_lower > 0.55, (
+        f"Winning cohort (80/100) should have ci_lower > breakeven 0.55; "
+        f"got ci_lower={report.ci_lower:.4f}"
+    )
+    # PROMOTE-eligible (tier 3 < required 6, ci_lower > breakeven)
+    verdict = adjudicate(
+        report, EvidenceTier.LIVE_LIMITED_HAIRCUT,
+        conn=world_conn, operator_ref="op_regression_test",
+    )
+    assert verdict.verdict == VerdictKind.PROMOTE
+
+
+def test_t4_losing_cohort_is_demote(world_conn) -> None:
+    """Losing cohort: Beta(2,2) CI lower < breakeven → adjudicate proposes DEMOTE.
+
+    Regression guard for SEV2-1: verifies negative total_regret_usd (realized < counterfactual)
+    correctly maps to n_wins=0, and a losing cohort is demoted.
+    """
+    from src.analysis.evidence_report import build_evidence_report
+    from src.state.shadow_experiment_registry import register_shadow_experiment
+    from src.analysis.regret_decomposer import decompose_regret, write_regret_decomposition
+    from datetime import datetime, timezone
+
+    started_at = datetime(2026, 5, 2, tzinfo=timezone.utc)
+    exp_id = register_shadow_experiment(
+        "center_sell", {"kelly": 0.3}, "losing_cohort",
+        started_at=started_at, conn=world_conn,
+    )
+    # Insert 100 losing trades (negative total_regret_usd)
+    for i in range(100):
+        components = decompose_regret(
+            forecast_error_usd=-0.08,
+            observation_error_usd=0.0,
+            quote_error_usd=0.0,
+            non_fill_error_usd=0.0,
+            fee_error_usd=-0.02,
+            timing_error_usd=0.0,
+            settlement_ambiguity_error_usd=0.0,
+            realized_pnl_usd=-0.10,
+            counterfactual_pnl_usd=0.0,  # realized < counterfactual → LOSS
+        )
+        write_regret_decomposition(exp_id, f"evt_lose_{i}", components, conn=world_conn)
+
+    report = build_evidence_report(
+        "center_sell", EvidenceTier.PAPER_COHORT,
+        conn=world_conn, breakeven_win_rate=0.55,
+    )
+    assert report.n_settled == 100
+    assert report.n_wins == 0
+    assert report.ci_lower is not None
+    assert report.ci_lower < 0.55
+
+    verdict = adjudicate(report, EvidenceTier.LIVE_LIMITED_HAIRCUT, conn=world_conn)
+    assert verdict.verdict == VerdictKind.DEMOTE

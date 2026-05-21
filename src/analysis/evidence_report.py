@@ -110,9 +110,12 @@ def build_evidence_report(
     """Build an EvidenceReport by querying the world DB.
 
     Queries:
-      - shadow_experiments: experiments for this strategy
-      - regret_decompositions: mean regret, win count (total_regret_usd > 0)
-      - no_trade_events: count for this strategy (if table exists)
+      - decision_events: authoritative n_decisions denominator (strategy_key filter)
+      - regret_decompositions: n_settled, n_wins (total_regret_usd > 0 = WIN),
+        mean_regret (supplemental; may lag decision_events)
+
+    Sign convention: total_regret_usd > 0 means realized > counterfactual (WIN).
+    Consistent with regret_decomposer.py SEV2-1 canonical convention.
 
     INV-37: caller supplies conn; never auto-opens.
     """
@@ -153,14 +156,9 @@ def build_evidence_report(
     mean_regret_usd = float(regret_row[2] or 0.0)
     n_settled = int(regret_row[0] or 0)  # rows with settled regret outcomes
 
-    # Count no-trade events if the table exists
+    # no_trade_events does not have a strategy_key column; n_no_trades is
+    # supplemental and always 0 for now (future: join via decision_events).
     n_no_trades = 0
-    if "no_trade_events" in tables:
-        nte_row = conn.execute(
-            "SELECT COUNT(*) FROM no_trade_events WHERE strategy_key = ?",
-            (strategy_id,),
-        ).fetchone()
-        n_no_trades = int(nte_row[0] or 0)
 
     # Bayesian CI
     ci_lower: Optional[float] = None

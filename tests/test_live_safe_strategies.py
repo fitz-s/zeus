@@ -179,7 +179,7 @@ def test_stage0_strategy_authority_surfaces_are_explicitly_split():
     reportable = set(EDGE_OBSERVATION_KEYS)
 
     assert buildable == runtime_canonical == portfolio_canonical == reportable == boot_safe
-    assert live_allowed == {"settlement_capture", "center_buy", "opening_inertia"}
+    assert live_allowed == {"settlement_capture", "center_buy", "opening_inertia", "imminent_open_capture"}
     assert positive_sizing == live_allowed
     assert "shoulder_sell" in boot_safe
     assert "shoulder_sell" not in live_allowed
@@ -209,10 +209,12 @@ def test_stage1_taxonomy_rollback_boundary_is_runtime_live_allowlist():
         "settlement_capture",
         "center_buy",
         "opening_inertia",
+        "imminent_open_capture",
     })
     assert control_plane.is_strategy_enabled("settlement_capture") is True
     assert control_plane.is_strategy_enabled("center_buy") is True
     assert control_plane.is_strategy_enabled("opening_inertia") is True
+    assert control_plane.is_strategy_enabled("imminent_open_capture") is True
     assert control_plane.is_strategy_enabled("shoulder_sell") is False
     assert control_plane.is_strategy_enabled("shoulder_buy") is False
     assert control_plane.is_strategy_enabled("center_sell") is False
