@@ -1,6 +1,9 @@
 # Created: 2026-05-21
 # Last reused or audited: 2026-05-21
 # Authority basis: docs/operations/task_2026-05-21_strategy_vnext_phase3_shoulder/PHASE_3_SHOULDER_PLAN.md §2 T2 + 04_PHASE_3_SHOULDER.md §"Stress scenarios"
+# Lifecycle: created=2026-05-21; last_reviewed=2026-05-21; last_reused=never
+# Purpose: T2 production tests for run_stress_tests + TailStressScenario instances (6 scenarios, ALL_SCENARIOS, R-4 fail-closed)
+# Reuse: activated in T2 production pass; all execution-path tests now live
 
 """Tests for run_stress_tests (TailStressScenario stress kernel).
 

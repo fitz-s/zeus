@@ -1,6 +1,9 @@
 # Created: 2026-05-21
 # Last reused or audited: 2026-05-21
 # Authority basis: docs/operations/task_2026-05-21_strategy_vnext_phase3_shoulder/PHASE_3_SHOULDER_PLAN.md §2 T2 + §3 Cross-Track Invariant 3 + 04_PHASE_3_SHOULDER.md §"Kelly + FDR + risk rules"
+# Lifecycle: created=2026-05-21; last_reviewed=2026-05-21; last_reused=never
+# Purpose: INV-3 probe — shoulder Kelly haircut clamp [0.05, 0.20] at phase_aware_kelly_multiplier; R-3 guard (live_status=shadow AND mult > 0.0)
+# Reuse: activated in T2 production pass; replaces SCAFFOLD xfail stubs
 
 """INV-3: shoulder Kelly haircut clamp [0.05, 0.20] at phase_aware_kelly_multiplier.
 
