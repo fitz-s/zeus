@@ -912,7 +912,7 @@ def _latest_completed_partial_order_fact_candidates(conn: sqlite3.Connection) ->
           FROM venue_commands cmd
           JOIN canonical_order_truth fact
             ON fact.command_id = cmd.command_id
-         WHERE cmd.intent_kind = 'ENTRY'
+         WHERE cmd.intent_kind IN ('ENTRY', 'EXIT')
            AND cmd.state = 'PARTIAL'
            AND cmd.venue_order_id IS NOT NULL
            AND cmd.venue_order_id != ''
@@ -1073,6 +1073,16 @@ def _matched_remaining_size(command: dict, matched_size: str, *, venue_status: s
 
 def _matched_event_type(command: dict, matched_size: str, *, venue_status: str = "") -> str:
     if str(command.get("intent_kind") or "").upper() == "EXIT":
+        matched = _decimal_or_none(matched_size)
+        command_size = _decimal_or_none(command.get("size"))
+        if (
+            _venue_status_is_fully_matched(venue_status)
+            and matched is not None
+            and matched > 0
+        ):
+            return CommandEventType.FILL_CONFIRMED.value
+        if command_size is not None and matched is not None and matched >= command_size:
+            return CommandEventType.FILL_CONFIRMED.value
         return CommandEventType.PARTIAL_FILL_OBSERVED.value
     command_size = _decimal_or_none(command.get("size"))
     matched = _decimal_or_none(matched_size)
@@ -1126,6 +1136,40 @@ def _append_matched_order_fill_projection(
     except Exception:
         logger.exception(
             "recovery: entry fill projection failed for command %s order %s",
+            command.get("command_id"),
+            venue_order_id,
+        )
+
+
+def _append_exit_order_fill_projection(
+    conn: sqlite3.Connection,
+    *,
+    command: dict,
+    venue_order_id: str,
+    matched_size: str,
+    fill_price: str,
+    observed_at: str,
+    event_type: str,
+) -> None:
+    if event_type != CommandEventType.FILL_CONFIRMED.value:
+        return
+    if str(command.get("intent_kind") or "").upper() != "EXIT":
+        return
+    try:
+        from src.execution.exchange_reconcile import _ensure_exit_fill_position_event
+
+        _ensure_exit_fill_position_event(
+            conn,
+            command=command,
+            venue_order_id=venue_order_id,
+            filled_size=matched_size,
+            fill_price=fill_price,
+            observed_at=_coerce_iso_datetime(observed_at),
+            command_event=event_type,
+        )
+    except Exception:
+        logger.exception(
+            "recovery: exit fill projection failed for command %s order %s",
             command.get("command_id"),
             venue_order_id,
         )
@@ -2816,6 +2860,15 @@ def reconcile_matched_order_facts(conn: sqlite3.Connection, client) -> dict:
                         fill_price=fill_price,
                         observed_at=observed_at,
                     )
+                _append_exit_order_fill_projection(
+                    conn,
+                    command=row,
+                    venue_order_id=order_id,
+                    matched_size=matched_size,
+                    fill_price=fill_price,
+                    observed_at=observed_at,
+                    event_type=event_type,
+                )
                 conn.execute(f"RELEASE SAVEPOINT {sp_name}")
             except Exception:
                 conn.execute(f"ROLLBACK TO SAVEPOINT {sp_name}")
@@ -2833,7 +2886,7 @@ def reconcile_matched_order_facts(conn: sqlite3.Connection, client) -> dict:
 
 
 def reconcile_completed_partial_order_facts(conn: sqlite3.Connection) -> dict:
-    """Finalize PARTIAL entry commands when order truth says the remainder is gone."""
+    """Finalize PARTIAL commands when order truth says the remainder is gone."""
 
     summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
     for row in _latest_completed_partial_order_fact_candidates(conn):
@@ -2841,8 +2894,14 @@ def reconcile_completed_partial_order_facts(conn: sqlite3.Connection) -> dict:
         command_id = str(row.get("command_id") or "")
         order_id = str(row.get("order_fact_venue_order_id") or row.get("venue_order_id") or "")
         try:
+            intent_kind = str(row.get("intent_kind") or "").upper()
+            observed_at = str(row.get("order_fact_observed_at") or _now_iso())
             payload = {
-                "reason": "partial_entry_order_fact_completed",
+                "reason": (
+                    "partial_exit_order_fact_completed"
+                    if intent_kind == "EXIT"
+                    else "partial_entry_order_fact_completed"
+                ),
                 "proof_class": "completed_partial_order_fact",
                 "venue_order_id": order_id,
                 "command_id": command_id,
@@ -2861,8 +2920,17 @@ def reconcile_completed_partial_order_facts(conn: sqlite3.Connection) -> dict:
                     conn,
                     command_id=command_id,
                     event_type=CommandEventType.FILL_CONFIRMED.value,
-                    occurred_at=_now_iso(),
+                    occurred_at=observed_at,
                     payload=payload,
+                )
+                _append_exit_order_fill_projection(
+                    conn,
+                    command=row,
+                    venue_order_id=order_id,
+                    matched_size=str(row.get("order_fact_matched_size") or ""),
+                    fill_price=str(row.get("price") or ""),
+                    observed_at=observed_at,
+                    event_type=CommandEventType.FILL_CONFIRMED.value,
                 )
                 conn.execute(f"RELEASE SAVEPOINT {sp_name}")
             except Exception:
