@@ -179,6 +179,9 @@ _ORDER_FACT_STATES = frozenset(
         "HEARTBEAT_CANCEL_SUSPECTED",
     }
 )
+_TERMINAL_ZERO_REMAINDER_ORDER_FACT_STATES = frozenset(
+    {"MATCHED", "CANCEL_CONFIRMED", "EXPIRED", "VENUE_WIPED"}
+)
 _TRADE_FACT_STATES = frozenset({"MATCHED", "MINED", "CONFIRMED", "RETRYING", "FAILED"})
 _TRADE_FILL_ECONOMICS_STATES = frozenset({"MATCHED", "MINED", "CONFIRMED"})
 _POSITION_LOT_STATES = frozenset(
@@ -230,6 +233,14 @@ def _decimal_text_equal(left: Any, right: Any) -> bool:
     )
 
 
+def _decimal_text_is_zero(value: Any) -> bool:
+    try:
+        parsed = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError):
+        return False
+    return parsed.is_finite() and parsed == 0
+
+
 def _finite_decimal_text(value: Any) -> str:
     try:
         parsed = Decimal(str(value))
@@ -252,6 +263,29 @@ def trade_fact_has_positive_fill_economics(row: Mapping[str, Any] | sqlite3.Row)
     return _positive_finite_decimal_text(
         _row_value(row, "filled_size")
     ) and _positive_finite_decimal_text(_row_value(row, "fill_price"))
+
+
+def _prior_terminal_zero_remainder_order_fact_id(
+    conn: sqlite3.Connection,
+    *,
+    venue_order_id: str,
+    command_id: str,
+) -> int | None:
+    row = conn.execute(
+        """
+        SELECT fact_id, state, remaining_size
+          FROM venue_order_facts
+         WHERE venue_order_id = ?
+           AND command_id = ?
+           AND state IN ('MATCHED', 'CANCEL_CONFIRMED', 'EXPIRED', 'VENUE_WIPED')
+         ORDER BY local_sequence DESC, fact_id DESC
+         LIMIT 1
+        """,
+        (venue_order_id, command_id),
+    ).fetchone()
+    if row is None or not _decimal_text_is_zero(row["remaining_size"]):
+        return None
+    return int(row["fact_id"])
 
 
 def _optimistic_source_trade_fact_ids_for_failed_trade(
@@ -2052,6 +2086,14 @@ def append_order_fact(
     raw_payload_json_s = _coerce_payload_json(raw_payload_json)
 
     with _savepoint_atomic(conn):
+        if state not in _TERMINAL_ZERO_REMAINDER_ORDER_FACT_STATES:
+            prior_terminal_fact_id = _prior_terminal_zero_remainder_order_fact_id(
+                conn,
+                venue_order_id=venue_order_id,
+                command_id=command_id,
+            )
+            if prior_terminal_fact_id is not None:
+                return prior_terminal_fact_id
         seq = _coerce_local_sequence(
             conn,
             table="venue_order_facts",
