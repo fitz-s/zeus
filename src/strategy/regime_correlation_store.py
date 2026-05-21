@@ -28,8 +28,9 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from contextlib import contextmanager
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Iterator
 
 import numpy as np
 
@@ -40,11 +41,30 @@ from src.strategy.correlation_shrinkage import (
 )
 from src.state.schema.regime_correlation_cache_schema import (
     SCHEMA_VERSION,
-    ensure_table,
 )
 
 if TYPE_CHECKING:
     pass
+
+
+@contextmanager
+def _savepoint_atomic(conn: sqlite3.Connection) -> Iterator[None]:
+    """SAVEPOINT-based atomic region that nests inside outer transactions.
+
+    Unlike `with conn:` (which BEGINs/COMMITs and silently RELEASEs any outer
+    SAVEPOINT — see project memory feedback_with_conn_nested_savepoint_audit),
+    SAVEPOINT/RELEASE/ROLLBACK TO compose correctly. Callers can wrap calls
+    inside their own outer SAVEPOINT without losing rollback granularity.
+    """
+    sp = "regime_correlation_store_sp"
+    conn.execute(f"SAVEPOINT {sp}")
+    try:
+        yield
+        conn.execute(f"RELEASE {sp}")
+    except BaseException:
+        conn.execute(f"ROLLBACK TO {sp}")
+        conn.execute(f"RELEASE {sp}")
+        raise
 
 
 class RegimeCorrelationStore:
@@ -52,7 +72,8 @@ class RegimeCorrelationStore:
 
     Args:
         conn: sqlite3.Connection to the world DB (or :memory: for tests).
-              The regime_correlation_cache table is created if absent.
+              The regime_correlation_cache table must already exist (created by
+              db.py:init_schema at daemon boot, or in tests via init_schema).
 
     Example:
         store = RegimeCorrelationStore(world_conn)
@@ -62,7 +83,6 @@ class RegimeCorrelationStore:
 
     def __init__(self, conn: sqlite3.Connection) -> None:
         self._conn = conn
-        ensure_table(conn)
 
     # ------------------------------------------------------------------
     # Public API
@@ -112,24 +132,24 @@ class RegimeCorrelationStore:
         cities_json = json.dumps(cities)
         matrix_json = json.dumps(est.shrunk_correlation.tolist())
 
-        self._conn.execute(
-            """
-            INSERT OR REPLACE INTO regime_correlation_cache
-                (regime, cities_json, matrix_json, fitted_at, n_observations,
-                 intensity, schema_version)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                str(regime),
-                cities_json,
-                matrix_json,
-                fitted_at,
-                est.n_observations,
-                est.intensity,
-                SCHEMA_VERSION,
-            ),
-        )
-        self._conn.commit()
+        with _savepoint_atomic(self._conn):
+            self._conn.execute(
+                """
+                INSERT OR REPLACE INTO regime_correlation_cache
+                    (regime, cities_json, matrix_json, fitted_at, n_observations,
+                     intensity, schema_version)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    str(regime),
+                    cities_json,
+                    matrix_json,
+                    fitted_at,
+                    est.n_observations,
+                    est.intensity,
+                    SCHEMA_VERSION,
+                ),
+            )
         return est
 
     def get(self, regime: WeatherRegimeTag, cities: list[str]) -> np.ndarray:
@@ -181,8 +201,8 @@ class RegimeCorrelationStore:
 
         No-op if the regime was never fit.
         """
-        self._conn.execute(
-            "DELETE FROM regime_correlation_cache WHERE regime = ?",
-            (str(regime),),
-        )
-        self._conn.commit()
+        with _savepoint_atomic(self._conn):
+            self._conn.execute(
+                "DELETE FROM regime_correlation_cache WHERE regime = ?",
+                (str(regime),),
+            )

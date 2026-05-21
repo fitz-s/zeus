@@ -472,6 +472,10 @@ test_trust_policy:
     tests/test_shoulder_cluster_cap.py: {created: "2026-05-21", last_used: "2026-05-21"}
     tests/test_shoulder_exposure_ledger.py: {created: "2026-05-21", last_used: "2026-05-21"}
     tests/test_shoulder_shadow_readiness_report.py: {created: "2026-05-21", last_used: "2026-05-21"}
+    # Phase 5 T1+T2+T3 (2026-05-21): Ledoit-Wolf shrinkage + regime correlation store + variance-based cluster cap.
+    tests/test_correlation_shrinkage.py: {created: "2026-05-21", last_used: "2026-05-21"}
+    tests/test_regime_correlation_store.py: {created: "2026-05-21", last_used: "2026-05-21"}
+    tests/test_cluster_exposure_shrunk.py: {created: "2026-05-21", last_used: "2026-05-21"}
 
 categories:
   core_law_antibody:
@@ -733,8 +737,10 @@ categories:
     - tests/test_chronicle_dedup.py
     - tests/test_churn_defense.py
     - tests/test_cluster_collapse.py
+    - tests/test_cluster_exposure_shrunk.py
     - tests/test_cluster_taxonomy_backfill.py
     - tests/test_correlation.py
+    - tests/test_correlation_shrinkage.py
     - tests/test_day0_exit_gate.py
     - tests/test_day0_runtime_observation_context.py
     - tests/test_day0_window.py
@@ -784,6 +790,7 @@ categories:
     - tests/test_phase9c_gate_f_prep.py
     - tests/test_proxy_health.py
     - tests/test_rebuild_pipeline.py
+    - tests/test_regime_correlation_store.py
     - tests/test_riskguard.py
     - tests/test_solar_etl.py
     - tests/test_tracker_integrity.py

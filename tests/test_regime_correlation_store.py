@@ -1,3 +1,8 @@
+# Lifecycle: created=2026-05-21; last_reviewed=2026-05-21; last_reused=never
+# Purpose: Phase 5 T2 acceptance tests for RegimeCorrelationStore — fit/get/
+#   invalidate, UNKNOWN-raises-ValueError antibody, cache round-trip, schema 24.
+# Reuse: Run when changing src/strategy/regime_correlation_store.py or the
+#   regime_correlation_cache table schema (SCHEMA_VERSION 24).
 # Created: 2026-05-21
 # Last reused or audited: 2026-05-21
 # Authority basis: docs/operations/task_2026-05-21_strategy_vnext_phase5_regime_correlation/PHASE_5_PLAN.md §Track2 acceptance tests

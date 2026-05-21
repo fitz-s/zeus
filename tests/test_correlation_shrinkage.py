@@ -1,3 +1,8 @@
+# Lifecycle: created=2026-05-21; last_reviewed=2026-05-21; last_reused=never
+# Purpose: Phase 5 T1 acceptance tests for Ledoit-Wolf shrinkage estimator
+#   (convergence, sparse n<p, γ=0 clamp, n=1 edge case).
+# Reuse: Run when changing src/strategy/correlation_shrinkage.py or the
+#   shrinkage math spec (docs/tech/06_PHASE_5_WEATHER_REGIME_CORRELATION.md §15.4).
 # Created: 2026-05-21
 # Last reused or audited: 2026-05-21
 # Authority basis: docs/operations/task_2026-05-21_strategy_vnext_phase5_regime_correlation/PHASE_5_PLAN.md §Track1 acceptance tests

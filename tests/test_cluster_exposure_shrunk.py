@@ -1,3 +1,8 @@
+# Lifecycle: created=2026-05-21; last_reviewed=2026-05-21; last_reused=never
+# Purpose: Phase 5 T3 acceptance tests for variance-based cluster_exposure_for_bankroll
+#   (HEAT_DOME tighter than NORMAL, notional fallback, city-order alignment).
+# Reuse: Run when changing src/state/portfolio.py::cluster_exposure_for_bankroll
+#   or src/engine/evaluator.py Phase 5 T3 variance path.
 # Created: 2026-05-21
 # Last reused or audited: 2026-05-21
 # Authority basis: docs/operations/task_2026-05-21_strategy_vnext_phase5_regime_correlation/PHASE_5_PLAN.md §Track3 acceptance tests
