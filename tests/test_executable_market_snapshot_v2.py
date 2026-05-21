@@ -377,6 +377,42 @@ def test_negrisk_active_false_child_captures_when_accepting_orders(conn):
     assert loaded.enable_orderbook is True
 
 
+def test_negrisk_missing_active_child_captures_when_orderbook_tradeable(conn):
+    gamma_raw = {
+        "id": "gamma-1",
+        "conditionId": "condition-1",
+        "questionID": "question-1",
+        "closed": False,
+        "acceptingOrders": True,
+        "enableOrderBook": True,
+        "clobTokenIds": ["yes-token", "no-token"],
+    }
+    market = _market_for_capture(gamma_market_raw=gamma_raw)
+    market["outcomes"][0].pop("active", None)
+
+    fields = capture_executable_market_snapshot(
+        conn,
+        market=market,
+        decision=_decision_for_capture(),
+        clob=FakeClobFacts(market_info={
+            "condition_id": "condition-1",
+            "tokens": [{"token_id": "yes-token"}, {"token_id": "no-token"}],
+            "enable_order_book": True,
+            "archived": False,
+        }),
+        captured_at=NOW,
+        scan_authority="VERIFIED",
+    )
+
+    loaded = get_snapshot(conn, fields["executable_snapshot_id"])
+
+    assert loaded is not None
+    assert loaded.active is False
+    assert loaded.closed is False
+    assert loaded.accepting_orders is True
+    assert loaded.enable_orderbook is True
+
+
 def test_entry_sizing_minimum_uses_snapshot_shares_not_global_usd_floor():
     effective_min, authority = _effective_min_order_usd_for_entry(
         tokens={"executable_snapshot_min_order_size": "5"},

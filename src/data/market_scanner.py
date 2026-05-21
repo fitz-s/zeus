@@ -2365,7 +2365,7 @@ def capture_executable_market_snapshot(
     if not isinstance(gamma_market_raw, dict):
         gamma_market_raw = _minimal_gamma_payload(market, outcome)
 
-    active = _required_bool_fact((outcome, gamma_market_raw), ("active", "isActive"))
+    active = _optional_bool_fact((outcome, gamma_market_raw), ("active", "isActive"), default=False)
     closed = _required_bool_fact((outcome, gamma_market_raw), ("closed", "isClosed"))
     enable_orderbook = _required_bool_fact(
         (outcome, gamma_market_raw),
@@ -3280,6 +3280,16 @@ def _required_bool_fact(surfaces: tuple[dict, ...], names: tuple[str, ...]) -> b
         if value is not None:
             return value
     raise ExecutableSnapshotCaptureError(f"required boolean fact missing: {'/'.join(names)}")
+
+
+def _optional_bool_fact(surfaces: tuple[dict, ...], names: tuple[str, ...], *, default: bool) -> bool:
+    for surface in surfaces:
+        if not isinstance(surface, dict):
+            continue
+        value = _boolish_market_field(surface, *names)
+        if value is not None:
+            return value
+    return bool(default)
 
 
 def _book_row_price_size(row: Any, side: str) -> tuple[Decimal, Decimal]:

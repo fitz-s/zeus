@@ -135,6 +135,7 @@ def write_cycle_pulse(cycle_summary: dict | None = None) -> None:
         }
     _refresh_current_open_entry_orders_for_status(status)
     if minimal_refresh_ok:
+        _refresh_pulse_infrastructure_status(status, cycle_summary)
         status["timestamp"] = generated_at
         status = annotate_truth_payload(status, STATUS_PATH, generated_at=generated_at, authority="VERIFIED")
     else:
@@ -157,6 +158,65 @@ def _preserve_prior_status_freshness_after_pulse_failure(status: dict, prior: di
     truth["authority"] = "UNVERIFIED"
     truth["stale_reason"] = "position_current_pulse_query_error"
     status["truth"] = truth
+
+
+def _pulse_only_summary(surface: str) -> dict:
+    return {
+        "status": "not_refreshed_by_cycle_pulse",
+        "authority": "derived_operator_visibility",
+        "pulse_only": True,
+        "surface": surface,
+    }
+
+
+def _refresh_pulse_infrastructure_status(status: dict, cycle_summary: dict | None) -> None:
+    """Recompute infrastructure truth for the surfaces a cycle pulse refreshes.
+
+    ``write_cycle_pulse`` intentionally avoids the full read model, so it must
+    not carry stale full-status failures forward under a fresh timestamp.
+    """
+
+    status["learning"] = _pulse_only_summary("learning")
+    status["calibration_serving"] = _pulse_only_summary("calibration_serving")
+    status["lifecycle_funnel"] = _pulse_only_summary("lifecycle_funnel")
+    status["price_evidence"] = _pulse_only_summary("price_evidence")
+    status["no_trade"] = _pulse_only_summary("no_trade")
+
+    cycle = cycle_summary if isinstance(cycle_summary, dict) else {}
+    consistency_issues: list[str] = []
+    if bool(cycle.get("failed", False)):
+        consistency_issues.append("cycle_failed")
+
+    current_open_entry_orders = (
+        status.get("execution", {}).get("current_open_entry_orders")
+        if isinstance(status.get("execution"), dict)
+        else None
+    )
+    if isinstance(current_open_entry_orders, dict) and current_open_entry_orders.get("status") == "query_error":
+        consistency_issues.append("current_open_entry_orders_query_error")
+
+    risk = status.setdefault("risk", {})
+    if not isinstance(risk, dict):
+        risk = {}
+        status["risk"] = risk
+    fallback_risk_level = str(
+        cycle.get("risk_level")
+        or risk.get("level")
+        or risk.get("riskguard_level")
+        or ""
+    )
+    if fallback_risk_level:
+        risk.setdefault("level", fallback_risk_level)
+        risk.setdefault("riskguard_level", risk.get("level", fallback_risk_level))
+    risk["consistency_check"] = {
+        "ok": not consistency_issues,
+        "issues": consistency_issues,
+        "cycle_risk_level": str(cycle.get("risk_level") or "") or None,
+        "scope": "cycle_pulse",
+    }
+    risk["infrastructure_level"] = "RED" if consistency_issues else "GREEN"
+    risk["infrastructure_issues"] = list(consistency_issues)
+    risk["infrastructure_scope"] = "cycle_pulse"
 
 
 def _refresh_minimal_runtime_read_model_for_status(status: dict) -> bool:
@@ -1307,10 +1367,10 @@ def write_status(cycle_summary: dict = None) -> None:
             (float(status["portfolio"]["total_exposure_usd"]) / float(effective_bankroll)) * 100,
             1,
         )
+    current_regime_started_at = str(
+        ((risk_details.get("strategy_tracker_accounting") or {}).get("current_regime_started_at")) or ""
+    )
     try:
-        current_regime_started_at = str(
-            ((risk_details.get("strategy_tracker_accounting") or {}).get("current_regime_started_at")) or ""
-        )
         execution_summary = query_execution_event_summary(
             conn,
             not_before=current_regime_started_at or None,
@@ -1319,48 +1379,62 @@ def write_status(cycle_summary: dict = None) -> None:
             execution_summary = {}
         execution_summary["current_open_entry_orders"] = current_open_entry_orders
         status["execution"] = execution_summary
-        status["learning"] = query_learning_surface_summary(
-            conn,
-            not_before=current_regime_started_at or None,
-        )
-        status["calibration_serving"] = build_calibration_serving_status(conn)
-        status["lifecycle_funnel"] = query_lifecycle_funnel_report(
-            conn,
-            not_before=current_regime_started_at or None,
-        )
-        status["price_evidence"] = build_price_evidence_report(conn)
-        recent_no_trades = query_no_trade_cases(conn, hours=24)
-        stage_counts: dict[str, int] = {}
-        for case in recent_no_trades:
-            stage = str(case.get("rejection_stage") or "UNKNOWN")
-            stage_counts[stage] = stage_counts.get(stage, 0) + 1
-        status["no_trade"] = {
-            "recent_stage_counts": stage_counts,
-        }
     except Exception:
         status["execution"] = {
             "error": "execution_summary_unavailable",
             "current_open_entry_orders": current_open_entry_orders,
         }
+
+    try:
+        status["learning"] = query_learning_surface_summary(
+            conn,
+            not_before=current_regime_started_at or None,
+        )
+    except Exception:
         status["learning"] = {"error": "learning_summary_unavailable"}
+
+    try:
+        status["calibration_serving"] = build_calibration_serving_status(conn)
+    except Exception:
         status["calibration_serving"] = {
             "status": "query_error",
             "authority": "derived_operator_visibility",
             "error": "calibration_serving_summary_unavailable",
         }
+
+    try:
+        status["lifecycle_funnel"] = query_lifecycle_funnel_report(
+            conn,
+            not_before=current_regime_started_at or None,
+        )
+    except Exception:
         status["lifecycle_funnel"] = {
             "status": "query_error",
             "authority": "derived_operator_visibility",
             "error": "lifecycle_funnel_summary_unavailable",
         }
+
+    try:
+        status["price_evidence"] = build_price_evidence_report(conn)
+    except Exception:
         status["price_evidence"] = build_price_evidence_error_report(
             "status_summary",
             "price_evidence_summary_unavailable",
         )
+
+    try:
+        recent_no_trades = query_no_trade_cases(conn, hours=24)
+        stage_counts: dict[str, int] = {}
+        for case in recent_no_trades:
+            stage = str(case.get("rejection_stage") or "unknown")
+            stage_counts[stage] = stage_counts.get(stage, 0) + 1
+        status["no_trade"] = {
+            "recent_stage_counts": stage_counts,
+        }
+    except Exception:
         status["no_trade"] = {"error": "no_trade_summary_unavailable"}
-    finally:
-        if conn is not None:
-            conn.close()
+    if conn is not None:
+        conn.close()
 
     # S5 R11 P10B: discrepancy flag — claim=True AND any v2 table has 0 rows
     if status.get("dual_track_scaffold_claimed") and v2_row_counts:

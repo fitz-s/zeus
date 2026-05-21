@@ -746,7 +746,7 @@ def _stale_local_orphan_terminal_no_fill_candidates(conn: sqlite3.Connection) ->
           FROM exchange_reconcile_findings finding
           JOIN venue_commands cmd
             ON cmd.venue_order_id = finding.subject_id
-          JOIN position_current pc
+          LEFT JOIN position_current pc
             ON pc.position_id = cmd.position_id
           JOIN canonical_order_truth fact
             ON fact.command_id = cmd.command_id
@@ -1893,7 +1893,7 @@ def _filled_entry_lot_materialization_candidates(conn: sqlite3.Connection) -> li
                fact.observed_at,
                fact.venue_timestamp
           FROM venue_commands cmd
-          JOIN position_current pc
+          LEFT JOIN position_current pc
             ON pc.position_id = cmd.position_id
           JOIN venue_trade_facts fact
             ON fact.command_id = cmd.command_id
@@ -1989,9 +1989,7 @@ def _filled_entry_execution_fact_repair_candidates(conn: sqlite3.Connection) -> 
         "venue_commands",
         "venue_order_facts",
         "venue_trade_facts",
-        "position_lots",
         "execution_fact",
-        "trade_decisions",
     }
     if not all(_table_exists(conn, table) for table in required):
         return []
@@ -2122,19 +2120,6 @@ def _filled_entry_execution_fact_repair_candidates(conn: sqlite3.Connection) -> 
            AND cmd.side = 'BUY'
            AND cmd.state IN ('FILLED', 'PARTIAL', 'EXPIRED')
            AND ABS(CAST(entry_fill.filled_size AS REAL) - CAST(latest_order.matched_size AS REAL)) <= 0.000001
-           AND EXISTS (
-               SELECT 1
-                 FROM position_lots lot
-                WHERE lot.source_command_id = cmd.command_id
-                  AND lot.state IN ('OPTIMISTIC_EXPOSURE', 'CONFIRMED_EXPOSURE')
-           )
-           AND EXISTS (
-               SELECT 1
-                 FROM trade_decisions td
-                WHERE td.runtime_trade_id = cmd.position_id
-                   OR CAST(td.trade_id AS TEXT) = cmd.position_id
-                   OR CAST(td.trade_id AS TEXT) = cmd.decision_id
-           )
            AND (
                ef.intent_id IS NULL
                OR COALESCE(ef.command_id, '') != cmd.command_id

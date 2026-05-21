@@ -745,8 +745,25 @@ class TestRCPV2RowCountSensor:
                 "opening_inertia": {"open_positions": 1, "open_exposure_usd": 1.86, "realized_pnl": 1.0},
                 "settlement_capture": {"open_positions": 9, "open_exposure_usd": 9.99},
             },
-            "execution": {"overall": {"entry_attempted": 99}},
-            "risk": {"infrastructure_level": "GREEN", "infrastructure_issues": []},
+            "execution": {"error": "execution_summary_unavailable"},
+            "learning": {"error": "learning_summary_unavailable"},
+            "calibration_serving": {"status": "query_error"},
+            "lifecycle_funnel": {"status": "query_error"},
+            "price_evidence": {"status": "query_error"},
+            "no_trade": {"error": "no_trade_summary_unavailable"},
+            "risk": {
+                "infrastructure_level": "RED",
+                "infrastructure_issues": [
+                    "execution_summary_unavailable",
+                    "learning_summary_unavailable",
+                    "calibration_serving_summary_unavailable",
+                    "lifecycle_funnel_summary_unavailable",
+                    "price_evidence_summary_unavailable",
+                    "no_trade_summary_unavailable",
+                    "position_current_missing_table",
+                    "strategy_health_missing_table",
+                ],
+            },
         }))
 
         class DummyConn:
@@ -793,7 +810,15 @@ class TestRCPV2RowCountSensor:
             "_query_current_open_entry_orders",
             lambda conn: {"status": "ok", "orders": 2},
         )
-        monkeypatch.setattr(status_summary_module, "annotate_truth_payload", lambda payload, path, generated_at, authority: payload)
+        def _annotate_truth_payload(payload, path, generated_at, authority):
+            payload["truth"] = {
+                "generated_at": generated_at,
+                "authority": authority,
+                "source_path": str(path),
+            }
+            return payload
+
+        monkeypatch.setattr(status_summary_module, "annotate_truth_payload", _annotate_truth_payload)
 
         status_summary_module.write_cycle_pulse({"mode": "opening_hunt", "trades": 0})
         status = json.loads(status_path.read_text())
@@ -813,6 +838,14 @@ class TestRCPV2RowCountSensor:
             "pulse_only": True,
             "current_open_entry_orders": {"status": "ok", "orders": 2},
         }
+        assert status["learning"]["status"] == "not_refreshed_by_cycle_pulse"
+        assert status["calibration_serving"]["status"] == "not_refreshed_by_cycle_pulse"
+        assert status["lifecycle_funnel"]["status"] == "not_refreshed_by_cycle_pulse"
+        assert status["price_evidence"]["status"] == "not_refreshed_by_cycle_pulse"
+        assert status["no_trade"]["status"] == "not_refreshed_by_cycle_pulse"
+        assert status["risk"]["infrastructure_level"] == "GREEN"
+        assert status["risk"]["infrastructure_issues"] == []
+        assert status["risk"]["consistency_check"]["ok"] is True
 
     def test_cycle_pulse_refresh_failure_does_not_advance_status_freshness(self, tmp_path, monkeypatch):
         """Relationship: failed DB truth refresh cannot mint a fresh status timestamp."""
@@ -877,6 +910,112 @@ class TestRCPV2RowCountSensor:
             "status": "query_error",
             "refresh_error": "position_current_pulse_query_error",
         }
+
+    def test_full_status_late_builder_failure_does_not_erase_good_sections(self, tmp_path, monkeypatch):
+        """Relationship: one derived section failure cannot demote every status surface."""
+        from src.observability import status_summary as status_summary_module
+
+        status_path = tmp_path / "status_summary.json"
+
+        class DummyConn:
+            def close(self):
+                return None
+
+        empty_position_view = {
+            "status": "ok",
+            "positions": [],
+            "open_positions": 0,
+            "total_exposure_usd": 0.0,
+            "unrealized_pnl": 0.0,
+            "strategy_open_counts": {},
+            "chain_state_counts": {},
+            "exit_state_counts": {},
+            "unverified_entries": 0,
+            "day0_positions": 0,
+        }
+        monkeypatch.setattr(status_summary_module, "STATUS_PATH", status_path)
+        monkeypatch.setattr(status_summary_module, "LEGACY_POSITIONS_PATH", tmp_path / "positions.json")
+        monkeypatch.setattr(status_summary_module, "_get_risk_level", lambda: "GREEN")
+        monkeypatch.setattr(status_summary_module, "_get_risk_details", lambda: {})
+        monkeypatch.setattr(status_summary_module, "get_trade_connection_with_world", lambda: DummyConn())
+        monkeypatch.setattr(status_summary_module, "query_position_current_status_view", lambda conn: empty_position_view)
+        monkeypatch.setattr(
+            status_summary_module,
+            "query_strategy_health_snapshot",
+            lambda conn, now=None: {"status": "fresh", "by_strategy": {}, "stale_strategy_keys": []},
+        )
+        monkeypatch.setattr(status_summary_module, "_get_v2_row_counts", lambda conn: {})
+        monkeypatch.setattr(status_summary_module, "_get_execution_capability_status", lambda: {})
+        monkeypatch.setattr(status_summary_module, "is_entries_paused", lambda: False)
+        monkeypatch.setattr(status_summary_module, "get_entries_pause_source", lambda: None)
+        monkeypatch.setattr(status_summary_module, "get_entries_pause_reason", lambda: None)
+        monkeypatch.setattr(status_summary_module, "get_edge_threshold_multiplier", lambda: 1.0)
+        monkeypatch.setattr(status_summary_module, "strategy_gates", lambda: {})
+        monkeypatch.setattr(status_summary_module, "recommended_autosafe_commands_from_status", lambda status: [])
+        monkeypatch.setattr(
+            status_summary_module,
+            "recommended_commands_from_status",
+            lambda status, include_review_required=True: [],
+        )
+        monkeypatch.setattr(status_summary_module, "review_required_commands_from_status", lambda status: [])
+        monkeypatch.setattr(
+            status_summary_module,
+            "query_execution_event_summary",
+            lambda conn, not_before=None: {"overall": {"entry_attempted": 1}, "by_strategy": {}},
+        )
+        monkeypatch.setattr(
+            status_summary_module,
+            "query_learning_surface_summary",
+            lambda conn, not_before=None: {"by_strategy": {}, "no_trade_stage_counts": {}},
+        )
+        monkeypatch.setattr(
+            status_summary_module,
+            "build_calibration_serving_status",
+            lambda conn: (_ for _ in ()).throw(RuntimeError("calibration db busy")),
+        )
+        monkeypatch.setattr(
+            status_summary_module,
+            "query_lifecycle_funnel_report",
+            lambda conn, not_before=None: {"status": "observed", "counts": {"evaluated": 1}},
+        )
+        monkeypatch.setattr(
+            status_summary_module,
+            "build_price_evidence_report",
+            lambda conn: {"status": "observed", "counts": {"market_price_history_rows": 1}},
+        )
+        monkeypatch.setattr(status_summary_module, "query_no_trade_cases", lambda conn, hours=24: [])
+
+        def _annotate_truth_payload(payload, path, generated_at, authority):
+            payload["truth"] = {
+                "generated_at": generated_at,
+                "authority": authority,
+                "source_path": str(path),
+            }
+            return payload
+
+        monkeypatch.setattr(status_summary_module, "annotate_truth_payload", _annotate_truth_payload)
+
+        status_summary_module.write_status({
+            "mode": "opening_hunt",
+            "risk_level": "GREEN",
+            "wallet_balance_usd": 100.0,
+        })
+        status = json.loads(status_path.read_text())
+
+        assert status["execution"]["overall"] == {"entry_attempted": 1}
+        assert status["execution"]["by_strategy"] == {}
+        assert isinstance(status["execution"]["current_open_entry_orders"], dict)
+        assert status["learning"] == {"by_strategy": {}, "no_trade_stage_counts": {}}
+        assert status["calibration_serving"]["status"] == "query_error"
+        assert status["lifecycle_funnel"]["status"] == "observed"
+        assert status["price_evidence"]["status"] == "observed"
+        assert status["no_trade"] == {"recent_stage_counts": {}}
+        assert "execution_summary_unavailable" not in status["risk"]["infrastructure_issues"]
+        assert "learning_summary_unavailable" not in status["risk"]["infrastructure_issues"]
+        assert "lifecycle_funnel_summary_unavailable" not in status["risk"]["infrastructure_issues"]
+        assert "price_evidence_summary_unavailable" not in status["risk"]["infrastructure_issues"]
+        assert "no_trade_summary_unavailable" not in status["risk"]["infrastructure_issues"]
+        assert status["risk"]["infrastructure_level"] == "YELLOW"
 
     def test_current_open_entry_orders_uses_fact_sequence_not_timestamp_text_order(self):
         """Relationship: mixed timestamp formats cannot hide terminal order facts."""

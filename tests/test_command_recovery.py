@@ -2404,6 +2404,70 @@ class TestRecoveryResolutionTable:
             "errors": 0,
         }
 
+    def test_filled_entry_execution_fact_repairs_without_trade_decision_or_lot(
+        self,
+        conn,
+        mock_client,
+    ):
+        _insert(conn, size=5.0, price=0.32)
+        _advance_to_acked(conn, venue_order_id="ord-001")
+        _seed_pending_entry_projection(conn)
+        conn.execute(
+            """
+            UPDATE venue_commands
+               SET state = 'FILLED',
+                   updated_at = '2026-04-26T00:06:00Z'
+             WHERE command_id = 'cmd-001'
+            """
+        )
+        conn.execute(
+            """
+            UPDATE position_current
+               SET phase = 'active',
+                   shares = 5.0,
+                   cost_basis_usd = 1.6,
+                   entry_price = 0.32,
+                   order_status = 'filled',
+                   updated_at = '2026-04-26T00:06:00Z'
+             WHERE position_id = 'pos-001'
+            """
+        )
+        _append_trade_fact(
+            conn,
+            state="CONFIRMED",
+            trade_id="trade-without-decision",
+            filled_size="5",
+            fill_price="0.32",
+        )
+        _append_order_fact(conn, state="MATCHED", matched_size="5", remaining_size="0")
+        assert conn.execute("SELECT COUNT(*) FROM trade_decisions").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM position_lots").fetchone()[0] == 0
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["filled_entry_execution_fact_repair"] == {
+            "scanned": 1,
+            "advanced": 1,
+            "stayed": 0,
+            "errors": 0,
+        }
+        execution = conn.execute(
+            """
+            SELECT command_id, shares, fill_price, venue_status, terminal_exec_status
+              FROM execution_fact
+             WHERE intent_id = 'pos-001:entry'
+            """
+        ).fetchone()
+        assert dict(execution) == {
+            "command_id": "cmd-001",
+            "shares": 5.0,
+            "fill_price": 0.32,
+            "venue_status": "FILLED",
+            "terminal_exec_status": "filled",
+        }
+
     def test_existing_entry_lot_execution_fact_repair_aggregates_split_fills(
         self,
         conn,

@@ -67,6 +67,22 @@ def test_matched_zero_remainder_order_fact_outranks_command_size_residue() -> No
     assert reduced.matched_size == Decimal("4.99")
 
 
+def test_terminal_positive_zero_remainder_does_not_regress_to_later_partial() -> None:
+    reduced = VenueOrderTruthReducer.reduce(
+        order_facts=[
+            {"state": "EXPIRED", "remaining_size": "0", "matched_size": "100"},
+            {"state": "PARTIALLY_MATCHED", "remaining_size": "81.16", "matched_size": "100"},
+        ],
+        trade_filled_size="100",
+        command_size="181.16",
+    )
+
+    assert reduced.state == "EXPIRED"
+    assert reduced.proof_class == TERMINAL_FILLED
+    assert reduced.remaining_size == Decimal("0")
+    assert reduced.matched_size == Decimal("100")
+
+
 def test_absence_from_open_orders_alone_is_unknown_not_no_exposure() -> None:
     reduced = VenueOrderTruthReducer.reduce(
         order_facts=[],
