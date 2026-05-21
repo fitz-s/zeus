@@ -189,6 +189,10 @@ _BASELINE_PER_FILE: dict[str, int] = {
     # _TERMINAL_PHASES (fixed-length tuple of internal constants — no user input).
     # Added PR-S3 (2026-05-17), registered here per bot review PR #143 (2026-05-18).
     "src/state/portfolio.py": 1,
+    # 2 f-string SQL sites: SELECT from {table_ref} where table_ref is drawn from
+    # the closed internal whitelist ("forecasts.observations", "observations").
+    # No user-controlled input. Audited safe 2026-05-21 (PR #248 bot review).
+    "src/contracts/weather_regime_tag.py": 2,
     # Tail catch — fresh files with f-string SQL must be added explicitly.
 }
 

@@ -83,22 +83,6 @@ def test_regime_tag_for_signature_accepts_required_args():
     )
 
 
-def test_regime_tag_for_raises_not_implemented():
-    """regime_tag_for body is NotImplementedError until SCAFFOLD critic PASS (T1 contract)."""
-    from src.contracts.weather_regime_tag import regime_tag_for
-    with pytest.raises(NotImplementedError, match="T1 production pending SCAFFOLD critic PASS"):
-        regime_tag_for("Chicago", None, None, None)  # type: ignore[arg-type]
-
-
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "pending T1 body: insufficient observation history → UNKNOWN regime. "
-        "regime_tag_for currently raises NotImplementedError. Once production logic lands, "
-        "passing conn with empty observation_history table must return UNKNOWN (not NORMAL). "
-        "strict=True: must XFAIL (NotImplementedError); a spurious PASS before body lands is an error."
-    ),
-)
 def test_regime_tag_for_returns_unknown_when_observation_history_insufficient():
     """G2: When observation history is insufficient, classifier returns UNKNOWN — not a silent default.
 
@@ -129,17 +113,12 @@ def test_inv_unknown_regime_does_not_aggregate_cluster():
     """
     from src.strategy.correlation_cluster import tail_correlation_cluster_for
     import datetime
-    with pytest.raises(NotImplementedError):
-        # Production body not yet landed — test structure is the deliverable
-        tail_correlation_cluster_for(
-            "Chicago",
-            WeatherRegimeTag.UNKNOWN,
-            datetime.date(2026, 7, 15),
-        )
-    # TODO(T1 body): When T1 production lands, replace the raises block with:
-    #   cluster_id = tail_correlation_cluster_for("Chicago", WeatherRegimeTag.UNKNOWN, date(2026, 7, 15))
-    #   assert cluster_id == "", f"UNKNOWN regime must produce empty cluster ID, got {cluster_id!r}"
-    # This assertion is the R-1 antibody — do NOT skip it or weaken it to "truthy".
+    cluster_id = tail_correlation_cluster_for(
+        "Chicago",
+        WeatherRegimeTag.UNKNOWN,
+        datetime.date(2026, 7, 15),
+    )
+    assert cluster_id == "", f"UNKNOWN regime must produce empty cluster ID, got {cluster_id!r}"
 
 
 # ---------------------------------------------------------------------------
