@@ -30,7 +30,7 @@ from src.strategy.selection_family import (
 # ---------------------------------------------------------------------------
 
 def test_make_hypothesis_family_id_accepts_source_regime_kwargs():
-    """G5: make_hypothesis_family_id accepts source and regime without TypeError."""
+    """G5: make_hypothesis_family_id accepts source and regime; uses position-prefix grammar (M1)."""
     fid = make_hypothesis_family_id(
         cycle_mode="live",
         city="Chicago",
@@ -41,8 +41,9 @@ def test_make_hypothesis_family_id_accepts_source_regime_kwargs():
         regime="heat_dome",
     )
     assert isinstance(fid, str)
-    assert "ENS_GFS" in fid
-    assert "heat_dome" in fid
+    # M1 position-prefix grammar: src= and rgm= prevent collision with snap=
+    assert "src=ENS_GFS" in fid
+    assert "rgm=heat_dome" in fid
 
 
 def test_make_hypothesis_family_id_backward_compat_empty_source_regime():
@@ -97,7 +98,7 @@ def test_make_hypothesis_family_id_source_regime_extend_id():
 # ---------------------------------------------------------------------------
 
 def test_make_edge_family_id_accepts_source_regime_kwargs():
-    """G5: make_edge_family_id accepts source and regime without TypeError."""
+    """G5: make_edge_family_id accepts source and regime; uses position-prefix grammar (M1)."""
     fid = make_edge_family_id(
         cycle_mode="live",
         city="Chicago",
@@ -109,8 +110,9 @@ def test_make_edge_family_id_accepts_source_regime_kwargs():
         regime="heat_dome",
     )
     assert isinstance(fid, str)
-    assert "ENS_GFS" in fid
-    assert "heat_dome" in fid
+    # M1 position-prefix grammar: src= and rgm= prevent collision with snap=
+    assert "src=ENS_GFS" in fid
+    assert "rgm=heat_dome" in fid
 
 
 def test_make_edge_family_id_backward_compat_empty_source_regime():
@@ -245,3 +247,68 @@ def test_make_shoulder_hypothesis_family_id_both_empty_raises():
             source="",
             regime="",
         )
+
+
+# ---------------------------------------------------------------------------
+# M2: Anti-collision test — position-prefix grammar prevents BH partition collision
+# ---------------------------------------------------------------------------
+
+def test_inv_family_id_no_collision_between_snapshot_source_regime():
+    """M2: Family IDs with the same value in different optional slots are NEVER byte-identical.
+
+    Without position-prefix grammar, make_hypothesis_family_id(decision_snapshot_id="X")
+    produces the same string as make_hypothesis_family_id(source="X"), collapsing two
+    distinct BH discovery budgets into one. This test verifies the M1 fix prevents that.
+
+    RED on old grammar (bare append): id_snap == id_source (collision)
+    GREEN on new grammar (prefixed):  id_snap != id_source (distinct)
+    """
+    common = dict(
+        cycle_mode="live",
+        city="Chicago",
+        target_date="2026-07-15",
+        temperature_metric="high",
+        discovery_mode="standard",
+    )
+    value = "ENS_GFS"
+
+    # Hypothesis-scope collision test
+    id_snap = make_hypothesis_family_id(**common, decision_snapshot_id=value)
+    id_source = make_hypothesis_family_id(**common, source=value)
+    id_regime = make_hypothesis_family_id(**common, regime=value)
+
+    assert id_snap != id_source, (
+        f"COLLISION: decision_snapshot_id={value!r} produced same ID as source={value!r}: {id_snap!r}"
+    )
+    assert id_snap != id_regime, (
+        f"COLLISION: decision_snapshot_id={value!r} produced same ID as regime={value!r}: {id_snap!r}"
+    )
+    assert id_source != id_regime, (
+        f"COLLISION: source={value!r} produced same ID as regime={value!r}: {id_source!r}"
+    )
+
+    # Verify prefix grammar is actually present
+    assert f"snap={value}" in id_snap, f"Expected 'snap={value}' in {id_snap!r}"
+    assert f"src={value}" in id_source, f"Expected 'src={value}' in {id_source!r}"
+    assert f"rgm={value}" in id_regime, f"Expected 'rgm={value}' in {id_regime!r}"
+
+    # Edge-scope collision test (parallel: same invariant for make_edge_family_id)
+    edge_common = dict(**common, strategy_key="shoulder_sell")
+
+    edge_id_snap = make_edge_family_id(**edge_common, decision_snapshot_id=value)
+    edge_id_source = make_edge_family_id(**edge_common, source=value)
+    edge_id_regime = make_edge_family_id(**edge_common, regime=value)
+
+    assert edge_id_snap != edge_id_source, (
+        f"EDGE COLLISION: decision_snapshot_id={value!r} == source={value!r}: {edge_id_snap!r}"
+    )
+    assert edge_id_snap != edge_id_regime, (
+        f"EDGE COLLISION: decision_snapshot_id={value!r} == regime={value!r}: {edge_id_snap!r}"
+    )
+    assert edge_id_source != edge_id_regime, (
+        f"EDGE COLLISION: source={value!r} == regime={value!r}: {edge_id_source!r}"
+    )
+
+    assert f"snap={value}" in edge_id_snap
+    assert f"src={value}" in edge_id_source
+    assert f"rgm={value}" in edge_id_regime

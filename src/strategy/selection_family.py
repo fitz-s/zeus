@@ -65,17 +65,26 @@ def make_hypothesis_family_id(
     so HIGH and LOW candidates never share a family budget.
 
     Phase 3 T1 (2026-05-21): source and regime kwargs added per plan §2 T1 G5.
-    When both are empty (default), the produced ID is identical to pre-T1 IDs —
-    existing callers continue to work unchanged. When non-empty, they are appended
-    after decision_snapshot_id so shoulder hypotheses get distinct BH families.
+    When all three optional fields are empty (default), the produced ID is
+    identical to pre-T1 IDs — existing callers continue to work unchanged.
+
+    Position-prefix grammar (M1 anti-collision): optional fields are appended
+    with typed prefixes ("snap=", "src=", "rgm=") so that
+        make_hypothesis_family_id(decision_snapshot_id="X")
+    is NEVER byte-identical to
+        make_hypothesis_family_id(source="X")
+    preventing silent shared BH FDR budgets across distinct families.
+
+    Grammar with all optional fields:
+        "hyp|{cycle_mode}|{city}|{target_date}|{metric}|{discovery_mode}|snap={snap}|src={source}|rgm={regime}"
     """
     parts = ["hyp", cycle_mode, city, target_date, temperature_metric, discovery_mode]
     if decision_snapshot_id:
-        parts.append(decision_snapshot_id)
+        parts.append(f"snap={decision_snapshot_id}")
     if source:
-        parts.append(source)
+        parts.append(f"src={source}")
     if regime:
-        parts.append(regime)
+        parts.append(f"rgm={regime}")
     return "|".join(parts)
 
 
@@ -103,9 +112,18 @@ def make_edge_family_id(
     so HIGH and LOW edges never share a family budget.
 
     Phase 3 T1 (2026-05-21): source and regime kwargs added per plan §2 T1 G5.
-    When both are empty (default), the produced ID is identical to pre-T1 IDs —
-    existing callers continue to work unchanged. When non-empty, they are appended
-    after decision_snapshot_id so shoulder edges get distinct BH families.
+    When all three optional fields are empty (default), the produced ID is
+    identical to pre-T1 IDs — existing callers continue to work unchanged.
+
+    Position-prefix grammar (M1 anti-collision): optional fields are appended
+    with typed prefixes ("snap=", "src=", "rgm=") so that
+        make_edge_family_id(decision_snapshot_id="X")
+    is NEVER byte-identical to
+        make_edge_family_id(source="X")
+    preventing silent shared BH FDR budgets across distinct families.
+
+    Grammar with all optional fields:
+        "edge|{cycle_mode}|{city}|{target_date}|{metric}|{strategy_key}|{discovery_mode}|snap={snap}|src={source}|rgm={regime}"
 
     Raises:
         ValueError: if strategy_key is falsy (empty string or None). An edge
@@ -118,11 +136,11 @@ def make_edge_family_id(
         )
     parts = ["edge", cycle_mode, city, target_date, temperature_metric, strategy_key, discovery_mode]
     if decision_snapshot_id:
-        parts.append(decision_snapshot_id)
+        parts.append(f"snap={decision_snapshot_id}")
     if source:
-        parts.append(source)
+        parts.append(f"src={source}")
     if regime:
-        parts.append(regime)
+        parts.append(f"rgm={regime}")
     return "|".join(parts)
 
 

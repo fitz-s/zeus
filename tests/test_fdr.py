@@ -276,7 +276,7 @@ class TestSelectionFamilySubstrate:
             strategy_key="center_buy",
             discovery_mode="opening_hunt",
             decision_snapshot_id="snap-1",
-        ) == "edge|opening_hunt|NYC|2026-04-01|high|center_buy|opening_hunt|snap-1"
+        ) == "edge|opening_hunt|NYC|2026-04-01|high|center_buy|opening_hunt|snap=snap-1"
 
     def test_bh_mask_uses_full_tested_family(self):
         mask = benjamini_hochberg_mask([0.001, 0.020, 0.080, 0.500], q=0.10)
@@ -394,7 +394,7 @@ class TestSelectionFamilySubstrate:
         assert result == {"status": "written", "families": 1, "hypotheses": 3}
         # Phase 1 (2026-04-16): hypothesis-scope IDs now carry "hyp|" prefix.
         # S4 R9 P10B: temperature_metric inserted after target_date.
-        assert family["family_id"] == "hyp|opening_hunt|NYC|2026-04-01|high|opening_hunt|snap-1"
+        assert family["family_id"] == "hyp|opening_hunt|NYC|2026-04-01|high|opening_hunt|snap=snap-1"
         family_meta = json.loads(family["meta_json"])
         assert family_meta["active_fdr_selected"] == 1
         assert family_meta["passed_prefilter"] == 2
@@ -726,7 +726,7 @@ class TestSelectionFamilySubstrate:
         assert result == {"status": "written", "families": 1, "hypotheses": 2}
         # Phase 1 (2026-04-16): hypothesis-scope IDs now carry "hyp|" prefix.
         # S4 R9 P10B: temperature_metric inserted after target_date.
-        assert family_ids == ["hyp|update_reaction|NYC|2026-04-01|high|update_reaction|snap-1"]
+        assert family_ids == ["hyp|update_reaction|NYC|2026-04-01|high|update_reaction|snap=snap-1"]
         assert {meta["hypothesis_strategy_key"] for meta in hypothesis_meta} == {
             "center_buy",
             "shoulder_sell",
