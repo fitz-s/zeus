@@ -1,17 +1,22 @@
 #!/usr/bin/env python3
 # Created: 2026-05-17
-# Last reused or audited: 2026-05-17
+# Lifecycle: created=2026-05-17; last_reviewed=2026-05-20; last_reused=2026-05-20
+# Last reused or audited: 2026-05-20
+# Purpose: Live rolling-window writer for observation_instants_v2 WU/OGIMET hourly rows.
+# Reuse: Run when ingest_main obs_v2 live-tick, hourly payload identity, or obs_v2 writer relationships change.
 # Authority basis: docs/operations/task_2026-05-17_post_karachi_remediation/F44_INVESTIGATION.md
 #   Root cause H2: observation_instants_v2 had no live-tick writer. This script provides the
 #   rolling-window live ingest for WU_ICAO and OGIMET_METAR cities. HKO_NATIVE (Hong Kong)
 #   is handled by the existing scripts/hko_ingest_tick.py --project-only path.
+#   2026-05-20 live stability: payload_hash includes hourly extrema material values.
 """Live rolling-window ingest for observation_instants_v2.
 
 Fetches the last N days of hourly observations for all non-HKO cities
 and writes through the typed v2 writer (A1/A2/A6 enforcement).
 
 Designed for hourly cron or ingest_main.py scheduler invocation.
-Idempotent: the writer uses INSERT OR REPLACE on UNIQUE(city, source, utc_timestamp).
+Idempotent: the writer preserves the first current row for a natural key and
+records later different payload hashes in revision history.
 
 Usage
 -----
@@ -164,6 +169,9 @@ def _hourly_obs_to_v2_row(
             "utc_timestamp": obs.utc_timestamp,
             "hour_max_raw_ts": obs.hour_max_raw_ts,
             "hour_min_raw_ts": obs.hour_min_raw_ts,
+            "hour_max_temp": obs.hour_max_temp,
+            "hour_min_temp": obs.hour_min_temp,
+            "temp_unit": obs.temp_unit,
             "observation_count": obs.observation_count,
         }),
         "payload_scope": "obs_v2_hour_bucket_source_identity",

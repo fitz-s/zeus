@@ -1,7 +1,8 @@
 # Created: 2026-04-21
-# Lifecycle: created=2026-04-21; last_reviewed=2026-04-25; last_reused=2026-04-25
-# Last reused/audited: 2026-05-02
-# Authority basis: plan v3 antibodies A1/A2; P1 obs_v2 provenance identity packet.
+# Lifecycle: created=2026-04-21; last_reviewed=2026-05-20; last_reused=2026-05-20
+# Last reused/audited: 2026-05-20
+# Authority basis: plan v3 antibodies A1/A2; P1 obs_v2 provenance identity packet;
+#                  2026-05-20 live tick payload hash material-extrema repair.
 # Purpose: Pin observation_instants_v2 writer provenance and source-role semantics.
 # Reuse: Inspect P1.2 packet, tier_resolver registry, and test topology first.
 # Authority basis: plan v3 antibodies A1/A2 (.omc/plans/observation-instants-
@@ -469,6 +470,47 @@ def test_insert_rows_rejects_reused_payload_hash_with_changed_material_fields(me
     ).fetchone()
     assert temp == 30.0
     assert revision_count == 0
+
+
+def test_live_tick_payload_hash_changes_with_hourly_extrema_material_values():
+    """RELATIONSHIP: changed WU extrema -> changed obs_v2 payload_hash."""
+    from scripts.obs_v2_live_tick import _hourly_obs_to_v2_row
+    from src.data.wu_hourly_client import HourlyObservation
+
+    base = dict(
+        city="Chicago",
+        target_date="2026-05-20",
+        local_hour=8.0,
+        local_timestamp="2026-05-20T08:00:00-05:00",
+        utc_timestamp="2026-05-20T13:00:00+00:00",
+        utc_offset_minutes=-300,
+        dst_active=1,
+        is_ambiguous_local_hour=0,
+        is_missing_local_hour=0,
+        time_basis="utc_hour_bucket_extremum",
+        hour_max_temp=71.0,
+        hour_min_temp=69.0,
+        hour_max_raw_ts="2026-05-20T13:00:00+00:00",
+        hour_min_raw_ts="2026-05-20T13:00:00+00:00",
+        temp_unit="F",
+        station_id="KORD",
+        observation_count=1,
+    )
+    row_a = _hourly_obs_to_v2_row(
+        HourlyObservation(**base),
+        imported_at="2026-05-20T14:00:00+00:00",
+        tier_name="WU_ICAO",
+    )
+    row_b = _hourly_obs_to_v2_row(
+        HourlyObservation(**{**base, "hour_min_temp": 68.0}),
+        imported_at="2026-05-20T14:01:00+00:00",
+        tier_name="WU_ICAO",
+    )
+
+    hash_a = json.loads(row_a.provenance_json)["payload_hash"]
+    hash_b = json.loads(row_b.provenance_json)["payload_hash"]
+
+    assert hash_a != hash_b
 
 
 def test_insert_rows_rolls_back_revision_history_on_failure(mem_db):

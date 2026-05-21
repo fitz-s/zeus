@@ -85,7 +85,7 @@ def _atomic_write_status_payload(payload: dict) -> None:
 
 
 def write_cycle_pulse(cycle_summary: dict | None = None) -> None:
-    """Update the live progress timestamp without running the full read model."""
+    """Update live progress plus the minimal DB-derived runtime read model."""
 
     generated_at = datetime.now(timezone.utc).isoformat()
     prior: dict = {}
@@ -99,8 +99,15 @@ def write_cycle_pulse(cycle_summary: dict | None = None) -> None:
             prior = {}
     status = dict(prior)
     status["timestamp"] = generated_at
+    status["process"] = {
+        "pid": os.getpid(),
+        "mode": get_mode(),
+        "version": "zeus_v2",
+        "pulse_only": True,
+    }
     if cycle_summary is not None:
         status["cycle"] = dict(cycle_summary)
+    _refresh_minimal_runtime_read_model_for_status(status)
     try:
         status["execution_capability"] = _get_execution_capability_status()
     except Exception as exc:
@@ -132,6 +139,94 @@ def write_cycle_pulse(cycle_summary: dict | None = None) -> None:
     _atomic_write_status_payload(status)
 
 
+def _refresh_minimal_runtime_read_model_for_status(status: dict) -> None:
+    """Refresh portfolio/runtime slices that make top-level freshness meaningful."""
+
+    conn = None
+    try:
+        conn = get_trade_connection_with_world()
+        position_view = query_position_current_status_view(conn)
+    except Exception as exc:
+        logger.warning(
+            "status_summary: minimal runtime read-model pulse refresh failed: %s",
+            exc,
+            exc_info=True,
+        )
+        risk = status.setdefault("risk", {})
+        if isinstance(risk, dict):
+            risk["infrastructure_level"] = "RED"
+            issues = risk.setdefault("infrastructure_issues", [])
+            if isinstance(issues, list) and "position_current_pulse_query_error" not in issues:
+                issues.append("position_current_pulse_query_error")
+        return
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+    portfolio = status.setdefault("portfolio", {})
+    if not isinstance(portfolio, dict):
+        portfolio = {}
+        status["portfolio"] = portfolio
+    portfolio["open_positions"] = int(position_view.get("open_positions", 0))
+    portfolio["total_exposure_usd"] = round(
+        float(position_view.get("total_exposure_usd", 0.0) or 0.0),
+        2,
+    )
+    portfolio["unrealized_pnl"] = round(float(position_view.get("unrealized_pnl", 0.0) or 0.0), 2)
+    portfolio["positions"] = list(position_view.get("positions", []))
+    effective_bankroll = portfolio.get("effective_bankroll") or portfolio.get("bankroll")
+    try:
+        effective_bankroll_f = float(effective_bankroll)
+    except (TypeError, ValueError):
+        effective_bankroll_f = 0.0
+    portfolio["heat_pct"] = (
+        round((float(portfolio["total_exposure_usd"]) / effective_bankroll_f) * 100, 1)
+        if effective_bankroll_f > 0
+        else 0.0
+    )
+    status["runtime"] = {
+        "chain_state_counts": dict(position_view.get("chain_state_counts", {})),
+        "exit_state_counts": dict(position_view.get("exit_state_counts", {})),
+        "unverified_entries": int(position_view.get("unverified_entries", 0)),
+        "day0_positions": int(position_view.get("day0_positions", 0)),
+        "pulse_refreshed": True,
+    }
+    strategy = status.setdefault("strategy", {})
+    if not isinstance(strategy, dict):
+        strategy = {}
+        status["strategy"] = strategy
+    open_by_strategy: dict[str, dict[str, float]] = {}
+    for position in position_view.get("positions", []):
+        if not isinstance(position, dict):
+            continue
+        strategy_key = str(position.get("strategy") or "unclassified")
+        bucket = open_by_strategy.setdefault(
+            strategy_key,
+            {"open_positions": 0.0, "open_exposure_usd": 0.0, "unrealized_pnl": 0.0},
+        )
+        bucket["open_positions"] += 1
+        bucket["open_exposure_usd"] += float(
+            position.get("effective_cost_basis_usd")
+            if position.get("effective_cost_basis_usd") is not None
+            else position.get("size_usd", 0.0)
+            or 0.0
+        )
+        bucket["unrealized_pnl"] += float(position.get("unrealized_pnl", 0.0) or 0.0)
+    for strategy_key, open_metrics in open_by_strategy.items():
+        bucket = strategy.setdefault(strategy_key, {})
+        if isinstance(bucket, dict):
+            bucket["open_positions"] = int(open_metrics["open_positions"])
+            bucket["open_exposure_usd"] = round(open_metrics["open_exposure_usd"], 2)
+            bucket["unrealized_pnl"] = round(open_metrics["unrealized_pnl"], 2)
+            bucket["total_pnl"] = round(
+                float(bucket.get("realized_pnl", 0.0) or 0.0) + bucket["unrealized_pnl"],
+                2,
+            )
+
+
 def _refresh_current_open_entry_orders_for_status(status: dict) -> None:
     """Refresh the cheap order-truth slice when a pulse marks status fresh."""
 
@@ -161,9 +256,10 @@ def _refresh_current_open_entry_orders_for_status(status: dict) -> None:
                 conn.close()
             except Exception:
                 pass
-    execution = status.setdefault("execution", {})
-    if isinstance(execution, dict):
-        execution["current_open_entry_orders"] = current_open_entry_orders
+    status["execution"] = {
+        "pulse_only": True,
+        "current_open_entry_orders": current_open_entry_orders,
+    }
 
 
 def _enum_text(value, default: str) -> str:

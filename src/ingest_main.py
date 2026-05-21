@@ -1,6 +1,7 @@
-# Lifecycle: created=2026-04-30; last_reviewed=2026-05-14; last_reused=2026-05-14
+# Lifecycle: created=2026-04-30; last_reviewed=2026-05-20; last_reused=2026-05-20
 # Authority basis: docs/operations/task_2026-05-14_data_daemon_live_efficiency/DATA_DAEMON_LIVE_EFFICIENCY_REFACTOR_PLAN.md
-#   Phase 2 legacy OpenData mutual exclusion with forecast-live-daemon.
+#   Phase 2 legacy OpenData mutual exclusion with forecast-live-daemon; 2026-05-20
+#   live stability hotfix keeps SIGTERM scheduler shutdown exit code clean.
 """Zeus data-ingest daemon entry point.
 
 Runs all K2 ingest jobs and supporting cycles on an independent APScheduler.
@@ -76,12 +77,23 @@ def _graceful_shutdown(signum, frame) -> None:
         "SIGTERM_RECEIVED pid=%s ppid=%s elapsed=%ss",
         os.getpid(), os.getppid(), int(time.monotonic() - _PROCESS_START),
     )
-    if _scheduler is not None:
-        try:
-            _scheduler.shutdown(wait=True)
-        except Exception as exc:
-            logger.warning("Scheduler shutdown error: %s", exc)
+    try:
+        _shutdown_scheduler_if_running(_scheduler, wait=True)
+    except Exception as exc:
+        logger.warning("Scheduler shutdown error: %s", exc)
     sys.exit(0)
+
+
+def _shutdown_scheduler_if_running(scheduler: Any | None, *, wait: bool = True) -> None:
+    """Stop APScheduler during process exit without converting SIGTERM to exit 1."""
+    if scheduler is None:
+        return
+    from apscheduler.schedulers.base import SchedulerNotRunningError
+
+    try:
+        scheduler.shutdown(wait=wait)
+    except SchedulerNotRunningError:
+        logger.info("Scheduler already stopped during shutdown")
 
 
 # ---------------------------------------------------------------------------
@@ -1632,7 +1644,7 @@ def main() -> None:
         _scheduler.start()
     except (KeyboardInterrupt, SystemExit):
         logger.info("Zeus data-ingest daemon shutting down")
-        _scheduler.shutdown()
+        _shutdown_scheduler_if_running(_scheduler, wait=True)
 
 
 if __name__ == "__main__":

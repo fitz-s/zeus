@@ -1,7 +1,8 @@
 # Created: 2026-05-19
-# Last reused or audited: 2026-05-19
+# Last reused or audited: 2026-05-20
 # Authority basis: PR 6 WAVE_B_PR_3_6_FIELD_MAP.md row 16; pr36_scaffold.md BLOCKING REVISION 5;
 #   operator brief 2026-05-19 auto-wrap session; .omc/plans/2026-05-19-auto-wrap-post-redeem.md
+#   2026-05-20 live readiness repair: wrap confirmation balance refresh must stay behind V2 adapter boundary.
 """Durable USDC.e → pUSD wrap command states for autonomous post-redeem wrapping.
 
 State machine shape (WRAP path only; UNWRAP not used in this implementation):
@@ -318,20 +319,10 @@ def reconcile_pending_wraps(
             )
             # CLOB ledger refresh on wrap confirmation.
             try:
-                try:
-                    from py_clob_client.clob_types import BalanceAllowanceParams, AssetType
-                    params = BalanceAllowanceParams(
-                        asset_type=AssetType.COLLATERAL,
-                        signature_type=adapter.signature_type,
-                    )
-                except ImportError:
-                    # py_clob_client not installed (test env or bare deployment);
-                    # call with None — adapter must tolerate None or handle internally.
-                    params = None
-                adapter.update_balance_allowance(params)
+                _refresh_collateral_after_wrap_confirmation(adapter)
             except Exception as refresh_exc:  # noqa: BLE001
                 # Fail-open: wrap is confirmed, balance refresh is best-effort.
-                # The operator can re-run adapter.update_balance_allowance manually.
+                # The operator can re-run a collateral refresh manually.
                 import logging
                 logging.getLogger(__name__).warning(
                     "reconcile_pending_wraps: WRAP_CONFIRMED command_id=%s "
@@ -340,6 +331,19 @@ def reconcile_pending_wraps(
                 )
         results.append(get_command(command_id, conn))
     return results
+
+
+def _refresh_collateral_after_wrap_confirmation(adapter: Any) -> None:
+    """Refresh collateral facts after WRAP_CONFIRMED without importing SDK types here."""
+    update_balance_allowance = getattr(adapter, "update_balance_allowance", None)
+    if callable(update_balance_allowance):
+        update_balance_allowance(None)
+        return
+    get_collateral_payload = getattr(adapter, "get_collateral_payload", None)
+    if callable(get_collateral_payload):
+        get_collateral_payload()
+        return
+    raise AttributeError("adapter exposes neither update_balance_allowance nor get_collateral_payload")
 
 
 def _read_usdce_balance(w3: Any, usdce_address: str, safe_address: str) -> int:
