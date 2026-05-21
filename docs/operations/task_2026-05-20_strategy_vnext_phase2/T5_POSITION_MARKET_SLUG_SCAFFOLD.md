@@ -66,11 +66,11 @@ Per ULTRAPLAN §1 T5 note: constructors at:
 |---|---|---|
 | JSON round-trip | `tests/test_position_market_slug_persistence.py` | GREEN (reflection path auto-flows) |
 | Backward-compat (v1 load) | `tests/test_position_market_slug_backward_compat.py` | GREEN (default=None) |
-| nowcast wiring gate | `tests/test_monitor_refresh_nowcast_wiring.py` | XFAIL strict (stub, no write_nowcast_run call) |
+| nowcast wiring gate | `tests/test_monitor_refresh_nowcast_wiring.py` | GREEN (write_nowcast_run wired, xfail removed, PR #236) |
 
-The RED/XFAIL is on `test_nowcast_write_called_when_gate_passes`: the stub emits only a
-DEBUG log; `write_nowcast_run` is not imported or called yet. Remove xfail when
-`fit_run_id` plumbing lands (Phase 2 T5 GREEN).
+`test_nowcast_write_called_when_gate_passes` is GREEN: `write_nowcast_run` is imported lazily,
+`read_latest_platt_fit` is called to obtain `fit_run_id`, and the real DB write fires with all
+required kwargs. xfail removed in the Phase 2 T5 GREEN commit (`9b76f8ba29`).
 
 ---
 

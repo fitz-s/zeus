@@ -1,6 +1,9 @@
 # Created: 2026-05-20
-# Last reused or audited: 2026-05-20
+# Last reused or audited: 2026-05-21
 # Authority basis: PHASE_2_ULTRAPLAN.md §8.2 — Position.market_slug JSON round-trip
+# Lifecycle: created=2026-05-20; last_reviewed=2026-05-21; last_reused=never
+# Purpose: T5 antibody — Position.market_slug JSON persistence and round-trip.
+# Reuse: Run when Position dataclass fields, save_portfolio, or load_portfolio change.
 """
 T5 antibody: Position.market_slug JSON round-trip preservation.
 
@@ -15,8 +18,6 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-
-import pytest
 
 from src.state.portfolio import Position, PortfolioState, save_portfolio, _load_portfolio_json_payload
 
@@ -57,7 +58,7 @@ def test_save_portfolio_writes_market_slug(tmp_path: Path) -> None:
     save_portfolio(state, path=out_path)
 
     raw = json.loads(out_path.read_text())
-    positions = raw.get("positions") or raw  # handle both list and dict payloads
+    positions = raw.get("positions", raw)  # handle both list and dict payloads
     if isinstance(positions, dict):
         positions = list(positions.values())
     found = next((p for p in positions if p.get("trade_id") == "trade-t5-001"), None)
@@ -75,7 +76,7 @@ def test_json_round_trip_preserves_market_slug(tmp_path: Path) -> None:
     save_portfolio(state, path=out_path)
 
     payload = _load_portfolio_json_payload(out_path)
-    raw_positions = payload.get("positions") or payload
+    raw_positions = payload.get("positions", payload)
     if isinstance(raw_positions, dict):
         raw_positions = list(raw_positions.values())
     found = next((p for p in raw_positions if p.get("trade_id") == "trade-t5-001"), None)

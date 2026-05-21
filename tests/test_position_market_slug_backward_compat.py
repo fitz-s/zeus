@@ -1,6 +1,9 @@
 # Created: 2026-05-20
-# Last reused or audited: 2026-05-20
+# Last reused or audited: 2026-05-21
 # Authority basis: PHASE_2_ULTRAPLAN.md §8.4 — backward-compat antibody
+# Lifecycle: created=2026-05-20; last_reviewed=2026-05-21; last_reused=never
+# Purpose: T5 backward-compat antibody — v1-vintage positions.json without market_slug loads cleanly.
+# Reuse: Run when Position dataclass fields or load_portfolio backward-compat path changes.
 """
 T5 backward-compat antibody: load v1-vintage positions.json (without market_slug)
 → Position.market_slug defaults to None → round-trip stable.
@@ -21,8 +24,6 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-
-import pytest
 
 from src.state.portfolio import Position, PortfolioState, save_portfolio, _load_portfolio_json_payload
 
@@ -54,7 +55,7 @@ def test_v1_position_loads_with_market_slug_none(tmp_path: Path) -> None:
     _write_v1_positions_json(path)
 
     payload = _load_portfolio_json_payload(path)
-    raw_positions = payload.get("positions") or payload
+    raw_positions = payload.get("positions", payload)
     if isinstance(raw_positions, dict):
         raw_positions = list(raw_positions.values())
 
@@ -83,7 +84,7 @@ def test_v1_round_trip_stable(tmp_path: Path) -> None:
     from dataclasses import fields as dc_fields
 
     payload = _load_portfolio_json_payload(path)
-    raw_positions = payload.get("positions") or payload
+    raw_positions = payload.get("positions", payload)
     if isinstance(raw_positions, dict):
         raw_positions = list(raw_positions.values())
     found = next((p for p in raw_positions if p.get("trade_id") == "trade-v1-001"), None)
@@ -98,11 +99,18 @@ def test_v1_round_trip_stable(tmp_path: Path) -> None:
     save_portfolio(state, path=out_path)
 
     payload2 = _load_portfolio_json_payload(out_path)
-    raw2 = payload2.get("positions") or payload2
+    raw2 = payload2.get("positions", payload2)
     if isinstance(raw2, dict):
         raw2 = list(raw2.values())
     found2 = next((p for p in raw2 if p.get("trade_id") == "trade-v1-001"), None)
     assert found2 is not None
+    # Assert JSON explicitly has market_slug key with null value (no silent drop).
+    assert "market_slug" in found2, (
+        "save_portfolio must not drop market_slug=None — field must appear as null in JSON"
+    )
+    assert found2["market_slug"] is None, (
+        f"Expected market_slug=null in saved JSON, got {found2['market_slug']!r}"
+    )
 
     filtered2 = {k: v for k, v in found2.items() if k in position_fields}
     pos2 = Position(**filtered2)

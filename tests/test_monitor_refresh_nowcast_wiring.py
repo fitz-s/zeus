@@ -1,6 +1,9 @@
 # Created: 2026-05-20
 # Last reused or audited: 2026-05-21
 # Authority basis: PHASE_2_ULTRAPLAN.md §8.2 + §8.3 — monitor_refresh nowcast wiring
+# Lifecycle: created=2026-05-20; last_reviewed=2026-05-21; last_reused=never
+# Purpose: T5 GREEN antibody — _maybe_write_day0_nowcast gate conditions + write_nowcast_run call.
+# Reuse: Run when _maybe_write_day0_nowcast, write_nowcast_run wiring, or day0 gate logic changes.
 """
 T5 GREEN antibody: _maybe_write_day0_nowcast call-site invocation.
 
@@ -15,9 +18,7 @@ Gate conditions tested:
 
 from __future__ import annotations
 
-from unittest.mock import patch, MagicMock, call
-
-import pytest
+from unittest.mock import patch, MagicMock
 
 from src.engine.monitor_refresh import _maybe_write_day0_nowcast
 from src.state.portfolio import Position
@@ -80,12 +81,21 @@ def test_nowcast_write_called_when_gate_passes() -> None:
             temperature_metric=MetricIdentity.from_raw("high"),
             target_d=date(2026, 6, 15),
             observation_time="2026-06-15T14:00:00",
-            conn=None,
         )
         assert mock_write.called, (
             "_maybe_write_day0_nowcast must call write_nowcast_run when "
             "market_slug is set, hours_remaining <= 6, and fit is available"
         )
+        # Verify the wiring passes the expected contract arguments.
+        kwargs = mock_write.call_args.kwargs
+        assert kwargs["market_slug"] == "boston-2026-06-15-high"
+        assert kwargs["fit_run_id"] == "test-fit-001"
+        assert kwargs["temperature_metric"] == "high"
+        assert kwargs["target_date"] == "2026-06-15"
+        assert kwargs["observation_time"] == "2026-06-15T14:00:00"
+        assert kwargs["hours_remaining"] == 4.0
+        assert kwargs["daypart"] == "afternoon"
+        assert kwargs["source"] == "live_nowcast"
 
 
 def test_nowcast_write_skipped_when_market_slug_none() -> None:
@@ -106,7 +116,6 @@ def test_nowcast_write_skipped_when_market_slug_none() -> None:
         temperature_metric=None,
         target_d=date(2026, 6, 15),
         observation_time="2026-06-15T14:00:00",
-        conn=None,
     )
     # If we reach here without exception, the early-return guard works.
 
@@ -128,6 +137,5 @@ def test_nowcast_write_skipped_when_hours_remaining_high() -> None:
         temperature_metric=None,
         target_d=date(2026, 6, 15),
         observation_time="2026-06-15T08:00:00",
-        conn=None,
     )
     # If we reach here without exception, the hours_remaining guard works.

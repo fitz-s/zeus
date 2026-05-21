@@ -998,7 +998,6 @@ def _refresh_day0_observation(
         temperature_metric=temperature_metric,
         target_d=target_d,
         observation_time=_day0_observation_field(obs, "observation_time"),
-        conn=conn,
     )
 
     return current_p_posterior, [*applied, "model_only_posterior", "alpha_posterior"]
@@ -1014,7 +1013,6 @@ def _maybe_write_day0_nowcast(
     temperature_metric: "MetricIdentity",
     target_d: "date",
     observation_time: "str | None",
-    conn: object,
 ) -> None:
     """Attempt a day0_nowcast_runs write if position carries a market_slug and
     hours_remaining <= 6.  Fail-soft: any write error is logged as WARNING
@@ -1087,6 +1085,7 @@ def _maybe_write_day0_nowcast(
             getattr(position, "trade_id", "?"),
             getattr(position, "market_slug", "?"),
             exc,
+            exc_info=True,
         )
 
 
