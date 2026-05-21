@@ -40,6 +40,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import src.engine.evaluator as evaluator_module
 from src.contracts.no_trade_reason import NoTradeReason  # used in fixtures
 from src.engine.evaluator import EdgeDecision
 from src.strategy.family_exclusive_dedup import (
@@ -48,7 +49,13 @@ from src.strategy.family_exclusive_dedup import (
     WeatherFamilyExposure,
     WeatherFamilyKey,
     dedup_mutually_exclusive_families,
+    preselect_single_family_edge_before_kelly,
     weather_family_exposures_from_portfolio,
+)
+from src.engine.evaluator import (
+    _expected_profit_usd_for_edge,
+    _live_entry_economic_floor_rejection,
+    _strategy_entry_price_floor_block_reason,
 )
 from src.contracts.semantic_types import RejectionStage
 from src.types import Bin, BinEdge
@@ -374,6 +381,163 @@ def test_family_portfolio_intent_allows_optimizer_owned_multi_bin_execution() ->
     assert out[0].should_trade is True
     assert out[0].rejection_stage == ""
     assert out[0].rejection_reasons == []
+
+
+def test_family_preselection_happens_before_projected_exposure_mutation() -> None:
+    """Pre-Kelly relationship: only one FDR sibling enters scalar sizing."""
+
+    bins = {s[2]: s for s in _BIN_SPECS}
+    low_price_tail = _bin_edge(bins["26°F or above"], entry_price=0.02, forward_edge=0.02)
+    mid_bin = _bin_edge(bins["22-23°F"], entry_price=0.45, forward_edge=0.07)
+    side_bin = _bin_edge(bins["20-21°F"], entry_price=0.18, forward_edge=0.04)
+
+    selected, dropped = preselect_single_family_edge_before_kelly(
+        [low_price_tail, mid_bin, side_bin],
+        city=CITY,
+        target_date=TARGET_DATE,
+        temperature_metric=METRIC,
+        enabled=True,
+    )
+
+    assert selected == [mid_bin]
+    assert {d.dropped_bin for d in dropped} == {"26°F or above", "20-21°F"}
+    assert all(d.kept_bin == "22-23°F" for d in dropped)
+
+
+def test_family_preselection_is_disabled_without_stage_a_gate() -> None:
+    bins = {s[2]: s for s in _BIN_SPECS}
+    edges = [
+        _bin_edge(bins["20-21°F"], entry_price=0.18, forward_edge=0.04),
+        _bin_edge(bins["22-23°F"], entry_price=0.45, forward_edge=0.07),
+    ]
+
+    selected, dropped = preselect_single_family_edge_before_kelly(
+        edges,
+        city=CITY,
+        target_date=TARGET_DATE,
+        temperature_metric=METRIC,
+        enabled=False,
+    )
+
+    assert selected is edges
+    assert dropped == []
+
+
+def test_one_cent_order_rejected_without_tail_strategy_even_if_venue_min_passes() -> None:
+    bins = {s[2]: s for s in _BIN_SPECS}
+    edge = _bin_edge(bins["26°F or above"], entry_price=0.01, forward_edge=0.04)
+
+    assert _strategy_entry_price_floor_block_reason("opening_inertia", edge) == (
+        "STRATEGY_ENTRY_PRICE_BELOW_LIVE_FLOOR(0.0100<=0.05; strategy=opening_inertia)"
+    )
+
+
+def test_venue_min_order_does_not_override_strategy_economic_floor() -> None:
+    bins = {s[2]: s for s in _BIN_SPECS}
+    edge = _bin_edge(bins["22-23°F"], entry_price=0.20, forward_edge=0.08)
+    expected_profit = _expected_profit_usd_for_edge(
+        edge,
+        notional_usd=0.06,
+        price=0.20,
+    )
+
+    reason = _live_entry_economic_floor_rejection(
+        strategy_key="opening_inertia",
+        edge=edge,
+        submitted_notional_usd=0.06,  # e.g. venue min shares * price passed.
+        expected_profit_usd=expected_profit,
+        final_limit_price=0.20,
+        passive_order=False,
+    )
+
+    assert reason is not None
+    assert reason.startswith("STRATEGY_NOTIONAL_BELOW_LIVE_FLOOR")
+
+
+def test_expected_profit_floor_blocks_tiny_positive_edge_order() -> None:
+    bins = {s[2]: s for s in _BIN_SPECS}
+    edge = _bin_edge(bins["22-23°F"], entry_price=0.20, forward_edge=0.001)
+    expected_profit = _expected_profit_usd_for_edge(
+        edge,
+        notional_usd=1.00,
+        price=0.20,
+    )
+
+    reason = _live_entry_economic_floor_rejection(
+        strategy_key="center_buy",
+        edge=edge,
+        submitted_notional_usd=1.00,
+        expected_profit_usd=expected_profit,
+        final_limit_price=0.20,
+        passive_order=False,
+    )
+
+    assert reason is not None
+    assert reason.startswith("EXPECTED_PROFIT_BELOW_LIVE_FLOOR")
+
+
+def test_final_one_cent_passive_order_requires_tail_authority_and_fill_model() -> None:
+    bins = {s[2]: s for s in _BIN_SPECS}
+    edge = _bin_edge(bins["26°F or above"], entry_price=0.20, forward_edge=0.08)
+
+    reason = _live_entry_economic_floor_rejection(
+        strategy_key="imminent_open_capture",
+        edge=edge,
+        submitted_notional_usd=2.00,
+        expected_profit_usd=0.20,
+        final_limit_price=0.01,
+        passive_order=True,
+        passive_fill_probability=None,
+    )
+
+    assert reason is not None
+    assert reason.startswith("PASSIVE_FILL_PROBABILITY_UNMODELED_FOR_ULTRA_LOW_PRICE")
+
+
+def test_ultra_low_tail_authority_does_not_bypass_passive_fill_model(monkeypatch) -> None:
+    bins = {s[2]: s for s in _BIN_SPECS}
+    edge = _bin_edge(bins["26°F or above"], entry_price=0.20, forward_edge=0.08)
+    monkeypatch.setattr(
+        evaluator_module,
+        "_try_get_strategy_profile",
+        lambda _strategy_key: SimpleNamespace(
+            min_entry_price=0.05,
+            min_strategy_notional_usd=1.00,
+            min_expected_profit_usd=0.05,
+            allow_ultra_low_tail=True,
+        ),
+    )
+
+    reason = _live_entry_economic_floor_rejection(
+        strategy_key="tail_arbitrage",
+        edge=edge,
+        submitted_notional_usd=2.00,
+        expected_profit_usd=0.20,
+        final_limit_price=0.01,
+        passive_order=True,
+        passive_fill_probability=None,
+    )
+
+    assert reason is not None
+    assert reason.startswith("PASSIVE_FILL_PROBABILITY_UNMODELED_FOR_ULTRA_LOW_PRICE")
+
+
+def test_ultra_low_non_passive_order_requires_tail_authority() -> None:
+    bins = {s[2]: s for s in _BIN_SPECS}
+    edge = _bin_edge(bins["26°F or above"], entry_price=0.20, forward_edge=0.08)
+
+    reason = _live_entry_economic_floor_rejection(
+        strategy_key="opening_inertia",
+        edge=edge,
+        submitted_notional_usd=2.00,
+        expected_profit_usd=0.20,
+        final_limit_price=0.01,
+        passive_order=False,
+        passive_fill_probability=None,
+    )
+
+    assert reason is not None
+    assert reason.startswith("ULTRA_LOW_PRICE_NOT_AUTHORIZED")
 
 
 if __name__ == "__main__":  # pragma: no cover

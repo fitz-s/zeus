@@ -1041,6 +1041,26 @@ def _reprice_decision_from_executable_snapshot(
             Decimal(str(corrected_pricing_shadow["candidate_size_usd"]))
         )
         repriced_size = corrected_candidate_size
+    strategy_key_for_live_quality = _resolve_strategy_key(decision)
+    if strategy_key_for_live_quality:
+        from src.engine.evaluator import _live_entry_economic_floor_rejection
+
+        expected_profit_usd = 0.0
+        if final_price > 0.0 and repriced_size > 0.0:
+            expected_profit_usd = max(0.0, repriced_edge) * (repriced_size / final_price)
+        live_quality_rejection = _live_entry_economic_floor_rejection(
+            strategy_key=strategy_key_for_live_quality,
+            edge=decision.edge,
+            submitted_notional_usd=float(repriced_size),
+            expected_profit_usd=float(expected_profit_usd),
+            final_limit_price=float(final_price),
+            passive_order=final_best_ask is None,
+            passive_fill_probability=None,
+        )
+        if live_quality_rejection:
+            raise ValueError(
+                f"EXECUTABLE_LIVE_QUALITY_REJECTED: {live_quality_rejection}"
+            )
     tokens = dict(getattr(decision, "tokens", {}) or {})
 
     decision.edge = replace(
