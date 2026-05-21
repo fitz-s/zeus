@@ -2919,6 +2919,8 @@ def test_day0_candidate_zero_cycle_records_market_phase_frontier(tmp_path, monke
     assert frontier["candidate_frontier"].get("candidate_objects_built", 0) == 0
     assert frontier.get("math_frontier", {}).get("evaluator_candidates", 0) == 0
     assert frontier["terminal_classification"] == "no_markets_after_mode_phase_filter"
+    assert summary["no_market_reason"] == "no_markets_after_mode_phase_filter"
+    assert summary["market_scanner_attempted"] is True
     assert summary["candidates"] == 0
 
 
@@ -3038,6 +3040,94 @@ def test_model_conflict_cycle_records_math_frontier_classification(tmp_path):
     assert frontier["math_frontier"]["evaluator_candidates"] == 1
     assert frontier["math_frontier"]["model_conflict"] == 1
     assert frontier["terminal_classification"] == "signal_conflict"
+
+
+def test_math_no_trade_frontier_publishes_status_reason_proof(tmp_path):
+    from src.contracts.no_trade_reason import NoTradeReason
+
+    conn = get_connection(tmp_path / "math-no-trade-frontier.db")
+    init_schema(conn)
+    artifact = CycleArtifact(mode=DiscoveryMode.OPENING_HUNT.value, started_at="2026-04-02T06:00:00Z")
+    summary = {"candidates": 0, "no_trades": 0}
+    base_market = {
+        "city": NYC,
+        "target_date": "2026-04-03",
+        "hours_since_open": 12.0,
+        "hours_to_resolution": 24.0,
+        "temperature_metric": "high",
+        "market_end_at": "2026-04-03T23:59:00Z",
+        "outcomes": [
+            {"title": "39-40°F", "range_low": 39, "range_high": 40},
+        ],
+    }
+    markets = [
+        {**base_market, "event_id": "evt-math-frontier-1", "slug": "slug-math-frontier-1"},
+        {**base_market, "event_id": "evt-math-frontier-2", "slug": "slug-math-frontier-2"},
+    ]
+    decisions = iter(
+        [
+            [
+                EdgeDecision(
+                    should_trade=False,
+                    rejection_stage="SIGNAL_QUALITY",
+                    rejection_reasons=[NoTradeReason.MODEL_CONFLICT.value],
+                    rejection_reason_enum=NoTradeReason.MODEL_CONFLICT,
+                    rejection_reason_detail="primary forecast conflicts with GFS crosscheck",
+                    decision_id="d-math-frontier-model-conflict",
+                    decision_snapshot_id="snap-math-frontier-model-conflict",
+                )
+            ],
+            [
+                EdgeDecision(
+                    should_trade=False,
+                    rejection_stage="EDGE_FILTER",
+                    rejection_reasons=["edge below threshold"],
+                    rejection_reason_enum=None,
+                    rejection_reason_detail="edge below threshold",
+                    decision_id="d-math-frontier-unclassified",
+                    decision_snapshot_id="snap-math-frontier-unclassified",
+                )
+            ],
+        ]
+    )
+    deps = types.SimpleNamespace(
+        MODE_PARAMS={DiscoveryMode.OPENING_HUNT: {}},
+        find_weather_markets=lambda **kwargs: markets,
+        get_last_scan_authority=lambda: "VERIFIED",
+        DiscoveryMode=DiscoveryMode,
+        logger=types.SimpleNamespace(warning=lambda *args, **kwargs: None, error=lambda *args, **kwargs: None),
+        NoTradeCase=NoTradeCase,
+        MarketCandidate=MarketCandidate,
+        evaluate_candidate=lambda *args, **kwargs: next(decisions),
+        _classify_edge_source=lambda _mode, _edge: "",
+    )
+
+    cycle_runtime.execute_discovery_phase(
+        conn,
+        clob=None,
+        portfolio=PortfolioState(),
+        artifact=artifact,
+        tracker=StrategyTracker(),
+        limits=types.SimpleNamespace(),
+        mode=DiscoveryMode.OPENING_HUNT,
+        summary=summary,
+        entry_bankroll=100.0,
+        decision_time=datetime(2026, 4, 2, 6, 0, tzinfo=timezone.utc),
+        env="shadow",
+        deps=deps,
+    )
+    conn.close()
+
+    frontier = summary["money_path_frontier"]
+    assert frontier["math_frontier"]["evaluator_candidates"] == 2
+    assert frontier["math_frontier"]["should_trade_true_before_family"] == 0
+    assert frontier["math_frontier"]["model_conflict"] == 1
+    assert frontier["terminal_classification"] == "math_rejected_before_family"
+    assert summary["rejection_reason_counts"] == {
+        "model_conflict": 1,
+        "uncategorized": 1,
+    }
+    assert summary["top_no_trade_reasons"] == summary["rejection_reason_counts"]
 
 
 def test_discovery_phase_buffers_forward_market_substrate_until_after_evaluator(monkeypatch, tmp_path):
