@@ -261,23 +261,6 @@ def _buy_entry_price_from_orderbook(token_id: str, orderbook: dict) -> dict[str,
     }
 
 
-def _best_ask_from_clob(clob, token_id: str) -> tuple[float, float]:
-    getter = getattr(clob, "get_best_ask", None)
-    if callable(getter):
-        return getter(token_id)
-
-    orderbook_getter = getattr(clob, "get_orderbook", None)
-    if not callable(orderbook_getter):
-        raise AttributeError("CLOB client does not expose get_best_ask or get_orderbook")
-    from src.data.market_scanner import _top_book_level_decimal
-
-    try:
-        ask, ask_size = _top_book_level_decimal(orderbook_getter(token_id), "asks")
-    except Exception as exc:
-        _raise_empty_orderbook(f"No executable ask for {token_id}: {exc}", exc)
-    return float(ask), float(ask_size)
-
-
 def _buy_entry_price_from_clob(clob, token_id: str) -> dict[str, float | bool | None]:
     """Return conservative BUY entry price without requiring two-sided VWMP.
 
@@ -309,15 +292,10 @@ def _buy_entry_price_from_clob(clob, token_id: str) -> dict[str, float | bool | 
             raise
         if not _is_missing_bid_error(exc):
             raise
-        ask, ask_size = _best_ask_from_clob(clob, token_id)
-        return {
-            "price": float(ask),
-            "bid": None,
-            "ask": float(ask),
-            "bid_size": 0.0,
-            "ask_size": float(ask_size),
-            "ask_only": True,
-        }
+        _raise_empty_orderbook(
+            f"No executable top book for {token_id}: missing bids without single-book ask authority",
+            exc,
+        )
 
 
 @dataclass

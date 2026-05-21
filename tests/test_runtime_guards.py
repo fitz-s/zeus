@@ -869,13 +869,15 @@ def test_entry_evaluator_uses_ask_only_buy_quote_when_yes_bid_is_absent(monkeypa
             return {"offset": 0.0, "lead_days": 1.0}
 
     class AskOnlyClob:
-        def get_best_bid_ask(self, token_id):
-            from src.contracts.exceptions import EmptyOrderbookError
+        def get_orderbook(self, token_id):
+            ask, size = {"yes0": ("0.12", "25"), "yes1": ("0.35", "40"), "yes2": ("0.53", "10")}[token_id]
+            return {"bids": [], "asks": [{"price": ask, "size": size}]}
 
-            raise EmptyOrderbookError(f"No executable top book for {token_id}: CLOB orderbook missing bids")
+        def get_best_bid_ask(self, token_id):
+            raise AssertionError("ask-only entry path must use one CLOB orderbook fetch")
 
         def get_best_ask(self, token_id):
-            return {"yes0": (0.12, 25.0), "yes1": (0.35, 40.0), "yes2": (0.53, 10.0)}[token_id]
+            raise AssertionError("ask-only entry path must not refetch ask depth")
 
     monkeypatch.setattr(
         evaluator_module,
