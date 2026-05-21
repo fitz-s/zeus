@@ -2923,9 +2923,9 @@ class TestRecoveryResolutionTable:
             command_id="cmd-exit",
             order_id="ord-exit",
             trade_id="trade-exit-001",
-            state="MATCHED",
+            state="MINED",
             filled_size="5.11",
-            fill_price="0.45",
+            fill_price="0.37",
         )
         _append_order_fact(
             conn,
@@ -2964,7 +2964,7 @@ class TestRecoveryResolutionTable:
         assert dict(execution) == {
             "command_id": "cmd-exit",
             "shares": 5.11,
-            "fill_price": pytest.approx(0.45),
+            "fill_price": pytest.approx(0.37),
             "venue_status": "FILLED",
             "terminal_exec_status": "filled",
         }

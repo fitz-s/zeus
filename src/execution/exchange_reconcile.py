@@ -2332,7 +2332,7 @@ def _exit_fill_economics_for_command(
             ON latest.trade_id = tf.trade_id
            AND latest.local_sequence = tf.local_sequence
          WHERE tf.command_id = ?
-           AND tf.state = 'CONFIRMED'
+           AND tf.state IN ('MATCHED', 'MINED', 'CONFIRMED')
         """,
         (command_id, command_id),
     ).fetchall()
