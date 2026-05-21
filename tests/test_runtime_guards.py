@@ -13555,6 +13555,43 @@ def test_monitoring_skips_economically_closed_positions(monkeypatch):
     assert summary["monitor_skipped_economic_close"] == 1
 
 
+def test_monitoring_skips_economically_closed_with_stale_exit_pending_missing(monkeypatch):
+    pos = _position(
+        trade_id="econ-close-stale-chain",
+        state="economically_closed",
+        chain_state="exit_pending_missing",
+        exit_state="retry_pending",
+        exit_reason="forward edge failed",
+        exit_price=0.46,
+    )
+    portfolio = PortfolioState(positions=[pos])
+    artifact = cycle_runner.CycleArtifact(mode="test", started_at="2026-01-01T00:00:00Z")
+    summary = {"monitors": 0, "exits": 0}
+
+    class Tracker:
+        def record_exit(self, position):
+            raise AssertionError("economically closed positions should not be admin-closed")
+
+    monkeypatch.setattr(
+        "src.execution.exit_lifecycle.handle_exit_pending_missing",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("stale chain_state must not imply pending_exit")),
+    )
+
+    p_dirty, t_dirty = cycle_runner._execute_monitoring_phase(
+        None,
+        type("LiveClob", (), {})(),
+        portfolio,
+        artifact,
+        Tracker(),
+        summary,
+    )
+
+    assert p_dirty is False
+    assert t_dirty is False
+    assert portfolio.positions == [pos]
+    assert summary["monitor_skipped_economic_close"] == 1
+
+
 def test_economically_closed_position_does_not_count_as_open_exposure():
     portfolio = PortfolioState(
         bankroll=100.0,
