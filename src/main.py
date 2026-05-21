@@ -117,6 +117,11 @@ def _run_mode(mode: DiscoveryMode):
         _write_scheduler_health(f"run_mode:{mode.value}", failed=False)
     except Exception as e:
         logger.error("%s failed: %s", mode.value, e, exc_info=True)
+        _write_scheduler_health(
+            f"run_mode:{mode.value}",
+            failed=True,
+            failure_reason=str(e),
+        )
         try:
             from src.observability.status_summary import write_status
 

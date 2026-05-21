@@ -494,7 +494,7 @@ def _edge_support_index(edge: Any, fallback: int) -> int:
 
 def _portfolio_payoff_for_leg(
     *,
-    outcome_index: int,
+    outcome_support_index: int,
     leg: FamilyPortfolioLeg,
 ) -> float:
     """Return profit per dollar staked for one leg in one family outcome."""
@@ -503,7 +503,7 @@ def _portfolio_payoff_for_leg(
     if cost <= 0.0 or cost >= 1.0:
         return -1.0
     direction = leg.direction.lower()
-    leg_wins = outcome_index == leg.support_index
+    leg_wins = outcome_support_index == leg.support_index
     if direction == "buy_yes":
         return ((1.0 - cost) / cost) if leg_wins else -1.0
     if direction == "buy_no":
@@ -535,21 +535,25 @@ def _score_portfolio_combo(
     leg_weights = tuple(1.0 / len(selected) for _ in selected)
     payoff_rows: list[tuple[float, ...]] = []
     outcome_returns: list[float] = []
-    for outcome_idx, _leg in enumerate(legs):
+    for outcome_leg in legs:
         row = tuple(
-            _portfolio_payoff_for_leg(outcome_index=outcome_idx, leg=selected_leg)
+            _portfolio_payoff_for_leg(
+                outcome_support_index=outcome_leg.support_index,
+                leg=selected_leg,
+            )
             for selected_leg in selected
         )
         payoff_rows.append(row)
         outcome_returns.append(sum(weight * payoff for weight, payoff in zip(leg_weights, row)))
 
-    expected_net_profit = sum(prob * ret for prob, ret in zip(posterior_vector, outcome_returns))
-    expected_log_growth = 0.0
-    for prob, ret in zip(posterior_vector, outcome_returns):
-        growth = 1.0 + log_growth_fraction * ret
-        if growth <= 0.0:
-            return (-math.inf, expected_net_profit, min(outcome_returns), tuple(payoff_rows), posterior_vector, leg_weights)
-        expected_log_growth += prob * math.log(growth)
+    expected_net_profit = (
+        sum(_edge_family_selection_score(leg.edge) for leg in selected)
+        / float(len(selected))
+    )
+    growth = 1.0 + log_growth_fraction * expected_net_profit
+    if growth <= 0.0:
+        return (-math.inf, expected_net_profit, min(outcome_returns), tuple(payoff_rows), posterior_vector, leg_weights)
+    expected_log_growth = math.log(growth)
     return (
         expected_log_growth,
         expected_net_profit,
@@ -573,17 +577,20 @@ def optimize_exclusive_outcome_portfolio(
 
     if not edges:
         return None
-    legs = [
-        FamilyPortfolioLeg(
-            edge=edge,
-            bin_label=_edge_bin_label(edge),
-            support_index=idx,
-            cost=_edge_cost(edge),
-            posterior=_edge_posterior(edge),
-            direction=str(getattr(edge, "direction", "") or ""),
-        )
-        for idx, edge in enumerate(edges)
-    ]
+    legs = sorted(
+        [
+            FamilyPortfolioLeg(
+                edge=edge,
+                bin_label=_edge_bin_label(edge),
+                support_index=_edge_support_index(edge, idx),
+                cost=_edge_cost(edge),
+                posterior=_edge_posterior(edge),
+                direction=str(getattr(edge, "direction", "") or ""),
+            )
+            for idx, edge in enumerate(edges)
+        ],
+        key=lambda leg: (leg.support_index, leg.bin_label),
+    )
     max_legs = max(1, min(int(max_legs or 1), len(legs)))
     min_legs = max(1, min(int(min_legs or 1), max_legs))
     best_key: tuple[float, float, float, float, tuple[int, ...]] | None = None
@@ -606,9 +613,9 @@ def optimize_exclusive_outcome_portfolio(
                 _edge_family_selection_score(legs[idx].edge) for idx in selected_indexes
             ) / float(width)
             key = (
-                edge_selection_utility,
                 expected_log_growth,
                 expected_net_profit,
+                edge_selection_utility,
                 -float(width),
                 tuple(-_edge_support_index(legs[idx].edge, idx) for idx in selected_indexes),
             )

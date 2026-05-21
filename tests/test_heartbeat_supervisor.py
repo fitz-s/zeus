@@ -494,6 +494,26 @@ def test_scheduler_health_tracks_mode_skips_as_business_liveness(monkeypatch, tm
     assert data["run_mode:opening_hunt"]["consecutive_skips"] == 0
 
 
+def test_run_mode_records_mode_specific_failure(monkeypatch):
+    from src import main
+    from src.engine.discovery_mode import DiscoveryMode
+
+    events = []
+
+    def _record(job_name, **kwargs):
+        events.append((job_name, kwargs))
+
+    monkeypatch.setattr(main, "_write_scheduler_health", _record)
+    monkeypatch.setattr(main, "run_cycle", lambda _mode: (_ for _ in ()).throw(RuntimeError("boom")))
+
+    main._run_mode(DiscoveryMode.OPENING_HUNT)
+
+    assert (
+        "run_mode:opening_hunt",
+        {"failed": True, "failure_reason": "boom"},
+    ) in events
+
+
 def test_venue_heartbeat_loop_continues_after_failed_tick(monkeypatch):
     from src import main
 

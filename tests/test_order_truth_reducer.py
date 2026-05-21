@@ -1,5 +1,7 @@
-# Created: 2026-05-21
-# Last reused or audited: 2026-05-21
+# Lifecycle: created=2026-05-21; last_reviewed=2026-05-21; last_reused=2026-05-21
+# Purpose: Relationship antibody for monotonic venue order truth reduction.
+# Reuse: Run when changing venue order fact precedence, command recovery,
+#        exchange reconciliation, or terminal/no-fill projection semantics.
 # Authority basis: user live endpoint asymmetry analysis 2026-05-21; monotonic venue order truth reducer
 
 from __future__ import annotations

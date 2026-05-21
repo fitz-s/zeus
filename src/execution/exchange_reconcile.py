@@ -946,12 +946,19 @@ def _ensure_entry_fill_order_fact(
     remaining_text = (
         _decimal_text(reduced.remaining_size)
         if reduced.remaining_size is not None
-        else "0"
+        else None
     )
     matched_text = _decimal_text(reduced.matched_size)
+    latest_remaining_matches = (
+        latest is not None
+        and (
+            (latest["remaining_size"] is None and remaining_text is None)
+            or _same_decimal_value(latest["remaining_size"], remaining_text)
+        )
+    )
     if latest is not None and (
         str(latest["state"] or "") == state
-        and _same_decimal_value(latest["remaining_size"], remaining_text)
+        and latest_remaining_matches
         and _same_decimal_value(latest["matched_size"], matched_text)
     ):
         return
