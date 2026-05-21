@@ -24,6 +24,8 @@ schema_version CHECK includes 14, 15, 16, 17, 18, 19, 20, 21, 22:
   - 19: executable snapshot tradeability evidence, no no_trade_events DDL change.
   - 20: P0-3 live release proof — schema_compatibility marks degraded
         compatibility rows so live learning/report trust can exclude them.
+  - 21, 22: current live-release schema/version bumps; no additional DDL
+        beyond the compatibility marker and expanded CHECK range.
 
 Note: _REASON_VALUES_SQL is enum-derived (iterates NoTradeReason) so adding
 SHOULDER_* members to the enum automatically extends the reason CHECK constraint —
@@ -106,7 +108,7 @@ def _rebuild_stale_no_trade_events_table(conn: sqlite3.Connection) -> None:
     Fires when the existing table SQL is missing:
     - MUTUALLY_EXCLUSIVE_FAMILY_DEDUP (v16 expansion), OR
     - SHOULDER_STRESS_FAIL (v18 expansion — Phase 3 T2), OR
-    - schema_version IN (14, 15, 16, 17, 18, 19, 20) check, OR
+    - current schema_version CHECK range, OR
     - schema_compatibility marker column.
 
     The rebuild is idempotent: if both flags and version range are present,
@@ -116,10 +118,11 @@ def _rebuild_stale_no_trade_events_table(conn: sqlite3.Connection) -> None:
         "SELECT sql FROM sqlite_master WHERE type='table' AND name='no_trade_events'"
     ).fetchone()
     table_sql = str(row[0] if row else "")
+    current_version_check = "14, 15, 16, 17, 18, 19, 20, 21, 22"
     if (
         NoTradeReason.MUTUALLY_EXCLUSIVE_FAMILY_DEDUP.value in table_sql
         and NoTradeReason.SHOULDER_STRESS_FAIL.value in table_sql
-        and "14, 15, 16, 17, 18, 19, 20" in table_sql
+        and current_version_check in table_sql
         and "schema_compatibility" in table_sql
     ):
         return
@@ -149,8 +152,8 @@ def _rebuild_stale_no_trade_events_table(conn: sqlite3.Connection) -> None:
             reason_detail,
             observed_at,
             CASE
-                WHEN schema_version IN (14, 15, 16, 17, 18, 19, 20) THEN schema_version
-                ELSE 20
+                WHEN schema_version IN (14, 15, 16, 17, 18, 19, 20, 21, 22) THEN schema_version
+                ELSE 22
             END,
             schema_compatibility
         FROM no_trade_events
