@@ -619,6 +619,35 @@ def test_confirmed_event_finalizes_trade_and_permits_canonical_pnl(conn):
     assert _command_state(conn) == "FILLED"
 
 
+def test_confirmed_event_finalizes_when_venue_order_fact_exhausts_normalized_size(conn):
+    """Relationship: venue remaining=0 outranks submitted-size rounding residue."""
+    ingestor = _ingestor(conn)
+    ingestor.handle_message(
+        _order_message(
+            type="UPDATE",
+            size=None,
+            original_size="9.99",
+            size_matched="9.99",
+        )
+    )
+
+    result = ingestor.handle_message(
+        _trade_message(
+            "CONFIRMED",
+            size="9.99",
+            transaction_hash="0xvenue-normalized",
+            confirmation_count=3,
+        )
+    )
+
+    assert result["command_event"] == "FILL_CONFIRMED"
+    assert _command_state(conn) == "FILLED"
+    order_fact = _rows(conn, "venue_order_facts")[-1]
+    assert order_fact["state"] == "MATCHED"
+    assert Decimal(order_fact["remaining_size"]) == Decimal("0")
+    assert Decimal(order_fact["matched_size"]) == Decimal("9.99")
+
+
 def test_duplicate_trade_messages_are_idempotent_at_latest_lifecycle_state(conn):
     ingestor = _ingestor(conn)
     ingestor.handle_message(_trade_message("MATCHED", size="10"))

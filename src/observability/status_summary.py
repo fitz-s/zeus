@@ -98,7 +98,6 @@ def write_cycle_pulse(cycle_summary: dict | None = None) -> None:
         except Exception:
             prior = {}
     status = dict(prior)
-    status["timestamp"] = generated_at
     status["process"] = {
         "pid": os.getpid(),
         "mode": get_mode(),
@@ -107,7 +106,7 @@ def write_cycle_pulse(cycle_summary: dict | None = None) -> None:
     }
     if cycle_summary is not None:
         status["cycle"] = dict(cycle_summary)
-    _refresh_minimal_runtime_read_model_for_status(status)
+    minimal_refresh_ok = _refresh_minimal_runtime_read_model_for_status(status)
     try:
         status["execution_capability"] = _get_execution_capability_status()
     except Exception as exc:
@@ -135,11 +134,32 @@ def write_cycle_pulse(cycle_summary: dict | None = None) -> None:
             },
         }
     _refresh_current_open_entry_orders_for_status(status)
-    status = annotate_truth_payload(status, STATUS_PATH, generated_at=generated_at, authority="VERIFIED")
+    if minimal_refresh_ok:
+        status["timestamp"] = generated_at
+        status = annotate_truth_payload(status, STATUS_PATH, generated_at=generated_at, authority="VERIFIED")
+    else:
+        _preserve_prior_status_freshness_after_pulse_failure(status, prior)
     _atomic_write_status_payload(status)
 
 
-def _refresh_minimal_runtime_read_model_for_status(status: dict) -> None:
+def _preserve_prior_status_freshness_after_pulse_failure(status: dict, prior: dict) -> None:
+    """Fail closed: a failed truth refresh must not mint a fresh status timestamp."""
+
+    prior_timestamp = prior.get("timestamp") if isinstance(prior, dict) else None
+    if prior_timestamp:
+        status["timestamp"] = prior_timestamp
+    else:
+        status.pop("timestamp", None)
+    prior_truth = prior.get("truth") if isinstance(prior, dict) else None
+    truth = dict(prior_truth) if isinstance(prior_truth, dict) else {}
+    truth.setdefault("runtime_state", get_mode())
+    truth.setdefault("source_path", str(STATUS_PATH))
+    truth["authority"] = "UNVERIFIED"
+    truth["stale_reason"] = "position_current_pulse_query_error"
+    status["truth"] = truth
+
+
+def _refresh_minimal_runtime_read_model_for_status(status: dict) -> bool:
     """Refresh portfolio/runtime slices that make top-level freshness meaningful."""
 
     conn = None
@@ -158,7 +178,25 @@ def _refresh_minimal_runtime_read_model_for_status(status: dict) -> None:
             issues = risk.setdefault("infrastructure_issues", [])
             if isinstance(issues, list) and "position_current_pulse_query_error" not in issues:
                 issues.append("position_current_pulse_query_error")
-        return
+        status["portfolio"] = {
+            "status": "query_error",
+            "truth_authority": "UNVERIFIED",
+            "refresh_error": "position_current_pulse_query_error",
+            "open_positions": None,
+            "total_exposure_usd": None,
+            "unrealized_pnl": None,
+            "positions": [],
+            "heat_pct": None,
+        }
+        status["runtime"] = {
+            "pulse_refreshed": False,
+            "pulse_refresh_error": "position_current_pulse_query_error",
+        }
+        status["strategy"] = {
+            "status": "query_error",
+            "refresh_error": "position_current_pulse_query_error",
+        }
+        return False
     finally:
         if conn is not None:
             try:
@@ -225,6 +263,7 @@ def _refresh_minimal_runtime_read_model_for_status(status: dict) -> None:
                 float(bucket.get("realized_pnl", 0.0) or 0.0) + bucket["unrealized_pnl"],
                 2,
             )
+    return True
 
 
 def _refresh_current_open_entry_orders_for_status(status: dict) -> None:

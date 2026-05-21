@@ -815,6 +815,70 @@ class TestRCPV2RowCountSensor:
             "current_open_entry_orders": {"status": "ok", "orders": 2},
         }
 
+    def test_cycle_pulse_refresh_failure_does_not_advance_status_freshness(self, tmp_path, monkeypatch):
+        """Relationship: failed DB truth refresh cannot mint a fresh status timestamp."""
+        from src.observability import status_summary as status_summary_module
+
+        status_path = tmp_path / "status_summary.json"
+        status_path.write_text(json.dumps({
+            "timestamp": "2026-05-20T00:00:00+00:00",
+            "truth": {
+                "runtime_state": "live",
+                "generated_at": "2026-05-20T00:00:00+00:00",
+                "authority": "VERIFIED",
+            },
+            "portfolio": {
+                "open_positions": 99,
+                "total_exposure_usd": 99.0,
+                "positions": [{"trade_id": "stale"}],
+            },
+            "runtime": {"chain_state_counts": {"stale": 99}},
+            "risk": {"infrastructure_level": "GREEN", "infrastructure_issues": []},
+        }))
+
+        class DummyConn:
+            def close(self):
+                return None
+
+        monkeypatch.setattr(status_summary_module, "STATUS_PATH", status_path)
+        monkeypatch.setattr(status_summary_module, "get_trade_connection_with_world", lambda: DummyConn())
+        monkeypatch.setattr(
+            status_summary_module,
+            "query_position_current_status_view",
+            lambda conn: (_ for _ in ()).throw(RuntimeError("database locked")),
+        )
+        monkeypatch.setattr(status_summary_module, "_get_execution_capability_status", lambda: {})
+        monkeypatch.setattr(
+            status_summary_module,
+            "_query_current_open_entry_orders",
+            lambda conn: {"status": "ok", "orders": 2},
+        )
+        monkeypatch.setattr(
+            status_summary_module,
+            "annotate_truth_payload",
+            lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("must not mint truth freshness")),
+        )
+
+        status_summary_module.write_cycle_pulse({"mode": "opening_hunt", "trades": 0})
+        status = json.loads(status_path.read_text())
+
+        assert status["timestamp"] == "2026-05-20T00:00:00+00:00"
+        assert status["truth"]["generated_at"] == "2026-05-20T00:00:00+00:00"
+        assert status["truth"]["authority"] == "UNVERIFIED"
+        assert status["truth"]["stale_reason"] == "position_current_pulse_query_error"
+        assert status["risk"]["infrastructure_level"] == "RED"
+        assert "position_current_pulse_query_error" in status["risk"]["infrastructure_issues"]
+        assert status["portfolio"]["status"] == "query_error"
+        assert status["portfolio"]["open_positions"] is None
+        assert status["portfolio"]["positions"] == []
+        assert status["runtime"]["pulse_refreshed"] is False
+        assert status["runtime"]["pulse_refresh_error"] == "position_current_pulse_query_error"
+        assert "chain_state_counts" not in status["runtime"]
+        assert status["strategy"] == {
+            "status": "query_error",
+            "refresh_error": "position_current_pulse_query_error",
+        }
+
     def test_status_summary_exposes_s2_lifecycle_funnel(self, tmp_path, monkeypatch):
         """S2 visibility stays a derived status block, not a cycle authority."""
         from src.observability import status_summary as status_summary_module

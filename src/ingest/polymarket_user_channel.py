@@ -357,6 +357,34 @@ def _command_tick_size(conn: Any, command: dict[str, Any]) -> str | None:
         return str(row[0])
 
 
+def _latest_order_fact_is_complete(conn: Any, command_id: str) -> bool:
+    row = conn.execute(
+        """
+        SELECT state, remaining_size, matched_size
+          FROM venue_order_facts
+         WHERE command_id = ?
+         ORDER BY local_sequence DESC, fact_id DESC
+         LIMIT 1
+        """,
+        (command_id,),
+    ).fetchone()
+    if row is None:
+        return False
+    try:
+        state = str(row["state"] or "").upper()
+        remaining = Decimal(str(row["remaining_size"]))
+        matched = Decimal(str(row["matched_size"]))
+    except (InvalidOperation, TypeError, ValueError, KeyError, IndexError):
+        return False
+    return (
+        state in {"MATCHED", "FILLED"}
+        and remaining.is_finite()
+        and matched.is_finite()
+        and remaining == Decimal("0")
+        and matched > Decimal("0")
+    )
+
+
 def _command_fill_is_complete(conn, command: dict[str, Any]) -> bool:
     try:
         command_size = Decimal(str(command.get("size")))
@@ -364,6 +392,8 @@ def _command_fill_is_complete(conn, command: dict[str, Any]) -> bool:
         return False
     if not command_size.is_finite() or command_size <= Decimal("0"):
         return False
+    if _latest_order_fact_is_complete(conn, str(command.get("command_id") or "")):
+        return True
     rows = conn.execute(
         """
         WITH latest AS (
