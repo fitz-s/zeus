@@ -701,6 +701,20 @@ def _fill_trade_fact_count(conn: sqlite3.Connection, command_id: str) -> int:
     return int((_dict_row(row).get("count") if row else 0) or 0)
 
 
+def _trade_fact_count(conn: sqlite3.Connection, command_id: str) -> int:
+    if not _table_exists(conn, "venue_trade_facts"):
+        return 0
+    row = conn.execute(
+        """
+        SELECT COUNT(*) AS count
+          FROM venue_trade_facts
+         WHERE command_id = ?
+        """,
+        (command_id,),
+    ).fetchone()
+    return int((_dict_row(row).get("count") if row else 0) or 0)
+
+
 def _latest_matched_order_fact_candidates(conn: sqlite3.Connection) -> list[dict]:
     if not _table_exists(conn, "venue_order_facts"):
         return []
@@ -2203,6 +2217,23 @@ def _append_entry_order_voided_projection(
     append_many_and_project(conn, [event], projection)
 
 
+def _entry_projection_is_pending_zero_exposure(
+    conn: sqlite3.Connection,
+    *,
+    command: dict,
+    order_id: str,
+) -> bool:
+    try:
+        current = _position_current_for_terminal_order(conn, command=command, order_id=order_id)
+    except (MissingPositionCurrentForTerminalOrder, ValueError):
+        return False
+    return (
+        str(current.get("phase") or "") == "pending_entry"
+        and _decimal_is_zero(current.get("shares"))
+        and _decimal_is_zero(current.get("cost_basis_usd"))
+    )
+
+
 def reconcile_terminal_order_facts(conn: sqlite3.Connection) -> dict:
     """Close ACKED entry commands whose latest venue order fact is terminal no-fill."""
 
@@ -2521,6 +2552,61 @@ def _client_open_order_ids(client) -> set[str]:
     }
 
 
+def _client_trades(client) -> list:
+    get_trades = getattr(client, "get_trades", None)
+    if callable(get_trades):
+        return list(get_trades() or [])
+    ensure_adapter = getattr(client, "_ensure_v2_adapter", None)
+    if callable(ensure_adapter):
+        adapter = ensure_adapter()
+        adapter_get_trades = getattr(adapter, "get_trades", None)
+        if callable(adapter_get_trades):
+            return list(adapter_get_trades() or [])
+    raise RuntimeError("client lacks get_trades; terminal no-fill proof is unknown")
+
+
+def _client_open_orders(client) -> list:
+    get_open_orders = getattr(client, "get_open_orders", None)
+    if not callable(get_open_orders):
+        raise RuntimeError("client lacks get_open_orders; terminal no-fill proof is unknown")
+    return list(get_open_orders() or [])
+
+
+def _matching_open_orders_for_command(
+    client,
+    command: dict,
+    *,
+    open_orders: list | None = None,
+) -> list[dict]:
+    venue_order_id = str(command.get("venue_order_id") or "")
+    matches: list[dict] = []
+    for order in (_client_open_orders(client) if open_orders is None else open_orders):
+        raw = _raw_payload(order)
+        order_id = _open_order_id(order) or _extract_order_id(raw)
+        if (venue_order_id and order_id == venue_order_id) or _raw_matches_command_exposure(raw, command):
+            matches.append(_summarize_venue_match(raw))
+    return matches
+
+
+def _matching_trades_for_command(
+    client,
+    command: dict,
+    *,
+    trades: list | None = None,
+) -> list[dict]:
+    created_epoch = _epoch_seconds(command.get("created_at")) or 0.0
+    matches: list[dict] = []
+    for trade in (_client_trades(client) if trades is None else trades):
+        raw = _raw_payload(trade)
+        if not _raw_matches_command_exposure(raw, command):
+            continue
+        trade_epoch = _epoch_seconds(raw.get("match_time") or raw.get("last_update"))
+        if trade_epoch is not None and trade_epoch < created_epoch:
+            continue
+        matches.append(_summarize_venue_match(raw))
+    return matches
+
+
 def _resolve_m5_local_orphan_findings(
     conn: sqlite3.Connection,
     *,
@@ -2613,6 +2699,61 @@ def _append_local_orphan_terminal_order_fact(
     )
 
 
+def _append_point_order_terminal_no_fill_fact(
+    conn: sqlite3.Connection,
+    *,
+    command: dict,
+    observed_at: str,
+    venue_status: str,
+    point_order: dict | None,
+    matching_open_orders: list[dict],
+    matching_trades: list[dict],
+    source_reason: str,
+) -> tuple[int, dict]:
+    command_id = str(command.get("command_id") or "")
+    venue_order_id = str(command.get("venue_order_id") or "")
+    fact_state = _terminal_fact_state_for_venue_status(
+        venue_status,
+        venue_resp_present=point_order is not None,
+    )
+    if fact_state is None:
+        raise ValueError(f"venue status is not terminal no-fill: {venue_status!r}")
+    payload = {
+        "reason": "point_order_terminal_no_fill",
+        "proof_class": "point_order_terminal_no_fill_plus_open_trade_absence",
+        "source_reason": source_reason,
+        "venue_order_id": venue_order_id,
+        "command_id": command_id,
+        "venue_status": str(venue_status or "NOT_FOUND"),
+        "point_order": point_order,
+        "remaining_size": "0",
+        "matched_size": "0",
+        "required_predicates": {
+            "point_order_terminal_no_fill": True,
+            "point_order_matched_size_zero": True,
+            "no_local_trade_facts": _trade_fact_count(conn, command_id) == 0,
+            "no_matching_open_orders": len(matching_open_orders) == 0,
+            "no_matching_trades": len(matching_trades) == 0,
+        },
+        "matching_open_orders": matching_open_orders[:10],
+        "matching_trades": matching_trades[:10],
+    }
+    fact_id = append_order_fact(
+        conn,
+        venue_order_id=venue_order_id,
+        command_id=command_id,
+        state=fact_state,
+        remaining_size="0",
+        matched_size="0",
+        source="REST",
+        observed_at=observed_at,
+        venue_timestamp=observed_at,
+        raw_payload_hash=_payload_hash(payload),
+        raw_payload_json=payload,
+    )
+    return fact_id, payload
+
+
 def reconcile_local_orphan_no_fill_findings(conn: sqlite3.Connection, client) -> dict:
     """Convert proven no-fill local-orphan findings into terminal order facts."""
 
@@ -2673,6 +2814,119 @@ def reconcile_local_orphan_no_fill_findings(conn: sqlite3.Connection, client) ->
         except Exception as exc:
             logger.error(
                 "recovery: local orphan no-fill reconciliation failed for command %s: %s",
+                command_id,
+                exc,
+            )
+            summary["errors"] += 1
+    return summary
+
+
+def _terminal_point_order_candidates(conn: sqlite3.Connection) -> list[dict]:
+    if not _table_exists(conn, "venue_order_facts"):
+        return []
+    command_states = tuple(sorted(_ACKED_ORDER_STATES))
+    if not command_states:
+        return []
+    state_placeholders = ",".join("?" for _ in command_states)
+    rows = conn.execute(
+        f"""
+        WITH latest_order_fact AS (
+            SELECT command_id, MAX(local_sequence) AS max_sequence
+              FROM venue_order_facts
+             GROUP BY command_id
+        )
+        SELECT
+            cmd.*,
+            fact.fact_id AS order_fact_id,
+            fact.state AS order_fact_state,
+            fact.observed_at AS order_fact_observed_at,
+            fact.venue_order_id AS order_fact_venue_order_id,
+            fact.remaining_size AS order_fact_remaining_size,
+            fact.matched_size AS order_fact_matched_size,
+            fact.source AS order_fact_source
+          FROM venue_commands cmd
+          JOIN latest_order_fact latest
+            ON latest.command_id = cmd.command_id
+          JOIN venue_order_facts fact
+            ON fact.command_id = latest.command_id
+           AND fact.local_sequence = latest.max_sequence
+          JOIN position_current pc
+            ON pc.position_id = cmd.position_id
+         WHERE cmd.intent_kind = 'ENTRY'
+           AND cmd.state IN ({state_placeholders})
+           AND COALESCE(cmd.venue_order_id, '') != ''
+           AND pc.phase = 'pending_entry'
+           AND CAST(COALESCE(pc.shares, '0') AS REAL) = 0
+           AND CAST(COALESCE(pc.cost_basis_usd, '0') AS REAL) = 0
+           AND fact.state IN ('LIVE', 'RESTING')
+           AND CAST(COALESCE(fact.matched_size, '0') AS REAL) = 0
+         ORDER BY cmd.updated_at, cmd.command_id
+        """,
+        command_states,
+    ).fetchall()
+    return [_dict_row(row) for row in rows]
+
+
+def reconcile_terminal_point_orders(conn: sqlite3.Connection, client) -> dict:
+    """Append terminal no-fill facts when CLOB point truth closes stale ACKED entries."""
+
+    summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+    get_order = getattr(client, "get_order", None)
+    if not callable(get_order):
+        return summary
+    candidates = _terminal_point_order_candidates(conn)
+    if not candidates:
+        return summary
+    try:
+        open_orders = _client_open_orders(client)
+        trades = _client_trades(client)
+    except Exception as exc:
+        logger.error("recovery: terminal point-order account truth enumeration failed: %s", exc)
+        summary["errors"] += len(candidates)
+        return summary
+    for row in candidates:
+        summary["scanned"] += 1
+        command_id = str(row.get("command_id") or "")
+        venue_order_id = str(row.get("venue_order_id") or "")
+        try:
+            if _trade_fact_count(conn, command_id) > 0:
+                summary["stayed"] += 1
+                continue
+            point_order = _venue_order_payload(get_order(venue_order_id))
+            venue_status = (
+                str((point_order or {}).get("status") or (point_order or {}).get("state") or "NOT_FOUND")
+                .upper()
+            )
+            fact_state = _terminal_fact_state_for_venue_status(
+                venue_status,
+                venue_resp_present=point_order is not None,
+            )
+            if fact_state is None:
+                summary["stayed"] += 1
+                continue
+            matched_size = _point_order_matched_size(point_order, fallback=row.get("order_fact_matched_size") or "0")
+            if _is_positive_decimal(matched_size):
+                summary["stayed"] += 1
+                continue
+            matching_open_orders = _matching_open_orders_for_command(client, row, open_orders=open_orders)
+            matching_trades = _matching_trades_for_command(client, row, trades=trades)
+            if matching_open_orders or matching_trades:
+                summary["stayed"] += 1
+                continue
+            _append_point_order_terminal_no_fill_fact(
+                conn,
+                command=row,
+                observed_at=_now_iso(),
+                venue_status=venue_status,
+                point_order=point_order,
+                matching_open_orders=matching_open_orders,
+                matching_trades=matching_trades,
+                source_reason="acked_point_order_terminal_no_fill",
+            )
+            summary["advanced"] += 1
+        except Exception as exc:
+            logger.error(
+                "recovery: terminal point-order reconciliation failed for command %s: %s",
                 command_id,
                 exc,
             )
@@ -3000,6 +3254,144 @@ def _review_required_cancel_unknown_live_order_recovery(
         or status not in _LIVE_ORDER_STATUSES
         or _is_positive_decimal(matched_size)
     ):
+        fact_state = _terminal_fact_state_for_venue_status(
+            status,
+            venue_resp_present=True,
+        )
+        if (
+            order_id == venue_order_id
+            and fact_state is not None
+            and not _is_positive_decimal(_point_order_matched_size(order, fallback=matched_size))
+            and _trade_fact_count(conn, cmd.command_id) == 0
+        ):
+            command = _dict_row(
+                conn.execute(
+                    "SELECT * FROM venue_commands WHERE command_id = ?",
+                    (cmd.command_id,),
+                ).fetchone()
+            )
+            if not _entry_projection_is_pending_zero_exposure(
+                conn,
+                command=command,
+                order_id=venue_order_id,
+            ):
+                logger.info(
+                    "recovery: command %s REVIEW_REQUIRED cancel-unknown stayed "
+                    "(terminal no-fill point order but entry projection is not zero-exposure pending)",
+                    cmd.command_id,
+                )
+                return "stayed"
+            matching_open_orders = _matching_open_orders_for_command(client, command)
+            matching_trades = _matching_trades_for_command(client, command)
+            if not matching_open_orders and not matching_trades:
+                now = _now_iso()
+                safe_command_id = "".join(ch if ch.isalnum() else "_" for ch in cmd.command_id)
+                sp_name = f"sp_cancel_unknown_no_fill_{safe_command_id}"
+                conn.execute(f"SAVEPOINT {sp_name}")
+                try:
+                    fact_id, fact_payload = _append_point_order_terminal_no_fill_fact(
+                        conn,
+                        command=command,
+                        observed_at=now,
+                        venue_status=status,
+                        point_order=order,
+                        matching_open_orders=matching_open_orders,
+                        matching_trades=matching_trades,
+                        source_reason="cancel_unknown_point_order_terminal_no_fill",
+                    )
+                    payload = {
+                        "schema_version": 1,
+                        "reason": "review_cleared_no_venue_exposure",
+                        "command_id": cmd.command_id,
+                        "venue_order_id": venue_order_id,
+                        "proof_class": "cancel_unknown_terminal_no_fill",
+                        "side_effect_boundary_crossed": "unknown",
+                        "sdk_submit_attempted": "unknown",
+                        "required_predicates": {
+                            "latest_event_is_cancel_replace_blocked": True,
+                            "semantic_cancel_status_cancel_unknown": True,
+                            "requires_m5_reconcile": True,
+                            "venue_order_id_present": True,
+                            "venue_order_id_matches_point_read": True,
+                            "point_order_terminal_no_fill": True,
+                            "point_order_matched_size_zero": True,
+                            "no_trade_facts": True,
+                            "no_matching_open_orders": True,
+                            "no_matching_trades": True,
+                        },
+                        "terminal_order_fact_id": fact_id,
+                        "terminal_order_fact": fact_payload,
+                        "venue_absence_proof": {
+                            "source": "authenticated_clob_user_read",
+                            "owner_scope": "authenticated_funder",
+                            "observed_at": now,
+                            "command_id": cmd.command_id,
+                            "decision_id": str(command.get("decision_id") or ""),
+                            "market_id": str(command.get("market_id") or ""),
+                            "token_id": str(command.get("token_id") or ""),
+                            "side": str(command.get("side") or ""),
+                            "price": str(Decimal(str(command.get("price")))),
+                            "size": str(Decimal(str(command.get("size")))),
+                            "time_window_start": command.get("created_at"),
+                            "time_window_end": now,
+                            "open_orders_checked": True,
+                            "trades_checked": True,
+                            "open_orders_query_complete": True,
+                            "trades_query_complete": True,
+                            "pagination_scope": "sdk_get_trades_returned_all_visible_user_trades",
+                            "matching_open_order_count": 0,
+                            "matching_trade_count": 0,
+                            "matching_open_orders": [],
+                            "matching_trades": [],
+                            "point_order_status": status,
+                            "point_order": order,
+                        },
+                        "source_proof": {
+                            "source_commit": "runtime",
+                            "source_function": "command_recovery._review_required_cancel_unknown_live_order_recovery",
+                            "source_reason": "cancel_unknown_point_order_terminal_no_fill",
+                        },
+                        "review_required_proof": {
+                            "reason": "cancel_unknown_requires_m5",
+                        },
+                        "reviewed_by": "command_recovery",
+                        "cleared_at": now,
+                    }
+                    append_event(
+                        conn,
+                        command_id=cmd.command_id,
+                        event_type=CommandEventType.REVIEW_CLEARED_NO_VENUE_EXPOSURE.value,
+                        occurred_at=now,
+                        payload=payload,
+                    )
+                    _append_entry_order_voided_projection(
+                        conn,
+                        command=command,
+                        order_fact={
+                            **command,
+                            "order_fact_id": fact_id,
+                            "order_fact_state": fact_state,
+                            "order_fact_observed_at": now,
+                            "order_fact_venue_order_id": venue_order_id,
+                            "order_fact_remaining_size": "0",
+                            "order_fact_matched_size": "0",
+                            "order_fact_source": "REST",
+                        },
+                        occurred_at=now,
+                    )
+                    conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+                except Exception:
+                    conn.execute(f"ROLLBACK TO SAVEPOINT {sp_name}")
+                    conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+                    raise
+                logger.info(
+                    "recovery: command %s REVIEW_REQUIRED cancel-unknown -> EXPIRED "
+                    "(venue_order_id=%s status=%s)",
+                    cmd.command_id,
+                    venue_order_id,
+                    status,
+                )
+                return "advanced"
         logger.info(
             "recovery: command %s REVIEW_REQUIRED cancel-unknown stayed "
             "(point_order_id=%s status=%s matched_size=%s)",
@@ -4114,6 +4506,12 @@ def reconcile_unresolved_commands(
         summary["advanced"] += local_orphan_summary["advanced"]
         summary["stayed"] += local_orphan_summary["stayed"]
         summary["errors"] += local_orphan_summary["errors"]
+
+        terminal_point_summary = reconcile_terminal_point_orders(conn, client)
+        summary["terminal_point_orders"] = terminal_point_summary
+        summary["advanced"] += terminal_point_summary["advanced"]
+        summary["stayed"] += terminal_point_summary["stayed"]
+        summary["errors"] += terminal_point_summary["errors"]
 
         terminal_summary = reconcile_terminal_order_facts(conn)
         summary["terminal_order_facts"] = terminal_summary
