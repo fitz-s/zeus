@@ -165,6 +165,11 @@ test_trust_policy:
     tests/test_provenance_enforcement.py: {created: "2026-04-07", last_used: "2026-04-23"}
     tests/test_proxy_health.py: {created: "2026-04-21", last_used: "2026-04-21"}
     tests/test_semantic_linter.py: {created: "2026-04-13", last_used: "2026-05-09"}
+    tests/test_money_path_semantic_ci.py: {created: "2026-05-21", last_used: "2026-05-21"}
+    tests/money_path/test_001_negrisk_tradeability_snapshot_submit.py: {created: "2026-05-21", last_used: "2026-05-21"}
+    tests/money_path/test_002_execution_lifecycle_replay.py: {created: "2026-05-21", last_used: "2026-05-21"}
+    tests/money_path/test_003_redeem_receipt_classifier.py: {created: "2026-05-21", last_used: "2026-05-21"}
+    tests/money_path/test_004_schema_live_failclosed.py: {created: "2026-05-21", last_used: "2026-05-21"}
     tests/test_structural_linter.py: {created: "2026-03-31", last_used: "2026-05-09"}
     tests/test_world_writer_boundary.py: {created: "2026-04-30", last_used: "2026-05-08"}
     tests/test_tier_resolver.py: {created: "2026-04-21", last_used: "2026-04-21"}

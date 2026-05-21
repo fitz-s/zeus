@@ -82,6 +82,9 @@ Only list durable entry points here; use the manifest for the full catalog.
 | `check_schema_version.py` | Enforcement check: init_schema boot invariant per task_2026-05-11_init_schema_boot_invariant §5.6 (created 2026-05-11) |
 | `check_table_registry_coherence.py` | Enforcement scan verifying table_registry coherence against live DB schema (created 2026-05-14) |
 | `check_writer_signature_typing.py` | Enforcement scan for writer signature typing conformance (created 2026-05-14) |
+| `ci/semantic_diff_classifier.py` | Money-path semantic diff classifier for CI selected-test routing (created 2026-05-21) |
+| `ci/assert_invariant_coverage.py` | Money-path invariant coverage assertion for CI selected tests (created 2026-05-21) |
+| `ci/assert_test_quality.py` | Money-path test-quality metadata gate (created 2026-05-21) |
 | `cloud_tigge_autochain.sh` | Cloud-side TIGGE download autochain; pairs with local_post_extract_chain.sh (created 2026-05-08) |
 | `data_chain_monitor.sh` | Shell monitor for data chain health; runtime support (created 2026-05-11) |
 | `ddd_v1_v2_replay.py` | DDD v1→v2 replay diagnostic; replay correctness probe (created 2026-05-03) |

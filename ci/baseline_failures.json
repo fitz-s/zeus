@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "metadata": {
+    "created": "2026-05-21",
+    "owner": "Zeus CI infrastructure",
+    "purpose": "Known full-sweep failure IDs with expiry; empty means no permanent exemption is active."
+  },
+  "failures": {}
+}

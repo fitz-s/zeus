@@ -63,6 +63,9 @@ Changes here are architecture or governance changes, never “just docs.”
 | `reference_replacement.yaml` | Replacement matrix for bulky reference docs and deletion eligibility |
 | `docs_registry.yaml` | Machine-readable docs classification registry and default-read contract |
 | `map_maintenance.yaml` | Companion-registry rules for added/deleted files in active surfaces |
+| `money_path_objects.yaml` | Money-path economic object/state/source registry; unknown objects fail closed in semantic CI |
+| `money_path_ci.yaml` | Money-path invariant-to-test routing and risk escalation map for semantic CI |
+| `test_quality.yaml` | Money-path test falsifying-proof metadata registry |
 | `lifecycle_grammar.md` | Lifecycle grammar specification |
 | `2026_04_02_architecture_kernel.sql` | Canonical event/projection schema — position_events, position_current, strategy_health, risk_actions, control_overrides, fact tables |
 | `self_check/zero_context_entry.md` | Zero-context agent entry checklist |

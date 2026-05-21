@@ -1,0 +1,198 @@
+schema_version: 1
+metadata:
+  created: "2026-05-21"
+  owner: "Zeus CI infrastructure"
+  purpose: >
+    Machine-readable registry of money-path economic objects, state machines,
+    external truth surfaces, strategy identity, scheduler jobs, and migration
+    semantics. Unknown money-path objects are unsafe until registered here and
+    routed through architecture/money_path_ci.yaml.
+  authority_basis:
+    - AGENTS.md money path
+    - architecture/test_topology.yaml test trust policy
+    - docs/authority/zeus_current_delivery.md CI governance
+
+economic_objects:
+  probability:
+    fields:
+      p_raw:
+        meaning: "Forecast/model raw probability before calibration."
+        allowed_modules: [src/signal/**, src/engine/evaluator.py, src/calibration/**]
+        forbidden_uses: ["order price", "market prior", "settlement probability"]
+      p_cal:
+        meaning: "Calibrated probability after Platt/family correction."
+        allowed_modules: [src/calibration/**, src/engine/**, src/strategy/**]
+      p_market:
+        meaning: "Market prior or quote-implied probability; never executable fill price."
+        forbidden_uses: ["submitted limit price", "fill fact"]
+      p_posterior:
+        meaning: "Posterior after model/source/market fusion."
+      edge:
+        meaning: "Posterior minus executable cost basis after fees/spread/depth in live mode."
+  price:
+    fields:
+      display_price:
+        meaning: "UI/display or last-trade substitute; never executable cost."
+        live_entry_allowed: false
+      market_price:
+        meaning: "Ambiguous legacy alias; new use must declare executable bid/ask or display role."
+        ambiguous: true
+      current_price:
+        meaning: "Ambiguous legacy alias; new use must declare executable bid/ask or display role."
+        ambiguous: true
+      orderbook_top_bid:
+        meaning: "Best executable sell price for held-token exit."
+      orderbook_top_ask:
+        meaning: "Best executable buy cost."
+      final_limit_price:
+        meaning: "Submitted limit price."
+      limit_price:
+        meaning: "Limit price candidate; must become final_limit_price before submit."
+      fill_price:
+        meaning: "Venue execution fact."
+      settlement_value:
+        meaning: "Weather/source settlement physical value."
+  identity:
+    fields:
+      market_id:
+        meaning: "Gamma market identifier unless caller explicitly declares condition_id surface."
+        ambiguous: true
+      condition_id:
+        meaning: "Polymarket condition id."
+      token_id:
+        meaning: "ERC1155 outcome token id."
+      outcome_label:
+        meaning: "Outcome side label."
+        allowed_values: [YES, NO]
+      weather_family_key:
+        meaning: "City/date/metric mutually-exclusive family identity."
+      strategy_key:
+        meaning: "Sole governance identity for attribution/risk/performance slicing."
+  time:
+    fields:
+      decision_time:
+        meaning: "When Zeus decided."
+      zeus_submit_intent_time:
+        meaning: "When Zeus persisted/finalized submit intent."
+      venue_ack_time:
+        meaning: "Venue acknowledgement time."
+      fill_time:
+        meaning: "Venue fill observation time."
+      observation_available_at:
+        meaning: "Source observation availability time."
+      settlement_time:
+        meaning: "Settlement source finality time."
+
+state_machines:
+  venue_command:
+    owner: src/state/venue_command_repo.py
+    states:
+      - INTENT_CREATED
+      - SUBMITTING
+      - ACKED
+      - POST_ACKED
+      - PARTIAL
+      - FILLED
+      - SUBMIT_UNKNOWN_SIDE_EFFECT
+      - REVIEW_REQUIRED
+      - SUBMIT_REJECTED
+    invariant_tests:
+      - tests/money_path/test_002_execution_lifecycle_replay.py
+      - tests/test_command_recovery.py
+      - tests/test_order_truth_reducer.py
+  settlement_command:
+    owner: src/execution/harvester.py
+    states:
+      - REDEEM_INTENT_CREATED
+      - REDEEM_SUBMITTED
+      - REDEEM_TX_HASHED
+      - REDEEM_CONFIRMED
+      - REDEEM_FAILED
+      - REDEEM_RETRYING
+      - REDEEM_REVIEW_REQUIRED
+      - REDEEM_OPERATOR_REQUIRED
+    invariant_tests:
+      - tests/money_path/test_003_redeem_receipt_classifier.py
+      - tests/test_harvester_settlement_redeem.py
+      - tests/test_polymarket_v2_adapter_negrisk_redeem.py
+    overloaded_states:
+      REDEEM_OPERATOR_REQUIRED:
+        risk: "Manual-required and autoretryable error classes may be conflated."
+        required_fields: [errorCode, operator_action_required, autoretry_eligible]
+  lifecycle_phase:
+    owner: src/state/lifecycle_manager.py
+    states:
+      - pending_entry
+      - active
+      - day0_window
+      - pending_exit
+      - economically_closed
+      - settled
+      - voided
+      - quarantined
+      - admin_closed
+      - unknown
+    invariant_tests:
+      - tests/test_lifecycle_terminal_predicate.py
+      - tests/test_exchange_reconcile.py
+
+schema_objects:
+  authority_fabricating_defaults:
+    - VERIFIED
+    - gamma_explicit
+    - LIVE_ELIGIBLE
+    - live_eligible
+    - explicit_verified
+  protected_tables:
+    world: [markets, positions, position_current, lifecycle_events]
+    forecasts: [observations, settlements, calibration_pairs_v2, ensemble_snapshots_v2, source_run, market_events_v2]
+    trades: [venue_commands, venue_order_facts, venue_trade_facts, settlement_commands]
+  historical_truth_policy_required_for:
+    - scripts/migrations/**
+    - scripts/migrate_*.py
+
+external_truth_sources:
+  gamma:
+    authority_tier: market_metadata
+    endpoint_patterns: [gamma-api.polymarket.com, /markets, /events]
+    required_tests: [tests/test_market_scanner_provenance.py, tests/test_scanner_archived_filter.py]
+  clob:
+    authority_tier: executable_venue
+    endpoint_patterns: [clob.polymarket.com, /book, /orders, /trades]
+    required_tests: [tests/test_executable_market_snapshot_v2.py, tests/test_order_truth_reducer.py]
+  ecmwf:
+    authority_tier: forecast_source
+    endpoint_patterns: [ecmwf, open-data, tigge]
+    required_tests: [tests/test_tigge_schema_contract.py, tests/test_executable_forecast_reader_member_floor.py]
+  weather_observation:
+    authority_tier: settlement_observation
+    endpoint_patterns: [wunderground, weather.com, hko, noaa, ogimet]
+    required_tests: [tests/test_ingest_boot_time_semantics.py, tests/test_settlement_semantics.py]
+  polygon_rpc:
+    authority_tier: chain_truth
+    endpoint_patterns: [polygon-rpc, eth_sendRawTransaction, eth_call]
+    required_tests: [tests/test_polymarket_v2_adapter_negrisk_redeem.py]
+
+side_effect_calls:
+  submit_order:
+    patterns: [client.submit, submit_order, create_order]
+    required_invariants: [MP-SIDE-001, MP-SIDE-002, MP-SIDE-003]
+  redeem:
+    patterns: [adapter.redeem, redeemPositions, eth_sendRawTransaction]
+    required_invariants: [MP-RED-001, MP-RED-002, MP-SIDE-001]
+  cancel:
+    patterns: [cancel_order, cancel_orders]
+    required_invariants: [MP-ORD-003, MP-SIDE-001]
+  canonical_event_write:
+    patterns: [append_event, append_order_fact, append_trade_fact, write_decision_event, write_no_trade_event]
+    required_invariants: [MP-SIDE-001, MP-SCH-001]
+
+scheduler_jobs:
+  imminent_open_capture:
+    produces: [market_scan_progress, evaluated_candidates, decision_or_no_trade_event]
+    stale_after_seconds: 900
+    blocking_for_live: true
+  redeem_reconciler:
+    produces: [redeem_command_progress, redeem_receipt_classification]
+    stale_after_seconds: 900
+    blocking_for_live: true
