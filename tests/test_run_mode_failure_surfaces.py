@@ -317,3 +317,31 @@ def test_business_plane_exposes_entry_and_reconcile_progress_counters(tmp_path: 
     assert progress["submit_attempted"] is True
     assert progress["venue_ack_observed"] is True
     assert progress["reconcile_progress_observed"] is True
+
+
+def test_business_plane_does_not_infer_venue_ack_from_submit_count(tmp_path: Path) -> None:
+    """A submit attempt is not venue acknowledgement authority."""
+    sd = tmp_path / "state"
+    sd.mkdir()
+    _setup_healthy_state(sd)
+    _write(
+        sd / "status_summary.json",
+        {
+            "timestamp": _now_iso(-30),
+            "cycle": {
+                "mode": "opening_hunt",
+                "completed_at": _now_iso(-30),
+                "candidates": 4,
+                "final_intents_built": 1,
+                "entry_orders_submitted": 1,
+                "command_recovery": {"scanned": 1},
+            },
+        },
+    )
+
+    result = compute_composite_live_health(state_dir=sd)
+
+    progress = result["surfaces"]["business_plane"]["progress"]
+    assert progress["submit_attempted"] is True
+    assert progress["venue_acks"] == 0
+    assert progress["venue_ack_observed"] is False

@@ -122,7 +122,7 @@ def _business_plane_surface(status_summary: Optional[dict]) -> dict:
         "entry_submit_attempts",
         "entry_orders_submitted",
     )
-    venue_acks = _int_value(cycle, "venue_acks", "venue_ack_count", "entry_orders_submitted")
+    venue_acks = _int_value(cycle, "venue_acks", "venue_ack_count")
     command_recovery = cycle.get("command_recovery")
     chain_sync = cycle.get("chain_sync")
     progress = {

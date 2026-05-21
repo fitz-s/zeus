@@ -469,7 +469,11 @@ def weather_family_exposures_from_trade_db(conn: Any) -> list[WeatherFamilyExpos
 
     envelope_table = "venue_submission_envelopes" if _table_exists(conn, "venue_submission_envelopes") else None
     snapshot_table = "executable_market_snapshots" if _table_exists(conn, "executable_market_snapshots") else None
-    market_schema = _first_table_schema(conn, "market_events_v2")
+    market_schema = _first_table_schema(
+        conn,
+        "market_events_v2",
+        preferred=("forecasts", "main", "world"),
+    )
     if market_schema is None:
         return exposures
     vc_cols = _table_columns(conn, "venue_commands")

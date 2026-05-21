@@ -829,7 +829,7 @@ def _latest_matched_order_fact_candidates(conn: sqlite3.Connection) -> list[dict
         return []
     command_states = tuple(_ACKED_ORDER_STATES)
     sources = tuple(sorted(_LIVE_TERMINAL_ORDER_FACT_SOURCES))
-    fact_states = ("LIVE", "RESTING", "MATCHED", "PARTIALLY_MATCHED")
+    fact_states = ("LIVE", "RESTING", "MATCHED", "PARTIALLY_MATCHED", "FILLED")
     rows = conn.execute(
         f"""
         WITH {_canonical_order_truth_cte()}
@@ -847,7 +847,7 @@ def _latest_matched_order_fact_candidates(conn: sqlite3.Connection) -> list[dict
             ON fact.command_id = cmd.command_id
          WHERE cmd.intent_kind IN ('ENTRY', 'EXIT')
            AND cmd.state IN (?, ?)
-           AND fact.state IN (?, ?, ?, ?)
+           AND fact.state IN (?, ?, ?, ?, ?)
            AND fact.source IN (?, ?, ?, ?, ?)
            AND cmd.venue_order_id IS NOT NULL
         """,
