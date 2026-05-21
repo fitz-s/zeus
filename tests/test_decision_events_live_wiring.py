@@ -96,6 +96,28 @@ def _minimal_dsc() -> DecisionSourceContext:
     )
 
 
+def _forecast_entry_dsc_without_observation_available_at() -> DecisionSourceContext:
+    return DecisionSourceContext(
+        source_id="tigge",
+        model_family="ecmwf_ifs025",
+        forecast_issue_time="2026-05-21T00:00:00Z",
+        forecast_valid_time="2026-05-23T00:00:00Z",
+        forecast_fetch_time="2026-05-21T11:34:30Z",
+        forecast_available_at="2026-05-21T00:00:00Z",
+        raw_payload_hash="a" * 64,
+        degradation_level="OK",
+        forecast_source_role="entry_primary",
+        authority_tier="FORECAST",
+        decision_time="2026-05-21T11:37:09Z",
+        decision_time_status="OK",
+        polymarket_end_anchor_source="gamma_explicit",
+        first_member_observed_time="2026-05-21T11:00:00Z",
+        run_complete_time="2026-05-21T11:34:00Z",
+        zeus_submit_intent_time="2026-05-21T11:37:54Z",
+        venue_ack_time="2026-05-21T11:38:03Z",
+    )
+
+
 @contextmanager
 def _noop_lock(*_args, **_kwargs) -> Generator[None, None, None]:
     yield
@@ -336,6 +358,99 @@ class TestWriteReachesTable:
         verify.close()
 
         assert side == "buy_no"
+
+
+class TestSourceClassTiming:
+    def test_forecast_entry_live_decision_does_not_require_observation_available_at(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Forecast-entry decisions carry forecast availability, not fabricated observation availability."""
+        world_db_path = tmp_path / "zeus-world.db"
+        _setup_world_db(world_db_path)
+        nk = make_decision_natural_key(
+            market_slug="kuala-lumpur-high-2026-05-23",
+            temperature_metric="high",
+            target_date="2026-05-23",
+            observation_time="",
+            decision_seq=0,
+        )
+        dsc = _forecast_entry_dsc_without_observation_available_at()
+
+        def _fake_world_conn(**_kwargs) -> sqlite3.Connection:
+            c = sqlite3.connect(str(world_db_path))
+            c.row_factory = sqlite3.Row
+            return c
+
+        from src.state.db import SCHEMA_VERSION
+
+        with (
+            patch("src.state.db.get_world_connection", side_effect=_fake_world_conn),
+            patch("src.state.db_writer_lock.db_writer_lock", _noop_lock),
+            patch("src.state.db.SCHEMA_VERSION", SCHEMA_VERSION),
+            patch("src.state.db.ZEUS_WORLD_DB_PATH", world_db_path),
+        ):
+            write_decision_event(
+                nk,
+                dsc,
+                None,
+                direction="buy_yes",
+                strategy_key="center_buy",
+                target_size_usd=1.26,
+                limit_price=0.009,
+                edge=0.05,
+                p_posterior=0.07,
+            )
+
+        verify = sqlite3.connect(str(world_db_path))
+        verify.row_factory = sqlite3.Row
+        row = verify.execute(
+            """
+            SELECT forecast_time, observation_available_at,
+                   zeus_submit_intent_time, venue_ack_time
+              FROM decision_events
+             WHERE market_slug = 'kuala-lumpur-high-2026-05-23'
+            """
+        ).fetchone()
+        verify.close()
+
+        assert row is not None
+        assert row["forecast_time"] == "2026-05-21T00:00:00Z"
+        assert row["observation_available_at"] == ""
+        assert row["observation_available_at"] != row["forecast_time"]
+        assert row["zeus_submit_intent_time"] == "2026-05-21T11:37:54Z"
+        assert row["venue_ack_time"] == "2026-05-21T11:38:03Z"
+
+    def test_observation_class_live_decision_still_requires_observation_available_at(
+        self,
+    ) -> None:
+        """Observation/nowcast decisions must not inherit the forecast-entry relaxation."""
+        nk = make_decision_natural_key(
+            market_slug="chicago-high-2026-06-01",
+            temperature_metric="high",
+            target_date="2026-06-01",
+            observation_time="2026-05-21T10:00:00Z",
+            decision_seq=0,
+        )
+        dsc = _forecast_entry_dsc_without_observation_available_at()
+        dsc = DecisionSourceContext(
+            **{
+                **dsc.__dict__,
+                "authority_tier": "OBSERVATION",
+                "observation_time": "2026-05-21T10:00:00Z",
+            }
+        )
+
+        with pytest.raises(ValueError, match="observation_available_at"):
+            write_decision_event(
+                nk,
+                dsc,
+                None,
+                direction="buy_yes",
+                strategy_key="settlement_capture",
+                target_size_usd=1.0,
+                limit_price=0.99,
+            )
 
 
 # ---------------------------------------------------------------------------

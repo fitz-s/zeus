@@ -341,6 +341,25 @@ def _decision_source_context_from_epistemic_json(value: str | None) -> DecisionS
     return DecisionSourceContext.from_forecast_context(forecast_context)
 
 
+def _decision_source_context_with_submit_result(
+    context: DecisionSourceContext | None,
+    result: object,
+) -> DecisionSourceContext | None:
+    """Attach post-submit timing facts before persisting live decision lineage."""
+    if context is None:
+        return None
+    updates: dict[str, str] = {}
+    zeus_submit_intent_time = getattr(result, "zeus_submit_intent_time", None)
+    venue_ack_time = getattr(result, "venue_ack_time", None)
+    if zeus_submit_intent_time:
+        updates["zeus_submit_intent_time"] = str(zeus_submit_intent_time)
+    if venue_ack_time:
+        updates["venue_ack_time"] = str(venue_ack_time)
+    if not updates:
+        return context
+    return replace(context, **updates)
+
+
 def _decimal_payload(value: Decimal) -> str:
     if value.is_zero():
         return "0"
@@ -3931,7 +3950,10 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                             # Fail-soft: logging/learning infrastructure must not crash the cycle.
                             # Pass conn=None so write_decision_event opens its own world-DB
                             # connection (P1-4: avoids lock-path mismatch with trade-DB conn).
-                            _dsc = getattr(final_intent, "decision_source_context", None)
+                            _dsc = _decision_source_context_with_submit_result(
+                                getattr(final_intent, "decision_source_context", None),
+                                result,
+                            )
                             if _dsc is not None:
                                 try:
                                     from src.contracts.decision_natural_key import (
