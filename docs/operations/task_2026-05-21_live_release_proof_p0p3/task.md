@@ -4,11 +4,12 @@ Created: 2026-05-21
 Branch/worktree: `fix/live-release-proof-p0p3-20260521` /
 `/Users/leofitz/.openclaw/workspace-venus/zeus-live-release-proof-p0p3-20260521`
 
-This task starts from latest `origin/main` at
-`1d63ad4450085e6b1c0ef7ab84fa92436768e8d9`. The source analysis recorded
-`656e73fe5a71893ef7751ac4cac7de6003540ea8`; keep both facts visible because
-the branch intentionally follows the newest main while preserving the original
-analysis context.
+This task was opened from `origin/main`
+`1d63ad4450085e6b1c0ef7ab84fa92436768e8d9`, then rebased on latest
+`origin/main` `a461d27f20ab416b17d59907ca52fc2d27939eaf` before PR creation.
+The source analysis recorded `656e73fe5a71893ef7751ac4cac7de6003540ea8`;
+keep all facts visible because the branch intentionally follows the newest
+main while preserving the original analysis context.
 
 ## Source Reference
 
@@ -93,3 +94,10 @@ runtime/code findings are handled.
 | 2026-05-21 | `python3 scripts/topology_doctor.py --planning-lock ... --plan-evidence docs/operations/task_2026-05-21_live_release_proof_p0p3/task.md` | PASS |
 | 2026-05-21 | `python3 scripts/topology_doctor.py --map-maintenance --map-maintenance-mode advisory ...` | PASS |
 | 2026-05-21 | `/Users/leofitz/.openclaw/workspace-venus/zeus/.venv/bin/python -m pytest tests/test_live_release_registry_runtime_assertions.py tests/test_pre_existing_failure_registry.py tests/test_monitor_refresh_nowcast_wiring.py tests/test_strategy_profile_registry.py -q --no-header` | PASS: 45 passed |
+| 2026-05-21 | `git rebase origin/main` | PASS: rebased onto `a461d27f20ab416b17d59907ca52fc2d27939eaf`; resolved docs/operations registry, workflow router, scanner tradeability, and workspace map conflicts |
+| 2026-05-21 | `/Users/leofitz/.openclaw/workspace-venus/zeus/.venv/bin/python -m pytest tests/test_market_scanner_negrisk.py tests/test_executable_market_snapshot_v2.py -q --no-header` | PASS: 96 passed after scanner tradeability conflict resolution |
+| 2026-05-21 | `/Users/leofitz/.openclaw/workspace-venus/zeus/.venv/bin/python -m pytest tests/test_live_release_gate.py tests/test_executable_market_snapshot_v2.py tests/test_market_scanner_negrisk.py tests/test_decision_seq_cross_table_no_collision.py tests/test_no_trade_events_check_accepts_all_shoulder_reasons.py tests/state/test_schema_current_invariant.py tests/test_money_path_lifecycle_replay.py tests/test_live_release_registry_runtime_assertions.py tests/test_settlement_commands_reseat.py tests/test_reseat_negrisk_misrouted_allowlist.py tests/test_redeem_cascade_liveness.py tests/test_settlement_commands_anchor_source_default.py tests/test_settlement_migration_unknown_legacy_default.py tests/test_inv_anchor_source_real_value.py tests/test_inv_family_exclusive_sizing.py tests/test_inv_kelly_effective.py tests/test_monitor_refresh_nowcast_wiring.py tests/test_strategy_profile_registry.py tests/test_pre_existing_failure_registry.py -q --no-header` | PASS: 255 passed, 3 skipped after rebase |
+| 2026-05-21 | `python3 scripts/check_schema_version.py` | PASS: schema hash OK for `SCHEMA_VERSION=22` after rebase |
+| 2026-05-21 | `python3 scripts/check_live_release_gate.py --self-test-fixture --json` | PASS: 7/7 gates pass on isolated fixture after rebase; `live_entries_allowed=false` |
+| 2026-05-21 | `python3 scripts/topology_doctor.py --planning-lock ... --plan-evidence docs/operations/task_2026-05-21_live_release_proof_p0p3/task.md` | PASS after rebase |
+| 2026-05-21 | `python3 scripts/topology_doctor.py --map-maintenance --map-maintenance-mode advisory ...` | PASS after rebase |
