@@ -45,6 +45,7 @@ Changes here are architecture or governance changes, never “just docs.”
 | `source_rationale.yaml` | Per-file rationale map for tracked `src/**` files, hazards, and write-route cards |
 | `test_topology.yaml` | Test-suite topology manifest: law gate, categories, high-sensitivity skips, reverse-antibody status |
 | `script_manifest.yaml` | Script manifest with authority class, write targets, dry-run/apply metadata, and safety gates |
+| `pre_existing_failure_registry.yaml` | Central registry for temporary pre-existing failure IDs, owners, evidence, and review deadlines; forbids permanent “pre-existing” status |
 | `naming_conventions.yaml` | Canonical file/function naming and script/test freshness metadata map |
 | `data_rebuild_topology.yaml` | Data/rebuild certification criteria and non-promotion topology |
 | `history_lore.yaml` | Dense historical lore registry: failure modes, wrong moves, antibodies, residual risks, and task routing |
@@ -89,6 +90,7 @@ Changes here are architecture or governance changes, never “just docs.”
 | `capabilities.yaml` | Capability registry with sunset dates; agent capability declarations per ULTIMATE_DESIGN §2.2 (created 2026-05-06) |
 | `cascade_liveness_contract.yaml` | Registry of state-machine tables and their cascade liveness obligations per SCAFFOLD_F14_F16 §G.2 (created 2026-05-16) |
 | `db_table_ownership.yaml` | Canonical table→DB mapping authority post K1 DB split (eba80d2b9d); cross-reference for all DB routing decisions (created 2026-05-14) |
+| `pre_existing_failure_registry.yaml` | Central registry for tracked pre-existing failure IDs; each entry must have owner, evidence, review deadline, and active-scope conditions (created 2026-05-21) |
 | `ecmwf_opendata_tigge_equivalence_2026_05_06.yaml` | ECMWF OpenData/TIGGE equivalence proof registry; calibration READ-path audit evidence (created 2026-05-06) |
 | `improvement_backlog.yaml` | Structured improvement backlog from PROPOSALS_2026-05-04 P3 context capsule (created 2026-05-04) |
 | `math_defects_2_3_2_4_3_1_design_2026-05-05.md` | Unified design for math defects 2.3/2.4/3.1; DDD INV-17 fix + calibration transfer scaffolding (created 2026-05-05) |

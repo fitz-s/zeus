@@ -1,0 +1,27 @@
+# Created: 2026-05-21
+# Last reused or audited: 2026-05-21
+# Authority basis: docs/operations/task_2026-05-21_live_release_proof_p0p3/task.md P3-2
+#
+# Central registry for failures that were observed before a task/PR and are
+# temporarily allowed to remain outside the active diff. Entries must expire
+# or be re-reviewed; "pre-existing" is not a permanent status.
+
+schema_version: 1
+entries:
+  - failure_id: PEF-2026-05-21-SCRIPT-MANIFEST-DEBT
+    status: tracking
+    owner: topology-maintenance
+    first_observed: "2026-05-21"
+    review_by: "2026-06-04"
+    evidence: "python3 scripts/topology_doctor.py --scripts --json failed on unrelated script-manifest debt while live-release gate script was registered."
+    active_task_scope: "docs/operations/task_2026-05-21_live_release_proof_p0p3"
+    allowed_only_if: "The active change registers its own scripts and does not add to the unrelated script-manifest debt."
+
+  - failure_id: PEF-2026-05-21-TEST-TOPOLOGY-DEBT
+    status: tracking
+    owner: topology-maintenance
+    first_observed: "2026-05-21"
+    review_by: "2026-06-04"
+    evidence: "python3 scripts/topology_doctor.py --tests --json failed on unrelated test-topology/law-gate debt while live-release tests were registered."
+    active_task_scope: "docs/operations/task_2026-05-21_live_release_proof_p0p3"
+    allowed_only_if: "The active change registers its own tests and does not add to the unrelated test-topology debt."

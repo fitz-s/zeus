@@ -865,7 +865,7 @@ tables:
       flows via trade conn (src/execution/harvester.py:683). Empty in
       both DBs today; declaration realigned for INV-37 ATTACH semantics.
     pr3_pr6_columns:
-      - {name: polymarket_end_anchor_source, type: TEXT, default: gamma_explicit, pr: PR3}
+      - {name: polymarket_end_anchor_source, type: TEXT, default: unknown_legacy, pr: PR3_corrected_live_release_proof_p1_6}
       - {name: zeus_submit_intent_time, type: TEXT, nullable: true, pr: PR6}
       - {name: venue_ack_time, type: TEXT, nullable: true, pr: PR6}
       - {name: clock_skew_estimate_ms_at_submit, type: INTEGER, nullable: true, pr: PR6}
@@ -1042,7 +1042,8 @@ tables:
       schema_compatibility.
       PK matches decision_events natural key for FK-like joins.
       SCHEMA_VERSION 14→15 (production pass), 20 (live release proof P0-3
-      compatibility marker). writer/reader in
+      compatibility marker), 22 (live release proof P1-3 settlement command
+      retry marker). writer/reader in
       src/state/no_trade_events.py (write_no_trade_event(natural_key: DecisionNaturalKey, reason: NoTradeReason, reason_detail: Optional[str], observed_at: str, *, conn: sqlite3.Connection) — conn REQUIRED, INV-37);
       producer wired at 69 evaluator.py callsites replacing raw rejection_reasons=[...]
       strings/f-strings with NoTradeReason enum refs + reason_detail capture.

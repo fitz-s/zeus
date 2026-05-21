@@ -46,6 +46,7 @@ from src.engine.time_context import lead_days_to_date_start
 from src.signal.day0_router import Day0Router, Day0SignalInputs
 from src.signal.day0_window import remaining_member_extrema_for_day0
 from src.signal.ensemble_signal import EnsembleSignal, p_raw_vector_from_maxes
+from src.observability.counters import increment as _cnt_inc
 from src.state.chain_reconciliation import resolve_position_metric
 from src.state.portfolio import Position
 from src.strategy.market_fusion import (
@@ -65,6 +66,8 @@ _WHALE_TOXICITY_PRICE_MARGIN = 0.05
 _WHALE_TOXICITY_SEVERE_PRICE_MARGIN = 0.15
 _WHALE_TOXICITY_LOOKBACK_HOURS = 1.0
 _WHALE_TOXICITY_MIN_NOTIONAL_USD = 25.0
+_NOWCAST_PERSISTENT_FAILURE_THRESHOLD = 3
+_nowcast_consecutive_write_failures = 0
 
 
 @dataclass(frozen=True)
@@ -108,6 +111,29 @@ def _model_only_native_posterior(p_native: float) -> float:
 
 def _set_monitor_probability_fresh(position: Position, is_fresh: bool) -> None:
     setattr(position, _MONITOR_PROBABILITY_FRESH_ATTR, is_fresh)
+
+
+def _record_nowcast_write_success() -> None:
+    global _nowcast_consecutive_write_failures
+    _nowcast_consecutive_write_failures = 0
+
+
+def _record_nowcast_write_failure(*, market_slug: str, trade_id: str) -> int:
+    global _nowcast_consecutive_write_failures
+    _nowcast_consecutive_write_failures += 1
+    _cnt_inc(
+        "monitor_day0_nowcast_write_failed_total",
+        labels={"market_slug": str(market_slug or "unknown")},
+    )
+    if _nowcast_consecutive_write_failures >= _NOWCAST_PERSISTENT_FAILURE_THRESHOLD:
+        logger.error(
+            "[MONITOR_NOWCAST_WRITE_PERSISTENT_FAILURE] consecutive_failures=%s "
+            "trade_id=%s market_slug=%s",
+            _nowcast_consecutive_write_failures,
+            trade_id,
+            market_slug,
+        )
+    return _nowcast_consecutive_write_failures
 
 
 def _ens_result_phase2_keys(ens_result: dict) -> tuple[
@@ -1079,7 +1105,12 @@ def _maybe_write_day0_nowcast(
             temporal_context.daypart,
             fit.fit_run_id,
         )
+        _record_nowcast_write_success()
     except Exception as exc:  # noqa: BLE001
+        _record_nowcast_write_failure(
+            market_slug=str(getattr(position, "market_slug", "?") or "?"),
+            trade_id=str(getattr(position, "trade_id", "?") or "?"),
+        )
         logger.warning(
             "T5 nowcast write FAILED (non-fatal) for %s market_slug=%s: %s",
             getattr(position, "trade_id", "?"),

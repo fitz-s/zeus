@@ -15,6 +15,10 @@ on:
       - "scripts/check_live_release_gate.py"
       - "tests/test_live_release_gate.py"
       - "tests/test_money_path_lifecycle_replay.py"
+      - "tests/test_live_release_registry_runtime_assertions.py"
+      - "tests/test_pre_existing_failure_registry.py"
+      - "tests/test_monitor_refresh_nowcast_wiring.py"
+      - "tests/test_strategy_profile_registry.py"
       - "tests/test_executable_market_snapshot_v2.py"
       - "tests/test_market_scanner_negrisk.py"
       - "tests/test_decision_seq_cross_table_no_collision.py"
@@ -22,6 +26,8 @@ on:
       - "tests/state/test_schema_current_invariant.py"
       - "architecture/script_manifest.yaml"
       - "architecture/test_topology.yaml"
+      - "architecture/pre_existing_failure_registry.yaml"
+      - "architecture/db_table_ownership.yaml"
       - ".github/workflows/money-path-release-gate.yml"
   push:
     branches: [main]
@@ -30,6 +36,10 @@ on:
       - "scripts/check_live_release_gate.py"
       - "tests/test_live_release_gate.py"
       - "tests/test_money_path_lifecycle_replay.py"
+      - "tests/test_live_release_registry_runtime_assertions.py"
+      - "tests/test_pre_existing_failure_registry.py"
+      - "tests/test_monitor_refresh_nowcast_wiring.py"
+      - "tests/test_strategy_profile_registry.py"
       - "tests/test_executable_market_snapshot_v2.py"
       - "tests/test_market_scanner_negrisk.py"
       - "tests/test_decision_seq_cross_table_no_collision.py"
@@ -37,6 +47,8 @@ on:
       - "tests/state/test_schema_current_invariant.py"
       - "architecture/script_manifest.yaml"
       - "architecture/test_topology.yaml"
+      - "architecture/pre_existing_failure_registry.yaml"
+      - "architecture/db_table_ownership.yaml"
       - ".github/workflows/money-path-release-gate.yml"
   workflow_dispatch:
 
@@ -86,7 +98,11 @@ jobs:
             tests/test_decision_seq_cross_table_no_collision.py \
             tests/test_no_trade_events_check_accepts_all_shoulder_reasons.py \
             tests/state/test_schema_current_invariant.py \
-            tests/test_money_path_lifecycle_replay.py
+            tests/test_money_path_lifecycle_replay.py \
+            tests/test_live_release_registry_runtime_assertions.py \
+            tests/test_pre_existing_failure_registry.py \
+            tests/test_monitor_refresh_nowcast_wiring.py \
+            tests/test_strategy_profile_registry.py
 
       - name: Run release gate self-test fixture
         run: python scripts/check_live_release_gate.py --self-test-fixture --json

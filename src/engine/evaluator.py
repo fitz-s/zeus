@@ -4523,8 +4523,10 @@ def evaluate_candidate(
             else 0.0
         )
         
-        # Phase 3: RiskGraph Regime Throttling (K3: cluster == city.name)
-        current_cluster_exp = cluster_exposure_for_bankroll(portfolio, city.name, sizing_bankroll)
+        # Phase 3: RiskGraph Regime Throttling. Cluster identity comes from
+        # reviewed city/config metadata; city.name is not a risk-cluster
+        # authority.
+        current_cluster_exp = cluster_exposure_for_bankroll(portfolio, city.cluster, sizing_bankroll)
         risk_throttle = 1.0
         if current_cluster_exp > 0.10: # Regime saturation starts
             risk_throttle *= 0.5
