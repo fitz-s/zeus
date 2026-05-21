@@ -86,15 +86,16 @@ def regime_tag_for(
     decision_time: "datetime",
     conn: "sqlite3.Connection",
 ) -> WeatherRegimeTag:
-    """Rule-based classifier: read observation history + forecast median → WeatherRegimeTag.
+    """Rule-based classifier: read observation history → WeatherRegimeTag.
 
     Returns WeatherRegimeTag.UNKNOWN when observation history is insufficient
     for HEAT_DOME or COLD_SNAP classification (G2 invariant — fail-open, never
     silently default to NORMAL or any strong regime label).
 
     Classification priority (checked in order; first match wins):
-      1. UNKNOWN      — observation count < _MIN_HISTORY_DAYS (G2 fail-open)
-      2. SOURCE_ANOMALY — cross-source spread > _SOURCE_ANOMALY_Z_THRESHOLD σ on most recent obs
+      1. UNKNOWN      — distinct observation days < _MIN_HISTORY_DAYS (G2 fail-open)
+      2. SOURCE_ANOMALY — cross-source spread > _SOURCE_ANOMALY_Z_THRESHOLD σ across
+                          the lookback window (pooled per-source means vs pooled std)
       3. HEAT_DOME    — rolling mean of recent high_temp > seasonal_mean + 2σ
       4. COLD_SNAP    — rolling mean of recent high_temp < seasonal_mean − 2σ
       5. SHOULDER_SEASON — target_date month in _SHOULDER_MONTHS
@@ -131,12 +132,15 @@ def regime_tag_for(
     # Query via forecasts.observations (K1 ATTACH pattern).
     # Fall back to bare observations if forecasts schema is not attached.
     # On OperationalError (missing tables — e.g., :memory: test conn), return UNKNOWN.
-    rows: list[tuple[float, str]] = []
+    # Selecting target_date so we can count DISTINCT days (not raw rows) for the G2 gate.
+    # observations schema is UNIQUE(city, target_date, source); multiple sources per day
+    # must not inflate the day count and bypass the _MIN_HISTORY_DAYS temporal gate.
+    rows: list[tuple[float, str, str]] = []
     for table_ref in ("forecasts.observations", "observations"):
         try:
             cur = conn.execute(
                 f"""
-                SELECT high_temp, source
+                SELECT high_temp, source, target_date
                 FROM {table_ref}
                 WHERE city = ?
                   AND target_date >= ?
@@ -152,16 +156,22 @@ def regime_tag_for(
             continue
 
     # G2 invariant: fail-open to UNKNOWN when observation history is insufficient.
-    if len(rows) < _MIN_HISTORY_DAYS:
+    # Count DISTINCT calendar days, not raw rows, so multi-source days don't inflate
+    # the count and allow HEAT_DOME/COLD_SNAP with < _MIN_HISTORY_DAYS actual days.
+    distinct_days = len({r[2] for r in rows})
+    if distinct_days < _MIN_HISTORY_DAYS:
         return WeatherRegimeTag.UNKNOWN
 
     high_temps = [r[0] for r in rows]
     sources = [r[1] for r in rows]
 
-    # --- SOURCE_ANOMALY: cross-source spread check ---
+    # --- SOURCE_ANOMALY: cross-source spread check (full lookback window) ---
+    # Compares per-source means across the full lookback window. A z-score
+    # (max_source_mean - min_source_mean) / pooled_std > _SOURCE_ANOMALY_Z_THRESHOLD
+    # indicates a sensor spike or station reporting anomaly (Paris 2026 class).
     unique_sources = set(sources)
     if len(unique_sources) >= 2:
-        # Group temps by source for the most recent available date slice.
+        # Group all temps by source across the entire lookback window.
         source_temps: dict[str, list[float]] = {}
         for temp, src in zip(high_temps, sources):
             source_temps.setdefault(src, []).append(temp)

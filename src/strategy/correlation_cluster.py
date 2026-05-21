@@ -24,6 +24,68 @@ if TYPE_CHECKING:
     from src.contracts.weather_regime_tag import WeatherRegimeTag
 
 
+# Geographic zone map — module-level constant (not rebuilt on each call).
+# Covers all 52 canonical cities in config/cities.json as of 2026-05-21.
+# Zones: east / central / west (North America), europe, asia, southern, tropics.
+# Derivation: continental-scale weather systems track together; zone boundaries
+# follow standard climatological regions used by NOAA/ECMWF ensemble domains.
+# Unmapped city → falls back to city slug (no cross-city cluster collapse).
+_CITY_ZONE: dict[str, str] = {
+    "Amsterdam": "europe",
+    "Ankara": "europe",
+    "Atlanta": "east",
+    "Auckland": "southern",
+    "Austin": "central",
+    "Beijing": "asia",
+    "Buenos Aires": "southern",
+    "Busan": "asia",
+    "Cape Town": "southern",
+    "Chengdu": "asia",
+    "Chicago": "central",
+    "Chongqing": "asia",
+    "Dallas": "central",
+    "Denver": "central",
+    "Guangzhou": "asia",
+    "Helsinki": "europe",
+    "Hong Kong": "asia",
+    "Houston": "central",
+    "Istanbul": "europe",
+    "Jakarta": "tropics",
+    "Jeddah": "europe",
+    "Karachi": "asia",
+    "Kuala Lumpur": "tropics",
+    "Lagos": "tropics",
+    "London": "europe",
+    "Los Angeles": "west",
+    "Lucknow": "asia",
+    "Madrid": "europe",
+    "Manila": "tropics",
+    "Mexico City": "central",
+    "Miami": "east",
+    "Milan": "europe",
+    "Moscow": "europe",
+    "Munich": "europe",
+    "NYC": "east",
+    "Panama City": "tropics",
+    "Paris": "europe",
+    "Qingdao": "asia",
+    "San Francisco": "west",
+    "Sao Paulo": "southern",
+    "Seattle": "west",
+    "Seoul": "asia",
+    "Shanghai": "asia",
+    "Shenzhen": "asia",
+    "Singapore": "tropics",
+    "Taipei": "asia",
+    "Tel Aviv": "europe",
+    "Tokyo": "asia",
+    "Toronto": "east",
+    "Warsaw": "europe",
+    "Wellington": "southern",
+    "Wuhan": "asia",
+}
+
+
 def tail_correlation_cluster_for(
     city: str,
     regime: "WeatherRegimeTag",
@@ -41,13 +103,13 @@ def tail_correlation_cluster_for(
     Returns empty string ("") when regime is UNKNOWN — UNKNOWN regime does not
     aggregate into any cluster (plan §5 R-1, invariant: test_inv_unknown_regime_does_not_aggregate_cluster).
 
+    Unmapped city names fall back to the city name itself (slug form) as the zone
+    so that no two unrelated cities share a cluster due to a missing map entry.
+
     Args:
         city:        City name (canonical Zeus city string).
         regime:      WeatherRegimeTag from regime_tag_for().
         target_date: Settlement date of the shoulder market.
-
-    Returns:
-        Cluster ID string, or "" when regime is UNKNOWN.
 
     Returns:
         Cluster ID string, or "" when regime is UNKNOWN.
@@ -57,60 +119,7 @@ def tail_correlation_cluster_for(
     if regime is WeatherRegimeTag.UNKNOWN:
         return ""
 
-    # Geographic zone map — hardcoded per task brief (no zone field in cities.json).
-    # Zones: east / central / west (North America), europe, asia, southern, tropics.
-    # Derivation: continental-scale weather systems track together; zone boundaries
-    # follow standard climatological regions used by NOAA/ECMWF ensemble domains.
-    _CITY_ZONE: dict[str, str] = {
-        "Amsterdam": "europe",
-        "Ankara": "europe",
-        "Atlanta": "east",
-        "Auckland": "southern",
-        "Austin": "central",
-        "Beijing": "asia",
-        "Buenos Aires": "southern",
-        "Busan": "asia",
-        "Cape Town": "southern",
-        "Chengdu": "asia",
-        "Chicago": "central",
-        "Chongqing": "asia",
-        "Dallas": "central",
-        "Denver": "central",
-        "Hong Kong": "asia",
-        "Houston": "central",
-        "Istanbul": "europe",
-        "Jakarta": "tropics",
-        "Jeddah": "europe",
-        "Kuala Lumpur": "tropics",
-        "Lagos": "tropics",
-        "London": "europe",
-        "Los Angeles": "west",
-        "Lucknow": "asia",
-        "Madrid": "europe",
-        "Mexico City": "central",
-        "Miami": "east",
-        "Milan": "europe",
-        "Moscow": "europe",
-        "Munich": "europe",
-        "NYC": "east",
-        "Panama City": "tropics",
-        "Paris": "europe",
-        "San Francisco": "west",
-        "Sao Paulo": "southern",
-        "Seattle": "west",
-        "Seoul": "asia",
-        "Shanghai": "asia",
-        "Shenzhen": "asia",
-        "Singapore": "tropics",
-        "Taipei": "asia",
-        "Tel Aviv": "europe",
-        "Tokyo": "asia",
-        "Toronto": "east",
-        "Warsaw": "europe",
-        "Wellington": "southern",
-        "Wuhan": "asia",
-    }
-
-    zone = _CITY_ZONE.get(city, "unknown")
+    # Use city name slug as fallback so unmapped cities never share a cluster.
+    zone = _CITY_ZONE.get(city, city.lower().replace(" ", "_"))
     date_str = target_date.strftime("%Y_%m_%d")
     return f"{regime}_{zone}_{date_str}"
