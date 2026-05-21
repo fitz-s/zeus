@@ -481,6 +481,7 @@ def test_forecast_snapshot_persistence_uses_forecasts_owned_boundary(monkeypatch
         clob=clob,
         limits=evaluator_module.RiskLimits(min_order_usd=1.0),
         decision_time=TEST_DECISION_TIME,
+        use_forecasts_live_snapshot_store=True,
     )
 
     assert len(decisions) == 1
@@ -489,6 +490,46 @@ def test_forecast_snapshot_persistence_uses_forecasts_owned_boundary(monkeypatch
     assert metadata_conn_calls == [None]
     assert p_raw_store_conn_calls == [None]
     trade_rooted_cycle_conn.close()
+
+
+def test_forecast_snapshot_persistence_respects_caller_owned_connection_by_default(monkeypatch):
+    store_conn_calls: list[object] = []
+    metadata_conn_calls: list[object] = []
+    p_raw_store_conn_calls: list[object] = []
+    audit_conn = sqlite3.connect(":memory:")
+    audit_conn.row_factory = sqlite3.Row
+    monkeypatch.setattr(evaluator_module, "_layer7_dedup_fires", lambda *args, **kwargs: False)
+    monkeypatch.setattr(
+        evaluator_module,
+        "evaluate_ddd_for_decision",
+        lambda **kwargs: evaluator_module.SimpleNamespace(
+            action="PASS",
+            diagnostic={"final_discount_pre_mismatch": 0.0},
+        ),
+    )
+    clob = _patch_evaluator(
+        monkeypatch,
+        entry_price=0.01,
+        store_conn_calls=store_conn_calls,
+        metadata_conn_calls=metadata_conn_calls,
+        p_raw_store_conn_calls=p_raw_store_conn_calls,
+    )
+
+    decisions = evaluator_module.evaluate_candidate(
+        _candidate(discovery_mode=DiscoveryMode.OPENING_HUNT.value),
+        conn=audit_conn,
+        portfolio=PortfolioState(bankroll=211.37),
+        clob=clob,
+        limits=evaluator_module.RiskLimits(min_order_usd=1.0),
+        decision_time=TEST_DECISION_TIME,
+    )
+
+    assert len(decisions) == 1
+    assert decisions[0].should_trade is True
+    assert store_conn_calls == [audit_conn]
+    assert metadata_conn_calls == [audit_conn]
+    assert p_raw_store_conn_calls == [audit_conn]
+    audit_conn.close()
 
 
 def test_forecast_snapshot_real_helpers_round_trip_forecasts_db(monkeypatch, tmp_path):
@@ -526,6 +567,7 @@ def test_forecast_snapshot_real_helpers_round_trip_forecasts_db(monkeypatch, tmp
         clob=clob,
         limits=evaluator_module.RiskLimits(min_order_usd=1.0),
         decision_time=TEST_DECISION_TIME,
+        use_forecasts_live_snapshot_store=True,
     )
 
     assert len(decisions) == 1

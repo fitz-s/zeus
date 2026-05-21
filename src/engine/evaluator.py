@@ -2112,6 +2112,7 @@ def evaluate_candidate(
     entry_bankroll: Optional[float] = None,
     decision_time: Optional[datetime] = None,
     microstructure_sink=None,
+    use_forecasts_live_snapshot_store: bool = False,
 ) -> list[EdgeDecision]:
     """Evaluate a market candidate through the full signal pipeline."""
 
@@ -2867,11 +2868,18 @@ def evaluate_candidate(
     # Store ENS snapshot AFTER all semantic gates pass (#67 — no write-before-validate).
     # Executable reader rows already have an audited ensemble_snapshots_v2 id;
     # reuse it instead of writing a second legacy snapshot for the same source run.
+    snapshot_persistence_conn = None if use_forecasts_live_snapshot_store else conn
     if using_period_extrema:
         snapshot_id = str(ens_result.get("executable_snapshot_id") or "")
     else:
         assert ens is not None
-        snapshot_id = _store_ens_snapshot(None, city, target_date, ens, ens_result)
+        snapshot_id = _store_ens_snapshot(
+            snapshot_persistence_conn,
+            city,
+            target_date,
+            ens,
+            ens_result,
+        )
     if not snapshot_id:
         return [_make_rejection_decision(
             rejection_stage="SIGNAL_QUALITY",
@@ -2885,7 +2893,7 @@ def evaluate_candidate(
         )]
 
     v2_snapshot_meta = _read_v2_snapshot_metadata(
-        None,
+        snapshot_persistence_conn,
         city.name,
         target_date,
         temperature_metric.temperature_metric,
@@ -2947,7 +2955,7 @@ def evaluate_candidate(
         p_raw_persisted = None
     else:
         p_raw_persisted = _store_snapshot_p_raw(
-            None,
+            snapshot_persistence_conn,
             snapshot_id,
             p_raw,
             bias_corrected=bool(getattr(ens, "bias_corrected", False)),
@@ -4543,11 +4551,8 @@ def _snapshot_identity_matches(
 def _store_ens_snapshot(conn, city, target_date, ens, ens_result) -> str:
     """Store every ENS fetch and return the snapshot_id."""
 
-    snapshot_write_ctx = _snapshot_forecasts_live_write_connection(conn)
-    snapshot_write_entered = False
-    try:
-        conn = snapshot_write_ctx.__enter__()
-        snapshot_write_entered = True
+    with _snapshot_forecasts_live_write_connection(conn) as conn:
+      try:
         v2_table = _ensemble_snapshots_v2_table(conn)
         issue_time_value = _snapshot_issue_time_value(ens_result)
         valid_time_value = _snapshot_valid_time_value(target_date, ens_result)
@@ -4731,7 +4736,7 @@ def _store_ens_snapshot(conn, city, target_date, ens, ens_result) -> str:
             )
         conn.commit()
         return snapshot_id
-    except sqlite3.OperationalError as e:
+      except sqlite3.OperationalError as e:
         try:
             conn.rollback()
         except Exception:
@@ -4740,22 +4745,19 @@ def _store_ens_snapshot(conn, city, target_date, ens, ens_result) -> str:
             logger.warning("Failed to store ENS snapshot: %s", e)
             return ""
         raise
-    except sqlite3.DatabaseError:
+      except sqlite3.DatabaseError:
         try:
             conn.rollback()
         except Exception:
             pass
         raise
-    except Exception as e:
+      except Exception as e:
         try:
             conn.rollback()
         except Exception:
             pass
         logger.warning("Failed to store ENS snapshot: %s", e)
         return ""
-    finally:
-        if snapshot_write_entered:
-            snapshot_write_ctx.__exit__(None, None, None)
 
 
 def _store_snapshot_p_raw(
@@ -4765,19 +4767,16 @@ def _store_snapshot_p_raw(
     *,
     bias_corrected: bool = False,
     p_raw_topology: dict | None = None,
-) -> bool:
-    """Persist the decision-time p_raw vector and bias_corrected flag onto the snapshot row."""
+) -> bool | None:
+    """Persist p_raw; return None when a lock defers persistence."""
 
     if not snapshot_id:
         return False
 
     import json
 
-    snapshot_write_ctx = _snapshot_forecasts_live_write_connection(conn)
-    snapshot_write_entered = False
-    try:
-        conn = snapshot_write_ctx.__enter__()
-        snapshot_write_entered = True
+    with _snapshot_forecasts_live_write_connection(conn) as conn:
+      try:
         p_raw_json = json.dumps(p_raw.tolist())
         topology_payload = None
         if p_raw_topology is not None:
@@ -4895,7 +4894,7 @@ def _store_snapshot_p_raw(
             )
         conn.commit()
         return True
-    except sqlite3.OperationalError as e:
+      except sqlite3.OperationalError as e:
         try:
             conn.rollback()
         except Exception:
@@ -4908,19 +4907,16 @@ def _store_snapshot_p_raw(
             )
             return None
         raise
-    except sqlite3.DatabaseError:
+      except sqlite3.DatabaseError:
         try:
             conn.rollback()
         except Exception:
             pass
         raise
-    except Exception as e:
+      except Exception as e:
         try:
             conn.rollback()
         except Exception:
             pass
         logger.warning("Failed to store snapshot p_raw for %s: %s", snapshot_id, e)
         return False
-    finally:
-        if snapshot_write_entered:
-            snapshot_write_ctx.__exit__(None, None, None)
