@@ -199,8 +199,15 @@ def _refresh_pulse_infrastructure_status(status: dict, cycle_summary: dict | Non
     if not isinstance(risk, dict):
         risk = {}
         status["risk"] = risk
-    risk.setdefault("level", "UNKNOWN")
-    risk.setdefault("riskguard_level", risk.get("level", "UNKNOWN"))
+    fallback_risk_level = str(
+        cycle.get("risk_level")
+        or risk.get("level")
+        or risk.get("riskguard_level")
+        or ""
+    )
+    if fallback_risk_level:
+        risk.setdefault("level", fallback_risk_level)
+        risk.setdefault("riskguard_level", risk.get("level", fallback_risk_level))
     risk["consistency_check"] = {
         "ok": not consistency_issues,
         "issues": consistency_issues,
@@ -1419,7 +1426,7 @@ def write_status(cycle_summary: dict = None) -> None:
         recent_no_trades = query_no_trade_cases(conn, hours=24)
         stage_counts: dict[str, int] = {}
         for case in recent_no_trades:
-            stage = str(case.get("rejection_stage") or "UNKNOWN")
+            stage = str(case.get("rejection_stage") or "unknown")
             stage_counts[stage] = stage_counts.get(stage, 0) + 1
         status["no_trade"] = {
             "recent_stage_counts": stage_counts,
