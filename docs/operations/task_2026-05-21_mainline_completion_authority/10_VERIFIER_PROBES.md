@@ -22,7 +22,7 @@ P-pkg-5: `09_WORKFLOW.md` references the `~/.claude/skills/orchestrator-delivery
 
 ## Phase 3 (Shoulder) probes — `04_PHASE_3_SHOULDER.md`
 
-P-3-1: Dossier §7.3 cited verbatim — 20-field object model present in `04_PHASE_3_SHOULDER.md`.
+P-3-1: Dossier §7.3 cited verbatim — 21-field object model present in `04_PHASE_3_SHOULDER.md` (verifier recount 2026-05-21: 21 rows from `is_open_shoulder` through `no_trade_reason`; header updated from "20" to "21").
 
 P-3-2: Five variants in §7.4 enumerated with verdicts matching dossier.
 
@@ -30,11 +30,11 @@ P-3-3: Kelly haircut range `[0.05, 0.20]` cited from §7.5 verbatim.
 
 P-3-4: Six stress scenarios (§7.5) enumerated.
 
-P-3-5: Schema impact lists `tail_stress_scenarios` (15→16) + `shoulder_exposure_ledger` (16→17). Both additive.
+P-3-5: Schema impact: T2 ships `no_trade_events` table-rebuild (CREATE new with expanded CHECK + INSERT old + DROP + RENAME, ATTACH+SAVEPOINT per INV-37) AND `tail_stress_scenarios` NEW table — both under single SCHEMA_VERSION 15→16 bump. T3 ships `shoulder_exposure_ledger` NEW table — SCHEMA_VERSION 16→17. All additive.
 
 P-3-6: 6 new SHOULDER_* NoTradeReason members enumerated.
 
-P-3-7: Day0-bound interaction §7.6 acknowledged + xfail relationship test specified.
+P-3-7: Day0-bound interaction §7.6 acknowledged + xfail relationship test specified. Verify `test_shoulder_day0_bound_eliminates_tail` exists as `@pytest.mark.xfail(reason="pending Phase 5/6 Day0BoundState 6-class upgrade per dossier §6.2", strict=False)` — verbatim reason string required.
 
 P-3-8: Phase 3 planner v2 output at `docs/operations/task_2026-05-21_strategy_vnext_phase3_shoulder/PHASE_3_SHOULDER_PLAN.md` cross-references this file's design.
 
@@ -45,6 +45,8 @@ P-3-10: `make_hypothesis_family_id` current signature on origin/main lacks `sour
 P-3-11: `tail_correlation_cluster_for(city, regime)` function does NOT exist on origin/main (proof: `git grep -n "tail_correlation_cluster_for" origin/main` returns empty).
 
 P-3-12: Phase 3 T1/T2/T3 are strictly sequential per planner output; T1 ships `WeatherRegimeTag` enum first.
+
+P-3-13: `shoulder_buy` remains `live_status: blocked` at Phase 3 end — verify `architecture/strategy_profile_registry.yaml` shoulder_buy entry still shows `live_status: blocked` after all 3 tracks merge. No code in Phase 3 changes shoulder_buy live_status to `shadow` or `dormant_redesign`.
 
 ## Phase 4 (FDR + Candidates) probes — `05_PHASE_4_FDR_FAMILY_CANDIDATES.md`
 

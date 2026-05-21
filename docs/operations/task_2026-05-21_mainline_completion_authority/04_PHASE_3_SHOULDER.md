@@ -23,7 +23,7 @@ Implication: shoulder cannot share Kelly multiplier, FDR family, or exposure cap
 
 ## Required object model (dossier §7.3, verbatim)
 
-`ShoulderStrategyVNext` carries 20 fields:
+`ShoulderStrategyVNext` carries 21 fields (verifier recount 2026-05-21: 21 enumerated rows vs original "20" header — row count is authoritative):
 
 ```
 is_open_shoulder: bool                                    # gate
@@ -129,30 +129,30 @@ Strictly sequential T1 → T2 → T3:
 
 | Track | Sub-objects | LOC | Branch |
 |---|---|---|---|
-| T1 | `WeatherRegimeTag` + `correlation_cluster_for(city, regime)` + `make_hypothesis_family_id(source, regime)` extension | ~300 | `feat/phase3-t1-weather-regime-tag-20260521` |
-| T2 | `ShoulderStrategyVNext` 20-field + `TailStressScenario` table + 6 stress scenarios + registry classifier replacing hardcoded triplicate + Kelly haircut | ~500 | `feat/phase3-t2-shoulder-vnext-stress-20260521` |
+| T1 | `WeatherRegimeTag` 6-member enum (HEAT_DOME/COLD_SNAP/NORMAL/SHOULDER_SEASON/SOURCE_ANOMALY/UNKNOWN) + `correlation_cluster_for(city, regime)` + `make_hypothesis_family_id(source, regime)` + `make_edge_family_id(source, regime)` extension (parallel per G5) | ~300 | `feat/phase3-t1-weather-regime-tag-20260521` |
+| T2 | `ShoulderStrategyVNext` 21-field + `TailStressScenario` table + 6 stress scenarios + `_classify_via_registry` in `strategy_profile.py` replacing hardcoded triplicate at evaluator L1462/1478/1494 + Kelly haircut at `phase_aware_kelly_multiplier` L198 + `no_trade_events` table-rebuild migration (ATTACH+SAVEPOINT per INV-37) + SCHEMA_VERSION 15→16 | ~500 | `feat/phase3-t2-shoulder-vnext-stress-20260521` |
 | T3 | `ShoulderExposureLedger` table + `cluster_cap_usd` enforcement + shadow-readiness report + Day0-bound xfail antibody | ~350 | `feat/phase3-t3-shoulder-ledger-readiness-20260521` |
 
 Per-track: opus SCAFFOLD critic. One opus wave-critic across all 3 PRs before merge.
 
 ## Verifier probes (must pass before merge)
 
-1. `git show origin/main:src/contracts/shoulder_strategy_vnext.py` exists; class `ShoulderStrategyVNext` has all 20 fields per dossier §7.3.
-2. `git show origin/main:src/contracts/weather_regime_tag.py | grep -E "class WeatherRegimeTag"` returns enum definition with ≥4 members covering normal / heat_dome / cold_snap / shoulder_season (+optional anomaly).
+1. `git show origin/main:src/contracts/shoulder_strategy_vnext.py` exists; class `ShoulderStrategyVNext` has all 21 fields per dossier §7.3 (recount 2026-05-21: 21 rows in `04_PHASE_3_SHOULDER.md` §"Required object model").
+2. `git show origin/main:src/contracts/weather_regime_tag.py | grep -E "class WeatherRegimeTag"` returns enum definition with exactly 6 members: `HEAT_DOME / COLD_SNAP / NORMAL / SHOULDER_SEASON / SOURCE_ANOMALY / UNKNOWN` (21-field `ShoulderStrategyVNext.tail_regime_tag: WeatherRegimeTag` must accept all 6 values).
 3. `make_hypothesis_family_id` signature accepts `source: str = ""` and `regime: str = ""` kwargs; existing callers continue to work (default empty preserves prior family IDs).
-4. `src/strategy/kelly.py` exports `shoulder_kelly_multiplier(evidence_tier)` returning value in `[0.05, 0.20]`.
-5. `src/strategy/strategy_profile.py` has a `_classify_via_registry` helper that replaces hardcoded shoulder branches at `evaluator.py:1462/1478/1494` and `cycle_runner.py:456` (verify those lines NO LONGER contain hardcoded `shoulder_sell` string).
+4. `src/strategy/kelly.py` `phase_aware_kelly_multiplier` at L198 applies shoulder Kelly clamp `[0.05, 0.20]` at call site (clamp applied to registry value, Interpretation B per AR2/G4). `strategy_kelly_multiplier` L60-78 is NOT modified. Verify `phase_aware_kelly_multiplier` contains the clamp guard; verify `strategy_kelly_multiplier` does NOT.
+5. `src/strategy/strategy_profile.py` has a `_classify_via_registry` helper (canonical home per m2) called from `evaluator.py:1462/1478/1494` + `cycle_runner.py:456` — verify those lines NO LONGER contain hardcoded `shoulder_sell` string; verify cycle-axis short-circuits (settlement_capture / opening_inertia / imminent_open_capture) ARE UNCHANGED per AR1.
 6. `tail_stress_scenarios` table exists in `state/zeus-world.db` with PRAGMA `user_version` ≥ 16; `shoulder_exposure_ledger` exists with `user_version` ≥ 17.
 7. `NoTradeReason` enum membership grew by 6 SHOULDER_* members (re-count via `git show origin/main:src/contracts/no_trade_reason.py`).
 8. Tags `phase3_track1_landed`, `phase3_track2_landed`, `phase3_track3_landed` exist; `phase3_landed` umbrella tag on the last merge sha.
 9. CI green on the last 5 main runs after Phase 3 closure.
 10. Relationship test `test_shoulder_day0_bound_eliminates_tail` exists as `xfail` with reason citing pending Phase 5/6 Day0BoundState upgrade.
-11. Relationship test `test_shoulder_cluster_cap_under_heat_dome` exists and passes — synthetic heat-dome regime + 3 cities → only first city's shoulder trade passes; subsequent 2 rejected with `SHOULDER_CLUSTER_CAP_EXCEEDED`.
-12. Relationship test `test_shoulder_stress_fail_rejects_candidate` exists and passes — synthetic shoulder candidate that survives baseline but fails +2σ stress is rejected with `SHOULDER_STRESS_FAIL`.
+11. Relationship test `test_shoulder_cluster_cap_under_heat_dome` exists and passes — **synthetic heat-dome 3-city** scenario: `WeatherRegimeTag.HEAT_DOME` tagged cluster, 3 cities same-direction shoulder sell attempted in sequence → only first city's shoulder trade passes; subsequent 2 rejected with `SHOULDER_CLUSTER_CAP_EXCEEDED`. (T3 test description, pinned per m4.)
+12. Relationship test `test_shoulder_stress_fail_rejects_candidate` exists and passes — **synthetic +2σ-stress reject** scenario: shoulder candidate with baseline posterior surviving threshold but `TailStressScenario.FORECAST_PLUS_2SIGMA` adversely perturbed posterior exceeds loss threshold → candidate rejected with `SHOULDER_STRESS_FAIL`. (T2 test description, pinned per m4.)
 
 ## What this phase explicitly does NOT do
 
-- Live promotion of shoulder_sell to `live_status: live`. End-state is `shadow` for shoulder_sell, `dormant_redesign → shadow` for shoulder_buy. Live promotion is Phase 6+ work after `EvidenceLadder` tier ≥ 6.
+- Live promotion of shoulder_sell to `live_status: live`. End-state is `shadow` for shoulder_sell, **`blocked` for shoulder_buy** (UNKNOWN_BUT_INTERESTING = research-only per §7.4; `dormant_redesign → shadow` transition does NOT happen at Phase 3 end). Live promotion is Phase 6+ work after `EvidenceLadder` tier ≥ 6.
 - Full 6-class `Day0BoundState` (dossier §6.2). That stays Phase 5/6.
 - `MarketAnalysisVNext` field additions (e.g., `executable_exit_value`, `fill_probability`). Phase 4 work.
 - Candidate stub production (`stale_quote_detector` etc.). Phase 4.
