@@ -84,7 +84,11 @@ test_trust_policy:
     tests/test_execution_intent_typed_slippage.py: {created: "2026-04-26", last_used: "2026-04-26"}
     tests/test_lifecycle_terminal_predicate.py: {created: "2026-04-26", last_used: "2026-04-26"}
     tests/test_monitor_refresh_ci_fallback.py: {created: "2026-04-26", last_used: "2026-04-26"}
+    tests/test_monitor_refresh_nowcast_wiring.py: {created: "2026-05-20", last_used: "2026-05-21"}
     tests/test_position_metric_resolver.py: {created: "2026-04-26", last_used: "2026-04-26"}
+    # Phase 2 T5: Position.market_slug JSON-only field antibodies (2026-05-20).
+    tests/test_position_market_slug_persistence.py: {created: "2026-05-20", last_used: "2026-05-21"}
+    tests/test_position_market_slug_backward_compat.py: {created: "2026-05-20", last_used: "2026-05-21"}
     # P5-1 + P5-3 (PR #19 closeout completion, 2026-04-26):
     tests/test_realized_fill_at_receipt.py: {created: "2026-04-26", last_used: "2026-04-26"}
     tests/test_evaluate_candidate_metric_integration.py: {created: "2026-04-26", last_used: "2026-04-26"}
@@ -648,6 +652,9 @@ categories:
     - tests/test_lifecycle_pending_exit_guard.py
     - tests/test_lifecycle_terminal_predicate.py
     - tests/test_monitor_refresh_ci_fallback.py
+    - tests/test_monitor_refresh_nowcast_wiring.py
+    - tests/test_position_market_slug_persistence.py
+    - tests/test_position_market_slug_backward_compat.py
     - tests/test_position_metric_resolver.py
     - tests/test_realized_fill_at_receipt.py
     - tests/test_evaluate_candidate_metric_integration.py

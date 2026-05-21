@@ -433,6 +433,12 @@ class Position:
     exit_price: float = 0.0
     pnl: float = 0.0
 
+    # Market slug (JSON-only — Phase 2 T5; NO SQL ALTER, NO SCHEMA_VERSION bump).
+    # Populated from market_events_v2 at decision time or via one-shot backfill.
+    # Used by monitor_refresh nowcast wiring to gate write_nowcast_run calls.
+    # Default None preserves backward-compat with v1-vintage positions.json.
+    market_slug: Optional[str] = None
+
     def __post_init__(self):
         """CRITICAL: Enforce Enum strictness via coercion."""
         # S3 R5 P10B: runtime enforcement of Literal["high", "low"] at entry point
