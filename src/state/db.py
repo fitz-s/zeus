@@ -3013,6 +3013,8 @@ _FORECAST_TABLES = (
     "day0_nowcast_runs",
     # T4 MarketAnalysisVNext — SCHEMA_FORECASTS_VERSION 5 (2026-05-21)
     "market_microstructure_snapshots",
+    # Phase 7 T3 — SCHEMA_FORECASTS_VERSION 6 (2026-05-21)
+    "settlement_capture_verifications",
 )
 
 

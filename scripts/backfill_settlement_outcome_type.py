@@ -2,6 +2,9 @@
 # Last reused or audited: 2026-05-21
 # Authority basis: docs/operations/task_2026-05-21_strategy_vnext_phase7_settlement_type_gate/PHASE_7_PLAN.md §T4
 #                  + docs/operations/task_2026-05-21_mainline_completion_authority/08_PHASE_7_SETTLEMENT_TYPE_GATE.md
+# Lifecycle: created=2026-05-21; last_reviewed=2026-05-21; last_reused=never
+# Purpose: One-shot backfill of settlements_v2.outcome_type from existing authority+winning_bin columns.
+# Reuse: Safe to re-run (idempotent). Use --dry-run first. Only touches rows with outcome_type IS NULL.
 """Backfill settlements_v2.outcome_type from existing authority column.
 
 Mapping (per plan §T4):
@@ -73,7 +76,8 @@ def run_backfill(
         chunk_size: Rows per SAVEPOINT chunk. Default 500.
 
     Returns:
-        Dict with 'total_processed', 'total_updated', 'skipped_already_set'.
+        Dict with 'total_processed', 'total_updated', 'total_skipped_already_set'.
+        total_skipped_already_set: rows with outcome_type IS NOT NULL skipped by the WHERE clause.
     """
     stats: dict[str, int] = {
         "total_processed": 0,
@@ -81,20 +85,18 @@ def run_backfill(
         "total_updated": 0,
     }
 
-    # Fetch all rows needing backfill
-    rows = conn.execute(
+    # Stream rows via cursor + fetchmany to avoid loading entire result set into memory.
+    cursor = conn.execute(
         "SELECT settlement_id, authority, winning_bin FROM settlements_v2 WHERE outcome_type IS NULL"
-    ).fetchall()
+    )
 
-    logger.info("Found %d rows with outcome_type IS NULL", len(rows))
-    stats["total_processed"] = len(rows)
+    chunk_index = 0
+    while True:
+        chunk = cursor.fetchmany(chunk_size)
+        if not chunk:
+            break
+        stats["total_processed"] += len(chunk)
 
-    if not rows:
-        return stats
-
-    # Chunked SAVEPOINT writes
-    for chunk_start in range(0, len(rows), chunk_size):
-        chunk = rows[chunk_start: chunk_start + chunk_size]
         updates: list[tuple[int, int]] = []
         for row in chunk:
             sid, authority, winning_bin = row[0], row[1], row[2]
@@ -108,7 +110,7 @@ def run_backfill(
             stats["total_updated"] += len(updates)
         else:
             # INV-37: use SAVEPOINT per chunk; no raw conn.commit() at top level
-            sp_name = f"backfill_chunk_{chunk_start}"
+            sp_name = f"backfill_chunk_{chunk_index}"
             conn.execute(f"SAVEPOINT {sp_name}")
             try:
                 conn.executemany(
@@ -121,6 +123,9 @@ def run_backfill(
                 conn.execute(f"ROLLBACK TO SAVEPOINT {sp_name}")
                 raise
 
+        chunk_index += 1
+
+    logger.info("Processed %d rows total", stats["total_processed"])
     return stats
 
 

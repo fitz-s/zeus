@@ -1,6 +1,9 @@
 # Created: 2026-05-21
 # Last reused or audited: 2026-05-21
 # Authority basis: docs/operations/task_2026-05-21_strategy_vnext_phase7_settlement_type_gate/PHASE_7_PLAN.md §T1 acceptance criteria
+# Lifecycle: created=2026-05-21; last_reviewed=2026-05-21; last_reused=never
+# Purpose: Phase 7 T1 acceptance — Position.lifecycle_state JSON round-trip + coercion + backward-compat.
+# Reuse: Run when Position dataclass fields or lifecycle_state coercion path changes.
 """Tests for Position.lifecycle_state — Phase 7 T1.
 
 Acceptance criteria:

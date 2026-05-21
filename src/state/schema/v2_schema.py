@@ -430,6 +430,14 @@ def apply_v2_schema(conn: sqlite3.Connection, *, forecast_tables: bool = True) -
             # settlements_v2  (K1 forecast-class: moves to zeus-forecasts.db)
             # ----------------------------------------------------------------
             _create_settlements_v2(conn)
+            # Phase 7 T1 — ALTER for existing settlements_v2 rows on migrated DBs.
+            # _create_settlements_v2 adds outcome_type only in CREATE TABLE IF NOT EXISTS;
+            # existing DBs need an explicit ALTER. Guard for duplicate column.
+            try:
+                conn.execute("ALTER TABLE settlements_v2 ADD COLUMN outcome_type INTEGER")
+            except Exception as exc:
+                if "duplicate column" not in str(exc).lower():
+                    raise
 
             # ----------------------------------------------------------------
             # market_events_v2  (K1 forecast-class: moves to zeus-forecasts.db)

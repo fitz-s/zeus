@@ -226,6 +226,24 @@ tables:
       Writer: src/analysis/market_analysis_vnext.py MarketAnalysisVNext.compute()
       via caller-provided conn (INV-37). SCHEMA_FORECASTS_VERSION 5 live.
 
+  - name: settlement_capture_verifications
+    db: forecasts
+    schema_class: forecast_class
+    schema_version_owner: SCHEMA_FORECASTS_VERSION
+    created_by: "init_schema_forecasts (SCHEMA_FORECASTS_VERSION 6, PR #278 2026-05-21)"
+    pk_col: verification_id
+    notes: >
+      Phase 7 T3 (PHASE_7_PLAN.md §T3, PR #278 2026-05-21): per-event settlement
+      capture coherence audit. One row per (city, target_date, temperature_metric).
+      Columns: verification_id (PK AUTOINCREMENT), city, target_date, temperature_metric,
+      fact_known_time, source_published_time, venue_resolved_time, redeemed_time,
+      coherence_verdict (COHERENT/INCOHERENT/INCOMPLETE), incoherence_reason,
+      evidence_tier, recorded_at. UNIQUE(city, target_date, temperature_metric).
+      Writer: src/contracts/settlement_capture_verifier.SettlementCaptureVerifier.write_result()
+      via INV-37 SAVEPOINT. Not in world_src.sqlite_master; created via static helper
+      _create_settlement_capture_verifications (same pattern as market_microstructure_snapshots).
+      SCHEMA_FORECASTS_VERSION 6 live.
+
   # ---------------------------------------------------------------------------
   # LEGACY_ARCHIVED — ghost copies of forecast-class tables on world.db
   # Same table names as forecast-class entries above, but db: world.

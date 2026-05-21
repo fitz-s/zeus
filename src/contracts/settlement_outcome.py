@@ -183,8 +183,10 @@ def classify_settlement_outcome(market_json: dict) -> SettlementOutcome:
     raw_prices = market_json.get("outcomePrices")
     prices = _parse_outcome_prices(raw_prices)
 
-    if prices is None or len(prices) < 2:
-        # Missing or malformed — fail-closed
+    if prices is None or len(prices) != 2:
+        # Missing, malformed, or non-binary length — fail-closed.
+        # Require exactly 2 elements; 3+ element lists (e.g. [1,0,0]) are rejected
+        # rather than silently picking the first two.
         return SettlementOutcome.SOURCE_PUBLISHED_VENUE_UNRESOLVED
 
     p0, p1 = prices[0], prices[1]

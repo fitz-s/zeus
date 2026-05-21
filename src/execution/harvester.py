@@ -1097,11 +1097,12 @@ def _extract_resolved_market_outcomes(event: dict) -> list[ResolvedMarketOutcome
     for market in event.get("markets", []) or []:
         # T2: typed gate replaces raw umaResolutionStatus string comparison.
         # classify_settlement_outcome is fail-closed: ambiguous prices → SOURCE_PUBLISHED_VENUE_UNRESOLVED.
+        # Allow only the two resolved-with-direction outcomes; REDEEMED excluded because
+        # classify_settlement_outcome() never returns REDEEMED from venue JSON alone.
         _outcome_cls = classify_settlement_outcome(market)
         if _outcome_cls not in {
             SettlementOutcome.VENUE_RESOLVED_WIN,
             SettlementOutcome.VENUE_RESOLVED_LOSE,
-            SettlementOutcome.REDEEMED,
         }:
             continue
 
@@ -1172,7 +1173,7 @@ def _find_winning_bin(event: dict) -> tuple[Optional[float], Optional[float]]:
     Returns: (pm_bin_lo, pm_bin_hi) of the YES-won market, or (None, None).
 
     Gate (P-D §6.1 + §5.3 non-reversal attestation against R3-09):
-      - ``umaResolutionStatus == 'resolved'`` (terminal UMA DVM state)
+      - ``classify_settlement_outcome(market)`` returns VENUE_RESOLVED_WIN or VENUE_RESOLVED_LOSE (typed gate, Phase 7 T2; replaces raw umaResolutionStatus string check)
       - ``outcomes`` map one token to Yes and one token to No (unexpected
         labels → fail closed)
       - the Yes-labeled token has resolution price 1.0 (YES-won per UMA's
