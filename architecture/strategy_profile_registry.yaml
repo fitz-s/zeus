@@ -305,3 +305,114 @@ center_sell:
   min_strategy_notional_usd: 1.00
   min_expected_profit_usd: 0.05
   allow_ultra_low_tail: false
+
+# ── Phase 4 T2/T3 shadow candidates ────────────────────────────────────────
+# Added: 2026-05-21
+# Authority: docs/operations/task_2026-05-21_mainline_completion_authority/05_PHASE_4_FDR_FAMILY_CANDIDATES.md
+# All Phase 4 candidates MUST remain shadow; no candidate promoted to live here.
+# executable_alpha=True lives in CandidateMetadata ONLY — NOT in registry YAML
+# (passing it here raises RegistrySchemaError per strategy_profile.py _REQUIRED_FIELDS).
+
+stale_quote_detector:
+  thesis: >
+    Shadow candidate: detects fill-infeasible stale resting quotes after
+    information events. Edge source: book hash unchanged after a known info
+    event signals the resting quote has not been refreshed and may be
+    fill-infeasible at the posted price. Shadow research phase only.
+  live_status: shadow
+  allowed_market_phases: [pre_settlement_day, settlement_day]
+  allowed_discovery_modes: [opening_hunt, update_reaction]
+  cycle_axis_dispatch_mode: null
+  allowed_directions: [buy_yes]
+  allowed_bin_topology: [finite_range]
+  metric_support:
+    high: shadow
+    low:  shadow
+  kelly_default_multiplier: 0.0
+  kelly_phase_overrides:
+    pre_trading: 0.0
+    pre_settlement_day: 0.0
+    settlement_day: 0.0
+    post_trading: 0.0
+    resolved: 0.0
+  min_shadow_decisions: 100
+  min_settled_decisions: 0
+  promotion_evidence_ref: docs/operations/task_2026-05-21_mainline_completion_authority/05_PHASE_4_FDR_FAMILY_CANDIDATES.md
+
+resolution_window_maker:
+  thesis: >
+    Shadow candidate: exploits source-known but venue-unresolved discount
+    window. When the UMA oracle has asserted a resolution result not yet
+    reflected in the Polymarket price, a maker entry on the converging side
+    captures the settlement discount. Shadow research phase only.
+  live_status: shadow
+  allowed_market_phases: [settlement_day]
+  allowed_discovery_modes: [update_reaction]
+  cycle_axis_dispatch_mode: null
+  allowed_directions: [buy_yes]
+  allowed_bin_topology: [finite_range]
+  metric_support:
+    high: shadow
+    low:  shadow
+  kelly_default_multiplier: 0.0
+  kelly_phase_overrides:
+    pre_trading: 0.0
+    pre_settlement_day: 0.0
+    settlement_day: 0.0
+    post_trading: 0.0
+    resolved: 0.0
+  min_shadow_decisions: 100
+  min_settled_decisions: 0
+  promotion_evidence_ref: docs/operations/task_2026-05-21_mainline_completion_authority/05_PHASE_4_FDR_FAMILY_CANDIDATES.md
+
+liquidity_provision_with_heartbeat:
+  thesis: >
+    Shadow candidate: heartbeat-aware passive liquidity provision. Exploits
+    market-maker quoting cadence by posting passive quotes in anticipation
+    of the next batch window. Edge source: fill_probability evidence from
+    prior command history. Shadow research phase only.
+  live_status: shadow
+  allowed_market_phases: [pre_settlement_day, settlement_day]
+  allowed_discovery_modes: [opening_hunt, update_reaction]
+  cycle_axis_dispatch_mode: null
+  allowed_directions: [buy_yes]
+  allowed_bin_topology: [finite_range]
+  metric_support:
+    high: shadow
+    low:  shadow
+  kelly_default_multiplier: 0.0
+  kelly_phase_overrides:
+    pre_trading: 0.0
+    pre_settlement_day: 0.0
+    settlement_day: 0.0
+    post_trading: 0.0
+    resolved: 0.0
+  min_shadow_decisions: 100
+  min_settled_decisions: 0
+  promotion_evidence_ref: docs/operations/task_2026-05-21_mainline_completion_authority/05_PHASE_4_FDR_FAMILY_CANDIDATES.md
+
+weather_event_arbitrage:
+  thesis: >
+    Shadow candidate: weather alert / extreme event lag arbitrage. When an
+    authoritative external alert feed signals an extreme weather event, the
+    corresponding Polymarket market may not have repriced yet. Edge source:
+    trusted alert feed lag vs. market price. Shadow research phase only.
+  live_status: shadow
+  allowed_market_phases: [pre_settlement_day, settlement_day]
+  allowed_discovery_modes: [opening_hunt, update_reaction]
+  cycle_axis_dispatch_mode: null
+  allowed_directions: [buy_yes]
+  allowed_bin_topology: [finite_range]
+  metric_support:
+    high: shadow
+    low:  shadow
+  kelly_default_multiplier: 0.0
+  kelly_phase_overrides:
+    pre_trading: 0.0
+    pre_settlement_day: 0.0
+    settlement_day: 0.0
+    post_trading: 0.0
+    resolved: 0.0
+  min_shadow_decisions: 100
+  min_settled_decisions: 0
+  promotion_evidence_ref: docs/operations/task_2026-05-21_mainline_completion_authority/05_PHASE_4_FDR_FAMILY_CANDIDATES.md

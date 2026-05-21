@@ -22,8 +22,25 @@ extended with `source: str = ""` and `regime: str = ""` kwargs per plan §2 T1
 (G5 parallel extension). Existing callers continue to work unchanged — defaults
 preserve prior family ID strings.
 
+Phase 4 T1 (2026-05-21): make_hypothesis_family_id and make_edge_family_id
+extended with `spread_bucket: Literal["tight","medium","wide"] = ""` kwarg per
+05_PHASE_4_FDR_FAMILY_CANDIDATES.md §"FDR + spread_bucket (math basis)".
+Prefix "sb=" appended only when non-empty — default "" preserves byte-identical
+IDs for all existing callers.
+
+Spread bucket thresholds (Phase 0 PR 2+7 EffectiveKellyContext alignment):
+  tight  — spread ≤ $0.05
+  medium — spread ≤ $0.10
+  wide   — spread  > $0.10
+
+BH math basis: partitioning by spread_bucket gives each sub-family its own
+BH denominuator `m`, preventing wide-spread noise bins from inflating the
+rejection threshold shared with tight-spread signal bins.
+
 Shoulder variant: make_shoulder_hypothesis_family_id enforces non-empty source
 and regime per dossier §7.5 family grammar: "shoulder:{city}:{metric}:{target_date}:{source}:{regime}".
+Shoulder spread_bucket discrimination is Phase 6 (make_shoulder_hypothesis_family_id
+is explicitly DEFERRED in Phase 4 per plan §T1 deliverable 4).
 """
 
 from __future__ import annotations
@@ -51,6 +68,7 @@ def make_hypothesis_family_id(
     decision_snapshot_id: str = "",
     source: str = "",
     regime: str = "",
+    spread_bucket: Literal["tight", "medium", "wide", ""] = "",
 ) -> str:
     """Canonical family ID for the per-candidate (hypothesis) scope.
 
@@ -68,15 +86,22 @@ def make_hypothesis_family_id(
     When all three optional fields are empty (default), the produced ID is
     identical to pre-T1 IDs — existing callers continue to work unchanged.
 
+    Phase 4 T1 (2026-05-21): spread_bucket kwarg added per
+    05_PHASE_4_FDR_FAMILY_CANDIDATES.md §"FDR + spread_bucket (math basis)".
+    Default "" preserves byte-identical IDs for all existing callers.
+
     Position-prefix grammar (M1 anti-collision): optional fields are appended
-    with typed prefixes ("snap=", "src=", "rgm=") so that
+    with typed prefixes ("snap=", "src=", "rgm=", "sb=") so that
         make_hypothesis_family_id(decision_snapshot_id="X")
     is NEVER byte-identical to
-        make_hypothesis_family_id(source="X")
+        make_hypothesis_family_id(source="X")  or
+        make_hypothesis_family_id(regime="X")  or
+        make_hypothesis_family_id(spread_bucket="X")
     preventing silent shared BH FDR budgets across distinct families.
 
     Grammar with all optional fields:
-        "hyp|{cycle_mode}|{city}|{target_date}|{metric}|{discovery_mode}|snap={snap}|src={source}|rgm={regime}"
+        "hyp|{cycle_mode}|{city}|{target_date}|{metric}|{discovery_mode}
+         [|snap={snap}][|src={source}][|rgm={regime}][|sb={spread_bucket}]"
     """
     parts = ["hyp", cycle_mode, city, target_date, temperature_metric, discovery_mode]
     if decision_snapshot_id:
@@ -85,6 +110,8 @@ def make_hypothesis_family_id(
         parts.append(f"src={source}")
     if regime:
         parts.append(f"rgm={regime}")
+    if spread_bucket:
+        parts.append(f"sb={spread_bucket}")
     return "|".join(parts)
 
 
@@ -99,6 +126,7 @@ def make_edge_family_id(
     decision_snapshot_id: str = "",
     source: str = "",
     regime: str = "",
+    spread_bucket: Literal["tight", "medium", "wide", ""] = "",
 ) -> str:
     """Canonical family ID for the per-strategy (edge) scope.
 
@@ -115,15 +143,22 @@ def make_edge_family_id(
     When all three optional fields are empty (default), the produced ID is
     identical to pre-T1 IDs — existing callers continue to work unchanged.
 
+    Phase 4 T1 (2026-05-21): spread_bucket kwarg added per
+    05_PHASE_4_FDR_FAMILY_CANDIDATES.md §"FDR + spread_bucket (math basis)".
+    Default "" preserves byte-identical IDs for all existing callers.
+
     Position-prefix grammar (M1 anti-collision): optional fields are appended
-    with typed prefixes ("snap=", "src=", "rgm=") so that
+    with typed prefixes ("snap=", "src=", "rgm=", "sb=") so that
         make_edge_family_id(decision_snapshot_id="X")
     is NEVER byte-identical to
-        make_edge_family_id(source="X")
+        make_edge_family_id(source="X")  or
+        make_edge_family_id(regime="X")  or
+        make_edge_family_id(spread_bucket="X")
     preventing silent shared BH FDR budgets across distinct families.
 
     Grammar with all optional fields:
-        "edge|{cycle_mode}|{city}|{target_date}|{metric}|{strategy_key}|{discovery_mode}|snap={snap}|src={source}|rgm={regime}"
+        "edge|{cycle_mode}|{city}|{target_date}|{metric}|{strategy_key}|{discovery_mode}
+         [|snap={snap}][|src={source}][|rgm={regime}][|sb={spread_bucket}]"
 
     Raises:
         ValueError: if strategy_key is falsy (empty string or None). An edge
@@ -141,6 +176,8 @@ def make_edge_family_id(
         parts.append(f"src={source}")
     if regime:
         parts.append(f"rgm={regime}")
+    if spread_bucket:
+        parts.append(f"sb={spread_bucket}")
     return "|".join(parts)
 
 
@@ -187,6 +224,27 @@ def make_shoulder_hypothesis_family_id(
             f"got {regime!r}. Shoulder family ID encodes regime per dossier §7.5."
         )
     return f"shoulder:{city}:{metric}:{target_date}:{source}:{regime}"
+
+
+def spread_bucket_for_spread(spread: float) -> Literal["tight", "medium", "wide"]:
+    """Classify a market spread value into the FDR spread_bucket tier.
+
+    Thresholds align with Phase 0 PR 2+7 EffectiveKellyContext spread tiers:
+        tight  — spread ≤ $0.05
+        medium — spread ≤ $0.10
+        wide   — spread  > $0.10
+
+    Args:
+        spread: Observed market spread in dollars (non-negative float).
+
+    Returns:
+        One of "tight", "medium", or "wide".
+    """
+    if spread <= 0.05:
+        return "tight"
+    if spread <= 0.10:
+        return "medium"
+    return "wide"
 
 
 def benjamini_hochberg_mask(p_values: list[float], q: float) -> list[bool]:
