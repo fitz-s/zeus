@@ -86,6 +86,12 @@
 #       Minimum expected profit before a live entry is worth execution churn.
 #   allow_ultra_low_tail: true | false
 #       Explicit exception for tail-arb strategies with separate calibration.
+#   partial_source_run_allowed: true | false
+#       Whether a floor-passing PARTIAL source run can remain live-eligible.
+#   complete_required_for_tail_orders: true | false
+#       If true, low-price/tail entries require COMPLETE source-run coverage.
+#   partial_run_kelly_haircut: 0.0 to <1.0
+#       Kelly multiplier applied when a floor-passing PARTIAL source run is allowed.
 #
 # Initial values
 # --------------

@@ -933,24 +933,22 @@ def _ensure_entry_fill_order_fact(
         command_id=command_id,
         venue_order_id=venue_order_id,
     )
-    latest_terminal_state = str(latest["state"] or "") if latest is not None else ""
-    latest_terminal_state_preserved = latest_terminal_state in _TERMINAL_ORDER_FACT_STATES
-    terminal_source = latest if latest_terminal_state_preserved else prior_terminal
-    terminal_state_preserved = terminal_source is not None
-    if terminal_state_preserved:
-        terminal_matched = _positive_decimal_or_none(terminal_source["matched_size"]) or Decimal("0")
-        matched_dec = max(filled_dec, terminal_matched)
-        remaining = Decimal("0")
-        state = str(terminal_source["state"] or "")
-    else:
-        matched_dec = filled_dec
-        if command_size is None:
-            remaining = Decimal("0")
-        else:
-            remaining = max(Decimal("0"), command_size - matched_dec)
-        state = "MATCHED" if command_size is not None and matched_dec >= command_size else "PARTIALLY_MATCHED"
-    remaining_text = _decimal_text(remaining)
-    matched_text = _decimal_text(matched_dec)
+    from src.execution.order_truth_reducer import VenueOrderTruthReducer
+
+    reducer_facts = [row for row in (latest, prior_terminal) if row is not None]
+    reduced = VenueOrderTruthReducer.reduce(
+        order_facts=reducer_facts,
+        trade_filled_size=filled_dec,
+        command_size=command_size,
+        command_state=str(command.get("state") or ""),
+    )
+    state = reduced.state
+    remaining_text = (
+        _decimal_text(reduced.remaining_size)
+        if reduced.remaining_size is not None
+        else "0"
+    )
+    matched_text = _decimal_text(reduced.matched_size)
     if latest is not None and (
         str(latest["state"] or "") == state
         and _same_decimal_value(latest["remaining_size"], remaining_text)
@@ -969,8 +967,8 @@ def _ensure_entry_fill_order_fact(
         "state": state,
         "remaining_size": remaining_text,
         "matched_size": matched_text,
-        "terminal_state_preserved": terminal_state_preserved,
-        "terminal_state_source": "latest" if latest_terminal_state_preserved else "prior",
+        "order_truth_proof_class": reduced.proof_class,
+        "order_truth_source_state": reduced.source_state,
     }
     append_order_fact(
         conn,

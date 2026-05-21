@@ -25,7 +25,7 @@ import sqlite3
 from src.contracts.no_trade_reason import NoTradeReason
 
 # Schema version stamped into each row; stays in sync with db.py SCHEMA_VERSION.
-SCHEMA_VERSION = 16
+SCHEMA_VERSION = 17
 
 # Enum CHECK: every valid NoTradeReason value, joined for SQL IN clause.
 _REASON_VALUES_SQL = ", ".join(f"'{r.value}'" for r in NoTradeReason)
@@ -40,7 +40,7 @@ CREATE TABLE IF NOT EXISTS no_trade_events (
     reason              TEXT NOT NULL CHECK (reason IN ({_REASON_VALUES_SQL})),
     reason_detail       TEXT,
     observed_at         TEXT NOT NULL,
-    schema_version      INTEGER NOT NULL CHECK (schema_version IN (14, 15, 16)),
+    schema_version      INTEGER NOT NULL CHECK (schema_version IN (14, 15, 16, 17)),
     PRIMARY KEY (market_slug, temperature_metric, target_date, observation_time, decision_seq)
 )
 """
@@ -55,7 +55,7 @@ CREATE TABLE no_trade_events_new (
     reason              TEXT NOT NULL CHECK (reason IN ({_REASON_VALUES_SQL})),
     reason_detail       TEXT,
     observed_at         TEXT NOT NULL,
-    schema_version      INTEGER NOT NULL CHECK (schema_version IN (14, 15, 16)),
+    schema_version      INTEGER NOT NULL CHECK (schema_version IN (14, 15, 16, 17)),
     PRIMARY KEY (market_slug, temperature_metric, target_date, observation_time, decision_seq)
 )
 """
@@ -93,7 +93,7 @@ def _rebuild_stale_no_trade_events_table(conn: sqlite3.Connection) -> None:
     table_sql = str(row[0] if row else "")
     if (
         NoTradeReason.MUTUALLY_EXCLUSIVE_FAMILY_DEDUP.value in table_sql
-        and "14, 15, 16" in table_sql
+        and "17" in table_sql
     ):
         return
 
@@ -114,8 +114,8 @@ def _rebuild_stale_no_trade_events_table(conn: sqlite3.Connection) -> None:
             reason_detail,
             observed_at,
             CASE
-                WHEN schema_version IN (14, 15, 16) THEN schema_version
-                ELSE 16
+                WHEN schema_version IN (14, 15, 16, 17) THEN schema_version
+                ELSE 17
             END
         FROM no_trade_events
         """

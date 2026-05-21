@@ -50,7 +50,9 @@ adds, resizes, or re-enables a decision, so it can never increase exposure.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from itertools import combinations
 import logging
+import math
 import os
 from typing import TYPE_CHECKING, Any, Iterable
 
@@ -101,6 +103,18 @@ class FamilyPreselectionDrop:
 
 
 @dataclass(frozen=True)
+class FamilyPortfolioLeg:
+    """One leg inside an exclusive-outcome payoff-vector portfolio."""
+
+    edge: Any
+    bin_label: str
+    support_index: int
+    cost: float
+    posterior: float
+    direction: str
+
+
+@dataclass(frozen=True)
 class ExclusiveOutcomePortfolio:
     """Single-family payoff object for mutually-exclusive weather bins.
 
@@ -116,6 +130,18 @@ class ExclusiveOutcomePortfolio:
     expected_net_profit_usd: float
     expected_fill_probability: float
     objective: str = "single_leg_expected_net_profit"
+    selected_legs: tuple[Any, ...] = ()
+    candidate_leg_descriptors: tuple[FamilyPortfolioLeg, ...] = ()
+    payoff_matrix: tuple[tuple[float, ...], ...] = ()
+    posterior_vector: tuple[float, ...] = ()
+    cost_vector: tuple[float, ...] = ()
+    leg_weights: tuple[float, ...] = ()
+    expected_log_growth: float = 0.0
+    max_loss_usd: float = 0.0
+
+    def __post_init__(self) -> None:
+        if not self.selected_legs:
+            object.__setattr__(self, "selected_legs", (self.selected_leg,))
 
 
 @dataclass(frozen=True)
@@ -433,6 +459,197 @@ def _edge_family_selection_score(edge: Any) -> float:
     return score
 
 
+def _edge_cost(edge: Any) -> float:
+    try:
+        cost = float(getattr(edge, "entry_price", 0.0) or getattr(edge, "p_market", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        cost = 0.0
+    return cost if 0.0 < cost < 1.0 else 0.0
+
+
+def _edge_posterior(edge: Any) -> float:
+    try:
+        posterior = float(getattr(edge, "p_posterior", 0.0) or getattr(edge, "p_model", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        posterior = 0.0
+    return max(0.0, min(1.0, posterior))
+
+
+def _edge_bin_label(edge: Any) -> str:
+    bin_obj = getattr(edge, "bin", None)
+    if bin_obj is None:
+        return ""
+    return str(getattr(bin_obj, "label", "") or "")
+
+
+def _edge_support_index(edge: Any, fallback: int) -> int:
+    try:
+        support_index = getattr(edge, "support_index", None)
+        if support_index is not None:
+            return int(support_index)
+    except (TypeError, ValueError):
+        pass
+    return fallback
+
+
+def _portfolio_payoff_for_leg(
+    *,
+    outcome_index: int,
+    leg: FamilyPortfolioLeg,
+) -> float:
+    """Return profit per dollar staked for one leg in one family outcome."""
+
+    cost = leg.cost
+    if cost <= 0.0 or cost >= 1.0:
+        return -1.0
+    direction = leg.direction.lower()
+    leg_wins = outcome_index == leg.support_index
+    if direction == "buy_yes":
+        return ((1.0 - cost) / cost) if leg_wins else -1.0
+    if direction == "buy_no":
+        return -1.0 if leg_wins else ((1.0 - cost) / cost)
+    return _edge_family_selection_score(leg.edge)
+
+
+def _normalize_posterior_vector(legs: list[FamilyPortfolioLeg]) -> tuple[float, ...]:
+    raw = [max(0.0, leg.posterior) for leg in legs]
+    total = sum(raw)
+    if total <= 0.0:
+        return tuple(1.0 / len(legs) for _ in legs) if legs else ()
+    return tuple(value / total for value in raw)
+
+
+def _score_portfolio_combo(
+    legs: list[FamilyPortfolioLeg],
+    selected_indexes: tuple[int, ...],
+    *,
+    log_growth_fraction: float = 0.01,
+) -> tuple[float, float, float, tuple[tuple[float, ...], ...], tuple[float, ...], tuple[float, ...]]:
+    """Score a candidate portfolio by expected log growth over the family vector."""
+
+    selected = [legs[i] for i in selected_indexes]
+    posterior_vector = _normalize_posterior_vector(legs)
+    if not selected or not posterior_vector:
+        return (-math.inf, 0.0, 0.0, (), (), ())
+
+    leg_weights = tuple(1.0 / len(selected) for _ in selected)
+    payoff_rows: list[tuple[float, ...]] = []
+    outcome_returns: list[float] = []
+    for outcome_idx, _leg in enumerate(legs):
+        row = tuple(
+            _portfolio_payoff_for_leg(outcome_index=outcome_idx, leg=selected_leg)
+            for selected_leg in selected
+        )
+        payoff_rows.append(row)
+        outcome_returns.append(sum(weight * payoff for weight, payoff in zip(leg_weights, row)))
+
+    expected_net_profit = sum(prob * ret for prob, ret in zip(posterior_vector, outcome_returns))
+    expected_log_growth = 0.0
+    for prob, ret in zip(posterior_vector, outcome_returns):
+        growth = 1.0 + log_growth_fraction * ret
+        if growth <= 0.0:
+            return (-math.inf, expected_net_profit, min(outcome_returns), tuple(payoff_rows), posterior_vector, leg_weights)
+        expected_log_growth += prob * math.log(growth)
+    return (
+        expected_log_growth,
+        expected_net_profit,
+        min(outcome_returns),
+        tuple(payoff_rows),
+        posterior_vector,
+        leg_weights,
+    )
+
+
+def optimize_exclusive_outcome_portfolio(
+    edges: list[Any],
+    *,
+    city: str,
+    target_date: str,
+    temperature_metric: str,
+    min_legs: int = 1,
+    max_legs: int = 1,
+) -> ExclusiveOutcomePortfolio | None:
+    """Build a payoff-vector family portfolio before scalar order sizing."""
+
+    if not edges:
+        return None
+    legs = [
+        FamilyPortfolioLeg(
+            edge=edge,
+            bin_label=_edge_bin_label(edge),
+            support_index=idx,
+            cost=_edge_cost(edge),
+            posterior=_edge_posterior(edge),
+            direction=str(getattr(edge, "direction", "") or ""),
+        )
+        for idx, edge in enumerate(edges)
+    ]
+    max_legs = max(1, min(int(max_legs or 1), len(legs)))
+    min_legs = max(1, min(int(min_legs or 1), max_legs))
+    best_key: tuple[float, float, float, float, tuple[int, ...]] | None = None
+    best_payload: tuple[
+        tuple[int, ...],
+        float,
+        float,
+        float,
+        float,
+        tuple[tuple[float, ...], ...],
+        tuple[float, ...],
+        tuple[float, ...],
+    ] | None = None
+    for width in range(min_legs, max_legs + 1):
+        for selected_indexes in combinations(range(len(legs)), width):
+            expected_log_growth, expected_net_profit, max_loss, payoff_matrix, posterior_vector, weights = (
+                _score_portfolio_combo(legs, selected_indexes)
+            )
+            edge_selection_utility = sum(
+                _edge_family_selection_score(legs[idx].edge) for idx in selected_indexes
+            ) / float(width)
+            key = (
+                edge_selection_utility,
+                expected_log_growth,
+                expected_net_profit,
+                -float(width),
+                tuple(-_edge_support_index(legs[idx].edge, idx) for idx in selected_indexes),
+            )
+            if best_key is None or key > best_key:
+                best_key = key
+                best_payload = (
+                    selected_indexes,
+                    edge_selection_utility,
+                    expected_log_growth,
+                    expected_net_profit,
+                    max_loss,
+                    payoff_matrix,
+                    posterior_vector,
+                    weights,
+                )
+
+    if best_payload is None:
+        return None
+    selected_indexes, edge_selection_utility, expected_log_growth, expected_net_profit, max_loss, payoff_matrix, posterior_vector, weights = best_payload
+    selected_legs = tuple(legs[idx].edge for idx in selected_indexes)
+    selected_leg = selected_legs[0]
+    selected_cost_vector = tuple(legs[idx].cost for idx in selected_indexes)
+    return ExclusiveOutcomePortfolio(
+        family_key=_family_key(city, target_date, temperature_metric),
+        selected_leg=selected_leg,
+        selected_legs=selected_legs,
+        candidate_legs=tuple(edges),
+        candidate_leg_descriptors=tuple(legs),
+        selection_score=edge_selection_utility,
+        expected_net_profit_usd=expected_net_profit,
+        expected_fill_probability=1.0,
+        objective="expected_log_growth_payoff_vector",
+        payoff_matrix=payoff_matrix,
+        posterior_vector=posterior_vector,
+        cost_vector=selected_cost_vector,
+        leg_weights=weights,
+        expected_log_growth=expected_log_growth,
+        max_loss_usd=abs(min(0.0, max_loss)),
+    )
+
+
 def _edge_preselection_key(edge: Any) -> tuple[float, float, float, tuple[int, ...]]:
     score = _edge_family_selection_score(edge)
     try:
@@ -523,25 +740,34 @@ def build_weather_family_decision(
     if not gate_enabled:
         return None
 
-    selected, dropped = preselect_single_family_edge_before_kelly(
-        edges,
+    try:
+        max_legs = int(os.environ.get("ZEUS_LIVE_FAMILY_PORTFOLIO_MAX_LEGS", "1"))
+    except ValueError:
+        max_legs = 1
+    portfolio = optimize_exclusive_outcome_portfolio(
+        list(edges),
         city=city,
         target_date=target_date,
         temperature_metric=temperature_metric,
-        enabled=gate_enabled,
+        max_legs=max_legs,
     )
-    if not selected:
+    if portfolio is None:
         return None
-    selected_leg = selected[0]
-    score = _edge_family_selection_score(selected_leg)
-    portfolio = ExclusiveOutcomePortfolio(
-        family_key=_family_key(city, target_date, temperature_metric),
-        selected_leg=selected_leg,
-        candidate_legs=tuple(edges),
-        selection_score=score,
-        expected_net_profit_usd=score,
-        expected_fill_probability=1.0,
-    )
+    selected_set = set(id(edge) for edge in portfolio.selected_legs)
+    kept_bin = ",".join(_edge_bin_label(edge) for edge in portfolio.selected_legs)
+    dropped: list[FamilyPreselectionDrop] = []
+    for edge in edges:
+        if id(edge) in selected_set:
+            continue
+        dropped.append(
+            FamilyPreselectionDrop(
+                edge=edge,
+                dropped_bin=_edge_bin_label(edge),
+                kept_bin=kept_bin,
+                family_selection_score=_edge_family_selection_score(edge),
+                kept_family_selection_score=portfolio.selection_score,
+            )
+        )
     return WeatherFamilyDecision(portfolio=portfolio, dropped=tuple(dropped))
 
 

@@ -467,6 +467,33 @@ def test_venue_heartbeat_does_not_run_slow_background_inline(monkeypatch, tmp_pa
     assert data["venue_heartbeat"]["status"] == "OK"
 
 
+def test_scheduler_health_tracks_mode_skips_as_business_liveness(monkeypatch, tmp_path):
+    from src.observability import scheduler_health
+
+    monkeypatch.setattr(scheduler_health, "_SCHEDULER_HEALTH_PATH", tmp_path / "scheduler_health.json")
+
+    scheduler_health._write_scheduler_health(
+        "run_mode:imminent_open_capture",
+        failed=False,
+        skipped=True,
+        skip_reason="cycle_lock_busy",
+    )
+    scheduler_health._write_scheduler_health(
+        "run_mode:imminent_open_capture",
+        failed=False,
+        skipped=True,
+        skip_reason="cycle_lock_busy",
+    )
+    scheduler_health._write_scheduler_health("run_mode:opening_hunt", failed=False)
+
+    data = json.loads((tmp_path / "scheduler_health.json").read_text())
+    skipped = data["run_mode:imminent_open_capture"]
+    assert skipped["status"] == "SKIPPED"
+    assert skipped["last_skip_reason"] == "cycle_lock_busy"
+    assert skipped["consecutive_skips"] == 2
+    assert data["run_mode:opening_hunt"]["consecutive_skips"] == 0
+
+
 def test_venue_heartbeat_loop_continues_after_failed_tick(monkeypatch):
     from src import main
 

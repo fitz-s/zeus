@@ -50,6 +50,7 @@ from src.strategy.family_exclusive_dedup import (
     WeatherFamilyKey,
     build_weather_family_decision,
     dedup_mutually_exclusive_families,
+    optimize_exclusive_outcome_portfolio,
     preselect_single_family_edge_before_kelly,
     weather_family_exposures_from_trade_db,
     weather_family_exposures_from_portfolio,
@@ -57,6 +58,8 @@ from src.strategy.family_exclusive_dedup import (
 from src.engine.evaluator import (
     _expected_profit_usd_for_edge,
     _live_entry_economic_floor_rejection,
+    _source_quality_kelly_haircut,
+    _source_quality_policy_rejection,
     _strategy_entry_price_floor_block_reason,
 )
 from src.contracts.semantic_types import RejectionStage
@@ -465,8 +468,35 @@ def test_weather_family_decision_is_first_class_single_leg_intent() -> None:
     assert family_decision.family_portfolio_intent is True
     assert family_decision.portfolio.family_key == WeatherFamilyKey(CITY, TARGET_DATE, METRIC)
     assert family_decision.portfolio.selected_leg is mid_bin
-    assert family_decision.portfolio.objective == "single_leg_expected_net_profit"
+    assert family_decision.portfolio.objective == "expected_log_growth_payoff_vector"
+    assert family_decision.portfolio.payoff_matrix
     assert [d.dropped_bin for d in family_decision.dropped] == ["26°F or above"]
+
+
+def test_family_portfolio_can_select_explicit_multi_leg_payoff_vector() -> None:
+    bins = {s[2]: s for s in _BIN_SPECS}
+    edge_a = _bin_edge(bins["20-21°F"], entry_price=0.20, forward_edge=0.05)
+    edge_b = _bin_edge(bins["22-23°F"], entry_price=0.24, forward_edge=0.04)
+    edge_c = _bin_edge(bins["26°F or above"], entry_price=0.70, forward_edge=0.01)
+
+    portfolio = optimize_exclusive_outcome_portfolio(
+        [edge_a, edge_b, edge_c],
+        city=CITY,
+        target_date=TARGET_DATE,
+        temperature_metric=METRIC,
+        min_legs=2,
+        max_legs=2,
+    )
+
+    assert portfolio is not None
+    assert portfolio.family_key == WeatherFamilyKey(CITY, TARGET_DATE, METRIC)
+    assert len(portfolio.selected_legs) == 2
+    assert portfolio.selected_legs == (edge_a, edge_b)
+    assert len(portfolio.payoff_matrix) == 3
+    assert all(len(row) == 2 for row in portfolio.payoff_matrix)
+    assert len(portfolio.posterior_vector) == 3
+    assert len(portfolio.leg_weights) == 2
+    assert portfolio.expected_log_growth > 0
 
 
 def test_runtime_family_dedup_ranks_by_expected_net_profit_not_size_usd() -> None:
@@ -649,6 +679,72 @@ def test_ultra_low_non_passive_order_requires_tail_authority() -> None:
 
     assert reason is not None
     assert reason.startswith("ULTRA_LOW_PRICE_NOT_AUTHORIZED")
+
+
+def test_partial_source_tail_order_requires_complete_source(monkeypatch) -> None:
+    bins = {s[2]: s for s in _BIN_SPECS}
+    edge = _bin_edge(bins["26°F or above"], entry_price=0.01, forward_edge=0.08)
+    monkeypatch.setattr(
+        evaluator_module,
+        "_try_get_strategy_profile",
+        lambda _strategy_key: SimpleNamespace(
+            min_entry_price=0.05,
+            min_strategy_notional_usd=1.00,
+            min_expected_profit_usd=0.05,
+            allow_ultra_low_tail=True,
+            partial_source_run_allowed=True,
+            complete_required_for_tail_orders=True,
+            partial_run_kelly_haircut=0.5,
+        ),
+    )
+    ens_result = {
+        "source_run_status": "PARTIAL",
+        "source_run_completeness_status": "PARTIAL",
+        "coverage_completeness_status": "PARTIAL",
+        "expected_members": 51,
+        "observed_members": 49,
+    }
+
+    reason = _source_quality_policy_rejection(
+        strategy_key="tail_arbitrage",
+        edge=edge,
+        ens_result=ens_result,
+    )
+
+    assert reason is not None
+    assert reason.startswith("PARTIAL_SOURCE_RUN_FOR_TAIL_ORDER")
+
+
+def test_partial_source_allowed_mid_bin_gets_kelly_haircut(monkeypatch) -> None:
+    bins = {s[2]: s for s in _BIN_SPECS}
+    edge = _bin_edge(bins["22-23°F"], entry_price=0.45, forward_edge=0.08)
+    monkeypatch.setattr(
+        evaluator_module,
+        "_try_get_strategy_profile",
+        lambda _strategy_key: SimpleNamespace(
+            min_entry_price=0.05,
+            min_strategy_notional_usd=1.00,
+            min_expected_profit_usd=0.05,
+            allow_ultra_low_tail=False,
+            partial_source_run_allowed=True,
+            complete_required_for_tail_orders=True,
+            partial_run_kelly_haircut=0.4,
+        ),
+    )
+    ens_result = {
+        "source_run_status": "SUCCESS",
+        "source_run_completeness_status": "PARTIAL",
+        "coverage_completeness_status": "PARTIAL",
+        "expected_members": 51,
+        "observed_members": 49,
+    }
+
+    assert _source_quality_policy_rejection(
+        strategy_key="opening_inertia",
+        edge=edge,
+        ens_result=ens_result,
+    ) is None
+    assert _source_quality_kelly_haircut("opening_inertia", ens_result) == pytest.approx(0.4)
 
 
 if __name__ == "__main__":  # pragma: no cover

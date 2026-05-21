@@ -227,6 +227,7 @@ test_trust_policy:
     tests/test_user_channel_ingest.py: {created: "2026-04-27", last_used: "2026-04-27"}
     tests/test_exit_safety.py: {created: "2026-04-27", last_used: "2026-04-27"}
     tests/test_exchange_reconcile.py: {created: "2026-04-27", last_used: "2026-05-08"}
+    tests/test_order_truth_reducer.py: {created: "2026-05-21", last_used: "2026-05-21"}
     tests/test_settlement_commands.py: {created: "2026-04-27", last_used: "2026-04-27"}
     tests/test_fake_polymarket_venue.py: {created: "2026-04-27", last_used: "2026-04-27"}
     tests/test_strategy_benchmark.py: {created: "2026-04-27", last_used: "2026-04-27"}
@@ -519,6 +520,7 @@ categories:
     - tests/test_user_channel_ingest.py
     - tests/test_exit_safety.py
     - tests/test_exchange_reconcile.py
+    - tests/test_order_truth_reducer.py
     - tests/test_settlement_commands.py
     - tests/test_settlement_semantics.py
     - tests/test_fake_polymarket_venue.py
