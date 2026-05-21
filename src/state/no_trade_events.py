@@ -35,6 +35,10 @@ from src.contracts.no_trade_reason import NoTradeReason
 from src.state.decision_events import allocate_decision_seq
 
 
+class NoTradeEventsSchemaCompatibilityError(RuntimeError):
+    """Raised when live no-trade writes would use degraded schema semantics."""
+
+
 def _fallback_schema_version(conn: sqlite3.Connection, default_schema_version: int) -> int:
     """Return a schema_version that an older no_trade_events CHECK accepts."""
 
@@ -65,6 +69,100 @@ def _fallback_schema_version(conn: sqlite3.Connection, default_schema_version: i
     return max(compatible) if compatible else default_schema_version
 
 
+def _no_trade_events_table_sql(conn: sqlite3.Connection) -> str:
+    try:
+        row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='no_trade_events'"
+        ).fetchone()
+    except Exception:
+        row = None
+    return str(row[0] if row else "")
+
+
+def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    try:
+        return {str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+    except Exception:
+        return set()
+
+
+def _schema_compatibility_column_present(conn: sqlite3.Connection) -> bool:
+    return "schema_compatibility" in _table_columns(conn, "no_trade_events")
+
+
+def _ensure_schema_compatibility_column(conn: sqlite3.Connection) -> None:
+    if _schema_compatibility_column_present(conn):
+        return
+    conn.execute(
+        """
+        ALTER TABLE no_trade_events
+        ADD COLUMN schema_compatibility TEXT NOT NULL DEFAULT 'current'
+        CHECK (schema_compatibility IN ('current', 'degraded'))
+        """
+    )
+
+
+def assert_no_trade_events_schema_current_for_live(
+    conn: sqlite3.Connection,
+    *,
+    expected_schema_version: int,
+) -> None:
+    """Fail closed when live no-trade semantics would be schema-degraded."""
+
+    try:
+        user_version = int(conn.execute("PRAGMA user_version").fetchone()[0])
+    except Exception:
+        user_version = 0
+    table_sql = _no_trade_events_table_sql(conn)
+    missing: list[str] = []
+    if 0 < user_version < expected_schema_version:
+        missing.append(f"user_version<{expected_schema_version}:{user_version}")
+    if "schema_compatibility" not in table_sql:
+        missing.append("schema_compatibility_column")
+    if str(expected_schema_version) not in table_sql:
+        missing.append(f"schema_version_check_{expected_schema_version}")
+    for reason in NoTradeReason:
+        if reason.value not in table_sql:
+            missing.append(f"reason:{reason.value}")
+            break
+    if missing:
+        raise NoTradeEventsSchemaCompatibilityError(
+            "live no_trade_events schema is not current: " + ",".join(missing)
+        )
+
+
+def _insert_no_trade_event_row(
+    conn: sqlite3.Connection,
+    values: tuple,
+    *,
+    schema_compatibility: str,
+) -> None:
+    if _schema_compatibility_column_present(conn):
+        conn.execute(
+            """
+            INSERT INTO no_trade_events (
+                market_slug, temperature_metric, target_date,
+                observation_time, decision_seq,
+                reason, reason_detail,
+                observed_at, schema_version, schema_compatibility
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (*values, schema_compatibility),
+        )
+    else:
+        conn.execute(
+            """
+            INSERT INTO no_trade_events (
+                market_slug, temperature_metric, target_date,
+                observation_time, decision_seq,
+                reason, reason_detail,
+                observed_at, schema_version
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            values,
+        )
+
+
 def write_no_trade_event(
     natural_key: DecisionNaturalKey,
     reason: NoTradeReason,
@@ -72,6 +170,7 @@ def write_no_trade_event(
     observed_at: str,
     *,
     conn: sqlite3.Connection,
+    allow_schema_compatibility_downgrade: bool = False,
 ) -> DecisionNaturalKey:
     """Persist a no-trade decision event to the world DB.
 
@@ -106,6 +205,11 @@ def write_no_trade_event(
             f"(lock path is ZEUS_WORLD_DB_PATH); got {_actual_path!r}. "
             "Caller must open a world connection via get_world_connection(write_class=WriteClass.LIVE)."
         )
+    if not allow_schema_compatibility_downgrade:
+        assert_no_trade_events_schema_current_for_live(
+            conn,
+            expected_schema_version=SCHEMA_VERSION,
+        )
 
     market_slug, temperature_metric, target_date, observation_time, _ = natural_key
 
@@ -119,14 +223,6 @@ def write_no_trade_event(
             conn=conn,
         )
 
-        insert_sql = """
-        INSERT INTO no_trade_events (
-            market_slug, temperature_metric, target_date,
-            observation_time, decision_seq,
-            reason, reason_detail,
-            observed_at, schema_version
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """
         insert_values = (
             market_slug,
             temperature_metric,
@@ -139,17 +235,26 @@ def write_no_trade_event(
             SCHEMA_VERSION,
         )
         try:
-            conn.execute(insert_sql, insert_values)
+            _insert_no_trade_event_row(
+                conn,
+                insert_values,
+                schema_compatibility="current",
+            )
         except sqlite3.IntegrityError as exc:
-            if reason is NoTradeReason.UNCATEGORIZED or "CHECK constraint failed" not in str(exc):
+            if (
+                not allow_schema_compatibility_downgrade
+                or reason is NoTradeReason.UNCATEGORIZED
+                or "CHECK constraint failed" not in str(exc)
+            ):
                 raise
             fallback_detail = (
                 f"reason_raw={reason.value}; "
                 f"reason_detail={reason_detail or ''}"
             )
             fallback_schema_version = _fallback_schema_version(conn, SCHEMA_VERSION)
-            conn.execute(
-                insert_sql,
+            _ensure_schema_compatibility_column(conn)
+            _insert_no_trade_event_row(
+                conn,
                 (
                     market_slug,
                     temperature_metric,
@@ -161,6 +266,7 @@ def write_no_trade_event(
                     observed_at,
                     fallback_schema_version,
                 ),
+                schema_compatibility="degraded",
             )
         conn.commit()
 
@@ -192,12 +298,18 @@ def read_no_trade_events_by_market(
     prior_row_factory = conn.row_factory
     try:
         conn.row_factory = sqlite3.Row
+        compatibility_expr = (
+            "schema_compatibility"
+            if _schema_compatibility_column_present(conn)
+            else "'unknown_legacy' AS schema_compatibility"
+        )
         cursor = conn.execute(
-            """
+            f"""
             SELECT market_slug, temperature_metric, target_date,
                    observation_time, decision_seq,
                    reason, reason_detail,
-                   observed_at, schema_version
+                   observed_at, schema_version,
+                   {compatibility_expr}
             FROM no_trade_events
             WHERE market_slug = ? AND observed_at >= ?
             ORDER BY observed_at ASC, decision_seq ASC

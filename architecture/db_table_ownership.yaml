@@ -1037,9 +1037,11 @@ tables:
       Phase 2 T2 (PHASE_2_ULTRAPLAN.md v3.1 §5.2, sha 00c2399742, PRODUCTION 2026-05-20):
       instrumentation table for no-trade decisions. Columns per §5.2: market_slug,
       temperature_metric, target_date, observation_time, decision_seq, reason
-      (NoTradeReason CHECK), reason_detail TEXT, observed_at, schema_version.
+      (NoTradeReason CHECK), reason_detail TEXT, observed_at, schema_version,
+      schema_compatibility.
       PK matches decision_events natural key for FK-like joins.
-      SCHEMA_VERSION 14→15 (production pass). writer/reader in
+      SCHEMA_VERSION 14→15 (production pass), 20 (live release proof P0-3
+      compatibility marker). writer/reader in
       src/state/no_trade_events.py (write_no_trade_event(natural_key: DecisionNaturalKey, reason: NoTradeReason, reason_detail: Optional[str], observed_at: str, *, conn: sqlite3.Connection) — conn REQUIRED, INV-37);
       producer wired at 69 evaluator.py callsites replacing raw rejection_reasons=[...]
       strings/f-strings with NoTradeReason enum refs + reason_detail capture.

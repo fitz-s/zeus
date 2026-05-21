@@ -29,7 +29,10 @@ from src.contracts.decision_natural_key import make_decision_natural_key
 from src.contracts.execution_intent import DecisionSourceContext
 from src.contracts.no_trade_reason import NoTradeReason
 from src.state.decision_events import write_decision_event
-from src.state.no_trade_events import write_no_trade_event
+from src.state.no_trade_events import (
+    NoTradeEventsSchemaCompatibilityError,
+    write_no_trade_event,
+)
 from src.state.schema.no_trade_events_schema import ensure_table as ensure_no_trade_events_table
 
 
@@ -114,7 +117,8 @@ def _make_world_db(tmp_path: Path) -> tuple[Path, sqlite3.Connection]:
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
     conn.execute(_DECISION_EVENTS_DDL)
-    conn.execute(_NO_TRADE_EVENTS_DDL)
+    ensure_no_trade_events_table(conn)
+    conn.execute("PRAGMA user_version = 20")
     conn.commit()
     return db_path, conn
 
@@ -218,11 +222,41 @@ class TestCrossTableDecisionSeqNoCollision:
 
         conn.close()
 
-    def test_no_trade_fallback_preserves_row_on_pre_migration_check_constraints(
+    def test_live_no_trade_write_fails_closed_on_pre_migration_check_constraints(
         self,
         tmp_path: Path,
     ) -> None:
-        """New reason writes must survive old reason/schema_version CHECKs."""
+        """Live writes must not downgrade semantic no-trade reasons."""
+
+        db_path, conn = _make_old_world_db(tmp_path)
+
+        nk_placeholder = make_decision_natural_key(
+            market_slug=_MARKET_SLUG,
+            temperature_metric=_TEMP_METRIC,
+            target_date=_TARGET_DATE,
+            observation_time=_OBS_TIME,
+            decision_seq=0,
+        )
+
+        with patch("src.state.db.ZEUS_WORLD_DB_PATH", db_path), \
+             patch("src.state.db_writer_lock.db_writer_lock", _noop_lock), \
+             pytest.raises(NoTradeEventsSchemaCompatibilityError, match="not current"):
+            write_no_trade_event(
+                nk_placeholder,
+                NoTradeReason.MUTUALLY_EXCLUSIVE_FAMILY_DEDUP,
+                "family dedup",
+                _OBS_AT,
+                conn=conn,
+            )
+
+        assert conn.execute("SELECT COUNT(*) FROM no_trade_events").fetchone()[0] == 0
+        conn.close()
+
+    def test_no_trade_paper_fallback_preserves_degraded_row_on_pre_migration_check_constraints(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Non-live compatibility writes must mark degraded rows explicitly."""
 
         db_path, conn = _make_old_world_db(tmp_path)
 
@@ -242,16 +276,21 @@ class TestCrossTableDecisionSeqNoCollision:
                 "family dedup",
                 _OBS_AT,
                 conn=conn,
+                allow_schema_compatibility_downgrade=True,
             )
 
         row = conn.execute(
-            "SELECT decision_seq, reason, reason_detail, schema_version FROM no_trade_events"
+            """
+            SELECT decision_seq, reason, reason_detail, schema_version, schema_compatibility
+            FROM no_trade_events
+            """
         ).fetchone()
         assert returned_key[4] == 0
         assert row["decision_seq"] == 0
         assert row["reason"] == NoTradeReason.UNCATEGORIZED.value
         assert "reason_raw=mutually_exclusive_family_dedup" in row["reason_detail"]
         assert row["schema_version"] == 15
+        assert row["schema_compatibility"] == "degraded"
         conn.close()
 
     def test_no_trade_schema_rebuild_upgrades_stale_check_constraints(
