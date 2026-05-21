@@ -46,12 +46,14 @@ from src.engine.evaluator import EdgeDecision
 from src.strategy.family_exclusive_dedup import (
     FAMILY_REJECTION_STAGE,
     MUTUALLY_EXCLUSIVE_FAMILY_DEDUP,
+    WeatherFamilyExposureReducer,
     WeatherFamilyExposure,
     WeatherFamilyKey,
     build_weather_family_decision,
     dedup_mutually_exclusive_families,
     optimize_exclusive_outcome_portfolio,
     preselect_single_family_edge_before_kelly,
+    resolve_weather_family_exposures,
     weather_family_exposures_from_trade_db,
     weather_family_exposures_from_portfolio,
 )
@@ -391,11 +393,50 @@ def test_portfolio_positions_project_to_weather_family_exposure_read_model() -> 
     ]
 
 
+def test_weather_family_exposure_resolver_is_canonical_entrypoint() -> None:
+    portfolio = SimpleNamespace(
+        positions=[
+            SimpleNamespace(
+                trade_id="pos-open",
+                city=CITY,
+                target_date=TARGET_DATE,
+                temperature_metric=METRIC,
+                bin_label="20-21°F",
+                state="holding",
+            ),
+        ]
+    )
+
+    wrapper_exposures = weather_family_exposures_from_portfolio(portfolio)
+    reducer_exposures = WeatherFamilyExposureReducer.from_portfolio(portfolio)
+    resolved_exposures = resolve_weather_family_exposures(portfolio=portfolio)
+
+    assert wrapper_exposures == reducer_exposures == resolved_exposures
+
+
+def test_weather_family_exposure_resolver_merges_trade_truth_and_portfolio_projection() -> None:
+    trade_exposure = WeatherFamilyExposure(
+        key=WeatherFamilyKey(CITY, TARGET_DATE, METRIC),
+        bin_label="20-21°F",
+        phase="ACKED",
+        position_id="cmd-1",
+    )
+    portfolio_exposure = WeatherFamilyExposure(
+        key=WeatherFamilyKey(CITY, TARGET_DATE, METRIC),
+        bin_label="20-21°F",
+        phase="holding",
+        position_id="pos-1",
+    )
+
+    exposures = WeatherFamilyExposureReducer.merge([trade_exposure], [portfolio_exposure])
+
+    assert exposures == [trade_exposure, portfolio_exposure]
+
+
 def test_cycle_runtime_threads_portfolio_exposure_into_family_gate() -> None:
     """Relationship guard: runtime callsite must supply current exposure state."""
     source = Path("src/engine/cycle_runtime.py").read_text()
-    assert "weather_family_exposures_from_trade_db" in source
-    assert "weather_family_exposures_from_portfolio" in source
+    assert "resolve_weather_family_exposures" in source
     assert "existing_exposures=_family_exposures" in source
 
 

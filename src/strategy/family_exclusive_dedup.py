@@ -239,7 +239,7 @@ def _blocking_exposures_for_key(
     return blocking
 
 
-def weather_family_exposures_from_portfolio(portfolio: Any) -> list[WeatherFamilyExposure]:
+def _weather_family_exposures_from_portfolio_impl(portfolio: Any) -> list[WeatherFamilyExposure]:
     """Project portfolio positions into the family-gate exposure read model."""
     exposures: list[WeatherFamilyExposure] = []
     for pos in getattr(portfolio, "positions", None) or ():
@@ -362,7 +362,7 @@ def _column_expr(
     return f"{alias}.{column_name}" if column_name in columns else default
 
 
-def weather_family_exposures_from_trade_db(conn: Any) -> list[WeatherFamilyExposure]:
+def _weather_family_exposures_from_trade_db_impl(conn: Any) -> list[WeatherFamilyExposure]:
     """Read family exposure from command/order/trade truth.
 
     The trade DB owns venue command/order/trade facts. Family metadata still
@@ -547,6 +547,78 @@ def weather_family_exposures_from_trade_db(conn: Any) -> list[WeatherFamilyExpos
             position_id=position_id or command_id,
         )
     return exposures
+
+
+class WeatherFamilyExposureReducer:
+    """Canonical family-exposure reducer for evaluator/runtime/no-trade gates.
+
+    P1-4: family exposure cannot be inferred separately by evaluator,
+    cycle-runtime dedup, and telemetry. All public exposure readers route through
+    this reducer so command/order/fill truth and portfolio projection share one
+    blocking-phase contract and one dedupe shape.
+    """
+
+    @staticmethod
+    def from_portfolio(portfolio: Any) -> list[WeatherFamilyExposure]:
+        return _weather_family_exposures_from_portfolio_impl(portfolio)
+
+    @staticmethod
+    def from_trade_db(conn: Any) -> list[WeatherFamilyExposure]:
+        return _weather_family_exposures_from_trade_db_impl(conn)
+
+    @staticmethod
+    def merge(*exposure_groups: Iterable[Any] | None) -> list[WeatherFamilyExposure]:
+        merged: list[WeatherFamilyExposure] = []
+        seen: set[tuple[WeatherFamilyKey, str, str, str]] = set()
+        for group in exposure_groups:
+            for raw in group or ():
+                key = _exposure_key(raw)
+                phase = str(_field(raw, "phase", _field(raw, "state", "")) or "")
+                exposure = WeatherFamilyExposure(
+                    key=key,
+                    bin_label=_exposure_bin_label(raw),
+                    phase=phase,
+                    position_id=str(_field(raw, "position_id", _field(raw, "trade_id", "")) or ""),
+                )
+                dedupe_key = (
+                    exposure.key,
+                    exposure.bin_label,
+                    exposure.phase,
+                    exposure.position_id,
+                )
+                if dedupe_key in seen:
+                    continue
+                seen.add(dedupe_key)
+                merged.append(exposure)
+        return merged
+
+    @classmethod
+    def resolve(cls, *, trade_conn: Any | None = None, portfolio: Any | None = None) -> list[WeatherFamilyExposure]:
+        trade_exposures = cls.from_trade_db(trade_conn) if trade_conn is not None else []
+        portfolio_exposures = cls.from_portfolio(portfolio) if portfolio is not None else []
+        return cls.merge(trade_exposures, portfolio_exposures)
+
+
+def weather_family_exposures_from_portfolio(portfolio: Any) -> list[WeatherFamilyExposure]:
+    """Compatibility wrapper; new callers should use WeatherFamilyExposureReducer."""
+
+    return WeatherFamilyExposureReducer.from_portfolio(portfolio)
+
+
+def weather_family_exposures_from_trade_db(conn: Any) -> list[WeatherFamilyExposure]:
+    """Compatibility wrapper; new callers should use WeatherFamilyExposureReducer."""
+
+    return WeatherFamilyExposureReducer.from_trade_db(conn)
+
+
+def resolve_weather_family_exposures(
+    *,
+    trade_conn: Any | None = None,
+    portfolio: Any | None = None,
+) -> list[WeatherFamilyExposure]:
+    """Canonical public exposure resolver for live family gates."""
+
+    return WeatherFamilyExposureReducer.resolve(trade_conn=trade_conn, portfolio=portfolio)
 
 
 def _has_conflicting_existing_exposure(
