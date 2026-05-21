@@ -30,6 +30,7 @@ from src.contracts.execution_intent import DecisionSourceContext
 from src.contracts.no_trade_reason import NoTradeReason
 from src.state.decision_events import write_decision_event
 from src.state.no_trade_events import write_no_trade_event
+from src.state.schema.no_trade_events_schema import ensure_table as ensure_no_trade_events_table
 
 
 # ---------------------------------------------------------------------------
@@ -88,6 +89,21 @@ CREATE TABLE no_trade_events (
 );
 """
 
+_OLD_NO_TRADE_EVENTS_DDL = """
+CREATE TABLE no_trade_events (
+    market_slug         TEXT NOT NULL,
+    temperature_metric  TEXT NOT NULL,
+    target_date         TEXT NOT NULL,
+    observation_time    TEXT NOT NULL,
+    decision_seq        INTEGER NOT NULL,
+    reason              TEXT NOT NULL CHECK (reason IN ('uncategorized','observation_quality_rejected')),
+    reason_detail       TEXT,
+    observed_at         TEXT NOT NULL,
+    schema_version      INTEGER NOT NULL CHECK (schema_version IN (14, 15)),
+    PRIMARY KEY (market_slug, temperature_metric, target_date, observation_time, decision_seq)
+);
+"""
+
 
 def _make_world_db(tmp_path: Path) -> tuple[Path, sqlite3.Connection]:
     """Create a real on-disk world DB with both tables.
@@ -99,6 +115,19 @@ def _make_world_db(tmp_path: Path) -> tuple[Path, sqlite3.Connection]:
     conn.row_factory = sqlite3.Row
     conn.execute(_DECISION_EVENTS_DDL)
     conn.execute(_NO_TRADE_EVENTS_DDL)
+    conn.commit()
+    return db_path, conn
+
+
+def _make_old_world_db(tmp_path: Path) -> tuple[Path, sqlite3.Connection]:
+    """Create a pre-SV16 world DB with stale no_trade_events CHECK constraints."""
+
+    db_path = tmp_path / "zeus-world.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA user_version = 15")
+    conn.execute(_DECISION_EVENTS_DDL)
+    conn.execute(_OLD_NO_TRADE_EVENTS_DDL)
     conn.commit()
     return db_path, conn
 
@@ -187,6 +216,99 @@ class TestCrossTableDecisionSeqNoCollision:
                 f"Expected decision_events seq=1, got {de_rows[0]['decision_seq']}"
             )
 
+        conn.close()
+
+    def test_no_trade_fallback_preserves_row_on_pre_migration_check_constraints(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """New reason writes must survive old reason/schema_version CHECKs."""
+
+        db_path, conn = _make_old_world_db(tmp_path)
+
+        nk_placeholder = make_decision_natural_key(
+            market_slug=_MARKET_SLUG,
+            temperature_metric=_TEMP_METRIC,
+            target_date=_TARGET_DATE,
+            observation_time=_OBS_TIME,
+            decision_seq=0,
+        )
+
+        with patch("src.state.db.ZEUS_WORLD_DB_PATH", db_path), \
+             patch("src.state.db_writer_lock.db_writer_lock", _noop_lock):
+            returned_key = write_no_trade_event(
+                nk_placeholder,
+                NoTradeReason.MUTUALLY_EXCLUSIVE_FAMILY_DEDUP,
+                "family dedup",
+                _OBS_AT,
+                conn=conn,
+            )
+
+        row = conn.execute(
+            "SELECT decision_seq, reason, reason_detail, schema_version FROM no_trade_events"
+        ).fetchone()
+        assert returned_key[4] == 0
+        assert row["decision_seq"] == 0
+        assert row["reason"] == NoTradeReason.UNCATEGORIZED.value
+        assert "reason_raw=mutually_exclusive_family_dedup" in row["reason_detail"]
+        assert row["schema_version"] == 15
+        conn.close()
+
+    def test_no_trade_schema_rebuild_upgrades_stale_check_constraints(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """ensure_table must upgrade existing tables, not only create new ones."""
+
+        _, conn = _make_old_world_db(tmp_path)
+        conn.execute(
+            """
+            INSERT INTO no_trade_events (
+                market_slug, temperature_metric, target_date, observation_time,
+                decision_seq, reason, reason_detail, observed_at, schema_version
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                _MARKET_SLUG,
+                _TEMP_METRIC,
+                _TARGET_DATE,
+                _OBS_TIME,
+                0,
+                NoTradeReason.OBSERVATION_QUALITY_REJECTED.value,
+                "old row",
+                _OBS_AT,
+                15,
+            ),
+        )
+
+        ensure_no_trade_events_table(conn)
+
+        conn.execute(
+            """
+            INSERT INTO no_trade_events (
+                market_slug, temperature_metric, target_date, observation_time,
+                decision_seq, reason, reason_detail, observed_at, schema_version
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                _MARKET_SLUG,
+                _TEMP_METRIC,
+                _TARGET_DATE,
+                _OBS_TIME,
+                1,
+                NoTradeReason.MUTUALLY_EXCLUSIVE_FAMILY_DEDUP.value,
+                "new row",
+                _OBS_AT,
+                16,
+            ),
+        )
+        rows = conn.execute(
+            "SELECT decision_seq, reason, schema_version FROM no_trade_events ORDER BY decision_seq"
+        ).fetchall()
+        assert [(r["decision_seq"], r["reason"], r["schema_version"]) for r in rows] == [
+            (0, NoTradeReason.OBSERVATION_QUALITY_REJECTED.value, 15),
+            (1, NoTradeReason.MUTUALLY_EXCLUSIVE_FAMILY_DEDUP.value, 16),
+        ]
         conn.close()
 
     def test_mutual_exclusion_no_5tuple_overlap(self, tmp_path: Path) -> None:

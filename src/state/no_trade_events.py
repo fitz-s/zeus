@@ -26,12 +26,43 @@ collision-free across both tables. Caller does not supply seq.
 
 from __future__ import annotations
 
+import re
 import sqlite3
 from typing import Optional
 
 from src.contracts.decision_natural_key import DecisionNaturalKey, make_decision_natural_key
 from src.contracts.no_trade_reason import NoTradeReason
 from src.state.decision_events import allocate_decision_seq
+
+
+def _fallback_schema_version(conn: sqlite3.Connection, default_schema_version: int) -> int:
+    """Return a schema_version that an older no_trade_events CHECK accepts."""
+
+    try:
+        user_version = int(conn.execute("PRAGMA user_version").fetchone()[0])
+    except Exception:
+        user_version = 0
+    if 0 < user_version <= default_schema_version:
+        return user_version
+
+    try:
+        row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='no_trade_events'"
+        ).fetchone()
+    except Exception:
+        row = None
+    table_sql = str(row[0] if row else "")
+    match = re.search(r"schema_version\s+IN\s*\(([^)]*)\)", table_sql)
+    if not match:
+        return default_schema_version
+    allowed: list[int] = []
+    for part in match.group(1).split(","):
+        try:
+            allowed.append(int(part.strip()))
+        except ValueError:
+            continue
+    compatible = [value for value in allowed if value <= default_schema_version]
+    return max(compatible) if compatible else default_schema_version
 
 
 def write_no_trade_event(
@@ -88,27 +119,49 @@ def write_no_trade_event(
             conn=conn,
         )
 
-        conn.execute(
-            """
-            INSERT INTO no_trade_events (
-                market_slug, temperature_metric, target_date,
-                observation_time, decision_seq,
-                reason, reason_detail,
-                observed_at, schema_version
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                market_slug,
-                temperature_metric,
-                target_date,
-                observation_time,
-                row_seq,
-                reason.value,
-                reason_detail,
-                observed_at,
-                SCHEMA_VERSION,
-            ),
+        insert_sql = """
+        INSERT INTO no_trade_events (
+            market_slug, temperature_metric, target_date,
+            observation_time, decision_seq,
+            reason, reason_detail,
+            observed_at, schema_version
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """
+        insert_values = (
+            market_slug,
+            temperature_metric,
+            target_date,
+            observation_time,
+            row_seq,
+            reason.value,
+            reason_detail,
+            observed_at,
+            SCHEMA_VERSION,
         )
+        try:
+            conn.execute(insert_sql, insert_values)
+        except sqlite3.IntegrityError as exc:
+            if reason is NoTradeReason.UNCATEGORIZED or "CHECK constraint failed" not in str(exc):
+                raise
+            fallback_detail = (
+                f"reason_raw={reason.value}; "
+                f"reason_detail={reason_detail or ''}"
+            )
+            fallback_schema_version = _fallback_schema_version(conn, SCHEMA_VERSION)
+            conn.execute(
+                insert_sql,
+                (
+                    market_slug,
+                    temperature_metric,
+                    target_date,
+                    observation_time,
+                    row_seq,
+                    NoTradeReason.UNCATEGORIZED.value,
+                    fallback_detail,
+                    observed_at,
+                    fallback_schema_version,
+                ),
+            )
         conn.commit()
 
     return make_decision_natural_key(

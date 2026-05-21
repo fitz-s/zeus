@@ -921,6 +921,58 @@ class ExecutionIntent:
 
 
 @dataclass(frozen=True)
+class PassiveMakerExecutionContext:
+    """Microstructure context required before live passive-maker entry submit."""
+
+    spread_usd: Decimal
+    quote_age_ms: int
+    expected_fill_probability: Decimal
+    queue_depth_ahead: Decimal | None = None
+    adverse_selection_score: Decimal | None = None
+    orderbook_hash_age_ms: int | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "spread_usd", _as_decimal(self.spread_usd, "spread_usd"))
+        object.__setattr__(
+            self,
+            "expected_fill_probability",
+            _as_decimal(self.expected_fill_probability, "expected_fill_probability"),
+        )
+        _require_unit_interval_closed(
+            self.expected_fill_probability,
+            "expected_fill_probability",
+        )
+        if self.spread_usd < Decimal("0"):
+            raise ValueError("spread_usd must be non-negative")
+        if self.quote_age_ms < 0:
+            raise ValueError("quote_age_ms must be non-negative")
+        if self.orderbook_hash_age_ms is not None and self.orderbook_hash_age_ms < 0:
+            raise ValueError("orderbook_hash_age_ms must be non-negative")
+        if self.queue_depth_ahead is not None:
+            object.__setattr__(
+                self,
+                "queue_depth_ahead",
+                _as_decimal(self.queue_depth_ahead, "queue_depth_ahead"),
+            )
+            if self.queue_depth_ahead < Decimal("0"):
+                raise ValueError("queue_depth_ahead must be non-negative")
+        if self.adverse_selection_score is not None:
+            object.__setattr__(
+                self,
+                "adverse_selection_score",
+                _as_decimal(self.adverse_selection_score, "adverse_selection_score"),
+            )
+            _require_unit_interval_closed(
+                self.adverse_selection_score,
+                "adverse_selection_score",
+            )
+
+    def assert_live_entry_authorized(self) -> None:
+        if self.expected_fill_probability <= Decimal("0"):
+            raise ValueError("passive maker expected_fill_probability must be positive")
+
+
+@dataclass(frozen=True)
 class ExecutableCostBasis:
     """Executable held-token cost basis tied to a single CLOB snapshot.
 
@@ -1514,6 +1566,7 @@ class FinalExecutionIntent:
     resolution_window: str = "default"
     correlation_key: str = ""
     decision_source_context: DecisionSourceContext | None = None
+    passive_maker_context: PassiveMakerExecutionContext | None = None
     pricing_semantics_version: CorrectedPricingSemanticsVersion = (
         CORRECTED_PRICING_SEMANTICS_VERSION
     )
@@ -1532,6 +1585,7 @@ class FinalExecutionIntent:
         resolution_window: str = "default",
         correlation_key: str = "",
         decision_source_context: DecisionSourceContext | None = None,
+        passive_maker_context: PassiveMakerExecutionContext | None = None,
     ) -> "FinalExecutionIntent":
         hypothesis.assert_matches_cost_basis(cost_basis)
         cost_basis.assert_submit_safe()
@@ -1571,6 +1625,7 @@ class FinalExecutionIntent:
             resolution_window=resolution_window,
             correlation_key=correlation_key,
             decision_source_context=decision_source_context,
+            passive_maker_context=passive_maker_context,
         )
 
     def __post_init__(self) -> None:
@@ -1605,6 +1660,13 @@ class FinalExecutionIntent:
         object.__setattr__(self, "correlation_key", normalized_correlation)
         if self.cancel_after is not None and not isinstance(self.cancel_after, datetime):
             raise TypeError("cancel_after must be datetime or None")
+        if self.passive_maker_context is not None and not isinstance(
+            self.passive_maker_context,
+            PassiveMakerExecutionContext,
+        ):
+            raise TypeError(
+                "passive_maker_context must be PassiveMakerExecutionContext or None"
+            )
         self.assert_submit_ready()
 
     def assert_no_recompute_inputs(self) -> None:
@@ -1670,6 +1732,8 @@ class FinalExecutionIntent:
                 "post_only_passive_limit maker-only final intent requires zero "
                 "applicable platform fee rate"
             )
+        if self.passive_maker_context is not None:
+            self.passive_maker_context.assert_live_entry_authorized()
         expected_fee_adjusted = _fee_adjusted_price(
             expected_fill_price_before_fee=self.expected_fill_price_before_fee,
             fee_rate=self.fee_rate,

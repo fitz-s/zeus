@@ -62,10 +62,10 @@ logger = logging.getLogger(__name__)
 ENV_FLAG = "ZEUS_LIVE_MAX_ONE_ENTRY_PER_WEATHER_FAMILY"
 _DEFAULT = "1"  # ON by default (live-money fail-safe).
 
-# Audit reason string for dropped bins. STAGE A uses the STRING (not the
-# NoTradeReason enum) so no schema-derived CHECK clause is touched. Stage B
-# promotes this to a NoTradeReason enum member + DB migration. Kept lower-case
-# to match the StrEnum auto() value convention the eventual member will take.
+from src.contracts.no_trade_reason import NoTradeReason
+
+# Audit reason string for dropped bins. Stage B promotes this into the
+# NoTradeReason enum while keeping the string stable for older artifacts.
 MUTUALLY_EXCLUSIVE_FAMILY_DEDUP = "mutually_exclusive_family_dedup"
 FAMILY_REJECTION_STAGE = "ANTI_CHURN"
 
@@ -98,6 +98,33 @@ class FamilyPreselectionDrop:
     kept_bin: str
     family_selection_score: float
     kept_family_selection_score: float
+
+
+@dataclass(frozen=True)
+class ExclusiveOutcomePortfolio:
+    """Single-family payoff object for mutually-exclusive weather bins.
+
+    Stage B can extend this to multi-leg payoff vectors. The current live path
+    intentionally emits one explicit family-approved leg so scalar Kelly never
+    sees sibling hypotheses as independent positions.
+    """
+
+    family_key: WeatherFamilyKey
+    selected_leg: Any
+    candidate_legs: tuple[Any, ...]
+    selection_score: float
+    expected_net_profit_usd: float
+    expected_fill_probability: float
+    objective: str = "single_leg_expected_net_profit"
+
+
+@dataclass(frozen=True)
+class WeatherFamilyDecision:
+    """Decision authority for one weather outcome family."""
+
+    portfolio: ExclusiveOutcomePortfolio
+    dropped: tuple[FamilyPreselectionDrop, ...]
+    family_portfolio_intent: bool = True
 
 
 _BLOCKING_EXPOSURE_PHASES = frozenset(
@@ -200,6 +227,140 @@ def weather_family_exposures_from_portfolio(portfolio: Any) -> list[WeatherFamil
     return exposures
 
 
+_TRADE_COMMAND_BLOCKING_STATES = frozenset(
+    {
+        "ACKED",
+        "LIVE",
+        "PARTIAL",
+        "PARTIALLY_FILLED",
+        "FILLED",
+        "SUBMIT_UNKNOWN_SIDE_EFFECT",
+        "UNKNOWN",
+        "REVIEW_REQUIRED",
+        "PENDING",
+        "SUBMITTED",
+    }
+)
+_TRADE_ORDER_BLOCKING_STATES = frozenset(
+    {
+        "LIVE",
+        "RESTING",
+        "PARTIALLY_MATCHED",
+        "MATCHED",
+        "ACKED",
+        "UNKNOWN",
+        "REVIEW_REQUIRED",
+    }
+)
+_TRADE_FACT_BLOCKING_STATES = frozenset({"MATCHED", "MINED", "CONFIRMED", "PARTIAL"})
+
+
+def _table_exists(conn: Any, table_name: str, *, schema: str = "main") -> bool:
+    expected_schema = schema
+    try:
+        rows = conn.execute("PRAGMA table_list").fetchall()
+    except Exception:
+        try:
+            row = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                (table_name,),
+            ).fetchone()
+        except Exception:
+            return False
+        return expected_schema == "main" and row is not None
+    for row in rows:
+        row_schema = str(row[0]) if len(row) > 0 else ""
+        row_name = str(row[1]) if len(row) > 1 else ""
+        row_type = str(row[2]) if len(row) > 2 else ""
+        if row_schema == expected_schema and row_name == table_name and row_type == "table":
+            return True
+    return False
+
+
+def _attached_schemas(conn: Any) -> set[str]:
+    try:
+        return {str(row[1]) for row in conn.execute("PRAGMA database_list").fetchall()}
+    except Exception:
+        return {"main"}
+
+
+def weather_family_exposures_from_trade_db(conn: Any) -> list[WeatherFamilyExposure]:
+    """Read family exposure from command/order/trade truth.
+
+    The trade DB owns venue command/order/trade facts. Family metadata still
+    comes from the canonical position projection, but a blocking exposure is
+    admitted only when command/order/trade truth says an ENTRY is live,
+    partially matched, filled, unknown-side-effect, or under review.
+    """
+
+    if conn is None or not _table_exists(conn, "venue_commands"):
+        return []
+    schemas = _attached_schemas(conn)
+    position_schema = "world" if "world" in schemas and _table_exists(conn, "position_current", schema="world") else "main"
+    if not _table_exists(conn, "position_current", schema=position_schema):
+        return []
+    has_order_facts = _table_exists(conn, "venue_order_facts")
+    has_trade_facts = _table_exists(conn, "venue_trade_facts")
+    order_state_sql = (
+        "EXISTS (SELECT 1 FROM venue_order_facts vof "
+        "WHERE vof.command_id = vc.command_id "
+        f"AND UPPER(COALESCE(vof.state, '')) IN ({','.join('?' for _ in _TRADE_ORDER_BLOCKING_STATES)}))"
+        if has_order_facts
+        else "0"
+    )
+    trade_state_sql = (
+        "EXISTS (SELECT 1 FROM venue_trade_facts vtf "
+        "WHERE vtf.command_id = vc.command_id "
+        f"AND UPPER(COALESCE(vtf.state, '')) IN ({','.join('?' for _ in _TRADE_FACT_BLOCKING_STATES)}))"
+        if has_trade_facts
+        else "0"
+    )
+    command_state_placeholders = ",".join("?" for _ in _TRADE_COMMAND_BLOCKING_STATES)
+    sql = f"""
+        SELECT
+            pc.city,
+            pc.target_date,
+            pc.temperature_metric,
+            pc.bin_label,
+            pc.phase,
+            pc.position_id,
+            vc.command_id
+        FROM venue_commands vc
+        JOIN {position_schema}.position_current pc
+          ON pc.position_id = vc.position_id
+        WHERE vc.intent_kind = 'ENTRY'
+          AND (
+              UPPER(COALESCE(vc.state, '')) IN ({command_state_placeholders})
+              OR {order_state_sql}
+              OR {trade_state_sql}
+          )
+    """
+    params: list[str] = [
+        *_TRADE_COMMAND_BLOCKING_STATES,
+        *(_TRADE_ORDER_BLOCKING_STATES if has_order_facts else ()),
+        *(_TRADE_FACT_BLOCKING_STATES if has_trade_facts else ()),
+    ]
+    exposures: list[WeatherFamilyExposure] = []
+    try:
+        rows = conn.execute(sql, params).fetchall()
+    except Exception:
+        logger.warning("[WEATHER_FAMILY_EXPOSURE_DB_READ_FAILED]", exc_info=True)
+        return []
+    for row in rows:
+        city, target_date, metric, bin_label, phase, position_id, command_id = tuple(row)
+        if not (city and target_date and metric):
+            continue
+        exposures.append(
+            WeatherFamilyExposure(
+                key=WeatherFamilyKey(str(city), str(target_date), str(metric)),
+                bin_label=str(bin_label or ""),
+                phase=str(phase or "pending_entry"),
+                position_id=str(position_id or command_id or ""),
+            )
+        )
+    return exposures
+
+
 def _has_conflicting_existing_exposure(
     decision: "EdgeDecision",
     exposures: list[Any],
@@ -223,24 +384,32 @@ def family_gate_enabled() -> bool:
     return raw not in {"0", "false", "no", "off"}
 
 
-def _executable_rank_key(decision: "EdgeDecision") -> tuple[float, float, str]:
-    """Sort key for "single best" within a mutually-exclusive family.
+def _decision_family_selection_score(decision: "EdgeDecision") -> float:
+    """Expected net-profit proxy for a sized family leg.
 
-    Primary: ``size_usd`` (the executor's post-everything executable dollar —
-    see module docstring for the reuse rationale). Secondary tie-break:
-    ``edge.forward_edge`` (fee/spread-adjusted per-dollar edge). Final
-    deterministic tie-break: ``decision_id`` (lexicographic) so identical
-    economic ranks resolve stably across runs.
-
-    Returned tuple is compared with ``max(...)``; larger is better. The
-    ``decision_id`` term is negated-by-min handling at the call site, so here
-    we return it as-is and the caller uses a composite that prefers the
-    lexicographically smallest id on a full tie.
+    This intentionally does not rank by size. It uses the candidate's forward
+    edge at the submitted notional, with non-positive or malformed costs
+    falling back to zero.
     """
-    size = float(getattr(decision, "size_usd", 0.0) or 0.0)
+
     edge = getattr(decision, "edge", None)
-    forward_edge = float(getattr(edge, "forward_edge", 0.0) or 0.0) if edge is not None else 0.0
-    return (size, forward_edge, getattr(decision, "decision_id", "") or "")
+    if edge is None:
+        return 0.0
+    try:
+        forward_edge = float(getattr(edge, "forward_edge", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        forward_edge = 0.0
+    try:
+        cost = float(getattr(edge, "entry_price", 0.0) or getattr(edge, "p_market", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        cost = 0.0
+    try:
+        notional = float(getattr(decision, "size_usd", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        notional = 0.0
+    if cost <= 0.0 or notional <= 0.0:
+        return max(0.0, forward_edge)
+    return max(0.0, forward_edge) * (notional / cost)
 
 
 def _edge_family_selection_score(edge: Any) -> float:
@@ -340,6 +509,42 @@ def preselect_single_family_edge_before_kelly(
     return kept, drops
 
 
+def build_weather_family_decision(
+    edges: list[Any],
+    *,
+    city: str,
+    target_date: str,
+    temperature_metric: str,
+    enabled: bool | None = None,
+) -> WeatherFamilyDecision | None:
+    """Build the single-leg family decision consumed before scalar Kelly."""
+
+    gate_enabled = family_gate_enabled() if enabled is None else enabled
+    if not gate_enabled:
+        return None
+
+    selected, dropped = preselect_single_family_edge_before_kelly(
+        edges,
+        city=city,
+        target_date=target_date,
+        temperature_metric=temperature_metric,
+        enabled=gate_enabled,
+    )
+    if not selected:
+        return None
+    selected_leg = selected[0]
+    score = _edge_family_selection_score(selected_leg)
+    portfolio = ExclusiveOutcomePortfolio(
+        family_key=_family_key(city, target_date, temperature_metric),
+        selected_leg=selected_leg,
+        candidate_legs=tuple(edges),
+        selection_score=score,
+        expected_net_profit_usd=score,
+        expected_fill_probability=1.0,
+    )
+    return WeatherFamilyDecision(portfolio=portfolio, dropped=tuple(dropped))
+
+
 def _pick_best_index(decisions: list["EdgeDecision"], idxs: list[int]) -> int:
     """Return the index (into ``decisions``) of the single best family member.
 
@@ -347,11 +552,17 @@ def _pick_best_index(decisions: list["EdgeDecision"], idxs: list[int]) -> int:
     lexicographically smallest ``decision_id`` wins (stable, deterministic).
     """
     def _composite(i: int) -> tuple[float, float, tuple[int, ...]]:
-        size, fwd, did = _executable_rank_key(decisions[i])
+        score = _decision_family_selection_score(decisions[i])
+        edge = getattr(decisions[i], "edge", None)
+        try:
+            fwd = float(getattr(edge, "forward_edge", 0.0) or 0.0) if edge is not None else 0.0
+        except (TypeError, ValueError):
+            fwd = 0.0
+        did = getattr(decisions[i], "decision_id", "") or ""
         # Negate the id codepoints so that `max` selects the SMALLEST id on a
         # (size, forward_edge) tie — deterministic and run-stable.
         neg_id = tuple(-ord(c) for c in did)
-        return (size, fwd, neg_id)
+        return (score, fwd, neg_id)
 
     return max(idxs, key=_composite)
 
@@ -421,6 +632,7 @@ def dedup_mutually_exclusive_families(
             d.should_trade = False
             d.rejection_stage = FAMILY_REJECTION_STAGE
             d.rejection_reasons = [MUTUALLY_EXCLUSIVE_FAMILY_DEDUP]
+            d.rejection_reason_enum = NoTradeReason.MUTUALLY_EXCLUSIVE_FAMILY_DEDUP
             d.rejection_reason_detail = (
                 f"family={city}|{target_date}|{temperature_metric} "
                 f"dropped_bin={_decision_bin_label(d)!r} "
@@ -468,8 +680,8 @@ def dedup_mutually_exclusive_families(
             d = decisions[i]
             d.should_trade = False
             d.rejection_stage = FAMILY_REJECTION_STAGE
-            # STAGE A audit: reason STRING only (no enum → no schema CHECK).
             d.rejection_reasons = [MUTUALLY_EXCLUSIVE_FAMILY_DEDUP]
+            d.rejection_reason_enum = NoTradeReason.MUTUALLY_EXCLUSIVE_FAMILY_DEDUP
             dropped_label = ""
             d_edge = getattr(d, "edge", None)
             if d_edge is not None and getattr(d_edge, "bin", None) is not None:
@@ -478,7 +690,8 @@ def dedup_mutually_exclusive_families(
                 f"family={city}|{target_date}|{temperature_metric} "
                 f"dropped_bin={dropped_label!r} kept_bin={best_label!r} "
                 f"kept_size_usd={kept_size:.2f} "
-                f"({ENV_FLAG}=1; STAGE A single_best)"
+                f"kept_expected_net_profit_usd={_decision_family_selection_score(best):.6f} "
+                f"({ENV_FLAG}=1; Stage-B single-leg family decision)"
             )
             logger.info(
                 "[MUTUALLY_EXCLUSIVE_FAMILY_DEDUP] family=%s|%s|%s dropped_bin=%r "

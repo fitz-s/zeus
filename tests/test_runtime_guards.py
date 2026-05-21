@@ -3265,6 +3265,91 @@ def test_executable_snapshot_repricing_updates_edge_and_size(tmp_path):
     assert shadow["posterior_distribution_id"] == "decision_snapshot:decision-snap"
 
 
+def test_live_passive_reprice_requires_fill_probability_context(tmp_path):
+    conn = get_connection(tmp_path / "snapshot-reprice-live-passive-no-fill.db")
+    init_schema(conn)
+    _insert_executable_snapshot(
+        conn,
+        snapshot_id="snap-live-passive-no-fill",
+        selected_outcome_token_id="yes1",
+        outcome_label="YES",
+        yes_token_id="yes1",
+        no_token_id="no1",
+        top_bid="0.20",
+        top_ask="0.30",
+        ask_size="150",
+        fee_details={"feeRate": "0.03", "source": "test_snapshot_taker_fee"},
+    )
+    edge = _edge()
+    decision = EdgeDecision(
+        should_trade=True,
+        edge=edge,
+        tokens={"token_id": "yes1", "no_token_id": "no1"},
+        size_usd=5.0,
+        decision_snapshot_id="decision-snap-live-passive-no-fill",
+        applied_validations=[],
+        edge_context=types.SimpleNamespace(p_posterior=edge.p_posterior),
+        sizing_bankroll=1000.0,
+        kelly_multiplier_used=0.25,
+        execution_fee_rate=0.03,
+        strategy_key="opening_inertia",
+    )
+
+    with pytest.raises(ValueError, match="PASSIVE_FILL_PROBABILITY_UNMODELED"):
+        cycle_runtime._reprice_decision_from_executable_snapshot(
+            conn,
+            decision,
+            {"executable_snapshot_id": "snap-live-passive-no-fill"},
+        )
+    conn.close()
+
+
+def test_live_passive_reprice_records_fill_probability_context(tmp_path):
+    conn = get_connection(tmp_path / "snapshot-reprice-live-passive-fill.db")
+    init_schema(conn)
+    _insert_executable_snapshot(
+        conn,
+        snapshot_id="snap-live-passive-fill",
+        selected_outcome_token_id="yes1",
+        outcome_label="YES",
+        yes_token_id="yes1",
+        no_token_id="no1",
+        top_bid="0.20",
+        top_ask="0.30",
+        ask_size="150",
+        fee_details={"feeRate": "0.03", "source": "test_snapshot_taker_fee"},
+    )
+    edge = _edge()
+    decision = EdgeDecision(
+        should_trade=True,
+        edge=edge,
+        tokens={"token_id": "yes1", "no_token_id": "no1"},
+        size_usd=5.0,
+        decision_snapshot_id="decision-snap-live-passive-fill",
+        applied_validations=[],
+        edge_context=types.SimpleNamespace(p_posterior=edge.p_posterior),
+        sizing_bankroll=1000.0,
+        kelly_multiplier_used=0.25,
+        execution_fee_rate=0.03,
+        strategy_key="opening_inertia",
+    )
+
+    best_ask = cycle_runtime._reprice_decision_from_executable_snapshot(
+        conn,
+        decision,
+        {"executable_snapshot_id": "snap-live-passive-fill"},
+        {"passive_fill_probability": "0.25"},
+    )
+    conn.close()
+
+    assert best_ask is None
+    reprice = decision.tokens["executable_snapshot_reprice"]
+    assert reprice["passive_maker_expected_fill_probability"] == pytest.approx(0.25)
+    assert reprice["corrected_pricing_shadow"]["passive_maker_context"][
+        "expected_fill_probability"
+    ] == "0.25"
+
+
 def test_executable_snapshot_repricing_passive_buy_limit_cannot_rest_below_best_bid(tmp_path):
     conn = get_connection(tmp_path / "snapshot-reprice-passive-top-bid.db")
     init_schema(conn)

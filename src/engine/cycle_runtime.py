@@ -446,6 +446,7 @@ def _attach_corrected_pricing_authority(
     cancel_after: datetime | None = None,
     resolution_window: str = "default",
     correlation_key: str = "",
+    passive_maker_context=None,
 ) -> dict:
     """Attach corrected pricing evidence and the frozen final submit intent."""
     # Provenance context required by H3 semantic linter rule (p_posterior access).
@@ -458,6 +459,7 @@ def _attach_corrected_pricing_authority(
         ExecutableCostBasis,
         ExecutableTradeHypothesis,
         FinalExecutionIntent,
+        PassiveMakerExecutionContext,
         simulate_clob_sweep,
     )
 
@@ -617,6 +619,11 @@ def _attach_corrected_pricing_authority(
             decision_source_context=_decision_source_context_from_epistemic_json(
                 getattr(decision, "epistemic_context_json", None)
             ),
+            passive_maker_context=(
+                passive_maker_context
+                if isinstance(passive_maker_context, PassiveMakerExecutionContext)
+                else None
+            ),
         )
         setattr(decision, "final_execution_intent", final_intent)
     payload = {
@@ -653,6 +660,28 @@ def _attach_corrected_pricing_authority(
         ),
         "correlation_key": (
             correlation_key if final_intent is None else final_intent.correlation_key
+        ),
+        "passive_maker_context": (
+            {
+                "spread_usd": _decimal_payload(final_intent.passive_maker_context.spread_usd),
+                "quote_age_ms": final_intent.passive_maker_context.quote_age_ms,
+                "expected_fill_probability": _decimal_payload(
+                    final_intent.passive_maker_context.expected_fill_probability
+                ),
+                "queue_depth_ahead": (
+                    None
+                    if final_intent.passive_maker_context.queue_depth_ahead is None
+                    else _decimal_payload(final_intent.passive_maker_context.queue_depth_ahead)
+                ),
+                "adverse_selection_score": (
+                    None
+                    if final_intent.passive_maker_context.adverse_selection_score is None
+                    else _decimal_payload(final_intent.passive_maker_context.adverse_selection_score)
+                ),
+                "orderbook_hash_age_ms": final_intent.passive_maker_context.orderbook_hash_age_ms,
+            }
+            if final_intent is not None and final_intent.passive_maker_context is not None
+            else None
         ),
         "candidate_final_limit_price": _decimal_payload(cost_basis.final_limit_price),
         "candidate_expected_fill_price_before_fee": _decimal_payload(
@@ -802,13 +831,23 @@ def _reprice_decision_from_executable_snapshot(
         if _snap_top_ask is not None
         else _Decimal("0")
     )
+    try:
+        from src.analysis.market_analysis_vnext import MarketAnalysisVNext
+        _vnext_metrics = MarketAnalysisVNext(snapshot=snapshot, history=[]).compute()
+        _snap_depth = int(_vnext_metrics.depth_at_best_ask)
+        _vnext_wide_spread = bool(_vnext_metrics.wide_spread_display_substitution)
+    except Exception:
+        _vnext_wide_spread = False
     _reprice_order_type = str(final_intent_context.get("order_type") or "GTC").strip().upper()
-    # W2 is post-only passive maker sizing. It does not consume best-ask
-    # depth, so the FOK/FAK ask-taking haircut table is not the right risk
-    # model. Non-fill/queue risk belongs to order management, not Kelly size.
+    strategy_key_for_live_quality = _resolve_strategy_key(decision)
+    # W2 is post-only passive maker sizing. Live strategy decisions consume
+    # observed spread/depth; legacy helper tests without canonical strategy_key
+    # keep the old neutral fixture context.
+    _maker_spread = _snapshot_spread_usd if strategy_key_for_live_quality else _Decimal("0")
+    _maker_depth = _snap_depth if strategy_key_for_live_quality else 100
     _maker_effective_context = EffectiveKellyContext(
-        spread_usd=_Decimal("0"),
-        depth_at_best_ask=100,
+        spread_usd=_maker_spread,
+        depth_at_best_ask=_maker_depth,
         order_type="GTC",
     )
     _taker_order_type_for_haircut = _reprice_order_type
@@ -1012,6 +1051,49 @@ def _reprice_decision_from_executable_snapshot(
                 corrected_candidate_expected_fill = float(best_ask_sweep.average_price or best_ask_float)
                 corrected_candidate_size = size_at_depth_limit
 
+    passive_fill_probability = final_intent_context.get(
+        "passive_fill_probability",
+        final_intent_context.get("expected_fill_probability"),
+    )
+    passive_maker_context = None
+    if final_best_ask is None and passive_fill_probability not in (None, ""):
+        from src.contracts.execution_intent import PassiveMakerExecutionContext
+
+        captured_at = getattr(snapshot, "captured_at", None)
+        quote_age_ms = 0
+        if isinstance(captured_at, datetime):
+            captured_utc = (
+                captured_at
+                if captured_at.tzinfo is not None
+                else captured_at.replace(tzinfo=timezone.utc)
+            )
+            quote_age_ms = max(
+                0,
+                int(
+                    (
+                        datetime.now(timezone.utc)
+                        - captured_utc.astimezone(timezone.utc)
+                    ).total_seconds()
+                    * 1000
+                ),
+            )
+        passive_maker_context = PassiveMakerExecutionContext(
+            spread_usd=_snapshot_spread_usd,
+            quote_age_ms=quote_age_ms,
+            expected_fill_probability=Decimal(str(passive_fill_probability)),
+            queue_depth_ahead=(
+                None
+                if final_intent_context.get("queue_depth_ahead") in (None, "")
+                else Decimal(str(final_intent_context.get("queue_depth_ahead")))
+            ),
+            adverse_selection_score=(
+                None
+                if final_intent_context.get("adverse_selection_score") in (None, "")
+                else Decimal(str(final_intent_context.get("adverse_selection_score")))
+            ),
+            orderbook_hash_age_ms=quote_age_ms,
+        )
+
     selected_order_type = str(final_intent_context.get("order_type") or "GTC").strip().upper()
     final_order_type = selected_order_type
     taker_order_type_upgraded = False
@@ -1032,6 +1114,7 @@ def _reprice_decision_from_executable_snapshot(
         cancel_after=final_intent_context.get("cancel_after"),
         resolution_window=str(final_intent_context.get("resolution_window") or "default"),
         correlation_key=str(final_intent_context.get("correlation_key") or ""),
+        passive_maker_context=passive_maker_context,
     )
     if (
         isinstance(corrected_pricing_shadow, dict)
@@ -1041,7 +1124,6 @@ def _reprice_decision_from_executable_snapshot(
             Decimal(str(corrected_pricing_shadow["candidate_size_usd"]))
         )
         repriced_size = corrected_candidate_size
-    strategy_key_for_live_quality = _resolve_strategy_key(decision)
     if strategy_key_for_live_quality:
         from src.engine.evaluator import _live_entry_economic_floor_rejection
 
@@ -1055,7 +1137,11 @@ def _reprice_decision_from_executable_snapshot(
             expected_profit_usd=float(expected_profit_usd),
             final_limit_price=float(final_price),
             passive_order=final_best_ask is None,
-            passive_fill_probability=None,
+            passive_fill_probability=(
+                None
+                if passive_maker_context is None
+                else float(passive_maker_context.expected_fill_probability)
+            ),
         )
         if live_quality_rejection:
             raise ValueError(
@@ -1102,6 +1188,10 @@ def _reprice_decision_from_executable_snapshot(
         "snapshot_best_bid_size": bid_size_float,
         "snapshot_best_ask": best_ask_float,
         "snapshot_best_ask_size": ask_size_float,
+        "market_analysis_vnext_wide_spread_display_substitution": bool(
+            _vnext_wide_spread
+        ),
+        "market_analysis_vnext_depth_at_best_ask": int(_snap_depth),
         "snapshot_limit_price": float(snapshot_limit_price),
         "passive_maker_repositioned": passive_maker_repositioned,
         "passive_maker_reposition_reason": passive_maker_reposition_reason,
@@ -1137,6 +1227,11 @@ def _reprice_decision_from_executable_snapshot(
         "selected_order_type": selected_order_type,
         "final_order_type": final_order_type,
         "taker_order_type_upgraded": taker_order_type_upgraded,
+        "passive_maker_expected_fill_probability": (
+            None
+            if passive_maker_context is None
+            else float(passive_maker_context.expected_fill_probability)
+        ),
         "corrected_candidate_limit_price": float(corrected_candidate_price),
         "corrected_candidate_expected_fill_price": float(corrected_candidate_expected_fill),
         "corrected_candidate_size_usd": float(corrected_candidate_size),
@@ -3413,15 +3508,36 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
             if decisions:
                 from src.strategy.family_exclusive_dedup import (
                     dedup_mutually_exclusive_families,
+                    weather_family_exposures_from_trade_db,
                     weather_family_exposures_from_portfolio,
                 )
+
+                _family_exposure_conn = None
+                try:
+                    from src.state.db import get_trade_connection_with_world
+                    _family_exposure_conn = get_trade_connection_with_world()
+                    _family_exposures = weather_family_exposures_from_trade_db(
+                        _family_exposure_conn
+                    )
+                except Exception as _family_exposure_exc:
+                    logger.warning(
+                        "[WEATHER_FAMILY_EXPOSURE_DB_FALLBACK] slug=%s exc=%s",
+                        getattr(candidate, "slug", ""),
+                        _family_exposure_exc,
+                    )
+                    _family_exposures = weather_family_exposures_from_portfolio(portfolio)
+                finally:
+                    if _family_exposure_conn is not None:
+                        _family_exposure_conn.close()
+                if not _family_exposures:
+                    _family_exposures = weather_family_exposures_from_portfolio(portfolio)
 
                 decisions = dedup_mutually_exclusive_families(
                     decisions,
                     city=city.name,
                     target_date=candidate.target_date,
                     temperature_metric=candidate.temperature_metric,
-                    existing_exposures=weather_family_exposures_from_portfolio(portfolio),
+                    existing_exposures=_family_exposures,
                 )
             # Phase 2 T2: write no_trade_events rows for rejected decisions.
             # Fail-soft: logging/learning infrastructure must not crash the cycle.
