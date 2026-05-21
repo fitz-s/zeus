@@ -146,15 +146,15 @@ def test_p_3_4_stress_scenarios_are_frozen_dataclasses():
 
 
 # ---------------------------------------------------------------------------
-# P-3-5: SCHEMA_VERSION bumped to 17 (v16 claimed by PR #249)
+# P-3-5: SCHEMA_VERSION bumped past Phase 3; live release proof added v20 schema trust markers.
 # ---------------------------------------------------------------------------
 
-def test_p_3_5_schema_version_is_18():
-    """P-3-5: db.py SCHEMA_VERSION == 18 (Phase 3 T2 bump; v17 claimed by PR #253)."""
+def test_p_3_5_schema_version_is_20():
+    """P-3-5: db.py SCHEMA_VERSION == 20 after live release proof schema markers."""
     from src.state.db import SCHEMA_VERSION
 
-    assert SCHEMA_VERSION == 18, (
-        f"Expected SCHEMA_VERSION=18, got {SCHEMA_VERSION}"
+    assert SCHEMA_VERSION == 20, (
+        f"Expected SCHEMA_VERSION=20, got {SCHEMA_VERSION}"
     )
 
 

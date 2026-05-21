@@ -25,6 +25,7 @@ Workflow files control gate severity and maintenance cost.
 | `architecture_advisory_gates.yml` | Architecture/topology CI lanes: blocking stable gates plus advisory staged checks |
 | `live-release-gate.yml` | Manual release proof gate: code/schema/static proof on GitHub plus explicit local runtime-proof boundary |
 | `money-path-required.yml` | Required semantic CI gate that classifies money-path objects, asserts invariant coverage, and runs selected relationship tests |
+| `money-path-release-gate.yml` | Required isolated money-path release gate for schema, release proof, negRisk tradeability, and no-trade live fail-closed antibodies |
 | `pr_identity_collision_check.yml` | Advisory check posting PR comment when identity-bearing class added under src/types/ or src/contracts/ |
 | `pr-policy.yml` | Universal cross-agent PR LOC/commit accumulation advisory comment (CI equivalent of pre-push hook) |
 | `replay-correctness.yml` | Required merge gate (Gate 4); replay-correctness DB-fixture validation |

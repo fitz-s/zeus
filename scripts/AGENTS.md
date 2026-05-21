@@ -80,6 +80,7 @@ Only list durable entry points here; use the manifest for the full catalog.
 | `check_contract_source_fields.py` | Enforcement scan verifying source-contract fields on all contract entries (created 2026-05-01) |
 | `check_pr_identity_collisions.py` | Enforcement scan for PR identity collisions; diagnostic (created 2026-05-04) |
 | `check_schema_version.py` | Enforcement check: init_schema boot invariant per task_2026-05-11_init_schema_boot_invariant §5.6 (created 2026-05-11) |
+| `check_live_release_gate.py` | Read-only live-release gate for loaded SHA, current schema, clean command/redeem state, freshness, and paper money-path proof (created 2026-05-21) |
 | `check_table_registry_coherence.py` | Enforcement scan verifying table_registry coherence against live DB schema (created 2026-05-14) |
 | `check_writer_signature_typing.py` | Enforcement scan for writer signature typing conformance (created 2026-05-14) |
 | `ci/semantic_diff_classifier.py` | Money-path semantic diff classifier for CI selected-test routing (created 2026-05-21) |
