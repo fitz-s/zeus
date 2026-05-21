@@ -84,18 +84,6 @@ def test_m3_heat_dome_three_city_cluster_cap_sequence():
     pass
 
 
-@pytest.mark.xfail(
-    reason="pending Phase 5/6 Day0BoundState 6-class upgrade per dossier §6.2",
-    strict=False,
-)
-def test_inv_shoulder_day0_bound_eliminates_tail():
-    """P-3-7: Shoulder is safer ONLY after Day0 bound has eliminated tail.
-
-    Relationship test (§7.6): after Day0 bound classified as
-    HIGH_IMPOSSIBLE_DETERMINISTIC + source-matched observation, upper shoulder
-    sell transitions from 'dangerous' to 'near-deterministic settlement capture'.
-
-    xfail until Phase 5/6 lands the full 6-class Day0BoundState (dossier §6.2).
-    Current BoundClassification on origin/main is 3-class scaffold from Phase 0 PR 5.
-    """
-    pass
+# test_inv_shoulder_day0_bound_eliminates_tail — canonical copy lives in
+# tests/test_weather_regime_tag.py (has real pytest.fail assertion body).
+# Removed duplicate empty-body stub here to eliminate XPASS noise.

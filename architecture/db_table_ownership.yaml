@@ -1064,6 +1064,26 @@ tables:
       SCHEMA_VERSION 15→16. DDL in src/state/schema/tail_stress_scenarios_schema.py.
       SCAFFOLD — writer/reader wired in T2 production pass.
 
+  - name: shoulder_exposure_ledger
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: "db.py:init_schema (daemon boot, SCHEMA_VERSION 23); rollback: scripts/rollback_phase3_t3.py (SCAFFOLD)"
+    pk_col: "id (AUTOINCREMENT); decision_event_id + shoulder_side form FK-like join key with decision_events"
+    notes: >
+      Phase 3 T3 (PHASE_3_SHOULDER_PLAN.md §2 T3, 2026-05-21):
+      append-only exposure ledger for shoulder trades. Columns: id, shoulder_side
+      CHECK('sell','buy'), weather_system_cluster, city, target_date, source, regime,
+      notional_usd, decision_event_id, observed_at, schema_version CHECK(22,23).
+      Indices: idx_shoulder_exposure_ledger_cluster_side (weather_system_cluster, shoulder_side),
+      idx_shoulder_exposure_ledger_city (city, target_date).
+      DDL in src/state/schema/shoulder_exposure_ledger_schema.py.
+      writer: src/state/shoulder_exposure_ledger.py write_shoulder_exposure_entry(
+        shoulder_side, weather_system_cluster, city, target_date, source, regime,
+        notional_usd, decision_event_id, observed_at, *, conn: sqlite3.Connection) —
+        conn REQUIRED, INV-37.
+      SCHEMA_VERSION 22→23.
+
   - name: db_chunk_boundary_events
     db: world
     schema_class: world_class
