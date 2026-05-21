@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-04-26; last_reviewed=2026-05-18; last_reused=2026-05-18
+# Lifecycle: created=2026-04-26; last_reviewed=2026-05-21; last_reused=2026-05-21
 # Purpose: Command recovery loop for unresolved venue command side effects.
 # Reuse: Run when command recovery, venue order payload normalization, or unknown side-effect resolution changes.
 # Authority basis: docs/operations/task_2026-04-26_execution_state_truth_p1_command_bus/implementation_plan.md §P1.S4
@@ -8,14 +8,13 @@
 At cycle start, scans venue_commands for rows in IN_FLIGHT_STATES and
 reconciles currently-supported side-effect states against venue truth. M2 owns
 SUBMIT_UNKNOWN_SIDE_EFFECT resolution: lookup by known venue_order_id or by
-idempotency-key capability, then convert found orders to ACKED/PARTIAL or
+idempotency-key capability, then convert found orders to ACKED/PARTIAL/FILLED or
 operator REVIEW_REQUIRED, or mark safe replay permitted via a terminal
-SUBMIT_REJECTED payload after the window elapses. MATCHED/MINED/FILLED are
-optimistic venue observations and stay PARTIAL. CONFIRMED order status is not
-fill-economics authority on this command-only recovery path; fill finality must
-flow through explicit venue trade/fill fact paths. Appends durable events that
-advance state per the §P1.S4 resolution table. P2/K4 will add chain-truth
-reconciliation for FILL_CONFIRMED.
+SUBMIT_REJECTED payload after the window elapses. MATCHED/MINED trade facts are
+optimistic venue observations; a PARTIAL entry command advances to FILLED only
+when order truth says the remainder is gone and positive fill facts already
+exist. Appends durable events that advance state per the §P1.S4 resolution
+table. P2/K4 will add chain-truth reconciliation for FILL_CONFIRMED.
 
 Chain reconciliation (FILL_CONFIRMED via on-chain settlement evidence) is OUT
 of scope for P1.S4 — that requires deep chain-state integration. Deferred to
@@ -739,6 +738,91 @@ def _latest_matched_order_fact_candidates(conn: sqlite3.Connection) -> list[dict
         (*command_states, *fact_states, *sources),
     ).fetchall()
     return [_dict_row(row) for row in rows]
+
+
+def _latest_completed_partial_order_fact_candidates(conn: sqlite3.Connection) -> list[dict]:
+    if not _table_exists(conn, "venue_order_facts") or not _table_exists(conn, "venue_trade_facts"):
+        return []
+    sources = tuple(sorted(_LIVE_TERMINAL_ORDER_FACT_SOURCES))
+    if not sources:
+        return []
+    source_placeholders = ", ".join("?" for _ in sources)
+    rows = conn.execute(
+        f"""
+        WITH latest_order_fact AS (
+            SELECT command_id, MAX(local_sequence) AS max_sequence
+              FROM venue_order_facts
+             GROUP BY command_id
+        )
+        SELECT
+            cmd.*,
+            fact.fact_id AS order_fact_id,
+            fact.state AS order_fact_state,
+            fact.observed_at AS order_fact_observed_at,
+            fact.venue_order_id AS order_fact_venue_order_id,
+            fact.remaining_size AS order_fact_remaining_size,
+            fact.matched_size AS order_fact_matched_size,
+            fact.source AS order_fact_source
+          FROM venue_commands cmd
+          JOIN latest_order_fact latest
+            ON latest.command_id = cmd.command_id
+          JOIN venue_order_facts fact
+            ON fact.command_id = latest.command_id
+           AND fact.local_sequence = latest.max_sequence
+         WHERE cmd.intent_kind = 'ENTRY'
+           AND cmd.state = 'PARTIAL'
+           AND cmd.venue_order_id IS NOT NULL
+           AND cmd.venue_order_id != ''
+           AND fact.venue_order_id = cmd.venue_order_id
+           AND fact.state = 'MATCHED'
+           AND fact.source IN ({source_placeholders})
+           AND EXISTS (
+               SELECT 1
+                 FROM venue_trade_facts trade
+                WHERE trade.command_id = cmd.command_id
+                  AND trade.venue_order_id = cmd.venue_order_id
+                  AND trade.state IN ('MATCHED', 'MINED', 'CONFIRMED')
+           )
+         ORDER BY fact.observed_at, fact.fact_id
+        """,
+        sources,
+    ).fetchall()
+    candidates: list[dict] = []
+    for row in rows:
+        candidate = _dict_row(row)
+        if not _decimal_is_zero(candidate.get("order_fact_remaining_size")):
+            continue
+        if not _decimal_is_positive(candidate.get("order_fact_matched_size")):
+            continue
+        if not _has_positive_trade_fact(
+            conn,
+            command_id=str(candidate.get("command_id") or ""),
+            venue_order_id=str(candidate.get("venue_order_id") or ""),
+        ):
+            continue
+        candidates.append(candidate)
+    return candidates
+
+
+def _has_positive_trade_fact(
+    conn: sqlite3.Connection,
+    *,
+    command_id: str,
+    venue_order_id: str,
+) -> bool:
+    if not command_id or not venue_order_id:
+        return False
+    rows = conn.execute(
+        """
+        SELECT filled_size
+          FROM venue_trade_facts
+         WHERE command_id = ?
+           AND venue_order_id = ?
+           AND state IN ('MATCHED', 'MINED', 'CONFIRMED')
+        """,
+        (command_id, venue_order_id),
+    ).fetchall()
+    return any(_decimal_is_positive(_dict_row(row).get("filled_size")) for row in rows)
 
 
 def _first_present(raw: dict | None, *keys: str):
@@ -2343,6 +2427,54 @@ def reconcile_matched_order_facts(conn: sqlite3.Connection, client) -> dict:
         except Exception as exc:
             logger.error(
                 "recovery: matched order fact reconciliation failed for command %s: %s",
+                command_id,
+                exc,
+            )
+            summary["errors"] += 1
+    return summary
+
+
+def reconcile_completed_partial_order_facts(conn: sqlite3.Connection) -> dict:
+    """Finalize PARTIAL entry commands when order truth says the remainder is gone."""
+
+    summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+    for row in _latest_completed_partial_order_fact_candidates(conn):
+        summary["scanned"] += 1
+        command_id = str(row.get("command_id") or "")
+        order_id = str(row.get("order_fact_venue_order_id") or row.get("venue_order_id") or "")
+        try:
+            payload = {
+                "reason": "partial_entry_order_fact_completed",
+                "proof_class": "completed_partial_order_fact",
+                "venue_order_id": order_id,
+                "command_id": command_id,
+                "matched_size": str(row.get("order_fact_matched_size") or ""),
+                "remaining_size": str(row.get("order_fact_remaining_size") or ""),
+                "latest_order_fact_id": row.get("order_fact_id"),
+                "latest_order_fact_state": row.get("order_fact_state"),
+                "latest_order_fact_source": row.get("order_fact_source"),
+                "latest_order_fact_observed_at": row.get("order_fact_observed_at"),
+            }
+            safe_command_id = "".join(ch if ch.isalnum() else "_" for ch in command_id)
+            sp_name = f"sp_completed_partial_order_{safe_command_id}"
+            conn.execute(f"SAVEPOINT {sp_name}")
+            try:
+                append_event(
+                    conn,
+                    command_id=command_id,
+                    event_type=CommandEventType.FILL_CONFIRMED.value,
+                    occurred_at=_now_iso(),
+                    payload=payload,
+                )
+                conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+            except Exception:
+                conn.execute(f"ROLLBACK TO SAVEPOINT {sp_name}")
+                conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+                raise
+            summary["advanced"] += 1
+        except Exception as exc:
+            logger.error(
+                "recovery: completed partial order fact reconciliation failed for command %s: %s",
                 command_id,
                 exc,
             )
@@ -3994,6 +4126,12 @@ def reconcile_unresolved_commands(
         summary["advanced"] += matched_summary["advanced"]
         summary["stayed"] += matched_summary["stayed"]
         summary["errors"] += matched_summary["errors"]
+
+        completed_partial_summary = reconcile_completed_partial_order_facts(conn)
+        summary["completed_partial_order_facts"] = completed_partial_summary
+        summary["advanced"] += completed_partial_summary["advanced"]
+        summary["stayed"] += completed_partial_summary["stayed"]
+        summary["errors"] += completed_partial_summary["errors"]
 
         live_entry_repair_summary = reconcile_live_entry_projection_repairs(conn)
         summary["live_entry_projection_repair"] = live_entry_repair_summary

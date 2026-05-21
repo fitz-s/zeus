@@ -2,7 +2,7 @@
 # Purpose: Lock healthcheck relationship predicates for live daemon, launchd, entry capability, and settlement truth.
 # Reuse: Run when scripts/healthcheck.py health predicates or live readiness status fields change.
 # Created: 2026-04-30
-# Last reused/audited: 2026-05-17
+# Last reused/audited: 2026-05-21
 # Authority basis: first-principles ZEUS_MODE cleanup 2026-04-30; healthcheck live-only runtime contract; docs/operations/task_2026-05-16_live_continuous_run_package/LIVE_CONTINUOUS_RUN_PACKAGE_PLAN.md Phase C; 2026-05-17 riskguard live DB-holder health contract.
 from __future__ import annotations
 import pytest
@@ -131,6 +131,26 @@ def _write_risk_state(path, *, checked_at=None, details=None):
     conn.execute(
         "INSERT INTO risk_state (level, details_json, checked_at) VALUES (?, ?, ?)",
         ("GREEN", json.dumps(details), checked_at or datetime.now(timezone.utc).isoformat()),
+    )
+    conn.commit()
+    conn.close()
+
+
+def _append_risk_state(path, *, checked_at=None, level="GREEN", details=None):
+    conn = sqlite3.connect(str(path))
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS risk_state (id INTEGER PRIMARY KEY, level TEXT NOT NULL, details_json TEXT, checked_at TEXT NOT NULL)"
+    )
+    if details is None:
+        details = {
+            "execution_quality_level": "GREEN",
+            "strategy_signal_level": "GREEN",
+            "recommended_controls": [],
+            "recommended_strategy_gates": [],
+        }
+    conn.execute(
+        "INSERT INTO risk_state (level, details_json, checked_at) VALUES (?, ?, ?)",
+        (level, json.dumps(details), checked_at or datetime.now(timezone.utc).isoformat()),
     )
     conn.commit()
     conn.close()
@@ -1837,6 +1857,91 @@ def test_healthcheck_flags_stale_status_and_risk_contracts(monkeypatch, tmp_path
     assert result["riskguard_contract_valid"] is False
     assert "execution_quality_level" in result["riskguard_contract_missing_keys"]
     assert result["recommended_commands"] == []
+    assert result["healthy"] is False
+
+
+def test_healthcheck_accepts_fresh_previous_risk_contract_after_dependency_db_lock(monkeypatch, tmp_path):
+    status_path = tmp_path / "status_summary.json"
+    risk_path = tmp_path / "risk_state.db"
+    zeus_db_path = tmp_path / "zeus.db"
+    now = datetime.now(timezone.utc)
+    previous_checked_at = (now - timedelta(seconds=60)).isoformat()
+    latest_checked_at = now.isoformat()
+    status_path.write_text(json.dumps(_status_payload()))
+    _write_risk_state(risk_path, checked_at=previous_checked_at)
+    _append_risk_state(
+        risk_path,
+        checked_at=latest_checked_at,
+        details={
+            "status": "dependency_db_locked_previous_risk_level_preserved",
+            "riskguard_degraded_reason": "dependency_db_locked",
+            "previous_full_risk_level": "GREEN",
+            "previous_full_risk_checked_at": previous_checked_at,
+        },
+    )
+    _write_no_trade_artifact(zeus_db_path)
+
+    monkeypatch.setenv("ZEUS_MODE", "live")
+    monkeypatch.setattr(healthcheck, "_status_path", lambda: status_path)
+    monkeypatch.setattr(healthcheck, "_risk_state_path", lambda: risk_path)
+    monkeypatch.setattr(healthcheck, "_zeus_db_path", lambda: zeus_db_path)
+
+    class _Result:
+        returncode = 0
+        stdout = "123\t0\tcom.zeus.live-trading\n"
+
+    monkeypatch.setattr(healthcheck.subprocess, "run", lambda *args, **kwargs: _Result())
+
+    result = healthcheck.check()
+
+    assert result["riskguard_checked_at"] == latest_checked_at
+    assert result["riskguard_fresh"] is True
+    assert result["riskguard_contract_valid"] is True
+    assert result["riskguard_contract_missing_keys"] == []
+    assert result["riskguard_contract_source"] == "previous_full_row_after_dependency_db_lock"
+    assert result["riskguard_contract_reference_checked_at"] == previous_checked_at
+    assert result["healthy"] is True
+
+
+def test_healthcheck_rejects_dependency_db_lock_row_when_previous_risk_contract_is_stale(monkeypatch, tmp_path):
+    status_path = tmp_path / "status_summary.json"
+    risk_path = tmp_path / "risk_state.db"
+    zeus_db_path = tmp_path / "zeus.db"
+    now = datetime.now(timezone.utc)
+    previous_checked_at = (now - timedelta(seconds=healthcheck.RISKGUARD_STALE_SECONDS + 30)).isoformat()
+    latest_checked_at = now.isoformat()
+    status_path.write_text(json.dumps(_status_payload()))
+    _write_risk_state(risk_path, checked_at=previous_checked_at)
+    _append_risk_state(
+        risk_path,
+        checked_at=latest_checked_at,
+        details={
+            "status": "dependency_db_locked_previous_risk_level_preserved",
+            "riskguard_degraded_reason": "dependency_db_locked",
+            "previous_full_risk_level": "GREEN",
+            "previous_full_risk_checked_at": previous_checked_at,
+        },
+    )
+    _write_no_trade_artifact(zeus_db_path)
+
+    monkeypatch.setenv("ZEUS_MODE", "live")
+    monkeypatch.setattr(healthcheck, "_status_path", lambda: status_path)
+    monkeypatch.setattr(healthcheck, "_risk_state_path", lambda: risk_path)
+    monkeypatch.setattr(healthcheck, "_zeus_db_path", lambda: zeus_db_path)
+
+    class _Result:
+        returncode = 0
+        stdout = "123\t0\tcom.zeus.live-trading\n"
+
+    monkeypatch.setattr(healthcheck.subprocess, "run", lambda *args, **kwargs: _Result())
+
+    result = healthcheck.check()
+
+    assert result["riskguard_fresh"] is True
+    assert result["riskguard_contract_valid"] is False
+    assert result["riskguard_contract_source"] == "previous_full_row_after_dependency_db_lock"
+    assert result["riskguard_contract_reference_stale"] is True
+    assert "execution_quality_level" in result["riskguard_contract_missing_keys"]
     assert result["healthy"] is False
 
 

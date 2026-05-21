@@ -1,7 +1,7 @@
 # Created: 2026-04-19
-# Last reused/audited: 2026-05-20
+# Last reused/audited: 2026-05-21
 # Authority basis: Phase 10B DT-Seam Cleanup, 2026-04-29 design simplification audit F4, 2026-05-01 stale live-state artifact tracking, and 2026-05-15 K1 forecast DB split status-summary false-flag repair.
-# Lifecycle: created=2026-04-19; last_reviewed=2026-05-15; last_reused=2026-05-15
+# Lifecycle: created=2026-04-19; last_reviewed=2026-05-21; last_reused=2026-05-21
 # Purpose: Phase 10B "DT-Seam Cleanup" antibodies (R-CL..R-CP).
 #          Dedicated test file per critic-carol cycle-3 L2 convention.
 #          Do NOT co-locate with test_phase10a_hygiene.py.
@@ -883,6 +883,101 @@ class TestRCPV2RowCountSensor:
             "status": "query_error",
             "refresh_error": "position_current_pulse_query_error",
         }
+
+    def test_current_open_entry_orders_uses_fact_sequence_not_timestamp_text_order(self):
+        """Relationship: mixed timestamp formats cannot hide terminal order facts."""
+        from src.observability import status_summary as status_summary_module
+
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.executescript(
+            """
+            CREATE TABLE venue_commands (
+                command_id TEXT PRIMARY KEY,
+                venue_order_id TEXT,
+                intent_kind TEXT,
+                state TEXT,
+                side TEXT,
+                size REAL,
+                price REAL,
+                position_id TEXT,
+                created_at TEXT,
+                updated_at TEXT
+            );
+            CREATE TABLE position_current (
+                position_id TEXT PRIMARY KEY,
+                phase TEXT,
+                order_status TEXT,
+                city TEXT,
+                target_date TEXT,
+                strategy_key TEXT
+            );
+            CREATE TABLE venue_order_facts (
+                fact_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                venue_order_id TEXT,
+                command_id TEXT,
+                state TEXT,
+                remaining_size TEXT,
+                matched_size TEXT,
+                source TEXT,
+                observed_at TEXT,
+                ingested_at TEXT,
+                local_sequence INTEGER
+            );
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO venue_commands (
+                command_id, venue_order_id, intent_kind, state, side, size, price,
+                position_id, created_at, updated_at
+            ) VALUES (
+                'cmd-mixed-ts', 'ord-mixed-ts', 'ENTRY', 'ACKED', 'BUY', 77.71, 0.01,
+                'pos-mixed-ts', '2026-05-21T01:28:36+00:00', '2026-05-21T01:28:44+00:00'
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO position_current (
+                position_id, phase, order_status, city, target_date, strategy_key
+            ) VALUES (
+                'pos-mixed-ts', 'pending_entry', 'pending', 'Kuala Lumpur',
+                '2026-05-22', 'opening_inertia'
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO venue_order_facts (
+                venue_order_id, command_id, state, remaining_size, matched_size,
+                source, observed_at, ingested_at, local_sequence
+            ) VALUES (
+                'ord-mixed-ts', 'cmd-mixed-ts', 'LIVE', '77.71', '0',
+                'REST', '2026-05-21T01:28:44.532263+00:00',
+                '2026-05-21T01:28:44.532263+00:00', 1
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO venue_order_facts (
+                venue_order_id, command_id, state, remaining_size, matched_size,
+                source, observed_at, ingested_at, local_sequence
+            ) VALUES (
+                'ord-mixed-ts', 'cmd-mixed-ts', 'MATCHED', '0.00', '77.70',
+                'WS_USER', '2026-05-21 01:34:26.192000+00:00',
+                '2026-05-21 01:34:26.192000+00:00', 2
+            )
+            """
+        )
+        conn.commit()
+
+        open_orders = status_summary_module._query_current_open_entry_orders(conn)
+
+        assert open_orders["status"] == "ok"
+        assert open_orders["count"] == 0
+        assert open_orders["orders"] == []
 
     def test_status_summary_exposes_s2_lifecycle_funnel(self, tmp_path, monkeypatch):
         """S2 visibility stays a derived status block, not a cycle authority."""

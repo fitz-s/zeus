@@ -436,9 +436,10 @@ def _query_current_open_entry_orders(conn) -> dict:
                 SELECT venue_order_id, command_id, state, remaining_size, matched_size, observed_at,
                        ROW_NUMBER() OVER (
                            PARTITION BY venue_order_id
-                           ORDER BY COALESCE(observed_at, '') DESC,
+                           ORDER BY COALESCE(local_sequence, 0) DESC,
+                                    COALESCE(observed_at, '') DESC,
                                     COALESCE(ingested_at, '') DESC,
-                                    COALESCE(local_sequence, 0) DESC
+                                    fact_id DESC
                        ) AS rn
                   FROM venue_order_facts
             )

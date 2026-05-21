@@ -1,8 +1,8 @@
 # Created: 2026-04-26
-# Lifecycle: created=2026-04-26; last_reviewed=2026-05-18; last_reused=2026-05-18
+# Lifecycle: created=2026-04-26; last_reviewed=2026-05-21; last_reused=2026-05-21
 # Purpose: Lock INV-31 command recovery behavior plus snapshot-gated command inserts.
 # Reuse: Run when command recovery, command journal schema, or executable snapshot gating changes.
-# Last reused/audited: 2026-05-18
+# Last reused/audited: 2026-05-21
 # Authority basis: docs/operations/task_2026-04-26_execution_state_truth_p1_command_bus/implementation_plan.md u00a7P1.S4
 """INV-31 anchor tests: command recovery loop.
 
@@ -1445,6 +1445,88 @@ class TestRecoveryResolutionTable:
             "matched_size": "4.99",
             "source": "REST",
         }
+
+    def test_partial_entry_finalizes_when_latest_order_fact_is_fully_matched(
+        self,
+        conn,
+        mock_client,
+    ):
+        """Relationship: complete order truth closes a prior partial command."""
+        _insert(conn, size=5.0, price=0.34)
+        _seed_pending_entry_projection(conn)
+        _advance_to_partial(conn, venue_order_id="ord-001")
+        _append_trade_fact(
+            conn,
+            command_id="cmd-001",
+            order_id="ord-001",
+            trade_id="trade-001",
+            state="MATCHED",
+            filled_size="4.99",
+            fill_price="0.34",
+        )
+        _append_order_fact(conn, state="MATCHED", matched_size="4.99", remaining_size="0")
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["completed_partial_order_facts"]["advanced"] == 1
+        assert _get_state(conn, "cmd-001") == "FILLED"
+        events = _get_events(conn, "cmd-001")
+        assert events[-1]["event_type"] == "FILL_CONFIRMED"
+        payload = json.loads(events[-1]["payload_json"])
+        assert payload["proof_class"] == "completed_partial_order_fact"
+        assert payload["matched_size"] == "4.99"
+        assert payload["remaining_size"] == "0"
+
+    def test_partial_entry_does_not_finalize_without_positive_trade_fact(
+        self,
+        conn,
+        mock_client,
+    ):
+        """Relationship: order completion alone is not fill-economics authority."""
+        _insert(conn, size=5.0, price=0.34)
+        _seed_pending_entry_projection(conn)
+        _advance_to_partial(conn, venue_order_id="ord-001")
+        _append_order_fact(conn, state="MATCHED", matched_size="4.99", remaining_size="0")
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["completed_partial_order_facts"]["advanced"] == 0
+        assert _get_state(conn, "cmd-001") == "PARTIAL"
+        event_types = [row["event_type"] for row in _get_events(conn, "cmd-001")]
+        assert "FILL_CONFIRMED" not in event_types
+
+    def test_partial_entry_does_not_finalize_with_malformed_completed_order_size(
+        self,
+        conn,
+        mock_client,
+    ):
+        """Relationship: malformed remainder text is not terminal fill truth."""
+        _insert(conn, size=5.0, price=0.34)
+        _seed_pending_entry_projection(conn)
+        _advance_to_partial(conn, venue_order_id="ord-001")
+        _append_trade_fact(
+            conn,
+            command_id="cmd-001",
+            order_id="ord-001",
+            trade_id="trade-001",
+            state="MATCHED",
+            filled_size="4.99",
+            fill_price="0.34",
+        )
+        _append_order_fact(conn, state="MATCHED", matched_size="4.99", remaining_size="")
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["completed_partial_order_facts"]["advanced"] == 0
+        assert _get_state(conn, "cmd-001") == "PARTIAL"
+        event_types = [row["event_type"] for row in _get_events(conn, "cmd-001")]
+        assert "FILL_CONFIRMED" not in event_types
 
     def test_terminal_filled_entry_trade_fact_without_pending_projection_recovers_position(
         self,
