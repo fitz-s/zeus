@@ -77,6 +77,15 @@
 #   promotion_evidence_ref: null | "<doc path>"
 #       Path to the operator-blessed evidence packet that justified live status.
 #       null until the strategy is promoted out of shadow.
+#   min_entry_price: 0.0 to <1.0
+#       Strategy economic floor for entry/final limit prices. Venue tick/min
+#       order authority may be lower; that does not make a trade live-quality.
+#   min_strategy_notional_usd: 0.0+
+#       Strategy economic minimum notional, separate from venue min_order_size.
+#   min_expected_profit_usd: 0.0+
+#       Minimum expected profit before a live entry is worth execution churn.
+#   allow_ultra_low_tail: true | false
+#       Explicit exception for tail-arb strategies with separate calibration.
 #
 # Initial values
 # --------------
@@ -117,6 +126,10 @@ settlement_capture:
   min_shadow_decisions: 0
   min_settled_decisions: 0
   promotion_evidence_ref: docs/reference/zeus_domain_model.md
+  min_entry_price: 0.05
+  min_strategy_notional_usd: 1.00
+  min_expected_profit_usd: 0.05
+  allow_ultra_low_tail: false
 
 center_buy:
   thesis: >
@@ -142,6 +155,10 @@ center_buy:
   min_shadow_decisions: 0
   min_settled_decisions: 0
   promotion_evidence_ref: docs/reference/zeus_domain_model.md
+  min_entry_price: 0.05
+  min_strategy_notional_usd: 1.00
+  min_expected_profit_usd: 0.05
+  allow_ultra_low_tail: false
 
 opening_inertia:
   thesis: >
@@ -167,6 +184,10 @@ opening_inertia:
   min_shadow_decisions: 0
   min_settled_decisions: 0
   promotion_evidence_ref: docs/reference/zeus_domain_model.md
+  min_entry_price: 0.05
+  min_strategy_notional_usd: 1.00
+  min_expected_profit_usd: 0.05
+  allow_ultra_low_tail: false
 
 shoulder_sell:
   thesis: >
@@ -194,6 +215,10 @@ shoulder_sell:
   min_shadow_decisions: 100
   min_settled_decisions: 30
   promotion_evidence_ref: null   # promote when shadow evidence is mature
+  min_entry_price: 0.05
+  min_strategy_notional_usd: 1.00
+  min_expected_profit_usd: 0.05
+  allow_ultra_low_tail: false
 
 imminent_open_capture:
   thesis: >
@@ -222,6 +247,10 @@ imminent_open_capture:
   min_shadow_decisions: 0
   min_settled_decisions: 0
   promotion_evidence_ref: null
+  min_entry_price: 0.05
+  min_strategy_notional_usd: 1.00
+  min_expected_profit_usd: 0.05
+  allow_ultra_low_tail: false
 
 shoulder_buy:
   thesis: >
@@ -242,6 +271,10 @@ shoulder_buy:
   min_shadow_decisions: 100
   min_settled_decisions: 30
   promotion_evidence_ref: null
+  min_entry_price: 0.05
+  min_strategy_notional_usd: 1.00
+  min_expected_profit_usd: 0.05
+  allow_ultra_low_tail: false
 
 center_sell:
   thesis: >
@@ -262,3 +295,7 @@ center_sell:
   min_shadow_decisions: 100
   min_settled_decisions: 30
   promotion_evidence_ref: null
+  min_entry_price: 0.05
+  min_strategy_notional_usd: 1.00
+  min_expected_profit_usd: 0.05
+  allow_ultra_low_tail: false

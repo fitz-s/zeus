@@ -69,6 +69,7 @@ def _patch_evaluator(
     monkeypatch,
     *,
     entry_price: float,
+    p_posterior: float = 0.06,
     calibration_level: int = 1,
     snapshot_id: str = "snap-1",
     ens_overrides: dict | None = None,
@@ -112,9 +113,9 @@ def _patch_evaluator(
                 edge=0.05,
                 ci_lower=0.03,
                 ci_upper=0.07,
-                p_model=0.06,
+                p_model=p_posterior,
                 p_market=entry_price,
-                p_posterior=0.06,
+                p_posterior=p_posterior,
                 entry_price=entry_price,
                 p_value=0.02,
                 vwmp=entry_price,
@@ -275,7 +276,7 @@ def test_center_buy_rejects_ultra_low_price_buy_yes_cohort(monkeypatch):
 
 def test_opening_inertia_low_price_entry_is_not_blocked_by_center_buy_guard(monkeypatch, tmp_path):
     _no_op_oracle_patch_compat_shim(monkeypatch, tmp_path)
-    clob = _patch_evaluator(monkeypatch, entry_price=0.01)
+    clob = _patch_evaluator(monkeypatch, entry_price=0.06, p_posterior=0.12)
 
     decisions = evaluator_module.evaluate_candidate(
         _candidate(discovery_mode=DiscoveryMode.OPENING_HUNT.value),
@@ -308,7 +309,8 @@ def test_missing_forecast_evidence_blocks_before_snapshot_persistence(monkeypatc
     store_calls: list[str] = []
     clob = _patch_evaluator(
         monkeypatch,
-        entry_price=0.01,
+        entry_price=0.06,
+        p_posterior=0.12,
         ens_overrides={"raw_payload_hash": ""},
         store_calls=store_calls,
     )
@@ -338,7 +340,8 @@ def test_missing_available_at_blocks_before_snapshot_persistence(monkeypatch):
     store_calls: list[str] = []
     clob = _patch_evaluator(
         monkeypatch,
-        entry_price=0.01,
+        entry_price=0.06,
+        p_posterior=0.12,
         ens_overrides={"available_at": None},
         store_calls=store_calls,
     )
@@ -364,7 +367,8 @@ def test_future_forecast_evidence_blocks_before_snapshot_persistence(monkeypatch
     store_calls: list[str] = []
     clob = _patch_evaluator(
         monkeypatch,
-        entry_price=0.01,
+        entry_price=0.06,
+        p_posterior=0.12,
         ens_overrides={
             "available_at": datetime(2026, 4, 2, 13, 0, tzinfo=timezone.utc),
             "fetch_time": datetime(2026, 4, 2, 13, 0, tzinfo=timezone.utc),
@@ -395,7 +399,8 @@ def test_available_forecast_before_decision_permits_late_local_fetch_time(monkey
     store_calls: list[str] = []
     clob = _patch_evaluator(
         monkeypatch,
-        entry_price=0.01,
+        entry_price=0.06,
+        p_posterior=0.12,
         ens_overrides={
             "issue_time": datetime(2026, 4, 2, 6, 0, tzinfo=timezone.utc),
             "available_at": datetime(2026, 4, 2, 6, 5, tzinfo=timezone.utc),
@@ -425,7 +430,8 @@ def test_available_at_before_issue_blocks_before_snapshot_persistence(monkeypatc
     store_calls: list[str] = []
     clob = _patch_evaluator(
         monkeypatch,
-        entry_price=0.01,
+        entry_price=0.06,
+        p_posterior=0.12,
         ens_overrides={
             "issue_time": datetime(2026, 4, 2, 6, 0, tzinfo=timezone.utc),
             "available_at": datetime(2026, 4, 2, 5, 59, tzinfo=timezone.utc),
@@ -468,7 +474,8 @@ def test_forecast_snapshot_persistence_uses_forecasts_owned_boundary(monkeypatch
     )
     clob = _patch_evaluator(
         monkeypatch,
-        entry_price=0.01,
+        entry_price=0.06,
+        p_posterior=0.12,
         store_conn_calls=store_conn_calls,
         metadata_conn_calls=metadata_conn_calls,
         p_raw_store_conn_calls=p_raw_store_conn_calls,
@@ -509,7 +516,8 @@ def test_forecast_snapshot_persistence_respects_caller_owned_connection_by_defau
     )
     clob = _patch_evaluator(
         monkeypatch,
-        entry_price=0.01,
+        entry_price=0.06,
+        p_posterior=0.12,
         store_conn_calls=store_conn_calls,
         metadata_conn_calls=metadata_conn_calls,
         p_raw_store_conn_calls=p_raw_store_conn_calls,
@@ -556,7 +564,8 @@ def test_forecast_snapshot_real_helpers_round_trip_forecasts_db(monkeypatch, tmp
     )
     clob = _patch_evaluator(
         monkeypatch,
-        entry_price=0.01,
+        entry_price=0.06,
+        p_posterior=0.12,
         real_snapshot_helpers=True,
     )
 

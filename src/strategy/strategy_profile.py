@@ -112,6 +112,10 @@ class StrategyProfile:
     min_shadow_decisions: int
     min_settled_decisions: int
     promotion_evidence_ref: Optional[str]
+    min_entry_price: float = 0.05
+    min_strategy_notional_usd: float = 1.0
+    min_expected_profit_usd: float = 0.05
+    allow_ultra_low_tail: bool = False
 
     def is_runtime_live(self) -> bool:
         """True iff entries placed by this strategy hit the live order book.
@@ -236,6 +240,29 @@ def _coerce_phase_overrides(value, *, key: str) -> dict[str, float]:
     return out
 
 
+def _coerce_nonnegative_float(
+    value,
+    *,
+    key: str,
+    field_name: str,
+    upper_bound: float | None = None,
+) -> float:
+    if not isinstance(value, (int, float)):
+        raise RegistrySchemaError(
+            f"{key}.{field_name}={value!r}: must be numeric"
+        )
+    coerced = float(value)
+    if coerced < 0.0:
+        raise RegistrySchemaError(
+            f"{key}.{field_name}={value!r}: must be non-negative"
+        )
+    if upper_bound is not None and coerced >= upper_bound:
+        raise RegistrySchemaError(
+            f"{key}.{field_name}={value!r}: must be < {upper_bound:g}"
+        )
+    return coerced
+
+
 _REQUIRED_FIELDS = {
     "thesis",
     "live_status",
@@ -252,6 +279,13 @@ _REQUIRED_FIELDS = {
     "promotion_evidence_ref",
 }
 
+_OPTIONAL_FIELDS = {
+    "min_entry_price",
+    "min_strategy_notional_usd",
+    "min_expected_profit_usd",
+    "allow_ultra_low_tail",
+}
+
 
 _VALID_DISCOVERY_MODES: frozenset[str] = frozenset({
     "day0_capture", "opening_hunt", "update_reaction", "imminent_open_capture",
@@ -263,7 +297,7 @@ def _build_profile(key: str, raw: dict) -> StrategyProfile:
         raise RegistrySchemaError(
             f"{key}: expected dict, got {type(raw).__name__}"
         )
-    extras = set(raw.keys()) - _REQUIRED_FIELDS
+    extras = set(raw.keys()) - _REQUIRED_FIELDS - _OPTIONAL_FIELDS
     if extras:
         raise RegistrySchemaError(
             f"{key}: unexpected fields {sorted(extras)} (typo? unrecognized field "
@@ -286,6 +320,28 @@ def _build_profile(key: str, raw: dict) -> StrategyProfile:
     if not isinstance(kelly_default, (int, float)) or not (0.0 <= float(kelly_default) <= 1.0):
         raise RegistrySchemaError(
             f"{key}.kelly_default_multiplier={kelly_default!r}: must be numeric in [0.0, 1.0]"
+        )
+
+    min_entry_price = _coerce_nonnegative_float(
+        raw.get("min_entry_price", 0.05),
+        key=key,
+        field_name="min_entry_price",
+        upper_bound=1.0,
+    )
+    min_strategy_notional_usd = _coerce_nonnegative_float(
+        raw.get("min_strategy_notional_usd", 1.0),
+        key=key,
+        field_name="min_strategy_notional_usd",
+    )
+    min_expected_profit_usd = _coerce_nonnegative_float(
+        raw.get("min_expected_profit_usd", 0.05),
+        key=key,
+        field_name="min_expected_profit_usd",
+    )
+    allow_ultra_low_tail = raw.get("allow_ultra_low_tail", False)
+    if not isinstance(allow_ultra_low_tail, bool):
+        raise RegistrySchemaError(
+            f"{key}.allow_ultra_low_tail={allow_ultra_low_tail!r}: must be boolean"
         )
 
     cycle_axis_mode = raw["cycle_axis_dispatch_mode"]
@@ -327,6 +383,10 @@ def _build_profile(key: str, raw: dict) -> StrategyProfile:
             None if raw["promotion_evidence_ref"] in (None, "null", "")
             else str(raw["promotion_evidence_ref"])
         ),
+        min_entry_price=min_entry_price,
+        min_strategy_notional_usd=min_strategy_notional_usd,
+        min_expected_profit_usd=min_expected_profit_usd,
+        allow_ultra_low_tail=allow_ultra_low_tail,
     )
 
 

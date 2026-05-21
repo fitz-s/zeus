@@ -1,5 +1,5 @@
 # Created: 2026-05-04
-# Last reused/audited: 2026-05-04
+# Last reused/audited: 2026-05-21
 # Authority basis: docs/operations/task_2026-05-04_oracle_kelly_evidence_rebuild/PLAN.md §A4 (StrategyProfile registry + 4-site cutover invariants).
 """StrategyProfile registry regression antibodies.
 
@@ -264,6 +264,14 @@ def test_kelly_for_phase_None_returns_default():
     per-strategy default — no behavior change from the pre-A6 path."""
     profile = sp.get("settlement_capture")
     assert profile.kelly_for_phase(None) == profile.kelly_default_multiplier
+
+
+def test_live_quality_floors_are_registry_backed() -> None:
+    profile = sp.get("opening_inertia")
+    assert profile.min_entry_price == pytest.approx(0.05)
+    assert profile.min_strategy_notional_usd == pytest.approx(1.0)
+    assert profile.min_expected_profit_usd == pytest.approx(0.05)
+    assert profile.allow_ultra_low_tail is False
 
 
 # ── schema enforcement ─────────────────────────────────────────────── #

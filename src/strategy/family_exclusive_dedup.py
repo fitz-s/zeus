@@ -35,17 +35,13 @@ is satisfied by the string-level audit. SEE the SCAFFOLD report — this is the
 flagged brief-premise conflict (brief said "no schema change" AND "add to enum";
 both cannot hold, runtime-gating wins for Stage A).
 
-Selection-metric provenance (flagged for critic review): the codebase does not
-compute an explicit "executable net EV" scalar anywhere reusable.
-``BinEdge.ev_per_dollar`` is a stale field (never set; always 0.0) and
-``rank_edges()`` no longer exists. The executor's own *revealed preference* —
-the single executable dollar figure produced AFTER fee-rate, phase-aware Kelly,
-DDD discount, oracle penalty, risk-throttle, allocation multiplier, min-order
-and risk-limit gates — is ``EdgeDecision.size_usd`` (set at evaluator.py
-size_usd=size). We therefore rank by ``size_usd`` (descending), which IS the
-post-fees / post-depth / post-cap executable allocation the executor would
-deploy. Deterministic tie-break: ``edge.forward_edge`` then ``decision_id``.
-No new EV formula is invented; we reuse the executor's existing sizing output.
+Selection-metric provenance: Stage A now has two hooks. The primary
+``preselect_single_family_edge_before_kelly`` hook runs in the evaluator before
+scalar Kelly/risk sizing and ranks by ``BinEdge.forward_edge`` so dropped
+siblings cannot mutate projected exposure. The cycle-runtime
+``dedup_mutually_exclusive_families`` hook remains a second-line safety net for
+legacy/mixed callers and still ranks already-sized ``EdgeDecision`` objects by
+``size_usd``. Stage B replaces both with a first-class family payoff optimizer.
 
 Fail-safe: this gate can only REMOVE entries (set should_trade False). It never
 adds, resizes, or re-enables a decision, so it can never increase exposure.
@@ -91,6 +87,17 @@ class WeatherFamilyExposure:
     bin_label: str = ""
     phase: str = "active"
     position_id: str = ""
+
+
+@dataclass(frozen=True)
+class FamilyPreselectionDrop:
+    """One FDR-selected edge removed before scalar Kelly sizing."""
+
+    edge: Any
+    dropped_bin: str
+    kept_bin: str
+    family_selection_score: float
+    kept_family_selection_score: float
 
 
 _BLOCKING_EXPOSURE_PHASES = frozenset(
@@ -234,6 +241,103 @@ def _executable_rank_key(decision: "EdgeDecision") -> tuple[float, float, str]:
     edge = getattr(decision, "edge", None)
     forward_edge = float(getattr(edge, "forward_edge", 0.0) or 0.0) if edge is not None else 0.0
     return (size, forward_edge, getattr(decision, "decision_id", "") or "")
+
+
+def _edge_family_selection_score(edge: Any) -> float:
+    """Stage-A pre-Kelly utility proxy for one mutually-exclusive family leg.
+
+    This intentionally does not use ``EdgeDecision.size_usd`` because that is a
+    downstream scalar-Kelly output. Until Stage B lands a payoff-vector
+    optimizer, the least-wrong pre-sizing score is the edge's executable
+    forward edge, with legacy ``edge`` as fallback.
+    """
+
+    try:
+        score = float(getattr(edge, "forward_edge", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        score = 0.0
+    if score == 0.0:
+        try:
+            score = float(getattr(edge, "edge", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            score = 0.0
+    return score
+
+
+def _edge_preselection_key(edge: Any) -> tuple[float, float, float, tuple[int, ...]]:
+    score = _edge_family_selection_score(edge)
+    try:
+        posterior = float(getattr(edge, "p_posterior", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        posterior = 0.0
+    try:
+        entry_price = float(getattr(edge, "entry_price", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        entry_price = 0.0
+    label = ""
+    bin_obj = getattr(edge, "bin", None)
+    if bin_obj is not None:
+        label = str(getattr(bin_obj, "label", "") or "")
+    return (score, posterior, entry_price, tuple(-ord(c) for c in label))
+
+
+def preselect_single_family_edge_before_kelly(
+    edges: list[Any],
+    *,
+    city: str,
+    target_date: str,
+    temperature_metric: str,
+    enabled: bool | None = None,
+) -> tuple[list[Any], list[FamilyPreselectionDrop]]:
+    """Collapse one mutually-exclusive weather family before scalar Kelly.
+
+    ``evaluate_candidate`` calls this after full-family FDR and before the
+    Kelly/risk loop. That prevents dropped sibling bins from mutating projected
+    exposure, heat, min-order, or risk throttles.
+    """
+
+    if enabled is None:
+        enabled = family_gate_enabled()
+    if not enabled or len(edges) < 2:
+        return edges, []
+
+    best = max(edges, key=_edge_preselection_key)
+    best_bin = ""
+    best_edge_bin = getattr(best, "bin", None)
+    if best_edge_bin is not None:
+        best_bin = str(getattr(best_edge_bin, "label", "") or "")
+    best_score = _edge_family_selection_score(best)
+    kept: list[Any] = [best]
+    drops: list[FamilyPreselectionDrop] = []
+    for edge in edges:
+        if edge is best:
+            continue
+        dropped_bin = ""
+        edge_bin = getattr(edge, "bin", None)
+        if edge_bin is not None:
+            dropped_bin = str(getattr(edge_bin, "label", "") or "")
+        score = _edge_family_selection_score(edge)
+        drops.append(
+            FamilyPreselectionDrop(
+                edge=edge,
+                dropped_bin=dropped_bin,
+                kept_bin=best_bin,
+                family_selection_score=score,
+                kept_family_selection_score=best_score,
+            )
+        )
+        logger.info(
+            "[MUTUALLY_EXCLUSIVE_FAMILY_PRE_KELLY] family=%s|%s|%s dropped_bin=%r "
+            "kept_bin=%r dropped_score=%.6f kept_score=%.6f",
+            city,
+            target_date,
+            temperature_metric,
+            dropped_bin,
+            best_bin,
+            score,
+            best_score,
+        )
+    return kept, drops
 
 
 def _pick_best_index(decisions: list["EdgeDecision"], idxs: list[int]) -> int:

@@ -102,6 +102,11 @@ from src.state.portfolio import (
     portfolio_heat_for_bankroll,
 )
 from src.strategy.fdr_filter import fdr_filter, DEFAULT_FDR_ALPHA
+from src.strategy.family_exclusive_dedup import (
+    FAMILY_REJECTION_STAGE,
+    MUTUALLY_EXCLUSIVE_FAMILY_DEDUP,
+    preselect_single_family_edge_before_kelly,
+)
 from src.strategy.kelly import (
     dynamic_kelly_mult,
     kelly_size,
@@ -146,6 +151,7 @@ from src.strategy.market_fusion import (
     vwmp,
 )
 from src.strategy.risk_limits import RiskLimits, check_position_allowed
+from src.strategy.strategy_profile import try_get as _try_get_strategy_profile
 from src.types import Bin, BinEdge
 from src.types.market import BinTopologyError, validate_bin_topology
 from src.types.temperature import TemperatureDelta
@@ -818,6 +824,103 @@ def _center_buy_ultra_low_price_block_reason(strategy_key: str, edge: BinEdge) -
         return None
     if entry_price <= CENTER_BUY_ULTRA_LOW_PRICE_MAX_ENTRY:
         return f"CENTER_BUY_ULTRA_LOW_PRICE({entry_price:.4f}<={CENTER_BUY_ULTRA_LOW_PRICE_MAX_ENTRY:.2f})"
+    return None
+
+
+def _strategy_live_quality_policy(strategy_key: str) -> SimpleNamespace:
+    profile = _try_get_strategy_profile(strategy_key)
+    return SimpleNamespace(
+        min_entry_price=float(getattr(profile, "min_entry_price", 0.05) if profile is not None else 0.05),
+        min_strategy_notional_usd=float(
+            getattr(profile, "min_strategy_notional_usd", 1.0) if profile is not None else 1.0
+        ),
+        min_expected_profit_usd=float(
+            getattr(profile, "min_expected_profit_usd", 0.05) if profile is not None else 0.05
+        ),
+        allow_ultra_low_tail=bool(
+            getattr(profile, "allow_ultra_low_tail", False) if profile is not None else False
+        ),
+    )
+
+
+def _strategy_entry_price_floor_block_reason(strategy_key: str, edge: BinEdge) -> str | None:
+    if _center_buy_ultra_low_price_block_reason(strategy_key, edge):
+        return None
+    policy = _strategy_live_quality_policy(strategy_key)
+    if policy.allow_ultra_low_tail:
+        return None
+    try:
+        entry_price = float(edge.entry_price)
+    except (TypeError, ValueError):
+        return None
+    if entry_price <= policy.min_entry_price:
+        return (
+            f"STRATEGY_ENTRY_PRICE_BELOW_LIVE_FLOOR("
+            f"{entry_price:.4f}<={policy.min_entry_price:.2f}; strategy={strategy_key})"
+        )
+    return None
+
+
+def _expected_profit_usd_for_edge(edge: BinEdge, *, notional_usd: float, price: float) -> float:
+    try:
+        edge_per_share = float(getattr(edge, "forward_edge", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        edge_per_share = 0.0
+    if edge_per_share <= 0.0:
+        try:
+            edge_per_share = float(edge.p_posterior) - float(price)
+        except (TypeError, ValueError):
+            edge_per_share = 0.0
+    try:
+        cost = float(price)
+        notional = float(notional_usd)
+    except (TypeError, ValueError):
+        return 0.0
+    if cost <= 0.0 or notional <= 0.0:
+        return 0.0
+    return max(0.0, edge_per_share) * (notional / cost)
+
+
+def _live_entry_economic_floor_rejection(
+    *,
+    strategy_key: str,
+    edge: BinEdge,
+    submitted_notional_usd: float,
+    expected_profit_usd: float,
+    final_limit_price: float,
+    passive_order: bool,
+    passive_fill_probability: float | None = None,
+) -> str | None:
+    """Return a live-quality rejection reason, separate from venue min order."""
+
+    policy = _strategy_live_quality_policy(strategy_key)
+    if submitted_notional_usd < policy.min_strategy_notional_usd:
+        return (
+            "STRATEGY_NOTIONAL_BELOW_LIVE_FLOOR("
+            f"{submitted_notional_usd:.4f}<${policy.min_strategy_notional_usd:.2f}; "
+            f"strategy={strategy_key})"
+        )
+    if expected_profit_usd < policy.min_expected_profit_usd:
+        return (
+            "EXPECTED_PROFIT_BELOW_LIVE_FLOOR("
+            f"{expected_profit_usd:.4f}<${policy.min_expected_profit_usd:.2f}; "
+            f"strategy={strategy_key})"
+        )
+    if not policy.allow_ultra_low_tail and final_limit_price <= policy.min_entry_price:
+        return (
+            "ULTRA_LOW_PRICE_NOT_AUTHORIZED("
+            f"{final_limit_price:.4f}<={policy.min_entry_price:.2f}; strategy={strategy_key})"
+        )
+    if (
+        passive_order
+        and final_limit_price <= policy.min_entry_price
+        and passive_fill_probability is None
+        and not policy.allow_ultra_low_tail
+    ):
+        return (
+            "PASSIVE_FILL_PROBABILITY_UNMODELED_FOR_ULTRA_LOW_PRICE("
+            f"price={final_limit_price:.4f}; strategy={strategy_key})"
+        )
     return None
 
 
@@ -3809,13 +3912,52 @@ def evaluate_candidate(
             fdr_family_size=_fdr_family_size,
         )]
 
+    n_edges_after_fdr_before_family_preselection = len(filtered)
+    filtered, family_preselection_drops = preselect_single_family_edge_before_kelly(
+        filtered,
+        city=city.name,
+        target_date=target_date,
+        temperature_metric=temperature_metric.temperature_metric,
+    )
+    family_preselection_rejections: list[EdgeDecision] = []
+    for drop in family_preselection_drops:
+        family_preselection_rejections.append(
+            EdgeDecision(
+                False,
+                edge=drop.edge,
+                decision_id=_decision_id(),
+                rejection_stage=FAMILY_REJECTION_STAGE,
+                rejection_reasons=[MUTUALLY_EXCLUSIVE_FAMILY_DEDUP],
+                selected_method=selected_method,
+                applied_validations=[*entry_validations, "family_pre_kelly_selection"],
+                decision_snapshot_id=snapshot_id,
+                p_raw=p_raw,
+                p_cal=p_cal,
+                p_market=p_market,
+                alpha=alpha,
+                agreement=agreement,
+                spread=_ensemble_spread_value(ensemble_spread, ens),
+                n_edges_found=len(edges),
+                n_edges_after_fdr=n_edges_after_fdr_before_family_preselection,
+                fdr_fallback_fired=_fdr_fallback,
+                fdr_family_size=_fdr_family_size,
+                rejection_reason_detail=(
+                    f"family={city.name}|{target_date}|{temperature_metric.temperature_metric} "
+                    f"dropped_bin={drop.dropped_bin!r} kept_bin={drop.kept_bin!r} "
+                    f"dropped_family_selection_score={drop.family_selection_score:.6f} "
+                    f"kept_family_selection_score={drop.kept_family_selection_score:.6f} "
+                    "(pre-Kelly Stage A single_best)"
+                ),
+            )
+        )
+
     bankroll_val = getattr(portfolio, "effective_bankroll", getattr(portfolio, "bankroll", 0.0)) if entry_bankroll is None else entry_bankroll
     sizing_bankroll = max(0.0, float(bankroll_val))
     current_heat = portfolio_heat_for_bankroll(portfolio, sizing_bankroll)
     projected_total_exposure_usd = current_heat * sizing_bankroll
     projected_city_exposure_usd: dict[str, float] = defaultdict(float)
     projected_cluster_exposure_usd: dict[str, float] = defaultdict(float)
-    decisions = []
+    decisions = list(family_preselection_rejections)
     for edge in filtered:
         decision_validations = list(entry_validations)
         if edge.support_index is None:
@@ -3863,6 +4005,23 @@ def evaluate_candidate(
                 edge_source=edge_source,
                 rejection_reason_enum=NoTradeReason.STRATEGY_KEY_UNCLASSIFIED,
                 rejection_reason_detail="strategy_key_unclassified",
+            ))
+            continue
+        entry_price_floor_reason = _strategy_entry_price_floor_block_reason(strategy_key, edge)
+        if entry_price_floor_reason:
+            decisions.append(EdgeDecision(
+                False,
+                edge=edge,
+                decision_id=_decision_id(),
+                rejection_stage="MARKET_FILTER",
+                rejection_reasons=[NoTradeReason.SIZE_BELOW_MINIMUM.value],
+                selected_method=selected_method,
+                applied_validations=[*decision_validations, "strategy_entry_price_floor"],
+                decision_snapshot_id=snapshot_id,
+                edge_source=edge_source,
+                strategy_key=strategy_key,
+                rejection_reason_enum=NoTradeReason.SIZE_BELOW_MINIMUM,
+                rejection_reason_detail=entry_price_floor_reason,
             ))
             continue
         ci_rejection_reason = _entry_ci_rejection_reason(candidate, edge)
@@ -4291,8 +4450,45 @@ def evaluate_candidate(
         )
         if min_order_authority == "executable_snapshot_min_order_size":
             decision_validations.append("executable_snapshot_min_order_size")
+        live_quality_policy = _strategy_live_quality_policy(strategy_key)
+        strategy_min_notional_usd = max(
+            effective_min_order_usd,
+            live_quality_policy.min_strategy_notional_usd,
+        )
+        expected_profit_usd = _expected_profit_usd_for_edge(
+            edge,
+            notional_usd=size,
+            price=float(edge.entry_price),
+        )
+        economic_floor_reason = _live_entry_economic_floor_rejection(
+            strategy_key=strategy_key,
+            edge=edge,
+            submitted_notional_usd=float(size),
+            expected_profit_usd=expected_profit_usd,
+            final_limit_price=float(edge.entry_price),
+            passive_order=False,
+        )
+        if economic_floor_reason:
+            decisions.append(EdgeDecision(
+                False,
+                edge=edge,
+                decision_id=_decision_id(),
+                rejection_stage="SIZING_TOO_SMALL",
+                rejection_reasons=[NoTradeReason.SIZE_BELOW_MINIMUM.value],
+                selected_method=selected_method,
+                applied_validations=[*decision_validations, "strategy_live_quality_floor"],
+                decision_snapshot_id=snapshot_id,
+                edge_source=edge_source,
+                strategy_key=strategy_key,
+                rejection_reason_enum=NoTradeReason.SIZE_BELOW_MINIMUM,
+                rejection_reason_detail=(
+                    f"{economic_floor_reason}; venue_min=${effective_min_order_usd:.4f} "
+                    f"authority={min_order_authority}"
+                ),
+            ))
+            continue
 
-        if size < effective_min_order_usd:
+        if size < strategy_min_notional_usd:
             decisions.append(EdgeDecision(
                 False,
                 edge=edge,
@@ -4306,8 +4502,10 @@ def evaluate_candidate(
                 strategy_key=strategy_key,
                 rejection_reason_enum=NoTradeReason.SIZE_BELOW_MINIMUM,
                 rejection_reason_detail=(
-                    f"${size:.2f} < ${effective_min_order_usd:.4f} "
-                    f"(authority: {min_order_authority}, throttled: {risk_throttle})"
+                    f"${size:.2f} < ${strategy_min_notional_usd:.4f} "
+                    f"(venue_min=${effective_min_order_usd:.4f}, "
+                    f"strategy_min=${live_quality_policy.min_strategy_notional_usd:.2f}, "
+                    f"authority: {min_order_authority}, throttled: {risk_throttle})"
                 ),
             ))
             continue
@@ -4325,7 +4523,7 @@ def evaluate_candidate(
             current_portfolio_heat=current_heat,
             limits=_risk_limits_for_effective_min_order(
                 limits,
-                effective_min_order_usd,
+                strategy_min_notional_usd,
             ),
         )
         if not allowed:
