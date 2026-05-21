@@ -38,7 +38,7 @@ P-3-7: Day0-bound interaction §7.6 acknowledged + xfail relationship test speci
 
 P-3-8: Phase 3 planner v2 output at `docs/operations/task_2026-05-21_strategy_vnext_phase3_shoulder/PHASE_3_SHOULDER_PLAN.md` cross-references this file's design.
 
-P-3-9: Verifier reads `git show origin/main:src/engine/evaluator.py | grep -nE "shoulder_sell|shoulder_buy"` and confirms hardcoded shoulder branches still exist at `evaluator.py:1462/1478/1494` and `cycle_runner.py:456` (replacement is Phase 3 T2 work, not yet landed).
+P-3-9: Verifier runs `git show origin/main:src/engine/evaluator.py | grep -n "buy_no.*is_shoulder"` and confirms exactly 3 hardcoded shoulder branch sites exist (line numbers shift per merge — as of 2026-05-21: L1482/L1498/L1514; use grep not hardcoded lines). Confirms `cycle_runner.py` mirror site exists via `git show origin/main:src/engine/cycle_runner.py | grep -n "shoulder"`. Replacement is Phase 3 T2 work, not yet landed.
 
 P-3-10: `make_hypothesis_family_id` current signature on origin/main lacks `source` + `regime` kwargs (Phase 3 T1 extension is not yet landed).
 
