@@ -1935,7 +1935,24 @@ def execute_intent(
             "requires ZEUS_ALLOW_LEGACY_EXECUTION_INTENT=1 and "
             "ZEUS_LEGACY_EXECUTION_INTENT_SCOPE=paper"
         )
-    return submit_order(intent, mode="paper")
+    trade_id = str(uuid.uuid4())[:12]
+    shadow_result = submit_order(intent, mode="paper")
+    if not isinstance(shadow_result, dict):
+        return OrderResult(
+            trade_id=trade_id,
+            status="rejected",
+            reason=f"legacy_paper_executor_result_invalid:{type(shadow_result).__name__}",
+        )
+    return OrderResult(
+        trade_id=trade_id,
+        status=str(shadow_result.get("status") or "shadow_filled"),
+        order_id=str(shadow_result.get("order_id") or ""),
+        submitted_price=float(intent.limit_price),
+        shares=_entry_buy_submit_shares(intent.target_size_usd, intent.limit_price),
+        order_role="entry",
+        reason=None,
+        command_state=None,
+    )
 
 
 def create_exit_order_intent(

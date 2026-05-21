@@ -2516,6 +2516,11 @@ def init_schema(
     from src.state.schema.no_trade_events_schema import migrate_no_trade_events_schema as _migrate_no_trade_events_schema
     _migrate_no_trade_events_schema(conn)
 
+    # 2026-05-21 live authority follow-up: decision_events CHECK constraints
+    # must admit shadow_decision / unknown_legacy before PRAGMA user_version is
+    # stamped current. CREATE TABLE IF NOT EXISTS cannot upgrade stale CHECKs.
+    _migrate_decision_events_schema(conn)
+
     # Phase 3 T2 (2026-05-21): tail_stress_scenarios table (SCHEMA_VERSION 16).
     from src.state.schema.tail_stress_scenarios_schema import ensure_table as _ensure_tail_stress_scenarios_table
     _ensure_tail_stress_scenarios_table(conn)
@@ -2555,6 +2560,138 @@ def init_schema(
     if own_conn:
         conn.commit()
         conn.close()
+
+
+def _migrate_decision_events_schema(conn: sqlite3.Connection) -> None:
+    """Upgrade stale decision_events CHECK constraints without losing rows."""
+
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='decision_events'"
+    ).fetchone()
+    table_sql = str(row[0] if row else "")
+    if not table_sql:
+        return
+    if (
+        "unknown_legacy" in table_sql
+        and "shadow_decision" in table_sql
+        and "12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25" in table_sql
+    ):
+        return
+
+    conn.execute("DROP TABLE IF EXISTS decision_events_new")
+    conn.execute(
+        """
+        CREATE TABLE decision_events_new (
+            market_slug         TEXT NOT NULL,
+            temperature_metric  TEXT NOT NULL CHECK (temperature_metric IN ('high', 'low')),
+            target_date         TEXT NOT NULL,
+            observation_time    TEXT NOT NULL,
+            decision_seq        INTEGER NOT NULL,
+            condition_id        TEXT,
+            decision_event_id   TEXT,
+            decision_time       TEXT NOT NULL,
+            outcome             TEXT NOT NULL,
+            side                TEXT NOT NULL,
+            strategy_key        TEXT NOT NULL,
+            cycle_id            TEXT,
+            cycle_iteration     INTEGER,
+            p_posterior         REAL,
+            edge                REAL,
+            target_size_usd     REAL,
+            target_price        REAL,
+            forecast_time              TEXT,
+            provider_reported_time     TEXT,
+            observation_available_at   TEXT NOT NULL,
+            polymarket_end_anchor_source TEXT NOT NULL CHECK (
+                polymarket_end_anchor_source IN ('gamma_explicit', 'f1_12z_fallback', 'unknown_legacy')
+            ),
+            first_member_observed_time TEXT,
+            run_complete_time          TEXT,
+            zeus_submit_intent_time    TEXT,
+            venue_ack_time             TEXT,
+            first_inclusion_block_time TEXT,
+            finality_confirmed_time    TEXT,
+            clock_skew_estimate_ms_at_submit INTEGER,
+            raw_orderbook_hash_transition_delta_ms INTEGER,
+            schema_version INTEGER NOT NULL CHECK (schema_version IN (12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25)),
+            source         TEXT NOT NULL CHECK (source IN ('phase0_backfill', 'live_decision', 'shadow_decision')),
+            PRIMARY KEY (market_slug, temperature_metric, target_date, observation_time, decision_seq)
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO decision_events_new (
+            market_slug, temperature_metric, target_date, observation_time,
+            decision_seq, condition_id, decision_event_id, decision_time,
+            outcome, side, strategy_key, cycle_id, cycle_iteration,
+            p_posterior, edge, target_size_usd, target_price,
+            forecast_time, provider_reported_time, observation_available_at,
+            polymarket_end_anchor_source, first_member_observed_time,
+            run_complete_time, zeus_submit_intent_time, venue_ack_time,
+            first_inclusion_block_time, finality_confirmed_time,
+            clock_skew_estimate_ms_at_submit, raw_orderbook_hash_transition_delta_ms,
+            schema_version, source
+        )
+        SELECT
+            market_slug, temperature_metric, target_date, observation_time,
+            decision_seq, condition_id, decision_event_id, decision_time,
+            outcome, side, strategy_key, cycle_id, cycle_iteration,
+            p_posterior, edge, target_size_usd, target_price,
+            forecast_time, provider_reported_time, observation_available_at,
+            CASE
+                WHEN polymarket_end_anchor_source IN ('gamma_explicit', 'f1_12z_fallback', 'unknown_legacy')
+                    THEN polymarket_end_anchor_source
+                ELSE 'unknown_legacy'
+            END,
+            first_member_observed_time, run_complete_time,
+            zeus_submit_intent_time, venue_ack_time,
+            first_inclusion_block_time, finality_confirmed_time,
+            clock_skew_estimate_ms_at_submit, raw_orderbook_hash_transition_delta_ms,
+            CASE
+                WHEN schema_version IN (12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25)
+                    THEN schema_version
+                ELSE 25
+            END,
+            CASE
+                WHEN source IN ('phase0_backfill', 'live_decision', 'shadow_decision')
+                    THEN source
+                ELSE 'phase0_backfill'
+            END
+        FROM decision_events
+        """
+    )
+    conn.execute("DROP TABLE decision_events")
+    conn.execute("ALTER TABLE decision_events_new RENAME TO decision_events")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_decision_events_slug_date "
+        "ON decision_events(market_slug, target_date)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_decision_events_strategy "
+        "ON decision_events(strategy_key, decision_time)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_decision_events_event_id "
+        "ON decision_events(decision_event_id)"
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS decision_events_event_id_backstop
+        AFTER INSERT ON decision_events
+        FOR EACH ROW
+        WHEN NEW.decision_event_id IS NULL
+        BEGIN
+            UPDATE decision_events
+               SET decision_event_id = 'deid_v1_BACKSTOP_NULL_WRITER_BYPASS'
+             WHERE market_slug = NEW.market_slug
+               AND temperature_metric = NEW.temperature_metric
+               AND target_date = NEW.target_date
+               AND observation_time = NEW.observation_time
+               AND decision_seq = NEW.decision_seq;
+        END
+        """
+    )
 
 
 class SchemaOutOfDateError(RuntimeError):

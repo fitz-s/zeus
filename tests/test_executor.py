@@ -787,6 +787,32 @@ class TestExecutor:
             execute_intent(intent, edge_vwmp=0.50, label="legacy-live-blocked", conn=_TEST_CONN)
         assert _TEST_CONN.execute("SELECT COUNT(*) FROM venue_commands").fetchone()[0] == 0
 
+    def test_execute_intent_paper_override_returns_order_result(self, monkeypatch):
+        intent = ExecutionIntent(
+            direction=Direction.YES,
+            target_size_usd=5.0,
+            limit_price=0.50,
+            toxicity_budget=0.05,
+            max_slippage=SlippageBps(value_bps=200, direction="adverse"),
+            is_sandbox=False,
+            market_id="gamma-legacy-paper",
+            token_id="yes-token-legacy-paper",
+            timeout_seconds=3600,
+        )
+
+        monkeypatch.setattr("src.config.get_mode", lambda: "paper")
+        monkeypatch.setenv("ZEUS_ALLOW_LEGACY_EXECUTION_INTENT", "1")
+        monkeypatch.setenv("ZEUS_LEGACY_EXECUTION_INTENT_SCOPE", "paper")
+
+        result = execute_intent(intent, edge_vwmp=0.50, label="legacy-paper", conn=_TEST_CONN)
+
+        assert isinstance(result, OrderResult)
+        assert result.status == "shadow_filled"
+        assert result.order_id == "shadow:yes-token-legacy-paper"
+        assert result.shares == pytest.approx(10.0)
+        assert result.command_state is None
+        assert _TEST_CONN.execute("SELECT COUNT(*) FROM venue_commands").fetchone()[0] == 0
+
     def test_execute_final_intent_allows_stricter_fok_when_a2_selected_resting_maker(self, monkeypatch):
         final_intent = _final_execution_intent(order_type="FOK")
         captured = {}

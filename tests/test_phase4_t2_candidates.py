@@ -25,6 +25,7 @@ import pytest
 from src.contracts.decision_natural_key import make_decision_natural_key
 from src.contracts.no_trade_reason import NoTradeReason
 from src.state.db import SCHEMA_VERSION
+from src.state.decision_events import write_shadow_decision_event
 from src.strategy.candidates import (
     CandidateContext,
     ResolutionWindowMaker,
@@ -144,6 +145,72 @@ def _make_metrics(**kwargs: Any) -> SimpleNamespace:
 
 
 _DECISION_TIME = datetime(2026, 6, 15, 10, 0, 0)
+
+
+def test_init_schema_migrates_decision_events_shadow_provenance_check() -> None:
+    """Existing v24 decision_events CHECKs must upgrade before shadow writes."""
+    from src.state.db import init_schema
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """
+        CREATE TABLE decision_events (
+            market_slug         TEXT NOT NULL,
+            temperature_metric  TEXT NOT NULL CHECK (temperature_metric IN ('high', 'low')),
+            target_date         TEXT NOT NULL,
+            observation_time    TEXT NOT NULL,
+            decision_seq        INTEGER NOT NULL,
+            condition_id        TEXT,
+            decision_event_id   TEXT,
+            decision_time       TEXT NOT NULL,
+            outcome             TEXT NOT NULL,
+            side                TEXT NOT NULL,
+            strategy_key        TEXT NOT NULL,
+            cycle_id            TEXT,
+            cycle_iteration     INTEGER,
+            p_posterior         REAL,
+            edge                REAL,
+            target_size_usd     REAL,
+            target_price        REAL,
+            forecast_time              TEXT,
+            provider_reported_time     TEXT,
+            observation_available_at   TEXT NOT NULL,
+            polymarket_end_anchor_source TEXT NOT NULL CHECK (
+                polymarket_end_anchor_source IN ('gamma_explicit', 'f1_12z_fallback')
+            ),
+            first_member_observed_time TEXT,
+            run_complete_time          TEXT,
+            zeus_submit_intent_time    TEXT,
+            venue_ack_time             TEXT,
+            first_inclusion_block_time TEXT,
+            finality_confirmed_time    TEXT,
+            clock_skew_estimate_ms_at_submit INTEGER,
+            raw_orderbook_hash_transition_delta_ms INTEGER,
+            schema_version INTEGER NOT NULL CHECK (schema_version IN (12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24)),
+            source         TEXT NOT NULL CHECK (source IN ('phase0_backfill', 'live_decision')),
+            PRIMARY KEY (market_slug, temperature_metric, target_date, observation_time, decision_seq)
+        )
+        """
+    )
+    init_schema(conn)
+    ctx = _make_context(conn, SimpleNamespace(metrics=_make_metrics()))
+
+    write_shadow_decision_event(
+        ctx.natural_key,
+        decision_time=_DECISION_TIME.isoformat(),
+        side="buy_yes",
+        strategy_key="stale_quote_detector",
+        conn=conn,
+        polymarket_end_anchor_source=None,
+    )
+
+    row = conn.execute(
+        "SELECT source, polymarket_end_anchor_source, schema_version FROM decision_events"
+    ).fetchone()
+    assert row["source"] == "shadow_decision"
+    assert row["polymarket_end_anchor_source"] == "unknown_legacy"
+    assert row["schema_version"] == SCHEMA_VERSION
 
 
 # ---------------------------------------------------------------------------
