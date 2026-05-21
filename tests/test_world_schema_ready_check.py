@@ -237,3 +237,84 @@ class TestWorldSchemaReadyCheck:
         assert row is not None
         assert row[0] == db_module.SCHEMA_VERSION
         assert tail == (1,)
+
+    def test_v2_schema_uses_savepoint_inside_caller_owned_transaction(self, tmp_path):
+        """The v2 schema owner must not require a caller-owned transaction commit.
+
+        Pre-v2 idempotent repairs can leave a supplied connection inside a
+        transaction. ``apply_v2_schema()`` must use a nested savepoint in that
+        case, not force the caller to commit unrelated writes first.
+        """
+        import sqlite3
+
+        import src.state.schema.v2_schema as v2_schema
+
+        db_path = tmp_path / "legacy-world.db"
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.execute("CREATE TABLE caller_owned_rows (id INTEGER PRIMARY KEY)")
+            conn.commit()
+            conn.execute("BEGIN")
+            conn.execute("INSERT INTO caller_owned_rows DEFAULT VALUES")
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS pre_v2_dirty_helper (id INTEGER PRIMARY KEY)"
+            )
+            conn.execute("INSERT INTO pre_v2_dirty_helper DEFAULT VALUES")
+
+            v2_schema.apply_v2_schema(conn, forecast_tables=False)
+
+            assert conn.in_transaction is True
+            assert conn.execute("SELECT COUNT(*) FROM pre_v2_dirty_helper").fetchone()[0] == 1
+            assert conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='market_price_history'"
+            ).fetchone() == (1,)
+            conn.rollback()
+            assert conn.execute("SELECT COUNT(*) FROM caller_owned_rows").fetchone()[0] == 0
+        finally:
+            conn.close()
+
+    def test_v2_schema_nested_transaction_preserves_fk_sensitive_dead_tables(self, tmp_path):
+        """Caller-owned transactions cannot switch SQLite FK enforcement off.
+
+        The nested v2 schema path must not attempt FK-sensitive destructive
+        cleanup while foreign_keys is already enabled by the caller; otherwise a
+        legacy dead-table parent with dependent rows can abort schema readiness.
+        """
+        import sqlite3
+
+        import src.state.schema.v2_schema as v2_schema
+
+        db_path = tmp_path / "legacy-fk-world.db"
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.execute("PRAGMA foreign_keys = ON")
+            conn.execute("CREATE TABLE promotion_registry (id INTEGER PRIMARY KEY)")
+            conn.execute(
+                """
+                CREATE TABLE promotion_registry_child (
+                    id INTEGER PRIMARY KEY,
+                    promotion_id INTEGER NOT NULL REFERENCES promotion_registry(id)
+                )
+                """
+            )
+            conn.execute("INSERT INTO promotion_registry (id) VALUES (1)")
+            conn.execute(
+                "INSERT INTO promotion_registry_child (id, promotion_id) VALUES (1, 1)"
+            )
+            conn.commit()
+
+            conn.execute("BEGIN")
+            assert conn.execute("PRAGMA foreign_keys").fetchone() == (1,)
+
+            v2_schema.apply_v2_schema(conn, forecast_tables=False)
+
+            assert conn.in_transaction is True
+            assert conn.execute("PRAGMA foreign_keys").fetchone() == (1,)
+            assert conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='promotion_registry'"
+            ).fetchone() == (1,)
+            assert conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='market_price_history'"
+            ).fetchone() == (1,)
+        finally:
+            conn.close()

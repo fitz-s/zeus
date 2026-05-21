@@ -359,21 +359,31 @@ def apply_v2_schema(conn: sqlite3.Connection, *, forecast_tables: bool = True) -
     _busy_timeout_ms = int(os.environ.get("ZEUS_DB_BUSY_TIMEOUT_MS", "30000"))
     conn.execute(f"PRAGMA busy_timeout = {_busy_timeout_ms}")
 
-    # Save foreign_keys state before touching anything
+    # Save foreign_keys state before touching anything. SQLite ignores
+    # PRAGMA foreign_keys changes once a caller-owned transaction has begun, so
+    # the nested path must avoid FK-sensitive cleanup rather than pretending it
+    # has a foreign-key-off migration envelope.
     (fk_before,) = conn.execute("PRAGMA foreign_keys").fetchone()
 
+    nested_transaction = conn.in_transaction
+    may_run_fk_sensitive_cleanup = not nested_transaction or fk_before == 0
+
     try:
-        conn.execute("PRAGMA foreign_keys = OFF")
-        conn.execute("BEGIN")
+        if nested_transaction:
+            conn.execute("SAVEPOINT zeus_v2_schema")
+        else:
+            conn.execute("PRAGMA foreign_keys = OFF")
+            conn.execute("BEGIN")
 
         # ----------------------------------------------------------------
         # Drop 3 dead tables (D2 — 0 rows, no writers)
         # model_skill is intentionally excluded: etl_historical_forecasts.py
         # writes to it actively. Cleanup deferred to a later phase.
         # ----------------------------------------------------------------
-        conn.execute("DROP TABLE IF EXISTS promotion_registry")
-        conn.execute("DROP TABLE IF EXISTS model_eval_point")
-        conn.execute("DROP TABLE IF EXISTS model_eval_run")
+        if may_run_fk_sensitive_cleanup:
+            conn.execute("DROP TABLE IF EXISTS promotion_registry")
+            conn.execute("DROP TABLE IF EXISTS model_eval_point")
+            conn.execute("DROP TABLE IF EXISTS model_eval_run")
 
         if forecast_tables:
             # ----------------------------------------------------------------
@@ -877,14 +887,22 @@ def apply_v2_schema(conn: sqlite3.Connection, *, forecast_tables: bool = True) -
                 ON refit_bucket_failures(ts)
         """)
 
-        conn.execute("COMMIT")
+        if nested_transaction:
+            conn.execute("RELEASE SAVEPOINT zeus_v2_schema")
+        else:
+            conn.execute("COMMIT")
 
     except Exception:
         try:
-            conn.execute("ROLLBACK")
+            if nested_transaction:
+                conn.execute("rollback to savepoint zeus_v2_schema")
+                conn.execute("release savepoint zeus_v2_schema")
+            else:
+                conn.execute("rollback")
         except Exception:
             pass
         raise
     finally:
         # Restore foreign_keys to whatever it was before we touched it
-        conn.execute(f"PRAGMA foreign_keys = {fk_before}")
+        if not nested_transaction:
+            conn.execute(f"PRAGMA foreign_keys = {fk_before}")

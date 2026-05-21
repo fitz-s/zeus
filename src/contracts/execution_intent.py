@@ -1732,6 +1732,13 @@ class FinalExecutionIntent:
                 "post_only_passive_limit maker-only final intent requires zero "
                 "applicable platform fee rate"
             )
+        if (
+            self.order_policy == "post_only_passive_limit"
+            and self.passive_maker_context is None
+        ):
+            raise ValueError(
+                "post_only_passive_limit requires PassiveMakerExecutionContext"
+            )
         if self.passive_maker_context is not None:
             self.passive_maker_context.assert_live_entry_authorized()
         expected_fee_adjusted = _fee_adjusted_price(

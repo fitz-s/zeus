@@ -3333,6 +3333,7 @@ def test_live_entry_final_intent_receives_executable_snapshot_fields(tmp_path):
             "executable_snapshot_min_tick_size": "0.01",
             "executable_snapshot_min_order_size": "5",
             "executable_snapshot_neg_risk": False,
+            "passive_fill_probability": "0.40",
         },
         size_usd=5.0,
         decision_id="d-exec-thread",
@@ -3397,6 +3398,7 @@ def test_live_entry_final_intent_receives_executable_snapshot_fields(tmp_path):
     )
     conn.close()
 
+    assert "intent" in captured, [case.rejection_reasons for case in artifact.no_trade_cases]
     final_intent = captured["intent"]
     assert final_intent.snapshot_id == "snap-entry-1"
     assert final_intent.tick_size == Decimal("0.01")
@@ -3504,6 +3506,7 @@ def test_executable_snapshot_repricing_updates_edge_and_size(tmp_path):
         conn,
         decision,
         {"executable_snapshot_id": "snap-reprice-1"},
+        {"passive_fill_probability": "0.40"},
     )
     conn.close()
 
@@ -3520,6 +3523,7 @@ def test_executable_snapshot_repricing_updates_edge_and_size(tmp_path):
     assert decision.final_execution_intent.order_policy == "post_only_passive_limit"
     assert decision.final_execution_intent.order_type == "GTC"
     assert decision.final_execution_intent.post_only is True
+    assert decision.final_execution_intent.passive_maker_context is not None
     reprice = decision.tokens["executable_snapshot_reprice"]
     assert reprice["snapshot_id"] == "snap-reprice-1"
     assert reprice["snapshot_vwmp"] == pytest.approx(0.25)
@@ -3549,6 +3553,113 @@ def test_executable_snapshot_repricing_updates_edge_and_size(tmp_path):
     assert shadow["cost_basis_hash"]
     assert shadow["final_execution_intent_id"] == decision.final_execution_intent.hypothesis_id
     assert shadow["posterior_distribution_id"] == "decision_snapshot:decision-snap"
+
+
+def test_buy_entry_ask_only_snapshot_reprices_without_bid_midpoint(tmp_path):
+    conn = get_connection(tmp_path / "ask-only-snapshot-reprice.db")
+    init_schema(conn)
+    _insert_executable_snapshot(
+        conn,
+        snapshot_id="snap-ask-only-buy",
+        selected_outcome_token_id="yes1",
+        outcome_label="YES",
+        yes_token_id="yes1",
+        no_token_id="no1",
+        top_bid="0.01",
+        top_ask="0.31",
+        orderbook_depth={
+            "bids": [],
+            "asks": [{"price": "0.31", "size": "100"}],
+        },
+    )
+    edge = _edge()
+    decision = EdgeDecision(
+        should_trade=True,
+        edge=edge,
+        tokens={"token_id": "yes1", "no_token_id": "no1"},
+        size_usd=5.0,
+        decision_snapshot_id="decision-snap-ask-only",
+        applied_validations=[],
+        edge_context=EdgeContext(
+            p_raw=np.array([0.5, 0.5]),
+            p_cal=np.array([0.5, 0.5]),
+            p_market=np.array([0.31]),
+            p_posterior=edge.p_posterior,
+            forward_edge=edge.forward_edge,
+            alpha=1.0,
+            confidence_band_upper=edge.ci_upper,
+            confidence_band_lower=edge.ci_lower,
+            entry_provenance=EntryMethod.ENS_MEMBER_COUNTING,
+            decision_snapshot_id="decision-snap-ask-only",
+            n_edges_found=1,
+            n_edges_after_fdr=1,
+        ),
+        edge_context_json=json.dumps({"forward_edge": edge.forward_edge, "p_posterior": edge.p_posterior}),
+        sizing_bankroll=100.0,
+        kelly_multiplier_used=0.25,
+        execution_fee_rate=0.0,
+    )
+
+    best_ask = cycle_runtime._reprice_decision_from_executable_snapshot(
+        conn,
+        decision,
+        {"executable_snapshot_id": "snap-ask-only-buy"},
+        {"order_type": "FOK", "allow_taker_upgrade": True},
+    )
+    conn.close()
+
+    assert best_ask == pytest.approx(0.31)
+    assert decision.final_execution_intent is not None
+    assert decision.final_execution_intent.order_policy == "marketable_limit_depth_bound"
+    assert decision.final_execution_intent.order_type == "FOK"
+    reprice = decision.tokens["executable_snapshot_reprice"]
+    assert reprice["entry_book_semantics"] == "ask_only_entry_book"
+    assert reprice["snapshot_market_prior_status"] == "ask_only_executable_cost"
+    assert reprice["snapshot_best_bid"] is None
+    assert reprice["snapshot_vwmp"] == pytest.approx(0.31)
+    assert reprice["final_best_ask"] == pytest.approx(0.31)
+    assert reprice["live_submit_authority"] is True
+
+
+def test_ask_only_book_never_builds_passive_maker_vwmp_intent(tmp_path):
+    conn = get_connection(tmp_path / "ask-only-passive-reject.db")
+    init_schema(conn)
+    _insert_executable_snapshot(
+        conn,
+        snapshot_id="snap-ask-only-passive",
+        selected_outcome_token_id="yes1",
+        outcome_label="YES",
+        yes_token_id="yes1",
+        no_token_id="no1",
+        top_bid="0.01",
+        top_ask="0.31",
+        orderbook_depth={
+            "bids": [],
+            "asks": [{"price": "0.31", "size": "100"}],
+        },
+    )
+    decision = EdgeDecision(
+        should_trade=True,
+        edge=_edge(),
+        tokens={"token_id": "yes1", "no_token_id": "no1"},
+        size_usd=5.0,
+        decision_snapshot_id="decision-snap-ask-only-passive",
+        applied_validations=[],
+        sizing_bankroll=100.0,
+        kelly_multiplier_used=0.25,
+        execution_fee_rate=0.0,
+    )
+
+    with pytest.raises(ValueError, match="EXECUTABLE_ASK_ONLY_PASSIVE_PRIOR_UNAVAILABLE"):
+        cycle_runtime._reprice_decision_from_executable_snapshot(
+            conn,
+            decision,
+            {"executable_snapshot_id": "snap-ask-only-passive"},
+            {"order_type": "GTC", "allow_taker_upgrade": False},
+        )
+    conn.close()
+
+    assert getattr(decision, "final_execution_intent", None) is None
 
 
 def test_passive_economic_floor_uses_fill_adjusted_expected_profit(monkeypatch):
@@ -3840,6 +3951,7 @@ def test_executable_snapshot_repricing_passive_buy_limit_cannot_rest_below_best_
         conn,
         decision,
         {"executable_snapshot_id": "snap-passive-top-bid"},
+        {"passive_fill_probability": "0.40"},
     )
     conn.close()
 
@@ -3886,6 +3998,7 @@ def test_executable_snapshot_repricing_tick_aligns_raw_passive_limit_before_fina
         conn,
         decision,
         {"executable_snapshot_id": "snap-raw-tick"},
+        {"passive_fill_probability": "0.40"},
     )
     conn.close()
 
@@ -4156,6 +4269,7 @@ def test_executable_snapshot_repricing_keeps_low_notional_marketable_buy_passive
             "cancel_after": datetime(2026, 5, 22, 1, tzinfo=timezone.utc),
             "resolution_window": "2026-05-22",
             "correlation_key": "Jeddah:2026-05-22",
+            "passive_fill_probability": "0.40",
         },
     )
     conn.close()
@@ -4851,6 +4965,7 @@ def test_executable_snapshot_repricing_uses_native_no_snapshot_for_buy_no(tmp_pa
         conn,
         decision,
         {"executable_snapshot_id": "snap-reprice-no-1"},
+        {"passive_fill_probability": "0.40"},
     )
     conn.close()
 
@@ -5312,6 +5427,7 @@ def test_live_reprice_builds_post_only_passive_final_intent(tmp_path):
             "executable_snapshot_min_tick_size": "0.01",
             "executable_snapshot_min_order_size": "5",
             "executable_snapshot_neg_risk": False,
+            "passive_fill_probability": "0.40",
         },
         size_usd=5.0,
         decision_id="d-passive-mismatch",
