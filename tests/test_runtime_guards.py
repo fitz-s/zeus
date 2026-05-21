@@ -3266,6 +3266,90 @@ def test_executable_snapshot_repricing_updates_edge_and_size(tmp_path):
     assert shadow["posterior_distribution_id"] == "decision_snapshot:decision-snap"
 
 
+def test_passive_economic_floor_uses_fill_adjusted_expected_profit(monkeypatch):
+    edge = _edge()
+    monkeypatch.setattr(
+        evaluator_module,
+        "_try_get_strategy_profile",
+        lambda _strategy_key: types.SimpleNamespace(
+            min_entry_price=0.05,
+            min_strategy_notional_usd=1.00,
+            min_expected_profit_usd=0.05,
+            allow_ultra_low_tail=True,
+        ),
+    )
+
+    reason = evaluator_module._live_entry_economic_floor_rejection(
+        strategy_key="opening_inertia",
+        edge=edge,
+        submitted_notional_usd=2.00,
+        expected_profit_usd=0.10,
+        final_limit_price=0.20,
+        passive_order=True,
+        passive_fill_probability=0.01,
+    )
+
+    assert reason is not None
+    assert reason.startswith("EXPECTED_PROFIT_BELOW_LIVE_FLOOR")
+    assert "fill_adjusted" in reason
+
+
+def test_passive_economic_floor_uses_adverse_selection_penalty(monkeypatch):
+    edge = _edge()
+    monkeypatch.setattr(
+        evaluator_module,
+        "_try_get_strategy_profile",
+        lambda _strategy_key: types.SimpleNamespace(
+            min_entry_price=0.05,
+            min_strategy_notional_usd=1.00,
+            min_expected_profit_usd=0.05,
+            allow_ultra_low_tail=True,
+        ),
+    )
+
+    reason = evaluator_module._live_entry_economic_floor_rejection(
+        strategy_key="opening_inertia",
+        edge=edge,
+        submitted_notional_usd=2.00,
+        expected_profit_usd=0.20,
+        final_limit_price=0.20,
+        passive_order=True,
+        passive_fill_probability=0.50,
+        passive_adverse_selection_score=0.04,
+    )
+
+    assert reason is not None
+    assert reason.startswith("EXPECTED_PROFIT_BELOW_LIVE_FLOOR")
+    assert "adverse_selection" in reason
+
+
+def test_passive_economic_floor_passes_positive_fill_adjusted_net_ev(monkeypatch):
+    edge = _edge()
+    monkeypatch.setattr(
+        evaluator_module,
+        "_try_get_strategy_profile",
+        lambda _strategy_key: types.SimpleNamespace(
+            min_entry_price=0.05,
+            min_strategy_notional_usd=1.00,
+            min_expected_profit_usd=0.05,
+            allow_ultra_low_tail=True,
+        ),
+    )
+
+    reason = evaluator_module._live_entry_economic_floor_rejection(
+        strategy_key="opening_inertia",
+        edge=edge,
+        submitted_notional_usd=2.00,
+        expected_profit_usd=0.20,
+        final_limit_price=0.20,
+        passive_order=True,
+        passive_fill_probability=0.50,
+        passive_adverse_selection_score=0.01,
+    )
+
+    assert reason is None
+
+
 def test_live_passive_reprice_requires_fill_probability_context(tmp_path):
     conn = get_connection(tmp_path / "snapshot-reprice-live-passive-no-fill.db")
     init_schema(conn)

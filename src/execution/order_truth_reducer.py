@@ -82,13 +82,16 @@ class VenueOrderTruthReducer:
         latest_open: Mapping[str, Any] | None = None
         latest_unknown: Mapping[str, Any] | None = None
         latest_review: Mapping[str, Any] | None = None
+        terminal_fill: Mapping[str, Any] | None = None
 
         for fact in facts:
             state = _state(fact)
             matched = _decimal_or_none(_row_get(fact, "matched_size")) or Decimal("0")
             remaining = _decimal_or_none(_row_get(fact, "remaining_size"))
             matched_from_orders = max(matched_from_orders, matched)
-            if state in _TERMINAL_STATES and _zero(remaining) and matched == 0:
+            if state == "MATCHED" and _zero(remaining) and matched > 0:
+                terminal_fill = fact
+            elif state in _TERMINAL_STATES and _zero(remaining) and matched == 0:
                 terminal_zero_no_fill = fact
             elif state in _OPEN_STATES:
                 latest_open = fact
@@ -98,6 +101,11 @@ class VenueOrderTruthReducer:
                 latest_review = fact
 
         matched = max(filled_from_trade, matched_from_orders)
+        if terminal_fill is not None:
+            terminal_matched = (
+                _decimal_or_none(_row_get(terminal_fill, "matched_size")) or matched
+            )
+            return CanonicalOrderTruth("MATCHED", Decimal("0"), terminal_matched, TERMINAL_FILLED)
         if matched > 0:
             if command_size_dec is not None:
                 remaining = max(Decimal("0"), command_size_dec - matched)

@@ -56,6 +56,94 @@ def _age_seconds(ts_str: str, now: datetime) -> Optional[float]:
         return None
 
 
+def _int_value(payload: dict, *keys: str) -> int:
+    for key in keys:
+        value = payload.get(key)
+        if value is None:
+            continue
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            continue
+    return 0
+
+
+def _mapping_has_positive_counter(payload: object) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    for value in payload.values():
+        if isinstance(value, dict):
+            if _mapping_has_positive_counter(value):
+                return True
+            continue
+        try:
+            if int(value) > 0:
+                return True
+        except (TypeError, ValueError):
+            continue
+    return False
+
+
+def _business_plane_surface(status_summary: Optional[dict]) -> dict:
+    """Derived business-plane progress proof from the latest cycle summary.
+
+    This intentionally does not authorize trading. It prevents health reports
+    from collapsing daemon/process liveness into business progress by requiring
+    the cycle read-model to expose core counters and by publishing the money-path
+    progress flags operators need to distinguish math no-trades from structural
+    stalls.
+    """
+
+    if status_summary is None:
+        return {"ok": False, "issue": "STATUS_SUMMARY_MISSING", "progress": {}}
+    cycle = status_summary.get("cycle")
+    if not isinstance(cycle, dict):
+        return {"ok": False, "issue": "CYCLE_SUMMARY_MISSING", "progress": {}}
+    if bool(cycle.get("failed", False)):
+        return {
+            "ok": False,
+            "issue": f"CYCLE_FAILED: {cycle.get('failure_reason') or 'unknown'}",
+            "progress": {},
+        }
+    if bool(cycle.get("skipped", False)):
+        return {
+            "ok": False,
+            "issue": f"CYCLE_SKIPPED: {cycle.get('skip_reason') or 'unknown'}",
+            "progress": {},
+        }
+    if "candidates" not in cycle:
+        return {"ok": False, "issue": "CANDIDATE_COUNTER_MISSING", "progress": {}}
+
+    candidates = _int_value(cycle, "candidates", "candidates_evaluated")
+    final_intents = _int_value(cycle, "final_intents_built", "final_execution_intents_built")
+    submit_attempts = _int_value(
+        cycle,
+        "submit_attempts",
+        "entry_submit_attempts",
+        "entry_orders_submitted",
+    )
+    venue_acks = _int_value(cycle, "venue_acks", "venue_ack_count")
+    command_recovery = cycle.get("command_recovery")
+    chain_sync = cycle.get("chain_sync")
+    progress = {
+        "mode": cycle.get("mode"),
+        "last_successful_cycle_at": cycle.get("completed_at") or cycle.get("started_at"),
+        "candidates": candidates,
+        "candidate_evaluated": candidates > 0 or "candidates" in cycle,
+        "final_intents_built": final_intents,
+        "final_intent_built": final_intents > 0,
+        "submit_attempts": submit_attempts,
+        "submit_attempted": submit_attempts > 0,
+        "venue_acks": venue_acks,
+        "venue_ack_observed": venue_acks > 0,
+        "reconcile_progress_observed": (
+            _mapping_has_positive_counter(command_recovery)
+            or _mapping_has_positive_counter(chain_sync)
+        ),
+    }
+    return {"ok": True, "issue": None, "progress": progress}
+
+
 def compute_composite_live_health(
     *,
     state_dir: Optional[Path] = None,
@@ -185,6 +273,16 @@ def compute_composite_live_health(
             "live_health_composite DEGRADED: failing_surface=%s reason=%s",
             "status_summary",
             ss_issue,
+        )
+
+    business_surface = _business_plane_surface(ss_data)
+    surfaces["business_plane"] = business_surface
+    if not business_surface["ok"]:
+        failing.append("business_plane")
+        logger.warning(
+            "live_health_composite DEGRADED: failing_surface=%s reason=%s",
+            "business_plane",
+            business_surface["issue"],
         )
 
     # ------------------------------------------------------------------ #

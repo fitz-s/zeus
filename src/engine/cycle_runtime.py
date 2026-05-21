@@ -1192,6 +1192,12 @@ def _reprice_decision_from_executable_snapshot(
                 if passive_maker_context is None
                 else float(passive_maker_context.expected_fill_probability)
             ),
+            passive_adverse_selection_score=(
+                None
+                if passive_maker_context is None
+                or passive_maker_context.adverse_selection_score is None
+                else float(passive_maker_context.adverse_selection_score)
+            ),
         )
         if live_quality_rejection:
             raise ValueError(

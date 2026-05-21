@@ -106,6 +106,7 @@ directory should EITHER be moved under `archive/` OR keep a
 | `task_2026-05-20_strategy_vnext_phase2/` | PR #220 (T1) | **active** — Phase 2 T1: book_hash_transitions table + writer + producer wiring + antibody (PHASE_2_ULTRAPLAN.md v3.1, SCHEMA_VERSION 14) | 2026-05-20 |
 | `task_2026-05-20_live_substrate_bookhash_ownership/` | PR #223 | **active** — live substrate ownership repair: co-locate executable_market_snapshots and book_hash_transitions on trade DB | 2026-05-20 |
 | `task_2026-05-21_live_family_vector_fill_model/` | PR #252 | **active** — remaining family vector, passive fill model, topology, order reducer, source-quality and liveness fixes after #246/#249 | 2026-05-21 |
+| `task_2026-05-21_live_contract_authority_pass/` | PR #253 | **active** — contract authority pass for tradability, passive EV, order truth, family exposure, and business-plane health after endpoint-asymmetry review | 2026-05-21 |
 
 ## Active operation (only one allowed unless explicit branching)
 

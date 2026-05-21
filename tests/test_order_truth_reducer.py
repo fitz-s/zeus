@@ -10,6 +10,7 @@ from decimal import Decimal
 
 from src.execution.order_truth_reducer import (
     PARTIAL_WITH_REMAINDER,
+    TERMINAL_FILLED,
     TERMINAL_NO_FILL,
     VenueOrderTruthReducer,
 )
@@ -47,6 +48,23 @@ def test_positive_trade_fact_cannot_reduce_to_terminal_no_fill() -> None:
     assert reduced.proof_class == PARTIAL_WITH_REMAINDER
     assert reduced.remaining_size == Decimal("3")
     assert reduced.matched_size == Decimal("2")
+
+
+def test_matched_zero_remainder_order_fact_outranks_command_size_residue() -> None:
+    reduced = VenueOrderTruthReducer.reduce(
+        order_facts=[
+            {"state": "MATCHED", "remaining_size": "0", "matched_size": "4.99"},
+            {"state": "RESTING", "remaining_size": "0.01", "matched_size": "4.99"},
+        ],
+        trade_filled_size="4.99",
+        command_size="5",
+        open_order_present=False,
+    )
+
+    assert reduced.state == "MATCHED"
+    assert reduced.proof_class == TERMINAL_FILLED
+    assert reduced.remaining_size == Decimal("0")
+    assert reduced.matched_size == Decimal("4.99")
 
 
 def test_absence_from_open_orders_alone_is_unknown_not_no_exposure() -> None:

@@ -338,6 +338,44 @@ def test_capture_executable_snapshot_persists_verified_gamma_and_clob_facts(conn
     assert fields["executable_snapshot_neg_risk"] is False
 
 
+def test_negrisk_active_false_child_captures_when_accepting_orders(conn):
+    market = _market_for_capture(
+        active=False,
+        gamma_market_raw={
+            "id": "gamma-1",
+            "conditionId": "condition-1",
+            "questionID": "question-1",
+            "active": False,
+            "closed": False,
+            "acceptingOrders": True,
+            "enableOrderBook": True,
+            "clobTokenIds": ["yes-token", "no-token"],
+        },
+    )
+
+    fields = capture_executable_market_snapshot(
+        conn,
+        market=market,
+        decision=_decision_for_capture(),
+        clob=FakeClobFacts(market_info={
+            "condition_id": "condition-1",
+            "tokens": [{"token_id": "yes-token"}, {"token_id": "no-token"}],
+            "enable_order_book": True,
+            "archived": False,
+        }),
+        captured_at=NOW,
+        scan_authority="VERIFIED",
+    )
+
+    loaded = get_snapshot(conn, fields["executable_snapshot_id"])
+
+    assert loaded is not None
+    assert loaded.active is False
+    assert loaded.closed is False
+    assert loaded.accepting_orders is True
+    assert loaded.enable_orderbook is True
+
+
 def test_entry_sizing_minimum_uses_snapshot_shares_not_global_usd_floor():
     effective_min, authority = _effective_min_order_usd_for_entry(
         tokens={"executable_snapshot_min_order_size": "5"},
@@ -944,11 +982,17 @@ def test_enable_orderbook_false_blocks_submit(conn):
         _insert_command(conn, snapshot_id="snap-disabled")
 
 
-def test_active_false_blocks_submit(conn):
+def test_active_false_accepting_orderbook_authorizes_submit(conn):
     insert_snapshot(conn, _snapshot(snapshot_id="snap-inactive", active=False))
 
-    with pytest.raises(MarketNotTradableError, match="active=false"):
-        _insert_command(conn, snapshot_id="snap-inactive")
+    _insert_command(conn, snapshot_id="snap-inactive")
+
+
+def test_accepting_orders_false_blocks_submit(conn):
+    insert_snapshot(conn, _snapshot(snapshot_id="snap-not-accepting", accepting_orders=False))
+
+    with pytest.raises(MarketNotTradableError, match="accepting_orders=false"):
+        _insert_command(conn, snapshot_id="snap-not-accepting")
 
 
 def test_closed_true_blocks_submit(conn):

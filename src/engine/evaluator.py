@@ -899,6 +899,7 @@ def _live_entry_economic_floor_rejection(
     final_limit_price: float,
     passive_order: bool,
     passive_fill_probability: float | None = None,
+    passive_adverse_selection_score: float | None = None,
 ) -> str | None:
     """Return a live-quality rejection reason, separate from venue min order."""
 
@@ -909,16 +910,49 @@ def _live_entry_economic_floor_rejection(
             f"{submitted_notional_usd:.4f}<${policy.min_strategy_notional_usd:.2f}; "
             f"strategy={strategy_key})"
         )
-    if expected_profit_usd < policy.min_expected_profit_usd:
+    effective_expected_profit_usd = float(expected_profit_usd)
+    if passive_order:
+        if passive_fill_probability is None:
+            return (
+                "PASSIVE_FILL_PROBABILITY_UNMODELED("
+                f"price={final_limit_price:.4f}; strategy={strategy_key})"
+            )
+        try:
+            fill_probability = float(passive_fill_probability)
+        except (TypeError, ValueError):
+            fill_probability = -1.0
+        if fill_probability <= 0.0 or fill_probability > 1.0:
+            return (
+                "PASSIVE_FILL_PROBABILITY_INVALID("
+                f"{fill_probability:.4f}; strategy={strategy_key})"
+            )
+        adverse_selection_cost_usd = 0.0
+        if passive_adverse_selection_score is not None:
+            try:
+                adverse_selection = float(passive_adverse_selection_score)
+            except (TypeError, ValueError):
+                adverse_selection = 1.0
+            adverse_selection = max(0.0, min(1.0, adverse_selection))
+            adverse_selection_cost_usd = adverse_selection * float(submitted_notional_usd)
+        effective_expected_profit_usd = (
+            effective_expected_profit_usd * fill_probability
+            - adverse_selection_cost_usd
+        )
+    if effective_expected_profit_usd < policy.min_expected_profit_usd:
+        display_profit = effective_expected_profit_usd if passive_order else expected_profit_usd
+        detail = (
+            "; fill_adjusted=true"
+            if passive_order and passive_adverse_selection_score is None
+            else (
+                "; fill_adjusted=true; adverse_selection=true"
+                if passive_order
+                else ""
+            )
+        )
         return (
             "EXPECTED_PROFIT_BELOW_LIVE_FLOOR("
-            f"{expected_profit_usd:.4f}<${policy.min_expected_profit_usd:.2f}; "
-            f"strategy={strategy_key})"
-        )
-    if passive_order and passive_fill_probability is None:
-        return (
-            "PASSIVE_FILL_PROBABILITY_UNMODELED("
-            f"price={final_limit_price:.4f}; strategy={strategy_key})"
+            f"{display_profit:.4f}<${policy.min_expected_profit_usd:.2f}; "
+            f"strategy={strategy_key}{detail})"
         )
     if not policy.allow_ultra_low_tail and final_limit_price <= policy.min_entry_price:
         return (
