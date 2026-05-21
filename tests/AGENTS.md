@@ -27,6 +27,7 @@ Use `python3 scripts/topology_doctor.py --tests --json` to check that active
 | `contracts/` | Spec-owned validation manifests; see `tests/contracts/AGENTS.md` |
 | `fakes/` | Test-only fake venue/runtime doubles; must not import credentials or perform live I/O |
 | `integration/` | Cross-module integration antibodies such as R3 T1 fake/live adapter parity scenarios |
+| `money_path/` | Deterministic money-path semantic CI relationship/model tests selected by architecture/money_path_ci.yaml |
 
 Top-level `test_*.py` files are registered below for topology compliance. The
 authoritative machine registry is `architecture/test_topology.yaml`.

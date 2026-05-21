@@ -1,0 +1,200 @@
+schema_version: 1
+metadata:
+  created: "2026-05-21"
+  owner: "Zeus CI infrastructure"
+  purpose: >
+    Route semantic diff classifications to required invariants and trusted
+    relationship tests. This is the machine gate behind the rule: a money-path
+    change must say which economic object changed, which invariant it touched,
+    and which relationship test proves the invariant still holds.
+
+risk_order: [P3, P2, P1, P0]
+
+risk_rules:
+  force_integration_if_changed:
+    - src/engine/evaluator.py
+    - src/engine/cycle_runtime.py
+    - src/execution/**
+    - src/venue/**
+    - src/data/market_scanner.py
+    - src/contracts/executable_market_snapshot_v2.py
+    - src/state/db.py
+    - src/state/schema/**
+    - scripts/migrations/**
+    - scripts/migrate_*.py
+  schema_change_requires: [MP-SCH-001, MP-SCH-002]
+  new_state_requires: [transition_test, reducer_test, report_eligibility_test]
+  new_side_effect_requires: [MP-SIDE-001, MP-SIDE-002, MP-SIDE-003]
+  new_external_source_requires: [MP-EXT-001, MP-EXT-002]
+  new_economic_field_requires: [MP-ECO-001, MP-ECO-002]
+
+invariants:
+  MP-MD-001:
+    description: "NegRisk/standard market tradeability cannot drift between scanner and executable snapshot."
+    tests:
+      - tests/money_path/test_001_negrisk_tradeability_snapshot_submit.py
+      - tests/test_market_scanner_negrisk.py
+      - tests/test_executable_market_snapshot_v2.py
+  MP-MD-002:
+    description: "Market identity fields round-trip without label/punctuation inference."
+    tests: [tests/test_market_scanner_provenance.py]
+  MP-MD-003:
+    description: "Archived/closed markets cannot become submit-eligible through fallback."
+    tests: [tests/test_scanner_archived_filter.py]
+  MP-ORD-001:
+    description: "Terminal fill cannot be demoted by later weaker venue facts."
+    tests:
+      - tests/money_path/test_002_execution_lifecycle_replay.py
+      - tests/test_order_truth_reducer.py
+  MP-ORD-002:
+    description: "Positive trade fact creates exposure exactly once."
+    tests: [tests/test_order_truth_reducer.py, tests/test_exchange_reconcile.py]
+  MP-ORD-003:
+    description: "Unknown side effect is not replayed until venue absence proof exists."
+    tests: [tests/test_command_recovery.py, tests/test_unknown_side_effect.py]
+  MP-ORD-004:
+    description: "Partial with remainder remains pending exposure."
+    tests: [tests/test_order_truth_reducer.py]
+  MP-RED-001:
+    description: "Redeem receipt classifier preserves NegRisk vs standard CTF route semantics."
+    tests:
+      - tests/money_path/test_003_redeem_receipt_classifier.py
+      - tests/test_polymarket_v2_adapter_negrisk_redeem.py
+  MP-RED-002:
+    description: "Redeem confirmed/review/operator states have non-overloaded report eligibility."
+    tests: [tests/test_harvester_settlement_redeem.py, tests/test_redeem_cascade_liveness.py]
+  MP-SCH-001:
+    description: "Schema migrations cannot fabricate historical authority."
+    tests:
+      - tests/money_path/test_004_schema_live_failclosed.py
+      - tests/test_schema_introspection.py
+      - tests/state/test_schema_current_invariant.py
+  MP-SCH-002:
+    description: "Schema version/hash and DB-owner boundaries move together."
+    tests: [tests/state/test_schema_current_invariant.py, tests/test_inv37_writer_schema_qualification.py]
+  MP-ECO-001:
+    description: "Display/current/market price aliases cannot drive executable edge."
+    tests: [tests/test_execution_price.py, tests/test_executable_ev_replay.py]
+  MP-ECO-002:
+    description: "Worse spread/depth/fee/passive-fill inputs cannot increase Kelly size."
+    tests: [tests/test_kelly_cascade_bounds.py, tests/test_phase_aware_kelly_live.py]
+  MP-EXT-001:
+    description: "External provider drift has contract fixtures and stale/unreachable behavior."
+    tests: [tests/test_market_scanner_provenance.py, tests/test_tigge_schema_contract.py]
+  MP-EXT-002:
+    description: "Live external authority fails closed instead of promoting fallback truth."
+    tests: [tests/test_live_readiness_gates.py, tests/test_source_run_schema.py]
+  MP-SIDE-001:
+    description: "Persist intent before side effect."
+    tests: [tests/test_executor_command_split.py, tests/test_command_recovery.py]
+  MP-SIDE-002:
+    description: "Side effect has idempotency key and unknown-side-effect recovery."
+    tests: [tests/test_unknown_side_effect.py, tests/test_command_recovery.py]
+  MP-SIDE-003:
+    description: "Recovery/report eligibility cannot confuse pending, terminal, and review states."
+    tests: [tests/test_exchange_reconcile.py, tests/test_harvester_settlement_redeem.py]
+  MP-CI-001:
+    description: "Money-path semantic gate changes run self-defense tests."
+    tests:
+      - tests/test_money_path_semantic_ci.py
+      - tests/money_path/test_001_negrisk_tradeability_snapshot_submit.py
+      - tests/money_path/test_004_schema_live_failclosed.py
+
+segments:
+  semantic_ci_self_defense:
+    invariant_ids: [MP-CI-001]
+    files:
+      - architecture/money_path_objects.yaml
+      - architecture/money_path_ci.yaml
+      - architecture/test_quality.yaml
+      - scripts/ci/**
+      - .github/workflows/money-path-required.yml
+      - tests/money_path/**
+      - tests/test_money_path_semantic_ci.py
+    relationship_tests:
+      - tests/test_money_path_semantic_ci.py
+      - tests/money_path/test_001_negrisk_tradeability_snapshot_submit.py
+      - tests/money_path/test_004_schema_live_failclosed.py
+  market_discovery:
+    invariant_ids: [MP-MD-001, MP-MD-002, MP-MD-003]
+    files:
+      - src/data/market_scanner.py
+      - src/contracts/executable_market_snapshot_v2.py
+      - src/state/snapshot_repo.py
+    relationship_tests:
+      - tests/money_path/test_001_negrisk_tradeability_snapshot_submit.py
+      - tests/test_market_scanner_negrisk.py
+      - tests/test_market_scanner_provenance.py
+      - tests/test_executable_market_snapshot_v2.py
+    future_object_rules:
+      new_external_source_id: requires_source_authority_test
+      new_market_identity_field: requires_identity_roundtrip_test
+  execution_lifecycle:
+    invariant_ids: [MP-ORD-001, MP-ORD-002, MP-ORD-003, MP-ORD-004]
+    files:
+      - src/execution/**
+      - src/venue/**
+      - src/state/venue_command_repo.py
+    relationship_tests:
+      - tests/money_path/test_002_execution_lifecycle_replay.py
+      - tests/test_order_truth_reducer.py
+      - tests/test_command_recovery.py
+      - tests/test_exchange_reconcile.py
+    future_object_rules:
+      new_command_state: requires_state_machine_model_test
+      new_order_fact_state: requires_reducer_property_test
+      new_side_effect_call: requires_persist_before_side_effect_test
+  settlement_redeem:
+    invariant_ids: [MP-RED-001, MP-RED-002, MP-SIDE-001]
+    files:
+      - src/execution/harvester.py
+      - src/venue/**
+      - scripts/operator_record_redeem.py
+      - scripts/run_redeem_reconcile_with_onchain_proof.py
+    relationship_tests:
+      - tests/money_path/test_003_redeem_receipt_classifier.py
+      - tests/test_harvester_settlement_redeem.py
+      - tests/test_polymarket_v2_adapter_negrisk_redeem.py
+      - tests/test_redeem_cascade_liveness.py
+    future_object_rules:
+      new_settlement_state: requires_receipt_classifier_test
+      new_error_code: requires_report_eligibility_test
+  schema_semantics:
+    invariant_ids: [MP-SCH-001, MP-SCH-002]
+    files:
+      - src/state/db.py
+      - src/state/schema/**
+      - scripts/migrations/**
+      - scripts/migrate_*.py
+    relationship_tests:
+      - tests/money_path/test_004_schema_live_failclosed.py
+      - tests/state/test_schema_current_invariant.py
+      - tests/test_schema_introspection.py
+      - tests/test_inv37_writer_schema_qualification.py
+    future_object_rules:
+      new_db_column: requires_migration_semantic_test
+      new_authority_default: forbidden_without_explicit_policy
+  economic_semantics:
+    invariant_ids: [MP-ECO-001, MP-ECO-002]
+    files:
+      - src/engine/evaluator.py
+      - src/risk_allocator/**
+      - src/strategy/**
+      - src/contracts/**
+    relationship_tests:
+      - tests/test_execution_price.py
+      - tests/test_executable_ev_replay.py
+      - tests/test_kelly_cascade_bounds.py
+      - tests/test_phase_aware_kelly_live.py
+    future_object_rules:
+      price_probability_assignment: requires_economic_isolation_test
+  external_truth:
+    invariant_ids: [MP-EXT-001, MP-EXT-002]
+    files:
+      - src/data/**
+      - src/ingest/**
+      - src/venue/**
+    relationship_tests:
+      - tests/test_market_scanner_provenance.py
+      - tests/test_tigge_schema_contract.py
+      - tests/test_source_run_schema.py

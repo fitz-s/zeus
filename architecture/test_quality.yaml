@@ -1,0 +1,45 @@
+schema_version: 1
+metadata:
+  created: "2026-05-21"
+  owner: "Zeus CI infrastructure"
+  purpose: >
+    Money-path tests are not trusted merely because they exist. Each protected
+    test must declare the invariant it protects and a falsifying proof shape.
+
+money_path_test_quality:
+  required_for_categories:
+    - money_path
+    - core_law_antibody
+    - schema_semantics
+    - venue_semantics
+  acceptable_falsifying_proof:
+    - mutation_kills
+    - negative_fixture
+    - property_counterexample
+    - semantic_diff_fixture
+
+tests:
+  tests/money_path/test_001_negrisk_tradeability_snapshot_submit.py:
+    category: money_path
+    protects: [MP-MD-001, MP-MD-003]
+    falsifying_proof:
+      type: semantic_diff_fixture
+      description: "Classifier blocks a new unregistered external source/tradeability drift surface."
+  tests/money_path/test_002_execution_lifecycle_replay.py:
+    category: money_path
+    protects: [MP-ORD-001, MP-ORD-002, MP-ORD-003, MP-ORD-004]
+    falsifying_proof:
+      type: property_counterexample
+      description: "Terminal/no-fill and positive-trade fact ordering counterexamples must remain impossible."
+  tests/money_path/test_003_redeem_receipt_classifier.py:
+    category: money_path
+    protects: [MP-RED-001, MP-RED-002]
+    falsifying_proof:
+      type: negative_fixture
+      description: "Standard CTF-only log on NegRisk market must be classified as misrouted/review, not confirmed."
+  tests/money_path/test_004_schema_live_failclosed.py:
+    category: schema_semantics
+    protects: [MP-SCH-001, MP-SCH-002]
+    falsifying_proof:
+      type: semantic_diff_fixture
+      description: "ALTER ADD COLUMN DEFAULT VERIFIED/gamma_explicit/LIVE_ELIGIBLE fails as authority fabrication."

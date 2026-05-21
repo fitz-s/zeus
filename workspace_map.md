@@ -67,6 +67,9 @@ Prefer these over prose when they exist:
 | `architecture/source_rationale.yaml` | Per-file `src/**` rationale, hazards, and write routes |
 | `architecture/script_manifest.yaml` | Script lifecycle and authority scope |
 | `architecture/test_topology.yaml` | Test categories and law gates |
+| `architecture/money_path_objects.yaml` | Money-path economic object, state, source, scheduler, and side-effect registry |
+| `architecture/money_path_ci.yaml` | Semantic diff to invariant/test routing for money-path CI |
+| `architecture/test_quality.yaml` | Money-path test falsifying-proof metadata |
 | `architecture/history_lore.yaml` | Dense historical lessons and antibodies |
 | `architecture/artifact_lifecycle.yaml` | Artifact classes and evidence rules |
 | `architecture/context_budget.yaml` | Boot-surface budget and maintenance cadence |
@@ -77,6 +80,8 @@ Prefer these over prose when they exist:
 | `architecture/fatal_misreads.yaml` | Machine-readable semantic shortcut antibodies |
 | `architecture/city_truth_contract.yaml` | Stable city/source/date truth contract schema; not a current truth table |
 | `architecture/code_review_graph_protocol.yaml` | Two-stage Code Review Graph use protocol; graph remains derived context |
+| `scripts/ci/` | CI-only enforcement helpers for semantic diff classification, invariant coverage, and test quality gates |
+| `tests/money_path/` | Deterministic money-path relationship/model tests selected by semantic CI |
 | `architecture/agent_pr_discipline_2026_05_09.md` | Agent PR discipline: 300-LOC threshold, auto-reviewer cost economics, author detection, bypass protocol |
 
 ## Do not default-read
