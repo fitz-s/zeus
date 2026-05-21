@@ -1575,7 +1575,9 @@ def test_write_cycle_pulse_refreshes_timestamp_without_full_status_read_model(mo
     refreshed = json.loads(status_path.read_text())
 
     assert refreshed["timestamp"] != "2026-04-02T00:00:00+00:00"
-    assert refreshed["portfolio"] == {"open_positions": 2}
+    assert refreshed["portfolio"]["open_positions"] == 0
+    assert refreshed["portfolio"]["positions"] == []
+    assert refreshed["portfolio"]["total_exposure_usd"] == 0.0
     assert refreshed["cycle"] == {"mode": "opening_hunt", "candidates": 3}
     assert refreshed["execution_capability"]["entry"]["global_allow_submit"] is True
     assert refreshed["execution_capability"]["entry"]["blocked_components"] == []

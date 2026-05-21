@@ -1989,9 +1989,8 @@ def _filled_entry_execution_fact_repair_candidates(conn: sqlite3.Connection) -> 
         "venue_commands",
         "venue_order_facts",
         "venue_trade_facts",
-        "position_lots",
         "execution_fact",
-        "trade_decisions",
+        "position_current",
     }
     if not all(_table_exists(conn, table) for table in required):
         return []
@@ -2110,6 +2109,8 @@ def _filled_entry_execution_fact_repair_candidates(conn: sqlite3.Connection) -> 
                ef.fill_price AS ef_fill_price,
                ef.terminal_exec_status AS ef_terminal_exec_status
           FROM venue_commands cmd
+          JOIN position_current pc
+            ON pc.position_id = cmd.position_id
           JOIN latest_order
             ON latest_order.command_id = cmd.command_id
            AND latest_order.venue_order_id = cmd.venue_order_id
@@ -2121,20 +2122,8 @@ def _filled_entry_execution_fact_repair_candidates(conn: sqlite3.Connection) -> 
          WHERE cmd.intent_kind = 'ENTRY'
            AND cmd.side = 'BUY'
            AND cmd.state IN ('FILLED', 'PARTIAL', 'EXPIRED')
+           AND pc.phase IN ('active', 'day0_window', 'pending_exit', 'economically_closed')
            AND ABS(CAST(entry_fill.filled_size AS REAL) - CAST(latest_order.matched_size AS REAL)) <= 0.000001
-           AND EXISTS (
-               SELECT 1
-                 FROM position_lots lot
-                WHERE lot.source_command_id = cmd.command_id
-                  AND lot.state IN ('OPTIMISTIC_EXPOSURE', 'CONFIRMED_EXPOSURE')
-           )
-           AND EXISTS (
-               SELECT 1
-                 FROM trade_decisions td
-                WHERE td.runtime_trade_id = cmd.position_id
-                   OR CAST(td.trade_id AS TEXT) = cmd.position_id
-                   OR CAST(td.trade_id AS TEXT) = cmd.decision_id
-           )
            AND (
                ef.intent_id IS NULL
                OR COALESCE(ef.command_id, '') != cmd.command_id
