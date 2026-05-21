@@ -41,7 +41,7 @@ def conn():
 
 @pytest.fixture
 def mock_client():
-    return MagicMock(spec_set=["get_order", "get_open_orders", "v2_preflight"])
+    return MagicMock(spec_set=["get_order", "get_open_orders", "get_trades", "v2_preflight"])
 
 
 # ---------------------------------------------------------------------------
@@ -899,16 +899,125 @@ class TestRecoveryResolutionTable:
         assert payload["required_predicates"]["latest_event_is_cancel_replace_blocked"] is True
         assert payload["required_predicates"]["point_order_status_live"] is True
 
-    def test_cancel_unknown_review_required_without_live_proof_stays_blocked(self, conn, mock_client):
-        _insert(conn, intent_kind="EXIT", side="SELL", size=11.62, price=0.02)
+    def test_cancel_unknown_review_required_terminal_no_fill_expires_entry(self, conn, mock_client):
+        _insert(conn, intent_kind="ENTRY", side="BUY", size=11.62, price=0.02)
         _advance_to_cancel_unknown_review_required(conn, venue_order_id="ord-terminal")
+        _seed_pending_entry_projection(conn, order_id="ord-terminal")
         mock_client.get_order.return_value = {
             "orderID": "ord-terminal",
             "status": "CANCELLED",
             "matched_size": "0",
         }
+        mock_client.get_open_orders.return_value = []
+        mock_client.get_trades.return_value = []
 
         from src.execution.command_recovery import reconcile_unresolved_commands
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert _get_state(conn, "cmd-001") == "EXPIRED"
+        assert summary["advanced"] == 1
+        events = _get_events(conn, "cmd-001")
+        assert events[-1]["event_type"] == "REVIEW_CLEARED_NO_VENUE_EXPOSURE"
+        payload = json.loads(events[-1]["payload_json"])
+        assert payload["reason"] == "review_cleared_no_venue_exposure"
+        assert payload["proof_class"] == "cancel_unknown_terminal_no_fill"
+        assert payload["required_predicates"]["point_order_terminal_no_fill"] is True
+        assert payload["required_predicates"]["no_matching_open_orders"] is True
+        assert payload["required_predicates"]["no_matching_trades"] is True
+
+        current = conn.execute(
+            "SELECT phase, shares, cost_basis_usd, order_status FROM position_current WHERE position_id='pos-001'"
+        ).fetchone()
+        assert dict(current) == {
+            "phase": "voided",
+            "shares": 0.0,
+            "cost_basis_usd": 0.0,
+            "order_status": "canceled",
+        }
+
+    def test_cancel_unknown_review_required_terminal_with_trade_match_stays_blocked(self, conn, mock_client):
+        _insert(conn, intent_kind="ENTRY", side="BUY", size=11.62, price=0.02)
+        _advance_to_cancel_unknown_review_required(conn, venue_order_id="ord-terminal")
+        _seed_pending_entry_projection(conn, order_id="ord-terminal")
+        mock_client.get_order.return_value = {
+            "orderID": "ord-terminal",
+            "status": "CANCELED",
+            "matched_size": "0",
+        }
+        mock_client.get_open_orders.return_value = []
+        mock_client.get_trades.return_value = [
+            {
+                "id": "trade-terminal",
+                "asset_id": "tok-001",
+                "side": "BUY",
+                "price": "0.02",
+                "size": "11.62",
+                "match_time": "2026-04-26T00:04:30Z",
+            }
+        ]
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert _get_state(conn, "cmd-001") == "REVIEW_REQUIRED"
+        assert summary["stayed"] == 1
+        assert summary["advanced"] == 0
+        events = _get_events(conn, "cmd-001")
+        assert events[-1]["event_type"] == "CANCEL_REPLACE_BLOCKED"
+
+    def test_cancel_unknown_review_required_terminal_with_open_order_match_stays_blocked(self, conn, mock_client):
+        _insert(conn, intent_kind="ENTRY", side="BUY", size=11.62, price=0.02)
+        _advance_to_cancel_unknown_review_required(conn, venue_order_id="ord-terminal")
+        _seed_pending_entry_projection(conn, order_id="ord-terminal")
+        mock_client.get_order.return_value = {
+            "orderID": "ord-terminal",
+            "status": "CANCELED",
+            "matched_size": "0",
+        }
+        mock_client.get_open_orders.return_value = [
+            {
+                "orderID": "ord-terminal",
+                "asset_id": "tok-001",
+                "side": "BUY",
+                "price": "0.02",
+                "original_size": "11.62",
+            }
+        ]
+        mock_client.get_trades.return_value = []
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert _get_state(conn, "cmd-001") == "REVIEW_REQUIRED"
+        assert summary["stayed"] == 1
+        assert summary["advanced"] == 0
+        events = _get_events(conn, "cmd-001")
+        assert events[-1]["event_type"] == "CANCEL_REPLACE_BLOCKED"
+
+    def test_cancel_unknown_review_required_terminal_with_local_exposure_stays_blocked(self, conn, mock_client):
+        _insert(conn, intent_kind="ENTRY", side="BUY", size=11.62, price=0.02)
+        _advance_to_cancel_unknown_review_required(conn, venue_order_id="ord-terminal")
+        _seed_pending_entry_projection(conn, order_id="ord-terminal")
+        conn.execute(
+            """
+            UPDATE position_current
+               SET shares = 1.25,
+                   cost_basis_usd = 0.025
+             WHERE position_id = 'pos-001'
+            """
+        )
+        mock_client.get_order.return_value = {
+            "orderID": "ord-terminal",
+            "status": "CANCELED",
+            "matched_size": "0",
+        }
+        mock_client.get_open_orders.return_value = []
+        mock_client.get_trades.return_value = []
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
         summary = reconcile_unresolved_commands(conn, mock_client)
 
         assert _get_state(conn, "cmd-001") == "REVIEW_REQUIRED"
@@ -1114,6 +1223,51 @@ class TestRecoveryResolutionTable:
         assert Decimal(str(current["shares"])) == Decimal("0")
         assert Decimal(str(current["cost_basis_usd"])) == Decimal("0")
         assert current["order_status"] == "canceled"
+
+    def test_acked_point_order_terminal_no_fill_fact_expires_command_and_voids_pending_entry(
+        self,
+        conn,
+        mock_client,
+    ):
+        _insert(conn)
+        _advance_to_acked(conn, venue_order_id="ord-001")
+        _seed_pending_entry_projection(conn)
+        _append_order_fact(conn, state="LIVE", matched_size="0", remaining_size="10")
+        mock_client.get_order.return_value = {
+            "orderID": "ord-001",
+            "status": "CANCELED",
+            "matched_size": "0",
+        }
+        mock_client.get_open_orders.return_value = []
+        mock_client.get_trades.return_value = []
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["terminal_point_orders"] == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+        assert summary["terminal_order_facts"]["advanced"] == 1
+        assert _get_state(conn, "cmd-001") == "EXPIRED"
+        order_fact = conn.execute(
+            """
+            SELECT state, remaining_size, matched_size, source, raw_payload_json
+              FROM venue_order_facts
+             WHERE command_id = 'cmd-001'
+             ORDER BY local_sequence DESC
+             LIMIT 1
+            """
+        ).fetchone()
+        order_fact = dict(order_fact)
+        payload = json.loads(order_fact.pop("raw_payload_json"))
+        assert order_fact == {
+            "state": "CANCEL_CONFIRMED",
+            "remaining_size": "0",
+            "matched_size": "0",
+            "source": "REST",
+        }
+        assert payload["reason"] == "point_order_terminal_no_fill"
+        assert payload["required_predicates"]["no_matching_open_orders"] is True
+        assert payload["required_predicates"]["no_matching_trades"] is True
 
     def test_cancelled_terminal_no_fill_order_without_pending_projection_recovers_and_voids(
         self,
