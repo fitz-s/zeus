@@ -53,9 +53,10 @@ adds, resizes, or re-enables a decision, so it can never increase exposure.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import logging
 import os
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Iterable
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from src.engine.evaluator import EdgeDecision
@@ -70,6 +71,138 @@ _DEFAULT = "1"  # ON by default (live-money fail-safe).
 # promotes this to a NoTradeReason enum member + DB migration. Kept lower-case
 # to match the StrEnum auto() value convention the eventual member will take.
 MUTUALLY_EXCLUSIVE_FAMILY_DEDUP = "mutually_exclusive_family_dedup"
+FAMILY_REJECTION_STAGE = "ANTI_CHURN"
+
+
+@dataclass(frozen=True)
+class WeatherFamilyKey:
+    """Identity for one mutually-exclusive weather outcome family."""
+
+    city: str
+    target_date: str
+    temperature_metric: str
+
+
+@dataclass(frozen=True)
+class WeatherFamilyExposure:
+    """Minimal read model for existing open/pending/active family exposure."""
+
+    key: WeatherFamilyKey
+    bin_label: str = ""
+    phase: str = "active"
+    position_id: str = ""
+
+
+_BLOCKING_EXPOSURE_PHASES = frozenset(
+    {
+        "",
+        "open",
+        "pending",
+        "active",
+        "pending_entry",
+        "pending_tracked",
+        "entered",
+        "holding",
+        "day0_window",
+        "pending_exit",
+    }
+)
+
+
+def _family_key(city: str, target_date: str, temperature_metric: str) -> WeatherFamilyKey:
+    return WeatherFamilyKey(str(city), str(target_date), str(temperature_metric))
+
+
+def _field(obj: Any, name: str, default: Any = "") -> Any:
+    if isinstance(obj, dict):
+        return obj.get(name, default)
+    return getattr(obj, name, default)
+
+
+def _exposure_key(exposure: Any) -> WeatherFamilyKey:
+    key = _field(exposure, "key", None)
+    if isinstance(key, WeatherFamilyKey):
+        return key
+    if isinstance(key, dict):
+        return WeatherFamilyKey(
+            str(key.get("city", "")),
+            str(key.get("target_date", "")),
+            str(key.get("temperature_metric", "")),
+        )
+    return WeatherFamilyKey(
+        str(_field(exposure, "city", "")),
+        str(_field(exposure, "target_date", "")),
+        str(_field(exposure, "temperature_metric", "")),
+    )
+
+
+def _exposure_bin_label(exposure: Any) -> str:
+    return str(
+        _field(
+            exposure,
+            "bin_label",
+            _field(exposure, "range_label", _field(exposure, "outcome_label", "")),
+        )
+        or ""
+    )
+
+
+def _decision_bin_label(decision: "EdgeDecision") -> str:
+    edge = getattr(decision, "edge", None)
+    if edge is None or getattr(edge, "bin", None) is None:
+        return ""
+    return str(getattr(edge.bin, "label", "") or "")
+
+
+def _blocking_exposures_for_key(
+    exposures: Iterable[Any] | None,
+    key: WeatherFamilyKey,
+) -> list[Any]:
+    if exposures is None:
+        return []
+    blocking: list[Any] = []
+    for exposure in exposures:
+        if _exposure_key(exposure) != key:
+            continue
+        phase = str(_field(exposure, "phase", _field(exposure, "state", "")) or "").lower()
+        if phase in _BLOCKING_EXPOSURE_PHASES:
+            blocking.append(exposure)
+    return blocking
+
+
+def weather_family_exposures_from_portfolio(portfolio: Any) -> list[WeatherFamilyExposure]:
+    """Project portfolio positions into the family-gate exposure read model."""
+    exposures: list[WeatherFamilyExposure] = []
+    for pos in getattr(portfolio, "positions", None) or ():
+        city = str(_field(pos, "city", "") or "")
+        target_date = str(_field(pos, "target_date", "") or "")
+        temperature_metric = str(_field(pos, "temperature_metric", "") or "")
+        if not (city and target_date and temperature_metric):
+            continue
+        phase = str(_field(pos, "phase", _field(pos, "state", "")) or "")
+        if phase.lower() not in _BLOCKING_EXPOSURE_PHASES:
+            continue
+        exposures.append(
+            WeatherFamilyExposure(
+                key=WeatherFamilyKey(city, target_date, temperature_metric),
+                bin_label=_exposure_bin_label(pos),
+                phase=phase,
+                position_id=str(_field(pos, "position_id", _field(pos, "trade_id", "")) or ""),
+            )
+        )
+    return exposures
+
+
+def _has_conflicting_existing_exposure(
+    decision: "EdgeDecision",
+    exposures: list[Any],
+) -> tuple[bool, Any | None]:
+    new_label = _decision_bin_label(decision)
+    for exposure in exposures:
+        existing_label = _exposure_bin_label(exposure)
+        if not existing_label or not new_label or existing_label != new_label:
+            return True, exposure
+    return False, None
 
 
 def family_gate_enabled() -> bool:
@@ -126,6 +259,8 @@ def dedup_mutually_exclusive_families(
     target_date: str,
     temperature_metric: str,
     enabled: bool | None = None,
+    existing_exposures: Iterable[Any] | None = None,
+    family_portfolio_intent: bool = False,
 ) -> list["EdgeDecision"]:
     """STAGE A gate: keep only the single best entry per exclusive family.
 
@@ -148,6 +283,13 @@ def dedup_mutually_exclusive_families(
             the candidate, not the per-bin decision), so the caller supplies it.
         enabled: override for the env gate; ``None`` reads
             ``family_gate_enabled()``.
+        existing_exposures: optional current-cycle read model of already
+            open/pending/active exposure keyed by ``WeatherFamilyKey``. When a
+            different bin already has exposure, new independent entries for the
+            same family are blocked unless ``family_portfolio_intent`` is true.
+        family_portfolio_intent: true only when a first-class family portfolio
+            optimizer emitted the executable portfolio intent. FDR-selected
+            hypotheses alone are not a portfolio intent.
 
     Returns:
         The same ``decisions`` list (mutated in place when the gate fires).
@@ -156,6 +298,43 @@ def dedup_mutually_exclusive_families(
         enabled = family_gate_enabled()
     if not enabled:
         return decisions
+
+    key = _family_key(city, target_date, temperature_metric)
+    blocking_exposures = (
+        []
+        if family_portfolio_intent
+        else _blocking_exposures_for_key(existing_exposures, key)
+    )
+    if blocking_exposures:
+        for d in decisions:
+            if not getattr(d, "should_trade", False):
+                continue
+            conflicts, exposure = _has_conflicting_existing_exposure(d, blocking_exposures)
+            if not conflicts:
+                continue
+            existing_label = _exposure_bin_label(exposure) if exposure is not None else ""
+            existing_position = str(_field(exposure, "position_id", "") or "")
+            d.should_trade = False
+            d.rejection_stage = FAMILY_REJECTION_STAGE
+            d.rejection_reasons = [MUTUALLY_EXCLUSIVE_FAMILY_DEDUP]
+            d.rejection_reason_detail = (
+                f"family={city}|{target_date}|{temperature_metric} "
+                f"dropped_bin={_decision_bin_label(d)!r} "
+                f"existing_exposure_bin={existing_label!r} "
+                f"existing_position_id={existing_position!r} "
+                f"({ENV_FLAG}=1; existing family exposure; no family portfolio intent)"
+            )
+            logger.info(
+                "[MUTUALLY_EXCLUSIVE_FAMILY_DEDUP] family=%s|%s|%s dropped_bin=%r "
+                "existing_exposure_bin=%r existing_position_id=%r decision_id=%s",
+                city,
+                target_date,
+                temperature_metric,
+                _decision_bin_label(d),
+                existing_label,
+                existing_position,
+                getattr(d, "decision_id", "") or "",
+            )
 
     # Group the should_trade=True decisions by the family key. With one
     # candidate per call this is a single group, but the dict keeps the
@@ -184,7 +363,7 @@ def dedup_mutually_exclusive_families(
                 continue
             d = decisions[i]
             d.should_trade = False
-            d.rejection_stage = "MUTUALLY_EXCLUSIVE_FAMILY"
+            d.rejection_stage = FAMILY_REJECTION_STAGE
             # STAGE A audit: reason STRING only (no enum → no schema CHECK).
             d.rejection_reasons = [MUTUALLY_EXCLUSIVE_FAMILY_DEDUP]
             dropped_label = ""

@@ -1,7 +1,7 @@
 # Created: 2026-04-27
-# Last reused/audited: 2026-05-17
-# Lifecycle: created=2026-04-27; last_reviewed=2026-05-06; last_reused=2026-05-17
-# Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/M4.yaml
+# Last reused/audited: 2026-05-21
+# Lifecycle: created=2026-04-27; last_reviewed=2026-05-21; last_reused=2026-05-21
+# Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/M4.yaml; task.md B1/B3 live-runtime follow-up
 # Purpose: Lock R3 M4 cancel/replace exit mutex, typed cancel outcomes, replacement gates, and CTF preflight.
 # Reuse: Run when exit_safety, executor exit submit, exit_lifecycle cancel retry, venue command transitions, or collateral sell preflight changes.
 """R3 M4 exit-safety antibodies for cancel/replace and exit mutex behavior."""
@@ -51,7 +51,7 @@ def _execution_facts(conn, position_id: str) -> list[sqlite3.Row]:
     return list(
         conn.execute(
             """
-            SELECT venue_status, terminal_exec_status, fill_price, shares
+            SELECT venue_status, terminal_exec_status, fill_price, shares, command_id
             FROM execution_fact
             WHERE position_id = ?
             ORDER BY intent_id
@@ -144,7 +144,12 @@ def _ensure_snapshot(
     snapshot_id: str | None = None,
     raw_orderbook_hash: str = "c" * 64,
     captured_at: datetime = _NOW,
+    freshness_deadline: datetime | None = None,
     min_tick_size: Decimal | str = Decimal("0.01"),
+    active: bool = True,
+    closed: bool = False,
+    accepting_orders: bool | None = True,
+    enable_orderbook: bool = True,
 ) -> str:
     from src.contracts.executable_market_snapshot_v2 import ExecutableMarketSnapshotV2
     from src.state.snapshot_repo import get_snapshot, insert_snapshot
@@ -168,10 +173,10 @@ def _ensure_snapshot(
             no_token_id=no_token,
             selected_outcome_token_id=selected_token,
             outcome_label=selected_label,
-            enable_orderbook=True,
-            active=True,
-            closed=False,
-            accepting_orders=True,
+            enable_orderbook=enable_orderbook,
+            active=active,
+            closed=closed,
+            accepting_orders=accepting_orders,
             market_start_at=None,
             market_end_at=None,
             market_close_at=None,
@@ -197,7 +202,7 @@ def _ensure_snapshot(
             raw_orderbook_hash=raw_orderbook_hash,
             authority_tier="CLOB",
             captured_at=captured_at,
-            freshness_deadline=captured_at + timedelta(days=365),
+            freshness_deadline=freshness_deadline or captured_at + timedelta(days=365),
         ),
     )
     return snapshot_id
@@ -666,6 +671,14 @@ def test_exit_lifecycle_partial_fill_reduces_open_position_exposure(conn):
         last_monitor_best_bid=0.44,
     )
     portfolio = PortfolioState(positions=[position])
+    _insert_exit_command(
+        conn,
+        command_id="cmd-partial-exit",
+        position_id=position.trade_id,
+        size=20.0,
+        price=0.44,
+        venue_order_id="ord-partial-exit",
+    )
 
     class FakeClob:
         def get_order_status(self, order_id):
@@ -697,6 +710,65 @@ def test_exit_lifecycle_partial_fill_reduces_open_position_exposure(conn):
     assert facts[0]["terminal_exec_status"] == "PARTIALLY_MATCHED"
     assert facts[0]["fill_price"] == pytest.approx(0.44)
     assert facts[0]["shares"] == pytest.approx(8.0)
+    assert facts[0]["command_id"] == "cmd-partial-exit"
+
+
+def test_exit_lifecycle_full_fill_logs_commanded_execution_fact(conn):
+    from src.execution import exit_lifecycle
+    from src.state.portfolio import PortfolioState, Position
+
+    position = Position(
+        trade_id="pos-full-exit",
+        market_id="mkt-full-exit",
+        city="NYC",
+        cluster="US-Northeast",
+        target_date="2026-04-27",
+        bin_label="50-51°F",
+        direction="buy_yes",
+        size_usd=10.0,
+        entry_price=0.50,
+        shares=20.0,
+        cost_basis_usd=10.0,
+        state="pending_exit",
+        exit_state="sell_pending",
+        last_exit_order_id="ord-full-exit",
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        last_monitor_market_price=0.45,
+        last_monitor_best_bid=0.44,
+    )
+    portfolio = PortfolioState(positions=[position])
+    _insert_exit_command(
+        conn,
+        command_id="cmd-full-exit",
+        position_id=position.trade_id,
+        size=20.0,
+        price=0.44,
+        venue_order_id="ord-full-exit",
+    )
+
+    class FakeClob:
+        def get_order_status(self, order_id):
+            assert order_id == "ord-full-exit"
+            return {
+                "status": "CONFIRMED",
+                "remaining_size": "0.00",
+                "matched_size": "20.00",
+                "avgPrice": "0.44",
+            }
+
+    stats = exit_lifecycle.check_pending_exits(portfolio, FakeClob(), conn=conn)
+
+    assert stats["filled"] == 1
+    assert stats["retried"] == 0
+    assert len(stats["filled_positions"]) == 1
+    facts = _execution_facts(conn, position.trade_id)
+    assert len(facts) == 1
+    assert facts[0]["venue_status"] == "CONFIRMED"
+    assert facts[0]["terminal_exec_status"] == "CONFIRMED"
+    assert facts[0]["fill_price"] == pytest.approx(0.44)
+    assert facts[0]["shares"] == pytest.approx(20.0)
+    assert facts[0]["command_id"] == "cmd-full-exit"
 
 
 def test_exit_lifecycle_confirmed_without_explicit_fill_price_stays_pending(conn):
@@ -936,6 +1008,14 @@ def test_exit_lifecycle_cancel_after_partial_only_retries_remaining_exposure(con
         last_monitor_best_bid=0.44,
     )
     portfolio = PortfolioState(positions=[position])
+    _insert_exit_command(
+        conn,
+        command_id="cmd-partial-cancel",
+        position_id=position.trade_id,
+        size=20.0,
+        price=0.44,
+        venue_order_id="ord-partial-cancel",
+    )
 
     class FakeClob:
         def get_order_status(self, order_id):
@@ -963,6 +1043,7 @@ def test_exit_lifecycle_cancel_after_partial_only_retries_remaining_exposure(con
     assert facts[0]["terminal_exec_status"] == "CANCELLED"
     assert facts[0]["fill_price"] == pytest.approx(0.44)
     assert facts[0]["shares"] == pytest.approx(8.0)
+    assert facts[0]["command_id"] == "cmd-partial-cancel"
 
 
 def test_two_exit_requests_for_same_position_collapse_into_one_durable_chain(conn, monkeypatch):
@@ -1539,6 +1620,183 @@ def test_live_exit_captures_snapshot_for_held_position_before_sell(conn, monkeyp
         "min_order": "0.01",
         "neg_risk": False,
     }
+
+
+def test_live_exit_uses_expired_snapshot_identity_when_static_topology_lacks_no_token(
+    conn,
+    monkeypatch,
+):
+    from src.execution import exit_lifecycle
+    from src.state.portfolio import Position
+
+    stale_snapshot_id = _ensure_snapshot(
+        conn,
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        selected_outcome_token_id=YES_TOKEN,
+        outcome_label="YES",
+        snapshot_id="snap-expired-identity-seed",
+        captured_at=_NOW - timedelta(minutes=10),
+        freshness_deadline=_NOW - timedelta(minutes=9),
+        accepting_orders=False,
+    )
+    assert stale_snapshot_id == "snap-expired-identity-seed"
+
+    position = Position(
+        trade_id="pos-exit-static-topology",
+        market_id="condition-test",
+        condition_id="condition-test",
+        city="NYC",
+        cluster="northeast",
+        target_date="2026-04-28",
+        bin_label="50-51°F",
+        direction="buy_yes",
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        entry_price=0.50,
+        size_usd=10.0,
+        shares=20.0,
+    )
+
+    monkeypatch.setattr(
+        "src.data.market_scanner.get_sibling_outcomes",
+        lambda market_id: [
+            {
+                "market_id": market_id,
+                "condition_id": market_id,
+                "token_id": YES_TOKEN,
+                "active": True,
+                "closed": False,
+                "accepting_orders": True,
+                "enable_orderbook": True,
+                "gamma_market_raw": {
+                    "id": "gamma-test-current",
+                    "active": True,
+                    "closed": False,
+                    "acceptingOrders": True,
+                    "enableOrderBook": True,
+                },
+            }
+        ],
+    )
+    monkeypatch.setattr("src.data.market_scanner.get_last_scan_authority", lambda: "VERIFIED")
+
+    def fake_capture_snapshot(
+        conn_arg,
+        *,
+        market,
+        decision,
+        clob,
+        captured_at,
+        scan_authority,
+        execution_side,
+    ):
+        assert execution_side == "SELL"
+        assert scan_authority == "VERIFIED"
+        assert len(market["outcomes"]) == 1
+        seeded = market["outcomes"][0]
+        assert seeded["condition_id"] == "condition-test"
+        assert seeded["question_id"] == "question-test"
+        assert seeded["token_id"] == YES_TOKEN
+        assert seeded["no_token_id"] == NO_TOKEN
+        assert seeded["active"] is True
+        assert seeded["accepting_orders"] is True
+        assert seeded["gamma_market_raw"]["acceptingOrders"] is True
+        assert seeded["source_contract"]["source"] == "executable_market_snapshots_identity_seed"
+        assert decision.tokens["token_id"] == YES_TOKEN
+        return {
+            "executable_snapshot_id": _ensure_snapshot(
+                conn_arg,
+                token_id=YES_TOKEN,
+                no_token_id=NO_TOKEN,
+                selected_outcome_token_id=YES_TOKEN,
+                outcome_label="YES",
+                snapshot_id="snap-exit-refreshed-from-seed",
+                captured_at=captured_at,
+            ),
+            "executable_snapshot_min_tick_size": "0.01",
+            "executable_snapshot_min_order_size": "0.01",
+            "executable_snapshot_neg_risk": False,
+        }
+
+    monkeypatch.setattr("src.data.market_scanner.capture_executable_market_snapshot", fake_capture_snapshot)
+
+    context = exit_lifecycle._latest_or_capture_exit_snapshot_context(
+        conn,
+        object(),
+        position,
+        YES_TOKEN,
+        now=_NOW,
+    )
+
+    assert context["executable_snapshot_id"] == "snap-exit-refreshed-from-seed"
+    assert context["executable_snapshot_hash"] == _snapshot_hash(conn, "snap-exit-refreshed-from-seed")
+
+
+def test_live_exit_identity_seed_does_not_reuse_stale_accepting_orders_as_tradability(
+    conn,
+    monkeypatch,
+):
+    from src.execution import exit_lifecycle
+    from src.state.portfolio import Position
+
+    _ensure_snapshot(
+        conn,
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        selected_outcome_token_id=YES_TOKEN,
+        outcome_label="YES",
+        snapshot_id="snap-expired-stale-tradability",
+        captured_at=_NOW - timedelta(minutes=10),
+        freshness_deadline=_NOW - timedelta(minutes=9),
+        accepting_orders=True,
+    )
+    position = Position(
+        trade_id="pos-exit-stale-tradability",
+        market_id="condition-test",
+        condition_id="condition-test",
+        city="NYC",
+        cluster="northeast",
+        target_date="2026-04-28",
+        bin_label="50-51°F",
+        direction="buy_yes",
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        entry_price=0.50,
+        size_usd=10.0,
+        shares=20.0,
+    )
+    current_non_tradable = {
+        "market_id": "condition-test",
+        "condition_id": "condition-test",
+        "token_id": YES_TOKEN,
+        "active": True,
+        "closed": False,
+        "accepting_orders": False,
+        "enable_orderbook": True,
+        "gamma_market_raw": {
+            "id": "gamma-test-current",
+            "active": True,
+            "closed": False,
+            "acceptingOrders": False,
+            "enableOrderBook": True,
+        },
+    }
+    monkeypatch.setattr(
+        "src.data.market_scanner.get_sibling_outcomes",
+        lambda market_id: [current_non_tradable],
+    )
+    monkeypatch.setattr("src.data.market_scanner.get_last_scan_authority", lambda: "VERIFIED")
+
+    context = exit_lifecycle._latest_or_capture_exit_snapshot_context(
+        conn,
+        object(),
+        position,
+        YES_TOKEN,
+        now=_NOW,
+    )
+
+    assert context == {}
 
 
 def test_live_exit_quick_confirmed_without_explicit_fill_price_does_not_close(monkeypatch):

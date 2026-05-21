@@ -17,7 +17,7 @@ Usage:
     .venv/bin/python scripts/bridge_oracle_to_calibration.py [--dry-run]
 
 Architecture:
-    settlements + world.observation_instants_v2
+    settlements + world.observation_instants_v2 / world.daily_observation_revisions
                                       →  canonical daily settlement values
     oracle_snapshot_listener.py  →  raw/oracle_shadow_snapshots/{city}/{date}.json
                                            ↓
@@ -96,8 +96,8 @@ def _load_settlements(conn: sqlite3.Connection) -> dict[tuple[str, str, str], di
             "value": r[3],
             "bin_lo": r[4],
             "bin_hi": r[5],
-            "source_type": r[6],
-            "unit": r[7],
+            "source_type": str(r[6] or "").strip().lower(),
+            "unit": str(r[7] or "").strip().upper(),
         }
     return result
 
@@ -202,6 +202,15 @@ def _coerce_observation_to_settlement_unit(value: float, obs_unit: str, settleme
     return val
 
 
+def _daily_revision_sources_for_city(city_name: str) -> frozenset[str]:
+    """Official daily-observation source tags for canonical daily evidence."""
+    sources = {str(source).strip().lower() for source in allowed_sources_for_city(city_name)}
+    city = runtime_cities_by_name().get(city_name)
+    if city is not None and str(city.settlement_source_type or "").strip().lower() == "hko":
+        sources.add("hko_daily_api")
+    return frozenset(source for source in sources if source)
+
+
 def _canonical_observation_daily_metric(
     conn: sqlite3.Connection,
     city_name: str,
@@ -255,7 +264,20 @@ def _canonical_observation_daily_metric(
                 "unit": str(row[2] or "F").upper(),
                 "hours": hours,
             }
+    revision_observation = _canonical_daily_observation_revision_metric(
+        conn,
+        city_name,
+        target_date,
+        temperature_metric,
+    )
+    if revision_observation is not None:
+        return revision_observation
+
     daily_column = "high_temp" if temperature_metric == "high" else "low_temp"
+    daily_sources = sorted(_daily_revision_sources_for_city(city_name))
+    if not daily_sources:
+        return None
+    daily_source_placeholders = ",".join(["?"] * len(daily_sources))
     row = conn.execute(
         f"""
         SELECT {daily_column} AS daily_value,
@@ -264,13 +286,14 @@ def _canonical_observation_daily_metric(
                    'F'
                ) AS temp_unit,
                MAX(source) AS source
-          FROM observations
+         FROM observations
          WHERE city = ?
            AND target_date = ?
+           AND lower(source) IN ({daily_source_placeholders})
            AND authority = 'VERIFIED'
            AND {daily_column} IS NOT NULL
         """,
-        (city_name, target_date),
+        (city_name, target_date, *daily_sources),
     ).fetchone()
     if row is not None and row[0] is not None:
         return {
@@ -279,6 +302,68 @@ def _canonical_observation_daily_metric(
             "unit": str(row[1] or "F").upper(),
             "hours": 24,
         }
+    return None
+
+
+def _canonical_daily_observation_revision_metric(
+    conn: sqlite3.Connection,
+    city_name: str,
+    target_date: str,
+    temperature_metric: str,
+) -> dict | None:
+    """Read verified daily-observation revision payloads as canonical evidence."""
+    if temperature_metric not in {"high", "low"}:
+        raise ValueError(f"unsupported temperature_metric={temperature_metric!r}")
+    value_key = "daily_high" if temperature_metric == "high" else "daily_low"
+    payload_key = "high_temp" if temperature_metric == "high" else "low_temp"
+    primary_source = expected_source_for_city(city_name)
+    allowed_sources = _daily_revision_sources_for_city(city_name)
+    source_order = [primary_source, *[s for s in allowed_sources if s != primary_source]]
+
+    for source in source_order:
+        try:
+            rows = conn.execute(
+                """
+                SELECT incoming_row_json
+                  FROM world.daily_observation_revisions
+                 WHERE city = ?
+                   AND target_date = ?
+                   AND lower(source) = lower(?)
+                 ORDER BY recorded_at DESC, id DESC
+                 LIMIT 5
+                """,
+                (city_name, target_date, source),
+            ).fetchall()
+        except sqlite3.OperationalError:
+            rows = []
+        for row in rows:
+            raw_payload = row[0] if row is not None else None
+            if not raw_payload:
+                continue
+            try:
+                payload = json.loads(raw_payload)
+            except (TypeError, json.JSONDecodeError):
+                continue
+            payload_source = str(payload.get("source") or "").strip().lower()
+            if payload_source and payload_source not in allowed_sources:
+                continue
+            if str(payload.get("authority") or "").upper() != "VERIFIED":
+                continue
+            daily_value = payload.get(payload_key)
+            if daily_value is None:
+                continue
+            return {
+                value_key: float(daily_value),
+                "source": str(payload.get("source") or source or "daily_observation_revisions"),
+                "unit": str(
+                    payload.get("unit")
+                    or payload.get(f"{temperature_metric}_target_unit")
+                    or payload.get(f"{temperature_metric}_raw_unit")
+                    or "F"
+                ).upper(),
+                "hours": 24,
+                "source_role": "canonical_daily_observation_revisions",
+            }
     return None
 
 
@@ -314,6 +399,38 @@ def _metric_observation_support(
         (city_name, *allowed_sources, _MIN_HOURS_PER_DAY),
     ).fetchall()
     dates = [str(row[0]) for row in rows if row[0]]
+    revision_sources = sorted(_daily_revision_sources_for_city(city_name))
+    if not revision_sources:
+        revision_rows = []
+    else:
+        revision_source_placeholders = ",".join(["?"] * len(revision_sources))
+        try:
+            revision_rows = conn.execute(
+                f"""
+                SELECT target_date, incoming_row_json
+                  FROM world.daily_observation_revisions
+                 WHERE city = ?
+                   AND lower(source) IN ({revision_source_placeholders})
+                """,
+                (city_name, *revision_sources),
+            ).fetchall()
+        except sqlite3.OperationalError:
+            revision_rows = []
+    daily_column = "high_temp" if temperature_metric == "high" else "low_temp"
+    for row in revision_rows:
+        try:
+            payload = json.loads(row[1] or "{}")
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if str(payload.get("authority") or "").upper() != "VERIFIED":
+            continue
+        payload_source = str(payload.get("source") or "").strip().lower()
+        if payload_source and payload_source not in revision_sources:
+            continue
+        if payload.get(daily_column) is None:
+            continue
+        dates.append(str(row[0]))
+    dates = sorted(set(dates))
     return {"days": len(dates), "last_date": max(dates) if dates else ""}
 
 
@@ -455,7 +572,7 @@ def bridge(dry_run: bool = False) -> dict:
                         "snapshot_error_rate": 0.0,
                         "snapshot_mismatch_dates": [],
                         "snapshot_dates": [],
-                        "source_role": "canonical_observation_instants_v2",
+                        "source_role": observation.get("source_role", "canonical_observation_instants_v2"),
                         "temperature_metric": temperature_metric,
                     },
                 )

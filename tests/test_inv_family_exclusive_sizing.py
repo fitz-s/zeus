@@ -35,14 +35,22 @@ RED→GREEN protocol (recorded for the opus critic):
 
 from __future__ import annotations
 
+from pathlib import Path
+from types import SimpleNamespace
+
 import pytest
 
 from src.contracts.no_trade_reason import NoTradeReason  # used in fixtures
 from src.engine.evaluator import EdgeDecision
 from src.strategy.family_exclusive_dedup import (
+    FAMILY_REJECTION_STAGE,
     MUTUALLY_EXCLUSIVE_FAMILY_DEDUP,
+    WeatherFamilyExposure,
+    WeatherFamilyKey,
     dedup_mutually_exclusive_families,
+    weather_family_exposures_from_portfolio,
 )
+from src.contracts.semantic_types import RejectionStage
 from src.types import Bin, BinEdge
 
 
@@ -191,8 +199,8 @@ def test_same_city_date_metric_mutually_exclusive_bins_do_not_emit_independent_l
             f"dropped bin {d.edge.bin.label if d.edge else '?'} must list the "
             "dedup reason string in rejection_reasons"
         )
-        assert d.rejection_stage == "MUTUALLY_EXCLUSIVE_FAMILY", (
-            "dropped bin must carry the dedup rejection_stage"
+        assert d.rejection_stage == FAMILY_REJECTION_STAGE == RejectionStage.ANTI_CHURN.value, (
+            "dropped bin must carry a legal anti-churn rejection_stage"
         )
         assert d.rejection_reason_detail and "kept_bin='22-23°F'" in d.rejection_reason_detail, (
             "rejection detail must name the kept bin for auditability"
@@ -263,6 +271,109 @@ def test_non_trade_decisions_in_family_are_ignored() -> None:
     # Pre-existing rejection reasons untouched (not overwritten with dedup).
     assert rejected_a.rejection_reason_enum is NoTradeReason.SIZE_BELOW_MINIMUM
     assert rejected_b.rejection_reason_enum is NoTradeReason.RISK_LIMITS_EXCEEDED
+
+
+def test_existing_family_exposure_blocks_new_different_bin_across_cycles() -> None:
+    """Cross-cycle relationship: existing exposure owns the family entry budget.
+
+    If a prior cycle already opened one bin for the same city/date/metric
+    family, a later FDR-selected hypothesis for a different bin is not an
+    executable portfolio. It must be rejected before executor submission.
+    """
+    bins = {s[2]: s for s in _BIN_SPECS}
+    new_bin = _trade_decision(bins["22-23°F"], size_usd=20.0, forward_edge=0.07)
+    exposure = WeatherFamilyExposure(
+        key=WeatherFamilyKey(CITY, TARGET_DATE, METRIC),
+        bin_label="20-21°F",
+        phase="active",
+        position_id="pos-existing-1",
+    )
+
+    out = dedup_mutually_exclusive_families(
+        [new_bin],
+        city=CITY,
+        target_date=TARGET_DATE,
+        temperature_metric=METRIC,
+        existing_exposures=[exposure],
+        enabled=True,
+    )
+
+    assert _count_trades(out) == 0
+    rejected = out[0]
+    assert rejected.rejection_stage == RejectionStage.ANTI_CHURN.value
+    assert MUTUALLY_EXCLUSIVE_FAMILY_DEDUP in rejected.rejection_reasons
+    assert rejected.rejection_reason_enum is None
+    assert rejected.rejection_reason_detail is not None
+    assert "existing_exposure_bin='20-21°F'" in rejected.rejection_reason_detail
+    assert "no family portfolio intent" in rejected.rejection_reason_detail
+
+
+def test_portfolio_positions_project_to_weather_family_exposure_read_model() -> None:
+    portfolio = SimpleNamespace(
+        positions=[
+            SimpleNamespace(
+                trade_id="pos-open",
+                city=CITY,
+                target_date=TARGET_DATE,
+                temperature_metric=METRIC,
+                bin_label="20-21°F",
+                state="holding",
+            ),
+            SimpleNamespace(
+                trade_id="pos-closed",
+                city=CITY,
+                target_date=TARGET_DATE,
+                temperature_metric=METRIC,
+                bin_label="22-23°F",
+                state="settled",
+            ),
+        ]
+    )
+
+    exposures = weather_family_exposures_from_portfolio(portfolio)
+
+    assert exposures == [
+        WeatherFamilyExposure(
+            key=WeatherFamilyKey(CITY, TARGET_DATE, METRIC),
+            bin_label="20-21°F",
+            phase="holding",
+            position_id="pos-open",
+        )
+    ]
+
+
+def test_cycle_runtime_threads_portfolio_exposure_into_family_gate() -> None:
+    """Relationship guard: runtime callsite must supply current exposure state."""
+    source = Path("src/engine/cycle_runtime.py").read_text()
+    assert "weather_family_exposures_from_portfolio" in source
+    assert "existing_exposures=weather_family_exposures_from_portfolio(portfolio)" in source
+
+
+def test_family_portfolio_intent_allows_optimizer_owned_multi_bin_execution() -> None:
+    """Stage A only blocks independent bins, not an explicit family portfolio."""
+    bins = {s[2]: s for s in _BIN_SPECS}
+    new_bin = _trade_decision(bins["22-23°F"], size_usd=20.0, forward_edge=0.07)
+    exposure = WeatherFamilyExposure(
+        key=WeatherFamilyKey(CITY, TARGET_DATE, METRIC),
+        bin_label="20-21°F",
+        phase="active",
+        position_id="pos-existing-1",
+    )
+
+    out = dedup_mutually_exclusive_families(
+        [new_bin],
+        city=CITY,
+        target_date=TARGET_DATE,
+        temperature_metric=METRIC,
+        existing_exposures=[exposure],
+        family_portfolio_intent=True,
+        enabled=True,
+    )
+
+    assert _count_trades(out) == 1
+    assert out[0].should_trade is True
+    assert out[0].rejection_stage == ""
+    assert out[0].rejection_reasons == []
 
 
 if __name__ == "__main__":  # pragma: no cover

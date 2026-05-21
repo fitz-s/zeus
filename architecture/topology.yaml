@@ -7856,6 +7856,53 @@ digest_profiles:
       - "Any schema migration belongs to a separate packet."
     reference_reads:
       - "docs/reference/zeus_execution_lifecycle_reference.md"
+  - id: "weather family exposure gate implementation"
+    match:
+      - "B2 Weather family exposure gate"
+      - "WeatherFamilyKey mutually exclusive"
+      - "same city target_date metric family bins"
+      - "family portfolio intent"
+      - "mutually exclusive weather family"
+    file_patterns:
+      - "src/engine/cycle_runtime.py"
+      - "src/strategy/family_exclusive_dedup.py"
+      - "tests/test_inv_family_exclusive_sizing.py"
+    required_law:
+      - "Same city + target_date + metric weather bins are mutually exclusive outcomes, not independent binary bets."
+      - "FDR-selected hypothesis is not an executable family portfolio."
+      - "Existing open/pending/active WeatherFamilyKey exposure blocks independent different-bin entries unless a FamilyPortfolioOptimizer emitted a family portfolio intent."
+      - "Family gate rejections must use a legal RejectionStage enum value; family-specific detail belongs in the reason string/detail."
+    allowed_files:
+      - "architecture/topology.yaml"
+      - "architecture/digest_profiles.py"
+      - "src/engine/cycle_runtime.py"
+      - "src/strategy/family_exclusive_dedup.py"
+      - "tests/test_digest_profile_matching.py"
+      - "tests/test_inv_family_exclusive_sizing.py"
+    forbidden_files:
+      - "state/*.db"
+      - "src/engine/evaluator.py"
+      - "src/state/**"
+      - "src/contracts/no_trade_reason.py"
+      - "docs/authority/**"
+      - ".claude/worktrees/**"
+      - ".omx/**"
+      - "production DB mutation"
+      - "live daemon restart"
+      - "live venue submission"
+    gates:
+      - "pytest -q tests/test_inv_family_exclusive_sizing.py"
+      - "pytest -q tests/test_digest_profile_matching.py::test_b2_weather_family_exposure_gate_routes_to_dedicated_profile"
+      - "python3 -m py_compile src/engine/cycle_runtime.py src/strategy/family_exclusive_dedup.py tests/test_inv_family_exclusive_sizing.py architecture/digest_profiles.py"
+      - "python3 scripts/digest_profiles_export.py --check"
+    downstream:
+      - "src/execution/executor.py"
+      - "state/zeus_trades.db"
+      - "future FamilyPortfolioOptimizer"
+    stop_conditions:
+      - "Stop before adding NoTradeReason enum/schema values for Stage A."
+      - "Stop before editing evaluator or settlement/source truth paths."
+      - "Stop before treating multiple FDR-selected bins as an executable portfolio without a first-class family portfolio intent."
   - id: "modify risk or strategy"
     match:
       - "risk"
@@ -7882,11 +7929,13 @@ digest_profiles:
     allowed_files:
       - "src/riskguard/risk_level.py"
       - "src/riskguard/policy.py"
+      - "src/strategy/family_exclusive_dedup.py"
       - "src/strategy/kelly.py"
       - "src/strategy/market_analysis.py"
       - "src/strategy/market_fusion.py"
       - "src/strategy/oracle_penalty.py"
       - "src/strategy/risk_limits.py"
+      - "tests/test_inv_family_exclusive_sizing.py"
       - "tests/test_riskguard.py"
       - "tests/test_kelly.py"
       - "tests/test_kelly_cascade_bounds.py"
@@ -7900,6 +7949,7 @@ digest_profiles:
       - ".omx/**"
     gates:
       - "pytest -q tests/test_cross_module_invariants.py"
+      - "pytest -q tests/test_inv_family_exclusive_sizing.py"
       - "pytest -q tests/test_riskguard.py tests/test_kelly.py tests/test_kelly_cascade_bounds.py"
       - "pytest -q tests/test_live_safety_invariants.py"
     downstream:
@@ -7912,6 +7962,92 @@ digest_profiles:
       - "Do not conflate strategy_key with edge_source or discovery_mode."
     reference_reads:
       - "docs/reference/zeus_risk_strategy_reference.md"
+  - id: "oracle evidence bridge implementation"
+    match:
+      - "B0 Oracle evidence wiring"
+      - "oracle evidence wiring bridge"
+      - "bridge oracle to calibration"
+      - "canonical settlements observations daily_observation_revisions"
+      - "source_type normalize"
+      - "normal city no penalty sufficient evidence"
+    file_patterns:
+      - "scripts/bridge_oracle_to_calibration.py"
+      - "tests/test_bridge_oracle_to_calibration.py"
+    required_law:
+      - "Oracle penalty is source/settlement error evidence, not a strategy conservatism policy."
+      - "Canonical settlements and observations outrank shadow snapshots when constructing oracle evidence."
+      - "Normal cities with sufficient canonical high/low evidence must not default to MISSING, METRIC_UNSUPPORTED, INSUFFICIENT_SAMPLE, or multiplier < 1.0."
+      - "Script writes remain bounded to declared artifacts; no production DB mutation is admitted by this route."
+    allowed_files:
+      - "architecture/topology.yaml"
+      - "architecture/digest_profiles.py"
+      - "scripts/bridge_oracle_to_calibration.py"
+      - "tests/test_bridge_oracle_to_calibration.py"
+      - "tests/test_digest_profile_matching.py"
+    forbidden_files:
+      - "state/*.db"
+      - "src/state/**"
+      - "docs/authority/**"
+      - ".claude/worktrees/**"
+      - ".omx/**"
+      - "production DB mutation"
+      - "live daemon restart"
+      - "live venue submission"
+    gates:
+      - "pytest -q tests/test_bridge_oracle_to_calibration.py"
+      - "pytest -q tests/test_digest_profile_matching.py::test_b0_oracle_evidence_bridge_routes_to_dedicated_profile"
+      - "python3 -m py_compile scripts/bridge_oracle_to_calibration.py tests/test_bridge_oracle_to_calibration.py architecture/digest_profiles.py"
+      - "python3 scripts/digest_profiles_export.py --check"
+    downstream:
+      - "src/strategy/oracle_penalty.py"
+      - "data/oracle_error_rates.json"
+      - "live sizing decisions"
+    stop_conditions:
+      - "Stop before mutating production DB rows or live daemon state."
+      - "Stop before changing oracle penalty policy instead of evidence construction."
+      - "Stop if canonical high/low evidence cannot be distinguished from shadow snapshot fallback."
+  - id: "t4 restart gate cleanup implementation"
+    match:
+      - "B4 T4 restart gate"
+      - "T4_MERGE_DATE"
+      - "MarketAnalysisVNext restart gate"
+      - "legacy ensemble_snapshots bias_corrected test rescope"
+      - "SCHEMA_FORECASTS_VERSION 5 restart"
+    file_patterns:
+      - "src/analysis/market_analysis_vnext.py"
+      - "tests/test_ensemble_snapshots_bias_corrected_schema.py"
+    required_law:
+      - "T4_MERGE_DATE must be a real UTC ISO timestamp because live antibodies compare SQLite UTC text timestamps lexicographically."
+      - "Legacy ensemble_snapshots world-class table was removed by v1.F20; tests must not require it to exist on fresh init_schema()."
+      - "Forecasts schema v5 migration proof and daemon restart are separate production steps; this route admits code/test cleanup only."
+    allowed_files:
+      - "architecture/topology.yaml"
+      - "architecture/digest_profiles.py"
+      - "src/analysis/market_analysis_vnext.py"
+      - "tests/test_digest_profile_matching.py"
+      - "tests/test_ensemble_snapshots_bias_corrected_schema.py"
+    forbidden_files:
+      - "state/*.db"
+      - "src/state/**"
+      - "docs/authority/**"
+      - ".claude/worktrees/**"
+      - ".omx/**"
+      - "production DB mutation"
+      - "live daemon restart"
+    gates:
+      - "pytest -q tests/test_ensemble_snapshots_bias_corrected_schema.py"
+      - "pytest -q tests/test_inv_vnext_substitution_consistency.py tests/test_inv_bin_grid_propagation.py tests/test_inv_anchor_source_real_value.py"
+      - "pytest -q tests/test_digest_profile_matching.py::test_b4_t4_restart_gate_cleanup_routes_to_dedicated_profile"
+      - "python3 -m py_compile src/analysis/market_analysis_vnext.py tests/test_ensemble_snapshots_bias_corrected_schema.py architecture/digest_profiles.py"
+      - "python3 scripts/digest_profiles_export.py --check"
+    downstream:
+      - "scripts/healthcheck.py"
+      - "src/main.py"
+      - "state/zeus-forecasts.db"
+    stop_conditions:
+      - "Stop before running production forecasts DB migration."
+      - "Stop before restarting live daemon."
+      - "Stop if tests require changing schema ownership or DB DDL."
   - id: "modify data ingestion"
     match:
       - "ingestion"

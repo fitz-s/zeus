@@ -1720,6 +1720,13 @@ def _append_linkable_trade_fact_if_missing(
                 resolution="unrecorded_trade_linked",
                 resolved_at=observed_at,
             )
+            if state == "CONFIRMED":
+                _resolve_open_trade_findings(
+                    conn,
+                    _finality_subject(trade_id),
+                    resolution="trade_finality_confirmed",
+                    resolved_at=observed_at,
+                )
             existing_event = _fill_event_for_command(command, filled_size, trade_state=state)
             if existing_event is not None:
                 try:
@@ -1759,7 +1766,16 @@ def _append_linkable_trade_fact_if_missing(
                 observed_at=observed_at,
                 command_event=existing_event,
             )
-            return None
+            return _record_nonfinal_full_exit_fill_finality_finding(
+                conn,
+                trade_id=trade_id,
+                command=command,
+                raw=raw,
+                state=state,
+                filled_size=filled_size,
+                observed_at=observed_at,
+                context=context,
+            )
         if state in {"MATCHED", "MINED", "CONFIRMED"} and not same_fill_economics:
             if not _confirmed_price_revision_has_authority(
                 latest_fact,
@@ -1832,14 +1848,31 @@ def _append_linkable_trade_fact_if_missing(
         resolution="unrecorded_trade_linked",
         resolved_at=observed_at,
     )
+    if state == "CONFIRMED":
+        _resolve_open_trade_findings(
+            conn,
+            _finality_subject(trade_id),
+            resolution="trade_finality_confirmed",
+            resolved_at=observed_at,
+        )
     if state in {"FAILED", "RETRYING"}:
         return None
+    finality_finding = _record_nonfinal_full_exit_fill_finality_finding(
+        conn,
+        trade_id=trade_id,
+        command=command,
+        raw=raw,
+        state=state,
+        filled_size=filled_size,
+        observed_at=observed_at,
+        context=context,
+    )
     latest = get_command(conn, str(command["command_id"]))
     if latest is None:
-        return None
+        return finality_finding
     event = _fill_event_for_command(latest, filled_size, trade_state=state)
     if event is None:
-        return None
+        return finality_finding
     try:
         append_event(
             conn,
@@ -1858,7 +1891,7 @@ def _append_linkable_trade_fact_if_missing(
         # The fact is still append-only venue truth.  Illegal command-state
         # transitions stay fail-closed by not inventing grammar or forcing a
         # local command mutation.
-        return None
+        return finality_finding
     _ensure_entry_fill_position_event(
         conn,
         command=latest,
@@ -1878,7 +1911,50 @@ def _append_linkable_trade_fact_if_missing(
         observed_at=observed_at,
         command_event=event,
     )
-    return None
+    return finality_finding
+
+
+def _finality_subject(trade_id: str) -> str:
+    return f"finality:{trade_id}"
+
+
+def _record_nonfinal_full_exit_fill_finality_finding(
+    conn: sqlite3.Connection,
+    *,
+    trade_id: str,
+    command: Mapping[str, Any],
+    raw: Mapping[str, Any],
+    state: str,
+    filled_size: str,
+    observed_at: datetime,
+    context: ReconcileContext,
+) -> ReconcileFinding | None:
+    if state not in {"MATCHED", "MINED"}:
+        return None
+    if str(command.get("intent_kind") or "").upper() != "EXIT":
+        return None
+    if str(command.get("side") or "").upper() != "SELL":
+        return None
+    filled = _positive_decimal_or_none(filled_size)
+    if filled is None or not _trade_fill_covers_local_command(command, filled):
+        return None
+    return record_finding(
+        conn,
+        kind="unrecorded_trade",
+        subject_id=_finality_subject(trade_id),
+        context=context,
+        evidence={
+            "exchange_trade": dict(raw),
+            "local_command": _command_evidence(command),
+            "reason": "exchange_trade_full_size_nonfinal_exit_fill_waiting_confirmation",
+            "trade_id": trade_id,
+            "incoming_state": state,
+            "filled_size": filled_size,
+            "required_state": "CONFIRMED",
+            "action": "poll_or_refresh_until_CONFIRMED_before_economic_close",
+        },
+        recorded_at=observed_at,
+    )
 
 
 def _ensure_entry_fill_position_event(
@@ -2322,6 +2398,7 @@ def _apply_exit_fill_projection_and_execution_fact(
             intent_id=f"{position_id}:exit",
             position_id=position_id,
             decision_id=str(command.get("decision_id") or "") or None,
+            command_id=str(command.get("command_id") or "") or None,
             order_role="exit",
             strategy_key=str(getattr(position, "strategy_key", "") or "") or None,
             posted_at=str(command.get("created_at") or "") or None,

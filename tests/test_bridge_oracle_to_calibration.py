@@ -14,7 +14,7 @@ from unittest.mock import patch
 
 import pytest
 
-from scripts.bridge_oracle_to_calibration import bridge
+from scripts.bridge_oracle_to_calibration import _metric_observation_support, bridge
 
 
 @pytest.fixture
@@ -52,6 +52,16 @@ def mock_db(tmp_path):
             low_temp REAL,
             unit TEXT,
             authority TEXT
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE world.daily_observation_revisions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            city TEXT NOT NULL,
+            target_date TEXT NOT NULL,
+            source TEXT NOT NULL,
+            incoming_row_json TEXT NOT NULL,
+            recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         )
     """)
     conn.commit()
@@ -148,6 +158,50 @@ def _insert_verified_low_hours(conn, city, target_date, source, low, *, unit="F"
                 value,
                 unit,
             ),
+        )
+
+
+def _insert_daily_observation_revision(
+    conn,
+    city,
+    target_date,
+    source,
+    *,
+    high,
+    low,
+    unit="F",
+    authority="VERIFIED",
+    recorded_at=None,
+    payload_source=None,
+):
+    payload = {
+        "city": city,
+        "target_date": target_date,
+        "source": payload_source or source,
+        "high_temp": high,
+        "low_temp": low,
+        "unit": unit,
+        "high_target_unit": unit,
+        "low_target_unit": unit,
+        "authority": authority,
+    }
+    if recorded_at is None:
+        conn.execute(
+            """
+            INSERT INTO world.daily_observation_revisions
+                (city, target_date, source, incoming_row_json)
+            VALUES (?, ?, ?, ?)
+            """,
+            (city, target_date, source, json.dumps(payload, sort_keys=True)),
+        )
+    else:
+        conn.execute(
+            """
+            INSERT INTO world.daily_observation_revisions
+                (city, target_date, source, incoming_row_json, recorded_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (city, target_date, source, json.dumps(payload, sort_keys=True), recorded_at),
         )
 
 
@@ -562,3 +616,152 @@ def test_bridge_uses_verified_daily_observations_when_hourly_metric_table_is_emp
     assert artifact[city]["high"]["status"] == "OK"
     assert artifact[city]["low"]["status"] == "OK"
     assert artifact[city]["low"]["source_role"] == "canonical_observation_instants_v2"
+
+
+@patch("scripts.bridge_oracle_to_calibration.get_forecasts_connection_with_world")
+def test_bridge_uses_daily_observation_revisions_when_hourly_and_legacy_daily_are_empty(
+    mock_helper, mock_db, monkeypatch, tmp_path
+):
+    """Relationship: revisioned HKO daily authority prevents false LOW sample gaps."""
+    db_path, conn = mock_db
+    monkeypatch.setenv("ZEUS_STORAGE_ROOT", str(tmp_path))
+
+    @contextmanager
+    def fake_ctx(*args, **kwargs):
+        yield conn
+
+    mock_helper.side_effect = fake_ctx
+
+    city = "Hong Kong"
+    conn.execute("DELETE FROM world.observation_instants_v2")
+    conn.execute("DELETE FROM observations")
+    for day in range(1, 61):
+        target_date = f"2026-03-{day:02d}" if day <= 31 else f"2026-04-{day - 31:02d}"
+        conn.execute(
+            """
+            INSERT INTO settlements
+                (city, target_date, settlement_value, pm_bin_lo, pm_bin_hi,
+                 settlement_source_type, unit, authority, temperature_metric)
+            VALUES (?, ?, 28.0, 28.0, 28.0, 'HKO', 'C', 'VERIFIED', 'high')
+            """,
+            (city, target_date),
+        )
+        conn.execute(
+            """
+            INSERT INTO settlements
+                (city, target_date, settlement_value, pm_bin_lo, pm_bin_hi,
+                 settlement_source_type, unit, authority, temperature_metric)
+            VALUES (?, ?, 22.0, 22.0, 22.0, 'HKO', 'C', 'VERIFIED', 'low')
+            """,
+            (city, target_date),
+        )
+        _insert_daily_observation_revision(
+            conn,
+            city,
+            target_date,
+            "hko_daily_api",
+            high=28.7,
+            low=22.9,
+            unit="C",
+        )
+    conn.commit()
+
+    stats = bridge(dry_run=False)
+
+    assert stats == {"cities": 2, "comparisons": 120, "mismatches": 0}
+    artifact = json.loads((tmp_path / "data" / "oracle_error_rates.json").read_text())
+    high = artifact[city]["high"]
+    low = artifact[city]["low"]
+    assert high["status"] == "OK"
+    assert high["source_role"] == "canonical_daily_observation_revisions"
+    assert low["status"] == "OK"
+    assert low["source_role"] == "canonical_daily_observation_revisions"
+    assert low["n"] == 60
+    assert low["penalty_multiplier"] == 1.0
+
+
+@patch("scripts.bridge_oracle_to_calibration.get_forecasts_connection_with_world")
+def test_bridge_matches_daily_revision_source_case_insensitively_before_fallback(
+    mock_helper, mock_db, monkeypatch, tmp_path
+):
+    """Relationship: source casing drift must not let unrelated revisions win."""
+    db_path, conn = mock_db
+    monkeypatch.setenv("ZEUS_STORAGE_ROOT", str(tmp_path))
+
+    @contextmanager
+    def fake_ctx(*args, **kwargs):
+        yield conn
+
+    mock_helper.side_effect = fake_ctx
+
+    city = "Hong Kong"
+    for day in range(1, 61):
+        target_date = f"2026-03-{day:02d}" if day <= 31 else f"2026-04-{day - 31:02d}"
+        conn.execute(
+            """
+            INSERT INTO settlements
+                (city, target_date, settlement_value, pm_bin_lo, pm_bin_hi,
+                 settlement_source_type, unit, authority, temperature_metric)
+            VALUES (?, ?, 28.0, 28.0, 28.0, 'hKo', 'c', 'VERIFIED', 'high')
+            """,
+            (city, target_date),
+        )
+        _insert_daily_observation_revision(
+            conn,
+            city,
+            target_date,
+            "HKO_DAILY_API",
+            high=28.7,
+            low=22.9,
+            unit="c",
+            recorded_at=f"{target_date}T00:00:00Z",
+        )
+        _insert_daily_observation_revision(
+            conn,
+            city,
+            target_date,
+            "HKO_DAILY_API",
+            high=31.7,
+            low=19.9,
+            unit="c",
+            recorded_at=f"{target_date}T00:30:00Z",
+            payload_source="unrelated_source",
+        )
+        _insert_daily_observation_revision(
+            conn,
+            target_date=target_date,
+            city=city,
+            source="unrelated_source",
+            high=31.7,
+            low=19.9,
+            unit="c",
+            recorded_at=f"{target_date}T01:00:00Z",
+        )
+    conn.commit()
+
+    stats = bridge(dry_run=False)
+
+    assert stats == {"cities": 2, "comparisons": 120, "mismatches": 0}
+    artifact = json.loads((tmp_path / "data" / "oracle_error_rates.json").read_text())
+    high = artifact[city]["high"]
+    assert high["status"] == "OK"
+    assert high["source_role"] == "canonical_daily_observation_revisions"
+    assert high["n"] == 60
+    assert high["mismatches"] == 0
+    assert high["penalty_multiplier"] == 1.0
+
+
+def test_metric_observation_support_skips_daily_revisions_when_no_sources(mock_db, monkeypatch):
+    """Relationship: empty revision-source universe is no daily-revision evidence."""
+    db_path, conn = mock_db
+    city = "Chicago"
+    _insert_verified_high_hours(conn, city, "2026-05-01", "wu_icao_history", 75.0)
+    conn.commit()
+    monkeypatch.setattr(
+        "scripts.bridge_oracle_to_calibration._daily_revision_sources_for_city",
+        lambda _city: frozenset(),
+    )
+
+    support = _metric_observation_support(conn, city, "high")
+
+    assert support == {"days": 1, "last_date": "2026-05-01"}

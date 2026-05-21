@@ -5,25 +5,14 @@
 #                  docs/operations/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md forecasts DB p_raw authority.
 """Slice P2-B1 relationship + idempotency tests.
 
-PR #19 phase 2 audit Q2: ensemble_snapshots schema declared by
-init_schema did not include `bias_corrected` column, but
-_store_snapshot_p_raw at evaluator.py:1928 writes
-`UPDATE ensemble_snapshots SET p_raw_json = ?, bias_corrected = ?`.
+PR #19 phase 2 originally protected the legacy
+`ensemble_snapshots.bias_corrected` column. v1.F20 removed the legacy
+world-class table and moved canonical writes to `forecasts.ensemble_snapshots_v2`.
 
-Fresh init_schema DBs (CI, dev, in-memory test fixtures) lacked the
-column → writer's silent-error swallow caused two runtime_guards
-tests to fail with NULL p_raw_json instead of the expected value.
-Production DB likely had it via undocumented ALTER TABLE migration.
-
-P2-B1 fix:
-1. Add column to CREATE TABLE ensemble_snapshots.
-2. Add idempotent ALTER TABLE to migration block (safe for legacy
-   DBs that already have the column).
-
-This test pins both:
-- column exists post-init_schema
-- second init_schema call doesn't error (idempotency)
-- writer + reader round-trip works
+This test now pins the current relationship:
+- fresh `init_schema()` must not recreate the removed legacy table
+- repeated `init_schema()` remains idempotent
+- writer + reader round-trip works on `ensemble_snapshots_v2`
 """
 from __future__ import annotations
 
@@ -49,32 +38,21 @@ def _columns_of(conn: sqlite3.Connection, table: str) -> dict[str, dict]:
     }
 
 
-def test_ensemble_snapshots_declares_bias_corrected_column():
-    """CREATE TABLE must declare bias_corrected on a fresh init_schema DB."""
+def test_fresh_init_schema_does_not_recreate_legacy_ensemble_snapshots():
+    """Fresh world schema must not recreate removed legacy ensemble_snapshots."""
     conn = sqlite3.connect(":memory:")
     init_schema(conn)
     cols = _columns_of(conn, "ensemble_snapshots")
-    assert "bias_corrected" in cols, (
-        "ensemble_snapshots schema must declare bias_corrected column "
-        "(P2-B1 fix; pre-fix this column existed only via legacy ALTER "
-        "TABLE migration, breaking fresh init_schema DBs)."
-    )
-    info = cols["bias_corrected"]
-    assert info["type"] == "INTEGER", f"expected INTEGER, got {info['type']!r}"
-    assert info["notnull"] == 1, "bias_corrected must be NOT NULL"
-    assert str(info["dflt"]) == "0", f"default must be 0, got {info['dflt']!r}"
+    assert cols == {}, "v1.F20 removed legacy ensemble_snapshots from fresh world init"
 
 
-def test_init_schema_is_idempotent_for_bias_corrected():
-    """Running init_schema twice must not raise (idempotency on the migration)."""
+def test_init_schema_is_idempotent_without_legacy_ensemble_snapshots():
+    """Running init_schema twice must not recreate the removed legacy table."""
     conn = sqlite3.connect(":memory:")
     init_schema(conn)
-    # Second call hits the ALTER TABLE migration; OperationalError ("duplicate
-    # column name") is caught by the surrounding try/except; verify no exception
-    # escapes.
     init_schema(conn)
     cols = _columns_of(conn, "ensemble_snapshots")
-    assert "bias_corrected" in cols
+    assert cols == {}
 
 
 @pytest.mark.skip(

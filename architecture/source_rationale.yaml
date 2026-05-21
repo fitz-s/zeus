@@ -19,6 +19,7 @@ hazard_badges:
   NOT_DAEMON_WIRED: Module exists in src/ but is not imported from any daemon hot-path file (src/main.py, src/ingest_main.py, src/engine/*, src/execution/*, src/state/db.py runtime callers, scripts/healthcheck.py healthy predicate). Daemon activation happens in a separate operator-controlled commit, not by anyone who happens to need the module.
   SOURCE_INGEST_SCHEMA_DRIFT: Ingest payload contract has drifted from the declared schema; mx2t6/mn2t6 field shapes, causality evidence, or boundary markers must be re-verified before merging new ingest paths.
   LOW_HIGH_METRIC_MIXING: High and low temperature metric families must never be mixed in a single ingest payload; each payload must carry an explicit metric identity tag.
+  MULTI_BIN_MUTUALLY_EXCLUSIVE_OVERALLOCATION: Weather market bins for one city/date/metric family are mutually exclusive outcomes; live entry selection must not treat multiple bins as independent scalar bets.
 write_routes:
   canonical_position_write:
     owner: src/state/ledger.py
