@@ -2003,7 +2003,7 @@ def _filled_entry_execution_fact_repair_candidates(conn: sqlite3.Connection) -> 
               FROM venue_order_facts
              GROUP BY command_id
         ),
-        terminal_order AS (
+        latest_order AS (
             SELECT fact.command_id,
                    fact.venue_order_id,
                    fact.remaining_size,
@@ -2013,8 +2013,20 @@ def _filled_entry_execution_fact_repair_candidates(conn: sqlite3.Connection) -> 
               JOIN latest_order_fact latest
                 ON latest.command_id = fact.command_id
                AND latest.max_sequence = fact.local_sequence
-             WHERE fact.state IN ('MATCHED', 'FILLED')
+            WHERE fact.state IN ('MATCHED', 'FILLED')
                AND CAST(COALESCE(fact.remaining_size, '0') AS REAL) = 0
+               AND CAST(COALESCE(fact.matched_size, '0') AS REAL) > 0
+            UNION ALL
+            SELECT fact.command_id,
+                   fact.venue_order_id,
+                   fact.remaining_size,
+                   fact.matched_size,
+                   fact.state
+              FROM venue_order_facts fact
+              JOIN latest_order_fact latest
+                ON latest.command_id = fact.command_id
+               AND latest.max_sequence = fact.local_sequence
+             WHERE fact.state IN ('PARTIALLY_MATCHED', 'EXPIRED', 'CANCEL_CONFIRMED')
                AND CAST(COALESCE(fact.matched_size, '0') AS REAL) > 0
         ),
         entry_fill AS (
@@ -2048,8 +2060,9 @@ def _filled_entry_execution_fact_repair_candidates(conn: sqlite3.Connection) -> 
                cmd.size AS cmd_size,
                cmd.price AS cmd_price,
                cmd.created_at AS cmd_created_at,
-               terminal_order.matched_size AS order_fact_matched_size,
-               terminal_order.remaining_size AS order_fact_remaining_size,
+               latest_order.matched_size AS order_fact_matched_size,
+               latest_order.remaining_size AS order_fact_remaining_size,
+               latest_order.state AS order_fact_state,
                entry_fill.trade_fact_id,
                NULL AS trade_id,
                entry_fill.fill_states AS trade_state,
@@ -2063,9 +2076,9 @@ def _filled_entry_execution_fact_repair_candidates(conn: sqlite3.Connection) -> 
                ef.fill_price AS ef_fill_price,
                ef.terminal_exec_status AS ef_terminal_exec_status
           FROM venue_commands cmd
-          JOIN terminal_order
-            ON terminal_order.command_id = cmd.command_id
-           AND terminal_order.venue_order_id = cmd.venue_order_id
+          JOIN latest_order
+            ON latest_order.command_id = cmd.command_id
+           AND latest_order.venue_order_id = cmd.venue_order_id
           JOIN entry_fill
             ON entry_fill.command_id = cmd.command_id
           LEFT JOIN execution_fact ef
@@ -2073,8 +2086,8 @@ def _filled_entry_execution_fact_repair_candidates(conn: sqlite3.Connection) -> 
            AND ef.order_role = 'entry'
          WHERE cmd.intent_kind = 'ENTRY'
            AND cmd.side = 'BUY'
-           AND cmd.state = 'FILLED'
-           AND ABS(CAST(entry_fill.filled_size AS REAL) - CAST(terminal_order.matched_size AS REAL)) <= 0.000001
+           AND cmd.state IN ('FILLED', 'PARTIAL', 'EXPIRED')
+           AND ABS(CAST(entry_fill.filled_size AS REAL) - CAST(latest_order.matched_size AS REAL)) <= 0.000001
            AND EXISTS (
                SELECT 1
                  FROM position_lots lot
@@ -2093,7 +2106,13 @@ def _filled_entry_execution_fact_repair_candidates(conn: sqlite3.Connection) -> 
                OR COALESCE(ef.command_id, '') != cmd.command_id
                OR ABS(COALESCE(CAST(ef.shares AS REAL), 0.0) - CAST(entry_fill.filled_size AS REAL)) > 0.000001
                OR ABS(COALESCE(CAST(ef.fill_price AS REAL), 0.0) - CAST(entry_fill.fill_price AS REAL)) > 0.000001
-               OR COALESCE(ef.terminal_exec_status, '') != 'filled'
+               OR COALESCE(ef.terminal_exec_status, '') != CASE
+                   WHEN cmd.state = 'FILLED'
+                    AND CAST(COALESCE(latest_order.remaining_size, '0') AS REAL) = 0
+                    AND latest_order.state IN ('MATCHED', 'FILLED')
+                   THEN 'filled'
+                   ELSE 'partial'
+               END
            )
          ORDER BY entry_fill.observed_at, entry_fill.trade_fact_id
         """
@@ -2108,19 +2127,7 @@ def _log_filled_entry_trade_candidate_execution_fact(
 ) -> None:
     from src.state.db import log_execution_fact
 
-    filled_size = _positive_decimal_or_none(candidate.get("filled_size"))
-    command_size = _positive_decimal_or_none(candidate.get("cmd_size") or candidate.get("size"))
-    command_state = str(candidate.get("cmd_state") or candidate.get("state") or "").upper()
-    terminal_status = (
-        "filled"
-        if command_state == CommandState.FILLED.value
-        or (
-            filled_size is not None
-            and command_size is not None
-            and filled_size >= command_size
-        )
-        else "partial"
-    )
+    terminal_status = _entry_execution_fact_terminal_status(candidate)
     position_id = str(candidate.get("position_id") or "")
     observed_at = str(candidate.get("observed_at") or _now_iso())
     log_execution_fact(
@@ -2139,6 +2146,19 @@ def _log_filled_entry_trade_candidate_execution_fact(
         venue_status="FILLED" if terminal_status == "filled" else "PARTIAL",
         terminal_exec_status=terminal_status,
     )
+
+
+def _entry_execution_fact_terminal_status(candidate: Mapping[str, object]) -> str:
+    remaining = _positive_decimal_or_none(candidate.get("order_fact_remaining_size"))
+    order_state = str(candidate.get("order_fact_state") or "").upper()
+    command_state = str(candidate.get("cmd_state") or candidate.get("state") or "").upper()
+    if (
+        command_state == CommandState.FILLED.value
+        and remaining is None
+        and order_state in {"MATCHED", "FILLED"}
+    ):
+        return "filled"
+    return "partial"
 
 
 def reconcile_filled_entry_execution_fact_repairs(conn: sqlite3.Connection) -> dict:
@@ -2162,12 +2182,14 @@ def reconcile_filled_entry_execution_fact_repairs(conn: sqlite3.Connection) -> d
                 """,
                 (f"{candidate.get('position_id')}:entry",),
             ).fetchone()
+            expected_status = _entry_execution_fact_terminal_status(candidate)
+            expected_venue_status = "FILLED" if expected_status == "filled" else "PARTIAL"
             if verified is None:
                 raise RuntimeError("filled entry execution_fact repair missing post-write row")
             if (
                 str(verified["command_id"] or "") != command_id
-                or str(verified["terminal_exec_status"] or "") != "filled"
-                or str(verified["venue_status"] or "") != "FILLED"
+                or str(verified["terminal_exec_status"] or "") != expected_status
+                or str(verified["venue_status"] or "") != expected_venue_status
             ):
                 raise RuntimeError(
                     "filled entry execution_fact repair postcondition failed "

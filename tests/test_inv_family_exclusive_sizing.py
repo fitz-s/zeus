@@ -280,19 +280,26 @@ def test_non_trade_decisions_in_family_are_ignored() -> None:
     assert rejected_b.rejection_reason_enum is NoTradeReason.RISK_LIMITS_EXCEEDED
 
 
-def test_existing_family_exposure_blocks_new_different_bin_across_cycles() -> None:
+@pytest.mark.parametrize("blocking_phase", ["open", "pending", "active"])
+def test_open_pending_active_family_exposure_blocks_fdr_selected_hypothesis_without_optimizer_intent(
+    blocking_phase: str,
+) -> None:
     """Cross-cycle relationship: existing exposure owns the family entry budget.
 
     If a prior cycle already opened one bin for the same city/date/metric
-    family, a later FDR-selected hypothesis for a different bin is not an
-    executable portfolio. It must be rejected before executor submission.
+    family, a later FDR-selected hypothesis for a different bin is still only
+    a statistical selection, not an executable family portfolio selection. It
+    must be rejected before executor submission unless a FamilyPortfolioOptimizer
+    portfolio intent is present.
     """
     bins = {s[2]: s for s in _BIN_SPECS}
     new_bin = _trade_decision(bins["22-23°F"], size_usd=20.0, forward_edge=0.07)
+    new_bin.fdr_family_size = len(_BIN_SPECS)
+    new_bin.n_edges_after_fdr = 1
     exposure = WeatherFamilyExposure(
         key=WeatherFamilyKey(CITY, TARGET_DATE, METRIC),
         bin_label="20-21°F",
-        phase="active",
+        phase=blocking_phase,
         position_id="pos-existing-1",
     )
 
@@ -313,6 +320,39 @@ def test_existing_family_exposure_blocks_new_different_bin_across_cycles() -> No
     assert rejected.rejection_reason_detail is not None
     assert "existing_exposure_bin='20-21°F'" in rejected.rejection_reason_detail
     assert "no family portfolio intent" in rejected.rejection_reason_detail
+    assert "FDR" not in rejected.rejection_stage
+
+
+@pytest.mark.parametrize("blocking_phase", ["open", "pending", "active"])
+def test_family_portfolio_optimizer_intent_is_the_only_existing_exposure_bypass(
+    blocking_phase: str,
+) -> None:
+    """FamilyPortfolioOptimizer intent, not FDR selection, can own multi-bin execution."""
+    bins = {s[2]: s for s in _BIN_SPECS}
+    new_bin = _trade_decision(bins["22-23°F"], size_usd=20.0, forward_edge=0.07)
+    new_bin.fdr_family_size = len(_BIN_SPECS)
+    new_bin.n_edges_after_fdr = 1
+    exposure = WeatherFamilyExposure(
+        key=WeatherFamilyKey(CITY, TARGET_DATE, METRIC),
+        bin_label="20-21°F",
+        phase=blocking_phase,
+        position_id="pos-existing-1",
+    )
+
+    out = dedup_mutually_exclusive_families(
+        [new_bin],
+        city=CITY,
+        target_date=TARGET_DATE,
+        temperature_metric=METRIC,
+        existing_exposures=[exposure],
+        family_portfolio_intent=True,
+        enabled=True,
+    )
+
+    assert _count_trades(out) == 1
+    assert out[0].should_trade is True
+    assert out[0].rejection_stage == ""
+    assert out[0].rejection_reasons == []
 
 
 def test_portfolio_positions_project_to_weather_family_exposure_read_model() -> None:
