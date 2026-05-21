@@ -293,6 +293,22 @@ files:
     zone: K4_experimental
     authority_role: package_marker
     why: Marks analysis namespace; currently placeholder.
+  src/analysis/market_analysis_vnext.py:
+    zone: K4_experimental
+    authority_role: microstructure_analytics
+    why: >
+      Phase 2 T4 (PHASE_2_ULTRAPLAN.md v3.1 §7, sha 00c2399742, SCAFFOLD 2026-05-20):
+      MarketAnalysisVNext(snapshot, history) -> MicrostructureMetrics. Computes
+      microstructure observables (wide_spread_display_substitution, spread_observed_window_ms,
+      depth_at_best_ask, polymarket_end_anchor_source) per snapshot. Wires
+      market_end_anchor_source() (market_phase.py:252) to replace static 'unknown_legacy'
+      default in execution_intent.py:~673. T4_MERGE_DATE constant used by INV-anchor-source-real-value
+      antibody. SCAFFOLD only — production bodies in T4 production pass.
+    hazards:
+    - SCAFFOLD_ONLY_NO_PRODUCTION_BODIES
+    downstream:
+    - src/contracts/execution_intent.py
+    - architecture/db_table_ownership.yaml (market_microstructure_snapshots)
   src/contracts/AGENTS.md:
     zone: docs
     authority_role: registry

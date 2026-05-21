@@ -210,6 +210,22 @@ tables:
       upstream ensemble_snapshots_v2.bin_grid_id covers the 24h lifecycle bin evolution.
       SCHEMA_FORECASTS_VERSION 4. CHECK (schema_version IN (3, 4)) for migration window.
 
+  - name: market_microstructure_snapshots
+    db: forecasts
+    schema_class: forecast_class
+    schema_version_owner: SCHEMA_FORECASTS_VERSION
+    created_by: "pending_t4_production (init_schema_forecasts; SCHEMA_FORECASTS_VERSION 5)"
+    pk_col: snapshot_id
+    notes: >
+      Phase 2 T4 (PHASE_2_ULTRAPLAN.md v3.1 §7, sha 00c2399742, SCAFFOLD 2026-05-20):
+      microstructure observational evidence per snapshot. Columns: snapshot_id,
+      event_slug, condition_id, captured_at, wide_spread (0/1), spread_window_ms,
+      depth_at_best_ask, anchor_source (gamma_explicit|f1_12z_fallback|unknown_legacy|''),
+      bin_grid_id, bin_schema_version, schema_version.
+      Writer: src/analysis/market_analysis_vnext.py MarketAnalysisVNext.compute()
+      via caller-provided conn (INV-37). SCHEMA_FORECASTS_VERSION 4→5 (production pass).
+      SCAFFOLD only — CREATE TABLE DDL and production bodies deferred to T4 production pass.
+
   # ---------------------------------------------------------------------------
   # LEGACY_ARCHIVED — ghost copies of forecast-class tables on world.db
   # Same table names as forecast-class entries above, but db: world.
