@@ -27,7 +27,7 @@ if TYPE_CHECKING:
 #   git log --format=%cI -1 origin/main
 # after PR-T4 is merged. Antibody INV-anchor-source-real-value queries
 # settlement_commands WHERE requested_at >= T4_MERGE_DATE.
-T4_MERGE_DATE: str = "2026-05-XX"
+T4_MERGE_DATE: str = "2026-05-21T07:46:25+00:00"
 
 
 @dataclass(frozen=True)
