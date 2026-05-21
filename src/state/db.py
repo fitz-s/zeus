@@ -2524,7 +2524,7 @@ def assert_schema_current(conn: sqlite3.Connection) -> None:
 # SCHEMA_FORECASTS_VERSION: bumped whenever forecast-authority DDL changes.
 # Owned tables include the 7 K1 forecast-class tables, the live source
 # authority chain tables, producer readiness_state, and forecast-live job_run.
-SCHEMA_FORECASTS_VERSION: int = 4  # T2 Day0Nowcast tables (2026-05-19)
+SCHEMA_FORECASTS_VERSION: int = 5  # T4 microstructure + bin_grid_id retrofit (2026-05-21)
 
 
 def _create_settlements(conn: sqlite3.Connection) -> None:
@@ -3110,6 +3110,41 @@ def _create_day0_nowcast_runs(conn: sqlite3.Connection) -> None:
     """)
 
 
+def _create_market_microstructure_snapshots(conn: sqlite3.Connection) -> None:
+    """Create market_microstructure_snapshots table. Idempotent.
+
+    K1 forecast-class only table; not in world_src so always created via this
+    static helper (ATTACH branch will not find it in world_src.sqlite_master).
+
+    T4 MarketAnalysisVNext — SCHEMA_FORECASTS_VERSION 5 (2026-05-21).
+    One row per MarketAnalysisVNext.compute() result.
+    """
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS market_microstructure_snapshots (
+            id                              INTEGER PRIMARY KEY AUTOINCREMENT,
+            snapshot_id                     TEXT NOT NULL,
+            event_slug                      TEXT NOT NULL,
+            condition_id                    TEXT NOT NULL,
+            captured_at_iso                 TEXT NOT NULL,
+            wide_spread_display_substitution INTEGER NOT NULL CHECK (wide_spread_display_substitution IN (0, 1)),
+            spread_observed_window_ms       INTEGER,
+            depth_at_best_ask               INTEGER NOT NULL DEFAULT 0,
+            polymarket_end_anchor_source    TEXT NOT NULL DEFAULT 'unknown_legacy',
+            bin_grid_id                     TEXT,
+            bin_schema_version              TEXT,
+            recorded_at                     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        )
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_mms_snapshot_id
+            ON market_microstructure_snapshots(snapshot_id)
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_mms_event_slug_captured
+            ON market_microstructure_snapshots(event_slug, captured_at_iso)
+    """)
+
+
 def init_schema_forecasts(conn: sqlite3.Connection) -> None:
     """Create all forecast-authority tables on zeus-forecasts.db. Idempotent.
 
@@ -3266,6 +3301,21 @@ def init_schema_forecasts(conn: sqlite3.Connection) -> None:
     # via static helpers (ATTACH branch will not find them in world_src.sqlite_master).
     _create_day0_horizon_platt_fits(conn)
     _create_day0_nowcast_runs(conn)
+
+    # T4 MarketAnalysisVNext — SCHEMA_FORECASTS_VERSION 5 (2026-05-21).
+    # ALTER TABLE migrations for F4 bin_grid_id retrofit + new microstructure table.
+    # Guard pattern: swallow "duplicate column" on already-migrated DBs.
+    for _alter_sql in (
+        "ALTER TABLE day0_nowcast_runs ADD COLUMN bin_grid_id TEXT",
+        "ALTER TABLE day0_nowcast_runs ADD COLUMN bin_schema_version TEXT",
+    ):
+        try:
+            conn.execute(_alter_sql)
+        except Exception as _exc:
+            if "duplicate column" not in str(_exc).lower():
+                raise
+
+    _create_market_microstructure_snapshots(conn)
 
     # Mark schema current — MUST be last (partial failure must not mark ready).
     conn.execute(f"PRAGMA user_version = {SCHEMA_FORECASTS_VERSION}")

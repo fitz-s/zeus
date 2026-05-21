@@ -572,6 +572,10 @@ def enqueue_redeem_command(
     from src/execution/settlement_commands.py (read-only import; that module
     is NOT modified by T1C).
 
+    T4 wire: polymarket_end_anchor_source is looked up from decision_events
+    (accessible via world ATTACH on conn) by condition_id. Falls back to ""
+    so request_redeem defaults to 'unknown_legacy' when no decision_event exists.
+
     Returns dict with keys: status ("queued" | "already_exists" | "error"),
     command_id (str | None), reason (str | None).
     """
@@ -583,6 +587,28 @@ def enqueue_redeem_command(
     try:
         resolved_market_id = market_id or condition_id
         assert_settlement_schema_ready(conn)
+
+        # T4: look up anchor source from decision_events (world ATTACH on conn).
+        # decision_events.condition_id is nullable; IS NOT NULL guard required.
+        _anchor_source = ""
+        if condition_id:
+            try:
+                _anchor_row = conn.execute(
+                    """
+                    SELECT polymarket_end_anchor_source
+                    FROM decision_events
+                    WHERE condition_id = ?
+                      AND polymarket_end_anchor_source IS NOT NULL
+                    ORDER BY decision_time DESC
+                    LIMIT 1
+                    """,
+                    (condition_id,),
+                ).fetchone()
+                if _anchor_row is not None:
+                    _anchor_source = str(_anchor_row[0] or "")
+            except Exception:
+                pass  # table absent in test envs or partial schema; fall back to ""
+
         existing = conn.execute(
             """
             SELECT command_id FROM settlement_commands
@@ -604,6 +630,7 @@ def enqueue_redeem_command(
             token_amounts=token_amounts or {},
             conn=conn,
             winning_index_set=winning_index_set,
+            polymarket_end_anchor_source=_anchor_source,
         )
         logger.info(
             "pUSD redemption for %s (condition=%s) recorded in R1 settlement command ledger: %s",

@@ -12,9 +12,6 @@ from src.contracts.semantic_types import Direction
 if TYPE_CHECKING:
     from src.contracts.slippage_bps import SlippageBps
     from src.contracts.executable_market_snapshot_v2 import ExecutableMarketSnapshotV2
-    # T4 production pass: wire market_end_anchor_source into polymarket_end_anchor_source
-    # writer at line ~673 (from_forecast_context). Import moves outside TYPE_CHECKING at that time.
-    from src.strategy.market_phase import market_end_anchor_source as _market_end_anchor_source  # noqa: F401
 
 
 CorrectedPricingSemanticsVersion = Literal["corrected_executable_cost_v1"]
@@ -673,9 +670,6 @@ class DecisionSourceContext:
             observation_time=_context_text(context.get("observation_time")),
             provider_reported_time=_context_text(context.get("provider_reported_time")) or None,
             observation_available_at=_context_text(context.get("observation_available_at")),
-            # T4 production pass: replace static context.get() with market_end_anchor_source(market).
-            # See src/strategy/market_phase.py:252 for function body.
-            # Market dict must be threaded through to this call site at T4 production time.
             polymarket_end_anchor_source=_context_text(context.get("polymarket_end_anchor_source")),
             first_member_observed_time=_context_text(context.get("first_member_observed_time")),
             run_complete_time=_context_text(context.get("run_complete_time")),
