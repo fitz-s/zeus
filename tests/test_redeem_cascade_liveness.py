@@ -42,6 +42,10 @@ def _allow_redemption(monkeypatch) -> None:
         "src.execution.settlement_commands.redemption_decision",
         lambda: SimpleNamespace(allow_redemption=True, block_reason=None, state="LIVE_ENABLED"),
     )
+    monkeypatch.setattr(
+        "src.execution.settlement_commands._fetch_neg_risk_from_gamma_for_submitter",
+        lambda _condition_id: {"neg_risk": 0, "yes_token_id": None, "no_token_id": None},
+    )
 
 
 def _seed_intent_row(conn, monkeypatch, condition_id: str = "c30f28a5-d4e-test") -> str:
@@ -124,10 +128,11 @@ def test_submit_redeem_transitions_to_operator_required_on_stub(conn, monkeypatc
         f"stub-deferred should land in OPERATOR_REQUIRED, got {result.state}"
     )
     row = conn.execute(
-        "SELECT state, terminal_at FROM settlement_commands WHERE command_id = ?",
+        "SELECT state, autoretry_eligible, terminal_at FROM settlement_commands WHERE command_id = ?",
         (command_id,),
     ).fetchone()
     assert row["state"] == "REDEEM_OPERATOR_REQUIRED"
+    assert row["autoretry_eligible"] == 1
     assert row["terminal_at"] is None, "OPERATOR_REQUIRED is NOT terminal (operator CLI exits it)"
 
     # Atomicity contract: logger.warning emitted with the expected prefix
@@ -165,10 +170,11 @@ def test_submit_redeem_transitions_to_failed_on_unexpected_error(conn, monkeypat
 
     assert result.state == SettlementState.REDEEM_FAILED
     row = conn.execute(
-        "SELECT state, terminal_at FROM settlement_commands WHERE command_id = ?",
+        "SELECT state, autoretry_eligible, terminal_at FROM settlement_commands WHERE command_id = ?",
         (command_id,),
     ).fetchone()
     assert row["state"] == "REDEEM_FAILED"
+    assert row["autoretry_eligible"] == 0
     assert row["terminal_at"] is not None, "REDEEM_FAILED is terminal; terminal_at must be set"
 
     # Atomicity: NO [REDEEM_OPERATOR_REQUIRED] alert for non-stub errors

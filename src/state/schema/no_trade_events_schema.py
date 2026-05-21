@@ -13,7 +13,7 @@ PK: (market_slug, temperature_metric, target_date, observation_time, decision_se
   — matches decision_events natural key for FK-like joins (§5.2 "decision_natural_key
   FK-like reference"). decision_seq shared counter scope.
 
-schema_version CHECK includes 14, 15, 16, 17, 18, 19, 20:
+schema_version CHECK includes 14, 15, 16, 17, 18, 19, 20, 21, 22:
   - 14: original scaffold
   - 15: P2 T2 production pass
   - 16: MUTUALLY_EXCLUSIVE_FAMILY_DEDUP added (PR #249, 2026-05-21)
@@ -37,7 +37,7 @@ import sqlite3
 from src.contracts.no_trade_reason import NoTradeReason
 
 # Schema version stamped into each row; stays in sync with db.py SCHEMA_VERSION.
-SCHEMA_VERSION = 21
+SCHEMA_VERSION = 22
 
 # Enum CHECK: every valid NoTradeReason value, joined for SQL IN clause.
 _REASON_VALUES_SQL = ", ".join(f"'{r.value}'" for r in NoTradeReason)
@@ -52,7 +52,7 @@ CREATE TABLE IF NOT EXISTS no_trade_events (
     reason              TEXT NOT NULL CHECK (reason IN ({_REASON_VALUES_SQL})),
     reason_detail       TEXT,
     observed_at         TEXT NOT NULL,
-    schema_version      INTEGER NOT NULL CHECK (schema_version IN (14, 15, 16, 17, 18, 19, 20, 21)),
+    schema_version      INTEGER NOT NULL CHECK (schema_version IN (14, 15, 16, 17, 18, 19, 20, 21, 22)),
     schema_compatibility TEXT NOT NULL DEFAULT 'current'
         CHECK (schema_compatibility IN ('current', 'degraded')),
     PRIMARY KEY (market_slug, temperature_metric, target_date, observation_time, decision_seq)
@@ -69,7 +69,7 @@ CREATE TABLE no_trade_events_new (
     reason              TEXT NOT NULL CHECK (reason IN ({_REASON_VALUES_SQL})),
     reason_detail       TEXT,
     observed_at         TEXT NOT NULL,
-    schema_version      INTEGER NOT NULL CHECK (schema_version IN (14, 15, 16, 17, 18, 19, 20, 21)),
+    schema_version      INTEGER NOT NULL CHECK (schema_version IN (14, 15, 16, 17, 18, 19, 20, 21, 22)),
     schema_compatibility TEXT NOT NULL DEFAULT 'current'
         CHECK (schema_compatibility IN ('current', 'degraded')),
     PRIMARY KEY (market_slug, temperature_metric, target_date, observation_time, decision_seq)

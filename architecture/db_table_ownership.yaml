@@ -869,6 +869,7 @@ tables:
       - {name: zeus_submit_intent_time, type: TEXT, nullable: true, pr: PR6}
       - {name: venue_ack_time, type: TEXT, nullable: true, pr: PR6}
       - {name: clock_skew_estimate_ms_at_submit, type: INTEGER, nullable: true, pr: PR6}
+      - {name: autoretry_eligible, type: INTEGER, default: 0, pr: live_release_proof_p1_3}
 
   - name: settlement_schema_migrations
     db: trade

@@ -1,6 +1,6 @@
 # Created: 2026-05-19
-# Last reused or audited: 2026-05-19
-# Authority basis: fix/redeem-reseat-stub-deferred plan; post-PR-#183 autonomous redeem path
+# Last reused or audited: 2026-05-21
+# Authority basis: fix/redeem-reseat-stub-deferred plan; post-PR-#183 autonomous redeem path; live release proof P1-3 autoretry_eligible split
 # Lifecycle: created=2026-05-19; last_reviewed=2026-05-19; last_reused=never
 # Purpose: Antibody tests for reseat_stub_deferred_rows_for_autonomous_retry — state-guard race, truthy env parity, idempotency.
 # Reuse: Inspect settlement_commands.py reseat function and SettlementState enum before running.
@@ -33,17 +33,24 @@ def conn():
     db.close()
 
 
-def _insert_operator_required(conn: sqlite3.Connection, command_id: str, error_code: str | None) -> None:
+def _insert_operator_required(
+    conn: sqlite3.Connection,
+    command_id: str,
+    error_code: str | None,
+    *,
+    autoretry_eligible: bool = False,
+) -> None:
     error_payload = json.dumps({"errorCode": error_code}) if error_code else None
     conn.execute(
         """
         INSERT INTO settlement_commands
-          (command_id, state, condition_id, market_id, payout_asset, requested_at, error_payload)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+          (command_id, state, autoretry_eligible, condition_id, market_id, payout_asset, requested_at, error_payload)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             command_id,
             SettlementState.REDEEM_OPERATOR_REQUIRED.value,
+            1 if autoretry_eligible else 0,
             "0xcond1",
             "0xmarket1",
             "USDC",
@@ -57,23 +64,41 @@ def _insert_operator_required(conn: sqlite3.Connection, command_id: str, error_c
 def test_reseat_promotes_stub_deferred_to_retrying_when_autonomous_enabled(conn, monkeypatch):
     """Rows with errorCode=REDEEM_DEFERRED_TO_R1 are promoted to RETRYING when env is set."""
     monkeypatch.setenv("ZEUS_AUTONOMOUS_REDEEM_ENABLED", "1")
-    _insert_operator_required(conn, "cmd-001", "REDEEM_DEFERRED_TO_R1")
+    _insert_operator_required(conn, "cmd-001", "REDEEM_DEFERRED_TO_R1", autoretry_eligible=True)
 
     promoted = reseat_stub_deferred_rows_for_autonomous_retry(conn)
 
     assert promoted == 1
     row = conn.execute(
-        "SELECT state, terminal_at FROM settlement_commands WHERE command_id = ?",
+        "SELECT state, autoretry_eligible, terminal_at FROM settlement_commands WHERE command_id = ?",
         ("cmd-001",),
     ).fetchone()
     assert row["state"] == SettlementState.REDEEM_RETRYING.value
+    assert row["autoretry_eligible"] == 0
     assert row["terminal_at"] is None
+
+
+def test_reseat_requires_explicit_autoretry_marker(conn, monkeypatch):
+    """OPERATOR_REQUIRED plus an allowlisted error is still manual unless the row
+    carries autoretry_eligible=1."""
+    monkeypatch.setenv("ZEUS_AUTONOMOUS_REDEEM_ENABLED", "1")
+    _insert_operator_required(conn, "cmd-001b", "REDEEM_DEFERRED_TO_R1")
+
+    promoted = reseat_stub_deferred_rows_for_autonomous_retry(conn)
+
+    assert promoted == 0
+    row = conn.execute(
+        "SELECT state, autoretry_eligible FROM settlement_commands WHERE command_id = ?",
+        ("cmd-001b",),
+    ).fetchone()
+    assert row["state"] == SettlementState.REDEEM_OPERATOR_REQUIRED.value
+    assert row["autoretry_eligible"] == 0
 
 
 def test_reseat_no_op_when_autonomous_disabled(conn, monkeypatch):
     """Without ZEUS_AUTONOMOUS_REDEEM_ENABLED, row stays in OPERATOR_REQUIRED and returns 0."""
     monkeypatch.delenv("ZEUS_AUTONOMOUS_REDEEM_ENABLED", raising=False)
-    _insert_operator_required(conn, "cmd-002", "REDEEM_DEFERRED_TO_R1")
+    _insert_operator_required(conn, "cmd-002", "REDEEM_DEFERRED_TO_R1", autoretry_eligible=True)
 
     promoted = reseat_stub_deferred_rows_for_autonomous_retry(conn)
 
@@ -139,7 +164,7 @@ def test_reseat_handles_malformed_error_payload(conn, monkeypatch):
 def test_reseat_idempotent(conn, monkeypatch):
     """Calling twice promotes 0 on second call (row already in RETRYING)."""
     monkeypatch.setenv("ZEUS_AUTONOMOUS_REDEEM_ENABLED", "1")
-    _insert_operator_required(conn, "cmd-006", "REDEEM_DEFERRED_TO_R1")
+    _insert_operator_required(conn, "cmd-006", "REDEEM_DEFERRED_TO_R1", autoretry_eligible=True)
 
     first = reseat_stub_deferred_rows_for_autonomous_retry(conn)
     conn.commit()
@@ -153,7 +178,7 @@ def test_reseat_state_guard_skips_concurrent_transition(conn, monkeypatch):
     """State guard prevents clobbering a row that transitioned out of OPERATOR_REQUIRED
     between the SELECT and UPDATE (e.g. operator CLI set it to REDEEM_TX_HASHED)."""
     monkeypatch.setenv("ZEUS_AUTONOMOUS_REDEEM_ENABLED", "1")
-    _insert_operator_required(conn, "cmd-007", "REDEEM_DEFERRED_TO_R1")
+    _insert_operator_required(conn, "cmd-007", "REDEEM_DEFERRED_TO_R1", autoretry_eligible=True)
     # Simulate concurrent operator transition before reseat runs its UPDATE.
     conn.execute(
         "UPDATE settlement_commands SET state = ? WHERE command_id = ?",
@@ -175,7 +200,7 @@ def test_reseat_state_guard_skips_concurrent_transition(conn, monkeypatch):
 def test_reseat_truthy_env_on_value(conn, monkeypatch):
     """ZEUS_AUTONOMOUS_REDEEM_ENABLED=on is accepted (parity with polymarket_v2_adapter)."""
     monkeypatch.setenv("ZEUS_AUTONOMOUS_REDEEM_ENABLED", "on")
-    _insert_operator_required(conn, "cmd-008", "REDEEM_DEFERRED_TO_R1")
+    _insert_operator_required(conn, "cmd-008", "REDEEM_DEFERRED_TO_R1", autoretry_eligible=True)
 
     promoted = reseat_stub_deferred_rows_for_autonomous_retry(conn)
 
@@ -185,7 +210,7 @@ def test_reseat_truthy_env_on_value(conn, monkeypatch):
 def test_reseat_appends_event_on_promotion(conn, monkeypatch):
     """A stub_deferred_reseat_autonomous event is appended when a row is promoted."""
     monkeypatch.setenv("ZEUS_AUTONOMOUS_REDEEM_ENABLED", "1")
-    _insert_operator_required(conn, "cmd-009", "REDEEM_DEFERRED_TO_R1")
+    _insert_operator_required(conn, "cmd-009", "REDEEM_DEFERRED_TO_R1", autoretry_eligible=True)
 
     promoted = reseat_stub_deferred_rows_for_autonomous_retry(conn)
     conn.commit()
@@ -208,7 +233,7 @@ def test_reseat_dry_run_logged_promotes(conn, monkeypatch):
     MUST be promoted to RETRYING — same structural class as DEFERRED_TO_R1
     (on-chain action did not happen). Anchor: 2026-05-19 Karachi c8c220f5."""
     monkeypatch.setenv("ZEUS_AUTONOMOUS_REDEEM_ENABLED", "1")
-    _insert_operator_required(conn, "cmd-010", "REDEEM_DRY_RUN_LOGGED")
+    _insert_operator_required(conn, "cmd-010", "REDEEM_DRY_RUN_LOGGED", autoretry_eligible=True)
 
     promoted = reseat_stub_deferred_rows_for_autonomous_retry(conn)
 
@@ -224,7 +249,7 @@ def test_reseat_records_prior_errorcode_for_forensics(conn, monkeypatch):
     """The append_event payload MUST carry prior_errorcode so post-mortem
     queries can distinguish DEFERRED_TO_R1 vs DRY_RUN_LOGGED origin."""
     monkeypatch.setenv("ZEUS_AUTONOMOUS_REDEEM_ENABLED", "1")
-    _insert_operator_required(conn, "cmd-011", "REDEEM_DRY_RUN_LOGGED")
+    _insert_operator_required(conn, "cmd-011", "REDEEM_DRY_RUN_LOGGED", autoretry_eligible=True)
 
     promoted = reseat_stub_deferred_rows_for_autonomous_retry(conn)
     conn.commit()
@@ -263,7 +288,7 @@ def test_reseat_dry_run_logged_blocked_when_dry_run_env_on(conn, monkeypatch):
     defeats the operator-review-before-broadcast gate."""
     monkeypatch.setenv("ZEUS_AUTONOMOUS_REDEEM_ENABLED", "1")
     monkeypatch.setenv("ZEUS_AUTONOMOUS_REDEEM_DRY_RUN", "1")
-    _insert_operator_required(conn, "cmd-013", "REDEEM_DRY_RUN_LOGGED")
+    _insert_operator_required(conn, "cmd-013", "REDEEM_DRY_RUN_LOGGED", autoretry_eligible=True)
 
     promoted = reseat_stub_deferred_rows_for_autonomous_retry(conn)
 
@@ -282,7 +307,7 @@ def test_reseat_deferred_r1_promotes_regardless_of_dry_run_env(conn, monkeypatch
     promotion of unrelated stub-era rows)."""
     monkeypatch.setenv("ZEUS_AUTONOMOUS_REDEEM_ENABLED", "1")
     monkeypatch.setenv("ZEUS_AUTONOMOUS_REDEEM_DRY_RUN", "1")
-    _insert_operator_required(conn, "cmd-014", "REDEEM_DEFERRED_TO_R1")
+    _insert_operator_required(conn, "cmd-014", "REDEEM_DEFERRED_TO_R1", autoretry_eligible=True)
 
     promoted = reseat_stub_deferred_rows_for_autonomous_retry(conn)
 
