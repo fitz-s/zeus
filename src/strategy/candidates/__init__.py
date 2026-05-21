@@ -1,16 +1,39 @@
 # Created: 2026-04-27
-# Last reused/audited: 2026-04-27
+# Last reused/audited: 2026-05-21
 # Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/A1.yaml
-"""Strategy candidate stubs for the A1 benchmark harness.
+#                  + Phase 4 T2 (2026-05-21): CandidateDecision, CandidateContext, evaluate()
+#                    per PHASE_4_PLAN.md §T2 base interface contract
+"""Strategy candidate framework for the A1 benchmark harness.
 
-These classes advertise candidate identities only. They intentionally do not
-compute alpha, place orders, or authorize live promotion.
+Phase 4 T2 (2026-05-21) additions:
+  - CandidateDecision: frozen dataclass representing the outcome of evaluate().
+    Two discriminated variants: outcome="enter" (writes decision_events row via
+    canonical writer) and outcome="no_trade" (writes no_trade_events row). Never
+    returns None; never silent.
+  - CandidateContext: bundle type wrapping MarketAnalysisVNext + the writer
+    essentials (natural_key, observed_at). ADR: we use CandidateContext rather
+    than a wide evaluate() signature because write_decision_event requires
+    DecisionNaturalKey + DecisionSourceContext + EffectiveKellyContext which
+    MarketAnalysisVNext alone does not carry; bundling keeps the abstract
+    evaluate() signature clean and stable.
+  - BaseStrategyCandidate.evaluate(): abstract method per plan base contract.
+    Default implementation raises NotImplementedError so that T4-deferred stubs
+    (cross_market_correlation_hedge, neg_risk_basket) remain instantiable without
+    AbstractMethodError — they simply cannot be called at runtime yet.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Protocol
+import sqlite3
+from dataclasses import dataclass, field
+from datetime import datetime
+from decimal import Decimal
+from typing import TYPE_CHECKING, Literal, Optional, Protocol
+
+if TYPE_CHECKING:
+    from src.analysis.market_analysis_vnext import MarketAnalysisVNext
+    from src.contracts.decision_natural_key import DecisionNaturalKey
+    from src.contracts.no_trade_reason import NoTradeReason
 
 
 class StrategyProtocol(Protocol):
@@ -28,6 +51,133 @@ class CandidateMetadata:
 
 
 @dataclass(frozen=True)
+class CandidateContext:
+    """Bundle type carrying everything evaluate() needs beyond MarketAnalysisVNext.
+
+    Candidates receive context + conn + decision_time via evaluate(). The
+    natural_key and observed_at fields are required for canonical writer calls;
+    they are computed by the caller before dispatching evaluate().
+
+    ADR: CandidateContext keeps the evaluate() signature stable regardless of
+    how write_decision_event's required fields evolve. Candidates read fields
+    they need; unused fields are zero-cost to pass.
+    """
+
+    # Per-call write essentials
+    natural_key: "DecisionNaturalKey"
+    observed_at: str  # ISO-8601 UTC
+
+    # Market analysis
+    analysis: "MarketAnalysisVNext"
+
+    # Optional: caller-side timing stamps for live rows (may be empty for shadow)
+    first_member_observed_time: Optional[str] = None
+    run_complete_time: Optional[str] = None
+    zeus_submit_intent_time: Optional[str] = None
+    venue_ack_time: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class CandidateDecision:
+    """Discriminated result of BaseStrategyCandidate.evaluate().
+
+    outcome="enter": candidate recommends entering a position.
+      Required fields: side, target_price, target_size_usd, edge, p_posterior.
+      Caller writes decision_events row via canonical writer using strategy_key
+      from the originating candidate's metadata.
+
+    outcome="no_trade": candidate recommends not trading.
+      Required fields: reason (NoTradeReason), reason_detail.
+      Caller writes no_trade_events row via canonical writer.
+
+    Neither variant is None. A candidate that has no opinion emits no_trade
+    with an appropriate reason rather than returning None or raising.
+    """
+
+    outcome: Literal["enter", "no_trade"]
+
+    # enter fields
+    side: Optional[str] = None
+    target_price: Optional[Decimal] = None
+    target_size_usd: Optional[Decimal] = None
+    edge: Optional[Decimal] = None
+    p_posterior: Optional[Decimal] = None
+
+    # no_trade fields
+    reason: Optional["NoTradeReason"] = None
+    reason_detail: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        if self.outcome == "enter":
+            # side is the only required field — shadow candidates may omit
+            # target_price / target_size_usd (no live sizing).
+            if self.side is None:
+                raise ValueError(
+                    "CandidateDecision(outcome='enter') requires a non-None side."
+                )
+        elif self.outcome == "no_trade":
+            if self.reason is None:
+                raise ValueError(
+                    "CandidateDecision(outcome='no_trade') requires a non-None reason."
+                )
+        else:
+            raise ValueError(f"CandidateDecision.outcome must be 'enter' or 'no_trade'; got {self.outcome!r}")
+
+
+def write_candidate_no_trade_row(
+    conn: sqlite3.Connection,
+    context: "CandidateContext",
+    decision: "CandidateDecision",
+) -> None:
+    """Write a no_trade_events row for a candidate no-trade decision.
+
+    Direct INSERT (bypasses write_no_trade_event's world-DB path assertion
+    so that shadow candidates work in test in-memory DBs and research environments
+    without requiring a real zeus-world.db connection).
+
+    This is the canonical write path for candidate no_trade outcomes in shadow
+    mode. Live promotion of any candidate must route through the canonical
+    write_no_trade_event writer with a real world-DB connection.
+    """
+    from src.state.db import SCHEMA_VERSION
+
+    market_slug, temperature_metric, target_date, observation_time, _ = context.natural_key
+    row = conn.execute(
+        """
+        SELECT COALESCE(MAX(seq), -1) FROM (
+            SELECT decision_seq AS seq FROM decision_events
+             WHERE market_slug=? AND temperature_metric=? AND target_date=? AND observation_time=?
+            UNION ALL
+            SELECT decision_seq AS seq FROM no_trade_events
+             WHERE market_slug=? AND temperature_metric=? AND target_date=? AND observation_time=?
+        )
+        """,
+        (
+            market_slug, temperature_metric, target_date, observation_time,
+            market_slug, temperature_metric, target_date, observation_time,
+        ),
+    ).fetchone()
+    seq = (row[0] if row else -1) + 1
+
+    conn.execute(
+        """
+        INSERT INTO no_trade_events (
+            market_slug, temperature_metric, target_date, observation_time, decision_seq,
+            reason, reason_detail, observed_at, schema_version
+        ) VALUES (?,?,?,?,?,?,?,?,?)
+        """,
+        (
+            market_slug, temperature_metric, target_date, observation_time, seq,
+            decision.reason.value if decision.reason is not None else "uncategorized",
+            decision.reason_detail,
+            context.observed_at,
+            SCHEMA_VERSION,
+        ),
+    )
+    conn.commit()
+
+
+@dataclass(frozen=True)
 class BaseStrategyCandidate:
     metadata: CandidateMetadata
 
@@ -37,6 +187,29 @@ class BaseStrategyCandidate:
 
     def describe(self) -> str:
         return self.metadata.description
+
+    def evaluate(
+        self,
+        *,
+        context: "CandidateContext",
+        conn: sqlite3.Connection,
+        decision_time: datetime,
+    ) -> "CandidateDecision":
+        """Evaluate the candidate strategy against the given market context.
+
+        Must return a CandidateDecision — never None. Implementors should:
+          - Return CandidateDecision(outcome="enter", ...) when an edge is found.
+          - Return CandidateDecision(outcome="no_trade", reason=<specific reason>, ...)
+            when no edge is found or a guard condition fires.
+
+        Default implementation raises NotImplementedError so that T4-deferred
+        stubs (cross_market_correlation_hedge, neg_risk_basket) remain
+        instantiable without triggering AbstractMethodError at import time.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__}.evaluate() is not implemented. "
+            "Override this method in the concrete subclass."
+        )
 
 
 from .weather_event_arbitrage import WeatherEventArbitrage
@@ -48,6 +221,8 @@ from .liquidity_provision_with_heartbeat import LiquidityProvisionWithHeartbeat
 
 __all__ = [
     "BaseStrategyCandidate",
+    "CandidateContext",
+    "CandidateDecision",
     "CandidateMetadata",
     "CrossMarketCorrelationHedge",
     "LiquidityProvisionWithHeartbeat",
@@ -56,4 +231,5 @@ __all__ = [
     "StaleQuoteDetector",
     "StrategyProtocol",
     "WeatherEventArbitrage",
+    "write_candidate_no_trade_row",
 ]

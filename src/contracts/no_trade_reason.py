@@ -1,6 +1,6 @@
 # Created: 2026-05-20
 # Last reused or audited: 2026-05-21
-# Authority basis: PHASE_2_ULTRAPLAN.md v3.1 §5.2 (sha 00c2399742) + Phase 3 T2 (2026-05-21): +6 SHOULDER_* members per 04_PHASE_3_SHOULDER.md
+# Authority basis: PHASE_2_ULTRAPLAN.md v3.1 §5.2 (sha 00c2399742) + Phase 3 T2 (2026-05-21): +6 SHOULDER_* members per 04_PHASE_3_SHOULDER.md + Phase 4 T2/T3 (2026-05-21): +4 candidate gates per 05_PHASE_4_FDR_FAMILY_CANDIDATES.md
 
 """
 NoTradeReason — canonical StrEnum covering every rejection_reasons=[...] callsite
@@ -132,6 +132,13 @@ class NoTradeReason(StrEnum):
     SHOULDER_DAY0_BOUND_NOT_ELIMINATED = auto()
     SHOULDER_NO_TRADE_GATE = auto()
     SHOULDER_CLUSTER_CAP_EXCEEDED = auto()
+
+    # ── Phase 4 T2/T3 candidate strategy gates ────────────────────────────────
+    # 4 members per 05_PHASE_4_FDR_FAMILY_CANDIDATES.md §"NoTradeReason additions"
+    STALE_QUOTE_FILL_INFEASIBLE = auto()       # stale_quote_detector: book hash stale post info-event
+    RESOLUTION_DISPUTED = auto()               # resolution_window_maker: venue resolution status contested
+    LIQPROV_HEARTBEAT_ABSENT = auto()          # liquidity_provision_with_heartbeat: fill_probability field absent
+    WEATHER_ALERT_SOURCE_UNTRUSTED = auto()    # weather_event_arbitrage: external alert feed not wired/trusted
 
     # ── Fallback (§13) ────────────────────────────────────────────────────────
     UNCATEGORIZED = auto()
