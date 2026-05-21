@@ -1,20 +1,16 @@
 # Created: 2026-05-20
-# Last reused or audited: 2026-05-20
+# Last reused or audited: 2026-05-21
 # Authority basis: PHASE_2_ULTRAPLAN.md §8.2 + §8.3 — monitor_refresh nowcast wiring
 """
-T5 RED antibody: _maybe_write_day0_nowcast call-site invocation.
+T5 GREEN antibody: _maybe_write_day0_nowcast call-site invocation.
 
-Verifies that _refresh_day0_observation calls _maybe_write_day0_nowcast
-when position.market_slug is set AND hours_remaining <= 6.
-
-SCAFFOLD phase: _maybe_write_day0_nowcast is a stub (no actual DB write).
-The xfail marks the gap: once fit_run_id plumbing lands and the function
-actually calls write_nowcast_run, the xfail must be REMOVED (activated).
+Verifies that _maybe_write_day0_nowcast calls write_nowcast_run when
+position.market_slug is set, hours_remaining <= 6, and a platt fit is available.
 
 Gate conditions tested:
-  - market_slug=None → function NOT called.
-  - market_slug set + hours_remaining > 6 → function NOT called.
-  - market_slug set + hours_remaining <= 6 → function IS called (RED: stub only).
+  - market_slug=None → function returns early, no write.
+  - market_slug set + hours_remaining > 6 → function returns early, no write.
+  - market_slug set + hours_remaining <= 6 + fit available → write_nowcast_run called (GREEN).
 """
 
 from __future__ import annotations
@@ -49,30 +45,32 @@ def _make_temporal_context(daypart: str = "afternoon") -> MagicMock:
     return ctx
 
 
-@pytest.mark.xfail(
-    reason=(
-        "SCAFFOLD: _maybe_write_day0_nowcast is a stub — no write_nowcast_run call yet. "
-        "Remove xfail when fit_run_id plumbing lands (Phase 2 T5 GREEN)."
-    ),
-    strict=True,
-)
 def test_nowcast_write_called_when_gate_passes() -> None:
-    """market_slug set + hours_remaining <= 6 → write_nowcast_run is called.
+    """market_slug set + hours_remaining <= 6 + fit available → write_nowcast_run is called.
 
-    RED: currently a stub; xfail must be REMOVED (activated) when the
-    Phase 2 T5 GREEN phase wires write_nowcast_run into _maybe_write_day0_nowcast.
+    GREEN: fit_run_id plumbing is live; xfail removed (Phase 2 T5 GREEN).
     """
     import numpy as np
     from src.types.metric_identity import MetricIdentity
+    from src.calibration.day0_horizon_calibration import HorizonPlattFit
     from datetime import date
 
     pos = _make_position(market_slug="boston-2026-06-15-high")
     temporal_ctx = _make_temporal_context("afternoon")
 
-    # Patch at the write site (will be imported inside _maybe_write_day0_nowcast
-    # in the GREEN phase; for SCAFFOLD the patch target doesn't matter — the stub
-    # never calls it, which is why this test is xfail strict).
-    with patch("src.state.day0_nowcast_store.write_nowcast_run") as mock_write:
+    stub_fit = HorizonPlattFit(
+        alpha=1.0,
+        beta=0.0,
+        gamma_morning=0.0,
+        gamma_afternoon=0.0,
+        gamma_post_peak=0.0,
+        delta=0.0,
+        epsilon=0.0,
+        fit_run_id="test-fit-001",
+    )
+
+    with patch("src.state.day0_nowcast_store.write_nowcast_run") as mock_write, \
+         patch("src.state.day0_nowcast_store.read_latest_platt_fit", return_value=stub_fit):
         _maybe_write_day0_nowcast(
             position=pos,
             hours_remaining=4.0,
@@ -81,11 +79,12 @@ def test_nowcast_write_called_when_gate_passes() -> None:
             p_raw_vector=np.array([0.55]),
             temperature_metric=MetricIdentity.from_raw("high"),
             target_d=date(2026, 6, 15),
+            observation_time="2026-06-15T14:00:00",
             conn=None,
         )
         assert mock_write.called, (
             "_maybe_write_day0_nowcast must call write_nowcast_run when "
-            "market_slug is set and hours_remaining <= 6"
+            "market_slug is set, hours_remaining <= 6, and fit is available"
         )
 
 
@@ -97,8 +96,7 @@ def test_nowcast_write_skipped_when_market_slug_none() -> None:
     pos = _make_position(market_slug=None)
     temporal_ctx = _make_temporal_context("afternoon")
 
-    # The stub logs a DEBUG message only when gate passes; with market_slug=None
-    # it returns before logging. Verify by confirming no exception and no write.
+    # market_slug=None returns before any write attempt.
     _maybe_write_day0_nowcast(
         position=pos,
         hours_remaining=4.0,
@@ -107,6 +105,7 @@ def test_nowcast_write_skipped_when_market_slug_none() -> None:
         p_raw_vector=np.array([0.55]),
         temperature_metric=None,
         target_d=date(2026, 6, 15),
+        observation_time="2026-06-15T14:00:00",
         conn=None,
     )
     # If we reach here without exception, the early-return guard works.
@@ -128,6 +127,7 @@ def test_nowcast_write_skipped_when_hours_remaining_high() -> None:
         p_raw_vector=np.array([0.4]),
         temperature_metric=None,
         target_d=date(2026, 6, 15),
+        observation_time="2026-06-15T08:00:00",
         conn=None,
     )
     # If we reach here without exception, the hours_remaining guard works.

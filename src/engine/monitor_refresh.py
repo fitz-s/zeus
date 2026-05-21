@@ -987,10 +987,8 @@ def _refresh_day0_observation(
 
     _set_monitor_probability_fresh(position, True)
 
-    # T5 nowcast wiring (Phase 2 T5 SCAFFOLD): gate on market_slug + hours_remaining.
-    # Full write_nowcast_run integration deferred until fit_run_id plumbing lands
-    # (day0_horizon_platt_fits writer); this site is the canonical call-site
-    # location verified by the T5 antibody (test_monitor_refresh_nowcast_wiring.py).
+    # T5 nowcast wiring (Phase 2 T5): gate on market_slug + hours_remaining.
+    # write_nowcast_run called when fit is available; fail-soft on any write error.
     _maybe_write_day0_nowcast(
         position=position,
         hours_remaining=hours_remaining,
@@ -999,6 +997,7 @@ def _refresh_day0_observation(
         p_raw_vector=p_raw_vector,
         temperature_metric=temperature_metric,
         target_d=target_d,
+        observation_time=_day0_observation_field(obs, "observation_time"),
         conn=conn,
     )
 
@@ -1014,21 +1013,24 @@ def _maybe_write_day0_nowcast(
     p_raw_vector: "np.ndarray",
     temperature_metric: "MetricIdentity",
     target_d: "date",
+    observation_time: "str | None",
     conn: object,
 ) -> None:
     """Attempt a day0_nowcast_runs write if position carries a market_slug and
-    hours_remaining <= 6.  fit_run_id plumbing is deferred to Phase 2 T5 GREEN
-    phase; this scaffold emits a DEBUG log confirming the gate condition.
+    hours_remaining <= 6.  Fail-soft: any write error is logged as WARNING
+    and swallowed so the monitor loop is never interrupted.
 
     Guards:
       - position.market_slug must be non-empty (positions from v1-vintage
         positions.json default to None and are silently skipped).
       - hours_remaining must be <= 6 (G8c: within the terminal nowcast window).
       - temporal_context must be non-None (daypart requires it).
+      - observation_time must be non-empty.
+      - read_latest_platt_fit() must return a fit (skipped silently before
+        first calibration run).
 
-    Phase 2 T5 SCAFFOLD: write is a no-op stub; the antibody
-    test_monitor_refresh_nowcast_wiring.py verifies this function is called
-    with the expected arguments.
+    Phase 2 T5 GREEN: calls write_nowcast_run with live fit_run_id from
+    day0_horizon_platt_fits.
     """
     if not getattr(position, "market_slug", None):
         return
@@ -1036,16 +1038,56 @@ def _maybe_write_day0_nowcast(
         return
     if temporal_context is None:
         return
+    if not observation_time:
+        return
 
-    logger.debug(
-        "T5 nowcast gate PASS for %s market_slug=%s hours_remaining=%.1f daypart=%s — "
-        "fit_run_id plumbing deferred (Phase 2 T5 GREEN)",
-        getattr(position, "trade_id", "?"),
-        position.market_slug,
-        hours_remaining,
-        getattr(temporal_context, "daypart", "unknown"),
-    )
-    # fit_run_id write will be wired here in Phase 2 T5 GREEN phase.
+    try:
+        from src.state.day0_nowcast_store import (  # noqa: PLC0415
+            read_latest_platt_fit,
+            write_nowcast_run,
+        )
+
+        fit = read_latest_platt_fit()
+        if fit is None:
+            logger.debug(
+                "T5 nowcast: no platt fit available yet for %s — skipping write",
+                position.market_slug,
+            )
+            return
+
+        _metric_str = (
+            temperature_metric.temperature_metric
+            if hasattr(temperature_metric, "temperature_metric")
+            else str(temperature_metric)
+        )
+
+        write_nowcast_run(
+            market_slug=position.market_slug,
+            temperature_metric=_metric_str,
+            target_date=target_d.isoformat(),
+            observation_time=observation_time,
+            fit_run_id=fit.fit_run_id,
+            p_nowcast=p_cal_full,
+            p_now_raw=p_raw_vector,
+            hours_remaining=hours_remaining,
+            daypart=temporal_context.daypart,
+            source="live_nowcast",
+        )
+        logger.debug(
+            "T5 nowcast write OK: %s market_slug=%s hours_remaining=%.1f daypart=%s fit_run_id=%s",
+            getattr(position, "trade_id", "?"),
+            position.market_slug,
+            hours_remaining,
+            temporal_context.daypart,
+            fit.fit_run_id,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "T5 nowcast write FAILED (non-fatal) for %s market_slug=%s: %s",
+            getattr(position, "trade_id", "?"),
+            getattr(position, "market_slug", "?"),
+            exc,
+        )
 
 
 def _delta_bucket(delta: float) -> str:
