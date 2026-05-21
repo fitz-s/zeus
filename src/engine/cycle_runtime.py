@@ -784,15 +784,24 @@ def _reprice_decision_from_executable_snapshot(
         else _Decimal("0")
     )
     _reprice_order_type = str(final_intent_context.get("order_type") or "GTC").strip().upper()
+    # W2 is post-only passive maker sizing. It does not consume best-ask
+    # depth, so the FOK/FAK ask-taking haircut table is not the right risk
+    # model. Non-fill/queue risk belongs to order management, not Kelly size.
     _maker_effective_context = EffectiveKellyContext(
-        spread_usd=_snapshot_spread_usd,
-        depth_at_best_ask=_snap_depth,
-        order_type="GTC",  # W2: passive maker limit order
+        spread_usd=_Decimal("0"),
+        depth_at_best_ask=100,
+        order_type="GTC",
     )
+    _taker_order_type_for_haircut = _reprice_order_type
+    if (
+        bool(final_intent_context.get("allow_taker_upgrade"))
+        and _taker_order_type_for_haircut in {"GTC", "GTD"}
+    ):
+        _taker_order_type_for_haircut = "FOK"
     _taker_effective_context = EffectiveKellyContext(
         spread_usd=_snapshot_spread_usd,
         depth_at_best_ask=_snap_depth,
-        order_type=_reprice_order_type,
+        order_type=_taker_order_type_for_haircut,
     )
     # The first candidate is a passive maker limit. If the book supports an
     # immediate fill, the marketable branch below resizes with taker fees.
@@ -1386,6 +1395,153 @@ def cleanup_orphan_open_orders(portfolio, clob, *, deps, conn=None) -> int:
                 cancelled += 1
         except Exception as exc:
             deps.logger.warning("Orphan open-order durable cancel failed for %s: %s", order_id, exc)
+    return cancelled
+
+
+def _decimal_or_none(value) -> Decimal | None:
+    if value in (None, ""):
+        return None
+    try:
+        return Decimal(str(value))
+    except (InvalidOperation, ValueError):
+        return None
+
+
+def _entry_command_has_positive_trade_fact(conn, command_id: str) -> bool:
+    row = conn.execute(
+        """
+        SELECT 1
+          FROM venue_trade_facts
+         WHERE command_id = ?
+           AND CAST(filled_size AS REAL) > 0
+         LIMIT 1
+        """,
+        (command_id,),
+    ).fetchone()
+    return row is not None
+
+
+def _entry_command_has_positive_order_fact(conn, command_id: str) -> bool:
+    row = conn.execute(
+        """
+        SELECT 1
+          FROM venue_order_facts
+         WHERE command_id = ?
+           AND CAST(COALESCE(matched_size, '0') AS REAL) > 0
+         LIMIT 1
+        """,
+        (command_id,),
+    ).fetchone()
+    return row is not None
+
+
+def _fresh_best_bid_for_token(clob, token_id: str) -> Decimal | None:
+    getter = getattr(clob, "get_orderbook_snapshot", None)
+    if not callable(getter):
+        getter = getattr(clob, "get_orderbook", None)
+    if not callable(getter):
+        return None
+    try:
+        raw_orderbook = getter(token_id)
+        from src.data.market_scanner import _top_book_level_decimal
+
+        best_bid, _bid_size = _top_book_level_decimal(raw_orderbook, "bids")
+    except Exception:
+        return None
+    return best_bid
+
+
+def cleanup_stale_entry_orders(clob, *, deps, conn=None) -> int:
+    """Cancel no-fill entry orders that are no longer competitive.
+
+    This is entry-order management, not exposure dedup. It only touches ACKED
+    no-fill ENTRY commands with durable command truth and a fresher executable
+    snapshot proving a better passive BUY bid is now required.
+    """
+    if conn is None or not hasattr(clob, "cancel_order"):
+        return 0
+    try:
+        rows = conn.execute(
+            """
+            SELECT vc.command_id,
+                   vc.position_id,
+                   vc.token_id,
+                   vc.side,
+                   vc.price,
+                   vc.venue_order_id,
+                   vc.state,
+                   pc.phase,
+                   pc.shares,
+                   pc.cost_basis_usd
+              FROM venue_commands vc
+              LEFT JOIN position_current pc
+                ON pc.position_id = vc.position_id
+             WHERE UPPER(vc.intent_kind) = 'ENTRY'
+               AND UPPER(vc.state) = 'ACKED'
+               AND COALESCE(vc.venue_order_id, '') != ''
+             ORDER BY vc.updated_at ASC, vc.created_at ASC
+            """
+        ).fetchall()
+    except Exception as exc:
+        if "no such table" in str(exc).lower():
+            deps.logger.warning("Stale entry-order cleanup blocked: command/snapshot tables unavailable")
+            return 0
+        raise
+
+    cancelled = 0
+    for row in rows:
+        command_id = str(row["command_id"] if hasattr(row, "keys") else row[0])
+        token_id = str(row["token_id"] if hasattr(row, "keys") else row[2])
+        side = str(row["side"] if hasattr(row, "keys") else row[3]).upper()
+        order_price = _decimal_or_none(row["price"] if hasattr(row, "keys") else row[4])
+        phase = str(row["phase"] if hasattr(row, "keys") else row[7] or "").lower()
+        shares = _decimal_or_none(row["shares"] if hasattr(row, "keys") else row[8]) or Decimal("0")
+        cost_basis = _decimal_or_none(row["cost_basis_usd"] if hasattr(row, "keys") else row[9]) or Decimal("0")
+        if side != "BUY" or order_price is None:
+            continue
+        if phase != "pending_entry" or shares != Decimal("0") or cost_basis != Decimal("0"):
+            continue
+        if _entry_command_has_positive_trade_fact(conn, command_id):
+            continue
+        if _entry_command_has_positive_order_fact(conn, command_id):
+            continue
+        snapshot = conn.execute(
+            """
+            SELECT orderbook_top_bid, orderbook_top_ask, min_tick_size, captured_at
+              FROM executable_market_snapshots
+             WHERE selected_outcome_token_id = ?
+             ORDER BY captured_at DESC
+             LIMIT 1
+            """,
+            (token_id,),
+        ).fetchone()
+        if snapshot is None:
+            continue
+        best_bid = _decimal_or_none(snapshot["orderbook_top_bid"] if hasattr(snapshot, "keys") else snapshot[0])
+        if best_bid is None or best_bid <= order_price:
+            continue
+        fresh_best_bid = _fresh_best_bid_for_token(clob, token_id)
+        if fresh_best_bid is None or fresh_best_bid <= order_price:
+            continue
+        try:
+            from src.execution.exit_safety import request_cancel_for_command
+
+            outcome = request_cancel_for_command(
+                conn,
+                command_id,
+                lambda venue_order_id: clob.cancel_order(venue_order_id),
+            )
+        except Exception as exc:
+            deps.logger.warning("Stale entry-order cancel failed for %s: %s", command_id, exc)
+            continue
+        if outcome.status == "CANCELED":
+            cancelled += 1
+            deps.logger.info(
+                "Stale entry order %s canceled for reprice: old_price=%s latest_best_bid=%s",
+                command_id,
+                order_price,
+                fresh_best_bid,
+            )
     return cancelled
 
 

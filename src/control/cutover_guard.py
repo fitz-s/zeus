@@ -336,6 +336,8 @@ def gate_for_intent(intent_kind: IntentKind, *, path: Path | None = None) -> Cut
         if intent_kind is IntentKind.CANCEL:
             return CutoverDecision(False, True, False, None, state)
         return CutoverDecision(True, False, False, None, state)
+    if state is CutoverState.NORMAL and intent_kind is IntentKind.CANCEL:
+        return CutoverDecision(False, True, False, None, state)
     if state is CutoverState.PRE_CUTOVER_FREEZE and intent_kind is IntentKind.CANCEL:
         return CutoverDecision(False, True, False, None, state)
     return _blocked(intent_kind, state)

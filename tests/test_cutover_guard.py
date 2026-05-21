@@ -229,6 +229,23 @@ def test_pre_cutover_freeze_blocks_new_submit_allows_cancel(tmp_path):
     assert "PRE_CUTOVER_FREEZE" in (entry.block_reason or "")
 
 
+def test_normal_blocks_cutover_submit_and_redemption_but_allows_existing_order_cancel(tmp_path):
+    from src.control import cutover_guard
+
+    path = _state_path(tmp_path)
+
+    entry = cutover_guard.gate_for_intent(IntentKind.ENTRY, path=path)
+    exit_ = cutover_guard.gate_for_intent(IntentKind.EXIT, path=path)
+    cancel = cutover_guard.gate_for_intent(IntentKind.CANCEL, path=path)
+    redemption = cutover_guard.redemption_decision(path=path)
+
+    assert entry.allow_submit is False
+    assert exit_.allow_submit is False
+    assert cancel.allow_cancel is True
+    assert cancel.block_reason is None
+    assert redemption.allow_redemption is False
+
+
 def test_cutover_downtime_blocks_all(tmp_path):
     from src.control import cutover_guard
 

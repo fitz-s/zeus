@@ -499,6 +499,10 @@ def _cleanup_orphan_open_orders(portfolio: PortfolioState, clob, conn=None) -> i
     return _runtime.cleanup_orphan_open_orders(portfolio, clob, deps=sys.modules[__name__], conn=conn)
 
 
+def _cleanup_stale_entry_orders(clob, conn=None) -> int:
+    return _runtime.cleanup_stale_entry_orders(clob, deps=sys.modules[__name__], conn=conn)
+
+
 def _entry_bankroll_for_cycle(portfolio: PortfolioState, clob):
     return _runtime.entry_bankroll_for_cycle(portfolio, clob, deps=sys.modules[__name__])
 
@@ -731,6 +735,14 @@ def run_cycle(mode: DiscoveryMode) -> dict:
     except Exception as exc:
         logger.error("command_recovery raised; continuing cycle: %s", exc, exc_info=True)
         summary["command_recovery"] = {"error": str(exc)}
+
+    try:
+        stale_entry_cancelled = _cleanup_stale_entry_orders(clob, conn=conn)
+    except Exception as exc:
+        logger.warning("Stale entry-order cleanup failed — continuing cycle: %s", exc)
+        stale_entry_cancelled = 0
+    if stale_entry_cancelled:
+        summary["stale_entry_orders_cancelled"] = stale_entry_cancelled
 
     # PR-S2 Bug #2: promote MATCHED/MINED trade facts to CONFIRMED via CLOB REST poll.
     # Runs AFTER reconcile_unresolved_commands, BEFORE bankroll gate, so newly
