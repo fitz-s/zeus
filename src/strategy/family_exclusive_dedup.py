@@ -256,14 +256,25 @@ _TRADE_FACT_BLOCKING_STATES = frozenset({"MATCHED", "MINED", "CONFIRMED", "PARTI
 
 
 def _table_exists(conn: Any, table_name: str, *, schema: str = "main") -> bool:
+    expected_schema = schema
     try:
-        row = conn.execute(
-            f"SELECT 1 FROM {schema}.sqlite_master WHERE type='table' AND name=?",
-            (table_name,),
-        ).fetchone()
+        rows = conn.execute("PRAGMA table_list").fetchall()
     except Exception:
-        return False
-    return row is not None
+        try:
+            row = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                (table_name,),
+            ).fetchone()
+        except Exception:
+            return False
+        return expected_schema == "main" and row is not None
+    for row in rows:
+        row_schema = str(row[0]) if len(row) > 0 else ""
+        row_name = str(row[1]) if len(row) > 1 else ""
+        row_type = str(row[2]) if len(row) > 2 else ""
+        if row_schema == expected_schema and row_name == table_name and row_type == "table":
+            return True
+    return False
 
 
 def _attached_schemas(conn: Any) -> set[str]:
@@ -508,12 +519,16 @@ def build_weather_family_decision(
 ) -> WeatherFamilyDecision | None:
     """Build the single-leg family decision consumed before scalar Kelly."""
 
+    gate_enabled = family_gate_enabled() if enabled is None else enabled
+    if not gate_enabled:
+        return None
+
     selected, dropped = preselect_single_family_edge_before_kelly(
         edges,
         city=city,
         target_date=target_date,
         temperature_metric=temperature_metric,
-        enabled=enabled,
+        enabled=gate_enabled,
     )
     if not selected:
         return None

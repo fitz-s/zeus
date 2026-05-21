@@ -516,6 +516,24 @@ def test_family_preselection_is_disabled_without_stage_a_gate() -> None:
     assert dropped == []
 
 
+def test_weather_family_decision_is_disabled_with_stage_a_gate() -> None:
+    bins = {s[2]: s for s in _BIN_SPECS}
+    edges = [
+        _bin_edge(bins["20-21°F"], entry_price=0.18, forward_edge=0.04),
+        _bin_edge(bins["22-23°F"], entry_price=0.45, forward_edge=0.07),
+    ]
+
+    family_decision = build_weather_family_decision(
+        edges,
+        city=CITY,
+        target_date=TARGET_DATE,
+        temperature_metric=METRIC,
+        enabled=False,
+    )
+
+    assert family_decision is None
+
+
 def test_one_cent_order_rejected_without_tail_strategy_even_if_venue_min_passes() -> None:
     bins = {s[2]: s for s in _BIN_SPECS}
     edge = _bin_edge(bins["26°F or above"], entry_price=0.01, forward_edge=0.04)
