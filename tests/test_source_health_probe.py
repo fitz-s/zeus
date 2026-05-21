@@ -24,6 +24,7 @@ os.environ.setdefault("ZEUS_MODE", "live")
 
 from src.data.source_health_probe import (
     EXPECTED_SOURCES,
+    SOURCE_PROBE_TIMEOUT_MINIMUMS,
     probe_all_sources,
     probe_sources,
     write_source_health,
@@ -160,6 +161,41 @@ class TestProbeAllSourcesSchema:
         assert set(results) == {"ecmwf_open_data"}
         assert "wu_pws" not in results
 
+    def test_ogimet_probe_uses_source_specific_timeout_floor(self, monkeypatch):
+        """Ogimet reachability is slower than the generic probe budget.
+
+        The ingest scheduler still passes the default 10s probe budget for the
+        whole batch, but Ogimet is a daily-observation source whose live
+        endpoint routinely answers after the generic budget. The source-health
+        dispatch layer must not turn that endpoint latency into a false global
+        stale verdict.
+        """
+        import src.data.source_health_probe as shp
+
+        seen_timeouts: dict[str, float] = {}
+
+        def _recording_probe(source: str):
+            def _fn(timeout: float) -> dict:
+                seen_timeouts[source] = timeout
+                return _make_fake_probe(True)(timeout)
+
+            return _fn
+
+        monkeypatch.setattr(shp, "_probe_open_meteo_archive", _recording_probe("open_meteo_archive"))
+        monkeypatch.setattr(shp, "_probe_wu_pws", _recording_probe("wu_pws"))
+        monkeypatch.setattr(shp, "_probe_hko", _recording_probe("hko"))
+        monkeypatch.setattr(shp, "_probe_ogimet", _recording_probe("ogimet"))
+        monkeypatch.setattr(shp, "_probe_ecmwf_open_data", _recording_probe("ecmwf_open_data"))
+        monkeypatch.setattr(shp, "_probe_noaa", _recording_probe("noaa"))
+        monkeypatch.setattr(shp, "_probe_tigge_mars", _recording_probe("tigge_mars"))
+
+        results = probe_all_sources(timeout_per_source_seconds=10.0)
+
+        assert set(results) == set(EXPECTED_SOURCES)
+        assert seen_timeouts["ogimet"] == SOURCE_PROBE_TIMEOUT_MINIMUMS["ogimet"]
+        assert seen_timeouts["open_meteo_archive"] == 10.0
+        assert seen_timeouts["ecmwf_open_data"] == 10.0
+
 
 class TestAbsentBranchHandling:
     """Absent or unknown sources return ABSENT entries, not crashes."""
@@ -185,22 +221,80 @@ class TestAbsentBranchHandling:
         """If a probe raises an exception, probe_all_sources handles it."""
         import src.data.source_health_probe as shp
 
+        called_after_failure = False
+
         def _raise_probe(timeout: float) -> dict:
             raise RuntimeError("Simulated network timeout")
 
+        def _probe_after_failure(timeout: float) -> dict:
+            nonlocal called_after_failure
+            called_after_failure = True
+            return _make_fake_probe(True)(timeout)
+
         monkeypatch.setattr(shp, "_probe_open_meteo_archive", _make_fake_probe(True))
         monkeypatch.setattr(shp, "_probe_wu_pws", _make_fake_probe(True))
-        # hko raises
-        monkeypatch.setattr(shp, "_probe_hko", _make_fake_probe(False))
+        monkeypatch.setattr(shp, "_probe_hko", _raise_probe)
         monkeypatch.setattr(shp, "_probe_ogimet", _make_fake_probe(True))
-        monkeypatch.setattr(shp, "_probe_ecmwf_open_data", _make_fake_probe(True))
+        monkeypatch.setattr(shp, "_probe_ecmwf_open_data", _probe_after_failure)
         monkeypatch.setattr(shp, "_probe_noaa", _make_fake_probe(True))
 
         # Must not raise even if one probe returns failure result
         results = probe_all_sources(timeout_per_source_seconds=1.0)
         assert "hko" in results
-        # Failure probe returns error field
+        # Raised probe returns error field without aborting the batch.
         assert results["hko"]["error"] is not None
+        assert called_after_failure is True
+        assert results["ecmwf_open_data"]["error"] is None
+
+
+class TestPriorStateSemantics:
+    """Current probe failures must not erase prior freshness authority."""
+
+    def test_failure_preserves_prior_success_timestamp_for_freshness_budget(self, monkeypatch):
+        """A transient probe failure records failure state without deleting last success.
+
+        `freshness_gate.evaluate_freshness()` evaluates source freshness from
+        `last_success_at`. If the writer replaces a recent success with null on
+        every timeout, the per-source freshness budget is bypassed and one slow
+        endpoint disables live modes immediately.
+        """
+        import src.data.source_health_probe as shp
+
+        prior_success_at = "2026-05-21T16:00:00+00:00"
+        current_failure_at = "2026-05-21T17:00:00+00:00"
+
+        def _failed_probe(_timeout: float) -> dict:
+            return {
+                "last_success_at": None,
+                "last_failure_at": current_failure_at,
+                "consecutive_failures": 1,
+                "degraded_since": current_failure_at,
+                "latency_ms": 30000,
+                "error": "The read operation timed out",
+            }
+
+        monkeypatch.setattr(shp, "_probe_ogimet", _failed_probe)
+
+        results = probe_sources(
+            ("ogimet",),
+            timeout_per_source_seconds=10.0,
+            _prior_state={
+                "ogimet": {
+                    "last_success_at": prior_success_at,
+                    "last_failure_at": None,
+                    "consecutive_failures": 0,
+                    "degraded_since": None,
+                    "latency_ms": 12000,
+                    "error": None,
+                }
+            },
+        )
+
+        assert results["ogimet"]["last_success_at"] == prior_success_at
+        assert results["ogimet"]["last_failure_at"] == current_failure_at
+        assert results["ogimet"]["consecutive_failures"] == 1
+        assert results["ogimet"]["degraded_since"] == current_failure_at
+        assert results["ogimet"]["error"] == "The read operation timed out"
 
 
 class TestWriteSourceHealth:

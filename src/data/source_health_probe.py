@@ -45,6 +45,13 @@ EXPECTED_SOURCES = [
     "tigge_mars",
 ]
 
+# Per-source lower bounds for reachability probes. The ingest scheduler passes a
+# generic batch timeout, but slower daily-observation endpoints must not become
+# false stale source truth when they routinely answer just outside that budget.
+SOURCE_PROBE_TIMEOUT_MINIMUMS: dict[str, float] = {
+    "ogimet": 30.0,
+}
+
 # tigge_mars is now actively probed by _probe_tigge_mars (2026-05-01) — it
 # reads ~/.ecmwfapirc + scheduler_jobs_health.json to decide success/failure.
 # Kept for backwards compatibility with the dispatch path; sources listed here
@@ -446,7 +453,12 @@ def _probe_source(source: str, timeout: float) -> dict[str, Any]:
             "latency_ms": None,
             "error": f"ABSENT — no probe registered for source={source!r}",
         }
-    return fn(timeout)
+    requested_timeout = float(timeout)
+    effective_timeout = max(
+        requested_timeout,
+        SOURCE_PROBE_TIMEOUT_MINIMUMS.get(source, requested_timeout),
+    )
+    return fn(effective_timeout)
 
 
 def _apply_prior_failure_state(
@@ -458,6 +470,8 @@ def _apply_prior_failure_state(
     prev = prior.get(source, {})
     if result.get("error") and result.get("last_success_at") is None and source not in _MANUAL_OPERATOR_SOURCES:
         prev_consec = prev.get("consecutive_failures", 0) or 0
+        if prev.get("last_success_at"):
+            result["last_success_at"] = prev.get("last_success_at")
         result["consecutive_failures"] = prev_consec + 1
         result["degraded_since"] = prev.get("degraded_since") or result.get("last_failure_at")
     else:
@@ -478,7 +492,17 @@ def probe_sources(
 
     for source in sources:
         logger.debug("Probing source: %s", source)
-        result = _probe_source(source, timeout_per_source_seconds)
+        try:
+            result = _probe_source(source, timeout_per_source_seconds)
+        except Exception as exc:
+            result = {
+                "last_success_at": None,
+                "last_failure_at": _now_iso(),
+                "consecutive_failures": 1,
+                "degraded_since": None,
+                "latency_ms": None,
+                "error": str(exc)[:200],
+            }
         result = _apply_prior_failure_state(source, result, prior=prior)
         results[source] = result
         logger.debug("Source %s: latency=%s error=%s", source, result.get("latency_ms"), result.get("error"))
