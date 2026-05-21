@@ -49,7 +49,8 @@ class EvidenceReport:
     n_wins:
         Decisions with positive realized edge (win-rate numerator).
     n_no_trades:
-        No-trade events logged (from no_trade_events table).
+        No-trade events logged. Currently always 0 — no_trade_events has no
+        strategy_key column; future path is a join via decision_events.
     n_settled:
         Settled decisions (subset of n_decisions with known outcome).
     mean_regret_usd:

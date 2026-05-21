@@ -201,7 +201,7 @@ def test_t4_live_normal_not_auto_demoted() -> None:
 
 
 def test_t4_live_normal_demoted_with_operator_override(world_conn) -> None:
-    """LIVE_NORMAL IS demoted when allow_live_normal_demote=True + operator_ref supplied."""
+    """LIVE_NORMAL IS demoted when allow_live_normal_demote=True; operator_ref optional for DEMOTE."""
     report = _make_report(
         tier_observed=EvidenceTier.LIVE_NORMAL,
         n_settled=50,
@@ -210,13 +210,38 @@ def test_t4_live_normal_demoted_with_operator_override(world_conn) -> None:
         ci_upper=0.35,
         breakeven_win_rate=0.55,
     )
+    # DEMOTE within live tiers does NOT require operator_ref (fail-closed-to-loss guard
+    # was reversed per Codex P1: blocking DEMOTE is fail-open-to-loss).
     verdict = adjudicate(
         report, EvidenceTier.LIVE_NORMAL,
         conn=world_conn, allow_live_normal_demote=True,
-        operator_ref="op_demote_live_normal",
+        operator_ref=None,
     )
     assert verdict.verdict == VerdictKind.DEMOTE
     assert verdict.tier_target == EvidenceTier.LIVE_LIMITED_HAIRCUT  # 7 → 6
+
+
+def test_t4_demote_within_live_tier_does_not_require_operator_ref(world_conn) -> None:
+    """DEMOTE targeting a live tier succeeds without operator_ref.
+
+    Regression guard: guard is PROMOTE-only; blocking DEMOTEs would leave a
+    losing live strategy running (fail-open-to-loss).
+    """
+    report = _make_report(
+        tier_observed=EvidenceTier.LIVE_PILOT_TINY,
+        n_settled=50,
+        n_wins=5,
+        ci_lower=0.10,
+        ci_upper=0.30,
+        breakeven_win_rate=0.55,
+    )
+    # LIVE_PILOT_TINY (5) → PAPER_COHORT (4) demotion, no operator_ref required
+    verdict = adjudicate(
+        report, EvidenceTier.LIVE_PILOT_TINY,
+        conn=world_conn, operator_ref=None,
+    )
+    assert verdict.verdict == VerdictKind.DEMOTE
+    assert verdict.tier_target == EvidenceTier.PAPER_COHORT  # 5 → 4
 
 
 # ---------------------------------------------------------------------------
@@ -305,11 +330,41 @@ def test_t4_promote_to_live_tier_with_operator_ref_succeeds(world_conn) -> None:
 #                  — losing cohort → DEMOTE  (SEV2-1 regression guard)
 # ---------------------------------------------------------------------------
 
+def _insert_decision_events(conn: sqlite3.Connection, strategy_key: str, count: int) -> None:
+    """Insert minimal valid decision_events rows for a strategy (test helper)."""
+    for i in range(count):
+        conn.execute(
+            """
+            INSERT INTO decision_events (
+                market_slug, temperature_metric, target_date, observation_time,
+                decision_seq, decision_time, outcome, side, strategy_key,
+                observation_available_at, polymarket_end_anchor_source, schema_version, source
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                f"test-market-{strategy_key}",
+                "high",
+                "2026-05-01",
+                f"2026-05-01T{i // 3600:02d}:{(i % 3600) // 60:02d}:{i % 60:02d}Z",
+                i,
+                "2026-05-01T12:00:00Z",
+                "YES",
+                "BUY",
+                strategy_key,
+                "2026-05-01T11:00:00Z",
+                "gamma_explicit",
+                25,
+                "phase0_backfill",
+            ),
+        )
+
+
 def test_t4_winning_cohort_is_promote_eligible(world_conn) -> None:
     """Winning cohort: Beta(2,2) CI lower > breakeven → adjudicate proposes PROMOTE.
 
     Regression guard for SEV2-1: verifies that positive total_regret_usd (realized > counterfactual)
     correctly maps to n_wins, and the Beta(2,2) CI lower exceeds breakeven for a strong winner.
+    Also verifies n_decisions == n_settled == 100 (decision_events denominator path).
     """
     from src.analysis.evidence_report import build_evidence_report
     from src.state.shadow_experiment_registry import register_shadow_experiment
@@ -349,12 +404,18 @@ def test_t4_winning_cohort_is_promote_eligible(world_conn) -> None:
             counterfactual_pnl_usd=0.0,  # realized < counterfactual → LOSS
         )
         write_regret_decomposition(exp_id, f"evt_loss_{i}", components, conn=world_conn)
+    # Insert matching decision_events rows (authoritative n_decisions denominator)
+    _insert_decision_events(world_conn, "shoulder_sell", 100)
 
     report = build_evidence_report(
         "shoulder_sell", EvidenceTier.SHADOW_PASS,
         conn=world_conn, breakeven_win_rate=0.55,
     )
     assert report.n_settled == 100
+    assert report.n_decisions == 100, (
+        f"n_decisions should equal n_settled (100 decision_events inserted); "
+        f"got n_decisions={report.n_decisions}"
+    )
     assert report.n_wins == 80
     assert report.ci_lower is not None
     assert report.ci_lower > 0.55, (
@@ -399,12 +460,18 @@ def test_t4_losing_cohort_is_demote(world_conn) -> None:
             counterfactual_pnl_usd=0.0,  # realized < counterfactual → LOSS
         )
         write_regret_decomposition(exp_id, f"evt_lose_{i}", components, conn=world_conn)
+    # Insert matching decision_events rows (authoritative n_decisions denominator)
+    _insert_decision_events(world_conn, "center_sell", 100)
 
     report = build_evidence_report(
         "center_sell", EvidenceTier.PAPER_COHORT,
         conn=world_conn, breakeven_win_rate=0.55,
     )
     assert report.n_settled == 100
+    assert report.n_decisions == 100, (
+        f"n_decisions should equal n_settled (100 decision_events inserted); "
+        f"got n_decisions={report.n_decisions}"
+    )
     assert report.n_wins == 0
     assert report.ci_lower is not None
     assert report.ci_lower < 0.55

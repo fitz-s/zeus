@@ -149,6 +149,7 @@ def adjudicate(
         _write_verdict_row(
             strategy_id=report.strategy_id,
             tier=tier_target,
+            verdict_kind=VerdictKind.DEMOTE,
             verdict_reason=verdict_reason,
             operator_ref=operator_ref,
             conn=conn,
@@ -177,6 +178,7 @@ def adjudicate(
         _write_verdict_row(
             strategy_id=report.strategy_id,
             tier=tier_target,
+            verdict_kind=VerdictKind.PROMOTE,
             verdict_reason=verdict_reason,
             operator_ref=operator_ref,
             conn=conn,
@@ -227,6 +229,7 @@ def adjudicate(
 def _write_verdict_row(
     strategy_id: str,
     tier: EvidenceTier,
+    verdict_kind: VerdictKind,
     verdict_reason: str,
     operator_ref: Optional[str],
     conn: Optional[sqlite3.Connection],
@@ -241,19 +244,24 @@ def _write_verdict_row(
     rows with operator_ref=NULL are advisory only and must not be acted on
     without explicit operator confirmation.
 
-    Operator-gate invariant
-    -----------------------
-    Any PROMOTE verdict targeting a live tier (tier >= LIVE_PILOT_TINY) MUST
+    Operator-gate invariant (PROMOTE-only)
+    ---------------------------------------
+    A PROMOTE verdict targeting a live tier (tier >= LIVE_PILOT_TINY) MUST
     have a non-empty operator_ref.  The Tribunal proposes; operator approves.
     This prevents a future auto-apply reader from silently promoting strategies
     into live execution without an explicit operator trace.
+
+    DEMOTE verdicts do NOT require operator_ref — blocking a demotion raises
+    fail-open-to-loss risk by leaving an underperforming live strategy running.
+    DEMOTE rows with operator_ref=NULL are written as advisory records.
 
     Raises
     ------
     RuntimeError
         If conn is None (DB write required for PROMOTE/DEMOTE).
     ValueError
-        If tier >= LIVE_PILOT_TINY and operator_ref is None or empty.
+        If verdict_kind == PROMOTE and tier >= LIVE_PILOT_TINY and
+        operator_ref is None or whitespace-only.
         A PROMOTE into a live tier without operator reference is rejected
         fail-closed.
 
@@ -264,11 +272,15 @@ def _write_verdict_row(
             "LiveReadinessTribunal: conn is required for PROMOTE/DEMOTE DB write. "
             "Supply a world DB connection via the conn= parameter."
         )
-    if tier >= EvidenceTier.LIVE_PILOT_TINY and not operator_ref:
+    if (
+        verdict_kind == VerdictKind.PROMOTE
+        and tier >= EvidenceTier.LIVE_PILOT_TINY
+        and not (operator_ref or "").strip()
+    ):
         raise ValueError(
-            f"Operator-gate violation: PROMOTE/DEMOTE targeting live tier "
+            f"Operator-gate violation: PROMOTE targeting live tier "
             f"{tier.name} (>= LIVE_PILOT_TINY) requires a non-empty operator_ref. "
-            "The Tribunal proposes; an operator must approve live-tier transitions."
+            "The Tribunal proposes; an operator must approve live-tier promotions."
         )
     assigned_at = datetime.now(tz=timezone.utc).isoformat()
     conn.execute(
