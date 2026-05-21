@@ -6912,6 +6912,9 @@ def test_evaluator_buffers_microstructure_without_opening_quote_loop_transaction
     assert len(clob.in_transaction_before_quote) >= 2
     assert all(in_tx is False for _, in_tx in clob.in_transaction_before_quote)
     assert len(microstructure_rows) == len(clob.in_transaction_before_quote)
+    logger_keys = set(db_module.log_microstructure.__code__.co_varnames[: db_module.log_microstructure.__code__.co_argcount])
+    logger_payload_keys = logger_keys - {"conn"}
+    assert set(microstructure_rows[0]) == logger_payload_keys
     assert conn.in_transaction is False
     conn.close()
 

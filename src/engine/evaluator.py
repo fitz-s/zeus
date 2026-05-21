@@ -3641,7 +3641,6 @@ def evaluate_candidate(
                             if bid is None
                             else (round(float(ask - bid), 4) if ask >= bid else 0.0)
                         ),
-                        "quote_authority": "ask_only" if yes_quote["ask_only"] else "two_sided_vwmp",
                         "source_timestamp": dt.datetime.now(dt.timezone.utc).isoformat(),
                     }
                 )
