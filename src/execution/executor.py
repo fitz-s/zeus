@@ -1241,6 +1241,10 @@ class OrderResult:
     # F7: FK to venue_commands.command_id — set when a command row was persisted
     # (post-persist path). None for pre-persist rejections.
     command_id: Optional[str] = None
+    # Post-submit source-timing facts for decision_events lineage. These are
+    # only populated after the SDK submit boundary has been reached.
+    zeus_submit_intent_time: Optional[str] = None
+    venue_ack_time: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -3347,6 +3351,7 @@ def _live_order(
         # -----------------------------------------------------------------------
         # Phase 5: submit — SDK call (INV-30: row already SUBMITTING)
         # -----------------------------------------------------------------------
+        zeus_submit_intent_time = datetime.now(timezone.utc).isoformat()
         try:
             result = client.place_limit_order(
                 token_id=intent.token_id,
@@ -3406,6 +3411,7 @@ def _live_order(
                     order_role="entry",
                     idempotency_key=idem.value,
                     command_state="REJECTED",
+                    zeus_submit_intent_time=zeus_submit_intent_time,
                 )
             return OrderResult(
                 trade_id=trade_id,
@@ -3416,6 +3422,7 @@ def _live_order(
                 order_role="entry",
                 idempotency_key=idem.value,
                 command_state="SUBMIT_UNKNOWN_SIDE_EFFECT",
+                zeus_submit_intent_time=zeus_submit_intent_time,
             )
 
         # -----------------------------------------------------------------------
@@ -3452,6 +3459,8 @@ def _live_order(
                 order_role="entry",
                 idempotency_key=idem.value,
                 command_state="REVIEW_REQUIRED",
+                zeus_submit_intent_time=zeus_submit_intent_time,
+                venue_ack_time=ack_time,
             )
 
         try:
@@ -3493,6 +3502,8 @@ def _live_order(
                 venue_status=str(result.get("status") or "") if isinstance(result, dict) else "",
                 idempotency_key=idem.value,
                 command_state="REVIEW_REQUIRED",
+                zeus_submit_intent_time=zeus_submit_intent_time,
+                venue_ack_time=ack_time,
             )
         order_id = _submit_result_order_id(result)
         if result.get("success") is False:
@@ -3532,6 +3543,8 @@ def _live_order(
                 venue_status=str(result.get("status") or ""),
                 idempotency_key=idem.value,
                 command_id=command_id,  # F7: propagate so log_execution_fact records FK
+                zeus_submit_intent_time=zeus_submit_intent_time,
+                venue_ack_time=ack_time,
             )
         if not order_id:
             try:
@@ -3560,6 +3573,8 @@ def _live_order(
                 venue_status=str(result.get("status") or ""),
                 idempotency_key=idem.value,
                 command_id=command_id,  # F7: propagate so log_execution_fact records FK
+                zeus_submit_intent_time=zeus_submit_intent_time,
+                venue_ack_time=ack_time,
             )
         order_fact_state = _venue_submit_order_fact_state(result)
         matched_size = _venue_submit_matched_size(result, fallback_size=shares)
@@ -3736,6 +3751,8 @@ def _live_order(
                 else ("PARTIAL" if fill_event_type == "PARTIAL_FILL_OBSERVED" else "ACKED")
             ),
             command_id=command_id,  # F7: FK to venue_commands row
+            zeus_submit_intent_time=zeus_submit_intent_time,
+            venue_ack_time=ack_time,
         )
         try:
             alert_trade(

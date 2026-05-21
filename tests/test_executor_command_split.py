@@ -1143,6 +1143,58 @@ class TestLiveOrderCommandSplit:
             "source": "REST",
         }
 
+    def test_entry_submit_result_returns_submit_and_ack_times(self, mem_conn, monkeypatch):
+        """Entry submit facts must flow back to cycle_runtime after the SDK boundary."""
+        import src.execution.executor as executor_module
+        from src.execution.executor import _live_order
+        from src.state.venue_command_repo import list_events
+
+        monkeypatch.setattr(executor_module, "_assert_risk_allocator_allows_submit", lambda *args, **kwargs: None)
+        monkeypatch.setattr(executor_module, "_select_risk_allocator_order_type", lambda *args, **kwargs: "GTC")
+        monkeypatch.setattr(
+            executor_module,
+            "_assert_ws_gap_allows_submit",
+            lambda *args, **kwargs: {"component": "ws_gap_guard", "allowed": True, "reason": "allowed"},
+        )
+        intent = _make_entry_intent(mem_conn)
+        command_ids_seen: list[str] = []
+
+        import src.state.venue_command_repo as _repo
+        _real_insert = _repo.insert_command
+
+        def capturing_insert(*args, **kwargs):
+            command_ids_seen.append(kwargs["command_id"])
+            return _real_insert(*args, **kwargs)
+
+        with patch(
+            "src.state.venue_command_repo.insert_command", side_effect=capturing_insert
+        ), patch("src.data.polymarket_client.PolymarketClient") as MockClient:
+            mock_inst = MagicMock()
+            MockClient.return_value = mock_inst
+            mock_inst.v2_preflight.return_value = None
+            bound = _capture_bound_submission_envelope(mock_inst)
+            mock_inst.place_limit_order.side_effect = (
+                lambda **kwargs: _final_submit_result(bound, order_id="ord-timing-001")
+            )
+
+            result = _live_order(
+                trade_id="trd-entry-timing",
+                intent=intent,
+                shares=18.19,
+                conn=mem_conn,
+                decision_id="dec-entry-timing",
+            )
+
+        assert result.status == "pending"
+        assert result.zeus_submit_intent_time
+        assert result.venue_ack_time
+        submit_at = datetime.fromisoformat(result.zeus_submit_intent_time)
+        ack_at = datetime.fromisoformat(result.venue_ack_time)
+        assert submit_at <= ack_at
+        events = list_events(mem_conn, command_ids_seen[0])
+        assert [event["event_type"] for event in events][-1] == "SUBMIT_ACKED"
+        assert events[-1]["occurred_at"] == result.venue_ack_time
+
     def test_matched_submit_records_fill_truth_instead_of_resting_ack(self, mem_conn):
         """A matched FOK submit response is a fill boundary, not a resting ACK."""
         from src.execution.executor import _live_order

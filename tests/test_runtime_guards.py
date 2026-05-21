@@ -3129,6 +3129,49 @@ def test_live_entry_final_intent_receives_executable_snapshot_fields(tmp_path):
     assert decision_source_context.integrity_errors() == ()
 
 
+def test_live_decision_source_context_enriched_with_submit_result_timing():
+    """Post-submit timing facts must be joined onto the frozen source context before writing decision_events."""
+    from src.contracts.execution_intent import DecisionSourceContext
+
+    original = DecisionSourceContext(
+        source_id="tigge",
+        model_family="ecmwf_ifs025",
+        forecast_issue_time="2026-05-21T00:00:00+00:00",
+        forecast_valid_time="2026-05-23T00:00:00+00:00",
+        forecast_fetch_time="2026-05-21T11:34:30+00:00",
+        forecast_available_at="2026-05-21T00:00:00+00:00",
+        raw_payload_hash="a" * 64,
+        degradation_level="OK",
+        forecast_source_role="entry_primary",
+        authority_tier="FORECAST",
+        decision_time="2026-05-21T11:37:09+00:00",
+        decision_time_status="OK",
+        observation_time="2026-05-21T10:00:00+00:00",
+        observation_available_at="2026-05-21T10:05:00+00:00",
+        polymarket_end_anchor_source="gamma_explicit",
+        first_member_observed_time="2026-05-21T11:00:00+00:00",
+        run_complete_time="2026-05-21T11:34:00+00:00",
+    )
+    result = OrderResult(
+        status="pending",
+        trade_id="trade-1",
+        order_id="ord-1",
+        submitted_price=0.01,
+        shares=140.0,
+        command_state="ACKED",
+        zeus_submit_intent_time="2026-05-21T11:37:54.943544+00:00",
+        venue_ack_time="2026-05-21T11:38:03.121273+00:00",
+    )
+
+    enriched = cycle_runtime._decision_source_context_with_submit_result(original, result)
+
+    assert enriched is not original
+    assert original.zeus_submit_intent_time == ""
+    assert original.venue_ack_time == ""
+    assert enriched.zeus_submit_intent_time == result.zeus_submit_intent_time
+    assert enriched.venue_ack_time == result.venue_ack_time
+
+
 def test_executable_snapshot_repricing_updates_edge_and_size(tmp_path):
     conn = get_connection(tmp_path / "snapshot-reprice.db")
     init_schema(conn)

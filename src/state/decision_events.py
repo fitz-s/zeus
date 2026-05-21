@@ -212,15 +212,26 @@ def write_decision_event(
                 "Pass conn=None to let write_decision_event open its own world connection."
             )
 
-    # Live-only enforcement of PR-6 timing fields
+    # Live-only enforcement of PR-6 timing fields.
+    #
+    # Forecast-entry decisions are made before the settlement observation exists,
+    # so observation_available_at is not a valid source fact yet. Keep it empty
+    # rather than fabricating it from forecast_available_at. Observation/nowcast
+    # decisions still require the real observation availability timestamp.
+    is_forecast_entry = (
+        str(getattr(ctx, "authority_tier", "") or "").upper() == "FORECAST"
+        and str(getattr(ctx, "forecast_source_role", "") or "") == "entry_primary"
+        and bool(getattr(ctx, "forecast_available_at", "") or "")
+    )
     _required_live = {
         "first_member_observed_time": ctx.first_member_observed_time,
         "run_complete_time": ctx.run_complete_time,
         "zeus_submit_intent_time": ctx.zeus_submit_intent_time,
         "venue_ack_time": ctx.venue_ack_time,
-        "observation_available_at": ctx.observation_available_at,
         "polymarket_end_anchor_source": ctx.polymarket_end_anchor_source,
     }
+    if not is_forecast_entry:
+        _required_live["observation_available_at"] = ctx.observation_available_at
     missing = [k for k, v in _required_live.items() if not v]
     if missing:
         raise ValueError(

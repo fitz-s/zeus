@@ -1800,6 +1800,29 @@ def test_phase2f_source_degradation_freshness_routes_to_dedicated_profile():
     assert "tests/test_live_execution.py" in digest["admission"]["admitted_files"]
 
 
+def test_decision_events_live_wiring_routes_to_dedicated_profile():
+    digest = build_digest(
+        "decision_events live wiring P1-3 decision_event_instrumentation "
+        "source-class timing split forecast entry observation nowcast",
+        [
+            "src/state/decision_events.py",
+            "tests/test_decision_events_live_wiring.py",
+            "tests/test_decision_seq_lock_path.py",
+            "tests/test_digest_profile_matching.py",
+            "architecture/topology.yaml",
+            "architecture/digest_profiles.py",
+        ],
+        intent="modify_existing",
+        write_intent="edit",
+    )
+
+    assert digest["profile"] == "decision events live wiring implementation"
+    assert digest["admission"]["status"] == "admitted"
+    assert "src/state/decision_events.py" in digest["admission"]["admitted_files"]
+    assert "tests/test_decision_events_live_wiring.py" in digest["admission"]["admitted_files"]
+    assert "tests/test_decision_seq_lock_path.py" in digest["admission"]["admitted_files"]
+
+
 def test_phase2d_execution_capability_status_routes_to_observability_profile():
     digest = build_digest(
         "Phase 2D DSA-16 execution capability status summary matrix for entry "
