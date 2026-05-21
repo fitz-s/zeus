@@ -36,7 +36,7 @@ tail_probability_raw: float                                # ensemble Monte Carl
 tail_probability_calibrated: float                         # post-Platt
 tail_probability_stressed: float                           # +2σ stress test
 
-tail_regime_tag: WeatherRegimeTag                          # heat_dome / cold_snap / normal / shoulder_season / anomaly
+tail_regime_tag: WeatherRegimeTag                          # heat_dome / cold_snap / normal / shoulder_season / source_anomaly / unknown
 retail_lottery_bias_score: float                           # diagnostic; if shoulder ask >> historical median, flag
 extreme_weather_underpricing_score: float                  # diagnostic; if regime is extreme but shoulder posterior < market, flag
 source_anomaly_score: float                                # cross-station deviation z-score

@@ -36,7 +36,7 @@ class SettlementOutcome(IntEnum):
     
     # Post-resolution
     REDEEMED = 5                         # winning token redeemed for collateral
-    OBSERVATION_REVISED = 6              # official observation revised after PHYSICALLY_CONFIRMED; triggers re-evaluation of bound state and position sizing; may revert to PHYSICALLY_CONFIRMED if revision is within settlement rounding tolerance, or to SOURCE_PUBLISHED_VENUE_UNRESOLVED if source has already published the original value
+    OBSERVATION_REVISED = 6              # official observation revised after PHYSICALLY_CONFIRMED; triggers re-evaluation of bound state and position sizing; routes forward to SOURCE_REVISION (if source has republished a corrected value) or DISPUTED (if correction is contested); does NOT revert to PHYSICALLY_CONFIRMED or SOURCE_PUBLISHED_VENUE_UNRESOLVED — monotonic-forward rule preserved
     
     # Edge cases
     DISPUTED = 100                       # UMA dispute filed
