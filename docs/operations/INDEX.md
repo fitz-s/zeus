@@ -109,6 +109,7 @@ directory should EITHER be moved under `archive/` OR keep a
 | `task_2026-05-21_live_contract_authority_pass/` | PR #253 | **active** — contract authority pass for tradability, passive EV, order truth, family exposure, and business-plane health after endpoint-asymmetry review | 2026-05-21 |
 | `task_2026-05-21_money_path_semantic_ci/` | PR #257 | **active** — money-path semantic CI object registry, classifier, invariant coverage, and test-quality gate | 2026-05-21 |
 | `task_2026-05-21_live_release_proof_p0p3/` | branch: `fix/live-release-proof-p0p3-20260521` | **active** — P0-P3 live release proof blockers: release gate, schema fail-closed, negRisk tradeability, lifecycle replay, redeem semantics, Kelly proof, required money-path CI | 2026-05-21 |
+| `task_2026-05-21_evidence_tier_tribunal_authority/` | PR #279 | **active** — EvidenceTier, Tribunal, no-trade provenance, and runtime strategy authority repair packet | 2026-05-21 |
 
 ## Active operation (only one allowed unless explicit branching)
 

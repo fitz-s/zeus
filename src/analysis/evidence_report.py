@@ -165,19 +165,23 @@ def build_evidence_report(
             for row in conn.execute("PRAGMA table_info(no_trade_events)").fetchall()
         }
         if "strategy_key" in no_trade_columns:
-            compatibility_filter = (
-                "AND schema_compatibility = 'current'"
-                if "schema_compatibility" in no_trade_columns
-                else ""
-            )
-            n_no_trade_row = conn.execute(
-                f"""
-                SELECT COUNT(*) FROM no_trade_events
-                WHERE strategy_key = ?
-                {compatibility_filter}
-                """,
-                (strategy_id,),
-            ).fetchone()
+            if "schema_compatibility" in no_trade_columns:
+                n_no_trade_row = conn.execute(
+                    """
+                    SELECT COUNT(*) FROM no_trade_events
+                    WHERE strategy_key = ?
+                      AND schema_compatibility = 'current'
+                    """,
+                    (strategy_id,),
+                ).fetchone()
+            else:
+                n_no_trade_row = conn.execute(
+                    """
+                    SELECT COUNT(*) FROM no_trade_events
+                    WHERE strategy_key = ?
+                    """,
+                    (strategy_id,),
+                ).fetchone()
             n_no_trades = int(n_no_trade_row[0] or 0)
         else:
             n_no_trade_row = conn.execute(
