@@ -381,6 +381,16 @@ def _classify_alerts(report, ss_age):
     settlement_truth = report.get("settlement_truth", {})
     if settlement_truth.get("ok") is not True:
         alerts.append(settlement_truth.get("issue") or "SETTLEMENT_TRUTH_UNHEALTHY")
+    composite = report.get("live_health_composite") or {}
+    if composite.get("status") == "DEGRADED" or composite.get("healthy") is False:
+        surfaces = composite.get("surfaces") if isinstance(composite.get("surfaces"), dict) else {}
+        failing = composite.get("failing_surfaces") or []
+        for surface in failing:
+            detail = surfaces.get(surface) if isinstance(surfaces, dict) else None
+            issue = detail.get("issue") if isinstance(detail, dict) else None
+            alerts.append(f"LIVE_HEALTH_{surface.upper()}={issue or 'DEGRADED'}")
+        if not failing:
+            alerts.append("LIVE_HEALTH_COMPOSITE_DEGRADED")
     if ss_age is not None and ss_age > 2700:
         alerts.append(f"cycle_stale={ss_age}s")
     if report.get("cycle", {}).get("ws_connected") is False:
@@ -424,6 +434,8 @@ def main():
     ss_path = os.path.join(ROOT, "state/status_summary.json")
     ss_age = _age(ss_path)
     report["status_summary_age_s"] = ss_age
+    composite_path = os.path.join(ROOT, "state/live_health_composite.json")
+    report["live_health_composite"] = _load_json(composite_path)
     try:
         ss = _load_json(ss_path)
         if ss.get("error"):

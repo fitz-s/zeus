@@ -206,6 +206,98 @@ def _directional_executable_tokens(tokens: dict, direction: str) -> dict:
     return selected
 
 
+def _empty_orderbook_error_type():
+    try:
+        from src.contracts.exceptions import EmptyOrderbookError
+
+        return EmptyOrderbookError
+    except ImportError:
+        return type("DummyEmptyOrderbookError", (Exception,), {})
+
+
+def _is_missing_bid_error(exc: Exception) -> bool:
+    return "missing bids" in str(exc).lower()
+
+
+def _raise_empty_orderbook(message: str, cause: Exception | None = None):
+    empty_orderbook_error = _empty_orderbook_error_type()
+    if cause is None:
+        raise empty_orderbook_error(message)
+    raise empty_orderbook_error(message) from cause
+
+
+def _buy_entry_price_from_orderbook(token_id: str, orderbook: dict) -> dict[str, float | bool | None]:
+    from src.data.market_scanner import _optional_top_book_level_decimal, _top_book_level_decimal
+
+    try:
+        ask, ask_size = _top_book_level_decimal(orderbook, "asks")
+    except Exception as exc:
+        _raise_empty_orderbook(f"No executable ask for {token_id}: {exc}", exc)
+
+    try:
+        bid, bid_size = _optional_top_book_level_decimal(orderbook, "bids")
+    except Exception as exc:
+        _raise_empty_orderbook(f"No executable bid for {token_id}: {exc}", exc)
+
+    if bid is None:
+        return {
+            "price": float(ask),
+            "bid": None,
+            "ask": float(ask),
+            "bid_size": 0.0,
+            "ask_size": float(ask_size),
+            "ask_only": True,
+        }
+    if bid >= ask:
+        _raise_empty_orderbook(f"Crossed orderbook for {token_id}")
+
+    return {
+        "price": float(vwmp(bid, ask, bid_size, ask_size)),
+        "bid": float(bid),
+        "ask": float(ask),
+        "bid_size": float(bid_size),
+        "ask_size": float(ask_size),
+        "ask_only": False,
+    }
+
+
+def _buy_entry_price_from_clob(clob, token_id: str) -> dict[str, float | bool | None]:
+    """Return conservative BUY entry price without requiring two-sided VWMP.
+
+    VWMP remains preferred when the book is two-sided. If the only missing fact
+    is bid depth, a BUY entry can still be priced from the ask side. Missing asks
+    remain fail-closed because there is no executable BUY price.
+    """
+
+    empty_orderbook_error = _empty_orderbook_error_type()
+    orderbook_getter = getattr(clob, "get_orderbook", None)
+    if callable(orderbook_getter):
+        return _buy_entry_price_from_orderbook(token_id, orderbook_getter(token_id))
+
+    try:
+        bid, ask, bid_size, ask_size = clob.get_best_bid_ask(token_id)
+        return {
+            "price": float(vwmp(bid, ask, bid_size, ask_size)),
+            "bid": float(bid),
+            "ask": float(ask),
+            "bid_size": float(bid_size),
+            "ask_size": float(ask_size),
+            "ask_only": False,
+        }
+    except Exception as exc:
+        if not (
+            isinstance(exc, empty_orderbook_error)
+            or exc.__class__.__name__ == "EmptyOrderbookError"
+        ):
+            raise
+        if not _is_missing_bid_error(exc):
+            raise
+        _raise_empty_orderbook(
+            f"No executable top book for {token_id}: missing bids without single-book ask authority",
+            exc,
+        )
+
+
 @dataclass
 class MarketCandidate:
     """A market discovered by the scanner, ready for evaluation."""
@@ -3551,8 +3643,12 @@ def evaluate_candidate(
         if not bool(executable_mask[idx]):
             continue
         try:
-            bid, ask, bid_sz, ask_sz = clob.get_best_bid_ask(o["token_id"])
-            p_market[idx] = vwmp(bid, ask, bid_sz, ask_sz)
+            yes_quote = _buy_entry_price_from_clob(clob, o["token_id"])
+            bid = yes_quote["bid"]
+            ask = yes_quote["ask"]
+            bid_sz = float(yes_quote["bid_size"] or 0.0)
+            ask_sz = float(yes_quote["ask_size"] or 0.0)
+            p_market[idx] = float(yes_quote["price"])
 
             # Injection Point 7: Data completeness - record microstructure snapshot
             if callable(microstructure_sink):
@@ -3565,9 +3661,13 @@ def evaluate_candidate(
                         "range_label": bins[idx].label,
                         "price": float(p_market[idx]),
                         "volume": float(bid_sz + ask_sz),
-                        "bid": float(bid),
+                        "bid": None if bid is None else float(bid),
                         "ask": float(ask),
-                        "spread": round(float(ask - bid), 4) if ask >= bid else 0.0,
+                        "spread": (
+                            None
+                            if bid is None
+                            else (round(float(ask - bid), 4) if ask >= bid else 0.0)
+                        ),
                         "source_timestamp": dt.datetime.now(dt.timezone.utc).isoformat(),
                     }
                 )
@@ -3578,8 +3678,8 @@ def evaluate_candidate(
                     native_no_quote_unavailable_labels.append(str(o["title"]))
                 else:
                     try:
-                        no_bid, no_ask, no_bid_sz, no_ask_sz = clob.get_best_bid_ask(no_token_id)
-                        p_market_no[idx] = vwmp(no_bid, no_ask, no_bid_sz, no_ask_sz)
+                        no_quote = _buy_entry_price_from_clob(clob, no_token_id)
+                        p_market_no[idx] = float(no_quote["price"])
                         buy_no_quote_available[idx] = True
                     except Exception as no_exc:
                         logger.warning(

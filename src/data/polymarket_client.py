@@ -418,6 +418,23 @@ class PolymarketClient:
 
         return float(best_bid), float(best_ask), float(bid_size), float(ask_size)
 
+    def get_best_ask(self, token_id: str) -> tuple[float, float]:
+        """Get executable BUY price and size for one token.
+
+        BUY entry authority is the ask side. A sparse book with no bid can still
+        be buy-executable; callers that need a two-sided VWMP should continue to
+        use get_best_bid_ask().
+        """
+        from src.contracts.exceptions import EmptyOrderbookError
+        from src.data.market_scanner import _top_book_level_decimal
+
+        book = self.get_orderbook(token_id)
+        try:
+            best_ask, ask_size = _top_book_level_decimal(book, "asks")
+        except Exception as exc:
+            raise EmptyOrderbookError(f"No executable ask for {token_id}: {exc}") from exc
+        return float(best_ask), float(ask_size)
+
     def get_fee_rate(self, token_id: str) -> float:
         """Fetch the token-specific Polymarket taker fee as a fraction."""
 

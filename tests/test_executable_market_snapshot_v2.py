@@ -690,6 +690,25 @@ def test_polymarket_client_best_bid_ask_normalizes_unsorted_orderbook(monkeypatc
     assert client.get_best_bid_ask("yes-token") == (0.47, 0.53, 100.0, 25.0)
 
 
+def test_polymarket_client_best_ask_accepts_buy_executable_ask_only_book(monkeypatch):
+    client = object.__new__(PolymarketClient)
+
+    def fake_orderbook(token_id):
+        assert token_id == "yes-token"
+        return {
+            "bids": [],
+            "asks": [
+                {"price": 0.99, "size": 50.0},
+                {"price": 0.53, "size": 10.0},
+                {"price": 0.53, "size": 15.0},
+            ],
+        }
+
+    monkeypatch.setattr(client, "get_orderbook", fake_orderbook)
+
+    assert client.get_best_ask("yes-token") == (0.53, 25.0)
+
+
 @pytest.mark.parametrize(
     "market_info",
     [
