@@ -45,8 +45,8 @@ Authority for orchestrator behavior: `~/.claude/skills/orchestrator-delivery/SKI
 | Per-track SCAFFOLD execution | **sonnet** | Implementation per phase contract; no architectural decisions inside phase. |
 | Per-track production | **sonnet** | Same. |
 | Verifier on standard surface | **sonnet** | Regression re-runs with pass/fail report. |
-| Per-track SCAFFOLD critic | **opus** | SCAFFOLD critic 4-for-4 ROI per memory `feedback_opus_critic_on_architectural_scaffold_4_for_4_roi`. Mandatory. |
-| Wave-level cross-track critic | **opus** | Cross-cutting reasoning + math correctness checks. |
+| Per-track SCAFFOLD critic | **sonnet** | Per ultraplan §L: SCAFFOLD critic is sonnet-tier (cross-module semantic reasoning on architectural skeleton). Opus reserved for wave critics. |
+| Wave-level cross-track critic | **opus** | Cross-PR coherence audit; one per wave per ultraplan §L. Budgeted: 9 opus total for plan-lock + wave + closure. |
 | Math defect / calibration / Kelly architecture | **opus** | High architectural load. |
 | K0 LIVE BOUNDARY phase critic | **opus** | Phases 6 (promotion gate) + 7 (settlement type-gate) are K0 — failures cost real capital. |
 | Closure verifier (wave end) | **opus** | Final live-money truth gate per Phase 0 §I precedent. |

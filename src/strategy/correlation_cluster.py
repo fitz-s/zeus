@@ -49,7 +49,68 @@ def tail_correlation_cluster_for(
     Returns:
         Cluster ID string, or "" when regime is UNKNOWN.
 
-    Raises:
-        NotImplementedError: T1 production logic pending SCAFFOLD critic PASS.
+    Returns:
+        Cluster ID string, or "" when regime is UNKNOWN.
     """
-    raise NotImplementedError("T1 production pending SCAFFOLD critic PASS")
+    from src.contracts.weather_regime_tag import WeatherRegimeTag
+
+    if regime is WeatherRegimeTag.UNKNOWN:
+        return ""
+
+    # Geographic zone map — hardcoded per task brief (no zone field in cities.json).
+    # Zones: east / central / west (North America), europe, asia, southern, tropics.
+    # Derivation: continental-scale weather systems track together; zone boundaries
+    # follow standard climatological regions used by NOAA/ECMWF ensemble domains.
+    _CITY_ZONE: dict[str, str] = {
+        "Amsterdam": "europe",
+        "Ankara": "europe",
+        "Atlanta": "east",
+        "Auckland": "southern",
+        "Austin": "central",
+        "Beijing": "asia",
+        "Buenos Aires": "southern",
+        "Busan": "asia",
+        "Cape Town": "southern",
+        "Chengdu": "asia",
+        "Chicago": "central",
+        "Chongqing": "asia",
+        "Dallas": "central",
+        "Denver": "central",
+        "Hong Kong": "asia",
+        "Houston": "central",
+        "Istanbul": "europe",
+        "Jakarta": "tropics",
+        "Jeddah": "europe",
+        "Kuala Lumpur": "tropics",
+        "Lagos": "tropics",
+        "London": "europe",
+        "Los Angeles": "west",
+        "Lucknow": "asia",
+        "Madrid": "europe",
+        "Mexico City": "central",
+        "Miami": "east",
+        "Milan": "europe",
+        "Moscow": "europe",
+        "Munich": "europe",
+        "NYC": "east",
+        "Panama City": "tropics",
+        "Paris": "europe",
+        "San Francisco": "west",
+        "Sao Paulo": "southern",
+        "Seattle": "west",
+        "Seoul": "asia",
+        "Shanghai": "asia",
+        "Shenzhen": "asia",
+        "Singapore": "tropics",
+        "Taipei": "asia",
+        "Tel Aviv": "europe",
+        "Tokyo": "asia",
+        "Toronto": "east",
+        "Warsaw": "europe",
+        "Wellington": "southern",
+        "Wuhan": "asia",
+    }
+
+    zone = _CITY_ZONE.get(city, "unknown")
+    date_str = target_date.strftime("%Y_%m_%d")
+    return f"{regime}_{zone}_{date_str}"
