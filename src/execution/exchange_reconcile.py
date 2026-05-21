@@ -2294,6 +2294,11 @@ def _ensure_exit_fill_position_event(
         phase_before="pending_exit",
         source_module="src.execution.exchange_reconcile",
     )
+    command_id = str(command.get("command_id") or "")
+    if command_id:
+        for event in events:
+            if event.get("event_type") == "EXIT_ORDER_FILLED":
+                event["command_id"] = command_id
     _apply_exit_fill_projection_and_execution_fact(
         conn,
         events=events,
