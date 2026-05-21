@@ -1,7 +1,9 @@
-# Created: 2026-05-21
-# Last reused or audited: 2026-05-21
+# Lifecycle: created=2026-05-21; last_reviewed=2026-05-21; last_reused=2026-05-21
+# Purpose: Cross-module relationship antibody — P0-1 STAGE A family-exclusive entry gate
+#          fires through execute_discovery_phase (cycle_runtime), not just in unit isolation.
+#          P0-1 opus critic Major #1 follow-up.
 # Authority basis: operator P0-1 live-money spec 2026-05-20/21 (mutually-exclusive
-#                  weather family sizing), STAGE A; P0-1 critic Major #1 follow-up.
+#                  weather family sizing), STAGE A.
 
 """Cross-module integration: family-exclusive entry gate through cycle_runtime.
 
@@ -404,9 +406,23 @@ def test_structural_sentinel_dedup_called_from_cycle_runtime() -> None:
         "SENTINEL FAIL: dedup_mutually_exclusive_families call not found in "
         "cycle_runtime.py — the cross-module hook has been deleted."
     )
-    # Call passes the family key kwargs (city=, target_date=, temperature_metric=).
-    for kwarg in ("city=", "target_date=", "temperature_metric="):
-        assert kwarg in text, (
-            f"SENTINEL FAIL: dedup call in cycle_runtime.py missing kwarg {kwarg!r}. "
-            "The call signature may have changed."
+
+    # Tighten kwarg checks: find the actual dedup call block (3-line span starting
+    # at "decisions = dedup_mutually_exclusive_families(") and verify the required
+    # family-key kwargs appear in the ~10-line window around that call.
+    # This avoids false positives from unrelated uses of "city=", "target_date=",
+    # "temperature_metric=" elsewhere in cycle_runtime.py.
+    call_marker = "decisions = dedup_mutually_exclusive_families("
+    call_idx = text.find(call_marker)
+    assert call_idx != -1, (
+        "SENTINEL FAIL: 'decisions = dedup_mutually_exclusive_families(' assignment "
+        "not found in cycle_runtime.py — the call site may have been refactored."
+    )
+    # Slice the 400 chars after the call open-paren — covers the kwargs block.
+    call_window = text[call_idx : call_idx + 400]
+    for kwarg in ("city=city", "target_date=candidate", "temperature_metric=candidate"):
+        assert kwarg in call_window, (
+            f"SENTINEL FAIL: expected kwarg pattern {kwarg!r} not found in the "
+            "dedup_mutually_exclusive_families call window in cycle_runtime.py. "
+            "The call signature may have changed or the kwargs were renamed."
         )
