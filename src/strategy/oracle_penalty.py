@@ -80,6 +80,8 @@ from src.strategy.oracle_status import OracleStatus
 
 logger = logging.getLogger(__name__)
 
+CANONICAL_OBSERVATION_SOURCE_ROLE = "canonical_observation_instants_v2"
+
 # Re-export for callers that imported from oracle_penalty pre-A3
 # (e.g. ``from src.strategy.oracle_penalty import OracleStatus``).
 __all__ = [
@@ -142,6 +144,32 @@ def _resolve_multiplier(
     return 0.0
 
 
+def _classify_oracle_evidence(
+    *,
+    mismatches: int,
+    n: int,
+    source_role: str,
+    artifact_age_hours: Optional[float],
+) -> OracleStatus:
+    """Classify oracle evidence at the correct authority level.
+
+    Snapshot evidence remains governed by the conservative Beta posterior
+    classifier. Canonical observation evidence is different: it is a direct
+    comparison between verified K1 observations and verified settlements, so a
+    city with enough comparisons and zero mismatches is not "missing" or
+    "insufficient"; it is normal operation with no penalty.
+    """
+    if (
+        source_role == CANONICAL_OBSERVATION_SOURCE_ROLE
+        and artifact_age_hours is not None
+        and artifact_age_hours > 24 * 7
+    ):
+        return OracleStatus.STALE
+    if source_role == CANONICAL_OBSERVATION_SOURCE_ROLE and n >= 10 and mismatches == 0:
+        return OracleStatus.OK
+    return _estimator_classify(mismatches, n, artifact_age_hours=artifact_age_hours)
+
+
 # ── OracleInfo dataclass ────────────────────────────────────────────── #
 
 
@@ -202,7 +230,12 @@ def summarize_oracle_posterior(
     Bridge and tests use this as the may4math F3 compatibility surface; the
     underlying policy remains the target branch's oracle_estimator classifier.
     """
-    status = _estimator_classify(mismatches, n, artifact_age_hours=None)
+    status = _classify_oracle_evidence(
+        mismatches=mismatches,
+        n=n,
+        source_role=source_role,
+        artifact_age_hours=None,
+    )
     p_mean = _posterior_mean(mismatches, n)
     p95 = _posterior_upper_95(mismatches, n)
     mult = _resolve_multiplier(status, posterior_upper_95=p95)
@@ -297,7 +330,12 @@ def _info_from_record(
             prev_multiplier=_prev_multiplier_cache.get((city, metric), 1.0),
         )
 
-    status = _estimator_classify(mismatches, n, artifact_age_hours=artifact_age_hours)
+    status = _classify_oracle_evidence(
+        mismatches=mismatches,
+        n=n,
+        source_role=source_role,
+        artifact_age_hours=artifact_age_hours,
+    )
     p_mean = _posterior_mean(mismatches, n)
     p95 = _posterior_upper_95(mismatches, n)
     mult = _resolve_multiplier(
@@ -424,17 +462,17 @@ def reload() -> None:
     _cache = new_cache
     _cache_artifact_mtime = new_mtime
     _cache_status = OracleStatus.OK if new_cache else OracleStatus.MISSING
+    artifact_age = _artifact_age_hours()
     blacklisted = sum(
         1
         for (c, m), r in new_cache.items()
-        # Coarse pre-classification for the log line; full classify
-        # happens at get_oracle_info time.
-        if int(r.get("n", r.get("snapshot_comparisons", 0)) or 0) >= 10
-        and _posterior_upper_95(
-            int(r.get("mismatches", r.get("snapshot_mismatch", 0)) or 0),
-            int(r.get("n", r.get("snapshot_comparisons", 0)) or 0),
+        if _classify_oracle_evidence(
+            mismatches=int(r.get("mismatches", r.get("snapshot_mismatch", 0)) or 0),
+            n=int(r.get("n", r.get("snapshot_comparisons", 0)) or 0),
+            source_role=str(r.get("source_role", "")),
+            artifact_age_hours=artifact_age,
         )
-        > 0.10
+        == OracleStatus.BLACKLIST
     )
     logger.info(
         "oracle_penalty reloaded: %d records, %d blacklisted",

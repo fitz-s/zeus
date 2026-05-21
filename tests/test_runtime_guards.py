@@ -8096,6 +8096,7 @@ def test_strategy_classification_preserves_day0_and_update_semantics():
     assert cycle_runner._classify_strategy(DiscoveryMode.DAY0_CAPTURE, center_edge, "") == "settlement_capture"
     assert cycle_runtime._strategy_phase_rejection_reason("settlement_capture", DiscoveryMode.DAY0_CAPTURE) is None
     assert cycle_runtime._strategy_phase_rejection_reason("opening_inertia", DiscoveryMode.OPENING_HUNT) is None
+    assert cycle_runtime._strategy_phase_rejection_reason("opening_inertia", DiscoveryMode.IMMINENT_OPEN_CAPTURE) is None
     assert cycle_runtime._strategy_phase_rejection_reason("center_buy", DiscoveryMode.UPDATE_REACTION) is None
     assert cycle_runtime._strategy_phase_rejection_reason("shoulder_sell", DiscoveryMode.UPDATE_REACTION) is None
     assert (

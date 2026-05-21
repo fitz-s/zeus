@@ -1,23 +1,24 @@
 #!/usr/bin/env python3
-# Lifecycle: created=2026-04-16; last_reviewed=2026-05-04; last_reused=2026-05-04
-# Purpose: Bridge oracle shadow snapshots into the reviewed oracle error-rate config artifact.
-# Reuse: Review source snapshots and high-track settlement filtering before applying output.
-# Authority basis: docs/operations/task_2026-05-04_oracle_kelly_evidence_rebuild/PLAN.md §A2 (storage path centralization + atomic write + heartbeat).
-"""Bridge oracle shadow snapshots to calibration data.
+# Lifecycle: created=2026-04-16; last_reviewed=2026-05-21; last_reused=2026-05-21
+# Purpose: Bridge canonical oracle evidence into the reviewed oracle error-rate config artifact.
+# Reuse: Review canonical observation/settlement routing and high-track settlement filtering before applying output.
+# Authority basis: docs/operations/task_2026-05-04_oracle_kelly_evidence_rebuild/PLAN.md §A2; 2026-05-21 live oracle-penalty P0 wiring repair.
+"""Bridge oracle evidence to calibration data.
 
-Compares oracle-time WU/HKO snapshots (captured by
-``oracle_snapshot_listener.py``) against PM settlement values, then
-updates ``data/oracle_error_rates.json`` with fresh per-city error
-rates.
+Compares canonical verified observations and oracle-time WU/HKO shadow snapshots
+against PM settlement values, then updates ``data/oracle_error_rates.json`` with
+fresh per-city error rates.
 
 This script is the ONLY writer to oracle_error_rates.json and the ONLY
-reader of oracle shadow snapshots.  It bridges the shadow storage layer
-to the evaluator's oracle penalty system without touching zeus-world.db.
+reader of oracle shadow snapshots. It bridges canonical observation truth plus
+the shadow storage layer to the evaluator's oracle penalty system.
 
 Usage:
     .venv/bin/python scripts/bridge_oracle_to_calibration.py [--dry-run]
 
 Architecture:
+    settlements + world.observation_instants_v2
+                                      →  canonical daily settlement values
     oracle_snapshot_listener.py  →  raw/oracle_shadow_snapshots/{city}/{date}.json
                                            ↓
     bridge_oracle_to_calibration.py  →  data/oracle_error_rates.json
@@ -192,6 +193,82 @@ def _snapshot_settlement_value(city_name: str, snap: dict, settle: dict, snap_hi
     return _settlement_semantics_for(city_name, settle).round_single(snap_val)
 
 
+def _coerce_observation_to_settlement_unit(value: float, obs_unit: str, settlement_unit: str) -> float:
+    """Convert canonical observation value to the settlement row's unit."""
+    obs_unit = str(obs_unit or "").upper()
+    settlement_unit = str(settlement_unit or "").upper()
+    val = float(value)
+    if obs_unit == settlement_unit or not obs_unit or not settlement_unit:
+        return val
+    if obs_unit == "F" and settlement_unit == "C":
+        return (val - 32.0) * 5.0 / 9.0
+    if obs_unit == "C" and settlement_unit == "F":
+        return val * 9.0 / 5.0 + 32.0
+    return val
+
+
+def _canonical_observation_daily_high(
+    conn: sqlite3.Connection,
+    city_name: str,
+    target_date: str,
+) -> dict | None:
+    """Read the canonical verified daily high from ``world.observation_instants_v2``.
+
+    The old bridge treated sparse shadow snapshots as the authority surface,
+    which made normal cities look ``INSUFFICIENT_SAMPLE`` even when the K1 DBs
+    already held many verified settlement/observation days. This helper uses
+    the current canonical ``world.observation_instants_v2`` table first and keeps the existing
+    primary/fallback source coverage rule.
+    """
+    primary_source = expected_source_for_city(city_name)
+    allowed_sources = allowed_sources_for_city(city_name)
+    source_order = [primary_source, *[s for s in allowed_sources if s != primary_source]]
+
+    for source in source_order:
+        row = conn.execute(
+            """
+            SELECT
+                COUNT(DISTINCT utc_timestamp) AS hours,
+                MAX(COALESCE(running_max, temp_current)) AS daily_high,
+                COALESCE(
+                    MAX(CASE WHEN temp_unit IS NOT NULL AND temp_unit <> '' THEN temp_unit END),
+                    'F'
+                ) AS temp_unit
+            FROM world.observation_instants_v2
+            WHERE city = ?
+              AND target_date = ?
+              AND source = ?
+              AND authority = 'VERIFIED'
+              AND COALESCE(running_max, temp_current) IS NOT NULL
+            """,
+            (city_name, target_date, source),
+        ).fetchone()
+        hours = int(row[0] or 0) if row is not None else 0
+        daily_high = row[1] if row is not None else None
+        if hours >= _MIN_HOURS_PER_DAY and daily_high is not None:
+            return {
+                "daily_high": float(daily_high),
+                "source": source,
+                "unit": str(row[2] or "F").upper(),
+                "hours": hours,
+            }
+    return None
+
+
+def _canonical_observation_settlement_value(
+    city_name: str,
+    observation: dict,
+    settle: dict,
+) -> float:
+    """Convert a canonical observation high into PM settlement value space."""
+    obs_val = _coerce_observation_to_settlement_unit(
+        float(observation["daily_high"]),
+        str(observation.get("unit") or ""),
+        str(settle.get("unit") or ""),
+    )
+    return _settlement_semantics_for(city_name, settle).round_single(obs_val)
+
+
 def _in_bin(value: float, bin_lo: float | None, bin_hi: float | None) -> bool:
     """Check if a value falls within PM settlement bin."""
     if bin_lo is not None and value < bin_lo:
@@ -199,6 +276,21 @@ def _in_bin(value: float, bin_lo: float | None, bin_hi: float | None) -> bool:
     if bin_hi is not None and value > bin_hi:
         return False
     return True
+
+
+def _matches_verified_settlement(value: float, settle: dict) -> bool:
+    """Compare a rounded observation value to the verified settlement row.
+
+    Prefer the canonical ``settlement_value`` equality. Historical rows can
+    carry PM bin labels in a display unit that does not match the settlement
+    value unit, so using only ``pm_bin_lo/hi`` can manufacture mismatches for
+    otherwise correct rows. Bin membership remains a fallback for shoulder rows
+    or old settlements without a value.
+    """
+    settlement_value = settle.get("value")
+    if settlement_value is not None and float(value) == float(settlement_value):
+        return True
+    return _in_bin(value, settle["bin_lo"], settle["bin_hi"])
 
 
 def bridge(dry_run: bool = False) -> dict:
@@ -212,7 +304,7 @@ def bridge(dry_run: bool = False) -> dict:
         snapshots = _load_snapshots()
         if not snapshots:
             logger.info("No shadow snapshots found in %s", oracle_snapshot_dir())
-            return {"cities": 0, "comparisons": 0}
+            logger.info("Falling back to canonical observation_instants_v2 evidence")
 
         # Coverage check helper (closure over conn — must be inside with block)
         def _get_day_coverage(city: str, target_date: str) -> tuple[int, int]:
@@ -254,6 +346,59 @@ def bridge(dry_run: bool = False) -> dict:
 
         city_stats: dict[str, dict] = {}
 
+        for (city_name, target_date), settle in sorted(settlements.items()):
+            matches = 0
+            mismatches = 0
+            mismatch_dates = []
+            dates_compared = []
+            observation = _canonical_observation_daily_high(conn, city_name, target_date)
+            if observation is None:
+                continue
+
+            obs_val = _canonical_observation_settlement_value(city_name, observation, settle)
+            dates_compared.append(target_date)
+            if _matches_verified_settlement(obs_val, settle):
+                matches += 1
+            else:
+                mismatches += 1
+                mismatch_dates.append(target_date)
+                logger.info(
+                    "MISMATCH %s %s: canonical_obs=%s%s → %s, PM value=%s bin=[%s,%s]",
+                    city_name,
+                    target_date,
+                    observation["daily_high"],
+                    observation.get("unit", ""),
+                    obs_val,
+                    settle.get("value"),
+                    settle["bin_lo"],
+                    settle["bin_hi"],
+                )
+
+            total = matches + mismatches
+            if total > 0:
+                stats = city_stats.setdefault(
+                    city_name,
+                    {
+                        "snapshot_comparisons": 0,
+                        "snapshot_match": 0,
+                        "snapshot_mismatch": 0,
+                        "skipped_low_coverage": 0,
+                        "snapshot_error_rate": 0.0,
+                        "snapshot_mismatch_dates": [],
+                        "snapshot_dates": [],
+                        "source_role": "canonical_observation_instants_v2",
+                    },
+                )
+                stats["snapshot_comparisons"] += total
+                stats["snapshot_match"] += matches
+                stats["snapshot_mismatch"] += mismatches
+                stats["snapshot_mismatch_dates"].extend(mismatch_dates)
+                stats["snapshot_dates"].extend(dates_compared)
+                stats["snapshot_error_rate"] = round(
+                    stats["snapshot_mismatch"] / stats["snapshot_comparisons"],
+                    4,
+                )
+
         for city_name, date_snaps in sorted(snapshots.items()):
             matches = 0
             mismatches = 0
@@ -264,6 +409,8 @@ def bridge(dry_run: bool = False) -> dict:
             for target_date, snap in sorted(date_snaps.items()):
                 key = (city_name, target_date)
                 if key not in settlements:
+                    continue
+                if city_name in city_stats and target_date in set(city_stats[city_name].get("snapshot_dates", [])):
                     continue
 
                 # S2 R4 P10C: Coverage filter. Ignore thin days to keep oracle stats clean.
@@ -288,14 +435,8 @@ def bridge(dry_run: bool = False) -> dict:
                     snap_high,
                 )
 
-                in_bin = _in_bin(
-                    snap_val,
-                    settle["bin_lo"],
-                    settle["bin_hi"],
-                )
-
                 dates_compared.append(target_date)
-                if in_bin:
+                if _matches_verified_settlement(snap_val, settle):
                     matches += 1
                 else:
                     mismatches += 1
@@ -309,15 +450,31 @@ def bridge(dry_run: bool = False) -> dict:
             total = matches + mismatches
             if total > 0:
                 error_rate = mismatches / total
-                city_stats[city_name] = {
-                    "snapshot_comparisons": total,
-                    "snapshot_match": matches,
-                    "snapshot_mismatch": mismatches,
-                    "skipped_low_coverage": skipped_low_coverage,
-                    "snapshot_error_rate": round(error_rate, 4),
-                    "snapshot_mismatch_dates": mismatch_dates,
-                    "snapshot_dates": dates_compared,
-                }
+                stats = city_stats.setdefault(
+                    city_name,
+                    {
+                        "snapshot_comparisons": 0,
+                        "snapshot_match": 0,
+                        "snapshot_mismatch": 0,
+                        "skipped_low_coverage": 0,
+                        "snapshot_error_rate": 0.0,
+                        "snapshot_mismatch_dates": [],
+                        "snapshot_dates": [],
+                        "source_role": "oracle_shadow_snapshot",
+                    },
+                )
+                stats["snapshot_comparisons"] += total
+                stats["snapshot_match"] += matches
+                stats["snapshot_mismatch"] += mismatches
+                stats["skipped_low_coverage"] += skipped_low_coverage
+                stats["snapshot_error_rate"] = round(
+                    stats["snapshot_mismatch"] / stats["snapshot_comparisons"],
+                    4,
+                )
+                stats["snapshot_mismatch_dates"].extend(mismatch_dates)
+                stats["snapshot_dates"].extend(dates_compared)
+                if stats.get("source_role") != "canonical_observation_instants_v2":
+                    stats["source_role"] = "oracle_shadow_snapshot"
                 logger.info(
                     "%s: %d/%d match, %d skipped (error=%.1f%%)",
                     city_name, matches, total, skipped_low_coverage, error_rate * 100,
@@ -379,7 +536,7 @@ def bridge(dry_run: bool = False) -> dict:
                 n=n,
                 mismatches=m,
                 metric="high",
-                source_role="oracle_shadow_snapshot",
+                source_role=snap_stats.get("source_role", "oracle_shadow_snapshot"),
                 last_date=city_entry["high"]["last_observed_date"] or "",
                 city=city_name,
             )
@@ -398,16 +555,7 @@ def bridge(dry_run: bool = False) -> dict:
             # `get_oracle_info` call — operators changing thresholds in code
             # should NOT need a bridge re-run. We still emit a status hint
             # for human readability of the JSON dump.
-            if n < 10:
-                city_entry["high"]["status_hint"] = "INSUFFICIENT_SAMPLE"
-            elif m == 0:
-                city_entry["high"]["status_hint"] = "OK_pending_p95"
-            elif snap_rate > 0.10:
-                city_entry["high"]["status_hint"] = "BLACKLIST"
-            elif snap_rate > 0.03:
-                city_entry["high"]["status_hint"] = "CAUTION"
-            else:
-                city_entry["high"]["status_hint"] = "INCIDENTAL"
+            city_entry["high"]["status_hint"] = posterior.status.value
             # Drop the old top-level "status" field; the reader's classify()
             # is the authority. Keep a one-cycle compat shim so anything
             # ad-hoc reading the JSON doesn't crash on missing key.

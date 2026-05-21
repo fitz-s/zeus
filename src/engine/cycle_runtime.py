@@ -3343,6 +3343,29 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                 _phase_value = candidate.market_phase.value
                 for _d in decisions:
                     _d.market_phase = _phase_value
+            # P0-1 STAGE A — emergency mutually-exclusive family entry gate.
+            # A (city, target_date, metric) weather market is a PARTITION
+            # (exactly one bin resolves YES). evaluate_candidate returns one
+            # EdgeDecision per bin; family-wise FDR can mark several bins
+            # should_trade=True, and the execution loop below submits each as
+            # an INDEPENDENT scalar-Kelly live order → ~Nx over-allocation on
+            # one underlying event. This single structural hook (NOT a
+            # per-callsite cap) collapses each family to its single best
+            # executable entry before the persistence + execution loops see
+            # the decisions. Gate default ON in live; fail-safe (only ever
+            # removes entries). Authority: operator P0-1 live-money spec
+            # 2026-05-20/21 (mutually-exclusive weather family sizing).
+            if decisions:
+                from src.strategy.family_exclusive_dedup import (
+                    dedup_mutually_exclusive_families,
+                )
+
+                decisions = dedup_mutually_exclusive_families(
+                    decisions,
+                    city=city.name,
+                    target_date=candidate.target_date,
+                    temperature_metric=candidate.temperature_metric,
+                )
             # Phase 2 T2: write no_trade_events rows for rejected decisions.
             # Fail-soft: logging/learning infrastructure must not crash the cycle.
             # INV-37: caller opens the world-DB connection (conn required on writer).

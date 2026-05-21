@@ -80,6 +80,15 @@ _LIVE_TERMINAL_ORDER_FACT_SOURCES = frozenset({
     "DATA_API",
     "CHAIN",
 })
+_CANONICAL_STRATEGY_KEYS = frozenset({
+    "settlement_capture",
+    "shoulder_sell",
+    "center_buy",
+    "opening_inertia",
+})
+_LEGACY_STRATEGY_KEY_ALIASES = {
+    "imminent_open_capture": "opening_inertia",
+}
 _ACKED_ORDER_STATES = frozenset({
     CommandState.ACKED.value,
     CommandState.POST_ACKED.value,
@@ -1338,6 +1347,13 @@ def _case_temperature_metric(case: dict) -> str:
     raise ValueError("filled entry projection repair requires temperature_metric provenance")
 
 
+def _canonical_projection_strategy_key(strategy_key: str) -> str:
+    normalized = str(strategy_key or "").strip()
+    if normalized in _CANONICAL_STRATEGY_KEYS:
+        return normalized
+    return _LEGACY_STRATEGY_KEY_ALIASES.get(normalized, normalized)
+
+
 def _entry_recovery_position(
     candidate: dict,
     trade_case: dict,
@@ -1403,7 +1419,9 @@ def _entry_recovery_position(
     city = str(trade_case.get("city") or "").strip()
     target_date = str(trade_case.get("target_date") or "").strip()
     direction = str(trade_case.get("direction") or "").strip()
-    strategy_key = str(trade_case.get("strategy_key") or trade_case.get("strategy") or "").strip()
+    strategy_key = _canonical_projection_strategy_key(
+        str(trade_case.get("strategy_key") or trade_case.get("strategy") or "").strip()
+    )
     if not city or not target_date or not bin_label or direction not in {"buy_yes", "buy_no"}:
         raise ValueError(f"{kind} projection repair requires decision_log market identity")
     expected_selected = no_token_id if direction == "buy_no" else token_id
@@ -1416,7 +1434,7 @@ def _entry_recovery_position(
         normalized = str(selected or "").strip()
         if normalized and normalized != selected_token_id:
             raise ValueError(f"{surface_name} selected token does not match venue command token")
-    if strategy_key not in {"settlement_capture", "shoulder_sell", "center_buy", "opening_inertia"}:
+    if strategy_key not in _CANONICAL_STRATEGY_KEYS:
         raise ValueError(f"{kind} projection repair requires valid strategy_key")
     p_posterior = _decimal_or_none(trade_case.get("p_posterior")) or Decimal("0")
     edge_context = _json_mapping(trade_case.get("edge_context_json"))

@@ -1564,6 +1564,14 @@ files:
     downstream:
     - src/engine/cycle_runner.py
     - src/engine/evaluator.py
+  src/strategy/family_exclusive_dedup.py:
+    zone: K3_extension
+    authority_role: mutually_exclusive_weather_family_gate
+    why: P0-1 Stage-A live-money emergency gate. A (city, target_date, metric) weather market is a partition (exactly one bin resolves YES); family-wise FDR can mark several bins should_trade=True and the cycle runtime would otherwise submit each as an independent scalar-Kelly live order (~Nx over-allocation on one underlying event). Collapses each family to its single best executable entry (by size_usd, the executor's post-fees/depth/cap revealed-preference dollar) at ONE structural hook before the execution loop. Pure runtime gating — no schema change; dropped bins audited via reason string + structured log. Stage B replaces with the full ExclusiveOutcomePortfolio object.
+    hazards:
+    - MULTI_BIN_MUTUALLY_EXCLUSIVE_OVERALLOCATION
+    downstream:
+    - src/engine/cycle_runtime.py
   src/strategy/oracle_penalty.py:
     zone: K3_extension
     authority_role: oracle_error_rate_penalty
