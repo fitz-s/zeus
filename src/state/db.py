@@ -849,7 +849,7 @@ def get_connection(
 # CI hook scripts/check_schema_version.py diffs the sqlite_master hash of
 # a fresh-init DB against tests/state/_schema_pinned_hash.txt and fails
 # the PR if SCHEMA_VERSION did not change in lockstep.
-SCHEMA_VERSION = 23  # 2026-05-21 Phase 3 T3: shoulder_exposure_ledger table
+SCHEMA_VERSION = 24  # 2026-05-21 Phase 5 T2: regime_correlation_cache table
 
 
 def init_schema(
@@ -2478,6 +2478,10 @@ def init_schema(
     # Phase 3 T3 (2026-05-21): shoulder_exposure_ledger table (SCHEMA_VERSION 23).
     from src.state.schema.shoulder_exposure_ledger_schema import ensure_table as _ensure_shoulder_exposure_ledger_table
     _ensure_shoulder_exposure_ledger_table(conn)
+
+    # Phase 5 T2 (2026-05-21): regime_correlation_cache table (SCHEMA_VERSION 24).
+    from src.state.schema.regime_correlation_cache_schema import ensure_table as _ensure_regime_correlation_cache_table
+    _ensure_regime_correlation_cache_table(conn)
 
     # Phase 2: apply v2 schema (idempotent — safe to run on every boot).
     from src.state.schema.v2_schema import apply_v2_schema as _apply_v2_schema
