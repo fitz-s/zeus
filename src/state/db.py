@@ -894,7 +894,7 @@ def get_connection(
 # CI hook scripts/check_schema_version.py diffs the sqlite_master hash of
 # a fresh-init DB against tests/state/_schema_pinned_hash.txt and fails
 # the PR if SCHEMA_VERSION did not change in lockstep.
-SCHEMA_VERSION = 24  # 2026-05-21 Phase 5 T2: regime_correlation_cache table
+SCHEMA_VERSION = 25  # 2026-05-21 Phase 6 T2+T3: shadow_experiments, evidence_tier_assignments, regret_decompositions
 
 
 def init_schema(
@@ -2527,6 +2527,11 @@ def init_schema(
     # Phase 5 T2 (2026-05-21): regime_correlation_cache table (SCHEMA_VERSION 24).
     from src.state.schema.regime_correlation_cache_schema import ensure_table as _ensure_regime_correlation_cache_table
     _ensure_regime_correlation_cache_table(conn)
+
+    # Phase 6 T2+T3 (2026-05-21): shadow_experiments, evidence_tier_assignments,
+    # regret_decompositions tables (SCHEMA_VERSION 25).
+    from src.state.schema.phase6_evidence_schema import ensure_tables as _ensure_phase6_evidence_tables
+    _ensure_phase6_evidence_tables(conn)
 
     # Phase 2: apply v2 schema (idempotent — safe to run on every boot).
     from src.state.schema.v2_schema import apply_v2_schema as _apply_v2_schema
