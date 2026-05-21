@@ -149,6 +149,76 @@ def test_effective_context_provided_applies_haircut():
     )
 
 
+@pytest.mark.parametrize(
+    "entry_mode,order_surface,order_type,spread_usd,depth,p_posterior,entry_price",
+    [
+        ("opening_hunt", "taker", "FOK", "0.01", 500, 0.60, 0.50),
+        ("day0_capture", "sub_dollar_passive", "GTC", "0.02", 500, 0.08, 0.02),
+        ("imminent_open_capture", "wide_spread_taker", "FAK", "0.12", 10, 0.60, 0.50),
+        ("opening_hunt", "low_depth_passive", "GTC", "0.07", 1, 0.60, 0.50),
+    ],
+)
+def test_effective_context_dynamic_live_mode_order_matrix(
+    entry_mode: str,
+    order_surface: str,
+    order_type: str,
+    spread_usd: str,
+    depth: int,
+    p_posterior: float,
+    entry_price: float,
+) -> None:
+    """Dynamic P1-5 matrix: live sizing must consume executable context for
+    every entry-mode/order-surface class instead of relying on AST threading.
+
+    `entry_mode` is recorded as the live money path under test; the sizer is
+    mode-agnostic, so this test proves the shared Kelly boundary applies the
+    context haircut for the surfaces that cycle_runtime feeds into it.
+    """
+    from src.engine.evaluator import _size_at_execution_price_boundary
+
+    neutral = _make_context(spread_usd="0.01", depth=500, order_type=order_type)
+    context = _make_context(spread_usd=spread_usd, depth=depth, order_type=order_type)
+    with patch("src.config.get_mode", return_value="live"):
+        neutral_size = _size_at_execution_price_boundary(
+            p_posterior=p_posterior,
+            entry_price=entry_price,
+            fee_rate=0.0,
+            sizing_bankroll=1000.0,
+            kelly_multiplier=0.2,
+            effective_context=neutral,
+        )
+        contextual_size = _size_at_execution_price_boundary(
+            p_posterior=p_posterior,
+            entry_price=entry_price,
+            fee_rate=0.0,
+            sizing_bankroll=1000.0,
+            kelly_multiplier=0.2,
+            effective_context=context,
+        )
+
+    assert contextual_size == pytest.approx(neutral_size * context.haircut(), rel=1e-9), (
+        f"{entry_mode}/{order_surface} did not size on EffectiveKellyContext: "
+        f"order_type={order_type} spread={spread_usd} depth={depth}"
+    )
+
+
+@pytest.mark.parametrize("entry_mode", ["opening_hunt", "day0_capture", "imminent_open_capture"])
+def test_live_missing_effective_context_fails_closed_for_each_entry_mode(entry_mode: str) -> None:
+    """Missing context is not mode-specific: every live entry mode fails closed."""
+    from src.engine.evaluator import _size_at_execution_price_boundary
+
+    with patch("src.config.get_mode", return_value="live"):
+        with pytest.raises(MissingEffectiveContextError, match="INV-kelly-effective"):
+            _size_at_execution_price_boundary(
+                p_posterior=0.60,
+                entry_price=0.50,
+                fee_rate=0.0,
+                sizing_bankroll=1000.0,
+                kelly_multiplier=0.2,
+                effective_context=None,
+            )
+
+
 # ── R-EE.2: AST audit — all call sites pass effective_context keyword ─────────
 
 def test_ast_audit_all_kelly_callers_pass_effective_context():
