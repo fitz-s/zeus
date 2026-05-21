@@ -219,6 +219,48 @@ def _is_missing_bid_error(exc: Exception) -> bool:
     return "missing bids" in str(exc).lower()
 
 
+def _raise_empty_orderbook(message: str, cause: Exception | None = None):
+    empty_orderbook_error = _empty_orderbook_error_type()
+    if cause is None:
+        raise empty_orderbook_error(message)
+    raise empty_orderbook_error(message) from cause
+
+
+def _buy_entry_price_from_orderbook(token_id: str, orderbook: dict) -> dict[str, float | bool | None]:
+    from src.data.market_scanner import _optional_top_book_level_decimal, _top_book_level_decimal
+
+    try:
+        ask, ask_size = _top_book_level_decimal(orderbook, "asks")
+    except Exception as exc:
+        _raise_empty_orderbook(f"No executable ask for {token_id}: {exc}", exc)
+
+    try:
+        bid, bid_size = _optional_top_book_level_decimal(orderbook, "bids")
+    except Exception as exc:
+        _raise_empty_orderbook(f"No executable bid for {token_id}: {exc}", exc)
+
+    if bid is None:
+        return {
+            "price": float(ask),
+            "bid": None,
+            "ask": float(ask),
+            "bid_size": 0.0,
+            "ask_size": float(ask_size),
+            "ask_only": True,
+        }
+    if bid >= ask:
+        _raise_empty_orderbook(f"Crossed orderbook for {token_id}")
+
+    return {
+        "price": float(vwmp(bid, ask, bid_size, ask_size)),
+        "bid": float(bid),
+        "ask": float(ask),
+        "bid_size": float(bid_size),
+        "ask_size": float(ask_size),
+        "ask_only": False,
+    }
+
+
 def _best_ask_from_clob(clob, token_id: str) -> tuple[float, float]:
     getter = getattr(clob, "get_best_ask", None)
     if callable(getter):
@@ -229,7 +271,10 @@ def _best_ask_from_clob(clob, token_id: str) -> tuple[float, float]:
         raise AttributeError("CLOB client does not expose get_best_ask or get_orderbook")
     from src.data.market_scanner import _top_book_level_decimal
 
-    ask, ask_size = _top_book_level_decimal(orderbook_getter(token_id), "asks")
+    try:
+        ask, ask_size = _top_book_level_decimal(orderbook_getter(token_id), "asks")
+    except Exception as exc:
+        _raise_empty_orderbook(f"No executable ask for {token_id}: {exc}", exc)
     return float(ask), float(ask_size)
 
 
@@ -242,6 +287,10 @@ def _buy_entry_price_from_clob(clob, token_id: str) -> dict[str, float | bool | 
     """
 
     empty_orderbook_error = _empty_orderbook_error_type()
+    orderbook_getter = getattr(clob, "get_orderbook", None)
+    if callable(orderbook_getter):
+        return _buy_entry_price_from_orderbook(token_id, orderbook_getter(token_id))
+
     try:
         bid, ask, bid_size, ask_size = clob.get_best_bid_ask(token_id)
         return {

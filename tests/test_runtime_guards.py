@@ -1030,6 +1030,51 @@ def test_entry_evaluator_missing_ask_still_fails_closed(monkeypatch):
     assert "missing asks" in decisions[0].rejection_reason_detail
 
 
+def test_buy_entry_quote_uses_single_orderbook_fetch_for_ask_only_book():
+    """RELATIONSHIP: ask-only BUY pricing must not refetch the same CLOB book."""
+
+    class SingleBookClob:
+        def __init__(self):
+            self.calls: list[str] = []
+
+        def get_orderbook(self, token_id):
+            self.calls.append(token_id)
+            return {"bids": [], "asks": [{"price": "0.42", "size": "17.5"}]}
+
+        def get_best_bid_ask(self, token_id):
+            raise AssertionError("single-book quote path must not call get_best_bid_ask")
+
+        def get_best_ask(self, token_id):
+            raise AssertionError("single-book quote path must not refetch ask depth")
+
+    clob = SingleBookClob()
+
+    quote = evaluator_module._buy_entry_price_from_clob(clob, "yes-single")
+
+    assert clob.calls == ["yes-single"]
+    assert quote == {
+        "price": 0.42,
+        "bid": None,
+        "ask": 0.42,
+        "bid_size": 0.0,
+        "ask_size": 17.5,
+        "ask_only": True,
+    }
+
+
+def test_buy_entry_quote_wraps_orderbook_missing_ask_as_empty_orderbook():
+    """RELATIONSHIP: fallback book parsing errors preserve liquidity no-trade semantics."""
+
+    from src.contracts.exceptions import EmptyOrderbookError
+
+    class MissingAskBookClob:
+        def get_orderbook(self, token_id):
+            return {"bids": [{"price": "0.40", "size": "12"}], "asks": []}
+
+    with pytest.raises(EmptyOrderbookError, match="No executable ask.*missing asks"):
+        evaluator_module._buy_entry_price_from_clob(MissingAskBookClob(), "yes-missing-ask")
+
+
 @pytest.mark.parametrize("observation_source", ["iem_asos", "openmeteo_hourly"])
 def test_day0_fallback_observation_source_rejected_before_signal_path(observation_source):
     candidate = MarketCandidate(
