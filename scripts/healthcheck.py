@@ -2,7 +2,7 @@
 # Purpose: Operator healthcheck for live daemon, launchd, source truth, entry capability, and settlement freshness.
 # Reuse: Run when live health predicates, launchd contracts, or readiness/status summary health fields change.
 # Created: 2026-03-26
-# Last reused or audited: 2026-05-17
+# Last reused or audited: 2026-05-21
 # Authority basis: docs/operations/task_2026-05-14_k1_followups/PLAN.md §4.5 (K1 broken-script remediation); docs/operations/task_2026-05-16_live_continuous_run_package/LIVE_CONTINUOUS_RUN_PACKAGE_PLAN.md Phase C; 2026-05-17 riskguard live DB-holder health contract.
 """Zeus health check for Venus/OpenClaw monitoring.
 
@@ -77,6 +77,7 @@ RISK_DETAILS_REQUIRED_KEYS = (
     "recommended_controls",
     "recommended_strategy_gates",
 )
+RISKGUARD_CONTRACT_FALLBACK_SCAN_ROWS = 25
 
 
 def _mode() -> str:
@@ -989,6 +990,27 @@ def _missing_required_keys(payload: dict | None, required: tuple[str, ...], *, p
     return missing
 
 
+def _latest_complete_riskguard_contract_row(conn: sqlite3.Connection) -> tuple[sqlite3.Row, dict] | None:
+    rows = conn.execute(
+        """
+        SELECT level, checked_at, details_json
+          FROM risk_state
+         ORDER BY checked_at DESC
+         LIMIT ?
+        """,
+        (RISKGUARD_CONTRACT_FALLBACK_SCAN_ROWS,),
+    ).fetchall()
+    for row in rows:
+        details_json = row["details_json"] if "details_json" in row.keys() else None
+        try:
+            details = json.loads(details_json) if details_json else {}
+        except Exception:
+            continue
+        if not _missing_required_keys(details, RISK_DETAILS_REQUIRED_KEYS):
+            return row, details
+    return None
+
+
 def check() -> dict:
     result = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -1158,6 +1180,7 @@ def check() -> dict:
     risk_state_path = _risk_state_path()
     result["risk_state_path"] = str(risk_state_path)
     if risk_state_path.exists():
+        conn = None
         try:
             import sqlite3
 
@@ -1166,14 +1189,29 @@ def check() -> dict:
             row = conn.execute(
                 "SELECT level, checked_at, details_json FROM risk_state ORDER BY checked_at DESC LIMIT 1"
             ).fetchone()
-            conn.close()
 
             if row is not None:
                 result["riskguard_level"] = row["level"]
                 result["riskguard_checked_at"] = row["checked_at"]
                 details_json = row["details_json"] if "details_json" in row.keys() else None
                 details = json.loads(details_json) if details_json else {}
-                result["riskguard_contract_missing_keys"] = _missing_required_keys(details, RISK_DETAILS_REQUIRED_KEYS)
+                missing_keys = _missing_required_keys(details, RISK_DETAILS_REQUIRED_KEYS)
+                if missing_keys and details.get("status") == "dependency_db_locked_previous_risk_level_preserved":
+                    fallback = _latest_complete_riskguard_contract_row(conn)
+                    if fallback is not None:
+                        fallback_row, _fallback_details = fallback
+                        fallback_age_seconds = _status_age_seconds(fallback_row["checked_at"])
+                        result["riskguard_contract_source"] = "previous_full_row_after_dependency_db_lock"
+                        result["riskguard_contract_reference_checked_at"] = fallback_row["checked_at"]
+                        if fallback_age_seconds is not None:
+                            result["riskguard_contract_reference_age_seconds"] = round(fallback_age_seconds, 1)
+                        if fallback_age_seconds is not None and fallback_age_seconds <= RISKGUARD_STALE_SECONDS:
+                            missing_keys = []
+                        else:
+                            result["riskguard_contract_reference_stale"] = True
+                    else:
+                        result["riskguard_contract_source"] = "dependency_db_lock_no_full_contract_row"
+                result["riskguard_contract_missing_keys"] = missing_keys
                 result["riskguard_contract_valid"] = not result["riskguard_contract_missing_keys"]
                 age_seconds = _status_age_seconds(row["checked_at"])
                 if age_seconds is not None:
@@ -1185,7 +1223,13 @@ def check() -> dict:
                 result["riskguard_state"] = "empty"
                 result["riskguard_fresh"] = False
                 result["riskguard_contract_valid"] = False
+            conn.close()
         except Exception:
+            try:
+                if conn is not None:
+                    conn.close()
+            except Exception:
+                pass
             result["riskguard_state"] = "corrupt"
             result["riskguard_fresh"] = False
             result["riskguard_contract_valid"] = False
