@@ -116,6 +116,7 @@ class NoTradeReason(StrEnum):
     EXECUTION_PRICE_SIZING_ERROR = auto()
     SIZE_BELOW_MINIMUM = auto()
     RISK_LIMITS_EXCEEDED = auto()
+    MUTUALLY_EXCLUSIVE_FAMILY_DEDUP = auto()
 
     # ── Fallback (§13) ────────────────────────────────────────────────────────
     UNCATEGORIZED = auto()

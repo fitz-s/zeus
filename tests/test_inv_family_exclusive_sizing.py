@@ -48,8 +48,10 @@ from src.strategy.family_exclusive_dedup import (
     MUTUALLY_EXCLUSIVE_FAMILY_DEDUP,
     WeatherFamilyExposure,
     WeatherFamilyKey,
+    build_weather_family_decision,
     dedup_mutually_exclusive_families,
     preselect_single_family_edge_before_kelly,
+    weather_family_exposures_from_trade_db,
     weather_family_exposures_from_portfolio,
 )
 from src.engine.evaluator import (
@@ -124,8 +126,8 @@ def _trade_decision(
 def _family_after_fdr() -> list[EdgeDecision]:
     """The 3 bins family-wise FDR selects (20-21, 22-23, 26+) all as trades.
 
-    Differentiated executable sizing so single-best selection is unambiguous:
-    22-23°F has the largest size_usd → it is the bin the gate must keep.
+    Differentiated executable economics so single-best selection is unambiguous:
+    22-23°F has the largest expected-net-profit proxy.
     """
     bins = {s[2]: s for s in _BIN_SPECS}
     return [
@@ -169,7 +171,7 @@ def test_same_city_date_metric_mutually_exclusive_bins_do_not_emit_independent_l
     """REQUIRED live-mode behavior: exactly 1 entry per exclusive family.
 
     With the gate ON, the 3 FDR-selected mutually-exclusive bins collapse to
-    exactly 1 should_trade=True (the single best by executable size_usd) and
+    exactly 1 should_trade=True (the single family utility winner) and
     the other 2 carry the auditable MUTUALLY_EXCLUSIVE_FAMILY_DEDUP reason.
 
     Run with the gate DISABLED this fails (3 != 1) — that is the RED proof.
@@ -192,7 +194,7 @@ def test_same_city_date_metric_mutually_exclusive_bins_do_not_emit_independent_l
         f"mutually-exclusive family must emit exactly 1 live entry, got {len(trades)}"
     )
 
-    # The survivor is the single best by executable size_usd (22-23°F, $20).
+    # The survivor is the single best by family expected-net-profit proxy.
     kept = trades[0]
     assert kept.edge is not None and kept.edge.bin.label == "22-23°F", (
         f"single_best must be the highest-size_usd bin; kept {kept.edge.bin.label!r}"
@@ -212,10 +214,7 @@ def test_same_city_date_metric_mutually_exclusive_bins_do_not_emit_independent_l
         assert d.rejection_reason_detail and "kept_bin='22-23°F'" in d.rejection_reason_detail, (
             "rejection detail must name the kept bin for auditability"
         )
-        # STAGE A is pure runtime gating — must NOT touch the enum / DB CHECK.
-        assert d.rejection_reason_enum is None, (
-            "STAGE A must not set rejection_reason_enum (no schema change)"
-        )
+        assert d.rejection_reason_enum is NoTradeReason.MUTUALLY_EXCLUSIVE_FAMILY_DEDUP
 
     # Structured audit log emitted per dropped bin.
     dedup_logs = [r for r in caplog.records if "MUTUALLY_EXCLUSIVE_FAMILY_DEDUP" in r.getMessage()]
@@ -309,7 +308,7 @@ def test_existing_family_exposure_blocks_new_different_bin_across_cycles() -> No
     rejected = out[0]
     assert rejected.rejection_stage == RejectionStage.ANTI_CHURN.value
     assert MUTUALLY_EXCLUSIVE_FAMILY_DEDUP in rejected.rejection_reasons
-    assert rejected.rejection_reason_enum is None
+    assert rejected.rejection_reason_enum is NoTradeReason.MUTUALLY_EXCLUSIVE_FAMILY_DEDUP
     assert rejected.rejection_reason_detail is not None
     assert "existing_exposure_bin='20-21°F'" in rejected.rejection_reason_detail
     assert "no family portfolio intent" in rejected.rejection_reason_detail
@@ -352,8 +351,53 @@ def test_portfolio_positions_project_to_weather_family_exposure_read_model() -> 
 def test_cycle_runtime_threads_portfolio_exposure_into_family_gate() -> None:
     """Relationship guard: runtime callsite must supply current exposure state."""
     source = Path("src/engine/cycle_runtime.py").read_text()
+    assert "weather_family_exposures_from_trade_db" in source
     assert "weather_family_exposures_from_portfolio" in source
-    assert "existing_exposures=weather_family_exposures_from_portfolio(portfolio)" in source
+    assert "existing_exposures=_family_exposures" in source
+
+
+def test_trade_db_family_exposures_include_live_entry_commands(tmp_path) -> None:
+    import sqlite3
+
+    db_path = tmp_path / "family-exposure.db"
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        """
+        CREATE TABLE venue_commands (
+            command_id TEXT PRIMARY KEY,
+            position_id TEXT NOT NULL,
+            intent_kind TEXT NOT NULL,
+            state TEXT NOT NULL
+        );
+        CREATE TABLE position_current (
+            position_id TEXT PRIMARY KEY,
+            city TEXT,
+            target_date TEXT,
+            temperature_metric TEXT,
+            bin_label TEXT,
+            phase TEXT
+        );
+        """
+    )
+    conn.execute(
+        "INSERT INTO position_current VALUES (?, ?, ?, ?, ?, ?)",
+        ("pos-1", CITY, TARGET_DATE, METRIC, "20-21°F", "pending_entry"),
+    )
+    conn.execute(
+        "INSERT INTO venue_commands VALUES (?, ?, ?, ?)",
+        ("cmd-1", "pos-1", "ENTRY", "ACKED"),
+    )
+
+    exposures = weather_family_exposures_from_trade_db(conn)
+
+    assert exposures == [
+        WeatherFamilyExposure(
+            key=WeatherFamilyKey(CITY, TARGET_DATE, METRIC),
+            bin_label="20-21°F",
+            phase="pending_entry",
+            position_id="pos-1",
+        )
+    ]
 
 
 def test_family_portfolio_intent_allows_optimizer_owned_multi_bin_execution() -> None:
@@ -402,6 +446,55 @@ def test_family_preselection_happens_before_projected_exposure_mutation() -> Non
     assert selected == [mid_bin]
     assert {d.dropped_bin for d in dropped} == {"26°F or above", "20-21°F"}
     assert all(d.kept_bin == "22-23°F" for d in dropped)
+
+
+def test_weather_family_decision_is_first_class_single_leg_intent() -> None:
+    bins = {s[2]: s for s in _BIN_SPECS}
+    low_price_tail = _bin_edge(bins["26°F or above"], entry_price=0.02, forward_edge=0.02)
+    mid_bin = _bin_edge(bins["22-23°F"], entry_price=0.45, forward_edge=0.07)
+
+    family_decision = build_weather_family_decision(
+        [low_price_tail, mid_bin],
+        city=CITY,
+        target_date=TARGET_DATE,
+        temperature_metric=METRIC,
+        enabled=True,
+    )
+
+    assert family_decision is not None
+    assert family_decision.family_portfolio_intent is True
+    assert family_decision.portfolio.family_key == WeatherFamilyKey(CITY, TARGET_DATE, METRIC)
+    assert family_decision.portfolio.selected_leg is mid_bin
+    assert family_decision.portfolio.objective == "single_leg_expected_net_profit"
+    assert [d.dropped_bin for d in family_decision.dropped] == ["26°F or above"]
+
+
+def test_runtime_family_dedup_ranks_by_expected_net_profit_not_size_usd() -> None:
+    bins = {s[2]: s for s in _BIN_SPECS}
+    big_low_utility = _trade_decision(
+        bins["20-21°F"],
+        size_usd=50.0,
+        forward_edge=0.001,
+        decision_id="a-big-low-utility",
+    )
+    smaller_high_utility = _trade_decision(
+        bins["22-23°F"],
+        size_usd=10.0,
+        forward_edge=0.08,
+        decision_id="b-smaller-high-utility",
+    )
+
+    out = dedup_mutually_exclusive_families(
+        [big_low_utility, smaller_high_utility],
+        city=CITY,
+        target_date=TARGET_DATE,
+        temperature_metric=METRIC,
+        enabled=True,
+    )
+
+    trades = [d for d in out if d.should_trade]
+    assert trades == [smaller_high_utility]
+    assert big_low_utility.rejection_reason_enum is NoTradeReason.MUTUALLY_EXCLUSIVE_FAMILY_DEDUP
 
 
 def test_family_preselection_is_disabled_without_stage_a_gate() -> None:
@@ -491,7 +584,7 @@ def test_final_one_cent_passive_order_requires_tail_authority_and_fill_model() -
     )
 
     assert reason is not None
-    assert reason.startswith("PASSIVE_FILL_PROBABILITY_UNMODELED_FOR_ULTRA_LOW_PRICE")
+    assert reason.startswith("PASSIVE_FILL_PROBABILITY_UNMODELED")
 
 
 def test_ultra_low_tail_authority_does_not_bypass_passive_fill_model(monkeypatch) -> None:
@@ -519,7 +612,7 @@ def test_ultra_low_tail_authority_does_not_bypass_passive_fill_model(monkeypatch
     )
 
     assert reason is not None
-    assert reason.startswith("PASSIVE_FILL_PROBABILITY_UNMODELED_FOR_ULTRA_LOW_PRICE")
+    assert reason.startswith("PASSIVE_FILL_PROBABILITY_UNMODELED")
 
 
 def test_ultra_low_non_passive_order_requires_tail_authority() -> None:

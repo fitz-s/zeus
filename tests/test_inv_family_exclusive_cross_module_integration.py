@@ -1,9 +1,9 @@
 # Lifecycle: created=2026-05-21; last_reviewed=2026-05-21; last_reused=2026-05-21
-# Purpose: Cross-module relationship antibody — P0-1 STAGE A family-exclusive entry gate
+# Purpose: Cross-module relationship antibody — live family-exclusive entry gate
 #          fires through execute_discovery_phase (cycle_runtime), not just in unit isolation.
 #          P0-1 opus critic Major #1 follow-up.
 # Authority basis: operator P0-1 live-money spec 2026-05-20/21 (mutually-exclusive
-#                  weather family sizing), STAGE A.
+#                  weather family sizing), Stage-B enum persistence follow-up.
 
 """Cross-module integration: family-exclusive entry gate through cycle_runtime.
 
@@ -15,8 +15,7 @@ Relationship under test (Fitz §3):
                └─ dedup_mutually_exclusive_families   ← gate lives HERE
                         │
                         ├─ 1 decision: should_trade=True   → reaches execution dispatch
-                        └─ 2 decisions: should_trade=False  → silently dropped (STAGE A
-                                        pure runtime gating, no artifact.add_no_trade)
+                        └─ 2 decisions: should_trade=False  → canonical no_trade reason
 
 Why this is NOT a unit test:
     The existing test at test_inv_family_exclusive_sizing.py:151 imports
@@ -29,14 +28,11 @@ Why this is NOT a unit test:
     dispatch layer. The test uses a mocked ``deps.evaluate_candidate`` to inject
     3 family-conflicting decisions and observes the post-gate decision state.
 
-STAGE A boundary constraint (preserved in test assertions):
+Stage-B persistence constraint:
     Dedup-dropped decisions use the existing legal ``ANTI_CHURN`` rejection stage,
-    carry ``"mutually_exclusive_family_dedup"`` in rejection_reasons, and do NOT
-    produce no_trade_events DB rows (``rejection_reason_enum`` stays None). Family
-    details live in ``rejection_reason_detail`` until Stage B introduces a first-class
-    enum + DB migration. Test assertions must NOT invent a new rejection stage, DB
-    row, or enum existence — that would be a false-positive failure today and a
-    Stage-B blocker test.
+    carry ``"mutually_exclusive_family_dedup"`` in rejection_reasons, and carry
+    ``NoTradeReason.MUTUALLY_EXCLUSIVE_FAMILY_DEDUP`` so cycle_runtime can persist
+    canonical no_trade_events rows.
 
 Observation mechanism:
     ``dedup_mutually_exclusive_families`` mutates EdgeDecision objects in-place.
@@ -56,6 +52,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from src.config import City
+from src.contracts.no_trade_reason import NoTradeReason
 from src.engine.cycle_runtime import execute_discovery_phase
 from src.engine.discovery_mode import DiscoveryMode
 from src.engine.evaluator import EdgeDecision, MarketCandidate
@@ -244,7 +241,7 @@ def test_gate_on_collapses_family_to_single_best_through_execute_discovery_phase
               rejection_stage == "ANTI_CHURN"
               "mutually_exclusive_family_dedup" in rejection_reasons
               rejection_reason_detail includes kept_bin label
-              rejection_reason_enum IS None (STAGE A pure runtime gating)
+              rejection_reason_enum == MUTUALLY_EXCLUSIVE_FAMILY_DEDUP
 
     Unlike the unit test in test_inv_family_exclusive_sizing.py, this test does
     NOT import or call dedup_mutually_exclusive_families directly. The gate fires
@@ -311,11 +308,7 @@ def test_gate_on_collapses_family_to_single_best_through_execute_discovery_phase
         assert d.rejection_reason_detail and "kept_bin='22-23°F'" in d.rejection_reason_detail, (
             "rejection_reason_detail must name the kept bin for auditability"
         )
-        # STAGE A: enum MUST stay None (no schema-derived CHECK touched).
-        assert d.rejection_reason_enum is None, (
-            "STAGE A must not set rejection_reason_enum on dedup-dropped decisions "
-            "(no NoTradeReason enum member exists yet; Stage B adds it + migration)"
-        )
+        assert d.rejection_reason_enum is NoTradeReason.MUTUALLY_EXCLUSIVE_FAMILY_DEDUP
 
     # ── Log line emitted by dedup (proves the module path was traversed) ──────
     dedup_log_lines = [

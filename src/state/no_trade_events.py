@@ -88,27 +88,48 @@ def write_no_trade_event(
             conn=conn,
         )
 
-        conn.execute(
-            """
-            INSERT INTO no_trade_events (
-                market_slug, temperature_metric, target_date,
-                observation_time, decision_seq,
-                reason, reason_detail,
-                observed_at, schema_version
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                market_slug,
-                temperature_metric,
-                target_date,
-                observation_time,
-                row_seq,
-                reason.value,
-                reason_detail,
-                observed_at,
-                SCHEMA_VERSION,
-            ),
+        insert_sql = """
+        INSERT INTO no_trade_events (
+            market_slug, temperature_metric, target_date,
+            observation_time, decision_seq,
+            reason, reason_detail,
+            observed_at, schema_version
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """
+        insert_values = (
+            market_slug,
+            temperature_metric,
+            target_date,
+            observation_time,
+            row_seq,
+            reason.value,
+            reason_detail,
+            observed_at,
+            SCHEMA_VERSION,
         )
+        try:
+            conn.execute(insert_sql, insert_values)
+        except sqlite3.IntegrityError as exc:
+            if reason is NoTradeReason.UNCATEGORIZED or "CHECK constraint failed" not in str(exc):
+                raise
+            fallback_detail = (
+                f"reason_raw={reason.value}; "
+                f"reason_detail={reason_detail or ''}"
+            )
+            conn.execute(
+                insert_sql,
+                (
+                    market_slug,
+                    temperature_metric,
+                    target_date,
+                    observation_time,
+                    row_seq,
+                    NoTradeReason.UNCATEGORIZED.value,
+                    fallback_detail,
+                    observed_at,
+                    SCHEMA_VERSION,
+                ),
+            )
         conn.commit()
 
     return make_decision_natural_key(

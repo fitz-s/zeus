@@ -190,6 +190,8 @@ make a surface default-read unless `current_state.md` routes it.
 | `task_2026-05-21_live_entry_order_management/LIVE_ENTRY_ORDER_MANAGEMENT_PLAN.md` | topology planning packet | Plan evidence for splitting same-token exposure dedup from pending-entry order management and separating passive-maker sizing from taker liquidity haircut |
 | `task_2026-05-21_live_family_selection_economic_floor/` | plan packet container | Planning-lock evidence for pre-Kelly weather-family selection and strategy live-quality economic floors |
 | `task_2026-05-21_live_family_selection_economic_floor/PLAN.md` | topology planning packet | Plan evidence for blocking mutually-exclusive family siblings before scalar Kelly and rejecting low-quality penny passive entries |
+| `task_2026-05-21_live_family_selection_complete/` | plan packet container | Planning-lock evidence for completing family decision object, passive fill context, no-trade persistence, and trade DB exposure authority |
+| `task_2026-05-21_live_family_selection_complete/PLAN.md` | topology planning packet | Plan evidence for the stacked PR after #246 that makes family dedup auditable and uses command/order/trade facts in family exposure gating |
 | `LIVE_LAUNCH_HANDOFF.md` | Live launch handoff document for daemon deployment |
 | `docs/historical_evidence/UNMATCHED_GAMMA_CITIES_2026_05_07.md` | Unmatched gamma cities investigation evidence (2026-05-07) |
 | `docs/historical_evidence/CLOUD_EXTRACT_PATCH_2026_05_07.md` | Cloud extract patch evidence (2026-05-07) |

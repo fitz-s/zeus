@@ -105,7 +105,7 @@ from src.strategy.fdr_filter import fdr_filter, DEFAULT_FDR_ALPHA
 from src.strategy.family_exclusive_dedup import (
     FAMILY_REJECTION_STAGE,
     MUTUALLY_EXCLUSIVE_FAMILY_DEDUP,
-    preselect_single_family_edge_before_kelly,
+    build_weather_family_decision,
 )
 from src.strategy.kelly import (
     dynamic_kelly_mult,
@@ -906,13 +906,9 @@ def _live_entry_economic_floor_rejection(
             f"{expected_profit_usd:.4f}<${policy.min_expected_profit_usd:.2f}; "
             f"strategy={strategy_key})"
         )
-    if (
-        passive_order
-        and final_limit_price <= policy.min_entry_price
-        and passive_fill_probability is None
-    ):
+    if passive_order and passive_fill_probability is None:
         return (
-            "PASSIVE_FILL_PROBABILITY_UNMODELED_FOR_ULTRA_LOW_PRICE("
+            "PASSIVE_FILL_PROBABILITY_UNMODELED("
             f"price={final_limit_price:.4f}; strategy={strategy_key})"
         )
     if not policy.allow_ultra_low_tail and final_limit_price <= policy.min_entry_price:
@@ -3912,12 +3908,15 @@ def evaluate_candidate(
         )]
 
     n_edges_after_fdr_before_family_preselection = len(filtered)
-    filtered, family_preselection_drops = preselect_single_family_edge_before_kelly(
+    family_decision = build_weather_family_decision(
         filtered,
         city=city.name,
         target_date=target_date,
         temperature_metric=temperature_metric.temperature_metric,
     )
+    family_preselection_drops = list(family_decision.dropped) if family_decision else []
+    if family_decision is not None:
+        filtered = [family_decision.portfolio.selected_leg]
     family_preselection_rejections: list[EdgeDecision] = []
     for drop in family_preselection_drops:
         family_preselection_rejections.append(
@@ -3940,12 +3939,13 @@ def evaluate_candidate(
                 n_edges_after_fdr=n_edges_after_fdr_before_family_preselection,
                 fdr_fallback_fired=_fdr_fallback,
                 fdr_family_size=_fdr_family_size,
+                rejection_reason_enum=NoTradeReason.MUTUALLY_EXCLUSIVE_FAMILY_DEDUP,
                 rejection_reason_detail=(
                     f"family={city.name}|{target_date}|{temperature_metric.temperature_metric} "
                     f"dropped_bin={drop.dropped_bin!r} kept_bin={drop.kept_bin!r} "
                     f"dropped_family_selection_score={drop.family_selection_score:.6f} "
                     f"kept_family_selection_score={drop.kept_family_selection_score:.6f} "
-                    "(pre-Kelly Stage A single_best)"
+                    "(pre-Kelly WeatherFamilyDecision single_leg)"
                 ),
             )
         )

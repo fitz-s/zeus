@@ -25,7 +25,7 @@ import sqlite3
 from src.contracts.no_trade_reason import NoTradeReason
 
 # Schema version stamped into each row; stays in sync with db.py SCHEMA_VERSION.
-SCHEMA_VERSION = 15
+SCHEMA_VERSION = 16
 
 # Enum CHECK: every valid NoTradeReason value, joined for SQL IN clause.
 _REASON_VALUES_SQL = ", ".join(f"'{r.value}'" for r in NoTradeReason)
@@ -40,7 +40,7 @@ CREATE TABLE IF NOT EXISTS no_trade_events (
     reason              TEXT NOT NULL CHECK (reason IN ({_REASON_VALUES_SQL})),
     reason_detail       TEXT,
     observed_at         TEXT NOT NULL,
-    schema_version      INTEGER NOT NULL CHECK (schema_version IN (14, 15)),
+    schema_version      INTEGER NOT NULL CHECK (schema_version IN (14, 15, 16)),
     PRIMARY KEY (market_slug, temperature_metric, target_date, observation_time, decision_seq)
 )
 """
