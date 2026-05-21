@@ -13,21 +13,24 @@ Phase 3 T1 lands `WeatherRegimeTag` enum + `correlation_cluster_for(city, regime
 
 ## Why shrinkage is structurally required
 
-Sample covariance matrix `S` of `n` historical realizations across `p` city-temperature series:
+**Terminology note**: math spec §15.4 derives the Ledoit-Wolf estimator in terms of a sample *covariance* matrix `S`. The Zeus implementation stores the result as a *correlation* matrix (covariance normalized by marginal standard deviations; entries ∈ [−1, 1]). The `ShrinkageEstimate` dataclass fields (`sample_correlation`, `shrunk_correlation`) use the implementation convention. When reading math spec §15.4, substitute "sample covariance `S`" → "sample correlation matrix" for implementation purposes; the shrinkage formula, diagonal target, and δ* formula are identical in form.
+
+Sample correlation matrix `S` of `n` historical residuals across `p` city-temperature series:
 - When `n < p`, `S` is singular — cannot invert for Markowitz / risk-parity / cluster-cap operations.
 - Even `n > p`, if `n` is small (Zeus has limited live-trading history per dossier §8), eigenvalue dispersion is overstated: smallest eigenvalues collapse toward 0, largest inflate. Direct use produces unstable position allocations.
-- Shrinkage replaces `S` with convex combination `Σ_shrunk = (1 - δ) · S + δ · T` where `T` is a structured target (identity, constant-correlation, single-factor). `δ ∈ [0, 1]` is selected to minimize expected MSE.
+- Shrinkage replaces `S` with convex combination `Σ_shrunk = (1 - δ) · S + δ · T` where `T` is a structured target. `δ ∈ [0, 1]` is selected to minimize expected MSE.
 
 **Ledoit-Wolf optimal intensity** (math spec §15.4; Ledoit & Wolf 2003; Ledoit & Wolf 2004 "Honey, I shrunk the sample covariance matrix"):
 ```
-δ* = π / (γ × n)
+δ* = clip(π / (γ × n), 0, 1)
 ```
 where
-- `π` = sum of asymptotic variances of sample covariance entries (estimable from data)
-- `γ` = squared Frobenius distance between sample covariance `S` and diagonal target `D`
+- `π` = sum of asymptotic variances of sample correlation entries (estimable from data)
+- `γ` = squared Frobenius distance between sample correlation `S` and diagonal target `D`
 - `n` = number of observations
+- `clip(..., 0, 1)` enforced — raw `π / (γ × n)` can exceed 1 on near-diagonal inputs
 
-Target is the **diagonal** matrix `D` formed from the diagonal entries of `S` (retain variances, zero all off-diagonal covariances). NOT constant-correlation. Per math spec §15.4 verbatim.
+Target is the **diagonal** matrix `D` formed from the diagonal entries of `S` (retain variances = 1.0 for correlation matrices, zero all off-diagonal entries). NOT constant-correlation. Per math spec §15.4 verbatim.
 
 Result: `Σ_shrunk` is invertible, well-conditioned, and provably MSE-optimal over the convex family `(1-δ)·S + δ·D`.
 
@@ -42,7 +45,7 @@ class ShrinkageEstimate:
     sample_correlation: np.ndarray         # raw S
     shrunk_correlation: np.ndarray         # Σ_shrunk
     intensity: float                       # δ*
-    target_kind: Literal["identity", "constant_correlation", "single_factor"]
+    target_kind: Literal["diagonal", "identity", "constant_correlation", "single_factor"]
     n_observations: int
     p_dimensions: int
 
