@@ -40,6 +40,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import src.engine.evaluator as evaluator_module
 from src.contracts.no_trade_reason import NoTradeReason  # used in fixtures
 from src.engine.evaluator import EdgeDecision
 from src.strategy.family_exclusive_dedup import (
@@ -486,6 +487,52 @@ def test_final_one_cent_passive_order_requires_tail_authority_and_fill_model() -
         expected_profit_usd=0.20,
         final_limit_price=0.01,
         passive_order=True,
+        passive_fill_probability=None,
+    )
+
+    assert reason is not None
+    assert reason.startswith("PASSIVE_FILL_PROBABILITY_UNMODELED_FOR_ULTRA_LOW_PRICE")
+
+
+def test_ultra_low_tail_authority_does_not_bypass_passive_fill_model(monkeypatch) -> None:
+    bins = {s[2]: s for s in _BIN_SPECS}
+    edge = _bin_edge(bins["26°F or above"], entry_price=0.20, forward_edge=0.08)
+    monkeypatch.setattr(
+        evaluator_module,
+        "_try_get_strategy_profile",
+        lambda _strategy_key: SimpleNamespace(
+            min_entry_price=0.05,
+            min_strategy_notional_usd=1.00,
+            min_expected_profit_usd=0.05,
+            allow_ultra_low_tail=True,
+        ),
+    )
+
+    reason = _live_entry_economic_floor_rejection(
+        strategy_key="tail_arbitrage",
+        edge=edge,
+        submitted_notional_usd=2.00,
+        expected_profit_usd=0.20,
+        final_limit_price=0.01,
+        passive_order=True,
+        passive_fill_probability=None,
+    )
+
+    assert reason is not None
+    assert reason.startswith("PASSIVE_FILL_PROBABILITY_UNMODELED_FOR_ULTRA_LOW_PRICE")
+
+
+def test_ultra_low_non_passive_order_requires_tail_authority() -> None:
+    bins = {s[2]: s for s in _BIN_SPECS}
+    edge = _bin_edge(bins["26°F or above"], entry_price=0.20, forward_edge=0.08)
+
+    reason = _live_entry_economic_floor_rejection(
+        strategy_key="opening_inertia",
+        edge=edge,
+        submitted_notional_usd=2.00,
+        expected_profit_usd=0.20,
+        final_limit_price=0.01,
+        passive_order=False,
         passive_fill_probability=None,
     )
 

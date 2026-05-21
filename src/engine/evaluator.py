@@ -906,20 +906,19 @@ def _live_entry_economic_floor_rejection(
             f"{expected_profit_usd:.4f}<${policy.min_expected_profit_usd:.2f}; "
             f"strategy={strategy_key})"
         )
-    if not policy.allow_ultra_low_tail and final_limit_price <= policy.min_entry_price:
-        return (
-            "ULTRA_LOW_PRICE_NOT_AUTHORIZED("
-            f"{final_limit_price:.4f}<={policy.min_entry_price:.2f}; strategy={strategy_key})"
-        )
     if (
         passive_order
         and final_limit_price <= policy.min_entry_price
         and passive_fill_probability is None
-        and not policy.allow_ultra_low_tail
     ):
         return (
             "PASSIVE_FILL_PROBABILITY_UNMODELED_FOR_ULTRA_LOW_PRICE("
             f"price={final_limit_price:.4f}; strategy={strategy_key})"
+        )
+    if not policy.allow_ultra_low_tail and final_limit_price <= policy.min_entry_price:
+        return (
+            "ULTRA_LOW_PRICE_NOT_AUTHORIZED("
+            f"{final_limit_price:.4f}<={policy.min_entry_price:.2f}; strategy={strategy_key})"
         )
     return None
 
@@ -4014,13 +4013,13 @@ def evaluate_candidate(
                 edge=edge,
                 decision_id=_decision_id(),
                 rejection_stage="MARKET_FILTER",
-                rejection_reasons=[NoTradeReason.SIZE_BELOW_MINIMUM.value],
+                rejection_reasons=[NoTradeReason.UNCATEGORIZED.value],
                 selected_method=selected_method,
                 applied_validations=[*decision_validations, "strategy_entry_price_floor"],
                 decision_snapshot_id=snapshot_id,
                 edge_source=edge_source,
                 strategy_key=strategy_key,
-                rejection_reason_enum=NoTradeReason.SIZE_BELOW_MINIMUM,
+                rejection_reason_enum=NoTradeReason.UNCATEGORIZED,
                 rejection_reason_detail=entry_price_floor_reason,
             ))
             continue
