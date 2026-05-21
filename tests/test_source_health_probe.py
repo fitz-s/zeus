@@ -296,6 +296,36 @@ class TestPriorStateSemantics:
         assert results["ogimet"]["degraded_since"] == current_failure_at
         assert results["ogimet"]["error"] == "The read operation timed out"
 
+    def test_empty_exception_message_still_counts_as_failure(self, monkeypatch):
+        """Exception fallback text must stay truthy for failure-state accounting."""
+        import src.data.source_health_probe as shp
+
+        prior_success_at = "2026-05-21T16:00:00+00:00"
+
+        def _empty_message_failure(_timeout: float) -> dict:
+            raise TimeoutError()
+
+        monkeypatch.setattr(shp, "_probe_ogimet", _empty_message_failure)
+
+        results = probe_sources(
+            ("ogimet",),
+            timeout_per_source_seconds=10.0,
+            _prior_state={
+                "ogimet": {
+                    "last_success_at": prior_success_at,
+                    "last_failure_at": None,
+                    "consecutive_failures": 0,
+                    "degraded_since": None,
+                    "latency_ms": 12000,
+                    "error": None,
+                }
+            },
+        )
+
+        assert results["ogimet"]["error"] == "TimeoutError"
+        assert results["ogimet"]["last_success_at"] == prior_success_at
+        assert results["ogimet"]["consecutive_failures"] == 1
+
 
 class TestWriteSourceHealth:
     """write_source_health writes correct file structure."""

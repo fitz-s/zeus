@@ -480,6 +480,13 @@ def _apply_prior_failure_state(
     return result
 
 
+def _probe_exception_error_text(exc: Exception) -> str:
+    text = str(exc).strip()
+    if not text:
+        text = exc.__class__.__name__
+    return text[:200]
+
+
 def probe_sources(
     sources: list[str] | tuple[str, ...] | frozenset[str],
     timeout_per_source_seconds: float = 10.0,
@@ -501,7 +508,7 @@ def probe_sources(
                 "consecutive_failures": 1,
                 "degraded_since": None,
                 "latency_ms": None,
-                "error": str(exc)[:200],
+                "error": _probe_exception_error_text(exc),
             }
         result = _apply_prior_failure_state(source, result, prior=prior)
         results[source] = result
