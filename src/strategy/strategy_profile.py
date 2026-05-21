@@ -563,9 +563,40 @@ def _classify_via_registry(strategy_id: str, context) -> "ClassificationResult":
 
     Fail-closed: ProfileNotFound (unknown strategy_id) returns None.
 
-    SCAFFOLD — production logic wired in T2 production pass.
+    T2 thin (Pattern B): returns ShoulderStrategyVNext with all probabilistic
+    fields = nan and no_trade_reason = SHOULDER_NO_TRADE_GATE when topology
+    matches. Probabilistic fields wired in T3+.
     """
-    raise NotImplementedError("T2 production pass owns _classify_via_registry body")
+    # Fail-closed: unknown strategy → None (no entry, no risk).
+    profile = try_get(strategy_id)
+    if profile is None:
+        return None
+
+    # Profile gate — only pure-shoulder strategies (open_shoulder topology ONLY)
+    # route through this classifier. Strategies that allow mixed topologies
+    # (e.g. opening_inertia allows point + finite_range + open_shoulder) use
+    # their own classification path; routing them here would misclassify.
+    if not (profile.allowed_bin_topology <= frozenset({"open_shoulder"})):
+        return None
+
+    edge = getattr(context, "edge", None)
+    if edge is None:
+        return None
+
+    # Topology gate — only open-shoulder buy_no edges route to shoulder classifier.
+    if not (getattr(edge, "direction", None) == "buy_no" and
+            getattr(getattr(edge, "bin", None), "is_shoulder", False)):
+        return None
+
+    # Lazy import avoids circular dependency: shoulder_strategy_vnext imports
+    # NoTradeReason + WeatherRegimeTag; this module imports strategy_profile.
+    from src.contracts.shoulder_strategy_vnext import classify_shoulder_candidate
+
+    candidate = getattr(context, "candidate", None)
+    market_phase = getattr(context, "market_phase", None)
+    conn = getattr(context, "conn", None)
+
+    return classify_shoulder_candidate(edge, candidate, market_phase, conn)
 
 
 # ── test helper ────────────────────────────────────────────────────── #
