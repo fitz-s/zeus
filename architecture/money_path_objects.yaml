@@ -93,6 +93,7 @@ state_machines:
       - POST_ACKED
       - PARTIAL
       - FILLED
+      - UNKNOWN
       - SUBMIT_UNKNOWN_SIDE_EFFECT
       - REVIEW_REQUIRED
       - SUBMIT_REJECTED
