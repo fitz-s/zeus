@@ -1,6 +1,6 @@
 # Created: 2026-05-20
 # Last reused or audited: 2026-05-21
-# Authority basis: PHASE_2_ULTRAPLAN.md v3.1 §5.2 (sha 00c2399742) + Phase 3 T2 (2026-05-21): +6 SHOULDER_* members per 04_PHASE_3_SHOULDER.md + Phase 4 T2/T3 (2026-05-21): +4 candidate gates per 05_PHASE_4_FDR_FAMILY_CANDIDATES.md
+# Authority basis: PHASE_2_ULTRAPLAN.md v3.1 §5.2 (sha 00c2399742) + Phase 3 T2 (2026-05-21): +6 SHOULDER_* members per 04_PHASE_3_SHOULDER.md + Phase 4 T2/T3 (2026-05-21): +4 candidate gates per 05_PHASE_4_FDR_FAMILY_CANDIDATES.md + Phase 4 T4 (2026-05-21): +2 T4 deferred candidate gates
 
 """
 NoTradeReason — canonical StrEnum covering every rejection_reasons=[...] callsite
@@ -139,6 +139,11 @@ class NoTradeReason(StrEnum):
     RESOLUTION_DISPUTED = auto()               # resolution_window_maker: venue resolution status contested
     LIQPROV_HEARTBEAT_ABSENT = auto()          # liquidity_provision_with_heartbeat: fill_probability field absent
     WEATHER_ALERT_SOURCE_UNTRUSTED = auto()    # weather_event_arbitrage: external alert feed not wired/trusted
+
+    # ── Phase 4 T4 candidate strategy gates ────────────────────────────────────
+    # 2 members per 05_PHASE_4_FDR_FAMILY_CANDIDATES.md §T4 deferred candidates
+    CORR_HEDGE_REGIME_UNAVAILABLE = auto()     # cross_market_correlation_hedge: regime UNKNOWN or store not fit
+    NEGRISK_FAMILY_INCOMPLETE = auto()         # neg_risk_basket: full token book per family unavailable
 
     # ── Fallback (§13) ────────────────────────────────────────────────────────
     UNCATEGORIZED = auto()

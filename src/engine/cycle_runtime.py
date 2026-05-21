@@ -16,6 +16,7 @@ from dataclasses import is_dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_FLOOR
 from types import SimpleNamespace
+from typing import Any
 
 from src.config import get_mode
 from src.contracts.decision_evidence import DecisionEvidence, EvidenceAsymmetryError
@@ -1899,6 +1900,106 @@ def _record_entry_order_summary(
         summary["entry_orders_filled_immediate"] += 1
     else:
         summary["entry_orders_resting"] += 1
+
+
+def _frontier_reason_prefix(reason: object) -> str:
+    text = str(reason or "").strip()
+    if not text:
+        return "unknown"
+    return text.split(":", 1)[0] or "unknown"
+
+
+def _increment_summary_counter(summary: dict, key: str, amount: int = 1) -> None:
+    summary[key] = int(summary.get(key, 0) or 0) + amount
+
+
+def _increment_reason_bucket(summary: dict, key: str, reason: object) -> str:
+    prefix = _frontier_reason_prefix(reason)
+    bucket = summary.setdefault(key, {})
+    bucket[prefix] = int(bucket.get(prefix, 0) or 0) + 1
+    return prefix
+
+
+def _family_key_for_frontier(candidate: Any, city_name: str) -> str:
+    metric = str(getattr(candidate, "temperature_metric", "") or "")
+    target_date = str(getattr(candidate, "target_date", "") or "")
+    family_id = (
+        getattr(candidate, "event_id", None)
+        or getattr(candidate, "slug", None)
+        or f"{city_name}:{target_date}:{metric}"
+    )
+    return f"{city_name}|{target_date}|{metric}|{family_id}"
+
+
+def _record_final_intent_frontier(
+    summary: dict,
+    *,
+    candidate: Any,
+    decision: Any,
+    city_name: str,
+    strategy_key: str,
+    stage: str,
+    outcome: str,
+    reason: object = "",
+    snapshot_fields: dict | None = None,
+) -> dict:
+    frontier = summary.setdefault(
+        "final_intent_frontier",
+        {
+            "attempts": [],
+            "rejections_by_stage": {},
+            "rejections_by_reason": {},
+        },
+    )
+    reason_text = str(reason or "")
+    reason_prefix = _frontier_reason_prefix(reason_text)
+    if outcome not in {"built", "submitted", "accepted", "venue_ack"}:
+        by_stage = frontier.setdefault("rejections_by_stage", {})
+        by_stage[stage] = int(by_stage.get(stage, 0) or 0) + 1
+        by_reason = frontier.setdefault("rejections_by_reason", {})
+        by_reason[reason_prefix] = int(by_reason.get(reason_prefix, 0) or 0) + 1
+    edge = getattr(decision, "edge", None)
+    tokens = getattr(decision, "tokens", None)
+    reprice_payload = {}
+    if isinstance(tokens, dict):
+        maybe_reprice = tokens.get("executable_snapshot_reprice")
+        if isinstance(maybe_reprice, dict):
+            reprice_payload = maybe_reprice
+    snapshot_shadow = reprice_payload.get("corrected_pricing_shadow")
+    if not isinstance(snapshot_shadow, dict):
+        snapshot_shadow = {}
+    fields = snapshot_fields or {}
+    attempt = {
+        "family_key": _family_key_for_frontier(candidate, city_name),
+        "city": city_name,
+        "target_date": str(getattr(candidate, "target_date", "") or ""),
+        "temperature_metric": str(getattr(candidate, "temperature_metric", "") or ""),
+        "decision_id": str(getattr(decision, "decision_id", "") or ""),
+        "rank": int(getattr(decision, "family_fallback_rank", 0) or 0),
+        "family_fallback_candidate_count": int(
+            getattr(decision, "family_fallback_candidate_count", 0) or 0
+        ),
+        "bin": str(getattr(getattr(edge, "bin", None), "label", "") or ""),
+        "direction": str(getattr(edge, "direction", "") or ""),
+        "strategy_key": strategy_key,
+        "stage": stage,
+        "outcome": outcome,
+        "reason": reason_text,
+        "reason_prefix": reason_prefix,
+        "executable_snapshot_id": str(fields.get("executable_snapshot_id") or ""),
+        "book_semantics": str(
+            reprice_payload.get("book_semantics")
+            or snapshot_shadow.get("book_semantics")
+            or ""
+        ),
+        "market_prior_status": str(
+            reprice_payload.get("market_prior_status")
+            or snapshot_shadow.get("market_prior_status")
+            or ""
+        ),
+    }
+    frontier.setdefault("attempts", []).append(attempt)
+    return attempt
 
 
 def _dedupe_steps(steps: list[str]) -> list[str]:
@@ -4204,6 +4305,23 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                             )
                         if buy_no_live_rejection_reason:
                             summary["no_trades"] += 1
+                            _increment_summary_counter(summary, "final_intent_attempts")
+                            _increment_summary_counter(summary, "final_intent_preflight_rejected")
+                            _increment_reason_bucket(
+                                summary,
+                                "final_intent_preflight_rejected_by_reason",
+                                buy_no_live_rejection_reason,
+                            )
+                            _record_final_intent_frontier(
+                                summary,
+                                candidate=candidate,
+                                decision=d,
+                                city_name=city.name,
+                                strategy_key=strategy_name,
+                                stage="preflight",
+                                outcome="preflight_rejected",
+                                reason=buy_no_live_rejection_reason,
+                            )
                             rejection_stage = "RISK_REJECTED"
                             rejection_reasons = [buy_no_live_rejection_reason]
                             _record_opportunity_fact(
@@ -4285,6 +4403,25 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                             )
                         if capture_error:
                             rejection_reasons.append(f"executable_snapshot_capture_failed:{capture_error}")
+                        frontier_reason = ";".join(rejection_reasons) or "executable_snapshot_unavailable"
+                        _increment_summary_counter(summary, "final_intent_attempts")
+                        _increment_summary_counter(summary, "final_intent_snapshot_failed")
+                        _increment_reason_bucket(
+                            summary,
+                            "final_intent_snapshot_failed_by_reason",
+                            frontier_reason,
+                        )
+                        _record_final_intent_frontier(
+                            summary,
+                            candidate=candidate,
+                            decision=d,
+                            city_name=city.name,
+                            strategy_key=strategy_name,
+                            stage="snapshot",
+                            outcome="snapshot_failed",
+                            reason=frontier_reason,
+                            snapshot_fields=snapshot_fields,
+                        )
                         _record_opportunity_fact(
                             candidate,
                             d,
@@ -4368,7 +4505,26 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                         except Exception as exc:
                             summary["no_trades"] += 1
                             rejection_stage = "EXECUTION_FAILED"
-                            rejection_reasons = [f"executable_snapshot_reprice_failed:{exc}"]
+                            rejection_reason = f"executable_snapshot_reprice_failed:{exc}"
+                            rejection_reasons = [rejection_reason]
+                            _increment_summary_counter(summary, "final_intent_attempts")
+                            _increment_summary_counter(summary, "final_intent_reprice_failed")
+                            _increment_reason_bucket(
+                                summary,
+                                "final_intent_reprice_failed_by_reason",
+                                exc,
+                            )
+                            _record_final_intent_frontier(
+                                summary,
+                                candidate=candidate,
+                                decision=d,
+                                city_name=city.name,
+                                strategy_key=strategy_name,
+                                stage="reprice",
+                                outcome="reprice_failed",
+                                reason=str(exc),
+                                snapshot_fields=snapshot_fields,
+                            )
                             _record_opportunity_fact(
                                 candidate,
                                 d,
@@ -4418,6 +4574,8 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                     )
                     result = None
                     family_fallback_attempt_accepted = False
+                    live_frontier_stage = "final_intent_contract"
+                    live_frontier_attempt_counted = False
                     try:
                         if is_live_env:
                             if not isinstance(getattr(d, "tokens", None), dict):
@@ -4476,9 +4634,34 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                                     f"corrected_candidate={float(corrected_candidate_limit):.6f} "
                                     f"final_intent_limit={float(final_limit_decimal):.6f}"
                                 )
+                            _increment_summary_counter(summary, "final_intent_attempts")
+                            live_frontier_attempt_counted = True
+                            _increment_summary_counter(summary, "final_intents_built")
+                            _record_final_intent_frontier(
+                                summary,
+                                candidate=candidate,
+                                decision=d,
+                                city_name=city.name,
+                                strategy_key=strategy_name,
+                                stage="final_intent_contract",
+                                outcome="built",
+                                snapshot_fields=snapshot_fields,
+                            )
                             execute_final = getattr(deps, "execute_final_intent", None)
                             if not callable(execute_final):
                                 from src.execution.executor import execute_final_intent as execute_final
+                            _increment_summary_counter(summary, "submit_attempts")
+                            _record_final_intent_frontier(
+                                summary,
+                                candidate=candidate,
+                                decision=d,
+                                city_name=city.name,
+                                strategy_key=strategy_name,
+                                stage="submit",
+                                outcome="submitted",
+                                snapshot_fields=snapshot_fields,
+                            )
+                            live_frontier_stage = "submit"
                             result = execute_final(
                                 final_intent,
                                 conn=conn,
@@ -4488,6 +4671,37 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                             submitted_limit = float(final_limit_decimal)
                             submit_rejected = str(getattr(result, "status", "") or "") == "rejected"
                             family_fallback_attempt_accepted = not submit_rejected
+                            if submit_rejected:
+                                submit_rejected_reason = getattr(result, "reason", None) or "submit_rejected"
+                                _increment_summary_counter(summary, "submit_rejected")
+                                _increment_reason_bucket(
+                                    summary,
+                                    "submit_rejected_by_reason",
+                                    submit_rejected_reason,
+                                )
+                                _record_final_intent_frontier(
+                                    summary,
+                                    candidate=candidate,
+                                    decision=d,
+                                    city_name=city.name,
+                                    strategy_key=strategy_name,
+                                    stage="submit",
+                                    outcome="submit_rejected",
+                                    reason=submit_rejected_reason,
+                                    snapshot_fields=snapshot_fields,
+                                )
+                            elif getattr(result, "command_state", None) in ("ACKED", "PARTIAL", "FILLED"):
+                                _increment_summary_counter(summary, "venue_acks")
+                                _record_final_intent_frontier(
+                                    summary,
+                                    candidate=candidate,
+                                    decision=d,
+                                    city_name=city.name,
+                                    strategy_key=strategy_name,
+                                    stage="venue_ack",
+                                    outcome="venue_ack",
+                                    snapshot_fields=snapshot_fields,
+                                )
                             # P1-3: write decision_events row after each live submit.
                             # Fail-soft: logging/learning infrastructure must not crash the cycle.
                             # Pass conn=None so write_decision_event opens its own world-DB
@@ -4607,6 +4821,45 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                         summary["no_trades"] += 1
                         rejection_stage = "EXECUTION_FAILED"
                         reason = str(exc)
+                        if is_live_env:
+                            if not live_frontier_attempt_counted:
+                                _increment_summary_counter(summary, "final_intent_attempts")
+                            if live_frontier_stage == "submit":
+                                _increment_summary_counter(summary, "submit_failed")
+                                _increment_reason_bucket(
+                                    summary,
+                                    "submit_failed_by_reason",
+                                    reason,
+                                )
+                                _record_final_intent_frontier(
+                                    summary,
+                                    candidate=candidate,
+                                    decision=d,
+                                    city_name=city.name,
+                                    strategy_key=strategy_name,
+                                    stage="submit",
+                                    outcome="submit_failed",
+                                    reason=reason,
+                                    snapshot_fields=snapshot_fields,
+                                )
+                            else:
+                                _increment_summary_counter(summary, "final_intent_unavailable")
+                                _increment_reason_bucket(
+                                    summary,
+                                    "final_intent_unavailable_by_reason",
+                                    reason,
+                                )
+                                _record_final_intent_frontier(
+                                    summary,
+                                    candidate=candidate,
+                                    decision=d,
+                                    city_name=city.name,
+                                    strategy_key=strategy_name,
+                                    stage="final_intent_contract",
+                                    outcome="contract_failed",
+                                    reason=reason,
+                                    snapshot_fields=snapshot_fields,
+                                )
                         if reason in {"strategy_key_unclassified", "depth_below_submitted_shares", "executable_snapshot_stale"}:
                             rejection_reasons = [reason]
                         else:

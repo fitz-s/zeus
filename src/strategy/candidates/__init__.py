@@ -159,6 +159,8 @@ def _candidate_strategy_key_for_reason(reason: Optional["NoTradeReason"]) -> str
         NoTradeReason.RESOLUTION_DISPUTED: "resolution_window_maker",
         NoTradeReason.LIQPROV_HEARTBEAT_ABSENT: "liquidity_provision_with_heartbeat",
         NoTradeReason.WEATHER_ALERT_SOURCE_UNTRUSTED: "weather_event_arbitrage",
+        NoTradeReason.CORR_HEDGE_REGIME_UNAVAILABLE: "cross_market_correlation_hedge",
+        NoTradeReason.NEGRISK_FAMILY_INCOMPLETE: "neg_risk_basket",
     }
     return strategy_by_reason.get(reason, "unknown_candidate")
 
