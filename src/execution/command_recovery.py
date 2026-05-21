@@ -744,8 +744,11 @@ def _latest_completed_partial_order_fact_candidates(conn: sqlite3.Connection) ->
     if not _table_exists(conn, "venue_order_facts") or not _table_exists(conn, "venue_trade_facts"):
         return []
     sources = tuple(sorted(_LIVE_TERMINAL_ORDER_FACT_SOURCES))
+    if not sources:
+        return []
+    source_placeholders = ", ".join("?" for _ in sources)
     rows = conn.execute(
-        """
+        f"""
         WITH latest_order_fact AS (
             SELECT command_id, MAX(local_sequence) AS max_sequence
               FROM venue_order_facts
@@ -772,22 +775,54 @@ def _latest_completed_partial_order_fact_candidates(conn: sqlite3.Connection) ->
            AND cmd.venue_order_id != ''
            AND fact.venue_order_id = cmd.venue_order_id
            AND fact.state = 'MATCHED'
-           AND CAST(COALESCE(fact.remaining_size, '1') AS REAL) = 0
-           AND CAST(COALESCE(fact.matched_size, '0') AS REAL) > 0
-           AND fact.source IN (?, ?, ?, ?, ?)
+           AND fact.source IN ({source_placeholders})
            AND EXISTS (
                SELECT 1
                  FROM venue_trade_facts trade
                 WHERE trade.command_id = cmd.command_id
                   AND trade.venue_order_id = cmd.venue_order_id
                   AND trade.state IN ('MATCHED', 'MINED', 'CONFIRMED')
-                  AND CAST(COALESCE(trade.filled_size, '0') AS REAL) > 0
            )
          ORDER BY fact.observed_at, fact.fact_id
         """,
         sources,
     ).fetchall()
-    return [_dict_row(row) for row in rows]
+    candidates: list[dict] = []
+    for row in rows:
+        candidate = _dict_row(row)
+        if not _decimal_is_zero(candidate.get("order_fact_remaining_size")):
+            continue
+        if not _decimal_is_positive(candidate.get("order_fact_matched_size")):
+            continue
+        if not _has_positive_trade_fact(
+            conn,
+            command_id=str(candidate.get("command_id") or ""),
+            venue_order_id=str(candidate.get("venue_order_id") or ""),
+        ):
+            continue
+        candidates.append(candidate)
+    return candidates
+
+
+def _has_positive_trade_fact(
+    conn: sqlite3.Connection,
+    *,
+    command_id: str,
+    venue_order_id: str,
+) -> bool:
+    if not command_id or not venue_order_id:
+        return False
+    rows = conn.execute(
+        """
+        SELECT filled_size
+          FROM venue_trade_facts
+         WHERE command_id = ?
+           AND venue_order_id = ?
+           AND state IN ('MATCHED', 'MINED', 'CONFIRMED')
+        """,
+        (command_id, venue_order_id),
+    ).fetchall()
+    return any(_decimal_is_positive(_dict_row(row).get("filled_size")) for row in rows)
 
 
 def _first_present(raw: dict | None, *keys: str):

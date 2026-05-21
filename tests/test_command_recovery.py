@@ -1499,6 +1499,35 @@ class TestRecoveryResolutionTable:
         event_types = [row["event_type"] for row in _get_events(conn, "cmd-001")]
         assert "FILL_CONFIRMED" not in event_types
 
+    def test_partial_entry_does_not_finalize_with_malformed_completed_order_size(
+        self,
+        conn,
+        mock_client,
+    ):
+        """Relationship: malformed remainder text is not terminal fill truth."""
+        _insert(conn, size=5.0, price=0.34)
+        _seed_pending_entry_projection(conn)
+        _advance_to_partial(conn, venue_order_id="ord-001")
+        _append_trade_fact(
+            conn,
+            command_id="cmd-001",
+            order_id="ord-001",
+            trade_id="trade-001",
+            state="MATCHED",
+            filled_size="4.99",
+            fill_price="0.34",
+        )
+        _append_order_fact(conn, state="MATCHED", matched_size="4.99", remaining_size="")
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["completed_partial_order_facts"]["advanced"] == 0
+        assert _get_state(conn, "cmd-001") == "PARTIAL"
+        event_types = [row["event_type"] for row in _get_events(conn, "cmd-001")]
+        assert "FILL_CONFIRMED" not in event_types
+
     def test_terminal_filled_entry_trade_fact_without_pending_projection_recovers_position(
         self,
         conn,
