@@ -214,23 +214,34 @@ def compute_composite_live_health(
         rm_issue = "SCHEDULER_HEALTH_MISSING"
         rm_ok = False
     else:
-        # job key is "_run_mode" (the actual function name used by @_scheduler_job)
-        entry = sj_data.get("_run_mode") or sj_data.get("run_mode")
-        if entry is None:
+        # The decorator writes "run_mode"; _run_mode itself writes
+        # mode-specific keys such as "run_mode:opening_hunt" after catching
+        # exceptions. Mode-specific failures are the business-plane authority:
+        # the generic wrapper can still be OK because _run_mode swallows errors.
+        entries = []
+        for key, value in sj_data.items():
+            if key in {"_run_mode", "run_mode"} or str(key).startswith("run_mode:"):
+                if isinstance(value, dict):
+                    entries.append((str(key), value))
+        failed_entries = [
+            (key, value)
+            for key, value in entries
+            if str(value.get("status", "")).upper() == "FAILED"
+        ]
+        if failed_entries:
+            key, entry = sorted(failed_entries)[0]
+            reason = entry.get("last_failure_reason") or "unknown"
+            rm_issue = f"RUN_MODE_FAILED[{key}]: {reason}"
+            rm_ok = False
+        elif not entries:
             # Tolerate: scheduler_jobs_health may not have an entry yet on first
             # boot before the first cycle has run — treat as HEALTHY (no evidence
             # of failure yet).
             rm_issue = None
             rm_ok = True
         else:
-            status = entry.get("status", "")
-            if status == "FAILED":
-                reason = entry.get("last_failure_reason") or "unknown"
-                rm_issue = f"RUN_MODE_FAILED: {reason}"
-                rm_ok = False
-            else:
-                rm_issue = None
-                rm_ok = True
+            rm_issue = None
+            rm_ok = True
 
     surfaces["run_mode"] = {"ok": rm_ok, "issue": rm_issue}
     if not rm_ok:

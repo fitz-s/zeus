@@ -510,7 +510,7 @@ def test_run_mode_records_mode_specific_failure(monkeypatch):
 
     assert (
         "run_mode:opening_hunt",
-        {"failed": True, "failure_reason": "boom"},
+        {"failed": True, "reason": "boom"},
     ) in events
 
 

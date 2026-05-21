@@ -2807,17 +2807,41 @@ def _local_order_is_open(conn: sqlite3.Connection, command: Mapping[str, Any]) -
 
 
 def _latest_order_fact(conn: sqlite3.Connection, venue_order_id: str) -> dict[str, Any] | None:
-    row = conn.execute(
+    rows = conn.execute(
         """
         SELECT *
           FROM venue_order_facts
          WHERE venue_order_id = ?
          ORDER BY local_sequence DESC, fact_id DESC
-         LIMIT 1
         """,
         (venue_order_id,),
-    ).fetchone()
-    return dict(row) if row is not None else None
+    ).fetchall()
+    facts = [dict(row) for row in rows]
+    if not facts:
+        return None
+
+    from src.execution.order_truth_reducer import VenueOrderTruthReducer
+
+    reduced = VenueOrderTruthReducer.reduce(order_facts=facts)
+    reduced_state = str(reduced.state or "").upper()
+    for fact in facts:
+        fact_state = str(fact.get("state") or "").upper()
+        if fact_state != reduced_state:
+            continue
+        try:
+            remaining = _decimal(fact.get("remaining_size"))
+        except ValueError:
+            remaining = None
+        try:
+            matched = _decimal(fact.get("matched_size"))
+        except ValueError:
+            matched = Decimal("0")
+        if reduced.remaining_size is not None and remaining != reduced.remaining_size:
+            continue
+        if matched != reduced.matched_size:
+            continue
+        return fact
+    return facts[0]
 
 
 def _local_absence_kind(context: ReconcileContext) -> FindingKind:

@@ -120,7 +120,7 @@ def _run_mode(mode: DiscoveryMode):
         _write_scheduler_health(
             f"run_mode:{mode.value}",
             failed=True,
-            failure_reason=str(e),
+            reason=str(e),
         )
         try:
             from src.observability.status_summary import write_status
@@ -1942,6 +1942,52 @@ def _startup_world_db_schema_ready_check() -> str:
         conn.close()
 
 
+def _startup_world_db_schema_prepare() -> str:
+    """Idempotently migrate an existing world DB before read-only boot proof.
+
+    Live boot previously proved schema currency in read-only mode before any
+    sanctioned world DB initialization could run. A merged SCHEMA_VERSION bump
+    could therefore wedge the daemon indefinitely until an operator ran manual
+    schema preparation. This helper keeps the final authority as the read-only
+    user_version proof while allowing existing stale world DBs to pass through
+    the normal idempotent init_schema() path first. This may perform bounded
+    startup DDL on ``state/zeus-world.db`` when code has advanced ahead of the
+    DB user_version; missing DBs and future-schema DBs still fail closed.
+    """
+    import src.state.db as db_module
+
+    path = db_module.ZEUS_WORLD_DB_PATH
+    if not path.exists():
+        raise FileNotFoundError(f"{path} does not exist")
+
+    conn = db_module.get_world_connection(write_class="live")
+    try:
+        row = conn.execute("PRAGMA user_version").fetchone()
+        current_version = int(row[0]) if row and row[0] is not None else 0
+        expected_version = int(db_module.SCHEMA_VERSION)
+        if current_version == expected_version:
+            return str(current_version)
+        if current_version > expected_version:
+            raise RuntimeError(
+                f"world DB user_version={current_version} exceeds code SCHEMA_VERSION={expected_version}"
+            )
+
+        logger.warning(
+            "world DB schema stale at live boot: user_version=%s expected=%s — running idempotent init_schema()",
+            current_version,
+            expected_version,
+        )
+        db_module.init_schema(conn)
+        conn.commit()
+        db_module.assert_schema_current(conn)
+        row = conn.execute("PRAGMA user_version").fetchone()
+        prepared_version = int(row[0]) if row and row[0] is not None else 0
+        logger.info("world DB schema prepared at live boot: user_version=%s", prepared_version)
+        return str(prepared_version)
+    finally:
+        conn.close()
+
+
 def _startup_forecasts_schema_ready_check() -> str:
     """Read-only forecast DB schema currency check for forecast-live split authority."""
     import sqlite3
@@ -1980,6 +2026,11 @@ def _startup_db_schema_ready_check() -> None:
     for attempt in range(1, BOOT_RETRY_MAX_ATTEMPTS + 1):
         missing = []
         try:
+            prepared_world_schema_version = _startup_world_db_schema_prepare()
+            logger.info(
+                "world DB schema prepared/unchanged before proof: user_version=%s",
+                prepared_world_schema_version,
+            )
             world_schema_version = _startup_world_db_schema_ready_check()
             logger.info(
                 "world DB schema current: user_version=%s",

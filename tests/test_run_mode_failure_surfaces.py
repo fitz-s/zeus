@@ -132,6 +132,48 @@ def test_run_mode_failed_yields_degraded(tmp_path: Path) -> None:
     assert result["surfaces"]["heartbeat"]["ok"] is True
 
 
+def test_mode_specific_run_mode_failed_yields_degraded(tmp_path: Path) -> None:
+    """_run_mode catches exceptions, so mode-specific failure is the authority."""
+    sd = tmp_path / "state"
+    sd.mkdir()
+    cycle_time = _now_iso(-30)
+    _write(
+        sd / "daemon-heartbeat.json",
+        {"alive": True, "timestamp": cycle_time, "mode": "live"},
+    )
+    _write(
+        sd / "scheduler_jobs_health.json",
+        {
+            "run_mode": {"status": "OK", "last_run_at": cycle_time, "last_success_at": cycle_time},
+            "run_mode:opening_hunt": {
+                "status": "FAILED",
+                "last_run_at": cycle_time,
+                "last_failure_reason": "exchange reconcile stuck",
+            },
+        },
+    )
+    _write(
+        sd / "status_summary.json",
+        {
+            "timestamp": cycle_time,
+            "cycle": {
+                "mode": "opening_hunt",
+                "completed_at": cycle_time,
+                "candidates": 0,
+                "entry_orders_submitted": 0,
+            },
+        },
+    )
+
+    result = compute_composite_live_health(state_dir=sd)
+
+    assert result["status"] == "DEGRADED"
+    assert result["surfaces"]["run_mode"]["ok"] is False
+    assert result["surfaces"]["run_mode"]["issue"] == (
+        "RUN_MODE_FAILED[run_mode:opening_hunt]: exchange reconcile stuck"
+    )
+
+
 # ---------------------------------------------------------------------------
 # T2: status_summary stale → DEGRADED
 # ---------------------------------------------------------------------------
