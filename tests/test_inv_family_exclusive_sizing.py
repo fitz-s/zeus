@@ -60,6 +60,7 @@ from src.strategy.family_exclusive_dedup import (
 from src.engine.evaluator import (
     _expected_profit_usd_for_edge,
     _live_entry_economic_floor_rejection,
+    _projects_exposure_during_family_fallback_sizing,
     _source_quality_kelly_haircut,
     _source_quality_policy_rejection,
     _strategy_entry_price_floor_block_reason,
@@ -745,6 +746,27 @@ def test_runtime_dedup_preserves_ranked_fallback_candidates_until_submit() -> No
     assert _count_trades(out) == 3
     assert all(d.rejection_stage == "" for d in out)
     assert all("family_ranked_executable_fallback" in d.applied_validations for d in out)
+
+
+def test_family_fallback_sizing_does_not_accumulate_sibling_exposure() -> None:
+    """Risk sizing sees ranked fallback siblings as alternate attempts, not a basket."""
+
+    assert not _projects_exposure_during_family_fallback_sizing(
+        family_fallback_rank=1,
+        family_fallback_candidate_count=3,
+    )
+    assert not _projects_exposure_during_family_fallback_sizing(
+        family_fallback_rank=2,
+        family_fallback_candidate_count=3,
+    )
+    assert _projects_exposure_during_family_fallback_sizing(
+        family_fallback_rank=0,
+        family_fallback_candidate_count=0,
+    )
+    assert _projects_exposure_during_family_fallback_sizing(
+        family_fallback_rank=1,
+        family_fallback_candidate_count=1,
+    )
 
 
 def test_family_portfolio_can_select_explicit_multi_leg_payoff_vector() -> None:

@@ -484,6 +484,81 @@ def test_live_family_fallback_tries_second_leg_when_primary_reprice_fails(
     assert skipped[0].decision_id == decisions[2].decision_id
 
 
+def test_paper_family_fallback_executes_at_most_one_ranked_leg(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    """RELATIONSHIP: family fallback is an execution invariant in every env."""
+
+    from src.state.db import get_connection, init_schema
+
+    monkeypatch.setenv("ZEUS_LIVE_MAX_ONE_ENTRY_PER_WEATHER_FAMILY", "1")
+    monkeypatch.setenv("ZEUS_LIVE_MARKET_SUBSTRATE_READER", "0")
+
+    decisions = _three_family_decisions()
+    for rank, decision in enumerate(decisions, start=1):
+        decision.strategy_key = "center_buy"
+        decision.family_fallback_rank = rank
+        decision.family_fallback_candidate_count = len(decisions)
+        decision.tokens.update(
+            {
+                "market_id": f"market-{rank}",
+                "token_id": f"token-{rank}",
+                "no_token_id": f"no-token-{rank}",
+            }
+        )
+
+    conn = get_connection(tmp_path / "family-fallback-paper.db")
+    init_schema(conn)
+    deps, captured, artifact, portfolio, summary = _build_harness(decisions)
+    created: list[str] = []
+    executed: list[str] = []
+
+    def _create_execution_intent(**kwargs):
+        created.append(str(kwargs.get("token_id") or ""))
+        return types.SimpleNamespace(intent_id=f"intent-{kwargs.get('token_id')}")
+
+    def _execute_intent(intent, *args, decision_id="", **kwargs):
+        executed.append(str(decision_id))
+        return types.SimpleNamespace(
+            trade_id=f"paper-trade-{decision_id}",
+            status="pending",
+            command_state="SUBMITTING",
+        )
+
+    deps.create_execution_intent = _create_execution_intent
+    deps.execute_intent = _execute_intent
+
+    execute_discovery_phase(
+        conn=conn,
+        clob=MagicMock(),
+        portfolio=portfolio,
+        artifact=artifact,
+        tracker=MagicMock(),
+        limits=MagicMock(),
+        mode=DiscoveryMode.UPDATE_REACTION,
+        summary=summary,
+        entry_bankroll=5000.0,
+        decision_time=datetime(2026, 6, 14, 12, 0, 0, tzinfo=timezone.utc),
+        env="paper",
+        deps=deps,
+    )
+
+    assert len(captured) == 1
+    assert created == ["token-1"]
+    assert executed == [decisions[0].decision_id]
+    assert len(artifact.trade_cases) == 1
+    skipped = [
+        ntc for ntc in artifact.no_trade_cases
+        if "mutually_exclusive_family_fallback_not_attempted_after_submit"
+        in ntc.rejection_reasons
+    ]
+    assert [ntc.decision_id for ntc in skipped] == [
+        decisions[1].decision_id,
+        decisions[2].decision_id,
+    ]
+
+
 def test_structural_sentinel_dedup_called_from_cycle_runtime() -> None:
     """STRUCTURAL sentinel: dedup_mutually_exclusive_families is imported and
     called inside execute_discovery_phase's source, not just in tests.

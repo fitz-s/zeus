@@ -3924,7 +3924,7 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                 except Exception as exc:
                     deps.logger.error("telemetry write failed, cycle flagged degraded: %s", exc, exc_info=True)
                     summary["degraded"] = True
-            family_fallback_live_submit_satisfied = False
+            family_fallback_submit_satisfied = False
             for d in decisions:
                 if False:
                     _ = d.calibration
@@ -3935,9 +3935,8 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                         getattr(d, "family_fallback_candidate_count", 0) or 0
                     )
                     if (
-                        is_live_env
-                        and family_fallback_candidate_count > 1
-                        and family_fallback_live_submit_satisfied
+                        family_fallback_candidate_count > 1
+                        and family_fallback_submit_satisfied
                     ):
                         summary["no_trades"] += 1
                         rejection_stage = "ANTI_CHURN"
@@ -4547,6 +4546,9 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                                 d.edge.bin.label,
                                 decision_id=str(d.decision_id) if d.decision_id else "",
                             )
+                            family_fallback_attempt_accepted = (
+                                str(getattr(result, "status", "") or "") != "rejected"
+                            )
                     except Exception as exc:
                         summary["no_trades"] += 1
                         rejection_stage = "EXECUTION_FAILED"
@@ -4636,11 +4638,10 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                         }
                     )
                     if (
-                        is_live_env
-                        and family_fallback_candidate_count > 1
+                        family_fallback_candidate_count > 1
                         and family_fallback_attempt_accepted
                     ):
-                        family_fallback_live_submit_satisfied = True
+                        family_fallback_submit_satisfied = True
                         summary["family_fallback_selected_rank"] = int(
                             getattr(d, "family_fallback_rank", 0) or 0
                         )

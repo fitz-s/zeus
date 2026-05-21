@@ -115,27 +115,29 @@ CREATE TABLE no_trade_events_v2 (
 
 
 def run(db_path: Path, dry_run: bool = False) -> None:
-    """Execute the table-rebuild migration using existing ensure_table wrappers (INV-37).
+    """Execute the table-rebuild migration using boot/operator migration wrappers.
 
-    Thin path: db.py init_schema already calls both ensure_table wrappers.
+    Thin path: db.py init_schema already calls the no_trade migration wrapper.
     This script provides an idempotent CLI entry-point for explicit re-run and
     PRAGMA user_version bump verification. Safe to run on a DB that already has
-    both tables — ensure_table is idempotent.
+    both tables — the migration wrapper is idempotent.
     """
     import sqlite3
 
-    from src.state.schema.no_trade_events_schema import ensure_table as _ensure_no_trade
+    from src.state.schema.no_trade_events_schema import (
+        migrate_no_trade_events_schema as _migrate_no_trade,
+    )
     from src.state.schema.tail_stress_scenarios_schema import ensure_table as _ensure_stress
 
     if dry_run:
-        logger.info("--dry-run: would call ensure_table for no_trade_events and tail_stress_scenarios, then PRAGMA user_version = 18")
+        logger.info("--dry-run: would migrate no_trade_events, ensure tail_stress_scenarios, then PRAGMA user_version = 18")
         return
 
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
     try:
         conn.execute(f"SAVEPOINT {_SAVEPOINT_NAME}")
-        _ensure_no_trade(conn)
+        _migrate_no_trade(conn)
         _ensure_stress(conn)
         conn.execute(_STEP6_USER_VERSION)
         conn.execute(f"RELEASE SAVEPOINT {_SAVEPOINT_NAME}")

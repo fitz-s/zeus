@@ -411,6 +411,19 @@ class EdgeDecision:
             )
 
 
+def _projects_exposure_during_family_fallback_sizing(
+    *,
+    family_fallback_rank: int,
+    family_fallback_candidate_count: int,
+) -> bool:
+    """Fallback siblings are mutually exclusive attempts, not additive exposure."""
+
+    return not (
+        int(family_fallback_candidate_count or 0) > 1
+        and int(family_fallback_rank or 0) > 0
+    )
+
+
 # F25 Strategy R: sentinel for pre-snapshot rejection paths (all 31 early-rejection
 # sites in evaluate_candidate fire before snapshot_id is resolved at line ~2378+).
 # Non-NULL, non-empty — passes truthy checks and SQL LIKE queries.
@@ -4220,6 +4233,13 @@ def evaluate_candidate(
     decisions = list(family_preselection_rejections)
     for edge in filtered:
         decision_validations = list(entry_validations)
+        family_fallback_rank = family_fallback_rank_by_edge_id.get(id(edge), 0)
+        family_fallback_candidate = (
+            family_fallback_candidate_count > 1
+            and family_fallback_rank > 0
+        )
+        if family_fallback_candidate:
+            decision_validations.append("family_fallback_risk_not_cumulative")
         if edge.support_index is None:
             decisions.append(EdgeDecision(
                 False,
@@ -4950,12 +4970,16 @@ def evaluate_candidate(
             sizing_bankroll=sizing_bankroll,
             kelly_multiplier_used=km * risk_throttle,
             execution_fee_rate=fee_rate,
-            family_fallback_rank=family_fallback_rank_by_edge_id.get(id(edge), 0),
+            family_fallback_rank=family_fallback_rank,
             family_fallback_candidate_count=family_fallback_candidate_count,
         ))
-        projected_total_exposure_usd += size
-        projected_city_exposure_usd[city.name] += size
-        projected_cluster_exposure_usd[city.name] += size
+        if _projects_exposure_during_family_fallback_sizing(
+            family_fallback_rank=family_fallback_rank,
+            family_fallback_candidate_count=family_fallback_candidate_count,
+        ):
+            projected_total_exposure_usd += size
+            projected_city_exposure_usd[city.name] += size
+            projected_cluster_exposure_usd[city.name] += size
 
     if _fdr_fallback or _fdr_family_size:
         from dataclasses import replace
