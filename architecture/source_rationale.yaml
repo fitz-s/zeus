@@ -2158,6 +2158,25 @@ files:
     downstream:
     - tests/state/test_table_registry_coherence.py
     - scripts/check_table_registry_coherence.py
+  src/contracts/freshness_registry.py:
+    zone: K2_runtime
+    authority_role: freshness_policy_registry
+    why: >
+      Centralized per-source freshness gate replacing 10 ad-hoc age_seconds/age_hours
+      threshold checks scattered across collateral_ledger, evaluator, oracle_estimator,
+      riskguard, heartbeat_supervisor, db, venue_command_repo, polymarket_v2_adapter.
+      FreshnessLevel enum (FRESH/DEGRADED/STALE/EXPIRED) + SOURCE_THRESHOLDS table +
+      evaluate(source_id, age_seconds) -> FreshnessLevel.
+      Phase 2 T3. Code-only — NO DB table, NO SCHEMA_VERSION bump.
+      SCAFFOLD pass: skeleton + xfail antibody. Production pass fills evaluate() body
+      + migrates 10 callsites per T3_FRESHNESS_REGISTRY_SCAFFOLD.md §3.
+    hazards:
+    - SCAFFOLD_BODY_NOT_IMPLEMENTED  # evaluate() raises NotImplementedError until production pass
+    downstream:
+    - tests/test_inv_freshness_no_ad_hoc_checks.py
+    track: T3
+    phase: Phase2
+
   src/supervisor_api/contracts.py:
     zone: K2_runtime
     authority_role: venus_external_contract
