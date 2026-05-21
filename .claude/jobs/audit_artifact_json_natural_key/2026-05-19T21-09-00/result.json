@@ -1,0 +1,12 @@
+{
+  "total_runs": 0,
+  "sampled_runs": 0,
+  "total_trade_cases": 0,
+  "recovered": 0,
+  "failed": 0,
+  "recovery_rate": null,
+  "status": "NO_TABLE",
+  "message": "decision_log table does not exist in world DB \u2014 no data to audit; gate passes vacuously",
+  "db_path": "/Users/leofitz/.openclaw/workspace-venus/zeus/.claude/worktrees/phase1-t1-decision-events-20260519/state/zeus-world.db",
+  "audit_ts": "2026-05-19T21:09:00.695561+00:00"
+}
