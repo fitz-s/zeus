@@ -163,6 +163,17 @@ state_machines:
       - READY_FOR_OPERATOR_REVIEW
     invariant_tests:
       - tests/test_shoulder_shadow_readiness_report.py
+  live_runtime_config:
+    owner: src/strategy/family_exclusive_dedup.py
+    description: >
+      Live runtime feature/config knobs that influence money-path candidate
+      routing without adding command/lifecycle states. Registered here so
+      CI treats new all-caps runtime authority as explicit, not accidental.
+    states:
+      - ZEUS_LIVE_FAMILY_EXECUTABLE_FALLBACK_CANDIDATES
+    invariant_tests:
+      - tests/test_inv_family_exclusive_sizing.py
+      - tests/test_inv_family_exclusive_cross_module_integration.py
 
 schema_objects:
   authority_fabricating_defaults:
