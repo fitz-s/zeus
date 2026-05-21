@@ -1403,6 +1403,49 @@ class TestRecoveryResolutionTable:
         assert Decimal(str(current["entry_price"])) == Decimal("0.34")
         assert current["order_status"] == "filled"
 
+    def test_matched_order_recovery_finalizes_when_venue_normalizes_size_below_command(
+        self,
+        conn,
+        mock_client,
+    ):
+        """Relationship: venue MATCHED status outranks submitted-size rounding residue."""
+        _insert(conn, size=5.0, price=0.34)
+        _advance_to_acked(conn, venue_order_id="ord-001")
+        _seed_pending_entry_projection(conn)
+        _append_order_fact(conn, state="LIVE", matched_size="0", remaining_size="5")
+        mock_client.get_order.return_value = {
+            "id": "ord-001",
+            "status": "MATCHED",
+            "size_matched": "4.99",
+            "price": "0.34",
+            "associate_trades": ["trade-001"],
+            "transactionsHashes": ["0xhash-001"],
+        }
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["matched_order_facts"]["advanced"] == 1
+        assert _get_state(conn, "cmd-001") == "FILLED"
+        events = _get_events(conn, "cmd-001")
+        assert events[-1]["event_type"] == "FILL_CONFIRMED"
+        latest_order_fact = conn.execute(
+            """
+            SELECT state, remaining_size, matched_size, source
+              FROM venue_order_facts
+             WHERE command_id = 'cmd-001'
+             ORDER BY local_sequence DESC
+             LIMIT 1
+            """
+        ).fetchone()
+        assert dict(latest_order_fact) == {
+            "state": "MATCHED",
+            "remaining_size": "0",
+            "matched_size": "4.99",
+            "source": "REST",
+        }
+
     def test_terminal_filled_entry_trade_fact_without_pending_projection_recovers_position(
         self,
         conn,

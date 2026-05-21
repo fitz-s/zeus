@@ -1,9 +1,10 @@
 # Created: 2026-04-27
 # Purpose: Lock R3 Z4 CollateralLedger pUSD/CTF reservation and fail-closed executor preflight behavior.
 # Reuse: Run when collateral snapshots, pUSD/CTF accounting, wrap/unwrap command state, or executor collateral gates change.
-# Last reused/audited: 2026-05-17
-# Lifecycle: created=2026-04-27; last_reviewed=2026-05-17; last_reused=2026-05-17
+# Last reused/audited: 2026-05-20
+# Lifecycle: created=2026-04-27; last_reviewed=2026-05-20; last_reused=2026-05-20
 # Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/Z4.yaml
+#                  2026-05-20 live readiness repair: wrap confirmation refresh stays behind V2 adapter boundary.
 """R3 Z4 collateral-ledger antibodies."""
 
 from __future__ import annotations
@@ -618,6 +619,37 @@ def test_wrap_command_lifecycle_atomic_states(conn):
         "SELECT COUNT(*) FROM wrap_unwrap_events WHERE command_id = ?",
         (command_id,),
     ).fetchone()[0] == 3
+
+
+def test_wrap_confirm_refreshes_collateral_through_v2_adapter_boundary(conn):
+    """RELATIONSHIP: WRAP_CONFIRMED -> V2 adapter payload refresh, no SDK v1 import."""
+    from src.execution.wrap_unwrap_commands import reconcile_pending_wraps
+
+    class FakeEth:
+        def get_transaction_receipt(self, tx_hash):
+            return {"status": 1, "blockNumber": 12}
+
+    class FakeWeb3:
+        eth = FakeEth()
+
+    class V2AdapterOnly:
+        def __init__(self) -> None:
+            self.payload_calls = 0
+
+        def get_collateral_payload(self):
+            self.payload_calls += 1
+            return {"pusd_balance_micro": 1, "pusd_allowance_micro": 1}
+
+    adapter = V2AdapterOnly()
+    command_id = request_wrap(5_000_000, conn=conn)
+    mark_tx_hashed(command_id, "0x" + "a" * 64, block_number=10, conn=conn)
+    conn.commit()
+
+    results = reconcile_pending_wraps(FakeWeb3(), adapter, conn)
+
+    assert results
+    assert get_command(command_id, conn)["state"] == WrapUnwrapState.WRAP_CONFIRMED.value
+    assert adapter.payload_calls == 1
 
 
 def test_unwrap_failed_does_not_decrement_pusd(conn):

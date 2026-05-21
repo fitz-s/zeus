@@ -1,5 +1,5 @@
 # Created: 2026-04-19
-# Last reused/audited: 2026-05-15
+# Last reused/audited: 2026-05-20
 # Authority basis: Phase 10B DT-Seam Cleanup, 2026-04-29 design simplification audit F4, 2026-05-01 stale live-state artifact tracking, and 2026-05-15 K1 forecast DB split status-summary false-flag repair.
 # Lifecycle: created=2026-04-19; last_reviewed=2026-05-15; last_reused=2026-05-15
 # Purpose: Phase 10B "DT-Seam Cleanup" antibodies (R-CL..R-CP).
@@ -731,6 +731,158 @@ class TestRCPV2RowCountSensor:
         ]
         assert status["risk"]["infrastructure_level"] == "RED"
         assert "legacy_positions_json_conflicts_with_canonical_empty" in status["risk"]["infrastructure_issues"]
+
+    def test_cycle_pulse_refreshes_minimal_portfolio_runtime_truth(self, tmp_path, monkeypatch):
+        """Relationship: pulse freshness cannot preserve a stale portfolio snapshot."""
+        from src.observability import status_summary as status_summary_module
+
+        status_path = tmp_path / "status_summary.json"
+        status_path.write_text(json.dumps({
+            "timestamp": "2026-05-20T00:00:00+00:00",
+            "process": {"pid": 37175, "mode": "live", "version": "zeus_v2"},
+            "portfolio": {
+                "open_positions": 1,
+                "total_exposure_usd": 1.86,
+                "effective_bankroll": 100.0,
+                "positions": [{"trade_id": "stale"}],
+            },
+            "runtime": {"chain_state_counts": {"exit_pending_missing": 1}},
+            "strategy": {
+                "opening_inertia": {"open_positions": 1, "open_exposure_usd": 1.86, "realized_pnl": 1.0},
+                "settlement_capture": {"open_positions": 9, "open_exposure_usd": 9.99},
+            },
+            "execution": {"overall": {"entry_attempted": 99}},
+            "risk": {"infrastructure_level": "GREEN", "infrastructure_issues": []},
+        }))
+
+        class DummyConn:
+            def close(self):
+                return None
+
+        fresh_positions = [
+            {
+                "trade_id": "partial-1",
+                "state": "active",
+                "shares": 4.45,
+                "strategy": "opening_inertia",
+                "effective_cost_basis_usd": 0.01335,
+            },
+            {
+                "trade_id": "partial-2",
+                "state": "active",
+                "shares": 4.45,
+                "strategy": "opening_inertia",
+                "effective_cost_basis_usd": 0.01335,
+            },
+        ]
+        monkeypatch.setattr(status_summary_module, "STATUS_PATH", status_path)
+        monkeypatch.setattr(status_summary_module, "get_trade_connection_with_world", lambda: DummyConn())
+        monkeypatch.setattr(
+            status_summary_module,
+            "query_position_current_status_view",
+            lambda conn: {
+                "status": "ok",
+                "positions": fresh_positions,
+                "open_positions": 2,
+                "total_exposure_usd": 0.03,
+                "unrealized_pnl": 0.0,
+                "strategy_open_counts": {"opening_inertia": 2},
+                "chain_state_counts": {"local_only": 2},
+                "exit_state_counts": {"none": 2},
+                "unverified_entries": 0,
+                "day0_positions": 0,
+            },
+        )
+        monkeypatch.setattr(status_summary_module, "_get_execution_capability_status", lambda: {})
+        monkeypatch.setattr(
+            status_summary_module,
+            "_query_current_open_entry_orders",
+            lambda conn: {"status": "ok", "orders": 2},
+        )
+        monkeypatch.setattr(status_summary_module, "annotate_truth_payload", lambda payload, path, generated_at, authority: payload)
+
+        status_summary_module.write_cycle_pulse({"mode": "opening_hunt", "trades": 0})
+        status = json.loads(status_path.read_text())
+
+        assert status["process"]["pid"] != 37175
+        assert status["process"]["pulse_only"] is True
+        assert status["portfolio"]["open_positions"] == 2
+        assert status["portfolio"]["total_exposure_usd"] == 0.03
+        assert status["portfolio"]["positions"] == fresh_positions
+        assert status["runtime"]["chain_state_counts"] == {"local_only": 2}
+        assert status["runtime"]["pulse_refreshed"] is True
+        assert status["strategy"]["opening_inertia"]["open_positions"] == 2
+        assert status["strategy"]["opening_inertia"]["open_exposure_usd"] == 0.03
+        assert status["strategy"]["opening_inertia"]["realized_pnl"] == 1.0
+        assert "settlement_capture" not in status["strategy"]
+        assert status["execution"] == {
+            "pulse_only": True,
+            "current_open_entry_orders": {"status": "ok", "orders": 2},
+        }
+
+    def test_cycle_pulse_refresh_failure_does_not_advance_status_freshness(self, tmp_path, monkeypatch):
+        """Relationship: failed DB truth refresh cannot mint a fresh status timestamp."""
+        from src.observability import status_summary as status_summary_module
+
+        status_path = tmp_path / "status_summary.json"
+        status_path.write_text(json.dumps({
+            "timestamp": "2026-05-20T00:00:00+00:00",
+            "truth": {
+                "runtime_state": "live",
+                "generated_at": "2026-05-20T00:00:00+00:00",
+                "authority": "VERIFIED",
+            },
+            "portfolio": {
+                "open_positions": 99,
+                "total_exposure_usd": 99.0,
+                "positions": [{"trade_id": "stale"}],
+            },
+            "runtime": {"chain_state_counts": {"stale": 99}},
+            "risk": {"infrastructure_level": "GREEN", "infrastructure_issues": []},
+        }))
+
+        class DummyConn:
+            def close(self):
+                return None
+
+        monkeypatch.setattr(status_summary_module, "STATUS_PATH", status_path)
+        monkeypatch.setattr(status_summary_module, "get_trade_connection_with_world", lambda: DummyConn())
+        monkeypatch.setattr(
+            status_summary_module,
+            "query_position_current_status_view",
+            lambda conn: (_ for _ in ()).throw(RuntimeError("database locked")),
+        )
+        monkeypatch.setattr(status_summary_module, "_get_execution_capability_status", lambda: {})
+        monkeypatch.setattr(
+            status_summary_module,
+            "_query_current_open_entry_orders",
+            lambda conn: {"status": "ok", "orders": 2},
+        )
+        monkeypatch.setattr(
+            status_summary_module,
+            "annotate_truth_payload",
+            lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("must not mint truth freshness")),
+        )
+
+        status_summary_module.write_cycle_pulse({"mode": "opening_hunt", "trades": 0})
+        status = json.loads(status_path.read_text())
+
+        assert status["timestamp"] == "2026-05-20T00:00:00+00:00"
+        assert status["truth"]["generated_at"] == "2026-05-20T00:00:00+00:00"
+        assert status["truth"]["authority"] == "UNVERIFIED"
+        assert status["truth"]["stale_reason"] == "position_current_pulse_query_error"
+        assert status["risk"]["infrastructure_level"] == "RED"
+        assert "position_current_pulse_query_error" in status["risk"]["infrastructure_issues"]
+        assert status["portfolio"]["status"] == "query_error"
+        assert status["portfolio"]["open_positions"] is None
+        assert status["portfolio"]["positions"] == []
+        assert status["runtime"]["pulse_refreshed"] is False
+        assert status["runtime"]["pulse_refresh_error"] == "position_current_pulse_query_error"
+        assert "chain_state_counts" not in status["runtime"]
+        assert status["strategy"] == {
+            "status": "query_error",
+            "refresh_error": "position_current_pulse_query_error",
+        }
 
     def test_status_summary_exposes_s2_lifecycle_funnel(self, tmp_path, monkeypatch):
         """S2 visibility stays a derived status block, not a cycle authority."""

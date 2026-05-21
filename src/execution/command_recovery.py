@@ -814,19 +814,27 @@ def _point_order_fill_price(point_order: dict | None, *, fallback: object = None
     return str(fallback or "")
 
 
-def _matched_remaining_size(command: dict, matched_size: str) -> str:
-    command_size = _decimal_or_none(command.get("size"))
+def _venue_status_is_fully_matched(venue_status: str) -> bool:
+    return str(venue_status or "").upper() in {"MATCHED", "FILLED"}
+
+
+def _matched_remaining_size(command: dict, matched_size: str, *, venue_status: str = "") -> str:
     matched = _decimal_or_none(matched_size)
+    if _venue_status_is_fully_matched(venue_status) and matched is not None and matched > 0:
+        return "0"
+    command_size = _decimal_or_none(command.get("size"))
     if command_size is None or matched is None or matched >= command_size:
         return "0"
     return _decimal_text(command_size - matched)
 
 
-def _matched_event_type(command: dict, matched_size: str) -> str:
+def _matched_event_type(command: dict, matched_size: str, *, venue_status: str = "") -> str:
     if str(command.get("intent_kind") or "").upper() == "EXIT":
         return CommandEventType.PARTIAL_FILL_OBSERVED.value
     command_size = _decimal_or_none(command.get("size"))
     matched = _decimal_or_none(matched_size)
+    if _venue_status_is_fully_matched(venue_status) and matched is not None and matched > 0:
+        return CommandEventType.FILL_CONFIRMED.value
     if command_size is not None and matched is not None and matched < command_size:
         return CommandEventType.PARTIAL_FILL_OBSERVED.value
     return CommandEventType.FILL_CONFIRMED.value
@@ -2255,8 +2263,8 @@ def reconcile_matched_order_facts(conn: sqlite3.Connection, client) -> dict:
                 summary["errors"] += 1
                 continue
             tx_hash = next(iter(_point_order_transaction_hashes(point_order)), None)
-            event_type = _matched_event_type(row, matched_size)
-            remaining_size = _matched_remaining_size(row, matched_size)
+            event_type = _matched_event_type(row, matched_size, venue_status=venue_status)
+            remaining_size = _matched_remaining_size(row, matched_size, venue_status=venue_status)
             order_fact_state = _matched_order_fact_state(
                 event_type=event_type,
                 venue_status=venue_status,

@@ -1,6 +1,10 @@
 # Created: 2026-05-15
-# Last reused/audited: 2026-05-15
+# Lifecycle: created=2026-05-15; last_reviewed=2026-05-20; last_reused=2026-05-20
+# Last reused/audited: 2026-05-20
+# Purpose: Live data-pipeline verifier relationship tests.
+# Reuse: Run when forecast owner, data-pipeline E2E checks, or ingest daemon shutdown health relationships change.
 # Authority basis: docs/operations/task_2026-05-15_data_pipeline_live_rootfix/DATA_PIPELINE_ROOTFIX_PLAN.md live verifier process-ownership gate.
+#                  2026-05-20 live stability hotfix: ingest SIGTERM second shutdown must not convert exit 0 to exit 1.
 """Tests for the live data-pipeline E2E verifier."""
 
 from __future__ import annotations
@@ -8,6 +12,8 @@ from __future__ import annotations
 from datetime import date
 import sqlite3
 from types import SimpleNamespace
+
+from apscheduler.schedulers.base import SchedulerNotRunningError
 
 from scripts import check_data_pipeline_live_e2e as checker
 
@@ -93,6 +99,26 @@ def test_forecast_owner_gate_treats_demoted_ingest_as_non_owner() -> None:
     assert checks["single_forecast_owner"].status == "PASS"
     assert checks["dedicated_forecast_owner"].status == "PASS"
     assert checks["legacy_ingest_opendata_demoted"].status == "PASS"
+
+
+def test_ingest_sigterm_second_scheduler_shutdown_is_clean_exit() -> None:
+    """RELATIONSHIP: SIGTERM-stopped APScheduler -> launchd must see exit 0."""
+    from src import ingest_main
+
+    class AlreadyStoppedScheduler:
+        def __init__(self) -> None:
+            self.shutdown_calls = 0
+
+        def shutdown(self, *, wait: bool = True) -> None:
+            self.shutdown_calls += 1
+            assert wait is True
+            raise SchedulerNotRunningError
+
+    scheduler = AlreadyStoppedScheduler()
+
+    ingest_main._shutdown_scheduler_if_running(scheduler, wait=True)
+
+    assert scheduler.shutdown_calls == 1
 
 
 def test_candidate_snapshot_uses_live_eligible_coverage_not_first_snapshot() -> None:

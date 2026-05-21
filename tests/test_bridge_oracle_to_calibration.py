@@ -58,6 +58,25 @@ def storage_root_with_snapshot(monkeypatch, tmp_path):
     return tmp_path
 
 
+def _write_snapshot(tmp_path, city, target_date, payload):
+    city_dir = tmp_path / "raw" / "oracle_shadow_snapshots" / city
+    city_dir.mkdir(parents=True, exist_ok=True)
+    snap = {"city": city, "target_date": target_date, **payload}
+    (city_dir / f"{target_date}.json").write_text(json.dumps(snap))
+
+
+def _insert_verified_hours(conn, city, target_date, source, count=22):
+    for i in range(count):
+        conn.execute(
+            """
+            INSERT INTO world.observation_instants_v2
+                (city, target_date, source, utc_timestamp, authority)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (city, target_date, source, f"{target_date}T{i:02d}:00:00Z", "VERIFIED"),
+        )
+
+
 @patch("scripts.bridge_oracle_to_calibration.get_forecasts_connection_with_world")
 def test_bridge_coverage_filtering(
     mock_helper, mock_db, storage_root_with_snapshot, tmp_path
@@ -119,3 +138,87 @@ def test_bridge_coverage_filtering(
     stats = bridge(dry_run=True)
     assert stats["comparisons"] == 1
     assert stats["cities"] == 1
+
+
+@patch("scripts.bridge_oracle_to_calibration.get_forecasts_connection_with_world")
+def test_bridge_uses_wmo_half_up_for_wu_fahrenheit_to_celsius(
+    mock_helper, mock_db, monkeypatch, tmp_path
+):
+    db_path, conn = mock_db
+    monkeypatch.setenv("ZEUS_STORAGE_ROOT", str(tmp_path))
+
+    @contextmanager
+    def fake_ctx(*args, **kwargs):
+        yield conn
+
+    mock_helper.side_effect = fake_ctx
+
+    city = "Kuala Lumpur"
+    target_date = "2026-05-01"
+    _write_snapshot(
+        tmp_path,
+        city,
+        target_date,
+        {
+            "daily_high_f": 93.0,  # 33.888... C -> WMO half-up settlement 34 C
+            "source": "wu_icao_history",
+        },
+    )
+    conn.execute(
+        """
+        INSERT INTO settlements
+            (city, target_date, settlement_value, pm_bin_lo, pm_bin_hi,
+             settlement_source_type, unit, authority, temperature_metric)
+        VALUES (?, ?, 34.0, 34.0, 34.0, 'wu_icao', 'C', 'VERIFIED', 'high')
+        """,
+        (city, target_date),
+    )
+    _insert_verified_hours(conn, city, target_date, "wu_icao_history")
+    conn.commit()
+
+    stats = bridge(dry_run=True)
+
+    assert stats == {"cities": 1, "comparisons": 1, "mismatches": 0}
+
+
+@patch("scripts.bridge_oracle_to_calibration.get_forecasts_connection_with_world")
+def test_bridge_keeps_hko_oracle_truncate_for_celsius_snapshots(
+    mock_helper, mock_db, monkeypatch, tmp_path
+):
+    db_path, conn = mock_db
+    monkeypatch.setenv("ZEUS_STORAGE_ROOT", str(tmp_path))
+
+    @contextmanager
+    def fake_ctx(*args, **kwargs):
+        yield conn
+
+    mock_helper.side_effect = fake_ctx
+
+    city = "Hong Kong"
+    target_date = "2026-05-01"
+    _write_snapshot(
+        tmp_path,
+        city,
+        target_date,
+        {
+            "source": "hko_hourly_accumulator",
+            "hko_raw_payload": {
+                "CLMMAXT": {"data": [[2026, 5, 1, 28.7, "C"]]},
+            },
+        },
+    )
+    conn.execute(
+        """
+        INSERT INTO settlements
+            (city, target_date, settlement_value, pm_bin_lo, pm_bin_hi,
+             settlement_source_type, unit, authority, temperature_metric)
+        VALUES (?, ?, 28.0, 28.0, 28.0, 'hko', 'C', 'VERIFIED', 'high')
+        """,
+        (city, target_date),
+    )
+    _insert_verified_hours(conn, city, target_date, "hko_hourly_accumulator")
+    conn.commit()
+
+    stats = bridge(dry_run=True)
+
+    assert stats == {"cities": 1, "comparisons": 1, "mismatches": 0}

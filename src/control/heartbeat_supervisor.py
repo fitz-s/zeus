@@ -26,7 +26,8 @@ from typing import Any, Optional
 logger = logging.getLogger(__name__)
 
 HEARTBEAT_CANCEL_SUSPECTED_REASON = "heartbeat_cancel_suspected"
-DEFAULT_HEARTBEAT_CADENCE_SECONDS = 5
+DEFAULT_HEARTBEAT_CADENCE_SECONDS = 2
+DEFAULT_HEARTBEAT_HTTP_TIMEOUT_SECONDS = 1.0
 DEFAULT_HEARTBEAT_STATUS_MAX_AGE_SECONDS = 8
 DEFAULT_HEARTBEAT_RESTART_SEED_MAX_AGE_SECONDS = 30
 DEFAULT_HEARTBEAT_LEASE_RECOVERY_SUCCESS_TICKS = 3
@@ -136,6 +137,56 @@ def heartbeat_cadence_seconds_from_env() -> int:
     if value <= 0:
         raise ValueError("ZEUS_HEARTBEAT_CADENCE_SECONDS must be positive")
     return value
+
+
+def heartbeat_http_timeout_seconds_from_env(cadence_seconds: int) -> float:
+    raw = os.environ.get("ZEUS_HEARTBEAT_HTTP_TIMEOUT_SECONDS")
+    if raw is None or raw == "":
+        value = min(DEFAULT_HEARTBEAT_HTTP_TIMEOUT_SECONDS, float(cadence_seconds) / 2.0)
+    else:
+        try:
+            value = float(raw)
+        except ValueError as exc:
+            raise ValueError("ZEUS_HEARTBEAT_HTTP_TIMEOUT_SECONDS must be numeric") from exc
+    if value <= 0:
+        raise ValueError("ZEUS_HEARTBEAT_HTTP_TIMEOUT_SECONDS must be positive")
+    if value >= float(cadence_seconds):
+        raise ValueError(
+            "ZEUS_HEARTBEAT_HTTP_TIMEOUT_SECONDS must be shorter than heartbeat cadence"
+        )
+    return value
+
+
+def install_dedicated_heartbeat_http_timeout(*, cadence_seconds: int) -> None:
+    """Keep heartbeat HTTP blocking time below the lease cadence.
+
+    The CLOB heartbeat rotates a server-owned lease token. A read timeout can
+    leave the client unsure whether the server accepted and rotated the token;
+    if the request blocks for a full cadence, one network stall can consume the
+    whole lease window and Polymarket may cancel resting GTC/GTD orders. The
+    keeper runs in its own process, so replacing the SDK module's global client
+    here does not affect live evaluator/orderbook traffic.
+    """
+
+    timeout_seconds = heartbeat_http_timeout_seconds_from_env(cadence_seconds)
+    try:
+        import httpx
+        from py_clob_client_v2.http_helpers import helpers as heartbeat_http_helpers
+    except Exception as exc:  # pragma: no cover - dependency absence is runtime-specific
+        logger.warning("heartbeat HTTP timeout install skipped: %s", exc)
+        return
+
+    old_client = getattr(heartbeat_http_helpers, "_http_client", None)
+    heartbeat_http_helpers._http_client = httpx.Client(
+        http2=True,
+        timeout=httpx.Timeout(timeout_seconds),
+    )
+    close = getattr(old_client, "close", None)
+    if callable(close):
+        try:
+            close()
+        except Exception:
+            logger.debug("old heartbeat HTTP client close failed", exc_info=True)
 
 
 def heartbeat_status_max_age_seconds_from_env() -> int:
@@ -591,11 +642,12 @@ def run_heartbeat_keeper(
     not read orders, reconcile, cancel, refresh collateral, or write DB truth.
     """
 
+    cadence = heartbeat_cadence_seconds_from_env() if cadence_seconds is None else int(cadence_seconds)
     if adapter is None:
+        install_dedicated_heartbeat_http_timeout(cadence_seconds=cadence)
         from src.data.polymarket_client import PolymarketClient
 
         adapter = PolymarketClient()._ensure_v2_adapter()
-    cadence = heartbeat_cadence_seconds_from_env() if cadence_seconds is None else int(cadence_seconds)
     initial_heartbeat_id = fresh_heartbeat_id_from_status(path=status_path)
     supervisor = HeartbeatSupervisor(
         adapter,

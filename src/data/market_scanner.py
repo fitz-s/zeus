@@ -934,6 +934,15 @@ def read_persisted_sibling_outcomes(
         global _ACTIVE_EVENTS_LAST_STATUS
         _ACTIVE_EVENTS_LAST_STATUS = snapshot.authority
         if snapshot.authority != "VERIFIED":
+            static_topology = _read_static_market_event_sibling_outcomes(
+                source,
+                market_id,
+                market_events_conn=market_events_conn,
+                market_events_db_path=market_events_db_path,
+            )
+            if static_topology is not None:
+                _ACTIVE_EVENTS_LAST_STATUS = static_topology.authority
+                return static_topology
             return MarketSnapshot(
                 events=[],
                 authority=snapshot.authority,
@@ -949,6 +958,15 @@ def read_persisted_sibling_outcomes(
                     fetched_at_utc=snapshot.fetched_at_utc,
                     stale_age_seconds=snapshot.stale_age_seconds,
                 )
+        static_topology = _read_static_market_event_sibling_outcomes(
+            source,
+            market_id,
+            market_events_conn=market_events_conn,
+            market_events_db_path=market_events_db_path,
+        )
+        if static_topology is not None:
+            _ACTIVE_EVENTS_LAST_STATUS = static_topology.authority
+            return static_topology
         return MarketSnapshot(
             events=[],
             authority="STALE",
@@ -958,6 +976,59 @@ def read_persisted_sibling_outcomes(
     finally:
         if owned_conn is not None:
             owned_conn.close()
+
+
+def _read_static_market_event_sibling_outcomes(
+    snapshot_conn,
+    market_id: str,
+    *,
+    market_events_conn=None,
+    market_events_db_path: str | Path | None = None,
+) -> MarketSnapshot | None:
+    rows = _market_event_rows_for_snapshot_conditions(
+        snapshot_conn,
+        (market_id,),
+        market_events_conn=market_events_conn,
+        market_events_db_path=market_events_db_path,
+    )
+    if not rows:
+        return None
+    latest_seen: datetime | None = None
+    outcomes: list[dict[str, Any]] = []
+    for row in rows:
+        data = dict(row)
+        condition_id = str(data.get("condition_id") or "").strip()
+        if not condition_id:
+            continue
+        recorded_at = _parse_snapshot_time(data.get("recorded_at"))
+        if recorded_at is not None:
+            latest_seen = recorded_at if latest_seen is None else max(latest_seen, recorded_at)
+        outcomes.append(
+            {
+                "title": str(data.get("range_label") or data.get("outcome") or condition_id),
+                "range_low": data.get("range_low"),
+                "range_high": data.get("range_high"),
+                "market_id": condition_id,
+                "condition_id": condition_id,
+                "token_id": str(data.get("token_id") or ""),
+                "no_token_id": "",
+                "price": None,
+                "no_price": None,
+                "executable": False,
+                "source_contract": {
+                    "status": "MATCH",
+                    "source": "market_events_v2_static_topology",
+                },
+            }
+        )
+    if not outcomes or not any(str(o.get("condition_id") or "") == market_id for o in outcomes):
+        return None
+    return MarketSnapshot(
+        events=outcomes,
+        authority="VERIFIED",
+        fetched_at_utc=latest_seen,
+        stale_age_seconds=0.0,
+    )
 
 
 def _get_active_events(*, include_slug_pattern: bool = True) -> list[dict]:
