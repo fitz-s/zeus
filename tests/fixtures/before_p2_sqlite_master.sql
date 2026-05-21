@@ -2308,11 +2308,34 @@ CREATE TABLE tail_stress_scenarios (
     scenarios               TEXT NOT NULL,
     max_loss_pct            REAL NOT NULL,
     tail_probability_stressed REAL NOT NULL,
-    schema_version          INTEGER NOT NULL CHECK (schema_version IN (17, 18)),
+    schema_version          INTEGER NOT NULL CHECK (schema_version IN (17, 18, 19, 20, 21, 22, 23)),
     PRIMARY KEY (market_slug, temperature_metric, target_date, observation_time, decision_seq)
 )
     ;
 -- index: idx_tail_stress_scenarios_market_date
 CREATE INDEX idx_tail_stress_scenarios_market_date
     ON tail_stress_scenarios(market_slug, target_date)
+    ;
+-- table: shoulder_exposure_ledger
+CREATE TABLE shoulder_exposure_ledger (
+    id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+    shoulder_side           TEXT NOT NULL CHECK (shoulder_side IN ('sell', 'buy')),
+    weather_system_cluster  TEXT NOT NULL,
+    city                    TEXT NOT NULL,
+    target_date             TEXT NOT NULL,
+    source                  TEXT NOT NULL,
+    regime                  TEXT NOT NULL,
+    notional_usd            REAL NOT NULL,
+    decision_event_id       TEXT NOT NULL,
+    observed_at             TEXT NOT NULL,
+    schema_version          INTEGER NOT NULL CHECK (schema_version IN (22, 23))
+)
+    ;
+-- index: idx_shoulder_exposure_ledger_cluster_side
+CREATE INDEX idx_shoulder_exposure_ledger_cluster_side
+    ON shoulder_exposure_ledger(weather_system_cluster, shoulder_side)
+    ;
+-- index: idx_shoulder_exposure_ledger_city
+CREATE INDEX idx_shoulder_exposure_ledger_city
+    ON shoulder_exposure_ledger(city, target_date)
     ;

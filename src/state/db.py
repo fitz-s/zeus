@@ -849,7 +849,7 @@ def get_connection(
 # CI hook scripts/check_schema_version.py diffs the sqlite_master hash of
 # a fresh-init DB against tests/state/_schema_pinned_hash.txt and fails
 # the PR if SCHEMA_VERSION did not change in lockstep.
-SCHEMA_VERSION = 22  # 2026-05-21 P1-3: settlement_commands autoretry_eligible separates manual vs autonomous review
+SCHEMA_VERSION = 23  # 2026-05-21 Phase 3 T3: shoulder_exposure_ledger table
 
 
 def init_schema(
@@ -1347,7 +1347,7 @@ def init_schema(
             finality_confirmed_time    TEXT,
             clock_skew_estimate_ms_at_submit INTEGER,
             raw_orderbook_hash_transition_delta_ms INTEGER,
-            schema_version INTEGER NOT NULL CHECK (schema_version IN (12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22)),
+            schema_version INTEGER NOT NULL CHECK (schema_version IN (12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23)),
             source         TEXT NOT NULL CHECK (source IN ('phase0_backfill', 'live_decision')),
             PRIMARY KEY (market_slug, temperature_metric, target_date, observation_time, decision_seq)
         );
@@ -2474,6 +2474,10 @@ def init_schema(
     # Phase 3 T2 (2026-05-21): tail_stress_scenarios table (SCHEMA_VERSION 16).
     from src.state.schema.tail_stress_scenarios_schema import ensure_table as _ensure_tail_stress_scenarios_table
     _ensure_tail_stress_scenarios_table(conn)
+
+    # Phase 3 T3 (2026-05-21): shoulder_exposure_ledger table (SCHEMA_VERSION 23).
+    from src.state.schema.shoulder_exposure_ledger_schema import ensure_table as _ensure_shoulder_exposure_ledger_table
+    _ensure_shoulder_exposure_ledger_table(conn)
 
     # Phase 2: apply v2 schema (idempotent — safe to run on every boot).
     from src.state.schema.v2_schema import apply_v2_schema as _apply_v2_schema

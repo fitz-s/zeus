@@ -4535,6 +4535,56 @@ def evaluate_candidate(
             risk_throttle *= 0.5
             decision_validations.append("global_heat_throttled_50pct")
 
+        # Phase 3 T3: shoulder weather-system cluster cap (Invariant 4 — fires BEFORE
+        # phase_aware_kelly_multiplier to avoid wasted compute on capped-out entries).
+        # Gate: only applies to open-shoulder edges (edge.bin.is_shoulder).
+        # Dossier §7.5: "No same-direction shoulder sell across multiple cities under
+        # one heat dome/cold front." Two-gate: cross-city presence + $ hard cap.
+        if edge.bin.is_shoulder:
+            try:
+                from src.strategy.shoulder_cluster_cap import check_shoulder_cluster_cap
+                from src.strategy.correlation_cluster import tail_correlation_cluster_for
+                from src.contracts.weather_regime_tag import WeatherRegimeTag
+                _shoulder_regime = getattr(edge, "tail_regime_tag", WeatherRegimeTag.UNKNOWN)
+                _shoulder_target_date = getattr(edge.bin, "target_date", None)
+                _cluster_id = tail_correlation_cluster_for(
+                    city.name, _shoulder_regime, _shoulder_target_date
+                )
+                _shoulder_side = "sell" if edge.direction == "buy_no" else "buy"
+                # conn = world conn (the evaluate_candidate parameter — INV-37 world DB).
+                if _cluster_id:
+                    _cap_ok, _cap_reason = check_shoulder_cluster_cap(
+                        cluster=_cluster_id,
+                        side=_shoulder_side,
+                        proposed_notional=0.0,  # pre-sizing check — notional TBD
+                        conn=conn,
+                        proposing_city=city.name,
+                    )
+                    if not _cap_ok:
+                        decisions.append(EdgeDecision(
+                            False,
+                            edge=edge,
+                            decision_id=_decision_id(),
+                            rejection_stage="SHOULDER_CLUSTER_CAP",
+                            rejection_reasons=[NoTradeReason.SHOULDER_CLUSTER_CAP_EXCEEDED.value],
+                            selected_method=selected_method,
+                            applied_validations=list(decision_validations),
+                            decision_snapshot_id=snapshot_id,
+                            edge_source=edge_source,
+                            strategy_key=strategy_key,
+                            rejection_reason_enum=NoTradeReason.SHOULDER_CLUSTER_CAP_EXCEEDED,
+                            rejection_reason_detail=_cap_reason,
+                        ))
+                        continue
+            except (sqlite3.OperationalError, AttributeError, ImportError) as _cap_exc:  # noqa: BLE001
+                # Fail-open: cluster cap check errors do not block decisions.
+                # Logged but not fatal — missing conn or cluster lookup failure
+                # should not cascade to a trade rejection.
+                import logging as _cap_logging
+                _cap_logging.getLogger(__name__).warning(
+                    "shoulder_cluster_cap check failed (fail-open): %s", _cap_exc
+                )
+
         try:
             # A6 (PLAN.md §A6): pass strategy_key=None so dynamic_kelly_mult
             # does NOT fold the pre-A4 strategy_kelly_multiplier into km.

@@ -1952,6 +1952,29 @@ files:
     write_routes: []
     downstream:
     - src/state/schema/tail_stress_scenarios_schema.py
+  src/state/schema/shoulder_exposure_ledger_schema.py:
+    zone: K2_runtime
+    authority_role: shoulder_exposure_ledger_schema_owner
+    why: "Phase 3 T3 (2026-05-21): DDL owner for shoulder_exposure_ledger table (world DB). SCHEMA_VERSION 19. Append-only log of shoulder exposure entries for cross-city cluster cap enforcement per dossier §7.5. CHECK (18, 19). Production wiring via db.py init_schema."
+    downstream:
+    - src/state/db.py
+    - src/state/shoulder_exposure_ledger.py
+  src/state/shoulder_exposure_ledger.py:
+    zone: K2_runtime
+    authority_role: shoulder_exposure_ledger_writer_reader
+    why: "Phase 3 T3 (2026-05-21): Writer/reader for shoulder_exposure_ledger world DB table. write_shoulder_exposure_entry (append-only), read_cluster_exposure (SUM by cluster+side), read_distinct_cities_in_cluster (Gate 1 cross-city check), read_total_exposure_usd (readiness report). INV-37: all functions require caller-supplied conn."
+    write_routes:
+    - shoulder_exposure_ledger
+    downstream:
+    - src/strategy/shoulder_cluster_cap.py
+    - scripts/shoulder_shadow_readiness_report.py
+  src/strategy/shoulder_cluster_cap.py:
+    zone: K2_runtime
+    authority_role: shoulder_cluster_cap_gate
+    why: "Phase 3 T3 (2026-05-21): check_shoulder_cluster_cap(cluster, side, proposed_notional, conn, proposing_city) -> tuple[bool, str]. Two-gate: Gate 1 cross-city presence (different city in same cluster+side → REFUSE), Gate 2 $ hard cap (SHOULDER_CLUSTER_HARD_CAP_USD=2000). Empty cluster (UNKNOWN regime) always allows. INV-37; fires BEFORE phase_aware_kelly_multiplier (Invariant 4)."
+    write_routes: []
+    downstream:
+    - src/engine/evaluator.py
   src/contracts/no_trade_reason.py:
     zone: K1_contracts
     authority_role: no_trade_reason_enum
