@@ -432,8 +432,6 @@ def is_strategy_enabled(strategy: str) -> bool:
     """
     if not strategy:
         return True
-    if "live_allowed_strategies" not in _control_state:
-        _refresh_live_allowed_strategy_cache()
     if _control_state.get("live_allowed_strategies_status") != "ok":
         logger.error(
             "Strategy evidence-tier authority unavailable; failing closed for %s",

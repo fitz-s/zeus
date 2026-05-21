@@ -203,7 +203,10 @@ def test_is_strategy_enabled_blocks_shoulder_sell_runtime_entry():
     The cutover preserves the pre-A4 ``shoulder_sell not in
     _LIVE_ALLOWED_STRATEGIES`` semantics through is_strategy_enabled.
     """
-    from src.control.control_plane import is_strategy_enabled
+    from src.control import control_plane
+    control_plane._control_state["live_allowed_strategies"] = sp.live_allowed_keys()
+    control_plane._control_state["live_allowed_strategies_status"] = "ok"
+    is_strategy_enabled = control_plane.is_strategy_enabled
 
     assert is_strategy_enabled("shoulder_sell") is False
     assert is_strategy_enabled("settlement_capture") is True

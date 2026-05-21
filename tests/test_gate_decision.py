@@ -16,6 +16,9 @@ from src.control.gate_decision import GateDecision, ReasonCode, reason_refuted
 class TestGateDecision:
     def setup_method(self):
         cp._control_state.clear()
+        from src.strategy.strategy_profile import live_allowed_keys
+        cp._control_state["live_allowed_strategies"] = live_allowed_keys()
+        cp._control_state["live_allowed_strategies_status"] = "ok"
 
     def teardown_method(self):
         cp._control_state.clear()
@@ -59,6 +62,9 @@ class TestGateDecision:
             gated_by="operator",
         )
         cp._control_state["strategy_gates"] = {"center_buy": decision.to_dict()}
+        from src.strategy.strategy_profile import live_allowed_keys
+        cp._control_state["live_allowed_strategies"] = live_allowed_keys()
+        cp._control_state["live_allowed_strategies_status"] = "ok"
         assert cp.is_strategy_enabled("center_buy") is False
         assert cp.is_strategy_enabled("opening_inertia") is True  # live-allowed unknown gate = enabled
         assert cp.is_strategy_enabled("shoulder_sell") is False
