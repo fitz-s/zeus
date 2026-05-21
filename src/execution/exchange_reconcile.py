@@ -879,6 +879,29 @@ def _append_maker_fill_economic_correction(
     )
 
 
+def _prior_terminal_zero_remainder_order_fact(
+    conn: sqlite3.Connection,
+    *,
+    command_id: str,
+    venue_order_id: str,
+) -> sqlite3.Row | None:
+    row = conn.execute(
+        """
+        SELECT state, remaining_size, matched_size
+          FROM venue_order_facts
+         WHERE command_id = ?
+           AND venue_order_id = ?
+           AND state IN ('MATCHED', 'CANCEL_CONFIRMED', 'EXPIRED', 'VENUE_WIPED')
+         ORDER BY local_sequence DESC, fact_id DESC
+         LIMIT 1
+        """,
+        (command_id, venue_order_id),
+    ).fetchone()
+    if row is None or not _same_decimal_value(row["remaining_size"], "0"):
+        return None
+    return row
+
+
 def _ensure_entry_fill_order_fact(
     conn: sqlite3.Connection,
     *,
@@ -894,6 +917,7 @@ def _ensure_entry_fill_order_fact(
     if filled_dec is None:
         return
     command_size = _positive_decimal_or_none(command.get("size"))
+    command_id = str(command.get("command_id") or "")
     latest = conn.execute(
         """
         SELECT state, remaining_size, matched_size
@@ -902,15 +926,22 @@ def _ensure_entry_fill_order_fact(
          ORDER BY local_sequence DESC, fact_id DESC
          LIMIT 1
         """,
-        (str(command.get("command_id") or ""),),
+        (command_id,),
     ).fetchone()
+    prior_terminal = _prior_terminal_zero_remainder_order_fact(
+        conn,
+        command_id=command_id,
+        venue_order_id=venue_order_id,
+    )
     latest_terminal_state = str(latest["state"] or "") if latest is not None else ""
-    terminal_state_preserved = latest_terminal_state in _TERMINAL_ORDER_FACT_STATES
+    latest_terminal_state_preserved = latest_terminal_state in _TERMINAL_ORDER_FACT_STATES
+    terminal_source = latest if latest_terminal_state_preserved else prior_terminal
+    terminal_state_preserved = terminal_source is not None
     if terminal_state_preserved:
-        latest_matched = _positive_decimal_or_none(latest["matched_size"]) or Decimal("0")
-        matched_dec = max(filled_dec, latest_matched)
+        terminal_matched = _positive_decimal_or_none(terminal_source["matched_size"]) or Decimal("0")
+        matched_dec = max(filled_dec, terminal_matched)
         remaining = Decimal("0")
-        state = latest_terminal_state
+        state = str(terminal_source["state"] or "")
     else:
         matched_dec = filled_dec
         if command_size is None:
@@ -939,6 +970,7 @@ def _ensure_entry_fill_order_fact(
         "remaining_size": remaining_text,
         "matched_size": matched_text,
         "terminal_state_preserved": terminal_state_preserved,
+        "terminal_state_source": "latest" if latest_terminal_state_preserved else "prior",
     }
     append_order_fact(
         conn,

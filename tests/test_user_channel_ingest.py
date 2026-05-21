@@ -28,6 +28,7 @@ from src.state.db import init_schema
 from src.state.snapshot_repo import insert_snapshot
 from src.state.venue_command_repo import (
     append_event,
+    append_order_fact,
     append_position_lot,
     append_trade_fact,
     insert_command,
@@ -550,6 +551,37 @@ def test_order_update_derives_remaining_from_original_minus_matched_when_size_ab
     assert Decimal(row["remaining_size"]) == Decimal("81.16")
     assert Decimal(row["matched_size"]) == Decimal("100")
     assert _command_state(conn) == "PARTIAL"
+
+
+def test_ws_partial_order_update_after_terminal_order_fact_does_not_regress_command(conn):
+    first_id = append_order_fact(
+        conn,
+        venue_order_id="ord-ws",
+        command_id="cmd-ws",
+        state="EXPIRED",
+        remaining_size="0",
+        matched_size="5",
+        source="REST",
+        observed_at=NOW - timedelta(minutes=1),
+        raw_payload_hash=HASH_A,
+        raw_payload_json={"status": "EXPIRED", "remaining_size": "0", "matched_size": "5"},
+    )
+
+    result = _ingestor(conn).handle_message(
+        _order_message(
+            type="UPDATE",
+            size=None,
+            original_size="10",
+            size_matched="5",
+        )
+    )
+
+    assert result == {"order_fact_id": first_id}
+    rows = _rows(conn, "venue_order_facts")
+    assert [(row["state"], row["remaining_size"], row["matched_size"]) for row in rows] == [
+        ("EXPIRED", "0", "5")
+    ]
+    assert _command_state(conn) == "ACKED"
 
 
 def test_ws_message_parsed_to_trade_fact(conn):

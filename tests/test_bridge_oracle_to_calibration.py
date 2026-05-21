@@ -694,6 +694,133 @@ def test_bridge_uses_daily_observation_revisions_when_hourly_and_legacy_daily_ar
 
 
 @patch("scripts.bridge_oracle_to_calibration.get_forecasts_connection_with_world")
+def test_bridge_promotes_low_with_thin_direct_settlements_to_city_source_proxy(
+    mock_helper, mock_db, monkeypatch, tmp_path
+):
+    """Relationship: thin LOW settlement rows must not penalize a well-covered HKO city."""
+    db_path, conn = mock_db
+    monkeypatch.setenv("ZEUS_STORAGE_ROOT", str(tmp_path))
+
+    @contextmanager
+    def fake_ctx(*args, **kwargs):
+        yield conn
+
+    mock_helper.side_effect = fake_ctx
+
+    city = "Hong Kong"
+    for day in range(1, 31):
+        target_date = f"2026-04-{day:02d}"
+        conn.execute(
+            """
+            INSERT INTO settlements
+                (city, target_date, settlement_value, pm_bin_lo, pm_bin_hi,
+                 settlement_source_type, unit, authority, temperature_metric)
+            VALUES (?, ?, 28.0, 28.0, 28.0, 'HKO', 'C', 'VERIFIED', 'high')
+            """,
+            (city, target_date),
+        )
+        if day >= 23:
+            conn.execute(
+                """
+                INSERT INTO settlements
+                    (city, target_date, settlement_value, pm_bin_lo, pm_bin_hi,
+                     settlement_source_type, unit, authority, temperature_metric)
+                VALUES (?, ?, 22.0, 22.0, 22.0, 'HKO', 'C', 'VERIFIED', 'low')
+                """,
+                (city, target_date),
+            )
+        _insert_daily_observation_revision(
+            conn,
+            city,
+            target_date,
+            "HKO_DAILY_API",
+            high=28.7,
+            low=22.9,
+            unit="C",
+            payload_source="hko_daily_api",
+        )
+    conn.commit()
+
+    stats = bridge(dry_run=False)
+
+    assert stats == {"cities": 2, "comparisons": 60, "mismatches": 0}
+    artifact = json.loads((tmp_path / "data" / "oracle_error_rates.json").read_text())
+    high = artifact[city]["high"]
+    low = artifact[city]["low"]
+    assert high["status"] == "OK"
+    assert high["n"] == 30
+    assert low["status"] == "OK"
+    assert low["n"] == 30
+    assert low["mismatches"] == 0
+    assert low["penalty_multiplier"] == 1.0
+    assert low["source_role"] == "shared_city_oracle_source_proxy"
+    assert low["source_metric"] == "high"
+    assert low["observation_support_days"] == 30
+    assert low["direct_low_comparisons"] == 8
+
+
+@patch("scripts.bridge_oracle_to_calibration.get_forecasts_connection_with_world")
+def test_bridge_does_not_proxy_thin_low_when_direct_low_has_mismatch(
+    mock_helper, mock_db, monkeypatch, tmp_path
+):
+    """Relationship: proxy support must not hide adverse direct LOW evidence."""
+    db_path, conn = mock_db
+    monkeypatch.setenv("ZEUS_STORAGE_ROOT", str(tmp_path))
+
+    @contextmanager
+    def fake_ctx(*args, **kwargs):
+        yield conn
+
+    mock_helper.side_effect = fake_ctx
+
+    city = "Hong Kong"
+    for day in range(1, 31):
+        target_date = f"2026-04-{day:02d}"
+        conn.execute(
+            """
+            INSERT INTO settlements
+                (city, target_date, settlement_value, pm_bin_lo, pm_bin_hi,
+                 settlement_source_type, unit, authority, temperature_metric)
+            VALUES (?, ?, 28.0, 28.0, 28.0, 'HKO', 'C', 'VERIFIED', 'high')
+            """,
+            (city, target_date),
+        )
+        if day >= 23:
+            low_settlement = 21.0 if day == 23 else 22.0
+            conn.execute(
+                """
+                INSERT INTO settlements
+                    (city, target_date, settlement_value, pm_bin_lo, pm_bin_hi,
+                     settlement_source_type, unit, authority, temperature_metric)
+                VALUES (?, ?, ?, ?, ?, 'HKO', 'C', 'VERIFIED', 'low')
+                """,
+                (city, target_date, low_settlement, low_settlement, low_settlement),
+            )
+        _insert_daily_observation_revision(
+            conn,
+            city,
+            target_date,
+            "hko_daily_api",
+            high=28.7,
+            low=22.9,
+            unit="C",
+        )
+    conn.commit()
+
+    stats = bridge(dry_run=False)
+
+    assert stats == {"cities": 2, "comparisons": 38, "mismatches": 1}
+    artifact = json.loads((tmp_path / "data" / "oracle_error_rates.json").read_text())
+    low = artifact[city]["low"]
+    assert low["status"] == "INSUFFICIENT_SAMPLE"
+    assert low["n"] == 8
+    assert low["mismatches"] == 1
+    assert low["source_role"] == "canonical_daily_observation_revisions"
+    assert "source_metric" not in low
+    assert "direct_low_comparisons" not in low
+
+
+@patch("scripts.bridge_oracle_to_calibration.get_forecasts_connection_with_world")
 def test_bridge_matches_daily_revision_source_case_insensitively_before_fallback(
     mock_helper, mock_db, monkeypatch, tmp_path
 ):

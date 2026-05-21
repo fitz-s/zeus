@@ -175,6 +175,64 @@ def _ensure_envelope(
     return envelope_id
 
 
+@pytest.mark.parametrize("terminal_state", ["MATCHED", "CANCEL_CONFIRMED", "EXPIRED", "VENUE_WIPED"])
+def test_append_order_fact_preserves_prior_terminal_zero_remainder(conn, terminal_state):
+    from src.state.venue_command_repo import append_order_fact
+
+    _insert(conn, command_id="cmd-terminal-order", size=181.16)
+
+    first_id = append_order_fact(
+        conn,
+        venue_order_id="ord-terminal-order",
+        command_id="cmd-terminal-order",
+        state=terminal_state,
+        remaining_size="0",
+        matched_size="100",
+        source="REST",
+        observed_at="2026-05-21T00:00:00Z",
+        raw_payload_hash="1" * 64,
+        raw_payload_json={"status": terminal_state, "remaining_size": "0", "matched_size": "100"},
+    )
+
+    second_id = append_order_fact(
+        conn,
+        venue_order_id="ord-terminal-order",
+        command_id="cmd-terminal-order",
+        state="PARTIALLY_MATCHED",
+        remaining_size="81.16",
+        matched_size="100",
+        source="WS_USER",
+        observed_at="2026-05-21T00:01:00Z",
+        raw_payload_hash="2" * 64,
+        raw_payload_json={
+            "status": "PARTIALLY_MATCHED",
+            "remaining_size": "81.16",
+            "matched_size": "100",
+        },
+    )
+
+    rows = conn.execute(
+        """
+        SELECT fact_id, state, remaining_size, matched_size, source
+          FROM venue_order_facts
+         WHERE venue_order_id = ?
+         ORDER BY local_sequence, fact_id
+        """,
+        ("ord-terminal-order",),
+    ).fetchall()
+
+    assert second_id == first_id
+    assert [dict(row) for row in rows] == [
+        {
+            "fact_id": first_id,
+            "state": terminal_state,
+            "remaining_size": "0",
+            "matched_size": "100",
+            "source": "REST",
+        }
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Test 1: insert_command atomicity
 # ---------------------------------------------------------------------------

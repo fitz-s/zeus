@@ -674,11 +674,26 @@ def bridge(dry_run: bool = False) -> dict:
         # property; a city with HIGH settlement-comparison evidence and verified
         # LOW observation coverage should be penalty/no-penalty, not MISSING.
         for (city_name, metric), high_stats in list(city_stats.items()):
-            if metric != "high" or (city_name, "low") in city_stats:
+            if metric != "high":
+                continue
+            if int(high_stats.get("snapshot_comparisons") or 0) < 10:
                 continue
             support = _metric_observation_support(conn, city_name, "low")
             if int(support.get("days") or 0) < 10:
                 continue
+            low_stats = city_stats.get((city_name, "low"))
+            direct_low_context = {}
+            if low_stats is not None:
+                direct_low_comparisons = int(low_stats.get("snapshot_comparisons") or 0)
+                direct_low_mismatches = int(low_stats.get("snapshot_mismatch") or 0)
+                if direct_low_comparisons >= 10 or direct_low_mismatches > 0:
+                    continue
+                direct_low_context = {
+                    "direct_low_comparisons": direct_low_comparisons,
+                    "direct_low_mismatches": direct_low_mismatches,
+                    "direct_low_source_role": low_stats.get("source_role", ""),
+                    "direct_low_snapshot_dates": list(low_stats.get("snapshot_dates") or []),
+                }
             city_stats[(city_name, "low")] = {
                 **high_stats,
                 "source_role": _SHARED_CITY_ORACLE_SOURCE_ROLE,
@@ -686,6 +701,7 @@ def bridge(dry_run: bool = False) -> dict:
                 "source_metric": "high",
                 "observation_support_days": int(support["days"]),
                 "observation_last_date": str(support.get("last_date") or ""),
+                **direct_low_context,
             }
 
         # Merge results into existing oracle error rates.
@@ -771,6 +787,10 @@ def bridge(dry_run: bool = False) -> dict:
                 "source_metric",
                 "observation_support_days",
                 "observation_last_date",
+                "direct_low_comparisons",
+                "direct_low_mismatches",
+                "direct_low_source_role",
+                "direct_low_snapshot_dates",
             ):
                 if support_key in snap_stats:
                     city_entry[metric][support_key] = snap_stats[support_key]

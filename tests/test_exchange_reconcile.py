@@ -3389,6 +3389,212 @@ def test_late_entry_fill_does_not_resurrect_terminal_order_remainder(conn):
     }
 
 
+def test_reconcile_repairs_historical_terminal_to_partial_order_fact_regression(conn):
+    from src.execution.exchange_reconcile import run_reconcile_sweep
+    from src.state.venue_command_repo import append_order_fact
+
+    seed_command(conn, state="PARTIAL", size=181.16, price=0.01)
+    seed_position_baseline(conn)
+    append_order_fact(
+        conn,
+        venue_order_id="ord-m5",
+        command_id="cmd-m5",
+        state="EXPIRED",
+        remaining_size="0",
+        matched_size="100",
+        source="REST",
+        observed_at=NOW,
+        raw_payload_hash=hashlib.sha256(b"historical-terminal-remainder").hexdigest(),
+        raw_payload_json={
+            "reason": "confirmed_fill_plus_point_order_terminal_remainder",
+            "point_order_status": "CANCELED",
+            "matched_size": "100",
+            "remaining_size": "0",
+        },
+    )
+    conn.execute(
+        """
+        INSERT INTO venue_order_facts (
+            venue_order_id, command_id, state, remaining_size, matched_size,
+            source, observed_at, venue_timestamp, local_sequence,
+            raw_payload_hash, raw_payload_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "ord-m5",
+            "cmd-m5",
+            "PARTIALLY_MATCHED",
+            "81.16",
+            "100",
+            "REST",
+            (NOW + timedelta(minutes=1)).isoformat(),
+            (NOW + timedelta(minutes=1)).isoformat(),
+            2,
+            hashlib.sha256(b"historical-regression").hexdigest(),
+            '{"reason":"historical_terminal_to_partial_regression"}',
+        ),
+    )
+
+    run_reconcile_sweep(
+        FakeM5Adapter(
+            positions=[position(token_id=YES_TOKEN, size="100")],
+            trades=[
+                trade(
+                    trade_id="trade-historical-terminal-partial",
+                    order_id="ord-m5",
+                    size="100",
+                    price="0.01",
+                    status="CONFIRMED",
+                )
+            ],
+        ),
+        conn,
+        context="periodic",
+        observed_at=NOW + timedelta(minutes=2),
+    )
+
+    latest = conn.execute(
+        """
+        SELECT state, remaining_size, matched_size
+          FROM venue_order_facts
+         WHERE command_id = 'cmd-m5'
+         ORDER BY local_sequence DESC, fact_id DESC
+         LIMIT 1
+        """
+    ).fetchone()
+    assert dict(latest) == {
+        "state": "EXPIRED",
+        "remaining_size": "0",
+        "matched_size": "100",
+    }
+    fact = conn.execute(
+        """
+        SELECT venue_status, terminal_exec_status
+          FROM execution_fact
+         WHERE intent_id = 'pos-m5:entry'
+        """
+    ).fetchone()
+    if fact is not None:
+        assert dict(fact) != {"venue_status": "FILLED", "terminal_exec_status": "filled"}
+
+
+def test_reconcile_repairs_filled_command_terminal_to_partial_regression_without_filling_execfact(conn):
+    from src.execution.exchange_reconcile import run_reconcile_sweep
+    from src.state.db import log_execution_fact
+    from src.state.venue_command_repo import append_order_fact
+
+    seed_command(conn, state="FILLED", size=181.16, price=0.01)
+    seed_position_baseline(conn)
+    seed_trade_decision_runtime_alias(conn)
+    append_trade_fact(
+        conn,
+        trade_id="trade-filled-command-partial",
+        size="100",
+        fill_price="0.01",
+        state="CONFIRMED",
+    )
+    log_execution_fact(
+        conn,
+        intent_id="pos-m5:entry",
+        position_id="pos-m5",
+        decision_id="dec-cmd-m5",
+        command_id="cmd-m5",
+        order_role="entry",
+        strategy_key="opening_inertia",
+        posted_at=NOW.isoformat(),
+        filled_at=NOW.isoformat(),
+        submitted_price=0.01,
+        fill_price=0.01,
+        shares=100,
+        venue_status="PARTIAL",
+        terminal_exec_status="partial",
+    )
+    append_order_fact(
+        conn,
+        venue_order_id="ord-m5",
+        command_id="cmd-m5",
+        state="EXPIRED",
+        remaining_size="0",
+        matched_size="100",
+        source="REST",
+        observed_at=NOW,
+        raw_payload_hash=hashlib.sha256(b"filled-command-terminal-remainder").hexdigest(),
+        raw_payload_json={
+            "reason": "confirmed_fill_plus_point_order_terminal_remainder",
+            "point_order_status": "CANCELED",
+            "matched_size": "100",
+            "remaining_size": "0",
+        },
+    )
+    conn.execute(
+        """
+        INSERT INTO venue_order_facts (
+            venue_order_id, command_id, state, remaining_size, matched_size,
+            source, observed_at, venue_timestamp, local_sequence,
+            raw_payload_hash, raw_payload_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "ord-m5",
+            "cmd-m5",
+            "PARTIALLY_MATCHED",
+            "81.16",
+            "100",
+            "WS_USER",
+            (NOW + timedelta(minutes=1)).isoformat(),
+            (NOW + timedelta(minutes=1)).isoformat(),
+            2,
+            hashlib.sha256(b"filled-command-regression").hexdigest(),
+            '{"reason":"historical_terminal_to_partial_regression"}',
+        ),
+    )
+
+    run_reconcile_sweep(
+        FakeM5Adapter(
+            positions=[position(token_id=YES_TOKEN, size="100")],
+            trades=[
+                trade(
+                    trade_id="trade-filled-command-partial",
+                    order_id="ord-m5",
+                    size="100",
+                    price="0.01",
+                    status="CONFIRMED",
+                )
+            ],
+        ),
+        conn,
+        context="periodic",
+        observed_at=NOW + timedelta(minutes=2),
+    )
+
+    latest = conn.execute(
+        """
+        SELECT state, remaining_size, matched_size
+          FROM venue_order_facts
+         WHERE command_id = 'cmd-m5'
+         ORDER BY local_sequence DESC, fact_id DESC
+         LIMIT 1
+        """
+    ).fetchone()
+    assert dict(latest) == {
+        "state": "EXPIRED",
+        "remaining_size": "0",
+        "matched_size": "100",
+    }
+    fact = conn.execute(
+        """
+        SELECT venue_status, terminal_exec_status, shares
+          FROM execution_fact
+         WHERE intent_id = 'pos-m5:entry'
+        """
+    ).fetchone()
+    assert dict(fact) == {
+        "venue_status": "PARTIAL",
+        "terminal_exec_status": "partial",
+        "shares": 100.0,
+    }
+
+
 def test_completed_partial_order_fact_repairs_execution_fact_to_filled(conn):
     from src.execution.command_recovery import (
         reconcile_completed_partial_order_facts,
