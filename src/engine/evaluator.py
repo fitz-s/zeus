@@ -4560,7 +4560,34 @@ def evaluate_candidate(
         # Phase 3: RiskGraph Regime Throttling. Cluster identity comes from
         # reviewed city/config metadata; city.name is not a risk-cluster
         # authority.
-        current_cluster_exp = cluster_exposure_for_bankroll(portfolio, city.cluster, sizing_bankroll)
+        # Phase 5 T3: pass regime + store for variance-based cluster cap when
+        # regime != UNKNOWN. Falls back to notional-sum when store is None or
+        # regime is UNKNOWN (backward-compatible per plan §Track3).
+        _phase5_regime = getattr(edge, "tail_regime_tag", None)
+        _phase5_store = None
+        _phase5_cities = None
+        try:
+            from src.contracts.weather_regime_tag import WeatherRegimeTag as _WRT5
+            from src.strategy.regime_correlation_store import RegimeCorrelationStore as _RCS
+            if _phase5_regime is None:
+                _phase5_regime = _WRT5.UNKNOWN
+            if _phase5_regime is not _WRT5.UNKNOWN:
+                _phase5_store = _RCS(conn)
+                # Collect cities present in the cluster from open positions.
+                _phase5_cities = list({
+                    p.city for p in portfolio.positions
+                    if p.cluster == city.cluster
+                    and hasattr(p, "city")
+                }) or None
+        except (ImportError, Exception):  # noqa: BLE001
+            # Fail-open: if import or construction fails, store stays None
+            # and the notional-sum fallback activates automatically.
+            pass
+        current_cluster_exp = cluster_exposure_for_bankroll(portfolio, city.cluster, sizing_bankroll,
+            regime_correlation_store=_phase5_store,
+            regime=_phase5_regime,
+            cities=_phase5_cities,
+        )
         risk_throttle = 1.0
         if current_cluster_exp > 0.10: # Regime saturation starts
             risk_throttle *= 0.5

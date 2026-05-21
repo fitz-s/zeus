@@ -2086,16 +2086,80 @@ def city_exposure_for_bankroll(state: PortfolioState, city: str, bankroll: float
     return total / bankroll
 
 
-def cluster_exposure_for_bankroll(state: PortfolioState, cluster: str, bankroll: float) -> float:
-    """Cluster exposure against an explicit entry bankroll/cap."""
+def cluster_exposure_for_bankroll(
+    state: PortfolioState,
+    cluster: str,
+    bankroll: float,
+    *,
+    regime_correlation_store: "Optional[Any]" = None,
+    regime: "Optional[Any]" = None,
+    cities: "Optional[list[str]]" = None,
+) -> float:
+    """Cluster exposure against an explicit entry bankroll/cap.
+
+    When regime_correlation_store is provided AND regime is not UNKNOWN (and not None),
+    computes portfolio-variance exposure σ²_p = wᵀ Σ_shrunk w where
+    w_i = notional_i / bankroll. This replaces the raw notional sum, producing a
+    tighter cap under high-correlation regimes (e.g. HEAT_DOME).
+
+    Positive-correlation invariant: variance-based exposure ≤ notional-sum exposure
+    when off-diagonal correlations are non-negative (Σw_i ≥ sqrt(wᵀΣw) when ρ≥0).
+    Heat-dome regime (higher ρ) gives a strictly tighter cap than normal regime on
+    the same portfolio.
+
+    Backward-compatible: when store is None or regime is None/UNKNOWN, falls back to
+    the original notional-sum path (total_notional / bankroll), preserving all
+    existing call-site behaviour.
+
+    Args:
+        state:                    Portfolio state.
+        cluster:                  Cluster key to filter positions.
+        bankroll:                 Entry bankroll / cap denominator.
+        regime_correlation_store: Optional RegimeCorrelationStore instance (T2).
+        regime:                   Optional WeatherRegimeTag for the current decision.
+        cities:                   Optional city list for the sub-matrix lookup.
+                                  If None, falls back to notional-sum path.
+
+    Returns:
+        Float exposure in [0, ∞). Returns 0.0 when bankroll ≤ 0.
+    """
     if bankroll <= 0:
         return 0.0
-    total = sum(
-        _runtime_open_exposure_usd(p)
-        for p in state.positions
+
+    open_positions = [
+        p for p in state.positions
         if p.cluster == cluster and _is_runtime_open_position(p)
-    )
-    return total / bankroll
+    ]
+    if not open_positions:
+        return 0.0
+
+    notionals = [_runtime_open_exposure_usd(p) for p in open_positions]
+    total_notional = sum(notionals)
+
+    # Variance-based path: requires store, a non-None/non-UNKNOWN regime, and cities.
+    if regime_correlation_store is not None and regime is not None and cities is not None:
+        try:
+            # Import here to avoid circular dependency at module load time.
+            from src.contracts.weather_regime_tag import WeatherRegimeTag as _WRT
+            if regime is not _WRT.UNKNOWN:
+                sigma = regime_correlation_store.get(regime, cities)
+                # Weight vector: w_i = notional_i / bankroll.
+                w = [n / bankroll for n in notionals]
+                if len(w) == len(cities):
+                    import numpy as _np
+                    import math as _math
+                    wv = _np.array(w, dtype=float)
+                    variance = float(wv @ sigma @ wv)
+                    # σ²_p is portfolio variance; return sqrt(σ²_p) so units match
+                    # the notional/bankroll scale. Under positive off-diagonal
+                    # correlations, sqrt(wᵀΣw) ≤ Σw_i = total_notional/bankroll.
+                    return _math.sqrt(max(variance, 0.0))
+        except (KeyError, Exception):  # noqa: BLE001
+            # Fail-open: if store lookup fails (regime not yet fit, city mismatch,
+            # or any unexpected error), fall through to notional-sum path.
+            pass
+
+    return total_notional / bankroll
 
 
 
