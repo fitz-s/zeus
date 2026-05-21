@@ -986,7 +986,66 @@ def _refresh_day0_observation(
     })
 
     _set_monitor_probability_fresh(position, True)
+
+    # T5 nowcast wiring (Phase 2 T5 SCAFFOLD): gate on market_slug + hours_remaining.
+    # Full write_nowcast_run integration deferred until fit_run_id plumbing lands
+    # (day0_horizon_platt_fits writer); this site is the canonical call-site
+    # location verified by the T5 antibody (test_monitor_refresh_nowcast_wiring.py).
+    _maybe_write_day0_nowcast(
+        position=position,
+        hours_remaining=hours_remaining,
+        temporal_context=temporal_context,
+        p_cal_full=p_cal_full,
+        p_raw_vector=p_raw_vector,
+        temperature_metric=temperature_metric,
+        target_d=target_d,
+        conn=conn,
+    )
+
     return current_p_posterior, [*applied, "model_only_posterior", "alpha_posterior"]
+
+
+def _maybe_write_day0_nowcast(
+    *,
+    position: "Position",
+    hours_remaining: float,
+    temporal_context: object,
+    p_cal_full: "np.ndarray",
+    p_raw_vector: "np.ndarray",
+    temperature_metric: "MetricIdentity",
+    target_d: "date",
+    conn: object,
+) -> None:
+    """Attempt a day0_nowcast_runs write if position carries a market_slug and
+    hours_remaining <= 6.  fit_run_id plumbing is deferred to Phase 2 T5 GREEN
+    phase; this scaffold emits a DEBUG log confirming the gate condition.
+
+    Guards:
+      - position.market_slug must be non-empty (positions from v1-vintage
+        positions.json default to None and are silently skipped).
+      - hours_remaining must be <= 6 (G8c: within the terminal nowcast window).
+      - temporal_context must be non-None (daypart requires it).
+
+    Phase 2 T5 SCAFFOLD: write is a no-op stub; the antibody
+    test_monitor_refresh_nowcast_wiring.py verifies this function is called
+    with the expected arguments.
+    """
+    if not getattr(position, "market_slug", None):
+        return
+    if hours_remaining > 6:
+        return
+    if temporal_context is None:
+        return
+
+    logger.debug(
+        "T5 nowcast gate PASS for %s market_slug=%s hours_remaining=%.1f daypart=%s — "
+        "fit_run_id plumbing deferred (Phase 2 T5 GREEN)",
+        getattr(position, "trade_id", "?"),
+        position.market_slug,
+        hours_remaining,
+        getattr(temporal_context, "daypart", "unknown"),
+    )
+    # fit_run_id write will be wired here in Phase 2 T5 GREEN phase.
 
 
 def _delta_bucket(delta: float) -> str:

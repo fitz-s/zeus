@@ -1953,6 +1953,12 @@ files:
     why: Runtime position model/read surface; transitional, not canonical event law.
     hazards:
     - TRANSITIONAL_DO_NOT_DEEPEN
+    # Phase 2 T5 (2026-05-20): added Position.market_slug Optional[str] = None.
+    # JSON-only field (no SQL ALTER, no SCHEMA_VERSION bump — positions.json at
+    # POSITIONS_PATH is NOT a SQL table). Backward-compat: v1-vintage positions.json
+    # without market_slug field loads with default None via dataclasses.fields filter.
+    # db_table_ownership entry: not applicable (JSON, no table).
+    t5_market_slug_note: "JSON-only; no db_table_ownership entry; no SCHEMA_VERSION bump"
     downstream:
     - src/engine/cycle_runner.py
     - src/engine/evaluator.py
