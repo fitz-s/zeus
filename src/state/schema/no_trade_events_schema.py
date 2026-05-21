@@ -92,12 +92,20 @@ CREATE INDEX IF NOT EXISTS idx_no_trade_events_reason
 
 
 def ensure_table(conn: sqlite3.Connection) -> None:
-    """Create no_trade_events table + indices if they do not exist.
+    """Create no_trade_events table + indices without destructive rebuild DDL.
 
-    Idempotent (IF NOT EXISTS). Called from two paths:
-      1. db.py init_schema (daemon boot, world DB) — wired at T2 production pass
-      2. scripts/migrate_no_trade_events_create_2026_05_21.py — operator one-shot migration
+    Runtime writers may call schema assertions, but must not rebuild this table
+    while the daemon is in the hot path. Stale CHECK upgrades belong to
+    ``migrate_no_trade_events_schema`` during boot/operator migration.
     """
+    conn.execute(CREATE_TABLE_SQL)
+    conn.execute(CREATE_INDEX_MARKET_TIME_SQL)
+    conn.execute(CREATE_INDEX_REASON_SQL)
+
+
+def migrate_no_trade_events_schema(conn: sqlite3.Connection) -> None:
+    """Boot/operator migration path for stale no_trade_events CHECK constraints."""
+
     conn.execute(CREATE_TABLE_SQL)
     _rebuild_stale_no_trade_events_table(conn)
     conn.execute(CREATE_INDEX_MARKET_TIME_SQL)

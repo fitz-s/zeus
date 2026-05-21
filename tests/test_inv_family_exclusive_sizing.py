@@ -692,9 +692,59 @@ def test_weather_family_decision_is_first_class_single_leg_intent() -> None:
     assert family_decision.family_portfolio_intent is True
     assert family_decision.portfolio.family_key == WeatherFamilyKey(CITY, TARGET_DATE, METRIC)
     assert family_decision.portfolio.selected_leg is mid_bin
-    assert family_decision.portfolio.objective == "expected_log_growth_payoff_vector"
+    assert family_decision.portfolio.selected_legs == (mid_bin,)
+    assert family_decision.portfolio.fallback_candidate_legs == (mid_bin, low_price_tail)
+    assert family_decision.portfolio.objective.startswith("expected_log_growth_payoff_vector")
     assert family_decision.portfolio.payoff_matrix
-    assert [d.dropped_bin for d in family_decision.dropped] == ["26°F or above"]
+    assert family_decision.dropped == ()
+
+
+def test_family_decision_retains_ranked_fallback_candidates_before_execution_viability() -> None:
+    """Primary leg failure must not erase sibling legs before executable reprice."""
+
+    bins = {s[2]: s for s in _BIN_SPECS}
+    low_price_tail = _bin_edge(bins["26°F or above"], entry_price=0.02, forward_edge=0.02)
+    mid_bin = _bin_edge(bins["22-23°F"], entry_price=0.45, forward_edge=0.07)
+    side_bin = _bin_edge(bins["20-21°F"], entry_price=0.18, forward_edge=0.04)
+    weak_bin = _bin_edge(bins["19°F or below"], entry_price=0.10, forward_edge=0.01)
+
+    family_decision = build_weather_family_decision(
+        [low_price_tail, mid_bin, side_bin, weak_bin],
+        city=CITY,
+        target_date=TARGET_DATE,
+        temperature_metric=METRIC,
+        enabled=True,
+    )
+
+    assert family_decision is not None
+    assert family_decision.portfolio.selected_leg is mid_bin
+    assert family_decision.portfolio.fallback_candidate_legs == (
+        mid_bin,
+        side_bin,
+        low_price_tail,
+    )
+    assert [d.dropped_bin for d in family_decision.dropped] == ["19°F or below"]
+
+
+def test_runtime_dedup_preserves_ranked_fallback_candidates_until_submit() -> None:
+    """Fallback candidates stay attemptable; runtime submits at most one later."""
+
+    decisions = _family_after_fdr()
+    for rank, decision in enumerate(decisions, start=1):
+        decision.family_fallback_rank = rank
+        decision.family_fallback_candidate_count = len(decisions)
+
+    out = dedup_mutually_exclusive_families(
+        decisions,
+        city=CITY,
+        target_date=TARGET_DATE,
+        temperature_metric=METRIC,
+        enabled=True,
+    )
+
+    assert _count_trades(out) == 3
+    assert all(d.rejection_stage == "" for d in out)
+    assert all("family_ranked_executable_fallback" in d.applied_validations for d in out)
 
 
 def test_family_portfolio_can_select_explicit_multi_leg_payoff_vector() -> None:

@@ -158,6 +158,42 @@ def _canonical_order_truth_cte(
     """
 
 
+def _canonical_trade_fact_cte(cte_name: str = "canonical_trade_fact") -> str:
+    """SQL CTE that prevents weaker later trade facts from hiding fills."""
+
+    return f"""
+        {cte_name} AS (
+            SELECT ranked.*
+              FROM (
+                    SELECT scored.*,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY command_id, trade_id
+                               ORDER BY proof_rank DESC, local_sequence DESC
+                           ) AS canonical_rank
+                      FROM (
+                            SELECT fact.*,
+                                   CASE
+                                       WHEN UPPER(COALESCE(fact.state, '')) = 'CONFIRMED'
+                                            AND CAST(COALESCE(fact.filled_size, '0') AS REAL) > 0
+                                       THEN 500
+                                       WHEN UPPER(COALESCE(fact.state, '')) = 'MINED'
+                                            AND CAST(COALESCE(fact.filled_size, '0') AS REAL) > 0
+                                       THEN 450
+                                       WHEN UPPER(COALESCE(fact.state, '')) = 'MATCHED'
+                                            AND CAST(COALESCE(fact.filled_size, '0') AS REAL) > 0
+                                       THEN 400
+                                       WHEN CAST(COALESCE(fact.filled_size, '0') AS REAL) > 0
+                                       THEN 300
+                                       ELSE 100
+                                   END AS proof_rank
+                              FROM venue_trade_facts fact
+                           ) scored
+                   ) ranked
+             WHERE ranked.canonical_rank = 1
+        )
+    """
+
+
 class MissingPositionCurrentForTerminalOrder(ValueError):
     """Raised when terminal order facts arrive before the entry projection."""
 
@@ -927,25 +963,15 @@ def _trade_facts_match_order_fact_size(
     if expected is None:
         return False
     rows = conn.execute(
-        """
-        WITH latest_trade_fact AS (
-            SELECT command_id, trade_id, MAX(local_sequence) AS max_sequence
-              FROM venue_trade_facts
-             WHERE command_id = ?
-               AND venue_order_id = ?
-             GROUP BY command_id, trade_id
-        )
+        f"""
+        WITH {_canonical_trade_fact_cte()}
         SELECT fact.filled_size
-          FROM venue_trade_facts fact
-          JOIN latest_trade_fact latest
-            ON latest.command_id = fact.command_id
-           AND latest.trade_id = fact.trade_id
-           AND latest.max_sequence = fact.local_sequence
+          FROM canonical_trade_fact fact
          WHERE fact.command_id = ?
            AND fact.venue_order_id = ?
            AND fact.state IN ('MATCHED', 'MINED', 'CONFIRMED')
         """,
-        (command_id, venue_order_id, command_id, venue_order_id),
+        (command_id, venue_order_id),
     ).fetchall()
     filled = Decimal("0")
     count = 0
@@ -1116,22 +1142,14 @@ def _positive_fill_trade_fact_summary(conn: sqlite3.Connection, command_id: str)
     if not _table_exists(conn, "venue_trade_facts"):
         return {"count": 0, "filled_size": "0"}
     rows = conn.execute(
-        """
-        WITH latest_trade_fact AS (
-            SELECT trade_id, MAX(local_sequence) AS max_sequence
-              FROM venue_trade_facts
-             WHERE command_id = ?
-             GROUP BY trade_id
-        )
+        f"""
+        WITH {_canonical_trade_fact_cte()}
         SELECT fact.filled_size
-          FROM venue_trade_facts fact
-          JOIN latest_trade_fact latest
-            ON latest.trade_id = fact.trade_id
-           AND latest.max_sequence = fact.local_sequence
+          FROM canonical_trade_fact fact
          WHERE fact.command_id = ?
            AND fact.state IN ('MATCHED', 'MINED', 'CONFIRMED')
         """,
-        (command_id, command_id),
+        (command_id,),
     ).fetchall()
     count = 0
     filled = Decimal("0")
@@ -1171,12 +1189,8 @@ def _latest_unprojected_filled_entry_candidates(conn: sqlite3.Connection) -> lis
     if not all(_table_exists(conn, table) for table in required):
         return []
     rows = conn.execute(
-        """
-        WITH latest_trade_fact AS (
-            SELECT command_id, trade_id, MAX(local_sequence) AS max_sequence
-              FROM venue_trade_facts
-             GROUP BY command_id, trade_id
-        ),
+        f"""
+        WITH {_canonical_trade_fact_cte()},
         entry_fill AS (
             SELECT fact.command_id,
                    COUNT(*) AS fill_fact_count,
@@ -1186,11 +1200,7 @@ def _latest_unprojected_filled_entry_candidates(conn: sqlite3.Connection) -> lis
                    MAX(fact.observed_at) AS observed_at,
                    GROUP_CONCAT(DISTINCT fact.state) AS fill_states,
                    MAX(fact.trade_fact_id) AS trade_fact_id
-              FROM venue_trade_facts fact
-              JOIN latest_trade_fact latest
-                ON latest.command_id = fact.command_id
-               AND latest.trade_id = fact.trade_id
-               AND latest.max_sequence = fact.local_sequence
+              FROM canonical_trade_fact fact
              WHERE fact.state IN ('MATCHED', 'MINED', 'CONFIRMED')
                AND CAST(COALESCE(fact.filled_size, '0') AS REAL) > 0
                AND CAST(COALESCE(fact.fill_price, '0') AS REAL) > 0
@@ -1847,12 +1857,8 @@ def _filled_entry_lot_materialization_candidates(conn: sqlite3.Connection) -> li
     if not all(_table_exists(conn, table) for table in required):
         return []
     rows = conn.execute(
-        """
-        WITH latest_trade_fact AS (
-            SELECT command_id, trade_id, MAX(local_sequence) AS max_sequence
-              FROM venue_trade_facts
-             GROUP BY command_id, trade_id
-        ),
+        f"""
+        WITH {_canonical_trade_fact_cte()},
         entry_fill AS (
             SELECT fact.command_id,
                    COUNT(*) AS fill_fact_count,
@@ -1863,11 +1869,7 @@ def _filled_entry_lot_materialization_candidates(conn: sqlite3.Connection) -> li
                    MAX(fact.venue_timestamp) AS venue_timestamp,
                    GROUP_CONCAT(DISTINCT fact.state) AS fill_states,
                    MAX(fact.trade_fact_id) AS trade_fact_id
-              FROM venue_trade_facts fact
-              JOIN latest_trade_fact latest
-                ON latest.command_id = fact.command_id
-               AND latest.trade_id = fact.trade_id
-               AND latest.max_sequence = fact.local_sequence
+              FROM canonical_trade_fact fact
              WHERE fact.state IN ('MATCHED', 'MINED', 'CONFIRMED')
                AND CAST(COALESCE(fact.filled_size, '0') AS REAL) > 0
                AND CAST(COALESCE(fact.fill_price, '0') AS REAL) > 0
@@ -1895,12 +1897,8 @@ def _filled_entry_lot_materialization_candidates(conn: sqlite3.Connection) -> li
           FROM venue_commands cmd
           LEFT JOIN position_current pc
             ON pc.position_id = cmd.position_id
-          JOIN venue_trade_facts fact
+          JOIN canonical_trade_fact fact
             ON fact.command_id = cmd.command_id
-          JOIN latest_trade_fact latest
-            ON latest.command_id = fact.command_id
-           AND latest.trade_id = fact.trade_id
-           AND latest.max_sequence = fact.local_sequence
           LEFT JOIN position_lots lot
             ON lot.source_trade_fact_id = fact.trade_fact_id
          WHERE cmd.intent_kind = 'ENTRY'
@@ -1994,52 +1992,9 @@ def _filled_entry_execution_fact_repair_candidates(conn: sqlite3.Connection) -> 
     if not all(_table_exists(conn, table) for table in required):
         return []
     rows = conn.execute(
-        """
-        WITH latest_trade_fact AS (
-            SELECT command_id, trade_id, MAX(local_sequence) AS max_sequence
-              FROM venue_trade_facts
-             GROUP BY command_id, trade_id
-        ),
-        canonical_order_truth AS (
-            SELECT fact.command_id,
-                   fact.venue_order_id,
-                   fact.remaining_size,
-                   fact.matched_size,
-                   fact.state,
-                   fact.local_sequence,
-                   CASE
-                     WHEN fact.state IN ('MATCHED', 'FILLED')
-                      AND CAST(COALESCE(fact.remaining_size, '0') AS REAL) = 0
-                      AND CAST(COALESCE(fact.matched_size, '0') AS REAL) > 0
-                     THEN 300
-                     WHEN fact.state IN ('PARTIALLY_MATCHED', 'EXPIRED', 'CANCEL_CONFIRMED')
-                      AND CAST(COALESCE(fact.matched_size, '0') AS REAL) > 0
-                     THEN 200
-                     WHEN fact.state IN ('LIVE', 'RESTING', 'ACKED')
-                     THEN 100
-                     ELSE 0
-                   END AS proof_rank
-              FROM venue_order_facts fact
-            WHERE fact.state IN ('MATCHED', 'FILLED')
-               AND CAST(COALESCE(fact.remaining_size, '0') AS REAL) = 0
-               AND CAST(COALESCE(fact.matched_size, '0') AS REAL) > 0
-            UNION ALL
-            SELECT fact.command_id,
-                   fact.venue_order_id,
-                   fact.remaining_size,
-                   fact.matched_size,
-                   fact.state,
-                   fact.local_sequence,
-                   CASE
-                     WHEN fact.state IN ('PARTIALLY_MATCHED', 'EXPIRED', 'CANCEL_CONFIRMED')
-                      AND CAST(COALESCE(fact.matched_size, '0') AS REAL) > 0
-                     THEN 200
-                     ELSE 0
-                   END AS proof_rank
-              FROM venue_order_facts fact
-             WHERE fact.state IN ('PARTIALLY_MATCHED', 'EXPIRED', 'CANCEL_CONFIRMED')
-               AND CAST(COALESCE(fact.matched_size, '0') AS REAL) > 0
-        ),
+        f"""
+        WITH {_canonical_trade_fact_cte()},
+        {_canonical_order_truth_cte()},
         latest_order AS (
             SELECT truth.command_id,
                    truth.venue_order_id,
@@ -2071,11 +2026,7 @@ def _filled_entry_execution_fact_repair_candidates(conn: sqlite3.Connection) -> 
                    MAX(fact.venue_timestamp) AS venue_timestamp,
                    GROUP_CONCAT(DISTINCT fact.state) AS fill_states,
                    MAX(fact.trade_fact_id) AS trade_fact_id
-              FROM venue_trade_facts fact
-              JOIN latest_trade_fact latest
-                ON latest.command_id = fact.command_id
-               AND latest.trade_id = fact.trade_id
-               AND latest.max_sequence = fact.local_sequence
+              FROM canonical_trade_fact fact
              WHERE fact.state IN ('MATCHED', 'MINED', 'CONFIRMED')
                AND CAST(COALESCE(fact.filled_size, '0') AS REAL) > 0
                AND CAST(COALESCE(fact.fill_price, '0') AS REAL) > 0
@@ -2289,22 +2240,14 @@ def _exit_pending_projection_candidates(conn: sqlite3.Connection) -> list[dict]:
     trade_placeholders = ", ".join("?" for _ in _EXIT_PENDING_PROJECTION_TRADE_STATES)
     rows = conn.execute(
         f"""
-        WITH latest_trade_fact AS (
-            SELECT command_id, trade_id, MAX(local_sequence) AS max_sequence
-              FROM venue_trade_facts
-             GROUP BY command_id, trade_id
-        ),
+        WITH {_canonical_trade_fact_cte()},
         exit_fill AS (
             SELECT fact.command_id,
                    COUNT(*) AS fill_fact_count,
                    SUM(CAST(COALESCE(fact.filled_size, '0') AS REAL)) AS filled_size,
                    GROUP_CONCAT(DISTINCT fact.state) AS fill_states,
                    MAX(fact.observed_at) AS observed_at
-              FROM venue_trade_facts fact
-              JOIN latest_trade_fact latest
-                ON latest.command_id = fact.command_id
-               AND latest.trade_id = fact.trade_id
-               AND latest.max_sequence = fact.local_sequence
+              FROM canonical_trade_fact fact
              WHERE fact.state IN ({trade_placeholders})
                AND CAST(COALESCE(fact.filled_size, '0') AS REAL) > 0
              GROUP BY fact.command_id

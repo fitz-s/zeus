@@ -401,6 +401,8 @@ class EdgeDecision:
     # Persisted to no_trade_events by cycle_runtime after evaluate_candidate returns.
     rejection_reason_enum: Optional["NoTradeReason"] = None
     rejection_reason_detail: Optional[str] = None
+    family_fallback_rank: int = 0
+    family_fallback_candidate_count: int = 0
 
     def __post_init__(self) -> None:
         if self.decision_snapshot_id is None:
@@ -4162,8 +4164,19 @@ def evaluate_candidate(
         temperature_metric=temperature_metric.temperature_metric,
     )
     family_preselection_drops = list(family_decision.dropped) if family_decision else []
+    family_fallback_rank_by_edge_id: dict[int, int] = {}
+    family_fallback_candidate_count = 0
     if family_decision is not None:
-        filtered = list(family_decision.portfolio.selected_legs)
+        fallback_candidates = tuple(
+            getattr(family_decision.portfolio, "fallback_candidate_legs", ())
+            or family_decision.portfolio.selected_legs
+        )
+        filtered = list(fallback_candidates)
+        family_fallback_candidate_count = len(fallback_candidates)
+        family_fallback_rank_by_edge_id = {
+            id(edge): rank
+            for rank, edge in enumerate(fallback_candidates, start=1)
+        }
     family_preselection_rejections: list[EdgeDecision] = []
     for drop in family_preselection_drops:
         family_preselection_rejections.append(
@@ -4186,6 +4199,7 @@ def evaluate_candidate(
                 n_edges_after_fdr=n_edges_after_fdr_before_family_preselection,
                 fdr_fallback_fired=_fdr_fallback,
                 fdr_family_size=_fdr_family_size,
+                family_fallback_candidate_count=family_fallback_candidate_count,
                 rejection_reason_enum=NoTradeReason.MUTUALLY_EXCLUSIVE_FAMILY_DEDUP,
                 rejection_reason_detail=(
                     f"family={city.name}|{target_date}|{temperature_metric.temperature_metric} "
@@ -4936,6 +4950,8 @@ def evaluate_candidate(
             sizing_bankroll=sizing_bankroll,
             kelly_multiplier_used=km * risk_throttle,
             execution_fee_rate=fee_rate,
+            family_fallback_rank=family_fallback_rank_by_edge_id.get(id(edge), 0),
+            family_fallback_candidate_count=family_fallback_candidate_count,
         ))
         projected_total_exposure_usd += size
         projected_city_exposure_usd[city.name] += size

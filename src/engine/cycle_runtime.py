@@ -3924,11 +3924,69 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                 except Exception as exc:
                     deps.logger.error("telemetry write failed, cycle flagged degraded: %s", exc, exc_info=True)
                     summary["degraded"] = True
+            family_fallback_live_submit_satisfied = False
             for d in decisions:
                 if False:
                     _ = d.calibration
                 strategy_key = _resolve_strategy_key(d) if d.edge else ""
                 if d.should_trade and d.edge and d.tokens:
+                    is_live_env = str(env or "").strip().lower() == "live"
+                    family_fallback_candidate_count = int(
+                        getattr(d, "family_fallback_candidate_count", 0) or 0
+                    )
+                    if (
+                        is_live_env
+                        and family_fallback_candidate_count > 1
+                        and family_fallback_live_submit_satisfied
+                    ):
+                        summary["no_trades"] += 1
+                        rejection_stage = "ANTI_CHURN"
+                        rejection_reasons = [
+                            "mutually_exclusive_family_fallback_not_attempted_after_submit"
+                        ]
+                        _record_opportunity_fact(
+                            candidate,
+                            d,
+                            should_trade=False,
+                            rejection_stage=rejection_stage,
+                            rejection_reasons=rejection_reasons,
+                        )
+                        artifact.add_no_trade(
+                            deps.NoTradeCase(
+                                decision_id=d.decision_id,
+                                city=city.name,
+                                target_date=candidate.target_date,
+                                range_label=d.edge.bin.label if d.edge else "",
+                                direction=d.edge.direction if d.edge else "",
+                                rejection_stage=rejection_stage,
+                                strategy=strategy_key,
+                                strategy_key=strategy_key,
+                                edge_source=d.edge_source or deps._classify_edge_source(mode, d.edge),
+                                availability_status=getattr(d, "availability_status", ""),
+                                rejection_reasons=rejection_reasons,
+                                best_edge=d.edge.edge if d.edge else 0.0,
+                                model_prob=d.edge.p_posterior if d.edge else 0.0,
+                                market_price=d.edge.entry_price if d.edge else 0.0,
+                                decision_snapshot_id=d.decision_snapshot_id,
+                                selected_method=d.selected_method,
+                                settlement_semantics_json=d.settlement_semantics_json,
+                                epistemic_context_json=d.epistemic_context_json,
+                                edge_context_json=d.edge_context_json,
+                                applied_validations=[
+                                    *list(d.applied_validations),
+                                    "family_ranked_executable_fallback_skipped_after_submit",
+                                ],
+                                bin_labels=parseable_labels,
+                                p_raw_vector=d.p_raw.tolist() if getattr(d, "p_raw", None) is not None else [],
+                                p_cal_vector=d.p_cal.tolist() if getattr(d, "p_cal", None) is not None else [],
+                                p_market_vector=d.p_market.tolist() if getattr(d, "p_market", None) is not None else [],
+                                alpha=getattr(d, "alpha", 0.0),
+                                market_hours_open=candidate.hours_since_open,
+                                agreement=getattr(d, "agreement", ""),
+                                timestamp=decision_time.isoformat(),
+                            )
+                        )
+                        continue
                     if not strategy_key:
                         summary["no_trades"] += 1
                         rejection_stage = "SIGNAL_QUALITY"
@@ -4306,8 +4364,8 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                         rejection_reasons=[],
                     )
                     result = None
+                    family_fallback_attempt_accepted = False
                     try:
-                        is_live_env = str(env or "").strip().lower() == "live"
                         if is_live_env:
                             if not isinstance(getattr(d, "tokens", None), dict):
                                 raise ValueError("FINAL_EXECUTION_INTENT_MISSING: decision tokens unavailable")
@@ -4376,6 +4434,7 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                             )
                             submitted_limit = float(final_limit_decimal)
                             submit_rejected = str(getattr(result, "status", "") or "") == "rejected"
+                            family_fallback_attempt_accepted = not submit_rejected
                             # P1-3: write decision_events row after each live submit.
                             # Fail-soft: logging/learning infrastructure must not crash the cycle.
                             # Pass conn=None so write_decision_event opens its own world-DB
@@ -4576,6 +4635,16 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                             ),
                         }
                     )
+                    if (
+                        is_live_env
+                        and family_fallback_candidate_count > 1
+                        and family_fallback_attempt_accepted
+                    ):
+                        family_fallback_live_submit_satisfied = True
+                        summary["family_fallback_selected_rank"] = int(
+                            getattr(d, "family_fallback_rank", 0) or 0
+                        )
+                        summary["family_fallback_candidate_count"] = family_fallback_candidate_count
                     # P1.S5 INV-32: materialize_position advances position
                     # authority ONLY after the venue command reached a durable
                     # ack state (ACKED, PARTIAL, FILLED). Commands in

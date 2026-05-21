@@ -35,7 +35,10 @@ from src.state.no_trade_events import (
     write_no_trade_event,
 )
 from src.state.db import SCHEMA_VERSION
-from src.state.schema.no_trade_events_schema import ensure_table as ensure_no_trade_events_table
+from src.state.schema.no_trade_events_schema import (
+    ensure_table as ensure_no_trade_events_table,
+    migrate_no_trade_events_schema,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -354,7 +357,7 @@ class TestCrossTableDecisionSeqNoCollision:
             ),
         )
 
-        ensure_no_trade_events_table(conn)
+        migrate_no_trade_events_schema(conn)
 
         conn.execute(
             """
@@ -392,7 +395,7 @@ class TestCrossTableDecisionSeqNoCollision:
 
         _, conn = _make_v20_world_db_with_compatibility_column(tmp_path)
 
-        ensure_no_trade_events_table(conn)
+        migrate_no_trade_events_schema(conn)
         conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
         assert_no_trade_events_schema_current_for_live(
@@ -425,6 +428,30 @@ class TestCrossTableDecisionSeqNoCollision:
         ).fetchone()
         assert row["schema_version"] == SCHEMA_VERSION
         assert row["schema_compatibility"] == "current"
+        conn.close()
+
+    def test_runtime_ensure_table_does_not_rebuild_stale_no_trade_schema(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Runtime schema ensure must not DROP/ALTER/RENAME a stale table."""
+
+        _, conn = _make_v20_world_db_with_compatibility_column(tmp_path)
+        before_sql = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='no_trade_events'"
+        ).fetchone()[0]
+
+        ensure_no_trade_events_table(conn)
+
+        after_sql = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='no_trade_events'"
+        ).fetchone()[0]
+        assert after_sql == before_sql
+        with pytest.raises(NoTradeEventsSchemaCompatibilityError):
+            assert_no_trade_events_schema_current_for_live(
+                conn,
+                expected_schema_version=SCHEMA_VERSION,
+            )
         conn.close()
 
     def test_mutual_exclusion_no_5tuple_overlap(self, tmp_path: Path) -> None:
