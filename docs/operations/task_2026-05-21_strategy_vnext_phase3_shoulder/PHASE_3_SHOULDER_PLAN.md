@@ -18,7 +18,7 @@
 
 **Current `origin/main` code state** (all via `git show origin/main:<path>`, re-grepped 2026-05-21 in this session):
 - `architecture/strategy_profile_registry.yaml` L171-196: shoulder_sell `live_status: shadow`, `kelly_default_multiplier: 0.0`, `min_shadow_decisions: 100`. L226-244: shoulder_buy `live_status: blocked`.
-- `src/engine/evaluator.py` L1461/L1477/L1493: shoulder classification hardcoded. L4068: `cluster_exposure_for_bankroll` enforces K3 `city.cluster` cap but NOT "weather system" cross-city correlation per §7.5.
+- `src/engine/evaluator.py`: shoulder classification hardcoded at 3 sites — verify current lines via `git show origin/main:src/engine/evaluator.py | grep -n "buy_no.*is_shoulder"` (line numbers shift after each merge; as of this session: L1482/L1498/L1514). `cluster_exposure_for_bankroll` enforces K3 `city.cluster` cap but NOT "weather system" cross-city correlation per §7.5.
 - `src/strategy/risk_limits.py` L7-13: `RiskLimits` has `max_correlated_pct` but no shoulder-side hard cap.
 - `src/strategy/kelly.py` L60-78: `strategy_kelly_multiplier` reads registry; L198: `phase_aware_kelly_multiplier` is canonical resolver. No `kelly_haircut` field.
 - `src/strategy/selection_family.py` L36-50: `make_hypothesis_family_id` keys = `(cycle_mode, city, target_date, temperature_metric, discovery_mode, decision_snapshot_id)`. **Missing `source` and `regime` per §7.5**.
@@ -84,7 +84,7 @@ shoulder_sell stays `live_status: shadow`, shoulder_buy stays `blocked` at Phase
 
 **Type-2 storage**: `src/state/decision_events.py` CREATE TABLE + strategy_key (P1 T1); `src/state/no_trade_events.py` CREATE TABLE + reason CHECK (P2 T2 — T2 rebuilds with expanded CHECK per C1); `src/state/db.py` for `SCHEMA_VERSION` + `settlements_v2` (T2 bumps to 16 — covers both no_trade_events rebuild + tail_stress_scenarios; T3 bumps to 17).
 
-**Type-3 line-anchor**: `src/engine/evaluator.py` L1455-1500 (hardcoded shoulder branches at L1462/L1478/L1494 — T2 replaces ONLY those `if edge.direction == "buy_no" and edge.bin.is_shoulder` blocks; cycle-axis short-circuits UNCHANGED per AR1) and L4060-4090 (`cluster_exposure_for_bankroll` K3 — T3 add-after); `src/engine/cycle_runner.py` L450-460 (`_classify_edge_source` L456 — T2 mirror); `src/strategy/selection_family.py` L30-100 (family-ID — T1 extends both make_hypothesis_family_id L36 and make_edge_family_id L74 per G5); `src/strategy/kelly.py` L195-205 (`phase_aware_kelly_multiplier` L198 — T2 clamp at call site, Interpretation B per AR2/G4; NOT `strategy_kelly_multiplier` L60-78).
+**Type-3 line-anchor**: `src/engine/evaluator.py` hardcoded shoulder branches — verify with `git show origin/main:src/engine/evaluator.py | grep -n "buy_no.*is_shoulder"` (as of 2026-05-21: L1482/L1498/L1514; line numbers shift after each merge — T2 replaces ONLY those `if edge.direction == "buy_no" and edge.bin.is_shoulder` blocks; cycle-axis short-circuits UNCHANGED per AR1); `cluster_exposure_for_bankroll` region (L4060-4090 approximate, verify — T3 add-after); `src/engine/cycle_runner.py` L450-460 (`_classify_edge_source` L456 — T2 mirror); `src/strategy/selection_family.py` L30-100 (family-ID — T1 extends both make_hypothesis_family_id L36 and make_edge_family_id L74 per G5); `src/strategy/kelly.py` L195-205 (`phase_aware_kelly_multiplier` L198 — T2 clamp at call site, Interpretation B per AR2/G4; NOT `strategy_kelly_multiplier` L60-78).
 
 ## §5 Risk + Escape Hatches
 
