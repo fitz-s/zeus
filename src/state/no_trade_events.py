@@ -119,6 +119,9 @@ def assert_no_trade_events_schema_current_for_live(
         missing.append(f"user_version<{expected_schema_version}:{user_version}")
     if "schema_compatibility" not in table_sql:
         missing.append("schema_compatibility_column")
+    for column in ("strategy_key", "event_source", "shadow_runtime"):
+        if column not in table_sql:
+            missing.append(f"{column}_column")
     if str(expected_schema_version) not in table_sql:
         missing.append(f"schema_version_check_{expected_schema_version}")
     for reason in NoTradeReason:
@@ -136,8 +139,33 @@ def _insert_no_trade_event_row(
     values: tuple,
     *,
     schema_compatibility: str,
+    strategy_key: str | None = None,
+    event_source: str | None = None,
+    shadow_runtime: bool = False,
 ) -> None:
-    if _schema_compatibility_column_present(conn):
+    columns = _table_columns(conn, "no_trade_events")
+    if "schema_compatibility" in columns:
+        if {"strategy_key", "event_source", "shadow_runtime"} <= columns:
+            conn.execute(
+                """
+                INSERT INTO no_trade_events (
+                    market_slug, temperature_metric, target_date,
+                    observation_time, decision_seq,
+                    reason, reason_detail,
+                    strategy_key, event_source, shadow_runtime,
+                    observed_at, schema_version, schema_compatibility
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    *values[:7],
+                    strategy_key,
+                    event_source,
+                    1 if shadow_runtime else 0,
+                    *values[7:],
+                    schema_compatibility,
+                ),
+            )
+            return
         conn.execute(
             """
             INSERT INTO no_trade_events (
@@ -171,6 +199,9 @@ def write_no_trade_event(
     *,
     conn: sqlite3.Connection,
     allow_schema_compatibility_downgrade: bool = False,
+    strategy_key: str | None = None,
+    event_source: str | None = None,
+    shadow_runtime: bool = False,
 ) -> DecisionNaturalKey:
     """Persist a no-trade decision event to the world DB.
 
@@ -239,6 +270,9 @@ def write_no_trade_event(
                 conn,
                 insert_values,
                 schema_compatibility="current",
+                strategy_key=strategy_key,
+                event_source=event_source,
+                shadow_runtime=shadow_runtime,
             )
         except sqlite3.IntegrityError as exc:
             if (
@@ -267,6 +301,9 @@ def write_no_trade_event(
                     fallback_schema_version,
                 ),
                 schema_compatibility="degraded",
+                strategy_key=strategy_key,
+                event_source=event_source,
+                shadow_runtime=shadow_runtime,
             )
         conn.commit()
 
@@ -303,11 +340,16 @@ def read_no_trade_events_by_market(
             if _schema_compatibility_column_present(conn)
             else "'unknown_legacy' AS schema_compatibility"
         )
+        columns = _table_columns(conn, "no_trade_events")
+        strategy_expr = "strategy_key" if "strategy_key" in columns else "NULL AS strategy_key"
+        source_expr = "event_source" if "event_source" in columns else "NULL AS event_source"
+        shadow_expr = "shadow_runtime" if "shadow_runtime" in columns else "0 AS shadow_runtime"
         cursor = conn.execute(
             f"""
             SELECT market_slug, temperature_metric, target_date,
                    observation_time, decision_seq,
                    reason, reason_detail,
+                   {strategy_expr}, {source_expr}, {shadow_expr},
                    observed_at, schema_version,
                    {compatibility_expr}
             FROM no_trade_events

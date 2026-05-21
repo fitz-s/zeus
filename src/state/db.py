@@ -894,7 +894,7 @@ def get_connection(
 # CI hook scripts/check_schema_version.py diffs the sqlite_master hash of
 # a fresh-init DB against tests/state/_schema_pinned_hash.txt and fails
 # the PR if SCHEMA_VERSION did not change in lockstep.
-SCHEMA_VERSION = 25  # 2026-05-21 shadow decision provenance + Phase 6 evidence tables
+SCHEMA_VERSION = 26  # 2026-05-21 evidence-tier authority + no_trade strategy provenance
 
 
 def init_schema(
@@ -1392,7 +1392,7 @@ def init_schema(
             finality_confirmed_time    TEXT,
             clock_skew_estimate_ms_at_submit INTEGER,
             raw_orderbook_hash_transition_delta_ms INTEGER,
-            schema_version INTEGER NOT NULL CHECK (schema_version IN (12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25)),
+            schema_version INTEGER NOT NULL CHECK (schema_version IN (12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26)),
             source         TEXT NOT NULL CHECK (source IN ('phase0_backfill', 'live_decision', 'shadow_decision')),
             PRIMARY KEY (market_slug, temperature_metric, target_date, observation_time, decision_seq)
         );
@@ -2534,7 +2534,7 @@ def init_schema(
     _ensure_regime_correlation_cache_table(conn)
 
     # Phase 6 T2+T3 (2026-05-21): shadow_experiments, evidence_tier_assignments,
-    # regret_decompositions tables (SCHEMA_VERSION 25).
+    # regret_decompositions tables (SCHEMA_VERSION 25/26).
     from src.state.schema.phase6_evidence_schema import ensure_tables as _ensure_phase6_evidence_tables
     _ensure_phase6_evidence_tables(conn)
 
@@ -2574,7 +2574,7 @@ def _migrate_decision_events_schema(conn: sqlite3.Connection) -> None:
     if (
         "unknown_legacy" in table_sql
         and "shadow_decision" in table_sql
-        and "12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25" in table_sql
+        and "12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26" in table_sql
     ):
         return
 
@@ -2613,7 +2613,7 @@ def _migrate_decision_events_schema(conn: sqlite3.Connection) -> None:
             finality_confirmed_time    TEXT,
             clock_skew_estimate_ms_at_submit INTEGER,
             raw_orderbook_hash_transition_delta_ms INTEGER,
-            schema_version INTEGER NOT NULL CHECK (schema_version IN (12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25)),
+            schema_version INTEGER NOT NULL CHECK (schema_version IN (12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26)),
             source         TEXT NOT NULL CHECK (source IN ('phase0_backfill', 'live_decision', 'shadow_decision')),
             PRIMARY KEY (market_slug, temperature_metric, target_date, observation_time, decision_seq)
         )
@@ -2649,9 +2649,9 @@ def _migrate_decision_events_schema(conn: sqlite3.Connection) -> None:
             first_inclusion_block_time, finality_confirmed_time,
             clock_skew_estimate_ms_at_submit, raw_orderbook_hash_transition_delta_ms,
             CASE
-                WHEN schema_version IN (12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25)
+                WHEN schema_version IN (12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26)
                     THEN schema_version
-                ELSE 25
+                ELSE 26
             END,
             CASE
                 WHEN source IN ('phase0_backfill', 'live_decision', 'shadow_decision')

@@ -433,7 +433,20 @@ def is_strategy_enabled(strategy: str) -> bool:
     if not strategy:
         return True
     from src.strategy.strategy_profile import live_allowed_keys
-    if strategy not in live_allowed_keys():
+    try:
+        from src.state.db import get_world_connection_read_only
+        conn = get_world_connection_read_only()
+        try:
+            allowed = live_allowed_keys(conn=conn)
+        finally:
+            conn.close()
+    except Exception:
+        logger.exception(
+            "Strategy evidence-tier authority unavailable; failing closed for %s",
+            strategy,
+        )
+        return False
+    if strategy not in allowed:
         return False
     decision = strategy_gates().get(strategy)
     if decision is None:

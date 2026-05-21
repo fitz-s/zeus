@@ -45,7 +45,7 @@ def test_live_release_runtime_columns_are_registry_visible() -> None:
 
         required = {
             "settlement_commands": {"autoretry_eligible", "polymarket_end_anchor_source"},
-            "no_trade_events": {"schema_compatibility"},
+            "no_trade_events": {"schema_compatibility", "strategy_key", "event_source", "shadow_runtime"},
             "executable_market_snapshots": {"tradeability_status_json", "depth_at_best_ask"},
         }
         for table_name, column_names in required.items():

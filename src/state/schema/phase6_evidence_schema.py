@@ -34,12 +34,18 @@ CREATE TABLE IF NOT EXISTS shadow_experiments (
 
 CREATE_EVIDENCE_TIER_ASSIGNMENTS_SQL = """
 CREATE TABLE IF NOT EXISTS evidence_tier_assignments (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
     strategy_id    TEXT NOT NULL,
-    tier           INTEGER NOT NULL,
+    tier           INTEGER NOT NULL CHECK (tier IN (0, 1, 2, 3, 4, 5, 6, 7)),
     assigned_at    TEXT NOT NULL,
     rationale      TEXT,
     operator_ref   TEXT,
-    verdict_reason TEXT
+    verdict_reason TEXT,
+    schema_version INTEGER NOT NULL DEFAULT 26 CHECK (schema_version IN (25, 26)),
+    assignment_source TEXT NOT NULL DEFAULT 'tribunal'
+        CHECK (assignment_source IN ('tribunal', 'operator_override', 'migration')),
+    verdict_kind   TEXT NOT NULL DEFAULT 'MIGRATION'
+        CHECK (verdict_kind IN ('PROMOTE', 'HOLD', 'DEMOTE', 'OPERATOR_OVERRIDE', 'MIGRATION'))
 )
 """
 
@@ -85,5 +91,51 @@ def ensure_tables(conn: sqlite3.Connection) -> None:
     """
     conn.execute(CREATE_SHADOW_EXPERIMENTS_SQL)
     conn.execute(CREATE_EVIDENCE_TIER_ASSIGNMENTS_SQL)
+    _migrate_evidence_tier_assignments_schema(conn)
     conn.execute(CREATE_IDX_ETA_STRATEGY_ASSIGNED_SQL)
     conn.execute(CREATE_REGRET_DECOMPOSITIONS_SQL)
+
+
+def _migrate_evidence_tier_assignments_schema(conn: sqlite3.Connection) -> None:
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='evidence_tier_assignments'"
+    ).fetchone()
+    table_sql = str(row[0] if row else "")
+    if (
+        "id" in table_sql
+        and "schema_version" in table_sql
+        and "assignment_source" in table_sql
+        and "verdict_kind" in table_sql
+        and "tier IN (0, 1, 2, 3, 4, 5, 6, 7)" in table_sql
+    ):
+        return
+
+    conn.execute("DROP TABLE IF EXISTS evidence_tier_assignments_new")
+    conn.execute(CREATE_EVIDENCE_TIER_ASSIGNMENTS_SQL.replace(
+        "CREATE TABLE IF NOT EXISTS evidence_tier_assignments",
+        "CREATE TABLE evidence_tier_assignments_new",
+    ))
+    conn.execute(
+        """
+        INSERT INTO evidence_tier_assignments_new (
+            strategy_id, tier, assigned_at, rationale, operator_ref,
+            verdict_reason, schema_version, assignment_source, verdict_kind
+        )
+        SELECT
+            strategy_id,
+            CASE
+                WHEN tier IN (0, 1, 2, 3, 4, 5, 6, 7) THEN tier
+                ELSE 0
+            END,
+            assigned_at,
+            rationale,
+            operator_ref,
+            verdict_reason,
+            26,
+            'migration',
+            'MIGRATION'
+        FROM evidence_tier_assignments
+        """
+    )
+    conn.execute("DROP TABLE evidence_tier_assignments")
+    conn.execute("ALTER TABLE evidence_tier_assignments_new RENAME TO evidence_tier_assignments")

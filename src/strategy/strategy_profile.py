@@ -125,16 +125,19 @@ class StrategyProfile:
     complete_required_for_tail_orders: bool = True
     partial_run_kelly_haircut: float = 0.5
 
-    def is_runtime_live(self) -> bool:
+    def is_runtime_live(self, *, effective_evidence_tier: EvidenceTier | None = None) -> bool:
         """True iff entries placed by this strategy hit the live order book.
 
-        Phase 6: requires BOTH live_status=="live" AND evidence_tier>=LIVE_PILOT_TINY.
-        Strategies with tier < LIVE_PILOT_TINY are blocked regardless of live_status.
+        Phase 6: requires live_status=="live" AND the effective tier to meet
+        this strategy's configured required tier. Static registry tier is the
+        baseline; callers may pass a DB-reduced effective tier.
         Equivalent pre-Phase-6: live_status == "live" only.
         """
+        tier = effective_evidence_tier if effective_evidence_tier is not None else self.evidence_tier
         return (
             self.live_status == "live"
-            and self.evidence_tier >= EvidenceTier.LIVE_PILOT_TINY
+            and tier >= self.evidence_tier_required_for_live
+            and not self.promotion_blockers
         )
 
     def is_boot_allowed(self) -> bool:
@@ -537,13 +540,27 @@ def live_safe_keys() -> frozenset[str]:
     )
 
 
-def live_allowed_keys() -> frozenset[str]:
+def live_allowed_keys(*, conn=None) -> frozenset[str]:
     """Strategies allowed to place live orders — replaces
     ``_LIVE_ALLOWED_STRATEGIES`` in control_plane. Strict subset of
     live_safe_keys (every live entry is also boot-allowed; not every
     boot-allowed strategy enters live)."""
+    profiles = _ensure_loaded()
+    if conn is None:
+        return frozenset(k for k, p in profiles.items() if p.is_runtime_live())
+
+    from src.state.evidence_tier_assignments import effective_evidence_tier
+
     return frozenset(
-        k for k, p in _ensure_loaded().items() if p.is_runtime_live()
+        k
+        for k, p in profiles.items()
+        if p.is_runtime_live(
+            effective_evidence_tier=effective_evidence_tier(
+                k,
+                baseline=p.evidence_tier,
+                conn=conn,
+            )
+        )
     )
 
 

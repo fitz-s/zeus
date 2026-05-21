@@ -9,6 +9,8 @@
 """T1 invariant tests: StrategyProfile.is_runtime_live() + evidence_tier extension."""
 from __future__ import annotations
 
+import sqlite3
+
 import pytest
 
 from src.contracts.evidence_tier import EvidenceTier
@@ -18,7 +20,10 @@ from src.strategy.strategy_profile import (
     StrategyProfile,
     _reload_for_test,
     get,
+    live_allowed_keys,
 )
+from src.state.db import init_schema
+from src.state.evidence_tier_assignments import record_evidence_tier_assignment
 
 
 # ---------------------------------------------------------------------------
@@ -29,6 +34,8 @@ def _make_profile(
     live_status: str,
     evidence_tier: EvidenceTier,
     key: str = "test_strategy",
+    required_tier: EvidenceTier = EvidenceTier.LIVE_PILOT_TINY,
+    promotion_blockers: tuple[str, ...] = (),
 ) -> StrategyProfile:
     return StrategyProfile(
         key=key,
@@ -46,8 +53,8 @@ def _make_profile(
         min_settled_decisions=0,
         promotion_evidence_ref=None,
         evidence_tier=evidence_tier,
-        evidence_tier_required_for_live=EvidenceTier.LIVE_PILOT_TINY,
-        promotion_blockers=(),
+        evidence_tier_required_for_live=required_tier,
+        promotion_blockers=promotion_blockers,
     )
 
 
@@ -65,6 +72,36 @@ def test_t1_is_runtime_live_live_pilot_tiny() -> None:
     """live_status=live + LIVE_PILOT_TINY → is_runtime_live True (minimum live tier)."""
     p = _make_profile("live", EvidenceTier.LIVE_PILOT_TINY)
     assert p.is_runtime_live() is True
+
+
+def test_t1_is_runtime_live_respects_required_tier() -> None:
+    """live_status=live + tier below per-profile required tier is blocked."""
+    p = _make_profile(
+        "live",
+        EvidenceTier.LIVE_PILOT_TINY,
+        required_tier=EvidenceTier.LIVE_LIMITED_HAIRCUT,
+    )
+    assert p.is_runtime_live() is False
+
+
+def test_t1_is_runtime_live_allows_tier_equal_required() -> None:
+    """live_status=live + tier equal to per-profile required tier is allowed."""
+    p = _make_profile(
+        "live",
+        EvidenceTier.LIVE_LIMITED_HAIRCUT,
+        required_tier=EvidenceTier.LIVE_LIMITED_HAIRCUT,
+    )
+    assert p.is_runtime_live() is True
+
+
+def test_t1_is_runtime_live_blocks_promotion_blockers() -> None:
+    """Promotion blockers are hard blockers for runtime live eligibility."""
+    p = _make_profile(
+        "live",
+        EvidenceTier.LIVE_NORMAL,
+        promotion_blockers=("operator_hold",),
+    )
+    assert p.is_runtime_live() is False
 
 
 def test_t1_is_runtime_live_limited_haircut() -> None:
@@ -159,6 +196,24 @@ def test_t1_live_registry_center_buy_live_normal() -> None:
     profile = get("center_buy")
     assert profile.evidence_tier == EvidenceTier.LIVE_NORMAL
     assert profile.is_runtime_live() is True
+
+
+def test_t1_live_allowed_keys_uses_db_assignment_overlay() -> None:
+    """DB demotion below required tier removes a static-live strategy."""
+    conn = sqlite3.connect(":memory:")
+    init_schema(conn)
+    record_evidence_tier_assignment(
+        conn,
+        strategy_id="center_buy",
+        tier=EvidenceTier.IDEA,
+        rationale="test demotion",
+        operator_ref=None,
+        verdict_reason="test",
+        assignment_source="tribunal",
+        verdict_kind="DEMOTE",
+    )
+    assert "center_buy" in live_allowed_keys()
+    assert "center_buy" not in live_allowed_keys(conn=conn)
 
 
 def test_t1_live_registry_shoulder_buy_idea() -> None:
