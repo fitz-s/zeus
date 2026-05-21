@@ -22,8 +22,9 @@ P2/K4 where chain authority is surfaced as a first-class seam.
 
 Cross-DB note (per INV-30 caveat): venue_commands lives in zeus_trades.db.
 When conn is not passed, this module opens its own trade connection via
-get_trade_connection_with_world() and closes it in a try/finally. P1.S5
-will add conn-threading from cycle_runner; for now self-contained.
+get_trade_connection_with_world() and closes it in a try/finally. The live
+cycle path passes its already-open trade/world connection to avoid a second
+connection inside the same cycle.
 """
 from __future__ import annotations
 
@@ -890,35 +891,59 @@ def _latest_completed_partial_order_fact_candidates(conn: sqlite3.Connection) ->
             continue
         if not _decimal_is_positive(candidate.get("order_fact_matched_size")):
             continue
-        if not _has_positive_trade_fact(
+        if not _trade_facts_match_order_fact_size(
             conn,
             command_id=str(candidate.get("command_id") or ""),
             venue_order_id=str(candidate.get("venue_order_id") or ""),
+            matched_size=candidate.get("order_fact_matched_size"),
         ):
             continue
         candidates.append(candidate)
     return candidates
 
 
-def _has_positive_trade_fact(
+def _trade_facts_match_order_fact_size(
     conn: sqlite3.Connection,
     *,
     command_id: str,
     venue_order_id: str,
+    matched_size: object,
 ) -> bool:
     if not command_id or not venue_order_id:
         return False
+    expected = _positive_decimal_or_none(matched_size)
+    if expected is None:
+        return False
     rows = conn.execute(
         """
-        SELECT filled_size
-          FROM venue_trade_facts
-         WHERE command_id = ?
-           AND venue_order_id = ?
-           AND state IN ('MATCHED', 'MINED', 'CONFIRMED')
+        WITH latest_trade_fact AS (
+            SELECT command_id, trade_id, MAX(local_sequence) AS max_sequence
+              FROM venue_trade_facts
+             WHERE command_id = ?
+               AND venue_order_id = ?
+             GROUP BY command_id, trade_id
+        )
+        SELECT fact.filled_size
+          FROM venue_trade_facts fact
+          JOIN latest_trade_fact latest
+            ON latest.command_id = fact.command_id
+           AND latest.trade_id = fact.trade_id
+           AND latest.max_sequence = fact.local_sequence
+         WHERE fact.command_id = ?
+           AND fact.venue_order_id = ?
+           AND fact.state IN ('MATCHED', 'MINED', 'CONFIRMED')
         """,
-        (command_id, venue_order_id),
+        (command_id, venue_order_id, command_id, venue_order_id),
     ).fetchall()
-    return any(_decimal_is_positive(_dict_row(row).get("filled_size")) for row in rows)
+    filled = Decimal("0")
+    count = 0
+    for row in rows:
+        size = _positive_decimal_or_none(_dict_row(row).get("filled_size"))
+        if size is None:
+            continue
+        filled += size
+        count += 1
+    return count > 0 and abs(filled - expected) <= Decimal("0.000001")
 
 
 def _first_present(raw: dict | None, *keys: str):
@@ -1848,6 +1873,7 @@ def _filled_entry_lot_materialization_candidates(conn: sqlite3.Connection) -> li
                cmd.position_id,
                cmd.decision_id,
                cmd.intent_kind,
+               cmd.state AS cmd_state,
                cmd.side,
                cmd.market_id,
                cmd.token_id,
@@ -1957,6 +1983,7 @@ def _append_filled_entry_position_lot_repair(
 def _filled_entry_execution_fact_repair_candidates(conn: sqlite3.Connection) -> list[dict]:
     required = {
         "venue_commands",
+        "venue_order_facts",
         "venue_trade_facts",
         "position_lots",
         "execution_fact",
@@ -1970,6 +1997,25 @@ def _filled_entry_execution_fact_repair_candidates(conn: sqlite3.Connection) -> 
             SELECT command_id, trade_id, MAX(local_sequence) AS max_sequence
               FROM venue_trade_facts
              GROUP BY command_id, trade_id
+        ),
+        latest_order_fact AS (
+            SELECT command_id, MAX(local_sequence) AS max_sequence
+              FROM venue_order_facts
+             GROUP BY command_id
+        ),
+        terminal_order AS (
+            SELECT fact.command_id,
+                   fact.venue_order_id,
+                   fact.remaining_size,
+                   fact.matched_size,
+                   fact.state
+              FROM venue_order_facts fact
+              JOIN latest_order_fact latest
+                ON latest.command_id = fact.command_id
+               AND latest.max_sequence = fact.local_sequence
+             WHERE fact.state IN ('MATCHED', 'FILLED')
+               AND CAST(COALESCE(fact.remaining_size, '0') AS REAL) = 0
+               AND CAST(COALESCE(fact.matched_size, '0') AS REAL) > 0
         ),
         entry_fill AS (
             SELECT fact.command_id,
@@ -1995,12 +2041,15 @@ def _filled_entry_execution_fact_repair_candidates(conn: sqlite3.Connection) -> 
                cmd.position_id,
                cmd.decision_id,
                cmd.intent_kind,
+               cmd.state AS cmd_state,
                cmd.side,
                cmd.market_id,
                cmd.token_id,
                cmd.size AS cmd_size,
                cmd.price AS cmd_price,
                cmd.created_at AS cmd_created_at,
+               terminal_order.matched_size AS order_fact_matched_size,
+               terminal_order.remaining_size AS order_fact_remaining_size,
                entry_fill.trade_fact_id,
                NULL AS trade_id,
                entry_fill.fill_states AS trade_state,
@@ -2014,6 +2063,9 @@ def _filled_entry_execution_fact_repair_candidates(conn: sqlite3.Connection) -> 
                ef.fill_price AS ef_fill_price,
                ef.terminal_exec_status AS ef_terminal_exec_status
           FROM venue_commands cmd
+          JOIN terminal_order
+            ON terminal_order.command_id = cmd.command_id
+           AND terminal_order.venue_order_id = cmd.venue_order_id
           JOIN entry_fill
             ON entry_fill.command_id = cmd.command_id
           LEFT JOIN execution_fact ef
@@ -2022,6 +2074,7 @@ def _filled_entry_execution_fact_repair_candidates(conn: sqlite3.Connection) -> 
          WHERE cmd.intent_kind = 'ENTRY'
            AND cmd.side = 'BUY'
            AND cmd.state = 'FILLED'
+           AND ABS(CAST(entry_fill.filled_size AS REAL) - CAST(terminal_order.matched_size AS REAL)) <= 0.000001
            AND EXISTS (
                SELECT 1
                  FROM position_lots lot
@@ -2040,7 +2093,7 @@ def _filled_entry_execution_fact_repair_candidates(conn: sqlite3.Connection) -> 
                OR COALESCE(ef.command_id, '') != cmd.command_id
                OR ABS(COALESCE(CAST(ef.shares AS REAL), 0.0) - CAST(entry_fill.filled_size AS REAL)) > 0.000001
                OR ABS(COALESCE(CAST(ef.fill_price AS REAL), 0.0) - CAST(entry_fill.fill_price AS REAL)) > 0.000001
-               OR COALESCE(ef.terminal_exec_status, '') NOT IN ('filled', 'partial')
+               OR COALESCE(ef.terminal_exec_status, '') != 'filled'
            )
          ORDER BY entry_fill.observed_at, entry_fill.trade_fact_id
         """
@@ -2057,11 +2110,15 @@ def _log_filled_entry_trade_candidate_execution_fact(
 
     filled_size = _positive_decimal_or_none(candidate.get("filled_size"))
     command_size = _positive_decimal_or_none(candidate.get("cmd_size") or candidate.get("size"))
+    command_state = str(candidate.get("cmd_state") or candidate.get("state") or "").upper()
     terminal_status = (
         "filled"
-        if filled_size is not None
-        and command_size is not None
-        and filled_size >= command_size
+        if command_state == CommandState.FILLED.value
+        or (
+            filled_size is not None
+            and command_size is not None
+            and filled_size >= command_size
+        )
         else "partial"
     )
     position_id = str(candidate.get("position_id") or "")
@@ -4811,8 +4868,9 @@ def reconcile_unresolved_commands(
     cannot distinguish never-placed from ack-lost side effects.
 
     DB connection: if conn is None, opens get_trade_connection_with_world()
-    internally (with a try/finally to close). P1.S5 will thread the trade
-    conn from cycle_runner so this path becomes the fallback only.
+    internally (with a try/finally to close). CycleRunner passes the per-cycle
+    trade/world connection; the internal-open path remains the external-caller
+    fallback.
 
     PolymarketClient: if client is None, lazily constructed here.
     """

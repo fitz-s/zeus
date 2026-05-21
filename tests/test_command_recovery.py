@@ -1709,6 +1709,35 @@ class TestRecoveryResolutionTable:
         assert payload["matched_size"] == "4.99"
         assert payload["remaining_size"] == "0"
 
+    def test_partial_entry_does_not_finalize_when_trade_facts_do_not_cover_order_fact(
+        self,
+        conn,
+        mock_client,
+    ):
+        """Relationship: terminal order fact must match aggregate fill economics."""
+        _insert(conn, size=5.0, price=0.34)
+        _seed_pending_entry_projection(conn)
+        _advance_to_partial(conn, venue_order_id="ord-001")
+        _append_trade_fact(
+            conn,
+            command_id="cmd-001",
+            order_id="ord-001",
+            trade_id="trade-001",
+            state="MATCHED",
+            filled_size="2",
+            fill_price="0.34",
+        )
+        _append_order_fact(conn, state="MATCHED", matched_size="4.99", remaining_size="0")
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["completed_partial_order_facts"]["advanced"] == 0
+        assert _get_state(conn, "cmd-001") == "PARTIAL"
+        event_types = [row["event_type"] for row in _get_events(conn, "cmd-001")]
+        assert "FILL_CONFIRMED" not in event_types
+
     def test_partial_entry_does_not_finalize_without_positive_trade_fact(
         self,
         conn,
@@ -2295,6 +2324,7 @@ class TestRecoveryResolutionTable:
             filled_size="5.116278",
             fill_price="0.429999894454523",
         )
+        _append_order_fact(conn, state="MATCHED", matched_size="5.116278", remaining_size="0")
 
         from src.execution.command_recovery import reconcile_unresolved_commands
 
@@ -2401,6 +2431,7 @@ class TestRecoveryResolutionTable:
             filled_size="3",
             fill_price="0.50",
         )
+        _append_order_fact(conn, state="MATCHED", matched_size="5", remaining_size="0")
         conn.execute(
             """
             UPDATE venue_commands
@@ -3540,6 +3571,25 @@ class TestRecoveryResolutionTable:
 class TestRecoveryCycleIntegration:
     """Assert cycle_runner invokes reconcile_unresolved_commands."""
 
+    def test_cycle_supplied_conn_does_not_open_trade_world_connection(
+        self,
+        conn,
+        mock_client,
+        monkeypatch,
+    ):
+        """Relationship: supplied cycle conn is reused by command recovery."""
+        import src.state.db as db_module
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        def fail_if_reopened(*args, **kwargs):
+            raise AssertionError("cycle-owned command recovery must not open a second trade/world connection")
+
+        monkeypatch.setattr(db_module, "get_trade_connection_with_world", fail_if_reopened)
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["scanned"] == 0
+
     def test_cycle_runner_calls_recovery(self, monkeypatch):
         """Patch reconcile_unresolved_commands and verify cycle_runner calls it."""
         import sys
@@ -3579,6 +3629,12 @@ class TestRecoveryCycleIntegration:
         )
         assert "command_recovery" in cr_src, (
             "cycle_runner.py must reference command_recovery module (INV-31)"
+        )
+        assert "reconcile_unresolved_commands(conn)" in cr_src, (
+            "cycle_runner.py must pass the already-open trade/world conn into command recovery"
+        )
+        assert "reconcile_unresolved_commands()" not in cr_src, (
+            "cycle_runner.py must not let command recovery open a second trade/world connection"
         )
         assert 'summary["command_recovery"]' in cr_src, (
             'cycle_runner.py must record summary["command_recovery"] result (INV-31)'

@@ -1,6 +1,6 @@
 # Created: 2026-04-23
-# Last reused/audited: 2026-05-08
-# Lifecycle: created=2026-04-23; last_reviewed=2026-05-08; last_reused=2026-05-08
+# Last reused/audited: 2026-05-21
+# Lifecycle: created=2026-04-23; last_reviewed=2026-05-21; last_reused=2026-05-21
 # Authority basis: midstream verdict v2 2026-04-23; Phase 1A calibration-maturity gate 2026-04-29; Wave31 D4 hard gate
 # Purpose: Lock runtime construction of entry DecisionEvidence on evaluator accept paths.
 # Reuse: Run for evaluator entry decision, day0 accept-path, or DecisionEvidence wiring changes.
@@ -37,7 +37,7 @@ import numpy as np
 import src.engine.evaluator as evaluator_module
 from src.config import cities_by_name
 from src.contracts.decision_evidence import DecisionEvidence
-from src.state.db import get_connection, init_schema
+from src.state.db import get_connection, init_schema, init_schema_forecasts
 from src.state.portfolio import PortfolioState
 from src.strategy.risk_limits import RiskLimits
 from src.types import BinEdge
@@ -209,6 +209,10 @@ def _install_common_mocks(monkeypatch, now: datetime) -> None:
         lambda p_raw, *args, **kwargs: np.array(p_raw, dtype=float).copy(),
     )
     monkeypatch.setattr(
+        "src.state.day0_nowcast_store.read_latest_platt_fit",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
         evaluator_module,
         "resolve_strategy_policy",
         lambda conn, strategy_key, now: evaluator_module.StrategyPolicy(
@@ -262,6 +266,7 @@ class TestDecisionEvidenceRuntimeInvocation:
     def test_accept_path_constructs_entry_evidence_at_runtime(self, tmp_path, monkeypatch):
         conn = get_connection(tmp_path / "runtime_invocation.db")
         init_schema(conn)
+        init_schema_forecasts(conn)
         now = datetime.now(timezone.utc)
         _install_common_mocks(monkeypatch, now)
 

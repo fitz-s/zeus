@@ -7866,6 +7866,7 @@ digest_profiles:
     file_patterns:
       - "src/engine/cycle_runtime.py"
       - "src/strategy/family_exclusive_dedup.py"
+      - "tests/test_inv_family_exclusive_cross_module_integration.py"
       - "tests/test_inv_family_exclusive_sizing.py"
     required_law:
       - "Same city + target_date + metric weather bins are mutually exclusive outcomes, not independent binary bets."
@@ -7878,6 +7879,7 @@ digest_profiles:
       - "src/engine/cycle_runtime.py"
       - "src/strategy/family_exclusive_dedup.py"
       - "tests/test_digest_profile_matching.py"
+      - "tests/test_inv_family_exclusive_cross_module_integration.py"
       - "tests/test_inv_family_exclusive_sizing.py"
     forbidden_files:
       - "state/*.db"
@@ -7891,9 +7893,9 @@ digest_profiles:
       - "live daemon restart"
       - "live venue submission"
     gates:
-      - "pytest -q tests/test_inv_family_exclusive_sizing.py"
+      - "pytest -q tests/test_inv_family_exclusive_sizing.py tests/test_inv_family_exclusive_cross_module_integration.py"
       - "pytest -q tests/test_digest_profile_matching.py::test_b2_weather_family_exposure_gate_routes_to_dedicated_profile"
-      - "python3 -m py_compile src/engine/cycle_runtime.py src/strategy/family_exclusive_dedup.py tests/test_inv_family_exclusive_sizing.py architecture/digest_profiles.py"
+      - "python3 -m py_compile src/engine/cycle_runtime.py src/strategy/family_exclusive_dedup.py tests/test_inv_family_exclusive_sizing.py tests/test_inv_family_exclusive_cross_module_integration.py architecture/digest_profiles.py"
       - "python3 scripts/digest_profiles_export.py --check"
     downstream:
       - "src/execution/executor.py"
@@ -7972,7 +7974,9 @@ digest_profiles:
       - "normal city no penalty sufficient evidence"
     file_patterns:
       - "scripts/bridge_oracle_to_calibration.py"
+      - "src/strategy/oracle_penalty.py"
       - "tests/test_bridge_oracle_to_calibration.py"
+      - "tests/test_digest_profile_matching.py"
     required_law:
       - "Oracle penalty is source/settlement error evidence, not a strategy conservatism policy."
       - "Canonical settlements and observations outrank shadow snapshots when constructing oracle evidence."
@@ -7982,6 +7986,7 @@ digest_profiles:
       - "architecture/topology.yaml"
       - "architecture/digest_profiles.py"
       - "scripts/bridge_oracle_to_calibration.py"
+      - "src/strategy/oracle_penalty.py"
       - "tests/test_bridge_oracle_to_calibration.py"
       - "tests/test_digest_profile_matching.py"
     forbidden_files:
@@ -7996,7 +8001,7 @@ digest_profiles:
     gates:
       - "pytest -q tests/test_bridge_oracle_to_calibration.py"
       - "pytest -q tests/test_digest_profile_matching.py::test_b0_oracle_evidence_bridge_routes_to_dedicated_profile"
-      - "python3 -m py_compile scripts/bridge_oracle_to_calibration.py tests/test_bridge_oracle_to_calibration.py architecture/digest_profiles.py"
+      - "python3 -m py_compile scripts/bridge_oracle_to_calibration.py src/strategy/oracle_penalty.py tests/test_bridge_oracle_to_calibration.py architecture/digest_profiles.py"
       - "python3 scripts/digest_profiles_export.py --check"
     downstream:
       - "src/strategy/oracle_penalty.py"

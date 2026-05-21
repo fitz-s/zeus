@@ -359,6 +359,7 @@ def append_trade_fact(
     token_id=YES_TOKEN,
     trade_id="trade-local",
     size="10",
+    fill_price="0.50",
     state="CONFIRMED",
 ):
     from src.state.venue_command_repo import append_trade_fact as append
@@ -370,14 +371,15 @@ def append_trade_fact(
         command_id=command_id,
         state=state,
         filled_size=size,
-        fill_price="0.50",
+        fill_price=fill_price,
         source="REST",
         observed_at=NOW,
-        raw_payload_hash=hashlib.sha256(f"{trade_id}:{token_id}:{size}:{state}".encode()).hexdigest(),
+        raw_payload_hash=hashlib.sha256(f"{trade_id}:{token_id}:{size}:{fill_price}:{state}".encode()).hexdigest(),
         raw_payload_json={
             "trade_id": trade_id,
             "order_id": venue_order_id,
             "size": size,
+            "price": fill_price,
             "state": state,
         },
     )
@@ -3384,6 +3386,83 @@ def test_late_entry_fill_does_not_resurrect_terminal_order_remainder(conn):
         "state": "EXPIRED",
         "remaining_size": "0",
         "matched_size": "4.95",
+    }
+
+
+def test_completed_partial_order_fact_repairs_execution_fact_to_filled(conn):
+    from src.execution.command_recovery import (
+        reconcile_completed_partial_order_facts,
+        reconcile_filled_entry_execution_fact_repairs,
+    )
+    from src.state.db import log_execution_fact
+    from src.state.venue_command_repo import append_order_fact, append_position_lot
+
+    seed_command(conn, state="PARTIAL", size=40.3, price=0.01)
+    seed_trade_decision_runtime_alias(conn)
+    append_trade_fact(conn, size="40.29", fill_price="0.01", state="CONFIRMED")
+    append_position_lot(
+        conn,
+        position_id=1,
+        state="CONFIRMED_EXPOSURE",
+        shares="40.29",
+        entry_price_avg="0.01",
+        source_command_id="cmd-m5",
+        source_trade_fact_id=1,
+        captured_at=NOW.isoformat(),
+        state_changed_at=NOW.isoformat(),
+        source="REST",
+        observed_at=NOW.isoformat(),
+        raw_payload_hash=hashlib.sha256(b"completed-partial-lot").hexdigest(),
+        raw_payload_json={"source": "test_completed_partial_order_fact"},
+    )
+    log_execution_fact(
+        conn,
+        intent_id="pos-m5:entry",
+        position_id="pos-m5",
+        decision_id="dec-cmd-m5",
+        command_id="cmd-m5",
+        order_role="entry",
+        strategy_key="opening_inertia",
+        posted_at=NOW.isoformat(),
+        filled_at=NOW.isoformat(),
+        submitted_price=0.01,
+        fill_price=0.01,
+        shares=40.29,
+        venue_status="PARTIAL",
+        terminal_exec_status="partial",
+    )
+    append_order_fact(
+        conn,
+        venue_order_id="ord-m5",
+        command_id="cmd-m5",
+        state="MATCHED",
+        remaining_size="0",
+        matched_size="40.29",
+        source="REST",
+        observed_at=NOW + timedelta(minutes=1),
+        raw_payload_hash=hashlib.sha256(b"completed-partial-order-fact").hexdigest(),
+        raw_payload_json={"status": "MATCHED", "matched_size": "40.29", "remaining_size": "0"},
+    )
+
+    completion = reconcile_completed_partial_order_facts(conn)
+    assert completion == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+    assert conn.execute("SELECT state FROM venue_commands WHERE command_id = 'cmd-m5'").fetchone()[0] == "FILLED"
+
+    repair = reconcile_filled_entry_execution_fact_repairs(conn)
+    assert repair == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+    fact = conn.execute(
+        """
+        SELECT command_id, venue_status, terminal_exec_status, shares, fill_price
+          FROM execution_fact
+         WHERE intent_id = 'pos-m5:entry'
+        """
+    ).fetchone()
+    assert dict(fact) == {
+        "command_id": "cmd-m5",
+        "venue_status": "FILLED",
+        "terminal_exec_status": "filled",
+        "shares": 40.29,
+        "fill_price": 0.01,
     }
 
 

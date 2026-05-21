@@ -81,6 +81,9 @@ from src.strategy.oracle_status import OracleStatus
 logger = logging.getLogger(__name__)
 
 CANONICAL_OBSERVATION_SOURCE_ROLE = "canonical_observation_instants_v2"
+CANONICAL_DAILY_OBSERVATION_REVISIONS_SOURCE_ROLE = (
+    "canonical_daily_observation_revisions"
+)
 SHARED_CITY_ORACLE_SOURCE_ROLE = "shared_city_oracle_source_proxy"
 
 # Re-export for callers that imported from oracle_penalty pre-A3
@@ -156,12 +159,14 @@ def _classify_oracle_evidence(
 
     Snapshot evidence remains governed by the conservative Beta posterior
     classifier. Canonical observation evidence is different: it is a direct
-    comparison between verified K1 observations and verified settlements, so a
-    city with enough comparisons and zero mismatches is not "missing" or
-    "insufficient"; it is normal operation with no penalty.
+    comparison between verified K1 observations/revisions and verified
+    settlements, so a city with enough comparisons and zero mismatches is not
+    "missing" or "insufficient"; it is normal operation with no penalty.
     """
-    evidence_bearing_source = source_role in {
+    normalized_source_role = str(source_role or "").strip().lower()
+    evidence_bearing_source = normalized_source_role in {
         CANONICAL_OBSERVATION_SOURCE_ROLE,
+        CANONICAL_DAILY_OBSERVATION_REVISIONS_SOURCE_ROLE,
         SHARED_CITY_ORACLE_SOURCE_ROLE,
     }
     if (

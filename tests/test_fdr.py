@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-03-30; last_reviewed=2026-04-30; last_reused=2026-04-30
+# Lifecycle: created=2026-03-30; last_reviewed=2026-05-21; last_reused=2026-05-21
 # Purpose: Tests for FDR (Benjamini-Hochberg) filter + T4.3 selection-family
 #          substrate boundary-gate + Day0 causal-day edge case coverage.
 # Reuse: Referenced by regression suite; touched 2026-04-24 only for M3
@@ -28,7 +28,7 @@ from src.engine.evaluator import (
     _selected_edge_keys_from_full_family,
 )
 from src.config import cities_by_name
-from src.state.db import get_connection, init_schema
+from src.state.db import get_connection, init_schema, init_schema_forecasts
 from src.state.portfolio import PortfolioState
 from src.strategy.market_analysis_family_scan import FullFamilyHypothesis, scan_full_hypothesis_family
 from src.strategy.fdr_filter import fdr_filter
@@ -37,6 +37,11 @@ from src.strategy.market_analysis import MarketAnalysis
 from src.strategy.risk_limits import RiskLimits
 from src.strategy.selection_family import apply_familywise_fdr, benjamini_hochberg_mask, make_edge_family_id
 from src.types import Bin, BinEdge
+
+
+def _init_schema_with_forecast_authority(conn) -> None:
+    init_schema(conn)
+    init_schema_forecasts(conn)
 
 
 def _make_edge(p_value: float, *, low: float = 40, high: float = 41) -> BinEdge:
@@ -117,6 +122,19 @@ def _patch_mature_calibration(monkeypatch) -> None:
         "calibrate_and_normalize",
         lambda p_raw, *args, **kwargs: np.array(p_raw, dtype=float).copy(),
     )
+    monkeypatch.setattr(
+        "src.state.day0_nowcast_store.read_latest_platt_fit",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        evaluator_module,
+        "_strict_feature_flag",
+        lambda name, default=False: (
+            False
+            if name == "ddd_v2_enabled"
+            else bool(evaluator_module.settings["feature_flags"].get(name, default))
+        ),
+    )
 
 
 def _set_native_multibin_buy_no_flags(monkeypatch, *, shadow: bool, live: bool = False) -> None:
@@ -191,7 +209,7 @@ class TestDT7ScemaPathActuallyRuns:
         real schema path (not via the fall-through empty-row branch)."""
         from src.engine.evaluator import _read_v2_snapshot_metadata
         conn = get_connection(tmp_path / "t2g_bambig_zero.db")
-        init_schema(conn)
+        _init_schema_with_forecast_authority(conn)
         snapshot_id = _seed_ensemble_snapshots_v2_row(
             conn, city="Dallas", target_date="2026-04-12", metric="high",
             boundary_ambiguous=0,
@@ -214,7 +232,7 @@ class TestDT7ScemaPathActuallyRuns:
         proof that DT7 is wired — not just dormant."""
         from src.engine.evaluator import _read_v2_snapshot_metadata
         conn = get_connection(tmp_path / "t2g_bambig_one.db")
-        init_schema(conn)
+        _init_schema_with_forecast_authority(conn)
         snapshot_id = _seed_ensemble_snapshots_v2_row(
             conn, city="Dallas", target_date="2026-04-12", metric="high",
             boundary_ambiguous=1, causality_status="REJECTED_BOUNDARY_AMBIGUOUS",
@@ -237,7 +255,7 @@ class TestDT7ScemaPathActuallyRuns:
         """
         from src.engine.evaluator import _read_v2_snapshot_metadata
         conn = get_connection(tmp_path / "t2g_exact_only.db")
-        init_schema(conn)
+        _init_schema_with_forecast_authority(conn)
         _seed_ensemble_snapshots_v2_row(
             conn, city="Dallas", target_date="2026-04-12", metric="high",
             boundary_ambiguous=1, causality_status="REJECTED_BOUNDARY_AMBIGUOUS",
@@ -295,7 +313,7 @@ class TestSelectionFamilySubstrate:
 
     def test_selection_family_facts_record_all_tested_hypotheses(self, tmp_path):
         conn = get_connection(tmp_path / "selection_facts.db")
-        init_schema(conn)
+        _init_schema_with_forecast_authority(conn)
         candidate = types.SimpleNamespace(
             city=types.SimpleNamespace(name="NYC"),
             target_date="2026-04-01",
@@ -638,7 +656,7 @@ class TestSelectionFamilySubstrate:
 
     def test_full_family_selection_uses_one_candidate_family_across_strategies(self, tmp_path):
         conn = get_connection(tmp_path / "selection_one_family.db")
-        init_schema(conn)
+        _init_schema_with_forecast_authority(conn)
         candidate = types.SimpleNamespace(
             city=types.SimpleNamespace(name="NYC"),
             target_date="2026-04-01",
@@ -722,7 +740,7 @@ class TestSelectionFamilySubstrate:
         # — no refusal). Proves the code actually executes under production-
         # shaped state, not just via a trivial short-circuit on empty table.
         conn = get_connection(tmp_path / "selection_eval_path.db")
-        init_schema(conn)
+        _init_schema_with_forecast_authority(conn)
         _seed_ensemble_snapshots_v2_row(
             conn, city="Dallas", target_date="2026-04-12", metric="high",
         )
@@ -984,7 +1002,7 @@ class TestSelectionFamilySubstrate:
         # T2.g CLOSED 2026-04-24: explicit v2 fixture row with
         # boundary_ambiguous=0 (see _seed_ensemble_snapshots_v2_row helper).
         conn = get_connection(tmp_path / "selection_fail_closed.db")
-        init_schema(conn)
+        _init_schema_with_forecast_authority(conn)
         _seed_ensemble_snapshots_v2_row(
             conn, city="Dallas", target_date="2026-04-12", metric="high",
         )
@@ -1100,7 +1118,7 @@ class TestSelectionFamilySubstrate:
         # FakeDay0Signal and wrap the route lambda to dispatch on
         # inputs.temperature_metric.is_low().
         #
-        # DT7 gate: init_schema(conn) calls apply_v2_schema which creates
+        # DT7 gate: _init_schema_with_forecast_authority(conn) calls apply_v2_schema which creates
         # empty ensemble_snapshots_v2; _read_v2_snapshot_metadata on empty
         # table naturally returns {} → boundary_ambiguous_refuses_signal
         # returns False → gate passes WITHOUT stubbing. T2.g (plan row)
@@ -1208,7 +1226,7 @@ class TestSelectionFamilySubstrate:
         # T2.g CLOSED 2026-04-24: explicit v2 fixture row with
         # boundary_ambiguous=0 (see _seed_ensemble_snapshots_v2_row helper).
         conn = get_connection(tmp_path / "selection_empty_family.db")
-        init_schema(conn)
+        _init_schema_with_forecast_authority(conn)
         _seed_ensemble_snapshots_v2_row(
             conn, city="Dallas", target_date="2026-04-12", metric="high",
         )
@@ -1324,7 +1342,7 @@ class TestSelectionFamilySubstrate:
         # FakeDay0Signal and wrap the route lambda to dispatch on
         # inputs.temperature_metric.is_low().
         #
-        # DT7 gate: init_schema(conn) calls apply_v2_schema which creates
+        # DT7 gate: _init_schema_with_forecast_authority(conn) calls apply_v2_schema which creates
         # empty ensemble_snapshots_v2; _read_v2_snapshot_metadata on empty
         # table naturally returns {} → boundary_ambiguous_refuses_signal
         # returns False → gate passes WITHOUT stubbing. T2.g (plan row)
@@ -1438,7 +1456,7 @@ class TestSelectionFamilySubstrate:
         Day0TemporalContext, this test fails loudly (not xfail).
         """
         conn = get_connection(tmp_path / "t2g_real_day0.db")
-        init_schema(conn)
+        _init_schema_with_forecast_authority(conn)
         now = datetime.now(timezone.utc)
         _patch_mature_calibration(monkeypatch)
 

@@ -30,12 +30,13 @@ Why this is NOT a unit test:
     3 family-conflicting decisions and observes the post-gate decision state.
 
 STAGE A boundary constraint (preserved in test assertions):
-    Dedup-dropped decisions have ``rejection_stage="MUTUALLY_EXCLUSIVE_FAMILY"`` and
-    ``"mutually_exclusive_family_dedup" in rejection_reasons`` but do NOT produce
-    no_trade_events DB rows (``rejection_reason_enum`` stays None). STAGE B will
-    promote the string to a NoTradeReason enum + DB migration. Test assertions must
-    NOT assert any DB row or enum existence — that would be a false-positive failure
-    today and a Stage-B blocker test.
+    Dedup-dropped decisions use the existing legal ``ANTI_CHURN`` rejection stage,
+    carry ``"mutually_exclusive_family_dedup"`` in rejection_reasons, and do NOT
+    produce no_trade_events DB rows (``rejection_reason_enum`` stays None). Family
+    details live in ``rejection_reason_detail`` until Stage B introduces a first-class
+    enum + DB migration. Test assertions must NOT invent a new rejection stage, DB
+    row, or enum existence — that would be a false-positive failure today and a
+    Stage-B blocker test.
 
 Observation mechanism:
     ``dedup_mutually_exclusive_families`` mutates EdgeDecision objects in-place.
@@ -240,7 +241,7 @@ def test_gate_on_collapses_family_to_single_best_through_execute_discovery_phase
         → execute_discovery_phase (cycle_runtime) calls dedup in-line
         → after the call, exactly 1 decision has should_trade=True (the $20 bin)
         → the other 2 carry the auditable STAGE A rejection contract:
-              rejection_stage == "MUTUALLY_EXCLUSIVE_FAMILY"
+              rejection_stage == "ANTI_CHURN"
               "mutually_exclusive_family_dedup" in rejection_reasons
               rejection_reason_detail includes kept_bin label
               rejection_reason_enum IS None (STAGE A pure runtime gating)
@@ -299,9 +300,9 @@ def test_gate_on_collapses_family_to_single_best_through_execute_discovery_phase
     # ── STAGE A audit trail on dropped decisions ──────────────────────────────
     for d in dropped:
         bin_label = d.edge.bin.label if d.edge else "?"
-        assert d.rejection_stage == "MUTUALLY_EXCLUSIVE_FAMILY", (
+        assert d.rejection_stage == "ANTI_CHURN", (
             f"dropped bin {bin_label!r}: "
-            f"rejection_stage expected 'MUTUALLY_EXCLUSIVE_FAMILY', got {d.rejection_stage!r}"
+            f"rejection_stage expected legal STAGE A value 'ANTI_CHURN', got {d.rejection_stage!r}"
         )
         assert MUTUALLY_EXCLUSIVE_FAMILY_DEDUP in (d.rejection_reasons or []), (
             f"dropped bin {bin_label!r} must list "
