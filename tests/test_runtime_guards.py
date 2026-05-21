@@ -3746,6 +3746,40 @@ def test_passive_economic_floor_passes_positive_fill_adjusted_net_ev(monkeypatch
     assert reason is None
 
 
+def test_source_quality_tail_order_uses_per_scope_complete_coverage(monkeypatch):
+    edge = _edge()
+    edge.entry_price = 0.01
+    monkeypatch.setattr(
+        evaluator_module,
+        "_try_get_strategy_profile",
+        lambda _strategy_key: types.SimpleNamespace(
+            min_entry_price=0.05,
+            min_strategy_notional_usd=1.00,
+            min_expected_profit_usd=0.05,
+            allow_ultra_low_tail=True,
+            partial_source_run_allowed=True,
+            complete_required_for_tail_orders=True,
+            partial_run_kelly_haircut=0.5,
+        ),
+    )
+    ens_result = {
+        "source_run_status": "PARTIAL",
+        "source_run_completeness_status": "PARTIAL",
+        "coverage_completeness_status": "COMPLETE",
+        "expected_members": 51,
+        "observed_members": 51,
+    }
+
+    reason = evaluator_module._source_quality_policy_rejection(
+        strategy_key="opening_inertia",
+        edge=edge,
+        ens_result=ens_result,
+    )
+
+    assert reason is None
+    assert evaluator_module._source_quality_kelly_haircut("opening_inertia", ens_result) == 1.0
+
+
 def test_live_passive_reprice_requires_fill_probability_context(tmp_path):
     conn = get_connection(tmp_path / "snapshot-reprice-live-passive-no-fill.db")
     init_schema(conn)
