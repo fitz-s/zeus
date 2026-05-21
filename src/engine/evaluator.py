@@ -840,6 +840,15 @@ def _strategy_live_quality_policy(strategy_key: str) -> SimpleNamespace:
         allow_ultra_low_tail=bool(
             getattr(profile, "allow_ultra_low_tail", False) if profile is not None else False
         ),
+        partial_source_run_allowed=bool(
+            getattr(profile, "partial_source_run_allowed", True) if profile is not None else True
+        ),
+        complete_required_for_tail_orders=bool(
+            getattr(profile, "complete_required_for_tail_orders", True) if profile is not None else True
+        ),
+        partial_run_kelly_haircut=float(
+            getattr(profile, "partial_run_kelly_haircut", 0.5) if profile is not None else 0.5
+        ),
     )
 
 
@@ -951,6 +960,102 @@ def _live_entry_economic_floor_rejection(
             f"{final_limit_price:.4f}<={policy.min_entry_price:.2f}; strategy={strategy_key})"
         )
     return None
+
+
+def _live_entry_economic_floor_no_trade_reason(reason: str) -> NoTradeReason:
+    if reason.startswith("PASSIVE_FILL_PROBABILITY_UNMODELED"):
+        return NoTradeReason.PASSIVE_FILL_MODEL_MISSING
+    if reason.startswith("ULTRA_LOW_PRICE_NOT_AUTHORIZED"):
+        return NoTradeReason.ULTRA_LOW_PRICE_NOT_AUTHORIZED
+    if (
+        reason.startswith("STRATEGY_NOTIONAL_BELOW_LIVE_FLOOR")
+        or reason.startswith("EXPECTED_PROFIT_BELOW_LIVE_FLOOR")
+    ):
+        return NoTradeReason.STRATEGY_ECONOMIC_FLOOR
+    return NoTradeReason.SIZE_BELOW_MINIMUM
+
+
+def _source_quality_context(ens_result: dict | None) -> SimpleNamespace:
+    result = ens_result if isinstance(ens_result, dict) else {}
+    evidence = result.get("executable_forecast_evidence")
+    get_attr = getattr
+    source_run_status = str(
+        result.get("source_run_status")
+        or get_attr(evidence, "source_run_status", "")
+        or ""
+    )
+    source_run_completeness = str(
+        result.get("source_run_completeness_status")
+        or get_attr(evidence, "source_run_completeness_status", "")
+        or ""
+    )
+    coverage_completeness = str(
+        result.get("coverage_completeness_status")
+        or get_attr(evidence, "coverage_completeness_status", "")
+        or ""
+    )
+    try:
+        expected_members = int(result.get("expected_members") or get_attr(evidence, "expected_members", 0) or 0)
+    except (TypeError, ValueError):
+        expected_members = 0
+    try:
+        observed_members = int(result.get("observed_members") or get_attr(evidence, "observed_members", 0) or 0)
+    except (TypeError, ValueError):
+        observed_members = 0
+    partial = (
+        source_run_status == "PARTIAL"
+        or source_run_completeness == "PARTIAL"
+        or coverage_completeness == "PARTIAL"
+    )
+    return SimpleNamespace(
+        partial=partial,
+        source_run_status=source_run_status,
+        source_run_completeness_status=source_run_completeness,
+        coverage_completeness_status=coverage_completeness,
+        expected_members=expected_members,
+        observed_members=observed_members,
+    )
+
+
+def _source_quality_policy_rejection(
+    *,
+    strategy_key: str,
+    edge: BinEdge,
+    ens_result: dict | None,
+) -> str | None:
+    context = _source_quality_context(ens_result)
+    if not context.partial:
+        return None
+    policy = _strategy_live_quality_policy(strategy_key)
+    if not policy.partial_source_run_allowed:
+        return (
+            "PARTIAL_SOURCE_RUN_NOT_ALLOWED("
+            f"strategy={strategy_key}; source_run={context.source_run_status}/"
+            f"{context.source_run_completeness_status}; coverage={context.coverage_completeness_status})"
+        )
+    try:
+        entry_price = float(edge.entry_price)
+    except (TypeError, ValueError):
+        entry_price = 1.0
+    if policy.complete_required_for_tail_orders and (
+        policy.allow_ultra_low_tail or entry_price <= policy.min_entry_price
+    ):
+        return (
+            "PARTIAL_SOURCE_RUN_FOR_TAIL_ORDER("
+            f"strategy={strategy_key}; price={entry_price:.4f}; "
+            f"members={context.observed_members}/{context.expected_members}; "
+            f"coverage={context.coverage_completeness_status})"
+        )
+    return None
+
+
+def _source_quality_kelly_haircut(strategy_key: str, ens_result: dict | None) -> float:
+    if not _source_quality_context(ens_result).partial:
+        return 1.0
+    policy = _strategy_live_quality_policy(strategy_key)
+    if not policy.partial_source_run_allowed:
+        return 0.0
+    return max(0.0, min(1.0, float(policy.partial_run_kelly_haircut)))
 
 
 def _crossing_decision(
@@ -3950,7 +4055,7 @@ def evaluate_candidate(
     )
     family_preselection_drops = list(family_decision.dropped) if family_decision else []
     if family_decision is not None:
-        filtered = [family_decision.portfolio.selected_leg]
+        filtered = list(family_decision.portfolio.selected_legs)
     family_preselection_rejections: list[EdgeDecision] = []
     for drop in family_preselection_drops:
         family_preselection_rejections.append(
@@ -4040,20 +4145,49 @@ def evaluate_candidate(
                 rejection_reason_detail="strategy_key_unclassified",
             ))
             continue
+        source_quality_rejection = _source_quality_policy_rejection(
+            strategy_key=strategy_key,
+            edge=edge,
+            ens_result=ens_result,
+        )
+        if source_quality_rejection:
+            decisions.append(EdgeDecision(
+                False,
+                edge=edge,
+                decision_id=_decision_id(),
+                rejection_stage="SIGNAL_QUALITY",
+                rejection_reasons=[NoTradeReason.PARTIAL_SOURCE_QUALITY_REJECTED.value],
+                selected_method=selected_method,
+                applied_validations=[*decision_validations, "source_quality_policy"],
+                decision_snapshot_id=snapshot_id,
+                edge_source=edge_source,
+                strategy_key=strategy_key,
+                rejection_reason_enum=NoTradeReason.PARTIAL_SOURCE_QUALITY_REJECTED,
+                rejection_reason_detail=source_quality_rejection,
+            ))
+            continue
+        source_quality_haircut = _source_quality_kelly_haircut(strategy_key, ens_result)
+        if source_quality_haircut != 1.0:
+            decision_validations.append(f"partial_source_kelly_haircut_{source_quality_haircut:g}x")
         entry_price_floor_reason = _strategy_entry_price_floor_block_reason(strategy_key, edge)
         if entry_price_floor_reason:
+            price_floor_enum = _live_entry_economic_floor_no_trade_reason(
+                "ULTRA_LOW_PRICE_NOT_AUTHORIZED"
+                if "BELOW_LIVE_FLOOR" in entry_price_floor_reason
+                else entry_price_floor_reason
+            )
             decisions.append(EdgeDecision(
                 False,
                 edge=edge,
                 decision_id=_decision_id(),
                 rejection_stage="MARKET_FILTER",
-                rejection_reasons=[NoTradeReason.UNCATEGORIZED.value],
+                rejection_reasons=[price_floor_enum.value],
                 selected_method=selected_method,
                 applied_validations=[*decision_validations, "strategy_entry_price_floor"],
                 decision_snapshot_id=snapshot_id,
                 edge_source=edge_source,
                 strategy_key=strategy_key,
-                rejection_reason_enum=NoTradeReason.UNCATEGORIZED,
+                rejection_reason_enum=price_floor_enum,
                 rejection_reason_detail=entry_price_floor_reason,
             ))
             continue
@@ -4418,6 +4552,7 @@ def evaluate_candidate(
         # is 0.0 unless Rail 2 fired (Rail 1 already short-circuited with HALT).
         if ddd_discount > 0.0:
             km *= max(0.0, 1.0 - ddd_discount)
+        km *= source_quality_haircut
         
         # F2/D3: ExecutionPrice contract — compute fee-adjusted entry cost.
         try:
@@ -4502,18 +4637,19 @@ def evaluate_candidate(
             passive_order=False,
         )
         if economic_floor_reason:
+            economic_floor_enum = _live_entry_economic_floor_no_trade_reason(economic_floor_reason)
             decisions.append(EdgeDecision(
                 False,
                 edge=edge,
                 decision_id=_decision_id(),
                 rejection_stage="SIZING_TOO_SMALL",
-                rejection_reasons=[NoTradeReason.SIZE_BELOW_MINIMUM.value],
+                rejection_reasons=[economic_floor_enum.value],
                 selected_method=selected_method,
                 applied_validations=[*decision_validations, "strategy_live_quality_floor"],
                 decision_snapshot_id=snapshot_id,
                 edge_source=edge_source,
                 strategy_key=strategy_key,
-                rejection_reason_enum=NoTradeReason.SIZE_BELOW_MINIMUM,
+                rejection_reason_enum=economic_floor_enum,
                 rejection_reason_detail=(
                     f"{economic_floor_reason}; venue_min=${effective_min_order_usd:.4f} "
                     f"authority={min_order_authority}"

@@ -3435,6 +3435,95 @@ def test_live_passive_reprice_records_fill_probability_context(tmp_path):
     ] == "0.25"
 
 
+def test_live_passive_reprice_estimates_fill_context_from_trade_facts(tmp_path):
+    conn = get_connection(tmp_path / "snapshot-reprice-live-passive-estimated-fill.db")
+    init_schema(conn)
+    _insert_executable_snapshot(
+        conn,
+        snapshot_id="snap-live-passive-estimated-fill",
+        selected_outcome_token_id="yes1",
+        outcome_label="YES",
+        yes_token_id="yes1",
+        no_token_id="no1",
+        top_bid="0.20",
+        top_ask="0.30",
+        bid_size="20",
+        ask_size="150",
+        fee_details={"feeRate": "0.03", "source": "test_snapshot_taker_fee"},
+    )
+    for idx, state in enumerate(["MATCHED", "EXPIRED", "MATCHED"]):
+        command_id = f"cmd-passive-history-{idx}"
+        conn.execute(
+            """
+            INSERT INTO venue_commands (
+                command_id, snapshot_id, envelope_id, position_id, decision_id,
+                idempotency_key, intent_kind, market_id, token_id, side, size,
+                price, venue_order_id, state, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, 'ENTRY', 'cond1', 'yes1', 'BUY', 5, 0.20, ?, ?, ?, ?)
+            """,
+            (
+                command_id,
+                "snap-live-passive-estimated-fill",
+                f"env-{idx}",
+                f"pos-{idx}",
+                f"decision-{idx}",
+                f"idem-{idx}",
+                f"venue-{idx}",
+                state,
+                f"2026-05-21T14:0{idx}:00Z",
+                f"2026-05-21T14:0{idx}:10Z",
+            ),
+        )
+        if state == "MATCHED":
+            conn.execute(
+                """
+                INSERT INTO venue_trade_facts (
+                    trade_id, venue_order_id, command_id, state, filled_size,
+                    fill_price, source, observed_at, local_sequence,
+                    raw_payload_hash
+                ) VALUES (?, ?, ?, 'MATCHED', '5', '0.20', 'REST', ?, 1, ?)
+                """,
+                (
+                    f"trade-{idx}",
+                    f"venue-{idx}",
+                    command_id,
+                    f"2026-05-21T14:0{idx}:20Z",
+                    f"hash-{idx}",
+                ),
+            )
+    edge = _edge()
+    decision = EdgeDecision(
+        should_trade=True,
+        edge=edge,
+        tokens={"token_id": "yes1", "no_token_id": "no1"},
+        size_usd=5.0,
+        decision_snapshot_id="decision-snap-live-passive-estimated-fill",
+        applied_validations=[],
+        edge_context=types.SimpleNamespace(p_posterior=edge.p_posterior),
+        sizing_bankroll=1000.0,
+        kelly_multiplier_used=0.25,
+        execution_fee_rate=0.03,
+        strategy_key="opening_inertia",
+    )
+
+    best_ask = cycle_runtime._reprice_decision_from_executable_snapshot(
+        conn,
+        decision,
+        {"executable_snapshot_id": "snap-live-passive-estimated-fill"},
+    )
+    conn.close()
+
+    assert best_ask is None
+    reprice = decision.tokens["executable_snapshot_reprice"]
+    assert reprice["passive_maker_expected_fill_probability"] == pytest.approx(0.6)
+    assert reprice["passive_fill_model_source"] == "venue_command_trade_history"
+    assert reprice["passive_fill_model_order_count"] == 3
+    assert reprice["passive_fill_model_fill_count"] == 2
+    assert reprice["corrected_pricing_shadow"]["passive_maker_context"][
+        "queue_depth_ahead"
+    ] == "20"
+
+
 def test_executable_snapshot_repricing_passive_buy_limit_cannot_rest_below_best_bid(tmp_path):
     conn = get_connection(tmp_path / "snapshot-reprice-passive-top-bid.db")
     init_schema(conn)

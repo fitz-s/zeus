@@ -1240,6 +1240,14 @@ files:
     - src/state/venue_command_repo.py
     - src/control/heartbeat_supervisor.py
     - src/control/cutover_guard.py
+  src/execution/order_truth_reducer.py:
+    zone: K2_runtime
+    authority_role: venue_order_truth_reducer
+    why: Monotonic reducer for venue order facts, trade facts, and open-order probes so terminal/partial/no-fill truth cannot regress by latest-write ordering.
+    downstream:
+    - src/execution/command_recovery.py
+    - src/execution/exchange_reconcile.py
+    - src/state/venue_command_repo.py
   src/execution/settlement_commands.py:
     zone: K2_runtime
     authority_role: settlement_redeem_command_model

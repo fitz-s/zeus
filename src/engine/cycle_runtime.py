@@ -1055,6 +1055,56 @@ def _reprice_decision_from_executable_snapshot(
         "passive_fill_probability",
         final_intent_context.get("expected_fill_probability"),
     )
+    if final_best_ask is None and passive_fill_probability in (None, ""):
+        try:
+            from src.analysis.market_analysis_vnext import estimate_passive_maker_execution
+
+            passive_estimate = estimate_passive_maker_execution(
+                conn,
+                snapshot,
+                quote_price=snapshot_limit_decimal,
+            )
+        except Exception:
+            passive_estimate = None
+        if passive_estimate is not None:
+            edge_profit_per_share = max(
+                Decimal("0"),
+                Decimal(str(decision.edge.p_posterior)) - snapshot_limit_decimal,
+            )
+            gross_profit_usd = (
+                Decimal(str(repriced_size))
+                * edge_profit_per_share
+                / max(snapshot_limit_decimal, Decimal("0.000001"))
+            )
+            adverse_penalty_usd = (
+                passive_estimate.adverse_selection_score
+                * Decimal(str(repriced_size))
+            )
+            fill_adjusted_profit_usd = (
+                passive_estimate.expected_fill_probability * gross_profit_usd
+                - adverse_penalty_usd
+            )
+            min_profit_raw = final_intent_context.get("min_expected_profit_usd")
+            min_profit_usd = Decimal(str(min_profit_raw if min_profit_raw not in (None, "") else "0.05"))
+            if fill_adjusted_profit_usd >= min_profit_usd:
+                passive_fill_probability = passive_estimate.expected_fill_probability
+                final_intent_context["passive_fill_probability"] = str(
+                    passive_estimate.expected_fill_probability
+                )
+                final_intent_context["queue_depth_ahead"] = (
+                    None
+                    if passive_estimate.queue_depth_ahead is None
+                    else str(passive_estimate.queue_depth_ahead)
+                )
+                final_intent_context["adverse_selection_score"] = str(
+                    passive_estimate.adverse_selection_score
+                )
+                final_intent_context["passive_fill_model_source"] = passive_estimate.evidence_source
+                final_intent_context["passive_fill_model_order_count"] = passive_estimate.evidence_order_count
+                final_intent_context["passive_fill_model_fill_count"] = passive_estimate.evidence_fill_count
+                final_intent_context["fill_adjusted_expected_profit_usd"] = str(
+                    fill_adjusted_profit_usd
+                )
     passive_maker_context = None
     if final_best_ask is None and passive_fill_probability not in (None, ""):
         from src.contracts.execution_intent import PassiveMakerExecutionContext
@@ -1237,6 +1287,12 @@ def _reprice_decision_from_executable_snapshot(
             None
             if passive_maker_context is None
             else float(passive_maker_context.expected_fill_probability)
+        ),
+        "passive_fill_model_source": final_intent_context.get("passive_fill_model_source"),
+        "passive_fill_model_order_count": final_intent_context.get("passive_fill_model_order_count"),
+        "passive_fill_model_fill_count": final_intent_context.get("passive_fill_model_fill_count"),
+        "fill_adjusted_expected_profit_usd": final_intent_context.get(
+            "fill_adjusted_expected_profit_usd"
         ),
         "corrected_candidate_limit_price": float(corrected_candidate_price),
         "corrected_candidate_expected_fill_price": float(corrected_candidate_expected_fill),

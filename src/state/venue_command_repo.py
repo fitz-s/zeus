@@ -288,6 +288,29 @@ def _prior_terminal_zero_remainder_order_fact_id(
     return int(row["fact_id"])
 
 
+def _prior_terminal_zero_remainder_order_fact(
+    conn: sqlite3.Connection,
+    *,
+    venue_order_id: str,
+    command_id: str,
+) -> sqlite3.Row | None:
+    row = conn.execute(
+        """
+        SELECT fact_id, state, remaining_size, matched_size
+          FROM venue_order_facts
+         WHERE venue_order_id = ?
+           AND command_id = ?
+           AND state IN ('MATCHED', 'CANCEL_CONFIRMED', 'EXPIRED', 'VENUE_WIPED')
+         ORDER BY local_sequence DESC, fact_id DESC
+         LIMIT 1
+        """,
+        (venue_order_id, command_id),
+    ).fetchone()
+    if row is None or not _decimal_text_is_zero(row["remaining_size"]):
+        return None
+    return row
+
+
 def _optimistic_source_trade_fact_ids_for_failed_trade(
     conn: sqlite3.Connection,
     *,
@@ -2087,13 +2110,31 @@ def append_order_fact(
 
     with _savepoint_atomic(conn):
         if state not in _TERMINAL_ZERO_REMAINDER_ORDER_FACT_STATES:
-            prior_terminal_fact_id = _prior_terminal_zero_remainder_order_fact_id(
+            prior_terminal = _prior_terminal_zero_remainder_order_fact(
                 conn,
                 venue_order_id=venue_order_id,
                 command_id=command_id,
             )
-            if prior_terminal_fact_id is not None:
-                return prior_terminal_fact_id
+            if prior_terminal is not None:
+                from src.execution.order_truth_reducer import (
+                    TERMINAL_NO_FILL,
+                    VenueOrderTruthReducer,
+                )
+
+                reduced = VenueOrderTruthReducer.reduce(
+                    order_facts=[
+                        {
+                            "state": state,
+                            "remaining_size": remaining_size,
+                            "matched_size": matched_size,
+                        },
+                        prior_terminal,
+                    ],
+                    trade_filled_size="0",
+                    open_order_present=state in {"LIVE", "RESTING", "PARTIALLY_MATCHED"},
+                )
+                if reduced.proof_class == TERMINAL_NO_FILL:
+                    return int(prior_terminal["fact_id"])
         seq = _coerce_local_sequence(
             conn,
             table="venue_order_facts",

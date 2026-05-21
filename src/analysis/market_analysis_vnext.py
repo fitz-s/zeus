@@ -15,9 +15,10 @@ Schema: SCHEMA_FORECASTS_VERSION 5 (production pass — 2026-05-21)
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 if TYPE_CHECKING:
     from src.contracts.executable_market_snapshot_v2 import ExecutableMarketSnapshotV2
@@ -58,6 +59,18 @@ class MicrostructureMetrics:
     # bin_grid_id propagated from ensemble_snapshots_v2 (F4 retrofit)
     bin_grid_id: Optional[str] = None
     bin_schema_version: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class PassiveMakerExecutionEstimate:
+    """Fill-probability estimate for a live passive-maker entry."""
+
+    expected_fill_probability: Decimal
+    queue_depth_ahead: Decimal | None
+    adverse_selection_score: Decimal
+    evidence_order_count: int
+    evidence_fill_count: int
+    evidence_source: str = "venue_command_trade_history"
 
 
 class MarketAnalysisVNext:
@@ -133,3 +146,135 @@ class MarketAnalysisVNext:
             bin_grid_id=self._bin_grid_id,
             bin_schema_version=self._bin_schema_version,
         )
+
+
+def _table_exists(conn: Any, table_name: str) -> bool:
+    try:
+        row = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+            (table_name,),
+        ).fetchone()
+    except Exception:
+        return False
+    return row is not None
+
+
+def _decimal_or_none(value: Any) -> Decimal | None:
+    if value in (None, ""):
+        return None
+    try:
+        return Decimal(str(value))
+    except Exception:
+        return None
+
+
+def _queue_depth_ahead(snapshot: "ExecutableMarketSnapshotV2", quote_price: Decimal) -> Decimal | None:
+    try:
+        orderbook = json.loads(snapshot.orderbook_depth_jsonb)
+    except Exception:
+        return None
+    bids = orderbook.get("bids") if isinstance(orderbook, dict) else None
+    if not isinstance(bids, list) or not bids:
+        return None
+    depth = Decimal("0")
+    for row in bids:
+        if not isinstance(row, dict):
+            continue
+        price = _decimal_or_none(row.get("price"))
+        size = _decimal_or_none(row.get("size"))
+        if price is None or size is None:
+            continue
+        if price >= quote_price:
+            depth += size
+    return depth
+
+
+def estimate_passive_maker_execution(
+    conn: Any,
+    snapshot: "ExecutableMarketSnapshotV2",
+    *,
+    quote_price: Decimal,
+) -> PassiveMakerExecutionEstimate | None:
+    """Estimate passive-maker fill context from local command/trade facts.
+
+    No history means no model. The live path must then reject passive submit
+    rather than treating a resting quote as executable edge.
+    """
+
+    if conn is None or not _table_exists(conn, "venue_commands"):
+        return None
+    token_id = str(snapshot.selected_outcome_token_id or "")
+    if not token_id:
+        return None
+    has_trades = _table_exists(conn, "venue_trade_facts")
+    price_window = max(Decimal(str(snapshot.min_tick_size)) * Decimal("2"), Decimal("0.01"))
+    query = """
+        SELECT
+            vc.command_id,
+            vc.price,
+            vc.state,
+            EXISTS (
+                SELECT 1 FROM venue_trade_facts vtf
+                WHERE vtf.command_id = vc.command_id
+                  AND UPPER(COALESCE(vtf.state, '')) IN ('MATCHED','MINED','CONFIRMED')
+            ) AS has_fill,
+            (
+                SELECT vtf.fill_price FROM venue_trade_facts vtf
+                WHERE vtf.command_id = vc.command_id
+                  AND UPPER(COALESCE(vtf.state, '')) IN ('MATCHED','MINED','CONFIRMED')
+                ORDER BY vtf.observed_at DESC
+                LIMIT 1
+            ) AS fill_price
+        FROM venue_commands vc
+        WHERE vc.token_id = ?
+          AND UPPER(COALESCE(vc.intent_kind, '')) = 'ENTRY'
+          AND UPPER(COALESCE(vc.side, '')) = 'BUY'
+          AND ABS(CAST(vc.price AS REAL) - CAST(? AS REAL)) <= CAST(? AS REAL)
+        ORDER BY vc.created_at DESC
+        LIMIT 50
+    """ if has_trades else """
+        SELECT
+            vc.command_id,
+            vc.price,
+            vc.state,
+            CASE WHEN UPPER(COALESCE(vc.state, '')) IN ('MATCHED','FILLED','PARTIAL','PARTIALLY_MATCHED')
+                 THEN 1 ELSE 0 END AS has_fill,
+            vc.price AS fill_price
+        FROM venue_commands vc
+        WHERE vc.token_id = ?
+          AND UPPER(COALESCE(vc.intent_kind, '')) = 'ENTRY'
+          AND UPPER(COALESCE(vc.side, '')) = 'BUY'
+          AND ABS(CAST(vc.price AS REAL) - CAST(? AS REAL)) <= CAST(? AS REAL)
+        ORDER BY vc.created_at DESC
+        LIMIT 50
+    """
+    try:
+        rows = conn.execute(query, (token_id, str(quote_price), str(price_window))).fetchall()
+    except Exception:
+        return None
+    if not rows:
+        return None
+    evidence_order_count = len(rows)
+    evidence_fill_count = sum(1 for row in rows if int(row[3] or 0) == 1)
+    expected_fill_probability = Decimal(evidence_fill_count + 1) / Decimal(evidence_order_count + 2)
+
+    adverse_scores: list[Decimal] = []
+    for row in rows:
+        if int(row[3] or 0) != 1:
+            continue
+        fill_price = _decimal_or_none(row[4])
+        if fill_price is None or quote_price <= 0:
+            continue
+        adverse_scores.append(max(Decimal("0"), (fill_price - quote_price) / quote_price))
+    adverse_selection_score = (
+        sum(adverse_scores, Decimal("0")) / Decimal(len(adverse_scores))
+        if adverse_scores
+        else Decimal("0")
+    )
+    return PassiveMakerExecutionEstimate(
+        expected_fill_probability=expected_fill_probability,
+        queue_depth_ahead=_queue_depth_ahead(snapshot, quote_price),
+        adverse_selection_score=min(adverse_selection_score, Decimal("1")),
+        evidence_order_count=evidence_order_count,
+        evidence_fill_count=evidence_fill_count,
+    )

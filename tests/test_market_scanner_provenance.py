@@ -286,6 +286,7 @@ def _insert_persisted_reader_snapshot(
     conn: sqlite3.Connection,
     *,
     market_end_at: str = "2026-05-20T12:00:00+00:00",
+    active: int = 1,
 ) -> None:
     conn.execute(
         """
@@ -302,8 +303,8 @@ def _insert_persisted_reader_snapshot(
         ) VALUES (
             'snap-mid', 'gamma-mid', 'event-persisted',
             'lowest-temperature-in-chicago-on-april-30-2026', 'cond-mid',
-            'question-mid', 'yes-mid', 'no-mid', 'yes-mid', 'YES',
-            1, 1, 0, 1, '0.01', '5', '{}',
+                'question-mid', 'yes-mid', 'no-mid', 'yes-mid', 'YES',
+            1, ?, 0, 1, '0.01', '5', '{}',
             '{"clobTokenIds":["yes-mid","no-mid"],"outcomes":["Yes","No"]}',
             1, '0.41', '0.43', '{}',
             '2026-05-19T08:00:00+00:00',
@@ -316,7 +317,7 @@ def _insert_persisted_reader_snapshot(
             '2026-05-20T10:15:00+00:00'
         )
         """,
-        (market_end_at, market_end_at, market_end_at),
+        (active, market_end_at, market_end_at, market_end_at),
     )
     conn.commit()
 
@@ -3289,6 +3290,69 @@ class TestForwardMarketSubstrateProducer:
         assert market["sports_start_at"] == "2026-05-20T12:00:00+00:00"
         assert market["hours_to_resolution"] == 1.9166666666666667
         assert market["hours_since_open"] == 26.083333333333332
+
+    def test_persisted_reader_does_not_verify_snapshot_defined_partial_support(self):
+        conn = _make_persisted_substrate_conn()
+        conn.execute(
+            """
+            INSERT INTO market_events_v2 (
+                market_slug, city, target_date, temperature_metric,
+                condition_id, token_id, range_label, range_low,
+                range_high, recorded_at
+            ) VALUES (
+                'lowest-temperature-in-chicago-on-april-30-2026',
+                'Chicago', '2026-04-30', 'low', 'cond-mid', 'yes-mid',
+                '36-37°F', 36.0, 37.0, '2026-05-20T09:59:00+00:00'
+            )
+            """
+        )
+        _insert_persisted_reader_snapshot(conn)
+
+        snapshot = ms.read_persisted_weather_markets(
+            conn,
+            now_utc=datetime(2026, 5, 20, 10, 5, tzinfo=timezone.utc),
+            max_age_seconds=900,
+        )
+
+        assert snapshot.authority == "STALE"
+        assert snapshot.events == []
+
+    def test_persisted_reader_keeps_negrisk_active_false_snapshot_executable(self):
+        conn = _make_persisted_substrate_conn()
+        for condition_id, label, low, high, token in (
+            ("cond-low", "35°F or lower", None, 35.0, "yes-low"),
+            ("cond-mid", "36-37°F", 36.0, 37.0, "yes-mid"),
+            ("cond-high", "38°F or higher", 38.0, None, "yes-high"),
+        ):
+            conn.execute(
+                """
+                INSERT INTO market_events_v2 (
+                    market_slug, city, target_date, temperature_metric,
+                    condition_id, token_id, range_label, range_low,
+                    range_high, recorded_at
+                ) VALUES (?, 'Chicago', '2026-04-30', 'low', ?, ?, ?, ?, ?,
+                    '2026-05-20T09:59:00+00:00')
+                """,
+                (
+                    "lowest-temperature-in-chicago-on-april-30-2026",
+                    condition_id,
+                    token,
+                    label,
+                    low,
+                    high,
+                ),
+            )
+        _insert_persisted_reader_snapshot(conn, active=0)
+
+        snapshot = ms.read_persisted_weather_markets(
+            conn,
+            now_utc=datetime(2026, 5, 20, 10, 5, tzinfo=timezone.utc),
+            max_age_seconds=900,
+        )
+
+        assert snapshot.authority == "VERIFIED"
+        executable = [o for o in snapshot.events[0]["outcomes"] if o["executable"]]
+        assert [o["condition_id"] for o in executable] == ["cond-mid"]
 
     def test_persisted_reader_preserves_yes_and_no_quote_sides_when_no_is_newer(self):
         """RELATIONSHIP: per-side snapshots must not collapse into one condition quote."""
