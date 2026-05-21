@@ -2252,37 +2252,30 @@ def _row_value(row, index: int, key: str):
 def _latest_exit_snapshot_identity_row(conn, pos):
     if conn is None:
         return None
-    identifiers = {
-        str(value).strip()
-        for value in (
-            getattr(pos, "token_id", ""),
-            getattr(pos, "no_token_id", ""),
-            getattr(pos, "market_id", ""),
-            getattr(pos, "condition_id", ""),
-        )
-        if value not in (None, "")
-    }
+    identifiers: list[str] = []
+    for value in (
+        getattr(pos, "token_id", ""),
+        getattr(pos, "no_token_id", ""),
+        getattr(pos, "market_id", ""),
+        getattr(pos, "condition_id", ""),
+    ):
+        identifier = str(value or "").strip()
+        if identifier and identifier not in identifiers:
+            identifiers.append(identifier)
     if not identifiers:
         return None
-    clauses: list[str] = []
-    params: list[str] = []
-    for value in sorted(identifiers):
-        clauses.extend(
-            [
-                "selected_outcome_token_id = ?",
-                "yes_token_id = ?",
-                "no_token_id = ?",
-                "condition_id = ?",
-                "gamma_market_id = ?",
-            ]
-        )
-        params.extend([value, value, value, value, value])
+    padded_identifiers = (identifiers + ["__zeus_no_exit_snapshot_identifier__"] * 4)[:4]
+    params = padded_identifiers * 5
     try:
         return conn.execute(
-            f"""
+            """
             SELECT yes_token_id, no_token_id, condition_id, question_id
               FROM executable_market_snapshots
-             WHERE {' OR '.join(clauses)}
+             WHERE selected_outcome_token_id IN (?, ?, ?, ?)
+                OR yes_token_id IN (?, ?, ?, ?)
+                OR no_token_id IN (?, ?, ?, ?)
+                OR condition_id IN (?, ?, ?, ?)
+                OR gamma_market_id IN (?, ?, ?, ?)
              ORDER BY captured_at DESC, snapshot_id DESC
              LIMIT 1
             """,
