@@ -142,7 +142,7 @@ def heartbeat_cadence_seconds_from_env() -> int:
 def heartbeat_http_timeout_seconds_from_env(cadence_seconds: int) -> float:
     raw = os.environ.get("ZEUS_HEARTBEAT_HTTP_TIMEOUT_SECONDS")
     if raw is None or raw == "":
-        value = DEFAULT_HEARTBEAT_HTTP_TIMEOUT_SECONDS
+        value = min(DEFAULT_HEARTBEAT_HTTP_TIMEOUT_SECONDS, float(cadence_seconds) / 2.0)
     else:
         try:
             value = float(raw)

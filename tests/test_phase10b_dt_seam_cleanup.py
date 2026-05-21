@@ -747,7 +747,10 @@ class TestRCPV2RowCountSensor:
                 "positions": [{"trade_id": "stale"}],
             },
             "runtime": {"chain_state_counts": {"exit_pending_missing": 1}},
-            "strategy": {"opening_inertia": {"open_positions": 1, "open_exposure_usd": 1.86, "realized_pnl": 1.0}},
+            "strategy": {
+                "opening_inertia": {"open_positions": 1, "open_exposure_usd": 1.86, "realized_pnl": 1.0},
+                "settlement_capture": {"open_positions": 9, "open_exposure_usd": 9.99},
+            },
             "execution": {"overall": {"entry_attempted": 99}},
             "risk": {"infrastructure_level": "GREEN", "infrastructure_issues": []},
         }))
@@ -810,6 +813,8 @@ class TestRCPV2RowCountSensor:
         assert status["runtime"]["pulse_refreshed"] is True
         assert status["strategy"]["opening_inertia"]["open_positions"] == 2
         assert status["strategy"]["opening_inertia"]["open_exposure_usd"] == 0.03
+        assert status["strategy"]["opening_inertia"]["realized_pnl"] == 1.0
+        assert "settlement_capture" not in status["strategy"]
         assert status["execution"] == {
             "pulse_only": True,
             "current_open_entry_orders": {"status": "ok", "orders": 2},

@@ -158,6 +158,18 @@ def test_default_heartbeat_timeout_budget_is_shorter_than_cadence(monkeypatch):
     assert cadence + timeout < 5.0
 
 
+def test_default_heartbeat_timeout_derives_below_one_second_cadence(monkeypatch):
+    """RELATIONSHIP: tighter cadence still gets a valid default timeout."""
+    monkeypatch.setenv("ZEUS_HEARTBEAT_CADENCE_SECONDS", "1")
+    monkeypatch.delenv("ZEUS_HEARTBEAT_HTTP_TIMEOUT_SECONDS", raising=False)
+
+    cadence = heartbeat_cadence_seconds_from_env()
+    timeout = heartbeat_http_timeout_seconds_from_env(cadence)
+
+    assert cadence == 1
+    assert 0.0 < timeout < cadence
+
+
 def test_heartbeat_timeout_env_cannot_cover_full_cadence(monkeypatch):
     monkeypatch.setenv("ZEUS_HEARTBEAT_HTTP_TIMEOUT_SECONDS", "5")
 

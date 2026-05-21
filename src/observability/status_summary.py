@@ -232,10 +232,9 @@ def _refresh_minimal_runtime_read_model_for_status(status: dict) -> bool:
         "day0_positions": int(position_view.get("day0_positions", 0)),
         "pulse_refreshed": True,
     }
-    strategy = status.setdefault("strategy", {})
-    if not isinstance(strategy, dict):
-        strategy = {}
-        status["strategy"] = strategy
+    prior_strategy = status.get("strategy") if isinstance(status.get("strategy"), dict) else {}
+    strategy = {}
+    status["strategy"] = strategy
     open_by_strategy: dict[str, dict[str, float]] = {}
     for position in position_view.get("positions", []):
         if not isinstance(position, dict):
@@ -254,15 +253,19 @@ def _refresh_minimal_runtime_read_model_for_status(status: dict) -> bool:
         )
         bucket["unrealized_pnl"] += float(position.get("unrealized_pnl", 0.0) or 0.0)
     for strategy_key, open_metrics in open_by_strategy.items():
-        bucket = strategy.setdefault(strategy_key, {})
-        if isinstance(bucket, dict):
-            bucket["open_positions"] = int(open_metrics["open_positions"])
-            bucket["open_exposure_usd"] = round(open_metrics["open_exposure_usd"], 2)
-            bucket["unrealized_pnl"] = round(open_metrics["unrealized_pnl"], 2)
-            bucket["total_pnl"] = round(
-                float(bucket.get("realized_pnl", 0.0) or 0.0) + bucket["unrealized_pnl"],
-                2,
-            )
+        prior_bucket = prior_strategy.get(strategy_key) if isinstance(prior_strategy, dict) else {}
+        realized_pnl = (
+            float(prior_bucket.get("realized_pnl", 0.0) or 0.0)
+            if isinstance(prior_bucket, dict)
+            else 0.0
+        )
+        strategy[strategy_key] = {
+            "open_positions": int(open_metrics["open_positions"]),
+            "open_exposure_usd": round(open_metrics["open_exposure_usd"], 2),
+            "unrealized_pnl": round(open_metrics["unrealized_pnl"], 2),
+            "realized_pnl": round(realized_pnl, 2),
+            "total_pnl": round(realized_pnl + round(open_metrics["unrealized_pnl"], 2), 2),
+        }
     return True
 
 
