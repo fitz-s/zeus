@@ -383,7 +383,7 @@ def _read_v2_snapshot_metadata(
         try:
             row = conn.execute(
                 f"""
-                SELECT boundary_ambiguous, causality_status, snapshot_id
+                SELECT boundary_ambiguous, causality_status, snapshot_id, bin_grid_id
                 FROM {sp}ensemble_snapshots_v2
                 WHERE city = ?
                   AND target_date = ?
@@ -393,7 +393,34 @@ def _read_v2_snapshot_metadata(
                 """,
                 (city_name, target_date, temperature_metric, snapshot_id),
             ).fetchone()
-        except sqlite3.OperationalError:
+        except sqlite3.OperationalError as _oe:
+            # Column bin_grid_id may not exist on older/test schemas (added via
+            # ALTER TABLE in SCHEMA_FORECASTS_VERSION 5). Fall back to query
+            # without bin_grid_id so boundary_ambiguous/causality_status still work.
+            if "bin_grid_id" in str(_oe).lower() or "no such column" in str(_oe).lower():
+                try:
+                    row = conn.execute(
+                        f"""
+                        SELECT boundary_ambiguous, causality_status, snapshot_id
+                        FROM {sp}ensemble_snapshots_v2
+                        WHERE city = ?
+                          AND target_date = ?
+                          AND temperature_metric = ?
+                          AND snapshot_id = ?
+                        LIMIT 1
+                        """,
+                        (city_name, target_date, temperature_metric, snapshot_id),
+                    ).fetchone()
+                    if row is None:
+                        return {}
+                    return {
+                        "boundary_ambiguous": bool(row["boundary_ambiguous"]),
+                        "causality_status": str(row["causality_status"]),
+                        "snapshot_id": row["snapshot_id"],
+                        "bin_grid_id": None,  # column absent in this schema version
+                    }
+                except sqlite3.OperationalError:
+                    continue
             continue
         except Exception:
             return {}
@@ -403,6 +430,7 @@ def _read_v2_snapshot_metadata(
             "boundary_ambiguous": bool(row["boundary_ambiguous"]),
             "causality_status": str(row["causality_status"]),
             "snapshot_id": row["snapshot_id"],
+            "bin_grid_id": row["bin_grid_id"] if row["bin_grid_id"] is not None else None,
         }
     return {}
 
@@ -2089,6 +2117,8 @@ def evaluate_candidate(
     # SIBLING" for the closure narrative.
     from src.engine.dispatch import is_settlement_day_dispatch
     is_day0_mode = is_settlement_day_dispatch(candidate)
+    # T4 F4: stash for deferred Day0 nowcast write (populated inside is_day0_mode block).
+    _nowcast_write_params: "dict | None" = None
     selected_method = (
         EntryMethod.DAY0_OBSERVATION.value
         if is_day0_mode
@@ -2683,6 +2713,8 @@ def evaluate_candidate(
         # fit_run_id NOT NULL FK: a missing fit means no write (fail-safe).
         # conn=None below: write_nowcast_run acquires its own forecasts connection
         # (INV-37: world conn from evaluate_candidate must not touch forecasts DB).
+        # T4 F4: deferred write — stash params here, write after v2_snapshot_meta
+        # is populated so bin_grid_id can be threaded from ensemble_snapshots_v2.
         if temperature_metric.is_high() and hours_remaining <= 6.0:
             _obs_time_for_nowcast = _day0_observation_field(
                 candidate.observation, "observation_time"
@@ -2710,28 +2742,18 @@ def evaluate_candidate(
                             round_fn=settlement_semantics.round_values,
                         )
                         _p_nowcast_vec = _nowcast.p_vector(bins)
-                        try:
-                            write_nowcast_run(
-                                market_slug=str(candidate.slug or ""),
-                                temperature_metric=temperature_metric.temperature_metric,
-                                target_date=str(target_date),
-                                observation_time=str(_obs_time_for_nowcast),
-                                fit_run_id=_horizon_model.fit_run_id,
-                                p_nowcast=_p_nowcast_vec,
-                                p_now_raw=p_raw,
-                                hours_remaining=hours_remaining,
-                                daypart=temporal_context.daypart,
-                                source="live_nowcast",
-                                conn=None,  # acquires own forecasts conn; world conn must not be passed
-                            )
-                        except Exception as _nowcast_write_exc:
-                            logger.warning(
-                                "[DAY0_NOWCAST_WRITE_FAILED] slug=%s metric=%s exc=%s",
-                                candidate.slug,
-                                temperature_metric.temperature_metric,
-                                _nowcast_write_exc,
-                            )
-                            _cnt_inc("day0_nowcast_write_failed_total")
+                        _nowcast_write_params = {
+                            "market_slug": str(candidate.slug or ""),
+                            "temperature_metric": temperature_metric.temperature_metric,
+                            "target_date": str(target_date),
+                            "observation_time": str(_obs_time_for_nowcast),
+                            "fit_run_id": _horizon_model.fit_run_id,
+                            "p_nowcast": _p_nowcast_vec,
+                            "p_now_raw": p_raw,
+                            "hours_remaining": hours_remaining,
+                            "daypart": temporal_context.daypart,
+                            "source": "live_nowcast",
+                        }
                 except _NowcastNotApplicableHorizon:
                     pass  # horizon guard fired; no write
         raw_arr = extrema.maxes if extrema.maxes is not None else extrema.mins
@@ -2862,6 +2884,40 @@ def evaluate_candidate(
             rejection_reason_enum=NoTradeReason.DT7_BOUNDARY_DAY_AMBIGUOUS,
             rejection_reason_detail="DT7_boundary_day_ambiguous",
         )]
+
+    # T4 F4: deferred Day0 nowcast write — now that v2_snapshot_meta has bin_grid_id.
+    # _nowcast_write_params is None unless Day0 high-mode path stashed params above.
+    # SEV-1: refuse write when bin_grid_id is None — writing NULL violates the
+    # JOIN-MATCH antibody (test_inv_bin_grid_propagation). Increment dedicated counter
+    # so the gap is observable in monitoring without silently corrupting the table.
+    if _nowcast_write_params is not None:
+        _bin_grid_id_for_write = v2_snapshot_meta.get("bin_grid_id")
+        if _bin_grid_id_for_write is None:
+            logger.warning(
+                "[DAY0_NOWCAST_WRITE_SKIPPED_NO_BIN_GRID_ID] slug=%s metric=%s "
+                "snapshot_id=%s — bin_grid_id missing from v2_snapshot_meta; "
+                "refusing write to preserve JOIN-MATCH invariant",
+                _nowcast_write_params.get("market_slug"),
+                _nowcast_write_params.get("temperature_metric"),
+                snapshot_id,
+            )
+            _cnt_inc("day0_nowcast_write_skipped_no_bin_grid_id_total")
+        else:
+            try:
+                from src.state.day0_nowcast_store import write_nowcast_run
+                write_nowcast_run(
+                    **_nowcast_write_params,
+                    bin_grid_id=_bin_grid_id_for_write,
+                    conn=None,  # acquires own forecasts conn; world conn must not be passed
+                )
+            except Exception as _nowcast_write_exc:
+                logger.warning(
+                    "[DAY0_NOWCAST_WRITE_FAILED] slug=%s metric=%s exc=%s",
+                    _nowcast_write_params.get("market_slug"),
+                    _nowcast_write_params.get("temperature_metric"),
+                    _nowcast_write_exc,
+                )
+                _cnt_inc("day0_nowcast_write_failed_total")
 
     if using_period_extrema:
         # Executable forecast-reader rows are forecast-authority inputs. The

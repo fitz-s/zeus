@@ -210,6 +210,22 @@ tables:
       upstream ensemble_snapshots_v2.bin_grid_id covers the 24h lifecycle bin evolution.
       SCHEMA_FORECASTS_VERSION 4. CHECK (schema_version IN (3, 4)) for migration window.
 
+  - name: market_microstructure_snapshots
+    db: forecasts
+    schema_class: forecast_class
+    schema_version_owner: SCHEMA_FORECASTS_VERSION
+    created_by: "init_schema_forecasts (SCHEMA_FORECASTS_VERSION 5, PR #238 2026-05-21)"
+    pk_col: id
+    notes: >
+      Phase 2 T4 (PHASE_2_ULTRAPLAN.md v3.1 §7, sha 00c2399742, production PR #238 2026-05-21):
+      microstructure observational evidence per snapshot. PK: id (AUTOINCREMENT).
+      Business key: snapshot_id (NOT NULL UNIQUE). Columns: id, snapshot_id,
+      event_slug, condition_id, captured_at_iso, wide_spread_display_substitution (0/1),
+      spread_observed_window_ms, depth_at_best_ask, polymarket_end_anchor_source,
+      bin_grid_id, bin_schema_version, schema_version (DEFAULT 5 CHECK IN (5)), recorded_at.
+      Writer: src/analysis/market_analysis_vnext.py MarketAnalysisVNext.compute()
+      via caller-provided conn (INV-37). SCHEMA_FORECASTS_VERSION 5 live.
+
   # ---------------------------------------------------------------------------
   # LEGACY_ARCHIVED — ghost copies of forecast-class tables on world.db
   # Same table names as forecast-class entries above, but db: world.

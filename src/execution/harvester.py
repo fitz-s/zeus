@@ -39,6 +39,7 @@ from src.state.decision_chain import (
 from src.state.db import (
     get_forecasts_connection,
     get_trade_connection,
+    get_world_connection,
     log_market_event_outcomes_v2,
     log_settlement_event,
     log_settlement_v2,
@@ -572,6 +573,10 @@ def enqueue_redeem_command(
     from src/execution/settlement_commands.py (read-only import; that module
     is NOT modified by T1C).
 
+    T4 wire: polymarket_end_anchor_source is looked up from decision_events
+    (accessible via world ATTACH on conn) by condition_id. Falls back to ""
+    so request_redeem defaults to 'unknown_legacy' when no decision_event exists.
+
     Returns dict with keys: status ("queued" | "already_exists" | "error"),
     command_id (str | None), reason (str | None).
     """
@@ -583,6 +588,35 @@ def enqueue_redeem_command(
     try:
         resolved_market_id = market_id or condition_id
         assert_settlement_schema_ready(conn)
+
+        # T4: look up anchor source from decision_events (world-class table).
+        # decision_events lives on zeus-world.db, NOT on trade_conn. Must open
+        # world connection directly — querying via trade_conn raises
+        # "no such table: decision_events" (swallowed by broad except, silently dead).
+        # decision_events.condition_id is nullable; IS NOT NULL guard required.
+        _anchor_source = ""
+        if condition_id:
+            try:
+                _world_conn = get_world_connection(write_class=None)
+                try:
+                    _anchor_row = _world_conn.execute(
+                        """
+                        SELECT polymarket_end_anchor_source
+                        FROM decision_events
+                        WHERE condition_id = ?
+                          AND polymarket_end_anchor_source IS NOT NULL
+                        ORDER BY decision_time DESC
+                        LIMIT 1
+                        """,
+                        (condition_id,),
+                    ).fetchone()
+                    if _anchor_row is not None:
+                        _anchor_source = str(_anchor_row[0] or "")
+                finally:
+                    _world_conn.close()
+            except sqlite3.OperationalError:
+                pass  # world DB absent or decision_events missing in test envs; fall back to ""
+
         existing = conn.execute(
             """
             SELECT command_id FROM settlement_commands
@@ -604,6 +638,7 @@ def enqueue_redeem_command(
             token_amounts=token_amounts or {},
             conn=conn,
             winning_index_set=winning_index_set,
+            polymarket_end_anchor_source=_anchor_source,
         )
         logger.info(
             "pUSD redemption for %s (condition=%s) recorded in R1 settlement command ledger: %s",

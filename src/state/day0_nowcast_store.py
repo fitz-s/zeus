@@ -131,6 +131,8 @@ def write_nowcast_run(
     hours_remaining: float,
     daypart: str,
     source: str = "live_nowcast",
+    bin_grid_id: Optional[str] = None,
+    bin_schema_version: Optional[str] = None,
     conn: Optional[sqlite3.Connection] = None,
 ) -> str:
     """Write a day0_nowcast_runs row. Returns the nowcast_event_id (nei_v1_ hash).
@@ -141,6 +143,8 @@ def write_nowcast_run(
     conn=None -> get_forecasts_connection(write_class=WriteClass.LIVE).
 
     p_nowcast, p_now_raw: np.ndarray or None; stored as JSON arrays.
+    bin_grid_id, bin_schema_version: propagated from ensemble_snapshots_v2
+        (F4 retrofit — SCHEMA_FORECASTS_VERSION 5, T4 2026-05-21).
     """
     from src.state.db import (
         SCHEMA_FORECASTS_VERSION,
@@ -190,9 +194,10 @@ def write_nowcast_run(
                     nowcast_event_id, fit_run_id,
                     p_nowcast_json, p_now_raw_json,
                     hours_remaining, daypart,
-                    schema_version, source
+                    schema_version, source,
+                    bin_grid_id, bin_schema_version
                 ) VALUES (
-                    ?,?,  ?,?,?,  ?,?,  ?,?,  ?,?,  ?,?
+                    ?,?,  ?,?,?,  ?,?,  ?,?,  ?,?,  ?,?,  ?,?
                 )
                 """,
                 (
@@ -202,6 +207,7 @@ def write_nowcast_run(
                     p_nowcast_json, p_now_raw_json,
                     float(hours_remaining), daypart,
                     SCHEMA_FORECASTS_VERSION, source,
+                    bin_grid_id, bin_schema_version,
                 ),
             )
             conn.commit()
