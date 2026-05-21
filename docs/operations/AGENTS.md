@@ -192,6 +192,10 @@ make a surface default-read unless `current_state.md` routes it.
 | `task_2026-05-21_live_family_selection_economic_floor/PLAN.md` | topology planning packet | Plan evidence for blocking mutually-exclusive family siblings before scalar Kelly and rejecting low-quality penny passive entries |
 | `task_2026-05-21_live_family_selection_complete/` | plan packet container | Planning-lock evidence for completing family decision object, passive fill context, no-trade persistence, and trade DB exposure authority |
 | `task_2026-05-21_live_family_selection_complete/PLAN.md` | topology planning packet | Plan evidence for the stacked PR after #246 that makes family dedup auditable and uses command/order/trade facts in family exposure gating |
+| `task_2026-05-21_live_family_vector_fill_model/` | plan packet container | Task ledger and source analyses for completing remaining live-money findings after #246/#249 |
+| `task_2026-05-21_live_family_vector_fill_model/task.md` | task ledger | Per-bug progress ledger referencing the two original analysis packets to prevent compaction drift |
+| `task_2026-05-21_live_family_vector_fill_model/analysis_1_family_selection_economic_floor.md` | packet source analysis | Captured first review packet covering family selection, economic floors, passive maker context, no-trade persistence, and exposure authority |
+| `task_2026-05-21_live_family_vector_fill_model/analysis_2_live_endpoint_asymmetry.md` | packet source analysis | Captured second review packet covering scanner/snapshot semantics, topology overlay, scheduler liveness, order reducer, and source-quality gates |
 | `LIVE_LAUNCH_HANDOFF.md` | Live launch handoff document for daemon deployment |
 | `docs/historical_evidence/UNMATCHED_GAMMA_CITIES_2026_05_07.md` | Unmatched gamma cities investigation evidence (2026-05-07) |
 | `docs/historical_evidence/CLOUD_EXTRACT_PATCH_2026_05_07.md` | Cloud extract patch evidence (2026-05-07) |
