@@ -120,7 +120,7 @@ def _run_mode(mode: DiscoveryMode):
         _write_scheduler_health(
             f"run_mode:{mode.value}",
             failed=True,
-            failure_reason=str(e),
+            reason=str(e),
         )
         try:
             from src.observability.status_summary import write_status
@@ -1943,24 +1943,24 @@ def _startup_world_db_schema_ready_check() -> str:
 
 
 def _startup_world_db_schema_prepare() -> str:
-    """Idempotently prepare world DB schema before the read-only boot proof.
+    """Idempotently migrate an existing world DB before read-only boot proof.
 
     Live boot previously proved schema currency in read-only mode before any
     sanctioned world DB initialization could run. A merged SCHEMA_VERSION bump
     could therefore wedge the daemon indefinitely until an operator ran manual
     schema preparation. This helper keeps the final authority as the read-only
     user_version proof while allowing existing stale world DBs to pass through
-    the normal idempotent init_schema() path first.
+    the normal idempotent init_schema() path first. This may perform bounded
+    startup DDL on ``state/zeus-world.db`` when code has advanced ahead of the
+    DB user_version; missing DBs and future-schema DBs still fail closed.
     """
-    import sqlite3
-
     import src.state.db as db_module
 
     path = db_module.ZEUS_WORLD_DB_PATH
     if not path.exists():
         raise FileNotFoundError(f"{path} does not exist")
 
-    conn = sqlite3.connect(str(path), timeout=30.0, isolation_level=None)
+    conn = db_module.get_world_connection(write_class="live")
     try:
         row = conn.execute("PRAGMA user_version").fetchone()
         current_version = int(row[0]) if row and row[0] is not None else 0
@@ -1978,6 +1978,7 @@ def _startup_world_db_schema_prepare() -> str:
             expected_version,
         )
         db_module.init_schema(conn)
+        conn.commit()
         db_module.assert_schema_current(conn)
         row = conn.execute("PRAGMA user_version").fetchone()
         prepared_version = int(row[0]) if row and row[0] is not None else 0

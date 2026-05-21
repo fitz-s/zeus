@@ -879,6 +879,43 @@ def test_recorded_maker_fill_economic_drift_appends_correction_and_reprojects(co
     assert lot["source_trade_fact_id"] == rows[-1]["trade_fact_id"]
 
 
+def test_local_order_open_uses_canonical_order_truth_over_later_weaker_fact(conn):
+    """Relationship C: weaker later facts cannot reopen terminal order truth."""
+    from src.execution.exchange_reconcile import _local_order_is_open
+    from src.state.venue_command_repo import append_order_fact
+
+    seed_command(conn, state="ACKED", size=5.0, price=0.34)
+    append_order_fact(
+        conn,
+        venue_order_id="ord-m5",
+        command_id="cmd-m5",
+        state="MATCHED",
+        remaining_size="0",
+        matched_size="5",
+        source="REST",
+        observed_at=NOW.isoformat(),
+        raw_payload_hash=hashlib.sha256(b"terminal-filled").hexdigest(),
+        raw_payload_json={"proof": "terminal-filled"},
+    )
+    append_order_fact(
+        conn,
+        venue_order_id="ord-m5",
+        command_id="cmd-m5",
+        state="RESTING",
+        remaining_size="0.01",
+        matched_size="4.99",
+        source="REST",
+        observed_at=(NOW + timedelta(seconds=5)).isoformat(),
+        raw_payload_hash=hashlib.sha256(b"later-weak-resting").hexdigest(),
+        raw_payload_json={"proof": "later-weak-resting"},
+    )
+    command = conn.execute(
+        "SELECT * FROM venue_commands WHERE command_id = 'cmd-m5'"
+    ).fetchone()
+
+    assert _local_order_is_open(conn, dict(command)) is False
+
+
 def test_failed_or_retrying_trade_fact_does_not_advance_command_fill_state(conn):
     from src.execution.exchange_reconcile import run_reconcile_sweep
 

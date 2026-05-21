@@ -654,10 +654,14 @@ def _launchd_contracts(
 def _status_age_seconds(timestamp: str) -> float | None:
     if not timestamp:
         return None
+    if not isinstance(timestamp, str):
+        return None
     try:
         ts = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
-    except ValueError:
+    except (TypeError, ValueError):
         return None
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
     return max(0.0, (datetime.now(timezone.utc) - ts).total_seconds())
 
 
@@ -1011,47 +1015,80 @@ def _live_health_composite_status() -> dict:
             "error": str(exc),
         }
 
-    surfaces = payload.get("surfaces") if isinstance(payload, dict) else {}
-    failing_surfaces = payload.get("failing_surfaces") if isinstance(payload, dict) else []
-    issue = None
-    if isinstance(failing_surfaces, list) and failing_surfaces:
-        first_surface = str(failing_surfaces[0])
-        surface = surfaces.get(first_surface) if isinstance(surfaces, dict) else None
-        if isinstance(surface, dict):
-            issue = surface.get("issue")
-    if not issue and isinstance(payload, dict):
-        issue = payload.get("issue")
-
-    computed_at = payload.get("computed_at") if isinstance(payload, dict) else None
-    computed_age_seconds = _status_age_seconds(computed_at or "")
-    if computed_at and computed_age_seconds is None:
+    if not isinstance(payload, dict):
         return {
             "ok": False,
             "path": str(path),
-            "status": payload.get("status") if isinstance(payload, dict) else "invalid",
-            "healthy": payload.get("healthy") if isinstance(payload, dict) else None,
+            "status": "invalid",
+            "issue": "LIVE_HEALTH_COMPOSITE_NOT_OBJECT",
+        }
+
+    missing = _missing_required_keys(
+        payload,
+        ("healthy", "status", "surfaces", "failing_surfaces", "computed_at"),
+    )
+    if missing:
+        return {
+            "ok": False,
+            "path": str(path),
+            "status": payload.get("status", "invalid"),
+            "healthy": payload.get("healthy"),
+            "failing_surfaces": payload.get("failing_surfaces")
+            if isinstance(payload.get("failing_surfaces"), list)
+            else [],
+            "issue": f"LIVE_HEALTH_COMPOSITE_MISSING_KEYS({','.join(missing)})",
+        }
+
+    surfaces = payload.get("surfaces")
+    failing_surfaces = payload.get("failing_surfaces")
+    if not isinstance(surfaces, dict) or not isinstance(failing_surfaces, list):
+        return {
+            "ok": False,
+            "path": str(path),
+            "status": payload.get("status", "invalid"),
+            "healthy": payload.get("healthy"),
             "failing_surfaces": failing_surfaces if isinstance(failing_surfaces, list) else [],
+            "issue": "LIVE_HEALTH_COMPOSITE_INVALID_SHAPE",
+        }
+    issue = None
+    if failing_surfaces:
+        first_surface = str(failing_surfaces[0])
+        surface = surfaces.get(first_surface)
+        if isinstance(surface, dict):
+            issue = surface.get("issue")
+    if not issue:
+        issue = payload.get("issue")
+
+    computed_at = payload.get("computed_at")
+    computed_age_seconds = _status_age_seconds(computed_at)
+    if computed_age_seconds is None:
+        return {
+            "ok": False,
+            "path": str(path),
+            "status": payload.get("status", "invalid"),
+            "healthy": payload.get("healthy"),
+            "failing_surfaces": failing_surfaces,
             "issue": "LIVE_HEALTH_COMPOSITE_UNPARSEABLE_COMPUTED_AT",
         }
     if computed_age_seconds is not None and computed_age_seconds > LIVE_HEALTH_COMPOSITE_STALE_SECONDS:
         return {
             "ok": False,
             "path": str(path),
-            "status": payload.get("status") if isinstance(payload, dict) else "invalid",
-            "healthy": payload.get("healthy") if isinstance(payload, dict) else None,
-            "failing_surfaces": failing_surfaces if isinstance(failing_surfaces, list) else [],
+            "status": payload.get("status", "invalid"),
+            "healthy": payload.get("healthy"),
+            "failing_surfaces": failing_surfaces,
             "computed_at": computed_at,
             "computed_age_seconds": round(computed_age_seconds, 1),
             "issue": f"LIVE_HEALTH_COMPOSITE_STALE({computed_age_seconds:.0f}s)",
         }
 
-    ok = isinstance(payload, dict) and payload.get("healthy") is not False and payload.get("status") != "DEGRADED"
+    ok = payload.get("healthy") is not False and payload.get("status") != "DEGRADED"
     return {
         "ok": ok,
         "path": str(path),
-        "status": payload.get("status") if isinstance(payload, dict) else "invalid",
-        "healthy": payload.get("healthy") if isinstance(payload, dict) else None,
-        "failing_surfaces": failing_surfaces if isinstance(failing_surfaces, list) else [],
+        "status": payload.get("status", "invalid"),
+        "healthy": payload.get("healthy"),
+        "failing_surfaces": failing_surfaces,
         "computed_at": computed_at,
         "computed_age_seconds": round(computed_age_seconds, 1) if computed_age_seconds is not None else None,
         "issue": None if ok else (issue or "LIVE_HEALTH_COMPOSITE_DEGRADED"),
