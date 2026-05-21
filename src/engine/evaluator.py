@@ -4573,12 +4573,15 @@ def evaluate_candidate(
                 _phase5_regime = _WRT5.UNKNOWN
             if _phase5_regime is not _WRT5.UNKNOWN:
                 _phase5_store = _RCS(conn)
-                # Collect cities present in the cluster from open positions.
-                # Use sorted() for deterministic order so w[i] aligns with sigma[i,j].
+                # Collect unique cities in the cluster from open positions.
+                # sorted(set(...)) deduplicates + gives deterministic order so
+                # w[i] aligns with sigma[i,j] from RegimeCorrelationStore.get().
                 _phase5_cities = sorted(
-                    p.city for p in portfolio.positions
-                    if p.cluster == city.cluster
-                    and hasattr(p, "city")
+                    set(
+                        p.city for p in portfolio.positions
+                        if p.cluster == city.cluster
+                        and hasattr(p, "city")
+                    )
                 ) or None
         except (ImportError, Exception):  # noqa: BLE001
             # Fail-open: if import or construction fails, store stays None
