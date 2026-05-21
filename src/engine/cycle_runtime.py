@@ -3247,8 +3247,12 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
             return "no_candidate_objects_built"
         evaluator_candidates = int(math_frontier.get("evaluator_candidates", 0) or 0)
         model_conflict = int(math_frontier.get("model_conflict", 0) or 0)
+        should_trade_true = int(math_frontier.get("should_trade_true_before_family", 0) or 0)
+        no_trades = int(summary.get("no_trades", 0) or 0)
         if evaluator_candidates > 0 and model_conflict >= evaluator_candidates:
             return "signal_conflict"
+        if evaluator_candidates > 0 and should_trade_true <= 0 and no_trades > 0:
+            return "math_rejected_before_family"
         if int(family_frontier.get("blocked_existing_family_exposure", 0) or 0) > 0:
             return "family_exposure_block"
         if (
@@ -3262,6 +3266,30 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
         ):
             return "submit_or_recovery_frontier"
         return "unclassified_frontier"
+
+    def _publish_frontier_status_proof() -> None:
+        math_frontier = _frontier("math_frontier")
+        reason_counts = math_frontier.get("rejection_reason_counts")
+        if not isinstance(reason_counts, dict):
+            reason_counts = {}
+        normalized_counts = {
+            str(key): int(value or 0)
+            for key, value in reason_counts.items()
+            if int(value or 0) > 0
+        }
+        no_trades = int(summary.get("no_trades", 0) or 0)
+        counted_no_trades = sum(normalized_counts.values())
+        if no_trades > counted_no_trades:
+            normalized_counts["unclassified_no_trade"] = no_trades - counted_no_trades
+            _frontier_set("math_frontier", "unclassified_no_trade", no_trades - counted_no_trades)
+        if normalized_counts:
+            summary["rejection_reason_counts"] = normalized_counts
+            summary["top_no_trade_reasons"] = normalized_counts
+        terminal = str(money_path_frontier.get("terminal_classification") or "")
+        if terminal in {"no_markets_after_mode_phase_filter", "market_filter_bug"}:
+            summary["no_market_reason"] = terminal
+        if "substrate_events_read" in _frontier("market_frontier"):
+            summary["market_scanner_attempted"] = True
 
     _frontier("scheduler_frontier").update(
         {
@@ -4096,9 +4124,12 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                     _frontier_set("math_frontier", "rejection_reason_counts", _reason_counts)
                 for _d in decisions:
                     _enum = getattr(_d, "rejection_reason_enum", None)
-                    if _enum is None:
+                    if _enum is None and not getattr(_d, "should_trade", False):
+                        _reason = "uncategorized"
+                    elif _enum is None:
                         continue
-                    _reason = str(getattr(_enum, "value", _enum) or "")
+                    else:
+                        _reason = str(getattr(_enum, "value", _enum) or "")
                     _reason_counts[_reason] = int(_reason_counts.get(_reason, 0) or 0) + 1
                     if _reason == "model_conflict":
                         _frontier_increment("math_frontier", "model_conflict")
@@ -4195,9 +4226,16 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                     from src.state.db_writer_lock import WriteClass
                     from src.state.no_trade_events import write_no_trade_event
                     from src.contracts.decision_natural_key import make_decision_natural_key
+                    from src.contracts.no_trade_reason import NoTradeReason
                     _no_trade_conn = get_world_connection(write_class=WriteClass.LIVE)
                     for _nd in decisions:
                         _enum = getattr(_nd, "rejection_reason_enum", None)
+                        _detail = getattr(_nd, "rejection_reason_detail", None)
+                        if _enum is None and not getattr(_nd, "should_trade", False):
+                            _enum = NoTradeReason.UNCATEGORIZED
+                            _detail = _detail or "|".join(
+                                str(reason) for reason in getattr(_nd, "rejection_reasons", [])
+                            ) or str(getattr(_nd, "rejection_stage", "") or "uncategorized")
                         if _enum is not None:
                             try:
                                 _nte_key = make_decision_natural_key(
@@ -4210,7 +4248,7 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                                 write_no_trade_event(
                                     _nte_key,
                                     _enum,
-                                    getattr(_nd, "rejection_reason_detail", None),
+                                    _detail,
                                     decision_time.isoformat(),
                                     conn=_no_trade_conn,
                                 )
@@ -5379,5 +5417,6 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
         }
     )
     money_path_frontier["terminal_classification"] = _classify_money_path_frontier()
+    _publish_frontier_status_proof()
     _flush_derived_writes()
     return portfolio_dirty, tracker_dirty
