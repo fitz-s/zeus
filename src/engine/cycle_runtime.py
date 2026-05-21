@@ -3209,6 +3209,73 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
         oracle_penalty_reload()
 
     derived_writes: list[tuple[str, object]] = []
+    money_path_frontier = summary.get("money_path_frontier")
+    if not isinstance(money_path_frontier, dict):
+        money_path_frontier = {}
+        summary["money_path_frontier"] = money_path_frontier
+
+    def _frontier(name: str) -> dict:
+        section = money_path_frontier.get(name)
+        if not isinstance(section, dict):
+            section = {}
+            money_path_frontier[name] = section
+        return section
+
+    def _frontier_increment(section_name: str, key: str, amount: int = 1) -> None:
+        section = _frontier(section_name)
+        section[key] = int(section.get(key, 0) or 0) + int(amount)
+
+    def _frontier_set(section_name: str, key: str, value) -> None:
+        _frontier(section_name)[key] = value
+
+    def _classify_money_path_frontier() -> str:
+        market_frontier = _frontier("market_frontier")
+        candidate_frontier = _frontier("candidate_frontier")
+        math_frontier = _frontier("math_frontier")
+        family_frontier = _frontier("family_frontier")
+        execution_frontier = _frontier("execution_frontier")
+        substrate_count = int(market_frontier.get("substrate_events_read", 0) or 0)
+        candidate_count = int(candidate_frontier.get("candidate_objects_built", 0) or 0)
+        if candidate_count == 0:
+            if int(market_frontier.get("dropped_phase_parse_failure", 0) or 0) > 0:
+                return "market_filter_bug"
+            if (
+                substrate_count > 0
+                and int(market_frontier.get("after_phase_or_hours_to_resolution", -1) or 0) == 0
+            ):
+                return "no_markets_after_mode_phase_filter"
+            return "no_candidate_objects_built"
+        evaluator_candidates = int(math_frontier.get("evaluator_candidates", 0) or 0)
+        model_conflict = int(math_frontier.get("model_conflict", 0) or 0)
+        if evaluator_candidates > 0 and model_conflict >= evaluator_candidates:
+            return "signal_conflict"
+        if int(family_frontier.get("blocked_existing_family_exposure", 0) or 0) > 0:
+            return "family_exposure_block"
+        if (
+            int(family_frontier.get("fallback_candidates", 0) or 0) > 0
+            and int(execution_frontier.get("final_intent_built", 0) or 0) == 0
+        ):
+            return "execution_viability_failure"
+        if (
+            int(execution_frontier.get("final_intent_built", 0) or 0) > 0
+            and int(execution_frontier.get("submit_attempts", 0) or 0) > 0
+        ):
+            return "submit_or_recovery_frontier"
+        return "unclassified_frontier"
+
+    _frontier("scheduler_frontier").update(
+        {
+            "mode": mode.value,
+            "cycle_lock_acquired": True,
+            "skipped": False,
+            "skip_reason": "",
+        }
+    )
+    _frontier("market_frontier")
+    _frontier("candidate_frontier")
+    _frontier("math_frontier")
+    _frontier("family_frontier")
+    _frontier("execution_frontier")
 
     def _queue_derived_write(name: str, writer) -> None:
         if callable(writer):
@@ -3592,24 +3659,51 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
             summary["market_substrate_unavailable_reason"] = market_snapshot.authority
     else:
         markets = deps.find_weather_markets(min_hours_to_resolution=min_hours_to_resolution)
+    _frontier_set("market_frontier", "substrate_events_read", len(markets))
+    _frontier_set(
+        "market_frontier",
+        "substrate_source",
+        summary.get("market_substrate_source", "scanner"),
+    )
     # NOTE: evaluation_started_at is set AFTER market substrate acquisition so
     # that upstream discovery I/O does not consume per-market evaluation budget.
     # Live normally reads persisted substrate here; background market_discovery
     # owns Gamma/CLOB refresh.
     evaluation_started_at = _monotonic_seconds(deps)
     if "max_hours_since_open" in params:
+        before_count = len(markets)
         markets = [m for m in markets if m["hours_since_open"] < params["max_hours_since_open"]]
+        _frontier_set("market_frontier", "after_max_hours_since_open", len(markets))
+        _frontier_set(
+            "market_frontier",
+            "dropped_by_max_hours_since_open",
+            before_count - len(markets),
+        )
     if "min_hours_since_open" in params:
+        before_count = len(markets)
         markets = [m for m in markets if m["hours_since_open"] >= params["min_hours_since_open"]]
+        _frontier_set("market_frontier", "after_min_hours_since_open", len(markets))
+        _frontier_set(
+            "market_frontier",
+            "dropped_by_min_hours_since_open",
+            before_count - len(markets),
+        )
     if "imminent_window_hours" in params:
         # Upper bound: strictly < imminent_window_hours (not <=) so opening_hunt
         # owns markets at exactly the boundary (hours_to_resolution == 24).
         window = float(params["imminent_window_hours"])
+        before_count = len(markets)
         markets = [
             m for m in markets
             if m.get("hours_to_resolution") is not None
             and 0 < m["hours_to_resolution"] < window
         ]
+        _frontier_set("market_frontier", "after_imminent_window", len(markets))
+        _frontier_set(
+            "market_frontier",
+            "dropped_by_imminent_window",
+            before_count - len(markets),
+        )
     if "max_hours_to_resolution" in params:
         # P4 site 2 of 2 (PLAN_v3 §6.P4 D-A two-clock unification).
         # Flag ON (default post-A6 2026-05-04): replace legacy filter
@@ -3621,10 +3715,7 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
         # Flag OFF (ZEUS_MARKET_PHASE_DISPATCH=0): byte-equal legacy
         # filter on hours_to_resolution (anchored at UTC endDate − now
         # via market_scanner._parse_event) — escape hatch for rollback.
-        from src.engine.dispatch import (
-            filter_market_to_settlement_day,
-            market_phase_dispatch_enabled,
-        )
+        from src.engine.dispatch import market_phase_dispatch_enabled
         # Critic R5 code-reviewer M1: stamp the flag state on the cycle
         # summary so downstream substrate / cohort attribution can
         # explain step-changes in candidate count when the operator
@@ -3633,14 +3724,81 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
         flag_on = market_phase_dispatch_enabled()
         summary["market_phase_dispatch_flag"] = flag_on
         if flag_on:
-            markets = [
-                m for m in markets
-                if filter_market_to_settlement_day(
-                    market=m, decision_time_utc=decision_time
-                )
-            ]
+            from src.strategy.market_phase import MarketPhase
+            from src.strategy.market_phase_evidence import (
+                from_market_dict as _build_filter_phase_evidence,
+            )
+
+            kept_markets = []
+            phase_drop_samples = []
+            dropped_not_settlement_day = 0
+            dropped_phase_parse_failure = 0
+            for market in markets:
+                city = market.get("city")
+                phase_value = None
+                phase_source = ""
+                failure_reason = ""
+                try:
+                    evidence = _build_filter_phase_evidence(
+                        market=market,
+                        city_timezone=getattr(city, "timezone", None),
+                        target_date_str=market.get("target_date", ""),
+                        decision_time_utc=decision_time,
+                    )
+                except Exception as exc:  # noqa: BLE001 - frontier only; filter is fail-closed.
+                    allowed = False
+                    dropped_phase_parse_failure += 1
+                    phase_source = "evidence_exception"
+                    failure_reason = str(exc)
+                else:
+                    phase_value = evidence.phase.value if evidence.phase is not None else None
+                    phase_source = evidence.phase_source
+                    failure_reason = evidence.failure_reason or ""
+                    allowed = evidence.phase == MarketPhase.SETTLEMENT_DAY
+                    if evidence.phase is None:
+                        dropped_phase_parse_failure += 1
+                if allowed:
+                    kept_markets.append(market)
+                    continue
+                if phase_value is not None:
+                    dropped_not_settlement_day += 1
+                if len(phase_drop_samples) < 10:
+                    phase_drop_samples.append(
+                        {
+                            "slug": str(market.get("slug", "") or ""),
+                            "event_id": str(market.get("event_id", "") or ""),
+                            "city": str(getattr(city, "name", "") or ""),
+                            "target_date": str(market.get("target_date", "") or ""),
+                            "temperature_metric": str(market.get("temperature_metric", "") or ""),
+                            "hours_to_resolution": market.get("hours_to_resolution"),
+                            "market_phase": phase_value,
+                            "phase_source": phase_source,
+                            "failure_reason": failure_reason,
+                        }
+                    )
+            markets = kept_markets
+            _frontier_set("market_frontier", "after_phase_or_hours_to_resolution", len(markets))
+            _frontier_set(
+                "market_frontier",
+                "dropped_not_settlement_day",
+                dropped_not_settlement_day,
+            )
+            _frontier_set(
+                "market_frontier",
+                "dropped_phase_parse_failure",
+                dropped_phase_parse_failure,
+            )
+            if phase_drop_samples:
+                _frontier_set("market_frontier", "phase_drop_samples", phase_drop_samples)
         else:
+            before_count = len(markets)
             markets = [m for m in markets if m.get("hours_to_resolution") is not None and m["hours_to_resolution"] < params["max_hours_to_resolution"]]
+            _frontier_set("market_frontier", "after_phase_or_hours_to_resolution", len(markets))
+            _frontier_set(
+                "market_frontier",
+                "dropped_by_max_hours_to_resolution",
+                before_count - len(markets),
+            )
     scan_authority = market_snapshot.authority if market_snapshot is not None else _market_scan_authority()
     summary["market_scan_authority"] = scan_authority
     _record_forward_market_substrate(markets, scan_authority)
@@ -3749,6 +3907,7 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                 break
         city = market.get("city")
         if city is None:
+            _frontier_increment("candidate_frontier", "dropped_missing_city")
             continue
         parseable_labels = [
             outcome["title"]
@@ -3814,6 +3973,8 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
         should_fetch_observation = should_fetch_settlement_day_observation(
             mode=mode, market_phase=market_phase
         )
+        if should_fetch_observation:
+            _frontier_increment("candidate_frontier", "observation_fetch_attempted")
 
         try:
             obs = (
@@ -3825,6 +3986,7 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
             from src.contracts.exceptions import MissingCalibrationError, ObservationUnavailableError
 
             if isinstance(e, (ObservationUnavailableError, MissingCalibrationError)):
+                _frontier_increment("candidate_frontier", "observation_unavailable")
                 deps.logger.warning("Skipping candidate for %s: %s", city.name, e)
                 availability_status = _availability_status_for_exception(e)
                 _record_availability_fact(
@@ -3894,6 +4056,7 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
             phase_evidence=market_phase_evidence,
         )
         summary["candidates"] += 1
+        _frontier_increment("candidate_frontier", "candidate_objects_built")
 
         try:
             # B091: forward the cycle's authoritative decision_time to the
@@ -3919,6 +4082,26 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                     entry_bankroll=entry_bankroll,
                     decision_time=decision_time,
                 )
+            _frontier_increment("math_frontier", "evaluator_candidates")
+            if decisions:
+                _frontier_increment("math_frontier", "evaluator_decisions", len(decisions))
+                _frontier_increment(
+                    "math_frontier",
+                    "should_trade_true_before_family",
+                    sum(1 for _d in decisions if getattr(_d, "should_trade", False)),
+                )
+                _reason_counts = _frontier("math_frontier").setdefault("rejection_reason_counts", {})
+                if not isinstance(_reason_counts, dict):
+                    _reason_counts = {}
+                    _frontier_set("math_frontier", "rejection_reason_counts", _reason_counts)
+                for _d in decisions:
+                    _enum = getattr(_d, "rejection_reason_enum", None)
+                    if _enum is None:
+                        continue
+                    _reason = str(getattr(_enum, "value", _enum) or "")
+                    _reason_counts[_reason] = int(_reason_counts.get(_reason, 0) or 0) + 1
+                    if _reason == "model_conflict":
+                        _frontier_increment("math_frontier", "model_conflict")
             # P2 (PLAN_v3 §6.P2 stage 2): stamp MarketPhase axis A onto
             # every returned EdgeDecision. evaluate_candidate has 30+
             # ``return [EdgeDecision(...)]`` sites; stamping at the call
@@ -3975,6 +4158,22 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                     target_date=candidate.target_date,
                     temperature_metric=candidate.temperature_metric,
                     existing_exposures=_family_exposures,
+                )
+                _frontier_increment("family_frontier", "families_seen")
+                _frontier_increment(
+                    "family_frontier",
+                    "fallback_candidates",
+                    sum(1 for _d in decisions if getattr(_d, "should_trade", False)),
+                )
+                _frontier_increment(
+                    "family_frontier",
+                    "blocked_existing_family_exposure",
+                    sum(
+                        1
+                        for _d in decisions
+                        if str(getattr(getattr(_d, "rejection_reason_enum", None), "value", ""))
+                        == "mutually_exclusive_family_dedup"
+                    ),
                 )
             # Phase 2 T2: write no_trade_events rows for rejected decisions.
             # Fail-soft: logging/learning infrastructure must not crash the cycle.
@@ -4368,6 +4567,7 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                     missing_snapshot_fields = _missing_execution_snapshot_fields(snapshot_fields)
                     snapshot_capture_error = ""
                     if str(env or "").strip().lower() == "live" and missing_snapshot_fields:
+                        _frontier_increment("execution_frontier", "snapshot_capture_attempts")
                         snapshot_fields, snapshot_capture_error = _capture_execution_snapshot_for_decision(
                             market,
                             d,
@@ -4382,6 +4582,7 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                         and not snapshot_capture_error
                         and _execution_snapshot_is_stale(conn, snapshot_fields["executable_snapshot_id"])
                     ):
+                        _frontier_increment("execution_frontier", "snapshot_capture_attempts")
                         snapshot_fields, snapshot_capture_error = _capture_execution_snapshot_for_decision(
                             market,
                             d,
@@ -4493,6 +4694,7 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                                         passive_key
                                     ]
                             _reprice_fn = getattr(deps, "reprice_from_snapshot", None)
+                            _frontier_increment("execution_frontier", "reprice_attempts")
                             if callable(_reprice_fn):
                                 snapshot_best_ask = _reprice_fn(conn, d, snapshot_fields, final_intent_context)
                             else:
@@ -5170,5 +5372,12 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
         except Exception as e:
             deps.logger.error("Evaluation failed for %s %s: %s", city.name, candidate.target_date, e, exc_info=True)
 
+    _frontier("execution_frontier").update(
+        {
+            "final_intent_built": int(summary.get("final_intents_built", 0) or 0),
+            "submit_attempts": int(summary.get("submit_attempts", 0) or 0),
+        }
+    )
+    money_path_frontier["terminal_classification"] = _classify_money_path_frontier()
     _flush_derived_writes()
     return portfolio_dirty, tracker_dirty

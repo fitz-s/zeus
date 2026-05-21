@@ -112,9 +112,18 @@ def _run_mode(mode: DiscoveryMode):
         )
         return
     try:
+        _write_scheduler_health(
+            f"run_mode:{mode.value}",
+            failed=False,
+            started=True,
+        )
         summary = run_cycle(mode)
         logger.info("%s: %s", mode.value, summary)
-        _write_scheduler_health(f"run_mode:{mode.value}", failed=False)
+        _write_scheduler_health(
+            f"run_mode:{mode.value}",
+            failed=False,
+            extra=_run_mode_business_liveness(mode, summary),
+        )
     except Exception as e:
         logger.error("%s failed: %s", mode.value, e, exc_info=True)
         _write_scheduler_health(
@@ -136,6 +145,32 @@ def _run_mode(mode: DiscoveryMode):
             logger.debug("failed to write error status for %s", mode.value, exc_info=True)
     finally:
         _cycle_lock.release()
+
+
+def _run_mode_business_liveness(mode: DiscoveryMode, summary: object) -> dict:
+    """Extract mode-specific business-plane counters from a cycle summary."""
+
+    if not isinstance(summary, dict):
+        return {
+            "last_completed_at": datetime.now(timezone.utc).isoformat(),
+            "last_mode": mode.value,
+        }
+    frontier = summary.get("money_path_frontier")
+    if not isinstance(frontier, dict):
+        frontier = {}
+    return {
+        "last_completed_at": datetime.now(timezone.utc).isoformat(),
+        "last_mode": mode.value,
+        "last_candidates": int(summary.get("candidates", 0) or 0),
+        "last_no_trades": int(summary.get("no_trades", 0) or 0),
+        "last_final_intent_built": int(summary.get("final_intents_built", 0) or 0),
+        "last_submit_attempts": int(summary.get("submit_attempts", 0) or 0),
+        "last_venue_acks": int(summary.get("venue_acks", 0) or 0),
+        "last_entry_orders_submitted": int(summary.get("entry_orders_submitted", 0) or 0),
+        "last_terminal_classification": str(
+            frontier.get("terminal_classification") or ""
+        ),
+    }
 
 
 @_scheduler_job("harvester")

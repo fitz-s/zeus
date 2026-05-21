@@ -2863,6 +2863,183 @@ def test_discovery_phase_blocks_unverified_market_scan_authority_before_evaluato
     assert artifact.no_trade_cases[0].rejection_reasons == ["market_scan_authority=NEVER_FETCHED"]
 
 
+def test_day0_candidate_zero_cycle_records_market_phase_frontier(tmp_path, monkeypatch):
+    conn = get_connection(tmp_path / "day0-frontier.db")
+    init_schema(conn)
+    artifact = CycleArtifact(mode=DiscoveryMode.DAY0_CAPTURE.value, started_at="2026-04-02T06:00:00Z")
+    summary = {"candidates": 0, "no_trades": 0}
+    market = {
+        "city": NYC,
+        "target_date": "2026-04-03",
+        "hours_since_open": 12.0,
+        "hours_to_resolution": 24.0,
+        "event_id": "evt-day0-frontier",
+        "slug": "slug-day0-frontier",
+        "temperature_metric": "high",
+        "market_end_at": "2026-04-03T23:59:00Z",
+        "endDate": "2026-04-03T23:59:00Z",
+        "outcomes": [
+            {"title": "39-40°F", "range_low": 39, "range_high": 40},
+        ],
+    }
+    monkeypatch.setenv("ZEUS_MARKET_PHASE_DISPATCH", "1")
+    deps = types.SimpleNamespace(
+        MODE_PARAMS={DiscoveryMode.DAY0_CAPTURE: {"max_hours_to_resolution": 6}},
+        find_weather_markets=lambda **kwargs: [market],
+        get_last_scan_authority=lambda: "VERIFIED",
+        DiscoveryMode=DiscoveryMode,
+        logger=types.SimpleNamespace(warning=lambda *args, **kwargs: None, error=lambda *args, **kwargs: None),
+        NoTradeCase=NoTradeCase,
+        evaluate_candidate=lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("market filtered before evaluator")
+        ),
+    )
+
+    cycle_runtime.execute_discovery_phase(
+        conn,
+        clob=None,
+        portfolio=PortfolioState(),
+        artifact=artifact,
+        tracker=StrategyTracker(),
+        limits=types.SimpleNamespace(),
+        mode=DiscoveryMode.DAY0_CAPTURE,
+        summary=summary,
+        entry_bankroll=100.0,
+        decision_time=datetime(2026, 4, 2, 6, 0, tzinfo=timezone.utc),
+        env="shadow",
+        deps=deps,
+    )
+    conn.close()
+
+    frontier = summary["money_path_frontier"]
+    assert frontier["scheduler_frontier"]["mode"] == DiscoveryMode.DAY0_CAPTURE.value
+    assert frontier["market_frontier"]["substrate_events_read"] == 1
+    assert frontier["market_frontier"]["after_phase_or_hours_to_resolution"] == 0
+    assert frontier["market_frontier"]["dropped_not_settlement_day"] == 1
+    assert frontier["candidate_frontier"].get("candidate_objects_built", 0) == 0
+    assert frontier.get("math_frontier", {}).get("evaluator_candidates", 0) == 0
+    assert frontier["terminal_classification"] == "no_markets_after_mode_phase_filter"
+    assert summary["candidates"] == 0
+
+
+def test_day0_phase_parse_failure_not_counted_as_not_settlement_day(tmp_path, monkeypatch):
+    conn = get_connection(tmp_path / "day0-frontier-parse-failure.db")
+    init_schema(conn)
+    artifact = CycleArtifact(mode=DiscoveryMode.DAY0_CAPTURE.value, started_at="2026-04-02T06:00:00Z")
+    summary = {"candidates": 0, "no_trades": 0}
+    market = {
+        "city": NYC,
+        "target_date": "not-a-date",
+        "hours_since_open": 12.0,
+        "hours_to_resolution": 24.0,
+        "event_id": "evt-day0-frontier-parse-failure",
+        "slug": "slug-day0-frontier-parse-failure",
+        "temperature_metric": "high",
+        "market_end_at": "2026-04-03T23:59:00Z",
+        "endDate": "2026-04-03T23:59:00Z",
+        "outcomes": [
+            {"title": "39-40°F", "range_low": 39, "range_high": 40},
+        ],
+    }
+    monkeypatch.setenv("ZEUS_MARKET_PHASE_DISPATCH", "1")
+    deps = types.SimpleNamespace(
+        MODE_PARAMS={DiscoveryMode.DAY0_CAPTURE: {"max_hours_to_resolution": 6}},
+        find_weather_markets=lambda **kwargs: [market],
+        get_last_scan_authority=lambda: "VERIFIED",
+        DiscoveryMode=DiscoveryMode,
+        logger=types.SimpleNamespace(warning=lambda *args, **kwargs: None, error=lambda *args, **kwargs: None),
+        NoTradeCase=NoTradeCase,
+        evaluate_candidate=lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("market filtered before evaluator")
+        ),
+    )
+
+    cycle_runtime.execute_discovery_phase(
+        conn,
+        clob=None,
+        portfolio=PortfolioState(),
+        artifact=artifact,
+        tracker=StrategyTracker(),
+        limits=types.SimpleNamespace(),
+        mode=DiscoveryMode.DAY0_CAPTURE,
+        summary=summary,
+        entry_bankroll=100.0,
+        decision_time=datetime(2026, 4, 2, 6, 0, tzinfo=timezone.utc),
+        env="shadow",
+        deps=deps,
+    )
+    conn.close()
+
+    market_frontier = summary["money_path_frontier"]["market_frontier"]
+    assert market_frontier["dropped_phase_parse_failure"] == 1
+    assert market_frontier["dropped_not_settlement_day"] == 0
+    assert summary["money_path_frontier"]["terminal_classification"] == "market_filter_bug"
+
+
+def test_model_conflict_cycle_records_math_frontier_classification(tmp_path):
+    from src.contracts.no_trade_reason import NoTradeReason
+
+    conn = get_connection(tmp_path / "model-conflict-frontier.db")
+    init_schema(conn)
+    artifact = CycleArtifact(mode=DiscoveryMode.OPENING_HUNT.value, started_at="2026-04-02T06:00:00Z")
+    summary = {"candidates": 0, "no_trades": 0}
+    market = {
+        "city": NYC,
+        "target_date": "2026-04-03",
+        "hours_since_open": 12.0,
+        "hours_to_resolution": 24.0,
+        "event_id": "evt-model-conflict-frontier",
+        "slug": "slug-model-conflict-frontier",
+        "temperature_metric": "high",
+        "market_end_at": "2026-04-03T23:59:00Z",
+        "outcomes": [
+            {"title": "39-40°F", "range_low": 39, "range_high": 40},
+        ],
+    }
+    decision = EdgeDecision(
+        should_trade=False,
+        rejection_stage="SIGNAL_QUALITY",
+        rejection_reasons=[NoTradeReason.MODEL_CONFLICT.value],
+        rejection_reason_enum=NoTradeReason.MODEL_CONFLICT,
+        rejection_reason_detail="primary forecast conflicts with GFS crosscheck",
+        decision_id="d-model-conflict-frontier",
+        decision_snapshot_id="snap-model-conflict-frontier",
+    )
+    deps = types.SimpleNamespace(
+        MODE_PARAMS={DiscoveryMode.OPENING_HUNT: {}},
+        find_weather_markets=lambda **kwargs: [market],
+        get_last_scan_authority=lambda: "VERIFIED",
+        DiscoveryMode=DiscoveryMode,
+        logger=types.SimpleNamespace(warning=lambda *args, **kwargs: None, error=lambda *args, **kwargs: None),
+        NoTradeCase=NoTradeCase,
+        MarketCandidate=MarketCandidate,
+        evaluate_candidate=lambda *args, **kwargs: [decision],
+        _classify_edge_source=lambda _mode, _edge: "",
+    )
+
+    cycle_runtime.execute_discovery_phase(
+        conn,
+        clob=None,
+        portfolio=PortfolioState(),
+        artifact=artifact,
+        tracker=StrategyTracker(),
+        limits=types.SimpleNamespace(),
+        mode=DiscoveryMode.OPENING_HUNT,
+        summary=summary,
+        entry_bankroll=100.0,
+        decision_time=datetime(2026, 4, 2, 6, 0, tzinfo=timezone.utc),
+        env="shadow",
+        deps=deps,
+    )
+    conn.close()
+
+    frontier = summary["money_path_frontier"]
+    assert frontier["candidate_frontier"]["candidate_objects_built"] == 1
+    assert frontier["math_frontier"]["evaluator_candidates"] == 1
+    assert frontier["math_frontier"]["model_conflict"] == 1
+    assert frontier["terminal_classification"] == "signal_conflict"
+
+
 def test_discovery_phase_buffers_forward_market_substrate_until_after_evaluator(monkeypatch, tmp_path):
     db_path = tmp_path / "forward-substrate-runtime.db"
     monkeypatch.setattr(db_module, "ZEUS_FORECASTS_DB_PATH", db_path)
