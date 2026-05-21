@@ -33,6 +33,7 @@ RISKGUARD_STALE_SECONDS = 5 * 60
 SOURCE_HEALTH_WRITER_STALE_SECONDS = 15 * 60
 LIVE_DB_UNKNOWN_HOLDER_SECONDS = 10 * 60
 SETTLEMENT_TRUTH_STALE_SECONDS = int(os.environ.get("ZEUS_SETTLEMENT_TRUTH_STALE_SECONDS", str(48 * 3600)))
+LIVE_HEALTH_COMPOSITE_STALE_SECONDS = 6 * 60
 
 # WAVE-4 F91+F99+F100 — daemon heartbeat staleness budgets, per
 # docs/operations/task_2026-05-16_post_pr126_audit/RUN_15_track3_f91_f86_observability.md
@@ -90,6 +91,10 @@ def _launchd_label() -> str:
 
 def _status_path() -> Path:
     return state_path("status_summary.json")
+
+
+def _live_health_composite_path() -> Path:
+    return state_path("live_health_composite.json")
 
 
 def _risk_state_path() -> Path:
@@ -990,6 +995,69 @@ def _missing_required_keys(payload: dict | None, required: tuple[str, ...], *, p
     return missing
 
 
+def _live_health_composite_status() -> dict:
+    """Read the stricter live business-plane composite when present."""
+    path = _live_health_composite_path()
+    if not path.exists():
+        return {"ok": True, "path": str(path), "status": "missing_optional", "issue": None}
+    try:
+        payload = json.loads(path.read_text())
+    except Exception as exc:
+        return {
+            "ok": False,
+            "path": str(path),
+            "status": "corrupt",
+            "issue": "LIVE_HEALTH_COMPOSITE_CORRUPT",
+            "error": str(exc),
+        }
+
+    surfaces = payload.get("surfaces") if isinstance(payload, dict) else {}
+    failing_surfaces = payload.get("failing_surfaces") if isinstance(payload, dict) else []
+    issue = None
+    if isinstance(failing_surfaces, list) and failing_surfaces:
+        first_surface = str(failing_surfaces[0])
+        surface = surfaces.get(first_surface) if isinstance(surfaces, dict) else None
+        if isinstance(surface, dict):
+            issue = surface.get("issue")
+    if not issue and isinstance(payload, dict):
+        issue = payload.get("issue")
+
+    computed_at = payload.get("computed_at") if isinstance(payload, dict) else None
+    computed_age_seconds = _status_age_seconds(computed_at or "")
+    if computed_at and computed_age_seconds is None:
+        return {
+            "ok": False,
+            "path": str(path),
+            "status": payload.get("status") if isinstance(payload, dict) else "invalid",
+            "healthy": payload.get("healthy") if isinstance(payload, dict) else None,
+            "failing_surfaces": failing_surfaces if isinstance(failing_surfaces, list) else [],
+            "issue": "LIVE_HEALTH_COMPOSITE_UNPARSEABLE_COMPUTED_AT",
+        }
+    if computed_age_seconds is not None and computed_age_seconds > LIVE_HEALTH_COMPOSITE_STALE_SECONDS:
+        return {
+            "ok": False,
+            "path": str(path),
+            "status": payload.get("status") if isinstance(payload, dict) else "invalid",
+            "healthy": payload.get("healthy") if isinstance(payload, dict) else None,
+            "failing_surfaces": failing_surfaces if isinstance(failing_surfaces, list) else [],
+            "computed_at": computed_at,
+            "computed_age_seconds": round(computed_age_seconds, 1),
+            "issue": f"LIVE_HEALTH_COMPOSITE_STALE({computed_age_seconds:.0f}s)",
+        }
+
+    ok = isinstance(payload, dict) and payload.get("healthy") is not False and payload.get("status") != "DEGRADED"
+    return {
+        "ok": ok,
+        "path": str(path),
+        "status": payload.get("status") if isinstance(payload, dict) else "invalid",
+        "healthy": payload.get("healthy") if isinstance(payload, dict) else None,
+        "failing_surfaces": failing_surfaces if isinstance(failing_surfaces, list) else [],
+        "computed_at": computed_at,
+        "computed_age_seconds": round(computed_age_seconds, 1) if computed_age_seconds is not None else None,
+        "issue": None if ok else (issue or "LIVE_HEALTH_COMPOSITE_DEGRADED"),
+    }
+
+
 def _latest_complete_riskguard_contract_row(conn: sqlite3.Connection) -> tuple[sqlite3.Row, dict] | None:
     rows = conn.execute(
         """
@@ -1035,6 +1103,12 @@ def check() -> dict:
     result["source_health_ok"] = bool(result["source_health"].get("ok"))
     if not result["source_health_ok"]:
         result["source_health_issue"] = result["source_health"].get("issue") or "LIVE_SOURCE_HEALTH_STALE"
+    result["live_health_composite"] = _live_health_composite_status()
+    result["live_health_composite_ok"] = bool(result["live_health_composite"].get("ok", True))
+    if not result["live_health_composite_ok"]:
+        result["live_health_composite_issue"] = (
+            result["live_health_composite"].get("issue") or "LIVE_HEALTH_COMPOSITE_DEGRADED"
+        )
 
     # WAVE-4 F91+F99+F100 — fold HB-1/HB-2/HB-3 staleness into healthcheck.
     # Always EVALUATED (so operators see the per-writer detail in the JSON
@@ -1307,6 +1381,7 @@ def check() -> dict:
         and bool(result.get("process_code_ok"))
         and bool(result.get("launchd_contract_ok"))
         and bool(result.get("source_health_ok"))
+        and bool(result.get("live_health_composite_ok", True))
         and bool(result.get("entry_execution_capability_ok", True))
         and bool(result.get("settlement_truth_ok"))
         and bool(result.get("db_lock_ok", True))

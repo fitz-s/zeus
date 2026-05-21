@@ -1068,6 +1068,131 @@ def test_healthcheck_uses_mode_qualified_status_and_reports_healthy(monkeypatch,
     assert healthcheck.exit_code_for(result) == 0
 
 
+def test_healthcheck_is_not_healthy_when_live_health_composite_is_degraded(monkeypatch, tmp_path):
+    """Operator health must honor business-plane composite degradation."""
+    status_path = tmp_path / "status_summary.json"
+    composite_path = tmp_path / "live_health_composite.json"
+    risk_path = tmp_path / "risk_state.db"
+    zeus_db_path = tmp_path / "zeus.db"
+    status_path.write_text(json.dumps(_status_payload()))
+    composite_path.write_text(json.dumps({
+        "healthy": False,
+        "status": "DEGRADED",
+        "failing_surfaces": ["status_summary"],
+        "surfaces": {
+            "status_summary": {
+                "ok": False,
+                "issue": "STATUS_SUMMARY_STALE(861s)",
+            },
+        },
+    }))
+    _write_risk_state(risk_path)
+    _write_no_trade_artifact(zeus_db_path)
+
+    monkeypatch.setenv("ZEUS_MODE", "live")
+    monkeypatch.setattr(healthcheck, "_status_path", lambda: status_path)
+    monkeypatch.setattr(healthcheck, "_live_health_composite_path", lambda: composite_path)
+    monkeypatch.setattr(healthcheck, "_risk_state_path", lambda: risk_path)
+    monkeypatch.setattr(healthcheck, "_zeus_db_path", lambda: zeus_db_path)
+
+    class _Result:
+        returncode = 0
+        stdout = "123\t0\tcom.zeus.live-trading\n"
+
+    monkeypatch.setattr(healthcheck.subprocess, "run", lambda *args, **kwargs: _Result())
+
+    result = healthcheck.check()
+
+    assert result["status_fresh"] is True
+    assert result["live_health_composite_ok"] is False
+    assert result["live_health_composite_issue"] == "STATUS_SUMMARY_STALE(861s)"
+    assert result["healthy"] is False
+    assert healthcheck.exit_code_for(result) == 1
+
+
+def test_healthcheck_is_not_healthy_when_live_health_composite_is_stale(monkeypatch, tmp_path):
+    """A prior healthy composite must not mask current business-plane staleness."""
+    status_path = tmp_path / "status_summary.json"
+    composite_path = tmp_path / "live_health_composite.json"
+    risk_path = tmp_path / "risk_state.db"
+    zeus_db_path = tmp_path / "zeus.db"
+    stale_computed_at = (
+        datetime.now(timezone.utc)
+        - timedelta(seconds=healthcheck.LIVE_HEALTH_COMPOSITE_STALE_SECONDS + 30)
+    ).isoformat()
+    status_path.write_text(json.dumps(_status_payload()))
+    composite_path.write_text(json.dumps({
+        "healthy": True,
+        "status": "HEALTHY",
+        "failing_surfaces": [],
+        "surfaces": {
+            "status_summary": {
+                "ok": True,
+                "issue": None,
+            },
+        },
+        "computed_at": stale_computed_at,
+    }))
+    _write_risk_state(risk_path)
+    _write_no_trade_artifact(zeus_db_path)
+
+    monkeypatch.setenv("ZEUS_MODE", "live")
+    monkeypatch.setattr(healthcheck, "_status_path", lambda: status_path)
+    monkeypatch.setattr(healthcheck, "_live_health_composite_path", lambda: composite_path)
+    monkeypatch.setattr(healthcheck, "_risk_state_path", lambda: risk_path)
+    monkeypatch.setattr(healthcheck, "_zeus_db_path", lambda: zeus_db_path)
+
+    class _Result:
+        returncode = 0
+        stdout = "123\t0\tcom.zeus.live-trading\n"
+
+    monkeypatch.setattr(healthcheck.subprocess, "run", lambda *args, **kwargs: _Result())
+
+    result = healthcheck.check()
+
+    assert result["status_fresh"] is True
+    assert result["live_health_composite_ok"] is False
+    assert result["live_health_composite_issue"].startswith("LIVE_HEALTH_COMPOSITE_STALE")
+    assert result["healthy"] is False
+    assert healthcheck.exit_code_for(result) == 1
+
+
+def test_healthcheck_is_not_healthy_when_live_health_composite_time_is_unparseable(monkeypatch, tmp_path):
+    """Composite freshness must be machine-provable, not assumed from a string."""
+    status_path = tmp_path / "status_summary.json"
+    composite_path = tmp_path / "live_health_composite.json"
+    risk_path = tmp_path / "risk_state.db"
+    zeus_db_path = tmp_path / "zeus.db"
+    status_path.write_text(json.dumps(_status_payload()))
+    composite_path.write_text(json.dumps({
+        "healthy": True,
+        "status": "HEALTHY",
+        "failing_surfaces": [],
+        "surfaces": {},
+        "computed_at": "not-a-timestamp",
+    }))
+    _write_risk_state(risk_path)
+    _write_no_trade_artifact(zeus_db_path)
+
+    monkeypatch.setenv("ZEUS_MODE", "live")
+    monkeypatch.setattr(healthcheck, "_status_path", lambda: status_path)
+    monkeypatch.setattr(healthcheck, "_live_health_composite_path", lambda: composite_path)
+    monkeypatch.setattr(healthcheck, "_risk_state_path", lambda: risk_path)
+    monkeypatch.setattr(healthcheck, "_zeus_db_path", lambda: zeus_db_path)
+
+    class _Result:
+        returncode = 0
+        stdout = "123\t0\tcom.zeus.live-trading\n"
+
+    monkeypatch.setattr(healthcheck.subprocess, "run", lambda *args, **kwargs: _Result())
+
+    result = healthcheck.check()
+
+    assert result["live_health_composite_ok"] is False
+    assert result["live_health_composite_issue"] == "LIVE_HEALTH_COMPOSITE_UNPARSEABLE_COMPUTED_AT"
+    assert result["healthy"] is False
+
+
 def test_healthcheck_is_not_healthy_when_code_plane_drifts(monkeypatch, tmp_path):
     status_path = tmp_path / "status_summary.json"
     risk_path = tmp_path / "risk_state.db"

@@ -33,6 +33,7 @@ class TestWorldSchemaReadyCheck:
 
         monkeypatch.setattr(fg_module, "BOOT_RETRY_INTERVAL_SECONDS", 0)
         monkeypatch.setattr(fg_module, "BOOT_RETRY_MAX_ATTEMPTS", 2)
+        monkeypatch.setattr(main_module, "_startup_world_db_schema_prepare", lambda: "3")
         monkeypatch.setattr(
             main_module,
             "_startup_world_db_schema_ready_check",
@@ -52,6 +53,7 @@ class TestWorldSchemaReadyCheck:
         """Direct DB schema checks are sufficient; JSON sentinel is not required."""
         import src.main as main_module
 
+        monkeypatch.setattr(main_module, "_startup_world_db_schema_prepare", lambda: "3")
         monkeypatch.setattr(main_module, "_startup_world_db_schema_ready_check", lambda: "3")
         monkeypatch.setattr(main_module, "_startup_forecasts_schema_ready_check", lambda: "3")
 
@@ -62,6 +64,7 @@ class TestWorldSchemaReadyCheck:
         """Stale legacy world_schema_ready.json no longer gates live startup."""
         import src.main as main_module
 
+        monkeypatch.setattr(main_module, "_startup_world_db_schema_prepare", lambda: "3")
         monkeypatch.setattr(main_module, "_startup_world_db_schema_ready_check", lambda: "3")
         monkeypatch.setattr(main_module, "_startup_forecasts_schema_ready_check", lambda: "3")
 
@@ -98,6 +101,7 @@ class TestWorldSchemaReadyCheck:
         import src.main as main_module
 
         monkeypatch.setattr(config_module, "STATE_DIR", tmp_path)
+        monkeypatch.setattr(main_module, "_startup_world_db_schema_prepare", lambda: "3")
         monkeypatch.setattr(main_module, "_startup_world_db_schema_ready_check", lambda: "3")
         monkeypatch.setattr(main_module, "_startup_forecasts_schema_ready_check", lambda: "3")
 
@@ -130,6 +134,7 @@ class TestWorldSchemaReadyCheck:
         monkeypatch.setattr(config_module, "STATE_DIR", tmp_path)
         monkeypatch.setattr(fg_module, "BOOT_RETRY_INTERVAL_SECONDS", 0)
         monkeypatch.setattr(fg_module, "BOOT_RETRY_MAX_ATTEMPTS", 2)
+        monkeypatch.setattr(main_module, "_startup_world_db_schema_prepare", lambda: "3")
         monkeypatch.setattr(main_module, "_startup_world_db_schema_ready_check", lambda: "3")
 
         def fail_forecasts_schema():
@@ -185,3 +190,50 @@ class TestWorldSchemaReadyCheck:
         assert main_body.index("_startup_world_schema_ready_check()") < main_body.index(
             "conn = get_world_connection()"
         )
+
+    def test_world_schema_prepare_runs_before_read_only_proof(self, monkeypatch):
+        """Live boot must repair stale world schema before read-only user_version proof."""
+        import src.control.freshness_gate as fg_module
+        import src.main as main_module
+
+        calls: list[str] = []
+        monkeypatch.setattr(fg_module, "BOOT_RETRY_INTERVAL_SECONDS", 0)
+        monkeypatch.setattr(fg_module, "BOOT_RETRY_MAX_ATTEMPTS", 1)
+        monkeypatch.setattr(
+            main_module,
+            "_startup_world_db_schema_prepare",
+            lambda: calls.append("prepare") or "18",
+        )
+        monkeypatch.setattr(
+            main_module,
+            "_startup_world_db_schema_ready_check",
+            lambda: calls.append("read_only_proof") or "18",
+        )
+        monkeypatch.setattr(main_module, "_startup_forecasts_schema_ready_check", lambda: "5")
+
+        main_module._startup_db_schema_ready_check()
+
+        assert calls == ["prepare", "read_only_proof"]
+
+    def test_world_schema_prepare_upgrades_stale_existing_world_db(self, tmp_path, monkeypatch):
+        """A bumped SCHEMA_VERSION must not wedge live before init_schema() can run."""
+        import sqlite3
+
+        import src.state.db as db_module
+        from src.main import _startup_world_db_schema_prepare
+
+        world_db = tmp_path / "zeus-world.db"
+        with sqlite3.connect(world_db) as conn:
+            conn.execute(f"PRAGMA user_version = {db_module.SCHEMA_VERSION - 1}")
+        monkeypatch.setattr(db_module, "ZEUS_WORLD_DB_PATH", world_db)
+
+        assert _startup_world_db_schema_prepare() == str(db_module.SCHEMA_VERSION)
+        with sqlite3.connect(world_db) as conn:
+            row = conn.execute("PRAGMA user_version").fetchone()
+            tail = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='tail_stress_scenarios'"
+            ).fetchone()
+
+        assert row is not None
+        assert row[0] == db_module.SCHEMA_VERSION
+        assert tail == (1,)
