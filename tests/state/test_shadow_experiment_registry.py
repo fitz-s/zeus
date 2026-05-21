@@ -185,3 +185,24 @@ def test_t2_immutable_default_is_1(world_conn) -> None:
         (experiment_id,),
     ).fetchone()
     assert row[0] == 1
+
+
+# ---------------------------------------------------------------------------
+# T2-9: cohort_tag mismatch raises ValueError (immutable field guard)
+# ---------------------------------------------------------------------------
+
+def test_t2_cohort_tag_mismatch_raises(world_conn) -> None:
+    """Re-registering with a different cohort_tag raises ValueError.
+
+    cohort_tag is part of the immutable experiment record and affects downstream
+    grouping/attribution. Mismatch must fail closed to prevent partial-application.
+    """
+    register_shadow_experiment(
+        "shoulder_sell", _CONFIG_A, "cohort_a",
+        started_at=_STARTED_AT, conn=world_conn,
+    )
+    with pytest.raises(ValueError, match="cohort_tag"):
+        register_shadow_experiment(
+            "shoulder_sell", _CONFIG_A, "cohort_b",  # different cohort_tag
+            started_at=_STARTED_AT, conn=world_conn,
+        )

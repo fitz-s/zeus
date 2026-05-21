@@ -1,3 +1,8 @@
+# Lifecycle: created=2026-05-21; last_reviewed=2026-05-21; last_reused=never
+# Purpose: T1 invariant tests for StrategyProfile.is_runtime_live() gating on
+#   evidence_tier >= LIVE_PILOT_TINY and evidence_tier field extension.
+# Reuse: Run when changing strategy_profile.py, evidence_tier.py, or
+#   architecture/strategy_profile_registry.yaml tier assignments.
 # Created: 2026-05-21
 # Last reused or audited: 2026-05-21
 # Authority basis: docs/operations/task_2026-05-21_strategy_vnext_phase6_evidence_ladder/PHASE_6_PLAN.md §T1

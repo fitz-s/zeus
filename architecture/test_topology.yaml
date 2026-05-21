@@ -476,6 +476,8 @@ test_trust_policy:
     tests/test_correlation_shrinkage.py: {created: "2026-05-21", last_used: "2026-05-21"}
     tests/test_regime_correlation_store.py: {created: "2026-05-21", last_used: "2026-05-21"}
     tests/test_cluster_exposure_shrunk.py: {created: "2026-05-21", last_used: "2026-05-21"}
+    # Phase 6 T1+T2+T3+T4 (2026-05-21): EvidenceTier + ShadowExperimentRegistry + RegretDecomposer + LiveReadinessTribunal.
+    tests/test_strategy_profile_evidence_tier.py: {created: "2026-05-21", last_used: "2026-05-21"}
 
 categories:
   core_law_antibody:

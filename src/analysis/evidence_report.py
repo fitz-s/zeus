@@ -116,11 +116,30 @@ def build_evidence_report(
 
     INV-37: caller supplies conn; never auto-opens.
     """
-    # Count decisions via regret_decompositions joined through shadow_experiments
-    decision_row = conn.execute(
+    # Count decisions from decision_events (authoritative denominator).
+    # decision_events is the source of truth for how many decisions a strategy
+    # produced; regret rows may lag or be absent, so using them as denominator
+    # risks false HOLD/DEMOTE outcomes from an artificially shrunken sample.
+    tables = {
+        row[0]
+        for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()
+    }
+    if "decision_events" in tables:
+        n_decisions_row = conn.execute(
+            "SELECT COUNT(*) FROM decision_events WHERE strategy_key = ?",
+            (strategy_id,),
+        ).fetchone()
+        n_decisions = int(n_decisions_row[0] or 0)
+    else:
+        n_decisions = 0
+
+    # Win/regret analytics from regret_decompositions (supplemental).
+    regret_row = conn.execute(
         """
         SELECT
-            COUNT(*) as n_decisions,
+            COUNT(*) as n_regret,
             SUM(CASE WHEN rd.total_regret_usd > 0 THEN 1 ELSE 0 END) as n_wins,
             AVG(rd.total_regret_usd) as mean_regret
         FROM regret_decompositions rd
@@ -130,19 +149,12 @@ def build_evidence_report(
         (strategy_id,),
     ).fetchone()
 
-    n_decisions = int(decision_row[0] or 0)
-    n_wins = int(decision_row[1] or 0)
-    mean_regret_usd = float(decision_row[2] or 0.0)
-    n_settled = n_decisions  # all regret rows have settled outcomes
+    n_wins = int(regret_row[1] or 0)
+    mean_regret_usd = float(regret_row[2] or 0.0)
+    n_settled = int(regret_row[0] or 0)  # rows with settled regret outcomes
 
     # Count no-trade events if the table exists
     n_no_trades = 0
-    tables = {
-        row[0]
-        for row in conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table'"
-        ).fetchall()
-    }
     if "no_trade_events" in tables:
         nte_row = conn.execute(
             "SELECT COUNT(*) FROM no_trade_events WHERE strategy_key = ?",

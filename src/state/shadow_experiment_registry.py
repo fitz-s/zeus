@@ -127,18 +127,25 @@ def register_shadow_experiment(
     try:
         # Check for existing row
         row = conn.execute(
-            "SELECT config_hash FROM shadow_experiments WHERE experiment_id = ?",
+            "SELECT config_hash, cohort_tag FROM shadow_experiments WHERE experiment_id = ?",
             (experiment_id,),
         ).fetchone()
 
         if row is not None:
-            existing_config_hash = row[0]
+            existing_config_hash, existing_cohort_tag = row[0], row[1]
             if existing_config_hash != config_hash:
                 raise ValueError(
                     f"Mutation of started experiment {experiment_id!r}: "
                     f"existing config_hash={existing_config_hash!r} != "
                     f"new config_hash={config_hash!r}. "
                     "Any config change must produce a new experiment."
+                )
+            if existing_cohort_tag != cohort_tag:
+                raise ValueError(
+                    f"Mutation of started experiment {experiment_id!r}: "
+                    f"existing cohort_tag={existing_cohort_tag!r} != "
+                    f"new cohort_tag={cohort_tag!r}. "
+                    "cohort_tag is immutable after registration; use a new experiment."
                 )
             # Idempotent — already registered
             return experiment_id
