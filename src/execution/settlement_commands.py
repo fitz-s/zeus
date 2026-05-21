@@ -118,6 +118,16 @@ class SettlementResult:
     error_payload: dict[str, Any] | None = None
 
 
+@dataclass(frozen=True)
+class AnchorSourceTrust:
+    """Report-facing trust classification for polymarket_end_anchor_source."""
+
+    source: str
+    evidence_class: str
+    report_trust: str
+    verified: bool
+
+
 class SettlementCommandError(RuntimeError):
     """Base error for invalid settlement command operations."""
 
@@ -132,6 +142,58 @@ def _enum_value(value: Any) -> str:
     if hasattr(value, "value"):
         return str(value.value)
     return str(value)
+
+
+def classify_polymarket_end_anchor_source(source: Any) -> AnchorSourceTrust:
+    """Classify anchor-source provenance for settlement/redeem reports.
+
+    `unknown_legacy` is an honest historical sentinel, not verified evidence.
+    Reports must preserve the row but exclude it from verified anchor counts.
+    """
+
+    source_s = str(source or "").strip() or "unknown_legacy"
+    source_l = source_s.lower()
+    if source_l == "unknown_legacy":
+        return AnchorSourceTrust(
+            source=source_s,
+            evidence_class="unknown_legacy",
+            report_trust="exclude_from_verified_anchor_evidence",
+            verified=False,
+        )
+    if source_l == "gamma_explicit":
+        return AnchorSourceTrust(
+            source=source_s,
+            evidence_class="gamma_explicit",
+            report_trust="verified_market_time_anchor",
+            verified=True,
+        )
+    if source_l == "f1_12z_fallback":
+        return AnchorSourceTrust(
+            source=source_s,
+            evidence_class="calendar_fallback",
+            report_trust="degraded_report_only",
+            verified=False,
+        )
+    if source_l.startswith("clob"):
+        return AnchorSourceTrust(
+            source=source_s,
+            evidence_class="clob_derived",
+            report_trust="verified_clob_anchor",
+            verified=True,
+        )
+    if source_l.startswith("chain"):
+        return AnchorSourceTrust(
+            source=source_s,
+            evidence_class="chain_derived",
+            report_trust="verified_chain_anchor",
+            verified=True,
+        )
+    return AnchorSourceTrust(
+        source=source_s,
+        evidence_class="unknown_untrusted",
+        report_trust="exclude_from_verified_anchor_evidence",
+        verified=False,
+    )
 
 
 def _capability_component(
@@ -1489,6 +1551,31 @@ def list_commands(conn: sqlite3.Connection, *, state: SettlementState | str | No
             (state_s,),
         ).fetchall()
     return [dict(row) for row in rows]
+
+
+def settlement_command_report_rows(
+    conn: sqlite3.Connection,
+    *,
+    state: SettlementState | str | None = None,
+) -> list[dict[str, Any]]:
+    """Return report-ready command rows with explicit anchor-source trust fields."""
+
+    rows = list_commands(conn, state=state)
+    report_rows: list[dict[str, Any]] = []
+    for row in rows:
+        trust = classify_polymarket_end_anchor_source(
+            row.get("polymarket_end_anchor_source")
+        )
+        report_row = dict(row)
+        report_row.update(
+            {
+                "anchor_source_evidence_class": trust.evidence_class,
+                "anchor_source_report_trust": trust.report_trust,
+                "anchor_source_verified": trust.verified,
+            }
+        )
+        report_rows.append(report_row)
+    return report_rows
 
 
 def _get_row(conn: sqlite3.Connection, command_id: str) -> sqlite3.Row:
