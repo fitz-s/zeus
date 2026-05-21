@@ -1268,3 +1268,52 @@ scripts:
     unguarded_write_rationale: "DDL only (CREATE TABLE IF NOT EXISTS); no data written; no PRAGMA user_version bump; idempotent."
     required_helpers: [src.state.schema.book_hash_transitions_schema.ensure_table]
     required_tests: [tests/test_inv_book_hash_transitions_completeness.py]
+
+  scripts/shoulder_shadow_readiness_report.py:
+    class: diagnostic_report_writer
+    lifecycle: phase3_t3_pr
+    packet: docs/operations/task_2026-05-21_strategy_vnext_phase3_shoulder
+    authority_scope: read_only
+    dangerous_if_run: false
+    dry_run_default: false
+    target_db: state/zeus-world.db
+    read_targets: [state/zeus-world.db]
+    write_targets: [stdout]
+    canonical_command: "python3 scripts/shoulder_shadow_readiness_report.py [--db PATH] [--json] [--markdown]"
+    external_inputs: []
+    delete_policy: retain_until_superseded
+    reuse_when: >
+      Phase 3 T3 operator-facing promotion gate. Aggregates shoulder shadow
+      decisions, no-trade events, stress coverage, and exposure ledger into
+      ReadinessStatus enum (INSUFFICIENT_SHADOW / INSUFFICIENT_STRESS_COVERAGE /
+      INSUFFICIENT_REGIME_COVERAGE / READY_FOR_OPERATOR_REVIEW). Read-only;
+      NEVER mutates live_status.
+    do_not_use_when: "Never produces live_status changes — only reports. Safe to run at any time."
+    promotion_barrier: "READY_FOR_OPERATOR_REVIEW is a necessary but not sufficient gate for live_status promotion. Operator must authorize manually."
+    unguarded_write_rationale: "Read-only SELECT aggregate; no writes, no PRAGMA user_version bump."
+    required_helpers: [src.state.shoulder_exposure_ledger.read_total_exposure_usd, scripts.shoulder_shadow_readiness_report.evaluate_readiness]
+    required_tests: [tests/test_shoulder_shadow_readiness_report.py]
+
+  scripts/rollback_phase3_t3.py:
+    class: rollback
+    lifecycle: phase3_t3_pr
+    packet: docs/operations/task_2026-05-21_strategy_vnext_phase3_shoulder
+    authority_scope: operator_invoked
+    dangerous_if_run: true
+    dry_run_default: true
+    apply_flag: null
+    target_db: state/zeus-world.db
+    read_targets: []
+    write_targets: [state/zeus-world.db]
+    canonical_command: "python3 scripts/rollback_phase3_t3.py [--dry-run] [--db PATH]"
+    external_inputs: []
+    delete_policy: retain_until_superseded
+    reuse_when: >
+      Phase 3 T3 escape hatch EH-3 (plan §5). Drops shoulder_exposure_ledger
+      and reverts PRAGMA user_version from 23 to 22. SCAFFOLD — run() raises
+      NotImplementedError; remove the guard after reviewing _ROLLBACK_SQL.
+    do_not_use_when: "shoulder_exposure_ledger already absent or user_version already 22."
+    promotion_barrier: "SCAFFOLD guard (NotImplementedError) must be removed after operator review of _ROLLBACK_SQL. Run only after confirming no live shoulder positions depend on ledger rows."
+    unguarded_write_rationale: "N/A — SCAFFOLD stub; run() raises NotImplementedError."
+    required_helpers: [src.state.schema.shoulder_exposure_ledger_schema.ensure_table]
+    required_tests: [tests/test_shoulder_exposure_ledger.py]

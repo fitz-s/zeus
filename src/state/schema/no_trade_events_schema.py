@@ -1,6 +1,6 @@
 # Created: 2026-05-20
 # Last reused or audited: 2026-05-21
-# Authority basis: PHASE_2_ULTRAPLAN.md v3.1 §5.2 (sha 00c2399742) + Phase 3 T2 (2026-05-21): schema_version CHECK extended to 18 + 6 SHOULDER_* NoTradeReason members + live release proof P0-3 schema compatibility marker
+# Authority basis: PHASE_2_ULTRAPLAN.md v3.1 §5.2 (sha 00c2399742) + Phase 3 T2 (2026-05-21): schema_version CHECK extended to 18 + 6 SHOULDER_* NoTradeReason members + live release proof P0-3 schema compatibility marker + Phase 3 T3 (2026-05-21): CHECK extended to 23
 
 """T2 — CREATE TABLE DDL for no_trade_events (world DB).
 
@@ -13,7 +13,7 @@ PK: (market_slug, temperature_metric, target_date, observation_time, decision_se
   — matches decision_events natural key for FK-like joins (§5.2 "decision_natural_key
   FK-like reference"). decision_seq shared counter scope.
 
-schema_version CHECK includes 14, 15, 16, 17, 18, 19, 20, 21, 22:
+schema_version CHECK includes 14, 15, 16, 17, 18, 19, 20, 21, 22, 23:
   - 14: original scaffold
   - 15: P2 T2 production pass
   - 16: MUTUALLY_EXCLUSIVE_FAMILY_DEDUP added (PR #249, 2026-05-21)
@@ -26,6 +26,8 @@ schema_version CHECK includes 14, 15, 16, 17, 18, 19, 20, 21, 22:
         compatibility rows so live learning/report trust can exclude them.
   - 21, 22: current live-release schema/version bumps; no additional DDL
         beyond the compatibility marker and expanded CHECK range.
+  - 23: Phase 3 T3 (2026-05-21) — shoulder_exposure_ledger table added;
+        no_trade_events CHECK extended to accept v23 rows.
 
 Note: _REASON_VALUES_SQL is enum-derived (iterates NoTradeReason) so adding
 SHOULDER_* members to the enum automatically extends the reason CHECK constraint —
@@ -39,7 +41,7 @@ import sqlite3
 from src.contracts.no_trade_reason import NoTradeReason
 
 # Schema version stamped into each row; stays in sync with db.py SCHEMA_VERSION.
-SCHEMA_VERSION = 22
+SCHEMA_VERSION = 23
 
 # Enum CHECK: every valid NoTradeReason value, joined for SQL IN clause.
 _REASON_VALUES_SQL = ", ".join(f"'{r.value}'" for r in NoTradeReason)
@@ -54,7 +56,7 @@ CREATE TABLE IF NOT EXISTS no_trade_events (
     reason              TEXT NOT NULL CHECK (reason IN ({_REASON_VALUES_SQL})),
     reason_detail       TEXT,
     observed_at         TEXT NOT NULL,
-    schema_version      INTEGER NOT NULL CHECK (schema_version IN (14, 15, 16, 17, 18, 19, 20, 21, 22)),
+    schema_version      INTEGER NOT NULL CHECK (schema_version IN (14, 15, 16, 17, 18, 19, 20, 21, 22, 23)),
     schema_compatibility TEXT NOT NULL DEFAULT 'current'
         CHECK (schema_compatibility IN ('current', 'degraded')),
     PRIMARY KEY (market_slug, temperature_metric, target_date, observation_time, decision_seq)
@@ -71,7 +73,7 @@ CREATE TABLE no_trade_events_new (
     reason              TEXT NOT NULL CHECK (reason IN ({_REASON_VALUES_SQL})),
     reason_detail       TEXT,
     observed_at         TEXT NOT NULL,
-    schema_version      INTEGER NOT NULL CHECK (schema_version IN (14, 15, 16, 17, 18, 19, 20, 21, 22)),
+    schema_version      INTEGER NOT NULL CHECK (schema_version IN (14, 15, 16, 17, 18, 19, 20, 21, 22, 23)),
     schema_compatibility TEXT NOT NULL DEFAULT 'current'
         CHECK (schema_compatibility IN ('current', 'degraded')),
     PRIMARY KEY (market_slug, temperature_metric, target_date, observation_time, decision_seq)
@@ -108,20 +110,19 @@ def _rebuild_stale_no_trade_events_table(conn: sqlite3.Connection) -> None:
     Fires when the existing table SQL is missing:
     - MUTUALLY_EXCLUSIVE_FAMILY_DEDUP (v16 expansion), OR
     - SHOULDER_STRESS_FAIL (v18 expansion — Phase 3 T2), OR
-    - current schema_version CHECK range, OR
+    - current schema_version CHECK range including v23, OR
     - schema_compatibility marker column.
 
-    The rebuild is idempotent: if both flags and version range are present,
+    The rebuild is idempotent: if all flags and version range are present,
     returns immediately without touching the table.
     """
     row = conn.execute(
         "SELECT sql FROM sqlite_master WHERE type='table' AND name='no_trade_events'"
     ).fetchone()
     table_sql = str(row[0] if row else "")
-    current_version_check = "14, 15, 16, 17, 18, 19, 20, 21, 22"
+    current_version_check = "14, 15, 16, 17, 18, 19, 20, 21, 22, 23"
     if (
         NoTradeReason.MUTUALLY_EXCLUSIVE_FAMILY_DEDUP.value in table_sql
-        and NoTradeReason.SHOULDER_STRESS_FAIL.value in table_sql
         and current_version_check in table_sql
         and "schema_compatibility" in table_sql
     ):
@@ -152,8 +153,8 @@ def _rebuild_stale_no_trade_events_table(conn: sqlite3.Connection) -> None:
             reason_detail,
             observed_at,
             CASE
-                WHEN schema_version IN (14, 15, 16, 17, 18, 19, 20, 21, 22) THEN schema_version
-                ELSE 22
+                WHEN schema_version IN (14, 15, 16, 17, 18, 19, 20, 21, 22, 23) THEN schema_version
+                ELSE 23
             END,
             schema_compatibility
         FROM no_trade_events

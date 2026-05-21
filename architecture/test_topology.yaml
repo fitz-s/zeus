@@ -468,6 +468,10 @@ test_trust_policy:
     tests/test_live_release_registry_runtime_assertions.py: {created: "2026-05-21", last_used: "2026-05-21"}
     # 2026-05-21 live release proof P3-2: central IDs and review deadlines for pre-existing failures.
     tests/test_pre_existing_failure_registry.py: {created: "2026-05-21", last_used: "2026-05-21"}
+    # Phase 3 T3 (2026-05-21): shoulder_exposure_ledger + cluster cap + shadow-readiness report.
+    tests/test_shoulder_cluster_cap.py: {created: "2026-05-21", last_used: "2026-05-21"}
+    tests/test_shoulder_exposure_ledger.py: {created: "2026-05-21", last_used: "2026-05-21"}
+    tests/test_shoulder_shadow_readiness_report.py: {created: "2026-05-21", last_used: "2026-05-21"}
 
 categories:
   core_law_antibody:

@@ -1,6 +1,6 @@
 # Created: 2026-05-21
 # Last reused or audited: 2026-05-21
-# Authority basis: docs/operations/task_2026-05-21_strategy_vnext_phase3_shoulder/PHASE_3_SHOULDER_PLAN.md §2 T2 + 04_PHASE_3_SHOULDER.md §"Schema impact"
+# Authority basis: docs/operations/task_2026-05-21_strategy_vnext_phase3_shoulder/PHASE_3_SHOULDER_PLAN.md §2 T2 + 04_PHASE_3_SHOULDER.md §"Schema impact" + Phase 3 T3 (2026-05-21): CHECK extended to 23
 
 """Phase 3 T2 — CREATE TABLE DDL for tail_stress_scenarios (world DB).
 
@@ -19,7 +19,7 @@ from __future__ import annotations
 import sqlite3
 
 # Schema version stamped into each row; bump in sync with db.py SCHEMA_VERSION.
-SCHEMA_VERSION = 18
+SCHEMA_VERSION = 23
 
 CREATE_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS tail_stress_scenarios (
@@ -31,7 +31,7 @@ CREATE TABLE IF NOT EXISTS tail_stress_scenarios (
     scenarios               TEXT NOT NULL,
     max_loss_pct            REAL NOT NULL,
     tail_probability_stressed REAL NOT NULL,
-    schema_version          INTEGER NOT NULL CHECK (schema_version IN (17, 18)),
+    schema_version          INTEGER NOT NULL CHECK (schema_version IN (17, 18, 19, 20, 21, 22, 23)),
     PRIMARY KEY (market_slug, temperature_metric, target_date, observation_time, decision_seq)
 )
 """

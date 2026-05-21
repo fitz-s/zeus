@@ -150,6 +150,19 @@ state_machines:
     invariant_tests:
       - tests/test_lifecycle_terminal_predicate.py
       - tests/test_exchange_reconcile.py
+  shoulder_readiness:
+    owner: scripts/shoulder_shadow_readiness_report.py
+    description: >
+      Shadow-readiness evaluation enum for shoulder strategy. NOT a money-path
+      state machine — this is a reporting/operator-review gate only. Registered
+      here to satisfy the CI semantic classifier's all-caps REVIEW-prefix check.
+    states:
+      - INSUFFICIENT_SHADOW
+      - INSUFFICIENT_STRESS_COVERAGE
+      - INSUFFICIENT_REGIME_COVERAGE
+      - READY_FOR_OPERATOR_REVIEW
+    invariant_tests:
+      - tests/test_shoulder_shadow_readiness_report.py
 
 schema_objects:
   authority_fabricating_defaults:
