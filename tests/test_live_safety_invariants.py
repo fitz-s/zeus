@@ -2,7 +2,7 @@
 # Lifecycle: created=2026-03-31; last_reviewed=2026-05-05; last_reused=2026-05-05
 # Purpose: Lock live-money safety invariants across fill, exit, chain, and P&L flows.
 # Reuse: Run for execution finality, live exit, chain reconciliation, and safety invariant changes.
-# Last reused/audited: 2026-05-17
+# Last reused/audited: 2026-05-21
 # Authority basis: midstream verdict v2 2026-04-23; docs/operations/task_2026-05-08_object_invariance_remaining_mainline/PLAN.md
 """Live safety invariant tests: relationship tests, not function tests.
 
@@ -154,6 +154,10 @@ def _seed_canonical_entry_baseline(conn, position) -> None:
     from src.engine.lifecycle_events import build_entry_canonical_write
     from src.state.ledger import append_many_and_project
 
+    if not getattr(position, "condition_id", ""):
+        position.condition_id = "cond-1"
+    if not getattr(position, "market_id", ""):
+        position.market_id = position.condition_id
     events, projection = build_entry_canonical_write(
         position,
         decision_id=getattr(position, "decision_snapshot_id", None) or "dec-t1c-followup",

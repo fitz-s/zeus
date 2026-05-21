@@ -2332,6 +2332,156 @@ def _build_exit_context(
     )
 
 
+def _row_value(row, index: int, key: str):
+    if row is None:
+        return None
+    try:
+        return row[key]
+    except (TypeError, KeyError, IndexError):
+        try:
+            return row[index]
+        except (TypeError, IndexError):
+            return None
+
+
+def _latest_exit_snapshot_identity_row(conn, pos):
+    if conn is None:
+        return None
+    identifiers: list[str] = []
+    for value in (
+        getattr(pos, "token_id", ""),
+        getattr(pos, "no_token_id", ""),
+        getattr(pos, "market_id", ""),
+        getattr(pos, "condition_id", ""),
+    ):
+        identifier = str(value or "").strip()
+        if identifier and identifier not in identifiers:
+            identifiers.append(identifier)
+    if not identifiers:
+        return None
+    padded_identifiers = (identifiers + ["__zeus_no_exit_snapshot_identifier__"] * 4)[:4]
+    params = padded_identifiers * 5
+    try:
+        return conn.execute(
+            """
+            SELECT yes_token_id, no_token_id, condition_id, question_id
+              FROM executable_market_snapshots
+             WHERE selected_outcome_token_id IN (?, ?, ?, ?)
+                OR yes_token_id IN (?, ?, ?, ?)
+                OR no_token_id IN (?, ?, ?, ?)
+                OR condition_id IN (?, ?, ?, ?)
+                OR gamma_market_id IN (?, ?, ?, ?)
+             ORDER BY captured_at DESC, snapshot_id DESC
+             LIMIT 1
+            """,
+            params,
+        ).fetchone()
+    except Exception as exc:
+        logger.debug(
+            "Exit retry snapshot identity lookup failed for %s: %s",
+            getattr(pos, "trade_id", ""),
+            exc,
+        )
+        return None
+
+
+def _held_exit_token_from_snapshot_identity(conn, pos) -> str:
+    direction = _position_direction_value(pos)
+    token_attr = "no_token_id" if direction == "buy_no" else "token_id"
+    token = str(getattr(pos, token_attr, "") or "").strip()
+    if token:
+        return token
+    row = _latest_exit_snapshot_identity_row(conn, pos)
+    if row is None:
+        return ""
+    yes_token = str(_row_value(row, 0, "yes_token_id") or "").strip()
+    no_token = str(_row_value(row, 1, "no_token_id") or "").strip()
+    if not getattr(pos, "token_id", "") and yes_token:
+        pos.token_id = yes_token
+    if not getattr(pos, "no_token_id", "") and no_token:
+        pos.no_token_id = no_token
+    if not getattr(pos, "condition_id", ""):
+        condition_id = str(_row_value(row, 2, "condition_id") or "").strip()
+        if condition_id:
+            pos.condition_id = condition_id
+    return str(getattr(pos, token_attr, "") or "").strip()
+
+
+def _refresh_pending_exit_retry_quote_from_current_clob(
+    *,
+    conn,
+    clob,
+    pos,
+    exit_context,
+    identity_seed_allowed: bool,
+):
+    """Use stale snapshot identity only to find the held token; price comes from CLOB."""
+
+    if (
+        not identity_seed_allowed
+        or conn is None
+        or clob is None
+        or getattr(exit_context, "current_market_price_is_fresh", False)
+    ):
+        return exit_context, False
+
+    token_id = _held_exit_token_from_snapshot_identity(conn, pos)
+    if not token_id:
+        return exit_context, False
+    quote_fn = getattr(clob, "get_best_bid_ask", None)
+    if not callable(quote_fn):
+        return exit_context, False
+
+    try:
+        bid, ask, bid_size, ask_size = quote_fn(token_id)
+        bid_f = float(bid)
+        ask_f = float(ask)
+        bid_size_f = float(bid_size)
+        ask_size_f = float(ask_size)
+    except Exception as exc:
+        logger.debug(
+            "Exit retry current CLOB quote failed for %s token=%s: %s",
+            getattr(pos, "trade_id", ""),
+            token_id,
+            exc,
+        )
+        return exit_context, False
+    if (
+        not math.isfinite(bid_f)
+        or not math.isfinite(ask_f)
+        or not math.isfinite(bid_size_f)
+        or not math.isfinite(ask_size_f)
+        or bid_f <= 0.0
+        or ask_f <= 0.0
+        or bid_size_f <= 0.0
+        or ask_size_f <= 0.0
+        or bid_f > ask_f
+    ):
+        return exit_context, False
+
+    from src.strategy.market_fusion import vwmp
+
+    diagnostic_market_price = (
+        bid_f if _position_state_value(pos) == "day0_window" else float(vwmp(bid_f, ask_f, bid_size_f, ask_size_f))
+    )
+    source_timestamp = datetime.now(timezone.utc).isoformat()
+    pos.last_monitor_best_bid = bid_f
+    pos.last_monitor_best_ask = ask_f
+    pos.last_monitor_market_price = diagnostic_market_price
+    pos.last_monitor_market_price_is_fresh = True
+    pos.last_monitor_at = source_timestamp
+    return (
+        replace(
+            exit_context,
+            current_market_price=diagnostic_market_price,
+            current_market_price_is_fresh=True,
+            best_bid=bid_f,
+            best_ask=ask_f,
+        ),
+        True,
+    )
+
+
 def _execution_stub(candidate, decision, result, city, mode, *, deps):
     edge_source = decision.edge_source or deps._classify_edge_source(mode, decision.edge)
     strategy_key = _resolve_strategy_key(decision)
@@ -2422,6 +2572,11 @@ def execute_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary: 
         if pos.state == "admin_closed":
             summary["monitor_skipped_admin_close"] = summary.get("monitor_skipped_admin_close", 0) + 1
             continue
+        pending_exit_retry_identity_seed_allowed = (
+            pos.state == "pending_exit"
+            and getattr(pos, "exit_state", "") == "retry_pending"
+            and not is_exit_cooldown_active(pos)
+        )
         if pos.state == "pending_exit":
             if pos.exit_state == "backoff_exhausted":
                 summary["monitor_skipped_pending_exit_phase"] = summary.get("monitor_skipped_pending_exit_phase", 0) + 1
@@ -2606,6 +2761,17 @@ def execute_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary: 
                 ExitContext=ExitContext,
                 portfolio=portfolio,
             )
+            exit_context, refreshed_retry_quote = _refresh_pending_exit_retry_quote_from_current_clob(
+                conn=conn,
+                clob=clob,
+                pos=pos,
+                exit_context=exit_context,
+                identity_seed_allowed=pending_exit_retry_identity_seed_allowed,
+            )
+            if refreshed_retry_quote:
+                summary["pending_exit_retry_current_clob_quote_refreshed"] = (
+                    summary.get("pending_exit_retry_current_clob_quote_refreshed", 0) + 1
+                )
             p_market = exit_context.current_market_price
             portfolio_dirty = True
             exit_decision = pos.evaluate_exit(exit_context)

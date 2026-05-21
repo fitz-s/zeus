@@ -1,5 +1,5 @@
 # Created: 2026-04-17
-# Last reused/audited: 2026-04-29
+# Last reused/audited: 2026-05-21
 # Authority basis: K1 Slice D plus task_2026-04-29_design_simplification_audit Phase 2A.
 """K1 Slice D tests — token label validation, quarantine sentinel, policy precedence."""
 import pytest
@@ -51,8 +51,8 @@ def test_extract_outcomes_reversed_no_yes_order():
     assert results[0]["no_price"] == pytest.approx(0.7)
 
 
-def test_extract_outcomes_unknown_labels_skipped():
-    """Unknown outcome labels → market skipped entirely."""
+def test_extract_outcomes_unknown_labels_disable_executable_token_routing():
+    """Unknown outcome labels preserve support but cannot become executable."""
     from src.data.market_scanner import _extract_outcomes
     event = {
         "markets": [{
@@ -64,11 +64,13 @@ def test_extract_outcomes_unknown_labels_skipped():
         }],
     }
     results = _extract_outcomes(event)
-    assert len(results) == 0
+    assert len(results) == 1
+    assert results[0]["executable"] is False
+    assert results[0]["token_map_raw"]["token_map_valid"] is False
 
 
-def test_extract_outcomes_filters_untradable_gamma_children():
-    """Closed or non-accepting children under an open event must not enter bins."""
+def test_extract_outcomes_preserves_untradable_gamma_children_as_non_executable_support():
+    """Closed or non-accepting children remain support, not executable tokens."""
     from src.data.market_scanner import _extract_outcomes
 
     def child(condition_id, low, high, **flags):
@@ -99,15 +101,43 @@ def test_extract_outcomes_filters_untradable_gamma_children():
 
     results = _extract_outcomes(event)
 
-    assert [row["market_id"] for row in results] == ["cond-good"]
-    assert results[0]["condition_id"] == "cond-good"
-    assert results[0]["question_id"] == "question-cond-good"
-    assert results[0]["gamma_market_id"] == "gamma-cond-good"
-    assert results[0]["active"] is True
-    assert results[0]["closed"] is False
-    assert results[0]["accepting_orders"] is True
-    assert results[0]["enable_orderbook"] is True
-    assert len(results[0]["raw_gamma_payload_hash"]) == 64
+    assert [row["market_id"] for row in results] == [
+        "cond-good",
+        "cond-closed",
+        "cond-closed-alias",
+        "cond-inactive",
+        "cond-inactive-alias",
+        "cond-no-orders",
+        "cond-no-orders-alias",
+        "cond-no-book",
+        "cond-no-book-alias",
+    ]
+    executable_rows = [row for row in results if row["executable"]]
+    assert [row["market_id"] for row in executable_rows] == [
+        "cond-good",
+        "cond-inactive",
+        "cond-inactive-alias",
+    ]
+    good = executable_rows[0]
+    assert good["condition_id"] == "cond-good"
+    assert good["question_id"] == "question-cond-good"
+    assert good["gamma_market_id"] == "gamma-cond-good"
+    assert good["active"] is True
+    assert good["closed"] is False
+    assert good["accepting_orders"] is True
+    assert good["enable_orderbook"] is True
+    assert len(good["raw_gamma_payload_hash"]) == 64
+    non_executable_market_ids = {
+        row["market_id"] for row in results if row["executable"] is False
+    }
+    assert non_executable_market_ids == {
+        "cond-closed",
+        "cond-closed-alias",
+        "cond-no-orders",
+        "cond-no-orders-alias",
+        "cond-no-book",
+        "cond-no-book-alias",
+    }
 
 
 # ==================== D2 (#49): Quarantine Sentinel ====================

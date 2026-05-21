@@ -2486,6 +2486,161 @@ class TestRecoveryResolutionTable:
             "terminal_exec_status": "filled",
         }
 
+    def test_partial_entry_lot_repairs_stale_execution_fact_with_command_id_and_aggregate_fill(
+        self,
+        conn,
+        mock_client,
+    ):
+        _insert(conn, size=7.21, price=0.28)
+        _advance_to_acked(conn, venue_order_id="ord-001")
+        _seed_pending_entry_projection(conn)
+        conn.execute(
+            """
+            UPDATE venue_commands
+               SET state = 'EXPIRED',
+                   updated_at = '2026-04-26T00:08:00Z'
+             WHERE command_id = 'cmd-001'
+            """
+        )
+        conn.execute(
+            """
+            UPDATE position_current
+               SET phase = 'active',
+                   shares = 4.95,
+                   cost_basis_usd = 1.386,
+                   entry_price = 0.28,
+                   order_status = 'partial',
+                   updated_at = '2026-04-26T00:08:00Z'
+             WHERE position_id = 'pos-001'
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO trade_decisions (
+                market_id, bin_label, direction, size_usd, price, timestamp,
+                p_raw, p_posterior, edge, ci_lower, ci_upper, kelly_fraction,
+                status, runtime_trade_id
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "condition-test",
+                "Karachi high",
+                "buy_yes",
+                1.386,
+                0.28,
+                "2026-04-26T00:08:00Z",
+                0.6,
+                0.6,
+                0.1,
+                0.05,
+                0.15,
+                0.0,
+                "entered",
+                "pos-001",
+            ),
+        )
+        first_fact = _append_trade_fact(
+            conn,
+            state="CONFIRMED",
+            trade_id="trade-partial-1",
+            filled_size="2",
+            fill_price="0.20",
+        )
+        second_fact = _append_trade_fact(
+            conn,
+            state="CONFIRMED",
+            trade_id="trade-partial-2",
+            filled_size="2.95",
+            fill_price="0.3342372881355932",
+        )
+        _append_order_fact(
+            conn,
+            state="PARTIALLY_MATCHED",
+            matched_size="4.95",
+            remaining_size="2.26",
+        )
+        from src.state.db import log_execution_fact
+        from src.state.venue_command_repo import append_position_lot
+
+        for lot_id, fact_id, shares, price in (
+            (7101, first_fact, "2", "0.20"),
+            (7102, second_fact, "2.95", "0.3342372881355932"),
+        ):
+            append_position_lot(
+                conn,
+                position_id=lot_id,
+                state="CONFIRMED_EXPOSURE",
+                shares=shares,
+                entry_price_avg=price,
+                source_command_id="cmd-001",
+                source_trade_fact_id=fact_id,
+                captured_at="2026-04-26T00:08:00Z",
+                state_changed_at="2026-04-26T00:08:00Z",
+                source="REST",
+                observed_at="2026-04-26T00:08:00Z",
+                raw_payload_json={"source": "test_partial_execfact_lot"},
+            )
+        log_execution_fact(
+            conn,
+            intent_id="pos-001:entry",
+            position_id="pos-001",
+            decision_id="dec-001",
+            command_id=None,
+            order_role="entry",
+            strategy_key="opening_inertia",
+            posted_at="2026-04-26T00:00:00Z",
+            filled_at="2026-04-26T00:07:00Z",
+            submitted_price=0.28,
+            fill_price=0.28,
+            shares=4.95,
+            venue_status="PARTIAL",
+            terminal_exec_status="partial",
+        )
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["filled_entry_execution_fact_repair"] == {
+            "scanned": 1,
+            "advanced": 1,
+            "stayed": 0,
+            "errors": 0,
+        }
+        execution = conn.execute(
+            """
+            SELECT command_id, shares, fill_price, venue_status, terminal_exec_status
+              FROM execution_fact
+             WHERE intent_id = 'pos-001:entry'
+            """
+        ).fetchone()
+        assert dict(execution) == {
+            "command_id": "cmd-001",
+            "shares": 4.95,
+            "fill_price": pytest.approx(0.28),
+            "venue_status": "PARTIAL",
+            "terminal_exec_status": "partial",
+        }
+
+    def test_entry_execution_fact_repair_treats_malformed_remainder_as_partial(self):
+        from src.execution.command_recovery import _entry_execution_fact_terminal_status
+
+        base_candidate = {
+            "cmd_state": "FILLED",
+            "order_fact_state": "MATCHED",
+        }
+
+        assert _entry_execution_fact_terminal_status(
+            {**base_candidate, "order_fact_remaining_size": "0"}
+        ) == "filled"
+        assert _entry_execution_fact_terminal_status(
+            {**base_candidate, "order_fact_remaining_size": ""}
+        ) == "partial"
+        assert _entry_execution_fact_terminal_status(
+            {**base_candidate, "order_fact_remaining_size": "not-a-number"}
+        ) == "partial"
+
     def test_acked_exit_order_fact_with_point_order_matched_records_pending_exit(
         self,
         conn,

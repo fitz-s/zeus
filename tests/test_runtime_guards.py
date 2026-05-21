@@ -1,8 +1,8 @@
 """Runtime guard and live-cycle wiring tests."""
 # Lifecycle: created=2026-04-28; last_reviewed=2026-05-18; last_reused=2026-05-18
 # Created: 2026-04-28
-# Last reused/audited: 2026-05-20
-# Authority basis: docs/operations/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md; task_2026-04-28_contamination_remediation Batch G; Phase 1B ENS snapshot persistence; Phase 1D forecast source policy; PR #56 MarketPhaseEvidence sidecar propagation; Wave26 explicit position env authority.
+# Last reused/audited: 2026-05-21
+# Authority basis: docs/operations/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md; task_2026-04-28_contamination_remediation Batch G; Phase 1B ENS snapshot persistence; Phase 1D forecast source policy; PR #56 MarketPhaseEvidence sidecar propagation; Wave26 explicit position env authority; task.md B3 exit executable snapshot identity.
 # Purpose: Lock runtime guard and live-cycle wiring contracts.
 # Reuse: Run for runtime guard, live-only cleanup, and cycle wiring changes.
 
@@ -710,6 +710,7 @@ def _insert_executable_snapshot(
     captured_at: datetime | None = None,
     fee_details: dict | None = None,
     min_tick_size: str = "0.01",
+    accepting_orders: bool = True,
 ) -> None:
     from src.contracts.executable_market_snapshot_v2 import ExecutableMarketSnapshotV2
     from src.state.snapshot_repo import insert_snapshot
@@ -731,7 +732,7 @@ def _insert_executable_snapshot(
             enable_orderbook=True,
             active=True,
             closed=False,
-            accepting_orders=True,
+            accepting_orders=accepting_orders,
             market_start_at=None,
             market_end_at=None,
             market_close_at=None,
@@ -11716,6 +11717,103 @@ def test_orange_risk_exits_favorable_position_through_monitor_lifecycle(monkeypa
     assert captured["position"].exit_trigger == "ORANGE_FAVORABLE_EXIT"
     assert "orange_favorable_bid_gate" in pos.applied_validations
     assert "orange_favorable_net_exit_gate" in pos.applied_validations
+
+
+def test_pending_exit_retry_snapshot_identity_seed_uses_current_clob_quote(tmp_path, monkeypatch):
+    """RELATIONSHIP: stale executable snapshots may seed identity, not price."""
+
+    conn = get_connection(tmp_path / "pending-exit-snapshot-identity.db")
+    init_schema(conn)
+    _insert_executable_snapshot(
+        conn,
+        snapshot_id="snap-stale-exit-identity",
+        selected_outcome_token_id="no-from-snapshot",
+        outcome_label="NO",
+        yes_token_id="yes-held",
+        no_token_id="no-from-snapshot",
+        condition_id="condition-exit",
+        top_bid="0.99",
+        top_ask="1.00",
+        captured_at=datetime(2026, 4, 1, 0, 0, tzinfo=timezone.utc),
+        accepting_orders=False,
+    )
+
+    pos = _position(
+        trade_id="pending-exit-retry-identity",
+        market_id="condition-exit",
+        state="pending_exit",
+        pre_exit_state="holding",
+        exit_state="retry_pending",
+        next_exit_retry_at="2026-04-01T00:00:00+00:00",
+        direction="buy_no",
+        token_id="yes-held",
+        no_token_id="",
+        last_monitor_market_price=0.99,
+        last_monitor_market_price_is_fresh=False,
+    )
+    portfolio = PortfolioState(positions=[pos])
+    artifact = CycleArtifact(mode="opening_hunt", started_at="2026-04-01T20:00:00Z")
+    summary = {"monitors": 0, "exits": 0}
+    captured = {}
+
+    class CurrentClob:
+        def __init__(self):
+            self.tokens = []
+
+        def get_best_bid_ask(self, token_id):
+            self.tokens.append(token_id)
+            assert token_id == "no-from-snapshot"
+            return 0.42, 0.45, 100.0, 100.0
+
+    clob = CurrentClob()
+
+    def _refresh_position(conn_arg, clob_arg, refreshed_pos):
+        assert refreshed_pos.no_token_id == ""
+        refreshed_pos.last_monitor_market_price = 0.99
+        refreshed_pos.last_monitor_market_price_is_fresh = False
+        refreshed_pos.last_monitor_best_bid = None
+        refreshed_pos.last_monitor_best_ask = None
+        refreshed_pos.last_monitor_prob = 0.62
+        refreshed_pos.last_monitor_prob_is_fresh = True
+        return types.SimpleNamespace(
+            p_market=np.array([0.99]),
+            p_posterior=0.62,
+            divergence_score=0.0,
+            market_velocity_1h=0.0,
+            forward_edge=-0.37,
+        )
+
+    def _evaluate_exit(self, exit_context):
+        captured["context"] = exit_context
+        return ExitDecision(
+            False,
+            "NO_EXIT",
+            selected_method=self.selected_method or self.entry_method,
+            applied_validations=list(self.applied_validations),
+        )
+
+    monkeypatch.setattr("src.engine.monitor_refresh.refresh_position", _refresh_position)
+    monkeypatch.setattr(Position, "evaluate_exit", _evaluate_exit)
+
+    p_dirty, t_dirty = cycle_runtime.execute_monitoring_phase(
+        conn=conn,
+        clob=clob,
+        portfolio=portfolio,
+        artifact=artifact,
+        tracker=StrategyTracker(),
+        summary=summary,
+        deps=_monitor_chain_deps(datetime(2026, 4, 1, 20, 0, tzinfo=timezone.utc)),
+    )
+
+    assert p_dirty is True
+    assert t_dirty is False
+    assert clob.tokens == ["no-from-snapshot"]
+    assert pos.no_token_id == "no-from-snapshot"
+    assert captured["context"].current_market_price == pytest.approx(0.435)
+    assert captured["context"].current_market_price_is_fresh is True
+    assert captured["context"].best_bid == pytest.approx(0.42)
+    assert captured["context"].best_ask == pytest.approx(0.45)
+    assert captured["context"].current_market_price != pytest.approx(0.99)
 
 
 def test_orange_risk_holds_when_bid_is_unfavorable(monkeypatch):
