@@ -1,9 +1,11 @@
 # Created: 2026-04-27
-# Last reused/audited: 2026-05-19
+# Last reused/audited: 2026-05-21
 # Authority basis: R3 R1 settlement/redeem command ledger packet
-# Lifecycle: created=2026-04-27; last_reviewed=2026-04-30; last_reused=2026-05-19
+# Lifecycle: created=2026-04-27; last_reviewed=2026-05-21; last_reused=2026-05-21
 # Purpose: Lock R3 R1 redeem command durability, Q-FX-1 gating, and tx-hash recovery.
 # Reuse: Run for settlement/redeem, harvester redemption, collateral FX gate, or payout-asset changes.
+# Authority basis update: docs/operations/task_2026-05-21_live_side_effect_risk_boundaries/task.md P0-2 redeem side-effect transaction boundary.
+#                         docs/operations/task_2026-05-21_live_side_effect_risk_boundaries/task.md P2-1 required live ATTACH seam.
 """Regression tests for R3 R1 durable settlement/redeem commands."""
 
 from __future__ import annotations
@@ -253,6 +255,214 @@ def test_redeem_submitted_persists_execution_capability_before_adapter_contact(c
     assert adapter.calls == ["condition-capability"]
     assert len(seen) == 1
     assert result.state is SettlementState.REDEEM_TX_HASHED
+
+
+def test_submit_redeem_external_conn_commits_submitted_before_adapter_contact(tmp_path, monkeypatch):
+    from src.execution.settlement_commands import SettlementState, request_redeem, submit_redeem
+
+    db_path = tmp_path / "trades.db"
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    init_schema(conn)
+    conn.execute("ATTACH DATABASE ':memory:' AS world")
+    conn.execute(
+        """
+        CREATE TABLE world.executable_market_snapshots (
+          snapshot_id TEXT PRIMARY KEY,
+          gamma_market_id TEXT NOT NULL DEFAULT '',
+          event_id TEXT NOT NULL DEFAULT '',
+          condition_id TEXT NOT NULL,
+          question_id TEXT NOT NULL DEFAULT '',
+          yes_token_id TEXT NOT NULL DEFAULT '',
+          no_token_id TEXT NOT NULL DEFAULT '',
+          enable_orderbook INTEGER NOT NULL DEFAULT 0,
+          active INTEGER NOT NULL DEFAULT 1,
+          closed INTEGER NOT NULL DEFAULT 0,
+          min_tick_size TEXT NOT NULL DEFAULT '0.01',
+          min_order_size TEXT NOT NULL DEFAULT '5',
+          fee_details_json TEXT NOT NULL DEFAULT '{}',
+          token_map_json TEXT NOT NULL DEFAULT '{}',
+          neg_risk INTEGER NOT NULL DEFAULT 0,
+          orderbook_top_bid TEXT NOT NULL DEFAULT '0',
+          orderbook_top_ask TEXT NOT NULL DEFAULT '1',
+          orderbook_depth_json TEXT NOT NULL DEFAULT '{}',
+          raw_gamma_payload_hash TEXT NOT NULL DEFAULT '',
+          raw_clob_market_info_hash TEXT NOT NULL DEFAULT '',
+          raw_orderbook_hash TEXT NOT NULL DEFAULT '',
+          authority_tier TEXT NOT NULL DEFAULT 'GAMMA',
+          captured_at TEXT NOT NULL DEFAULT (datetime('now')),
+          freshness_deadline TEXT NOT NULL DEFAULT (datetime('now', '+1 day'))
+        )
+        """
+    )
+    monkeypatch.setenv("ZEUS_PUSD_FX_CLASSIFIED", FXClassification.FX_LINE_ITEM.value)
+    allow_redemption(monkeypatch)
+    _insert_world_snapshot(conn, "condition-external-submitted")
+    command_id = request_redeem(
+        "condition-external-submitted",
+        "pUSD",
+        market_id="market-external-submitted",
+        token_amounts={"yes-token": "1"},
+        winning_index_set='["2"]',
+        conn=conn,
+        requested_at=NOW,
+    )
+    conn.commit()
+    observed: list[str] = []
+
+    class InspectingAdapter:
+        def redeem(self, condition_id: str, *, index_sets=None, **_ignored):
+            read_conn = sqlite3.connect(db_path)
+            read_conn.row_factory = sqlite3.Row
+            try:
+                row = read_conn.execute(
+                    "SELECT state FROM settlement_commands WHERE command_id = ?",
+                    (command_id,),
+                ).fetchone()
+                event = read_conn.execute(
+                    """
+                    SELECT event_type
+                      FROM settlement_command_events
+                     WHERE command_id = ?
+                     ORDER BY id DESC
+                     LIMIT 1
+                    """,
+                    (command_id,),
+                ).fetchone()
+            finally:
+                read_conn.close()
+            observed.append(row["state"])
+            assert event["event_type"] == "REDEEM_SUBMITTED"
+            assert condition_id == "condition-external-submitted"
+            return {"success": True, "tx_hash": "0xexternal-submitted"}
+
+    result = submit_redeem(command_id, InspectingAdapter(), object(), conn=conn, submitted_at=NOW)
+
+    assert observed == [SettlementState.REDEEM_SUBMITTED.value]
+    assert result.state is SettlementState.REDEEM_TX_HASHED
+    conn.close()
+
+
+def test_submit_redeem_adapter_exception_after_external_submit_does_not_rollback_submitted(
+    tmp_path,
+    monkeypatch,
+):
+    from src.execution.settlement_commands import SettlementState, request_redeem, submit_redeem
+
+    db_path = tmp_path / "trades.db"
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    init_schema(conn)
+    conn.execute("ATTACH DATABASE ':memory:' AS world")
+    conn.execute(
+        """
+        CREATE TABLE world.executable_market_snapshots (
+          snapshot_id TEXT PRIMARY KEY,
+          gamma_market_id TEXT NOT NULL DEFAULT '',
+          event_id TEXT NOT NULL DEFAULT '',
+          condition_id TEXT NOT NULL,
+          question_id TEXT NOT NULL DEFAULT '',
+          yes_token_id TEXT NOT NULL DEFAULT '',
+          no_token_id TEXT NOT NULL DEFAULT '',
+          enable_orderbook INTEGER NOT NULL DEFAULT 0,
+          active INTEGER NOT NULL DEFAULT 1,
+          closed INTEGER NOT NULL DEFAULT 0,
+          min_tick_size TEXT NOT NULL DEFAULT '0.01',
+          min_order_size TEXT NOT NULL DEFAULT '5',
+          fee_details_json TEXT NOT NULL DEFAULT '{}',
+          token_map_json TEXT NOT NULL DEFAULT '{}',
+          neg_risk INTEGER NOT NULL DEFAULT 0,
+          orderbook_top_bid TEXT NOT NULL DEFAULT '0',
+          orderbook_top_ask TEXT NOT NULL DEFAULT '1',
+          orderbook_depth_json TEXT NOT NULL DEFAULT '{}',
+          raw_gamma_payload_hash TEXT NOT NULL DEFAULT '',
+          raw_clob_market_info_hash TEXT NOT NULL DEFAULT '',
+          raw_orderbook_hash TEXT NOT NULL DEFAULT '',
+          authority_tier TEXT NOT NULL DEFAULT 'GAMMA',
+          captured_at TEXT NOT NULL DEFAULT (datetime('now')),
+          freshness_deadline TEXT NOT NULL DEFAULT (datetime('now', '+1 day'))
+        )
+        """
+    )
+    monkeypatch.setenv("ZEUS_PUSD_FX_CLASSIFIED", FXClassification.FX_LINE_ITEM.value)
+    allow_redemption(monkeypatch)
+    _insert_world_snapshot(conn, "condition-external-crash")
+    command_id = request_redeem(
+        "condition-external-crash",
+        "pUSD",
+        market_id="market-external-crash",
+        token_amounts={"yes-token": "1"},
+        winning_index_set='["2"]',
+        conn=conn,
+        requested_at=NOW,
+    )
+    conn.commit()
+    adapter = FakeRedeemAdapter(exc=RuntimeError("simulated adapter crash after side effect seam"))
+
+    result = submit_redeem(command_id, adapter, object(), conn=conn, submitted_at=NOW)
+
+    assert result.state is SettlementState.REDEEM_RETRYING
+    read_conn = sqlite3.connect(db_path)
+    read_conn.row_factory = sqlite3.Row
+    try:
+        row = read_conn.execute(
+            "SELECT state FROM settlement_commands WHERE command_id = ?",
+            (command_id,),
+        ).fetchone()
+        events = [
+            event["event_type"]
+            for event in read_conn.execute(
+                "SELECT event_type FROM settlement_command_events WHERE command_id = ? ORDER BY id",
+                (command_id,),
+            ).fetchall()
+        ]
+    finally:
+        read_conn.close()
+        conn.close()
+    assert row["state"] == SettlementState.REDEEM_RETRYING.value
+    assert events == ["REDEEM_INTENT_CREATED", "REDEEM_SUBMITTED", "REDEEM_RETRYING"]
+
+
+def test_submit_redeem_external_conn_attach_failure_fails_before_adapter(
+    tmp_path,
+    monkeypatch,
+):
+    import src.state.db as db_module
+    from src.execution.settlement_commands import (
+        SettlementCommandStateError,
+        request_redeem,
+        submit_redeem,
+    )
+
+    db_path = tmp_path / "redeem-no-world.db"
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    init_schema(conn)
+    monkeypatch.setattr(
+        db_module,
+        "ZEUS_WORLD_DB_PATH",
+        tmp_path / "missing-parent" / "zeus-world.db",
+    )
+    allow_redemption(monkeypatch)
+    command_id = request_redeem(
+        "condition-no-world",
+        "USDC",
+        market_id="market-no-world",
+        token_amounts={"yes-token": "1"},
+        winning_index_set='["1"]',
+        conn=conn,
+        requested_at=NOW,
+    )
+    adapter = FakeRedeemAdapter()
+
+    with pytest.raises(
+        SettlementCommandStateError,
+        match="requires world ATTACH before live side-effect boundary",
+    ):
+        submit_redeem(command_id, adapter, object(), conn=conn, submitted_at=NOW)
+
+    assert adapter.calls == []
+    conn.close()
 
 
 def test_redeem_crash_after_tx_hash_recovers_by_chain_receipt(conn, monkeypatch):

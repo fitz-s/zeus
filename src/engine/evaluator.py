@@ -411,6 +411,148 @@ class EdgeDecision:
             )
 
 
+@dataclass(frozen=True)
+class ShoulderClusterContext:
+    cluster_id: str
+    side: str
+    regime: str
+
+
+def _shoulder_cluster_context_for_edge(
+    *,
+    city_name: str,
+    target_date: str,
+    edge: BinEdge,
+) -> ShoulderClusterContext | None:
+    if not getattr(edge.bin, "is_shoulder", False):
+        return None
+    try:
+        from src.contracts.weather_regime_tag import WeatherRegimeTag
+        from src.strategy.correlation_cluster import tail_correlation_cluster_for
+
+        regime = getattr(edge, "tail_regime_tag", WeatherRegimeTag.UNKNOWN)
+        if isinstance(regime, str):
+            try:
+                regime = WeatherRegimeTag(regime)
+            except ValueError:
+                regime = WeatherRegimeTag.UNKNOWN
+        target = date.fromisoformat(str(target_date))
+        cluster_id = tail_correlation_cluster_for(city_name, regime, target)
+        if not cluster_id:
+            return None
+        side = "sell" if edge.direction == "buy_no" else "buy"
+        return ShoulderClusterContext(
+            cluster_id=cluster_id,
+            side=side,
+            regime=str(getattr(regime, "value", regime)),
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "shoulder cluster context unavailable for city=%s target_date=%s: %s",
+            city_name,
+            target_date,
+            exc,
+        )
+        return None
+
+
+def _shoulder_cluster_cap_rejection(
+    *,
+    conn: sqlite3.Connection | None,
+    city_name: str,
+    target_date: str,
+    edge: BinEdge,
+    proposed_notional: float,
+) -> str | None:
+    context = _shoulder_cluster_context_for_edge(
+        city_name=city_name,
+        target_date=target_date,
+        edge=edge,
+    )
+    if context is None:
+        return None
+    if conn is None:
+        logger.warning(
+            "shoulder_cluster_cap skipped without DB conn (paper/shadow path): "
+            "cluster=%s side=%s proposed_notional=%.4f",
+            context.cluster_id,
+            context.side,
+            proposed_notional,
+        )
+        return None
+    try:
+        from src.strategy.shoulder_cluster_cap import check_shoulder_cluster_cap
+
+        cap_ok, cap_reason = check_shoulder_cluster_cap(
+            cluster=context.cluster_id,
+            side=context.side,
+            proposed_notional=float(proposed_notional),
+            conn=conn,
+            proposing_city=city_name,
+        )
+    except (sqlite3.OperationalError, AttributeError, ImportError) as exc:
+        return f"shoulder_cluster_cap_unavailable: {exc}"
+    if not cap_ok:
+        return cap_reason
+    return None
+
+
+def _record_accepted_shoulder_exposure(
+    *,
+    conn: sqlite3.Connection | None,
+    city_name: str,
+    target_date: str,
+    edge: BinEdge,
+    notional_usd: float,
+    decision_event_id: str,
+    observed_at: datetime,
+    source: str,
+) -> str | None:
+    context = _shoulder_cluster_context_for_edge(
+        city_name=city_name,
+        target_date=target_date,
+        edge=edge,
+    )
+    if context is None or conn is None:
+        return None
+    try:
+        from src.state.shoulder_exposure_ledger import write_shoulder_exposure_entry
+
+        write_shoulder_exposure_entry(
+            shoulder_side=context.side,
+            weather_system_cluster=context.cluster_id,
+            city=city_name,
+            target_date=target_date,
+            source=source or "evaluator",
+            regime=context.regime,
+            notional_usd=float(notional_usd),
+            decision_event_id=decision_event_id,
+            observed_at=observed_at.isoformat(),
+            conn=conn,
+        )
+    except (sqlite3.OperationalError, AttributeError, ImportError) as exc:
+        return f"shoulder_exposure_ledger_write_failed: {exc}"
+    return None
+
+
+def _current_cluster_exposure_for_sizing(
+    *,
+    portfolio: PortfolioState,
+    cluster_key: str,
+    sizing_bankroll: float,
+    projected_cluster_exposure_usd: dict[str, float],
+) -> float:
+    projected_cluster_heat = (
+        projected_cluster_exposure_usd[cluster_key] / sizing_bankroll
+        if sizing_bankroll > 0
+        else 0.0
+    )
+    return (
+        cluster_exposure_for_bankroll(portfolio, cluster_key, sizing_bankroll)
+        + projected_cluster_heat
+    )
+
+
 def _projects_exposure_during_family_fallback_sizing(
     *,
     family_fallback_rank: int,
@@ -4563,6 +4705,7 @@ def evaluate_candidate(
         # Phase 3: RiskGraph Regime Throttling. Cluster identity comes from
         # reviewed city/config metadata; city.name is not a risk-cluster
         # authority.
+        cluster_key = getattr(city, "cluster", "") or city.name
         # Phase 5 T3: pass regime + store for variance-based cluster cap when
         # regime != UNKNOWN. Falls back to notional-sum when store is None or
         # regime is UNKNOWN (backward-compatible per plan §Track3).
@@ -4590,11 +4733,20 @@ def evaluate_candidate(
             # Fail-open: if import or construction fails, store stays None
             # and the notional-sum fallback activates automatically.
             pass
-        current_cluster_exp = cluster_exposure_for_bankroll(portfolio, city.cluster, sizing_bankroll,
+        _base_cluster_exp = cluster_exposure_for_bankroll(
+            portfolio,
+            cluster_key,
+            sizing_bankroll,
             regime_correlation_store=_phase5_store,
             regime=_phase5_regime,
             cities=_phase5_cities,
         )
+        _projected_cluster_heat = (
+            projected_cluster_exposure_usd[cluster_key] / sizing_bankroll
+            if sizing_bankroll > 0
+            else 0.0
+        )
+        current_cluster_exp = _base_cluster_exp + _projected_cluster_heat
         risk_throttle = 1.0
         if current_cluster_exp > 0.10: # Regime saturation starts
             risk_throttle *= 0.5
@@ -4602,56 +4754,6 @@ def evaluate_candidate(
         if current_heat > 0.25: # Global heat saturation 
             risk_throttle *= 0.5
             decision_validations.append("global_heat_throttled_50pct")
-
-        # Phase 3 T3: shoulder weather-system cluster cap (Invariant 4 — fires BEFORE
-        # phase_aware_kelly_multiplier to avoid wasted compute on capped-out entries).
-        # Gate: only applies to open-shoulder edges (edge.bin.is_shoulder).
-        # Dossier §7.5: "No same-direction shoulder sell across multiple cities under
-        # one heat dome/cold front." Two-gate: cross-city presence + $ hard cap.
-        if edge.bin.is_shoulder:
-            try:
-                from src.strategy.shoulder_cluster_cap import check_shoulder_cluster_cap
-                from src.strategy.correlation_cluster import tail_correlation_cluster_for
-                from src.contracts.weather_regime_tag import WeatherRegimeTag
-                _shoulder_regime = getattr(edge, "tail_regime_tag", WeatherRegimeTag.UNKNOWN)
-                _shoulder_target_date = getattr(edge.bin, "target_date", None)
-                _cluster_id = tail_correlation_cluster_for(
-                    city.name, _shoulder_regime, _shoulder_target_date
-                )
-                _shoulder_side = "sell" if edge.direction == "buy_no" else "buy"
-                # conn = world conn (the evaluate_candidate parameter — INV-37 world DB).
-                if _cluster_id:
-                    _cap_ok, _cap_reason = check_shoulder_cluster_cap(
-                        cluster=_cluster_id,
-                        side=_shoulder_side,
-                        proposed_notional=0.0,  # pre-sizing check — notional TBD
-                        conn=conn,
-                        proposing_city=city.name,
-                    )
-                    if not _cap_ok:
-                        decisions.append(EdgeDecision(
-                            False,
-                            edge=edge,
-                            decision_id=_decision_id(),
-                            rejection_stage="SHOULDER_CLUSTER_CAP",
-                            rejection_reasons=[NoTradeReason.SHOULDER_CLUSTER_CAP_EXCEEDED.value],
-                            selected_method=selected_method,
-                            applied_validations=list(decision_validations),
-                            decision_snapshot_id=snapshot_id,
-                            edge_source=edge_source,
-                            strategy_key=strategy_key,
-                            rejection_reason_enum=NoTradeReason.SHOULDER_CLUSTER_CAP_EXCEEDED,
-                            rejection_reason_detail=_cap_reason,
-                        ))
-                        continue
-            except (sqlite3.OperationalError, AttributeError, ImportError) as _cap_exc:  # noqa: BLE001
-                # Fail-open: cluster cap check errors do not block decisions.
-                # Logged but not fatal — missing conn or cluster lookup failure
-                # should not cascade to a trade rejection.
-                import logging as _cap_logging
-                _cap_logging.getLogger(__name__).warning(
-                    "shoulder_cluster_cap check failed (fail-open): %s", _cap_exc
-                )
 
         try:
             # A6 (PLAN.md §A6): pass strategy_key=None so dynamic_kelly_mult
@@ -4839,6 +4941,30 @@ def evaluate_candidate(
             size *= policy.allocation_multiplier
             decision_validations.append(f"strategy_policy_allocation_{policy.allocation_multiplier:g}x")
 
+        shoulder_cap_rejection = _shoulder_cluster_cap_rejection(
+            conn=conn,
+            city_name=city.name,
+            target_date=candidate.target_date,
+            edge=edge,
+            proposed_notional=float(size),
+        )
+        if shoulder_cap_rejection:
+            decisions.append(EdgeDecision(
+                False,
+                edge=edge,
+                decision_id=_decision_id(),
+                rejection_stage="SHOULDER_CLUSTER_CAP",
+                rejection_reasons=[NoTradeReason.SHOULDER_CLUSTER_CAP_EXCEEDED.value],
+                selected_method=selected_method,
+                applied_validations=[*decision_validations, "shoulder_cluster_cap"],
+                decision_snapshot_id=snapshot_id,
+                edge_source=edge_source,
+                strategy_key=strategy_key,
+                rejection_reason_enum=NoTradeReason.SHOULDER_CLUSTER_CAP_EXCEEDED,
+                rejection_reason_detail=shoulder_cap_rejection,
+            ))
+            continue
+
         effective_min_order_usd, min_order_authority = _effective_min_order_usd_for_entry(
             tokens=tokens,
             entry_price=edge.entry_price,
@@ -4974,12 +5100,13 @@ def evaluate_candidate(
             fdr_corrected=True,
             consecutive_confirmations=1,
         )
+        accepted_decision_id = _decision_id()
         decisions.append(EdgeDecision(
             should_trade=True,
             edge=edge,
             tokens=tokens,
             size_usd=size,
-            decision_id=_decision_id(),
+            decision_id=accepted_decision_id,
             selected_method=selected_method,
             applied_validations=[*decision_validations, "anti_churn"],
             decision_snapshot_id=snapshot_id,
@@ -5013,7 +5140,7 @@ def evaluate_candidate(
         ):
             projected_total_exposure_usd += size
             projected_city_exposure_usd[city.name] += size
-            projected_cluster_exposure_usd[city.name] += size
+            projected_cluster_exposure_usd[cluster_key] += size
 
     if _fdr_fallback or _fdr_family_size:
         from dataclasses import replace

@@ -1,6 +1,7 @@
 # Created: 2026-05-19
-# Last reused or audited: 2026-05-19
+# Last reused or audited: 2026-05-21
 # Authority basis: codereview-may19-2.md relationship F
+#                  + docs/operations/task_2026-05-21_live_side_effect_risk_boundaries/task.md P1-1
 #
 # Composite live-health: heartbeat OK AND latest run_mode OK AND
 # status_summary fresh AND no surface is silently stale.
@@ -84,6 +85,14 @@ def _mapping_has_positive_counter(payload: object) -> bool:
     return False
 
 
+def _has_text_value(payload: dict, *keys: str) -> bool:
+    for key in keys:
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return True
+    return False
+
+
 def _business_plane_surface(status_summary: Optional[dict]) -> dict:
     """Derived business-plane progress proof from the latest cycle summary.
 
@@ -123,24 +132,80 @@ def _business_plane_surface(status_summary: Optional[dict]) -> dict:
         "entry_orders_submitted",
     )
     venue_acks = _int_value(cycle, "venue_acks", "venue_ack_count")
+    no_trades = _int_value(cycle, "no_trades", "no_trade_count")
+    no_trade_reasons = (
+        cycle.get("top_no_trade_reasons")
+        or cycle.get("no_trade_reasons")
+        or cycle.get("rejection_reason_counts")
+    )
+    deterministic_rejections = (
+        cycle.get("deterministic_rejections")
+        or cycle.get("submit_rejections")
+        or cycle.get("submit_rejection_reasons")
+    )
+    zero_candidate_has_proof = (
+        _has_text_value(
+            cycle,
+            "no_market_reason",
+            "scanner_no_market_reason",
+            "market_discovery_no_market_reason",
+            "source_freshness_proof",
+        )
+        or bool(cycle.get("source_freshness_ok") is True)
+        or bool(cycle.get("scanner_attempted") is True)
+        or bool(cycle.get("market_scanner_attempted") is True)
+    )
+    no_trade_reason_proof = (
+        _mapping_has_positive_counter(no_trade_reasons)
+        or _has_text_value(cycle, "top_no_trade_reason", "dominant_no_trade_reason")
+    )
+    deterministic_rejection_observed = _mapping_has_positive_counter(deterministic_rejections)
     command_recovery = cycle.get("command_recovery")
     chain_sync = cycle.get("chain_sync")
     progress = {
         "mode": cycle.get("mode"),
         "last_successful_cycle_at": cycle.get("completed_at") or cycle.get("started_at"),
         "candidates": candidates,
-        "candidate_evaluated": candidates > 0 or "candidates" in cycle,
+        "candidate_evaluated": candidates > 0,
         "final_intents_built": final_intents,
         "final_intent_built": final_intents > 0,
         "submit_attempts": submit_attempts,
         "submit_attempted": submit_attempts > 0,
         "venue_acks": venue_acks,
         "venue_ack_observed": venue_acks > 0,
+        "no_trades": no_trades,
+        "no_trade_reason_proof": no_trade_reason_proof,
+        "zero_candidate_has_proof": zero_candidate_has_proof,
+        "deterministic_rejection_observed": deterministic_rejection_observed,
         "reconcile_progress_observed": (
             _mapping_has_positive_counter(command_recovery)
             or _mapping_has_positive_counter(chain_sync)
         ),
     }
+    if candidates <= 0 and not zero_candidate_has_proof:
+        return {
+            "ok": False,
+            "issue": "ZERO_CANDIDATES_WITHOUT_SOURCE_OR_NO_MARKET_PROOF",
+            "progress": progress,
+        }
+    if candidates > 0 and final_intents <= 0 and not no_trade_reason_proof:
+        return {
+            "ok": False,
+            "issue": "CANDIDATES_WITHOUT_FINAL_INTENTS_OR_NO_TRADE_REASONS",
+            "progress": progress,
+        }
+    if final_intents > 0 and submit_attempts <= 0:
+        return {
+            "ok": False,
+            "issue": "FINAL_INTENTS_WITHOUT_SUBMIT_ATTEMPTS",
+            "progress": progress,
+        }
+    if submit_attempts > 0 and venue_acks <= 0 and not deterministic_rejection_observed:
+        return {
+            "ok": False,
+            "issue": "SUBMIT_ATTEMPTS_WITHOUT_ACK_OR_DETERMINISTIC_REJECTION",
+            "progress": progress,
+        }
     return {"ok": True, "issue": None, "progress": progress}
 
 

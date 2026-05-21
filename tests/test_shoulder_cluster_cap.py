@@ -21,8 +21,13 @@ Function tests (post-implementation):
 from __future__ import annotations
 
 import sqlite3
+from datetime import datetime
+from types import SimpleNamespace
 
 import pytest
+
+from src.contracts.weather_regime_tag import WeatherRegimeTag
+from src.types import Bin, BinEdge
 
 
 # ---------------------------------------------------------------------------
@@ -192,6 +197,30 @@ class TestSameDirectionShoulderSellRefuseAcrossCluster:
         )
         assert allowed, "Same city adding more under cap should be allowed"
 
+    def test_same_city_second_entry_rejected_when_real_proposed_notional_exceeds_cap(self) -> None:
+        """Post-sizing cap must use the real proposed notional, not 0.0."""
+        conn = _make_world_conn()
+        cluster = "heat_dome_east_2026_07_15"
+        _insert_ledger_row(
+            conn,
+            shoulder_side="sell",
+            weather_system_cluster=cluster,
+            city="Atlanta",
+            notional_usd=1900.0,
+        )
+
+        from src.strategy.shoulder_cluster_cap import check_shoulder_cluster_cap
+
+        allowed, reason = check_shoulder_cluster_cap(
+            cluster=cluster,
+            side="sell",
+            proposed_notional=500.0,
+            conn=conn,
+            proposing_city="Atlanta",
+        )
+        assert not allowed
+        assert "$2400.00 exceeds hard cap" in reason
+
     def test_empty_cluster_always_allows(self) -> None:
         """No existing entries → always allow."""
         conn = _make_world_conn()
@@ -227,6 +256,78 @@ class TestSameDirectionShoulderSellRefuseAcrossCluster:
             proposing_city="Chicago",
         )
         assert allowed, "Different cluster must not block"
+
+
+def _shoulder_edge() -> BinEdge:
+    edge = BinEdge(
+        bin=Bin(low=100, high=None, label="100°F or higher", unit="F"),
+        direction="buy_no",
+        edge=0.12,
+        ci_lower=0.05,
+        ci_upper=0.15,
+        p_model=0.60,
+        p_market=0.35,
+        p_posterior=0.47,
+        entry_price=0.35,
+        p_value=0.02,
+        vwmp=0.35,
+        support_index=0,
+    )
+    edge.tail_regime_tag = WeatherRegimeTag.HEAT_DOME
+    return edge
+
+
+def test_evaluator_shoulder_cap_missing_ledger_table_fails_closed_with_db_conn() -> None:
+    conn = sqlite3.connect(":memory:")
+    from src.engine.evaluator import _shoulder_cluster_cap_rejection
+
+    reason = _shoulder_cluster_cap_rejection(
+        conn=conn,
+        city_name="Atlanta",
+        target_date="2026-07-15",
+        edge=_shoulder_edge(),
+        proposed_notional=500.0,
+    )
+
+    assert reason is not None
+    assert reason.startswith("shoulder_cluster_cap_unavailable:")
+
+
+def test_runtime_submitted_shoulder_decision_writes_exposure_ledger_row() -> None:
+    conn = _make_world_conn()
+    from src.engine.cycle_runtime import _record_submitted_shoulder_exposure
+
+    error = _record_submitted_shoulder_exposure(
+        conn=conn,
+        city_name="Atlanta",
+        target_date="2026-07-15",
+        decision=SimpleNamespace(
+            edge=_shoulder_edge(),
+            size_usd=250.0,
+            decision_id="decision-shoulder-ledger-1",
+        ),
+        observed_at=datetime(2026, 7, 14, 12, 0),
+        source="test_fixture",
+    )
+
+    assert error is None
+    row = conn.execute(
+        """
+        SELECT shoulder_side, weather_system_cluster, city, target_date, source,
+               regime, notional_usd, decision_event_id
+          FROM shoulder_exposure_ledger
+        """
+    ).fetchone()
+    assert row == (
+        "sell",
+        "heat_dome_east_2026_07_15",
+        "Atlanta",
+        "2026-07-15",
+        "test_fixture",
+        "heat_dome",
+        250.0,
+        "decision-shoulder-ledger-1",
+    )
 
 
 # ---------------------------------------------------------------------------

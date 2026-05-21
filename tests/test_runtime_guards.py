@@ -2,7 +2,7 @@
 # Lifecycle: created=2026-04-28; last_reviewed=2026-05-18; last_reused=2026-05-18
 # Created: 2026-04-28
 # Last reused/audited: 2026-05-21
-# Authority basis: docs/operations/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md; task_2026-04-28_contamination_remediation Batch G; Phase 1B ENS snapshot persistence; Phase 1D forecast source policy; PR #56 MarketPhaseEvidence sidecar propagation; Wave26 explicit position env authority; task.md B3 exit executable snapshot identity.
+# Authority basis: docs/operations/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md; task_2026-04-28_contamination_remediation Batch G; Phase 1B ENS snapshot persistence; Phase 1D forecast source policy; PR #56 MarketPhaseEvidence sidecar propagation; Wave26 explicit position env authority; task.md B3 exit executable snapshot identity; docs/operations/task_2026-05-21_live_side_effect_risk_boundaries/task.md P1-2 cluster projection.
 # Purpose: Lock runtime guard and live-cycle wiring contracts.
 # Reuse: Run for runtime guard, live-only cleanup, and cycle wiring changes.
 
@@ -10211,6 +10211,11 @@ def test_evaluator_projects_exposure_across_multiple_edges(monkeypatch, tmp_path
         heats.append(kwargs["current_portfolio_heat"])
         projected = kwargs["current_portfolio_heat"] + (kwargs["size_usd"] / kwargs["bankroll"])
         return (projected <= 0.5, "portfolio_heat")
+    kelly_multipliers: list[float] = []
+
+    def _kelly_size(_p_posterior, _entry_price, _bankroll, multiplier):
+        kelly_multipliers.append(float(multiplier))
+        return 4.0
 
     class DummyClob:
         def get_best_bid_ask(self, token_id):
@@ -10245,7 +10250,8 @@ def test_evaluator_projects_exposure_across_multiple_edges(monkeypatch, tmp_path
     _stub_full_family_scan(monkeypatch)
     monkeypatch.setattr(evaluator_module, "fdr_filter", lambda edges, fdr_alpha=0.10: list(edges))
     monkeypatch.setattr(evaluator_module, "dynamic_kelly_mult", lambda **kwargs: 0.25)
-    monkeypatch.setattr(evaluator_module, "kelly_size", lambda *args, **kwargs: 4.0)
+    monkeypatch.setattr(evaluator_module, "phase_aware_kelly_multiplier", lambda **kwargs: 1.0)
+    monkeypatch.setattr(evaluator_module, "kelly_size", _kelly_size)
     monkeypatch.setattr(evaluator_module, "check_position_allowed", _check_position_allowed)
 
     decisions = evaluator_module.evaluate_candidate(
@@ -10258,9 +10264,10 @@ def test_evaluator_projects_exposure_across_multiple_edges(monkeypatch, tmp_path
         decision_time=datetime(2026, 4, 2, 0, 0, tzinfo=timezone.utc),
     )
 
-    assert [d.should_trade for d in decisions] == [True, False]
+    assert [d.should_trade for d in decisions] == [True, True]
     assert heats[0] == pytest.approx(0.0)
-    assert heats[1] == pytest.approx(0.4)
+    assert heats[1] == pytest.approx(0.0)
+    assert kelly_multipliers == pytest.approx([0.25, 0.25])
 
 
 def test_update_reaction_degenerate_ci_fails_closed_before_sizing(monkeypatch):
@@ -13471,6 +13478,34 @@ def test_fill_authority_cost_basis_feeds_portfolio_exposure_helpers():
     assert portfolio_heat_for_bankroll(portfolio, 100.0) == pytest.approx(0.05)
     assert city_exposure_for_bankroll(portfolio, "Chicago", 100.0) == pytest.approx(0.05)
     assert cluster_exposure_for_bankroll(portfolio, "Great Lakes", 100.0) == pytest.approx(0.05)
+
+
+def test_evaluator_cluster_sizing_exposure_adds_same_cycle_projection_by_cluster():
+    pos = _position(
+        trade_id="cluster-projection-open-1",
+        state="holding",
+        city="Chicago",
+        cluster="Great Lakes",
+        size_usd=100.0,
+        entry_price=0.50,
+        shares=200.0,
+        cost_basis_usd=100.0,
+        shares_filled=10.0,
+        filled_cost_basis_usd=5.0,
+        entry_price_avg_fill=0.50,
+        entry_economics_authority=ENTRY_ECONOMICS_AVG_FILL_PRICE,
+        fill_authority=FILL_AUTHORITY_VENUE_CONFIRMED_FULL,
+    )
+    portfolio = PortfolioState(bankroll=100.0, positions=[pos])
+
+    current = evaluator_module._current_cluster_exposure_for_sizing(
+        portfolio=portfolio,
+        cluster_key="Great Lakes",
+        sizing_bankroll=100.0,
+        projected_cluster_exposure_usd={"Great Lakes": 20.0, "Chicago": 999.0},
+    )
+
+    assert current == pytest.approx(0.25)
 
 
 def test_materialize_position_carries_semantic_snapshot_jsons():

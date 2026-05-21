@@ -22,7 +22,7 @@ P2/K4 where chain authority is surfaced as a first-class seam.
 
 Cross-DB note (per INV-30 caveat): venue_commands lives in zeus_trades.db.
 When conn is not passed, this module opens its own trade connection via
-get_trade_connection_with_world() and closes it in a try/finally. The live
+get_trade_connection_with_world_required() and closes it in a try/finally. The live
 cycle path passes its already-open trade/world connection to avoid a second
 connection inside the same cycle.
 """
@@ -4867,7 +4867,7 @@ def reconcile_unresolved_commands(
     venue_order_id and in SUBMITTING get a REVIEW_REQUIRED event since recovery
     cannot distinguish never-placed from ack-lost side effects.
 
-    DB connection: if conn is None, opens get_trade_connection_with_world()
+    DB connection: if conn is None, opens get_trade_connection_with_world_required()
     internally (with a try/finally to close). CycleRunner passes the per-cycle
     trade/world connection; the internal-open path remains the external-caller
     fallback.
@@ -4876,8 +4876,8 @@ def reconcile_unresolved_commands(
     """
     own_conn = False
     if conn is None:
-        from src.state.db import get_trade_connection_with_world
-        conn = get_trade_connection_with_world()
+        from src.state.db import get_trade_connection_with_world_required
+        conn = get_trade_connection_with_world_required(write_class="live")
         own_conn = True
 
     if client is None:
