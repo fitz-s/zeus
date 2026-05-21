@@ -32,6 +32,7 @@ from src.contracts.executable_market_snapshot_v2 import (
     canonicalize_fee_details,
     is_fresh,
 )
+from src.contracts.exceptions import EmptyOrderbookError
 from src.contracts.execution_intent import (
     ExecutableCostBasis,
     ExecutableTradeHypothesis,
@@ -688,6 +689,21 @@ def test_polymarket_client_best_bid_ask_normalizes_unsorted_orderbook(monkeypatc
     monkeypatch.setattr(client, "get_orderbook", fake_orderbook)
 
     assert client.get_best_bid_ask("yes-token") == (0.47, 0.53, 100.0, 25.0)
+
+
+def test_polymarket_client_orderbook_parse_failure_is_empty_orderbook(monkeypatch):
+    """RELATIONSHIP: malformed CLOB book numerics preserve liquidity no-trade semantics."""
+
+    client = object.__new__(PolymarketClient)
+
+    def fake_orderbook_snapshot(token_id):
+        assert token_id == "yes-token"
+        return {"bids": [], "asks": [{"price": "not-a-price", "size": "10"}]}
+
+    monkeypatch.setattr(client, "get_orderbook_snapshot", fake_orderbook_snapshot)
+
+    with pytest.raises(EmptyOrderbookError, match="Invalid CLOB orderbook.*asks.*price"):
+        client.get_orderbook("yes-token")
 
 
 def test_polymarket_client_best_ask_accepts_buy_executable_ask_only_book(monkeypatch):

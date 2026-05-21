@@ -368,14 +368,26 @@ class PolymarketClient:
         Returns: {"bids": [{"price": float, "size": float}...],
                   "asks": [{"price": float, "size": float}...]}
         """
+        from src.contracts.exceptions import EmptyOrderbookError
+
         data = self.get_orderbook_snapshot(token_id)
 
         # Normalize: API returns string numerics
         for side in ("bids", "asks"):
             if side in data:
-                for entry in data[side]:
-                    entry["price"] = float(entry["price"])
-                    entry["size"] = float(entry["size"])
+                rows = data[side]
+                if not isinstance(rows, list):
+                    raise EmptyOrderbookError(
+                        f"Invalid CLOB orderbook for {token_id}: {side} rows must be a list"
+                    )
+                for idx, entry in enumerate(rows):
+                    try:
+                        entry["price"] = float(entry["price"])
+                        entry["size"] = float(entry["size"])
+                    except (KeyError, TypeError, ValueError) as exc:
+                        raise EmptyOrderbookError(
+                            f"Invalid CLOB orderbook for {token_id}: {side}[{idx}] price/size parse failed: {exc}"
+                        ) from exc
 
         return data
 
