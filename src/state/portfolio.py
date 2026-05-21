@@ -2143,8 +2143,15 @@ def cluster_exposure_for_bankroll(
             from src.contracts.weather_regime_tag import WeatherRegimeTag as _WRT
             if regime is not _WRT.UNKNOWN:
                 sigma = regime_correlation_store.get(regime, cities)
-                # Weight vector: w_i = notional_i / bankroll.
-                w = [n / bankroll for n in notionals]
+                # Weight vector aligned to cities order (not open_positions order).
+                # Build a city→notional map first, then index by cities list so that
+                # w[i] corresponds to sigma[i,j] (same city ordering).
+                _city_notional = {
+                    p.city: _runtime_open_exposure_usd(p)
+                    for p in open_positions
+                    if hasattr(p, "city")
+                }
+                w = [_city_notional.get(c, 0.0) / bankroll for c in cities]
                 if len(w) == len(cities):
                     import numpy as _np
                     import math as _math

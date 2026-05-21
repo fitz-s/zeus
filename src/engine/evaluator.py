@@ -4574,11 +4574,12 @@ def evaluate_candidate(
             if _phase5_regime is not _WRT5.UNKNOWN:
                 _phase5_store = _RCS(conn)
                 # Collect cities present in the cluster from open positions.
-                _phase5_cities = list({
+                # Use sorted() for deterministic order so w[i] aligns with sigma[i,j].
+                _phase5_cities = sorted(
                     p.city for p in portfolio.positions
                     if p.cluster == city.cluster
                     and hasattr(p, "city")
-                }) or None
+                ) or None
         except (ImportError, Exception):  # noqa: BLE001
             # Fail-open: if import or construction fails, store stays None
             # and the notional-sum fallback activates automatically.

@@ -307,3 +307,54 @@ def test_unknown_regime_uses_notional_fallback() -> None:
     assert result == pytest.approx(expected_notional, rel=1e-9), (
         f"UNKNOWN regime: expected notional fallback {expected_notional}, got {result}"
     )
+
+
+# ---------------------------------------------------------------------------
+# T3-5: city-order alignment — positions in A,B order; cities in B,A order
+# ---------------------------------------------------------------------------
+
+def test_city_order_alignment_in_variance_path() -> None:
+    """w[i] must correspond to Σ[i,j] city ordering, not state.positions order.
+
+    Regression guard for SEV-1 alignment bug: if w is built from positions
+    iteration order rather than cities list order, wᵀΣw is wrong when the
+    two orderings differ.
+
+    Setup: two cities A ($10) and B ($200) in positions listed [A, B].
+    cities arg = ["B", "A"] (reversed). The shrunk matrix is 2×2 with a
+    known off-diagonal. We verify the returned value matches the by-hand
+    calculation using the cities-ordered weights [w_B, w_A].
+    """
+    cities_ordered = ["B", "A"]  # reversed from positions order
+    bankroll = 1000.0
+    positions = [
+        _make_position("A", "test_cluster", 10.0),
+        _make_position("B", "test_cluster", 200.0),
+    ]
+    state = _MockPortfolioState(positions)
+
+    # Build a store with known correlation.
+    rng = np.random.default_rng(7)
+    # Fit with cities in ["B","A"] order — residuals col 0 = B, col 1 = A.
+    fit_cities = ["B", "A"]
+    residuals = rng.standard_normal((500, 2))
+    conn = _world_conn()
+    store = RegimeCorrelationStore(conn)
+    est = store.fit(WeatherRegimeTag.NORMAL, residuals, cities=fit_cities)
+
+    result = cluster_exposure_for_bankroll(
+        state, "test_cluster", bankroll,
+        regime_correlation_store=store,
+        regime=WeatherRegimeTag.NORMAL,
+        cities=cities_ordered,
+    )
+
+    # By-hand: w must be in cities_ordered=["B","A"] order.
+    w_cities = np.array([200.0 / bankroll, 10.0 / bankroll])  # [w_B, w_A]
+    sigma = est.shrunk_correlation  # shape (2,2), fitted in [B,A] order
+    expected = math.sqrt(float(w_cities @ sigma @ w_cities))
+
+    assert result == pytest.approx(expected, rel=1e-9), (
+        f"City-order alignment: expected {expected:.8f}, got {result:.8f}. "
+        "w must be indexed by cities list order, not state.positions order."
+    )
