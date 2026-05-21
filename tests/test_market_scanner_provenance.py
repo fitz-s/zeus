@@ -3494,6 +3494,52 @@ class TestForwardMarketSubstrateProducer:
             "executable_snapshot_id"
         ] == "snap-mid"
 
+    def test_persisted_sibling_reader_uses_static_topology_when_executable_snapshot_stale(self):
+        """Relationship: monitor bin topology is static, not executable quote freshness."""
+        conn = _make_persisted_substrate_conn()
+        for condition_id, label, low, high, token in (
+            ("cond-low", "35°F or lower", None, 35.0, "yes-low"),
+            ("cond-mid", "36-37°F", 36.0, 37.0, "yes-mid"),
+            ("cond-high", "38°F or higher", 38.0, None, "yes-high"),
+        ):
+            conn.execute(
+                """
+                INSERT INTO market_events_v2 (
+                    market_slug, city, target_date, temperature_metric,
+                    condition_id, token_id, range_label, range_low,
+                    range_high, recorded_at
+                ) VALUES (?, 'Chicago', '2026-04-30', 'low', ?, ?, ?, ?, ?,
+                    '2026-05-20T09:59:00+00:00')
+                """,
+                (
+                    "lowest-temperature-in-chicago-on-april-30-2026",
+                    condition_id,
+                    token,
+                    label,
+                    low,
+                    high,
+                ),
+            )
+        _insert_persisted_reader_snapshot(conn)
+
+        snapshot = ms.read_persisted_sibling_outcomes(
+            "cond-mid",
+            conn=conn,
+            now_utc=datetime(2026, 5, 20, 10, 20, tzinfo=timezone.utc),
+            max_age_seconds=60,
+        )
+
+        assert snapshot.authority == "VERIFIED"
+        assert [o["condition_id"] for o in snapshot.events] == [
+            "cond-low",
+            "cond-mid",
+            "cond-high",
+        ]
+        held = next(o for o in snapshot.events if o["condition_id"] == "cond-mid")
+        assert held["executable"] is False
+        assert held["price"] is None
+        assert held["source_contract"]["source"] == "market_events_v2_static_topology"
+
     def test_get_sibling_outcomes_uses_persisted_authority_without_legacy_scan(self, monkeypatch):
         monkeypatch.setattr(
             ms,
