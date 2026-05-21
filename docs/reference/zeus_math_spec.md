@@ -675,7 +675,26 @@ Current §9 treats `H ≈ 220` as the family size. Upgrade: record every tested 
 ### 15.4 Correlation matrix via shrinkage
 Layer A: settlement anomaly correlation `a_{c,d} = T_{c,d} - E[T_{c,month(d)}]`.
 Layer B: forecast error correlation `e_{c,d,ℓ,s} = T̂_{c,d,ℓ,s} - T_{c,d}`.
-Shrinkage `Σ_λ = (1-λ)Σ̂ + λ·D`. Deferred.
+
+**Ledoit-Wolf optimal shrinkage intensity over diagonal target D** (Ledoit & Wolf 2003; see also Ledoit & Wolf 2004, "Honey, I shrunk the sample covariance matrix"):
+
+```
+Σ_shrunk = (1 - δ*) · S + δ* · D
+```
+
+where `D` is the diagonal matrix formed from the diagonal entries of the sample covariance `S` (i.e., retain variances, zero all off-diagonal covariances), and the optimal intensity is:
+
+```
+δ* = π / (γ × n)
+```
+
+- `π` = sum of asymptotic variances of the sample covariance entries (estimable from the data itself without additional assumptions)
+- `γ` = squared Frobenius distance between the sample covariance matrix `S` and the diagonal target `D` (measures how far the sample matrix is from diagonal)
+- `n` = number of observations
+
+`δ*` is the analytically optimal convex-combination weight that minimises the expected mean-squared error of the estimator over the class `(1-δ)·S + δ·D, δ ∈ [0,1]`.
+
+**Verification cohort (back-test design)**: synthetic AR(1) temperature-residual sequences of increasing length `n ∈ {50, 100, 250, 500, 1000}` across `p = 20` city series with known underlying diagonal-dominant true covariance. The fitted `δ*` must converge toward 0 as `n → ∞` (sample covariance becomes reliable) and remain bounded away from 0 for `n < p`. Test harness: `tests/test_correlation_shrinkage.py::test_intensity_converges_diagonal_target`.
 
 ### 15.5 Day0 two-stage residual model
 When a position is in day0 window, the observed running max `R` is a hard floor:
