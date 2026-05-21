@@ -2339,3 +2339,57 @@ CREATE INDEX idx_shoulder_exposure_ledger_cluster_side
 CREATE INDEX idx_shoulder_exposure_ledger_city
     ON shoulder_exposure_ledger(city, target_date)
     ;
+-- table: regime_correlation_cache
+CREATE TABLE regime_correlation_cache (
+    regime              TEXT PRIMARY KEY,
+    cities_json         TEXT NOT NULL,
+    matrix_json         TEXT NOT NULL,
+    fitted_at           TEXT NOT NULL,
+    n_observations      INTEGER NOT NULL,
+    intensity           REAL NOT NULL,
+    schema_version      INTEGER NOT NULL CHECK (schema_version IN (24))
+)
+    ;
+-- table: shadow_experiments
+CREATE TABLE shadow_experiments (
+    experiment_id  TEXT PRIMARY KEY,
+    strategy_id    TEXT NOT NULL,
+    config_hash    TEXT NOT NULL,
+    started_at     TEXT NOT NULL,
+    closed_at      TEXT,
+    cohort_tag     TEXT NOT NULL,
+    immutable      INTEGER NOT NULL DEFAULT 1
+        CHECK (immutable IN (0, 1))
+)
+    ;
+-- table: evidence_tier_assignments
+CREATE TABLE evidence_tier_assignments (
+    strategy_id    TEXT NOT NULL,
+    tier           INTEGER NOT NULL,
+    assigned_at    TEXT NOT NULL,
+    rationale      TEXT,
+    operator_ref   TEXT,
+    verdict_reason TEXT
+)
+    ;
+-- index: idx_eta_strategy_assigned
+CREATE INDEX idx_eta_strategy_assigned
+    ON evidence_tier_assignments (strategy_id, assigned_at DESC)
+    ;
+-- table: regret_decompositions
+CREATE TABLE regret_decompositions (
+    id                              INTEGER PRIMARY KEY AUTOINCREMENT,
+    experiment_id                   TEXT NOT NULL
+        REFERENCES shadow_experiments(experiment_id),
+    decision_event_id               TEXT NOT NULL,
+    forecast_error_usd              REAL,
+    observation_error_usd           REAL,
+    quote_error_usd                 REAL,
+    non_fill_error_usd              REAL,
+    fee_error_usd                   REAL,
+    timing_error_usd                REAL,
+    settlement_ambiguity_error_usd  REAL,
+    total_regret_usd                REAL NOT NULL,
+    computed_at                     TEXT NOT NULL
+)
+    ;
