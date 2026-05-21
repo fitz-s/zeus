@@ -1532,6 +1532,193 @@ def _latest_exit_snapshot_context(
     }
 
 
+def _latest_exit_snapshot_identity_seed(
+    conn: sqlite3.Connection | None,
+    token_id: str,
+) -> dict[str, object]:
+    """Return durable token identity from the latest executable snapshot.
+
+    The snapshot may be price-stale; use it only to seed immutable market
+    identity before capturing a fresh exit snapshot from current CLOB facts.
+    """
+
+    if conn is None or not token_id:
+        return {}
+    saved = conn.row_factory
+    conn.row_factory = sqlite3.Row
+    try:
+        row = conn.execute(
+            """
+            SELECT gamma_market_id, event_id, event_slug, condition_id, question_id,
+                   yes_token_id, no_token_id, selected_outcome_token_id, outcome_label,
+                   market_start_at, market_end_at, market_close_at, sports_start_at,
+                   raw_gamma_payload_hash, captured_at
+              FROM executable_market_snapshots
+             WHERE selected_outcome_token_id = ?
+                OR yes_token_id = ?
+                OR no_token_id = ?
+             ORDER BY captured_at DESC, snapshot_id DESC
+             LIMIT 1
+            """,
+            (token_id, token_id, token_id),
+        ).fetchone()
+    except sqlite3.OperationalError:
+        row = None
+    finally:
+        conn.row_factory = saved
+    if row is None:
+        return {}
+
+    yes_token = str(row["yes_token_id"] or "")
+    no_token = str(row["no_token_id"] or "")
+    condition_id = str(row["condition_id"] or "")
+    question_id = str(row["question_id"] or "")
+    if not yes_token or not no_token or not condition_id or not question_id:
+        return {}
+
+    gamma_raw = {
+        "id": str(row["gamma_market_id"] or condition_id),
+        "conditionId": condition_id,
+        "questionID": question_id,
+        "clobTokenIds": [yes_token, no_token],
+    }
+    return {
+        "market_id": condition_id,
+        "condition_id": condition_id,
+        "question_id": question_id,
+        "gamma_market_id": str(row["gamma_market_id"] or condition_id),
+        "event_id": str(row["event_id"] or ""),
+        "event_slug": str(row["event_slug"] or ""),
+        "token_id": yes_token,
+        "no_token_id": no_token,
+        "title": str(row["outcome_label"] or ""),
+        "market_start_at": row["market_start_at"],
+        "market_end_at": row["market_end_at"],
+        "market_close_at": row["market_close_at"],
+        "sports_start_at": row["sports_start_at"],
+        "token_map_raw": {"YES": yes_token, "NO": no_token},
+        "raw_gamma_payload_hash": str(row["raw_gamma_payload_hash"] or ""),
+        "gamma_market_raw": gamma_raw,
+        "source_contract": {
+            "status": "MATCH",
+            "source": "executable_market_snapshots_identity_seed",
+            "captured_at": row["captured_at"],
+        },
+    }
+
+
+def _outcome_has_executable_identity(outcome: object) -> bool:
+    if not isinstance(outcome, Mapping):
+        return False
+    return all(
+        str(outcome.get(key) or "").strip()
+        for key in ("condition_id", "question_id", "token_id", "no_token_id")
+    )
+
+
+def _outcome_matches_exit_identity_seed(
+    outcome: Mapping[str, object],
+    identity_seed: Mapping[str, object],
+    token_id: str,
+    *,
+    single_outcome: bool,
+) -> bool:
+    if single_outcome:
+        return True
+    seed_condition = str(identity_seed.get("condition_id") or "")
+    values = {
+        str(value)
+        for value in (
+            outcome.get("market_id"),
+            outcome.get("condition_id"),
+            outcome.get("token_id"),
+            outcome.get("no_token_id"),
+        )
+        if value not in (None, "")
+    }
+    return bool(values & {str(token_id), seed_condition})
+
+
+def _merge_current_outcome_with_exit_identity_seed(
+    outcome: Mapping[str, object],
+    identity_seed: Mapping[str, object],
+) -> dict[str, object]:
+    """Fill missing immutable identity without importing stale tradability facts."""
+
+    merged = dict(outcome)
+    for key in (
+        "market_id",
+        "condition_id",
+        "question_id",
+        "gamma_market_id",
+        "event_id",
+        "event_slug",
+        "token_id",
+        "no_token_id",
+        "title",
+        "market_start_at",
+        "market_end_at",
+        "market_close_at",
+        "sports_start_at",
+        "raw_gamma_payload_hash",
+    ):
+        if merged.get(key) in (None, "") and identity_seed.get(key) not in (None, ""):
+            merged[key] = identity_seed[key]
+
+    if not isinstance(merged.get("token_map_raw"), Mapping):
+        token_map = identity_seed.get("token_map_raw")
+        if isinstance(token_map, Mapping):
+            merged["token_map_raw"] = dict(token_map)
+
+    current_raw = merged.get("gamma_market_raw")
+    gamma_raw = dict(current_raw) if isinstance(current_raw, Mapping) else {}
+    seed_raw = identity_seed.get("gamma_market_raw")
+    if isinstance(seed_raw, Mapping):
+        for key in ("id", "conditionId", "questionID", "clobTokenIds"):
+            if gamma_raw.get(key) in (None, "") and seed_raw.get(key) not in (None, ""):
+                gamma_raw[key] = seed_raw[key]
+    if gamma_raw:
+        merged["gamma_market_raw"] = gamma_raw
+
+    merged["source_contract"] = {
+        "status": "MATCH",
+        "source": "executable_market_snapshots_identity_seed",
+        "captured_at": identity_seed.get("source_contract", {}).get("captured_at")
+        if isinstance(identity_seed.get("source_contract"), Mapping)
+        else None,
+    }
+    return merged
+
+
+def _seed_exit_snapshot_identity(
+    siblings: list[object],
+    identity_seed: Mapping[str, object],
+    token_id: str,
+) -> list[object]:
+    mapping_siblings = [outcome for outcome in siblings if isinstance(outcome, Mapping)]
+    if not mapping_siblings:
+        return [dict(identity_seed)]
+
+    seeded: list[object] = []
+    applied = False
+    single_outcome = len(mapping_siblings) == 1
+    for outcome in siblings:
+        if not isinstance(outcome, Mapping):
+            seeded.append(outcome)
+            continue
+        if _outcome_matches_exit_identity_seed(
+            outcome,
+            identity_seed,
+            token_id,
+            single_outcome=single_outcome,
+        ):
+            seeded.append(_merge_current_outcome_with_exit_identity_seed(outcome, identity_seed))
+            applied = True
+        else:
+            seeded.append(outcome)
+    return seeded if applied else siblings
+
+
 def _latest_or_capture_exit_snapshot_context(
     conn: sqlite3.Connection | None,
     clob,
@@ -1586,6 +1773,10 @@ def _latest_or_capture_exit_snapshot_context(
                 market_id,
             )
             return {}
+        if not any(_outcome_has_executable_identity(outcome) for outcome in siblings):
+            identity_seed = _latest_exit_snapshot_identity_seed(conn, token_id)
+            if identity_seed:
+                siblings = _seed_exit_snapshot_identity(siblings, identity_seed, token_id)
 
         raw_direction = getattr(position, "direction", "")
         direction = str(getattr(raw_direction, "value", raw_direction))
@@ -1775,6 +1966,7 @@ def _log_partial_exit_execution_fact(
     status: str,
     fill_price: float,
     filled_shares: float,
+    order_id: str,
 ) -> None:
     from src.state.db import log_execution_fact
 
@@ -1794,7 +1986,47 @@ def _log_partial_exit_execution_fact(
         shares=filled_shares,
         venue_status=status or "PARTIAL",
         terminal_exec_status=status or "PARTIAL",
+        command_id=_exit_command_id_for_order(conn, position, order_id),
     )
+
+
+def _exit_command_id_for_order(
+    conn: sqlite3.Connection,
+    position: Position,
+    order_id: str,
+) -> str | None:
+    if not order_id:
+        return None
+    try:
+        row = conn.execute(
+            """
+            SELECT command_id
+              FROM venue_commands
+             WHERE venue_order_id = ?
+               AND position_id = ?
+               AND intent_kind = 'EXIT'
+             ORDER BY updated_at DESC, created_at DESC
+             LIMIT 1
+            """,
+            (order_id, getattr(position, "trade_id", "")),
+        ).fetchone()
+        if row is None:
+            row = conn.execute(
+                """
+                SELECT command_id
+                  FROM venue_commands
+                 WHERE venue_order_id = ?
+                   AND intent_kind = 'EXIT'
+                 ORDER BY updated_at DESC, created_at DESC
+                 LIMIT 1
+                """,
+                (order_id,),
+            ).fetchone()
+    except sqlite3.OperationalError:
+        return None
+    if row is None:
+        return None
+    return str(row["command_id"] if isinstance(row, sqlite3.Row) else row[0]) or None
 
 
 def check_pending_exits(
@@ -1885,6 +2117,7 @@ def check_pending_exits(
                 continue
             exit_reason = pos.exit_reason or "DEFERRED_SELL_FILL"
             phase_before = _canonical_phase_before_for_economic_close(pos)
+            filled_shares = float(pos.effective_shares)
             closed = compute_economic_close(portfolio, pos.trade_id, actual_price, exit_reason)
             if closed is not None:
                 closed.exit_state = "sell_filled"
@@ -1903,6 +2136,14 @@ def check_pending_exits(
                         current_market_price=pos.last_monitor_market_price or pos.entry_price,
                         best_bid=getattr(pos, "last_monitor_best_bid", None),
                         timestamp=getattr(closed, "last_exit_at", None),
+                    )
+                    _log_partial_exit_execution_fact(
+                        conn,
+                        closed,
+                        status=status or "CONFIRMED",
+                        fill_price=actual_price,
+                        filled_shares=filled_shares,
+                        order_id=pos.last_exit_order_id,
                     )
                     # Slice P5-1 third site: typed RealizedFill at the
                     # async-monitor fill-receipt seam (same construction
@@ -1964,6 +2205,7 @@ def check_pending_exits(
                             status=status or "PARTIAL",
                             fill_price=actual_price,
                             filled_shares=filled_shares,
+                            order_id=pos.last_exit_order_id,
                         )
             if status in VOID_STATUSES:
                 _mark_exit_retry(pos, reason=f"SELL_{status}", error=status, conn=conn)
@@ -1983,6 +2225,7 @@ def check_pending_exits(
                             status=status or "PARTIAL",
                             fill_price=actual_price,
                             filled_shares=filled_shares,
+                            order_id=pos.last_exit_order_id,
                         )
                 stats["retried"] += 1
             elif partial_applied:

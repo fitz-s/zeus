@@ -138,6 +138,66 @@ def test_source_contract_watch_script_routes_to_script_profile():
     assert "scripts/watch_source_contract.py" in digest["admission"]["admitted_files"]
 
 
+def test_b0_oracle_evidence_bridge_routes_to_dedicated_profile():
+    digest = build_digest(
+        "B0 Oracle evidence wiring bridge canonical settlements observations "
+        "daily_observation_revisions high low no penalty sufficient evidence "
+        "source_type normalize",
+        [
+            "scripts/bridge_oracle_to_calibration.py",
+            "tests/test_bridge_oracle_to_calibration.py",
+        ],
+        intent="modify_existing",
+        write_intent="edit",
+    )
+
+    assert digest["profile"] == "oracle evidence bridge implementation"
+    assert digest["admission"]["status"] == "admitted"
+    assert "scripts/bridge_oracle_to_calibration.py" in digest["admission"]["admitted_files"]
+    assert "tests/test_bridge_oracle_to_calibration.py" in digest["admission"]["admitted_files"]
+
+
+def test_b2_weather_family_exposure_gate_routes_to_dedicated_profile():
+    digest = build_digest(
+        "B2 Weather family exposure gate WeatherFamilyKey mutually exclusive "
+        "same city target_date metric family bins ANTI_CHURN rejection stage",
+        [
+            "src/engine/cycle_runtime.py",
+            "src/strategy/family_exclusive_dedup.py",
+            "tests/test_inv_family_exclusive_sizing.py",
+        ],
+        intent="modify_existing",
+        write_intent="edit",
+    )
+
+    assert digest["profile"] == "weather family exposure gate implementation"
+    assert digest["admission"]["status"] == "admitted"
+    assert "src/engine/cycle_runtime.py" in digest["admission"]["admitted_files"]
+    assert "src/strategy/family_exclusive_dedup.py" in digest["admission"]["admitted_files"]
+    assert "tests/test_inv_family_exclusive_sizing.py" in digest["admission"]["admitted_files"]
+
+
+def test_b4_t4_restart_gate_cleanup_routes_to_dedicated_profile():
+    digest = build_digest(
+        "B4 T4 restart gate MarketAnalysisVNext restart gate T4_MERGE_DATE "
+        "legacy ensemble_snapshots bias_corrected test rescope",
+        [
+            "src/analysis/market_analysis_vnext.py",
+            "tests/test_ensemble_snapshots_bias_corrected_schema.py",
+        ],
+        intent="modify_existing",
+        write_intent="edit",
+    )
+
+    assert digest["profile"] == "t4 restart gate cleanup implementation"
+    assert digest["admission"]["status"] == "admitted"
+    assert "src/analysis/market_analysis_vnext.py" in digest["admission"]["admitted_files"]
+    assert (
+        "tests/test_ensemble_snapshots_bias_corrected_schema.py"
+        in digest["admission"]["admitted_files"]
+    )
+
+
 def test_source_canary_readiness_hot_swap_routes_without_live_execution():
     digest = build_digest(
         "source freshness provider hot-swap Paris canary readiness only no live execution",

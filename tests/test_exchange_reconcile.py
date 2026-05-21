@@ -1,6 +1,6 @@
 # Created: 2026-04-27
-# Last reused/audited: 2026-05-19
-# Lifecycle: created=2026-04-27; last_reviewed=2026-05-07; last_reused=2026-05-17
+# Last reused/audited: 2026-05-21
+# Lifecycle: created=2026-04-27; last_reviewed=2026-05-07; last_reused=2026-05-21
 # Authority basis: docs/operations/task_2026-05-08_object_invariance_remaining_mainline/PLAN.md
 # Purpose: R3 M5 exchange reconciliation sweep antibodies.
 # Reuse: Run when exchange_reconcile, venue facts, findings, heartbeat/cutover reconciliation, or operator finding resolution changes.
@@ -1108,7 +1108,7 @@ def test_confirmed_exit_trade_economically_closes_active_position_projection(con
     }
     fact = conn.execute(
         """
-        SELECT filled_at, fill_price, shares, venue_status, terminal_exec_status
+        SELECT filled_at, fill_price, shares, venue_status, terminal_exec_status, command_id
           FROM execution_fact
          WHERE intent_id = 'pos-exit-confirmed:exit'
         """
@@ -1119,6 +1119,7 @@ def test_confirmed_exit_trade_economically_closes_active_position_projection(con
         "shares": 35.6,
         "venue_status": "FILLED",
         "terminal_exec_status": "filled",
+        "command_id": "cmd-exit-confirmed",
     }
 
 
@@ -1257,7 +1258,7 @@ def test_recorded_confirmed_exit_trade_repair_hook_economically_closes_projectio
     }
     fact = conn.execute(
         """
-        SELECT filled_at, fill_price, shares, venue_status, terminal_exec_status
+        SELECT filled_at, fill_price, shares, venue_status, terminal_exec_status, command_id
           FROM execution_fact
          WHERE intent_id = 'pos-exit-recorded-confirmed:exit'
         """
@@ -1268,6 +1269,7 @@ def test_recorded_confirmed_exit_trade_repair_hook_economically_closes_projectio
         "shares": 35.6,
         "venue_status": "FILLED",
         "terminal_exec_status": "filled",
+        "command_id": "cmd-recorded-exit-confirmed",
     }
 
 
@@ -1338,6 +1340,149 @@ def test_nonconfirmed_exit_trade_does_not_economically_close_position(conn, stat
            AND event_type = 'EXIT_ORDER_FILLED'
         """
     ).fetchone()[0] == 0
+
+
+@pytest.mark.parametrize("status", ["MATCHED", "MINED"])
+def test_full_size_nonconfirmed_exit_trade_leaves_actionable_finality_finding(conn, status):
+    from src.execution.exchange_reconcile import run_reconcile_sweep
+
+    token = "exit-finality-wait-token"
+    seed_position_baseline(conn, position_id="pos-exit-finality-wait", order_id="ord-entry-finality-wait")
+    seed_command(
+        conn,
+        command_id="cmd-entry-finality-wait",
+        venue_order_id="ord-entry-finality-wait",
+        position_id="pos-exit-finality-wait",
+        token_id=token,
+        side="BUY",
+        size=17.3,
+        price=0.21,
+        state="FILLED",
+    )
+    append_trade_fact(
+        conn,
+        command_id="cmd-entry-finality-wait",
+        venue_order_id="ord-entry-finality-wait",
+        token_id=token,
+        trade_id="trade-entry-finality-wait",
+        size="17.3",
+        state="CONFIRMED",
+    )
+    conn.execute(
+        """
+        UPDATE position_current
+           SET phase = 'pending_exit',
+               token_id = ?,
+               order_id = 'ord-exit-finality-wait',
+               order_status = 'sell_pending_confirmation',
+               shares = 17.3,
+               cost_basis_usd = 3.633,
+               entry_price = 0.21,
+               updated_at = ?
+         WHERE position_id = 'pos-exit-finality-wait'
+        """,
+        (token, NOW.isoformat()),
+    )
+    seed_command(
+        conn,
+        command_id="cmd-exit-finality-wait",
+        venue_order_id="ord-exit-finality-wait",
+        position_id="pos-exit-finality-wait",
+        token_id=token,
+        side="SELL",
+        size=17.3,
+        price=0.19,
+        state="ACKED",
+    )
+
+    result = run_reconcile_sweep(
+        FakeM5Adapter(
+            trades=[
+                trade(
+                    trade_id=f"trade-exit-finality-wait-{status.lower()}",
+                    order_id="ord-exit-finality-wait",
+                    size="17.3",
+                    price="0.19",
+                    status=status,
+                )
+            ],
+            positions=[position(token_id=token, size="0")],
+        ),
+        conn,
+        context="periodic",
+        observed_at=NOW,
+    )
+
+    finality_findings = [
+        finding
+        for finding in result
+        if finding.kind == "unrecorded_trade"
+        and f"trade-exit-finality-wait-{status.lower()}" in finding.subject_id
+    ]
+    assert len(finality_findings) == 1
+    assert "exchange_trade_full_size_nonfinal_exit_fill_waiting_confirmation" in finality_findings[0].evidence_json
+    current = conn.execute(
+        "SELECT phase, order_status FROM position_current WHERE position_id = 'pos-exit-finality-wait'"
+    ).fetchone()
+    assert dict(current) == {
+        "phase": "pending_exit",
+        "order_status": "sell_pending_confirmation",
+    }
+    assert (
+        conn.execute(
+            """
+            SELECT COUNT(*)
+              FROM execution_fact
+             WHERE intent_id = 'pos-exit-finality-wait:exit'
+               AND terminal_exec_status = 'filled'
+            """
+        ).fetchone()[0]
+        == 0
+    )
+
+    run_reconcile_sweep(
+        FakeM5Adapter(
+            trades=[
+                trade(
+                    trade_id=f"trade-exit-finality-wait-{status.lower()}",
+                    order_id="ord-exit-finality-wait",
+                    size="17.3",
+                    price="0.19",
+                    status="CONFIRMED",
+                )
+            ],
+            positions=[position(token_id=token, size="0")],
+        ),
+        conn,
+        context="periodic",
+        observed_at=NOW + timedelta(seconds=1),
+    )
+
+    resolved = conn.execute(
+        """
+        SELECT resolved_at, resolution
+          FROM exchange_reconcile_findings
+         WHERE subject_id = ?
+        """,
+        (f"finality:trade-exit-finality-wait-{status.lower()}",),
+    ).fetchone()
+    assert resolved["resolved_at"] == (NOW + timedelta(seconds=1)).isoformat()
+    assert resolved["resolution"] == "trade_finality_confirmed"
+    execution = conn.execute(
+        """
+        SELECT command_id, filled_at, fill_price, shares, venue_status, terminal_exec_status
+          FROM execution_fact
+         WHERE intent_id = 'pos-exit-finality-wait:exit'
+        """
+    ).fetchone()
+    assert dict(execution) == {
+        "command_id": "cmd-exit-finality-wait",
+        "filled_at": (NOW + timedelta(seconds=1)).isoformat(),
+        "fill_price": 0.19,
+        "shares": 17.3,
+        "venue_status": "FILLED",
+        "terminal_exec_status": "filled",
+    }
 
 
 def test_trade_lifecycle_update_appends_confirmed_after_matched_without_double_counting(conn):

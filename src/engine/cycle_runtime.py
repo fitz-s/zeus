@@ -3370,6 +3370,7 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
             if decisions:
                 from src.strategy.family_exclusive_dedup import (
                     dedup_mutually_exclusive_families,
+                    weather_family_exposures_from_portfolio,
                 )
 
                 decisions = dedup_mutually_exclusive_families(
@@ -3377,6 +3378,7 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                     city=city.name,
                     target_date=candidate.target_date,
                     temperature_metric=candidate.temperature_metric,
+                    existing_exposures=weather_family_exposures_from_portfolio(portfolio),
                 )
             # Phase 2 T2: write no_trade_events rows for rejected decisions.
             # Fail-soft: logging/learning infrastructure must not crash the cycle.
