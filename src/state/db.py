@@ -2481,6 +2481,11 @@ def init_schema(
 
     # Phase 2: apply v2 schema (idempotent — safe to run on every boot).
     from src.state.schema.v2_schema import apply_v2_schema as _apply_v2_schema
+    if conn.in_transaction:
+        # Legacy-world upgrades above can perform DML before the v2 schema owner
+        # opens its explicit transaction. Commit the completed idempotent repairs
+        # so the next schema owner starts from a clean transaction boundary.
+        conn.commit()
     _apply_v2_schema(conn, forecast_tables=False)
     conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
