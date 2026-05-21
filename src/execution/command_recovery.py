@@ -658,6 +658,64 @@ def _local_orphan_no_fill_candidates(conn: sqlite3.Connection) -> list[dict]:
     return [_dict_row(row) for row in rows]
 
 
+def _stale_local_orphan_terminal_no_fill_candidates(conn: sqlite3.Connection) -> list[dict]:
+    if not _table_exists(conn, "exchange_reconcile_findings"):
+        return []
+    if not _table_exists(conn, "venue_order_facts"):
+        return []
+    states = tuple(sorted(_TERMINAL_NO_FILL_ORDER_FACT_STATES))
+    sources = tuple(sorted(_LIVE_TERMINAL_ORDER_FACT_SOURCES))
+    state_placeholders = ",".join("?" for _ in states)
+    source_placeholders = ",".join("?" for _ in sources)
+    rows = conn.execute(
+        f"""
+        WITH latest_order_fact AS (
+            SELECT command_id, MAX(local_sequence) AS max_sequence
+              FROM venue_order_facts
+             GROUP BY command_id
+        )
+        SELECT
+            finding.finding_id AS finding_id,
+            finding.subject_id AS finding_subject_id,
+            cmd.command_id AS command_id,
+            cmd.venue_order_id AS venue_order_id,
+            cmd.state AS command_state,
+            pc.phase AS position_phase,
+            pc.shares AS position_shares,
+            pc.cost_basis_usd AS position_cost_basis_usd,
+            fact.fact_id AS order_fact_id,
+            fact.state AS order_fact_state,
+            fact.observed_at AS order_fact_observed_at,
+            fact.venue_order_id AS order_fact_venue_order_id,
+            fact.matched_size AS order_fact_matched_size,
+            fact.source AS order_fact_source
+          FROM exchange_reconcile_findings finding
+          JOIN venue_commands cmd
+            ON cmd.venue_order_id = finding.subject_id
+          JOIN position_current pc
+            ON pc.position_id = cmd.position_id
+          JOIN latest_order_fact latest
+            ON latest.command_id = cmd.command_id
+          JOIN venue_order_facts fact
+            ON fact.command_id = latest.command_id
+           AND fact.local_sequence = latest.max_sequence
+         WHERE finding.kind = 'local_orphan_order'
+           AND finding.resolved_at IS NULL
+           AND cmd.intent_kind = 'ENTRY'
+           AND cmd.state IN ('CANCELLED', 'EXPIRED')
+           AND pc.phase = 'voided'
+           AND CAST(COALESCE(pc.shares, '0') AS REAL) = 0
+           AND CAST(COALESCE(pc.cost_basis_usd, '0') AS REAL) = 0
+           AND fact.state IN ({state_placeholders})
+           AND fact.source IN ({source_placeholders})
+           AND CAST(COALESCE(fact.matched_size, '0') AS REAL) = 0
+         ORDER BY finding.recorded_at, finding.finding_id
+        """,
+        (*states, *sources),
+    ).fetchall()
+    return [_dict_row(row) for row in rows]
+
+
 def _json_dict(raw: object) -> dict:
     if isinstance(raw, dict):
         return raw
@@ -2821,6 +2879,46 @@ def reconcile_local_orphan_no_fill_findings(conn: sqlite3.Connection, client) ->
     return summary
 
 
+def reconcile_stale_terminal_no_fill_findings(conn: sqlite3.Connection) -> dict:
+    """Resolve local-orphan findings after canonical terminal no-fill recovery."""
+
+    summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+    for row in _stale_local_orphan_terminal_no_fill_candidates(conn):
+        summary["scanned"] += 1
+        command_id = str(row.get("command_id") or "")
+        venue_order_id = str(row.get("venue_order_id") or "")
+        fact_order_id = str(row.get("order_fact_venue_order_id") or "")
+        try:
+            if not venue_order_id or venue_order_id != fact_order_id:
+                summary["errors"] += 1
+                logger.error(
+                    "recovery: stale local-orphan terminal no-fill candidate %s order mismatch "
+                    "(command=%s fact=%s)",
+                    command_id,
+                    venue_order_id,
+                    fact_order_id,
+                )
+                continue
+            if _trade_fact_count(conn, command_id) > 0:
+                summary["stayed"] += 1
+                continue
+            resolved = _resolve_m5_local_orphan_findings(
+                conn,
+                venue_order_id=venue_order_id,
+                resolved_at=str(row.get("order_fact_observed_at") or _now_iso()),
+                resolution="command_recovery_terminal_no_fill",
+            )
+            summary["advanced"] += resolved
+        except Exception as exc:
+            logger.error(
+                "recovery: stale local-orphan terminal no-fill finding failed for command %s: %s",
+                command_id,
+                exc,
+            )
+            summary["errors"] += 1
+    return summary
+
+
 def _terminal_point_order_candidates(conn: sqlite3.Connection) -> list[dict]:
     if not _table_exists(conn, "venue_order_facts"):
         return []
@@ -3299,6 +3397,12 @@ def _review_required_cancel_unknown_live_order_recovery(
                         matching_trades=matching_trades,
                         source_reason="cancel_unknown_point_order_terminal_no_fill",
                     )
+                    resolved_findings = _resolve_m5_local_orphan_findings(
+                        conn,
+                        venue_order_id=venue_order_id,
+                        resolved_at=now,
+                        resolution="command_recovery_terminal_no_fill",
+                    )
                     payload = {
                         "schema_version": 1,
                         "reason": "review_cleared_no_venue_exposure",
@@ -3321,6 +3425,7 @@ def _review_required_cancel_unknown_live_order_recovery(
                         },
                         "terminal_order_fact_id": fact_id,
                         "terminal_order_fact": fact_payload,
+                        "resolved_m5_local_orphan_findings": resolved_findings,
                         "venue_absence_proof": {
                             "source": "authenticated_clob_user_read",
                             "owner_scope": "authenticated_funder",
@@ -4518,6 +4623,12 @@ def reconcile_unresolved_commands(
         summary["advanced"] += terminal_summary["advanced"]
         summary["stayed"] += terminal_summary["stayed"]
         summary["errors"] += terminal_summary["errors"]
+
+        stale_terminal_summary = reconcile_stale_terminal_no_fill_findings(conn)
+        summary["stale_terminal_no_fill_findings"] = stale_terminal_summary
+        summary["advanced"] += stale_terminal_summary["advanced"]
+        summary["stayed"] += stale_terminal_summary["stayed"]
+        summary["errors"] += stale_terminal_summary["errors"]
 
         matched_summary = reconcile_matched_order_facts(conn, client)
         summary["matched_order_facts"] = matched_summary
