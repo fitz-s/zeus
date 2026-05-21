@@ -849,7 +849,7 @@ def get_connection(
 # CI hook scripts/check_schema_version.py diffs the sqlite_master hash of
 # a fresh-init DB against tests/state/_schema_pinned_hash.txt and fails
 # the PR if SCHEMA_VERSION did not change in lockstep.
-SCHEMA_VERSION = 17  # 2026-05-21: add live-money no_trade reason taxonomy
+SCHEMA_VERSION = 18  # 2026-05-21 Phase 3 T2: tail_stress_scenarios table + no_trade_events rebuild (6 SHOULDER_* members)
 
 
 def init_schema(
@@ -2470,6 +2470,10 @@ def init_schema(
     # Phase 2 T2 (2026-05-20): no_trade_events table + indices (SCHEMA_VERSION 15).
     from src.state.schema.no_trade_events_schema import ensure_table as _ensure_no_trade_events_table
     _ensure_no_trade_events_table(conn)
+
+    # Phase 3 T2 (2026-05-21): tail_stress_scenarios table (SCHEMA_VERSION 16).
+    from src.state.schema.tail_stress_scenarios_schema import ensure_table as _ensure_tail_stress_scenarios_table
+    _ensure_tail_stress_scenarios_table(conn)
 
     # Phase 2: apply v2 schema (idempotent — safe to run on every boot).
     from src.state.schema.v2_schema import apply_v2_schema as _apply_v2_schema

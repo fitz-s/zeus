@@ -1,6 +1,6 @@
 # Created: 2026-05-20
-# Last reused or audited: 2026-05-20
-# Authority basis: PHASE_2_ULTRAPLAN.md v3.1 §5.2 (sha 00c2399742)
+# Last reused or audited: 2026-05-21
+# Authority basis: PHASE_2_ULTRAPLAN.md v3.1 §5.2 (sha 00c2399742) + Phase 3 T2 (2026-05-21): +6 SHOULDER_* members per 04_PHASE_3_SHOULDER.md
 
 """
 NoTradeReason — canonical StrEnum covering every rejection_reasons=[...] callsite
@@ -123,6 +123,15 @@ class NoTradeReason(StrEnum):
     PARTIAL_SOURCE_QUALITY_REJECTED = auto()
     RISK_LIMITS_EXCEEDED = auto()
     MUTUALLY_EXCLUSIVE_FAMILY_DEDUP = auto()
+
+    # ── Shoulder strategy gates (Phase 3 T2) ─────────────────────────────────
+    # 6 SHOULDER_* members per 04_PHASE_3_SHOULDER.md §"NoTradeReason additions"
+    SHOULDER_STRESS_FAIL = auto()
+    SHOULDER_REGIME_MISMATCH = auto()
+    SHOULDER_NATIVE_NO_DEPTH_INSUFFICIENT = auto()
+    SHOULDER_DAY0_BOUND_NOT_ELIMINATED = auto()
+    SHOULDER_NO_TRADE_GATE = auto()
+    SHOULDER_CLUSTER_CAP_EXCEEDED = auto()
 
     # ── Fallback (§13) ────────────────────────────────────────────────────────
     UNCATEGORIZED = auto()

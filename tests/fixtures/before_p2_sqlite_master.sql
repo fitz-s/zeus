@@ -2298,3 +2298,21 @@ CREATE INDEX idx_mms_snapshot_id
 CREATE INDEX idx_mms_event_slug_captured
             ON market_microstructure_snapshots(event_slug, captured_at_iso)
     ;
+-- table: tail_stress_scenarios
+CREATE TABLE tail_stress_scenarios (
+    market_slug             TEXT NOT NULL,
+    temperature_metric      TEXT NOT NULL,
+    target_date             TEXT NOT NULL,
+    observation_time        TEXT NOT NULL,
+    decision_seq            INTEGER NOT NULL,
+    scenarios               TEXT NOT NULL,
+    max_loss_pct            REAL NOT NULL,
+    tail_probability_stressed REAL NOT NULL,
+    schema_version          INTEGER NOT NULL CHECK (schema_version IN (17, 18)),
+    PRIMARY KEY (market_slug, temperature_metric, target_date, observation_time, decision_seq)
+)
+    ;
+-- index: idx_tail_stress_scenarios_market_date
+CREATE INDEX idx_tail_stress_scenarios_market_date
+    ON tail_stress_scenarios(market_slug, target_date)
+    ;

@@ -1,6 +1,6 @@
 # Created: 2026-05-04
-# Last reused/audited: 2026-05-04
-# Authority basis: docs/operations/task_2026-05-04_oracle_kelly_evidence_rebuild/PLAN.md §A4 + Bug review §D (scattered strategy lists) + §E (LIVE_SAFE / _LIVE_ALLOWED divergence).
+# Last reused/audited: 2026-05-21
+# Authority basis: docs/operations/task_2026-05-04_oracle_kelly_evidence_rebuild/PLAN.md §A4 + Bug review §D (scattered strategy lists) + §E (LIVE_SAFE / _LIVE_ALLOWED divergence) + Phase 3 T2 (2026-05-21): _classify_via_registry SCAFFOLD per 04_PHASE_3_SHOULDER.md §2 T2.
 """StrategyProfile registry — single source of per-strategy authority.
 
 What this module replaces
@@ -529,6 +529,43 @@ def kelly_default_multiplier(strategy_key: str) -> float:
     if profile is None:
         return 0.0
     return profile.kelly_default_multiplier
+
+
+
+# ── Phase 3 T2 — registry-driven shoulder classifier ─────────────── #
+
+# Type alias: Optional[ShoulderStrategyVNext] — avoids circular import at
+# module level (ShoulderStrategyVNext imports NoTradeReason + WeatherRegimeTag;
+# lazy import inside function body is the safe pattern).
+# Deviation from dispatch literal "ClassificationResult": ClassificationResult
+# is defined here as an alias so dispatch signature works and v3 callsite shape
+# aligns (Optional[ShoulderStrategyVNext] is the concrete type).
+ClassificationResult = object  # Runtime: Optional["ShoulderStrategyVNext"]; see body.
+
+
+def _classify_via_registry(strategy_id: str, context) -> "ClassificationResult":
+    """Registry-driven shoulder classification helper (canonical home per plan §2 T2 m2).
+
+    Replaces hardcoded shoulder branches at evaluator.py L1462/L1478/L1494
+    and cycle_runner.py L456. Called ONLY for shoulder paths; cycle-axis
+    short-circuits (settlement_capture / opening_inertia / imminent_open_capture)
+    ARE UNCHANGED per AR1.
+
+    Args:
+        strategy_id: Strategy key from the profile registry (e.g. "shoulder_sell").
+        context:     EdgeContext or equivalent carrier; provides edge, candidate,
+                     market_phase, conn fields for classify_shoulder_candidate.
+
+    Returns:
+        ClassificationResult = Optional[ShoulderStrategyVNext]:
+          - ShoulderStrategyVNext instance if candidate passes all gates.
+          - None if strategy is unknown, blocked, or context is insufficient.
+
+    Fail-closed: ProfileNotFound (unknown strategy_id) returns None.
+
+    SCAFFOLD — production logic wired in T2 production pass.
+    """
+    raise NotImplementedError("T2 production pass owns _classify_via_registry body")
 
 
 # ── test helper ────────────────────────────────────────────────────── #

@@ -1926,6 +1926,32 @@ files:
     downstream:
     - src/state/db.py
     - src/state/book_hash_transitions.py
+  src/state/schema/no_trade_events_schema.py:
+    zone: K2_runtime
+    authority_role: no_trade_events_schema_owner
+    why: "Phase 2 T2 (PHASE_2_ULTRAPLAN.md v3.1 §5.2): DDL owner for no_trade_events table (world DB). SCHEMA_VERSION 14→18. _rebuild_stale_no_trade_events_table handles in-place CHECK expansion across version bumps. Phase 3 T2: extended CHECK to include 6 SHOULDER_* NoTradeReason members + schema_version IN (14,15,16,17,18)."
+    downstream:
+    - src/state/db.py
+  src/state/schema/tail_stress_scenarios_schema.py:
+    zone: K2_runtime
+    authority_role: tail_stress_scenarios_schema_owner
+    why: "Phase 3 T2 SCAFFOLD (2026-05-21): DDL owner for tail_stress_scenarios table (world DB). SCHEMA_VERSION 18. PK=(market_slug, temperature_metric, target_date, observation_time, decision_seq) FK-like with decision_events. columns: scenarios JSON, max_loss_pct REAL, tail_probability_stressed REAL. Production wiring via db.py init_schema; T2 production pass owns first execution."
+    downstream:
+    - src/state/db.py
+  src/contracts/shoulder_strategy_vnext.py:
+    zone: K1_contracts
+    authority_role: shoulder_strategy_vnext_dataclass
+    why: "Phase 3 T2 SCAFFOLD (2026-05-21): 21-field frozen dataclass for shoulder strategy candidates per 04_PHASE_3_SHOULDER.md §'Required object model'. classify_shoulder_candidate() is SCAFFOLD stub raising NotImplementedError. T2 production pass owns implementation."
+    write_routes: []
+    downstream:
+    - src/strategy/stress_scenarios.py
+  src/strategy/stress_scenarios.py:
+    zone: K2_runtime
+    authority_role: tail_stress_scenario_kernel
+    why: "Phase 3 T2 SCAFFOLD (2026-05-21): TailStressScenario dataclass + 6 module-level scenario instances + ALL_SCENARIOS tuple per 04_PHASE_3_SHOULDER.md §'Stress scenarios'. run_stress_tests() SCAFFOLD stub raising NotImplementedError. T2 production pass owns implementation."
+    write_routes: []
+    downstream:
+    - src/state/schema/tail_stress_scenarios_schema.py
   src/contracts/no_trade_reason.py:
     zone: K1_contracts
     authority_role: no_trade_reason_enum
