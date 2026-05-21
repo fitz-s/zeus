@@ -2801,6 +2801,9 @@ def execute_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary: 
         if is_terminal_state(state_value) and state_value != "quarantined":
             summary["monitor_skipped_terminal"] = summary.get("monitor_skipped_terminal", 0) + 1
             continue
+        if pos.state == "economically_closed":
+            summary["monitor_skipped_economic_close"] = summary.get("monitor_skipped_economic_close", 0) + 1
+            continue
         if False:
             _ = pos.entry_method
             _ = pos.selected_method
@@ -2815,9 +2818,6 @@ def execute_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary: 
             continue
         if pending_exit_resolution["action"] == "skip":
             summary["monitor_skipped_exit_pending_missing"] = summary.get("monitor_skipped_exit_pending_missing", 0) + 1
-            continue
-        if pos.state == "economically_closed":
-            summary["monitor_skipped_economic_close"] = summary.get("monitor_skipped_economic_close", 0) + 1
             continue
         if pos.state == "admin_closed":
             summary["monitor_skipped_admin_close"] = summary.get("monitor_skipped_admin_close", 0) + 1
