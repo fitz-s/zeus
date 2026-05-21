@@ -42,9 +42,16 @@ def test_inv_bin_grid_propagation() -> None:
     when the forecasts DB is accessible but the T4 ALTER has not yet run.
     Skips when forecasts DB is absent (CI / paper environments).
 
-    Production assertion (activated in T4 production pass):
+    Production assertion phase 1 (activated in T4 production pass):
       SELECT COUNT(*) FROM day0_nowcast_runs WHERE bin_grid_id IS NULL must be 0
       for rows inserted after T4_MERGE_DATE.
+
+    Production assertion phase 2 (strengthened post-T4 merge):
+      For each day0_nowcast_runs row, bin_grid_id must MATCH
+      ensemble_snapshots_v2.bin_grid_id for the triggering snapshot (JOIN on
+      fit_run_id or observation_time+market_slug foreign-key path). The IS NULL
+      check here is the SCAFFOLD approximation; production pass adds the JOIN-MATCH
+      assertion once the propagation path from ensemble_snapshots_v2 is wired.
     """
     from src.analysis.market_analysis_vnext import T4_MERGE_DATE
     from src.state.db import ZEUS_FORECASTS_DB_PATH

@@ -63,7 +63,10 @@ def test_inv_vnext_substitution_consistency() -> None:
     # This raises NotImplementedError → xfail RED
     metrics = vnext.compute()
 
-    # Production assertion (unreachable in SCAFFOLD):
+    # Production assertion (unreachable in SCAFFOLD — compute() raises NotImplementedError).
+    # Production-pass note: do NOT simply re-read snapshot.wide_spread_display_substitution.
+    # Strengthen to independent spread recompute using orderbook inputs:
+    #   spread=0.12 (>= 0.10 threshold) → True; spread=0.03 (< threshold) → False.
     assert metrics.wide_spread_display_substitution is True, (
         "INV-vnext-substitution-consistency: MarketAnalysisVNext.compute() returned "
         f"wide_spread_display_substitution={metrics.wide_spread_display_substitution!r} "
