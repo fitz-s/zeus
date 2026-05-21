@@ -20,6 +20,7 @@ closed=false is put back).
 """
 from __future__ import annotations
 
+import json
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -250,11 +251,11 @@ def test_child_missing_accepting_is_not_tradable() -> None:
     assert _market_child_is_tradable(child) is False
 
 
-def test_child_closed_overrides_accepting() -> None:
-    """closed=True wins even with acceptingOrders=True (stale Gamma routing)."""
+def test_child_closed_routing_label_does_not_override_accepting() -> None:
+    """Raw closed=True is provenance, not executable authority for negRisk children."""
     child = dict(_NEGRISK_TRADEABLE_CHILD)
     child["closed"] = True
-    assert _market_child_is_tradable(child) is False
+    assert _market_child_is_tradable(child) is True
 
 
 def test_child_orderbook_disabled_is_not_tradable() -> None:
@@ -275,6 +276,8 @@ class _FakeClob:
             "tick_size": "0.01",
             "min_order_size": "5",
             "neg_risk": True,
+            "archived": False,
+            "enable_order_book": True,
         }
 
     def get_orderbook_snapshot(self, token_id: str) -> dict:
@@ -301,17 +304,20 @@ def test_negrisk_child_active_false_accepting_true_capture_snapshot_admits() -> 
 
     conn = sqlite3.connect(":memory:")
     init_snapshot_schema(conn)
-    gamma_child = {
+    gamma_parent = {
         **_NEGRISK_TRADEABLE_CHILD,
         "id": "gamma-child",
         "condition_id": "cond-active-false",
         "question_id": "question-active-false",
         "clobTokenIds": ["yes-token", "no-token"],
+        "closed": True,
     }
     market = {
         "id": "event-active-false",
         "event_id": "event-active-false",
         "slug": "highest-temperature-in-chicago-on-june-15-2026",
+        "closed": True,
+        "active": False,
         "outcomes": [
             {
                 "market_id": "cond-active-false",
@@ -321,10 +327,10 @@ def test_negrisk_child_active_false_accepting_true_capture_snapshot_admits() -> 
                 "token_id": "yes-token",
                 "no_token_id": "no-token",
                 "active": False,
-                "closed": False,
+                "closed": True,
                 "accepting_orders": True,
                 "enable_orderbook": True,
-                "gamma_market_raw": gamma_child,
+                "gamma_market_raw": gamma_parent,
             }
         ],
     }
@@ -347,7 +353,16 @@ def test_negrisk_child_active_false_accepting_true_capture_snapshot_admits() -> 
     )
 
     row = conn.execute(
-        "SELECT condition_id, active, closed, accepting_orders FROM executable_market_snapshots"
+        """
+        SELECT condition_id, active, closed, accepting_orders, tradeability_status_json
+        FROM executable_market_snapshots
+        """
     ).fetchone()
     assert result["condition_id"] == "cond-active-false"
-    assert row == ("cond-active-false", 0, 0, 1)
+    assert row[:4] == ("cond-active-false", 0, 1, 1)
+    status = json.loads(row[4])
+    assert status["gamma_parent_closed"] is True
+    assert status["child_closed"] is True
+    assert status["clob_archived"] is False
+    assert status["clob_enable_order_book"] is True
+    assert status["executable_allowed"] is True

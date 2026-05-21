@@ -1,6 +1,6 @@
 # Created: 2026-05-04
-# Last reused/audited: 2026-05-04
-# Authority basis: docs/operations/task_2026-05-04_strategy_redesign_day0_endgame/PLAN_v3.md §2 + §6.P2 (v3 per §0.1).
+# Last reused/audited: 2026-05-21
+# Authority basis: docs/operations/task_2026-05-04_strategy_redesign_day0_endgame/PLAN_v3.md §2 + §6.P2 (v3 per §0.1); docs/operations/task_2026-05-21_live_release_proof_p0p3/task.md P2-1.
 """``MarketPhase`` axis — market-time lifecycle of a Polymarket weather market.
 
 Per PLAN_v3 §2 (axis A), ``MarketPhase`` is computed from
@@ -256,11 +256,10 @@ def market_end_anchor_source(market: dict) -> str:
     in the market dict, otherwise 'f1_12z_fallback' (the F1 12:00 UTC uniform
     anchor is used as the settlement end time).
 
-    Phase 0 status: helper introduced but not yet wired into the harvester →
-    request_redeem call path (wiring requires threading the market dict through
-    harvester.py; deferred to Phase 1 settlement-chain hardening).
-    The DB column defaults to 'gamma_explicit' for all Phase 0 rows, which is
-    correct for the current majority case (all live markets have explicit end dates).
+    Runtime report trust no longer treats the DB default as verified authority:
+    settlement_commands rows default to 'unknown_legacy' unless the caller
+    supplies an explicit anchor source. This helper only classifies the market
+    dict passed to it; it does not upgrade historical defaults.
     """
     end_str = market.get("market_end_at") or market.get("endDate") or market.get("end_date")
     return "gamma_explicit" if end_str else "f1_12z_fallback"

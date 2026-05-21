@@ -70,6 +70,7 @@ Prefer these over prose when they exist:
 | `architecture/money_path_objects.yaml` | Money-path economic object, state, source, scheduler, and side-effect registry |
 | `architecture/money_path_ci.yaml` | Semantic diff to invariant/test routing for money-path CI |
 | `architecture/test_quality.yaml` | Money-path test falsifying-proof metadata |
+| `architecture/pre_existing_failure_registry.yaml` | Central IDs, owners, evidence, and review deadlines for temporary pre-existing failures |
 | `architecture/history_lore.yaml` | Dense historical lessons and antibodies |
 | `architecture/artifact_lifecycle.yaml` | Artifact classes and evidence rules |
 | `architecture/context_budget.yaml` | Boot-surface budget and maintenance cadence |

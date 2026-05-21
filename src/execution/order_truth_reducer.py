@@ -13,6 +13,7 @@ from typing import Any, Iterable, Mapping
 
 TERMINAL_NO_FILL = "TERMINAL_NO_FILL"
 TERMINAL_FILLED = "TERMINAL_FILLED"
+TERMINAL_PARTIAL = "TERMINAL_PARTIAL"
 PARTIAL_WITH_REMAINDER = "PARTIAL_WITH_REMAINDER"
 LIVE_RESTING = "LIVE_RESTING"
 UNKNOWN_SIDE_EFFECT = "UNKNOWN_SIDE_EFFECT"
@@ -83,7 +84,7 @@ class VenueOrderTruthReducer:
         latest_unknown: Mapping[str, Any] | None = None
         latest_review: Mapping[str, Any] | None = None
         terminal_fill: Mapping[str, Any] | None = None
-        terminal_positive_zero_remainder: Mapping[str, Any] | None = None
+        terminal_partial: Mapping[str, Any] | None = None
 
         for fact in facts:
             state = _state(fact)
@@ -92,10 +93,11 @@ class VenueOrderTruthReducer:
             matched_from_orders = max(matched_from_orders, matched)
             if state == "MATCHED" and _zero(remaining) and matched > 0:
                 terminal_fill = fact
-            elif state in _TERMINAL_STATES and _zero(remaining) and matched > 0:
-                terminal_positive_zero_remainder = fact
-            elif state in _TERMINAL_STATES and _zero(remaining) and matched == 0:
-                terminal_zero_no_fill = fact
+            elif state in _TERMINAL_STATES and _zero(remaining):
+                if matched > 0:
+                    terminal_partial = fact
+                else:
+                    terminal_zero_no_fill = fact
             elif state in _OPEN_STATES:
                 latest_open = fact
             elif state in _UNKNOWN_STATES:
@@ -109,18 +111,17 @@ class VenueOrderTruthReducer:
                 _decimal_or_none(_row_get(terminal_fill, "matched_size")) or matched
             )
             return CanonicalOrderTruth("MATCHED", Decimal("0"), terminal_matched, TERMINAL_FILLED)
-        if terminal_positive_zero_remainder is not None:
-            source_state = _state(terminal_positive_zero_remainder)
+        if terminal_partial is not None:
+            source_state = _state(terminal_partial)
             terminal_matched = max(
-                _decimal_or_none(_row_get(terminal_positive_zero_remainder, "matched_size"))
-                or Decimal("0"),
                 matched,
+                _decimal_or_none(_row_get(terminal_partial, "matched_size")) or Decimal("0"),
             )
             return CanonicalOrderTruth(
                 source_state,
                 Decimal("0"),
                 terminal_matched,
-                TERMINAL_FILLED,
+                TERMINAL_PARTIAL,
                 source_state=source_state,
             )
         if matched > 0:

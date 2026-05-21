@@ -274,6 +274,14 @@ def test_live_quality_floors_are_registry_backed() -> None:
     assert profile.allow_ultra_low_tail is False
 
 
+def test_regime_throttle_uses_reviewed_city_cluster_not_city_name() -> None:
+    """P2-4: correlated risk grouping must use city config metadata."""
+    source = Path("src/engine/evaluator.py").read_text()
+
+    assert "cluster_exposure_for_bankroll(portfolio, city.cluster" in source
+    assert "cluster_exposure_for_bankroll(portfolio, city.name" not in source
+
+
 # ── schema enforcement ─────────────────────────────────────────────── #
 
 

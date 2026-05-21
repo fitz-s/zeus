@@ -27,6 +27,7 @@ from src.config import get_mode, settings
 from src.riskguard.discord_alerts import alert_trade
 from src.contracts.slippage_bps import SlippageBps
 from src.contracts import (
+    DecisionSourceContext,
     HeldSideProbability,
     NativeSidePrice,
     compute_native_limit_price,

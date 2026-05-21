@@ -65,6 +65,82 @@ _FEE_HASH_NUMERIC_FIELDS = frozenset(
 
 
 @dataclass(frozen=True)
+class ExecutableTradeabilityStatus:
+    """Normalized market tradeability facts used by snapshot submit gates.
+
+    Gamma parent/child ``active`` and ``closed`` fields are venue routing labels
+    for negRisk weather families. ``executable_allowed`` is the authority after
+    Gamma child facts are reconciled with CLOB market/orderbook facts.
+    """
+
+    gamma_parent_closed: Optional[bool] = None
+    gamma_parent_active: Optional[bool] = None
+    child_closed: Optional[bool] = None
+    child_active: Optional[bool] = None
+    accepting_orders: Optional[bool] = None
+    clob_archived: Optional[bool] = None
+    clob_enable_order_book: Optional[bool] = None
+    executable_allowed: bool = False
+    reason: str = "uninitialized"
+
+    @classmethod
+    def from_mapping(cls, payload: Mapping[str, Any] | None) -> "ExecutableTradeabilityStatus":
+        if not payload:
+            return cls()
+        return cls(
+            gamma_parent_closed=_optional_bool(payload.get("gamma_parent_closed")),
+            gamma_parent_active=_optional_bool(payload.get("gamma_parent_active")),
+            child_closed=_optional_bool(payload.get("child_closed")),
+            child_active=_optional_bool(payload.get("child_active")),
+            accepting_orders=_optional_bool(payload.get("accepting_orders")),
+            clob_archived=_optional_bool(payload.get("clob_archived")),
+            clob_enable_order_book=_optional_bool(payload.get("clob_enable_order_book")),
+            executable_allowed=bool(payload.get("executable_allowed", False)),
+            reason=str(payload.get("reason") or "uninitialized"),
+        )
+
+    @classmethod
+    def from_legacy_snapshot_flags(
+        cls,
+        *,
+        active: bool,
+        closed: bool,
+        accepting_orders: Optional[bool],
+        enable_orderbook: bool,
+    ) -> "ExecutableTradeabilityStatus":
+        if not enable_orderbook:
+            reason = "enable_orderbook=false"
+        elif closed:
+            reason = "closed=true"
+        elif accepting_orders is False:
+            reason = "accepting_orders=false"
+        else:
+            reason = "legacy_snapshot_flags"
+        return cls(
+            child_active=active,
+            child_closed=closed,
+            accepting_orders=accepting_orders,
+            clob_archived=None,
+            clob_enable_order_book=enable_orderbook,
+            executable_allowed=bool(enable_orderbook and not closed and accepting_orders is not False),
+            reason=reason,
+        )
+
+    def to_json_dict(self) -> dict[str, Any]:
+        return {
+            "gamma_parent_closed": self.gamma_parent_closed,
+            "gamma_parent_active": self.gamma_parent_active,
+            "child_closed": self.child_closed,
+            "child_active": self.child_active,
+            "accepting_orders": self.accepting_orders,
+            "clob_archived": self.clob_archived,
+            "clob_enable_order_book": self.clob_enable_order_book,
+            "executable_allowed": self.executable_allowed,
+            "reason": self.reason,
+        }
+
+
+@dataclass(frozen=True)
 class ExecutableMarketSnapshotV2:
     """Immutable executable market truth captured before order submission."""
 
@@ -111,6 +187,8 @@ class ExecutableMarketSnapshotV2:
     depth_at_best_ask: int = 0
     # Shares available at best ask from orderbook_depth_jsonb["asks"][0]["size"].
     # Parsed as int (shares, rounded down). 0 = one-sided book or unavailable.
+
+    tradeability_status: ExecutableTradeabilityStatus | None = None
 
     def __post_init__(self) -> None:
         if not self.snapshot_id:
@@ -177,6 +255,26 @@ class ExecutableMarketSnapshotV2:
             )
         if self.depth_at_best_ask < 0:
             raise ValueError("depth_at_best_ask must be >= 0")
+        status = self.tradeability_status
+        if status is None:
+            status = ExecutableTradeabilityStatus.from_legacy_snapshot_flags(
+                active=self.active,
+                closed=self.closed,
+                accepting_orders=self.accepting_orders,
+                enable_orderbook=self.enable_orderbook,
+            )
+        elif isinstance(status, Mapping):
+            status = ExecutableTradeabilityStatus.from_mapping(status)
+        elif not isinstance(status, ExecutableTradeabilityStatus):
+            raise TypeError("tradeability_status must be ExecutableTradeabilityStatus, mapping, or None")
+        if status.executable_allowed and status.reason != "legacy_snapshot_flags":
+            if status.accepting_orders is not True:
+                raise ValueError("tradeability_status executable_allowed requires accepting_orders=true")
+            if status.clob_archived is not False:
+                raise ValueError("tradeability_status executable_allowed requires clob_archived=false")
+            if status.clob_enable_order_book is not True:
+                raise ValueError("tradeability_status executable_allowed requires clob_enable_order_book=true")
+        object.__setattr__(self, "tradeability_status", status)
 
     @property
     def is_fresh(self) -> bool:
@@ -242,6 +340,9 @@ class ExecutableMarketSnapshotV2:
                 "authority_tier": self.authority_tier,
                 "captured_at": self.captured_at,
                 "freshness_deadline": self.freshness_deadline,
+                "tradeability_status": self.tradeability_status.to_json_dict()
+                if self.tradeability_status is not None
+                else None,
             }
         )
 
@@ -288,12 +389,10 @@ def assert_snapshot_executable(
         raise StaleMarketSnapshotError(
             f"ExecutableMarketSnapshotV2 {snapshot.snapshot_id} is stale at {_as_utc(checked_at, field_name='now').isoformat()}"
         )
-    if not snapshot.enable_orderbook:
-        raise MarketNotTradableError("snapshot enable_orderbook=false blocks submit")
-    if snapshot.closed:
-        raise MarketNotTradableError("snapshot closed=true blocks submit")
-    if snapshot.accepting_orders is False:
-        raise MarketNotTradableError("snapshot accepting_orders=false blocks submit")
+    tradeability = snapshot.tradeability_status
+    if tradeability is None or not tradeability.executable_allowed:
+        reason = getattr(tradeability, "reason", None) or "not_executable"
+        raise MarketNotTradableError(f"snapshot tradeability blocks submit: {reason}")
 
     token = str(token_id or "")
     if not token:
@@ -563,6 +662,21 @@ def _canonical_fee_details_for_hash(value: Any, key: str = "") -> Any:
     if key in _FEE_HASH_NUMERIC_FIELDS:
         return _decimal_text(value)
     return value
+
+
+def _optional_bool(value: Any) -> Optional[bool]:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = str(value).strip().lower()
+    if text in {"true", "1", "yes", "y"}:
+        return True
+    if text in {"false", "0", "no", "n"}:
+        return False
+    return None
 
 
 def _as_utc(value: datetime, *, field_name: str) -> datetime:

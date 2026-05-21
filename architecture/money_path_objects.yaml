@@ -93,6 +93,7 @@ state_machines:
       - POST_ACKED
       - PARTIAL
       - FILLED
+      - UNKNOWN
       - SUBMIT_UNKNOWN_SIDE_EFFECT
       - REVIEW_REQUIRED
       - SUBMIT_REJECTED
@@ -119,6 +120,20 @@ state_machines:
       REDEEM_OPERATOR_REQUIRED:
         risk: "Manual-required and autoretryable error classes may be conflated."
         required_fields: [errorCode, operator_action_required, autoretry_eligible]
+  order_truth:
+    owner: src/execution/order_truth_reducer.py
+    states:
+      - TERMINAL_NO_FILL
+      - TERMINAL_FILLED
+      - TERMINAL_PARTIAL
+      - PARTIAL_WITH_REMAINDER
+      - LIVE_RESTING
+      - UNKNOWN_SIDE_EFFECT
+      - REVIEW_REQUIRED
+    invariant_tests:
+      - tests/test_order_truth_reducer.py
+      - tests/test_exchange_reconcile.py
+      - tests/money_path/test_002_execution_lifecycle_replay.py
   lifecycle_phase:
     owner: src/state/lifecycle_manager.py
     states:

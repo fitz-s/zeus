@@ -12,6 +12,7 @@ from src.execution.order_truth_reducer import (
     PARTIAL_WITH_REMAINDER,
     TERMINAL_FILLED,
     TERMINAL_NO_FILL,
+    TERMINAL_PARTIAL,
     VenueOrderTruthReducer,
 )
 from src.state.db import get_connection, init_schema
@@ -50,6 +51,23 @@ def test_positive_trade_fact_cannot_reduce_to_terminal_no_fill() -> None:
     assert reduced.matched_size == Decimal("2")
 
 
+def test_terminal_zero_remainder_partial_does_not_regress_to_open_remainder() -> None:
+    reduced = VenueOrderTruthReducer.reduce(
+        order_facts=[
+            {"state": "EXPIRED", "remaining_size": "0", "matched_size": "2.11"},
+            {"state": "PARTIALLY_MATCHED", "remaining_size": "2.26", "matched_size": "4.95"},
+        ],
+        trade_filled_size="4.95",
+        command_size="7.21",
+        open_order_present=True,
+    )
+
+    assert reduced.state == "EXPIRED"
+    assert reduced.proof_class == TERMINAL_PARTIAL
+    assert reduced.remaining_size == Decimal("0")
+    assert reduced.matched_size == Decimal("4.95")
+
+
 def test_matched_zero_remainder_order_fact_outranks_command_size_residue() -> None:
     reduced = VenueOrderTruthReducer.reduce(
         order_facts=[
@@ -78,7 +96,7 @@ def test_terminal_positive_zero_remainder_does_not_regress_to_later_partial() ->
     )
 
     assert reduced.state == "EXPIRED"
-    assert reduced.proof_class == TERMINAL_FILLED
+    assert reduced.proof_class == TERMINAL_PARTIAL
     assert reduced.remaining_size == Decimal("0")
     assert reduced.matched_size == Decimal("100")
 

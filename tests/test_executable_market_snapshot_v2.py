@@ -26,6 +26,7 @@ from src.data.market_scanner import (
 from src.data.polymarket_client import PolymarketClient
 from src.contracts.executable_market_snapshot_v2 import (
     ExecutableMarketSnapshotV2,
+    ExecutableTradeabilityStatus,
     MarketNotTradableError,
     MarketSnapshotMismatchError,
     StaleMarketSnapshotError,
@@ -342,6 +343,7 @@ def test_capture_executable_snapshot_persists_verified_gamma_and_clob_facts(conn
 def test_negrisk_active_false_child_captures_when_accepting_orders(conn):
     market = _market_for_capture(
         active=False,
+        closed=False,
         gamma_market_raw={
             "id": "gamma-1",
             "conditionId": "condition-1",
@@ -375,6 +377,92 @@ def test_negrisk_active_false_child_captures_when_accepting_orders(conn):
     assert loaded.closed is False
     assert loaded.accepting_orders is True
     assert loaded.enable_orderbook is True
+    assert loaded.tradeability_status is not None
+    assert loaded.tradeability_status.executable_allowed is True
+    assert loaded.tradeability_status.clob_archived is False
+    assert loaded.tradeability_status.clob_enable_order_book is True
+
+
+def test_negrisk_parent_closed_label_does_not_block_clob_confirmed_snapshot(conn):
+    market = _market_for_capture(
+        active=False,
+        closed=True,
+        gamma_market_raw={
+            "id": "gamma-1",
+            "conditionId": "condition-1",
+            "questionID": "question-1",
+            "active": False,
+            "closed": True,
+            "acceptingOrders": True,
+            "enableOrderBook": True,
+            "clobTokenIds": ["yes-token", "no-token"],
+        },
+    )
+    market["closed"] = True
+    market["active"] = False
+    market["outcomes"][0]["closed"] = False
+
+    fields = capture_executable_market_snapshot(
+        conn,
+        market=market,
+        decision=_decision_for_capture(),
+        clob=FakeClobFacts(market_info={
+            "condition_id": "condition-1",
+            "tokens": [{"token_id": "yes-token"}, {"token_id": "no-token"}],
+            "enable_order_book": True,
+            "archived": False,
+        }),
+        captured_at=NOW,
+        scan_authority="VERIFIED",
+    )
+
+    loaded = get_snapshot(conn, fields["executable_snapshot_id"])
+
+    assert loaded is not None
+    assert loaded.tradeability_status is not None
+    assert loaded.tradeability_status.gamma_parent_closed is True
+    assert loaded.tradeability_status.gamma_parent_active is False
+    assert loaded.tradeability_status.child_closed is False
+    assert loaded.tradeability_status.executable_allowed is True
+    _insert_command(
+        conn,
+        snapshot_id=loaded.snapshot_id,
+        expected_min_order_size=Decimal("5"),
+    )
+
+
+def test_clob_archived_blocks_even_when_gamma_accepts(conn):
+    market = _market_for_capture(
+        active=False,
+        closed=True,
+        gamma_market_raw={
+            "id": "gamma-1",
+            "conditionId": "condition-1",
+            "questionID": "question-1",
+            "active": False,
+            "closed": True,
+            "acceptingOrders": True,
+            "enableOrderBook": True,
+            "clobTokenIds": ["yes-token", "no-token"],
+        },
+    )
+    market["closed"] = True
+    market["outcomes"][0]["closed"] = False
+
+    with pytest.raises(ExecutableSnapshotCaptureError, match="clob_archived"):
+        capture_executable_market_snapshot(
+            conn,
+            market=market,
+            decision=_decision_for_capture(),
+            clob=FakeClobFacts(market_info={
+                "condition_id": "condition-1",
+                "tokens": [{"token_id": "yes-token"}, {"token_id": "no-token"}],
+                "enable_order_book": True,
+                "archived": True,
+            }),
+            captured_at=NOW,
+            scan_authority="VERIFIED",
+        )
 
 
 def test_negrisk_missing_active_child_captures_when_orderbook_tradeable(conn):
@@ -936,7 +1024,6 @@ def test_capture_sell_exit_snapshot_fails_closed_without_bid_depth(conn):
 @pytest.mark.parametrize(
     ("market", "clob", "match"),
     [
-        (_market_for_capture(closed=True), FakeClobFacts(), "not currently tradable"),
         (
             _market_for_capture(),
             FakeClobFacts(market_info={
@@ -977,6 +1064,26 @@ def test_capture_executable_snapshot_fails_closed_on_gamma_clob_inconsistency(co
             captured_at=NOW,
             scan_authority="VERIFIED",
         )
+
+
+def test_capture_executable_snapshot_allows_raw_closed_when_clob_live(conn):
+    result = capture_executable_market_snapshot(
+        conn,
+        market=_market_for_capture(closed=True),
+        decision=_decision_for_capture(),
+        clob=FakeClobFacts(),
+        captured_at=NOW,
+        scan_authority="VERIFIED",
+    )
+
+    assert result["condition_id"] == "condition-1"
+    row = conn.execute(
+        "SELECT closed, tradeability_status_json FROM executable_market_snapshots"
+    ).fetchone()
+    assert row[0] == 1
+    status = json.loads(row[1])
+    assert status["child_closed"] is True
+    assert status["executable_allowed"] is True
 
 
 def test_update_snapshot_raises_via_trigger(conn):
@@ -1071,6 +1178,29 @@ def test_closed_true_blocks_submit(conn):
 
     with pytest.raises(MarketNotTradableError, match="closed=true"):
         _insert_command(conn, snapshot_id="snap-closed")
+
+
+def test_tradeability_status_authorizes_raw_closed_routing_label(conn):
+    insert_snapshot(
+        conn,
+        _snapshot(
+            snapshot_id="snap-parent-closed",
+            closed=True,
+            tradeability_status=ExecutableTradeabilityStatus(
+                gamma_parent_closed=True,
+                gamma_parent_active=False,
+                child_closed=False,
+                child_active=False,
+                accepting_orders=True,
+                clob_archived=False,
+                clob_enable_order_book=True,
+                executable_allowed=True,
+                reason="clob_live_accepting_child",
+            ),
+        ),
+    )
+
+    _insert_command(conn, snapshot_id="snap-parent-closed")
 
 
 def test_tick_mismatch_blocks_before_signing(conn):

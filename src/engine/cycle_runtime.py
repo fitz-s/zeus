@@ -3736,16 +3736,16 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
             if decisions:
                 from src.strategy.family_exclusive_dedup import (
                     dedup_mutually_exclusive_families,
-                    weather_family_exposures_from_trade_db,
-                    weather_family_exposures_from_portfolio,
+                    resolve_weather_family_exposures,
                 )
 
                 _family_exposure_conn = None
                 try:
                     from src.state.db import get_trade_connection_with_world
                     _family_exposure_conn = get_trade_connection_with_world()
-                    _family_exposures = weather_family_exposures_from_trade_db(
-                        _family_exposure_conn
+                    _family_exposures = resolve_weather_family_exposures(
+                        trade_conn=_family_exposure_conn,
+                        portfolio=portfolio,
                     )
                 except Exception as _family_exposure_exc:
                     logger.warning(
@@ -3753,12 +3753,10 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                         getattr(candidate, "slug", ""),
                         _family_exposure_exc,
                     )
-                    _family_exposures = weather_family_exposures_from_portfolio(portfolio)
+                    _family_exposures = resolve_weather_family_exposures(portfolio=portfolio)
                 finally:
                     if _family_exposure_conn is not None:
                         _family_exposure_conn.close()
-                if not _family_exposures:
-                    _family_exposures = weather_family_exposures_from_portfolio(portfolio)
 
                 decisions = dedup_mutually_exclusive_families(
                     decisions,

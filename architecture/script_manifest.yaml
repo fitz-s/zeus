@@ -503,6 +503,29 @@ scripts:
     required_helpers: [scripts.check_data_pipeline_live_e2e._connect_live_readonly]
     required_tests: [tests/test_check_live_order_e2e.py]
     reason: "Classifies existing venue_commands, venue_command_events, submission envelopes, order facts, and trade facts. It fails closed unless an accepted/resting or filled command has daemon-to-command correlation fields, venue order identity, live venue facts, and matching record-chain proof."
+  check_live_release_gate.py:
+    # Created: 2026-05-21
+    # Last reused or audited: 2026-05-21
+    # Authority basis: docs/operations/task_2026-05-21_live_release_proof_p0p3/task.md P0-1/P1-2/P1-7
+    class: enforcement
+    lifecycle: long_lived
+    status: active
+    authority_scope: release_gate_read_only
+    canonical_command: "python3 scripts/check_live_release_gate.py --json"
+    read_targets: [repo, state/zeus-world.db, state/zeus_trades.db, state/source_health.json, state/status_summary.json, state/paper_money_path_proof.json]
+    write_targets: [stdout, temp]
+    dry_run_default: true
+    apply_flag: null
+    target_db: null
+    external_inputs: [operator_loaded_sha_evidence, paper_money_path_proof]
+    dangerous_if_run: false
+    delete_policy: retain_until_superseded
+    reuse_when: "Before paper/tiny/live promotion to prove release evidence is coherent across loaded SHA, schema, trade state, redeem state, freshness, and paper money-path proof."
+    do_not_use_when: "As standalone live authorization or as a substitute for operator approval; output never places trades or mutates canonical DB truth."
+    promotion_barrier: "PASS only removes the release-proof blocker; operator live-go remains external and live_entries_allowed is always false."
+    required_helpers: [src.state.no_trade_events.assert_no_trade_events_schema_current_for_live]
+    required_tests: [tests/test_live_release_gate.py]
+    reason: "P0 release gate for the May 21 live-proof packet. It makes discovery fallback, stale schemas, unknown command states, blocking redeem rows, stale business-plane JSON, and overclaimed paper proof fail closed before live entry."
   live_health_probe.py:
     # Created: 2026-05-11
     # Last reused or audited: 2026-05-18

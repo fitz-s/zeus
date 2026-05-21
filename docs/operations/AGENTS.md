@@ -201,6 +201,9 @@ make a surface default-read unless `current_state.md` routes it.
 | `task_2026-05-21_live_contract_authority_pass/PLAN.md` | topology planning packet | Plan evidence for repairing endpoint-asymmetry contracts before live root alignment and daemon restart proof |
 | `task_2026-05-21_live_side_specific_entry_authority/` | plan packet container | Planning-lock evidence for side-specific BUY entry quote authority after live substrate/evaluator mismatch |
 | `task_2026-05-21_live_side_specific_entry_authority/PLAN.md` | topology planning packet | Plan evidence for preserving ask-only BUY executable candidates while keeping missing-ask, stale substrate, and incomplete topology fail-closed |
+| `task_2026-05-21_live_release_proof_p0p3/` | task packet container | Source analysis and task ledger for P0-P3 live release proof blockers after latest main |
+| `task_2026-05-21_live_release_proof_p0p3/analysis_live_release_proof_p0p3.md` | packet source analysis | Captured operator analysis covering release proof, schema/live gating, negRisk tradeability, lifecycle replay, redeem semantics, Kelly proof, CI, and docs drift |
+| `task_2026-05-21_live_release_proof_p0p3/task.md` | task ledger | Per-finding P0-P3 progress ledger requiring source-section reread before each repair |
 | `LIVE_LAUNCH_HANDOFF.md` | Live launch handoff document for daemon deployment |
 | `docs/historical_evidence/UNMATCHED_GAMMA_CITIES_2026_05_07.md` | Unmatched gamma cities investigation evidence (2026-05-07) |
 | `docs/historical_evidence/CLOUD_EXTRACT_PATCH_2026_05_07.md` | Cloud extract patch evidence (2026-05-07) |

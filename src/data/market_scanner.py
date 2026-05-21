@@ -27,6 +27,7 @@ from src.contracts.executable_market_snapshot_v2 import (
     FRESHNESS_WINDOW_DEFAULT,
     WIDE_SPREAD_THRESHOLD_USD,
     ExecutableMarketSnapshotV2,
+    ExecutableTradeabilityStatus,
     MarketSnapshotMismatchError,
     canonicalize_legacy_fee_rate_value,
     canonicalize_fee_details,
@@ -2273,14 +2274,71 @@ def _market_child_is_tradable(market: dict) -> bool:
     accepting=True, closed=False, enableOrderBook=True — and was fully
     tradeable on the Polymarket UI.
 
-    Missing closed/accepting/orderbook flags remain unknown=not-tradable.
+    Missing accepting/orderbook flags remain unknown=not-tradable.  Raw
+    ``closed`` is captured for provenance but is not executable authority for
+    negRisk children; CLOB archived/orderbook facts decide that boundary.
     """
 
-    closed = _boolish_market_field(market, "closed", "isClosed")
     accepting = _boolish_market_field(market, "acceptingOrders", "accepting_orders")
     orderbook = _boolish_market_field(market, "enableOrderBook", "enable_orderbook", "orderbookEnabled")
 
-    return closed is False and accepting is True and orderbook is True
+    return accepting is True and orderbook is True
+
+
+def _build_executable_tradeability_status(
+    *,
+    parent_market: dict,
+    child_outcome: dict,
+    gamma_market_raw: dict,
+    raw_clob_market: dict,
+    accepting_orders: bool | None,
+    child_active: bool,
+    child_closed: bool | None,
+) -> ExecutableTradeabilityStatus:
+    """Build the scanner/snapshot shared tradeability authority object."""
+
+    parent_closed = _boolish_market_field(parent_market, "closed", "isClosed")
+    parent_active = _boolish_market_field(parent_market, "active", "isActive")
+    raw_child_active = _boolish_market_field(child_outcome, "active", "isActive")
+    if raw_child_active is None:
+        raw_child_active = _boolish_market_field(gamma_market_raw, "active", "isActive")
+    clob_archived = _boolish_market_field(raw_clob_market, "archived", "isArchived")
+    if clob_archived is None:
+        clob_archived = False
+    clob_enable_order_book = _boolish_market_field(
+        raw_clob_market,
+        "enable_order_book",
+        "enableOrderBook",
+        "orderbookEnabled",
+    )
+    if clob_enable_order_book is None:
+        clob_enable_order_book = True
+
+    executable_allowed = bool(
+        accepting_orders is True
+        and clob_archived is False
+        and clob_enable_order_book is True
+    )
+    if accepting_orders is not True:
+        reason = "accepting_orders_not_true"
+    elif clob_archived is not False:
+        reason = "clob_archived"
+    elif clob_enable_order_book is not True:
+        reason = "clob_orderbook_disabled"
+    else:
+        reason = "clob_live_accepting_child"
+
+    return ExecutableTradeabilityStatus(
+        gamma_parent_closed=parent_closed,
+        gamma_parent_active=parent_active,
+        child_closed=child_closed,
+        child_active=raw_child_active if raw_child_active is not None else child_active,
+        accepting_orders=accepting_orders,
+        clob_archived=clob_archived,
+        clob_enable_order_book=clob_enable_order_book,
+        executable_allowed=executable_allowed,
+        reason=reason,
+    )
 
 
 def _boolish_market_field(market: dict, *names: str) -> bool | None:
@@ -2366,7 +2424,8 @@ def capture_executable_market_snapshot(
         gamma_market_raw = _minimal_gamma_payload(market, outcome)
 
     active = _optional_bool_fact((outcome, gamma_market_raw), ("active", "isActive"), default=False)
-    closed = _required_bool_fact((outcome, gamma_market_raw), ("closed", "isClosed"))
+    child_closed = _boolish_market_field(outcome, "closed", "isClosed")
+    closed = bool(child_closed is True)
     enable_orderbook = _required_bool_fact(
         (outcome, gamma_market_raw),
         ("enable_orderbook", "enableOrderBook", "orderbookEnabled"),
@@ -2374,8 +2433,7 @@ def capture_executable_market_snapshot(
     accepting_orders = _boolish_market_field(outcome, "accepting_orders", "acceptingOrders")
     if accepting_orders is None:
         accepting_orders = _boolish_market_field(gamma_market_raw, "acceptingOrders", "accepting_orders")
-    child_tradeability_payload = {**gamma_market_raw, **outcome}
-    if not _market_child_is_tradable(child_tradeability_payload):
+    if accepting_orders is not True or enable_orderbook is not True:
         raise ExecutableSnapshotCaptureError("Gamma child market is not currently tradable")
 
     raw_clob_market = _fetch_clob_market_info(clob, condition_id)
@@ -2389,6 +2447,19 @@ def capture_executable_market_snapshot(
         yes_token=yes_token,
         no_token=no_token,
     )
+    tradeability_status = _build_executable_tradeability_status(
+        parent_market=market,
+        child_outcome=outcome,
+        gamma_market_raw=gamma_market_raw,
+        raw_clob_market=raw_clob_market,
+        accepting_orders=accepting_orders,
+        child_active=active,
+        child_closed=child_closed,
+    )
+    if not tradeability_status.executable_allowed:
+        raise ExecutableSnapshotCaptureError(
+            f"Gamma/CLOB market is not executable: {tradeability_status.reason}"
+        )
 
     min_tick_size = _required_decimal_fact(
         (raw_orderbook, raw_clob_market),
@@ -2461,6 +2532,7 @@ def capture_executable_market_snapshot(
         authority_tier="CLOB",
         captured_at=captured,
         freshness_deadline=captured + FRESHNESS_WINDOW_DEFAULT,
+        tradeability_status=tradeability_status,
         # PR 2 microstructure transparency fields (_spread_usd cached above)
         wide_spread_display_substitution=bool(
             _spread_usd is not None and _spread_usd >= WIDE_SPREAD_THRESHOLD_USD
@@ -2588,6 +2660,9 @@ def _snapshot_is_executable(snapshot: dict[str, Any] | None) -> bool:
     if snapshot is None:
         return False
     selected_token = str(snapshot.get("selected_outcome_token_id") or "")
+    status = _json_object(snapshot.get("tradeability_status_json"))
+    if status:
+        return bool(status.get("executable_allowed") is True and selected_token)
     return bool(
         not snapshot.get("closed")
         and snapshot.get("enable_orderbook")

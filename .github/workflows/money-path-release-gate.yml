@@ -1,0 +1,108 @@
+name: money-path-release-gate
+
+# Required CI lane for the May 21 live-release proof packet.
+# Owner: live-release-proof-p0p3 packet implementer.
+# Rationale: current main integration, not PR-slice tests alone, must prove the
+# release gate and critical money-path antibodies before any live promotion.
+# Review condition: keep blocking while these tests stay deterministic and
+# isolated from live DBs; split into narrower jobs only if runtime proves noisy.
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "scripts/check_live_release_gate.py"
+      - "tests/test_live_release_gate.py"
+      - "tests/test_money_path_lifecycle_replay.py"
+      - "tests/test_live_release_registry_runtime_assertions.py"
+      - "tests/test_pre_existing_failure_registry.py"
+      - "tests/test_monitor_refresh_nowcast_wiring.py"
+      - "tests/test_strategy_profile_registry.py"
+      - "tests/test_executable_market_snapshot_v2.py"
+      - "tests/test_market_scanner_negrisk.py"
+      - "tests/test_decision_seq_cross_table_no_collision.py"
+      - "tests/test_no_trade_events_check_accepts_all_shoulder_reasons.py"
+      - "tests/state/test_schema_current_invariant.py"
+      - "architecture/script_manifest.yaml"
+      - "architecture/test_topology.yaml"
+      - "architecture/pre_existing_failure_registry.yaml"
+      - "architecture/db_table_ownership.yaml"
+      - ".github/workflows/money-path-release-gate.yml"
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "scripts/check_live_release_gate.py"
+      - "tests/test_live_release_gate.py"
+      - "tests/test_money_path_lifecycle_replay.py"
+      - "tests/test_live_release_registry_runtime_assertions.py"
+      - "tests/test_pre_existing_failure_registry.py"
+      - "tests/test_monitor_refresh_nowcast_wiring.py"
+      - "tests/test_strategy_profile_registry.py"
+      - "tests/test_executable_market_snapshot_v2.py"
+      - "tests/test_market_scanner_negrisk.py"
+      - "tests/test_decision_seq_cross_table_no_collision.py"
+      - "tests/test_no_trade_events_check_accepts_all_shoulder_reasons.py"
+      - "tests/state/test_schema_current_invariant.py"
+      - "architecture/script_manifest.yaml"
+      - "architecture/test_topology.yaml"
+      - "architecture/pre_existing_failure_registry.yaml"
+      - "architecture/db_table_ownership.yaml"
+      - ".github/workflows/money-path-release-gate.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: money-path-release-gate-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  money-path-release-gate:
+    name: money-path-release-gate (required)
+    runs-on: ubuntu-latest
+    env:
+      GATE_OWNER: "live-release-proof-p0p3"
+      GATE_RATIONALE: "Blocks live-impact PRs unless schema, release-gate, negRisk executable semantics, and no-trade live fail-closed antibodies pass on isolated fixtures."
+      GATE_REVIEW_CONDITION: "Keep required until a broader money-path replay lane supersedes it with equal or stronger coverage."
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Describe gate contract
+        run: |
+          echo "owner=${GATE_OWNER}"
+          echo "rationale=${GATE_RATIONALE}"
+          echo "review_condition=${GATE_REVIEW_CONDITION}"
+
+      - name: Check pinned schema contract
+        run: python scripts/check_schema_version.py
+
+      - name: Run required money-path antibodies
+        run: |
+          pytest -q \
+            tests/test_live_release_gate.py \
+            tests/test_executable_market_snapshot_v2.py \
+            tests/test_market_scanner_negrisk.py \
+            tests/test_decision_seq_cross_table_no_collision.py \
+            tests/test_no_trade_events_check_accepts_all_shoulder_reasons.py \
+            tests/state/test_schema_current_invariant.py \
+            tests/test_money_path_lifecycle_replay.py \
+            tests/test_live_release_registry_runtime_assertions.py \
+            tests/test_pre_existing_failure_registry.py \
+            tests/test_monitor_refresh_nowcast_wiring.py \
+            tests/test_strategy_profile_registry.py
+
+      - name: Run release gate self-test fixture
+        run: python scripts/check_live_release_gate.py --self-test-fixture --json

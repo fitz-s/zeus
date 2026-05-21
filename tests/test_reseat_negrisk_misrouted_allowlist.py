@@ -1,6 +1,6 @@
 # Created: 2026-05-19
-# Last reused or audited: 2026-05-19
-# Authority basis: PR-208 5th-iter Karachi fix; _AUTONOMOUS_RETRY_ERRORCODES_ALWAYS allowlist expansion
+# Last reused or audited: 2026-05-21
+# Authority basis: PR-208 5th-iter Karachi fix; _AUTONOMOUS_RETRY_ERRORCODES_ALWAYS allowlist expansion; live release proof P1-3 autoretry_eligible split
 # Lifecycle: created=2026-05-19; last_reviewed=2026-05-19; last_reused=never
 # Purpose: Antibody tests — REDEEM_NEGRISK_MISROUTED added to autonomous retry allowlist.
 # Reuse: Run when modifying reseat_stub_deferred_rows_for_autonomous_retry(),
@@ -55,18 +55,23 @@ def conn():
 
 
 def _insert_operator_required(
-    conn: sqlite3.Connection, command_id: str, error_code: str | None
+    conn: sqlite3.Connection,
+    command_id: str,
+    error_code: str | None,
+    *,
+    autoretry_eligible: bool = False,
 ) -> None:
     error_payload = json.dumps({"errorCode": error_code}) if error_code else None
     conn.execute(
         """
         INSERT INTO settlement_commands
-          (command_id, state, condition_id, market_id, payout_asset, requested_at, error_payload)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+          (command_id, state, autoretry_eligible, condition_id, market_id, payout_asset, requested_at, error_payload)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             command_id,
             SettlementState.REDEEM_OPERATOR_REQUIRED.value,
+            1 if autoretry_eligible else 0,
             "0xnegrisk_cond_karachi",
             "0xmarket_karachi",
             "USDC",
@@ -85,7 +90,12 @@ def test_t1_negrisk_misrouted_promoted_to_retrying(conn, monkeypatch):
     """T1: OPERATOR_REQUIRED + REDEEM_NEGRISK_MISROUTED → promoted to RETRYING,
     event row appended with prior_errorcode=REDEEM_NEGRISK_MISROUTED."""
     monkeypatch.setenv("ZEUS_AUTONOMOUS_REDEEM_ENABLED", "1")
-    _insert_operator_required(conn, "karachi-t1", "REDEEM_NEGRISK_MISROUTED")
+    _insert_operator_required(
+        conn,
+        "karachi-t1",
+        "REDEEM_NEGRISK_MISROUTED",
+        autoretry_eligible=True,
+    )
 
     promoted = reseat_stub_deferred_rows_for_autonomous_retry(conn)
     conn.commit()
@@ -120,7 +130,12 @@ def test_t2_negrisk_misrouted_not_promoted_when_autonomous_disabled(conn, monkey
     """T2: REDEEM_NEGRISK_MISROUTED row is NOT promoted when ZEUS_AUTONOMOUS_REDEEM_ENABLED
     is unset — env gate must be respected regardless of errorCode."""
     monkeypatch.delenv("ZEUS_AUTONOMOUS_REDEEM_ENABLED", raising=False)
-    _insert_operator_required(conn, "karachi-t2", "REDEEM_NEGRISK_MISROUTED")
+    _insert_operator_required(
+        conn,
+        "karachi-t2",
+        "REDEEM_NEGRISK_MISROUTED",
+        autoretry_eligible=True,
+    )
 
     promoted = reseat_stub_deferred_rows_for_autonomous_retry(conn)
 
@@ -192,13 +207,14 @@ def test_t5_end_to_end_karachi_pattern_advances_to_retrying(conn, monkeypatch):
     conn.execute(
         """
         INSERT INTO settlement_commands
-          (command_id, state, condition_id, market_id, payout_asset, requested_at,
+          (command_id, state, autoretry_eligible, condition_id, market_id, payout_asset, requested_at,
            error_payload, tx_hash)
-        VALUES (?, ?, ?, ?, ?, ?, ?, NULL)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)
         """,
         (
             "karachi-t5",
             SettlementState.REDEEM_OPERATOR_REQUIRED.value,
+            1,
             "0xkarachi_negrisk_condition_id_c8c220f5",
             "0xkarachi_market",
             "USDC",
@@ -257,13 +273,14 @@ def test_t6_negrisk_fact_missing_promoted_to_retrying(conn, monkeypatch):
     conn.execute(
         """
         INSERT INTO settlement_commands
-          (command_id, state, condition_id, market_id, payout_asset, requested_at,
+          (command_id, state, autoretry_eligible, condition_id, market_id, payout_asset, requested_at,
            error_payload, tx_hash)
-        VALUES (?, ?, ?, ?, ?, ?, ?, NULL)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)
         """,
         (
             "karachi-t6",
             SettlementState.REDEEM_OPERATOR_REQUIRED.value,
+            1,
             "0xkarachi_negrisk_condition_id_c8c220f5",
             "0xkarachi_market",
             "USDC",

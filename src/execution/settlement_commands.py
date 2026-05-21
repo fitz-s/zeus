@@ -37,6 +37,7 @@ CREATE TABLE IF NOT EXISTS settlement_commands (
     'REDEEM_CONFIRMED','REDEEM_FAILED','REDEEM_RETRYING','REDEEM_REVIEW_REQUIRED',
     'REDEEM_OPERATOR_REQUIRED'
   )),
+  autoretry_eligible INTEGER NOT NULL DEFAULT 0 CHECK (autoretry_eligible IN (0, 1)),
   condition_id TEXT NOT NULL,
   market_id TEXT NOT NULL,
   payout_asset TEXT NOT NULL CHECK (payout_asset IN ('pUSD','USDC','USDC_E')),
@@ -117,6 +118,16 @@ class SettlementResult:
     error_payload: dict[str, Any] | None = None
 
 
+@dataclass(frozen=True)
+class AnchorSourceTrust:
+    """Report-facing trust classification for polymarket_end_anchor_source."""
+
+    source: str
+    evidence_class: str
+    report_trust: str
+    verified: bool
+
+
 class SettlementCommandError(RuntimeError):
     """Base error for invalid settlement command operations."""
 
@@ -131,6 +142,58 @@ def _enum_value(value: Any) -> str:
     if hasattr(value, "value"):
         return str(value.value)
     return str(value)
+
+
+def classify_polymarket_end_anchor_source(source: Any) -> AnchorSourceTrust:
+    """Classify anchor-source provenance for settlement/redeem reports.
+
+    `unknown_legacy` is an honest historical sentinel, not verified evidence.
+    Reports must preserve the row but exclude it from verified anchor counts.
+    """
+
+    source_s = str(source or "").strip() or "unknown_legacy"
+    source_l = source_s.lower()
+    if source_l == "unknown_legacy":
+        return AnchorSourceTrust(
+            source=source_s,
+            evidence_class="unknown_legacy",
+            report_trust="exclude_from_verified_anchor_evidence",
+            verified=False,
+        )
+    if source_l == "gamma_explicit":
+        return AnchorSourceTrust(
+            source=source_s,
+            evidence_class="gamma_explicit",
+            report_trust="verified_market_time_anchor",
+            verified=True,
+        )
+    if source_l == "f1_12z_fallback":
+        return AnchorSourceTrust(
+            source=source_s,
+            evidence_class="calendar_fallback",
+            report_trust="degraded_report_only",
+            verified=False,
+        )
+    if source_l.startswith("clob"):
+        return AnchorSourceTrust(
+            source=source_s,
+            evidence_class="clob_derived",
+            report_trust="verified_clob_anchor",
+            verified=True,
+        )
+    if source_l.startswith("chain"):
+        return AnchorSourceTrust(
+            source=source_s,
+            evidence_class="chain_derived",
+            report_trust="verified_chain_anchor",
+            verified=True,
+        )
+    return AnchorSourceTrust(
+        source=source_s,
+        evidence_class="unknown_untrusted",
+        report_trust="exclude_from_verified_anchor_evidence",
+        verified=False,
+    )
 
 
 def _capability_component(
@@ -240,6 +303,10 @@ def ensure_settlement_schema_ready(conn: sqlite3.Connection) -> None:
         "ALTER TABLE settlement_commands ADD COLUMN zeus_submit_intent_time TEXT",
         "ALTER TABLE settlement_commands ADD COLUMN venue_ack_time TEXT",
         "ALTER TABLE settlement_commands ADD COLUMN clock_skew_estimate_ms_at_submit INTEGER",
+        # P1-3 live release proof: OPERATOR_REQUIRED is a manual state by
+        # default. Autonomous reseat requires an explicit row-level marker so
+        # scheduler policy no longer derives authority from the state name.
+        "ALTER TABLE settlement_commands ADD COLUMN autoretry_eligible INTEGER NOT NULL DEFAULT 0 CHECK (autoretry_eligible IN (0, 1))",
     ]:
         try:
             conn.execute(alter_sql)
@@ -307,7 +374,7 @@ _REQUIRED_SETTLEMENT_COLUMNS: frozenset[str] = frozenset({
     "pusd_amount_micro", "token_amounts_json", "winning_index_set",
     "tx_hash", "block_number", "confirmation_count",
     "requested_at", "submitted_at", "terminal_at", "error_payload",
-    "polymarket_end_anchor_source",
+    "polymarket_end_anchor_source", "autoretry_eligible",
 })
 
 
@@ -819,6 +886,7 @@ def submit_redeem(
             })
             error_code = raw_payload.get("errorCode")
             stub_deferred = error_code in _OPERATOR_REVIEW_ERRORCODES
+            autoretry_eligible = _error_code_can_be_marked_autoretryable(error_code)
             if stub_deferred:
                 state_after = SettlementState.REDEEM_OPERATOR_REQUIRED
                 terminal_flag = False  # operator CLI exits this state
@@ -832,6 +900,7 @@ def submit_redeem(
                     state_after,
                     payload=raw_payload,
                     error_payload=raw_payload,
+                    autoretry_eligible=autoretry_eligible,
                     terminal=terminal_flag,
                     recorded_at=_coerce_time(None),
                 )
@@ -1245,6 +1314,7 @@ def reconcile_pending_redeems(web3: Any, conn: sqlite3.Connection) -> list[Settl
                         """
                         UPDATE settlement_commands
                            SET state = ?,
+                               autoretry_eligible = 1,
                                tx_hash = NULL,
                                terminal_at = NULL,
                                error_payload = ?
@@ -1483,6 +1553,31 @@ def list_commands(conn: sqlite3.Connection, *, state: SettlementState | str | No
     return [dict(row) for row in rows]
 
 
+def settlement_command_report_rows(
+    conn: sqlite3.Connection,
+    *,
+    state: SettlementState | str | None = None,
+) -> list[dict[str, Any]]:
+    """Return report-ready command rows with explicit anchor-source trust fields."""
+
+    rows = list_commands(conn, state=state)
+    report_rows: list[dict[str, Any]] = []
+    for row in rows:
+        trust = classify_polymarket_end_anchor_source(
+            row.get("polymarket_end_anchor_source")
+        )
+        report_row = dict(row)
+        report_row.update(
+            {
+                "anchor_source_evidence_class": trust.evidence_class,
+                "anchor_source_report_trust": trust.report_trust,
+                "anchor_source_verified": trust.verified,
+            }
+        )
+        report_rows.append(report_row)
+    return report_rows
+
+
 def _get_row(conn: sqlite3.Connection, command_id: str) -> sqlite3.Row:
     row = conn.execute("SELECT * FROM settlement_commands WHERE command_id = ?", (command_id,)).fetchone()
     if row is None:
@@ -1501,14 +1596,17 @@ def _transition(
     confirmation_count: int | None = None,
     submitted_at: str | None = None,
     error_payload: Mapping[str, Any] | None = None,
+    autoretry_eligible: bool | None = None,
     terminal: bool = False,
     recorded_at: str,
 ) -> None:
     terminal_at = recorded_at if terminal else None
+    autoretry_value = int(bool(autoretry_eligible)) if autoretry_eligible is not None else None
     conn.execute(
         """
         UPDATE settlement_commands
            SET state = ?,
+               autoretry_eligible = COALESCE(?, autoretry_eligible),
                tx_hash = COALESCE(?, tx_hash),
                block_number = COALESCE(?, block_number),
                confirmation_count = COALESCE(?, confirmation_count),
@@ -1519,6 +1617,7 @@ def _transition(
         """,
         (
             state.value,
+            autoretry_value,
             tx_hash,
             block_number,
             confirmation_count,
@@ -1541,6 +1640,7 @@ def _atomic_transition(
     submitted_at: str | None = None,
     terminal_at: str | None = None,
     error_payload: Mapping[str, Any] | None = None,
+    autoretry_eligible: bool | None = None,
     payload: Mapping[str, Any] | None = None,
     recorded_at: str | None = None,
 ) -> bool:
@@ -1565,10 +1665,12 @@ def _atomic_transition(
     """
     from_value = from_state.value if isinstance(from_state, SettlementState) else from_state
     to_value = to_state.value if isinstance(to_state, SettlementState) else to_state
+    autoretry_value = int(bool(autoretry_eligible)) if autoretry_eligible is not None else None
     cur = conn.execute(
         """
         UPDATE settlement_commands
            SET state = ?,
+               autoretry_eligible = COALESCE(?, autoretry_eligible),
                tx_hash = COALESCE(?, tx_hash),
                submitted_at = COALESCE(?, submitted_at),
                terminal_at = COALESCE(?, terminal_at),
@@ -1578,6 +1680,7 @@ def _atomic_transition(
         """,
         (
             to_value,
+            autoretry_value,
             tx_hash,
             submitted_at,
             terminal_at,
@@ -1798,6 +1901,21 @@ _AUTONOMOUS_RETRY_ERRORCODES_REQUIRE_LIVE: frozenset[str] = frozenset({
 })
 
 
+def _error_code_autoretry_eligible(error_code: Any, *, dry_run_enabled: bool) -> bool:
+    if error_code in _AUTONOMOUS_RETRY_ERRORCODES_ALWAYS:
+        return True
+    if error_code in _AUTONOMOUS_RETRY_ERRORCODES_REQUIRE_LIVE:
+        return not dry_run_enabled
+    return False
+
+
+def _error_code_can_be_marked_autoretryable(error_code: Any) -> bool:
+    return (
+        error_code in _AUTONOMOUS_RETRY_ERRORCODES_ALWAYS
+        or error_code in _AUTONOMOUS_RETRY_ERRORCODES_REQUIRE_LIVE
+    )
+
+
 def _autonomous_dry_run_enabled() -> bool:
     return os.environ.get(
         "ZEUS_AUTONOMOUS_REDEEM_DRY_RUN", ""
@@ -1805,8 +1923,15 @@ def _autonomous_dry_run_enabled() -> bool:
 
 
 def reseat_stub_deferred_rows_for_autonomous_retry(conn: sqlite3.Connection) -> int:
-    """Promote rows parked in REDEEM_OPERATOR_REQUIRED whose errorCode is
-    auto-retry-eligible back to REDEEM_RETRYING so the submitter picks them
+    """Promote explicitly autoretry-eligible OPERATOR_REQUIRED rows to RETRYING.
+
+    P1-3 live release proof: REDEEM_OPERATOR_REQUIRED itself means manual
+    review. Autonomous reseat requires `autoretry_eligible=1` plus an allowlisted
+    errorCode, so scheduler authority no longer depends on an overloaded state
+    name or on error_payload parsing alone.
+
+    Rows parked in REDEEM_OPERATOR_REQUIRED whose errorCode is
+    auto-retry-eligible move back to REDEEM_RETRYING so the submitter picks them
     up. Two-tier allowlist:
       * _AUTONOMOUS_RETRY_ERRORCODES_ALWAYS — retry whenever autonomous mode
         is ON (legacy stubs that never produced a real tx). Includes:
@@ -1826,7 +1951,12 @@ def reseat_stub_deferred_rows_for_autonomous_retry(conn: sqlite3.Connection) -> 
         return 0
     dry_run_enabled = _autonomous_dry_run_enabled()
     rows = conn.execute(
-        "SELECT command_id, error_payload FROM settlement_commands WHERE state = ?",
+        """
+        SELECT command_id, error_payload, autoretry_eligible
+          FROM settlement_commands
+         WHERE state = ?
+           AND autoretry_eligible = 1
+        """,
         (SettlementState.REDEEM_OPERATOR_REQUIRED.value,),
     ).fetchall()
     promoted = 0
@@ -1836,18 +1966,11 @@ def reseat_stub_deferred_rows_for_autonomous_retry(conn: sqlite3.Connection) -> 
         except json.JSONDecodeError:
             continue
         err_code = err.get("errorCode")
-        if err_code in _AUTONOMOUS_RETRY_ERRORCODES_ALWAYS:
-            eligible = True
-        elif err_code in _AUTONOMOUS_RETRY_ERRORCODES_REQUIRE_LIVE:
-            # DRY_RUN_LOGGED: only reseat once dry-run gate is lifted, otherwise
-            # the adapter dry-run branch returns DRY_RUN_LOGGED again → loop.
-            eligible = not dry_run_enabled
-        else:
-            eligible = False
+        eligible = _error_code_autoretry_eligible(err_code, dry_run_enabled=dry_run_enabled)
         if eligible:
             cur = conn.execute(
-                "UPDATE settlement_commands SET state = ?, terminal_at = NULL"
-                " WHERE command_id = ? AND state = ?",
+                "UPDATE settlement_commands SET state = ?, autoretry_eligible = 0, terminal_at = NULL"
+                " WHERE command_id = ? AND state = ? AND autoretry_eligible = 1",
                 (
                     SettlementState.REDEEM_RETRYING.value,
                     row["command_id"],
@@ -1862,6 +1985,7 @@ def reseat_stub_deferred_rows_for_autonomous_retry(conn: sqlite3.Connection) -> 
                     {
                         "reason": "stub_deferred_reseat_autonomous",
                         "prior_errorcode": err_code,
+                        "prior_autoretry_eligible": True,
                     },
                     recorded_at=_coerce_time(None),
                 )

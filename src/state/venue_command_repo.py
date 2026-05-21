@@ -2117,6 +2117,7 @@ def append_order_fact(
             )
             if prior_terminal is not None:
                 from src.execution.order_truth_reducer import (
+                    TERMINAL_PARTIAL,
                     TERMINAL_NO_FILL,
                     VenueOrderTruthReducer,
                 )
@@ -2133,7 +2134,7 @@ def append_order_fact(
                     trade_filled_size="0",
                     open_order_present=state in {"LIVE", "RESTING", "PARTIALLY_MATCHED"},
                 )
-                if reduced.proof_class == TERMINAL_NO_FILL:
+                if reduced.proof_class in {TERMINAL_NO_FILL, TERMINAL_PARTIAL}:
                     return int(prior_terminal["fact_id"])
         seq = _coerce_local_sequence(
             conn,

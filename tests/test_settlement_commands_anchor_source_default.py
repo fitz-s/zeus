@@ -1,6 +1,6 @@
 # Created: 2026-05-19
-# Last reused or audited: 2026-05-19
-# Authority basis: operator codereview-may19 P1-3
+# Last reused or audited: 2026-05-21
+# Authority basis: operator codereview-may19 P1-3; live release proof P1-6 anchor report trust
 # Lifecycle: created=2026-05-19; last_reviewed=2026-05-19; last_reused=never
 # Purpose: Antibody — timing-chain migration default for
 #          polymarket_end_anchor_source must be 'unknown_legacy', not
@@ -35,8 +35,10 @@ from datetime import datetime, timezone
 import pytest
 
 from src.execution.settlement_commands import (
+    classify_polymarket_end_anchor_source,
     init_settlement_command_schema,
     request_redeem,
+    settlement_command_report_rows,
 )
 from src.state.db import init_schema
 
@@ -119,3 +121,60 @@ def test_t3_request_redeem_explicit_value_stored_verbatim(conn):
         f"{row['polymarket_end_anchor_source']!r}; expected 'gamma_explicit' "
         f"(explicit caller value). The fallback is corrupting verified rows."
     )
+
+
+def test_t4_unknown_legacy_is_not_verified_report_evidence():
+    trust = classify_polymarket_end_anchor_source("unknown_legacy")
+
+    assert trust.evidence_class == "unknown_legacy"
+    assert trust.report_trust == "exclude_from_verified_anchor_evidence"
+    assert trust.verified is False
+
+
+@pytest.mark.parametrize(
+    "source,evidence_class,report_trust",
+    [
+        ("gamma_explicit", "gamma_explicit", "verified_market_time_anchor"),
+        ("clob_market", "clob_derived", "verified_clob_anchor"),
+        ("chain_receipt", "chain_derived", "verified_chain_anchor"),
+    ],
+)
+def test_t5_verified_anchor_sources_are_distinguished(source, evidence_class, report_trust):
+    trust = classify_polymarket_end_anchor_source(source)
+
+    assert trust.evidence_class == evidence_class
+    assert trust.report_trust == report_trust
+    assert trust.verified is True
+
+
+def test_t6_settlement_report_rows_exclude_unknown_legacy_from_verified_counts(conn):
+    request_redeem(
+        "0xcond_report_legacy",
+        "USDC",
+        market_id="0xcond_report_legacy",
+        token_amounts={"yes": "1.0"},
+        winning_index_set='["2"]',
+        conn=conn,
+        requested_at=NOW,
+    )
+    request_redeem(
+        "0xcond_report_gamma",
+        "USDC",
+        market_id="0xcond_report_gamma",
+        token_amounts={"yes": "1.0"},
+        winning_index_set='["2"]',
+        conn=conn,
+        requested_at=NOW,
+        polymarket_end_anchor_source="gamma_explicit",
+    )
+
+    rows = settlement_command_report_rows(conn)
+    by_source = {row["polymarket_end_anchor_source"]: row for row in rows}
+
+    assert by_source["unknown_legacy"]["anchor_source_verified"] is False
+    assert (
+        by_source["unknown_legacy"]["anchor_source_report_trust"]
+        == "exclude_from_verified_anchor_evidence"
+    )
+    assert by_source["gamma_explicit"]["anchor_source_verified"] is True
+    assert by_source["gamma_explicit"]["anchor_source_evidence_class"] == "gamma_explicit"
