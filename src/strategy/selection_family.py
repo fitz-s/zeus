@@ -16,6 +16,14 @@ satisfied structurally — the wrapper is gone, not just unused.
 
 If you find yourself wanting to re-add `make_family_id()`, route through the
 two scope-aware helpers instead — they are the canonical contract.
+
+Phase 3 T1 (2026-05-21): make_hypothesis_family_id and make_edge_family_id
+extended with `source: str = ""` and `regime: str = ""` kwargs per plan §2 T1
+(G5 parallel extension). Existing callers continue to work unchanged — defaults
+preserve prior family ID strings.
+
+Shoulder variant: make_shoulder_hypothesis_family_id enforces non-empty source
+and regime per dossier §7.5 family grammar: "shoulder:{city}:{metric}:{target_date}:{source}:{regime}".
 """
 
 from __future__ import annotations
@@ -41,6 +49,8 @@ def make_hypothesis_family_id(
     temperature_metric: Literal["high", "low"],
     discovery_mode: str,
     decision_snapshot_id: str = "",
+    source: str = "",
+    regime: str = "",
 ) -> str:
     """Canonical family ID for the per-candidate (hypothesis) scope.
 
@@ -53,10 +63,19 @@ def make_hypothesis_family_id(
 
     S4 R9 P10B: temperature_metric is a required kwarg inserted after target_date
     so HIGH and LOW candidates never share a family budget.
+
+    Phase 3 T1 (2026-05-21): source and regime kwargs added per plan §2 T1 G5.
+    When both are empty (default), the produced ID is identical to pre-T1 IDs —
+    existing callers continue to work unchanged. When non-empty, they are appended
+    after decision_snapshot_id so shoulder hypotheses get distinct BH families.
     """
     parts = ["hyp", cycle_mode, city, target_date, temperature_metric, discovery_mode]
     if decision_snapshot_id:
         parts.append(decision_snapshot_id)
+    if source:
+        parts.append(source)
+    if regime:
+        parts.append(regime)
     return "|".join(parts)
 
 
@@ -69,6 +88,8 @@ def make_edge_family_id(
     strategy_key: str,
     discovery_mode: str,
     decision_snapshot_id: str = "",
+    source: str = "",
+    regime: str = "",
 ) -> str:
     """Canonical family ID for the per-strategy (edge) scope.
 
@@ -80,6 +101,11 @@ def make_edge_family_id(
 
     S4 R9 P10B: temperature_metric is a required kwarg inserted after target_date
     so HIGH and LOW edges never share a family budget.
+
+    Phase 3 T1 (2026-05-21): source and regime kwargs added per plan §2 T1 G5.
+    When both are empty (default), the produced ID is identical to pre-T1 IDs —
+    existing callers continue to work unchanged. When non-empty, they are appended
+    after decision_snapshot_id so shoulder edges get distinct BH families.
 
     Raises:
         ValueError: if strategy_key is falsy (empty string or None). An edge
@@ -93,7 +119,56 @@ def make_edge_family_id(
     parts = ["edge", cycle_mode, city, target_date, temperature_metric, strategy_key, discovery_mode]
     if decision_snapshot_id:
         parts.append(decision_snapshot_id)
+    if source:
+        parts.append(source)
+    if regime:
+        parts.append(regime)
     return "|".join(parts)
+
+
+def make_shoulder_hypothesis_family_id(
+    *,
+    city: str,
+    metric: Literal["high", "low"],
+    target_date: str,
+    source: str,
+    regime: str,
+) -> str:
+    """Shoulder-specific hypothesis family ID enforcing §7.5 grammar.
+
+    Grammar (dossier §7.5 verbatim):
+        shoulder_family_id := f"shoulder:{city}:{metric}:{target_date}:{source_id}:{regime}"
+
+    Separates shoulder hypotheses from center hypotheses in the BH gate so the
+    FDR budget is NOT shared between shoulder and finite-bin hypotheses per
+    04_PHASE_3_SHOULDER.md §"Kelly + FDR + risk rules".
+
+    Args:
+        city:        Canonical Zeus city string.
+        metric:      "high" or "low" temperature extremum.
+        target_date: Settlement date string (YYYY-MM-DD).
+        source:      Non-empty source_id (e.g. GFS, ENS grid identifier).
+        regime:      Non-empty WeatherRegimeTag value string.
+
+    Returns:
+        Shoulder family ID string of form "shoulder:{city}:{metric}:{target_date}:{source}:{regime}".
+
+    Raises:
+        ValueError: if source or regime is falsy — shoulder family requires both
+            non-empty per dossier §7.5 (plan §2 T1 invariant:
+            test_inv_shoulder_family_id_requires_source_and_regime).
+    """
+    if not source:
+        raise ValueError(
+            f"make_shoulder_hypothesis_family_id requires a non-empty source; "
+            f"got {source!r}. Shoulder family ID encodes source per dossier §7.5."
+        )
+    if not regime:
+        raise ValueError(
+            f"make_shoulder_hypothesis_family_id requires a non-empty regime; "
+            f"got {regime!r}. Shoulder family ID encodes regime per dossier §7.5."
+        )
+    return f"shoulder:{city}:{metric}:{target_date}:{source}:{regime}"
 
 
 def benjamini_hochberg_mask(p_values: list[float], q: float) -> list[bool]:
