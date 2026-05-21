@@ -20,7 +20,9 @@ closed=false is put back).
 """
 from __future__ import annotations
 
+import sqlite3
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import pytest
 
@@ -216,7 +218,11 @@ def test_fetch_events_by_tags_does_not_pass_closed_false_param():
 # level; same active=False ≠ untradeable invariant applies at the child level)
 # ---------------------------------------------------------------------------
 
-from src.data.market_scanner import _market_child_is_tradable
+from src.data.market_scanner import (
+    _market_child_is_tradable,
+    capture_executable_market_snapshot,
+)
+from src.state.snapshot_repo import init_snapshot_schema
 
 
 _NEGRISK_TRADEABLE_CHILD = {
@@ -256,3 +262,92 @@ def test_child_orderbook_disabled_is_not_tradable() -> None:
     child = dict(_NEGRISK_TRADEABLE_CHILD)
     child["enableOrderBook"] = False
     assert _market_child_is_tradable(child) is False
+
+
+class _FakeClob:
+    def get_clob_market_info(self, condition_id: str) -> dict:
+        return {
+            "condition_id": condition_id,
+            "tokens": [
+                {"token_id": "yes-token"},
+                {"token_id": "no-token"},
+            ],
+            "tick_size": "0.01",
+            "min_order_size": "5",
+            "neg_risk": True,
+        }
+
+    def get_orderbook_snapshot(self, token_id: str) -> dict:
+        return {
+            "asset_id": token_id,
+            "tick_size": "0.01",
+            "min_order_size": "5",
+            "neg_risk": True,
+            "bids": [{"price": "0.02", "size": "10"}],
+            "asks": [{"price": "0.03", "size": "12"}],
+        }
+
+    def get_fee_rate_details(self, token_id: str) -> dict:
+        return {"bps": 0, "source": "clob_fee_rate", "token_id": token_id}
+
+
+def test_negrisk_child_active_false_accepting_true_capture_snapshot_admits() -> None:
+    """Snapshot capture must share scanner tradeability semantics.
+
+    Sed-break: reintroducing ``not active`` in capture_executable_market_snapshot
+    rejects this otherwise tradable negRisk child before CLOB evidence can be
+    captured.
+    """
+
+    conn = sqlite3.connect(":memory:")
+    init_snapshot_schema(conn)
+    gamma_child = {
+        **_NEGRISK_TRADEABLE_CHILD,
+        "id": "gamma-child",
+        "condition_id": "cond-active-false",
+        "question_id": "question-active-false",
+        "clobTokenIds": ["yes-token", "no-token"],
+    }
+    market = {
+        "id": "event-active-false",
+        "event_id": "event-active-false",
+        "slug": "highest-temperature-in-chicago-on-june-15-2026",
+        "outcomes": [
+            {
+                "market_id": "cond-active-false",
+                "condition_id": "cond-active-false",
+                "question_id": "question-active-false",
+                "gamma_market_id": "gamma-child",
+                "token_id": "yes-token",
+                "no_token_id": "no-token",
+                "active": False,
+                "closed": False,
+                "accepting_orders": True,
+                "enable_orderbook": True,
+                "gamma_market_raw": gamma_child,
+            }
+        ],
+    }
+    decision = SimpleNamespace(
+        tokens={
+            "market_id": "cond-active-false",
+            "token_id": "yes-token",
+            "no_token_id": "no-token",
+        },
+        edge=SimpleNamespace(direction="buy_yes"),
+    )
+
+    result = capture_executable_market_snapshot(
+        conn,
+        market=market,
+        decision=decision,
+        clob=_FakeClob(),
+        captured_at=datetime.now(timezone.utc),
+        scan_authority="VERIFIED",
+    )
+
+    row = conn.execute(
+        "SELECT condition_id, active, closed, accepting_orders FROM executable_market_snapshots"
+    ).fetchone()
+    assert result["condition_id"] == "cond-active-false"
+    assert row == ("cond-active-false", 0, 0, 1)

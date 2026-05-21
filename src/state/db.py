@@ -849,7 +849,7 @@ def get_connection(
 # CI hook scripts/check_schema_version.py diffs the sqlite_master hash of
 # a fresh-init DB against tests/state/_schema_pinned_hash.txt and fails
 # the PR if SCHEMA_VERSION did not change in lockstep.
-SCHEMA_VERSION = 16  # 2026-05-21: add MUTUALLY_EXCLUSIVE_FAMILY_DEDUP no_trade reason
+SCHEMA_VERSION = 17  # 2026-05-21: add live-money no_trade reason taxonomy
 
 
 def init_schema(

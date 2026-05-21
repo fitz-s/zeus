@@ -104,12 +104,24 @@ def _run_mode(mode: DiscoveryMode):
     acquired = _cycle_lock.acquire(blocking=False)
     if not acquired:
         logger.warning("%s skipped: another cycle is still running", mode.value)
+        _write_scheduler_health(
+            f"run_mode:{mode.value}",
+            failed=False,
+            skipped=True,
+            skip_reason="cycle_lock_busy",
+        )
         return
     try:
         summary = run_cycle(mode)
         logger.info("%s: %s", mode.value, summary)
+        _write_scheduler_health(f"run_mode:{mode.value}", failed=False)
     except Exception as e:
         logger.error("%s failed: %s", mode.value, e, exc_info=True)
+        _write_scheduler_health(
+            f"run_mode:{mode.value}",
+            failed=True,
+            failure_reason=str(e),
+        )
         try:
             from src.observability.status_summary import write_status
 

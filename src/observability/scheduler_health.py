@@ -41,6 +41,8 @@ def _write_scheduler_health(
     *,
     failed: bool,
     reason: Optional[str] = None,
+    skipped: bool = False,
+    skip_reason: Optional[str] = None,
 ) -> None:
     """Atomically upsert a per-job health entry.
 
@@ -66,13 +68,20 @@ def _write_scheduler_health(
 
     entry = dict(existing.get(job_name) or {})
     entry["last_run_at"] = now
-    if failed:
+    if skipped:
+        entry["status"] = "SKIPPED"
+        entry["last_skip_at"] = now
+        entry["last_skip_reason"] = skip_reason or reason or ""
+        entry["consecutive_skips"] = int(entry.get("consecutive_skips") or 0) + 1
+    elif failed:
         entry["status"] = "FAILED"
         entry["last_failure_at"] = now
         entry["last_failure_reason"] = reason or ""
+        entry["consecutive_skips"] = 0
     else:
         entry["status"] = "OK"
         entry["last_success_at"] = now
+        entry["consecutive_skips"] = 0
     existing[job_name] = entry
 
     try:

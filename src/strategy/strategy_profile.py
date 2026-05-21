@@ -116,6 +116,9 @@ class StrategyProfile:
     min_strategy_notional_usd: float = 1.0
     min_expected_profit_usd: float = 0.05
     allow_ultra_low_tail: bool = False
+    partial_source_run_allowed: bool = True
+    complete_required_for_tail_orders: bool = True
+    partial_run_kelly_haircut: float = 0.5
 
     def is_runtime_live(self) -> bool:
         """True iff entries placed by this strategy hit the live order book.
@@ -284,6 +287,9 @@ _OPTIONAL_FIELDS = {
     "min_strategy_notional_usd",
     "min_expected_profit_usd",
     "allow_ultra_low_tail",
+    "partial_source_run_allowed",
+    "complete_required_for_tail_orders",
+    "partial_run_kelly_haircut",
 }
 
 
@@ -343,6 +349,22 @@ def _build_profile(key: str, raw: dict) -> StrategyProfile:
         raise RegistrySchemaError(
             f"{key}.allow_ultra_low_tail={allow_ultra_low_tail!r}: must be boolean"
         )
+    partial_source_run_allowed = raw.get("partial_source_run_allowed", True)
+    if not isinstance(partial_source_run_allowed, bool):
+        raise RegistrySchemaError(
+            f"{key}.partial_source_run_allowed={partial_source_run_allowed!r}: must be boolean"
+        )
+    complete_required_for_tail_orders = raw.get("complete_required_for_tail_orders", True)
+    if not isinstance(complete_required_for_tail_orders, bool):
+        raise RegistrySchemaError(
+            f"{key}.complete_required_for_tail_orders={complete_required_for_tail_orders!r}: must be boolean"
+        )
+    partial_run_kelly_haircut = _coerce_nonnegative_float(
+        raw.get("partial_run_kelly_haircut", 0.5),
+        key=key,
+        field_name="partial_run_kelly_haircut",
+        upper_bound=1.0,
+    )
 
     cycle_axis_mode = raw["cycle_axis_dispatch_mode"]
     if cycle_axis_mode is not None:
@@ -387,6 +409,9 @@ def _build_profile(key: str, raw: dict) -> StrategyProfile:
         min_strategy_notional_usd=min_strategy_notional_usd,
         min_expected_profit_usd=min_expected_profit_usd,
         allow_ultra_low_tail=allow_ultra_low_tail,
+        partial_source_run_allowed=partial_source_run_allowed,
+        complete_required_for_tail_orders=complete_required_for_tail_orders,
+        partial_run_kelly_haircut=partial_run_kelly_haircut,
     )
 
 

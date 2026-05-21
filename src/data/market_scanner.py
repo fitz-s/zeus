@@ -2374,7 +2374,8 @@ def capture_executable_market_snapshot(
     accepting_orders = _boolish_market_field(outcome, "accepting_orders", "acceptingOrders")
     if accepting_orders is None:
         accepting_orders = _boolish_market_field(gamma_market_raw, "acceptingOrders", "accepting_orders")
-    if closed or not active or not enable_orderbook or accepting_orders is not True:
+    child_tradeability_payload = {**gamma_market_raw, **outcome}
+    if not _market_child_is_tradable(child_tradeability_payload):
         raise ExecutableSnapshotCaptureError("Gamma child market is not currently tradable")
 
     raw_clob_market = _fetch_clob_market_info(clob, condition_id)
@@ -2588,8 +2589,7 @@ def _snapshot_is_executable(snapshot: dict[str, Any] | None) -> bool:
         return False
     selected_token = str(snapshot.get("selected_outcome_token_id") or "")
     return bool(
-        snapshot.get("active")
-        and not snapshot.get("closed")
+        not snapshot.get("closed")
         and snapshot.get("enable_orderbook")
         and snapshot.get("accepting_orders")
         and selected_token
@@ -2871,6 +2871,13 @@ def read_persisted_weather_markets(
         event["condition_ids"] = _dedupe_condition_ids(event["condition_ids"])
         event["support_topology"]["support_child_count"] = len(event["outcomes"])
         event["support_topology"]["executable_child_count"] = len(event["condition_ids"])
+        if len(event["outcomes"]) < 2:
+            logger.warning(
+                "persisted weather market topology incomplete: slug=%s support_child_count=%s",
+                event.get("slug"),
+                len(event["outcomes"]),
+            )
+            continue
         hours_to_resolution = event.get("hours_to_resolution")
         if hours_to_resolution is None or hours_to_resolution <= 0:
             continue

@@ -89,6 +89,10 @@ class ExecutableForecastEvidence:
     observed_steps: tuple[int, ...]
     expected_members: int
     observed_members: int
+    source_run_status: str
+    source_run_completeness_status: str
+    coverage_completeness_status: str
+    coverage_readiness_status: str | None
 
 
 @dataclass(frozen=True)
@@ -136,6 +140,10 @@ class ExecutableForecastBundle:
             "raw_orderbook_hash_transition_delta_ms": (
                 self.snapshot.raw_orderbook_hash_transition_delta_ms
             ),
+            "source_run_status": self.evidence.source_run_status,
+            "source_run_completeness_status": self.evidence.source_run_completeness_status,
+            "coverage_completeness_status": self.evidence.coverage_completeness_status,
+            "coverage_readiness_status": self.evidence.coverage_readiness_status,
             "executable_forecast_evidence": self.evidence,
         }
 
@@ -850,6 +858,12 @@ def read_executable_forecast(
         observed_steps=observed_steps,
         expected_members=expected_members,
         observed_members=observed_members,
+        source_run_status=str(source_run.get("status") or ""),
+        source_run_completeness_status=str(source_run.get("completeness_status") or ""),
+        coverage_completeness_status=str(coverage.get("completeness_status") or ""),
+        coverage_readiness_status=(
+            None if coverage.get("readiness_status") is None else str(coverage.get("readiness_status"))
+        ),
     )
     return ExecutableForecastBundleResult(
         "LIVE_ELIGIBLE",
