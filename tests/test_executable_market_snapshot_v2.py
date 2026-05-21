@@ -38,6 +38,7 @@ from src.contracts.execution_intent import (
     ExecutableCostBasis,
     ExecutableTradeHypothesis,
     FinalExecutionIntent,
+    PassiveMakerExecutionContext,
     simulate_clob_sweep,
 )
 from src.engine.evaluator import (
@@ -1755,16 +1756,32 @@ def test_passive_limit_candidate_cost_basis_requires_maker_only_submit_intent():
     cost_basis.assert_live_safe()
     cost_basis.assert_submit_safe()
 
+    passive_context = PassiveMakerExecutionContext(
+        spread_usd=Decimal("0.02"),
+        quote_age_ms=10,
+        expected_fill_probability=Decimal("0.40"),
+    )
+
     final_intent = FinalExecutionIntent.from_hypothesis_and_cost_basis(
         hypothesis=hypothesis,
         cost_basis=cost_basis,
         order_type="GTC",
         post_only=True,
+        passive_maker_context=passive_context,
     )
 
     assert final_intent.order_policy == "post_only_passive_limit"
     assert final_intent.order_type == "GTC"
     assert final_intent.post_only is True
+    assert final_intent.passive_maker_context == passive_context
+
+    with pytest.raises(ValueError, match="requires PassiveMakerExecutionContext"):
+        FinalExecutionIntent.from_hypothesis_and_cost_basis(
+            hypothesis=hypothesis,
+            cost_basis=cost_basis,
+            order_type="GTC",
+            post_only=True,
+        )
 
     with pytest.raises(ValueError, match="requires post_only=True"):
         FinalExecutionIntent.from_hypothesis_and_cost_basis(
@@ -1772,6 +1789,7 @@ def test_passive_limit_candidate_cost_basis_requires_maker_only_submit_intent():
             cost_basis=cost_basis,
             order_type="GTC",
             post_only=False,
+            passive_maker_context=passive_context,
         )
 
 
@@ -1801,6 +1819,11 @@ def test_low_price_notional_order_passes_snapshot_share_minimum():
         cost_basis=cost_basis,
         order_type="GTC",
         post_only=True,
+        passive_maker_context=PassiveMakerExecutionContext(
+            spread_usd=Decimal("0.005"),
+            quote_age_ms=10,
+            expected_fill_probability=Decimal("0.25"),
+        ),
     )
 
     assert final_intent.size_kind == "notional_usd"

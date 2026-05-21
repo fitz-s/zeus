@@ -742,7 +742,10 @@ def _reprice_decision_from_executable_snapshot(
         raise ValueError("EXECUTABLE_SNAPSHOT_UNAVAILABLE: missing snapshot_id")
     if decision.edge is None:
         raise ValueError("EXECUTABLE_REPRICE_REJECTED: missing edge")
-    from src.data.market_scanner import _top_book_level_decimal
+    from src.data.market_scanner import (
+        _optional_top_book_level_decimal,
+        _top_book_level_decimal,
+    )
     from src.engine.evaluator import _size_at_execution_price_boundary
     from src.state.snapshot_repo import get_snapshot
     from src.strategy.market_fusion import vwmp
@@ -776,23 +779,32 @@ def _reprice_decision_from_executable_snapshot(
     if str(snapshot.outcome_label or "").upper() != expected_label:
         raise ValueError("EXECUTABLE_SNAPSHOT_OUTCOME_MISMATCH")
 
+    direction = Direction(decision.edge.direction)
     try:
         orderbook = json.loads(snapshot.orderbook_depth_jsonb)
     except (TypeError, ValueError) as exc:
         raise ValueError(f"EXECUTABLE_SNAPSHOT_UNAVAILABLE: invalid orderbook JSON: {exc}") from exc
-    best_bid, bid_size = _top_book_level_decimal(orderbook, "bids")
-    best_ask, ask_size = _top_book_level_decimal(orderbook, "asks")
-    best_bid_float = float(best_bid)
+    if direction.startswith("buy_"):
+        best_bid, bid_size = _optional_top_book_level_decimal(orderbook, "bids")
+        best_ask, ask_size = _top_book_level_decimal(orderbook, "asks")
+    else:
+        best_bid, bid_size = _top_book_level_decimal(orderbook, "bids")
+        best_ask, ask_size = _top_book_level_decimal(orderbook, "asks")
+    ask_only_entry_book = direction.startswith("buy_") and best_bid is None
+    best_bid_float = None if best_bid is None else float(best_bid)
     best_ask_float = float(best_ask)
     bid_size_float = float(bid_size)
     ask_size_float = float(ask_size)
     original_edge = decision.edge
     original_size = float(getattr(decision, "size_usd", 0.0) or 0.0)
-    snapshot_vwmp = vwmp(best_bid_float, best_ask_float, bid_size_float, ask_size_float)
+    snapshot_vwmp = (
+        best_ask_float
+        if ask_only_entry_book
+        else vwmp(float(best_bid_float), best_ask_float, bid_size_float, ask_size_float)
+    )
     repriced_edge = float(decision.edge.p_posterior) - float(snapshot_vwmp)
     if repriced_edge <= 0.0:
         raise ValueError(f"EXECUTABLE_REPRICE_REJECTED: edge={repriced_edge:.6f}")
-    direction = Direction(decision.edge.direction)
     snapshot_limit_price = compute_native_limit_price(
         HeldSideProbability(float(decision.edge.p_posterior), direction),
         NativeSidePrice(float(snapshot_vwmp), direction),
@@ -828,7 +840,7 @@ def _reprice_decision_from_executable_snapshot(
     _snap_depth = int(getattr(snapshot, "depth_at_best_ask", 0) or 0)
     _snapshot_spread_usd = (
         (best_ask - best_bid)
-        if _snap_top_ask is not None
+        if _snap_top_ask is not None and best_bid is not None
         else _Decimal("0")
     )
     try:
@@ -882,7 +894,11 @@ def _reprice_decision_from_executable_snapshot(
     positive_edge_cap_decimal = p_posterior_decimal - tick_size_decimal
     passive_maker_repositioned = False
     passive_maker_reposition_reason = ""
-    if direction.startswith("buy_") and snapshot_limit_decimal < best_bid:
+    if (
+        direction.startswith("buy_")
+        and best_bid is not None
+        and snapshot_limit_decimal < best_bid
+    ):
         if positive_edge_cap_decimal < best_bid:
             raise ValueError(
                 "EXECUTABLE_PASSIVE_MAKER_NO_COMPETITIVE_POSITIVE_EDGE: "
@@ -925,7 +941,11 @@ def _reprice_decision_from_executable_snapshot(
     # default "0" preserves the existing passive-maker-only behavior exactly.
     # Karachi safety: flag defaults OFF → zero impact on day0_window positions.
     # Operator must validate via backtest before flipping.
-    if os.environ.get("ZEUS_TAKER_CROSSING_ENABLED", "0") == "1" and allow_taker_upgrade:
+    if (
+        os.environ.get("ZEUS_TAKER_CROSSING_ENABLED", "0") == "1"
+        and allow_taker_upgrade
+        and not ask_only_entry_book
+    ):
         from src.engine.evaluator import _crossing_decision as _f34_crossing_decision
         _f34_order_size = best_ask_size_at_fee_adjusted_cost
         _f34_expected_pnl = best_ask_fee_adjusted_edge * _f34_order_size
@@ -995,6 +1015,13 @@ def _reprice_decision_from_executable_snapshot(
                 limit_price=depth_sweep_limit_decimal,
             )
             if best_ask_sweep.depth_status != "PASS":
+                if ask_only_entry_book:
+                    raise ValueError(
+                        "EXECUTABLE_ASK_ONLY_PASSIVE_PRIOR_UNAVAILABLE: "
+                        f"taker depth constrained status={best_ask_sweep.depth_status} "
+                        f"visible_best_ask_usd={float(best_ask_sweep.gross_notional):.6f} "
+                        f"required_usd={size_at_depth_limit:.6f}"
+                    )
                 raise ValueError(
                     "EXECUTABLE_TAKER_DEPTH_CONSTRAINED: "
                     f"visible_best_ask_usd={float(best_ask_sweep.gross_notional):.6f} "
@@ -1014,6 +1041,13 @@ def _reprice_decision_from_executable_snapshot(
                 marketable_buy_submitted_notional_usd is not None
                 and marketable_buy_submitted_notional_usd < marketable_buy_min_notional_usd
             ):
+                if ask_only_entry_book:
+                    raise ValueError(
+                        "EXECUTABLE_ASK_ONLY_MARKETABLE_BUY_BELOW_MIN_NOTIONAL_NO_PASSIVE_BID: "
+                        f"required_usd={float(marketable_buy_submitted_notional_usd):.6f} "
+                        f"marketable_min_usd={float(marketable_buy_min_notional_usd):.6f} "
+                        f"best_ask={best_ask_float:.6f}"
+                    )
                 passive_cap = _floor_to_tick(
                     min(
                         snapshot_limit_decimal,
@@ -1022,7 +1056,11 @@ def _reprice_decision_from_executable_snapshot(
                     ),
                     tick_size_decimal,
                 )
-                if passive_cap < best_bid <= positive_edge_cap_decimal and best_bid < best_ask:
+                if (
+                    best_bid is not None
+                    and passive_cap < best_bid <= positive_edge_cap_decimal
+                    and best_bid < best_ask
+                ):
                     passive_cap = best_bid
                 if passive_cap <= Decimal("0") or passive_cap >= best_ask:
                     raise ValueError(
@@ -1050,6 +1088,13 @@ def _reprice_decision_from_executable_snapshot(
                 corrected_candidate_price = depth_sweep_limit_float
                 corrected_candidate_expected_fill = float(best_ask_sweep.average_price or best_ask_float)
                 corrected_candidate_size = size_at_depth_limit
+
+    if ask_only_entry_book and final_best_ask is None:
+        raise ValueError(
+            "EXECUTABLE_ASK_ONLY_PASSIVE_PRIOR_UNAVAILABLE: "
+            "BUY entry ask-only book has executable taker cost but no bid-side "
+            "market prior for passive maker pricing"
+        )
 
     passive_fill_probability = final_intent_context.get(
         "passive_fill_probability",
@@ -1142,6 +1187,11 @@ def _reprice_decision_from_executable_snapshot(
                 else Decimal(str(final_intent_context.get("adverse_selection_score")))
             ),
             orderbook_hash_age_ms=quote_age_ms,
+        )
+    if final_best_ask is None and passive_maker_context is None:
+        raise ValueError(
+            "PASSIVE_FILL_PROBABILITY_UNMODELED: "
+            "post_only_passive_limit requires PassiveMakerExecutionContext"
         )
 
     selected_order_type = str(final_intent_context.get("order_type") or "GTC").strip().upper()
@@ -1239,6 +1289,12 @@ def _reprice_decision_from_executable_snapshot(
         "old_entry_price": float(getattr(original_edge, "entry_price", 0.0) or 0.0),
         "old_vwmp": float(getattr(original_edge, "vwmp", 0.0) or 0.0),
         "old_size_usd": original_size,
+        "entry_book_semantics": (
+            "ask_only_entry_book" if ask_only_entry_book else "two_sided_entry_book"
+        ),
+        "snapshot_market_prior_status": (
+            "ask_only_executable_cost" if ask_only_entry_book else "two_sided_vwmp"
+        ),
         "snapshot_vwmp": float(snapshot_vwmp),
         "snapshot_best_bid": best_bid_float,
         "snapshot_best_bid_size": bid_size_float,
@@ -4176,6 +4232,18 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                                     f"{getattr(city, 'cluster', '') or city.name}:{candidate.target_date}"
                                 ),
                             }
+                            decision_tokens = dict(getattr(d, "tokens", {}) or {})
+                            for passive_key in (
+                                "passive_fill_probability",
+                                "expected_fill_probability",
+                                "queue_depth_ahead",
+                                "adverse_selection_score",
+                                "min_expected_profit_usd",
+                            ):
+                                if passive_key in decision_tokens:
+                                    final_intent_context[passive_key] = decision_tokens[
+                                        passive_key
+                                    ]
                             _reprice_fn = getattr(deps, "reprice_from_snapshot", None)
                             if callable(_reprice_fn):
                                 snapshot_best_ask = _reprice_fn(conn, d, snapshot_fields, final_intent_context)
