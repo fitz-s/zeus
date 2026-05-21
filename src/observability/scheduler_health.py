@@ -26,7 +26,7 @@ import logging
 import os
 import tempfile
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Any, Optional
 
 from src.config import state_path
 
@@ -43,6 +43,8 @@ def _write_scheduler_health(
     reason: Optional[str] = None,
     skipped: bool = False,
     skip_reason: Optional[str] = None,
+    started: bool = False,
+    extra: Optional[dict[str, Any]] = None,
 ) -> None:
     """Atomically upsert a per-job health entry.
 
@@ -73,6 +75,10 @@ def _write_scheduler_health(
         entry["last_skip_at"] = now
         entry["last_skip_reason"] = skip_reason or reason or ""
         entry["consecutive_skips"] = int(entry.get("consecutive_skips") or 0) + 1
+    elif started:
+        entry["status"] = "RUNNING"
+        entry["last_started_at"] = now
+        entry["consecutive_skips"] = 0
     elif failed:
         entry["status"] = "FAILED"
         entry["last_failure_at"] = now
@@ -82,6 +88,8 @@ def _write_scheduler_health(
         entry["status"] = "OK"
         entry["last_success_at"] = now
         entry["consecutive_skips"] = 0
+    if extra:
+        entry["business_liveness"] = dict(extra)
     existing[job_name] = entry
 
     try:

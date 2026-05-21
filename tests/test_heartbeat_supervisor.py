@@ -494,6 +494,98 @@ def test_scheduler_health_tracks_mode_skips_as_business_liveness(monkeypatch, tm
     assert data["run_mode:opening_hunt"]["consecutive_skips"] == 0
 
 
+def test_scheduler_health_persists_mode_business_frontier(monkeypatch, tmp_path):
+    from src.observability import scheduler_health
+
+    monkeypatch.setattr(scheduler_health, "_SCHEDULER_HEALTH_PATH", tmp_path / "scheduler_health.json")
+
+    scheduler_health._write_scheduler_health(
+        "run_mode:day0_capture",
+        failed=False,
+        extra={
+            "status": "FAILED",
+            "last_started_at": "2026-05-21T20:00:00+00:00",
+            "last_completed_at": "2026-05-21T20:01:00+00:00",
+            "last_candidates": 0,
+            "last_final_intent_built": 0,
+            "last_submit_attempts": 0,
+            "last_terminal_classification": "no_markets_after_mode_phase_filter",
+        },
+    )
+
+    data = json.loads((tmp_path / "scheduler_health.json").read_text())
+    day0 = data["run_mode:day0_capture"]
+    assert day0["status"] == "OK"
+    assert day0["business_liveness"]["status"] == "FAILED"
+    assert day0["business_liveness"]["last_candidates"] == 0
+    assert day0["business_liveness"]["last_final_intent_built"] == 0
+    assert day0["business_liveness"]["last_submit_attempts"] == 0
+    assert (
+        day0["business_liveness"]["last_terminal_classification"]
+        == "no_markets_after_mode_phase_filter"
+    )
+
+
+def test_scheduler_health_started_does_not_advance_success(monkeypatch, tmp_path):
+    from src.observability import scheduler_health
+
+    monkeypatch.setattr(scheduler_health, "_SCHEDULER_HEALTH_PATH", tmp_path / "scheduler_health.json")
+
+    scheduler_health._write_scheduler_health(
+        "run_mode:opening_hunt",
+        failed=False,
+        started=True,
+    )
+
+    data = json.loads((tmp_path / "scheduler_health.json").read_text())
+    entry = data["run_mode:opening_hunt"]
+    assert entry["status"] == "RUNNING"
+    assert entry["last_started_at"]
+    assert "last_success_at" not in entry
+
+
+def test_run_mode_records_success_business_liveness(monkeypatch):
+    from src import main
+    from src.engine.discovery_mode import DiscoveryMode
+
+    events = []
+
+    def _record(job_name, **kwargs):
+        events.append((job_name, kwargs))
+
+    monkeypatch.setattr(main, "_write_scheduler_health", _record)
+    monkeypatch.setattr(
+        main,
+        "run_cycle",
+        lambda _mode: {
+            "candidates": 0,
+            "no_trades": 0,
+            "final_intents_built": 0,
+            "submit_attempts": 0,
+            "money_path_frontier": {
+                "terminal_classification": "no_markets_after_mode_phase_filter"
+            },
+        },
+    )
+
+    main._run_mode(DiscoveryMode.DAY0_CAPTURE)
+
+    assert any(
+        job_name == "run_mode:day0_capture"
+        and kwargs.get("failed") is False
+        and kwargs.get("started") is True
+        for job_name, kwargs in events
+    )
+    assert any(
+        job_name == "run_mode:day0_capture"
+        and kwargs.get("failed") is False
+        and kwargs.get("extra", {}).get("last_terminal_classification")
+        == "no_markets_after_mode_phase_filter"
+        and kwargs.get("extra", {}).get("last_candidates") == 0
+        for job_name, kwargs in events
+    )
+
+
 def test_run_mode_records_mode_specific_failure(monkeypatch):
     from src import main
     from src.engine.discovery_mode import DiscoveryMode

@@ -213,6 +213,27 @@ def test_init_schema_migrates_decision_events_shadow_provenance_check() -> None:
     assert row["schema_version"] == SCHEMA_VERSION
 
 
+def test_init_schema_removes_interrupted_decision_events_temp_table() -> None:
+    """Current decision_events schema plus stale rebuild temp must boot cleanly."""
+    from src.state.db import init_schema
+    from src.state.table_registry import DBIdentity, assert_db_matches_registry
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    init_schema(conn)
+    conn.execute("CREATE TABLE decision_events_new AS SELECT * FROM decision_events")
+
+    init_schema(conn)
+
+    assert (
+        conn.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='decision_events_new'"
+        ).fetchone()[0]
+        == 0
+    )
+    assert_db_matches_registry(conn, DBIdentity.WORLD)
+
+
 # ---------------------------------------------------------------------------
 # StaleQuoteDetector relationship tests
 # ---------------------------------------------------------------------------
