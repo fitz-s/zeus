@@ -1185,15 +1185,32 @@ class TestLiveOrderCommandSplit:
                 decision_id="dec-entry-timing",
             )
 
-        assert result.status == "pending"
-        assert result.zeus_submit_intent_time
-        assert result.venue_ack_time
-        submit_at = datetime.fromisoformat(result.zeus_submit_intent_time)
-        ack_at = datetime.fromisoformat(result.venue_ack_time)
-        assert submit_at <= ack_at
-        events = list_events(mem_conn, command_ids_seen[0])
-        assert [event["event_type"] for event in events][-1] == "SUBMIT_ACKED"
-        assert events[-1]["occurred_at"] == result.venue_ack_time
+            assert result.status == "pending"
+            assert result.zeus_submit_intent_time
+            assert result.venue_ack_time
+            submit_at = datetime.fromisoformat(result.zeus_submit_intent_time)
+            ack_at = datetime.fromisoformat(result.venue_ack_time)
+            assert submit_at <= ack_at
+            events = list_events(mem_conn, command_ids_seen[0])
+            submit_requested = [event for event in events if event["event_type"] == "SUBMIT_REQUESTED"][0]
+            submit_acked = [event for event in events if event["event_type"] == "SUBMIT_ACKED"][0]
+            assert [event["event_type"] for event in events][-1] == "SUBMIT_ACKED"
+            assert events[-1]["occurred_at"] == result.venue_ack_time
+
+            mock_inst.place_limit_order.side_effect = AssertionError(
+                "existing-command path should not resubmit"
+            )
+            retry_result = _live_order(
+                trade_id="trd-entry-timing",
+                intent=intent,
+                shares=18.19,
+                conn=mem_conn,
+                decision_id="dec-entry-timing",
+            )
+
+            assert retry_result.zeus_submit_intent_time == submit_requested["occurred_at"]
+            assert retry_result.venue_ack_time == submit_acked["occurred_at"]
+            assert len(command_ids_seen) == 1
 
     def test_matched_submit_records_fill_truth_instead_of_resting_ack(self, mem_conn):
         """A matched FOK submit response is a fill boundary, not a resting ACK."""

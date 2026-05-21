@@ -1266,6 +1266,7 @@ class ExitOrderIntent:
 
 
 def _orderresult_from_existing(
+    conn: sqlite3.Connection,
     existing: "VenueCommand",  # type: ignore[name-defined]
     trade_id: str,
     limit_price: float,
@@ -1285,6 +1286,23 @@ def _orderresult_from_existing(
     """
     # Lazy import to avoid circular deps at module load time.
     from src.execution.command_bus import CommandState
+    from src.state.venue_command_repo import list_events
+
+    def _timing_from_existing() -> tuple[Optional[str], Optional[str]]:
+        submit_time: Optional[str] = None
+        ack_time: Optional[str] = None
+        for event in list_events(conn, existing.command_id):
+            event_type = str(event.get("event_type") or "")
+            occurred_at = str(event.get("occurred_at") or "")
+            if event_type == "SUBMIT_REQUESTED" and occurred_at and submit_time is None:
+                submit_time = occurred_at
+            elif event_type == "SUBMIT_ACKED" and occurred_at and ack_time is None:
+                ack_time = occurred_at
+            if submit_time and ack_time:
+                break
+        return submit_time, ack_time
+
+    submit_time, ack_time = _timing_from_existing()
 
     s = existing.state
     if s in (CommandState.ACKED, CommandState.PARTIAL):
@@ -1300,6 +1318,8 @@ def _orderresult_from_existing(
             idempotency_key=idem_value,
             intent_id=intent_id,
             command_state=s.value,
+            zeus_submit_intent_time=submit_time,
+            venue_ack_time=ack_time,
         )
     if s == CommandState.FILLED:
         return OrderResult(
@@ -1314,6 +1334,8 @@ def _orderresult_from_existing(
             idempotency_key=idem_value,
             intent_id=intent_id,
             command_state=s.value,
+            zeus_submit_intent_time=submit_time,
+            venue_ack_time=ack_time,
         )
     if s == CommandState.SUBMIT_UNKNOWN_SIDE_EFFECT:
         return OrderResult(
@@ -2125,6 +2147,7 @@ def execute_exit_order(
                 idem.value, intent.trade_id,
             )
             return _orderresult_from_existing(
+                conn,
                 VenueCommand.from_row(pre_lookup_row),
                 trade_id=intent.trade_id,
                 limit_price=limit_price,
@@ -2376,6 +2399,7 @@ def execute_exit_order(
                         reason=exit_existing_mismatch,
                     )
                 return _orderresult_from_existing(
+                    conn,
                     VenueCommand.from_row(existing_row),
                     trade_id=intent.trade_id,
                     limit_price=limit_price,
@@ -2969,6 +2993,7 @@ def _live_order(
                 idem.value, trade_id,
             )
             return _orderresult_from_existing(
+                conn,
                 VenueCommand.from_row(pre_lookup_row),
                 trade_id=trade_id,
                 limit_price=intent.limit_price,
@@ -3207,6 +3232,7 @@ def _live_order(
                         reason=corrected_existing_mismatch,
                     )
                 return _orderresult_from_existing(
+                    conn,
                     VenueCommand.from_row(existing_row),
                     trade_id=trade_id,
                     limit_price=intent.limit_price,
