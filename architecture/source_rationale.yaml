@@ -2164,6 +2164,26 @@ files:
     downstream:
     - tests/state/test_table_registry_coherence.py
     - scripts/check_table_registry_coherence.py
+  src/contracts/freshness_registry.py:
+    zone: K2_runtime
+    authority_role: freshness_policy_registry
+    why: >
+      Centralized per-source freshness gate replacing 10 ad-hoc age_seconds/age_hours
+      threshold checks scattered across collateral_ledger, evaluator, oracle_estimator,
+      riskguard, heartbeat_supervisor, db, venue_command_repo, polymarket_v2_adapter.
+      FreshnessLevel(IntEnum) with explicit integer ranks (FRESH=0, DEGRADED=1, STALE=2,
+      EXPIRED=3) ensures >= comparisons use severity order, not lexicographic string order.
+      evaluate(source_id, age_seconds) -> FreshnessLevel. Module-level `registry` singleton.
+      Phase 2 T3 production pass complete — 10 callsites migrated, antibody GREEN.
+      Code-only — NO DB table, NO SCHEMA_VERSION bump.
+    hazards:
+    - FRESHNESS_ENUM_MUST_BE_INTENUM  # StrEnum breaks >= semantics; do not change to StrEnum
+    downstream:
+    - tests/test_inv_freshness_no_ad_hoc_checks.py
+    - tests/test_contracts_freshness_registry.py
+    track: T3
+    phase: Phase2
+
   src/supervisor_api/contracts.py:
     zone: K2_runtime
     authority_role: venus_external_contract

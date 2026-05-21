@@ -31,6 +31,7 @@ from src.contracts.executable_market_snapshot_v2 import (
     canonicalize_fee_details,
 )
 from src.contracts.venue_submission_envelope import VenueSubmissionEnvelope
+from src.contracts.freshness_registry import FreshnessLevel, registry as _freshness_registry
 from src.observability.counters import increment as _cnt_inc
 
 logger = logging.getLogger(__name__)
@@ -2628,7 +2629,7 @@ def _assert_snapshot_fresh(snapshot: Any) -> None:
         if window_seconds <= 0:
             raise StaleMarketSnapshotError("ExecutableMarketSnapshotV2 freshness window must be positive")
         age_seconds = (datetime.now(timezone.utc) - captured_at).total_seconds()
-        if age_seconds > window_seconds:
+        if _freshness_registry.evaluate("executable_snapshot", age_seconds, override_threshold_seconds=window_seconds) >= FreshnessLevel.STALE:
             raise StaleMarketSnapshotError("ExecutableMarketSnapshotV2 is outside freshness window")
         return
 

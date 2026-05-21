@@ -23,6 +23,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Optional
 
+from src.contracts.freshness_registry import FreshnessLevel, registry as _freshness_registry
+
 logger = logging.getLogger(__name__)
 
 HEARTBEAT_CANCEL_SUSPECTED_REASON = "heartbeat_cancel_suspected"
@@ -269,7 +271,7 @@ def fresh_heartbeat_id_from_status(
     if written_at is None:
         return ""
     age_seconds = (datetime.now(timezone.utc) - written_at).total_seconds()
-    if age_seconds < 0 or age_seconds > max_age_seconds:
+    if age_seconds < 0 or _freshness_registry.evaluate("heartbeat_restart_seed", age_seconds, override_threshold_seconds=max_age_seconds) >= FreshnessLevel.STALE:
         return ""
     if str(payload.get("health") or "").upper() != HeartbeatHealth.HEALTHY.value:
         return ""
@@ -345,7 +347,7 @@ class ExternalHeartbeatSupervisor:
             )
         age_seconds = (datetime.now(timezone.utc) - written_at).total_seconds()
         cadence_seconds = int(payload.get("cadence_seconds") or self._cadence_seconds)
-        if age_seconds > self._max_age_seconds:
+        if _freshness_registry.evaluate("heartbeat_status", age_seconds, override_threshold_seconds=self._max_age_seconds) >= FreshnessLevel.STALE:
             return HeartbeatStatus(
                 health=HeartbeatHealth.LOST,
                 last_success_at=last_success_at,

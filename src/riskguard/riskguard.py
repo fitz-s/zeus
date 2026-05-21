@@ -54,6 +54,7 @@ from src.state.portfolio import (
 )
 from src.state.portfolio_loader_policy import choose_portfolio_truth_source
 from src.state.strategy_tracker import load_tracker
+from src.contracts.freshness_registry import FreshnessLevel, registry as _freshness_registry
 
 logger = logging.getLogger(__name__)
 TRAILING_LOSS_ROW_TOLERANCE_USD = 0.01
@@ -1404,7 +1405,7 @@ def get_current_level() -> RiskLevel:
         from datetime import datetime as dt
         last_check = dt.fromisoformat(row["checked_at"].replace("Z", "+00:00"))
         age_seconds = (datetime.now(timezone.utc) - last_check).total_seconds()
-        if age_seconds > 300:
+        if _freshness_registry.evaluate("riskguard_last_check", age_seconds) >= FreshnessLevel.STALE:
             logger.warning("RiskGuard STALE: last check was %ds ago. Fail-closed → RED.",
                            int(age_seconds))
             return RiskLevel.RED

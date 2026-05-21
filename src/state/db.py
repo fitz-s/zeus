@@ -23,6 +23,7 @@ if TYPE_CHECKING:
 from src.architecture.decorators import capability
 from src.config import STATE_DIR, get_mode, state_path
 from src.contracts.semantic_types import ExitState
+from src.contracts.freshness_registry import FreshnessLevel, registry as _freshness_registry
 from src.state.ledger import (
     CANONICAL_POSITION_EVENT_COLUMNS,
     apply_architecture_kernel_schema,
@@ -7762,7 +7763,7 @@ def query_strategy_health_snapshot(
         age_seconds = None
         if snapshot_dt is not None and row_as_of is not None:
             age_seconds = max(0.0, (snapshot_dt - row_as_of).total_seconds())
-        if age_seconds is None or age_seconds > max_age_seconds:
+        if age_seconds is None or _freshness_registry.evaluate("strategy_health", age_seconds, override_threshold_seconds=max_age_seconds) >= FreshnessLevel.STALE:
             stale_strategy_keys.append(strategy_key)
         by_strategy[strategy_key] = {
             key: row[key]

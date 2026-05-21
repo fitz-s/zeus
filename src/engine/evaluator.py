@@ -132,6 +132,7 @@ from src.contracts.executable_market_snapshot_v2 import (
 from src.contracts.effective_kelly_context import EffectiveKellyContext, MissingEffectiveContextError
 from src.contracts.execution_price import ExecutionPrice, polymarket_fee
 from src.contracts.alpha_decision import AlphaTargetMismatchError
+from src.contracts.freshness_registry import FreshnessLevel, registry as _freshness_registry
 from src.data.forecast_source_registry import (
     SourceNotEnabled,
     calibration_source_id_for_lookup,
@@ -730,7 +731,7 @@ def _day0_observation_quality_rejection_reason(
             f"decision_time={reference_time.isoformat()}"
         )
     age_hours = max(0.0, age_seconds / 3600.0)
-    if age_hours > DAY0_EXECUTABLE_OBSERVATION_MAX_AGE_HOURS:
+    if _freshness_registry.evaluate("day0_executable_observation", age_hours * 3600.0) >= FreshnessLevel.STALE:
         return (
             "Day0 observation is stale for executable probability generation: "
             f"city={city.name} age_hours={age_hours:.3f} "
