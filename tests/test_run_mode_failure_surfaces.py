@@ -54,17 +54,32 @@ def _write(path: Path, payload: dict) -> None:
 
 def _setup_healthy_state(sd: Path, offset_seconds: int = -30) -> None:
     """Write all three surfaces in a healthy / fresh state."""
+    cycle_time = _now_iso(offset_seconds)
     _write(
         sd / "daemon-heartbeat.json",
-        {"alive": True, "timestamp": _now_iso(offset_seconds), "mode": "live"},
+        {"alive": True, "timestamp": cycle_time, "mode": "live"},
     )
     _write(
         sd / "scheduler_jobs_health.json",
-        {"_run_mode": {"status": "OK", "last_run_at": _now_iso(offset_seconds)}},
+        {"_run_mode": {"status": "OK", "last_run_at": cycle_time, "last_success_at": cycle_time}},
     )
     _write(
         sd / "status_summary.json",
-        {"timestamp": _now_iso(offset_seconds), "cycle": 1},
+        {
+            "timestamp": cycle_time,
+            "cycle": {
+                "mode": "opening_hunt",
+                "started_at": cycle_time,
+                "completed_at": cycle_time,
+                "candidates": 0,
+                "entry_orders_submitted": 0,
+                "trades": 0,
+                "exits": 0,
+                "no_trades": 0,
+                "command_recovery": {"scanned": 0, "advanced": 0},
+                "chain_sync": {"synced": 0},
+            },
+        },
     )
 
 
@@ -93,7 +108,17 @@ def test_run_mode_failed_yields_degraded(tmp_path: Path) -> None:
     )
     _write(
         sd / "status_summary.json",
-        {"timestamp": _now_iso(-30), "cycle": 1},
+        {
+            "timestamp": _now_iso(-30),
+            "cycle": {
+                "mode": "opening_hunt",
+                "completed_at": _now_iso(-30),
+                "candidates": 0,
+                "entry_orders_submitted": 0,
+                "trades": 0,
+                "exits": 0,
+            },
+        },
     )
 
     result = compute_composite_live_health(state_dir=sd)
@@ -121,7 +146,14 @@ def test_stale_status_summary_yields_degraded(tmp_path: Path) -> None:
     stale_offset = -(STATUS_FRESH_BUDGET_SECONDS + 60)
     _write(
         sd / "status_summary.json",
-        {"timestamp": _now_iso(stale_offset), "cycle": 1},
+        {
+            "timestamp": _now_iso(stale_offset),
+            "cycle": {
+                "mode": "opening_hunt",
+                "completed_at": _now_iso(stale_offset),
+                "candidates": 0,
+            },
+        },
     )
 
     result = compute_composite_live_health(state_dir=sd)
@@ -179,7 +211,14 @@ def test_degraded_emits_warning_log_with_surface_name(
     )
     _write(
         sd / "status_summary.json",
-        {"timestamp": _now_iso(-30), "cycle": 1},
+        {
+            "timestamp": _now_iso(-30),
+            "cycle": {
+                "mode": "opening_hunt",
+                "completed_at": _now_iso(-30),
+                "candidates": 0,
+            },
+        },
     )
 
     with caplog.at_level(logging.WARNING, logger="src.control.live_health"):
@@ -195,3 +234,86 @@ def test_degraded_emits_warning_log_with_surface_name(
     assert any("DEGRADED" in msg for msg in warning_texts), (
         f"No WARNING log containing 'DEGRADED' found. Got: {warning_texts}"
     )
+
+
+def test_business_plane_missing_candidate_counter_yields_degraded(tmp_path: Path) -> None:
+    """F5: fresh process/status without cycle counters is not live progress proof."""
+    sd = tmp_path / "state"
+    sd.mkdir()
+    _setup_healthy_state(sd)
+    _write(
+        sd / "status_summary.json",
+        {
+            "timestamp": _now_iso(-30),
+            "cycle": {
+                "mode": "opening_hunt",
+                "completed_at": _now_iso(-30),
+                "entry_orders_submitted": 0,
+            },
+        },
+    )
+
+    result = compute_composite_live_health(state_dir=sd)
+
+    assert result["status"] == "DEGRADED"
+    assert "business_plane" in result["failing_surfaces"]
+    assert result["surfaces"]["business_plane"]["ok"] is False
+    assert result["surfaces"]["business_plane"]["issue"] == "CANDIDATE_COUNTER_MISSING"
+
+
+def test_business_plane_skipped_cycle_yields_degraded(tmp_path: Path) -> None:
+    """F6: scheduler OK plus skipped cycle is daemon liveness, not business progress."""
+    sd = tmp_path / "state"
+    sd.mkdir()
+    _setup_healthy_state(sd)
+    _write(
+        sd / "status_summary.json",
+        {
+            "timestamp": _now_iso(-30),
+            "cycle": {
+                "mode": "opening_hunt",
+                "completed_at": _now_iso(-30),
+                "skipped": True,
+                "skip_reason": "cycle_lock_held",
+                "candidates": 0,
+            },
+        },
+    )
+
+    result = compute_composite_live_health(state_dir=sd)
+
+    assert result["status"] == "DEGRADED"
+    assert result["surfaces"]["business_plane"]["issue"] == "CYCLE_SKIPPED: cycle_lock_held"
+
+
+def test_business_plane_exposes_entry_and_reconcile_progress_counters(tmp_path: Path) -> None:
+    """F7: composite output exposes candidate/intent/submit/ack/reconcile truth."""
+    sd = tmp_path / "state"
+    sd.mkdir()
+    _setup_healthy_state(sd)
+    _write(
+        sd / "status_summary.json",
+        {
+            "timestamp": _now_iso(-30),
+            "cycle": {
+                "mode": "opening_hunt",
+                "completed_at": _now_iso(-30),
+                "candidates": 4,
+                "final_intents_built": 1,
+                "entry_orders_submitted": 1,
+                "venue_acks": 1,
+                "command_recovery": {"scanned": 3, "advanced": 1},
+                "chain_sync": {"synced": 2},
+            },
+        },
+    )
+
+    result = compute_composite_live_health(state_dir=sd)
+
+    progress = result["surfaces"]["business_plane"]["progress"]
+    assert result["status"] == "HEALTHY"
+    assert progress["candidate_evaluated"] is True
+    assert progress["final_intent_built"] is True
+    assert progress["submit_attempted"] is True
+    assert progress["venue_ack_observed"] is True
+    assert progress["reconcile_progress_observed"] is True

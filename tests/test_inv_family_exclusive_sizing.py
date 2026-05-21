@@ -440,6 +440,75 @@ def test_trade_db_family_exposures_include_live_entry_commands(tmp_path) -> None
     ]
 
 
+def test_trade_db_family_exposure_blocks_command_without_position_projection(tmp_path) -> None:
+    import sqlite3
+
+    db_path = tmp_path / "family-exposure-no-projection.db"
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        """
+        CREATE TABLE venue_commands (
+            command_id TEXT PRIMARY KEY,
+            position_id TEXT,
+            envelope_id TEXT,
+            snapshot_id TEXT,
+            market_id TEXT,
+            intent_kind TEXT NOT NULL,
+            state TEXT NOT NULL
+        );
+        CREATE TABLE venue_submission_envelopes (
+            envelope_id TEXT PRIMARY KEY,
+            condition_id TEXT,
+            selected_outcome_token_id TEXT,
+            outcome_label TEXT
+        );
+        CREATE TABLE executable_market_snapshots (
+            snapshot_id TEXT PRIMARY KEY,
+            condition_id TEXT,
+            event_slug TEXT,
+            selected_outcome_token_id TEXT,
+            outcome_label TEXT
+        );
+        CREATE TABLE market_events_v2 (
+            market_slug TEXT,
+            city TEXT NOT NULL,
+            target_date TEXT NOT NULL,
+            temperature_metric TEXT NOT NULL,
+            condition_id TEXT,
+            token_id TEXT,
+            range_label TEXT
+        );
+        """
+    )
+    conn.execute(
+        "INSERT INTO venue_submission_envelopes VALUES (?, ?, ?, ?)",
+        ("env-1", "cond-1", "tok-yes-1", "YES"),
+    )
+    conn.execute(
+        "INSERT INTO executable_market_snapshots VALUES (?, ?, ?, ?, ?)",
+        ("snap-1", "cond-1", "weather-chicago-high", "tok-yes-1", "YES"),
+    )
+    conn.execute(
+        "INSERT INTO market_events_v2 VALUES (?, ?, ?, ?, ?, ?, ?)",
+        ("weather-chicago-high", CITY, TARGET_DATE, METRIC, "cond-1", "tok-yes-1", "20-21°F"),
+    )
+    conn.execute(
+        "INSERT INTO venue_commands VALUES (?, ?, ?, ?, ?, ?, ?)",
+        ("cmd-1", "", "env-1", "snap-1", "cond-1", "ENTRY", "ACKED"),
+    )
+
+    exposures = weather_family_exposures_from_trade_db(conn)
+
+    assert exposures == [
+        WeatherFamilyExposure(
+            key=WeatherFamilyKey(CITY, TARGET_DATE, METRIC),
+            bin_label="20-21°F",
+            phase="ACKED",
+            position_id="cmd-1",
+        )
+    ]
+
+
 def test_family_portfolio_intent_allows_optimizer_owned_multi_bin_execution() -> None:
     """Stage A only blocks independent bins, not an explicit family portfolio."""
     bins = {s[2]: s for s in _BIN_SPECS}

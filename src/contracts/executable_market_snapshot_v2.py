@@ -290,8 +290,6 @@ def assert_snapshot_executable(
         )
     if not snapshot.enable_orderbook:
         raise MarketNotTradableError("snapshot enable_orderbook=false blocks submit")
-    if not snapshot.active:
-        raise MarketNotTradableError("snapshot active=false blocks submit")
     if snapshot.closed:
         raise MarketNotTradableError("snapshot closed=true blocks submit")
     if snapshot.accepting_orders is False:

@@ -2261,6 +2261,36 @@ def build_market_support_topology(event: dict, *, unit: str) -> MarketSupportTop
     )
 
 
+def gamma_child_has_tradeable_orderbook(*surfaces: dict) -> bool:
+    """Return whether Gamma child facts prove a tradeable orderbook.
+
+    Polymarket negRisk child ``active=False`` is routing metadata, not an
+    execution blocker. The executable gate is the same for scanner admission
+    and post-decision snapshot capture: not closed, accepting orders, and
+    orderbook enabled. CLOB identity/orderbook checks still provide the final
+    execution authority after Gamma admission.
+    """
+
+    closed: bool | None = None
+    accepting: bool | None = None
+    orderbook: bool | None = None
+    for surface in surfaces:
+        if not isinstance(surface, dict):
+            continue
+        if closed is None:
+            closed = _boolish_market_field(surface, "closed", "isClosed")
+        if accepting is None:
+            accepting = _boolish_market_field(surface, "acceptingOrders", "accepting_orders")
+        if orderbook is None:
+            orderbook = _boolish_market_field(
+                surface,
+                "enableOrderBook",
+                "enable_orderbook",
+                "orderbookEnabled",
+            )
+    return closed is False and accepting is True and orderbook is True
+
+
 def _market_child_is_tradable(market: dict) -> bool:
     """Return whether a Gamma child market is currently tradable.
 
@@ -2276,11 +2306,7 @@ def _market_child_is_tradable(market: dict) -> bool:
     Missing closed/accepting/orderbook flags remain unknown=not-tradable.
     """
 
-    closed = _boolish_market_field(market, "closed", "isClosed")
-    accepting = _boolish_market_field(market, "acceptingOrders", "accepting_orders")
-    orderbook = _boolish_market_field(market, "enableOrderBook", "enable_orderbook", "orderbookEnabled")
-
-    return closed is False and accepting is True and orderbook is True
+    return gamma_child_has_tradeable_orderbook(market)
 
 
 def _boolish_market_field(market: dict, *names: str) -> bool | None:
@@ -2365,7 +2391,11 @@ def capture_executable_market_snapshot(
     if not isinstance(gamma_market_raw, dict):
         gamma_market_raw = _minimal_gamma_payload(market, outcome)
 
-    active = _required_bool_fact((outcome, gamma_market_raw), ("active", "isActive"))
+    active = _boolish_market_field(outcome, "active", "isActive")
+    if active is None:
+        active = _boolish_market_field(gamma_market_raw, "active", "isActive")
+    if active is None:
+        active = False
     closed = _required_bool_fact((outcome, gamma_market_raw), ("closed", "isClosed"))
     enable_orderbook = _required_bool_fact(
         (outcome, gamma_market_raw),
@@ -2374,7 +2404,7 @@ def capture_executable_market_snapshot(
     accepting_orders = _boolish_market_field(outcome, "accepting_orders", "acceptingOrders")
     if accepting_orders is None:
         accepting_orders = _boolish_market_field(gamma_market_raw, "acceptingOrders", "accepting_orders")
-    if closed or not active or not enable_orderbook or accepting_orders is not True:
+    if not gamma_child_has_tradeable_orderbook(outcome, gamma_market_raw):
         raise ExecutableSnapshotCaptureError("Gamma child market is not currently tradable")
 
     raw_clob_market = _fetch_clob_market_info(clob, condition_id)

@@ -1709,6 +1709,39 @@ class TestRecoveryResolutionTable:
         assert payload["matched_size"] == "4.99"
         assert payload["remaining_size"] == "0"
 
+    def test_partial_entry_uses_canonical_order_truth_over_later_weaker_fact(
+        self,
+        conn,
+        mock_client,
+    ):
+        """Relationship: later weak order facts cannot demote terminal truth."""
+        _insert(conn, size=5.0, price=0.34)
+        _seed_pending_entry_projection(conn)
+        _advance_to_partial(conn, venue_order_id="ord-001")
+        _append_trade_fact(
+            conn,
+            command_id="cmd-001",
+            order_id="ord-001",
+            trade_id="trade-001",
+            state="MATCHED",
+            filled_size="4.99",
+            fill_price="0.34",
+        )
+        _append_order_fact(conn, state="MATCHED", matched_size="4.99", remaining_size="0")
+        _append_order_fact(conn, state="RESTING", matched_size="4.99", remaining_size="0.01")
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["completed_partial_order_facts"]["advanced"] == 1
+        assert _get_state(conn, "cmd-001") == "FILLED"
+        events = _get_events(conn, "cmd-001")
+        assert events[-1]["event_type"] == "FILL_CONFIRMED"
+        payload = json.loads(events[-1]["payload_json"])
+        assert payload["proof_class"] == "completed_partial_order_fact"
+        assert payload["remaining_size"] == "0"
+
     def test_partial_entry_does_not_finalize_when_trade_facts_do_not_cover_order_fact(
         self,
         conn,
@@ -2557,6 +2590,12 @@ class TestRecoveryResolutionTable:
         _append_order_fact(
             conn,
             state="PARTIALLY_MATCHED",
+            matched_size="4.95",
+            remaining_size="2.26",
+        )
+        _append_order_fact(
+            conn,
+            state="RESTING",
             matched_size="4.95",
             remaining_size="2.26",
         )
