@@ -385,6 +385,16 @@ def _latest_order_fact_is_complete(conn: Any, command_id: str) -> bool:
     )
 
 
+def _row_value(row: Any, key: str, index: int = 0) -> Any:
+    try:
+        return row[key]
+    except (KeyError, TypeError, IndexError):
+        try:
+            return row[index]
+        except (KeyError, TypeError, IndexError):
+            return None
+
+
 def _command_fill_is_complete(conn, command: dict[str, Any]) -> bool:
     try:
         command_size = Decimal(str(command.get("size")))
@@ -722,7 +732,7 @@ class PolymarketUserChannelIngestor:
                 "SELECT state FROM venue_order_facts WHERE fact_id = ?",
                 (fact_id,),
             ).fetchone()
-            persisted_state = str(persisted["state"] or "") if persisted is not None else ""
+            persisted_state = str(_row_value(persisted, "state", 0) or "")
             if state in {"MATCHED", "PARTIALLY_MATCHED"} and persisted_state == state:
                 self._append_command_event_if_legal(
                     conn,

@@ -233,6 +233,75 @@ def test_append_order_fact_preserves_prior_terminal_zero_remainder(conn, termina
     ]
 
 
+def test_append_order_fact_terminal_preservation_is_command_scoped(conn):
+    from src.state.venue_command_repo import append_order_fact
+
+    _insert(conn, command_id="cmd-terminal-order", size=181.16)
+    _insert(
+        conn,
+        command_id="cmd-other-order",
+        position_id="pos-other-order",
+        decision_id="dec-other-order",
+        idempotency_key="idem-other-order",
+        token_id="tok-other-order",
+        size=181.16,
+    )
+
+    first_id = append_order_fact(
+        conn,
+        venue_order_id="ord-shared-order-id",
+        command_id="cmd-terminal-order",
+        state="EXPIRED",
+        remaining_size="0",
+        matched_size="100",
+        source="REST",
+        observed_at="2026-05-21T00:00:00Z",
+        raw_payload_hash="3" * 64,
+        raw_payload_json={"status": "EXPIRED", "remaining_size": "0", "matched_size": "100"},
+    )
+
+    second_id = append_order_fact(
+        conn,
+        venue_order_id="ord-shared-order-id",
+        command_id="cmd-other-order",
+        state="PARTIALLY_MATCHED",
+        remaining_size="81.16",
+        matched_size="100",
+        source="WS_USER",
+        observed_at="2026-05-21T00:01:00Z",
+        raw_payload_hash="4" * 64,
+        raw_payload_json={"status": "PARTIALLY_MATCHED"},
+    )
+
+    rows = conn.execute(
+        """
+        SELECT fact_id, command_id, state, remaining_size, matched_size
+          FROM venue_order_facts
+         WHERE venue_order_id = ?
+         ORDER BY local_sequence, fact_id
+        """,
+        ("ord-shared-order-id",),
+    ).fetchall()
+
+    assert second_id != first_id
+    assert [dict(row) for row in rows] == [
+        {
+            "fact_id": first_id,
+            "command_id": "cmd-terminal-order",
+            "state": "EXPIRED",
+            "remaining_size": "0",
+            "matched_size": "100",
+        },
+        {
+            "fact_id": second_id,
+            "command_id": "cmd-other-order",
+            "state": "PARTIALLY_MATCHED",
+            "remaining_size": "81.16",
+            "matched_size": "100",
+        },
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Test 1: insert_command atomicity
 # ---------------------------------------------------------------------------

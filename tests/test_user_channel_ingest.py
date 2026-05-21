@@ -584,6 +584,60 @@ def test_ws_partial_order_update_after_terminal_order_fact_does_not_regress_comm
     assert _command_state(conn) == "ACKED"
 
 
+def test_ws_partial_terminal_preservation_handles_tuple_persisted_state_row(conn):
+    class TuplePersistedStateConnection:
+        def __init__(self, inner):
+            self._inner = inner
+
+        def execute(self, sql, params=()):
+            cursor = self._inner.execute(sql, params)
+            if "SELECT state FROM venue_order_facts WHERE fact_id" not in " ".join(sql.split()):
+                return cursor
+            row = cursor.fetchone()
+
+            class TupleCursor:
+                def fetchone(self_nonlocal):
+                    return None if row is None else (row["state"],)
+
+            return TupleCursor()
+
+        def commit(self):
+            self._inner.commit()
+
+    first_id = append_order_fact(
+        conn,
+        venue_order_id="ord-ws",
+        command_id="cmd-ws",
+        state="EXPIRED",
+        remaining_size="0",
+        matched_size="5",
+        source="REST",
+        observed_at=NOW - timedelta(minutes=1),
+        raw_payload_hash=HASH_A,
+        raw_payload_json={"status": "EXPIRED", "remaining_size": "0", "matched_size": "5"},
+    )
+    ingestor = PolymarketUserChannelIngestor(
+        adapter=object(),
+        condition_ids=["condition-ws"],
+        auth=WSAuth("key", "secret", "pass"),
+        conn_factory=lambda: TuplePersistedStateConnection(conn),
+        own_connection=False,
+    )
+
+    result = ingestor.handle_message(
+        _order_message(
+            type="UPDATE",
+            size=None,
+            original_size="10",
+            size_matched="5",
+        )
+    )
+
+    assert result == {"order_fact_id": first_id}
+    assert _rows(conn, "venue_order_facts")[-1]["state"] == "EXPIRED"
+    assert _command_state(conn) == "ACKED"
+
+
 def test_ws_message_parsed_to_trade_fact(conn):
     result = _ingestor(conn).handle_message(_trade_message("MATCHED"))
 
