@@ -476,6 +476,8 @@ test_trust_policy:
     tests/test_correlation_shrinkage.py: {created: "2026-05-21", last_used: "2026-05-21"}
     tests/test_regime_correlation_store.py: {created: "2026-05-21", last_used: "2026-05-21"}
     tests/test_cluster_exposure_shrunk.py: {created: "2026-05-21", last_used: "2026-05-21"}
+    # Phase 4 T4 (2026-05-21): cross_market_correlation_hedge + neg_risk_basket shadow candidate relationship tests.
+    tests/test_phase4_t4_candidates.py: {created: "2026-05-21", last_used: "2026-05-21"}
     # Phase 6 T1+T2+T3+T4 (2026-05-21): EvidenceTier + ShadowExperimentRegistry + RegretDecomposer + LiveReadinessTribunal.
     tests/test_strategy_profile_evidence_tier.py: {created: "2026-05-21", last_used: "2026-05-21"}
 
@@ -784,6 +786,7 @@ categories:
     - tests/test_phase4_ingest.py
     - tests/test_phase4_platt_v2.py
     - tests/test_phase4_rebuild.py
+    - tests/test_phase4_t4_candidates.py
     - tests/test_phase5_fixpack.py
     - tests/test_phase5_gate_d_low_purity.py
     - tests/test_phase5b_low_historical_lane.py

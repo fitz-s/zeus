@@ -1,5 +1,5 @@
 # Created: 2026-05-19
-# Last reused or audited: 2026-05-19
+# Last reused or audited: 2026-05-21
 # Authority basis: PHASE_1_ULTRAPLAN.md §4.1–§4.2 (Path D natural-key reframe, v3)
 
 from __future__ import annotations
@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Optional
 from src.contracts.decision_natural_key import (
     DecisionNaturalKey,
     decision_event_id_v1_hash,
+    make_decision_natural_key,
 )
 
 if TYPE_CHECKING:
@@ -323,6 +324,131 @@ def write_decision_event(
     finally:
         if own_conn and conn is not None:
             conn.close()
+
+
+def _is_world_db_conn(conn: sqlite3.Connection) -> bool:
+    from pathlib import Path
+
+    from src.state.db import ZEUS_WORLD_DB_PATH
+
+    rows = conn.execute("PRAGMA database_list").fetchall()
+    for _seq, name, path in rows:
+        if name == "main" and path:
+            return Path(path).resolve() == Path(ZEUS_WORLD_DB_PATH).resolve()
+    return False
+
+
+def _shadow_anchor_source(raw: object) -> str:
+    value = str(raw or "").strip()
+    if value in {"gamma_explicit", "f1_12z_fallback"}:
+        return value
+    return "unknown_legacy"
+
+
+def write_shadow_decision_event(
+    natural_key: DecisionNaturalKey,
+    *,
+    decision_time: str,
+    side: str,
+    strategy_key: str,
+    conn: sqlite3.Connection,
+    edge: Optional[float] = None,
+    p_posterior: Optional[float] = None,
+    target_size_usd: Optional[float] = None,
+    target_price: Optional[float] = None,
+    polymarket_end_anchor_source: object = None,
+) -> DecisionNaturalKey:
+    """Write a runtime shadow candidate decision without backfill provenance.
+
+    Shadow candidates are research signals, not historical phase-0 backfills and
+    not live executable decisions. Missing anchor evidence is explicitly recorded
+    as ``unknown_legacy`` instead of fabricating ``gamma_explicit``.
+    """
+
+    from src.state.db import SCHEMA_VERSION, ZEUS_WORLD_DB_PATH
+    from src.state.db_writer_lock import WriteClass, db_writer_lock
+
+    market_slug, temperature_metric, target_date, observation_time, _ = natural_key
+
+    def _insert(seq: int) -> None:
+        deid = decision_event_id_v1_hash(
+            market_slug=market_slug,
+            temperature_metric=temperature_metric,
+            target_date=target_date,
+            observation_time=observation_time,
+            decision_seq=seq,
+        )
+        conn.execute(
+            """
+            INSERT INTO decision_events (
+                market_slug, temperature_metric, target_date,
+                observation_time, decision_seq,
+                condition_id, decision_event_id, decision_time,
+                outcome, side, strategy_key,
+                cycle_id, cycle_iteration,
+                p_posterior, edge, target_size_usd, target_price,
+                forecast_time, provider_reported_time,
+                observation_available_at, polymarket_end_anchor_source,
+                first_member_observed_time, run_complete_time,
+                zeus_submit_intent_time, venue_ack_time,
+                first_inclusion_block_time, finality_confirmed_time,
+                clock_skew_estimate_ms_at_submit,
+                raw_orderbook_hash_transition_delta_ms,
+                schema_version, source
+            ) VALUES (
+                ?,?,?,?,?,
+                NULL,?,?,
+                ?,?,?,
+                NULL,NULL,
+                ?,?,?,?,
+                NULL,NULL,
+                '',?,
+                NULL,NULL,NULL,NULL,
+                NULL,NULL,NULL,NULL,
+                ?,?
+            )
+            """,
+            (
+                market_slug,
+                temperature_metric,
+                target_date,
+                observation_time,
+                seq,
+                deid,
+                decision_time,
+                "shadow_enter",
+                side,
+                strategy_key,
+                p_posterior,
+                edge,
+                target_size_usd,
+                target_price,
+                _shadow_anchor_source(polymarket_end_anchor_source),
+                SCHEMA_VERSION,
+                "shadow_decision",
+            ),
+        )
+        conn.commit()
+
+    if _is_world_db_conn(conn):
+        with db_writer_lock(ZEUS_WORLD_DB_PATH, WriteClass.LIVE):
+            seq = allocate_decision_seq(
+                market_slug, temperature_metric, target_date, observation_time, conn=conn
+            )
+            _insert(seq)
+    else:
+        seq = allocate_decision_seq(
+            market_slug, temperature_metric, target_date, observation_time, conn=conn
+        )
+        _insert(seq)
+
+    return make_decision_natural_key(
+        market_slug=market_slug,
+        temperature_metric=temperature_metric,  # type: ignore[arg-type]
+        target_date=target_date,
+        observation_time=observation_time,
+        decision_seq=seq,
+    )
 
 
 def read_decision_event_by_natural_key(

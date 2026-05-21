@@ -95,6 +95,7 @@ from src.state.portfolio import (
     INACTIVE_RUNTIME_STATES,
     city_exposure_for_bankroll,
     cluster_exposure_for_bankroll,
+    cluster_exposure_result_for_bankroll,
     has_same_token_open,
     has_inflight_exit_for_token,
     is_reentry_blocked,
@@ -464,37 +465,15 @@ def _shoulder_cluster_cap_rejection(
     edge: BinEdge,
     proposed_notional: float,
 ) -> str | None:
-    context = _shoulder_cluster_context_for_edge(
+    from src.strategy.shoulder_cluster_cap import shoulder_cluster_cap_rejection
+
+    return shoulder_cluster_cap_rejection(
+        conn=conn,
         city_name=city_name,
         target_date=target_date,
         edge=edge,
+        proposed_notional=proposed_notional,
     )
-    if context is None:
-        return None
-    if conn is None:
-        logger.warning(
-            "shoulder_cluster_cap skipped without DB conn (paper/shadow path): "
-            "cluster=%s side=%s proposed_notional=%.4f",
-            context.cluster_id,
-            context.side,
-            proposed_notional,
-        )
-        return None
-    try:
-        from src.strategy.shoulder_cluster_cap import check_shoulder_cluster_cap
-
-        cap_ok, cap_reason = check_shoulder_cluster_cap(
-            cluster=context.cluster_id,
-            side=context.side,
-            proposed_notional=float(proposed_notional),
-            conn=conn,
-            proposing_city=city_name,
-        )
-    except (sqlite3.OperationalError, AttributeError, ImportError) as exc:
-        return f"shoulder_cluster_cap_unavailable: {exc}"
-    if not cap_ok:
-        return cap_reason
-    return None
 
 
 def _record_accepted_shoulder_exposure(
@@ -508,31 +487,18 @@ def _record_accepted_shoulder_exposure(
     observed_at: datetime,
     source: str,
 ) -> str | None:
-    context = _shoulder_cluster_context_for_edge(
+    from src.strategy.shoulder_cluster_cap import record_accepted_shoulder_exposure
+
+    return record_accepted_shoulder_exposure(
+        conn=conn,
         city_name=city_name,
         target_date=target_date,
         edge=edge,
+        notional_usd=notional_usd,
+        decision_event_id=decision_event_id,
+        observed_at=observed_at,
+        source=source,
     )
-    if context is None or conn is None:
-        return None
-    try:
-        from src.state.shoulder_exposure_ledger import write_shoulder_exposure_entry
-
-        write_shoulder_exposure_entry(
-            shoulder_side=context.side,
-            weather_system_cluster=context.cluster_id,
-            city=city_name,
-            target_date=target_date,
-            source=source or "evaluator",
-            regime=context.regime,
-            notional_usd=float(notional_usd),
-            decision_event_id=decision_event_id,
-            observed_at=observed_at.isoformat(),
-            conn=conn,
-        )
-    except (sqlite3.OperationalError, AttributeError, ImportError) as exc:
-        return f"shoulder_exposure_ledger_write_failed: {exc}"
-    return None
 
 
 def _current_cluster_exposure_for_sizing(
@@ -4733,7 +4699,7 @@ def evaluate_candidate(
             # Fail-open: if import or construction fails, store stays None
             # and the notional-sum fallback activates automatically.
             pass
-        _base_cluster_exp = cluster_exposure_for_bankroll(
+        _cluster_exposure_result = cluster_exposure_result_for_bankroll(
             portfolio,
             cluster_key,
             sizing_bankroll,
@@ -4741,12 +4707,21 @@ def evaluate_candidate(
             regime=_phase5_regime,
             cities=_phase5_cities,
         )
+        _base_cluster_exp = _cluster_exposure_result.policy_heat
         _projected_cluster_heat = (
             projected_cluster_exposure_usd[cluster_key] / sizing_bankroll
             if sizing_bankroll > 0
             else 0.0
         )
         current_cluster_exp = _base_cluster_exp + _projected_cluster_heat
+        if _cluster_exposure_result.method != "gross_notional":
+            decision_validations.append(
+                f"cluster_exposure_method:{_cluster_exposure_result.method}"
+            )
+        if _cluster_exposure_result.fallback_reason:
+            decision_validations.append(
+                f"cluster_exposure_fallback:{_cluster_exposure_result.fallback_reason}"
+            )
         risk_throttle = 1.0
         if current_cluster_exp > 0.10: # Regime saturation starts
             risk_throttle *= 0.5

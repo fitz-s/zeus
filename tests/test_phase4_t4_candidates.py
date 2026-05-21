@@ -72,7 +72,7 @@ CREATE TABLE IF NOT EXISTS decision_events (
     forecast_time              TEXT,
     provider_reported_time     TEXT,
     observation_available_at   TEXT NOT NULL DEFAULT '',
-    polymarket_end_anchor_source TEXT NOT NULL DEFAULT 'gamma_explicit',
+    polymarket_end_anchor_source TEXT NOT NULL DEFAULT 'unknown_legacy',
     first_member_observed_time TEXT,
     run_complete_time          TEXT,
     zeus_submit_intent_time    TEXT,
@@ -98,6 +98,7 @@ CREATE TABLE IF NOT EXISTS no_trade_events (
     reason_detail       TEXT,
     observed_at         TEXT NOT NULL,
     schema_version      INTEGER NOT NULL,
+    schema_compatibility TEXT NOT NULL DEFAULT 'current',
     PRIMARY KEY (market_slug, temperature_metric, target_date, observation_time, decision_seq)
 )
 """
@@ -224,13 +225,15 @@ class TestCrossMarketCorrelationHedgeRelationship:
         assert decision.outcome == "enter", f"Expected enter, got {decision.outcome}"
 
         rows = conn.execute(
-            "SELECT strategy_key FROM decision_events WHERE market_slug=?",
+            "SELECT strategy_key, source, polymarket_end_anchor_source FROM decision_events WHERE market_slug=?",
             (ctx.natural_key[0],),
         ).fetchall()
         assert len(rows) == 1, f"Expected 1 decision_events row, got {len(rows)}"
         assert rows[0]["strategy_key"] == "cross_market_correlation_hedge", (
             f"strategy_key mismatch: {rows[0]['strategy_key']!r}"
         )
+        assert rows[0]["source"] == "shadow_decision"
+        assert rows[0]["polymarket_end_anchor_source"] == "gamma_explicit"
 
     def test_no_trade_path_writes_no_trade_events_row_with_correct_reason(self):
         """No-trade path: UNKNOWN regime (in-memory conn) → CORR_HEDGE_REGIME_UNAVAILABLE."""
@@ -246,11 +249,13 @@ class TestCrossMarketCorrelationHedgeRelationship:
         assert decision.reason == NoTradeReason.CORR_HEDGE_REGIME_UNAVAILABLE
 
         rows = conn.execute(
-            "SELECT reason FROM no_trade_events WHERE market_slug=?",
+            "SELECT reason, schema_compatibility, reason_detail FROM no_trade_events WHERE market_slug=?",
             (ctx.natural_key[0],),
         ).fetchall()
         assert len(rows) == 1, f"Expected 1 no_trade_events row, got {len(rows)}"
         assert rows[0]["reason"] == NoTradeReason.CORR_HEDGE_REGIME_UNAVAILABLE.value
+        assert rows[0]["schema_compatibility"] == "current"
+        assert "candidate_strategy_key=cross_market_correlation_hedge" in rows[0]["reason_detail"]
 
     def test_unknown_regime_does_not_propagate_exception(self, monkeypatch):
         """UNKNOWN regime fallback: regime_tag_for returns UNKNOWN → no_trade, no exception raised."""
@@ -347,13 +352,15 @@ class TestNegRiskBasketRelationship:
         assert decision.outcome == "enter", f"Expected enter, got {decision.outcome}"
 
         rows = conn.execute(
-            "SELECT strategy_key FROM decision_events WHERE market_slug=?",
+            "SELECT strategy_key, source, polymarket_end_anchor_source FROM decision_events WHERE market_slug=?",
             (ctx.natural_key[0],),
         ).fetchall()
         assert len(rows) == 1, f"Expected 1 decision_events row, got {len(rows)}"
         assert rows[0]["strategy_key"] == "neg_risk_basket", (
             f"strategy_key mismatch: {rows[0]['strategy_key']!r}"
         )
+        assert rows[0]["source"] == "shadow_decision"
+        assert rows[0]["polymarket_end_anchor_source"] == "gamma_explicit"
 
     def test_no_trade_path_missing_family_complete_writes_no_trade_row(self):
         """No-trade path: neg_risk_family_complete absent → NEGRISK_FAMILY_INCOMPLETE."""
@@ -372,11 +379,13 @@ class TestNegRiskBasketRelationship:
         assert decision.reason == NoTradeReason.NEGRISK_FAMILY_INCOMPLETE
 
         rows = conn.execute(
-            "SELECT reason FROM no_trade_events WHERE market_slug=?",
+            "SELECT reason, schema_compatibility, reason_detail FROM no_trade_events WHERE market_slug=?",
             (ctx.natural_key[0],),
         ).fetchall()
         assert len(rows) == 1, f"Expected 1 no_trade_events row, got {len(rows)}"
         assert rows[0]["reason"] == NoTradeReason.NEGRISK_FAMILY_INCOMPLETE.value
+        assert rows[0]["schema_compatibility"] == "current"
+        assert "candidate_strategy_key=neg_risk_basket" in rows[0]["reason_detail"]
 
     def test_no_trade_path_neg_risk_false_writes_no_trade_row(self):
         """No-trade path: neg_risk=False → NEGRISK_FAMILY_INCOMPLETE (not a negRisk market)."""
@@ -392,9 +401,13 @@ class TestNegRiskBasketRelationship:
 
         assert decision.outcome == "no_trade"
         assert decision.reason == NoTradeReason.NEGRISK_FAMILY_INCOMPLETE
-        rows = conn.execute("SELECT reason FROM no_trade_events").fetchall()
+        rows = conn.execute(
+            "SELECT reason, schema_compatibility, reason_detail FROM no_trade_events"
+        ).fetchall()
         assert len(rows) == 1
         assert rows[0]["reason"] == NoTradeReason.NEGRISK_FAMILY_INCOMPLETE.value
+        assert rows[0]["schema_compatibility"] == "current"
+        assert "candidate_strategy_key=neg_risk_basket" in rows[0]["reason_detail"]
 
     def test_no_trade_path_missing_fields_no_exception(self):
         """Missing all completeness fields → no_trade without exception (fail-open)."""

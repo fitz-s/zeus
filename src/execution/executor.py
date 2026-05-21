@@ -1918,35 +1918,40 @@ def execute_intent(
     with a WARNING log.
     """
 
-    from src.architecture.gate_runtime import check as _gate_runtime_check
-    _gate_runtime_check("live_venue_submit")
+    from src.config import get_mode
+
+    if get_mode() == "live":
+        raise RuntimeError(
+            "LEGACY_EXECUTION_INTENT_LIVE_BLOCKED: live entry must use "
+            "FinalExecutionIntent via execute_final_intent"
+        )
     if not (
         os.environ.get("ZEUS_ALLOW_LEGACY_EXECUTION_INTENT") == "1"
         and os.environ.get("ZEUS_LEGACY_EXECUTION_INTENT_SCOPE", "").strip().lower()
         == "paper"
     ):
         raise RuntimeError(
-            "LEGACY_EXECUTION_INTENT_LIVE_BLOCKED: live entry must use "
-            "FinalExecutionIntent via execute_final_intent"
+            "LEGACY_EXECUTION_INTENT_NON_LIVE_BLOCKED: legacy ExecutionIntent "
+            "requires ZEUS_ALLOW_LEGACY_EXECUTION_INTENT=1 and "
+            "ZEUS_LEGACY_EXECUTION_INTENT_SCOPE=paper"
         )
     trade_id = str(uuid.uuid4())[:12]
-
-    limit_price = intent.limit_price
-
-    # V6: Compute shares with proper quantization
-    shares = _entry_buy_submit_shares(intent.target_size_usd, limit_price)
-
-    if not intent.token_id:
+    shadow_result = submit_order(intent, mode="paper")
+    if not isinstance(shadow_result, dict):
         return OrderResult(
-            trade_id=trade_id, status="rejected",
-            reason=f"No token_id provided for intent",
+            trade_id=trade_id,
+            status="rejected",
+            reason=f"legacy_paper_executor_result_invalid:{type(shadow_result).__name__}",
         )
-
-    from src.execution.command_bus import IntentKind
-    _assert_cutover_allows_submit(IntentKind.ENTRY)
-
-    return _live_order(
-        trade_id, intent, shares, conn=conn, decision_id=decision_id
+    return OrderResult(
+        trade_id=trade_id,
+        status=str(shadow_result.get("status") or "shadow_filled"),
+        order_id=str(shadow_result.get("order_id") or ""),
+        submitted_price=float(intent.limit_price),
+        shares=_entry_buy_submit_shares(intent.target_size_usd, intent.limit_price),
+        order_role="entry",
+        reason=None,
+        command_state=None,
     )
 
 
@@ -2741,6 +2746,29 @@ def execute_exit_order(
                     "(command_id=%s): %s",
                     command_id, inner,
                 )
+                durable_state = _mark_post_submit_persistence_failure(
+                    conn,
+                    command_id=command_id,
+                    order_id=order_id,
+                    occurred_at=ack_time,
+                    reason="terminal_rejection_persistence_failed_after_side_effect",
+                    detail=str(inner),
+                    idempotency_key=idem.value,
+                    order_role="exit",
+                )
+                return OrderResult(
+                    trade_id=intent.trade_id,
+                    status="unknown_side_effect",
+                    reason="terminal_rejection_persistence_failed_after_side_effect",
+                    submitted_price=limit_price,
+                    shares=shares,
+                    order_role="exit",
+                    intent_id=intent.intent_id,
+                    idempotency_key=idem.value,
+                    venue_status=str(result.get("status") or ""),
+                    command_id=command_id,
+                    command_state=durable_state or "REVIEW_REQUIRED",
+                )
             return OrderResult(
                 trade_id=intent.trade_id,
                 status="rejected",
@@ -2768,6 +2796,29 @@ def execute_exit_order(
                     "execute_exit_order: SUBMIT_REJECTED (missing_order_id) append_event failed "
                     "(command_id=%s): %s",
                     command_id, inner,
+                )
+                durable_state = _mark_post_submit_persistence_failure(
+                    conn,
+                    command_id=command_id,
+                    order_id=None,
+                    occurred_at=ack_time,
+                    reason="terminal_rejection_persistence_failed_after_side_effect",
+                    detail=str(inner),
+                    idempotency_key=idem.value,
+                    order_role="exit",
+                )
+                return OrderResult(
+                    trade_id=intent.trade_id,
+                    status="unknown_side_effect",
+                    reason="terminal_rejection_persistence_failed_after_side_effect",
+                    submitted_price=limit_price,
+                    shares=shares,
+                    order_role="exit",
+                    intent_id=intent.intent_id,
+                    idempotency_key=idem.value,
+                    venue_status=str(result.get("status") or ""),
+                    command_id=command_id,
+                    command_state=durable_state or "REVIEW_REQUIRED",
                 )
             return OrderResult(
                 trade_id=intent.trade_id,
@@ -3678,6 +3729,30 @@ def _live_order(
                     "(command_id=%s): %s",
                     command_id, inner,
                 )
+                durable_state = _mark_post_submit_persistence_failure(
+                    conn,
+                    command_id=command_id,
+                    order_id=order_id,
+                    occurred_at=ack_time,
+                    reason="terminal_rejection_persistence_failed_after_side_effect",
+                    detail=str(inner),
+                    idempotency_key=idem.value,
+                    order_role="entry",
+                )
+                return OrderResult(
+                    trade_id=trade_id,
+                    status="unknown_side_effect",
+                    reason="terminal_rejection_persistence_failed_after_side_effect",
+                    submitted_price=intent.limit_price,
+                    shares=shares,
+                    order_role="entry",
+                    venue_status=str(result.get("status") or ""),
+                    idempotency_key=idem.value,
+                    command_id=command_id,
+                    command_state=durable_state or "REVIEW_REQUIRED",
+                    zeus_submit_intent_time=zeus_submit_intent_time,
+                    venue_ack_time=ack_time,
+                )
             return OrderResult(
                 trade_id=trade_id,
                 status="rejected",
@@ -3707,6 +3782,30 @@ def _live_order(
                     "_live_order: SUBMIT_REJECTED (missing_order_id) append_event failed "
                     "(command_id=%s): %s",
                     command_id, inner,
+                )
+                durable_state = _mark_post_submit_persistence_failure(
+                    conn,
+                    command_id=command_id,
+                    order_id=None,
+                    occurred_at=ack_time,
+                    reason="terminal_rejection_persistence_failed_after_side_effect",
+                    detail=str(inner),
+                    idempotency_key=idem.value,
+                    order_role="entry",
+                )
+                return OrderResult(
+                    trade_id=trade_id,
+                    status="unknown_side_effect",
+                    reason="terminal_rejection_persistence_failed_after_side_effect",
+                    submitted_price=intent.limit_price,
+                    shares=shares,
+                    order_role="entry",
+                    venue_status=str(result.get("status") or ""),
+                    idempotency_key=idem.value,
+                    command_id=command_id,
+                    command_state=durable_state or "REVIEW_REQUIRED",
+                    zeus_submit_intent_time=zeus_submit_intent_time,
+                    venue_ack_time=ack_time,
                 )
             return OrderResult(
                 trade_id=trade_id,

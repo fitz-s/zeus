@@ -295,7 +295,7 @@ def test_regime_throttle_uses_reviewed_city_cluster_not_city_name() -> None:
     source = Path("src/engine/evaluator.py").read_text()
 
     assert 'cluster_key = getattr(city, "cluster", "") or city.name' in source
-    assert "cluster_exposure_for_bankroll(\n            portfolio,\n            cluster_key," in source
+    assert "cluster_exposure_result_for_bankroll(\n            portfolio,\n            cluster_key," in source
     assert "cluster_exposure_for_bankroll(portfolio, city.name" not in source
 
 

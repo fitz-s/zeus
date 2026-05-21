@@ -141,6 +141,30 @@ def _is_world_db_conn(conn: sqlite3.Connection) -> bool:
     return False
 
 
+def _candidate_strategy_key_for_reason(reason: Optional["NoTradeReason"]) -> str:
+    """Map shadow candidate no-trade reasons back to their candidate strategy.
+
+    Candidate no-trade rows are written from the shared framework, after the
+    concrete candidate has already returned a canonical reason. Preserve the
+    strategy provenance here instead of relying on ad-hoc attributes on the
+    analysis object.
+    """
+    if reason is None:
+        return "unknown_candidate"
+
+    from src.contracts.no_trade_reason import NoTradeReason
+
+    strategy_by_reason = {
+        NoTradeReason.STALE_QUOTE_FILL_INFEASIBLE: "stale_quote_detector",
+        NoTradeReason.RESOLUTION_DISPUTED: "resolution_window_maker",
+        NoTradeReason.LIQPROV_HEARTBEAT_ABSENT: "liquidity_provision_with_heartbeat",
+        NoTradeReason.WEATHER_ALERT_SOURCE_UNTRUSTED: "weather_event_arbitrage",
+        NoTradeReason.CORR_HEDGE_REGIME_UNAVAILABLE: "cross_market_correlation_hedge",
+        NoTradeReason.NEGRISK_FAMILY_INCOMPLETE: "neg_risk_basket",
+    }
+    return strategy_by_reason.get(reason, "unknown_candidate")
+
+
 def write_candidate_no_trade_row(
     conn: sqlite3.Connection,
     context: "CandidateContext",
@@ -157,41 +181,73 @@ def write_candidate_no_trade_row(
     mode. Live promotion of any candidate must route through the canonical
     write_no_trade_event writer with a real world-DB connection.
     """
-    from src.state.db import SCHEMA_VERSION, ZEUS_WORLD_DB_PATH
+    from src.state.db import SCHEMA_VERSION
     from src.state.decision_events import allocate_decision_seq
 
     market_slug, temperature_metric, target_date, observation_time, _ = context.natural_key
-
-    def _do_insert(seq: int) -> None:
-        conn.execute(
-            """
-            INSERT INTO no_trade_events (
-                market_slug, temperature_metric, target_date, observation_time, decision_seq,
-                reason, reason_detail, observed_at, schema_version
-            ) VALUES (?,?,?,?,?,?,?,?,?)
-            """,
-            (
-                market_slug, temperature_metric, target_date, observation_time, seq,
-                decision.reason.value if decision.reason is not None else "uncategorized",
-                decision.reason_detail,
-                context.observed_at,
-                SCHEMA_VERSION,
-            ),
-        )
-        conn.commit()
+    candidate_strategy_key = _candidate_strategy_key_for_reason(decision.reason)
+    reason_detail = (
+        f"shadow_runtime=true; candidate_strategy_key={candidate_strategy_key}; "
+        f"{decision.reason_detail or ''}"
+    )
 
     if _is_world_db_conn(conn):
-        from src.state.db_writer_lock import WriteClass, db_writer_lock
-        with db_writer_lock(ZEUS_WORLD_DB_PATH, WriteClass.LIVE):
-            seq = allocate_decision_seq(
-                market_slug, temperature_metric, target_date, observation_time, conn=conn
-            )
-            _do_insert(seq)
-    else:
-        seq = allocate_decision_seq(
-            market_slug, temperature_metric, target_date, observation_time, conn=conn
+        from src.state.no_trade_events import write_no_trade_event
+
+        write_no_trade_event(
+            context.natural_key,
+            decision.reason,  # type: ignore[arg-type]
+            reason_detail,
+            context.observed_at,
+            conn=conn,
+            allow_schema_compatibility_downgrade=False,
         )
-        _do_insert(seq)
+        return
+
+    def _do_insert(seq: int) -> None:
+        columns = {
+            str(row[1])
+            for row in conn.execute("PRAGMA table_info(no_trade_events)").fetchall()
+        }
+        if "schema_compatibility" in columns:
+            conn.execute(
+                """
+                INSERT INTO no_trade_events (
+                    market_slug, temperature_metric, target_date, observation_time, decision_seq,
+                    reason, reason_detail, observed_at, schema_version, schema_compatibility
+                ) VALUES (?,?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    market_slug, temperature_metric, target_date, observation_time, seq,
+                    decision.reason.value if decision.reason is not None else "uncategorized",
+                    reason_detail,
+                    context.observed_at,
+                    SCHEMA_VERSION,
+                    "current",
+                ),
+            )
+        else:
+            conn.execute(
+                """
+                INSERT INTO no_trade_events (
+                    market_slug, temperature_metric, target_date, observation_time, decision_seq,
+                    reason, reason_detail, observed_at, schema_version
+                ) VALUES (?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    market_slug, temperature_metric, target_date, observation_time, seq,
+                    decision.reason.value if decision.reason is not None else "uncategorized",
+                    reason_detail,
+                    context.observed_at,
+                    SCHEMA_VERSION,
+                ),
+            )
+        conn.commit()
+
+    seq = allocate_decision_seq(
+        market_slug, temperature_metric, target_date, observation_time, conn=conn
+    )
+    _do_insert(seq)
 
 
 @dataclass(frozen=True)

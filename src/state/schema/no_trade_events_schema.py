@@ -1,6 +1,6 @@
 # Created: 2026-05-20
 # Last reused or audited: 2026-05-21
-# Authority basis: PHASE_2_ULTRAPLAN.md v3.1 §5.2 (sha 00c2399742) + Phase 3 T2 (2026-05-21): schema_version CHECK extended to 18 + 6 SHOULDER_* NoTradeReason members + live release proof P0-3 schema compatibility marker + Phase 3 T3 (2026-05-21): CHECK extended to 23
+# Authority basis: PHASE_2_ULTRAPLAN.md v3.1 §5.2 (sha 00c2399742) + Phase 3 T2 (2026-05-21): schema_version CHECK extended to 18 + 6 SHOULDER_* NoTradeReason members + live release proof P0-3 schema compatibility marker + Phase 3 T3 (2026-05-21): CHECK extended to 23 + live authority follow-up (2026-05-21): CHECK extended to 25
 
 """T2 — CREATE TABLE DDL for no_trade_events (world DB).
 
@@ -13,7 +13,7 @@ PK: (market_slug, temperature_metric, target_date, observation_time, decision_se
   — matches decision_events natural key for FK-like joins (§5.2 "decision_natural_key
   FK-like reference"). decision_seq shared counter scope.
 
-schema_version CHECK includes 14, 15, 16, 17, 18, 19, 20, 21, 22, 23:
+schema_version CHECK includes 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25:
   - 14: original scaffold
   - 15: P2 T2 production pass
   - 16: MUTUALLY_EXCLUSIVE_FAMILY_DEDUP added (PR #249, 2026-05-21)
@@ -28,6 +28,10 @@ schema_version CHECK includes 14, 15, 16, 17, 18, 19, 20, 21, 22, 23:
         beyond the compatibility marker and expanded CHECK range.
   - 23: Phase 3 T3 (2026-05-21) — shoulder_exposure_ledger table added;
         no_trade_events CHECK extended to accept v23 rows.
+  - 24: Phase 5 T2 (2026-05-21) — regime_correlation_cache table added;
+        no_trade_events CHECK extended to accept v24 rows.
+  - 25: live authority/shadow/risk follow-up (2026-05-21) — shadow decision
+        provenance schema bump; no_trade_events CHECK extended to accept v25 rows.
 
 Note: _REASON_VALUES_SQL is enum-derived (iterates NoTradeReason) so adding
 SHOULDER_* members to the enum automatically extends the reason CHECK constraint —
@@ -41,7 +45,7 @@ import sqlite3
 from src.contracts.no_trade_reason import NoTradeReason
 
 # Schema version stamped into each row; stays in sync with db.py SCHEMA_VERSION.
-SCHEMA_VERSION = 23
+SCHEMA_VERSION = 25
 
 # Enum CHECK: every valid NoTradeReason value, joined for SQL IN clause.
 _REASON_VALUES_SQL = ", ".join(f"'{r.value}'" for r in NoTradeReason)
