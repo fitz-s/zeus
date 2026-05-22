@@ -2565,7 +2565,7 @@ def _migrate_decision_events_schema(conn: sqlite3.Connection) -> None:
     if (
         "unknown_legacy" in table_sql
         and "shadow_decision" in table_sql
-        and "12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26" in table_sql
+        and "12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27" in table_sql
     ):
         conn.execute("DROP TABLE IF EXISTS decision_events_new")
         return

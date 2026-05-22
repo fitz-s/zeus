@@ -76,6 +76,8 @@ def test_all_registered_strategies():
         # Phase 4 shadow candidates (T4) — added 2026-05-21
         "cross_market_correlation_hedge",
         "neg_risk_basket",
+        # P1 architecture review (2026-05-22) — settlement-day upside strategy
+        "day0_nowcast_entry",
     })
 
 
@@ -125,6 +127,8 @@ def test_live_safe_keys_match_pre_A4_LIVE_SAFE_STRATEGIES():
         # Phase 4 shadow candidates (T4) — added 2026-05-21
         "cross_market_correlation_hedge",
         "neg_risk_basket",
+        # P1 architecture review (2026-05-22) — settlement-day upside strategy
+        "day0_nowcast_entry",
     })
 
 
