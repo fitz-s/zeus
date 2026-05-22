@@ -36,6 +36,7 @@ def _schema(conn: sqlite3.Connection) -> None:
           decision_id TEXT,
           idempotency_key TEXT,
           snapshot_id TEXT,
+          intent_kind TEXT,
           side TEXT,
           token_id TEXT,
           limit_price TEXT,
@@ -119,17 +120,18 @@ def _insert_command(
     decision_id: str = "decision-1",
     venue_order_id: str | None = None,
     size: str = "10.00",
+    intent_kind: str = "ENTRY",
 ) -> None:
     conn.execute(
         """
         INSERT INTO venue_commands (
           command_id, state, venue_order_id, decision_id, idempotency_key,
-          snapshot_id, side, token_id, limit_price, size, created_at, updated_at
+          snapshot_id, intent_kind, side, token_id, limit_price, size, created_at, updated_at
         )
-        VALUES ('cmd-1', ?, ?, ?, 'idem-1', 'snap-1', 'BUY', 'token-1', '0.42',
+        VALUES ('cmd-1', ?, ?, ?, 'idem-1', 'snap-1', ?, 'BUY', 'token-1', '0.42',
                 ?, '2026-05-15T12:00:00Z', '2026-05-15T12:00:02Z')
         """,
-        (state, venue_order_id, decision_id, size),
+        (state, venue_order_id, decision_id, intent_kind, size),
     )
 
 
@@ -284,6 +286,42 @@ def _insert_position_fill(
         VALUES ('pos-1', 'active', ?, ?, '10.00', '4.20')
         """,
         (order_id, order_status),
+    )
+
+
+def _insert_exit_position_fill(
+    conn: sqlite3.Connection,
+    *,
+    exit_order_id: str = "exit-order-1",
+    entry_order_id: str = "entry-order-1",
+    order_status: str = "sell_filled",
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO position_events (
+          event_id, position_id, sequence_no, event_type, command_id, order_id, env
+        )
+        VALUES ('pos-1:exit_order_posted', 'pos-1', 2, 'EXIT_ORDER_POSTED',
+                'cmd-1', ?, 'live')
+        """,
+        (exit_order_id,),
+    )
+    conn.execute(
+        """
+        INSERT INTO position_events (
+          event_id, position_id, sequence_no, event_type, command_id, order_id, env
+        )
+        VALUES ('pos-1:exit_order_filled', 'pos-1', 3, 'EXIT_ORDER_FILLED',
+                'cmd-1', ?, 'live')
+        """,
+        (exit_order_id,),
+    )
+    conn.execute(
+        """
+        INSERT INTO position_current (position_id, phase, order_id, order_status, shares, cost_basis_usd)
+        VALUES ('pos-1', 'economically_closed', ?, ?, '0', '0')
+        """,
+        (entry_order_id, order_status),
     )
 
 
@@ -972,6 +1010,83 @@ def test_fill_completion_requires_trade_fact_and_position_projection(tmp_path):
 
     assert result["status"] == "PASS"
     assert result["completion_category"] == "LIVE_ORDER_FILLED"
+
+
+def test_exit_fill_completion_uses_exit_position_events(tmp_path):
+    module = _load_module()
+    db = tmp_path / "trades.db"
+    with sqlite3.connect(db) as conn:
+        conn.row_factory = sqlite3.Row
+        _schema(conn)
+        _insert_command(conn, state="FILLED", venue_order_id="exit-order-1", intent_kind="EXIT")
+        _insert_submit_requested(conn)
+        _insert_submit_acked(conn, order_id="exit-order-1")
+        _insert_pre_submit_envelope(conn)
+        _insert_order_fact(conn, order_id="exit-order-1", state="MATCHED")
+        _insert_trade_fact(conn, order_id="exit-order-1")
+        _insert_exit_position_fill(conn, exit_order_id="exit-order-1", entry_order_id="entry-order-1")
+
+    with _connect_module_readonly(module, db, tmp_path) as conn:
+        result = module.evaluate(conn, "cmd-1")
+
+    assert result["status"] == "PASS"
+    assert result["completion_category"] == "LIVE_ORDER_FILLED"
+    assert any(
+        check["name"] == "position_current_projection_present" and check["status"] == "PASS"
+        for check in result["checks"]
+    )
+    assert any(
+        check["name"] == "position_current_order_status_consistent" and check["status"] == "PASS"
+        for check in result["checks"]
+    )
+
+
+def test_exit_fill_projection_matches_position_id_not_entry_order_id(tmp_path):
+    module = _load_module()
+    db = tmp_path / "trades.db"
+    with sqlite3.connect(db) as conn:
+        conn.row_factory = sqlite3.Row
+        _schema(conn)
+        _insert_command(conn, state="FILLED", venue_order_id="exit-order-1", intent_kind="EXIT")
+        _insert_submit_requested(conn)
+        _insert_submit_acked(conn, order_id="exit-order-1")
+        _insert_pre_submit_envelope(conn)
+        _insert_order_fact(conn, order_id="exit-order-1", state="MATCHED")
+        _insert_trade_fact(conn, order_id="exit-order-1")
+        _insert_exit_position_fill(conn, exit_order_id="exit-order-1", entry_order_id="entry-order-1")
+
+    with _connect_module_readonly(module, db, tmp_path) as conn:
+        result = module.evaluate(conn, "cmd-1")
+
+    assert result["status"] == "PASS"
+    assert any(
+        check["name"] == "position_current_projection_present" and check["status"] == "PASS"
+        for check in result["checks"]
+    )
+
+
+def test_exit_fill_requires_exit_position_event(tmp_path):
+    module = _load_module()
+    db = tmp_path / "trades.db"
+    with sqlite3.connect(db) as conn:
+        conn.row_factory = sqlite3.Row
+        _schema(conn)
+        _insert_command(conn, state="FILLED", venue_order_id="exit-order-1", intent_kind="EXIT")
+        _insert_submit_requested(conn)
+        _insert_submit_acked(conn, order_id="exit-order-1")
+        _insert_pre_submit_envelope(conn)
+        _insert_order_fact(conn, order_id="exit-order-1", state="MATCHED")
+        _insert_trade_fact(conn, order_id="exit-order-1")
+
+    with _connect_module_readonly(module, db, tmp_path) as conn:
+        result = module.evaluate(conn, "cmd-1")
+
+    assert result["status"] == "FAIL"
+    assert result["completion_category"] == "LIVE_ORDER_FILL_MISSING_POSITION_PROOF"
+    assert any(
+        check["name"] == "position_fill_event_present" and check["status"] == "FAIL"
+        for check in result["checks"]
+    )
 
 
 def test_confirmed_fill_with_expired_remainder_is_live_order_filled(tmp_path):

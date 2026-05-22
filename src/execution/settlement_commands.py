@@ -1172,6 +1172,8 @@ def reconcile_pending_redeems(web3: Any, conn: sqlite3.Connection) -> list[Settl
 
     assert_settlement_schema_ready(conn)
 
+    recheckable_review_errors = frozenset({"REDEEM_NEGRISK_AMOUNT_MISMATCH"})
+
     # P1-4 (a): batch cap — avoid processing unbounded rows per tick.
     _batch_cap = int(os.environ.get("ZEUS_REDEEM_RECONCILE_BATCH_CAP", "50") or "50")
     # P1-4 (c): wall-clock budget.
@@ -1181,11 +1183,16 @@ def reconcile_pending_redeems(web3: Any, conn: sqlite3.Connection) -> list[Settl
     rows = conn.execute(
         """
         SELECT * FROM settlement_commands
-         WHERE state = ? AND tx_hash IS NOT NULL
+         WHERE tx_hash IS NOT NULL
+           AND state IN (?, ?)
          ORDER BY requested_at, command_id
          LIMIT ?
         """,
-        (SettlementState.REDEEM_TX_HASHED.value, _batch_cap),
+        (
+            SettlementState.REDEEM_TX_HASHED.value,
+            SettlementState.REDEEM_REVIEW_REQUIRED.value,
+            _batch_cap,
+        ),
     ).fetchall()
 
     # P1-4 (b): per-call CLOB result cache keyed by condition_id.
@@ -1195,6 +1202,13 @@ def reconcile_pending_redeems(web3: Any, conn: sqlite3.Connection) -> list[Settl
 
     results: list[SettlementResult] = []
     for row in rows:
+        if row["state"] == SettlementState.REDEEM_REVIEW_REQUIRED.value:
+            try:
+                review_payload = json.loads(row["error_payload"] or "{}")
+            except Exception:
+                review_payload = {}
+            if review_payload.get("errorCode") not in recheckable_review_errors:
+                continue
         # P1-4 (c): budget check — break before fetching next receipt.
         if _time.monotonic() - _t_start > _budget_s:
             logger.warning(
@@ -1426,7 +1440,9 @@ def reconcile_pending_redeems(web3: Any, conn: sqlite3.Connection) -> list[Settl
                     # Decode payout from log data (second 32-byte word).
                     _raw_data = _log.get("data") or ""
                     try:
-                        _data_hex = _to_hex_str(_raw_data).lstrip("0x") if _raw_data else ""
+                        _data_hex = _to_hex_str(_raw_data) if _raw_data else ""
+                        if _data_hex.startswith("0x"):
+                            _data_hex = _data_hex[2:]
                         if len(_data_hex) < 128:
                             # Fewer than 2 full 32-byte words — cannot decode payout.
                             _proof_error_code = "REDEEM_NEGRISK_REVIEW_REQUIRED"

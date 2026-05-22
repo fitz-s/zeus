@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-# Lifecycle: created=2026-05-11; last_reviewed=2026-05-18; last_reused=2026-05-18
+# Lifecycle: created=2026-05-11; last_reviewed=2026-05-18; last_reused=2026-05-22
 # Purpose: One-shot live health signal for daemon, forecast-live owner, riskguard, status summary, and entry capability.
 # Reuse: Run when live process ownership, forecast-live heartbeat semantics, or operator health alerts change.
 # Created: 2026-05-11
-# Last reused/audited: 2026-05-18
+# Last reused/audited: 2026-05-22
 # Authority basis: docs/operations/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md; docs/operations/task_2026-05-16_live_continuous_run_package/LIVE_CONTINUOUS_RUN_PACKAGE_PLAN.md Phase C; 2026-05-17 volatile runtime-artifact code-plane contract.
 """One-shot live health probe.
 
@@ -22,7 +22,7 @@ Reports a single JSON line per invocation summarizing:
 Designed to be called by Monitor with grep filter on "ALERT" lines.
 """
 from __future__ import annotations
-import json, os, sys, time, subprocess
+import json, os, sqlite3, sys, time, subprocess
 from datetime import datetime, timezone
 
 ROOT = "/Users/leofitz/.openclaw/workspace-venus/zeus"
@@ -209,25 +209,11 @@ def _settlement_truth_status(root=ROOT):
             "issue": "SETTLEMENT_TRUTH_DB_MISSING",
         }
     try:
-        result = subprocess.run(
-            [
-                "sqlite3",
-                "-readonly",
-                "-separator",
-                "\t",
-                path,
+        with sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=10) as conn:
+            count, max_settled_at, max_recorded_at = conn.execute(
                 "SELECT COUNT(*), COALESCE(MAX(settled_at), ''), "
-                "COALESCE(MAX(recorded_at), '') FROM settlements_v2",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        if result.returncode != 0:
-            raise RuntimeError((result.stderr or result.stdout or "sqlite3 query failed").strip())
-        parts = result.stdout.strip().split("\t")
-        if len(parts) != 3:
-            raise RuntimeError("unexpected settlement freshness query output")
+                "COALESCE(MAX(recorded_at), '') FROM settlements_v2"
+            ).fetchone()
     except Exception as exc:
         return {
             "ok": False,
@@ -235,8 +221,8 @@ def _settlement_truth_status(root=ROOT):
             "issue": "SETTLEMENT_TRUTH_UNAVAILABLE",
             "error": str(exc),
         }
-    count = int(parts[0] or 0)
-    max_settled_at = parts[1] or None
+    count = int(count or 0)
+    max_settled_at = max_settled_at or None
     settled_epoch = _parse_iso_epoch(max_settled_at)
     age = None if settled_epoch is None else max(0, int(datetime.now(timezone.utc).timestamp() - settled_epoch))
     ok = count > 0 and age is not None and age <= SETTLEMENT_TRUTH_STALE_SECONDS
@@ -252,7 +238,7 @@ def _settlement_truth_status(root=ROOT):
         "path": path,
         "count": count,
         "max_settled_at": max_settled_at,
-        "max_recorded_at": parts[2] or None,
+        "max_recorded_at": max_recorded_at or None,
         "age_s": age,
         "stale_budget_s": SETTLEMENT_TRUTH_STALE_SECONDS,
         "issue": issue,
