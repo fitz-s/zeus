@@ -59,6 +59,21 @@ def _day0_candidate_with_observed_high(observed_high: float) -> MarketCandidate:
     )
 
 
+def _imminent_candidate_with_observed_high(observed_high: float) -> MarketCandidate:
+    from src.strategy.market_phase import MarketPhase
+
+    return MarketCandidate(
+        city=_city(),
+        target_date="2026-05-03",
+        outcomes=[],
+        hours_since_open=0.5,
+        temperature_metric="high",
+        discovery_mode=DiscoveryMode.IMMINENT_OPEN_CAPTURE.value,
+        market_phase=MarketPhase.SETTLEMENT_DAY,
+        observation={"high_so_far": observed_high, "current_temp": observed_high},
+    )
+
+
 def _unclassified_edge() -> BinEdge:
     return BinEdge(
         bin=Bin(70, 71, "F", "70-71°F"),
@@ -204,6 +219,14 @@ def test_imminent_open_capture_maps_to_canonical_opening_inertia_strategy_key() 
 
 def test_day0_forecast_upside_does_not_masquerade_as_settlement_capture() -> None:
     candidate = _day0_candidate_with_observed_high(34.0)
+    edge = _finite_buy_yes_edge(36.0, 37.0)
+
+    assert _edge_source_for(candidate, edge) == "day0_nowcast_entry"
+    assert _strategy_key_for(candidate, edge) is None
+
+
+def test_imminent_forecast_upside_does_not_masquerade_as_settlement_capture() -> None:
+    candidate = _imminent_candidate_with_observed_high(34.0)
     edge = _finite_buy_yes_edge(36.0, 37.0)
 
     assert _edge_source_for(candidate, edge) == "day0_nowcast_entry"

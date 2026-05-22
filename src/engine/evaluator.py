@@ -2244,7 +2244,10 @@ def _day0_high_truth_classification_for_edge(
     nowcast/forecast-upside edge and must not inherit settlement_capture live
     policy.
     """
-    if candidate.discovery_mode != DiscoveryMode.DAY0_CAPTURE.value:
+    if candidate.discovery_mode not in {
+        DiscoveryMode.DAY0_CAPTURE.value,
+        DiscoveryMode.IMMINENT_OPEN_CAPTURE.value,
+    }:
         return None
     if str(candidate.temperature_metric).lower() != "high":
         return None
