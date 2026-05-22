@@ -470,10 +470,12 @@ def _classify_strategy(mode: DiscoveryMode, edge, edge_source: str = "") -> str:
     # 4-entry universe.
     from src.strategy.strategy_profile import live_safe_keys
     candidate = edge_source or _classify_edge_source(mode, edge)
-    # Discovery mode labels are not durable governance strategy keys. The
-    # imminent capture lane belongs to opening_inertia for DB CHECKs, risk
-    # attribution, and position projection.
-    strategy = "opening_inertia" if candidate == "imminent_open_capture" else candidate
+    # imminent_open_capture is its own registry profile (strategy_profile_registry.yaml:280,
+    # added in #205) with distinct Kelly and market-phase settings. No collapse to
+    # opening_inertia — pass through so live_safe_keys() lookup uses the correct key.
+    # (C-2 fix: pre-2026-05-22 this line collapsed to "opening_inertia", contaminating
+    # the opening_inertia promotion-evidence cohort.)
+    strategy = candidate
     if strategy in live_safe_keys():
         return strategy
     return "unclassified"
