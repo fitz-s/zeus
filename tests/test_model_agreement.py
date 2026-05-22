@@ -12,7 +12,12 @@ Covers:
 import numpy as np
 import pytest
 
-from src.signal.model_agreement import model_agreement, compute_jsd
+from src.signal.model_agreement import (
+    CrosscheckComparableContext,
+    analyze_model_agreement,
+    compute_jsd,
+    model_agreement,
+)
 
 
 def _make_peaked(n_bins: int, peak_idx: int, sharpness: float = 0.1) -> np.ndarray:
@@ -106,3 +111,74 @@ class TestComputeJSD:
     def test_invalid_vector_raises_before_scipy(self):
         with pytest.raises(ValueError, match="negative"):
             compute_jsd(np.array([1.1, -0.1]), np.array([0.5, 0.5]))
+
+
+class TestModelAgreementEvidence:
+    def test_model_conflict_evidence_persists_jsd_mode_gap_and_physical_gap(self):
+        primary = _make_peaked(7, 1, sharpness=0.01)
+        crosscheck = _make_peaked(7, 5, sharpness=0.01)
+
+        evidence = analyze_model_agreement(
+            primary,
+            crosscheck,
+            primary_model="ecmwf_ifs025",
+            crosscheck_model="gfs025",
+            bin_labels=["a", "b", "c", "d", "e", "f", "g"],
+            bin_centers=[50, 51, 52, 53, 54, 55, 56],
+            primary_source_run_id="sr-primary",
+            crosscheck_source_run_id="sr-cross",
+            issue_time_primary="2026-05-22T00:00:00+00:00",
+            issue_time_crosscheck="2026-05-22T06:00:00+00:00",
+            local_day_window_primary="2026-05-23T00:00:00+00:00|2026-05-23T23:00:00+00:00",
+            local_day_window_crosscheck="2026-05-23T00:00:00+00:00|2026-05-23T23:00:00+00:00",
+            candidate_support_index=1,
+        )
+
+        assert evidence.classification == "CONFLICT"
+        assert evidence.live_action == "reject"
+        assert evidence.jsd > 0
+        assert evidence.mode_gap == 4
+        assert evidence.primary_mode_label == "b"
+        assert evidence.crosscheck_mode_label == "f"
+        assert evidence.expected_value_gap_degf >= 2.0
+        detail = evidence.to_detail_json()
+        assert '"primary_source_run_id":"sr-primary"' in detail
+        assert '"crosscheck_source_run_id":"sr-cross"' in detail
+
+    def test_model_conflict_uses_physical_temp_gap_not_only_bin_index_gap(self):
+        primary = _make_peaked(5, 1, sharpness=0.01)
+        crosscheck = _make_peaked(5, 3, sharpness=0.01)
+
+        evidence = analyze_model_agreement(
+            primary,
+            crosscheck,
+            bin_labels=["open-low", "51F", "52F", "53F", "open-high"],
+            bin_centers=[50.0, 51.0, 51.4, 51.8, 52.0],
+            candidate_support_index=1,
+        )
+
+        assert evidence.mode_gap >= 2
+        assert evidence.jsd >= 0.08
+        assert evidence.mode_temp_gap_degf < 2.0
+        assert evidence.classification == "SOFT_DISAGREE"
+        assert evidence.live_action == "haircut"
+
+    def test_crosscheck_comparable_context_serializes_noncomparable_reason(self):
+        context = CrosscheckComparableContext(
+            primary_source_id="ecmwf",
+            primary_issue_time="2026-05-22T00:00:00+00:00",
+            primary_valid_window=("2026-05-23T00:00:00+00:00", "2026-05-23T23:00:00+00:00"),
+            primary_target_local_date="2026-05-23",
+            crosscheck_source_id="gfs",
+            crosscheck_issue_time="2026-05-20T00:00:00+00:00",
+            crosscheck_valid_window=("2026-05-23T00:00:00+00:00", "2026-05-23T23:00:00+00:00"),
+            crosscheck_target_local_date="2026-05-23",
+            local_day_mapping_equal=True,
+            horizon_delta_hours=48.0,
+            comparable=False,
+            non_comparable_reason="issue_time_delta_exceeds_tolerance",
+        )
+
+        detail = context.to_detail_json()
+        assert '"comparable":false' in detail
+        assert "issue_time_delta_exceeds_tolerance" in detail

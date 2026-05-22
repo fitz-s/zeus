@@ -4189,6 +4189,29 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                     _reason_counts[_reason] = int(_reason_counts.get(_reason, 0) or 0) + 1
                     if _reason == "model_conflict":
                         _frontier_increment("math_frontier", "model_conflict")
+                        _frontier_increment("source_math_frontier", "model_conflict")
+                    detail = str(getattr(_d, "rejection_reason_detail", "") or "")
+                    if _reason in {
+                        "ultra_low_price_not_authorized",
+                        "center_buy_ultra_low_price",
+                    } or (
+                        _reason == "strategy_economic_floor"
+                        and (
+                            detail.startswith("STRATEGY_ENTRY_PRICE_BELOW_LIVE_FLOOR")
+                            or detail.startswith("ULTRA_LOW_NON_TAIL_NOT_AUTHORIZED")
+                        )
+                    ):
+                        _frontier_increment("edge_frontier", "price_policy_rejected")
+                        if "tail_topology=true" in detail:
+                            _frontier_increment("edge_frontier", "tail_edges_blocked")
+                        else:
+                            _frontier_increment("edge_frontier", "normal_price_or_non_tail_edges_blocked")
+                    elif _reason == "strategy_economic_floor":
+                        _frontier_increment("edge_frontier", "economic_floor_rejected")
+                    if _reason in {"confidence_band_insufficient", "uncategorized"}:
+                        stage = str(getattr(_d, "rejection_stage", "") or "")
+                        if stage in {"EDGE_INSUFFICIENT", "FDR_FILTERED", "FDR_FAMILY_SCAN_UNAVAILABLE"}:
+                            _frontier_increment("edge_frontier", "edge_or_fdr_rejected")
             # P2 (PLAN_v3 §6.P2 stage 2): stamp MarketPhase axis A onto
             # every returned EdgeDecision. evaluate_candidate has 30+
             # ``return [EdgeDecision(...)]`` sites; stamping at the call
@@ -4254,12 +4277,24 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                 )
                 _frontier_increment(
                     "family_frontier",
+                    "family_selection_dedup",
+                    sum(
+                        1
+                        for _d in decisions
+                        if str(getattr(getattr(_d, "rejection_reason_enum", None), "value", ""))
+                        == "mutually_exclusive_family_dedup"
+                        and "existing family exposure" not in str(getattr(_d, "rejection_reason_detail", "") or "")
+                    ),
+                )
+                _frontier_increment(
+                    "family_frontier",
                     "blocked_existing_family_exposure",
                     sum(
                         1
                         for _d in decisions
                         if str(getattr(getattr(_d, "rejection_reason_enum", None), "value", ""))
                         == "mutually_exclusive_family_dedup"
+                        and "existing family exposure" in str(getattr(_d, "rejection_reason_detail", "") or "")
                     ),
                 )
             # Phase 2 T2: write no_trade_events rows for rejected decisions.

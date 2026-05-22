@@ -270,8 +270,10 @@ def test_center_buy_rejects_ultra_low_price_buy_yes_cohort(monkeypatch):
     assert decisions[0].strategy_key == "center_buy"
     assert decisions[0].rejection_stage == "MARKET_FILTER"
     assert decisions[0].rejection_reasons == ["center_buy_ultra_low_price"]
-    assert decisions[0].rejection_reason_detail == "CENTER_BUY_ULTRA_LOW_PRICE(0.0100<=0.02)"
-    assert "center_buy_ultra_low_price_guard" in decisions[0].applied_validations
+    assert decisions[0].rejection_reason_detail.startswith("CENTER_BUY_ULTRA_LOW_PRICE(0.0100<=0.02")
+    assert "strategy=center_buy" in decisions[0].rejection_reason_detail
+    assert "tail_topology=false" in decisions[0].rejection_reason_detail
+    assert "strategy_entry_price_floor" in decisions[0].applied_validations
 
 
 def test_opening_inertia_low_price_entry_is_not_blocked_by_center_buy_guard(monkeypatch, tmp_path):
