@@ -71,6 +71,54 @@ class TribunalVerdict:
 
 
 # ---------------------------------------------------------------------------
+# Pure promotion predicate — single source of truth for the promotion gate
+# ---------------------------------------------------------------------------
+
+def promotion_predicate(
+    tier_current: EvidenceTier,
+    tier_required_for_live: EvidenceTier,
+    ci_lower: Optional[float],
+    breakeven: float,
+    cost_of_capital: float = 0.0,
+) -> bool:
+    """Return True iff the tribunal's promotion gate would fire for this evidence state.
+
+    Pure function — no DB write, no side effects. This is the canonical promotion
+    decision rule shared by both adjudicate() and PromotionReadinessValidator so
+    the two call sites can never silently diverge (Fitz #4 / #279 finding #1).
+
+    Promotion rule (mirrors adjudicate lines 166-170):
+        tier_current < tier_required_for_live
+        AND ci_lower is not None
+        AND ci_lower > breakeven + cost_of_capital
+
+    Parameters
+    ----------
+    tier_current:
+        Observed tier at time of assessment.
+    tier_required_for_live:
+        Minimum tier the strategy must reach for live eligibility.
+    ci_lower:
+        Lower bound of 95% Beta(2,2) credible interval on win-rate.
+        None when n_settled == 0 (no evidence).
+    breakeven:
+        Strategy-specific breakeven win-rate.
+    cost_of_capital:
+        Additional margin above breakeven required to promote.
+
+    Returns
+    -------
+    bool
+        True → tribunal would emit PROMOTE; False → HOLD or DEMOTE.
+    """
+    return (
+        tier_current < tier_required_for_live
+        and ci_lower is not None
+        and ci_lower > breakeven + cost_of_capital
+    )
+
+
+# ---------------------------------------------------------------------------
 # Adjudication logic
 # ---------------------------------------------------------------------------
 
@@ -163,10 +211,8 @@ def adjudicate(
         )
 
     # --- Check promotion: tier below required AND CI clears threshold ---
-    if (
-        tier_current < tier_required_for_live
-        and ci_lower is not None
-        and ci_lower > breakeven + cost_of_capital
+    if promotion_predicate(
+        tier_current, tier_required_for_live, ci_lower, breakeven, cost_of_capital
     ):
         tier_target = EvidenceTier(min(7, tier_current.value + 1))
         verdict_reason = (

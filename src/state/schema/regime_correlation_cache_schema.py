@@ -35,7 +35,7 @@ CREATE TABLE IF NOT EXISTS regime_correlation_cache (
     fitted_at           TEXT NOT NULL,
     n_observations      INTEGER NOT NULL,
     intensity           REAL NOT NULL,
-    schema_version      INTEGER NOT NULL CHECK (schema_version IN (24))
+    schema_version      INTEGER NOT NULL CHECK (schema_version IN (24, 25, 26))
 )
 """
 

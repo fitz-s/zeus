@@ -31,7 +31,7 @@ CREATE TABLE IF NOT EXISTS tail_stress_scenarios (
     scenarios               TEXT NOT NULL,
     max_loss_pct            REAL NOT NULL,
     tail_probability_stressed REAL NOT NULL,
-    schema_version          INTEGER NOT NULL CHECK (schema_version IN (17, 18, 19, 20, 21, 22, 23)),
+    schema_version          INTEGER NOT NULL CHECK (schema_version IN (17, 18, 19, 20, 21, 22, 23, 24, 25, 26)),
     PRIMARY KEY (market_slug, temperature_metric, target_date, observation_time, decision_seq)
 )
 """

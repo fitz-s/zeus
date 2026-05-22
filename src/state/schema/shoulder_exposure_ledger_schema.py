@@ -34,7 +34,7 @@ CREATE TABLE IF NOT EXISTS shoulder_exposure_ledger (
     notional_usd            REAL NOT NULL,
     decision_event_id       TEXT NOT NULL,
     observed_at             TEXT NOT NULL,
-    schema_version          INTEGER NOT NULL CHECK (schema_version IN (22, 23))
+    schema_version          INTEGER NOT NULL CHECK (schema_version IN (22, 23, 24, 25, 26))
 )
 """
 

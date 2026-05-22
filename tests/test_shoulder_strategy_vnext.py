@@ -146,17 +146,10 @@ def test_p_3_4_stress_scenarios_are_frozen_dataclasses():
 
 
 # ---------------------------------------------------------------------------
-# P-3-5: SCHEMA_VERSION bumped past Phase 3; live release proof added v22 settlement autoretry markers.
+# P-3-5: tail_stress_scenarios table + schema coherence
+# (absolute SCHEMA_VERSION assertion deleted — coherence covered by
+#  tests/state/test_schema_current_invariant.py; brittle constants break every bump)
 # ---------------------------------------------------------------------------
-
-def test_p_3_5_schema_version_is_22():
-    """P-3-5: db.py SCHEMA_VERSION == 22 after settlement autoretry markers."""
-    from src.state.db import SCHEMA_VERSION
-
-    assert SCHEMA_VERSION == 22, (
-        f"Expected SCHEMA_VERSION=22, got {SCHEMA_VERSION}"
-    )
-
 
 def test_p_3_5_tail_stress_scenarios_table_in_fresh_db():
     """P-3-5: tail_stress_scenarios table exists in a fresh init_schema DB."""
