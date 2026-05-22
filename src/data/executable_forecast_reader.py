@@ -1,5 +1,5 @@
 # Created: 2026-05-03
-# Last reused/audited: 2026-05-20
+# Last reused/audited: 2026-05-22
 # Authority basis: docs/operations/task_2026-05-14_data_daemon_live_efficiency/DATA_DAEMON_LIVE_EFFICIENCY_REFACTOR_PLAN.md
 #   Phase 3 evaluator consumes producer readiness without hot-path entry-readiness writes.
 """Executable forecast reader for V4 source-linked ensemble snapshots."""
@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 from src.config import settings
@@ -84,6 +84,8 @@ class ExecutableForecastEvidence:
     raw_payload_hash: str | None
     manifest_hash: str | None
     target_local_date: str
+    target_window_start_utc: str
+    target_window_end_utc: str
     city_timezone: str
     required_steps: tuple[int, ...]
     observed_steps: tuple[int, ...]
@@ -102,6 +104,10 @@ class ExecutableForecastBundle:
 
     def to_ens_result(self) -> dict[str, Any]:
         evidence_hash = self.evidence.raw_payload_hash or self.evidence.manifest_hash
+        target_day_valid_window = _target_day_valid_window_from_coverage(
+            self.evidence.target_window_start_utc,
+            self.evidence.target_window_end_utc,
+        )
         return {
             "period_extrema_members": list(self.snapshot.members),
             "period_extrema_source": "local_calendar_day_member_extrema",
@@ -125,6 +131,9 @@ class ExecutableForecastBundle:
             "manifest_hash": self.evidence.manifest_hash,
             "issue_time": self.evidence.source_issue_time or self.evidence.source_cycle_time,
             "valid_time": self.evidence.target_local_date,
+            "target_day_valid_window": target_day_valid_window,
+            "target_window_start_utc": target_day_valid_window[0],
+            "target_window_end_utc": target_day_valid_window[1],
             "fetch_time": self.evidence.captured_at,
             "available_at": self.evidence.source_available_at,
             "first_member_observed_time": (
@@ -168,6 +177,18 @@ class ExecutableForecastBundleResult:
     @property
     def ok(self) -> bool:
         return self.status == "LIVE_ELIGIBLE"
+
+
+def _target_day_valid_window_from_coverage(
+    target_window_start_utc: str,
+    target_window_end_utc: str,
+) -> tuple[str, str]:
+    start = _parse_utc(target_window_start_utc)
+    end = _parse_utc(target_window_end_utc)
+    if start is None or end is None:
+        return ("", "")
+    last_observed_hour = end - timedelta(hours=1) if end > start else end
+    return (start.isoformat(), last_observed_hour.isoformat())
 
 
 def _parse_date(value: date | str) -> date:
@@ -853,6 +874,8 @@ def read_executable_forecast(
         raw_payload_hash=source_run.get("raw_payload_hash"),
         manifest_hash=snapshot.manifest_hash or source_run.get("manifest_hash"),
         target_local_date=target_local_date.isoformat(),
+        target_window_start_utc=str(coverage["target_window_start_utc"]),
+        target_window_end_utc=str(coverage["target_window_end_utc"]),
         city_timezone=city_timezone,
         required_steps=expected_steps,
         observed_steps=observed_steps,

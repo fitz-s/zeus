@@ -113,6 +113,7 @@ make a surface default-read unless `current_state.md` routes it.
 | `task_2026-05-21_money_path_semantic_ci/` | planning-lock evidence | Plan evidence for money-path semantic CI object registry, classifier, invariant coverage, test-quality gate, and required workflow |
 | `task_2026-05-21_evidence_tier_tribunal_authority/` | packet evidence | EvidenceTier, Tribunal, no-trade provenance, and runtime strategy authority repair packet from 2026-05-21 audit |
 | `task_2026-05-22_live_math_frontier/` | planning-lock evidence | Plan evidence for live math-frontier edge trace, Day0 observation-fused bootstrap, source writer observability, and no-trade attribution repair |
+| `task_2026-05-22_crosscheck_valid_window/` | planning-lock evidence | Plan evidence for preserving executable forecast local-day valid-window provenance through evaluator crosscheck comparability |
 | `tigge_daemon_integration.md` | packet evidence | Design doc for TIGGE retrieval inside the data-ingest daemon — operator directive 2026-05-01 |
 | `live_egress/` | active runtime-gating evidence | Current Q1 Zeus daemon egress evidence for Polymarket CLOB V2 preflight; public probe results only, no secrets or signed payloads |
 | `edge_observation/` | active monitoring | Operator-managed edge trajectory observation surface |

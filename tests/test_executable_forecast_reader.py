@@ -1,5 +1,5 @@
 # Created: 2026-05-03
-# Last reused/audited: 2026-05-20
+# Last reused/audited: 2026-05-22
 # Authority basis: docs/operations/task_2026-05-14_data_daemon_live_efficiency/DATA_DAEMON_LIVE_EFFICIENCY_REFACTOR_PLAN.md
 #   Phase 3 producer-readiness-only data daemon cutover path.
 """Executable forecast reader relationship tests."""
@@ -429,6 +429,35 @@ def test_full_reader_returns_evidence_bundle_with_separate_readiness_ids() -> No
     assert ens_result["raw_payload_hash"] == "a" * 64
     assert ens_result["first_member_observed_time"] == "2026-05-03T08:10:00+00:00"
     assert ens_result["run_complete_time"] == "2026-05-03T08:15:00+00:00"
+    assert ens_result["target_day_valid_window"] == (
+        "2026-05-07T23:00:00+00:00",
+        "2026-05-08T22:00:00+00:00",
+    )
+    assert ens_result["target_window_start_utc"] == "2026-05-07T23:00:00+00:00"
+    assert ens_result["target_window_end_utc"] == "2026-05-08T22:00:00+00:00"
+
+
+def test_bundle_valid_window_uses_coverage_end_not_fixed_24h_day() -> None:
+    conn = _conn()
+    _insert_full_reader_fixture(conn)
+    conn.execute(
+        """
+        UPDATE source_run_coverage
+        SET target_window_end_utc = ?
+        WHERE coverage_id = ?
+        """,
+        ("2026-05-08T22:00:00+00:00", "coverage-1"),
+    )
+
+    result = _read_full(conn)
+
+    assert result.ok
+    assert result.bundle is not None
+    ens_result = result.bundle.to_ens_result()
+    assert ens_result["target_day_valid_window"] == (
+        "2026-05-07T23:00:00+00:00",
+        "2026-05-08T21:00:00+00:00",
+    )
 
 
 def test_full_reader_prefers_attached_forecasts_authority_and_keeps_entry_local(tmp_path) -> None:

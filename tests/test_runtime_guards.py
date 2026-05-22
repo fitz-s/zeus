@@ -1,8 +1,8 @@
 """Runtime guard and live-cycle wiring tests."""
 # Lifecycle: created=2026-04-28; last_reviewed=2026-05-18; last_reused=2026-05-18
 # Created: 2026-04-28
-# Last reused/audited: 2026-05-21
-# Authority basis: docs/operations/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md; task_2026-04-28_contamination_remediation Batch G; Phase 1B ENS snapshot persistence; Phase 1D forecast source policy; PR #56 MarketPhaseEvidence sidecar propagation; Wave26 explicit position env authority; task.md B3 exit executable snapshot identity; docs/operations/task_2026-05-21_live_side_effect_risk_boundaries/task.md P1-2 cluster projection.
+# Last reused/audited: 2026-05-22
+# Authority basis: docs/operations/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md; task_2026-04-28_contamination_remediation Batch G; Phase 1B ENS snapshot persistence; Phase 1D forecast source policy; PR #56 MarketPhaseEvidence sidecar propagation; Wave26 explicit position env authority; task.md B3 exit executable snapshot identity; docs/operations/task_2026-05-21_live_side_effect_risk_boundaries/task.md P1-2 cluster projection; docs/operations/task_2026-05-22_crosscheck_valid_window/CROSSCHECK_VALID_WINDOW_PLAN.md.
 # Purpose: Lock runtime guard and live-cycle wiring contracts.
 # Reuse: Run for runtime guard, live-only cleanup, and cycle wiring changes.
 
@@ -11878,14 +11878,14 @@ def test_gfs_crosscheck_uses_local_target_day_hours_instead_of_first_24h(monkeyp
             ),
         }
 
-    def _model_agreement(p_raw, gfs_p):
+    def _model_agreement(p_raw, gfs_p, *args, **kwargs):
         calls["gfs_p"] = gfs_p
-        return "AGREE"
+        return types.SimpleNamespace(classification="AGREE", live_action="allow")
 
     monkeypatch.setattr(evaluator_module, "fetch_ensemble", _fetch_ensemble)
     monkeypatch.setattr(evaluator_module, "validate_ensemble", lambda result, expected_members=51: result is not None)
     monkeypatch.setattr(evaluator_module, "EnsembleSignal", DummyEnsembleSignal)
-    monkeypatch.setattr(evaluator_module, "model_agreement", _model_agreement)
+    monkeypatch.setattr(evaluator_module, "analyze_model_agreement", _model_agreement)
     monkeypatch.setattr(evaluator_module, "_store_ens_snapshot", lambda *args, **kwargs: "snap-gfs")
     monkeypatch.setattr(evaluator_module, "_store_snapshot_p_raw", lambda *args, **kwargs: None)
     _patch_mature_calibration(monkeypatch)
@@ -11991,7 +11991,11 @@ def test_gfs_crosscheck_forecast_days_cover_fractional_local_target_lead(monkeyp
     monkeypatch.setattr(evaluator_module, "fetch_ensemble", _fetch_ensemble)
     monkeypatch.setattr(evaluator_module, "validate_ensemble", lambda result, expected_members=51: result is not None)
     monkeypatch.setattr(evaluator_module, "EnsembleSignal", DummyEnsembleSignal)
-    monkeypatch.setattr(evaluator_module, "model_agreement", lambda p_raw, gfs_p: "AGREE")
+    monkeypatch.setattr(
+        evaluator_module,
+        "analyze_model_agreement",
+        lambda *args, **kwargs: types.SimpleNamespace(classification="AGREE", live_action="allow"),
+    )
     monkeypatch.setattr(evaluator_module, "_store_ens_snapshot", lambda *args, **kwargs: "snap-gfs")
     monkeypatch.setattr(evaluator_module, "_store_snapshot_p_raw", lambda *args, **kwargs: None)
     _patch_mature_calibration(monkeypatch)
@@ -12011,6 +12015,41 @@ def test_gfs_crosscheck_forecast_days_cover_fractional_local_target_lead(monkeyp
     assert calls["gfs025"] == 4
     assert len(decisions) == 1
     assert decisions[0].agreement == "AGREE"
+
+
+def test_executable_primary_valid_window_satisfies_crosscheck_comparability():
+    target_date = "2026-01-15"
+    target_window = (
+        "2026-01-15T05:00:00+00:00",
+        "2026-01-16T04:00:00+00:00",
+    )
+    crosscheck_times = [
+        (datetime(2026, 1, 15, 5, tzinfo=timezone.utc) + timedelta(hours=i)).isoformat()
+        for i in range(24)
+    ]
+
+    context = evaluator_module._crosscheck_comparable_context(
+        primary_result={
+            "issue_time": "2026-01-14T00:00:00+00:00",
+            "source_id": "ecmwf_open_data",
+            "target_day_valid_window": target_window,
+        },
+        crosscheck_result={
+            "issue_time": "2026-01-14T00:00:00+00:00",
+            "source_id": "openmeteo_ensemble_gfs025",
+            "times": crosscheck_times,
+        },
+        primary_source_id="ecmwf_open_data",
+        crosscheck_source_id="openmeteo_ensemble_gfs025",
+        target_date=target_date,
+        timezone_name=NYC.timezone,
+    )
+
+    assert context.comparable is True
+    assert context.local_day_mapping_equal is True
+    assert context.non_comparable_reason == ""
+    assert context.primary_valid_window == ("2026-01-15T05:00", "2026-01-16T04:00")
+    assert context.crosscheck_valid_window == ("2026-01-15T05:00", "2026-01-16T04:00")
 
 
 def test_gfs_crosscheck_failure_rejects_instead_of_defaulting_to_agree(monkeypatch):

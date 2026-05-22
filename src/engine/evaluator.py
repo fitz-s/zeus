@@ -1758,6 +1758,9 @@ def _forecast_valid_window_for_target_day(
     target_date: str,
     timezone_name: str,
 ) -> tuple[str, str]:
+    explicit_window = _explicit_target_day_valid_window(ens_result)
+    if explicit_window != ("", ""):
+        return explicit_window
     try:
         target = date.fromisoformat(str(target_date)) if isinstance(target_date, str) else target_date
         indices = select_hours_for_target_date(
@@ -1777,7 +1780,32 @@ def _forecast_valid_window_for_target_day(
     selected = [s for s in selected if s]
     if not selected:
         return ("", "")
-    return (selected[0], selected[-1])
+    return (_forecast_window_label(selected[0]), _forecast_window_label(selected[-1]))
+
+
+def _forecast_window_label(value: object) -> str:
+    text = _snapshot_time_value(value)
+    dt = _forecast_evidence_datetime(text)
+    if dt is None:
+        return text or ""
+    return dt.strftime("%Y-%m-%dT%H:%M")
+
+
+def _explicit_target_day_valid_window(ens_result: dict) -> tuple[str, str]:
+    window = ens_result.get("target_day_valid_window")
+    if isinstance(window, (list, tuple)) and len(window) >= 2:
+        start = _forecast_window_label(window[0])
+        end = _forecast_window_label(window[1])
+        if start and end:
+            return (start, end)
+
+    start = ens_result.get("target_window_start_utc")
+    end = ens_result.get("target_window_end_utc")
+    start_label = _forecast_window_label(start)
+    end_label = _forecast_window_label(end)
+    if start_label and end_label:
+        return (start_label, end_label)
+    return ("", "")
 
 
 def _issue_time_delta_hours(primary_issue: str | None, crosscheck_issue: str | None) -> float | None:
