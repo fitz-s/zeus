@@ -1,91 +1,76 @@
-# Copilot review — Zeus
+# Copilot review — Zeus money-path
 
-Live quant trading on Polymarket weather derivatives. Real money flows.
-Review by runtime risk, not file order.
+Zeus: live Polymarket weather derivatives. Real capital. Review from the
+money-path inward — find the economic object the diff touches, then ask
+the domain-specific question for that object.
 
-## Order
+## Step 1 — Identify the economic object
 
-Read PR body's "AI Review Scope" first. Group changed paths into Tiers.
-Exhaust Tier 0 before Tier 1. Tier 2 verifies 0/1. Tier 3 only if budget
-remains. Skip-list only if change demonstrably alters runtime.
+| Object | Canonical fields | Owner |
+|--------|-----------------|-------|
+| Probability | p_raw, p_cal, p_market, p_posterior, edge | src/calibration/**, src/engine/evaluator.py |
+| Executable price | final_limit_price, orderbook_top_bid/ask, fill_price | src/contracts/execution_price.py |
+| Identity | condition_id, token_id, strategy_key, outcome_label | src/contracts/**, src/state/** |
+| Side effect | place_limit_order, redeem, cancel | src/venue/**, src/execution/** |
+| Settlement | settlement_value, physical_quantity | src/contracts/settlement_semantics.py |
+| Evidence | n_wins, n_settled, ci_lower, breakeven_win_rate | src/analysis/evidence_report.py |
+| State machine | lifecycle_phase, venue_command, settlement_outcome | src/state/**, src/contracts/** |
 
-## Tier 0 — live money / runtime safety
+## Step 2 — Domain question per object
 
-`src/execution/**`, `src/venue/**`, `src/main.py`,
-`src/engine/{cycle_runner,evaluator,monitor_refresh}.py`,
-`src/contracts/{settlement_semantics,execution_price,venue_submission_envelope,fx_classification}.py`,
-`src/state/{lifecycle_manager,chain_reconciliation,db,ledger,projection,collateral_ledger,venue_command_repo,readiness_repo}.py`,
-`src/riskguard/**`, `src/control/**`, `src/supervisor_api/**`,
-`migrations/**`, `architecture/2026_04_02_architecture_kernel.sql`.
+**Probability.** Is p_raw used where p_cal is required? Does edge include
+fees + spread + depth? Is display_price or market_price flowing into a
+limit price? (Forbidden.) Is orderbook_top_ask the BUY cost, top_bid
+the SELL cost?
 
-## Tier 1 — data / probability / persistence
+**Executable price.** Does final_limit_price round BUY up, SELL down?
+Is limit_price promoted to final_limit_price before submission?
+Is market_order used? (Forbidden in execution.)
 
-`src/calibration/**`, `src/signal/**`, `src/strategy/**`, `src/data/**`,
-`src/ingest/**`, `src/oracle/**`, `src/observability/**`,
-`src/risk_allocator/**`, `src/types/**`, `src/runtime/**`, rest of
-`src/contracts/**` and `src/state/**`.
+**Identity.** Does strategy_key flow unmodified from decision_event to
+regret_decompositions? Are condition_id and token_id distinct? Is
+outcome_label always YES or NO, never a raw string?
 
-## Tier 2 — tests
+**Side effects.** place_limit_order outside gateway? (INV-24.) Every
+venue side effect needs a venue_commands row first (INV-28, INV-30).
+Redeem gated on CHAIN_EMPTY not CHAIN_UNKNOWN (INV-18). RED cancels
+pending and sweeps active (INV-19).
 
-`tests/contracts/**`, `tests/test_*invariant*.py`,
-`tests/test_architecture_contracts.py`, paired tests for Tier 0/1.
+**Settlement.** Every DB settlement write passes through
+SettlementSemantics.assert_settlement_value()? wmo_half_up for
+WU/NOAA/CWA; oracle_truncate only for HKO. Swapping silently
+mismatches the oracle.
 
-## Tier 3 — docs / agent surfaces
+**Evidence / promotion.** Cohort scope consistent across n_decisions,
+n_settled, n_wins queries? Cross-strategy contamination enters through
+shared experiment_id unless joined through decision_events.
+ci_lower compared against breakeven_win_rate — never hardcoded 0.5?
+Bayesian prior stays at Beta(2,2)?
 
-`AGENTS.md` (root + scoped), `.agents/**`, `.claude/**`, `.github/**`,
-`architecture/**`, `docs/authority/**`, `docs/operations/current_*.md`,
-`docs/reference/**`, `docs/review/**`.
-
-## Skip — only if change demonstrably alters runtime
-
-`.claude/orchestrator/**`, `.claude/worktrees/**`, `.code-review-graph/**`,
-`.omc/**`, `.omx/**`, `.zeus/**`, `.zeus-githooks/**`, `.zpkt-cache/**`,
-`docs/archives/**`, `docs/artifacts/**`, `docs/reports/**`,
-`docs/operations/archive/**`, closed `docs/operations/task_*/**`,
-`logs/**`, `raw/**`, `state/**`, `evidence/**`, generated/cache files.
-Canonical list: `docs/review/review_scope_map.md`.
+**State machines.** Lifecycle phases from LifecyclePhase enum only
+(INV-07). venue_command transitions journaled before side effects.
+settlement_outcome monotonic-forward.
 
 ## Severity
 
-**Critical** (block): live-money loss; venue identity error (market_id,
-condition_id, token_id, YES/NO); SettlementSemantics bypass
-(`wmo_half_up` vs `oracle_truncate`-HKO-only); transaction split (INV-08);
-RED not cancel+sweep (INV-19); advisory risk (INV-05); authority-loss
-raising RuntimeError instead of read-only (INV-20); void on CHAIN_UNKNOWN
-(INV-18); secret exposure;
-market-order where limit-order is law; LLM as authority (INV-10);
-`place_limit_order` outside gateway (INV-24); V2 preflight bypass
-(INV-25); venue side effect missing `venue_commands` (INV-28, 30);
-schema data loss.
+**Critical** (block): live-money loss; identity error (condition_id,
+token_id, YES/NO); SettlementSemantics bypass; market order;
+place_limit_order outside gateway (INV-24); side effect without
+venue_commands (INV-28, 30); void on CHAIN_UNKNOWN (INV-18);
+schema data loss; secret exposure.
 
-**Important**: probability/economics crossing without provenance
-(INV-21, 33, 34, 35); held-token quote into posterior (INV-36);
-DB-before-JSON inversion (INV-17); exit-as-close (INV-01);
-settlement-as-exit (INV-02); non-canonical phase string (INV-07);
-`strategy_key` drift (INV-04, 22); high/low dual-track contamination;
-missing relationship test; planning-lock bypass on `architecture/**`,
-authority/workflow/control/supervisor surfaces, truth-owning
-`src/state/**`; `authority="VERIFIED"` on degraded projection (INV-23);
-Day0 low via historical Platt (INV-16); `runtime_posture` not blocking
-entry (INV-26).
+**Important**: probability crossing without provenance (INV-21, 33–35);
+held-token quote into posterior (INV-36); strategy_key drift (INV-04, 22);
+DB-before-JSON inversion (INV-17); evidence cohort scope gap;
+ci_lower vs hardcoded threshold; missing relationship test.
 
-**Nit**: style / formatting / typos. **Suppress when
-Critical/Important exist.**
+**Nit**: style / naming. Suppress when Critical/Important exist.
 
-## Evidence + coverage
+## Report format
 
-Every finding cites `path:line` and invariant ID. No speculative
-warnings. Mark **Uncertain** if unresolvable from the diff and state
-what would resolve it.
+Header: `Reviewed: <objects>; Coverage: full|partial; Findings: N C, N I, N N`.
+Per finding: `Severity | Path:line | What | Why | Fix`.
+No speculation. Mark **Uncertain** if unresolvable from diff.
 
-Full coverage impossible: state Tier 0/1 paths reviewed vs not.
-**Empty findings + partial coverage ≠ clean pass** — report as partial,
-list reviewed slice + unreviewed paths, recommend slice review or split PR.
-
-## Reporting
-
-Per finding: `Severity | Path:line | What | Why | Fix | Evidence (INV-NN)`.
-Top: `Reviewed: <by tier>; Skipped: <paths>; Coverage: full|partial; Findings: N C, N I, N N, N U`.
-
-Deeper: `REVIEW.md`, `docs/review/code_review.md`,
-`docs/review/review_scope_map.md`, `architecture/invariants.yaml`.
+Full tier-scope: `.github/instructions/tier-scope.instructions.md`.
+Invariants: `architecture/invariants.yaml`.
