@@ -321,12 +321,7 @@ CREATE TABLE IF NOT EXISTS opportunity_fact (
     target_date TEXT,
     range_label TEXT,
     direction TEXT CHECK (direction IN ('buy_yes', 'buy_no', 'unknown')),
-    strategy_key TEXT CHECK (strategy_key IN (
-        'settlement_capture',
-        'shoulder_sell',
-        'center_buy',
-        'opening_inertia'
-    )),
+    strategy_key TEXT,
     discovery_mode TEXT,
     entry_method TEXT,
     snapshot_id TEXT,

@@ -1,6 +1,6 @@
 # Created: 2026-04-02
-# Last reused/audited: 2026-05-18
-# Lifecycle: created=2026-04-02; last_reviewed=2026-05-18; last_reused=2026-05-18
+# Last reused/audited: 2026-05-22
+# Lifecycle: created=2026-04-02; last_reviewed=2026-05-22; last_reused=2026-05-22
 # Purpose: Protect architecture/schema contracts and high-sensitivity DB bootstrap invariants.
 # Reuse: Audit touched assertions against architecture manifests and scoped AGENTS before extending.
 # Authority basis: midstream verdict v2 2026-04-23 (docs/to-do-list/zeus_midstream_fix_plan_2026-04-23.md T1.a midstream guardian panel); Wave26 canonical position event env authority
@@ -3715,6 +3715,28 @@ def test_harvester_snapshot_source_logging_degrades_cleanly_on_canonical_bootstr
     conn.close()
 
 
+def test_architecture_kernel_bootstrap_installs_settlement_command_readiness():
+    from src.state.db import apply_architecture_kernel_schema
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+
+    apply_architecture_kernel_schema(conn)
+
+    tables = {
+        row["name"]
+        for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
+        ).fetchall()
+    }
+    assert {
+        "settlement_commands",
+        "settlement_command_events",
+        "settlement_schema_migrations",
+    }.issubset(tables)
+    conn.close()
+
+
 def test_harvester_settlement_path_settles_pending_exit_residual_exposure():
     from src.execution.harvester import _settle_positions
     from src.engine.lifecycle_events import build_entry_canonical_write
@@ -4220,6 +4242,13 @@ def _discovery_phase_harness(*, conn: sqlite3.Connection):
         # Stub for _select_final_submit_order_type: avoids _select_risk_allocator_order_type
         # which requires a configured allocator (not available in unit-test harness).
         select_final_order_type=lambda conn, snapshot_id: "GTC",
+        capture_executable_market_snapshot=lambda conn, **kwargs: {
+            "executable_snapshot_id": "snap-1",
+            "condition_id": "0xdeadbeef00000000000000000000000000000000000000000000000000000001",
+            "executable_snapshot_min_tick_size": 0.01,
+            "executable_snapshot_min_order_size": 1.0,
+            "executable_snapshot_neg_risk": False,
+        },
         # Stub for reprice_from_snapshot: bypasses _reprice_decision_from_executable_snapshot
         # which requires a live executable_market_snapshots row with MAX_SNAPSHOT_AGE_SECONDS=5.
         # Populates d.tokens["executable_snapshot_reprice"] and d.final_execution_intent
@@ -4240,20 +4269,28 @@ def _discovery_phase_harness(*, conn: sqlite3.Connection):
         ),
     )
 
-    execute_discovery_phase(
-        conn,
-        SimpleNamespace(),
-        portfolio,
-        artifact,
-        tracker,
-        SimpleNamespace(),
-        DiscoveryMode.UPDATE_REACTION,
-        summary,
-        211.37,
-        datetime(2026, 4, 3, 0, 0, tzinfo=timezone.utc),
-        env="live",
-        deps=deps,
-    )
+    old_reader = os.environ.get("ZEUS_LIVE_MARKET_SUBSTRATE_READER")
+    os.environ["ZEUS_LIVE_MARKET_SUBSTRATE_READER"] = "0"
+    try:
+        execute_discovery_phase(
+            conn,
+            SimpleNamespace(),
+            portfolio,
+            artifact,
+            tracker,
+            SimpleNamespace(),
+            DiscoveryMode.UPDATE_REACTION,
+            summary,
+            211.37,
+            datetime(2026, 4, 3, 0, 0, tzinfo=timezone.utc),
+            env="live",
+            deps=deps,
+        )
+    finally:
+        if old_reader is None:
+            os.environ.pop("ZEUS_LIVE_MARKET_SUBSTRATE_READER", None)
+        else:
+            os.environ["ZEUS_LIVE_MARKET_SUBSTRATE_READER"] = old_reader
 
     return {
         "portfolio": portfolio,

@@ -2491,7 +2491,7 @@ def _record_selection_family_facts(
                         range_label=hypothesis.range_label,
                         direction=hypothesis.direction,
                     ),
-                    "strategy_key": "",
+                    "strategy_key": strategy_key or "",
                     "hypothesis_strategy_key": strategy_key,
                     "candidate_id": candidate_id,
                     "range_label": hypothesis.range_label,
@@ -2587,7 +2587,14 @@ def _record_selection_family_facts(
     family_writes = 0
     hypothesis_writes = 0
     for family_id, meta in family_meta.items():
-        first = next(row for row in selected_rows if row["family_id"] == family_id)
+        family_rows = [row for row in selected_rows if row["family_id"] == family_id]
+        family_row_strategy_keys = [str(row.get("strategy_key") or "") for row in family_rows]
+        nonempty_strategy_keys = {key for key in family_row_strategy_keys if key}
+        family_strategy_key = (
+            next(iter(nonempty_strategy_keys))
+            if len(nonempty_strategy_keys) == 1 and all(family_row_strategy_keys)
+            else ""
+        )
         result = log_selection_family_fact(
             conn,
             family_id=family_id,
@@ -2595,7 +2602,7 @@ def _record_selection_family_facts(
             decision_snapshot_id=decision_snapshot_id,
             city=candidate.city.name,
             target_date=candidate.target_date,
-            strategy_key=first["strategy_key"],
+            strategy_key=family_strategy_key,
             discovery_mode=discovery_mode,
             created_at=recorded_at,
             meta=meta,
@@ -4716,6 +4723,8 @@ def evaluate_candidate(
         }
     family_preselection_rejections: list[EdgeDecision] = []
     for drop in family_preselection_drops:
+        edge_source = _edge_source_for(candidate, drop.edge)
+        strategy_key = _strategy_key_for(candidate, drop.edge) or ""
         family_preselection_rejections.append(
             EdgeDecision(
                 False,
@@ -4726,6 +4735,8 @@ def evaluate_candidate(
                 selected_method=selected_method,
                 applied_validations=[*entry_validations, "family_pre_kelly_selection"],
                 decision_snapshot_id=snapshot_id,
+                edge_source=edge_source,
+                strategy_key=strategy_key,
                 p_raw=p_raw,
                 p_cal=p_cal,
                 p_market=p_market,

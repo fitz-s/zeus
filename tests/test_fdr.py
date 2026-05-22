@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-03-30; last_reviewed=2026-05-21; last_reused=2026-05-21
+# Lifecycle: created=2026-03-30; last_reviewed=2026-05-22; last_reused=2026-05-22
 # Purpose: Tests for FDR (Benjamini-Hochberg) filter + T4.3 selection-family
 #          substrate boundary-gate + Day0 causal-day edge case coverage.
 # Reuse: Referenced by regression suite; touched 2026-04-24 only for M3
@@ -395,6 +395,7 @@ class TestSelectionFamilySubstrate:
         # Phase 1 (2026-04-16): hypothesis-scope IDs now carry "hyp|" prefix.
         # S4 R9 P10B: temperature_metric inserted after target_date.
         assert family["family_id"] == "hyp|opening_hunt|NYC|2026-04-01|high|opening_hunt|snap=snap-1"
+        assert family["strategy_key"] == "opening_inertia"
         family_meta = json.loads(family["meta_json"])
         assert family_meta["active_fdr_selected"] == 1
         assert family_meta["passed_prefilter"] == 2
@@ -408,6 +409,7 @@ class TestSelectionFamilySubstrate:
         assert by_direction["buy_yes"]["passed_prefilter"] == 1
         assert by_direction["buy_yes"]["selected_post_fdr"] == 1
         assert by_direction["buy_yes"]["q_value"] <= 0.10
+        assert json.loads(by_direction["buy_yes"]["meta_json"])["hypothesis_strategy_key"] == "opening_inertia"
         assert json.loads(by_direction["buy_yes"]["meta_json"])["active_fdr_selected"] is True
         assert json.loads(hypotheses[2]["meta_json"])["active_fdr_selected"] is False
 
@@ -717,6 +719,10 @@ class TestSelectionFamilySubstrate:
             row["family_id"]
             for row in conn.execute("SELECT family_id FROM selection_family_fact").fetchall()
         ]
+        family_strategy_keys = [
+            row["strategy_key"]
+            for row in conn.execute("SELECT strategy_key FROM selection_family_fact").fetchall()
+        ]
         hypothesis_meta = [
             json.loads(row["meta_json"])
             for row in conn.execute("SELECT meta_json FROM selection_hypothesis_fact").fetchall()
@@ -727,10 +733,83 @@ class TestSelectionFamilySubstrate:
         # Phase 1 (2026-04-16): hypothesis-scope IDs now carry "hyp|" prefix.
         # S4 R9 P10B: temperature_metric inserted after target_date.
         assert family_ids == ["hyp|update_reaction|NYC|2026-04-01|high|update_reaction|snap=snap-1"]
+        assert family_strategy_keys == [""]
         assert {meta["hypothesis_strategy_key"] for meta in hypothesis_meta} == {
             "center_buy",
             "shoulder_sell",
         }
+
+    def test_full_family_selection_keeps_family_strategy_blank_when_partially_unclassified(self, tmp_path):
+        conn = get_connection(tmp_path / "selection_partial_unclassified_family.db")
+        _init_schema_with_forecast_authority(conn)
+        candidate = types.SimpleNamespace(
+            city=types.SimpleNamespace(name="NYC"),
+            target_date="2026-04-01",
+            temperature_metric="high",
+            discovery_mode="update_reaction",
+            event_id="event-1",
+            slug="",
+            outcomes=[],
+        )
+        edges = [
+            _make_edge(0.001),
+            _make_edge(0.001, low=38, high=39),
+        ]
+        hypotheses = [
+            FullFamilyHypothesis(
+                index=0,
+                range_label="40-41°F",
+                direction="buy_yes",
+                edge=0.05,
+                ci_lower=0.01,
+                ci_upper=0.10,
+                p_value=0.001,
+                p_model=0.15,
+                p_market=0.10,
+                p_posterior=0.15,
+                entry_price=0.10,
+                is_shoulder=False,
+                passed_prefilter=True,
+            ),
+            FullFamilyHypothesis(
+                index=1,
+                range_label="38-39°F",
+                direction="buy_no",
+                edge=0.04,
+                ci_lower=0.01,
+                ci_upper=0.08,
+                p_value=0.001,
+                p_model=0.15,
+                p_market=0.10,
+                p_posterior=0.15,
+                entry_price=0.90,
+                is_shoulder=False,
+                passed_prefilter=True,
+            ),
+        ]
+
+        result = _record_selection_family_facts(
+            conn,
+            candidate=candidate,
+            edges=edges,
+            filtered=edges,
+            hypotheses=hypotheses,
+            decision_snapshot_id="snap-1",
+            selected_method="ens_member_counting",
+            recorded_at="2026-04-01T00:00:00Z",
+        )
+        family_strategy_key = conn.execute(
+            "SELECT strategy_key FROM selection_family_fact"
+        ).fetchone()["strategy_key"]
+        hypothesis_strategy_keys = [
+            json.loads(row["meta_json"])["hypothesis_strategy_key"]
+            for row in conn.execute("SELECT meta_json FROM selection_hypothesis_fact").fetchall()
+        ]
+        conn.close()
+
+        assert result == {"status": "written", "families": 1, "hypotheses": 2}
+        assert family_strategy_key == ""
+        assert sorted(hypothesis_strategy_keys) == ["", "center_buy"]
 
     def test_evaluate_candidate_materializes_selection_facts(self, tmp_path, monkeypatch):
         # T2.g CLOSED 2026-04-24: explicit ensemble_snapshots_v2 fixture row
