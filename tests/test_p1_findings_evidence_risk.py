@@ -1,5 +1,6 @@
 # Created: 2026-05-22
 # Last reused/audited: 2026-05-22
+# Lifecycle: created=2026-05-22; last_reviewed=2026-05-22; last_reused=never
 # Authority basis: Architecture code review 2026-05-22 — P1/P2 findings
 #   F1: day0_nowcast_entry strategy authority
 #   F2: EvidenceReport denominator scoping
@@ -7,6 +8,10 @@
 #   F4: EvidenceTierAssignment lifecycle fields (revoke/expiry)
 #   F5: cluster risk — separate gross vs variance throttle gates
 #   F6: stale strategy_key CHECK constraint migration
+# Purpose: Antibody tests for six P1/P2 architecture review findings; ensures the
+#   fixed invariants do not regress as db.py/evidence_report.py/evaluator.py evolve.
+# Reuse: Re-run after any change to db.py migrations, evidence_report.py query
+#   logic, evaluator strategy routing, or evidence_tier_assignments schema.
 """Antibody tests for P1/P2 architecture review findings (2026-05-22)."""
 from __future__ import annotations
 

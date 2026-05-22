@@ -30,3 +30,4 @@ Workflow files control gate severity and maintenance cost.
 | `pr-policy.yml` | Universal cross-agent PR LOC/commit accumulation advisory comment (CI equivalent of pre-push hook) |
 | `replay-correctness.yml` | Required merge gate (Gate 4); replay-correctness DB-fixture validation |
 | `secrets-scan.yml` | Required cross-agent secrets-scan gate covering Codex, Copilot, human, and raw pushes |
+| `threads-resolved.yml` | Required merge gate: blocks merge when any review thread is unresolved or a requested reviewer has not yet submitted; re-triggers on resolve/unresolve events |

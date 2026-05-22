@@ -91,6 +91,9 @@ test_trust_policy:
     tests/test_position_market_slug_backward_compat.py: {created: "2026-05-20", last_used: "2026-05-21"}
     # Phase 7 T1: Position.lifecycle_state JSON-only field antibodies (2026-05-21).
     tests/test_position_lifecycle_state.py: {created: "2026-05-21", last_used: "2026-05-21"}
+    # P1/P2 architecture review antibodies (2026-05-22): strategy routing, evidence
+    # report scoping, migration clamp, evidence tier provenance.
+    tests/test_p1_findings_evidence_risk.py: {created: "2026-05-22", last_used: "2026-05-22"}
     # P5-1 + P5-3 (PR #19 closeout completion, 2026-04-26):
     tests/test_realized_fill_at_receipt.py: {created: "2026-04-26", last_used: "2026-04-26"}
     tests/test_evaluate_candidate_metric_integration.py: {created: "2026-04-26", last_used: "2026-04-26"}
