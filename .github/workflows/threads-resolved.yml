@@ -6,7 +6,7 @@ name: threads-resolved
 #
 # Setup: add "threads-resolved" as a required status check in branch protection
 # (Settings → Branches → main → Require status checks → "threads-resolved").
-# gh CLI: see docs/ci/branch_protection.md or run the command in the PR description.
+# After first PR run, search for "threads-resolved" in the branch protection UI.
 #
 # Owner: Fitz (Zeus CI infrastructure)
 # Authority basis: GitHub Actions pull_request_review_thread event + requested_reviewers REST API
