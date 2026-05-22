@@ -490,6 +490,123 @@ If `settlement_value = v` and every `outcome_yes = 0`, the market's bin set fail
 2. Quarantined — do not store as a calibration pair
 3. Escalated to human review for the market taxonomy
 
+### 11.4 Complete-bin basket arbitrage (neg_risk_basket) — deterministic payoff identity
+
+The `neg_risk_basket` strategy is **not** a predictive edge. It does not estimate any
+probability `p`. Its profit is a settlement payoff *identity* that follows directly from
+the §5.3 coverage invariant and the §11.2 exactly-one-winning-bin invariant. This makes it
+the only strategy whose edge is provable pathwise (for every possible settlement, not in
+expectation) — there is no model misspecification, no sample-size CI, no regime dependence.
+
+**Premise.** A weather temperature market exposes an exhaustive, mutually exclusive bin set
+`{B_1, ..., B_K}` (§5.3). For any realized settlement temperature `T`:
+
+```
+Σ_{i=1..K} 1{T ∈ B_i} = 1                         (exactly one bin wins — §11.2)
+```
+
+YES token `i` pays `Y_i(T) = 1{T ∈ B_i}`; NO token `i` pays `N_i(T) = 1 − 1{T ∈ B_i}`.
+
+**Complete YES basket (payoff = 1).** Holding 1 share of YES on every bin:
+
+```
+Σ_{i=1..K} Y_i(T) = Σ 1{T ∈ B_i} = 1            ∀T   (constant payoff)
+```
+
+**Complete NO basket (payoff = K−1).** Holding 1 share of NO on every bin:
+
+```
+Σ_{i=1..K} N_i(T) = Σ (1 − 1{T ∈ B_i}) = K − 1   ∀T   (constant payoff)
+```
+
+Both payoffs are constants independent of `T`. The strategy is therefore an exact
+arbitrage when the executable cost to acquire the basket is below its constant payoff.
+
+### 11.5 Executable cost with order-book sweep and fees
+
+Cost is the **order-book sweep cost**, not `top_ask × q`. For basket size `q` shares per leg,
+leg `i`'s YES asks form discrete levels `(p_{i,ℓ}, Δq_{i,ℓ})`. Define the consumed-depth sweep
+cost and per-level fee:
+
+```
+A_i(q) = Σ_ℓ p_{i,ℓ} · Δq_{i,ℓ}                  (sweep notional, levels consumed up to q)
+F_i(q) = Σ_ℓ r · p_{i,ℓ} · (1 − p_{i,ℓ}) · Δq_{i,ℓ}   (per-level taker fee)
+```
+
+The Polymarket fee model is `fee = C · r · p · (1 − p)` where `C` = shares, `p` = share price,
+`r` = taker fee rate (maker fee `r = 0`). The weather taker rate is `r = 0.05` per the
+Polymarket fees documentation. **`r` MUST be sourced from live venue config / fee schedule,
+never hardcoded** — code-provenance rule: a frozen `0.05` constant silently breaks if the
+venue reprices. Symbols `B_i(q)`, `G_i(q)` denote the same sweep notional and fee for the NO leg.
+
+### 11.6 Profit functions and the exact arbitrage condition
+
+```
+Π_Y(q) = q        − Σ_{i=1..K} [ A_i(q) + F_i(q) ]      (complete YES basket)
+Π_N(q) = (K−1)·q  − Σ_{i=1..K} [ B_i(q) + G_i(q) ]      (complete NO basket)
+```
+
+**Theorem (pathwise positive PnL).** If there exists `q > 0` with `Π(q) > 0`, the basket is a
+deterministic profit: `Π(T) = Π(q) > 0 ∀T`. This replaces the heuristic threshold currently
+in code. The exact condition is:
+
+```
+EXECUTE  ⇔  max( Π_Y(q*), Π_N(q*) ) > 0
+```
+
+The **maker-only, single-share** special case collapses to the familiar identity-form gate:
+
+```
+Σ_i a_i < 1          (YES basket, r = 0)        — NOT the hardcoded 0.97
+Σ_i b_i < K − 1      (NO basket,  r = 0)
+```
+
+The constant `0.97` in `src/strategy/candidates/neg_risk_basket.py` is an empirical
+mis-statement of this condition (see §14.11). The correct gate is the fee-adjusted exact
+inequality above, evaluated on swept depth — not a top-ask sum vs a hand-tuned constant.
+
+### 11.7 Sizing by arbitrage optimization (NOT Kelly)
+
+Sizing is not §10 fractional-Kelly. The basket has no probabilistic edge to fraction; its
+size is the profit-maximizing depth:
+
+```
+q* = argmax_{q ∈ D} Π(q)        where D = the set of order-book depth breakpoints across all legs
+```
+
+`Π(q)` is piecewise-linear in `q` (slope changes only at level boundaries), so the optimum lies
+at a breakpoint in `D`; enumerate breakpoints rather than solving continuously. In the registry,
+`kelly_default_multiplier = 0.0` for `neg_risk_basket` denotes "sizing does not come from Kelly,"
+not "size zero."
+
+### 11.8 Vector-fill accounting identity (the basket is the asset)
+
+Only a **complete vector** of legs is the arbitrage asset; a partial fill is not. If leg `i`
+fills `f_i` shares, the completed-basket quantity and realized profit are:
+
+```
+q_complete = min_{i=1..K} f_i
+Π_realized = payoff(q_complete) − Σ_i cost_i(q_complete)
+```
+
+Any fill beyond `q_complete` on a leg is an **execution residual**, not strategy alpha, and must
+be flattened or merged — it carries directional (non-arbitrage) risk. Consequently a
+`decision_events(outcome="enter")` row for `neg_risk_basket` is valid only when all `K` legs are
+confirmed with `f_i ≥ q` for a common `q > 0`; otherwise the attempt is a failed-vector /
+residual event, not a strategy trade. Order-placement mechanics (FOK/marketable-limit per leg,
+`basket_execution_id` binding) are **execution semantics and out of scope here per §16** — this
+section specifies only the accounting identity that defines the strategy asset.
+
+### 11.9 Why this is application-grade where predictive strategies are not
+
+The promotion machinery in §8/§10 and the EvidenceReport Beta-CI gate are built for *stochastic*
+edges (`EV = p − a − fee`, where `p` is estimated and needs a sample-size CI to bound). The basket
+edge is `Π = const − cost`: deterministic, so its evidence is the realized-vs-computed payoff
+identity per completed basket, not a win-rate sample. If the existing promotion machinery must be
+reused, write `regret_decompositions.total_regret_usd = Π_realized` per completed basket — but the
+edge's existence does not require `N` settled samples to establish. Promotion semantics for a
+deterministic strategy are governed by the strategy authority docs, not by this math spec.
+
 ---
 
 ## 12. Decision groups and training pair construction
@@ -652,6 +769,26 @@ Current code disagrees with this spec at the following points. The data-rebuild 
 - `Bin.low`/`high` type is float per current `src/types/market.py`; `-inf`/`+inf` allowed by Python but unverified across all Bin consumers.
 - **Fix**: audit `find_bin`, `market_events` storage, and Bin construction for ±inf handling.
 
+### 14.11 `neg_risk_basket` uses a heuristic threshold, not the exact arbitrage condition (§11.6)
+- `src/strategy/candidates/neg_risk_basket.py:54` — `_BASKET_ARB_THRESHOLD = Decimal("0.97")`,
+  gated at line 195 as `yes_ask_sum >= 0.97 → no_trade`. This is an empirical mis-statement of
+  the §11.6 condition. Correct gate: fee-adjusted exact inequality `Π(q*) > 0` on swept depth
+  (maker-only special case: `Σ a_i < 1`), not a top-ask sum vs a hand-tuned constant.
+- The strategy only checks a scalar `neg_risk_yes_ask_sum`; it has no NO-basket scan (§11.6
+  `Π_N`) and no order-book sweep (§11.5) — it cannot detect the larger of the two arbitrages
+  nor size by §11.7 `q*`.
+- The required inputs are **unwired**: `neg_risk_family_complete`, `neg_risk_token_count`,
+  `neg_risk_yes_ask_sum` are documented "not yet wired in MarketAnalysisVNext" (file docstring
+  lines 20–23). `MarketAnalysisVNext` is a single-market snapshot and lacks a family-level
+  executable book (`A_i(q)`, `B_i(q)` level data per leg).
+- The enter-path `CandidateDecision` (lines 230–237) is predictive-shaped (`side`,
+  `target_price`, `edge`, `p_posterior`) and cannot express a multi-leg deterministic basket
+  (`legs`, `deterministic_profit_usd`, `basket_execution_id` per §11.8).
+- **Fix**: replace the threshold with the §11.6 exact condition; add a `FamilyOrderBookSnapshot`
+  + family book fields to `MarketAnalysisVNext`; scan both `Π_Y` and `Π_N` over depth breakpoints
+  (§11.7); emit a basket-shaped decision (§11.8). This converts the strategy from a permanent-
+  no_trade shadow stub into the application-grade arbitrage of §11.4–11.9.
+
 ---
 
 ## 15. Deferred upgrades (future work, not in current scope)
@@ -726,3 +863,4 @@ If any formula, parameter, or rule in this spec appears to disagree with executa
 **Version history**:
 - **v1 (2026-04-13 earlier)**: initial draft based on Zeus ground-truth investigation + user's WMO rounding correction.
 - **v2 (2026-04-13 now)**: corrections per user review of v1 — logit clipping explicit, open-boundary bins allowed (`-inf`/`+inf`), Monte Carlo pseudocode deduplicated across bins (histogram once per snapshot), stream-of-consciousness removed from §1.3, `decision_group` concept added as §12.1 with cascading updates to §6.3 (CV), §6.4 (loss weights), §6.5 (maturity gates with n_eff), §8.2 (bootstrap by group), §13 (verification items 7-9, 16), §14 (new known defects 14.6-14.10).
+- **v3 (2026-05-22)**: added §11.4–11.9 complete-bin basket arbitrage (`neg_risk_basket`) as a deterministic payoff identity derived from §5.3/§11.2 — YES basket payoff = 1, NO basket payoff = K−1, fee-adjusted sweep-cost profit functions `Π_Y(q)/Π_N(q)`, exact arbitrage condition replacing the heuristic `0.97`, sizing by `q* = argmax Π(q)` (not Kelly), and the `q_complete = min_i f_i` vector-fill accounting identity. Added known defect §14.11 (current code uses heuristic threshold, unwired family-book inputs, predictive-shaped decision). Authority basis for the strategy reframe: operator directive 2026-05-22 + Polymarket CTF/negRisk/fees/order-lifecycle docs.
