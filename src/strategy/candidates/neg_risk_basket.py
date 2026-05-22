@@ -1,28 +1,35 @@
 # Created: 2026-04-27
-# Last reused or audited: 2026-05-21
-# Authority basis: docs/operations/task_2026-05-21_mainline_completion_authority/05_PHASE_4_FDR_FAMILY_CANDIDATES.md
-"""NegRiskBasket — shadow candidate strategy.
+# Last reused or audited: 2026-05-22
+# Authority basis: docs/operations/task_2026-05-21_mainline_completion_authority/STRATEGY_TAXONOMY_DIRECTIVE.md §17
+#                  + docs/reference/zeus_math_spec.md §11.4-11.9
+"""NegRiskBasket — exact-arbitrage deterministic pipeline PILOT.
 
-Edge source: family completeness of the negRisk YES token book vs theoretical.
-When all YES tokens in a negRisk family are known, the sum of YES ask prices must
-be >= 1.0 (otherwise an arbitrage exists by buying all YES sides). A basket arb
-is available when the sum of best asks across the full token book is < 1.0.
+Math spec authority: zeus_math_spec.md §11.4-11.9.
 
-Gate conditions (emit no_trade with reason=NEGRISK_FAMILY_INCOMPLETE):
-  1. analysis.neg_risk_family_complete is absent or falsy: token book completeness
-     metadata not yet wired — cannot assess basket arb. Fail-open.
-  2. analysis.neg_risk_token_count is absent or < 2: family has fewer than 2
-     tokens; basket arb requires at least 2 YES sides.
-  3. analysis.neg_risk_yes_ask_sum is absent or None: sum of YES asks not
-     computed; cannot assess the basket spread.
-  4. neg_risk flag not set on snapshot: market is not a negRisk market.
+Exact arbitrage condition (§11.6):
+    EXECUTE ⟺ max(Π_Y(q*), Π_N(q*)) > 0
 
-Note: All completeness fields (neg_risk_family_complete, neg_risk_token_count,
-neg_risk_yes_ask_sum) are not yet wired in MarketAnalysisVNext (as of Phase 4 T4,
-2026-05-21). This candidate operates in permanent no_trade shadow mode until the
-negRisk metadata audit in a future phase wires these fields.
+YES basket profit:
+    Π_Y(q) = q − Σ_i [A_i(q) + F_i(q)]
+    A_i(q) = Σ_ℓ p_{i,ℓ}·Δq_{i,ℓ}          sweep notional (§11.5)
+    F_i(q) = Σ_ℓ r·p_{i,ℓ}·(1−p_{i,ℓ})·Δq_{i,ℓ}  per-level taker fee (§11.5)
 
-live_status: shadow (NEVER live in Phase 4).
+NO basket profit:
+    Π_N(q) = (K-1)·q − Σ_i [B_i(q) + G_i(q)]
+    B_i / G_i: same formulas applied to NO levels.
+
+q* sizing (§11.7):
+    q* = argmax_{q∈D} Π(q)
+    D = sorted union of cumulative depth breakpoints across all legs,
+        bounded by min(total_depth_i for all legs).
+    Π piecewise-linear ⟹ optimum at a breakpoint.
+
+Vector-fill accounting (§11.8):
+    q_complete = min_{i=1..K} f_i  (shallowest leg total depth)
+    Partial fill (q < q_complete) is NOT strategy alpha.
+
+live_status: shadow (kelly 0.0). NO live multi-leg order placement.
+basket_execution_id execution: DEFERRED (out of scope per §11.8 brief).
 
 INV-37: conn supplied by caller; never auto-opened here.
 """
@@ -42,31 +49,209 @@ from . import (
     CandidateContext,
     CandidateDecision,
     CandidateMetadata,
+    FamilyOrderBookSnapshot,
+    LegBook,
+    LegIntent,
+    PriceLevel,
+    VectorEdgeDecision,
     write_candidate_no_trade_row,
 )
 
-# Placeholder shadow edge for decision_events row (no live sizing in Phase 4).
-_SHADOW_EDGE: float = 0.02
+# TEMPORARY — taker fee rate pending canonical fees module integration.
+# Source: Polymarket CTF feeRate=0.05 (weather markets). Replace with
+# fees.get_taker_fee_rate() once the canonical fees module ships.
+_TAKER_FEE_RATE_TEMP: Decimal = Decimal("0.05")
 
-# Basket arb threshold: sum of YES asks must be strictly below this to signal arb.
-# In a negRisk family, sum of YES probabilities should equal 1.0.
-# A sum < _BASKET_ARB_THRESHOLD indicates mis-pricing across the family.
-_BASKET_ARB_THRESHOLD: Decimal = Decimal("0.97")
+# Minimum number of outcomes for a meaningful neg-risk basket.
+_MIN_LEGS: int = 2
 
-# Minimum token count for a meaningful basket.
-_MIN_TOKEN_COUNT: int = 2
+
+def _sweep_yes(leg: LegBook, q: Decimal) -> tuple[Decimal, Decimal]:
+    """Compute A_i(q) and F_i(q) for the YES side of one leg.
+
+    Returns (sweep_cost, fee) both in USD per q shares.
+    Levels consumed in ascending price order (best ask first).
+    """
+    remaining = q
+    cost = Decimal(0)
+    fee = Decimal(0)
+    for lv in sorted(leg.yes_levels, key=lambda x: x.price):
+        fill = min(remaining, lv.quantity)
+        if fill <= 0:
+            continue
+        cost += lv.price * fill
+        fee += _TAKER_FEE_RATE_TEMP * lv.price * (1 - lv.price) * fill
+        remaining -= fill
+        if remaining <= 0:
+            break
+    return cost, fee
+
+
+def _sweep_no(leg: LegBook, q: Decimal) -> tuple[Decimal, Decimal]:
+    """Compute B_i(q) and G_i(q) for the NO side of one leg."""
+    remaining = q
+    cost = Decimal(0)
+    fee = Decimal(0)
+    for lv in sorted(leg.no_levels, key=lambda x: x.price):
+        fill = min(remaining, lv.quantity)
+        if fill <= 0:
+            continue
+        cost += lv.price * fill
+        fee += _TAKER_FEE_RATE_TEMP * lv.price * (1 - lv.price) * fill
+        remaining -= fill
+        if remaining <= 0:
+            break
+    return cost, fee
+
+
+def _total_depth(levels: tuple[PriceLevel, ...]) -> Decimal:
+    """Sum of quantities across all price levels."""
+    return sum((lv.quantity for lv in levels), Decimal(0))
+
+
+def _depth_breakpoints(family: FamilyOrderBookSnapshot) -> list[Decimal]:
+    """Build the sorted breakpoint set D for q* search (§11.7).
+
+    D = sorted union of all leg cumulative depth values,
+        bounded by min(total_depth_i) so q never exceeds shallowest leg.
+
+    Returns empty list if any leg has zero depth on the chosen side.
+    The caller selects YES or NO levels before calling this helper.
+    """
+    all_breakpoints: set[Decimal] = set()
+    for leg in family.legs:
+        cumulative = Decimal(0)
+        for lv in sorted(leg.yes_levels, key=lambda x: x.price):
+            cumulative += lv.quantity
+            all_breakpoints.add(cumulative)
+    return sorted(all_breakpoints)
+
+
+def _yes_breakpoints(family: FamilyOrderBookSnapshot) -> list[Decimal]:
+    """Cumulative-depth breakpoints for YES side, bounded by shallowest leg."""
+    min_depth = min(
+        (_total_depth(leg.yes_levels) for leg in family.legs),
+        default=Decimal(0),
+    )
+    pts: set[Decimal] = set()
+    for leg in family.legs:
+        cumulative = Decimal(0)
+        for lv in sorted(leg.yes_levels, key=lambda x: x.price):
+            cumulative += lv.quantity
+            if cumulative <= min_depth:
+                pts.add(cumulative)
+    # Always include min_depth as the outermost bound
+    if min_depth > 0:
+        pts.add(min_depth)
+    return sorted(pts)
+
+
+def _no_breakpoints(family: FamilyOrderBookSnapshot) -> list[Decimal]:
+    """Cumulative-depth breakpoints for NO side, bounded by shallowest leg."""
+    min_depth = min(
+        (_total_depth(leg.no_levels) for leg in family.legs),
+        default=Decimal(0),
+    )
+    pts: set[Decimal] = set()
+    for leg in family.legs:
+        cumulative = Decimal(0)
+        for lv in sorted(leg.no_levels, key=lambda x: x.price):
+            cumulative += lv.quantity
+            if cumulative <= min_depth:
+                pts.add(cumulative)
+    if min_depth > 0:
+        pts.add(min_depth)
+    return sorted(pts)
+
+
+def _pi_yes(family: FamilyOrderBookSnapshot, q: Decimal) -> Decimal:
+    """Π_Y(q) = q − Σ_i [A_i(q) + F_i(q)]."""
+    total = Decimal(0)
+    for leg in family.legs:
+        a, f = _sweep_yes(leg, q)
+        total += a + f
+    return q - total
+
+
+def _pi_no(family: FamilyOrderBookSnapshot, q: Decimal) -> Decimal:
+    """Π_N(q) = (K-1)·q − Σ_i [B_i(q) + G_i(q)]."""
+    K = family.K
+    total = Decimal(0)
+    for leg in family.legs:
+        b, g = _sweep_no(leg, q)
+        total += b + g
+    return Decimal(K - 1) * q - total
+
+
+def _opt_yes(family: FamilyOrderBookSnapshot) -> tuple[Decimal, Decimal]:
+    """Return (q*, Π_Y(q*)) for YES basket."""
+    pts = _yes_breakpoints(family)
+    if not pts:
+        return Decimal(0), Decimal(0)
+    best_q = Decimal(0)
+    best_pi = Decimal(0)
+    for q in pts:
+        pi = _pi_yes(family, q)
+        if pi > best_pi:
+            best_pi = pi
+            best_q = q
+    return best_q, best_pi
+
+
+def _opt_no(family: FamilyOrderBookSnapshot) -> tuple[Decimal, Decimal]:
+    """Return (q*, Π_N(q*)) for NO basket."""
+    pts = _no_breakpoints(family)
+    if not pts:
+        return Decimal(0), Decimal(0)
+    best_q = Decimal(0)
+    best_pi = Decimal(0)
+    for q in pts:
+        pi = _pi_no(family, q)
+        if pi > best_pi:
+            best_pi = pi
+            best_q = q
+    return best_q, best_pi
+
+
+def _build_yes_legs(family: FamilyOrderBookSnapshot, q_star: Decimal) -> tuple[LegIntent, ...]:
+    """Build YES LegIntents at q_star (best YES ask for each leg)."""
+    intents = []
+    for leg in family.legs:
+        best_ask = min((lv.price for lv in leg.yes_levels), default=Decimal(0))
+        intents.append(
+            LegIntent(
+                side="buy_yes",
+                condition_id=leg.condition_id,
+                quantity=q_star,
+                price_limit=best_ask,
+            )
+        )
+    return tuple(intents)
+
+
+def _build_no_legs(family: FamilyOrderBookSnapshot, q_star: Decimal) -> tuple[LegIntent, ...]:
+    """Build NO LegIntents at q_star (best NO ask for each leg)."""
+    intents = []
+    for leg in family.legs:
+        best_ask = min((lv.price for lv in leg.no_levels), default=Decimal(0))
+        intents.append(
+            LegIntent(
+                side="buy_no",
+                condition_id=leg.condition_id,
+                quantity=q_star,
+                price_limit=best_ask,
+            )
+        )
+    return tuple(intents)
 
 
 class NegRiskBasket(BaseStrategyCandidate):
-    """Shadow candidate: negRisk family completeness basket arbitrage.
+    """Exact-arbitrage neg-risk basket — deterministic pipeline PILOT.
 
-    Edge source: when the full YES token book for a negRisk family is available and
-    the sum of YES ask prices is below the basket arbitrage threshold, a shadow
-    buy_yes entry is logged to decision_events.
+    Execute iff max(Π_Y(q*), Π_N(q*)) > 0.  (§11.6)
 
-    Token book completeness is a required precondition: if any YES side of the family
-    is missing from the token book, the basket sum is not comparable to the theoretical
-    1.0 total, and a no_trade with reason=NEGRISK_FAMILY_INCOMPLETE is emitted.
+    Emits VectorEdgeDecision on enter. Writes ONE shadow decision_events row.
+    Multi-leg DB persistence and basket_execution_id are DEFERRED (out of scope).
 
     live_status: shadow. CandidateMetadata.executable_alpha=True (metadata-only;
     NOT a registry YAML field — passing it to registry raises RegistrySchemaError).
@@ -78,10 +263,9 @@ class NegRiskBasket(BaseStrategyCandidate):
                 strategy_key="neg_risk_basket",
                 family="neg_risk_basket",
                 description=(
-                    "Shadow candidate: negRisk family completeness basket arbitrage. "
-                    "Edge source: sum of YES ask prices across full negRisk token book "
-                    "vs theoretical 1.0 total. Requires complete family token book. "
-                    "Shadow research only."
+                    "Exact-arbitrage neg-risk basket — deterministic pipeline PILOT. "
+                    "Execute iff max(Π_Y(q*), Π_N(q*)) > 0 per zeus_math_spec §11.6. "
+                    "Emits VectorEdgeDecision. Shadow research only; kelly=0."
                 ),
                 executable_alpha=True,
             )
@@ -93,119 +277,98 @@ class NegRiskBasket(BaseStrategyCandidate):
         context: CandidateContext,
         conn: sqlite3.Connection,
         decision_time: datetime,
-    ) -> CandidateDecision:
-        """Evaluate negRisk basket completeness arb against the market context.
+    ) -> CandidateDecision | VectorEdgeDecision:
+        """Evaluate neg-risk basket exact arb.
 
-        No-trade path (reason=NEGRISK_FAMILY_INCOMPLETE):
-          - analysis.neg_risk_family_complete is absent or falsy.
-          - analysis.neg_risk_token_count is absent or < _MIN_TOKEN_COUNT.
-          - analysis.neg_risk_yes_ask_sum is absent or None.
-          - Snapshot is not a negRisk market.
-          - YES ask sum >= _BASKET_ARB_THRESHOLD (no basket arb available).
+        Guard path (reason=NEGRISK_FAMILY_INCOMPLETE):
+          - No FamilyOrderBookSnapshot on analysis.
+          - Family has fewer than _MIN_LEGS legs.
+          - Any YES leg has zero depth AND any NO leg has zero depth (both baskets blocked).
+
+        No-trade path (reason=NEGRISK_NO_PROFITABLE_BASKET):
+          - max(Π_Y(q*), Π_N(q*)) ≤ 0.
 
         Enter path:
-          - neg_risk flag confirmed on snapshot.
-          - neg_risk_family_complete truthy.
-          - neg_risk_token_count >= _MIN_TOKEN_COUNT.
-          - neg_risk_yes_ask_sum present and < _BASKET_ARB_THRESHOLD.
-          -> shadow enter logged to decision_events.
+          - max(Π_Y(q*), Π_N(q*)) > 0.
+          - Emits VectorEdgeDecision with legs + monetary fields.
+          - Writes ONE shadow decision_events row.
 
         Never returns None. Never raises; all guard failures become no_trade.
         """
         analysis = context.analysis
-        market_slug, temperature_metric, target_date_str, observation_time, _ = context.natural_key
+        market_slug = context.natural_key[0]
 
-        # --- Guard 1: negRisk flag on snapshot ---
-        snapshot = getattr(analysis, "_snapshot", None)
-        is_neg_risk: bool = bool(getattr(snapshot, "neg_risk", False))
-        if not is_neg_risk:
-            # Fall back to checking analysis directly for test scenarios.
-            is_neg_risk = bool(getattr(analysis, "neg_risk", False))
-        if not is_neg_risk:
+        # --- Resolve FamilyOrderBookSnapshot ---
+        family: Optional[FamilyOrderBookSnapshot] = getattr(
+            analysis, "family_book_snapshot", None
+        )
+        if family is None:
             decision = CandidateDecision(
                 outcome="no_trade",
                 reason=NoTradeReason.NEGRISK_FAMILY_INCOMPLETE,
                 reason_detail=(
-                    f"neg_risk_basket: market_slug={market_slug!r} is not a negRisk market "
-                    "(neg_risk=False on snapshot); basket arb not applicable."
+                    f"neg_risk_basket: FamilyOrderBookSnapshot absent on analysis "
+                    f"for market_slug={market_slug!r}; exact-arb requires per-leg book."
                 ),
             )
             write_candidate_no_trade_row(conn, context, decision)
             return decision
 
-        # --- Guard 2: family completeness metadata ---
-        family_complete: Optional[bool] = getattr(analysis, "neg_risk_family_complete", None)
-        if not family_complete:
+        # --- Guard: minimum legs ---
+        if family.K < _MIN_LEGS:
             decision = CandidateDecision(
                 outcome="no_trade",
                 reason=NoTradeReason.NEGRISK_FAMILY_INCOMPLETE,
                 reason_detail=(
-                    f"neg_risk_basket: neg_risk_family_complete absent or False for "
-                    f"market_slug={market_slug!r}; token book completeness not confirmed. "
-                    "Fail-open (metadata not yet wired in MarketAnalysisVNext)."
+                    f"neg_risk_basket: family has {family.K} legs < minimum {_MIN_LEGS} "
+                    f"for market_slug={market_slug!r}."
                 ),
             )
             write_candidate_no_trade_row(conn, context, decision)
             return decision
 
-        # --- Guard 3: token count ---
-        token_count: Optional[int] = getattr(analysis, "neg_risk_token_count", None)
-        if token_count is None or int(token_count) < _MIN_TOKEN_COUNT:
+        # --- Compute q* and Π* for both baskets ---
+        q_yes, pi_yes = _opt_yes(family)
+        q_no, pi_no = _opt_no(family)
+
+        best_pi = max(pi_yes, pi_no)
+
+        if best_pi <= Decimal(0):
             decision = CandidateDecision(
                 outcome="no_trade",
-                reason=NoTradeReason.NEGRISK_FAMILY_INCOMPLETE,
+                reason=NoTradeReason.NEGRISK_NO_PROFITABLE_BASKET,
                 reason_detail=(
-                    f"neg_risk_basket: neg_risk_token_count={token_count!r} < "
-                    f"minimum {_MIN_TOKEN_COUNT} for market_slug={market_slug!r}; "
-                    "cannot compute basket arb on a single token."
+                    f"neg_risk_basket: max(Π_Y({q_yes})={pi_yes}, Π_N({q_no})={pi_no}) "
+                    f"= {best_pi} ≤ 0 for market_slug={market_slug!r}; no exact arb."
                 ),
             )
             write_candidate_no_trade_row(conn, context, decision)
             return decision
 
-        # --- Guard 4: YES ask sum ---
-        yes_ask_sum_raw = getattr(analysis, "neg_risk_yes_ask_sum", None)
-        if yes_ask_sum_raw is None:
-            decision = CandidateDecision(
-                outcome="no_trade",
-                reason=NoTradeReason.NEGRISK_FAMILY_INCOMPLETE,
-                reason_detail=(
-                    f"neg_risk_basket: neg_risk_yes_ask_sum absent for "
-                    f"market_slug={market_slug!r}; cannot assess basket spread."
-                ),
-            )
-            write_candidate_no_trade_row(conn, context, decision)
-            return decision
+        # --- Build VectorEdgeDecision ---
+        if pi_yes >= pi_no:
+            # YES basket wins
+            q_star = q_yes
+            legs = _build_yes_legs(family, q_star)
+            # Recompute cost for the decision record
+            total_cost = Decimal(0)
+            for leg in family.legs:
+                a, f = _sweep_yes(leg, q_star)
+                total_cost += a + f
+            payoff = q_star  # YES basket: 1 leg pays $1 per share, all others $0 → total = q*
+            profit = pi_yes
+        else:
+            # NO basket wins
+            q_star = q_no
+            legs = _build_no_legs(family, q_star)
+            total_cost = Decimal(0)
+            for leg in family.legs:
+                b, g = _sweep_no(leg, q_star)
+                total_cost += b + g
+            payoff = Decimal(family.K - 1) * q_star  # (K-1) losers pay $1 each
+            profit = pi_no
 
-        try:
-            yes_ask_sum = Decimal(str(yes_ask_sum_raw))
-        except Exception:
-            decision = CandidateDecision(
-                outcome="no_trade",
-                reason=NoTradeReason.NEGRISK_FAMILY_INCOMPLETE,
-                reason_detail=(
-                    f"neg_risk_basket: neg_risk_yes_ask_sum={yes_ask_sum_raw!r} cannot "
-                    f"be parsed as Decimal for market_slug={market_slug!r}."
-                ),
-            )
-            write_candidate_no_trade_row(conn, context, decision)
-            return decision
-
-        # --- Guard 5: basket arb threshold ---
-        if yes_ask_sum >= _BASKET_ARB_THRESHOLD:
-            decision = CandidateDecision(
-                outcome="no_trade",
-                reason=NoTradeReason.NEGRISK_FAMILY_INCOMPLETE,
-                reason_detail=(
-                    f"neg_risk_basket: YES ask sum {yes_ask_sum} >= threshold "
-                    f"{_BASKET_ARB_THRESHOLD} for market_slug={market_slug!r}; "
-                    "no basket arb available."
-                ),
-            )
-            write_candidate_no_trade_row(conn, context, decision)
-            return decision
-
-        # --- Shadow enter: write decision_events row ---
+        # --- Write ONE shadow decision_events row (multi-leg DB persistence deferred) ---
         decision_time_iso = (
             decision_time.replace(tzinfo=timezone.utc).isoformat()
             if decision_time.tzinfo is None
@@ -220,18 +383,16 @@ class NegRiskBasket(BaseStrategyCandidate):
         write_shadow_decision_event(
             context.natural_key,
             decision_time=decision_time_iso,
-            side="buy_yes",
+            side="buy_yes" if pi_yes >= pi_no else "buy_no",
             strategy_key=self.strategy_key,
             conn=conn,
-            edge=_SHADOW_EDGE,
+            edge=float(profit),
             polymarket_end_anchor_source=anchor_source,
         )
 
-        return CandidateDecision(
-            outcome="enter",
-            side="buy_yes",
-            target_price=None,
-            target_size_usd=None,
-            edge=None,
-            p_posterior=None,
+        return VectorEdgeDecision(
+            legs=legs,
+            vector_cost_usd=total_cost,
+            vector_payoff_usd=payoff,
+            vector_profit_usd=profit,
         )
