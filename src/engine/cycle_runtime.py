@@ -4190,17 +4190,24 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                     if _reason == "model_conflict":
                         _frontier_increment("math_frontier", "model_conflict")
                         _frontier_increment("source_math_frontier", "model_conflict")
+                    detail = str(getattr(_d, "rejection_reason_detail", "") or "")
                     if _reason in {
                         "ultra_low_price_not_authorized",
                         "center_buy_ultra_low_price",
-                        "strategy_economic_floor",
-                    }:
+                    } or (
+                        _reason == "strategy_economic_floor"
+                        and (
+                            detail.startswith("STRATEGY_ENTRY_PRICE_BELOW_LIVE_FLOOR")
+                            or detail.startswith("ULTRA_LOW_NON_TAIL_NOT_AUTHORIZED")
+                        )
+                    ):
                         _frontier_increment("edge_frontier", "price_policy_rejected")
-                        detail = str(getattr(_d, "rejection_reason_detail", "") or "")
                         if "tail_topology=true" in detail:
                             _frontier_increment("edge_frontier", "tail_edges_blocked")
                         else:
                             _frontier_increment("edge_frontier", "normal_price_or_non_tail_edges_blocked")
+                    elif _reason == "strategy_economic_floor":
+                        _frontier_increment("edge_frontier", "economic_floor_rejected")
                     if _reason in {"confidence_band_insufficient", "uncategorized"}:
                         stage = str(getattr(_d, "rejection_stage", "") or "")
                         if stage in {"EDGE_INSUFFICIENT", "FDR_FILTERED", "FDR_FAMILY_SCAN_UNAVAILABLE"}:

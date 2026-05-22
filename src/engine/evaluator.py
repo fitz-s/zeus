@@ -1811,7 +1811,12 @@ def _crosscheck_comparable_context(
         timezone_name,
     )
     horizon_delta = _issue_time_delta_hours(primary_issue, crosscheck_issue)
-    local_day_equal = bool(target_date) and primary_window != ("", "") and crosscheck_window != ("", "")
+    local_day_equal = (
+        bool(target_date)
+        and primary_window != ("", "")
+        and crosscheck_window != ("", "")
+        and primary_window == crosscheck_window
+    )
     reasons: list[str] = []
     if not primary_issue:
         reasons.append("primary_missing_issue_time")
@@ -1821,6 +1826,12 @@ def _crosscheck_comparable_context(
         reasons.append("primary_missing_target_day_valid_window")
     if crosscheck_window == ("", ""):
         reasons.append("crosscheck_missing_target_day_valid_window")
+    if (
+        primary_window != ("", "")
+        and crosscheck_window != ("", "")
+        and primary_window != crosscheck_window
+    ):
+        reasons.append("target_day_valid_window_mismatch")
     if horizon_delta is None:
         reasons.append("issue_time_delta_unavailable")
     elif horizon_delta > issue_time_tolerance_hours:

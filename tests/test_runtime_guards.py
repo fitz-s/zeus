@@ -3294,6 +3294,94 @@ def test_math_no_trade_frontier_publishes_status_reason_proof(tmp_path):
     assert summary["top_no_trade_reasons"] == summary["rejection_reason_counts"]
 
 
+def test_strategy_economic_floor_frontier_separates_price_and_profit_policy(tmp_path):
+    from src.contracts.no_trade_reason import NoTradeReason
+
+    conn = get_connection(tmp_path / "economic-frontier.db")
+    init_schema(conn)
+    artifact = CycleArtifact(mode=DiscoveryMode.OPENING_HUNT.value, started_at="2026-04-02T06:00:00Z")
+    summary = {"candidates": 0, "no_trades": 0}
+    base_market = {
+        "city": NYC,
+        "target_date": "2026-04-03",
+        "hours_since_open": 12.0,
+        "hours_to_resolution": 24.0,
+        "temperature_metric": "high",
+        "market_end_at": "2026-04-03T23:59:00Z",
+        "outcomes": [
+            {"title": "39-40°F", "range_low": 39, "range_high": 40},
+        ],
+    }
+    markets = [
+        {**base_market, "event_id": "evt-price-frontier", "slug": "slug-price-frontier"},
+        {**base_market, "event_id": "evt-profit-frontier", "slug": "slug-profit-frontier"},
+    ]
+    decisions = iter(
+        [
+            [
+                EdgeDecision(
+                    should_trade=False,
+                    rejection_stage="MARKET_FILTER",
+                    rejection_reasons=[NoTradeReason.STRATEGY_ECONOMIC_FLOOR.value],
+                    rejection_reason_enum=NoTradeReason.STRATEGY_ECONOMIC_FLOOR,
+                    rejection_reason_detail=(
+                        "STRATEGY_ENTRY_PRICE_BELOW_LIVE_FLOOR(0.0040<=0.05; "
+                        "strategy=opening_inertia; direction=buy_yes; tail_topology=false)"
+                    ),
+                    decision_id="d-price-frontier",
+                    decision_snapshot_id="snap-price-frontier",
+                )
+            ],
+            [
+                EdgeDecision(
+                    should_trade=False,
+                    rejection_stage="SIZING_TOO_SMALL",
+                    rejection_reasons=[NoTradeReason.STRATEGY_ECONOMIC_FLOOR.value],
+                    rejection_reason_enum=NoTradeReason.STRATEGY_ECONOMIC_FLOOR,
+                    rejection_reason_detail=(
+                        "EXPECTED_PROFIT_BELOW_LIVE_FLOOR(0.0100<$0.05; "
+                        "strategy=opening_inertia)"
+                    ),
+                    decision_id="d-profit-frontier",
+                    decision_snapshot_id="snap-profit-frontier",
+                )
+            ],
+        ]
+    )
+    deps = types.SimpleNamespace(
+        MODE_PARAMS={DiscoveryMode.OPENING_HUNT: {}},
+        find_weather_markets=lambda **kwargs: markets,
+        get_last_scan_authority=lambda: "VERIFIED",
+        DiscoveryMode=DiscoveryMode,
+        logger=types.SimpleNamespace(warning=lambda *args, **kwargs: None, error=lambda *args, **kwargs: None),
+        NoTradeCase=NoTradeCase,
+        MarketCandidate=MarketCandidate,
+        evaluate_candidate=lambda *args, **kwargs: next(decisions),
+        _classify_edge_source=lambda _mode, _edge: "",
+    )
+
+    cycle_runtime.execute_discovery_phase(
+        conn,
+        clob=None,
+        portfolio=PortfolioState(),
+        artifact=artifact,
+        tracker=StrategyTracker(),
+        limits=types.SimpleNamespace(),
+        mode=DiscoveryMode.OPENING_HUNT,
+        summary=summary,
+        entry_bankroll=100.0,
+        decision_time=datetime(2026, 4, 2, 6, 0, tzinfo=timezone.utc),
+        env="shadow",
+        deps=deps,
+    )
+    conn.close()
+
+    edge_frontier = summary["money_path_frontier"]["edge_frontier"]
+    assert edge_frontier["price_policy_rejected"] == 1
+    assert edge_frontier["normal_price_or_non_tail_edges_blocked"] == 1
+    assert edge_frontier["economic_floor_rejected"] == 1
+
+
 def test_family_frontier_does_not_count_preselection_dedup_as_existing_exposure(tmp_path):
     from src.contracts.no_trade_reason import NoTradeReason
 
@@ -7609,6 +7697,41 @@ def test_crosscheck_noncomparable_source_run_does_not_emit_model_conflict():
     assert context.comparable is False
     assert "issue_time_delta_exceeds_tolerance" in context.non_comparable_reason
     assert context.to_detail_json().startswith("{")
+
+
+def test_crosscheck_nonmatching_target_day_windows_are_not_comparable():
+    target_date = "2026-01-15"
+    tz = ZoneInfo(NYC.timezone)
+    start_local = datetime(2026, 1, 15, 0, 0, tzinfo=tz)
+    primary_times = [
+        (start_local + timedelta(hours=i)).astimezone(timezone.utc).isoformat()
+        for i in range(24)
+    ]
+    shifted_times = [
+        (start_local + timedelta(hours=i + 1)).astimezone(timezone.utc).isoformat()
+        for i in range(24)
+    ]
+
+    context = evaluator_module._crosscheck_comparable_context(
+        primary_result={
+            "times": primary_times,
+            "source_id": "ecmwf_ifs025",
+            "issue_time": datetime(2026, 1, 14, 0, tzinfo=timezone.utc).isoformat(),
+        },
+        crosscheck_result={
+            "times": shifted_times,
+            "source_id": "gfs025",
+            "issue_time": datetime(2026, 1, 14, 6, tzinfo=timezone.utc).isoformat(),
+        },
+        primary_source_id="ecmwf_ifs025",
+        crosscheck_source_id="gfs025",
+        target_date=target_date,
+        timezone_name=NYC.timezone,
+    )
+
+    assert context.local_day_mapping_equal is False
+    assert context.comparable is False
+    assert "target_day_valid_window_mismatch" in context.non_comparable_reason
 
 
 def test_forecast_provider_identity_uses_source_id_not_model_family(monkeypatch):
