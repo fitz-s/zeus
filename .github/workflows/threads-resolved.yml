@@ -1,0 +1,91 @@
+name: threads-resolved
+
+# Blocks merge when any review thread is unresolved.
+# Gate enforced at GitHub level — works for UI, CLI (gh pr merge), and API.
+#
+# Setup: add "threads-resolved" as a required status check in branch protection
+# (Settings → Branches → main → Require status checks → "threads-resolved").
+# gh CLI: see docs/ci/branch_protection.md or run the command in the PR description.
+#
+# Owner: Fitz (Zeus CI infrastructure)
+# Authority basis: GitHub Actions pull_request_review_thread event (resolved/unresolved)
+# Review condition: update trigger list if new review-thread event types are introduced.
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
+  pull_request_review:
+    types: [submitted, dismissed]
+  pull_request_review_thread:
+    types: [resolved, unresolved]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: threads-resolved-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: threads-resolved
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Check unresolved review threads
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          OWNER="${REPO%/*}"
+          REPO_NAME="${REPO#*/}"
+
+          RESULT=$(gh api graphql \
+            -f owner="${OWNER}" \
+            -f repo="${REPO_NAME}" \
+            -F pr="${PR_NUMBER}" \
+            -f query='
+              query($owner: String!, $repo: String!, $pr: Int!) {
+                repository(owner: $owner, name: $repo) {
+                  pullRequest(number: $pr) {
+                    reviewThreads(first: 100) {
+                      totalCount
+                      nodes { isResolved }
+                    }
+                  }
+                }
+              }
+            ')
+
+          TOTAL=$(echo "$RESULT" | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+print(d['data']['repository']['pullRequest']['reviewThreads']['totalCount'])
+")
+
+          UNRESOLVED=$(echo "$RESULT" | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+nodes = d['data']['repository']['pullRequest']['reviewThreads']['nodes']
+print(sum(1 for n in nodes if not n['isResolved']))
+")
+
+          echo "Total threads: ${TOTAL}  Unresolved: ${UNRESOLVED}"
+
+          # > 100 threads: pagination not implemented — fail closed so no thread is silently skipped
+          if [ "${TOTAL}" -gt 100 ]; then
+            echo "BLOCKED: PR has ${TOTAL} review threads (> 100 pagination limit). Failing closed."
+            exit 1
+          fi
+
+          if [ "${UNRESOLVED}" -gt 0 ]; then
+            echo "BLOCKED: ${UNRESOLVED} unresolved review thread(s) — resolve all before merging."
+            exit 1
+          fi
+
+          echo "OK: all ${TOTAL} review thread(s) resolved (or no threads)."
