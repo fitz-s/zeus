@@ -2561,25 +2561,26 @@ def _entry_fill_covers_command(
     command_id = str(command.get("command_id") or "").strip()
     venue_order_id = str(command.get("venue_order_id") or "").strip()
     if command_id and _table_exists(conn, "venue_order_facts"):
-        row = conn.execute(
+        rows = conn.execute(
             """
             SELECT state, remaining_size, matched_size
               FROM venue_order_facts
              WHERE command_id = ?
                AND (? = '' OR venue_order_id = ?)
-             ORDER BY local_sequence DESC, fact_id DESC
-             LIMIT 1
+             ORDER BY local_sequence ASC, fact_id ASC
             """,
             (command_id, venue_order_id, venue_order_id),
-        ).fetchone()
-        if row is not None:
-            state = str(row["state"] or "").upper()
-            matched = _positive_decimal_or_none(row["matched_size"])
-            try:
-                remaining_zero = _decimal(row["remaining_size"]) == Decimal("0")
-            except ValueError:
-                remaining_zero = False
-            if state == "MATCHED" and remaining_zero and matched is not None:
+        ).fetchall()
+        if rows:
+            from src.execution.order_truth_reducer import TERMINAL_FILLED, VenueOrderTruthReducer
+
+            reduced = VenueOrderTruthReducer.reduce(
+                order_facts=rows,
+                trade_filled_size=shares,
+                command_size=command.get("size"),
+                command_state=str(command.get("state") or ""),
+            )
+            if reduced.proof_class == TERMINAL_FILLED:
                 return True
 
     target = _positive_decimal_or_none(command.get("size"))

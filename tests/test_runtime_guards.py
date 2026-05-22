@@ -1286,6 +1286,8 @@ def test_chain_reconciliation_updates_live_position_from_chain(monkeypatch, tmp_
     monkeypatch.setattr(cycle_runner, "get_tracker", lambda: StrategyTracker())
     monkeypatch.setattr(cycle_runner, "save_tracker", lambda tracker: None)
     monkeypatch.setattr(cycle_runner, "find_weather_markets", lambda **kwargs: [])
+    monkeypatch.setattr("src.data.market_scanner._clob_market_is_live", lambda condition_id: True)
+    monkeypatch.setattr("src.data.market_scanner.get_sibling_outcomes", lambda market_id: [])
     def _mock_refresh(conn, clob, pos):
         pos.entry_method = getattr(pos, "entry_method", "ens_member_counting") or "ens_member_counting"
         assert pos.entry_method

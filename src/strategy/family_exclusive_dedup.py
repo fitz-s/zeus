@@ -63,8 +63,11 @@ logger = logging.getLogger(__name__)
 
 ENV_FLAG = "ZEUS_LIVE_MAX_ONE_ENTRY_PER_WEATHER_FAMILY"
 _DEFAULT = "1"  # ON by default (live-money fail-safe).
+NATIVE_MULTIBIN_BUY_NO_SHADOW_FLAG = "NATIVE_MULTIBIN_BUY_NO_SHADOW"
+NATIVE_MULTIBIN_BUY_NO_LIVE_FLAG = "NATIVE_MULTIBIN_BUY_NO_LIVE"
 
 from src.contracts.no_trade_reason import NoTradeReason
+from src.config import get_mode, settings
 
 # Audit reason string for dropped bins. Stage B promotes this into the
 # NoTradeReason enum while keeping the string stable for older artifacts.
@@ -100,6 +103,7 @@ class FamilyPreselectionDrop:
     kept_bin: str
     family_selection_score: float
     kept_family_selection_score: float
+    rejection_reason: str = MUTUALLY_EXCLUSIVE_FAMILY_DEDUP
 
 
 @dataclass(frozen=True)
@@ -916,6 +920,48 @@ def _edge_preselection_key(edge: Any) -> tuple[float, float, float, tuple[int, .
     return (score, posterior, entry_price, tuple(-ord(c) for c in label))
 
 
+def _strict_feature_flag(name: str, *, default: bool = False) -> bool:
+    flags = settings["feature_flags"]
+    value = flags.get(name, default)
+    if not isinstance(value, bool):
+        raise ValueError(f"feature flag {name} must be boolean, got {type(value).__name__}")
+    return bool(value)
+
+
+def _native_buy_no_live_rejection_reason() -> str | None:
+    if not native_multibin_buy_no_live_enabled():
+        return "NATIVE_MULTIBIN_BUY_NO_LIVE_DISABLED"
+    return None
+
+
+def native_multibin_buy_no_shadow_enabled() -> bool:
+    return _strict_feature_flag(NATIVE_MULTIBIN_BUY_NO_SHADOW_FLAG)
+
+
+def native_multibin_buy_no_live_enabled() -> bool:
+    shadow_enabled = native_multibin_buy_no_shadow_enabled()
+    live_enabled = _strict_feature_flag(NATIVE_MULTIBIN_BUY_NO_LIVE_FLAG)
+    if live_enabled and not shadow_enabled:
+        raise ValueError(
+            f"{NATIVE_MULTIBIN_BUY_NO_LIVE_FLAG}=true requires "
+            f"{NATIVE_MULTIBIN_BUY_NO_SHADOW_FLAG}=true"
+        )
+    return live_enabled
+
+
+def _edge_live_family_executable_rejection_reason(edge: Any) -> str | None:
+    """Return structural live-execution reason before a leg consumes fallback rank."""
+
+    if get_mode() != "live":
+        return None
+    if str(getattr(edge, "direction", "") or "") != "buy_no":
+        return None
+    try:
+        return _native_buy_no_live_rejection_reason()
+    except ValueError as exc:
+        return f"NATIVE_MULTIBIN_BUY_NO_FLAG_INVALID:{exc}"
+
+
 def preselect_single_family_edge_before_kelly(
     edges: list[Any],
     *,
@@ -989,6 +1035,18 @@ def build_weather_family_decision(
     if not gate_enabled:
         return None
     candidate_edges = list(edges)
+    blocked_edges: list[tuple[Any, str]] = []
+    excluded_blocked_edges: list[tuple[Any, str]] = []
+    executable_candidate_edges: list[Any] = []
+    for edge in candidate_edges:
+        rejection_reason = _edge_live_family_executable_rejection_reason(edge)
+        if rejection_reason:
+            blocked_edges.append((edge, rejection_reason))
+        else:
+            executable_candidate_edges.append(edge)
+    if executable_candidate_edges:
+        candidate_edges = executable_candidate_edges
+        excluded_blocked_edges = blocked_edges
 
     try:
         max_legs = int(os.environ.get("ZEUS_LIVE_FAMILY_PORTFOLIO_MAX_LEGS", "1"))
@@ -1038,6 +1096,17 @@ def build_weather_family_decision(
     selected_set = set(id(edge) for edge in portfolio.fallback_candidate_legs)
     kept_bin = ",".join(_edge_bin_label(edge) for edge in portfolio.fallback_candidate_legs)
     dropped: list[FamilyPreselectionDrop] = []
+    for edge, rejection_reason in excluded_blocked_edges:
+        dropped.append(
+            FamilyPreselectionDrop(
+                edge=edge,
+                dropped_bin=_edge_bin_label(edge),
+                kept_bin=kept_bin,
+                family_selection_score=_edge_family_selection_score(edge),
+                kept_family_selection_score=portfolio.selection_score,
+                rejection_reason=rejection_reason,
+            )
+        )
     for edge in candidate_edges:
         if id(edge) in selected_set:
             continue

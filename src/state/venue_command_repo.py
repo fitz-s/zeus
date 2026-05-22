@@ -1,5 +1,5 @@
 # Created: 2026-04-26
-# Last reused/audited: 2026-05-17
+# Last reused/audited: 2026-05-21
 # Authority basis: docs/operations/task_2026-05-08_object_invariance_wave27/PLAN.md
 #                  + docs/operations/task_2026-05-15_live_order_e2e_goal/LIVE_ORDER_E2E_GOAL_PLAN.md
 #                  + docs/operations/task_2026-05-17_live_order_survival/LIVE_ORDER_SURVIVAL_PLAN.md S5
@@ -1861,14 +1861,42 @@ def _actual_review_confirmed_fill_predicates(
         ).fetchall()
         trade_fact = conn.execute(
             """
+            WITH canonical_trade_fact AS (
+                SELECT ranked.*
+                  FROM (
+                        SELECT scored.*,
+                               ROW_NUMBER() OVER (
+                                   PARTITION BY command_id, trade_id
+                                   ORDER BY proof_rank DESC, local_sequence DESC
+                               ) AS canonical_rank
+                          FROM (
+                                SELECT fact.*,
+                                       CASE
+                                           WHEN UPPER(COALESCE(fact.state, '')) = 'CONFIRMED'
+                                                AND CAST(COALESCE(fact.filled_size, '0') AS REAL) > 0
+                                           THEN 500
+                                           WHEN UPPER(COALESCE(fact.state, '')) = 'MINED'
+                                                AND CAST(COALESCE(fact.filled_size, '0') AS REAL) > 0
+                                           THEN 450
+                                           WHEN UPPER(COALESCE(fact.state, '')) = 'MATCHED'
+                                                AND CAST(COALESCE(fact.filled_size, '0') AS REAL) > 0
+                                           THEN 400
+                                           WHEN CAST(COALESCE(fact.filled_size, '0') AS REAL) > 0
+                                           THEN 300
+                                           ELSE 100
+                                       END AS proof_rank
+                                  FROM venue_trade_facts fact
+                               ) scored
+                       ) ranked
+                 WHERE ranked.canonical_rank = 1
+            )
             SELECT *
-            FROM venue_trade_facts
+            FROM canonical_trade_fact
             WHERE command_id = ?
               AND trade_id = ?
               AND venue_order_id = ?
               AND state IN ('MATCHED', 'MINED', 'CONFIRMED')
-            ORDER BY local_sequence DESC, trade_fact_id DESC
-            LIMIT 1
+              AND CAST(COALESCE(filled_size, '0') AS REAL) > 0
             """,
             (command_id, trade_id, venue_order_id),
         ).fetchone()

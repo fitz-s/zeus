@@ -35,6 +35,7 @@ RED→GREEN protocol (recorded for the opus critic):
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -46,6 +47,8 @@ from src.engine.evaluator import EdgeDecision
 from src.strategy.family_exclusive_dedup import (
     FAMILY_REJECTION_STAGE,
     MUTUALLY_EXCLUSIVE_FAMILY_DEDUP,
+    NATIVE_MULTIBIN_BUY_NO_LIVE_FLAG,
+    NATIVE_MULTIBIN_BUY_NO_SHADOW_FLAG,
     WeatherFamilyExposureReducer,
     WeatherFamilyExposure,
     WeatherFamilyKey,
@@ -796,6 +799,72 @@ def test_family_decision_retains_ranked_fallback_candidates_before_execution_via
         low_price_tail,
     )
     assert [d.dropped_bin for d in family_decision.dropped] == ["19°F or below"]
+
+
+def test_family_decision_excludes_live_disabled_buy_no_from_fallback_slots(monkeypatch) -> None:
+    """Live-disabled buy_no is a structural non-executable leg, not fallback capacity."""
+
+    flags = dict(evaluator_module.settings["feature_flags"])
+    flags[NATIVE_MULTIBIN_BUY_NO_SHADOW_FLAG] = True
+    flags[NATIVE_MULTIBIN_BUY_NO_LIVE_FLAG] = False
+    monkeypatch.setitem(evaluator_module.settings._data, "feature_flags", flags)
+
+    bins = {s[2]: s for s in _BIN_SPECS}
+    live_disabled_buy_no = replace(
+        _bin_edge(bins["26°F or above"], entry_price=0.12, forward_edge=0.50),
+        direction="buy_no",
+    )
+    best_buy_yes = _bin_edge(bins["22-23°F"], entry_price=0.45, forward_edge=0.07)
+    fallback_buy_yes = _bin_edge(bins["20-21°F"], entry_price=0.18, forward_edge=0.04)
+
+    family_decision = build_weather_family_decision(
+        [live_disabled_buy_no, best_buy_yes, fallback_buy_yes],
+        city=CITY,
+        target_date=TARGET_DATE,
+        temperature_metric=METRIC,
+        enabled=True,
+    )
+
+    assert family_decision is not None
+    assert family_decision.portfolio.selected_leg is best_buy_yes
+    assert family_decision.portfolio.fallback_candidate_legs == (
+        best_buy_yes,
+        fallback_buy_yes,
+    )
+    assert [d.dropped_bin for d in family_decision.dropped] == ["26°F or above"]
+    assert family_decision.dropped[0].rejection_reason == "NATIVE_MULTIBIN_BUY_NO_LIVE_DISABLED"
+
+
+def test_family_decision_all_live_disabled_buy_no_does_not_self_drop(monkeypatch) -> None:
+    """If no executable sibling exists, blocked diagnostics must not mark the selected leg dropped."""
+
+    flags = dict(evaluator_module.settings["feature_flags"])
+    flags[NATIVE_MULTIBIN_BUY_NO_SHADOW_FLAG] = True
+    flags[NATIVE_MULTIBIN_BUY_NO_LIVE_FLAG] = False
+    monkeypatch.setitem(evaluator_module.settings._data, "feature_flags", flags)
+
+    bins = {s[2]: s for s in _BIN_SPECS}
+    buy_no_a = replace(
+        _bin_edge(bins["26°F or above"], entry_price=0.12, forward_edge=0.50),
+        direction="buy_no",
+    )
+    buy_no_b = replace(
+        _bin_edge(bins["20-21°F"], entry_price=0.18, forward_edge=0.04),
+        direction="buy_no",
+    )
+
+    family_decision = build_weather_family_decision(
+        [buy_no_a, buy_no_b],
+        city=CITY,
+        target_date=TARGET_DATE,
+        temperature_metric=METRIC,
+        enabled=True,
+    )
+
+    assert family_decision is not None
+    assert family_decision.portfolio.selected_leg is buy_no_a
+    assert family_decision.portfolio.fallback_candidate_legs == (buy_no_a, buy_no_b)
+    assert family_decision.dropped == ()
 
 
 def test_runtime_dedup_preserves_ranked_fallback_candidates_until_submit() -> None:

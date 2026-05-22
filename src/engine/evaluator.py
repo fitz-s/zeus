@@ -106,7 +106,11 @@ from src.strategy.fdr_filter import fdr_filter, DEFAULT_FDR_ALPHA
 from src.strategy.family_exclusive_dedup import (
     FAMILY_REJECTION_STAGE,
     MUTUALLY_EXCLUSIVE_FAMILY_DEDUP,
+    NATIVE_MULTIBIN_BUY_NO_LIVE_FLAG,
+    NATIVE_MULTIBIN_BUY_NO_SHADOW_FLAG,
     build_weather_family_decision,
+    native_multibin_buy_no_live_enabled,
+    native_multibin_buy_no_shadow_enabled,
 )
 from src.strategy.kelly import (
     dynamic_kelly_mult,
@@ -164,8 +168,6 @@ DAY0_EXECUTABLE_OBSERVATION_SOURCES_BY_SETTLEMENT_TYPE = {
 }
 DAY0_EXECUTABLE_OBSERVATION_MAX_AGE_HOURS = 1.0
 DAY0_EXECUTABLE_OBSERVATION_FUTURE_TOLERANCE_SECONDS = 60.0
-NATIVE_MULTIBIN_BUY_NO_SHADOW_FLAG = "NATIVE_MULTIBIN_BUY_NO_SHADOW"
-NATIVE_MULTIBIN_BUY_NO_LIVE_FLAG = "NATIVE_MULTIBIN_BUY_NO_LIVE"
 NATIVE_BUY_NO_QUOTE_AVAILABLE_VALIDATION = "buy_no_native_quote_available"
 NATIVE_BUY_NO_QUOTE_UNAVAILABLE_VALIDATION = "buy_no_native_quote_unavailable"
 
@@ -182,21 +184,6 @@ def _strict_feature_flag(name: str, *, default: bool = False) -> bool:
     if not isinstance(value, bool):
         raise ValueError(f"feature flag {name} must be boolean, got {type(value).__name__}")
     return bool(value)
-
-
-def native_multibin_buy_no_shadow_enabled() -> bool:
-    return _strict_feature_flag(NATIVE_MULTIBIN_BUY_NO_SHADOW_FLAG)
-
-
-def native_multibin_buy_no_live_enabled() -> bool:
-    shadow_enabled = native_multibin_buy_no_shadow_enabled()
-    live_enabled = _strict_feature_flag(NATIVE_MULTIBIN_BUY_NO_LIVE_FLAG)
-    if live_enabled and not shadow_enabled:
-        raise ValueError(
-            f"{NATIVE_MULTIBIN_BUY_NO_LIVE_FLAG}=true requires "
-            f"{NATIVE_MULTIBIN_BUY_NO_SHADOW_FLAG}=true"
-        )
-    return live_enabled
 
 
 def _directional_executable_tokens(tokens: dict, direction: str) -> dict:

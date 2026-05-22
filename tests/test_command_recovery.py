@@ -1157,6 +1157,66 @@ class TestRecoveryResolutionTable:
         assert payload["required_predicates"]["prior_fill_confirmed_event"] is True
         assert payload["trade_fact_proof"]["state"] == "MATCHED"
 
+    def test_review_required_clearance_uses_canonical_positive_trade_fact(self, conn):
+        """Relationship: a later weak trade fact cannot erase prior fill proof."""
+        from src.execution.command_recovery import clear_review_required_confirmed_fill
+        from src.state.venue_command_repo import append_event
+
+        _insert(conn, size=5.0, price=0.44)
+        _advance_to_acked(conn, venue_order_id="ord-001")
+        _append_trade_fact(
+            conn,
+            trade_id="trade-001",
+            order_id="ord-001",
+            state="CONFIRMED",
+            filled_size="5.116278",
+            fill_price="0.4299998944545233859457988796",
+        )
+        _append_trade_fact(
+            conn,
+            trade_id="trade-001",
+            order_id="ord-001",
+            state="MATCHED",
+            filled_size="1",
+            fill_price="0.4299998944545233859457988796",
+        )
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="FILL_CONFIRMED",
+            occurred_at="2026-04-26T00:06:00Z",
+            payload={
+                "reason": "place_limit_order_matched_submit",
+                "venue_order_id": "ord-001",
+                "trade_id": "trade-001",
+                "filled_size": "5.116278",
+                "fill_price": "0.4299998944545233859457988796",
+            },
+        )
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="REVIEW_REQUIRED",
+            occurred_at="2026-04-26T00:07:00Z",
+            payload={
+                "reason": "ws_trade_lifecycle_regression_or_economic_drift",
+                "trade_id": "trade-001",
+                "venue_order_id": "ord-001",
+            },
+        )
+
+        payload = clear_review_required_confirmed_fill(
+            conn,
+            "cmd-001",
+            source_commit="test-commit",
+            reviewed_by="pytest",
+            occurred_at="2026-04-26T00:08:00Z",
+        )
+
+        assert _get_state(conn, "cmd-001") == "FILLED"
+        assert payload["trade_fact_proof"]["state"] == "CONFIRMED"
+        assert payload["filled_size"] == "5.116278"
+
     def test_review_required_fill_confirmed_clearance_requires_structured_proof(self, conn):
         from src.state.venue_command_repo import append_event
 
@@ -3852,6 +3912,32 @@ class TestRecoveryResolutionTable:
         event_payload = json.loads(_get_events(conn, "cmd-001")[-1]["payload_json"])
         assert event_payload["positive_fill_trade_fact_count"] == 1
         assert event_payload["positive_fill_size"] == "1.25"
+
+    def test_terminal_remainder_helper_uses_canonical_order_truth_over_later_weaker_fact(
+        self,
+        conn,
+    ):
+        """Relationship: terminal zero-remainder partial proof outranks later open-ish facts."""
+        _insert(conn, size=5.0)
+        _advance_to_partial(conn, venue_order_id="ord-partial")
+        _append_order_fact(
+            conn,
+            order_id="ord-partial",
+            state="EXPIRED",
+            matched_size="1.25",
+            remaining_size="0",
+        )
+        _append_order_fact(
+            conn,
+            order_id="ord-partial",
+            state="PARTIALLY_MATCHED",
+            matched_size="1.25",
+            remaining_size="3.75",
+        )
+
+        from src.execution.command_recovery import _latest_terminal_remainder_order_fact_exists
+
+        assert _latest_terminal_remainder_order_fact_exists(conn, command_id="cmd-001") is True
 
     def test_legacy_filled_command_with_partial_economic_coverage_records_terminal_remainder_fact(
         self,

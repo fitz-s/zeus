@@ -106,6 +106,10 @@ def _status_path() -> Path:
     return state_path("status_summary.json")
 
 
+def _scheduler_health_path() -> Path:
+    return state_path("scheduler_jobs_health.json")
+
+
 def _live_health_composite_path() -> Path:
     return state_path("live_health_composite.json")
 
@@ -131,6 +135,70 @@ def _world_db_path() -> Path:
     # forecasts.db.  Return ZEUS_FORECASTS_DB_PATH so callers (and monkeypatched
     # tests that stub this function) target the correct physical file.
     return ZEUS_FORECASTS_DB_PATH
+
+
+def _scheduler_business_liveness_status() -> dict:
+    """Expose per-mode money-path progress from scheduler health.
+
+    ``status_summary.json`` can be a pulse-only artifact between trading cycles.
+    The per-mode scheduler surface is the durable place where run-mode
+    liveness records candidates, final intents, submit attempts, and terminal
+    frontier class for each mode.
+    """
+
+    path = _scheduler_health_path()
+    if not path.exists():
+        return {
+            "ok": False,
+            "path": str(path),
+            "issue": "SCHEDULER_HEALTH_MISSING",
+            "modes": {},
+        }
+    try:
+        with open(path) as f:
+            payload = json.load(f)
+    except Exception as exc:
+        return {
+            "ok": False,
+            "path": str(path),
+            "issue": f"SCHEDULER_HEALTH_UNPARSEABLE:{exc}",
+            "modes": {},
+        }
+    if not isinstance(payload, dict):
+        return {
+            "ok": False,
+            "path": str(path),
+            "issue": "SCHEDULER_HEALTH_NOT_OBJECT",
+            "modes": {},
+        }
+    modes: dict[str, dict] = {}
+    for key, entry in payload.items():
+        if not isinstance(key, str) or not key.startswith("run_mode:"):
+            continue
+        if not isinstance(entry, dict):
+            continue
+        mode = key.split(":", 1)[1]
+        liveness = entry.get("business_liveness")
+        if not isinstance(liveness, dict):
+            liveness = {}
+        modes[mode] = {
+            "status": entry.get("status"),
+            "last_run_at": entry.get("last_run_at"),
+            "last_started_at": entry.get("last_started_at"),
+            "last_success_at": entry.get("last_success_at"),
+            "last_skip_at": entry.get("last_skip_at"),
+            "last_skip_reason": entry.get("last_skip_reason"),
+            "consecutive_skips": int(entry.get("consecutive_skips") or 0),
+            "business_liveness": dict(liveness),
+        }
+    if not modes:
+        return {
+            "ok": False,
+            "path": str(path),
+            "issue": "RUN_MODE_BUSINESS_LIVENESS_MISSING",
+            "modes": {},
+        }
+    return {"ok": True, "path": str(path), "issue": None, "modes": modes}
 
 
 def _riskguard_label() -> str:
@@ -1216,6 +1284,15 @@ def check() -> dict:
     result["live_db_holders_ok"] = bool(result["live_db_holders"].get("ok", True))
     if not result["live_db_holders_ok"]:
         result["live_db_holders_issue"] = result["live_db_holders"].get("issue") or "LIVE_DB_HOLDER_POLICY"
+    result["scheduler_business_liveness"] = _scheduler_business_liveness_status()
+    result["scheduler_business_liveness_ok"] = bool(
+        result["scheduler_business_liveness"].get("ok", True)
+    )
+    if not result["scheduler_business_liveness_ok"]:
+        result["scheduler_business_liveness_issue"] = (
+            result["scheduler_business_liveness"].get("issue")
+            or "RUN_MODE_BUSINESS_LIVENESS_UNAVAILABLE"
+        )
 
     # Check daemon PID
     try:
@@ -1485,6 +1562,7 @@ def check() -> dict:
         and bool(result.get("launchd_contract_ok"))
         and bool(result.get("source_health_ok"))
         and bool(result.get("live_health_composite_ok", True))
+        and bool(result.get("scheduler_business_liveness_ok", True))
         and bool(result.get("entry_execution_capability_ok", True))
         and bool(result.get("settlement_truth_ok"))
         and bool(result.get("db_lock_ok", True))
