@@ -291,7 +291,7 @@ def test_kelly_for_phase_None_returns_default():
 
 def test_live_quality_floors_are_registry_backed() -> None:
     profile = sp.get("opening_inertia")
-    assert profile.min_entry_price == pytest.approx(0.05)
+    assert profile.min_entry_price == pytest.approx(0.0)
     assert profile.min_strategy_notional_usd == pytest.approx(1.0)
     assert profile.min_expected_profit_usd == pytest.approx(0.05)
     assert profile.allow_ultra_low_tail is False

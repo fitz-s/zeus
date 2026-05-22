@@ -1060,13 +1060,36 @@ def test_weather_family_decision_is_disabled_with_stage_a_gate() -> None:
     assert family_decision is None
 
 
-def test_one_cent_order_rejected_without_tail_strategy_even_if_venue_min_passes() -> None:
+def test_one_cent_opening_inertia_order_uses_profit_floor_not_price_floor() -> None:
     bins = {s[2]: s for s in _BIN_SPECS}
     edge = _bin_edge(bins["26°F or above"], entry_price=0.01, forward_edge=0.04)
 
-    assert _strategy_entry_price_floor_block_reason("opening_inertia", edge) == (
-        "STRATEGY_ENTRY_PRICE_BELOW_LIVE_FLOOR(0.0100<=0.05; "
-        "strategy=opening_inertia; direction=buy_yes; tail_topology=true)"
+    assert _strategy_entry_price_floor_block_reason("opening_inertia", edge) is None
+
+    expected_profit = _expected_profit_usd_for_edge(
+        edge,
+        notional_usd=1.00,
+        price=0.01,
+    )
+    assert expected_profit > 0.05
+    assert _live_entry_economic_floor_rejection(
+        strategy_key="opening_inertia",
+        edge=edge,
+        submitted_notional_usd=1.00,
+        expected_profit_usd=expected_profit,
+        final_limit_price=0.01,
+        passive_order=False,
+    ) is None
+
+
+def test_one_cent_center_buy_order_still_rejected_even_if_venue_min_passes() -> None:
+    bins = {s[2]: s for s in _BIN_SPECS}
+    edge = _bin_edge(bins["22-23°F"], entry_price=0.01, forward_edge=0.04)
+
+    assert _strategy_entry_price_floor_block_reason("center_buy", edge) == (
+        "CENTER_BUY_ULTRA_LOW_PRICE(0.0100<=0.02; "
+        "strategy=center_buy; direction=buy_yes; tail_topology=false; "
+        "specialized=CENTER_BUY_ULTRA_LOW_PRICE(0.0100<=0.02))"
     )
 
 
@@ -1160,12 +1183,12 @@ def test_ultra_low_tail_authority_does_not_bypass_passive_fill_model(monkeypatch
     assert reason.startswith("PASSIVE_FILL_PROBABILITY_UNMODELED")
 
 
-def test_ultra_low_non_passive_order_requires_tail_authority() -> None:
+def test_ultra_low_non_passive_order_requires_tail_authority_for_non_opening_strategy() -> None:
     bins = {s[2]: s for s in _BIN_SPECS}
     edge = _bin_edge(bins["26°F or above"], entry_price=0.20, forward_edge=0.08)
 
     reason = _live_entry_economic_floor_rejection(
-        strategy_key="opening_inertia",
+        strategy_key="center_buy",
         edge=edge,
         submitted_notional_usd=2.00,
         expected_profit_usd=0.20,

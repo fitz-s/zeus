@@ -236,7 +236,7 @@ opening_inertia:
   min_shadow_decisions: 0
   min_settled_decisions: 0
   promotion_evidence_ref: docs/reference/zeus_domain_model.md
-  min_entry_price: 0.05
+  min_entry_price: 0.0
   min_strategy_notional_usd: 1.00
   min_expected_profit_usd: 0.05
   allow_ultra_low_tail: false
