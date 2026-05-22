@@ -1,6 +1,6 @@
-# Created: 2026-05-21
-# Last reused or audited: 2026-05-21
-# Authority basis: docs/operations/task_2026-05-21_strategy_vnext_phase4_fdr_candidates/PHASE_4_PLAN.md §T4
+# Lifecycle: created=2026-05-21; last_reviewed=2026-05-22; last_reused=never
+# Purpose: Phase 4 T4 relationship tests for cross_market_correlation_hedge + neg_risk_basket candidates
+# Reuse: verify NoTradeReason enum has CORR_HEDGE_REGIME_UNAVAILABLE + NEGRISK_FAMILY_INCOMPLETE before running
 """Phase 4 T4 — relationship tests for cross_market_correlation_hedge + neg_risk_basket.
 
 Two relationship assertions per candidate (per plan §T4 acceptance criteria):
@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import sqlite3
 from datetime import datetime
+from decimal import Decimal
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
@@ -32,7 +33,11 @@ from src.state.db import SCHEMA_VERSION
 from src.strategy.candidates import (
     CandidateContext,
     CrossMarketCorrelationHedge,
+    FamilyOrderBookSnapshot,
+    LegBook,
     NegRiskBasket,
+    PriceLevel,
+    VectorEdgeDecision,
 )
 from src.strategy.strategy_profile import get as get_strategy_profile
 
@@ -44,6 +49,9 @@ assert NoTradeReason.CORR_HEDGE_REGIME_UNAVAILABLE, (
 )
 assert NoTradeReason.NEGRISK_FAMILY_INCOMPLETE, (
     "NoTradeReason.NEGRISK_FAMILY_INCOMPLETE must exist (Phase 4 T4)"
+)
+assert NoTradeReason.NEGRISK_NO_PROFITABLE_BASKET, (
+    "NoTradeReason.NEGRISK_NO_PROFITABLE_BASKET must exist (feat-negrisk-basket-exact-arb)"
 )
 
 # ---------------------------------------------------------------------------
@@ -327,21 +335,40 @@ class TestCrossMarketCorrelationHedgeRelationship:
 # NegRiskBasket relationship tests
 # ---------------------------------------------------------------------------
 
+def _make_profitable_yes_family() -> FamilyOrderBookSnapshot:
+    """3-leg family where YES basket has positive exact-arb profit."""
+    # YES asks [0.20, 0.22, 0.18] → sum = 0.60 < 1 → Π_Y = 0.40*q - fee > 0
+    legs = tuple(
+        LegBook(
+            condition_id=f"0xcond{i:02d}",
+            yes_levels=(PriceLevel(price=p, quantity=Decimal("10")),),
+            no_levels=(PriceLevel(price=Decimal("0.85"), quantity=Decimal("10")),),
+        )
+        for i, p in enumerate([Decimal("0.20"), Decimal("0.22"), Decimal("0.18")])
+    )
+    return FamilyOrderBookSnapshot(
+        legs=legs,
+        neg_risk_market_id="nrm-t4-001",
+        captured_at_iso="2026-06-15T09:00:00+00:00",
+    )
+
+
 class TestNegRiskBasketRelationship:
-    """R-tests: neg_risk_basket enter→decision_events, no_trade→no_trade_events."""
+    """R-tests: neg_risk_basket enter→decision_events, no_trade→no_trade_events.
+
+    Reframed 2026-05-22: NegRiskBasket now requires FamilyOrderBookSnapshot
+    (exact-arb per zeus_math_spec §11.6), not legacy neg_risk_yes_ask_sum threshold.
+    """
 
     def _make_enter_analysis(self) -> SimpleNamespace:
-        """Build an analysis namespace with all neg_risk completeness fields set for enter."""
+        """Analysis with profitable YES basket via FamilyOrderBookSnapshot."""
         return SimpleNamespace(
             metrics=_make_metrics(),
-            neg_risk=True,                         # snapshot-level negRisk flag
-            neg_risk_family_complete=True,         # token book complete
-            neg_risk_token_count=4,                # 4-outcome family (enough for basket)
-            neg_risk_yes_ask_sum="0.90",           # sum < 0.97 threshold → arb exists
+            family_book_snapshot=_make_profitable_yes_family(),
         )
 
     def test_enter_path_writes_decision_events_row_with_correct_strategy_key(self):
-        """Enter path: complete token book + arb below threshold → decision_events row."""
+        """Enter path: profitable FamilyOrderBookSnapshot → decision_events row."""
         conn = _make_conn()
         candidate = NegRiskBasket()
         analysis = self._make_enter_analysis()
@@ -362,15 +389,12 @@ class TestNegRiskBasketRelationship:
         assert rows[0]["source"] == "shadow_decision"
         assert rows[0]["polymarket_end_anchor_source"] == "gamma_explicit"
 
-    def test_no_trade_path_missing_family_complete_writes_no_trade_row(self):
-        """No-trade path: neg_risk_family_complete absent → NEGRISK_FAMILY_INCOMPLETE."""
+    def test_no_trade_path_missing_family_snapshot_writes_no_trade_row(self):
+        """No-trade path: FamilyOrderBookSnapshot absent → NEGRISK_FAMILY_INCOMPLETE."""
         conn = _make_conn()
         candidate = NegRiskBasket()
-        # neg_risk=True but family_complete not set.
-        analysis = SimpleNamespace(
-            metrics=_make_metrics(),
-            neg_risk=True,
-        )
+        # Analysis with no family_book_snapshot at all.
+        analysis = SimpleNamespace(metrics=_make_metrics())
         ctx = _make_context(conn, analysis)
 
         decision = candidate.evaluate(context=ctx, conn=conn, decision_time=_DECISION_TIME)
@@ -387,37 +411,46 @@ class TestNegRiskBasketRelationship:
         assert rows[0]["schema_compatibility"] == "current"
         assert "candidate_strategy_key=neg_risk_basket" in rows[0]["reason_detail"]
 
-    def test_no_trade_path_neg_risk_false_writes_no_trade_row(self):
-        """No-trade path: neg_risk=False → NEGRISK_FAMILY_INCOMPLETE (not a negRisk market)."""
+    def test_no_trade_path_no_profitable_basket_writes_no_trade_row(self):
+        """No-trade path: book present but max(Π_Y, Π_N) ≤ 0 → NEGRISK_NO_PROFITABLE_BASKET."""
         conn = _make_conn()
         candidate = NegRiskBasket()
-        analysis = SimpleNamespace(
-            metrics=_make_metrics(),
-            neg_risk=False,
+        # 2-leg family, YES and NO asks both at 0.52 → both baskets unprofitable
+        legs = tuple(
+            LegBook(
+                condition_id=f"0xcond{i:02d}",
+                yes_levels=(PriceLevel(price=Decimal("0.52"), quantity=Decimal("10")),),
+                no_levels=(PriceLevel(price=Decimal("0.52"), quantity=Decimal("10")),),
+            )
+            for i in range(2)
         )
+        family = FamilyOrderBookSnapshot(
+            legs=legs, neg_risk_market_id="nrm-t4-002", captured_at_iso="2026-06-15T09:00:00+00:00"
+        )
+        analysis = SimpleNamespace(metrics=_make_metrics(), family_book_snapshot=family)
         ctx = _make_context(conn, analysis)
 
         decision = candidate.evaluate(context=ctx, conn=conn, decision_time=_DECISION_TIME)
 
-        assert decision.outcome == "no_trade"
-        assert decision.reason == NoTradeReason.NEGRISK_FAMILY_INCOMPLETE
+        assert decision.outcome == "no_trade", f"Expected no_trade, got {decision.outcome}"
+        assert decision.reason == NoTradeReason.NEGRISK_NO_PROFITABLE_BASKET
+
         rows = conn.execute(
-            "SELECT reason, schema_compatibility, reason_detail FROM no_trade_events"
+            "SELECT reason, schema_compatibility, reason_detail FROM no_trade_events WHERE market_slug=?",
+            (ctx.natural_key[0],),
         ).fetchall()
-        assert len(rows) == 1
-        assert rows[0]["reason"] == NoTradeReason.NEGRISK_FAMILY_INCOMPLETE.value
+        assert len(rows) == 1, f"Expected 1 no_trade_events row, got {len(rows)}"
+        assert rows[0]["reason"] == NoTradeReason.NEGRISK_NO_PROFITABLE_BASKET.value
         assert rows[0]["schema_compatibility"] == "current"
         assert "candidate_strategy_key=neg_risk_basket" in rows[0]["reason_detail"]
 
     def test_no_trade_path_missing_fields_no_exception(self):
-        """Missing all completeness fields → no_trade without exception (fail-open)."""
+        """Bare analysis (no family_book_snapshot) → no_trade without exception."""
         conn = _make_conn()
         candidate = NegRiskBasket()
-        # Bare analysis, no neg_risk or completeness fields.
         analysis = SimpleNamespace(metrics=_make_metrics())
         ctx = _make_context(conn, analysis)
 
-        # Must not raise.
         decision = candidate.evaluate(context=ctx, conn=conn, decision_time=_DECISION_TIME)
 
         assert decision.outcome == "no_trade"
@@ -433,7 +466,7 @@ class TestNegRiskBasketRelationship:
         d1 = candidate.evaluate(context=ctx1, conn=conn, decision_time=_DECISION_TIME)
         assert d1 is not None
 
-        # No-trade path (different observation_time).
+        # No-trade path (different observation_time, bare analysis).
         ctx2 = _make_context(
             conn,
             SimpleNamespace(metrics=_make_metrics()),

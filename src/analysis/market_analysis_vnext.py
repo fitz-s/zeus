@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, Any, Optional
 
 if TYPE_CHECKING:
     from src.contracts.executable_market_snapshot_v2 import ExecutableMarketSnapshotV2
+    from src.strategy.candidates import FamilyOrderBookSnapshot
 
 # T4_MERGE_DATE: placeholder. Production pass overwrites with the merge commit
 # ISO timestamp extracted from:
@@ -90,6 +91,7 @@ class MarketAnalysisVNext:
         polymarket_end_anchor_source: str = "",
         bin_grid_id: Optional[str] = None,
         bin_schema_version: Optional[str] = None,
+        family_book_snapshot: "Optional[FamilyOrderBookSnapshot]" = None,
     ) -> None:
         """
         Args:
@@ -101,12 +103,21 @@ class MarketAnalysisVNext:
             bin_grid_id: From ensemble_snapshots_v2.bin_grid_id for this snapshot's
                      triggering cycle (F4 retrofit).
             bin_schema_version: Companion to bin_grid_id.
+            family_book_snapshot: Optional caller-injected neg-risk family order-book
+                     snapshot. When present, neg_risk_basket.evaluate() reads per-leg
+                     depth for exact sweep-cost / profit calculation (§11.5-11.8).
         """
         self._snapshot = snapshot
         self._history = history
         self._polymarket_end_anchor_source = polymarket_end_anchor_source
         self._bin_grid_id = bin_grid_id
         self._bin_schema_version = bin_schema_version
+        self._family_book_snapshot = family_book_snapshot
+
+    @property
+    def family_book_snapshot(self) -> "Optional[FamilyOrderBookSnapshot]":
+        """Caller-injected neg-risk family order-book snapshot (may be None)."""
+        return self._family_book_snapshot
 
     def compute(self) -> MicrostructureMetrics:
         """Compute MicrostructureMetrics for this snapshot.

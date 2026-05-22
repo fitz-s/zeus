@@ -21,6 +21,7 @@ from pathlib import Path
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _SRC_ROOT = _REPO_ROOT / "src"
 _ALLOWED_NEG_RISK_FILES = {
+    "src/analysis/market_analysis_vnext.py",  # family_book_snapshot caller-injected param (exact-arb pipeline)
     "src/contracts/executable_market_snapshot_v2.py",
     "src/contracts/execution_intent.py",
     "src/contracts/venue_submission_envelope.py",

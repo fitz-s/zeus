@@ -145,6 +145,7 @@ class NoTradeReason(StrEnum):
     # 2 members per 05_PHASE_4_FDR_FAMILY_CANDIDATES.md §T4 deferred candidates
     CORR_HEDGE_REGIME_UNAVAILABLE = auto()     # cross_market_correlation_hedge: regime UNKNOWN or store not fit
     NEGRISK_FAMILY_INCOMPLETE = auto()         # neg_risk_basket: full token book per family unavailable
+    NEGRISK_NO_PROFITABLE_BASKET = auto()      # neg_risk_basket: book present but max(Π_Y(q*),Π_N(q*)) <= 0
 
     # ── Fallback (§13) ────────────────────────────────────────────────────────
     UNCATEGORIZED = auto()
