@@ -894,7 +894,7 @@ def get_connection(
 # CI hook scripts/check_schema_version.py diffs the sqlite_master hash of
 # a fresh-init DB against tests/state/_schema_pinned_hash.txt and fails
 # the PR if SCHEMA_VERSION did not change in lockstep.
-SCHEMA_VERSION = 26  # 2026-05-21 evidence-tier authority + no_trade strategy provenance
+SCHEMA_VERSION = 27  # 2026-05-22 evidence lifecycle + strategy_key CHECK widening
 
 
 def init_schema(
@@ -1205,12 +1205,7 @@ def init_schema(
             range_label TEXT,
             direction TEXT CHECK (direction IN ('buy_yes', 'buy_no', 'unknown')),
             mode TEXT,
-            strategy_key TEXT CHECK (strategy_key IN (
-                'settlement_capture',
-                'shoulder_sell',
-                'center_buy',
-                'opening_inertia'
-            )),
+            strategy_key TEXT,
             discovery_mode TEXT,
             entry_method TEXT,
             selected_method TEXT,
@@ -1323,12 +1318,7 @@ def init_schema(
 
         -- Derived health view for PnL and edge compression
         CREATE TABLE IF NOT EXISTS strategy_health (
-            strategy_key TEXT NOT NULL CHECK (strategy_key IN (
-                'settlement_capture',
-                'shoulder_sell',
-                'center_buy',
-                'opening_inertia'
-            )),
+            strategy_key TEXT NOT NULL,
             as_of TEXT NOT NULL,
             open_exposure_usd REAL NOT NULL DEFAULT 0,
             settled_trades_30d INTEGER NOT NULL DEFAULT 0,
@@ -1392,7 +1382,7 @@ def init_schema(
             finality_confirmed_time    TEXT,
             clock_skew_estimate_ms_at_submit INTEGER,
             raw_orderbook_hash_transition_delta_ms INTEGER,
-            schema_version INTEGER NOT NULL CHECK (schema_version IN (12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26)),
+            schema_version INTEGER NOT NULL CHECK (schema_version IN (12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27)),
             source         TEXT NOT NULL CHECK (source IN ('phase0_backfill', 'live_decision', 'shadow_decision')),
             PRIMARY KEY (market_slug, temperature_metric, target_date, observation_time, decision_seq)
         );
@@ -2520,6 +2510,7 @@ def init_schema(
     # must admit shadow_decision / unknown_legacy before PRAGMA user_version is
     # stamped current. CREATE TABLE IF NOT EXISTS cannot upgrade stale CHECKs.
     _migrate_decision_events_schema(conn)
+    _migrate_world_strategy_key_checks(conn)
 
     # Phase 3 T2 (2026-05-21): tail_stress_scenarios table (SCHEMA_VERSION 16).
     from src.state.schema.tail_stress_scenarios_schema import ensure_table as _ensure_tail_stress_scenarios_table
@@ -2574,7 +2565,7 @@ def _migrate_decision_events_schema(conn: sqlite3.Connection) -> None:
     if (
         "unknown_legacy" in table_sql
         and "shadow_decision" in table_sql
-        and "12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26" in table_sql
+        and "12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27" in table_sql
     ):
         conn.execute("DROP TABLE IF EXISTS decision_events_new")
         return
@@ -2614,7 +2605,7 @@ def _migrate_decision_events_schema(conn: sqlite3.Connection) -> None:
             finality_confirmed_time    TEXT,
             clock_skew_estimate_ms_at_submit INTEGER,
             raw_orderbook_hash_transition_delta_ms INTEGER,
-            schema_version INTEGER NOT NULL CHECK (schema_version IN (12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26)),
+            schema_version INTEGER NOT NULL CHECK (schema_version IN (12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27)),
             source         TEXT NOT NULL CHECK (source IN ('phase0_backfill', 'live_decision', 'shadow_decision')),
             PRIMARY KEY (market_slug, temperature_metric, target_date, observation_time, decision_seq)
         )
@@ -2650,7 +2641,7 @@ def _migrate_decision_events_schema(conn: sqlite3.Connection) -> None:
             first_inclusion_block_time, finality_confirmed_time,
             clock_skew_estimate_ms_at_submit, raw_orderbook_hash_transition_delta_ms,
             CASE
-                WHEN schema_version IN (12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26)
+                WHEN schema_version IN (12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27)
                     THEN schema_version
                 ELSE 26
             END,
@@ -3352,6 +3343,92 @@ def _create_market_microstructure_snapshots(conn: sqlite3.Connection) -> None:
     """)
 
 
+
+def _strip_strategy_key_check(sql: str) -> str:
+    """Remove strategy_key inline CHECK from a CREATE TABLE DDL string."""
+    import re as _re
+    return _re.sub(
+        r"(strategy_key\s+TEXT(?:\s+NOT\s+NULL)?)\s+CHECK\s*\(strategy_key\s+IN\s*\([^)]+\)\)",
+        r"\1",
+        sql,
+    )
+
+
+def _migrate_world_strategy_key_checks(conn: sqlite3.Connection) -> None:
+    """Remove stale hardcoded strategy_key CHECK from world-class telemetry tables.
+
+    Finding 6 (P2, 2026-05-22): probability_trace_fact and strategy_health had
+    a hardcoded CHECK enumerating the 4 founding strategies. Day0_nowcast_entry
+    and future registry additions would fail with CHECK constraint violations.
+    Application-layer _strategy_key_for() + registry are the authoritative enum.
+    Uses full table-swap so existing rows are preserved.
+    """
+    import re as _re  # noqa: F811
+    for tname in ("probability_trace_fact", "strategy_health"):
+        row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (tname,)
+        ).fetchone()
+        if row is None:
+            continue
+        old_sql = str(row[0])
+        if "'opening_inertia'" not in old_sql or "day0_nowcast_entry" in old_sql:
+            continue  # Already migrated or no stale CHECK
+        indexes = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='index' AND tbl_name=? AND sql IS NOT NULL",
+            (tname,),
+        ).fetchall()
+        new_create = _strip_strategy_key_check(old_sql)
+        new_create = _re.sub(
+            rf"CREATE TABLE(?:\s+IF NOT EXISTS)?\s+{_re.escape(tname)}\b",
+            f"CREATE TABLE {tname}_new",
+            new_create,
+        )
+        conn.execute(f"DROP TABLE IF EXISTS {tname}_new")
+        conn.execute(new_create)
+        conn.execute(f"INSERT INTO {tname}_new SELECT * FROM {tname}")
+        conn.execute(f"DROP TABLE {tname}")
+        conn.execute(f"ALTER TABLE {tname}_new RENAME TO {tname}")
+        for (idx_sql,) in indexes:
+            conn.execute(idx_sql)
+
+
+def _migrate_trade_strategy_key_checks(conn: sqlite3.Connection) -> None:
+    """Remove stale hardcoded strategy_key CHECK from trade-class tables.
+
+    Finding 6 (P2, 2026-05-22): position_events, position_current, and
+    execution_fact carried the same stale 4-strategy CHECK. Triggers on
+    position_events are preserved via sqlite_master query+recreate.
+    """
+    import re as _re  # noqa: F811
+    for tname in ("position_events", "position_current", "execution_fact"):
+        row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (tname,)
+        ).fetchone()
+        if row is None:
+            continue
+        old_sql = str(row[0])
+        if "'opening_inertia'" not in old_sql or "day0_nowcast_entry" in old_sql:
+            continue  # Already migrated or no stale CHECK
+        triggers = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='trigger' AND tbl_name=? AND sql IS NOT NULL",
+            (tname,),
+        ).fetchall()
+        new_create = _strip_strategy_key_check(old_sql)
+        new_create = _re.sub(
+            rf"CREATE TABLE(?:\s+IF NOT EXISTS)?\s+{_re.escape(tname)}\b",
+            f"CREATE TABLE {tname}_new",
+            new_create,
+        )
+        conn.execute(f"DROP TABLE IF EXISTS {tname}_new")
+        conn.execute(new_create)
+        conn.execute(f"INSERT INTO {tname}_new SELECT * FROM {tname}")
+        conn.execute(f"DROP TABLE {tname}")
+        conn.execute(f"ALTER TABLE {tname}_new RENAME TO {tname}")
+        for (trg_sql,) in triggers:
+            conn.execute(trg_sql)
+
+
+
 def init_schema_forecasts(conn: sqlite3.Connection) -> None:
     """Create all forecast-authority tables on zeus-forecasts.db. Idempotent.
 
@@ -3624,9 +3701,7 @@ CREATE TABLE IF NOT EXISTS position_events (
         'pending_entry','active','day0_window','pending_exit',
         'economically_closed','settled','voided','quarantined','admin_closed'
     )),
-    strategy_key TEXT NOT NULL CHECK (strategy_key IN (
-        'settlement_capture','shoulder_sell','center_buy','opening_inertia'
-    )),
+    strategy_key TEXT NOT NULL,
     decision_id TEXT,
     snapshot_id TEXT,
     order_id TEXT,
@@ -3681,9 +3756,7 @@ CREATE TABLE IF NOT EXISTS position_current (
     last_monitor_market_price REAL,
     decision_snapshot_id TEXT,
     entry_method TEXT,
-    strategy_key TEXT NOT NULL CHECK (strategy_key IN (
-        'settlement_capture','shoulder_sell','center_buy','opening_inertia'
-    )),
+    strategy_key TEXT NOT NULL,
     edge_source TEXT,
     discovery_mode TEXT,
     chain_state TEXT,
@@ -3702,9 +3775,7 @@ CREATE TABLE IF NOT EXISTS execution_fact (
     position_id TEXT,
     decision_id TEXT,
     order_role TEXT NOT NULL CHECK (order_role IN ('entry','exit')),
-    strategy_key TEXT CHECK (strategy_key IN (
-        'settlement_capture','shoulder_sell','center_buy','opening_inertia'
-    )),
+    strategy_key TEXT,
     posted_at TEXT,
     filled_at TEXT,
     voided_at TEXT,
@@ -4050,6 +4121,7 @@ def init_schema_trade_only(conn: sqlite3.Connection) -> None:
 
     # Create the trade runtime tables (IF NOT EXISTS — idempotent).
     conn.executescript(_TRADE_CLASS_DDL)
+    _migrate_trade_strategy_key_checks(conn)
     # Executable market substrate is live execution evidence. The market
     # discovery scheduler passes this same trade connection to snapshot_repo and
     # book_hash_transitions so snapshot rows and hash transitions commit together.

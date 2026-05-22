@@ -41,11 +41,16 @@ CREATE TABLE IF NOT EXISTS evidence_tier_assignments (
     rationale      TEXT,
     operator_ref   TEXT,
     verdict_reason TEXT,
-    schema_version INTEGER NOT NULL DEFAULT 26 CHECK (schema_version IN (25, 26)),
+    schema_version INTEGER NOT NULL DEFAULT 27 CHECK (schema_version IN (25, 26, 27)),
     assignment_source TEXT NOT NULL DEFAULT 'tribunal'
         CHECK (assignment_source IN ('tribunal', 'operator_override', 'migration')),
     verdict_kind   TEXT NOT NULL DEFAULT 'MIGRATION'
-        CHECK (verdict_kind IN ('PROMOTE', 'HOLD', 'DEMOTE', 'OPERATOR_OVERRIDE', 'MIGRATION'))
+        CHECK (verdict_kind IN ('PROMOTE', 'HOLD', 'DEMOTE', 'OPERATOR_OVERRIDE', 'MIGRATION')),
+    effective_from        TEXT,
+    effective_until       TEXT,
+    revoked_at            TEXT,
+    revoked_by            TEXT,
+    supersedes_assignment_id INTEGER
 )
 """
 
@@ -107,6 +112,7 @@ def _migrate_evidence_tier_assignments_schema(conn: sqlite3.Connection) -> None:
         and "assignment_source" in table_sql
         and "verdict_kind" in table_sql
         and "tier IN (0, 1, 2, 3, 4, 5, 6, 7)" in table_sql
+        and "effective_from" in table_sql
     ):
         return
 
@@ -115,27 +121,40 @@ def _migrate_evidence_tier_assignments_schema(conn: sqlite3.Connection) -> None:
         "CREATE TABLE IF NOT EXISTS evidence_tier_assignments",
         "CREATE TABLE evidence_tier_assignments_new",
     ))
-    conn.execute(
-        """
-        INSERT INTO evidence_tier_assignments_new (
-            strategy_id, tier, assigned_at, rationale, operator_ref,
-            verdict_reason, schema_version, assignment_source, verdict_kind
+    old_cols = {
+        row[1]
+        for row in conn.execute("PRAGMA table_info(evidence_tier_assignments)").fetchall()
+    }
+    has_provenance = "assignment_source" in old_cols and "verdict_kind" in old_cols
+    if has_provenance:
+        conn.execute(
+            """
+            INSERT INTO evidence_tier_assignments_new (
+                strategy_id, tier, assigned_at, rationale, operator_ref,
+                verdict_reason, schema_version, assignment_source, verdict_kind
+            )
+            SELECT
+                strategy_id,
+                CASE WHEN tier IN (0, 1, 2, 3, 4, 5, 6, 7) THEN tier ELSE 0 END,
+                assigned_at, rationale, operator_ref, verdict_reason,
+                27, assignment_source, verdict_kind
+            FROM evidence_tier_assignments
+            """
         )
-        SELECT
-            strategy_id,
-            CASE
-                WHEN tier IN (0, 1, 2, 3, 4, 5, 6, 7) THEN tier
-                ELSE 0
-            END,
-            assigned_at,
-            rationale,
-            operator_ref,
-            verdict_reason,
-            26,
-            'migration',
-            'MIGRATION'
-        FROM evidence_tier_assignments
-        """
-    )
+    else:
+        conn.execute(
+            """
+            INSERT INTO evidence_tier_assignments_new (
+                strategy_id, tier, assigned_at, rationale, operator_ref,
+                verdict_reason, schema_version, assignment_source, verdict_kind
+            )
+            SELECT
+                strategy_id,
+                CASE WHEN tier IN (0, 1, 2, 3, 4, 5, 6, 7) THEN tier ELSE 0 END,
+                assigned_at, rationale, operator_ref, verdict_reason,
+                27, 'migration', 'MIGRATION'
+            FROM evidence_tier_assignments
+            """
+        )
     conn.execute("DROP TABLE evidence_tier_assignments")
     conn.execute("ALTER TABLE evidence_tier_assignments_new RENAME TO evidence_tier_assignments")

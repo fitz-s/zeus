@@ -458,16 +458,27 @@ def test_t4_promote_to_live_tier_with_operator_ref_succeeds(world_conn) -> None:
 #                  — losing cohort → DEMOTE  (SEV2-1 regression guard)
 # ---------------------------------------------------------------------------
 
-def _insert_decision_events(conn: sqlite3.Connection, strategy_key: str, count: int) -> None:
-    """Insert minimal valid decision_events rows for a strategy (test helper)."""
+def _insert_decision_events(
+    conn: sqlite3.Connection,
+    strategy_key: str,
+    count: int,
+    *,
+    ids: list[str] | None = None,
+) -> None:
+    """Insert minimal valid decision_events rows for a strategy (test helper).
+
+    ids: optional list of decision_event_id values to set (for F3 JOIN correctness).
+    If omitted, decision_event_id is left NULL.
+    """
     for i in range(count):
+        de_id = ids[i] if ids is not None else None
         conn.execute(
             """
             INSERT INTO decision_events (
                 market_slug, temperature_metric, target_date, observation_time,
-                decision_seq, decision_time, outcome, side, strategy_key,
+                decision_seq, decision_event_id, decision_time, outcome, side, strategy_key,
                 observation_available_at, polymarket_end_anchor_source, schema_version, source
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 f"test-market-{strategy_key}",
@@ -475,13 +486,14 @@ def _insert_decision_events(conn: sqlite3.Connection, strategy_key: str, count: 
                 "2026-05-01",
                 f"2026-05-01T{i // 3600:02d}:{(i % 3600) // 60:02d}:{i % 60:02d}Z",
                 i,
+                de_id,
                 "2026-05-01T12:00:00Z",
                 "YES",
                 "BUY",
                 strategy_key,
                 "2026-05-01T11:00:00Z",
                 "gamma_explicit",
-                25,
+                27,
                 "phase0_backfill",
             ),
         )
@@ -533,7 +545,10 @@ def test_t4_winning_cohort_is_promote_eligible(world_conn) -> None:
         )
         write_regret_decomposition(exp_id, f"evt_loss_{i}", components, conn=world_conn)
     # Insert matching decision_events rows (authoritative n_decisions denominator)
-    _insert_decision_events(world_conn, "shoulder_sell", 100)
+    _insert_decision_events(
+        world_conn, "shoulder_sell", 100,
+        ids=[f"evt_win_{i}" for i in range(80)] + [f"evt_loss_{i}" for i in range(20)],
+    )
 
     report = build_evidence_report(
         "shoulder_sell", EvidenceTier.SHADOW_PASS,
@@ -647,7 +662,10 @@ def test_t4_losing_cohort_is_demote(world_conn) -> None:
         )
         write_regret_decomposition(exp_id, f"evt_lose_{i}", components, conn=world_conn)
     # Insert matching decision_events rows (authoritative n_decisions denominator)
-    _insert_decision_events(world_conn, "center_sell", 100)
+    _insert_decision_events(
+        world_conn, "center_sell", 100,
+        ids=[f"evt_lose_{i}" for i in range(100)],
+    )
 
     report = build_evidence_report(
         "center_sell", EvidenceTier.PAPER_COHORT,

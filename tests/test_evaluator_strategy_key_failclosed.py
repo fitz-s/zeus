@@ -235,7 +235,7 @@ def test_day0_forecast_upside_does_not_masquerade_as_settlement_capture() -> Non
     edge = _finite_buy_yes_edge(36.0, 37.0)
 
     assert _edge_source_for(candidate, edge) == "day0_nowcast_entry"
-    assert _strategy_key_for(candidate, edge) is None
+    assert _strategy_key_for(candidate, edge) == "day0_nowcast_entry"
 
 
 def test_imminent_forecast_upside_does_not_masquerade_as_settlement_capture() -> None:
@@ -243,7 +243,7 @@ def test_imminent_forecast_upside_does_not_masquerade_as_settlement_capture() ->
     edge = _finite_buy_yes_edge(36.0, 37.0)
 
     assert _edge_source_for(candidate, edge) == "day0_nowcast_entry"
-    assert _strategy_key_for(candidate, edge) is None
+    assert _strategy_key_for(candidate, edge) == "day0_nowcast_entry"
 
 
 def test_any_settlement_day_forecast_upside_does_not_masquerade_as_settlement_capture() -> None:
@@ -254,4 +254,4 @@ def test_any_settlement_day_forecast_upside_does_not_masquerade_as_settlement_ca
     edge = _finite_buy_yes_edge(36.0, 37.0)
 
     assert _edge_source_for(candidate, edge) == "day0_nowcast_entry"
-    assert _strategy_key_for(candidate, edge) is None
+    assert _strategy_key_for(candidate, edge) == "day0_nowcast_entry"

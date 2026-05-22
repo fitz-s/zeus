@@ -140,6 +140,43 @@ settlement_capture:
   min_expected_profit_usd: 0.05
   allow_ultra_low_tail: false
 
+day0_nowcast_entry:
+  thesis: >
+    Day-0 forecast-upside entry: enter a settlement-day bin whose edge source
+    is the ensemble forecast rather than the locked intraday observation.
+    Fires only when the HIGH observed-so-far value has NOT yet confirmed the
+    target bin (i.e., not observation-locked). Alpha is forecast-speed, decays
+    as the observation window narrows. Complements settlement_capture, which
+    requires observation confirmation.
+  live_status: shadow
+  evidence_tier: REPLAY_PASS
+  evidence_tier_required_for_live: LIVE_PILOT_TINY
+  promotion_blockers: []
+  allowed_market_phases: [settlement_day]
+  allowed_discovery_modes: [day0_capture]
+  cycle_axis_dispatch_mode: null
+  allowed_directions: [buy_yes]
+  allowed_bin_topology: [point, finite_range]
+  metric_support:
+    high: shadow
+    low: blocked
+  kelly_default_multiplier: 0.5
+  kelly_phase_overrides:
+    pre_trading: 0.0
+    pre_settlement_day: 0.0
+    settlement_day: 0.5
+    post_trading: 0.0
+    resolved: 0.0
+  min_shadow_decisions: 30
+  min_settled_decisions: 20
+  promotion_evidence_ref: docs/reference/zeus_domain_model.md
+  min_entry_price: 0.05
+  min_strategy_notional_usd: 1.00
+  min_expected_profit_usd: 0.05
+  allow_ultra_low_tail: false
+  partial_source_run_allowed: false
+  complete_required_for_tail_orders: true
+
 center_buy:
   thesis: >
     Center-bin buy on forecast model accuracy vs market price.

@@ -108,6 +108,9 @@ def build_evidence_report(
     conn: sqlite3.Connection,
     breakeven_win_rate: float = 0.5,
     promotion_blockers: tuple[str, ...] = (),
+    experiment_id: str | None = None,
+    cohort_tag: str | None = None,
+    source: str | None = None,
 ) -> EvidenceReport:
     """Build an EvidenceReport by querying the world DB.
 
@@ -115,7 +118,13 @@ def build_evidence_report(
       - decision_events: authoritative n_decisions denominator (strategy_key filter)
       - no_trade_events: structured strategy_key count, excluding degraded rows
       - regret_decompositions: n_settled, n_wins (total_regret_usd > 0 = WIN),
-        mean_regret (supplemental; may lag decision_events)
+        mean_regret, joined through decision_events to verify strategy_key+source match
+
+    Optional scoping:
+      - experiment_id: restrict denominator and regret rows to a single experiment
+      - cohort_tag:    restrict denominator and regret rows to a cohort
+      - source:        restrict denominator to a specific decision source
+                       ('phase0_backfill', 'live_decision', 'shadow_decision')
 
     Sign convention: total_regret_usd > 0 means realized > counterfactual (WIN).
     Consistent with regret_decomposer.py SEV2-1 canonical convention.
@@ -123,9 +132,7 @@ def build_evidence_report(
     INV-37: caller supplies conn; never auto-opens.
     """
     # Count decisions from decision_events (authoritative denominator).
-    # decision_events is the source of truth for how many decisions a strategy
-    # produced; regret rows may lag or be absent, so using them as denominator
-    # risks false HOLD/DEMOTE outcomes from an artificially shrunken sample.
+    # Scoped by source when provided so cross-source contamination is prevented.
     tables = {
         row[0]
         for row in conn.execute(
@@ -133,26 +140,64 @@ def build_evidence_report(
         ).fetchall()
     }
     if "decision_events" in tables:
+        _de_params: list = [strategy_id]
+        _de_filters = "WHERE strategy_key = ?"
+        if source is not None:
+            _de_filters += " AND source = ?"
+            _de_params.append(source)
+        if experiment_id is not None and "regret_decompositions" in tables:
+            _de_filters += " AND decision_event_id IN (SELECT decision_event_id FROM regret_decompositions WHERE experiment_id = ?)"
+            _de_params.append(experiment_id)
+        if cohort_tag is not None and "regret_decompositions" in tables and "shadow_experiments" in tables:
+            _de_filters += (
+                " AND decision_event_id IN ("
+                "SELECT rd.decision_event_id FROM regret_decompositions rd"
+                " JOIN shadow_experiments se ON se.experiment_id = rd.experiment_id"
+                " WHERE se.cohort_tag = ?)"
+            )
+            _de_params.append(cohort_tag)
         n_decisions_row = conn.execute(
-            "SELECT COUNT(*) FROM decision_events WHERE strategy_key = ?",
-            (strategy_id,),
+            f"SELECT COUNT(*) FROM decision_events {_de_filters}",
+            _de_params,
         ).fetchone()
         n_decisions = int(n_decisions_row[0] or 0)
     else:
         n_decisions = 0
 
-    # Win/regret analytics from regret_decompositions (supplemental).
+    # Win/regret analytics from regret_decompositions joined through decision_events
+    # to verify strategy_key AND source match the experiment's strategy.
+    # Finding 3 fix: join through decision_events.decision_event_id so cross-strategy
+    # contamination (a regret row sharing experiment_id with a different strategy_key)
+    # is excluded.
+    _rg_params: list = [strategy_id]
+    _rg_join = ""
+    _rg_filter = "WHERE se.strategy_id = ?"
+    if "decision_events" in tables:
+        _rg_join = """
+        JOIN decision_events de
+          ON de.decision_event_id = rd.decision_event_id
+         AND de.strategy_key = se.strategy_id"""
+        if source is not None:
+            _rg_filter += " AND de.source = ?"
+            _rg_params.append(source)
+    if experiment_id is not None:
+        _rg_filter += " AND se.experiment_id = ?"
+        _rg_params.append(experiment_id)
+    if cohort_tag is not None:
+        _rg_filter += " AND se.cohort_tag = ?"
+        _rg_params.append(cohort_tag)
     regret_row = conn.execute(
-        """
+        f"""
         SELECT
             COUNT(*) as n_regret,
             SUM(CASE WHEN rd.total_regret_usd > 0 THEN 1 ELSE 0 END) as n_wins,
             AVG(rd.total_regret_usd) as mean_regret
         FROM regret_decompositions rd
         JOIN shadow_experiments se ON rd.experiment_id = se.experiment_id
-        WHERE se.strategy_id = ?
+        {_rg_join}
+        {_rg_filter}
         """,
-        (strategy_id,),
+        _rg_params,
     ).fetchone()
 
     n_wins = int(regret_row[1] or 0)
