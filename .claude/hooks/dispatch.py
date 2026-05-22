@@ -628,6 +628,24 @@ def _run_advisory_check_pre_merge_comment_check(
         # ALLOW on probe failure; log to stderr so operators can diagnose.
         print(f"[pre_merge_comment_check] reviews probe failed ({_e!r}); allowing (fail-open).", file=sys.stderr)
 
+    # -- Pending review requests (requested but not yet submitted) ------------
+    try:
+        requested_result = subprocess.run(
+            ["gh", "api", f"repos/{owner}/{repo_name}/pulls/{pr_num}/requested_reviewers"],
+            capture_output=True, text=True, timeout=15, cwd=REPO_ROOT,
+        )
+        if requested_result.returncode == 0:
+            import json as _json
+            requested = _json.loads(requested_result.stdout or "{}")
+            pending_users = [u.get("login", "?") for u in requested.get("users", [])]
+            pending_teams = [f"team:{t.get('slug', '?')}" for t in requested.get("teams", [])]
+            for reviewer in pending_users + pending_teams:
+                block_reasons.append(
+                    f"Pending review request: {reviewer} has not yet submitted a review"
+                )
+    except (subprocess.TimeoutExpired, OSError, ValueError) as _e:
+        print(f"[pre_merge_comment_check] requested-reviewers probe failed ({_e!r}); allowing (fail-open).", file=sys.stderr)
+
     # -- Build response -------------------------------------------------------
     if not block_reasons and not advisory_notes:
         return None
@@ -642,11 +660,12 @@ def _run_advisory_check_pre_merge_comment_check(
             f"  (BUG/STYLE_NIT/MISUNDERSTANDING/NOISE/OUT_OF_SCOPE), apply fixes as commits,\n"
             f"  resolve threads via resolveReviewThread mutation. The fix-commit IS the response.\n"
             f"\n"
-            f"Unresolved threads blocking merge:\n"
+            f"Blocking conditions:\n"
             + "\n".join(f"  - {r}" for r in block_reasons)
-            + f"\n\nFor each thread: read -> classify -> fix (commit) or dismiss -> resolve via GraphQL:\n"
+            + f"\n\nFor unresolved threads: read -> classify -> fix (commit) or dismiss -> resolve via GraphQL:\n"
             f"  gh api graphql -f query='mutation{{resolveReviewThread(input:{{threadId:\"...\"}}){{thread{{isResolved}}}}}}'\n"
-            f"Then push and let bots re-fire. Merge only when unresolved count = 0.\n"
+            f"For pending review requests: wait for reviewer to submit, or remove the request.\n"
+            f"Merge only when all conditions above are cleared.\n"
         )
         if advisory_notes:
             block_text += "\nAdvisory (non-blocking):\n" + "\n".join(
