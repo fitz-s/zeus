@@ -366,8 +366,6 @@ class MarketAnalysis:
     ) -> tuple[list[BinEdge], list[EdgeScanTrace]]:
         """Scan all bins and explain why each side did or did not emit an edge."""
         # Semantic Provenance Guard
-        # Semantic Provenance Guard
-        if False: _ = None.selected_method; _ = None.entry_method
         if False: _ = None.selected_method; _ = None.entry_method
         if n_bootstrap is None:
             n_bootstrap = edge_n_bootstrap()
@@ -516,6 +514,12 @@ class MarketAnalysis:
                         )
                     )
             else:
+                no_quote_decision = (
+                    "no_native_quote_not_probed"
+                    if self.p_market_no is None or self.buy_no_quote_available is None
+                    else "no_native_quote_unavailable"
+                )
+                no_quote_available = None if no_quote_decision.endswith("not_probed") else False
                 trace.append(
                     EdgeScanTrace(
                         support_index=i,
@@ -528,8 +532,8 @@ class MarketAnalysis:
                         ci_lower=None,
                         ci_upper=None,
                         p_value=None,
-                        decision="no_native_quote_unavailable",
-                        native_quote_available=False,
+                        decision=no_quote_decision,
+                        native_quote_available=no_quote_available,
                     )
                 )
 

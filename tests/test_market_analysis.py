@@ -665,6 +665,33 @@ class TestMarketAnalysis:
         assert missing_no.p_market == pytest.approx(0.20)
         assert missing_no.raw_edge is None
 
+    def test_edge_scan_trace_distinguishes_unprobed_native_no_quote(self):
+        bins = [
+            Bin(low=None, high=32, label="32°F or below", unit="F"),
+            Bin(low=33, high=None, label="33°F or higher", unit="F"),
+        ]
+        ma = MarketAnalysis(
+            p_raw=np.array([0.55, 0.45]),
+            p_cal=np.array([0.55, 0.45]),
+            p_market=np.array([0.80, 0.20]),
+            alpha=1.0,
+            bins=bins,
+            member_maxes=np.array([30.0, 31.0, 32.0]),
+            unit="F",
+        )
+
+        _edges, trace = ma.find_edges_with_trace(n_bootstrap=1)
+
+        unprobed_no = [
+            item
+            for item in trace
+            if item.support_index == 0 and item.direction == "buy_no"
+        ][0]
+        assert unprobed_no.decision == "no_native_quote_not_probed"
+        assert unprobed_no.native_quote_available is None
+        assert unprobed_no.p_market is None
+        assert unprobed_no.raw_edge is None
+
     def test_bootstrap_probability_sampler_controls_edge_confidence_object(self):
         bins = [
             Bin(low=None, high=32, label="32°F or below", unit="F"),

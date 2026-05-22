@@ -530,6 +530,7 @@ def _edge_scan_trace_frontier_detail(edge_scan_trace: list[object]) -> str:
     no_positive_raw_edge = 0
     no_ci_pass = 0
     no_quote_unavailable = 0
+    no_quote_not_probed = 0
     for item in edge_scan_trace:
         decision = str(getattr(item, "decision", "unknown") or "unknown")
         decision_counts[decision] += 1
@@ -560,6 +561,8 @@ def _edge_scan_trace_frontier_detail(edge_scan_trace: list[object]) -> str:
             no_ci_pass += 1
         elif decision == "no_native_quote_unavailable":
             no_quote_unavailable += 1
+        elif decision == "no_native_quote_not_probed":
+            no_quote_not_probed += 1
     decisions = ",".join(
         f"{key}:{decision_counts[key]}" for key in sorted(decision_counts)
     )
@@ -568,7 +571,8 @@ def _edge_scan_trace_frontier_detail(edge_scan_trace: list[object]) -> str:
         f"executable_bins={len(executable_bins)}/{len(support_bins)}; "
         f"yes_positive_raw_edge={yes_positive_raw_edge}; yes_ci_pass={yes_ci_pass}; "
         f"no_positive_raw_edge={no_positive_raw_edge}; no_ci_pass={no_ci_pass}; "
-        f"no_quote_unavailable={no_quote_unavailable})"
+        f"no_quote_unavailable={no_quote_unavailable}; "
+        f"no_quote_not_probed={no_quote_not_probed})"
     )
 
 
@@ -4305,6 +4309,7 @@ def evaluate_candidate(
         elif _fdr_selection_unexecutable:
             stage = "FDR_SELECTION_UNEXECUTABLE"
             rejection_reasons = [_fdr_selection_unexecutable]
+            rejection_reasons.append(_edge_scan_trace_frontier_detail(edge_scan_trace))
         else:
             stage = "EDGE_INSUFFICIENT" if not edges else "FDR_FILTERED"
             rejection_reasons = [f"{len(edges)} edges found, {len(filtered)} passed FDR"]
@@ -4333,8 +4338,10 @@ def evaluate_candidate(
             fdr_fallback_fired=_fdr_fallback,
             fdr_family_size=_fdr_family_size,
             rejection_reason_enum=(
-                NoTradeReason.CONFIDENCE_BAND_INSUFFICIENT
-                if not edges
+                NoTradeReason.UNCATEGORIZED
+                if _fdr_fallback or _fdr_selection_unexecutable
+                else NoTradeReason.CONFIDENCE_BAND_INSUFFICIENT
+                if stage == "EDGE_INSUFFICIENT"
                 else NoTradeReason.UNCATEGORIZED
             ),
             rejection_reason_detail="; ".join(rejection_reasons),

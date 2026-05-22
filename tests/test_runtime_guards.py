@@ -11639,7 +11639,7 @@ def test_gfs_crosscheck_uses_local_target_day_hours_instead_of_first_24h(monkeyp
     assert len(decisions) == 1
     assert decisions[0].agreement == "AGREE"
     np.testing.assert_allclose(calls["gfs_p"], np.array([0.0, 0.0, 1.0]))
-    assert decisions[0].rejection_reason_enum == evaluator_module.NoTradeReason.CONFIDENCE_BAND_INSUFFICIENT
+    assert decisions[0].rejection_reason_enum == evaluator_module.NoTradeReason.UNCATEGORIZED
     assert any(reason.startswith("EDGE_SCAN_TRACE(") for reason in decisions[0].rejection_reasons)
     assert "yes_raw_edge_nonpositive:1" in decisions[0].rejection_reason_detail
     assert "no_quote_unavailable=1" in decisions[0].rejection_reason_detail
