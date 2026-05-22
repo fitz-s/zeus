@@ -52,31 +52,10 @@ jobs:
             -f owner="${OWNER}" \
             -f repo="${REPO_NAME}" \
             -F pr="${PR_NUMBER}" \
-            -f query='
-              query($owner: String!, $repo: String!, $pr: Int!) {
-                repository(owner: $owner, name: $repo) {
-                  pullRequest(number: $pr) {
-                    reviewThreads(first: 100) {
-                      totalCount
-                      nodes { isResolved }
-                    }
-                  }
-                }
-              }
-            ')
+            -f query='query($owner:String!,$repo:String!,$pr:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$pr){reviewThreads(first:100){totalCount nodes{isResolved}}}}}')
 
-          TOTAL=$(echo "$RESULT" | python3 -c "
-import json, sys
-d = json.load(sys.stdin)
-print(d['data']['repository']['pullRequest']['reviewThreads']['totalCount'])
-")
-
-          UNRESOLVED=$(echo "$RESULT" | python3 -c "
-import json, sys
-d = json.load(sys.stdin)
-nodes = d['data']['repository']['pullRequest']['reviewThreads']['nodes']
-print(sum(1 for n in nodes if not n['isResolved']))
-")
+          TOTAL=$(echo "$RESULT" | jq '.data.repository.pullRequest.reviewThreads.totalCount')
+          UNRESOLVED=$(echo "$RESULT" | jq '[.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved == false)] | length')
 
           echo "Review threads: total=${TOTAL}  unresolved=${UNRESOLVED}"
 
@@ -92,15 +71,7 @@ print(sum(1 for n in nodes if not n['isResolved']))
           # -- Pending review requests ------------------------------------------
           REQUESTED=$(gh api "repos/${OWNER}/${REPO_NAME}/pulls/${PR_NUMBER}/requested_reviewers")
 
-          PENDING_USERS=$(echo "$REQUESTED" | python3 -c "
-import json, sys
-d = json.load(sys.stdin)
-users = [u['login'] for u in d.get('users', [])]
-teams = ['team:' + t['slug'] for t in d.get('teams', [])]
-pending = users + teams
-for p in pending:
-    print(p)
-")
+          PENDING_USERS=$(echo "$REQUESTED" | jq -r '([.users[].login], ["team:" + .teams[].slug]) | .[]' 2>/dev/null || true)
 
           if [ -n "${PENDING_USERS}" ]; then
             echo "BLOCKED: pending review request(s) — reviewer(s) have not yet submitted:"
