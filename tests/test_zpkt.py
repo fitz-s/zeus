@@ -98,7 +98,7 @@ def _run(repo: Path, *args: str, expect_rc: int = 0) -> subprocess.CompletedProc
 
 
 def test_start_creates_packet(synthetic_repo: Path) -> None:
-    cp = _run(synthetic_repo, "start", "demo_pkt", "--inplace", "--date", "2099-01-02")
+    cp = _run(synthetic_repo, "start", "demo_pkt", "--inplace", "--date", "2099-01-02", "--new-package")
     payload = json.loads(cp.stdout)
     assert payload["packet"] == "task_2099-01-02_demo_pkt"
     pkt_dir = synthetic_repo / "docs" / "operations" / "task_2099-01-02_demo_pkt"
@@ -125,6 +125,7 @@ def test_start_can_create_phase_inside_existing_package(synthetic_repo: Path) ->
         "2099-01-02",
         "--package",
         "task_2099-01-01_parent",
+        "--new-package",
     )
     payload = json.loads(cp.stdout)
     packet_path = "task_2099-01-01_parent/phases/task_2099-01-02_phase_demo"
@@ -145,7 +146,7 @@ def test_scope_schema_accepts_closed_packet_status() -> None:
 
 
 def test_scope_show_and_add(synthetic_repo: Path) -> None:
-    _run(synthetic_repo, "start", "demo", "--inplace", "--date", "2099-02-02")
+    _run(synthetic_repo, "start", "demo", "--inplace", "--date", "2099-02-02", "--new-package")
     cp = _run(synthetic_repo, "scope", "show")
     payload = json.loads(cp.stdout)
     assert any(p.startswith("docs/operations/") for p in payload["in_scope"])
@@ -156,7 +157,7 @@ def test_scope_show_and_add(synthetic_repo: Path) -> None:
 
 
 def test_status_classifies_buckets(synthetic_repo: Path) -> None:
-    _run(synthetic_repo, "start", "demo", "--inplace", "--date", "2099-03-03")
+    _run(synthetic_repo, "start", "demo", "--inplace", "--date", "2099-03-03", "--new-package")
     pkt = synthetic_repo / "docs/operations/task_2099-03-03_demo"
     # Stage one in-scope file (inside packet folder) and one out-of-scope file.
     (pkt / "notes.md").write_text("hi", encoding="utf-8")
@@ -174,7 +175,7 @@ def test_status_classifies_buckets(synthetic_repo: Path) -> None:
 
 
 def test_close_writes_receipt(synthetic_repo: Path) -> None:
-    _run(synthetic_repo, "start", "demo", "--inplace", "--date", "2099-04-04")
+    _run(synthetic_repo, "start", "demo", "--inplace", "--date", "2099-04-04", "--new-package")
     pkt = synthetic_repo / "docs/operations/task_2099-04-04_demo"
     # Pretend the packet is finished; commit something so HEAD has a hash.
     (pkt / "out.md").write_text("done", encoding="utf-8")

@@ -165,6 +165,22 @@ file_budgets:
     diet_target: >
       Keep as script-zone route and rules. Do not duplicate the full active
       script catalog from architecture/script_manifest.yaml.
+  - path: docs/operations/current/index.md
+    role: active_operations_package_index
+    max_lines: 120
+    enforcement: advisory
+    diet_target: >
+      Keep as a compact index into the active operations package. Do not
+      accumulate packet history or narrative; use frontier_status.md and
+      package.yaml for detail.
+  - path: docs/operations/current/task.md
+    role: active_operations_task_ledger
+    max_lines: 220
+    enforcement: advisory
+    diet_target: >
+      Keep as the active task tracker (T2 canonical location). Do not
+      duplicate architecture law or runtime contracts; use for current
+      implementation status and frontier facts only.
 
 digest_budgets:
   history_lore:

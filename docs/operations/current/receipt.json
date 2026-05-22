@@ -1,0 +1,43 @@
+{
+  "task": "PR-T1 active operations package skeleton (docs-convergence-20260522)",
+  "packet": "docs/operations/current/package.yaml",
+  "route_source": "file_arrangement_yaml_canonical_path",
+  "route_evidence": [
+    "architecture/file_arrangement.yaml",
+    "docs/operations/current/package.yaml",
+    "docs/operations/current/index.md"
+  ],
+  "required_law": [
+    "AGENTS.md",
+    "docs/operations/AGENTS.md",
+    "architecture/topology.yaml",
+    "architecture/file_arrangement.yaml"
+  ],
+  "allowed_files": [
+    "docs/operations/current/",
+    "docs/operations/current_state.md",
+    "docs/operations/AGENTS.md",
+    "architecture/topology.yaml",
+    "architecture/artifact_lifecycle.yaml",
+    "architecture/context_budget.yaml",
+    "architecture/docs_registry.yaml"
+  ],
+  "changed_files": [
+    "docs/operations/current_state.md",
+    "docs/operations/AGENTS.md",
+    "docs/operations/current/package.yaml",
+    "docs/operations/current/receipt.json",
+    "docs/operations/current/index.md",
+    "docs/operations/current/frontier_status.md",
+    "architecture/topology.yaml",
+    "architecture/artifact_lifecycle.yaml",
+    "architecture/context_budget.yaml",
+    "architecture/docs_registry.yaml"
+  ],
+  "tests_evidence": [
+    "python scripts/topology_doctor.py --docs",
+    "python scripts/topology_doctor.py --file-arrangement-audit",
+    "git diff --check"
+  ],
+  "completion_claim": "skeleton_only_no_plan_files_no_moves"
+}

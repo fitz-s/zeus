@@ -64,6 +64,12 @@ coverage_roots:
     zone: docs_operations
     authority_role: operations_pointer
     forbidden_misread: Operations docs point to active work; they do not rewrite architecture law.
+  - path: "docs/operations/current"
+    status: active
+    scope: scoped
+    zone: docs_operations
+    authority_role: operations_pointer
+    forbidden_misread: "active work/evidence, not architecture law"
   - path: "docs/runbooks"
     status: active
     scope: scoped

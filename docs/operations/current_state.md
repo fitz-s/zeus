@@ -21,13 +21,16 @@ pointer to keep it thin.
 
 ## Active packet control
 
-Active short-term tracker: `task.md` (repo root). Live recovery workflow,
+Active short-term tracker: `docs/operations/current/task.md`. Live recovery workflow,
 current analysis references, implementation status, and verification evidence.
+Root `task.md` is a thin pointer to this location.
 
-- Active execution packet: none (task.md tracker active; no frozen packet)
-- Receipt-bound source: none
-- Required evidence: see `task.md`
-- Next action: see `task.md` (current live recovery workflow)
+- Active package manifest: `docs/operations/current/package.yaml` (OperationPackage current_live_recovery)
+- Active execution packet: `docs/operations/current/package.yaml` (see package.yaml for subtasks and frontier)
+- Active package source: `docs/operations/current/package.yaml`
+- Receipt-bound source: `docs/operations/current/receipt.json`
+- Required evidence: see `docs/operations/current/task.md`
+- Next action: see `docs/operations/current/task.md` (current live recovery workflow)
 
 Freeze a new packet through this file before starting any implementation slice.
 

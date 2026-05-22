@@ -93,6 +93,8 @@ test_trust_policy:
     tests/test_position_lifecycle_state.py: {created: "2026-05-21", last_used: "2026-05-21"}
     # PR-T0 advisory file-arrangement kernel antibodies (2026-05-22).
     tests/topology/test_file_arrangement.py: {created: "2026-05-22", last_used: "2026-05-22"}
+    # PR-T4 operations packet inventory advisory antibodies (2026-05-22).
+    tests/topology/test_operations_package_inventory.py: {created: "2026-05-22", last_used: "2026-05-22"}
     # P1/P2 architecture review antibodies (2026-05-22): strategy routing, evidence
     # report scoping, migration clamp, evidence tier provenance.
     tests/test_p1_findings_evidence_risk.py: {created: "2026-05-22", last_used: "2026-05-22"}
@@ -228,6 +230,7 @@ test_trust_policy:
     tests/test_tick_size.py: {created: "2026-04-23", last_used: "2026-04-28"}
     tests/test_vig_treatment_provenance.py: {created: "2026-04-24", last_used: "2026-04-24"}
     tests/test_zpkt.py: {created: "2026-04-25", last_used: "2026-04-25"}
+    tests/test_zpkt_current_package.py: {created: "2026-05-22", last_used: "2026-05-22"}
     tests/test_z0_plan_lock.py: {created: "2026-04-27", last_used: "2026-04-27"}
     tests/test_cutover_guard.py: {created: "2026-04-27", last_used: "2026-04-27"}
     tests/test_heartbeat_supervisor.py: {created: "2026-04-27", last_used: "2026-04-27"}
@@ -2815,3 +2818,26 @@ test_metadata:
       datetime('now',...) vs ISO TEXT format mismatch in SQLite comparisons.
     created: 2026-05-20
     last_reused_or_audited: 2026-05-20
+  tests/topology/test_operations_package_inventory.py:
+    modules: [docs_system]
+    category: topology_antibody
+    kind: advisory
+    profile: pr_t4_operations_packet_inventory
+    blocks_commit: false
+    asserted_invariants:
+      - LOAD_BEARING_packet_never_archive_candidate
+      - ARCHIVE_CANDIDATE_requires_all_exemption_checks
+      - RUNTIME_GATING_EVIDENCE_classified_keep
+    source_under_test:
+      - scripts/operations_package_inventory.py
+    law_dependencies:
+      - docs/authority/ARCHIVAL_RULES.md
+      - architecture/docs_registry.yaml
+    notes: >
+      Pure-function tests using synthetic SignalBundles injected into classify().
+      No real packet slugs appear in this source (self-poison prevention).
+      Tests verify classification precedence: LOAD_BEARING > RUNTIME_GATING >
+      CURRENT_PACKAGE_INPUT > MONITORING_SURFACE > ARCHIVE_CANDIDATE.
+      Advisory only; exit 0 always.
+    created: 2026-05-22
+    last_reused_or_audited: 2026-05-22

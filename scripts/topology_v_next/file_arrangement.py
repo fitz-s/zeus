@@ -220,20 +220,26 @@ def audit_file_arrangement(
                 continue
             # Advisory: top-level task dir detected
             rule = rules.get("no_new_top_level_operation_task_by_default", {})
+            slug = _slug_from_task_dir(name)
             findings.append(ArrangementFinding(
                 code="top_level_task_dir_advisory",
                 path=f"docs/operations/{name}/",
                 severity=rule.get("severity", "warn"),  # type: ignore[arg-type]
                 blocking=False,
                 artifact_kind="operation_plan",
-                recommended_path=f"docs/operations/current/plans/{_slug_from_task_dir(name)}/PLAN.md",
+                recommended_path=f"docs/operations/current/plans/{slug}/PLAN.md",
                 reason=(
                     rule.get("description",
                              "Top-level task dirs are advisory-discouraged; prefer current/plans/<slug>/")
                     .strip()
+                    + " This directory was likely created by a legacy zpkt default "
+                    "(zpkt start without --new-package flag). The current zpkt default "
+                    "places new work under docs/operations/current/plans/<slug>/ instead."
                 ),
                 followups=(
-                    f"Consider migrating to docs/operations/current/plans/{_slug_from_task_dir(name)}/",
+                    f"Consider migrating to docs/operations/current/plans/{slug}/",
+                    f"Use `zpkt start {slug}` (default) for new work; "
+                    "--new-package/--legacy-top-level restores the legacy path.",
                 ),
                 evidence=(f"docs/operations/{name}/ exists as top-level dir",),
             ))

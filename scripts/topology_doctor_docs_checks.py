@@ -105,6 +105,8 @@ DOCS_REGISTRY_PARENT_PATTERNS = (
     "docs/operations/attribution_drift/",
     # date-prefixed incident/operation packets (e.g. 2026-05-18_*)
     "docs/operations/[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]_*/",
+    # active operations package (file_arrangement.yaml canonical path)
+    "docs/operations/current/",
     "docs/reports/",
     "docs/artifacts/",
     "docs/to-do-list/",

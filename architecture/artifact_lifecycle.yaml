@@ -116,14 +116,21 @@ artifact_classes:
     record_required: true
 
 classification_rules:
+  - id: current_operations_package
+    path_globs:
+      - docs/operations/current/
+      - docs/operations/current/plans/*/
+    artifact_class: active_solution_package
+    lifecycle: active
+    destination_rule: "use docs/operations/current/"
   - id: active_operations_packet
     path_globs:
       - docs/operations/task_????-??-??_*.md
       - docs/operations/task_????-??-??_*/
       - docs/operations/task_????-??-??_*/phases/task_????-??-??_*/
     artifact_class: active_solution_package
-    lifecycle: active
-    destination_rule: Keep only active packet/control work here.
+    lifecycle: legacy
+    destination_rule: "use docs/operations/current/"
   - id: active_docs_artifacts
     path_globs:
       - docs/artifacts/*
