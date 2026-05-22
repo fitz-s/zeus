@@ -152,6 +152,12 @@ class NoTradeReason(StrEnum):
     CENTER_PAIR_PARITY_BOOK_UNAVAILABLE = auto()  # center_sell: binary_book_snapshot absent on analysis
     CENTER_PAIR_PARITY_NO_EDGE = auto()           # center_sell: a_YES+a_NO+fees >= 1 at q*; no deterministic arb
 
+    # ── center_sell model-NO calibrated stochastic candidate gates (2026-05-22) ──
+    # Authority: STRATEGY_TAXONOMY_DIRECTIVE §6 + zeus_strategy_spec §8.2
+    # Theorem: enter iff 1 − p⁺_i − b_i − phi(b_i) > 0; p⁺ = calibrated upper bound.
+    CENTER_SELL_MODEL_NO_CALIBRATION_UNAVAILABLE = auto()  # center_sell_model_no: calibration inputs (cal_p_hats, cal_outcomes) absent → no_trade
+    CENTER_SELL_MODEL_NO_NO_EDGE = auto()                  # center_sell_model_no: 1−p⁺−b−phi ≤ 0; calibrated NO edge non-positive
+
     # ── shoulder_impossible_tail_capture data-gate (2026-05-22) ────────────────
     # DATA-GATED: physical envelope input (Δ_phys⁺/Δ_phys⁻ from station/season empirical
     # envelope) is not yet wired. Emitted until the envelope feed lands.
