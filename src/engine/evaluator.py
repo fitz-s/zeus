@@ -519,6 +519,63 @@ def _projects_exposure_during_family_fallback_sizing(
     )
 
 
+def _edge_scan_trace_frontier_detail(edge_scan_trace: list[object]) -> str:
+    if not edge_scan_trace:
+        return "EDGE_SCAN_TRACE(decisions=unavailable)"
+    decision_counts: dict[str, int] = defaultdict(int)
+    executable_bins: set[int] = set()
+    support_bins: set[int] = set()
+    yes_positive_raw_edge = 0
+    yes_ci_pass = 0
+    no_positive_raw_edge = 0
+    no_ci_pass = 0
+    no_quote_unavailable = 0
+    no_quote_not_probed = 0
+    for item in edge_scan_trace:
+        decision = str(getattr(item, "decision", "unknown") or "unknown")
+        decision_counts[decision] += 1
+        support_index = getattr(item, "support_index", None)
+        if support_index is not None:
+            try:
+                support_bins.add(int(support_index))
+            except (TypeError, ValueError):
+                pass
+        if bool(getattr(item, "executable", False)) and support_index is not None:
+            try:
+                executable_bins.add(int(support_index))
+            except (TypeError, ValueError):
+                pass
+        direction = str(getattr(item, "direction", "") or "")
+        raw_edge = getattr(item, "raw_edge", None)
+        try:
+            raw_edge_positive = raw_edge is not None and float(raw_edge) > 0.0
+        except (TypeError, ValueError):
+            raw_edge_positive = False
+        if direction == "buy_yes" and raw_edge_positive:
+            yes_positive_raw_edge += 1
+        if direction == "buy_no" and raw_edge_positive:
+            no_positive_raw_edge += 1
+        if decision == "yes_edge_accepted":
+            yes_ci_pass += 1
+        elif decision == "no_edge_accepted":
+            no_ci_pass += 1
+        elif decision == "no_native_quote_unavailable":
+            no_quote_unavailable += 1
+        elif decision == "no_native_quote_not_probed":
+            no_quote_not_probed += 1
+    decisions = ",".join(
+        f"{key}:{decision_counts[key]}" for key in sorted(decision_counts)
+    )
+    return (
+        f"EDGE_SCAN_TRACE(decisions={decisions}; "
+        f"executable_bins={len(executable_bins)}/{len(support_bins)}; "
+        f"yes_positive_raw_edge={yes_positive_raw_edge}; yes_ci_pass={yes_ci_pass}; "
+        f"no_positive_raw_edge={no_positive_raw_edge}; no_ci_pass={no_ci_pass}; "
+        f"no_quote_unavailable={no_quote_unavailable}; "
+        f"no_quote_not_probed={no_quote_not_probed})"
+    )
+
+
 # F25 Strategy R: sentinel for pre-snapshot rejection paths (all 31 early-rejection
 # sites in evaluate_candidate fire before snapshot_id is resolved at line ~2378+).
 # Non-NULL, non-empty — passes truthy checks and SQL LIKE queries.
@@ -4109,6 +4166,14 @@ def evaluate_candidate(
         bias_reference=bias_reference,
         posterior_mode=MODEL_ONLY_POSTERIOR_MODE,
         transfer_logit_sigma=_transfer_logit_sigma,
+        bootstrap_probability_sampler=(
+            (lambda _analysis, _n_members: day0.p_vector(bins, n_mc=1, rng=_analysis._rng))
+            if is_day0_mode
+            else None
+        ),
+        bootstrap_signal_type=(
+            "day0_observation_fused" if is_day0_mode else "generic_ensemble"
+        ),
     )
     if hasattr(analysis, "forecast_context"):
         forecast_context = analysis.forecast_context()
@@ -4146,7 +4211,11 @@ def evaluate_candidate(
         _polymarket_end_anchor_source_for_candidate(candidate)
     )
     n_bootstrap = edge_n_bootstrap()
-    edges = analysis.find_edges(n_bootstrap=n_bootstrap)
+    if hasattr(analysis, "find_edges_with_trace"):
+        edges, edge_scan_trace = analysis.find_edges_with_trace(n_bootstrap=n_bootstrap)
+    else:
+        edges = analysis.find_edges(n_bootstrap=n_bootstrap)
+        edge_scan_trace = []
     _fdr_fallback = False
     _fdr_selection_unexecutable = ""
     try:
@@ -4236,12 +4305,15 @@ def evaluate_candidate(
         if _fdr_fallback:
             stage = "FDR_FAMILY_SCAN_UNAVAILABLE"
             rejection_reasons = ["full-family FDR scan unavailable; entry selection failed closed"]
+            rejection_reasons.append(_edge_scan_trace_frontier_detail(edge_scan_trace))
         elif _fdr_selection_unexecutable:
             stage = "FDR_SELECTION_UNEXECUTABLE"
             rejection_reasons = [_fdr_selection_unexecutable]
+            rejection_reasons.append(_edge_scan_trace_frontier_detail(edge_scan_trace))
         else:
             stage = "EDGE_INSUFFICIENT" if not edges else "FDR_FILTERED"
             rejection_reasons = [f"{len(edges)} edges found, {len(filtered)} passed FDR"]
+            rejection_reasons.append(_edge_scan_trace_frontier_detail(edge_scan_trace))
             if native_no_quote_unavailable_labels:
                 labels = ",".join(native_no_quote_unavailable_labels[:3])
                 if len(native_no_quote_unavailable_labels) > 3:
@@ -4265,6 +4337,14 @@ def evaluate_candidate(
             n_edges_after_fdr=0,
             fdr_fallback_fired=_fdr_fallback,
             fdr_family_size=_fdr_family_size,
+            rejection_reason_enum=(
+                NoTradeReason.UNCATEGORIZED
+                if _fdr_fallback or _fdr_selection_unexecutable
+                else NoTradeReason.CONFIDENCE_BAND_INSUFFICIENT
+                if stage == "EDGE_INSUFFICIENT"
+                else NoTradeReason.UNCATEGORIZED
+            ),
+            rejection_reason_detail="; ".join(rejection_reasons),
         )]
 
     n_edges_after_fdr_before_family_preselection = len(filtered)

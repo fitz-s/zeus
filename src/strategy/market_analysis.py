@@ -9,7 +9,8 @@ Double bootstrap captures four σ sources:
 """
 
 import logging
-from typing import Optional
+from dataclasses import dataclass
+from typing import Callable, Optional
 
 import numpy as np
 
@@ -40,6 +41,25 @@ logger = logging.getLogger(__name__)
 
 # Compatibility alias for tests and assumption audits.
 DEFAULT_EDGE_BOOTSTRAP = edge_n_bootstrap()
+
+
+@dataclass(frozen=True)
+class EdgeScanTrace:
+    support_index: int
+    bin_label: str
+    executable: bool
+    direction: str
+    p_posterior: float | None
+    p_market: float | None
+    raw_edge: float | None
+    ci_lower: float | None
+    ci_upper: float | None
+    p_value: float | None
+    decision: str
+    native_quote_available: bool | None = None
+
+
+BootstrapProbabilitySampler = Callable[["MarketAnalysis", int], np.ndarray]
 
 
 def compute_transfer_logit_sigma(brier_diff: float, scale: float = 4.0) -> float:
@@ -168,6 +188,8 @@ class MarketAnalysis:
         allow_legacy_quote_prior: bool = False,
         *,
         transfer_logit_sigma: float = 0.0,
+        bootstrap_probability_sampler: BootstrapProbabilitySampler | None = None,
+        bootstrap_signal_type: str = "generic_ensemble",
     ):
         # Semantic Provenance Guard
         if False: _ = None.selected_method; _ = None.entry_method; _ = None.bias_correction
@@ -241,6 +263,8 @@ class MarketAnalysis:
         self._bootstrap_cache: dict[tuple, tuple[float, float, float]] = {}
         self._rng = np.random.default_rng(rng_seed)
         self._transfer_logit_sigma = float(transfer_logit_sigma)
+        self._bootstrap_probability_sampler = bootstrap_probability_sampler
+        self._bootstrap_signal_type = str(bootstrap_signal_type or "generic_ensemble")
 
     def _compute_posterior(self, p_cal: np.ndarray) -> np.ndarray:
         if self._posterior_mode == MODEL_ONLY_POSTERIOR_MODE:
@@ -269,7 +293,22 @@ class MarketAnalysis:
             "uncertainty": self.sigma_context(),
             "location": self.mean_context(),
             "market_complete": self.market_complete,
+            "bootstrap_signal_type": self._bootstrap_signal_type,
         }
+
+    def _bootstrap_p_raw_all(self, n_members: int) -> np.ndarray:
+        """Sample the same probability object used for edge confidence."""
+        if self._bootstrap_probability_sampler is not None:
+            sampled = np.asarray(self._bootstrap_probability_sampler(self, n_members), dtype=float)
+            return _finite_probability_distribution(
+                f"{self._bootstrap_signal_type}_bootstrap_probability_sample",
+                sampled,
+                len(self.bins),
+            )
+        sample = self._rng.choice(self._member_maxes, size=n_members, replace=True)
+        noised = sample + self._rng.normal(0, self._sigma, n_members)
+        measured = self._settle(noised)
+        return np.array([self._bin_probability(measured, bb) for bb in self.bins])
 
     def supports_buy_no_edges(self, bin_idx: int | None = None) -> bool:
         """Return whether local NO-side economics are executable for this market.
@@ -320,18 +359,38 @@ class MarketAnalysis:
         For each bin, considers buy_yes and any executable buy_no direction.
         Uses double bootstrap to compute CI and p-value.
         """
+        return self.find_edges_with_trace(n_bootstrap=n_bootstrap)[0]
+
+    def find_edges_with_trace(
+        self, n_bootstrap: int | None = None
+    ) -> tuple[list[BinEdge], list[EdgeScanTrace]]:
+        """Scan all bins and explain why each side did or did not emit an edge."""
         # Semantic Provenance Guard
-        # Semantic Provenance Guard
-        if False: _ = None.selected_method; _ = None.entry_method
         if False: _ = None.selected_method; _ = None.entry_method
         if n_bootstrap is None:
             n_bootstrap = edge_n_bootstrap()
         if self.p_market is None:
             raise ValueError("find_edges requires executable YES-side market prices")
-        edges = []
+        edges: list[BinEdge] = []
+        trace: list[EdgeScanTrace] = []
 
         for i, b in enumerate(self.bins):
             if not self.is_executable_bin(i):
+                trace.append(
+                    EdgeScanTrace(
+                        support_index=i,
+                        bin_label=b.label,
+                        executable=False,
+                        direction="support",
+                        p_posterior=None,
+                        p_market=None,
+                        raw_edge=None,
+                        ci_lower=None,
+                        ci_upper=None,
+                        p_value=None,
+                        decision="non_executable_bin",
+                    )
+                )
                 continue
             # Buy YES direction: edge = p_posterior - p_market
             edge_yes = float(self.p_posterior[i] - self.p_market[i])
@@ -354,6 +413,42 @@ class MarketAnalysis:
                         support_index=i,
                     )
                     edges.append(edge)
+                    yes_decision = "yes_edge_accepted"
+                else:
+                    yes_decision = "yes_ci_lower_nonpositive"
+                trace.append(
+                    EdgeScanTrace(
+                        support_index=i,
+                        bin_label=b.label,
+                        executable=True,
+                        direction="buy_yes",
+                        p_posterior=float(self.p_posterior[i]),
+                        p_market=float(self.p_market[i]),
+                        raw_edge=edge_yes,
+                        ci_lower=ci_lo,
+                        ci_upper=ci_hi,
+                        p_value=p_val,
+                        decision=yes_decision,
+                        native_quote_available=True,
+                    )
+                )
+            else:
+                trace.append(
+                    EdgeScanTrace(
+                        support_index=i,
+                        bin_label=b.label,
+                        executable=True,
+                        direction="buy_yes",
+                        p_posterior=float(self.p_posterior[i]),
+                        p_market=float(self.p_market[i]),
+                        raw_edge=edge_yes,
+                        ci_lower=None,
+                        ci_upper=None,
+                        p_value=None,
+                        decision="yes_raw_edge_nonpositive",
+                        native_quote_available=True,
+                    )
+                )
 
             # Buy NO direction: payoff probability is complement; executable
             # entry price must come from the native NO side when available.
@@ -382,8 +477,67 @@ class MarketAnalysis:
                             support_index=i,
                         )
                         edges.append(edge)
+                        no_decision = "no_edge_accepted"
+                    else:
+                        no_decision = "no_ci_lower_nonpositive"
+                    trace.append(
+                        EdgeScanTrace(
+                            support_index=i,
+                            bin_label=b.label,
+                            executable=True,
+                            direction="buy_no",
+                            p_posterior=p_post_no,
+                            p_market=p_market_no,
+                            raw_edge=edge_no,
+                            ci_lower=ci_lo,
+                            ci_upper=ci_hi,
+                            p_value=p_val,
+                            decision=no_decision,
+                            native_quote_available=True,
+                        )
+                    )
+                else:
+                    trace.append(
+                        EdgeScanTrace(
+                            support_index=i,
+                            bin_label=b.label,
+                            executable=True,
+                            direction="buy_no",
+                            p_posterior=p_post_no,
+                            p_market=p_market_no,
+                            raw_edge=edge_no,
+                            ci_lower=None,
+                            ci_upper=None,
+                            p_value=None,
+                            decision="no_raw_edge_nonpositive",
+                            native_quote_available=True,
+                        )
+                    )
+            else:
+                no_quote_decision = (
+                    "no_native_quote_not_probed"
+                    if self.p_market_no is None or self.buy_no_quote_available is None
+                    else "no_native_quote_unavailable"
+                )
+                no_quote_available = None if no_quote_decision.endswith("not_probed") else False
+                trace.append(
+                    EdgeScanTrace(
+                        support_index=i,
+                        bin_label=b.label,
+                        executable=True,
+                        direction="buy_no",
+                        p_posterior=1.0 - float(self.p_posterior[i]),
+                        p_market=None if self.p_market_no is None else float(self.p_market_no[i]),
+                        raw_edge=None,
+                        ci_lower=None,
+                        ci_upper=None,
+                        p_value=None,
+                        decision=no_quote_decision,
+                        native_quote_available=no_quote_available,
+                    )
+                )
 
-        return edges
+        return edges, trace
 
     def _settle(self, values: np.ndarray) -> np.ndarray:
         """Apply settlement rounding using this market's precision.
@@ -440,13 +594,10 @@ class MarketAnalysis:
         is_wnd = input_space == "width_normalized_density"
 
         for i in range(n):
-            # Layer 1: resample ENS members + instrument noise
-            sample = rng.choice(members, size=n_members, replace=True)
-            noised = sample + rng.normal(0, self._sigma, n_members)
-            measured = self._settle(noised)
-
-            # Bug #8: recompute p_raw for ALL bins (cross-bin correlation)
-            p_raw_all = np.array([self._bin_probability(measured, bb) for bb in self.bins])
+            # Layer 1: sample the configured signal probability object for all
+            # bins. Generic ENS uses member resampling; Day0 injects the
+            # observation-fused signal sampler so CI and p_raw share authority.
+            p_raw_all = self._bootstrap_p_raw_all(n_members)
 
             # Layer 2: sample Platt parameterization for ALL bins
             if has_platt:
@@ -506,12 +657,7 @@ class MarketAnalysis:
         is_wnd = input_space == "width_normalized_density"
 
         for i in range(n):
-            sample = rng.choice(members, size=n_members, replace=True)
-            noised = sample + rng.normal(0, self._sigma, n_members)
-            measured = self._settle(noised)
-
-            # Bug #8: recompute p_raw for ALL bins (cross-bin correlation)
-            p_raw_all = np.array([self._bin_probability(measured, bb) for bb in self.bins])
+            p_raw_all = self._bootstrap_p_raw_all(n_members)
 
             if has_platt:
                 params = platt_params[rng.integers(len(platt_params))]

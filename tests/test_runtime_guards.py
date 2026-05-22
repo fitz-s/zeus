@@ -2665,6 +2665,135 @@ def test_probability_trace_skip_is_warned_when_decision_id_missing(tmp_path, cap
     assert "skipped_missing_decision_id" in caplog.text
 
 
+def test_no_trade_event_writer_preserves_decision_attribution(monkeypatch, tmp_path):
+    world_db = tmp_path / "zeus-world.db"
+    conn = get_connection(world_db)
+    init_schema(conn)
+    from src.contracts.no_trade_reason import NoTradeReason
+
+    decision = EdgeDecision(
+        False,
+        edge=_edge(),
+        decision_id="d-attribution",
+        rejection_stage="MARKET_FILTER",
+        rejection_reasons=[NoTradeReason.ULTRA_LOW_PRICE_NOT_AUTHORIZED.value],
+        selected_method="ens_member_counting",
+        applied_validations=["strategy_entry_price_floor"],
+        decision_snapshot_id="snap-attribution",
+        edge_source="opening_inertia",
+        strategy_key="opening_inertia",
+        rejection_reason_enum=NoTradeReason.ULTRA_LOW_PRICE_NOT_AUTHORIZED,
+        rejection_reason_detail=(
+            "STRATEGY_ENTRY_PRICE_BELOW_LIVE_FLOOR(0.0048<=0.05; "
+            "strategy=opening_inertia)"
+        ),
+    )
+    deps = types.SimpleNamespace(
+        MODE_PARAMS={DiscoveryMode.OPENING_HUNT: {}},
+        find_weather_markets=lambda **kwargs: [{
+            "city": NYC,
+            "target_date": "2026-04-03",
+            "hours_since_open": 12.0,
+            "hours_to_resolution": 24.0,
+            "market_end_at": "2026-04-03T23:59:00Z",
+            "outcomes": [{
+                "title": "39-40°F",
+                "range_low": 39,
+                "range_high": 40,
+                "token_id": "yes1",
+                "no_token_id": "no1",
+                "market_id": "m1",
+                "price": 0.35,
+            }],
+            "temperature_metric": "high",
+            "event_id": "evt-attribution",
+            "slug": "evt-attribution",
+        }],
+        MarketCandidate=MarketCandidate,
+        DiscoveryMode=DiscoveryMode,
+        evaluate_candidate=lambda *args, **kwargs: [decision],
+        get_last_scan_authority=lambda: "VERIFIED",
+        logger=logging.getLogger("test_no_trade_attribution"),
+        NoTradeCase=NoTradeCase,
+        _classify_edge_source=lambda mode, edge: "opening_inertia",
+    )
+    captured: dict[str, object] = {}
+
+    def capture_no_trade_write(natural_key, reason, reason_detail, observed_at, **kwargs):
+        captured.update(
+            natural_key=natural_key,
+            reason=reason,
+            reason_detail=reason_detail,
+            observed_at=observed_at,
+            kwargs=kwargs,
+        )
+        return natural_key
+
+    monkeypatch.setattr("src.state.db.get_world_connection", lambda *_, **__: get_connection(world_db))
+    monkeypatch.setattr("src.state.no_trade_events.write_no_trade_event", capture_no_trade_write)
+    monkeypatch.setattr(
+        "src.state.db.get_trade_connection_with_world_required",
+        lambda *_, **__: (_ for _ in ()).throw(RuntimeError("trade db not needed")),
+    )
+    artifact = CycleArtifact(mode=DiscoveryMode.OPENING_HUNT.value, started_at="2026-04-02T06:00:00Z")
+    summary = {"candidates": 0, "no_trades": 0}
+
+    cycle_runtime.execute_discovery_phase(
+        conn,
+        types.SimpleNamespace(),
+        PortfolioState(),
+        artifact,
+        StrategyTracker(),
+        types.SimpleNamespace(),
+        DiscoveryMode.OPENING_HUNT,
+        summary,
+        211.37,
+        datetime(2026, 4, 2, 6, 0, tzinfo=timezone.utc),
+        env="shadow",
+        deps=deps,
+    )
+
+    conn.close()
+
+    assert captured, summary
+    assert captured["reason"] is NoTradeReason.ULTRA_LOW_PRICE_NOT_AUTHORIZED
+    assert captured["natural_key"][0] == "evt-attribution"
+    assert captured["kwargs"]["strategy_key"] == "opening_inertia"
+    assert captured["kwargs"]["event_source"] == "opening_inertia"
+    assert captured["kwargs"]["shadow_runtime"] is True
+    assert "strategy=opening_inertia" in str(captured["reason_detail"])
+
+
+def test_source_writer_frontier_marks_observability_degraded_without_source_data_failure(
+    monkeypatch,
+    tmp_path,
+):
+    now = datetime(2026, 5, 22, 1, 0, tzinfo=timezone.utc)
+    source_health_path = tmp_path / "source_health.json"
+    source_health_path.write_text(
+        json.dumps(
+            {
+                "written_at": (now - timedelta(seconds=459)).isoformat(),
+                "sources": {
+                    "ecmwf_open_data": {
+                        "status": "OK",
+                        "last_success_at": (now - timedelta(seconds=30)).isoformat(),
+                    }
+                },
+            }
+        )
+    )
+    monkeypatch.setattr(cycle_runtime, "state_path", lambda filename: source_health_path)
+
+    status = cycle_runtime._source_writer_frontier_status(now)
+
+    assert status["source_data_fresh"] is True
+    assert status["source_writer_fresh"] is False
+    assert status["observability_degraded"] is True
+    assert status["issue"] == "SOURCE_HEALTH_WRITER_OBSERVABILITY_STALE"
+    assert status["writer_age_seconds"] == pytest.approx(459.0)
+
+
 def test_discovery_phase_blocks_stale_market_scan_before_evaluator(tmp_path):
     conn = get_connection(tmp_path / "scan-authority.db")
     init_schema(conn)
@@ -7258,8 +7387,37 @@ def test_evaluator_uses_configured_primary_and_crosscheck_models(monkeypatch):
         def __init__(self, **kwargs):
             pass
 
-        def find_edges(self, n_bootstrap=500):
-            return []
+        def find_edges_with_trace(self, n_bootstrap=500):
+            return [], [
+                types.SimpleNamespace(
+                    support_index=0,
+                    bin_label="32°F or below",
+                    executable=True,
+                    direction="buy_yes",
+                    p_posterior=0.01,
+                    p_market=0.30,
+                    raw_edge=-0.29,
+                    ci_lower=None,
+                    ci_upper=None,
+                    p_value=None,
+                    decision="yes_raw_edge_nonpositive",
+                    native_quote_available=True,
+                ),
+                types.SimpleNamespace(
+                    support_index=0,
+                    bin_label="32°F or below",
+                    executable=True,
+                    direction="buy_no",
+                    p_posterior=0.99,
+                    p_market=None,
+                    raw_edge=None,
+                    ci_lower=None,
+                    ci_upper=None,
+                    p_value=None,
+                    decision="no_native_quote_unavailable",
+                    native_quote_available=False,
+                ),
+            ]
 
         def sigma_context(self):
             return {"base_sigma": 0.5, "lead_multiplier": 1.1, "spread_multiplier": 1.05, "final_sigma": 0.5775}
@@ -7601,8 +7759,37 @@ def test_evaluator_live_path_ignores_shadow_calibration_authority_result(monkeyp
         def __init__(self, **kwargs):
             pass
 
-        def find_edges(self, n_bootstrap=500):
-            return []
+        def find_edges_with_trace(self, n_bootstrap=500):
+            return [], [
+                types.SimpleNamespace(
+                    support_index=0,
+                    bin_label="32°F or below",
+                    executable=True,
+                    direction="buy_yes",
+                    p_posterior=0.01,
+                    p_market=0.30,
+                    raw_edge=-0.29,
+                    ci_lower=None,
+                    ci_upper=None,
+                    p_value=None,
+                    decision="yes_raw_edge_nonpositive",
+                    native_quote_available=True,
+                ),
+                types.SimpleNamespace(
+                    support_index=0,
+                    bin_label="32°F or below",
+                    executable=True,
+                    direction="buy_no",
+                    p_posterior=0.99,
+                    p_market=None,
+                    raw_edge=None,
+                    ci_lower=None,
+                    ci_upper=None,
+                    p_value=None,
+                    decision="no_native_quote_unavailable",
+                    native_quote_available=False,
+                ),
+            ]
 
         def sigma_context(self):
             return {"base_sigma": 0.5, "lead_multiplier": 1.1, "spread_multiplier": 1.05, "final_sigma": 0.5775}
@@ -11029,7 +11216,9 @@ def test_day0_observation_path_reaches_day0_signal(monkeypatch):
             calls["unit"] = unit
             calls["temporal_context"] = kwargs.get("temporal_context")
 
-        def p_vector(self, bins, n_mc=3000):
+        def p_vector(self, bins, n_mc=3000, rng=None):
+            calls["day0_p_vector_n_mc"] = n_mc
+            calls["day0_p_vector_rng_supplied"] = rng is not None
             calls["bins"] = [b.label for b in bins]
             return np.array([0.50, 0.30, 0.15, 0.05])
 
@@ -11064,6 +11253,14 @@ def test_day0_observation_path_reaches_day0_signal(monkeypatch):
     class DummyAnalysis:
         def __init__(self, **kwargs):
             self.bins = kwargs["bins"]
+            calls["bootstrap_signal_type"] = kwargs.get("bootstrap_signal_type")
+            sampler = kwargs.get("bootstrap_probability_sampler")
+            calls["bootstrap_sampler_supplied"] = callable(sampler)
+            if sampler is not None:
+                calls["bootstrap_sampler_vector"] = sampler(
+                    types.SimpleNamespace(_rng=np.random.default_rng(17)),
+                    51,
+                )
 
         def find_edges(self, n_bootstrap=500):
             self.selected_method = getattr(self, "selected_method", "test_fixture")
@@ -11114,6 +11311,7 @@ def test_day0_observation_path_reaches_day0_signal(monkeypatch):
         )
 
     monkeypatch.setattr(evaluator_module.Day0Router, "route", staticmethod(_route_day0))
+    monkeypatch.setattr("src.state.day0_nowcast_store.read_latest_platt_fit", lambda *args, **kwargs: None)
     from src.signal.day0_extrema import RemainingMemberExtrema as _REM
     def _remaining_for_day0(members_hourly, times, timezone_name, target_d, now=None, **kwargs):
         calls["day0_now"] = now
@@ -11169,6 +11367,11 @@ def test_day0_observation_path_reaches_day0_signal(monkeypatch):
     assert calls["temporal_context"].current_local_hour == 12.0
     assert calls["day0_now"] == datetime(2026, 4, 1, 12, 0, tzinfo=timezone.utc)
     assert "39-40°F" in calls["bins"]
+    assert calls["bootstrap_signal_type"] == "day0_observation_fused"
+    assert calls["bootstrap_sampler_supplied"] is True
+    assert calls["day0_p_vector_n_mc"] == 1
+    assert calls["day0_p_vector_rng_supplied"] is True
+    np.testing.assert_allclose(calls["bootstrap_sampler_vector"], np.array([0.50, 0.30, 0.15, 0.05]))
 
 
 def test_day0_observation_path_rejects_missing_solar_context(monkeypatch):
@@ -11338,8 +11541,37 @@ def test_gfs_crosscheck_uses_local_target_day_hours_instead_of_first_24h(monkeyp
         def __init__(self, **kwargs):
             pass
 
-        def find_edges(self, n_bootstrap=500):
-            return []
+        def find_edges_with_trace(self, n_bootstrap=500):
+            return [], [
+                types.SimpleNamespace(
+                    support_index=0,
+                    bin_label="32°F or below",
+                    executable=True,
+                    direction="buy_yes",
+                    p_posterior=0.01,
+                    p_market=0.30,
+                    raw_edge=-0.29,
+                    ci_lower=None,
+                    ci_upper=None,
+                    p_value=None,
+                    decision="yes_raw_edge_nonpositive",
+                    native_quote_available=True,
+                ),
+                types.SimpleNamespace(
+                    support_index=0,
+                    bin_label="32°F or below",
+                    executable=True,
+                    direction="buy_no",
+                    p_posterior=0.99,
+                    p_market=None,
+                    raw_edge=None,
+                    ci_lower=None,
+                    ci_upper=None,
+                    p_value=None,
+                    decision="no_native_quote_unavailable",
+                    native_quote_available=False,
+                ),
+            ]
 
         def sigma_context(self):
             return {"base_sigma": 0.5, "lead_multiplier": 1.1, "spread_multiplier": 1.05, "final_sigma": 0.5775}
@@ -11407,6 +11639,10 @@ def test_gfs_crosscheck_uses_local_target_day_hours_instead_of_first_24h(monkeyp
     assert len(decisions) == 1
     assert decisions[0].agreement == "AGREE"
     np.testing.assert_allclose(calls["gfs_p"], np.array([0.0, 0.0, 1.0]))
+    assert decisions[0].rejection_reason_enum == evaluator_module.NoTradeReason.UNCATEGORIZED
+    assert any(reason.startswith("EDGE_SCAN_TRACE(") for reason in decisions[0].rejection_reasons)
+    assert "yes_raw_edge_nonpositive:1" in decisions[0].rejection_reason_detail
+    assert "no_quote_unavailable=1" in decisions[0].rejection_reason_detail
 
 
 def test_gfs_crosscheck_forecast_days_cover_fractional_local_target_lead(monkeypatch):
