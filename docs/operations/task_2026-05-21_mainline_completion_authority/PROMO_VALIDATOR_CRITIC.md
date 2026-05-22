@@ -1,7 +1,13 @@
 # PromotionReadinessValidator — Adversarial Critic
 # Reviewer: critic | Date: 2026-05-22 | Mode: THOROUGH (no escalation; advisory module, fail-closed)
 
-VERDICT: FIX_REQUIRED
+> **RESOLUTION (PR #284):** FIXED. The contract-#4 finding and both MINORs below were addressed
+> in PR #284 — the promotion predicate is single-sourced as `promotion_predicate()` in
+> `live_readiness_tribunal.py` (both adjudicate() and the validator call it), the operator_ref
+> guard fires only on live-tier crossings, and `tier_required_for_live` is no longer a local
+> literal default. This is a FROZEN review record; findings below describe pre-fix state.
+
+VERDICT: FIX_REQUIRED *(historical — fixed in PR #284)*
 
 Test repro: `python -m pytest tests/analysis/test_promotion_readiness.py -q` → 14 passed in 1.20s.
 

@@ -217,6 +217,10 @@ make a surface default-read unless `current_state.md` routes it.
 | `INDEX.md` | Directory index for docs/operations live surfaces |
 | `live_rescue_ledger_2026-05-04.md` | Live rescue ledger evidence (2026-05-04) |
 | `POLICY.md` | Operations policy document |
+| `task_2026-05-21_mainline_completion_authority/` | task packet container | Phase 1-7 mainline completion authority package (closure verdict, promotion-validator critic, completion report) |
+| `task_2026-05-21_mainline_completion_authority/MAINLINE_COMPLETION_REPORT.md` | completion report | Decision-grade Phase 1-7 mainline completion summary: phases/tags, money-gate verdict, #77 validator, open items |
+| `task_2026-05-21_mainline_completion_authority/SESSION_CLOSURE_VERDICT.md` | closure verdict | Session-wide opus critic verdict (Phase 3-7 cross-phase seams + money gate); frozen, fixed in PR #284 |
+| `task_2026-05-21_mainline_completion_authority/PROMO_VALIDATOR_CRITIC.md` | critic verdict | Opus adversarial critic of PromotionReadinessValidator; frozen, fixed in PR #284 |
 Archived packet evidence (physically moved to `docs/operations/archive/<YYYY>-Q<N>/`) is
 listed in `docs/operations/archive/<YYYY>-Q<N>/INDEX.md`; do not re-list those packets here.
 When a packet closes and is archived, create a stub at `docs/operations/<name>.archived`

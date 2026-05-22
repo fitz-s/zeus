@@ -1,6 +1,12 @@
 # SESSION-WIDE CLOSURE VERDICT — Phase 3-7 Mainline Completion
 
-**VERDICT: FIX_REQUIRED**
+> **RESOLUTION (PR #284):** All 3 findings below were FIXED in PR #284. This is a FROZEN
+> review record: it was written against `origin/main @62ed96e133` when `SCHEMA_VERSION` was
+> **25**. Five sibling live PRs (#279–283) then advanced main to `22dba73349` / `SCHEMA_VERSION`
+> **26**. The shipped SEV-3.1 CHECK-list fix targets the current **26** (not the 25 cited in the
+> frozen body below). Version numbers in the body reflect review-time state, not current code.
+
+**VERDICT: FIX_REQUIRED** *(historical — fixed in PR #284)*
 
 Delta reviewed: `git diff phase2_landed(5c471cd51f)..origin/main(62ed96e133)` = 221 files, +37408/-974.
 Worktree: phase7-settlement-typegate-20260521 @ 62ed96e133 (clean, == origin/main).

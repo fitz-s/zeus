@@ -112,6 +112,7 @@ directory should EITHER be moved under `archive/` OR keep a
 | `task_2026-05-21_evidence_tier_tribunal_authority/` | PR #279 | **active** — EvidenceTier, Tribunal, no-trade provenance, and runtime strategy authority repair packet | 2026-05-21 |
 | `task_2026-05-22_live_math_frontier/` | PR #285 | **active** — live math-frontier edge trace, Day0 observation-fused bootstrap, source writer observability, and no-trade attribution repair | 2026-05-22 |
 | `task_2026-05-22_crosscheck_valid_window/` | PR #287 | **active** — executable forecast valid-window provenance repair for crosscheck comparability | 2026-05-22 |
+| `task_2026-05-21_mainline_completion_authority/` | PR #284 | **active** — Phase 1-7 mainline completion authority package: closure verdict, promotion-validator critic, completion report, and #77 promotion-readiness validator | 2026-05-22 |
 
 ## Active operation (only one allowed unless explicit branching)
 
