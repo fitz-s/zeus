@@ -2213,7 +2213,11 @@ def _strategy_key_for_hypothesis(candidate: MarketCandidate, hypothesis: FullFam
     if candidate.discovery_mode == DiscoveryMode.IMMINENT_OPEN_CAPTURE.value:
         return "opening_inertia"
     from src.strategy.strategy_profile import _classify_via_registry
-    _hyp_bin = SimpleNamespace(is_shoulder=hypothesis.is_shoulder)
+    _hyp_bin = SimpleNamespace(
+        is_shoulder=hypothesis.is_shoulder,
+        is_open_high=False,
+        is_open_low=False,
+    )
     _hyp_edge = SimpleNamespace(direction=hypothesis.direction, bin=_hyp_bin)
     _ctx = SimpleNamespace(edge=_hyp_edge, candidate=candidate, market_phase=None, conn=None)
     if _classify_via_registry("shoulder_sell", _ctx) is not None:
