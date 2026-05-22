@@ -1,5 +1,5 @@
 # Created: 2026-05-19
-# Last reused or audited: 2026-05-19
+# Last reused or audited: 2026-05-22
 # Authority basis: codereview-may19-2.md P1-2
 """Antibody: NegRisk redeem payout proof — route presence is not enough.
 
@@ -112,23 +112,26 @@ def _patch_negrisk_lookup(monkeypatch, neg_risk_by_cond: dict):
 
 
 def _seed_tx_hashed(conn, command_id: str, condition_id: str, tx_hash: str,
-                    token_amounts_json: str | None = None) -> None:
+                    token_amounts_json: str | None = None,
+                    state: str = SettlementState.REDEEM_TX_HASHED.value,
+                    error_payload: dict | None = None) -> None:
     conn.execute(
         """
         INSERT INTO settlement_commands
           (command_id, state, condition_id, market_id, payout_asset,
-           requested_at, tx_hash, token_amounts_json)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+           requested_at, tx_hash, token_amounts_json, error_payload)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             command_id,
-            SettlementState.REDEEM_TX_HASHED.value,
+            state,
             condition_id,
             condition_id,
             "USDC",
             NOW.isoformat(),
             tx_hash,
             token_amounts_json,
+            json.dumps(error_payload, sort_keys=True) if error_payload else None,
         ),
     )
     conn.commit()
@@ -259,3 +262,49 @@ def test_t3_correct_payout_confirmed(conn, monkeypatch):
         f"T3 FAIL: correct NegRisk payout proof did not confirm. "
         f"state={row['state']!r}"
     )
+
+
+def test_recheckable_amount_mismatch_review_with_correct_payout_confirms(conn, monkeypatch):
+    """A previous parser can leave a valid redeem terminally parked in
+    REDEEM_REVIEW_REQUIRED. If the stored tx_hash now proves the exact
+    NegRisk payout, reconcile must heal that row instead of requiring a
+    manual force transition.
+    """
+    _patch_negrisk_lookup(monkeypatch, {TARGET_COND: True})
+    _seed_tx_hashed(
+        conn,
+        "review-cmd",
+        TARGET_COND,
+        TARGET_TX,
+        token_amounts_json=json.dumps({"winning-position": 1.0}),
+        state=SettlementState.REDEEM_REVIEW_REQUIRED.value,
+        error_payload={
+            "errorCode": "REDEEM_NEGRISK_AMOUNT_MISMATCH",
+            "payout_from_receipt": 2**255,
+            "expected_amount_per_slot": _PAYOUT_MICRO,
+        },
+    )
+
+    receipt = {
+        "status": 1,
+        "transactionHash": TARGET_TX,
+        "blockNumber": 87200003,
+        "logs": [
+            {
+                "address": POLYGON_NEGRISK_ADAPTER_ADDRESS.lower(),
+                "topics": [_NEGRISK_REDEMPTION_TOPIC, _REDEEMER_TOPIC, TARGET_COND],
+                "data": _abi_encode_payout(_PAYOUT_MICRO),
+            },
+        ],
+    }
+    results = reconcile_pending_redeems(_StubWeb3(receipt), conn)
+
+    row = conn.execute(
+        "SELECT state, error_payload FROM settlement_commands WHERE command_id = ?",
+        ("review-cmd",),
+    ).fetchone()
+    assert len(results) == 1
+    assert results[0].state == SettlementState.REDEEM_CONFIRMED
+    assert results[0].error_payload is None
+    assert row["state"] == SettlementState.REDEEM_CONFIRMED.value
+    assert row["error_payload"] is None

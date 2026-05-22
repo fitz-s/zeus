@@ -451,11 +451,31 @@ def _matching_fill_position_events(events: list[dict[str, Any]], order_id: str) 
     ]
 
 
+def _matching_exit_fill_position_events(events: list[dict[str, Any]], order_id: str) -> list[dict[str, Any]]:
+    return [
+        event
+        for event in events
+        if str(event.get("event_type") or "") == "EXIT_ORDER_FILLED"
+        and (not order_id or str(event.get("order_id") or "") == order_id)
+        and str(event.get("env") or "live") == "live"
+    ]
+
+
 def _matching_pending_entry_position_events(events: list[dict[str, Any]], order_id: str) -> list[dict[str, Any]]:
     return [
         event
         for event in events
         if str(event.get("event_type") or "") == "ENTRY_ORDER_POSTED"
+        and (not order_id or str(event.get("order_id") or "") == order_id)
+        and str(event.get("env") or "live") == "live"
+    ]
+
+
+def _matching_pending_exit_position_events(events: list[dict[str, Any]], order_id: str) -> list[dict[str, Any]]:
+    return [
+        event
+        for event in events
+        if str(event.get("event_type") or "") == "EXIT_ORDER_POSTED"
         and (not order_id or str(event.get("order_id") or "") == order_id)
         and str(event.get("env") or "live") == "live"
     ]
@@ -475,6 +495,8 @@ def _has_matching_position_current(
     fill_events: list[dict[str, Any]],
     current_rows: list[dict[str, Any]],
     order_id: str,
+    *,
+    intent_kind: str = "ENTRY",
 ) -> bool:
     position_ids = {str(event.get("position_id") or "") for event in fill_events if event.get("position_id")}
     if not position_ids:
@@ -482,7 +504,7 @@ def _has_matching_position_current(
     for row in current_rows:
         if str(row.get("position_id") or "") not in position_ids:
             continue
-        if order_id and str(row.get("order_id") or "") != order_id:
+        if intent_kind != "EXIT" and order_id and str(row.get("order_id") or "") != order_id:
             continue
         if str(row.get("phase") or "") not in FILLED_POSITION_PHASES:
             continue
@@ -496,6 +518,8 @@ def _position_current_order_status_consistent(
     fill_events: list[dict[str, Any]],
     current_rows: list[dict[str, Any]],
     order_id: str,
+    *,
+    intent_kind: str = "ENTRY",
 ) -> bool:
     command_state = str(command.get("state") or "")
     coverage_state = _fill_coverage_state(command, trade_facts, order_id)
@@ -504,6 +528,8 @@ def _position_current_order_status_consistent(
     elif command_state == "FILLED":
         if coverage_state == "partial":
             expected = {"partial", "partially_filled", "partially_matched"}
+        elif intent_kind == "EXIT":
+            expected = {"sell_filled", "buy_filled", "exit_filled", "filled", "confirmed", "complete"}
         else:
             expected = {"filled", "confirmed", "complete"}
     else:
@@ -512,7 +538,7 @@ def _position_current_order_status_consistent(
     for row in current_rows:
         if str(row.get("position_id") or "") not in position_ids:
             continue
-        if order_id and str(row.get("order_id") or "") != order_id:
+        if intent_kind != "EXIT" and order_id and str(row.get("order_id") or "") != order_id:
             continue
         if str(row.get("order_status") or "").lower() in expected:
             return True
@@ -672,6 +698,7 @@ def evaluate(conn: sqlite3.Connection, command_id: str | None = None) -> dict[st
 
     cmd_id = str(command.get("command_id") or "")
     state = str(command.get("state") or "")
+    intent_kind = str(command.get("intent_kind") or "ENTRY").upper()
     events = _events(conn, cmd_id)
     envelopes = _envelopes(conn, command)
     order_facts = _facts(conn, "venue_order_facts", cmd_id)
@@ -691,8 +718,12 @@ def evaluate(conn: sqlite3.Connection, command_id: str | None = None) -> dict[st
         if event.get("position_id")
     }
     position_current = _position_current(conn, order_id, position_ids)
-    fill_position_events = _matching_fill_position_events(position_events, order_id)
-    pending_entry_position_events = _matching_pending_entry_position_events(position_events, order_id)
+    if intent_kind == "EXIT":
+        fill_position_events = _matching_exit_fill_position_events(position_events, order_id)
+        pending_entry_position_events = _matching_pending_exit_position_events(position_events, order_id)
+    else:
+        fill_position_events = _matching_fill_position_events(position_events, order_id)
+        pending_entry_position_events = _matching_pending_entry_position_events(position_events, order_id)
     void_position_events = _matching_void_position_events(position_events, order_id)
     position_tables_present = _table_exists(conn, "position_events") and _table_exists(
         conn, "position_current"
@@ -836,7 +867,12 @@ def evaluate(conn: sqlite3.Connection, command_id: str | None = None) -> dict[st
             Check(
                 "position_current_projection_present",
                 "PASS"
-                if _has_matching_position_current(fill_position_events, position_current, order_id)
+                if _has_matching_position_current(
+                    fill_position_events,
+                    position_current,
+                    order_id,
+                    intent_kind=intent_kind,
+                )
                 else "FAIL",
                 f"count={len(position_current)}",
             )
@@ -846,7 +882,12 @@ def evaluate(conn: sqlite3.Connection, command_id: str | None = None) -> dict[st
                 "position_current_order_status_consistent",
                 "PASS"
                 if _position_current_order_status_consistent(
-                    command, trade_facts, fill_position_events, position_current, order_id
+                    command,
+                    trade_facts,
+                    fill_position_events,
+                    position_current,
+                    order_id,
+                    intent_kind=intent_kind,
                 )
                 else "FAIL",
                 _position_current_order_status_detail(command, trade_facts, position_current, order_id),

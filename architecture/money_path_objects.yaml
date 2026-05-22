@@ -193,6 +193,18 @@ state_machines:
       - READY_FOR_OPERATOR_REVIEW
     invariant_tests:
       - tests/test_shoulder_shadow_readiness_report.py
+  redeem_review_error_code:
+    owner: src/execution/settlement_commands.py
+    description: >
+      settlement_commands.error_payload.errorCode labels that route a redeem to
+      REDEEM_REVIEW_REQUIRED. These are not command states; they are review
+      classifications that determine whether a row can be automatically
+      rechecked or must remain operator-reviewed.
+    states:
+      - REDEEM_NEGRISK_AMOUNT_MISMATCH
+    invariant_tests:
+      - tests/test_negrisk_redeem_payout_proof.py
+      - tests/test_redeem_cascade_liveness.py
   live_runtime_config:
     owner: src/strategy/family_exclusive_dedup.py
     description: >
