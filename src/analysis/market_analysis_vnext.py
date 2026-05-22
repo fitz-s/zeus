@@ -1,5 +1,5 @@
 # Created: 2026-05-20
-# Last reused or audited: 2026-05-21
+# Last reused or audited: 2026-05-22
 # Authority basis: PHASE_2_ULTRAPLAN.md v3.1 §7 (sha 00c2399742)
 """MarketAnalysisVNext — production.
 
@@ -56,6 +56,15 @@ class MicrostructureMetrics:
     # Market end anchor source (INV-anchor-source-real-value target)
     # Derived by market_end_anchor_source(market) at caller site; passed in.
     polymarket_end_anchor_source: str
+
+    # FOK information-delay arbitrage fields (stale_quote_detector theorem)
+    # Authority: STRATEGY_TAXONOMY_DIRECTIVE.md §3 + zeus_strategy_spec.md §13
+    # Data-gated: all three default to None/False until the info-event feed and
+    # executable-quote capture are wired.  MarketAnalysisVNext.compute() sets
+    # all three to their data-gated defaults; the feed populates them when live.
+    info_event_observed: bool = False           # True iff canonical InfoEvent known
+    p_after_lower_bound: Optional[Decimal] = None  # post-event posterior lower bound p1
+    stale_quote_price: Optional[Decimal] = None    # executable stale ask a0
 
     # bin_grid_id propagated from ensemble_snapshots_v2 (F4 retrofit)
     bin_grid_id: Optional[str] = None
@@ -145,6 +154,14 @@ class MarketAnalysisVNext:
         # spread_observed_window_ms: deferred until windowed observer is implemented.
         spread_observed_window_ms: Optional[int] = None
 
+        # FOK information-delay arbitrage fields — data-gated until the info-event
+        # feed and executable-quote capture are wired.  The feed populates these
+        # fields; compute() supplies safe data-gated defaults in the interim.
+        # Strategy sees info_event_observed=False → no_trade (no theorem applies).
+        info_event_observed: bool = False
+        p_after_lower_bound: Optional[Decimal] = None
+        stale_quote_price: Optional[Decimal] = None
+
         return MicrostructureMetrics(
             snapshot_id=snapshot.snapshot_id,
             event_slug=snapshot.event_slug,
@@ -154,6 +171,9 @@ class MarketAnalysisVNext:
             spread_observed_window_ms=spread_observed_window_ms,
             depth_at_best_ask=snapshot.depth_at_best_ask,
             polymarket_end_anchor_source=self._polymarket_end_anchor_source,
+            info_event_observed=info_event_observed,
+            p_after_lower_bound=p_after_lower_bound,
+            stale_quote_price=stale_quote_price,
             bin_grid_id=self._bin_grid_id,
             bin_schema_version=self._bin_schema_version,
         )
