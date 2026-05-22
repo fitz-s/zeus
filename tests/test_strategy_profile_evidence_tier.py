@@ -185,9 +185,10 @@ def test_t1_live_registry_settlement_capture_live_normal() -> None:
 
 
 def test_t1_live_registry_shoulder_sell_shadow_pass() -> None:
-    """shoulder_sell has evidence_tier=SHADOW_PASS and is_runtime_live=False."""
+    """D6 (2026-05-22): shoulder_sell REFUTED — evidence_tier demoted to IDEA,
+    live_status=blocked, is_runtime_live=False."""
     profile = get("shoulder_sell")
-    assert profile.evidence_tier == EvidenceTier.SHADOW_PASS
+    assert profile.evidence_tier == EvidenceTier.IDEA  # D6: refuted, tombstoned
     assert profile.is_runtime_live() is False
 
 

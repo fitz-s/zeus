@@ -198,7 +198,7 @@ def test_dormant_inverse_quadrants_do_not_masquerade_as_live_strategy_keys() -> 
     assert cycle_runner._classify_edge_source(DiscoveryMode.UPDATE_REACTION, _shoulder_buy_edge()) == "unclassified"
     assert cycle_runner._classify_strategy(DiscoveryMode.UPDATE_REACTION, _shoulder_buy_edge(), "") == "unclassified"
 
-    assert _strategy_key_for_hypothesis(candidate, _hypothesis(direction="buy_no", is_shoulder=True)) == "shoulder_sell"
+    assert _strategy_key_for_hypothesis(candidate, _hypothesis(direction="buy_no", is_shoulder=True)) == "shoulder_impossible_tail_capture"  # D6: shoulder_sell retired
     assert _strategy_key_for_hypothesis(candidate, _hypothesis(direction="buy_yes", is_shoulder=False)) == "center_buy"
     assert _strategy_key_for_hypothesis(candidate, _hypothesis(direction="buy_yes", is_shoulder=True)) is None
     assert _strategy_key_for_hypothesis(candidate, _hypothesis(direction="buy_no", is_shoulder=False)) is None

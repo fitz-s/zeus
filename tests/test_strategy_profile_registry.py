@@ -78,6 +78,8 @@ def test_all_registered_strategies():
         "neg_risk_basket",
         # P1 architecture review (2026-05-22) — settlement-day upside strategy
         "day0_nowcast_entry",
+        # D6 (2026-05-22) — deterministic physical-bound tail-capture (shoulder_sell successor)
+        "shoulder_impossible_tail_capture",
     })
 
 
@@ -117,7 +119,7 @@ def test_live_safe_keys_match_pre_A4_LIVE_SAFE_STRATEGIES():
         "opening_inertia",
         "center_buy",
         "settlement_capture",
-        "shoulder_sell",
+        # shoulder_sell removed: D6 (2026-05-22) set live_status=blocked (REFUTED)
         "imminent_open_capture",  # added 2026-05-19
         # Phase 4 shadow candidates boot-allowed (live_status: shadow) — added 2026-05-21
         "stale_quote_detector",
@@ -129,6 +131,8 @@ def test_live_safe_keys_match_pre_A4_LIVE_SAFE_STRATEGIES():
         "neg_risk_basket",
         # P1 architecture review (2026-05-22) — settlement-day upside strategy
         "day0_nowcast_entry",
+        # D6 (2026-05-22) — shoulder_sell successor, live_status=shadow
+        "shoulder_impossible_tail_capture",
     })
 
 
@@ -157,12 +161,12 @@ def test_shoulder_sell_resolves_pre_A4_divergence():
     """Bug review §E: shoulder_sell was in LIVE_SAFE but not _LIVE_ALLOWED
     (a divergence between two hardcoded sets that nominally meant the
     same thing). Post-A4 the two sets derive from live_status; shoulder_sell
-    is ``shadow`` — boots OK, runtime entry blocked. The divergence is
-    resolved into a single semantic state.
+    was ``shadow`` pre-D6. D6 (2026-05-22) refuted and retired it: live_status
+    is now ``blocked`` — not boot-allowed, routing disabled.
     """
     profile = sp.get("shoulder_sell")
-    assert profile.live_status == "shadow"
-    assert profile.is_boot_allowed() is True
+    assert profile.live_status == "blocked"  # D6: REFUTED, tombstoned
+    assert profile.is_boot_allowed() is False
     assert profile.is_runtime_live() is False
 
 
@@ -448,7 +452,7 @@ def test_schema_load_rejects_missing_required_field(tmp_path: Path):
         ("center_buy",         "buy_yes", "finite_range",  "post_trading",        False),
         ("opening_inertia",    "buy_yes", "open_shoulder", "pre_settlement_day",  True),
         ("opening_inertia",    "buy_no",  "open_shoulder", "pre_settlement_day",  True),
-        ("shoulder_sell",      "buy_no",  "open_shoulder", "settlement_day",      True),  # phase OK; live_status=shadow blocks runtime, not classifier
+        ("shoulder_sell",      "buy_no",  "open_shoulder", "settlement_day",      False),  # D6: REFUTED/tombstone — allowed_market_phases=[], direction=[], topology=[]
         ("shoulder_buy",       "buy_yes", "open_shoulder", "settlement_day",      False),  # blocked
         ("center_sell",        "buy_no",  "finite_range",  "settlement_day",      False),  # blocked
     ],
