@@ -125,6 +125,7 @@ def analyze_model_agreement(
     local_day_window_crosscheck: str = "",
     candidate_support_index: int | None = None,
     candidate_support_floor: float = CANDIDATE_SUPPORT_FLOOR,
+    require_candidate_support_for_conflict: bool = True,
 ) -> ModelConflictEvidence:
     """Return the model-agreement classification with live-money evidence.
 
@@ -176,11 +177,10 @@ def analyze_model_agreement(
             expected_gap >= PHYSICAL_TEMP_GAP_CONFLICT
             or mode_temp_gap >= PHYSICAL_TEMP_GAP_CONFLICT
         )
-        candidate_not_supported = (
-            candidate_supported_by_crosscheck is False
-            if candidate_supported_by_crosscheck is not None
-            else True
-        )
+        if candidate_supported_by_crosscheck is None:
+            candidate_not_supported = not require_candidate_support_for_conflict
+        else:
+            candidate_not_supported = candidate_supported_by_crosscheck is False
         if physically_separated and candidate_not_supported:
             classification = "CONFLICT"
             live_action = "reject"
@@ -227,7 +227,11 @@ def model_agreement(ecmwf_p: np.ndarray, gfs_p: np.ndarray) -> str:
         "SOFT_DISAGREE" — widen CI, raise edge threshold
         "CONFLICT" — skip market entirely
     """
-    return analyze_model_agreement(ecmwf_p, gfs_p).classification
+    return analyze_model_agreement(
+        ecmwf_p,
+        gfs_p,
+        require_candidate_support_for_conflict=False,
+    ).classification
 
 
 def compute_jsd(p: np.ndarray, q: np.ndarray) -> float:

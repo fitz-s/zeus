@@ -381,13 +381,18 @@ def day0_blended_highs(
     observation_weight: float,
     backbone_high: float | None = None,
 ):
-    """Current Phase-0 residual blending policy, extracted behind a seam."""
+    """Return physical Day0 HIGH settlement samples.
+
+    The settled daily high is a hard-floor/max object: once a canonical
+    intraday high has been observed, later samples may exceed it but cannot be
+    compressed below their own remaining-member high.  The historical
+    observation_weight/backbone arguments remain in the seam for compatibility
+    and diagnostics, but they must not change the physical settlement value.
+    """
     import numpy as np
 
-    anchor_high = float(observed_high if backbone_high is None else backbone_high)
     remaining = np.asarray(remaining_member_highs, dtype=float)
-    residual_excess = np.maximum(0.0, remaining - anchor_high)
-    return anchor_high + residual_excess * (1.0 - float(observation_weight))
+    return np.maximum(float(observed_high), remaining)
 
 
 def day0_backbone_high(

@@ -331,6 +331,66 @@ def test_open_pending_active_family_exposure_blocks_fdr_selected_hypothesis_with
     assert "FDR" not in rejected.rejection_stage
 
 
+def test_known_different_market_family_exposure_does_not_block_replacement_market() -> None:
+    """Known venue family identity narrows B2 exposure blocking.
+
+    City/date/metric remains the conservative fallback, but when both old and
+    new sides carry explicit market-family ids, only the same event family can
+    block replacement/reopened weather markets.
+    """
+    bins = {s[2]: s for s in _BIN_SPECS}
+    new_bin = _trade_decision(bins["22-23°F"], size_usd=20.0, forward_edge=0.07)
+    new_bin.fdr_family_size = len(_BIN_SPECS)
+    new_bin.n_edges_after_fdr = 1
+    exposure = WeatherFamilyExposure(
+        key=WeatherFamilyKey(CITY, TARGET_DATE, METRIC, "old-event-family"),
+        bin_label="20-21°F",
+        phase="active",
+        position_id="pos-old-family",
+    )
+
+    out = dedup_mutually_exclusive_families(
+        [new_bin],
+        city=CITY,
+        target_date=TARGET_DATE,
+        temperature_metric=METRIC,
+        market_family_id="new-event-family",
+        existing_exposures=[exposure],
+        enabled=True,
+    )
+
+    assert _count_trades(out) == 1
+    assert out[0].should_trade is True
+
+
+def test_unknown_market_family_exposure_blocks_conservatively() -> None:
+    """Historical exposure without family id still blocks same city/date/metric."""
+    bins = {s[2]: s for s in _BIN_SPECS}
+    new_bin = _trade_decision(bins["22-23°F"], size_usd=20.0, forward_edge=0.07)
+    new_bin.fdr_family_size = len(_BIN_SPECS)
+    new_bin.n_edges_after_fdr = 1
+    exposure = WeatherFamilyExposure(
+        key=WeatherFamilyKey(CITY, TARGET_DATE, METRIC),
+        bin_label="20-21°F",
+        phase="active",
+        position_id="pos-legacy-family",
+    )
+
+    out = dedup_mutually_exclusive_families(
+        [new_bin],
+        city=CITY,
+        target_date=TARGET_DATE,
+        temperature_metric=METRIC,
+        market_family_id="new-event-family",
+        existing_exposures=[exposure],
+        enabled=True,
+    )
+
+    assert _count_trades(out) == 0
+    assert out[0].rejection_reason_enum is NoTradeReason.MUTUALLY_EXCLUSIVE_FAMILY_DEDUP
+    assert "existing_exposure_bin='20-21°F'" in str(out[0].rejection_reason_detail)
+
+
 @pytest.mark.parametrize("blocking_phase", ["open", "pending", "active"])
 def test_family_portfolio_optimizer_intent_is_the_only_existing_exposure_bypass(
     blocking_phase: str,
@@ -549,7 +609,7 @@ def test_trade_db_family_exposure_blocks_command_without_position_projection(tmp
 
     assert exposures == [
         WeatherFamilyExposure(
-            key=WeatherFamilyKey(CITY, TARGET_DATE, METRIC),
+            key=WeatherFamilyKey(CITY, TARGET_DATE, METRIC, "weather-chicago-high"),
             bin_label="20-21°F",
             phase="ACKED",
             position_id="cmd-1",
@@ -623,7 +683,7 @@ def test_trade_db_family_exposure_prefers_forecasts_market_events_authority(tmp_
 
     assert exposures == [
         WeatherFamilyExposure(
-            key=WeatherFamilyKey(CITY, TARGET_DATE, METRIC),
+            key=WeatherFamilyKey(CITY, TARGET_DATE, METRIC, "weather-chicago-high"),
             bin_label="20-21°F",
             phase="ACKED",
             position_id="cmd-1",
@@ -694,7 +754,7 @@ def test_trade_db_family_exposure_does_not_let_stale_envelope_mask_snapshot_iden
 
     assert exposures == [
         WeatherFamilyExposure(
-            key=WeatherFamilyKey(CITY, TARGET_DATE, METRIC),
+            key=WeatherFamilyKey(CITY, TARGET_DATE, METRIC, "weather-chicago-high"),
             bin_label="20-21°F",
             phase="ACKED",
             position_id="cmd-1",
@@ -1005,7 +1065,8 @@ def test_one_cent_order_rejected_without_tail_strategy_even_if_venue_min_passes(
     edge = _bin_edge(bins["26°F or above"], entry_price=0.01, forward_edge=0.04)
 
     assert _strategy_entry_price_floor_block_reason("opening_inertia", edge) == (
-        "STRATEGY_ENTRY_PRICE_BELOW_LIVE_FLOOR(0.0100<=0.05; strategy=opening_inertia)"
+        "STRATEGY_ENTRY_PRICE_BELOW_LIVE_FLOOR(0.0100<=0.05; "
+        "strategy=opening_inertia; direction=buy_yes; tail_topology=true)"
     )
 
 

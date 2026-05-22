@@ -2171,6 +2171,9 @@ def _edge_source_for(candidate: MarketCandidate, edge: BinEdge) -> str:
     # legacy behavior (T6).
     from src.engine.dispatch import is_settlement_day_dispatch
     if is_settlement_day_dispatch(candidate):
+        day0_truth = _day0_high_truth_classification_for_edge(candidate, edge)
+        if day0_truth and day0_truth != "observation_locked":
+            return "day0_nowcast_entry"
         return "settlement_capture"
     if candidate.discovery_mode == DiscoveryMode.OPENING_HUNT.value:
         return "opening_inertia"
@@ -2189,6 +2192,9 @@ def _strategy_key_for(candidate: MarketCandidate, edge: BinEdge) -> str | None:
     # P3 site 2 of 3 in evaluator (PLAN_v3 §6.P3).
     from src.engine.dispatch import is_settlement_day_dispatch
     if is_settlement_day_dispatch(candidate):
+        day0_truth = _day0_high_truth_classification_for_edge(candidate, edge)
+        if day0_truth and day0_truth != "observation_locked":
+            return None
         return "settlement_capture"
     if candidate.discovery_mode == DiscoveryMode.OPENING_HUNT.value:
         return "opening_inertia"
@@ -2225,6 +2231,53 @@ def _strategy_key_for_hypothesis(candidate: MarketCandidate, hypothesis: FullFam
     if hypothesis.direction == "buy_yes" and not hypothesis.is_shoulder:
         return "center_buy"
     return None
+
+
+def _day0_high_truth_classification_for_edge(
+    candidate: MarketCandidate,
+    edge: BinEdge,
+) -> str | None:
+    """Classify whether a Day0 HIGH buy_yes edge is observation-locked.
+
+    Settlement capture is reserved for facts already locked by canonical
+    intraday observation. A buy_yes bin above the observed high is still a
+    nowcast/forecast-upside edge and must not inherit settlement_capture live
+    policy.
+    """
+    if candidate.discovery_mode != DiscoveryMode.DAY0_CAPTURE.value:
+        return None
+    if str(candidate.temperature_metric).lower() != "high":
+        return None
+    if edge.direction != "buy_yes":
+        return None
+    observed_high = _finite_day0_observation_float(
+        candidate.observation,
+        "high_so_far",
+    )
+    if observed_high is None:
+        return "observation_unknown"
+    edge_bin = edge.bin
+    if edge_bin.is_open_high:
+        try:
+            return (
+                "observation_locked"
+                if observed_high >= float(edge_bin.low)
+                else "observation_floor_plus_forecast_upside"
+            )
+        except (TypeError, ValueError):
+            return "observation_unknown"
+    if edge_bin.is_open_low:
+        try:
+            if observed_high > float(edge_bin.high):
+                return "observation_excludes_bin"
+        except (TypeError, ValueError):
+            return "observation_unknown"
+        return "observation_partial_unresolved"
+    if edge_bin.low is not None and observed_high < float(edge_bin.low):
+        return "observation_floor_plus_forecast_upside"
+    if edge_bin.high is not None and observed_high > float(edge_bin.high):
+        return "observation_excludes_bin"
+    return "observation_partial_unresolved"
 
 
 def _entry_ci_rejection_reason(candidate: MarketCandidate, edge: BinEdge) -> str | None:
@@ -4599,6 +4652,7 @@ def evaluate_candidate(
         city=city.name,
         target_date=target_date,
         temperature_metric=temperature_metric.temperature_metric,
+        market_family_id=_entry_forecast_market_family(candidate, temperature_metric),
     )
     family_preselection_drops = list(family_decision.dropped) if family_decision else []
     family_fallback_rank_by_edge_id: dict[int, int] = {}
@@ -4693,6 +4747,58 @@ def evaluate_candidate(
                 rejection_reason_detail=f"selected support index {bin_idx} has no executable token payload",
             ))
             continue
+        if "agreement_evidence" in locals() and "gfs_p" in locals():
+            edge_agreement_evidence = analyze_model_agreement(
+                p_raw,
+                gfs_p,
+                primary_model=primary_model,
+                crosscheck_model=crosscheck_model,
+                bin_labels=[b.label for b in bins],
+                bin_centers=[
+                    _bin_center_for_model_agreement(b, city.settlement_unit)
+                    for b in bins
+                ],
+                primary_source_run_id=str(ens_result.get("source_run_id") or ""),
+                crosscheck_source_run_id=str(
+                    crosscheck_result.get("source_run_id") or ""
+                ),
+                issue_time_primary=_snapshot_issue_time_value(ens_result) or "",
+                issue_time_crosscheck=_snapshot_issue_time_value(crosscheck_result)
+                or "",
+                local_day_window_primary=getattr(
+                    agreement_evidence,
+                    "local_day_window_primary",
+                    "",
+                ),
+                local_day_window_crosscheck=getattr(
+                    agreement_evidence,
+                    "local_day_window_crosscheck",
+                    "",
+                ),
+                candidate_support_index=bin_idx,
+            )
+            if edge_agreement_evidence.classification == "CONFLICT":
+                decisions.append(EdgeDecision(
+                    False,
+                    edge=edge,
+                    decision_id=_decision_id(),
+                    rejection_stage="SIGNAL_QUALITY",
+                    rejection_reasons=[NoTradeReason.MODEL_CONFLICT.value],
+                    selected_method=selected_method,
+                    applied_validations=[
+                        *decision_validations,
+                        "model_agreement_edge_support",
+                    ],
+                    decision_snapshot_id=snapshot_id,
+                    rejection_reason_enum=NoTradeReason.MODEL_CONFLICT,
+                    rejection_reason_detail=(
+                        "MODEL_CONFLICT_EDGE_UNSUPPORTED:"
+                        f"{edge_agreement_evidence.to_detail_json()}"
+                    ),
+                ))
+                continue
+            if edge_agreement_evidence.classification == "SOFT_DISAGREE":
+                decision_validations.append("model_agreement_edge_soft_disagree")
         tokens = _directional_executable_tokens(token_map[bin_idx], edge.direction)
         edge_source = _edge_source_for(candidate, edge)
         strategy_key = _strategy_key_for(candidate, edge)

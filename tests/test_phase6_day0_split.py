@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-04-18; last_reviewed=2026-04-29; last_reused=2026-04-29
+# Lifecycle: created=2026-04-18; last_reviewed=2026-05-22; last_reused=2026-05-22
 # Purpose: Phase 6 R-BA..R-BG invariants: Day0 split + router + DT#6 graceful-degradation + B055 absorption
 # Reuse: Anchors on phase6_contract.md. Confirms Day0Router routes by metric+causality,
 #   LOW missing low_so_far clean-rejects, RemainingMemberExtrema prevents MAX→MIN alias.
@@ -64,6 +64,33 @@ class TestRBA_HighPathMaxArray:
         assert samples.min() >= 79.0
         # Would fail if mins array was mistakenly used (50-52 < 79)
         assert samples.max() <= 90.0  # sanity: within plausible range
+
+    def test_high_signal_p_vector_uses_physical_max_not_residual_compression(self):
+        """Rich evaluator p_vector must match HIGH hard-floor/max semantics."""
+        from src.signal.day0_router import Day0Router, Day0SignalInputs
+        from src.types import Bin
+        from src.types.metric_identity import HIGH_LOCALDAY_MAX
+
+        inputs = Day0SignalInputs(
+            temperature_metric=HIGH_LOCALDAY_MAX,
+            current_temp=34.0,
+            hours_remaining=0.0,
+            observed_high_so_far=34.0,
+            observed_low_so_far=None,
+            member_maxes_remaining=np.array([42.0, 42.0, 42.0], dtype=np.float64),
+            member_mins_remaining=None,
+        )
+        signal = Day0Router.route(inputs)
+        bins = [
+            Bin(low=None, high=36, label="36°F or below", unit="F"),
+            Bin(low=37, high=38, label="37-38°F", unit="F"),
+            Bin(low=42, high=None, label="42°F or higher", unit="F"),
+        ]
+
+        p = signal.p_vector(bins, n_mc=1, rng=np.random.default_rng(7))
+
+        assert p[2] == pytest.approx(1.0)
+
 
     def test_high_signal_returns_day0_high_signal_instance(self):
         """Router must return Day0HighSignal for HIGH metric."""
