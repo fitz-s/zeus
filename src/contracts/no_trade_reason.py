@@ -161,6 +161,11 @@ class NoTradeReason(StrEnum):
     # ── Physical bound theorem failure gate ────────────────────────────────────
     SHOULDER_PHYSICAL_BOUND_NOT_EXCLUDES_TAIL = auto()  # physical bound >= threshold; theorem fails
 
+    # ── imminent_open_capture posterior-collapse candidate gates (2026-05-22) ──
+    # Authority: STRATEGY_TAXONOMY_DIRECTIVE.md §9 + zeus_strategy_spec.md §10
+    IMMINENT_CALIBRATION_UNAVAILABLE = auto()  # cal_p_hats empty or analysis absent → fail-closed
+    IMMINENT_NO_EDGE = auto()                  # p⁻−ask−phi≤0 AND 1−p⁺−bid−phi≤0; no theorem applies
+
     # ── settlement_capture shadow: physical-interval theorem (STRATEGY_TAXONOMY_DIRECTIVE §1) ──
     PHYSICAL_INTERVAL_DATA_GATED = auto()      # settlement_capture_shadow: Δ_phys⁺/QC input absent → no_trade until data wired
     PHYSICAL_INTERVAL_OVERLAP = auto()         # settlement_capture_shadow: I_t overlaps B_i but neither ⊆ nor disjoint → ambiguous

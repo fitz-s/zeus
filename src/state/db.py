@@ -894,7 +894,7 @@ def get_connection(
 # CI hook scripts/check_schema_version.py diffs the sqlite_master hash of
 # a fresh-init DB against tests/state/_schema_pinned_hash.txt and fails
 # the PR if SCHEMA_VERSION did not change in lockstep.
-SCHEMA_VERSION = 29  # 2026-05-22 deterministic-strategy wave: 5 reframes + F3 Pipeline-A + C-2 cohort fix + day0 nowcast attribution (origin/main v28 base)
+SCHEMA_VERSION = 30  # 2026-05-22 s3/imminent-posterior-collapse: +2 NoTradeReason members (IMMINENT_CALIBRATION_UNAVAILABLE, IMMINENT_NO_EDGE) + shadow candidate
 
 
 def init_schema(
