@@ -894,7 +894,7 @@ def get_connection(
 # CI hook scripts/check_schema_version.py diffs the sqlite_master hash of
 # a fresh-init DB against tests/state/_schema_pinned_hash.txt and fails
 # the PR if SCHEMA_VERSION did not change in lockstep.
-SCHEMA_VERSION = 28  # 2026-05-22 neg_risk_basket reason + opportunity_fact strategy_key CHECK widening
+SCHEMA_VERSION = 30  # 2026-05-22 resolution_window_maker reframe: RESOLUTION_TYPED_OUTCOME_UNAVAILABLE reason enum member
 
 
 def init_schema(
