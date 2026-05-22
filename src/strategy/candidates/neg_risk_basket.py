@@ -1,22 +1,23 @@
 # Created: 2026-04-27
 # Last reused or audited: 2026-05-22
-# Authority basis: docs/operations/task_2026-05-21_mainline_completion_authority/STRATEGY_TAXONOMY_DIRECTIVE.md §17
+# Authority basis: docs/reference/zeus_strategy_spec.md §19.3
 #                  + docs/reference/zeus_math_spec.md §11.4-11.9
 """NegRiskBasket — exact-arbitrage deterministic pipeline PILOT.
 
 Math spec authority: zeus_math_spec.md §11.4-11.9.
+Decision schema authority: zeus_strategy_spec.md §19.3 (VectorEdgeDecision).
 
 Exact arbitrage condition (§11.6):
     EXECUTE ⟺ max(Π_Y(q*), Π_N(q*)) > 0
 
 YES basket profit:
     Π_Y(q) = q − Σ_i [A_i(q) + F_i(q)]
-    A_i(q) = Σ_ℓ p_{i,ℓ}·Δq_{i,ℓ}          sweep notional (§11.5)
-    F_i(q) = Σ_ℓ r·p_{i,ℓ}·(1−p_{i,ℓ})·Δq_{i,ℓ}  per-level taker fee (§11.5)
+    A_i(q) = Σ_ℓ p_{i,ℓ}·Δq_{i,ℓ}                   sweep notional (§11.5)
+    F_i(q) = Σ_ℓ phi(Δq_{i,ℓ}, p_{i,ℓ}, r)           per-level taker fee (§11.5)
+    r = venue_fee_rate() from src.strategy.fees — never hardcoded
 
 NO basket profit:
     Π_N(q) = (K-1)·q − Σ_i [B_i(q) + G_i(q)]
-    B_i / G_i: same formulas applied to NO levels.
 
 q* sizing (§11.7):
     q* = argmax_{q∈D} Π(q)
@@ -43,6 +44,7 @@ from typing import Optional
 
 from src.contracts.no_trade_reason import NoTradeReason
 from src.state.decision_events import write_shadow_decision_event
+from src.strategy.fees import phi, venue_fee_rate
 
 from . import (
     BaseStrategyCandidate,
@@ -57,51 +59,57 @@ from . import (
     write_candidate_no_trade_row,
 )
 
-# TEMPORARY — taker fee rate pending canonical fees module integration.
-# Source: Polymarket CTF feeRate=0.05 (weather markets). Replace with
-# fees.get_taker_fee_rate() once the canonical fees module ships.
-_TAKER_FEE_RATE_TEMP: Decimal = Decimal("0.05")
-
 # Minimum number of outcomes for a meaningful neg-risk basket.
 _MIN_LEGS: int = 2
 
 
-def _sweep_yes(leg: LegBook, q: Decimal) -> tuple[Decimal, Decimal]:
+def _sweep_yes(
+    leg: LegBook, q: Decimal, fee_rate: Decimal
+) -> tuple[Decimal, Decimal]:
     """Compute A_i(q) and F_i(q) for the YES side of one leg.
 
-    Returns (sweep_cost, fee) both in USD per q shares.
+    §11.5: A_i(q) = Σ_ℓ p_{i,ℓ}·Δq_{i,ℓ}; F_i(q) = Σ_ℓ phi(Δq_{i,ℓ}, p_{i,ℓ}, r).
     Levels consumed in ascending price order (best ask first).
+    Returns (sweep_cost, fee).
     """
     remaining = q
     cost = Decimal(0)
-    fee = Decimal(0)
+    fee_total = Decimal(0)
     for lv in sorted(leg.yes_levels, key=lambda x: x.price):
         fill = min(remaining, lv.quantity)
         if fill <= 0:
             continue
+        # §11.5 level-by-level sweep: notional + phi per level
         cost += lv.price * fill
-        fee += _TAKER_FEE_RATE_TEMP * lv.price * (1 - lv.price) * fill
+        fee_total += phi(fill, lv.price, fee_rate)
         remaining -= fill
         if remaining <= 0:
             break
-    return cost, fee
+    return cost, fee_total
 
 
-def _sweep_no(leg: LegBook, q: Decimal) -> tuple[Decimal, Decimal]:
-    """Compute B_i(q) and G_i(q) for the NO side of one leg."""
+def _sweep_no(
+    leg: LegBook, q: Decimal, fee_rate: Decimal
+) -> tuple[Decimal, Decimal]:
+    """Compute B_i(q) and G_i(q) for the NO side of one leg.
+
+    §11.5: same formula as _sweep_yes applied to NO levels.
+    Returns (sweep_cost, fee).
+    """
     remaining = q
     cost = Decimal(0)
-    fee = Decimal(0)
+    fee_total = Decimal(0)
     for lv in sorted(leg.no_levels, key=lambda x: x.price):
         fill = min(remaining, lv.quantity)
         if fill <= 0:
             continue
+        # §11.5 level-by-level sweep: notional + phi per level
         cost += lv.price * fill
-        fee += _TAKER_FEE_RATE_TEMP * lv.price * (1 - lv.price) * fill
+        fee_total += phi(fill, lv.price, fee_rate)
         remaining -= fill
         if remaining <= 0:
             break
-    return cost, fee
+    return cost, fee_total
 
 
 def _total_depth(levels: tuple[PriceLevel, ...]) -> Decimal:
@@ -109,26 +117,12 @@ def _total_depth(levels: tuple[PriceLevel, ...]) -> Decimal:
     return sum((lv.quantity for lv in levels), Decimal(0))
 
 
-def _depth_breakpoints(family: FamilyOrderBookSnapshot) -> list[Decimal]:
-    """Build the sorted breakpoint set D for q* search (§11.7).
-
-    D = sorted union of all leg cumulative depth values,
-        bounded by min(total_depth_i) so q never exceeds shallowest leg.
-
-    Returns empty list if any leg has zero depth on the chosen side.
-    The caller selects YES or NO levels before calling this helper.
-    """
-    all_breakpoints: set[Decimal] = set()
-    for leg in family.legs:
-        cumulative = Decimal(0)
-        for lv in sorted(leg.yes_levels, key=lambda x: x.price):
-            cumulative += lv.quantity
-            all_breakpoints.add(cumulative)
-    return sorted(all_breakpoints)
-
-
 def _yes_breakpoints(family: FamilyOrderBookSnapshot) -> list[Decimal]:
-    """Cumulative-depth breakpoints for YES side, bounded by shallowest leg."""
+    """Cumulative-depth breakpoints for YES side, bounded by shallowest leg.
+
+    §11.7: D = sorted union of cumulative depth values across all legs,
+    bounded by min(total_depth_i). Π piecewise-linear ⟹ q* at a breakpoint.
+    """
     min_depth = min(
         (_total_depth(leg.yes_levels) for leg in family.legs),
         default=Decimal(0),
@@ -140,7 +134,6 @@ def _yes_breakpoints(family: FamilyOrderBookSnapshot) -> list[Decimal]:
             cumulative += lv.quantity
             if cumulative <= min_depth:
                 pts.add(cumulative)
-    # Always include min_depth as the outermost bound
     if min_depth > 0:
         pts.add(min_depth)
     return sorted(pts)
@@ -164,56 +157,74 @@ def _no_breakpoints(family: FamilyOrderBookSnapshot) -> list[Decimal]:
     return sorted(pts)
 
 
-def _pi_yes(family: FamilyOrderBookSnapshot, q: Decimal) -> Decimal:
-    """Π_Y(q) = q − Σ_i [A_i(q) + F_i(q)]."""
-    total = Decimal(0)
+def _pi_yes(
+    family: FamilyOrderBookSnapshot, q: Decimal, fee_rate: Decimal
+) -> tuple[Decimal, Decimal, Decimal]:
+    """Π_Y(q) = q − Σ_i [A_i(q) + F_i(q)].
+
+    Returns (total_cost, total_fee, profit).
+    """
+    total_cost = Decimal(0)
+    total_fee = Decimal(0)
     for leg in family.legs:
-        a, f = _sweep_yes(leg, q)
-        total += a + f
-    return q - total
+        a, f = _sweep_yes(leg, q, fee_rate)
+        total_cost += a
+        total_fee += f
+    profit = q - total_cost - total_fee
+    return total_cost, total_fee, profit
 
 
-def _pi_no(family: FamilyOrderBookSnapshot, q: Decimal) -> Decimal:
-    """Π_N(q) = (K-1)·q − Σ_i [B_i(q) + G_i(q)]."""
+def _pi_no(
+    family: FamilyOrderBookSnapshot, q: Decimal, fee_rate: Decimal
+) -> tuple[Decimal, Decimal, Decimal]:
+    """Π_N(q) = (K-1)·q − Σ_i [B_i(q) + G_i(q)].
+
+    Returns (total_cost, total_fee, profit).
+    """
     K = family.K
-    total = Decimal(0)
+    total_cost = Decimal(0)
+    total_fee = Decimal(0)
     for leg in family.legs:
-        b, g = _sweep_no(leg, q)
-        total += b + g
-    return Decimal(K - 1) * q - total
+        b, g = _sweep_no(leg, q, fee_rate)
+        total_cost += b
+        total_fee += g
+    profit = Decimal(K - 1) * q - total_cost - total_fee
+    return total_cost, total_fee, profit
 
 
-def _opt_yes(family: FamilyOrderBookSnapshot) -> tuple[Decimal, Decimal]:
-    """Return (q*, Π_Y(q*)) for YES basket."""
+def _opt_yes(
+    family: FamilyOrderBookSnapshot, fee_rate: Decimal
+) -> tuple[Decimal, Decimal, Decimal, Decimal]:
+    """Return (q*, cost, fee, Π_Y(q*)) for YES basket (§11.7 breakpoint search)."""
     pts = _yes_breakpoints(family)
     if not pts:
-        return Decimal(0), Decimal(0)
-    best_q = Decimal(0)
-    best_pi = Decimal(0)
+        return Decimal(0), Decimal(0), Decimal(0), Decimal(0)
+    best = (Decimal(0), Decimal(0), Decimal(0), Decimal(0))  # (q, cost, fee, profit)
     for q in pts:
-        pi = _pi_yes(family, q)
-        if pi > best_pi:
-            best_pi = pi
-            best_q = q
-    return best_q, best_pi
+        cost, fee, pi = _pi_yes(family, q, fee_rate)
+        if pi > best[3]:
+            best = (q, cost, fee, pi)
+    return best
 
 
-def _opt_no(family: FamilyOrderBookSnapshot) -> tuple[Decimal, Decimal]:
-    """Return (q*, Π_N(q*)) for NO basket."""
+def _opt_no(
+    family: FamilyOrderBookSnapshot, fee_rate: Decimal
+) -> tuple[Decimal, Decimal, Decimal, Decimal]:
+    """Return (q*, cost, fee, Π_N(q*)) for NO basket (§11.7 breakpoint search)."""
     pts = _no_breakpoints(family)
     if not pts:
-        return Decimal(0), Decimal(0)
-    best_q = Decimal(0)
-    best_pi = Decimal(0)
+        return Decimal(0), Decimal(0), Decimal(0), Decimal(0)
+    best = (Decimal(0), Decimal(0), Decimal(0), Decimal(0))
     for q in pts:
-        pi = _pi_no(family, q)
-        if pi > best_pi:
-            best_pi = pi
-            best_q = q
-    return best_q, best_pi
+        cost, fee, pi = _pi_no(family, q, fee_rate)
+        if pi > best[3]:
+            best = (q, cost, fee, pi)
+    return best
 
 
-def _build_yes_legs(family: FamilyOrderBookSnapshot, q_star: Decimal) -> tuple[LegIntent, ...]:
+def _build_yes_legs(
+    family: FamilyOrderBookSnapshot, q_star: Decimal
+) -> tuple[LegIntent, ...]:
     """Build YES LegIntents at q_star (best YES ask for each leg)."""
     intents = []
     for leg in family.legs:
@@ -229,7 +240,9 @@ def _build_yes_legs(family: FamilyOrderBookSnapshot, q_star: Decimal) -> tuple[L
     return tuple(intents)
 
 
-def _build_no_legs(family: FamilyOrderBookSnapshot, q_star: Decimal) -> tuple[LegIntent, ...]:
+def _build_no_legs(
+    family: FamilyOrderBookSnapshot, q_star: Decimal
+) -> tuple[LegIntent, ...]:
     """Build NO LegIntents at q_star (best NO ask for each leg)."""
     intents = []
     for leg in family.legs:
@@ -249,6 +262,7 @@ class NegRiskBasket(BaseStrategyCandidate):
     """Exact-arbitrage neg-risk basket — deterministic pipeline PILOT.
 
     Execute iff max(Π_Y(q*), Π_N(q*)) > 0.  (§11.6)
+    Decision schema: §19.3 VectorEdgeDecision.
 
     Emits VectorEdgeDecision on enter. Writes ONE shadow decision_events row.
     Multi-leg DB persistence and basket_execution_id are DEFERRED (out of scope).
@@ -265,7 +279,8 @@ class NegRiskBasket(BaseStrategyCandidate):
                 description=(
                     "Exact-arbitrage neg-risk basket — deterministic pipeline PILOT. "
                     "Execute iff max(Π_Y(q*), Π_N(q*)) > 0 per zeus_math_spec §11.6. "
-                    "Emits VectorEdgeDecision. Shadow research only; kelly=0."
+                    "Decision schema: §19.3 VectorEdgeDecision. "
+                    "Shadow research only; kelly=0."
                 ),
                 executable_alpha=True,
             )
@@ -283,20 +298,24 @@ class NegRiskBasket(BaseStrategyCandidate):
         Guard path (reason=NEGRISK_FAMILY_INCOMPLETE):
           - No FamilyOrderBookSnapshot on analysis.
           - Family has fewer than _MIN_LEGS legs.
-          - Any YES leg has zero depth AND any NO leg has zero depth (both baskets blocked).
 
         No-trade path (reason=NEGRISK_NO_PROFITABLE_BASKET):
-          - max(Π_Y(q*), Π_N(q*)) ≤ 0.
+          - max(Π_Y(q*), Π_N(q*)) ≤ 0 (data present, no profitable basket).
 
         Enter path:
           - max(Π_Y(q*), Π_N(q*)) > 0.
-          - Emits VectorEdgeDecision with legs + monetary fields.
-          - Writes ONE shadow decision_events row.
+          - Emits §19.3 VectorEdgeDecision with strategy_key, proof_type,
+            basket_execution_id="", legs, q_star, vector_cost, vector_fee,
+            vector_payoff, vector_profit.
+          - Writes ONE shadow decision_events row (multi-leg DB persistence deferred).
 
         Never returns None. Never raises; all guard failures become no_trade.
         """
         analysis = context.analysis
         market_slug = context.natural_key[0]
+
+        # Resolve fee rate once per evaluate() (§11.5: never hardcode r)
+        fee_rate = venue_fee_rate()
 
         # --- Resolve FamilyOrderBookSnapshot ---
         family: Optional[FamilyOrderBookSnapshot] = getattr(
@@ -327,9 +346,9 @@ class NegRiskBasket(BaseStrategyCandidate):
             write_candidate_no_trade_row(conn, context, decision)
             return decision
 
-        # --- Compute q* and Π* for both baskets ---
-        q_yes, pi_yes = _opt_yes(family)
-        q_no, pi_no = _opt_no(family)
+        # --- Compute q* and Π* for both baskets (§11.7 breakpoint search) ---
+        q_yes, cost_yes, fee_yes, pi_yes = _opt_yes(family, fee_rate)
+        q_no, cost_no, fee_no, pi_no = _opt_no(family, fee_rate)
 
         best_pi = max(pi_yes, pi_no)
 
@@ -345,27 +364,22 @@ class NegRiskBasket(BaseStrategyCandidate):
             write_candidate_no_trade_row(conn, context, decision)
             return decision
 
-        # --- Build VectorEdgeDecision ---
+        # --- Build §19.3 VectorEdgeDecision ---
         if pi_yes >= pi_no:
-            # YES basket wins
             q_star = q_yes
             legs = _build_yes_legs(family, q_star)
-            # Recompute cost for the decision record
-            total_cost = Decimal(0)
-            for leg in family.legs:
-                a, f = _sweep_yes(leg, q_star)
-                total_cost += a + f
-            payoff = q_star  # YES basket: 1 leg pays $1 per share, all others $0 → total = q*
+            basket_side = "buy_yes"
+            vector_cost = cost_yes
+            vector_fee_val = fee_yes
+            payoff = q_star  # YES basket: Σ Y_i(T) = 1 → payoff = q*
             profit = pi_yes
         else:
-            # NO basket wins
             q_star = q_no
             legs = _build_no_legs(family, q_star)
-            total_cost = Decimal(0)
-            for leg in family.legs:
-                b, g = _sweep_no(leg, q_star)
-                total_cost += b + g
-            payoff = Decimal(family.K - 1) * q_star  # (K-1) losers pay $1 each
+            basket_side = "buy_no"
+            vector_cost = cost_no
+            vector_fee_val = fee_no
+            payoff = Decimal(family.K - 1) * q_star  # NO basket: (K-1) pay $1 each
             profit = pi_no
 
         # --- Write ONE shadow decision_events row (multi-leg DB persistence deferred) ---
@@ -383,7 +397,7 @@ class NegRiskBasket(BaseStrategyCandidate):
         write_shadow_decision_event(
             context.natural_key,
             decision_time=decision_time_iso,
-            side="buy_yes" if pi_yes >= pi_no else "buy_no",
+            side=basket_side,
             strategy_key=self.strategy_key,
             conn=conn,
             edge=float(profit),
@@ -391,8 +405,13 @@ class NegRiskBasket(BaseStrategyCandidate):
         )
 
         return VectorEdgeDecision(
+            strategy_key=self.strategy_key,
+            proof_type="complete_family_basket",
+            basket_execution_id="",  # DEFERRED until §11.8 multi-leg execution ships
             legs=legs,
-            vector_cost_usd=total_cost,
-            vector_payoff_usd=payoff,
-            vector_profit_usd=profit,
+            q_star=q_star,
+            vector_cost=vector_cost,
+            vector_fee=vector_fee_val,
+            vector_payoff=payoff,
+            vector_profit=profit,
         )

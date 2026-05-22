@@ -1,18 +1,17 @@
 # Created: 2026-05-22
 # Last reused or audited: 2026-05-22
-# Authority basis: docs/operations/task_2026-05-21_mainline_completion_authority/STRATEGY_TAXONOMY_DIRECTIVE.md §17
+# Authority basis: docs/reference/zeus_strategy_spec.md §19.3
 #                  + docs/reference/zeus_math_spec.md §11.4-11.9
 """Neg-risk basket exact-arbitrage relationship tests.
 
-Five cross-module invariants (written BEFORE implementation per Fitz TDD rule):
+Seven cross-module invariants (R1-R7):
   R1  Payoff identity: Σ Y_i(T) = 1 for every winning-bin assignment across family.
   R2  Π_Y formula: q − Σ_i [A_i(q) + F_i(q)] matches manual sweep calculation.
   R3  Π_N formula: (K-1)·q − Σ_i [B_i(q) + G_i(q)] matches manual sweep.
   R4  q* lands on a depth breakpoint (boundary of piecewise-linear profit fn).
   R5  No zero-depth fill: a leg with depth=0 at q must yield q_complete=0, not q.
-
-These tests import from the reframed neg_risk_basket module.  They FAIL until the
-implementation is written (see negated xfail marks — these tests are strict green/red).
+  R6  fee/phi numerical agreement: inline F_i(q) == Σ phi(Δq, p, venue_fee_rate()).
+  R7  q* early-optimum regression: family where optimum is an EARLY breakpoint.
 """
 
 from __future__ import annotations
@@ -35,6 +34,7 @@ from src.strategy.candidates import (
     PriceLevel,
     VectorEdgeDecision,
 )
+from src.strategy.fees import phi, venue_fee_rate
 from src.contracts.decision_natural_key import make_decision_natural_key
 
 # ---------------------------------------------------------------------------
@@ -152,13 +152,7 @@ def _make_family(
     no_qtys: list[Decimal],
     neg_risk_market_id: str = "nrm-001",
 ) -> FamilyOrderBookSnapshot:
-    """Build a K-outcome family where each leg has one YES level and one NO level.
-
-    yes_prices[i]: best YES ask for leg i.
-    yes_qtys[i]: depth at that YES ask.
-    no_prices[i]: best NO ask for leg i.
-    no_qtys[i]: depth at that NO ask.
-    """
+    """Build a K-outcome family where each leg has one YES level and one NO level."""
     K = len(yes_prices)
     assert len(yes_qtys) == K
     assert len(no_prices) == K
@@ -187,18 +181,10 @@ def _make_analysis(family: FamilyOrderBookSnapshot) -> SimpleNamespace:
 # ---------------------------------------------------------------------------
 
 class TestR1PayoffIdentity:
-    """Σ Y_i(T) = 1 across all outcomes in a family.
-
-    In a negRisk family of K outcomes, exactly one bin settles YES.
-    The YES basket pays exactly q regardless of which bin wins.
-    The NO basket pays exactly (K-1)*q regardless of which bin wins.
-    """
+    """Σ Y_i(T) = 1 across all outcomes in a family."""
 
     def test_yes_basket_payoff_is_q_for_each_winner(self):
         """For a 3-outcome family, YES basket pays q whatever the winner is."""
-        # Each leg has profitable YES ask (0.20) and depth 10.
-        # YES basket payoff = q (deterministic); test that the candidate
-        # computes vector_payoff_usd = q* regardless of which leg wins.
         family = _make_family(
             yes_prices=[Decimal("0.20"), Decimal("0.20"), Decimal("0.20")],
             yes_qtys=[Decimal("10"), Decimal("10"), Decimal("10")],
@@ -210,23 +196,16 @@ class TestR1PayoffIdentity:
         ctx = _ctx(conn, analysis)
         dec = NegRiskBasket().evaluate(context=ctx, conn=conn, decision_time=_DT)
 
-        # Must be VectorEdgeDecision or CandidateDecision(enter)
         assert dec.outcome == "enter", f"Expected enter; got {dec!r}"
         if isinstance(dec, VectorEdgeDecision):
-            # vector_payoff_usd must equal q* (one share of winning leg pays $1)
-            # legs in a YES basket: K legs each at q*, payoff = q* (only one pays)
-            # Math: payoff = q* because in negRisk, buying all YES pays exactly q*.
-            q_star = min(leg.quantity for leg in dec.legs)
-            assert dec.vector_payoff_usd == q_star, (
-                f"YES basket payoff identity: expected {q_star}, got {dec.vector_payoff_usd}"
+            # §19.3: vector_payoff = q* for YES basket (payoff identity Σ Y_i(T)=1)
+            assert dec.vector_payoff == dec.q_star, (
+                f"YES basket payoff identity: expected {dec.q_star}, got {dec.vector_payoff}"
             )
 
     def test_no_basket_payoff_is_K_minus_1_times_q(self):
         """For a 4-outcome family, NO basket pays (K-1)*q whatever the winner is."""
         K = 4
-        # Use prices where NO basket is profitable:
-        # NO payoff = (K-1)*q = 3q, buy NO at 0.10 per leg → cost = 4*0.10*q = 0.40*q
-        # fee negligible for this test; just verify payoff formula
         family = _make_family(
             yes_prices=[Decimal("0.85"), Decimal("0.85"), Decimal("0.85"), Decimal("0.85")],
             yes_qtys=[Decimal("10")] * K,
@@ -240,11 +219,9 @@ class TestR1PayoffIdentity:
 
         assert dec.outcome == "enter", f"Expected enter (NO basket profitable); got {dec!r}"
         if isinstance(dec, VectorEdgeDecision):
-            # NO basket legs: each pays $1 except the winner's NO, so total = (K-1)*q*
-            q_star = min(leg.quantity for leg in dec.legs)
-            expected_payoff = Decimal(K - 1) * q_star
-            assert dec.vector_payoff_usd == expected_payoff, (
-                f"NO basket payoff identity: expected {expected_payoff}, got {dec.vector_payoff_usd}"
+            expected_payoff = Decimal(K - 1) * dec.q_star
+            assert dec.vector_payoff == expected_payoff, (
+                f"NO basket payoff identity: expected {expected_payoff}, got {dec.vector_payoff}"
             )
 
 
@@ -253,21 +230,22 @@ class TestR1PayoffIdentity:
 # ---------------------------------------------------------------------------
 
 class TestR2PiYFormula:
-    """Π_Y(q) = q − Σ_i [A_i(q) + F_i(q)] matches manual sweep."""
+    """Π_Y(q) = q − Σ_i [A_i(q) + F_i(q)] matches manual sweep.
 
-    _FEE_RATE = Decimal("0.05")  # TEMPORARY taker fee rate (same as implementation)
+    Uses venue_fee_rate() + phi() — same source as implementation.
+    """
 
     def _sweep_cost_and_fee(
-        self, levels: tuple[PriceLevel, ...], q: Decimal
+        self, levels: tuple[PriceLevel, ...], q: Decimal, fee_rate: Decimal
     ) -> tuple[Decimal, Decimal]:
-        """Compute A_i(q) and F_i(q) for one leg, given depth levels."""
+        """Manual A_i(q) and F_i(q) using phi() (§11.5 level-by-level)."""
         remaining = q
         cost = Decimal(0)
         fee = Decimal(0)
         for lv in sorted(levels, key=lambda x: x.price):
             fill = min(remaining, lv.quantity)
             cost += lv.price * fill
-            fee += self._FEE_RATE * lv.price * (1 - lv.price) * fill
+            fee += phi(fill, lv.price, fee_rate)
             remaining -= fill
             if remaining <= 0:
                 break
@@ -275,10 +253,8 @@ class TestR2PiYFormula:
 
     def test_pi_y_matches_manual_sweep_single_level(self):
         """3-leg family, 1 level each; Π_Y computed by candidate matches formula."""
-        # YES asks: [0.20, 0.25, 0.15], depth 10 each; q* = 10
         yes_prices = [Decimal("0.20"), Decimal("0.25"), Decimal("0.15")]
         yes_qtys = [Decimal("10")] * 3
-        # NO asks unprofitable for NO basket (irrelevant to YES path)
         no_prices = [Decimal("0.85")] * 3
         no_qtys = [Decimal("10")] * 3
 
@@ -293,34 +269,29 @@ class TestR2PiYFormula:
             f"Expected VectorEdgeDecision, got {type(dec).__name__}"
         )
 
-        # q* must be 10 (limited by depth)
-        q_star = min(leg.quantity for leg in dec.legs)
+        fee_rate = venue_fee_rate()
+        q_star = dec.q_star
 
-        # Manual Π_Y
+        # Manual Π_Y using phi()
         total_cost = Decimal(0)
         total_fee = Decimal(0)
-        for i, leg in enumerate(family.legs):
-            a, f = self._sweep_cost_and_fee(leg.yes_levels, q_star)
+        for leg in family.legs:
+            a, f = self._sweep_cost_and_fee(leg.yes_levels, q_star, fee_rate)
             total_cost += a
             total_fee += f
         expected_profit = q_star - total_cost - total_fee
 
-        assert float(dec.vector_profit_usd) == pytest.approx(float(expected_profit), rel=1e-6), (
-            f"Π_Y formula mismatch: expected {expected_profit}, got {dec.vector_profit_usd}"
+        assert float(dec.vector_profit) == pytest.approx(float(expected_profit), rel=1e-6), (
+            f"Π_Y formula mismatch: expected {expected_profit}, got {dec.vector_profit}"
         )
 
     def test_pi_y_positive_only_when_sum_ask_plus_fee_lt_1(self):
-        """Π_Y > 0 iff sum_i[ask_i] + total_fee < 1 at that q.
+        """Both baskets unprofitable → NEGRISK_NO_PROFITABLE_BASKET.
 
-        Both YES and NO baskets must be unprofitable to get NEGRISK_NO_PROFITABLE_BASKET.
-        YES asks 0.34×3=1.02 → Π_Y < 0.
-        NO asks 0.34×3=1.02, payoff=2 → Π_N = 2 - 1.02 - fee > 0 (NO basket IS arb).
-        To get truly no-arb: use a 2-leg family where all prices make both baskets negative.
-        YES asks 0.52×2=1.04 → Π_Y = q - 1.04q - fee < 0
-        NO asks 0.52×2=1.04, payoff=1q → Π_N = q - 1.04q - fee < 0
+        2-leg family, each price 0.52:
+          YES: Π_Y = q - 2*0.52*q - fee = -0.04q - fee < 0
+          NO:  Π_N = 1*q - 2*0.52*q - fee = -0.04q - fee < 0
         """
-        # 2-leg family, each YES ask = 0.52 → sum = 1.04 > 1 → Π_Y < 0
-        # Each NO ask = 0.52 → Σ NO cost = 1.04, payoff = 1*q → Π_N = q - 1.04q - fee < 0
         family_no_arb = _make_family(
             yes_prices=[Decimal("0.52"), Decimal("0.52")],
             yes_qtys=[Decimal("10")] * 2,
@@ -347,10 +318,8 @@ class TestR2PiYFormula:
 class TestR3PiNFormula:
     """Π_N(q) = (K-1)·q − Σ_i [B_i(q) + G_i(q)] matches manual sweep."""
 
-    _FEE_RATE = Decimal("0.05")
-
     def _sweep_cost_and_fee(
-        self, levels: tuple[PriceLevel, ...], q: Decimal
+        self, levels: tuple[PriceLevel, ...], q: Decimal, fee_rate: Decimal
     ) -> tuple[Decimal, Decimal]:
         remaining = q
         cost = Decimal(0)
@@ -358,14 +327,14 @@ class TestR3PiNFormula:
         for lv in sorted(levels, key=lambda x: x.price):
             fill = min(remaining, lv.quantity)
             cost += lv.price * fill
-            fee += self._FEE_RATE * lv.price * (1 - lv.price) * fill
+            fee += phi(fill, lv.price, fee_rate)
             remaining -= fill
             if remaining <= 0:
                 break
         return cost, fee
 
     def test_pi_n_matches_manual_sweep_four_legs(self):
-        """4-leg NO basket: Π_N = 3q − Σ[B_i + G_i] vs manual."""
+        """4-leg NO basket: Π_N = 3q − Σ[B_i + G_i] vs manual using phi()."""
         K = 4
         no_prices = [Decimal("0.10"), Decimal("0.12"), Decimal("0.11"), Decimal("0.09")]
         no_qtys = [Decimal("8")] * K
@@ -383,25 +352,24 @@ class TestR3PiNFormula:
             f"Expected VectorEdgeDecision, got {type(dec).__name__}"
         )
 
-        q_star = min(leg.quantity for leg in dec.legs)
+        fee_rate = venue_fee_rate()
+        q_star = dec.q_star
 
-        # Manual Π_N
         total_cost = Decimal(0)
         total_fee = Decimal(0)
-        for i, leg in enumerate(family.legs):
-            b, g = self._sweep_cost_and_fee(leg.no_levels, q_star)
+        for leg in family.legs:
+            b, g = self._sweep_cost_and_fee(leg.no_levels, q_star, fee_rate)
             total_cost += b
             total_fee += g
         expected_profit = Decimal(K - 1) * q_star - total_cost - total_fee
 
-        assert float(dec.vector_profit_usd) == pytest.approx(float(expected_profit), rel=1e-6), (
-            f"Π_N formula mismatch: expected {expected_profit}, got {dec.vector_profit_usd}"
+        assert float(dec.vector_profit) == pytest.approx(float(expected_profit), rel=1e-6), (
+            f"Π_N formula mismatch: expected {expected_profit}, got {dec.vector_profit}"
         )
 
     def test_pi_n_negative_emits_no_trade(self):
-        """NO asks too high → Π_N ≤ 0 → no_trade (NEGRISK_NO_PROFITABLE_BASKET)."""
+        """NO asks too high → Π_N ≤ 0 → no_trade or enter depending on Π_Y."""
         K = 3
-        # NO asks 0.35 each → 3 * 0.35 = 1.05 cost for payoff = 2 → net = 2 - 1.05 - fee < 0
         family = _make_family(
             yes_prices=[Decimal("0.35")] * K,
             yes_qtys=[Decimal("10")] * K,
@@ -413,9 +381,6 @@ class TestR3PiNFormula:
         ctx = _ctx(conn, analysis)
         dec = NegRiskBasket().evaluate(context=ctx, conn=conn, decision_time=_DT)
 
-        # YES sum = 1.05 > 1, NO sum cost = 1.05 for payoff 2 → profit = 0.95 - fee
-        # 0.95 - fees(0.35*0.65*0.05*3*q) > 0 is possible; let's verify the candidate
-        # emits correct decision either way (just confirm no exception + reason if no_trade)
         if dec.outcome == "no_trade":
             assert dec.reason == NoTradeReason.NEGRISK_NO_PROFITABLE_BASKET
 
@@ -425,17 +390,13 @@ class TestR3PiNFormula:
 # ---------------------------------------------------------------------------
 
 class TestR4QStarAtBreakpoint:
-    """q* = argmax_{q∈D} Π(q) where D = depth breakpoints (§11.7).
-
-    Π is piecewise-linear; maximum lies at a breakpoint.
-    """
+    """q* = argmax_{q∈D} Π(q) where D = depth breakpoints (§11.7)."""
 
     def test_q_star_is_a_depth_breakpoint(self):
         """YES basket, 2 legs each with 2 price levels; q* must be one of the cum-depths."""
         # Leg 0: level1 at (0.10, 5), level2 at (0.15, 5) → cum depths: 5, 10
         # Leg 1: level1 at (0.12, 8), level2 at (0.18, 4) → cum depths: 8, 12
-        # Cross-leg breakpoints: {5, 8, 10, 12}; bound by min total: min(10,12) = 10
-        # Breakpoints in D: {5, 8, 10}
+        # Breakpoints bounded by min(10,12)=10: {5, 8, 10}
         leg0 = LegBook(
             condition_id="0xcond00",
             yes_levels=(
@@ -467,11 +428,9 @@ class TestR4QStarAtBreakpoint:
             f"Expected VectorEdgeDecision, got {type(dec).__name__}"
         )
 
-        # q* must be in the breakpoint set {5, 8, 10}
         valid_breakpoints = {Decimal("5"), Decimal("8"), Decimal("10")}
-        q_star = min(leg.quantity for leg in dec.legs)
-        assert q_star in valid_breakpoints, (
-            f"q* = {q_star} not in expected breakpoint set {valid_breakpoints}"
+        assert dec.q_star in valid_breakpoints, (
+            f"q* = {dec.q_star} not in expected breakpoint set {valid_breakpoints}"
         )
 
 
@@ -480,16 +439,10 @@ class TestR4QStarAtBreakpoint:
 # ---------------------------------------------------------------------------
 
 class TestR5NoZeroDepthFill:
-    """A leg with depth=0 at q means q_complete = min_i fill_i = 0.
-
-    Per §11.8: partial fill (q < q_complete) is NOT strategy alpha.
-    A basket with one empty leg must NOT emit an enter decision.
-    """
+    """A leg with depth=0 means q_complete = 0; no alpha counted."""
 
     def test_empty_leg_forces_no_trade_or_zero_profit(self):
-        """Leg with zero depth → q_complete = 0 → no profitable basket."""
-        # Leg 0: profitable YES ask 0.10, depth 10
-        # Leg 1: YES levels empty (no depth)
+        """YES leg with zero depth → YES basket q_complete=0 → no_trade."""
         leg0 = LegBook(
             condition_id="0xcond00",
             yes_levels=(PriceLevel(Decimal("0.10"), Decimal("10")),),
@@ -510,9 +463,6 @@ class TestR5NoZeroDepthFill:
         ctx = _ctx(conn, analysis)
         dec = NegRiskBasket().evaluate(context=ctx, conn=conn, decision_time=_DT)
 
-        # With one leg having zero YES depth, q_complete = 0 for YES basket.
-        # The candidate must NOT enter: either no_trade or VectorEdgeDecision with profit <= 0.
-        # We require no_trade here (zero q* → zero profit → no profitable basket).
         assert dec.outcome == "no_trade", (
             f"Empty YES leg must yield no_trade (q_complete=0); got {dec!r}"
         )
@@ -522,7 +472,7 @@ class TestR5NoZeroDepthFill:
         ), f"Expected NEGRISK_FAMILY_INCOMPLETE or NEGRISK_NO_PROFITABLE_BASKET, got {dec.reason}"
 
     def test_zero_depth_no_leg_forces_no_trade(self):
-        """Same for NO basket: leg with zero NO depth → q_complete = 0."""
+        """NO leg with zero depth → NO basket q_complete=0 → no_trade."""
         leg0 = LegBook(
             condition_id="0xcond00",
             yes_levels=(PriceLevel(Decimal("0.85"), Decimal("10")),),
@@ -550,3 +500,139 @@ class TestR5NoZeroDepthFill:
             NoTradeReason.NEGRISK_FAMILY_INCOMPLETE,
             NoTradeReason.NEGRISK_NO_PROFITABLE_BASKET,
         ), f"Expected NEGRISK_FAMILY_INCOMPLETE or NEGRISK_NO_PROFITABLE_BASKET, got {dec.reason}"
+
+
+# ---------------------------------------------------------------------------
+# R6 — fee/phi numerical agreement
+# ---------------------------------------------------------------------------
+
+class TestR6FeePhiAgreement:
+    """Implementation's F_i(q) == Σ phi(Δq, p, venue_fee_rate()) (§11.5).
+
+    Verifies that the inline sweep in neg_risk_basket.py uses phi() correctly:
+    the vector_fee field must equal manually computed Σ phi across all legs.
+    """
+
+    def test_vector_fee_equals_sum_phi_across_legs(self):
+        """3-leg YES basket: dec.vector_fee == Σ_i phi(q*, p_i, venue_fee_rate())."""
+        yes_prices = [Decimal("0.20"), Decimal("0.25"), Decimal("0.15")]
+        yes_qtys = [Decimal("10")] * 3
+        no_prices = [Decimal("0.85")] * 3
+        no_qtys = [Decimal("10")] * 3
+
+        family = _make_family(yes_prices, yes_qtys, no_prices, no_qtys)
+        conn = _conn()
+        analysis = _make_analysis(family)
+        ctx = _ctx(conn, analysis)
+        dec = NegRiskBasket().evaluate(context=ctx, conn=conn, decision_time=_DT)
+
+        assert dec.outcome == "enter"
+        assert isinstance(dec, VectorEdgeDecision)
+
+        fee_rate = venue_fee_rate()
+        q_star = dec.q_star
+
+        # Manual Σ phi — one level per leg, fill = min(q*, depth) = q* since depth >= q*
+        expected_fee = sum(
+            phi(min(q_star, yes_qtys[i]), yes_prices[i], fee_rate)
+            for i in range(3)
+        )
+
+        assert float(dec.vector_fee) == pytest.approx(float(expected_fee), rel=1e-6), (
+            f"vector_fee mismatch: expected {expected_fee}, got {dec.vector_fee}"
+        )
+
+    def test_fee_rate_is_sourced_from_venue_fee_rate_not_hardcoded(self):
+        """venue_fee_rate() returns a positive Decimal (not zero, not hardcoded 0.05 string)."""
+        rate = venue_fee_rate()
+        assert isinstance(rate, Decimal), f"venue_fee_rate() must return Decimal, got {type(rate)}"
+        assert rate > Decimal(0), f"venue_fee_rate() must be > 0, got {rate}"
+
+
+# ---------------------------------------------------------------------------
+# R7 — q* early-optimum regression
+# ---------------------------------------------------------------------------
+
+class TestR7EarlyOptimumRegression:
+    """q* early-optimum: family where profit peaks at an EARLY breakpoint.
+
+    If the implementation naively takes max depth, it picks a later breakpoint
+    where profit is LOWER. The optimizer must pick the global maximum.
+    """
+
+    def test_q_star_is_early_breakpoint_not_max_depth(self):
+        """YES basket with 2 levels per leg; early level gives best profit.
+
+        Design:
+          Leg 0: level1 (0.10, 5 shares), level2 (0.50, 5 shares)
+          Leg 1: level1 (0.12, 5 shares), level2 (0.50, 5 shares)
+
+          At q=5 (early breakpoint):
+            cost = (0.10+0.12)*5 = 1.10; fee = phi(5,0.10,r) + phi(5,0.12,r) ≈ small
+            Π_Y(5) = 5 - 1.10 - small_fee ≈ 3.89 > 0  ✓ very profitable
+
+          At q=10 (max depth, crosses into expensive level2 at 0.50 each):
+            cost = 0.10*5 + 0.50*5 + 0.12*5 + 0.50*5 = 0.50+2.50+0.60+2.50 = 6.10
+            Π_Y(10) = 10 - 6.10 - fee ≈ 3.90 - fee — could be profitable BUT
+            q* must be selected by argmax, not max depth.
+
+          We verify q* ∈ {5, 10} and that the reported profit == Π_Y(q*).
+          The regression test: if implementation uses max depth, it would
+          select q*=10; if it uses argmax it selects whichever is higher.
+          The structural invariant: vector_profit == Π_Y(q_star).
+        """
+        fee_rate = venue_fee_rate()
+        leg0 = LegBook(
+            condition_id="0xcond00",
+            yes_levels=(
+                PriceLevel(Decimal("0.10"), Decimal("5")),
+                PriceLevel(Decimal("0.50"), Decimal("5")),
+            ),
+            no_levels=(PriceLevel(Decimal("0.85"), Decimal("10")),),
+        )
+        leg1 = LegBook(
+            condition_id="0xcond01",
+            yes_levels=(
+                PriceLevel(Decimal("0.12"), Decimal("5")),
+                PriceLevel(Decimal("0.50"), Decimal("5")),
+            ),
+            no_levels=(PriceLevel(Decimal("0.85"), Decimal("10")),),
+        )
+        family = FamilyOrderBookSnapshot(
+            legs=(leg0, leg1),
+            neg_risk_market_id="nrm-r7",
+            captured_at_iso="2026-06-15T09:00:00+00:00",
+        )
+        conn = _conn()
+        analysis = _make_analysis(family)
+        ctx = _ctx(conn, analysis)
+        dec = NegRiskBasket().evaluate(context=ctx, conn=conn, decision_time=_DT)
+
+        assert dec.outcome == "enter", f"Expected enter; got {dec!r}"
+        assert isinstance(dec, VectorEdgeDecision)
+
+        # Manually compute profit at q=5 and q=10 to find the true argmax
+        def manual_pi_yes(q: Decimal) -> Decimal:
+            total = Decimal(0)
+            for leg in family.legs:
+                remaining = q
+                for lv in sorted(leg.yes_levels, key=lambda x: x.price):
+                    fill = min(remaining, lv.quantity)
+                    total += lv.price * fill + phi(fill, lv.price, fee_rate)
+                    remaining -= fill
+                    if remaining <= 0:
+                        break
+            return q - total
+
+        pi5 = manual_pi_yes(Decimal("5"))
+        pi10 = manual_pi_yes(Decimal("10"))
+        expected_q_star = Decimal("5") if pi5 >= pi10 else Decimal("10")
+        expected_profit = max(pi5, pi10)
+
+        assert dec.q_star == expected_q_star, (
+            f"q* early-optimum: expected q*={expected_q_star} "
+            f"(Π(5)={pi5:.4f}, Π(10)={pi10:.4f}); got {dec.q_star}"
+        )
+        assert float(dec.vector_profit) == pytest.approx(float(expected_profit), rel=1e-6), (
+            f"vector_profit at q*={dec.q_star}: expected {expected_profit}, got {dec.vector_profit}"
+        )
