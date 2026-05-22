@@ -4267,6 +4267,10 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                     city=city.name,
                     target_date=candidate.target_date,
                     temperature_metric=candidate.temperature_metric,
+                    market_family_id=(
+                        getattr(candidate, "event_id", "")
+                        or getattr(candidate, "slug", "")
+                    ),
                     existing_exposures=_family_exposures,
                 )
                 _frontier_increment("family_frontier", "families_seen")

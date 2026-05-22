@@ -82,6 +82,7 @@ class WeatherFamilyKey:
     city: str
     target_date: str
     temperature_metric: str
+    market_family_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -185,8 +186,18 @@ _BLOCKING_EXPOSURE_PHASES = frozenset(
 )
 
 
-def _family_key(city: str, target_date: str, temperature_metric: str) -> WeatherFamilyKey:
-    return WeatherFamilyKey(str(city), str(target_date), str(temperature_metric))
+def _family_key(
+    city: str,
+    target_date: str,
+    temperature_metric: str,
+    market_family_id: str = "",
+) -> WeatherFamilyKey:
+    return WeatherFamilyKey(
+        str(city),
+        str(target_date),
+        str(temperature_metric),
+        str(market_family_id or ""),
+    )
 
 
 def _field(obj: Any, name: str, default: Any = "") -> Any:
@@ -204,12 +215,53 @@ def _exposure_key(exposure: Any) -> WeatherFamilyKey:
             str(key.get("city", "")),
             str(key.get("target_date", "")),
             str(key.get("temperature_metric", "")),
+            str(
+                key.get("market_family_id")
+                or key.get("event_slug")
+                or key.get("market_slug")
+                or key.get("condition_id")
+                or ""
+            ),
         )
     return WeatherFamilyKey(
         str(_field(exposure, "city", "")),
         str(_field(exposure, "target_date", "")),
         str(_field(exposure, "temperature_metric", "")),
+        str(
+            _field(
+                exposure,
+                "market_family_id",
+                _field(
+                    exposure,
+                    "event_slug",
+                    _field(exposure, "market_slug", _field(exposure, "condition_id", "")),
+                ),
+            )
+            or ""
+        ),
     )
+
+
+def _family_keys_conflict(left: WeatherFamilyKey, right: WeatherFamilyKey) -> bool:
+    """Return whether two keys should share one exposure budget.
+
+    When both sides know the venue weather family identity, only the same
+    family blocks. If either side is legacy/unknown, fall back to conservative
+    city/date/metric blocking so historical exposure cannot disappear.
+    """
+    if (
+        left.city,
+        left.target_date,
+        left.temperature_metric,
+    ) != (
+        right.city,
+        right.target_date,
+        right.temperature_metric,
+    ):
+        return False
+    if left.market_family_id and right.market_family_id:
+        return left.market_family_id == right.market_family_id
+    return True
 
 
 def _exposure_bin_label(exposure: Any) -> str:
@@ -238,7 +290,7 @@ def _blocking_exposures_for_key(
         return []
     blocking: list[Any] = []
     for exposure in exposures:
-        if _exposure_key(exposure) != key:
+        if not _family_keys_conflict(_exposure_key(exposure), key):
             continue
         phase = str(_field(exposure, "phase", _field(exposure, "state", "")) or "").lower()
         if phase in _BLOCKING_EXPOSURE_PHASES:
@@ -253,6 +305,14 @@ def _weather_family_exposures_from_portfolio_impl(portfolio: Any) -> list[Weathe
         city = str(_field(pos, "city", "") or "")
         target_date = str(_field(pos, "target_date", "") or "")
         temperature_metric = str(_field(pos, "temperature_metric", "") or "")
+        market_family_id = str(
+            _field(
+                pos,
+                "market_family_id",
+                _field(pos, "event_slug", _field(pos, "market_slug", "")),
+            )
+            or ""
+        )
         if not (city and target_date and temperature_metric):
             continue
         phase = str(_field(pos, "phase", _field(pos, "state", "")) or "")
@@ -260,7 +320,12 @@ def _weather_family_exposures_from_portfolio_impl(portfolio: Any) -> list[Weathe
             continue
         exposures.append(
             WeatherFamilyExposure(
-                key=WeatherFamilyKey(city, target_date, temperature_metric),
+                key=WeatherFamilyKey(
+                    city,
+                    target_date,
+                    temperature_metric,
+                    market_family_id,
+                ),
                 bin_label=_exposure_bin_label(pos),
                 phase=phase,
                 position_id=str(_field(pos, "position_id", _field(pos, "trade_id", "")) or ""),
@@ -415,6 +480,7 @@ def _weather_family_exposures_from_trade_db_impl(conn: Any) -> list[WeatherFamil
         city: Any,
         target_date: Any,
         metric: Any,
+        market_family_id: Any = "",
         bin_label: Any,
         phase: Any,
         position_id: Any,
@@ -422,7 +488,12 @@ def _weather_family_exposures_from_trade_db_impl(conn: Any) -> list[WeatherFamil
         if not (city and target_date and metric):
             return
         exposure = WeatherFamilyExposure(
-            key=WeatherFamilyKey(str(city), str(target_date), str(metric)),
+            key=WeatherFamilyKey(
+                str(city),
+                str(target_date),
+                str(metric),
+                str(market_family_id or ""),
+            ),
             bin_label=str(bin_label or ""),
             phase=str(phase or "pending_entry"),
             position_id=str(position_id or ""),
@@ -439,11 +510,24 @@ def _weather_family_exposures_from_trade_db_impl(conn: Any) -> list[WeatherFamil
         exposures.append(exposure)
 
     if _table_exists(conn, "position_current", schema=position_schema):
+        pc_cols = _table_columns(conn, "position_current", schema=position_schema)
+        pc_family_id = _column_expr(
+            pc_cols,
+            "pc",
+            "market_family_id",
+            default=_column_expr(
+                pc_cols,
+                "pc",
+                "event_slug",
+                default=_column_expr(pc_cols, "pc", "market_slug"),
+            ),
+        )
         projection_sql = f"""
         SELECT
             pc.city,
             pc.target_date,
             pc.temperature_metric,
+            {pc_family_id} AS market_family_id,
             pc.bin_label,
             pc.phase,
             pc.position_id,
@@ -464,11 +548,21 @@ def _weather_family_exposures_from_trade_db_impl(conn: Any) -> list[WeatherFamil
             logger.warning("[WEATHER_FAMILY_EXPOSURE_PROJECTION_DB_READ_FAILED]", exc_info=True)
         else:
             for row in rows:
-                city, target_date, metric, bin_label, phase, position_id, command_id = tuple(row)
+                (
+                    city,
+                    target_date,
+                    metric,
+                    market_family_id,
+                    bin_label,
+                    phase,
+                    position_id,
+                    command_id,
+                ) = tuple(row)
                 _append_exposure(
                     city=city,
                     target_date=target_date,
                     metric=metric,
+                    market_family_id=market_family_id,
                     bin_label=bin_label,
                     phase=phase,
                     position_id=position_id or command_id,
@@ -518,6 +612,7 @@ def _weather_family_exposures_from_trade_db_impl(conn: Any) -> list[WeatherFamil
             me.city,
             me.target_date,
             me.temperature_metric,
+            COALESCE({me_slug}, {snap_slug}, {vc_market_id}, {env_condition}, {snap_condition}) AS market_family_id,
             COALESCE({me_range_label}, {me_outcome}, {env_label}, {snap_label}) AS bin_label,
             vc.state AS phase,
             COALESCE(NULLIF(vc.position_id, ''), vc.command_id) AS position_id,
@@ -549,11 +644,12 @@ def _weather_family_exposures_from_trade_db_impl(conn: Any) -> list[WeatherFamil
         logger.warning("[WEATHER_FAMILY_EXPOSURE_COMMAND_DB_READ_FAILED]", exc_info=True)
         return exposures
     for row in rows:
-        city, target_date, metric, bin_label, phase, position_id, command_id = tuple(row)
+        city, target_date, metric, market_family_id, bin_label, phase, position_id, command_id = tuple(row)
         _append_exposure(
             city=city,
             target_date=target_date,
             metric=metric,
+            market_family_id=market_family_id,
             bin_label=bin_label,
             phase=phase,
             position_id=position_id or command_id,
@@ -816,6 +912,7 @@ def optimize_exclusive_outcome_portfolio(
     city: str,
     target_date: str,
     temperature_metric: str,
+    market_family_id: str = "",
     min_legs: int = 1,
     max_legs: int = 1,
 ) -> ExclusiveOutcomePortfolio | None:
@@ -885,7 +982,7 @@ def optimize_exclusive_outcome_portfolio(
     selected_leg = selected_legs[0]
     selected_cost_vector = tuple(legs[idx].cost for idx in selected_indexes)
     return ExclusiveOutcomePortfolio(
-        family_key=_family_key(city, target_date, temperature_metric),
+        family_key=_family_key(city, target_date, temperature_metric, market_family_id),
         selected_leg=selected_leg,
         selected_legs=selected_legs,
         candidate_legs=tuple(edges),
@@ -1027,6 +1124,7 @@ def build_weather_family_decision(
     city: str,
     target_date: str,
     temperature_metric: str,
+    market_family_id: str = "",
     enabled: bool | None = None,
 ) -> WeatherFamilyDecision | None:
     """Build the single-leg family decision consumed before scalar Kelly."""
@@ -1063,6 +1161,7 @@ def build_weather_family_decision(
         city=city,
         target_date=target_date,
         temperature_metric=temperature_metric,
+        market_family_id=market_family_id,
         max_legs=max_legs,
     )
     if portfolio is None:
@@ -1150,6 +1249,7 @@ def dedup_mutually_exclusive_families(
     city: str,
     target_date: str,
     temperature_metric: str,
+    market_family_id: str = "",
     enabled: bool | None = None,
     existing_exposures: Iterable[Any] | None = None,
     family_portfolio_intent: bool = False,
@@ -1191,7 +1291,7 @@ def dedup_mutually_exclusive_families(
     if not enabled:
         return decisions
 
-    key = _family_key(city, target_date, temperature_metric)
+    key = _family_key(city, target_date, temperature_metric, market_family_id)
     blocking_exposures = (
         []
         if family_portfolio_intent

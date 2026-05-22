@@ -6,7 +6,7 @@ Covers:
 3. Failure mode: mismatched vector lengths
 """
 # Created: 2026-03-31
-# Last reused/audited: 2026-04-30
+# Last reused/audited: 2026-05-22
 # Authority basis: Non-Paris live-alpha blocker repair; invalid probability vectors must fail closed.
 
 import numpy as np
@@ -144,6 +144,45 @@ class TestModelAgreementEvidence:
         detail = evidence.to_detail_json()
         assert '"primary_source_run_id":"sr-primary"' in detail
         assert '"crosscheck_source_run_id":"sr-cross"' in detail
+
+    def test_global_conflict_without_candidate_support_is_soft_until_edge_scan(self):
+        primary = _make_peaked(7, 1, sharpness=0.01)
+        crosscheck = _make_peaked(7, 5, sharpness=0.01)
+
+        evidence = analyze_model_agreement(
+            primary,
+            crosscheck,
+            bin_labels=["a", "b", "c", "d", "e", "f", "g"],
+            bin_centers=[50, 51, 52, 53, 54, 55, 56],
+        )
+
+        assert evidence.candidate_support_index is None
+        assert evidence.classification == "SOFT_DISAGREE"
+        assert evidence.live_action == "haircut"
+
+    def test_edge_level_conflict_rejects_only_unsupported_candidate_bin(self):
+        primary = _make_peaked(7, 1, sharpness=0.01)
+        crosscheck = _make_peaked(7, 5, sharpness=0.01)
+
+        unsupported = analyze_model_agreement(
+            primary,
+            crosscheck,
+            bin_labels=["a", "b", "c", "d", "e", "f", "g"],
+            bin_centers=[50, 51, 52, 53, 54, 55, 56],
+            candidate_support_index=1,
+        )
+        supported = analyze_model_agreement(
+            primary,
+            crosscheck,
+            bin_labels=["a", "b", "c", "d", "e", "f", "g"],
+            bin_centers=[50, 51, 52, 53, 54, 55, 56],
+            candidate_support_index=5,
+        )
+
+        assert unsupported.classification == "CONFLICT"
+        assert unsupported.live_action == "reject"
+        assert supported.classification == "SOFT_DISAGREE"
+        assert supported.live_action == "haircut"
 
     def test_model_conflict_uses_physical_temp_gap_not_only_bin_index_gap(self):
         primary = _make_peaked(5, 1, sharpness=0.01)

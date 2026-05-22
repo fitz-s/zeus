@@ -184,9 +184,8 @@ class Day0Signal:
                 current_utc_timestamp=self._current_utc_timestamp,
             )
 
-            # Day0 fusion: the observed high is a hard floor, while residual upside
-            # above that floor should shrink continuously as the observation becomes
-            # more dominant later in the day.
+            # Day0 HIGH is a physical max object: observed high is a hard floor,
+            # and remaining-member highs above that floor remain possible.
             final_highs = day0_blended_highs(
                 observed_high=self.obs_high,
                 remaining_member_highs=noised,

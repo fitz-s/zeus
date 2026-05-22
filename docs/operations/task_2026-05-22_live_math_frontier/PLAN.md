@@ -13,6 +13,13 @@ temperature conflict policy, normal-vs-tail ultra-low decomposition, and
 family-frontier cause separation. It does not authorize production DB mutation,
 daemon restarts, economic-floor relaxation, or forced live orders.
 
+Current short-term refinement: live evidence shows evaluator reaches candidates
+but stops on `MODEL_CONFLICT`, `strategy_economic_floor`, and historical family
+exposure. This packet now explicitly covers the semantic split between
+observation-locked settlement capture, Day0 observation-plus-remaining-forecast
+nowcast, and low-price tail hypotheses. It also covers moving model conflict
+from market-level pre-edge hard kill to edge-level crosscheck support.
+
 ## Invariants
 
 - Do not lower CI, FDR, economic floors, model-conflict gates, or force live orders.
@@ -29,6 +36,17 @@ daemon restarts, economic-floor relaxation, or forced live orders.
 - Ultra-low live authorization is tail-topology aware; profile permission alone
   must not authorize non-tail penny orders.
 - Family preselection/sibling drops must not be reported as existing exposure.
+- `MODEL_CONFLICT` must not hard-kill a market before an actual executable edge
+  support index exists; candidate support is an edge-level property.
+- `settlement_capture` means observation-locked settlement truth. A Day0 high
+  candidate whose target bin is above the current observed high remains
+  observation-plus-forecast nowcast, even if posterior/CI are strong.
+- Day0 HIGH probability generation must match the documented physical hard-floor
+  semantics: final high samples are `max(observed_high_so_far, remaining_high)`.
+  If residual compression is retained, it must be named and governed as nowcast,
+  not settlement truth.
+- Historical multi-bin family exposure remains live risk inventory and must not
+  be erased by the presence of Stage-A gates or by a price-floor change.
 
 ## Implementation
 
@@ -43,6 +61,13 @@ daemon restarts, economic-floor relaxation, or forced live orders.
   generator over target-day extrema.
 - Normalize low-price rejection detail and expose price-policy frontier counters.
 - Split `family_selection_dedup` from `blocked_existing_family_exposure`.
+- Delay hard model-conflict rejection until edge support is known; use global
+  conflict as haircut/risk evidence before edge scan, then reject only
+  unsupported candidate edges.
+- Add Day0 truth classification evidence so non-observation-locked Day0 edges do
+  not masquerade as observed settlement capture.
+- Align Day0 HIGH p-vector sampling with physical max semantics or fail closed
+  under a nowcast strategy classification.
 
 ## Verification
 
@@ -50,4 +75,9 @@ daemon restarts, economic-floor relaxation, or forced live orders.
 - Relationship tests for model-conflict evidence, physical-temperature conflict
   policy, crosscheck non-comparability, ultra-low tail topology, and family
   frontier cause separation.
+- Relationship tests that global model conflict without candidate support does
+  not pre-edge hard kill, while edge-level unsupported conflict still rejects.
+- Relationship tests that Day0 HIGH `p_vector` respects hard-floor/max semantics
+  and that a Jeddah-shaped 34C-observed -> 36C candidate is not classified as
+  observation-locked settlement capture.
 - Focused module gate: `tests/test_market_analysis.py`.
