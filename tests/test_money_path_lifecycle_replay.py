@@ -1,10 +1,10 @@
-# Lifecycle: created=2026-05-21; last_reviewed=2026-05-21; last_reused=never
+# Lifecycle: created=2026-05-21; last_reviewed=2026-05-21; last_reused=2026-05-22
 # Purpose: Integrated money-path lifecycle replay across command, order, trade,
 #   position, settlement, redeem, and telemetry crash/restart boundaries.
 # Reuse: Run before live-money release claims or when touching execution,
 #   recovery, reconcile, settlement, decision-event, or no-trade state.
 # Created: 2026-05-21
-# Last reused/audited: 2026-05-21
+# Last reused/audited: 2026-05-22
 # Authority basis: docs/operations/task_2026-05-21_live_release_proof_p0p3/task.md P0-4
 """Integrated money-path lifecycle replay with crash/restart boundaries."""
 
@@ -39,7 +39,6 @@ from src.state.venue_command_repo import (
     insert_submission_envelope,
 )
 
-NOW = datetime(2026, 5, 21, 12, 0, tzinfo=timezone.utc)
 PAYOUT_TOPIC = "0x2682012a4a4f1973119f1c9b90745d1bd91fa2bab387344f044cb3586864d18d"
 
 
@@ -143,6 +142,7 @@ def _ensure_snapshot(conn: sqlite3.Connection) -> str:
     snapshot_id = "snap-entry"
     if get_snapshot(conn, snapshot_id) is not None:
         return snapshot_id
+    captured_at = datetime.now(timezone.utc)
     insert_snapshot(
         conn,
         ExecutableMarketSnapshotV2(
@@ -177,8 +177,8 @@ def _ensure_snapshot(conn: sqlite3.Connection) -> str:
             raw_clob_market_info_hash="b" * 64,
             raw_orderbook_hash="c" * 64,
             authority_tier="CLOB",
-            captured_at=NOW,
-            freshness_deadline=NOW + timedelta(days=1),
+            captured_at=captured_at,
+            freshness_deadline=captured_at + timedelta(days=1),
         ),
     )
     return snapshot_id
@@ -188,6 +188,7 @@ def _ensure_envelope(conn: sqlite3.Connection) -> str:
     envelope_id = "env-entry"
     if conn.execute("SELECT 1 FROM venue_submission_envelopes WHERE envelope_id = ?", (envelope_id,)).fetchone():
         return envelope_id
+    captured_at = datetime.now(timezone.utc)
     insert_submission_envelope(
         conn,
         VenueSubmissionEnvelope(
@@ -221,7 +222,7 @@ def _ensure_envelope(conn: sqlite3.Connection) -> str:
             transaction_hashes=(),
             error_code=None,
             error_message=None,
-            captured_at=NOW.isoformat(),
+            captured_at=captured_at.isoformat(),
         ),
         envelope_id=envelope_id,
     )
