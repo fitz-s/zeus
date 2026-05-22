@@ -11,6 +11,8 @@ on:
       - "docs/authority/**"
       - "docs/operations/**"
       - ".github/workflows/**"
+      - ".github/copilot-instructions.md"
+      - ".github/instructions/**"
       - "migrations/2026_04_02_architecture_kernel.sql"
       - "scripts/_yaml_bootstrap.py"
       - "docs/work_packets/**"
@@ -24,6 +26,8 @@ on:
       - "docs/authority/**"
       - "docs/operations/**"
       - ".github/workflows/**"
+      - ".github/copilot-instructions.md"
+      - ".github/instructions/**"
       - "migrations/2026_04_02_architecture_kernel.sql"
       - "scripts/_yaml_bootstrap.py"
       - "docs/work_packets/**"
@@ -374,5 +378,37 @@ jobs:
             echo "## replay-parity advisory lane"
             echo "- continue-on-error is intentional for current-phase P-GATE work"
             echo "- staged parity output is advisory until prerequisites exist"
+            echo "- promotion condition: ${GATE_REVIEW_CONDITION}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  review-contract:
+    name: review-contract (advisory)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    env:
+      GATE_OWNER: "Copilot review system owner"
+      GATE_RATIONALE: "Instruction file budget and applyTo coverage enforce that Copilot receives well-scoped, size-bounded review guidance. Advisory until one clean week established."
+      GATE_REVIEW_CONDITION: "Promote to blocking after one week without false positives. Remove continue-on-error and add to money-path-required.yml required status check list."
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: "pip"
+      - name: Describe gate contract
+        run: |
+          echo "owner=${GATE_OWNER}"
+          echo "rationale=${GATE_RATIONALE}"
+          echo "review_condition=${GATE_REVIEW_CONDITION}"
+      - name: Check instruction file budget and applyTo
+        run: python scripts/ci/check_copilot_instruction_budget.py
+      - name: Check instruction coverage (applyTo patterns resolve)
+        run: python scripts/ci/check_review_instruction_coverage.py
+      - name: Summarize advisory stance
+        if: always()
+        run: |
+          {
+            echo "## review-contract advisory lane"
+            echo "- continue-on-error is intentional on first land"
             echo "- promotion condition: ${GATE_REVIEW_CONDITION}"
           } >> "$GITHUB_STEP_SUMMARY"

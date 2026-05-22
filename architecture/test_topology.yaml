@@ -94,6 +94,11 @@ test_trust_policy:
     # P1/P2 architecture review antibodies (2026-05-22): strategy routing, evidence
     # report scoping, migration clamp, evidence tier provenance.
     tests/test_p1_findings_evidence_risk.py: {created: "2026-05-22", last_used: "2026-05-22"}
+    # Copilot review system antibodies (2026-05-22): evidence cohort scope consistency
+    # and CI instruction contract.
+    tests/analysis/test_evidence_report_cohort_scope.py: {created: "2026-05-22", last_used: "2026-05-22"}
+    tests/analysis/test_regret_decision_event_join.py: {created: "2026-05-22", last_used: "2026-05-22"}
+    tests/ci/test_copilot_instruction_contract.py: {created: "2026-05-22", last_used: "2026-05-22"}
     # P5-1 + P5-3 (PR #19 closeout completion, 2026-04-26):
     tests/test_realized_fill_at_receipt.py: {created: "2026-04-26", last_used: "2026-04-26"}
     tests/test_evaluate_candidate_metric_integration.py: {created: "2026-04-26", last_used: "2026-04-26"}

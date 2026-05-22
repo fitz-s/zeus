@@ -100,6 +100,38 @@ invariants:
       - tests/money_path/test_001_negrisk_tradeability_snapshot_submit.py
       - tests/money_path/test_004_schema_live_failclosed.py
 
+  MP-LEA-001:
+    description: "Evidence cohort scope is consistent: n_decisions, n_settled, n_wins all scoped to same strategy_key + experiment_id + cohort_tag + source."
+    tests:
+      - tests/analysis/test_evidence_report_cohort_scope.py
+      - tests/analysis/test_promotion_readiness.py
+      - tests/analysis/test_live_readiness_tribunal.py
+  MP-LEA-002:
+    description: "Regret decompositions joined through decision_events.decision_event_id to prevent cross-strategy contamination via shared experiment_id."
+    tests:
+      - tests/analysis/test_regret_decision_event_join.py
+      - tests/analysis/test_regret_decomposer.py
+      - tests/test_p1_findings_evidence_risk.py
+  MP-LEA-003:
+    description: "Bayesian prior is Beta(2,2); ci_lower compared against strategy breakeven_win_rate, not a hardcoded constant."
+    tests:
+      - tests/analysis/test_evidence_report_cohort_scope.py
+      - tests/analysis/test_promotion_readiness.py
+  MP-STR-001:
+    description: "strategy_key is the sole attribution identity; routing decisions from strategy registry, never ad-hoc from condition_id or market type."
+    tests:
+      - tests/test_evaluator_strategy_key_failclosed.py
+      - tests/test_architecture_contracts.py
+  MP-STR-002:
+    description: "Shadow replay source field is shadow_decision; replay rows never contaminate live evidence queries."
+    tests:
+      - tests/analysis/test_evidence_report_cohort_scope.py
+      - tests/test_p1_findings_evidence_risk.py
+  MP-RSK-001:
+    description: "Cluster exposure cap checks use all dimensions: weather_family_key, outcome_label (YES/NO), strategy_key. Collapsing dimensions allows factor-2 over-concentration."
+    tests:
+      - tests/test_cluster_exposure_shrunk.py
+      - tests/test_inv_cluster_cap_short_circuits_kelly_compute.py
 segments:
   semantic_ci_self_defense:
     invariant_ids: [MP-CI-001]
@@ -198,3 +230,45 @@ segments:
       - tests/test_market_scanner_provenance.py
       - tests/test_tigge_schema_contract.py
       - tests/test_source_run_schema.py
+  learning_promotion:
+    invariant_ids: [MP-LEA-001, MP-LEA-002, MP-LEA-003]
+    files:
+      - src/analysis/**
+      - src/backtest/**
+      - src/state/*evidence*.py
+      - src/state/*experiment*.py
+    relationship_tests:
+      - tests/analysis/test_evidence_report_cohort_scope.py
+      - tests/analysis/test_regret_decision_event_join.py
+      - tests/analysis/test_promotion_readiness.py
+      - tests/analysis/test_live_readiness_tribunal.py
+      - tests/analysis/test_regret_decomposer.py
+      - tests/test_p1_findings_evidence_risk.py
+    future_object_rules:
+      new_evidence_query: requires_cohort_scope_test
+      new_promotion_gate: requires_ci_lower_vs_strategy_breakeven_test
+  strategy_authority:
+    invariant_ids: [MP-STR-001, MP-STR-002]
+    files:
+      - src/strategy/**
+      - src/contracts/**
+      - src/engine/evaluator.py
+      - src/backtest/**
+    relationship_tests:
+      - tests/test_evaluator_strategy_key_failclosed.py
+      - tests/test_architecture_contracts.py
+      - tests/analysis/test_evidence_report_cohort_scope.py
+    future_object_rules:
+      new_strategy_dimension: requires_registry_first_architecture_review
+      new_shadow_source: requires_live_evidence_isolation_test
+  risk_dimension:
+    invariant_ids: [MP-RSK-001]
+    files:
+      - src/risk_allocator/**
+      - src/strategy/**
+    relationship_tests:
+      - tests/test_cluster_exposure_shrunk.py
+      - tests/test_inv_cluster_cap_short_circuits_kelly_compute.py
+    future_object_rules:
+      new_risk_dimension: requires_all_dimension_coverage_test
+      collapsed_exposure_aggregation: forbidden_without_explicit_policy

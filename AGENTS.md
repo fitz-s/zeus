@@ -213,7 +213,7 @@ Commits: `type(scope): subject` — body only when why is non-obvious. Use `[ski
 
 Worktree isolation: `git add -A`/`--all`/`.` is hook-blocked in the main worktree; allowed in any linked worktree (isolated index). Bypass: `COTENANT_GUARD_BYPASS=1`. Verify `git log -1` after heredoc commits.
 
-PRs: batch multiple slices into one PR — every open triggers automated review that surfaces substantive issues. Resolve all review comments before merging. Template: `.github/pull_request_template.md`.
+PRs: only milestone-level changes open a PR against main. Everything else stays in the worktree and is validated there. A milestone is a complete feature, a new invariant + antibody tests, a security gate, or a schema migration with full test coverage. Incremental work, partial implementations, doc-only changes, and single-function fixes do NOT qualify — commit to the worktree branch and keep iterating. Every PR open triggers paid automated review (Copilot + Codex) that fires exactly once and cannot be retriggered; wasting it on non-milestone work is a protocol violation. Batch all related work before opening. Resolve all review comments before merging. Template: `.github/pull_request_template.md`.
 
 **Post-merge cleanup** (soft, agent decides; hook prints checklist on `gh pr merge`):
 - worktree → `git worktree remove <path> && git worktree prune` when task done.
