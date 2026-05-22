@@ -243,24 +243,26 @@ opening_inertia:
 
 shoulder_sell:
   thesis: >
-    Sell open-shoulder bins exhibiting retail cognitive bias. Edge
-    source is the bias premium; decays as the market matures and
-    competition narrows. Currently SHADOW until promotion evidence
-    accumulates — pre-A4 this was the LIVE_SAFE / _LIVE_ALLOWED
-    divergence flagged by Bug review §E.
-  live_status: shadow
-  evidence_tier: SHADOW_PASS
-  evidence_tier_required_for_live: LIVE_LIMITED_HAIRCUT
+    RETIRED/REFUTED 2026-05-22. Ex-ante retail-bias short-tail is sign-reversed:
+    E[p_mkt - p_cal] = -0.030 (boot-95 [-0.056,-0.004]); mean EV_sell = -0.020/$ 1
+    (253 settled cases, May 2026). No tau >= 0 yields net EV > 0. Routing
+    disabled — open-shoulder buy_no edges now handled by
+    shoulder_impossible_tail_capture (physical bound deterministic family).
+    Authority: SHOULDER_SELL_EDGE_PROOF.md + STRATEGY_TAXONOMY_DIRECTIVE.md §7.
+    Tombstone preserved for history/attribution queries only.
+  live_status: blocked
+  evidence_tier: IDEA
+  evidence_tier_required_for_live: LIVE_NORMAL
   promotion_blockers:
-    - "shadow_pass requires N=100 decisions; observed N<100"
-    - "tail stress scenarios not yet replay-verified across regimes"
-  allowed_market_phases: [pre_settlement_day, settlement_day]
-  allowed_discovery_modes: [opening_hunt, update_reaction]
-  cycle_axis_dispatch_mode: update_reaction
-  allowed_directions: [buy_no]
-  allowed_bin_topology: [open_shoulder]
+    - "REFUTED: sign-reversed mispricing on all 253 settled cases (2026-05-22)"
+    - "Routing disabled — use shoulder_impossible_tail_capture instead"
+  allowed_market_phases: []
+  allowed_discovery_modes: []
+  cycle_axis_dispatch_mode: null
+  allowed_directions: []
+  allowed_bin_topology: []
   metric_support:
-    high: shadow
+    high: blocked
     low:  blocked
   kelly_default_multiplier: 0.0
   kelly_phase_overrides:
@@ -269,12 +271,54 @@ shoulder_sell:
     settlement_day: 0.0
     post_trading: 0.0
     resolved: 0.0
-  min_shadow_decisions: 100
-  min_settled_decisions: 30
-  promotion_evidence_ref: null   # promote when shadow evidence is mature
+  min_shadow_decisions: 0
+  min_settled_decisions: 0
+  promotion_evidence_ref: null
   min_entry_price: 0.05
   min_strategy_notional_usd: 1.00
   min_expected_profit_usd: 0.05
+  allow_ultra_low_tail: false
+
+shoulder_impossible_tail_capture:
+  thesis: >
+    Physical-bound deterministic: buy NO on open shoulder B=[u,∞) when
+    H_t + Δ_phys⁺(t) < u (upper shoulder YES physically impossible given
+    current observed high H_t and empirical physical envelope Δ_phys⁺).
+    Payoff pathwise: Π = 1 - b_NO - phi(b_NO) > 0. Symmetric for lower
+    shoulder. Folded into settlement-bound deterministic family.
+    DATA-GATED: Δ_phys⁺/Δ_phys⁻ envelope input unwired → emits
+    PHYSICAL_ENVELOPE_UNWIRED until envelope feed lands.
+    SHADOW-FIRST per operator directive 2026-05-22. Logs DeterministicEdgeDecision;
+    does NOT change live routing/sizing until operator-gated promotion.
+    Authority: STRATEGY_TAXONOMY_DIRECTIVE.md §7 + zeus_strategy_spec.md §11.4.
+  live_status: shadow
+  evidence_tier: SHADOW_PASS
+  evidence_tier_required_for_live: LIVE_PILOT_TINY
+  promotion_blockers:
+    - "DATA-GATED: Δ_phys⁺/Δ_phys⁻ physical envelope input not yet wired"
+    - "SHADOW-FIRST: operator-gated promotion required before live routing"
+    - "promotion class: deterministic pipeline (not Beta win-rate CI)"
+  allowed_market_phases: [pre_settlement_day, settlement_day]
+  allowed_discovery_modes: [opening_hunt, update_reaction]
+  cycle_axis_dispatch_mode: update_reaction
+  allowed_directions: [buy_no]
+  allowed_bin_topology: [open_shoulder]
+  metric_support:
+    high: shadow
+    low:  shadow
+  kelly_default_multiplier: 0.0
+  kelly_phase_overrides:
+    pre_trading: 0.0
+    pre_settlement_day: 0.0
+    settlement_day: 0.0
+    post_trading: 0.0
+    resolved: 0.0
+  min_shadow_decisions: 0
+  min_settled_decisions: 0
+  promotion_evidence_ref: null
+  min_entry_price: 0.01
+  min_strategy_notional_usd: 1.00
+  min_expected_profit_usd: 0.01
   allow_ultra_low_tail: false
 
 imminent_open_capture:

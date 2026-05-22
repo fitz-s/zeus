@@ -894,7 +894,7 @@ def get_connection(
 # CI hook scripts/check_schema_version.py diffs the sqlite_master hash of
 # a fresh-init DB against tests/state/_schema_pinned_hash.txt and fails
 # the PR if SCHEMA_VERSION did not change in lockstep.
-SCHEMA_VERSION = 28  # 2026-05-22 neg_risk_basket reason + opportunity_fact strategy_key CHECK widening
+SCHEMA_VERSION = 29  # 2026-05-22 deterministic-strategy wave: 5 reframes + F3 Pipeline-A + C-2 cohort fix + day0 nowcast attribution (origin/main v28 base)
 
 
 def init_schema(
@@ -1382,7 +1382,7 @@ def init_schema(
             finality_confirmed_time    TEXT,
             clock_skew_estimate_ms_at_submit INTEGER,
             raw_orderbook_hash_transition_delta_ms INTEGER,
-            schema_version INTEGER NOT NULL CHECK (schema_version IN (12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28)),
+            schema_version INTEGER NOT NULL CHECK (schema_version IN (12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29)),
             source         TEXT NOT NULL CHECK (source IN ('phase0_backfill', 'live_decision', 'shadow_decision')),
             PRIMARY KEY (market_slug, temperature_metric, target_date, observation_time, decision_seq)
         );
@@ -2605,7 +2605,7 @@ def _migrate_decision_events_schema(conn: sqlite3.Connection) -> None:
             finality_confirmed_time    TEXT,
             clock_skew_estimate_ms_at_submit INTEGER,
             raw_orderbook_hash_transition_delta_ms INTEGER,
-            schema_version INTEGER NOT NULL CHECK (schema_version IN (12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28)),
+            schema_version INTEGER NOT NULL CHECK (schema_version IN (12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29)),
             source         TEXT NOT NULL CHECK (source IN ('phase0_backfill', 'live_decision', 'shadow_decision')),
             PRIMARY KEY (market_slug, temperature_metric, target_date, observation_time, decision_seq)
         )

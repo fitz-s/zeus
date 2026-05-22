@@ -98,14 +98,30 @@ def test_classify_shoulder_candidate_returns_none_for_finite_bin():
 
 
 def test_classify_via_registry_replaces_evaluator_hardcoded_shoulder_branch():
-    """_classify_via_registry returns ShoulderStrategyVNext for shoulder buy_no edges."""
+    """shoulder_sell is retired/blocked — returns None; shoulder_impossible_tail_capture routes.
+
+    Updated 2026-05-22: shoulder_sell REFUTED + blocked per STRATEGY_TAXONOMY_DIRECTIVE.md §7.
+    Open-shoulder buy_no edges now handled by shoulder_impossible_tail_capture.
+    _classify_via_registry("shoulder_sell", ctx) must return None (blocked strategy, empty topology).
+    _classify_via_registry("shoulder_impossible_tail_capture", ctx) returns ShoulderStrategyVNext.
+    """
     edge = _make_shoulder_edge(direction="buy_no", is_open_high=True)
     candidate = _make_candidate()
     ctx = SimpleNamespace(edge=edge, candidate=candidate, market_phase=None, conn=None)
-    result = _classify_via_registry("shoulder_sell", ctx)
-    assert result is not None
-    assert isinstance(result, ShoulderStrategyVNext)
-    assert result.no_trade_reason == NoTradeReason.SHOULDER_NO_TRADE_GATE
+
+    # shoulder_sell is blocked — must return None
+    retired_result = _classify_via_registry("shoulder_sell", ctx)
+    assert retired_result is None, (
+        "shoulder_sell is retired/blocked; _classify_via_registry must return None"
+    )
+
+    # shoulder_impossible_tail_capture is the new open-shoulder strategy — must classify
+    new_result = _classify_via_registry("shoulder_impossible_tail_capture", ctx)
+    assert new_result is not None, (
+        "shoulder_impossible_tail_capture must classify open-shoulder buy_no edges"
+    )
+    assert isinstance(new_result, ShoulderStrategyVNext)
+    assert new_result.no_trade_reason == NoTradeReason.SHOULDER_NO_TRADE_GATE
 
 
 def test_classify_via_registry_fail_closed_on_unknown_strategy():
@@ -118,29 +134,33 @@ def test_classify_via_registry_fail_closed_on_unknown_strategy():
 
 
 def test_inv_classifier_equals_registry_for_all_boot_safe_strategies():
-    """Relationship test: _classify_via_registry returns ShoulderStrategyVNext for
-    boot-safe shoulder strategies (shoulder_sell) and None for non-shoulder strategies."""
+    """Relationship test: _classify_via_registry routing after shoulder_sell retirement.
+
+    Updated 2026-05-22: shoulder_sell REFUTED/blocked — returns None.
+    shoulder_impossible_tail_capture is the new open-shoulder strategy.
+    Non-shoulder live-safe strategies return None for shoulder edges.
+    """
     from src.strategy.strategy_profile import live_safe_keys
 
     edge_shoulder = _make_shoulder_edge(direction="buy_no", is_open_high=True)
-    edge_center = BinEdge(
-        bin=Bin(low=60.0, high=61.0, unit="F", label="60-61°F"),
-        direction="buy_yes",
-        edge=0.05, ci_lower=0.40, ci_upper=0.60,
-        p_model=0.50, p_market=0.45, p_posterior=0.50,
-        entry_price=0.45, p_value=0.03, vwmp=0.44,
-    )
     candidate = _make_candidate()
     ctx_shoulder = SimpleNamespace(edge=edge_shoulder, candidate=candidate, market_phase=None, conn=None)
 
-    # shoulder_sell must classify successfully for a shoulder buy_no edge
-    result = _classify_via_registry("shoulder_sell", ctx_shoulder)
-    assert result is not None, "shoulder_sell must classify open-shoulder buy_no as ShoulderStrategyVNext"
+    # shoulder_sell is retired/blocked — must return None
+    retired_result = _classify_via_registry("shoulder_sell", ctx_shoulder)
+    assert retired_result is None, (
+        "shoulder_sell is retired/blocked; must return None after retirement"
+    )
 
-    # Non-shoulder strategies must return None for the same edge
-    for key in live_safe_keys() - {"shoulder_sell", "shoulder_buy"}:
+    # shoulder_impossible_tail_capture must classify for a shoulder buy_no edge
+    new_result = _classify_via_registry("shoulder_impossible_tail_capture", ctx_shoulder)
+    assert new_result is not None, (
+        "shoulder_impossible_tail_capture must classify open-shoulder buy_no as ShoulderStrategyVNext"
+    )
+
+    # Non-shoulder live-safe strategies return None for shoulder edges
+    for key in live_safe_keys() - {"shoulder_sell", "shoulder_buy", "shoulder_impossible_tail_capture"}:
         ctx = SimpleNamespace(edge=edge_shoulder, candidate=candidate, market_phase=None, conn=None)
         assert _classify_via_registry(key, ctx) is None, (
-            f"Strategy {key!r} should return None for a shoulder edge "
-            f"(only shoulder_sell/shoulder_buy classify shoulders)"
+            f"Strategy {key!r} should return None for a shoulder edge"
         )

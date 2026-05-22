@@ -140,12 +140,33 @@ class NoTradeReason(StrEnum):
     RESOLUTION_DISPUTED = auto()               # resolution_window_maker: venue resolution status contested
     LIQPROV_HEARTBEAT_ABSENT = auto()          # liquidity_provision_with_heartbeat: fill_probability field absent
     WEATHER_ALERT_SOURCE_UNTRUSTED = auto()    # weather_event_arbitrage: external alert feed not wired/trusted
+    RESOLUTION_TYPED_OUTCOME_UNAVAILABLE = auto()  # resolution_window_maker: typed SettlementOutcome not wired on context (data-gated)
 
     # ── Phase 4 T4 candidate strategy gates ────────────────────────────────────
     # 2 members per 05_PHASE_4_FDR_FAMILY_CANDIDATES.md §T4 deferred candidates
     CORR_HEDGE_REGIME_UNAVAILABLE = auto()     # cross_market_correlation_hedge: regime UNKNOWN or store not fit
     NEGRISK_FAMILY_INCOMPLETE = auto()         # neg_risk_basket: full token book per family unavailable
     NEGRISK_NO_PROFITABLE_BASKET = auto()      # neg_risk_basket: book present but max(Π_Y(q*),Π_N(q*)) <= 0
+
+    # ── center_sell parity arb candidate gates ─────────────────────────────────
+    CENTER_PAIR_PARITY_BOOK_UNAVAILABLE = auto()  # center_sell: binary_book_snapshot absent on analysis
+    CENTER_PAIR_PARITY_NO_EDGE = auto()           # center_sell: a_YES+a_NO+fees >= 1 at q*; no deterministic arb
+
+    # ── shoulder_impossible_tail_capture data-gate (2026-05-22) ────────────────
+    # DATA-GATED: physical envelope input (Δ_phys⁺/Δ_phys⁻ from station/season empirical
+    # envelope) is not yet wired. Emitted until the envelope feed lands.
+    # Authority: STRATEGY_TAXONOMY_DIRECTIVE.md §7 + zeus_strategy_spec.md §11.4
+    PHYSICAL_ENVELOPE_UNWIRED = auto()            # shoulder_impossible_tail_capture: Δ_phys⁺/⁻ not wired
+
+    # ── Physical bound theorem failure gate ────────────────────────────────────
+    SHOULDER_PHYSICAL_BOUND_NOT_EXCLUDES_TAIL = auto()  # physical bound >= threshold; theorem fails
+
+    # ── settlement_capture shadow: physical-interval theorem (STRATEGY_TAXONOMY_DIRECTIVE §1) ──
+    PHYSICAL_INTERVAL_DATA_GATED = auto()      # settlement_capture_shadow: Δ_phys⁺/QC input absent → no_trade until data wired
+    PHYSICAL_INTERVAL_OVERLAP = auto()         # settlement_capture_shadow: I_t overlaps B_i but neither ⊆ nor disjoint → ambiguous
+    PHYSICAL_INTERVAL_UNPROFITABLE = auto()    # settlement_capture_shadow: I_t⊆B_i or disjoint but a+phi≥1 → no positive profit
+    SETTLEMENT_CAPTURE_NOT_LOCKED = auto()     # settlement_capture_shadow: edge is not observation-locked (day0_nowcast scope)
+
 
     # ── Fallback (§13) ────────────────────────────────────────────────────────
     UNCATEGORIZED = auto()

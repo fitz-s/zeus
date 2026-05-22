@@ -266,6 +266,8 @@ class TestF4EvidenceTierLifecycle:
     """F4: lifecycle fields (revoked_at, effective_until, effective_from) are enforced."""
 
     def test_v27_table_rebuilds_to_admit_schema_version_28_writer_rows(self) -> None:
+        # Renamed context: now tests v27→v29 migration (wave bumped SCHEMA_VERSION 28→29).
+        # The v27 patch replaces the current DDL default/CHECK to simulate a prod-v27 table.
         from src.state.schema.phase6_evidence_schema import (
             CREATE_EVIDENCE_TIER_ASSIGNMENTS_SQL,
             _migrate_evidence_tier_assignments_schema,
@@ -274,7 +276,7 @@ class TestF4EvidenceTierLifecycle:
         conn = sqlite3.connect(":memory:")
         conn.execute(
             CREATE_EVIDENCE_TIER_ASSIGNMENTS_SQL.replace(
-                "DEFAULT 28 CHECK (schema_version IN (25, 26, 27, 28))",
+                "DEFAULT 29 CHECK (schema_version IN (25, 26, 27, 28, 29))",
                 "DEFAULT 27 CHECK (schema_version IN (25, 26, 27))",
             )
         )
@@ -305,7 +307,7 @@ class TestF4EvidenceTierLifecycle:
             conn,
             strategy_id="settlement_capture",
             tier=EvidenceTier.LIVE_PILOT_TINY,
-            rationale="v28",
+            rationale="v29",
             operator_ref=None,
             verdict_reason=None,
             assignment_source="tribunal",
@@ -318,7 +320,7 @@ class TestF4EvidenceTierLifecycle:
             ).fetchall()
         ]
 
-        assert schema_versions == [27, 28]
+        assert schema_versions == [27, 29]  # old row stays at 27; new row at current SCHEMA_VERSION=29
 
     def test_revoked_row_excluded_from_current_assignment(self) -> None:
         conn = _make_tier_db()
@@ -756,15 +758,18 @@ class TestF6StrategyKeyCheckMigration:
         assert "28" in table_sql["no_trade_events"]
 
     def test_no_trade_events_v27_table_rebuilds_to_admit_schema_version_28(self) -> None:
+        # Updated for wave SCHEMA_VERSION bump 28→29: the test now verifies that a
+        # v27-only table is rebuilt to accept both v28 and v29 rows.
         from src.state.schema.no_trade_events_schema import (
             CREATE_TABLE_SQL,
             _rebuild_stale_no_trade_events_table,
         )
 
         old_versions = "14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27"
-        new_versions = f"{old_versions}, 28"
+        current_versions = f"{old_versions}, 28, 29"
         conn = sqlite3.connect(":memory:")
-        conn.executescript(CREATE_TABLE_SQL.replace(new_versions, old_versions))
+        # Build a v27-only table by replacing the full current version list.
+        conn.executescript(CREATE_TABLE_SQL.replace(current_versions, old_versions))
 
         _rebuild_stale_no_trade_events_table(conn)
         conn.commit()
@@ -789,10 +794,10 @@ class TestF6StrategyKeyCheckMigration:
                 NoTradeReason.MUTUALLY_EXCLUSIVE_FAMILY_DEDUP.value,
                 "test",
                 "2026-05-22T17:40:00Z",
-                28,
+                29,  # current SCHEMA_VERSION after wave bump
                 "current",
             ),
         )
         conn.commit()
 
-        assert new_versions in sql
+        assert current_versions in sql

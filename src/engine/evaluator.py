@@ -2223,8 +2223,8 @@ def _edge_source_for(candidate: MarketCandidate, edge: BinEdge) -> str:
         return "imminent_open_capture"
     from src.strategy.strategy_profile import _classify_via_registry
     _ctx = SimpleNamespace(edge=edge, candidate=candidate, market_phase=None, conn=None)
-    if _classify_via_registry("shoulder_sell", _ctx) is not None:
-        return "shoulder_sell"
+    if _classify_via_registry("shoulder_impossible_tail_capture", _ctx) is not None:
+        return "shoulder_impossible_tail_capture"
     if edge.direction == "buy_yes" and not edge.bin.is_shoulder:
         return "center_buy"
     return "unclassified"
@@ -2241,11 +2241,11 @@ def _strategy_key_for(candidate: MarketCandidate, edge: BinEdge) -> str | None:
     if candidate.discovery_mode == DiscoveryMode.OPENING_HUNT.value:
         return "opening_inertia"
     if candidate.discovery_mode == DiscoveryMode.IMMINENT_OPEN_CAPTURE.value:
-        return "opening_inertia"
+        return "imminent_open_capture"
     from src.strategy.strategy_profile import _classify_via_registry
     _ctx = SimpleNamespace(edge=edge, candidate=candidate, market_phase=None, conn=None)
-    if _classify_via_registry("shoulder_sell", _ctx) is not None:
-        return "shoulder_sell"
+    if _classify_via_registry("shoulder_impossible_tail_capture", _ctx) is not None:
+        return "shoulder_impossible_tail_capture"
     if edge.direction == "buy_yes" and not edge.bin.is_shoulder:
         return "center_buy"
     return None
@@ -2265,7 +2265,7 @@ def _strategy_key_for_hypothesis(candidate: MarketCandidate, hypothesis: FullFam
     if candidate.discovery_mode == DiscoveryMode.OPENING_HUNT.value:
         return "opening_inertia"
     if candidate.discovery_mode == DiscoveryMode.IMMINENT_OPEN_CAPTURE.value:
-        return "opening_inertia"
+        return "imminent_open_capture"
     from src.strategy.strategy_profile import _classify_via_registry
     _hyp_bin = SimpleNamespace(
         is_shoulder=hypothesis.is_shoulder,
@@ -2274,8 +2274,8 @@ def _strategy_key_for_hypothesis(candidate: MarketCandidate, hypothesis: FullFam
     )
     _hyp_edge = SimpleNamespace(direction=hypothesis.direction, bin=_hyp_bin)
     _ctx = SimpleNamespace(edge=_hyp_edge, candidate=candidate, market_phase=None, conn=None)
-    if _classify_via_registry("shoulder_sell", _ctx) is not None:
-        return "shoulder_sell"
+    if _classify_via_registry("shoulder_impossible_tail_capture", _ctx) is not None:
+        return "shoulder_impossible_tail_capture"
     if hypothesis.direction == "buy_yes" and not hypothesis.is_shoulder:
         return "center_buy"
     return None

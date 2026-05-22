@@ -282,11 +282,15 @@ def _candidate_strategy_key_for_reason(reason: Optional["NoTradeReason"]) -> str
     strategy_by_reason = {
         NoTradeReason.STALE_QUOTE_FILL_INFEASIBLE: "stale_quote_detector",
         NoTradeReason.RESOLUTION_DISPUTED: "resolution_window_maker",
+        NoTradeReason.RESOLUTION_TYPED_OUTCOME_UNAVAILABLE: "resolution_window_maker",
         NoTradeReason.LIQPROV_HEARTBEAT_ABSENT: "liquidity_provision_with_heartbeat",
         NoTradeReason.WEATHER_ALERT_SOURCE_UNTRUSTED: "weather_event_arbitrage",
         NoTradeReason.CORR_HEDGE_REGIME_UNAVAILABLE: "cross_market_correlation_hedge",
         NoTradeReason.NEGRISK_FAMILY_INCOMPLETE: "neg_risk_basket",
         NoTradeReason.NEGRISK_NO_PROFITABLE_BASKET: "neg_risk_basket",
+        # shoulder_impossible_tail_capture data-gate and theorem failure
+        NoTradeReason.PHYSICAL_ENVELOPE_UNWIRED: "shoulder_impossible_tail_capture",
+        NoTradeReason.SHOULDER_PHYSICAL_BOUND_NOT_EXCLUDES_TAIL: "shoulder_impossible_tail_capture",
     }
     return strategy_by_reason.get(reason, "unknown_candidate")
 
@@ -445,6 +449,9 @@ from .resolution_window_maker import ResolutionWindowMaker
 from .neg_risk_basket import NegRiskBasket
 from .cross_market_correlation_hedge import CrossMarketCorrelationHedge
 from .liquidity_provision_with_heartbeat import LiquidityProvisionWithHeartbeat
+from .center_sell_parity import CenterSellParity
+from .shoulder_impossible_tail_capture import ShoulderImpossibleTailCapture
+from .settlement_capture_shadow import PhysicalIntervalBound, SettlementCaptureShadow
 
 __all__ = [
     "_is_world_db_conn",
@@ -452,6 +459,7 @@ __all__ = [
     "CandidateContext",
     "CandidateDecision",
     "CandidateMetadata",
+    "CenterSellParity",
     "CrossMarketCorrelationHedge",
     "DeterministicEdgeDecision",
     "FamilyOrderBookSnapshot",
@@ -459,8 +467,11 @@ __all__ = [
     "LegIntent",
     "LiquidityProvisionWithHeartbeat",
     "NegRiskBasket",
+    "PhysicalIntervalBound",
     "PriceLevel",
     "ResolutionWindowMaker",
+    "SettlementCaptureShadow",
+    "ShoulderImpossibleTailCapture",
     "StaleQuoteDetector",
     "StrategyProtocol",
     "VectorEdgeDecision",

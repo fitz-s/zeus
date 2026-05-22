@@ -198,40 +198,56 @@ def test_dormant_inverse_quadrants_do_not_masquerade_as_live_strategy_keys() -> 
     assert cycle_runner._classify_edge_source(DiscoveryMode.UPDATE_REACTION, _shoulder_buy_edge()) == "unclassified"
     assert cycle_runner._classify_strategy(DiscoveryMode.UPDATE_REACTION, _shoulder_buy_edge(), "") == "unclassified"
 
-    assert _strategy_key_for_hypothesis(candidate, _hypothesis(direction="buy_no", is_shoulder=True)) == "shoulder_sell"
+    assert _strategy_key_for_hypothesis(candidate, _hypothesis(direction="buy_no", is_shoulder=True)) == "shoulder_impossible_tail_capture"  # D6: shoulder_sell retired
     assert _strategy_key_for_hypothesis(candidate, _hypothesis(direction="buy_yes", is_shoulder=False)) == "center_buy"
     assert _strategy_key_for_hypothesis(candidate, _hypothesis(direction="buy_yes", is_shoulder=True)) is None
     assert _strategy_key_for_hypothesis(candidate, _hypothesis(direction="buy_no", is_shoulder=False)) is None
 
 
-def test_imminent_open_capture_maps_to_canonical_opening_inertia_strategy_key() -> None:
-    """Discovery mode is not a governance strategy key.
+def test_imminent_open_capture_maps_to_own_strategy_key() -> None:
+    """IMMINENT_OPEN_CAPTURE mode must attribute to its own registry profile.
 
-    Live durable tables constrain strategy_key to the canonical four strategy
-    families. `imminent_open_capture` is a cycle/discovery mode inside the
-    opening-inertia family, so evaluator output must use `opening_inertia` for
-    durable facts, position projection, and risk attribution.
+    §22.1 C-2 (zeus_strategy_spec.md) and STRATEGY_TAXONOMY_DIRECTIVE.md §9
+    treat imminent_open_capture as a distinct live strategy with its own profile
+    in architecture/strategy_profile_registry.yaml:280. Evaluator strategy_key
+    must resolve to "imminent_open_capture" so its decisions land in the correct
+    promotion-evidence cohort and are NOT credited to opening_inertia.
+
+    Note: cycle_runner._classify_strategy is a separate function not involved in
+    evaluator cohort attribution; its mapping is tested separately in test_runtime_guards.
     """
     candidate = _candidate(DiscoveryMode.IMMINENT_OPEN_CAPTURE.value)
     edge = _shoulder_buy_edge()
 
+    # edge_source and strategy_key must now agree on "imminent_open_capture"
     assert _edge_source_for(candidate, edge) == "imminent_open_capture"
-    assert _strategy_key_for(candidate, edge) == "opening_inertia"
-    assert (
-        cycle_runner._classify_strategy(
-            DiscoveryMode.IMMINENT_OPEN_CAPTURE,
-            edge,
-            "imminent_open_capture",
-        )
-        == "opening_inertia"
-    )
+    assert _strategy_key_for(candidate, edge) == "imminent_open_capture"
+
     assert (
         _strategy_key_for_hypothesis(
             candidate,
             _hypothesis(direction="buy_yes", is_shoulder=True),
         )
-        == "opening_inertia"
+        == "imminent_open_capture"
     )
+
+
+def test_imminent_open_capture_and_opening_inertia_strategy_keys_are_separate() -> None:
+    """Mode→key separation: OPENING_HUNT→opening_inertia, IMMINENT_OPEN_CAPTURE→imminent_open_capture.
+
+    Regression guard for §22.1 C-2 cohort contamination fix.
+    """
+    edge = _shoulder_buy_edge()
+
+    oi_candidate = _candidate(DiscoveryMode.OPENING_HUNT.value)
+    ioc_candidate = _candidate(DiscoveryMode.IMMINENT_OPEN_CAPTURE.value)
+
+    assert _strategy_key_for(oi_candidate, edge) == "opening_inertia"
+    assert _strategy_key_for(ioc_candidate, edge) == "imminent_open_capture"
+    assert _strategy_key_for(oi_candidate, edge) != _strategy_key_for(ioc_candidate, edge)
+
+    assert _strategy_key_for_hypothesis(oi_candidate, _hypothesis(direction="buy_yes", is_shoulder=True)) == "opening_inertia"
+    assert _strategy_key_for_hypothesis(ioc_candidate, _hypothesis(direction="buy_yes", is_shoulder=True)) == "imminent_open_capture"
 
 
 def test_day0_forecast_upside_does_not_masquerade_as_settlement_capture() -> None:
@@ -326,3 +342,39 @@ def test_family_preselection_rejections_stamp_strategy_identity_before_runtime_p
 
     assert target is not None
     assert {"edge_source", "strategy_key"} <= target
+
+
+def test_imminent_open_capture_kelly_phase_diverges_from_opening_inertia() -> None:
+    """IOC and opening_inertia have distinct Kelly profiles — the C-2 fix reveals intended sizing.
+
+    Critic verdict (C2_CRITIC_VERDICT.md):
+    - opening_inertia: kelly_phase_overrides[settlement_day]=0.0 (alpha decayed by then)
+    - imminent_open_capture: kelly_phase_overrides[settlement_day]=0.5 (0-24h window IS settlement_day)
+
+    Under live-default flag ZEUS_MARKET_PHASE_DISPATCH=1 the IOC settlement_day=0.5 override
+    is unreachable (dispatch.py intercepts settlement_day → settlement_capture first). It is a
+    deliberate flag-OFF fallback added in commit f83db10008 (#205, 2026-05-19, operator urgency).
+    VERDICT: CORRECT_DESIGN (C2_DESIGN_HOMEWORK.md).
+
+    This test is NON-VACUOUS: if strategy_key reverts to "opening_inertia" for IOC mode,
+    the settlement_day assertion fails (0.0 != 0.5).
+    """
+    from src.strategy.strategy_profile import try_get as _try_get_profile
+
+    ioc_profile = _try_get_profile("imminent_open_capture")
+    oi_profile = _try_get_profile("opening_inertia")
+    assert ioc_profile is not None, "imminent_open_capture profile missing from registry"
+    assert oi_profile is not None, "opening_inertia profile missing from registry"
+
+    # Core divergence: settlement_day Kelly
+    assert ioc_profile.kelly_for_phase("settlement_day") == 0.5
+    assert oi_profile.kelly_for_phase("settlement_day") == 0.0
+    assert ioc_profile.kelly_for_phase("settlement_day") != oi_profile.kelly_for_phase("settlement_day")
+
+    # pre_settlement_day Kelly is equal (both 0.5) — only settlement_day diverges
+    assert ioc_profile.kelly_for_phase("pre_settlement_day") == 0.5
+    assert oi_profile.kelly_for_phase("pre_settlement_day") == 0.5
+
+    # IOC's allowed_market_phases includes settlement_day; opening_inertia's does not
+    assert "settlement_day" in ioc_profile.allowed_market_phases
+    assert "settlement_day" not in oi_profile.allowed_market_phases
