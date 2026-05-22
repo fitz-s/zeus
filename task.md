@@ -1,3 +1,7 @@
+Status: active
+Owner: venus
+Updated_at: 2026-05-22
+
 # Zeus Live Short-Term Recovery Workflow
 
 ## 1. Current original goal

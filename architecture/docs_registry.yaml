@@ -415,6 +415,24 @@ entries:
   contains_volatile_metrics: false
   current_tense_allowed: true
   refresh_source: packet_audit
+- path: task.md
+  doc_class: operations
+  default_read: false
+  direct_reference_allowed: true
+  current_role: active short-term live recovery tracker named by current_state
+  canonical_replaced_by: []
+  next_action: keep
+  lifecycle_state: active
+  coverage_scope: exact
+  parent_coverage_allowed: false
+  truth_profile: router
+  freshness_class: packet_bound
+  supersedes: []
+  superseded_by: []
+  may_live_in_reference: false
+  contains_volatile_metrics: true
+  current_tense_allowed: true
+  refresh_source: packet_audit
 - path: docs/operations/AGENTS.md
   doc_class: operations
   default_read: false

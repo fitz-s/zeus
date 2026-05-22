@@ -113,6 +113,12 @@ def build_parser(description: str | None = None) -> argparse.ArgumentParser:
             "is emitted (non-blocking). Also settable via ZEUS_COMPANION_LOOP_BATCH_CAP env var."
         ),
     )
+    # PR-T0 advisory file-arrangement kernel flags
+    parser.add_argument("--arrange", action="store_true", help="Advisory: recommend canonical path for an artifact (requires --artifact-kind and --slug)")
+    parser.add_argument("--artifact-kind", default=None, metavar="KIND", help="Artifact kind for --arrange (e.g. operation_plan, operation_evidence)")
+    parser.add_argument("--slug", default=None, metavar="SLUG", help="Slug for --arrange (e.g. my-task-name)")
+    parser.add_argument("--file-arrangement-audit", action="store_true", help="Advisory: scan repo for file-arrangement findings (exit always 0)")
+    parser.add_argument("--explain-path", default=None, metavar="PATH", help="Advisory: classify and explain where PATH belongs")
 
     sub = parser.add_subparsers(dest="command")
     digest = sub.add_parser("digest", help="Emit bounded task topology digest")
@@ -474,6 +480,43 @@ def run_flag_command(api: Any, args: argparse.Namespace) -> int | None:
         result = api.run_planning_lock(args.changed_files, args.plan_evidence)
         api._print_strict(result, as_json=args.json, summary_only=args.summary_only, issue_schema_version=args.issue_schema_version)
         return 0 if result.ok else 1
+    # PR-T0 advisory file-arrangement kernel handlers (always exit 0)
+    if args.arrange:
+        artifact_kind = getattr(args, "artifact_kind", None)
+        slug = getattr(args, "slug", None)
+        if not artifact_kind or not slug:
+            print(
+                "--arrange requires both --artifact-kind KIND and --slug SLUG",
+                file=sys.stderr,
+            )
+            return 2
+        payload = api.run_arrange(artifact_kind, slug)
+        if args.json:
+            print(json.dumps(payload, indent=2))
+        else:
+            print(f"recommended_path: {payload['recommended_path']}")
+        return 0
+    if getattr(args, "file_arrangement_audit", False):
+        payload = api.run_file_arrangement_audit()
+        if args.json:
+            print(json.dumps(payload, indent=2))
+        else:
+            count = payload["finding_count"]
+            print(f"file-arrangement audit: {count} advisory finding(s) (exit 0 always)")
+            for f in payload["findings"]:
+                print(f"  [{f['severity']}] {f['code']}: {f['path']}")
+        return 0
+    explain_path_val = getattr(args, "explain_path", None)
+    if explain_path_val is not None:
+        payload = api.run_explain_path(explain_path_val)
+        if args.json:
+            print(json.dumps(payload, indent=2))
+        else:
+            print(f"path: {payload['path']}")
+            print(f"artifact_kind: {payload['artifact_kind']}")
+            print(f"recommended_path: {payload['recommended_path']}")
+            print(f"reason: {payload['reason']}")
+        return 0
     return None
 
 

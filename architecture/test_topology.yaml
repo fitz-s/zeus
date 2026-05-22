@@ -91,6 +91,8 @@ test_trust_policy:
     tests/test_position_market_slug_backward_compat.py: {created: "2026-05-20", last_used: "2026-05-21"}
     # Phase 7 T1: Position.lifecycle_state JSON-only field antibodies (2026-05-21).
     tests/test_position_lifecycle_state.py: {created: "2026-05-21", last_used: "2026-05-21"}
+    # PR-T0 advisory file-arrangement kernel antibodies (2026-05-22).
+    tests/topology/test_file_arrangement.py: {created: "2026-05-22", last_used: "2026-05-22"}
     # P1/P2 architecture review antibodies (2026-05-22): strategy routing, evidence
     # report scoping, migration clamp, evidence tier provenance.
     tests/test_p1_findings_evidence_risk.py: {created: "2026-05-22", last_used: "2026-05-22"}
