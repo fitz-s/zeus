@@ -452,6 +452,7 @@ from .liquidity_provision_with_heartbeat import LiquidityProvisionWithHeartbeat
 from .center_sell_parity import CenterSellParity
 from .shoulder_impossible_tail_capture import ShoulderImpossibleTailCapture
 from .settlement_capture_shadow import PhysicalIntervalBound, SettlementCaptureShadow
+from .opening_inertia_relaxation import OpeningInertiaRelaxation, estimate_lambda
 
 __all__ = [
     "_is_world_db_conn",
@@ -462,11 +463,13 @@ __all__ = [
     "CenterSellParity",
     "CrossMarketCorrelationHedge",
     "DeterministicEdgeDecision",
+    "estimate_lambda",
     "FamilyOrderBookSnapshot",
     "LegBook",
     "LegIntent",
     "LiquidityProvisionWithHeartbeat",
     "NegRiskBasket",
+    "OpeningInertiaRelaxation",
     "PhysicalIntervalBound",
     "PriceLevel",
     "ResolutionWindowMaker",
