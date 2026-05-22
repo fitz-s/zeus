@@ -150,6 +150,19 @@ class _StubWeb3:
         return self._receipt.get("blockNumber", 87000000) + 12
 
 
+class _ReceiptMapWeb3:
+    def __init__(self, receipts_by_hash):
+        self._receipts_by_hash = receipts_by_hash
+        self.eth = self
+
+    def get_transaction_receipt(self, tx_hash):
+        return self._receipts_by_hash.get(tx_hash)
+
+    @property
+    def block_number(self):
+        return 87200020
+
+
 def test_t1_unrelated_condition_not_confirmed(conn, monkeypatch):
     """T1: NegRiskAdapter log is for a DIFFERENT condition_id; Standard CTF
     log is present for target condition but that's the wrong adapter.
@@ -308,3 +321,87 @@ def test_recheckable_amount_mismatch_review_with_correct_payout_confirms(conn, m
     assert results[0].error_payload is None
     assert row["state"] == SettlementState.REDEEM_CONFIRMED.value
     assert row["error_payload"] is None
+
+
+def test_non_recheckable_review_rows_do_not_starve_tx_hashed_redeems(conn, monkeypatch):
+    """Non-healable review rows must not fill the batch window ahead of
+    ordinary tx-hashed rows. The SQL candidate set filters review rows before
+    LIMIT so a tiny cap still reaches the actionable redeem.
+    """
+    monkeypatch.setenv("ZEUS_REDEEM_RECONCILE_BATCH_CAP", "1")
+    _patch_negrisk_lookup(monkeypatch, {TARGET_COND: True})
+    _seed_tx_hashed(
+        conn,
+        "aaa-review-cmd",
+        TARGET_COND,
+        "0x" + "aa" * 32,
+        state=SettlementState.REDEEM_REVIEW_REQUIRED.value,
+        error_payload={"errorCode": "REDEEM_OPERATOR_ACTION_REQUIRED"},
+    )
+    _seed_tx_hashed(conn, "zzz-tx-cmd", TARGET_COND, TARGET_TX)
+
+    receipt = {
+        "status": 1,
+        "transactionHash": TARGET_TX,
+        "blockNumber": 87200004,
+        "logs": [
+            {
+                "address": POLYGON_NEGRISK_ADAPTER_ADDRESS.lower(),
+                "topics": [_NEGRISK_REDEMPTION_TOPIC, _REDEEMER_TOPIC, TARGET_COND],
+                "data": _abi_encode_payout(_PAYOUT_MICRO),
+            },
+        ],
+    }
+    results = reconcile_pending_redeems(_StubWeb3(receipt), conn)
+
+    review_row = conn.execute(
+        "SELECT state FROM settlement_commands WHERE command_id = ?",
+        ("aaa-review-cmd",),
+    ).fetchone()
+    tx_row = conn.execute(
+        "SELECT state FROM settlement_commands WHERE command_id = ?",
+        ("zzz-tx-cmd",),
+    ).fetchone()
+    assert [result.command_id for result in results] == ["zzz-tx-cmd"]
+    assert review_row["state"] == SettlementState.REDEEM_REVIEW_REQUIRED.value
+    assert tx_row["state"] == SettlementState.REDEEM_CONFIRMED.value
+
+
+def test_recheckable_review_rows_do_not_starve_tx_hashed_redeems(conn, monkeypatch):
+    monkeypatch.setenv("ZEUS_REDEEM_RECONCILE_BATCH_CAP", "1")
+    _patch_negrisk_lookup(monkeypatch, {TARGET_COND: True})
+    _seed_tx_hashed(
+        conn,
+        "aaa-review-cmd",
+        TARGET_COND,
+        "0x" + "aa" * 32,
+        state=SettlementState.REDEEM_REVIEW_REQUIRED.value,
+        error_payload={"errorCode": "REDEEM_NEGRISK_AMOUNT_MISMATCH"},
+    )
+    _seed_tx_hashed(conn, "zzz-tx-cmd", TARGET_COND, TARGET_TX)
+
+    receipt = {
+        "status": 1,
+        "transactionHash": TARGET_TX,
+        "blockNumber": 87200004,
+        "logs": [
+            {
+                "address": POLYGON_NEGRISK_ADAPTER_ADDRESS.lower(),
+                "topics": [_NEGRISK_REDEMPTION_TOPIC, _REDEEMER_TOPIC, TARGET_COND],
+                "data": _abi_encode_payout(_PAYOUT_MICRO),
+            },
+        ],
+    }
+    results = reconcile_pending_redeems(_ReceiptMapWeb3({TARGET_TX: receipt}), conn)
+
+    review_row = conn.execute(
+        "SELECT state FROM settlement_commands WHERE command_id = ?",
+        ("aaa-review-cmd",),
+    ).fetchone()
+    tx_row = conn.execute(
+        "SELECT state FROM settlement_commands WHERE command_id = ?",
+        ("zzz-tx-cmd",),
+    ).fetchone()
+    assert [result.command_id for result in results] == ["zzz-tx-cmd"]
+    assert review_row["state"] == SettlementState.REDEEM_REVIEW_REQUIRED.value
+    assert tx_row["state"] == SettlementState.REDEEM_CONFIRMED.value

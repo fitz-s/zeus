@@ -529,7 +529,7 @@ def _position_current_order_status_consistent(
         if coverage_state == "partial":
             expected = {"partial", "partially_filled", "partially_matched"}
         elif intent_kind == "EXIT":
-            expected = {"sell_filled", "buy_filled", "exit_filled", "filled", "confirmed", "complete"}
+            expected = {"sell_filled", "filled"}
         else:
             expected = {"filled", "confirmed", "complete"}
     else:

@@ -1089,6 +1089,36 @@ def test_exit_fill_requires_exit_position_event(tmp_path):
     )
 
 
+def test_exit_fill_rejects_unemitted_projection_status(tmp_path):
+    module = _load_module()
+    db = tmp_path / "trades.db"
+    with sqlite3.connect(db) as conn:
+        conn.row_factory = sqlite3.Row
+        _schema(conn)
+        _insert_command(conn, state="FILLED", venue_order_id="exit-order-1", intent_kind="EXIT")
+        _insert_submit_requested(conn)
+        _insert_submit_acked(conn, order_id="exit-order-1")
+        _insert_pre_submit_envelope(conn)
+        _insert_order_fact(conn, order_id="exit-order-1", state="MATCHED")
+        _insert_trade_fact(conn, order_id="exit-order-1")
+        _insert_exit_position_fill(
+            conn,
+            exit_order_id="exit-order-1",
+            entry_order_id="entry-order-1",
+            order_status="exit_filled",
+        )
+
+    with _connect_module_readonly(module, db, tmp_path) as conn:
+        result = module.evaluate(conn, "cmd-1")
+
+    assert result["status"] == "FAIL"
+    assert result["completion_category"] == "LIVE_ORDER_FILL_MISSING_POSITION_PROOF"
+    assert any(
+        check["name"] == "position_current_order_status_consistent" and check["status"] == "FAIL"
+        for check in result["checks"]
+    )
+
+
 def test_confirmed_fill_with_expired_remainder_is_live_order_filled(tmp_path):
     module = _load_module()
     db = tmp_path / "trades.db"
