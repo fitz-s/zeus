@@ -1,6 +1,10 @@
 # Created: 2026-05-22
 # Last reused or audited: 2026-05-22
 # Authority basis: task brief (Track R-1a antibodies §8)
+# Lifecycle: created=2026-05-22; last_reviewed=2026-05-22; last_reused=never
+# Purpose: Antibody tests for shadow_replay_harness.py Track R-1a — look-ahead guard,
+#          depth-proxy, COUNT>0 smoke, and regret 7-component sum invariant.
+# Reuse: All tests use fixture DBs; no live DB access. Safe to re-run at any time.
 """Antibody tests for shadow_replay_harness.py (Track R-1a).
 
 Tests
@@ -55,9 +59,20 @@ class TestLookaheadAntibody:
         with pytest.raises(ValueError, match="Look-ahead violation"):
             _assert_no_lookahead(available, decision)
 
-    def test_run_replay_raises_on_lookahead_row(self, tmp_path: Path) -> None:
-        """Injecting a lookahead row into the FCST fixture causes run_replay to raise."""
-        # Build a minimal FCST fixture DB with a lookahead row
+    def test_run_replay_valid_rows_succeed_and_guard_is_wired(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """run_replay completes on valid rows; raises if _assert_no_lookahead fires.
+
+        Since decision_time == available_at in the harness, a genuine look-ahead
+        violation cannot arise from well-formed DB rows. The unit tests above
+        (test_future_available_raises) verify the guard function directly.
+
+        This integration test verifies two things:
+        (a) run_replay completes successfully on valid rows (no spurious raise).
+        (b) If _assert_no_lookahead is monkeypatched to raise, run_replay propagates
+            the error — confirming the guard is actually wired into the hot path.
+        """
         fcst_path = tmp_path / "fcst_lookahead.db"
         fcst_conn = sqlite3.connect(str(fcst_path))
         fcst_conn.execute("""
@@ -66,22 +81,6 @@ class TestLookaheadAntibody:
                 temperature_metric TEXT, available_at TEXT, p_raw_json TEXT
             )
         """)
-        # decision_time = available_at by harness design.
-        # Inject a row where available_at is LATER than the window start → use
-        # a value that is date_to + 1 day, but still inside query range.
-        # Actually: decision_time = available_at = "2025-12-01T13:00:00".
-        # But harness asserts available_at <= decision_time (same value).
-        # To force a violation, we need to monkeypatch _assert_no_lookahead.
-        # Simpler: call it directly with a violating pair (already tested above).
-        # This test instead verifies the guard is CALLED per row by testing
-        # that a ValueError propagates from run_replay when we inject it.
-        # We inject by patching: available_at is set to a datetime far in future.
-        # The harness will see available_at > decision_time only if date logic differs.
-        # Since decision_time == available_at in the harness, a violation can only
-        # occur if a row comes from outside the window.
-        # We test the guard path by directly testing the function above;
-        # for run_replay integration we verify it completes cleanly when rows are valid.
-        # Insert valid row:
         available_at = "2025-12-01T12:00:00"
         fcst_conn.execute(
             "INSERT INTO ensemble_snapshots_v2 VALUES (?,?,?,?,?,?)",
@@ -102,7 +101,7 @@ class TestLookaheadAntibody:
         world_conn.close()
 
         temp_world = tmp_path / "temp_lookahead.db"
-        # Should NOT raise (valid row; available_at == decision_time)
+        # (a) Valid rows: should NOT raise
         result = run_replay(
             strategy_id="shoulder_sell",
             date_from="2025-12-01",
@@ -112,6 +111,24 @@ class TestLookaheadAntibody:
             live_fcst_path=fcst_path,
         )
         assert result.n_candidates_scanned == 1
+
+        # (b) Monkeypatch guard to always raise → run_replay must propagate it
+        import src.backtest.shadow_replay_harness as _h
+        monkeypatch.setattr(
+            _h,
+            "_assert_no_lookahead",
+            lambda *_: (_ for _ in ()).throw(ValueError("injected look-ahead violation")),
+        )
+        temp_world2 = tmp_path / "temp_lookahead2.db"
+        with pytest.raises(ValueError, match="injected look-ahead violation"):
+            run_replay(
+                strategy_id="shoulder_sell",
+                date_from="2025-12-01",
+                date_to="2025-12-31",
+                temp_world_path=temp_world2,
+                live_world_path=world_path,
+                live_fcst_path=fcst_path,
+            )
 
 
 # ---------------------------------------------------------------------------

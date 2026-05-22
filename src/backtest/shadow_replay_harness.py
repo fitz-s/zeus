@@ -12,8 +12,11 @@ CLI usage:
 
 Reads historical forecast edges from the LIVE FCST + WORLD DBs (read-only,
 immutable=1 URI) and replays classify_shoulder_candidate() against them.
-Writes shadow_experiments, decision_events (source='replay_decision'), and
-regret_decompositions to a TEMP world DB (never the live state/ DB).
+Writes shadow_experiments and decision_events (source='replay_decision') to a
+TEMP world DB (never the live state/ DB). regret_decompositions: the table is
+present in the DDL but R-1a writes no regret rows — the SCAFFOLD classifier
+produces only no-trade decisions, so n_settled=0 and there are no filled
+outcomes to decompose. R-1b will wire regret writes when trading logic lands.
 
 Design constraints
 ------------------
@@ -344,21 +347,19 @@ def run_replay(
     decision_seq_counter: dict[tuple, int] = {}
 
     fcst_conn = _open_readonly(Path(_live_fcst))
-    try:
-        rows = fcst_conn.execute(
-            """
-            SELECT snapshot_id, city, target_date, temperature_metric,
-                   available_at, p_raw_json
-            FROM ensemble_snapshots_v2
-            WHERE available_at >= ?
-              AND available_at <= ?
-              AND p_raw_json IS NOT NULL
-            ORDER BY available_at
-            """,
-            (date_from, date_to + "T99:99:99"),  # inclusive date range
-        ).fetchall()
-    finally:
-        fcst_conn.close()
+    # Stream rows via cursor iteration (do not fetchall — table may be O(1M) rows).
+    fcst_cursor = fcst_conn.execute(
+        """
+        SELECT snapshot_id, city, target_date, temperature_metric,
+               available_at, p_raw_json
+        FROM ensemble_snapshots_v2
+        WHERE available_at >= ?
+          AND available_at <= ?
+          AND p_raw_json IS NOT NULL
+        ORDER BY available_at
+        """,
+        (date_from, date_to + "T99:99:99"),  # inclusive date range
+    )
 
     world_conn_ro = _open_readonly(Path(_live_world))
     try:
@@ -400,7 +401,8 @@ def run_replay(
                     best = (rec_at, ask)
         return best[1] if best else None
 
-    for row in rows:
+    try:
+      for row in fcst_cursor:
         (snapshot_id, city_name, target_date, temperature_metric,
          available_at, p_raw_json_str) = row
         n_candidates_scanned += 1
@@ -417,17 +419,16 @@ def run_replay(
             continue
 
         # Build shoulder bin edges (open_low = bin[0], open_high = bin[-1]).
+        # Snapshots with n_bins < 2 are skipped: a single-bin p_raw_json has no
+        # open-low/open-high distinction and cannot be a shoulder candidate.
         n_bins = len(p_raw)
-        shoulder_bins_indices = []
-        if n_bins >= 2:
-            shoulder_bins_indices = [0, n_bins - 1]  # lower and upper shoulder
+        if n_bins < 2:
+            continue
+        shoulder_bins_indices = [0, n_bins - 1]  # lower and upper shoulder
 
         for i in shoulder_bins_indices:
             is_open_low = (i == 0)
             is_open_high = (i == n_bins - 1 and not is_open_low)
-            if n_bins == 1:
-                is_open_low = True
-                is_open_high = True
             bin_label = f"bin_{i}"
 
             replay_bin = _ReplayBin(
@@ -533,6 +534,8 @@ def run_replay(
                     f"  deid={deid[:16]}... city={city_name} "
                     f"date={target_date} outcome={outcome}"
                 )
+    finally:
+        fcst_conn.close()
 
     temp_conn.commit()
 

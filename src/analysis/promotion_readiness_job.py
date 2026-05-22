@@ -6,7 +6,7 @@
 """Promotion Readiness Job — offline ranked readiness report.
 
 Offline (no daemon coupling). Reads from a WORLD DB conn, runs:
-    EvidenceReport → adjudicate (pure, no tier write) → PromotionReadinessValidator
+    EvidenceReport → pure tribunal verdict (no DB write) → PromotionReadinessValidator
 
 and writes a ranked readiness report to .omc/research/promotion_readiness_{timestamp}.json.
 
@@ -15,7 +15,9 @@ a non-empty operator_ref; the validator raises ValueError if missing.
 This guard is preserved at the job level: pass operator_ref only when a human
 operator has explicitly authorised the promotion action.
 
-PURE-COMPUTE mode: adjudicate() is called with conn=None to skip DB writes.
+PURE-COMPUTE mode: the tribunal verdict is computed via promotion_predicate() +
+the demotion condition directly — adjudicate() is NOT called (it requires a live
+conn and raises RuntimeError on PROMOTE/DEMOTE when conn=None).
 The job never writes a tier. It emits a recommendation only.
 
 Usage:
@@ -34,7 +36,11 @@ from pathlib import Path
 from typing import Optional
 
 from src.analysis.evidence_report import build_evidence_report
-from src.analysis.live_readiness_tribunal import adjudicate
+from src.analysis.live_readiness_tribunal import (
+    TribunalVerdict,
+    VerdictKind,
+    promotion_predicate,
+)
 from src.analysis.promotion_readiness import PromotionReadinessValidator
 from src.contracts.evidence_tier import EvidenceTier
 
@@ -106,13 +112,44 @@ def run_promotion_readiness_job(
             breakeven_win_rate=breakeven,
         )
 
-        # adjudicate() pure-compute: conn=None → no DB write, returns verdict only
-        tribunal_verdict = adjudicate(
-            evidence,
-            tier_required,
-            cost_of_capital=cost_of_capital,
-            conn=None,          # pure-compute; no tier written
-            operator_ref=operator_ref,
+        # Pure-compute tribunal verdict via promotion_predicate + demotion check.
+        # adjudicate() is NOT used here: it calls _write_verdict_row() on PROMOTE/DEMOTE
+        # and raises RuntimeError when conn=None. This job is read-only.
+        tier_current = evidence.tier_observed
+        ci_lower = evidence.ci_lower
+        breakeven = evidence.breakeven_win_rate
+
+        if promotion_predicate(tier_current, tier_required, ci_lower, breakeven, cost_of_capital):
+            _tier_target = EvidenceTier(min(7, tier_current.value + 1))
+            _verdict_kind = VerdictKind.PROMOTE
+            _verdict_reason = (
+                f"PROMOTE: ci_lower={ci_lower:.4f} > breakeven={breakeven:.4f} + "
+                f"cost_of_capital={cost_of_capital:.4f}; "
+                f"{tier_current.name} → {_tier_target.name} [advisory; operator apply required]"
+            )
+        elif ci_lower is not None and ci_lower < breakeven - cost_of_capital:
+            _tier_target = EvidenceTier(max(0, tier_current.value - 1))
+            _verdict_kind = VerdictKind.DEMOTE
+            _verdict_reason = (
+                f"DEMOTE: ci_lower={ci_lower:.4f} < breakeven={breakeven:.4f} - "
+                f"cost_of_capital={cost_of_capital:.4f}; "
+                f"{tier_current.name} → {_tier_target.name} [advisory; operator apply required]"
+            )
+        else:
+            _tier_target = tier_current
+            _verdict_kind = VerdictKind.HOLD
+            _verdict_reason = (
+                f"HOLD: ci_lower={ci_lower!r}, breakeven={breakeven:.4f}; "
+                f"insufficient evidence to promote or demote"
+            )
+
+        tribunal_verdict = TribunalVerdict(
+            strategy_id=strategy_id,
+            verdict=_verdict_kind,
+            tier_current=tier_current,
+            tier_target=_tier_target,
+            verdict_reason=_verdict_reason,
+            ci_lower=ci_lower,
         )
 
         # PromotionReadinessValidator: operator_ref guard preserved
