@@ -1179,21 +1179,42 @@ def reconcile_pending_redeems(web3: Any, conn: sqlite3.Connection) -> list[Settl
     # P1-4 (c): wall-clock budget.
     _budget_s = float(os.environ.get("ZEUS_REDEEM_RECONCILE_BUDGET_S", "60") or "60")
     _t_start = _time.monotonic()
+    recheckable_error_codes = sorted(recheckable_review_errors)
+    recheckable_error_placeholders = ", ".join("?" for _ in recheckable_error_codes)
 
-    rows = conn.execute(
+    tx_hashed_rows = conn.execute(
         """
         SELECT * FROM settlement_commands
          WHERE tx_hash IS NOT NULL
-           AND state IN (?, ?)
+           AND state = ?
          ORDER BY requested_at, command_id
          LIMIT ?
         """,
         (
             SettlementState.REDEEM_TX_HASHED.value,
-            SettlementState.REDEEM_REVIEW_REQUIRED.value,
             _batch_cap,
         ),
     ).fetchall()
+    rows = list(tx_hashed_rows)
+    remaining_batch = max(0, _batch_cap - len(rows))
+    if remaining_batch:
+        review_rows = conn.execute(
+                        f"""
+            SELECT * FROM settlement_commands
+             WHERE tx_hash IS NOT NULL
+               AND state = ?
+               AND json_valid(error_payload)
+                             AND json_extract(error_payload, '$.errorCode') IN ({recheckable_error_placeholders})
+             ORDER BY requested_at, command_id
+             LIMIT ?
+            """,
+            (
+                SettlementState.REDEEM_REVIEW_REQUIRED.value,
+                                *recheckable_error_codes,
+                remaining_batch,
+            ),
+        ).fetchall()
+        rows.extend(review_rows)
 
     # P1-4 (b): per-call CLOB result cache keyed by condition_id.
     # Avoids repeated 5-second Gamma HTTP calls for the same market within
