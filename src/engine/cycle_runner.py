@@ -455,8 +455,8 @@ def _classify_edge_source(mode: DiscoveryMode, edge) -> str:
     from src.strategy.strategy_profile import _classify_via_registry
     from types import SimpleNamespace as _SimpleNamespace
     _ctx = _SimpleNamespace(edge=edge, candidate=None, market_phase=None, conn=None)
-    if _classify_via_registry("shoulder_sell", _ctx) is not None:
-        return "shoulder_sell"
+    if _classify_via_registry("shoulder_impossible_tail_capture", _ctx) is not None:
+        return "shoulder_impossible_tail_capture"
     if edge.direction == "buy_yes" and not edge.bin.is_shoulder:
         return "center_buy"
     return "unclassified"

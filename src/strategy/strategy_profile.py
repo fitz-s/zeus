@@ -641,10 +641,19 @@ def _classify_via_registry(strategy_id: str, context) -> "ClassificationResult":
     if profile is None:
         return None
 
+    # Live-status gate: blocked strategies (including refuted shoulder_sell) must not
+    # classify any edges. Empty allowed_bin_topology is a subset of everything so
+    # it does not implicitly block; this explicit gate does.
+    if profile.live_status == "blocked":
+        return None
+
     # Profile gate — only pure-shoulder strategies (open_shoulder topology ONLY)
     # route through this classifier. Strategies that allow mixed topologies
     # (e.g. opening_inertia allows point + finite_range + open_shoulder) use
     # their own classification path; routing them here would misclassify.
+    # Also blocks strategies with empty allowed_bin_topology.
+    if not profile.allowed_bin_topology:
+        return None
     if not (profile.allowed_bin_topology <= frozenset({"open_shoulder"})):
         return None
 
