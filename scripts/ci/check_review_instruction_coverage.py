@@ -54,14 +54,22 @@ def pattern_resolves(root: Path, pattern: str) -> bool:
 
 
 def pattern_covers_module(pattern: str, module: str) -> bool:
-    """Return True if the glob pattern could match the given module path."""
-    # Direct prefix or substring match in the pattern
+    """Return True if the glob pattern could cover the given module path.
+
+    Rules:
+    - Wildcard-only patterns (e.g. "**") are excluded from Rule 2 coverage
+      evaluation: they cover everything syntactically but provide no
+      domain-specific review guidance for the module.
+    - pat_base must be a strict path prefix of module (or equal), not
+      the reverse.  Bidirectional startswith produced false positives:
+      "scripts/*redeem*.py" -> base "scripts" falsely covered "scripts/ci".
+    """
     module_base = module.rstrip("/")
-    # Strip wildcards from pattern to get base path
     pat_base = re.split(r"[*\[{]", pattern)[0].rstrip("/")
     if not pat_base:
-        return True  # wildcard-only pattern covers everything
-    return module_base.startswith(pat_base) or pat_base.startswith(module_base)
+        return False  # wildcard-only: skip for Rule 2 coverage accounting
+    # module must be pat_base itself or under pat_base/
+    return module_base == pat_base or module_base.startswith(pat_base + "/")
 
 
 def main(argv: list[str] | None = None) -> int:

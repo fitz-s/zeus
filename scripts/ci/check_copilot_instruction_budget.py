@@ -25,7 +25,7 @@ VAGUE_PHRASES = [
     "make sure",
     "be careful",
     "you should",
-    "consider",
+    r"\bconsider\b",
     "it is important",
     "in general",
     "as needed",
@@ -55,7 +55,11 @@ def check_file(path: Path) -> list[str]:
 
     text_lower = text.lower()
     for phrase in VAGUE_PHRASES:
-        if phrase in text_lower:
+        if phrase.startswith(r"\b"):
+            # word-boundary regex phrase
+            if re.search(phrase, text_lower):
+                violations.append(f"{path}: vague phrase found: {phrase!r}")
+        elif phrase in text_lower:
             violations.append(f"{path}: vague phrase found: {phrase!r}")
 
     return violations

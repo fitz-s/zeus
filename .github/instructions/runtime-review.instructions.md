@@ -1,5 +1,5 @@
 ---
-applyTo: "src/execution/**,src/venue/**,src/main.py,src/engine/cycle_runner.py,src/engine/evaluator.py,src/engine/monitor_refresh.py,src/contracts/settlement_semantics.py,src/contracts/execution_price.py,src/contracts/venue_submission_envelope.py,src/contracts/fx_classification.py,src/state/lifecycle_manager.py,src/state/chain_reconciliation.py,src/state/db.py,src/state/ledger.py,src/state/projection.py,src/state/collateral_ledger.py,src/state/venue_command_repo.py,src/state/readiness_repo.py,src/riskguard/**,src/control/**,src/supervisor_api/**,migrations/**,tests/test_*invariant*.py,tests/test_architecture_contracts.py"
+applyTo: "src/execution/**,src/venue/**,src/main.py,src/engine/cycle_runner.py,src/engine/evaluator.py,src/engine/monitor_refresh.py,src/contracts/settlement_semantics.py,src/contracts/execution_price.py,src/contracts/venue_submission_envelope.py,src/contracts/fx_classification.py,src/state/lifecycle_manager.py,src/state/chain_reconciliation.py,src/state/db.py,src/state/ledger.py,src/state/projection.py,src/state/collateral_ledger.py,src/state/venue_command_repo.py,src/state/readiness_repo.py,src/riskguard/**,src/control/**,src/supervisor_api/**,scripts/migrations/**,tests/test_*invariant*.py,tests/test_architecture_contracts.py"
 ---
 
 # Runtime review — Tier 0 + invariant tests
