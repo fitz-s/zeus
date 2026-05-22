@@ -1,10 +1,10 @@
-# Lifecycle: created=2026-05-21; last_reviewed=2026-05-21; last_reused=never
+# Lifecycle: created=2026-05-21; last_reviewed=2026-05-21; last_reused=2026-05-22
 # Purpose: Relationship tests for the read-only live release gate and its
 #   fail-closed proof requirements.
 # Reuse: Run when changing scripts/check_live_release_gate.py or live release
 #   money-path proof requirements.
 # Created: 2026-05-21
-# Last reused/audited: 2026-05-21
+# Last reused/audited: 2026-05-22
 # Authority basis: docs/operations/task_2026-05-21_live_release_proof_p0p3/task.md P0-1/P1-2/P1-7
 
 from __future__ import annotations
@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import subprocess
+from datetime import datetime, timezone
 from pathlib import Path
 
 from scripts.check_live_release_gate import PAPER_PROOF_KEYS, FAIL, PASS, _check_loaded_sha, evaluate_release_gate, parse_args
@@ -63,8 +64,9 @@ def _make_gate_args(tmp_path: Path, *, live_eligibility: str = "UNKNOWN", loaded
     _make_world_db(world_db)
     _make_trade_db(trade_db)
     _write_json(loaded, {"loaded_sha": loaded_sha})
-    _write_json(source, {"generated_at": "2026-05-21T12:00:00+00:00"})
-    _write_json(status, {"generated_at": "2026-05-21T12:00:00+00:00"})
+    generated_at = datetime.now(timezone.utc).isoformat()
+    _write_json(source, {"generated_at": generated_at})
+    _write_json(status, {"generated_at": generated_at})
     _write_json(
         proof,
         {
