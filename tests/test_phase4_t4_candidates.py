@@ -1,7 +1,6 @@
-# Created: 2026-05-21
-# Last reused or audited: 2026-05-22
-# Authority basis: docs/operations/task_2026-05-21_strategy_vnext_phase4_fdr_candidates/PHASE_4_PLAN.md §T4
-#                  + feat-negrisk-basket-exact-arb-20260522: NegRiskBasket reframed to exact-arb
+# Lifecycle: created=2026-05-21; last_reviewed=2026-05-22; last_reused=never
+# Purpose: Phase 4 T4 relationship tests for cross_market_correlation_hedge + neg_risk_basket candidates
+# Reuse: verify NoTradeReason enum has CORR_HEDGE_REGIME_UNAVAILABLE + NEGRISK_FAMILY_INCOMPLETE before running
 """Phase 4 T4 — relationship tests for cross_market_correlation_hedge + neg_risk_basket.
 
 Two relationship assertions per candidate (per plan §T4 acceptance criteria):

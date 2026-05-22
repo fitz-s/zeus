@@ -37,6 +37,8 @@ INV-37: conn supplied by caller; never auto-opened here.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import sqlite3
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -347,8 +349,20 @@ class NegRiskBasket(BaseStrategyCandidate):
             return decision
 
         # --- Compute q* and Π* for both baskets (§11.7 breakpoint search) ---
-        q_yes, cost_yes, fee_yes, pi_yes = _opt_yes(family, fee_rate)
-        q_no, cost_no, fee_no, pi_no = _opt_no(family, fee_rate)
+        try:
+            q_yes, cost_yes, fee_yes, pi_yes = _opt_yes(family, fee_rate)
+            q_no, cost_no, fee_no, pi_no = _opt_no(family, fee_rate)
+        except Exception as exc:  # phi/sweep can raise ValueError/TypeError on bad level data
+            decision = CandidateDecision(
+                outcome="no_trade",
+                reason=NoTradeReason.NEGRISK_FAMILY_INCOMPLETE,
+                reason_detail=(
+                    f"neg_risk_basket: sweep/fee computation failed for "
+                    f"market_slug={market_slug!r}: {exc!r}"
+                ),
+            )
+            write_candidate_no_trade_row(conn, context, decision)
+            return decision
 
         best_pi = max(pi_yes, pi_no)
 
@@ -382,6 +396,25 @@ class NegRiskBasket(BaseStrategyCandidate):
             payoff = Decimal(family.K - 1) * q_star  # NO basket: (K-1) pay $1 each
             profit = pi_no
 
+        # --- Compute proof_inputs_hash (§19.3): SHA-256 of legs + q_star + fee_rate ---
+        _proof_blob = json.dumps(
+            {
+                "legs": [
+                    {
+                        "condition_id": lg.condition_id,
+                        "side": lg.side,
+                        "quantity": str(lg.quantity),
+                        "price_limit": str(lg.price_limit),
+                    }
+                    for lg in legs
+                ],
+                "q_star": str(q_star),
+                "fee_rate": str(fee_rate),
+            },
+            sort_keys=True,
+        )
+        proof_inputs_hash = hashlib.sha256(_proof_blob.encode()).hexdigest()
+
         # --- Write ONE shadow decision_events row (multi-leg DB persistence deferred) ---
         decision_time_iso = (
             decision_time.replace(tzinfo=timezone.utc).isoformat()
@@ -394,13 +427,16 @@ class NegRiskBasket(BaseStrategyCandidate):
             if metrics is not None
             else None
         )
+        # edge: normalized per-share profit signal (vector_profit / vector_payoff);
+        # vector_profit alone is multi-leg notional, not comparable to single-leg p − q signals.
+        edge_normalized = float(profit / payoff) if payoff > Decimal(0) else None
         write_shadow_decision_event(
             context.natural_key,
             decision_time=decision_time_iso,
             side=basket_side,
             strategy_key=self.strategy_key,
             conn=conn,
-            edge=float(profit),
+            edge=edge_normalized,
             polymarket_end_anchor_source=anchor_source,
         )
 
@@ -414,4 +450,5 @@ class NegRiskBasket(BaseStrategyCandidate):
             vector_fee=vector_fee_val,
             vector_payoff=payoff,
             vector_profit=profit,
+            proof_inputs_hash=proof_inputs_hash,
         )

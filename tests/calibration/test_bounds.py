@@ -1,7 +1,6 @@
-# Created: 2026-05-22
-# Last reused/audited: 2026-05-22
-# Authority basis: docs/operations/task_2026-05-21_mainline_completion_authority/STRATEGY_TAXONOMY_DIRECTIVE.md §0, §5, §8
-#                  + docs/reference/zeus_math_spec.md §6
+# Lifecycle: created=2026-05-22; last_reviewed=2026-05-22; last_reused=never
+# Purpose: Relationship tests for split-conformal calibrated_bounds() — coverage guarantee §5/§8
+# Reuse: synthetic data only; no external dependencies; safe to run in isolation
 """Relationship tests for src/calibration/bounds.py — calibrated probability bounds.
 
 §0: Class 3 (calibrated statistical edge) MUST use calibrated bound, not raw posterior.

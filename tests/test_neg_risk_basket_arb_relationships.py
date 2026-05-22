@@ -1,7 +1,6 @@
-# Created: 2026-05-22
-# Last reused or audited: 2026-05-22
-# Authority basis: docs/reference/zeus_strategy_spec.md §19.3
-#                  + docs/reference/zeus_math_spec.md §11.4-11.9
+# Lifecycle: created=2026-05-22; last_reviewed=2026-05-22; last_reused=never
+# Purpose: Neg-risk basket exact-arb cross-module relationship tests (R1-R7); §11.4-11.9 / §19.3
+# Reuse: confirm venue_fee_rate() returns current config value before relying on R2/R3/R6 fee assertions
 """Neg-risk basket exact-arbitrage relationship tests.
 
 Seven cross-module invariants (R1-R7):

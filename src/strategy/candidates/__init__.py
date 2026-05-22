@@ -241,6 +241,7 @@ class VectorEdgeDecision:
     vector_fee: Decimal                  # Σ phi across all legs
     vector_payoff: Decimal               # deterministic payoff
     vector_profit: Decimal               # = payoff - cost - fee
+    proof_inputs_hash: str               # SHA-256 of (family legs, q_star, fee_rate) — §19.3
 
     def __post_init__(self) -> None:
         if self.vector_profit <= Decimal(0):

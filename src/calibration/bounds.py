@@ -67,8 +67,10 @@ def calibrated_bounds(
             satisfying p_lo ≤ p_hat ≤ p_hi.
 
     Raises:
-        ValueError: if alpha not in (0, 1) or inputs are empty.
+        ValueError: if alpha not in (0, 1), inputs are empty, p_hat or cal_p_hats
+            are outside [0, 1] or non-finite, or cal_outcomes contain values outside {0, 1}.
     """
+    import math as _math
     if not (0.0 < alpha < 1.0):
         raise ValueError(f"alpha must be in (0, 1), got {alpha}")
     if len(cal_p_hats) == 0:
@@ -77,6 +79,16 @@ def calibrated_bounds(
         raise ValueError(
             f"cal_p_hats length {len(cal_p_hats)} != cal_outcomes length {len(cal_outcomes)}"
         )
+    p_hat_f = float(p_hat)
+    if not _math.isfinite(p_hat_f) or not (0.0 <= p_hat_f <= 1.0):
+        raise ValueError(f"p_hat must be finite and in [0, 1], got {p_hat}")
+    for i, cp in enumerate(cal_p_hats):
+        cp_f = float(cp)
+        if not _math.isfinite(cp_f) or not (0.0 <= cp_f <= 1.0):
+            raise ValueError(f"cal_p_hats[{i}]={cp} is not finite or not in [0, 1]")
+    for i, y in enumerate(cal_outcomes):
+        if y not in (0, 1, 0.0, 1.0):
+            raise ValueError(f"cal_outcomes[{i}]={y} is not in {{0, 1}}")
 
     # Step 1: nonconformity scores on calibration set
     scores = [abs(float(y) - float(p)) for p, y in zip(cal_p_hats, cal_outcomes)]

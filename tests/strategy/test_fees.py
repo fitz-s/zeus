@@ -1,7 +1,6 @@
-# Created: 2026-05-22
-# Last reused/audited: 2026-05-22
-# Authority basis: docs/operations/task_2026-05-21_mainline_completion_authority/STRATEGY_TAXONOMY_DIRECTIVE.md §0
-#                  + docs/reference/zeus_math_spec.md §11.5
+# Lifecycle: created=2026-05-22; last_reviewed=2026-05-22; last_reused=never
+# Purpose: Relationship tests for phi() fee formula and venue_fee_rate() config contract (§11.5)
+# Reuse: verify config/settings.json fee_rate entry is current before trusting phi numerical assertions
 """Relationship tests for src/strategy/fees.py — canonical fee function phi.
 
 §0: phi = C · feeRate · p(1−p), feeRate from config, maker fee = 0.
