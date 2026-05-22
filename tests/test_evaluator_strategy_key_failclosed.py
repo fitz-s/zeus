@@ -1,6 +1,6 @@
 # Created: 2026-05-02
-# Last reused/audited: 2026-05-21
-# Lifecycle: created=2026-05-02; last_reviewed=2026-05-21; last_reused=2026-05-21
+# Last reused/audited: 2026-05-22
+# Lifecycle: created=2026-05-02; last_reviewed=2026-05-21; last_reused=2026-05-22
 # Purpose: Lock durable strategy_key classification and fail-closed behavior across evaluator/runtime persistence boundaries.
 # Reuse: Run before changing evaluator strategy_key mapping, discovery-mode classification, or strategy_key DB persistence.
 # Authority basis: PR44 review comment 3177316079 / 3177317099 strategy_key unclassified fail-closed contract;
@@ -60,15 +60,28 @@ def _day0_candidate_with_observed_high(observed_high: float) -> MarketCandidate:
 
 
 def _imminent_candidate_with_observed_high(observed_high: float) -> MarketCandidate:
+    return _settlement_day_candidate_with_observed_high(
+        observed_high,
+        discovery_mode=DiscoveryMode.IMMINENT_OPEN_CAPTURE.value,
+        hours_since_open=0.5,
+    )
+
+
+def _settlement_day_candidate_with_observed_high(
+    observed_high: float,
+    *,
+    discovery_mode: str,
+    hours_since_open: float = 30.0,
+) -> MarketCandidate:
     from src.strategy.market_phase import MarketPhase
 
     return MarketCandidate(
         city=_city(),
         target_date="2026-05-03",
         outcomes=[],
-        hours_since_open=0.5,
+        hours_since_open=hours_since_open,
         temperature_metric="high",
-        discovery_mode=DiscoveryMode.IMMINENT_OPEN_CAPTURE.value,
+        discovery_mode=discovery_mode,
         market_phase=MarketPhase.SETTLEMENT_DAY,
         observation={"high_so_far": observed_high, "current_temp": observed_high},
     )
@@ -227,6 +240,17 @@ def test_day0_forecast_upside_does_not_masquerade_as_settlement_capture() -> Non
 
 def test_imminent_forecast_upside_does_not_masquerade_as_settlement_capture() -> None:
     candidate = _imminent_candidate_with_observed_high(34.0)
+    edge = _finite_buy_yes_edge(36.0, 37.0)
+
+    assert _edge_source_for(candidate, edge) == "day0_nowcast_entry"
+    assert _strategy_key_for(candidate, edge) is None
+
+
+def test_any_settlement_day_forecast_upside_does_not_masquerade_as_settlement_capture() -> None:
+    candidate = _settlement_day_candidate_with_observed_high(
+        34.0,
+        discovery_mode=DiscoveryMode.UPDATE_REACTION.value,
+    )
     edge = _finite_buy_yes_edge(36.0, 37.0)
 
     assert _edge_source_for(candidate, edge) == "day0_nowcast_entry"

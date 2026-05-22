@@ -2237,18 +2237,13 @@ def _day0_high_truth_classification_for_edge(
     candidate: MarketCandidate,
     edge: BinEdge,
 ) -> str | None:
-    """Classify whether a Day0 HIGH buy_yes edge is observation-locked.
+    """Classify whether a settlement-day HIGH buy_yes edge is observation-locked.
 
     Settlement capture is reserved for facts already locked by canonical
     intraday observation. A buy_yes bin above the observed high is still a
     nowcast/forecast-upside edge and must not inherit settlement_capture live
     policy.
     """
-    if candidate.discovery_mode not in {
-        DiscoveryMode.DAY0_CAPTURE.value,
-        DiscoveryMode.IMMINENT_OPEN_CAPTURE.value,
-    }:
-        return None
     if str(candidate.temperature_metric).lower() != "high":
         return None
     if edge.direction != "buy_yes":
