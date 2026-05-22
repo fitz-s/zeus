@@ -894,7 +894,7 @@ def get_connection(
 # CI hook scripts/check_schema_version.py diffs the sqlite_master hash of
 # a fresh-init DB against tests/state/_schema_pinned_hash.txt and fails
 # the PR if SCHEMA_VERSION did not change in lockstep.
-SCHEMA_VERSION = 28  # 2026-05-22 neg_risk_basket: NEGRISK_NO_PROFITABLE_BASKET reason enum member
+SCHEMA_VERSION = 28  # 2026-05-22 neg_risk_basket reason + opportunity_fact strategy_key CHECK widening
 
 
 def init_schema(
@@ -2565,7 +2565,7 @@ def _migrate_decision_events_schema(conn: sqlite3.Connection) -> None:
     if (
         "unknown_legacy" in table_sql
         and "shadow_decision" in table_sql
-        and "12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27" in table_sql
+        and "12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28" in table_sql
     ):
         conn.execute("DROP TABLE IF EXISTS decision_events_new")
         return
@@ -2641,9 +2641,9 @@ def _migrate_decision_events_schema(conn: sqlite3.Connection) -> None:
             first_inclusion_block_time, finality_confirmed_time,
             clock_skew_estimate_ms_at_submit, raw_orderbook_hash_transition_delta_ms,
             CASE
-                WHEN schema_version IN (12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27)
+                WHEN schema_version IN (12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28)
                     THEN schema_version
-                ELSE 27
+                ELSE 28
             END,
             CASE
                 WHEN source IN ('phase0_backfill', 'live_decision', 'shadow_decision')
@@ -3355,7 +3355,7 @@ def _strip_strategy_key_check(sql: str) -> str:
 
 
 def _migrate_world_strategy_key_checks(conn: sqlite3.Connection) -> None:
-    """Remove stale hardcoded strategy_key CHECK from world-class telemetry tables.
+    """Remove stale hardcoded strategy_key CHECK from telemetry tables.
 
     Finding 6 (P2, 2026-05-22): probability_trace_fact and strategy_health had
     a hardcoded CHECK enumerating the 4 founding strategies. Day0_nowcast_entry
@@ -3364,7 +3364,7 @@ def _migrate_world_strategy_key_checks(conn: sqlite3.Connection) -> None:
     Uses full table-swap so existing rows are preserved.
     """
     import re as _re  # noqa: F811
-    for tname in ("probability_trace_fact", "strategy_health"):
+    for tname in ("probability_trace_fact", "strategy_health", "opportunity_fact"):
         row = conn.execute(
             "SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (tname,)
         ).fetchone()
@@ -3395,12 +3395,13 @@ def _migrate_world_strategy_key_checks(conn: sqlite3.Connection) -> None:
 def _migrate_trade_strategy_key_checks(conn: sqlite3.Connection) -> None:
     """Remove stale hardcoded strategy_key CHECK from trade-class tables.
 
-    Finding 6 (P2, 2026-05-22): position_events, position_current, and
-    execution_fact carried the same stale 4-strategy CHECK. Triggers on
-    position_events are preserved via sqlite_master query+recreate.
+    Finding 6 (P2, 2026-05-22): position_events, position_current,
+    execution_fact, and trade-rooted opportunity_fact carried the same stale
+    4-strategy CHECK. Triggers and explicit indexes are preserved via
+    sqlite_master query+recreate.
     """
     import re as _re  # noqa: F811
-    for tname in ("position_events", "position_current", "execution_fact"):
+    for tname in ("position_events", "position_current", "execution_fact", "opportunity_fact"):
         row = conn.execute(
             "SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (tname,)
         ).fetchone()
@@ -3411,6 +3412,10 @@ def _migrate_trade_strategy_key_checks(conn: sqlite3.Connection) -> None:
             continue  # Already migrated or no stale CHECK
         triggers = conn.execute(
             "SELECT sql FROM sqlite_master WHERE type='trigger' AND tbl_name=? AND sql IS NOT NULL",
+            (tname,),
+        ).fetchall()
+        indexes = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='index' AND tbl_name=? AND sql IS NOT NULL",
             (tname,),
         ).fetchall()
         new_create = _strip_strategy_key_check(old_sql)
@@ -3426,6 +3431,8 @@ def _migrate_trade_strategy_key_checks(conn: sqlite3.Connection) -> None:
         conn.execute(f"ALTER TABLE {tname}_new RENAME TO {tname}")
         for (trg_sql,) in triggers:
             conn.execute(trg_sql)
+        for (idx_sql,) in indexes:
+            conn.execute(idx_sql)
 
 
 

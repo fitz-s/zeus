@@ -265,6 +265,61 @@ def _make_tier_db() -> sqlite3.Connection:
 class TestF4EvidenceTierLifecycle:
     """F4: lifecycle fields (revoked_at, effective_until, effective_from) are enforced."""
 
+    def test_v27_table_rebuilds_to_admit_schema_version_28_writer_rows(self) -> None:
+        from src.state.schema.phase6_evidence_schema import (
+            CREATE_EVIDENCE_TIER_ASSIGNMENTS_SQL,
+            _migrate_evidence_tier_assignments_schema,
+        )
+
+        conn = sqlite3.connect(":memory:")
+        conn.execute(
+            CREATE_EVIDENCE_TIER_ASSIGNMENTS_SQL.replace(
+                "DEFAULT 28 CHECK (schema_version IN (25, 26, 27, 28))",
+                "DEFAULT 27 CHECK (schema_version IN (25, 26, 27))",
+            )
+        )
+        conn.execute(
+            """
+            INSERT INTO evidence_tier_assignments (
+                strategy_id, tier, assigned_at, rationale, operator_ref,
+                verdict_reason, schema_version, assignment_source, verdict_kind
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "settlement_capture",
+                int(EvidenceTier.SHADOW_PASS),
+                "2026-05-22T00:00:00Z",
+                "legacy",
+                None,
+                None,
+                27,
+                "tribunal",
+                "PROMOTE",
+            ),
+        )
+        conn.commit()
+
+        _migrate_evidence_tier_assignments_schema(conn)
+        conn.commit()
+        record_evidence_tier_assignment(
+            conn,
+            strategy_id="settlement_capture",
+            tier=EvidenceTier.LIVE_PILOT_TINY,
+            rationale="v28",
+            operator_ref=None,
+            verdict_reason=None,
+            assignment_source="tribunal",
+            verdict_kind="PROMOTE",
+        )
+        schema_versions = [
+            row[0]
+            for row in conn.execute(
+                "SELECT schema_version FROM evidence_tier_assignments ORDER BY id"
+            ).fetchall()
+        ]
+
+        assert schema_versions == [27, 28]
+
     def test_revoked_row_excluded_from_current_assignment(self) -> None:
         conn = _make_tier_db()
         assignment = record_evidence_tier_assignment(
@@ -521,6 +576,14 @@ CREATE TABLE position_events (
 )
 """
 
+_STALE_OPPORTUNITY_DDL = """\
+CREATE TABLE opportunity_fact (
+    decision_id TEXT PRIMARY KEY,
+    recorded_at TEXT NOT NULL,
+    strategy_key TEXT CHECK(strategy_key IN ('settlement_capture','shoulder_sell','center_buy','opening_inertia'))
+)
+"""
+
 
 class TestF6StrategyKeyCheckMigration:
     """F6: stale CHECK constraint is removed from both world and trade tables."""
@@ -556,6 +619,66 @@ class TestF6StrategyKeyCheckMigration:
 
         count = conn.execute("SELECT COUNT(*) FROM probability_trace_fact").fetchone()[0]
         assert count == 2
+
+    def test_migrate_world_removes_opportunity_fact_strategy_check(self) -> None:
+        conn = sqlite3.connect(":memory:")
+        conn.execute(_STALE_OPPORTUNITY_DDL)
+        conn.execute(
+            "INSERT INTO opportunity_fact (decision_id, recorded_at, strategy_key) VALUES (?,?,?)",
+            ("dec-1", "2026-05-22T00:00:00Z", "opening_inertia"),
+        )
+        conn.commit()
+
+        _migrate_world_strategy_key_checks(conn)
+        conn.commit()
+
+        conn.execute(
+            "INSERT INTO opportunity_fact (decision_id, recorded_at, strategy_key) VALUES (?,?,?)",
+            ("dec-2", "2026-05-22T01:00:00Z", "day0_nowcast_entry"),
+        )
+        conn.commit()
+
+        count = conn.execute("SELECT COUNT(*) FROM opportunity_fact").fetchone()[0]
+        assert count == 2
+
+    def test_migrate_trade_removes_opportunity_fact_strategy_check(self) -> None:
+        conn = sqlite3.connect(":memory:")
+        conn.execute(_STALE_OPPORTUNITY_DDL)
+        conn.execute(
+            "INSERT INTO opportunity_fact (decision_id, recorded_at, strategy_key) VALUES (?,?,?)",
+            ("dec-1", "2026-05-22T00:00:00Z", "opening_inertia"),
+        )
+        conn.commit()
+
+        _migrate_trade_strategy_key_checks(conn)
+        conn.commit()
+
+        conn.execute(
+            "INSERT INTO opportunity_fact (decision_id, recorded_at, strategy_key) VALUES (?,?,?)",
+            ("dec-2", "2026-05-22T01:00:00Z", "day0_nowcast_entry"),
+        )
+        conn.commit()
+
+        count = conn.execute("SELECT COUNT(*) FROM opportunity_fact").fetchone()[0]
+        assert count == 2
+
+    def test_architecture_kernel_opportunity_fact_accepts_day0_strategy_key(self) -> None:
+        from src.state.ledger import apply_architecture_kernel_schema
+
+        conn = sqlite3.connect(":memory:")
+        apply_architecture_kernel_schema(conn)
+
+        conn.execute(
+            """
+            INSERT INTO opportunity_fact (decision_id, recorded_at, strategy_key, should_trade)
+            VALUES (?,?,?,?)
+            """,
+            ("dec-1", "2026-05-22T00:00:00Z", "day0_nowcast_entry", 0),
+        )
+        conn.commit()
+
+        count = conn.execute("SELECT COUNT(*) FROM opportunity_fact").fetchone()[0]
+        assert count == 1
 
     def test_migrate_trade_removes_check_preserves_triggers(self) -> None:
         conn = sqlite3.connect(":memory:")
@@ -615,3 +738,61 @@ class TestF6StrategyKeyCheckMigration:
         assert "opening_inertia" not in str(row[0]), (
             "New DB still has stale strategy_key CHECK enumerating opening_inertia"
         )
+
+    def test_new_db_init_event_tables_admit_schema_version_28(self) -> None:
+        conn = _make_evidence_db()
+
+        table_sql = {
+            name: sql
+            for name, sql in conn.execute(
+                """
+                SELECT name, sql FROM sqlite_master
+                WHERE type='table' AND name IN ('decision_events', 'no_trade_events')
+                """
+            ).fetchall()
+        }
+
+        assert "28" in table_sql["decision_events"]
+        assert "28" in table_sql["no_trade_events"]
+
+    def test_no_trade_events_v27_table_rebuilds_to_admit_schema_version_28(self) -> None:
+        from src.state.schema.no_trade_events_schema import (
+            CREATE_TABLE_SQL,
+            _rebuild_stale_no_trade_events_table,
+        )
+
+        old_versions = "14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27"
+        new_versions = f"{old_versions}, 28"
+        conn = sqlite3.connect(":memory:")
+        conn.executescript(CREATE_TABLE_SQL.replace(new_versions, old_versions))
+
+        _rebuild_stale_no_trade_events_table(conn)
+        conn.commit()
+
+        sql = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='no_trade_events'"
+        ).fetchone()[0]
+        conn.execute(
+            """
+            INSERT INTO no_trade_events (
+                market_slug, temperature_metric, target_date, observation_time,
+                decision_seq, reason, reason_detail, observed_at, schema_version,
+                schema_compatibility
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "tokyo-high-2026-05-23",
+                "high",
+                "2026-05-23",
+                "2026-05-22T17:40:00Z",
+                1,
+                NoTradeReason.MUTUALLY_EXCLUSIVE_FAMILY_DEDUP.value,
+                "test",
+                "2026-05-22T17:40:00Z",
+                28,
+                "current",
+            ),
+        )
+        conn.commit()
+
+        assert new_versions in sql

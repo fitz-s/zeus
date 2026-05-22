@@ -162,7 +162,7 @@ def _ensure_day0_window_entered_event_type(conn: sqlite3.Connection) -> None:
 
 
 def apply_architecture_kernel_schema(conn: sqlite3.Connection) -> None:
-    """Apply the canonical architecture schema only when no legacy collision exists."""
+    """Apply canonical architecture schema and required runtime support tables."""
     event_columns = table_columns(conn, "position_events")
     if event_columns and not set(CANONICAL_POSITION_EVENT_COLUMNS).issubset(
         event_columns
@@ -205,6 +205,9 @@ def apply_architecture_kernel_schema(conn: sqlite3.Connection) -> None:
     for column in CANONICAL_POSITION_CURRENT_COLUMNS:
         if column not in existing_columns:
             conn.execute(f"ALTER TABLE position_current ADD COLUMN {column} TEXT;")
+    from src.execution.settlement_commands import ensure_settlement_schema_ready
+
+    ensure_settlement_schema_ready(conn)
     assert_canonical_transaction_schema(conn)
 
 

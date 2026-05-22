@@ -8,7 +8,10 @@
 
 from __future__ import annotations
 
+import ast
+import json
 import sqlite3
+from pathlib import Path
 
 from src.config import City
 from src.engine.discovery_mode import DiscoveryMode
@@ -20,6 +23,7 @@ from src.engine.evaluator import (
     _strategy_key_for,
     _strategy_key_for_hypothesis,
 )
+from src.state.db import init_schema, init_schema_forecasts
 from src.strategy.market_analysis_family_scan import FullFamilyHypothesis
 from src.types.market import Bin, BinEdge
 
@@ -255,3 +259,70 @@ def test_any_settlement_day_forecast_upside_does_not_masquerade_as_settlement_ca
 
     assert _edge_source_for(candidate, edge) == "day0_nowcast_entry"
     assert _strategy_key_for(candidate, edge) == "day0_nowcast_entry"
+
+
+def test_day0_nowcast_selection_facts_preserve_strategy_identity() -> None:
+    candidate = _day0_candidate_with_observed_high(34.0)
+    edge = _finite_buy_yes_edge(36.0, 37.0)
+    hypothesis = FullFamilyHypothesis(
+        index=0,
+        range_label=edge.bin.label,
+        direction=edge.direction,
+        edge=edge.edge,
+        ci_lower=edge.ci_lower,
+        ci_upper=edge.ci_upper,
+        p_value=edge.p_value,
+        p_model=edge.p_model,
+        p_market=edge.p_market,
+        p_posterior=edge.p_posterior,
+        entry_price=edge.entry_price,
+        is_shoulder=False,
+        passed_prefilter=True,
+    )
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    init_schema(conn)
+    init_schema_forecasts(conn)
+
+    result = _record_selection_family_facts(
+        conn,
+        candidate=candidate,
+        edges=[edge],
+        filtered=[edge],
+        hypotheses=[hypothesis],
+        decision_snapshot_id="snap-day0-nowcast",
+        selected_method="day0_observation",
+        recorded_at="2026-05-22T17:06:14+00:00",
+    )
+
+    family = conn.execute("SELECT strategy_key FROM selection_family_fact").fetchone()
+    row = conn.execute("SELECT meta_json FROM selection_hypothesis_fact").fetchone()
+    assert result == {"status": "written", "families": 1, "hypotheses": 1}
+    assert family["strategy_key"] == "day0_nowcast_entry"
+    assert json.loads(row["meta_json"])["hypothesis_strategy_key"] == "day0_nowcast_entry"
+
+
+def test_family_preselection_rejections_stamp_strategy_identity_before_runtime_persistence() -> None:
+    source = Path("src/engine/evaluator.py").read_text()
+    tree = ast.parse(source)
+    target = None
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and getattr(node.func, "id", "") == "EdgeDecision":
+            keyword_names = {keyword.arg for keyword in node.keywords if keyword.arg}
+            rejection_reasons = keyword_names and next(
+                (
+                    keyword.value
+                    for keyword in node.keywords
+                    if keyword.arg == "rejection_reasons"
+                ),
+                None,
+            )
+            if isinstance(rejection_reasons, ast.List) and any(
+                isinstance(elt, ast.Name) and elt.id == "MUTUALLY_EXCLUSIVE_FAMILY_DEDUP"
+                for elt in rejection_reasons.elts
+            ):
+                target = keyword_names
+                break
+
+    assert target is not None
+    assert {"edge_source", "strategy_key"} <= target

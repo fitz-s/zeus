@@ -1,6 +1,6 @@
 # Created: 2026-03-30
-# Last reused/audited: 2026-05-18
-# Lifecycle: created=2026-03-30; last_reviewed=2026-05-16; last_reused=2026-05-18
+# Last reused/audited: 2026-05-22
+# Lifecycle: created=2026-03-30; last_reviewed=2026-05-22; last_reused=2026-05-22
 # Purpose: Protect DB schema bootstrap contracts, daily revision-history DDL, and fact-smoke authority labels.
 # Reuse: Audit touched schema assertions and high-sensitivity skip metadata before closeout.
 # Authority basis: P2 4.4.A2 daily observation revision-history schema packet; Wave16 object-meaning fact-smoke authority repair; PR90 latest-event env authority review fix; 2026-05-16 live-continuous Phase B event-status boundary.
@@ -28,12 +28,7 @@ def _create_opportunity_fact_table(conn):
             target_date TEXT,
             range_label TEXT,
             direction TEXT CHECK (direction IN ('buy_yes', 'buy_no', 'unknown')),
-            strategy_key TEXT CHECK (strategy_key IN (
-                'settlement_capture',
-                'shoulder_sell',
-                'center_buy',
-                'opening_inertia'
-            )),
+            strategy_key TEXT,
             discovery_mode TEXT,
             entry_method TEXT,
             snapshot_id TEXT,
@@ -407,6 +402,62 @@ def test_log_opportunity_fact_preserves_missing_snapshot_without_latest_fallback
     assert row["p_cal"] == pytest.approx(0.75)
     assert row["p_market"] == pytest.approx(0.7)
     assert row["availability_status"] == "rate_limited"
+    assert row["should_trade"] == 0
+
+
+def test_log_opportunity_fact_preserves_day0_nowcast_no_trade_strategy_key(tmp_path):
+    from src.state.db import log_opportunity_fact
+
+    conn = get_connection(tmp_path / "zeus_trades.db")
+    init_schema(conn)
+    _create_opportunity_fact_table(conn)
+
+    candidate = types.SimpleNamespace(
+        city=types.SimpleNamespace(name="Tokyo"),
+        target_date="2026-05-23",
+        event_id="evt-day0-nowcast",
+        slug="tokyo-may-23",
+        discovery_mode="day0_capture",
+    )
+    edge = types.SimpleNamespace(
+        bin=types.SimpleNamespace(label="14°C or below"),
+        direction="buy_yes",
+        p_model=0.011,
+        p_market=0.004,
+        edge=0.007,
+        ci_lower=0.001,
+        ci_upper=0.012,
+    )
+    decision = types.SimpleNamespace(
+        decision_id="dec-day0-nowcast-dedup",
+        edge=edge,
+        strategy_key="day0_nowcast_entry",
+        selected_method="day0_observation",
+        decision_snapshot_id="snap-day0-nowcast",
+        availability_status="AVAILABLE",
+    )
+
+    result = log_opportunity_fact(
+        conn,
+        candidate=candidate,
+        decision=decision,
+        should_trade=False,
+        rejection_stage="ANTI_CHURN",
+        rejection_reasons=["mutually_exclusive_family_dedup"],
+        recorded_at="2026-05-22T17:40:00Z",
+    )
+    row = conn.execute(
+        """
+        SELECT strategy_key, rejection_reason_json, should_trade
+        FROM opportunity_fact
+        WHERE decision_id = 'dec-day0-nowcast-dedup'
+        """
+    ).fetchone()
+    conn.close()
+
+    assert result["status"] == "written"
+    assert row["strategy_key"] == "day0_nowcast_entry"
+    assert json.loads(row["rejection_reason_json"]) == ["mutually_exclusive_family_dedup"]
     assert row["should_trade"] == 0
 
 
