@@ -18,8 +18,12 @@ on:
     types: [opened, synchronize, reopened, ready_for_review]
   pull_request_review:
     types: [submitted, dismissed]
-  pull_request_review_thread:
-    types: [resolved, unresolved]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "PR number to check"
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -38,7 +42,7 @@ jobs:
       - name: Check unresolved threads and pending review requests
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_NUMBER: ${{ github.event.pull_request.number || inputs.pr_number }}
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
@@ -48,6 +52,7 @@ jobs:
           BLOCKED=0
 
           # -- Unresolved review threads ----------------------------------------
+          # shellcheck disable=SC2016  # $owner/$repo/$pr are GraphQL variables, not shell
           RESULT=$(gh api graphql \
             -f owner="${OWNER}" \
             -f repo="${REPO_NAME}" \
