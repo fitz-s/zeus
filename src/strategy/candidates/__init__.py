@@ -288,6 +288,9 @@ def _candidate_strategy_key_for_reason(reason: Optional["NoTradeReason"]) -> str
         NoTradeReason.CORR_HEDGE_REGIME_UNAVAILABLE: "cross_market_correlation_hedge",
         NoTradeReason.NEGRISK_FAMILY_INCOMPLETE: "neg_risk_basket",
         NoTradeReason.NEGRISK_NO_PROFITABLE_BASKET: "neg_risk_basket",
+        # shoulder_impossible_tail_capture data-gate and theorem failure
+        NoTradeReason.PHYSICAL_ENVELOPE_UNWIRED: "shoulder_impossible_tail_capture",
+        NoTradeReason.SHOULDER_PHYSICAL_BOUND_NOT_EXCLUDES_TAIL: "shoulder_impossible_tail_capture",
     }
     return strategy_by_reason.get(reason, "unknown_candidate")
 
@@ -447,6 +450,7 @@ from .neg_risk_basket import NegRiskBasket
 from .cross_market_correlation_hedge import CrossMarketCorrelationHedge
 from .liquidity_provision_with_heartbeat import LiquidityProvisionWithHeartbeat
 from .center_sell_parity import CenterSellParity
+from .shoulder_impossible_tail_capture import ShoulderImpossibleTailCapture
 
 __all__ = [
     "_is_world_db_conn",
@@ -464,6 +468,7 @@ __all__ = [
     "NegRiskBasket",
     "PriceLevel",
     "ResolutionWindowMaker",
+    "ShoulderImpossibleTailCapture",
     "StaleQuoteDetector",
     "StrategyProtocol",
     "VectorEdgeDecision",
