@@ -89,7 +89,10 @@ from src.signal.day0_window import remaining_member_extrema_for_day0
 from src.signal.ensemble_signal import EnsembleSignal, p_raw_vector_from_maxes, select_hours_for_target_date
 from src.control.control_plane import get_edge_threshold_multiplier
 from src.riskguard.policy import StrategyPolicy, resolve_strategy_policy
-from src.signal.model_agreement import model_agreement
+from src.signal.model_agreement import (
+    CrosscheckComparableContext,
+    analyze_model_agreement,
+)
 from src.state.portfolio import (
     PortfolioState,
     INACTIVE_RUNTIME_STATES,
@@ -174,6 +177,29 @@ NATIVE_BUY_NO_QUOTE_UNAVAILABLE_VALIDATION = "buy_no_native_quote_unavailable"
 
 class FeeRateUnavailableError(RuntimeError):
     """Raised when token-specific execution fee cannot be established."""
+
+
+@dataclass(frozen=True)
+class LowPriceRejection:
+    strategy_key: str
+    direction: str
+    entry_price: float
+    floor: float
+    reason_code: str
+    specialized_reason: str = ""
+    is_tail_topology: bool = False
+
+    def detail(self) -> str:
+        suffix = (
+            f"; specialized={self.specialized_reason}"
+            if self.specialized_reason
+            else ""
+        )
+        return (
+            f"{self.reason_code}({self.entry_price:.4f}<={self.floor:.2f}; "
+            f"strategy={self.strategy_key}; direction={self.direction}; "
+            f"tail_topology={str(self.is_tail_topology).lower()}{suffix})"
+        )
 
 
 def _strict_feature_flag(name: str, *, default: bool = False) -> bool:
@@ -1112,19 +1138,42 @@ def _strategy_live_quality_policy(strategy_key: str) -> SimpleNamespace:
 
 
 def _strategy_entry_price_floor_block_reason(strategy_key: str, edge: BinEdge) -> str | None:
-    if _center_buy_ultra_low_price_block_reason(strategy_key, edge):
-        return None
     policy = _strategy_live_quality_policy(strategy_key)
-    if policy.allow_ultra_low_tail:
-        return None
     try:
         entry_price = float(edge.entry_price)
     except (TypeError, ValueError):
         return None
+    if entry_price > policy.min_entry_price:
+        return None
+    is_tail_topology = bool(getattr(getattr(edge, "bin", None), "is_shoulder", False))
+    center_reason = _center_buy_ultra_low_price_block_reason(strategy_key, edge)
+    if center_reason:
+        return LowPriceRejection(
+            strategy_key=strategy_key,
+            direction=str(getattr(edge, "direction", "")),
+            entry_price=entry_price,
+            floor=CENTER_BUY_ULTRA_LOW_PRICE_MAX_ENTRY,
+            reason_code="CENTER_BUY_ULTRA_LOW_PRICE",
+            specialized_reason=center_reason,
+            is_tail_topology=is_tail_topology,
+        ).detail()
     if entry_price <= policy.min_entry_price:
+        if policy.allow_ultra_low_tail and is_tail_topology:
+            return None
+        reason_code = (
+            "ULTRA_LOW_NON_TAIL_NOT_AUTHORIZED"
+            if policy.allow_ultra_low_tail and not is_tail_topology
+            else "STRATEGY_ENTRY_PRICE_BELOW_LIVE_FLOOR"
+        )
         return (
-            f"STRATEGY_ENTRY_PRICE_BELOW_LIVE_FLOOR("
-            f"{entry_price:.4f}<={policy.min_entry_price:.2f}; strategy={strategy_key})"
+            LowPriceRejection(
+                strategy_key=strategy_key,
+                direction=str(getattr(edge, "direction", "")),
+                entry_price=entry_price,
+                floor=policy.min_entry_price,
+                reason_code=reason_code,
+                is_tail_topology=is_tail_topology,
+            ).detail()
         )
     return None
 
@@ -1224,11 +1273,16 @@ def _live_entry_economic_floor_rejection(
 def _live_entry_economic_floor_no_trade_reason(reason: str) -> NoTradeReason:
     if reason.startswith("PASSIVE_FILL_PROBABILITY_UNMODELED"):
         return NoTradeReason.PASSIVE_FILL_MODEL_MISSING
+    if reason.startswith("CENTER_BUY_ULTRA_LOW_PRICE"):
+        return NoTradeReason.CENTER_BUY_ULTRA_LOW_PRICE
     if reason.startswith("ULTRA_LOW_PRICE_NOT_AUTHORIZED"):
+        return NoTradeReason.ULTRA_LOW_PRICE_NOT_AUTHORIZED
+    if reason.startswith("ULTRA_LOW_NON_TAIL_NOT_AUTHORIZED"):
         return NoTradeReason.ULTRA_LOW_PRICE_NOT_AUTHORIZED
     if (
         reason.startswith("STRATEGY_NOTIONAL_BELOW_LIVE_FLOOR")
         or reason.startswith("EXPECTED_PROFIT_BELOW_LIVE_FLOOR")
+        or reason.startswith("STRATEGY_ENTRY_PRICE_BELOW_LIVE_FLOOR")
     ):
         return NoTradeReason.STRATEGY_ECONOMIC_FLOOR
     return NoTradeReason.SIZE_BELOW_MINIMUM
@@ -1697,6 +1751,111 @@ def _entry_forecast_evidence_errors(
         errors.append(f"forecast_evidence_authority_not_forecast:{authority}")
 
     return errors
+
+
+def _forecast_valid_window_for_target_day(
+    ens_result: dict,
+    target_date: str,
+    timezone_name: str,
+) -> tuple[str, str]:
+    try:
+        target = date.fromisoformat(str(target_date)) if isinstance(target_date, str) else target_date
+        indices = select_hours_for_target_date(
+            target,
+            timezone_name,
+            times=_forecast_times_as_strings(ens_result.get("times", [])),
+        )
+    except Exception:
+        return ("", "")
+    times = list(ens_result.get("times", []) or [])
+    if len(indices) == 0 or not times:
+        return ("", "")
+    try:
+        selected = [_snapshot_time_value(times[i]) or "" for i in indices]
+    except Exception:
+        return ("", "")
+    selected = [s for s in selected if s]
+    if not selected:
+        return ("", "")
+    return (selected[0], selected[-1])
+
+
+def _issue_time_delta_hours(primary_issue: str | None, crosscheck_issue: str | None) -> float | None:
+    primary_dt = _forecast_evidence_datetime(primary_issue)
+    crosscheck_dt = _forecast_evidence_datetime(crosscheck_issue)
+    if primary_dt is None or crosscheck_dt is None:
+        return None
+    return abs((primary_dt - crosscheck_dt).total_seconds()) / 3600.0
+
+
+def _crosscheck_comparable_context(
+    *,
+    primary_result: dict,
+    crosscheck_result: dict,
+    primary_source_id: str,
+    crosscheck_source_id: str,
+    target_date: str,
+    timezone_name: str,
+    issue_time_tolerance_hours: float = 18.0,
+) -> CrosscheckComparableContext:
+    primary_issue = _snapshot_issue_time_value(primary_result) or ""
+    crosscheck_issue = _snapshot_issue_time_value(crosscheck_result) or ""
+    primary_window = _forecast_valid_window_for_target_day(
+        primary_result,
+        target_date,
+        timezone_name,
+    )
+    crosscheck_window = _forecast_valid_window_for_target_day(
+        crosscheck_result,
+        target_date,
+        timezone_name,
+    )
+    horizon_delta = _issue_time_delta_hours(primary_issue, crosscheck_issue)
+    local_day_equal = bool(target_date) and primary_window != ("", "") and crosscheck_window != ("", "")
+    reasons: list[str] = []
+    if not primary_issue:
+        reasons.append("primary_missing_issue_time")
+    if not crosscheck_issue:
+        reasons.append("crosscheck_missing_issue_time")
+    if primary_window == ("", ""):
+        reasons.append("primary_missing_target_day_valid_window")
+    if crosscheck_window == ("", ""):
+        reasons.append("crosscheck_missing_target_day_valid_window")
+    if horizon_delta is None:
+        reasons.append("issue_time_delta_unavailable")
+    elif horizon_delta > issue_time_tolerance_hours:
+        reasons.append(
+            f"issue_time_delta_exceeds_tolerance:{horizon_delta:.2f}h>{issue_time_tolerance_hours:.2f}h"
+        )
+    comparable = not reasons and local_day_equal
+    return CrosscheckComparableContext(
+        primary_source_id=primary_source_id,
+        primary_issue_time=primary_issue,
+        primary_valid_window=primary_window,
+        primary_target_local_date=str(target_date),
+        crosscheck_source_id=crosscheck_source_id,
+        crosscheck_issue_time=crosscheck_issue,
+        crosscheck_valid_window=crosscheck_window,
+        crosscheck_target_local_date=str(target_date),
+        local_day_mapping_equal=local_day_equal,
+        horizon_delta_hours=horizon_delta,
+        comparable=comparable,
+        non_comparable_reason=",".join(reasons),
+    )
+
+
+def _bin_center_for_model_agreement(bin_: Bin, settlement_unit: str) -> float:
+    if bin_.low is None and bin_.high is None:
+        center = 0.0
+    elif bin_.low is None:
+        center = float(bin_.high)
+    elif bin_.high is None:
+        center = float(bin_.low)
+    else:
+        center = (float(bin_.low) + float(bin_.high)) / 2.0
+    if settlement_unit == "C":
+        return center * 9.0 / 5.0 + 32.0
+    return center
 
 
 def _polymarket_end_anchor_source_for_candidate(candidate: MarketCandidate) -> str:
@@ -3985,20 +4144,59 @@ def evaluate_candidate(
                 if temperature_metric.is_low()
                 else crosscheck_result["members_hourly"][:, gfs_tz_hours].max(axis=1)
             )
-            gfs_measured = settlement_semantics.round_values(gfs_metric_values)
-            n_gfs = len(gfs_measured)
-            gfs_p = np.zeros(len(bins))
-            for i, b in enumerate(bins):
-                if b.is_open_low:
-                    gfs_p[i] = np.sum(gfs_measured <= b.high) / n_gfs
-                elif b.is_open_high:
-                    gfs_p[i] = np.sum(gfs_measured >= b.low) / n_gfs
-                elif b.low is not None and b.high is not None:
-                    gfs_p[i] = np.sum((gfs_measured >= b.low) & (gfs_measured <= b.high)) / n_gfs
-            total = gfs_p.sum()
-            if total > 0:
-                gfs_p /= total
-            agreement = model_agreement(p_raw, gfs_p)
+            gfs_p = p_raw_vector_from_maxes(
+                gfs_metric_values,
+                city,
+                settlement_semantics,
+                bins,
+                n_mc=ensemble_n_mc(),
+            )
+            crosscheck_context = _crosscheck_comparable_context(
+                primary_result=ens_result,
+                crosscheck_result=crosscheck_result,
+                primary_source_id=str(ens_result.get("source_id") or primary_model),
+                crosscheck_source_id=str(crosscheck_result.get("source_id") or crosscheck_model),
+                target_date=target_d.isoformat(),
+                timezone_name=city.timezone,
+            )
+            if not crosscheck_context.comparable:
+                return [EdgeDecision(
+                    False,
+                    decision_id=_decision_id(),
+                    rejection_stage="SIGNAL_QUALITY",
+                    rejection_reasons=[NoTradeReason.CROSSCHECK_UNAVAILABLE.value],
+                    availability_status="DATA_UNAVAILABLE",
+                    selected_method=selected_method,
+                    applied_validations=[*entry_validations, "crosscheck_comparability"],
+                    decision_snapshot_id=snapshot_id,
+                    p_raw=p_raw,
+                    p_cal=p_cal,
+                    p_market=p_market,
+                    agreement="CROSSCHECK_UNAVAILABLE",
+                    rejection_reason_enum=NoTradeReason.CROSSCHECK_UNAVAILABLE,
+                    rejection_reason_detail=(
+                        "SOURCE_COMPARABILITY_FAILED:"
+                        f"{crosscheck_context.to_detail_json()}"
+                    ),
+                )]
+            agreement_evidence = analyze_model_agreement(
+                p_raw,
+                gfs_p,
+                primary_model=primary_model,
+                crosscheck_model=crosscheck_model,
+                bin_labels=[b.label for b in bins],
+                bin_centers=[
+                    _bin_center_for_model_agreement(b, city.settlement_unit)
+                    for b in bins
+                ],
+                primary_source_run_id=str(ens_result.get("source_run_id") or ""),
+                crosscheck_source_run_id=str(crosscheck_result.get("source_run_id") or ""),
+                issue_time_primary=_snapshot_issue_time_value(ens_result) or "",
+                issue_time_crosscheck=_snapshot_issue_time_value(crosscheck_result) or "",
+                local_day_window_primary="|".join(crosscheck_context.primary_valid_window),
+                local_day_window_crosscheck="|".join(crosscheck_context.crosscheck_valid_window),
+            )
+            agreement = agreement_evidence.classification
         except Exception as e:
             logger.warning("%s crosscheck failed: %s", crosscheck_model, e)
             return [EdgeDecision(
@@ -4019,6 +4217,11 @@ def evaluate_candidate(
             )]
 
     if agreement == "CONFLICT":
+        evidence_detail = (
+            agreement_evidence.to_detail_json()
+            if "agreement_evidence" in locals()
+            else f"{primary_model}/{crosscheck_model} CONFLICT"
+        )
         return [EdgeDecision(
             False,
             decision_id=_decision_id(),
@@ -4032,7 +4235,7 @@ def evaluate_candidate(
             p_market=p_market,
             agreement=agreement,
             rejection_reason_enum=NoTradeReason.MODEL_CONFLICT,
-            rejection_reason_detail=f"{primary_model}/{crosscheck_model} CONFLICT",
+            rejection_reason_detail=f"MODEL_CONFLICT:{evidence_detail}",
         )]
 
     # Compute alpha — UNION resolution: K4.5 authority_verified gate (worktree)
@@ -4491,11 +4694,7 @@ def evaluate_candidate(
             decision_validations.append(f"partial_source_kelly_haircut_{source_quality_haircut:g}x")
         entry_price_floor_reason = _strategy_entry_price_floor_block_reason(strategy_key, edge)
         if entry_price_floor_reason:
-            price_floor_enum = _live_entry_economic_floor_no_trade_reason(
-                "ULTRA_LOW_PRICE_NOT_AUTHORIZED"
-                if "BELOW_LIVE_FLOOR" in entry_price_floor_reason
-                else entry_price_floor_reason
-            )
+            price_floor_enum = _live_entry_economic_floor_no_trade_reason(entry_price_floor_reason)
             decisions.append(EdgeDecision(
                 False,
                 edge=edge,

@@ -2764,6 +2764,39 @@ def test_no_trade_event_writer_preserves_decision_attribution(monkeypatch, tmp_p
     assert "strategy=opening_inertia" in str(captured["reason_detail"])
 
 
+def test_ultra_low_tail_authority_requires_tail_topology(monkeypatch):
+    profile = types.SimpleNamespace(
+        min_entry_price=0.05,
+        min_strategy_notional_usd=1.0,
+        min_expected_profit_usd=0.05,
+        allow_ultra_low_tail=True,
+        partial_source_run_allowed=True,
+        complete_required_for_tail_orders=True,
+        partial_run_kelly_haircut=0.5,
+    )
+    monkeypatch.setattr(evaluator_module, "_try_get_strategy_profile", lambda _key: profile)
+    center_edge = _edge()
+    center_edge.entry_price = 0.01
+
+    center_reason = evaluator_module._strategy_entry_price_floor_block_reason(
+        "tail_arbitrage",
+        center_edge,
+    )
+
+    assert center_reason is not None
+    assert center_reason.startswith("ULTRA_LOW_NON_TAIL_NOT_AUTHORIZED")
+    assert "tail_topology=false" in center_reason
+
+    tail_edge = _edge()
+    tail_edge.bin = Bin(low=45, high=None, label="45°F+", unit="F")
+    tail_edge.entry_price = 0.01
+
+    assert evaluator_module._strategy_entry_price_floor_block_reason(
+        "tail_arbitrage",
+        tail_edge,
+    ) is None
+
+
 def test_source_writer_frontier_marks_observability_degraded_without_source_data_failure(
     monkeypatch,
     tmp_path,
@@ -3259,6 +3292,72 @@ def test_math_no_trade_frontier_publishes_status_reason_proof(tmp_path):
         "uncategorized": 1,
     }
     assert summary["top_no_trade_reasons"] == summary["rejection_reason_counts"]
+
+
+def test_family_frontier_does_not_count_preselection_dedup_as_existing_exposure(tmp_path):
+    from src.contracts.no_trade_reason import NoTradeReason
+
+    conn = get_connection(tmp_path / "family-dedup-frontier.db")
+    init_schema(conn)
+    artifact = CycleArtifact(mode=DiscoveryMode.OPENING_HUNT.value, started_at="2026-04-02T06:00:00Z")
+    summary = {"candidates": 0, "no_trades": 0}
+    market = {
+        "city": NYC,
+        "target_date": "2026-04-03",
+        "hours_since_open": 12.0,
+        "hours_to_resolution": 24.0,
+        "event_id": "evt-family-dedup-frontier",
+        "slug": "slug-family-dedup-frontier",
+        "temperature_metric": "high",
+        "market_end_at": "2026-04-03T23:59:00Z",
+        "outcomes": [
+            {"title": "39-40°F", "range_low": 39, "range_high": 40},
+        ],
+    }
+    decision = EdgeDecision(
+        should_trade=False,
+        rejection_stage="ANTI_CHURN",
+        rejection_reasons=[NoTradeReason.MUTUALLY_EXCLUSIVE_FAMILY_DEDUP.value],
+        rejection_reason_enum=NoTradeReason.MUTUALLY_EXCLUSIVE_FAMILY_DEDUP,
+        rejection_reason_detail=(
+            "family=New York|2026-04-03|high dropped_bin='39-40F' "
+            "kept_bin='41-42F' (pre-Kelly WeatherFamilyDecision single_leg)"
+        ),
+        decision_id="d-family-dedup-frontier",
+        decision_snapshot_id="snap-family-dedup-frontier",
+    )
+    deps = types.SimpleNamespace(
+        MODE_PARAMS={DiscoveryMode.OPENING_HUNT: {}},
+        find_weather_markets=lambda **kwargs: [market],
+        get_last_scan_authority=lambda: "VERIFIED",
+        DiscoveryMode=DiscoveryMode,
+        logger=types.SimpleNamespace(warning=lambda *args, **kwargs: None, error=lambda *args, **kwargs: None),
+        NoTradeCase=NoTradeCase,
+        MarketCandidate=MarketCandidate,
+        evaluate_candidate=lambda *args, **kwargs: [decision],
+        _classify_edge_source=lambda _mode, _edge: "",
+    )
+
+    cycle_runtime.execute_discovery_phase(
+        conn,
+        clob=None,
+        portfolio=PortfolioState(),
+        artifact=artifact,
+        tracker=StrategyTracker(),
+        limits=types.SimpleNamespace(),
+        mode=DiscoveryMode.OPENING_HUNT,
+        summary=summary,
+        entry_bankroll=100.0,
+        decision_time=datetime(2026, 4, 2, 6, 0, tzinfo=timezone.utc),
+        env="shadow",
+        deps=deps,
+    )
+    conn.close()
+
+    family_frontier = summary["money_path_frontier"]["family_frontier"]
+    assert family_frontier["family_selection_dedup"] == 1
+    assert family_frontier.get("blocked_existing_family_exposure", 0) == 0
+    assert summary["money_path_frontier"]["terminal_classification"] == "math_rejected_before_family"
 
 
 def test_discovery_phase_buffers_forward_market_substrate_until_after_evaluator(monkeypatch, tmp_path):
@@ -7344,6 +7443,8 @@ def test_day0_monitor_refresh_degrades_on_malformed_solar_daily_rootpage(monkeyp
 
 
 def test_evaluator_uses_configured_primary_and_crosscheck_models(monkeypatch):
+    from src.contracts.no_trade_reason import NoTradeReason
+
     monkeypatch.setattr(evaluator_module, "get_mode", lambda: "test")
     monkeypatch.setitem(settings["ensemble"], "primary", "tigge")
     monkeypatch.setitem(settings["ensemble"], "crosscheck", "gfs025")
@@ -7451,7 +7552,15 @@ def test_evaluator_uses_configured_primary_and_crosscheck_models(monkeypatch):
     monkeypatch.setattr(evaluator_module, "MarketAnalysis", DummyAnalysis)
     _stub_full_family_scan(monkeypatch)
     monkeypatch.setattr(evaluator_module, "fdr_filter", lambda edges, fdr_alpha=0.10: list(edges))
-    monkeypatch.setattr(evaluator_module, "model_agreement", lambda *args, **kwargs: "CONFLICT")
+    monkeypatch.setattr(
+        evaluator_module,
+        "analyze_model_agreement",
+        lambda *args, **kwargs: types.SimpleNamespace(
+            classification="CONFLICT",
+            live_action="reject",
+            to_detail_json=lambda: '{"jsd":0.2,"mode_gap":3}',
+        ),
+    )
 
     decisions = evaluator_module.evaluate_candidate(
         candidate,
@@ -7465,7 +7574,41 @@ def test_evaluator_uses_configured_primary_and_crosscheck_models(monkeypatch):
     assert len(decisions) == 1
     assert calls[0] == {"model": "tigge", "role": "entry_primary"}
     assert calls[1] == {"model": "gfs025", "role": "diagnostic"}
-    assert decisions[0].rejection_reasons == ["tigge/gfs025 CONFLICT"]
+    assert decisions[0].rejection_reason_enum is NoTradeReason.MODEL_CONFLICT
+    assert '"jsd":0.2' in decisions[0].rejection_reason_detail
+
+
+def test_crosscheck_noncomparable_source_run_does_not_emit_model_conflict():
+    target_date = "2026-01-15"
+    tz = ZoneInfo(NYC.timezone)
+    start_local = datetime(2026, 1, 15, 0, 0, tzinfo=tz)
+    times = [
+        (start_local + timedelta(hours=i)).astimezone(timezone.utc).isoformat()
+        for i in range(24)
+    ]
+    primary = {
+        "times": times,
+        "source_id": "ecmwf_ifs025",
+        "issue_time": datetime(2026, 1, 14, 0, tzinfo=timezone.utc).isoformat(),
+    }
+    stale_crosscheck = {
+        "times": times,
+        "source_id": "gfs025",
+        "issue_time": datetime(2026, 1, 12, 0, tzinfo=timezone.utc).isoformat(),
+    }
+
+    context = evaluator_module._crosscheck_comparable_context(
+        primary_result=primary,
+        crosscheck_result=stale_crosscheck,
+        primary_source_id="ecmwf_ifs025",
+        crosscheck_source_id="gfs025",
+        target_date=target_date,
+        timezone_name=NYC.timezone,
+    )
+
+    assert context.comparable is False
+    assert "issue_time_delta_exceeds_tolerance" in context.non_comparable_reason
+    assert context.to_detail_json().startswith("{")
 
 
 def test_forecast_provider_identity_uses_source_id_not_model_family(monkeypatch):
