@@ -1816,6 +1816,38 @@ def _issue_time_delta_hours(primary_issue: str | None, crosscheck_issue: str | N
     return abs((primary_dt - crosscheck_dt).total_seconds()) / 3600.0
 
 
+def _crosscheck_fetch_delta_hours(primary_issue: str | None, crosscheck_result: dict) -> float | None:
+    primary_dt = _forecast_evidence_datetime(primary_issue)
+    fetched_dt = _forecast_evidence_datetime(
+        _snapshot_time_value(crosscheck_result.get("fetch_time"))
+        or _snapshot_time_value(crosscheck_result.get("captured_at"))
+    )
+    if primary_dt is None or fetched_dt is None or fetched_dt < primary_dt:
+        return None
+    return (fetched_dt - primary_dt).total_seconds() / 3600.0
+
+
+def _source_limited_crosscheck_issue_time_allowed(
+    *,
+    crosscheck_source_id: str,
+    primary_issue: str,
+    crosscheck_issue: str,
+    crosscheck_result: dict,
+    local_day_equal: bool,
+    issue_time_tolerance_hours: float,
+) -> tuple[bool, float | None]:
+    if crosscheck_issue:
+        return (False, None)
+    if not primary_issue or not local_day_equal:
+        return (False, None)
+    if not crosscheck_source_id.startswith("openmeteo_ensemble_"):
+        return (False, None)
+    fetch_delta = _crosscheck_fetch_delta_hours(primary_issue, crosscheck_result)
+    if fetch_delta is None or fetch_delta > issue_time_tolerance_hours:
+        return (False, fetch_delta)
+    return (True, fetch_delta)
+
+
 def _crosscheck_comparable_context(
     *,
     primary_result: dict,
@@ -1845,10 +1877,20 @@ def _crosscheck_comparable_context(
         and crosscheck_window != ("", "")
         and primary_window == crosscheck_window
     )
+    source_limited_issue_allowed, fetch_delta = _source_limited_crosscheck_issue_time_allowed(
+        crosscheck_source_id=crosscheck_source_id,
+        primary_issue=primary_issue,
+        crosscheck_issue=crosscheck_issue,
+        crosscheck_result=crosscheck_result,
+        local_day_equal=local_day_equal,
+        issue_time_tolerance_hours=issue_time_tolerance_hours,
+    )
+    if horizon_delta is None and source_limited_issue_allowed:
+        horizon_delta = fetch_delta
     reasons: list[str] = []
     if not primary_issue:
         reasons.append("primary_missing_issue_time")
-    if not crosscheck_issue:
+    if not crosscheck_issue and not source_limited_issue_allowed:
         reasons.append("crosscheck_missing_issue_time")
     if primary_window == ("", ""):
         reasons.append("primary_missing_target_day_valid_window")
