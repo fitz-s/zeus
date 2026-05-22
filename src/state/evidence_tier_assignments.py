@@ -25,6 +25,11 @@ class EvidenceTierAssignment:
     operator_ref: str | None = None
     verdict_reason: str | None = None
     row_id: int | None = None
+    effective_from: str | None = None
+    effective_until: str | None = None
+    revoked_at: str | None = None
+    revoked_by: str | None = None
+    supersedes_assignment_id: int | None = None
 
 
 def _coerce_tier(value: EvidenceTier | int) -> EvidenceTier:
@@ -45,6 +50,9 @@ def record_evidence_tier_assignment(
     assignment_source: str,
     verdict_kind: str,
     commit: bool = True,
+    effective_from: str | None = None,
+    effective_until: str | None = None,
+    supersedes_assignment_id: int | None = None,
 ) -> EvidenceTierAssignment:
     """Persist a validated evidence-tier assignment and optionally commit it.
 
@@ -65,8 +73,9 @@ def record_evidence_tier_assignment(
         """
         INSERT INTO evidence_tier_assignments (
             strategy_id, tier, assigned_at, rationale, operator_ref,
-            verdict_reason, schema_version, assignment_source, verdict_kind
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            verdict_reason, schema_version, assignment_source, verdict_kind,
+            effective_from, effective_until, supersedes_assignment_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             strategy_id,
@@ -78,6 +87,9 @@ def record_evidence_tier_assignment(
             SCHEMA_VERSION,
             assignment_source,
             verdict_kind,
+            effective_from,
+            effective_until,
+            supersedes_assignment_id,
         ),
     )
     if commit:
@@ -91,6 +103,9 @@ def record_evidence_tier_assignment(
         operator_ref=operator_ref,
         verdict_reason=verdict_reason,
         row_id=int(cur.lastrowid) if cur.lastrowid is not None else None,
+        effective_from=effective_from,
+        effective_until=effective_until,
+        supersedes_assignment_id=supersedes_assignment_id,
     )
 
 
@@ -111,10 +126,15 @@ def current_evidence_tier_assignment(
         row = conn.execute(
             """
             SELECT id, strategy_id, tier, assigned_at, assignment_source,
-                   verdict_kind, operator_ref, verdict_reason
+                   verdict_kind, operator_ref, verdict_reason,
+                   effective_from, effective_until, revoked_at, revoked_by,
+                   supersedes_assignment_id
             FROM evidence_tier_assignments
             WHERE strategy_id = ?
               AND tier IN (0, 1, 2, 3, 4, 5, 6, 7)
+              AND (effective_from IS NULL OR datetime(effective_from) <= datetime('now'))
+              AND (effective_until IS NULL OR datetime(effective_until) > datetime('now'))
+              AND revoked_at IS NULL
             ORDER BY
               CASE assignment_source
                 WHEN 'operator_override' THEN 0
@@ -129,7 +149,8 @@ def current_evidence_tier_assignment(
             (strategy_id,),
         ).fetchone()
     except sqlite3.OperationalError as exc:
-        if "no such table: evidence_tier_assignments" in str(exc):
+        err = str(exc)
+        if "no such table: evidence_tier_assignments" in err or "no such column" in err:
             return None
         raise
     except sqlite3.Error:
@@ -145,6 +166,11 @@ def current_evidence_tier_assignment(
         verdict_kind=str(row[5]),
         operator_ref=row[6],
         verdict_reason=row[7],
+        effective_from=row[8],
+        effective_until=row[9],
+        revoked_at=row[10],
+        revoked_by=row[11],
+        supersedes_assignment_id=row[12],
     )
 
 

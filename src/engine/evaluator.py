@@ -2236,7 +2236,7 @@ def _strategy_key_for(candidate: MarketCandidate, edge: BinEdge) -> str | None:
     if is_settlement_day_dispatch(candidate):
         day0_truth = _day0_high_truth_classification_for_edge(candidate, edge)
         if day0_truth and day0_truth != "observation_locked":
-            return None
+            return "day0_nowcast_entry"
         return "settlement_capture"
     if candidate.discovery_mode == DiscoveryMode.OPENING_HUNT.value:
         return "opening_inertia"
@@ -2255,6 +2255,12 @@ def _strategy_key_for_hypothesis(candidate: MarketCandidate, hypothesis: FullFam
     # P3 site 3 of 3 in evaluator (PLAN_v3 §6.P3).
     from src.engine.dispatch import is_settlement_day_dispatch
     if is_settlement_day_dispatch(candidate):
+        # Hypothesis path cannot check bin-level observation-lock; approximate by
+        # temperature_metric: HIGH edges on settlement day are predominantly
+        # day0_nowcast_entry unless locked. Edge-level _strategy_key_for() is
+        # authoritative for actual trade decisions.
+        if str(candidate.temperature_metric).lower() == "high":
+            return "day0_nowcast_entry"
         return "settlement_capture"
     if candidate.discovery_mode == DiscoveryMode.OPENING_HUNT.value:
         return "opening_inertia"
@@ -5162,13 +5168,19 @@ def evaluate_candidate(
             regime=_phase5_regime,
             cities=_phase5_cities,
         )
-        _base_cluster_exp = _cluster_exposure_result.policy_heat
         _projected_cluster_heat = (
             projected_cluster_exposure_usd[cluster_key] / sizing_bankroll
             if sizing_bankroll > 0
             else 0.0
         )
-        current_cluster_exp = _base_cluster_exp + _projected_cluster_heat
+        _base_gross = _cluster_exposure_result.gross_heat
+        _base_variance = _cluster_exposure_result.variance_heat
+        current_gross_exp = _base_gross + _projected_cluster_heat
+        current_variance_exp = (
+            (_base_variance + _projected_cluster_heat)
+            if _base_variance is not None
+            else None
+        )
         if _cluster_exposure_result.method != "gross_notional":
             decision_validations.append(
                 f"cluster_exposure_method:{_cluster_exposure_result.method}"
@@ -5178,10 +5190,13 @@ def evaluate_candidate(
                 f"cluster_exposure_fallback:{_cluster_exposure_result.fallback_reason}"
             )
         risk_throttle = 1.0
-        if current_cluster_exp > 0.10: # Regime saturation starts
+        if current_gross_exp > 0.10:  # Gross notional saturation
             risk_throttle *= 0.5
-            decision_validations.append("regime_throttled_50pct")
-        if current_heat > 0.25: # Global heat saturation 
+            decision_validations.append(f"regime_throttled_gross_50pct:{current_gross_exp:.3f}")
+        if current_variance_exp is not None and current_variance_exp > 0.10:  # Variance saturation
+            risk_throttle *= 0.5
+            decision_validations.append(f"regime_throttled_variance_50pct:{current_variance_exp:.3f}")
+        if current_heat > 0.25: # Global heat saturation
             risk_throttle *= 0.5
             decision_validations.append("global_heat_throttled_50pct")
 
