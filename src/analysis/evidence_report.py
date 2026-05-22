@@ -169,40 +169,45 @@ def build_evidence_report(
     # Finding 3 fix: join through decision_events.decision_event_id so cross-strategy
     # contamination (a regret row sharing experiment_id with a different strategy_key)
     # is excluded.
-    _rg_params: list = [strategy_id]
-    _rg_join = ""
-    _rg_filter = "WHERE se.strategy_id = ?"
-    if "decision_events" in tables:
-        _rg_join = """
-        JOIN decision_events de
-          ON de.decision_event_id = rd.decision_event_id
-         AND de.strategy_key = se.strategy_id"""
-        if source is not None:
-            _rg_filter += " AND de.source = ?"
-            _rg_params.append(source)
-    if experiment_id is not None:
-        _rg_filter += " AND se.experiment_id = ?"
-        _rg_params.append(experiment_id)
-    if cohort_tag is not None:
-        _rg_filter += " AND se.cohort_tag = ?"
-        _rg_params.append(cohort_tag)
-    regret_row = conn.execute(
-        f"""
-        SELECT
-            COUNT(*) as n_regret,
-            SUM(CASE WHEN rd.total_regret_usd > 0 THEN 1 ELSE 0 END) as n_wins,
-            AVG(rd.total_regret_usd) as mean_regret
-        FROM regret_decompositions rd
-        JOIN shadow_experiments se ON rd.experiment_id = se.experiment_id
-        {_rg_join}
-        {_rg_filter}
-        """,
-        _rg_params,
-    ).fetchone()
-
-    n_wins = int(regret_row[1] or 0)
-    mean_regret_usd = float(regret_row[2] or 0.0)
-    n_settled = int(regret_row[0] or 0)  # rows with settled regret outcomes
+    # Guarded on table presence: pre-Phase-6 DBs and partial fixtures lack these
+    # tables; absence produces zeros rather than OperationalError.
+    n_wins = 0
+    mean_regret_usd = 0.0
+    n_settled = 0
+    if "regret_decompositions" in tables and "shadow_experiments" in tables:
+        _rg_params: list = [strategy_id]
+        _rg_join = ""
+        _rg_filter = "WHERE se.strategy_id = ?"
+        if "decision_events" in tables:
+            _rg_join = """
+            JOIN decision_events de
+              ON de.decision_event_id = rd.decision_event_id
+             AND de.strategy_key = se.strategy_id"""
+            if source is not None:
+                _rg_filter += " AND de.source = ?"
+                _rg_params.append(source)
+        if experiment_id is not None:
+            _rg_filter += " AND se.experiment_id = ?"
+            _rg_params.append(experiment_id)
+        if cohort_tag is not None:
+            _rg_filter += " AND se.cohort_tag = ?"
+            _rg_params.append(cohort_tag)
+        regret_row = conn.execute(
+            f"""
+            SELECT
+                COUNT(*) as n_regret,
+                SUM(CASE WHEN rd.total_regret_usd > 0 THEN 1 ELSE 0 END) as n_wins,
+                AVG(rd.total_regret_usd) as mean_regret
+            FROM regret_decompositions rd
+            JOIN shadow_experiments se ON rd.experiment_id = se.experiment_id
+            {_rg_join}
+            {_rg_filter}
+            """,
+            _rg_params,
+        ).fetchone()
+        n_wins = int(regret_row[1] or 0)
+        mean_regret_usd = float(regret_row[2] or 0.0)
+        n_settled = int(regret_row[0] or 0)  # rows with settled regret outcomes
 
     if "no_trade_events" in tables:
         no_trade_columns = {

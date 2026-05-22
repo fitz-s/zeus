@@ -1,0 +1,94 @@
+name: threads-resolved
+
+# Blocks merge when any review thread is unresolved OR any requested reviewer
+# has not yet submitted their review.
+# Gate enforced at GitHub level — works for UI, CLI (gh pr merge), and API.
+#
+# Setup: add "threads-resolved" as a required status check in branch protection
+# (Settings → Branches → main → Require status checks → "threads-resolved").
+# After first PR run, search for "threads-resolved" in the branch protection UI.
+#
+# Owner: Fitz (Zeus CI infrastructure)
+# Authority basis: GitHub Actions pull_request_review_thread event + requested_reviewers REST API
+# Review condition: update trigger list if new review-thread event types are introduced.
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
+  pull_request_review:
+    types: [submitted, dismissed]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "PR number to check"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: threads-resolved-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: threads-resolved
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Check unresolved threads and pending review requests
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number || inputs.pr_number }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          OWNER="${REPO%/*}"
+          REPO_NAME="${REPO#*/}"
+          BLOCKED=0
+
+          # -- Unresolved review threads ----------------------------------------
+          # shellcheck disable=SC2016  # $owner/$repo/$pr are GraphQL variables, not shell
+          RESULT=$(gh api graphql \
+            -f owner="${OWNER}" \
+            -f repo="${REPO_NAME}" \
+            -F pr="${PR_NUMBER}" \
+            -f query='query($owner:String!,$repo:String!,$pr:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$pr){reviewThreads(first:100){totalCount nodes{isResolved}}}}}')
+
+          TOTAL=$(echo "$RESULT" | jq '.data.repository.pullRequest.reviewThreads.totalCount')
+          UNRESOLVED=$(echo "$RESULT" | jq '[.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved == false)] | length')
+
+          echo "Review threads: total=${TOTAL}  unresolved=${UNRESOLVED}"
+
+          # > 100 threads: pagination not implemented — fail closed
+          if [ "${TOTAL}" -gt 100 ]; then
+            echo "BLOCKED: PR has ${TOTAL} review threads (> 100 pagination limit). Failing closed."
+            BLOCKED=1
+          elif [ "${UNRESOLVED}" -gt 0 ]; then
+            echo "BLOCKED: ${UNRESOLVED} unresolved review thread(s) — resolve all before merging."
+            BLOCKED=1
+          fi
+
+          # -- Pending review requests ------------------------------------------
+          REQUESTED=$(gh api "repos/${OWNER}/${REPO_NAME}/pulls/${PR_NUMBER}/requested_reviewers")
+
+          PENDING_USERS=$(echo "$REQUESTED" | jq -r '([.users[].login], ["team:" + .teams[].slug]) | .[]' 2>/dev/null || true)
+
+          if [ -n "${PENDING_USERS}" ]; then
+            echo "BLOCKED: pending review request(s) — reviewer(s) have not yet submitted:"
+            echo "${PENDING_USERS}" | while read -r reviewer; do
+              echo "  - ${reviewer}"
+            done
+            BLOCKED=1
+          fi
+
+          # -- Result -----------------------------------------------------------
+          if [ "${BLOCKED}" -eq 1 ]; then
+            exit 1
+          fi
+
+          echo "OK: all ${TOTAL} thread(s) resolved, no pending review requests."
