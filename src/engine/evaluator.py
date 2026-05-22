@@ -2241,7 +2241,7 @@ def _strategy_key_for(candidate: MarketCandidate, edge: BinEdge) -> str | None:
     if candidate.discovery_mode == DiscoveryMode.OPENING_HUNT.value:
         return "opening_inertia"
     if candidate.discovery_mode == DiscoveryMode.IMMINENT_OPEN_CAPTURE.value:
-        return "opening_inertia"
+        return "imminent_open_capture"
     from src.strategy.strategy_profile import _classify_via_registry
     _ctx = SimpleNamespace(edge=edge, candidate=candidate, market_phase=None, conn=None)
     if _classify_via_registry("shoulder_sell", _ctx) is not None:
@@ -2265,7 +2265,7 @@ def _strategy_key_for_hypothesis(candidate: MarketCandidate, hypothesis: FullFam
     if candidate.discovery_mode == DiscoveryMode.OPENING_HUNT.value:
         return "opening_inertia"
     if candidate.discovery_mode == DiscoveryMode.IMMINENT_OPEN_CAPTURE.value:
-        return "opening_inertia"
+        return "imminent_open_capture"
     from src.strategy.strategy_profile import _classify_via_registry
     _hyp_bin = SimpleNamespace(
         is_shoulder=hypothesis.is_shoulder,
