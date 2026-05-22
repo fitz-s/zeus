@@ -604,6 +604,98 @@ class TestMarketAnalysis:
             ma._bootstrap_bin(0, 1)
         assert ma.supports_buy_no_edges(0) is False
 
+    def test_edge_scan_trace_explains_empty_edge_set(self):
+        bins = [
+            Bin(low=None, high=32, label="32°F or below", unit="F"),
+            Bin(low=33, high=None, label="33°F or higher", unit="F"),
+        ]
+        ma = MarketAnalysis(
+            p_raw=np.array([0.55, 0.45]),
+            p_cal=np.array([0.55, 0.45]),
+            p_market=np.array([0.50, 0.50]),
+            p_market_no=np.array([0.90, 0.90]),
+            buy_no_quote_available=np.array([True, False]),
+            executable_mask=np.array([True, False]),
+            alpha=1.0,
+            bins=bins,
+            member_maxes=np.array([30.0, 31.0, 32.0]),
+            unit="F",
+        )
+        ma._bootstrap_bin = lambda bin_idx, n: (-0.01, 0.08, 0.60)  # type: ignore[method-assign]
+
+        edges, trace = ma.find_edges_with_trace(n_bootstrap=5)
+
+        assert edges == []
+        by_decision = {item.decision for item in trace}
+        assert "yes_ci_lower_nonpositive" in by_decision
+        assert "no_raw_edge_nonpositive" in by_decision
+        assert "non_executable_bin" in by_decision
+        yes_trace = next(item for item in trace if item.decision == "yes_ci_lower_nonpositive")
+        assert yes_trace.raw_edge == pytest.approx(0.05)
+        assert yes_trace.ci_lower == pytest.approx(-0.01)
+        assert yes_trace.p_market == pytest.approx(0.50)
+        assert yes_trace.p_posterior == pytest.approx(0.55)
+
+    def test_edge_scan_trace_records_missing_native_no_quote(self):
+        bins = [
+            Bin(low=None, high=32, label="32°F or below", unit="F"),
+            Bin(low=33, high=None, label="33°F or higher", unit="F"),
+        ]
+        ma = MarketAnalysis(
+            p_raw=np.array([0.55, 0.45]),
+            p_cal=np.array([0.55, 0.45]),
+            p_market=np.array([0.80, 0.20]),
+            p_market_no=np.array([0.20, 0.20]),
+            buy_no_quote_available=np.array([False, True]),
+            alpha=1.0,
+            bins=bins,
+            member_maxes=np.array([30.0, 31.0, 32.0]),
+            unit="F",
+        )
+
+        _edges, trace = ma.find_edges_with_trace(n_bootstrap=1)
+
+        missing_no = [
+            item
+            for item in trace
+            if item.support_index == 0 and item.direction == "buy_no"
+        ][0]
+        assert missing_no.decision == "no_native_quote_unavailable"
+        assert missing_no.native_quote_available is False
+        assert missing_no.p_market == pytest.approx(0.20)
+        assert missing_no.raw_edge is None
+
+    def test_bootstrap_probability_sampler_controls_edge_confidence_object(self):
+        bins = [
+            Bin(low=None, high=32, label="32°F or below", unit="F"),
+            Bin(low=33, high=None, label="33°F or higher", unit="F"),
+        ]
+        calls = {"n": 0}
+
+        def observation_fused_sampler(_analysis, _n_members):
+            calls["n"] += 1
+            return np.array([0.90, 0.10])
+
+        ma = MarketAnalysis(
+            p_raw=np.array([0.90, 0.10]),
+            p_cal=np.array([0.90, 0.10]),
+            p_market=np.array([0.20, 0.80]),
+            alpha=1.0,
+            bins=bins,
+            member_maxes=np.array([40.0, 41.0, 42.0]),
+            unit="F",
+            bootstrap_probability_sampler=observation_fused_sampler,
+            bootstrap_signal_type="day0_observation_fused",
+        )
+
+        edges, trace = ma.find_edges_with_trace(n_bootstrap=5)
+
+        assert calls["n"] == 5
+        assert any(edge.bin.label == "32°F or below" for edge in edges)
+        accepted = next(item for item in trace if item.decision == "yes_edge_accepted")
+        assert accepted.ci_lower == pytest.approx(0.70)
+        assert ma.forecast_context()["bootstrap_signal_type"] == "day0_observation_fused"
+
     def test_market_analysis_corrected_prior_uses_named_distribution(self):
         bins = [
             Bin(low=30, high=31, label="30-31", unit="F"),

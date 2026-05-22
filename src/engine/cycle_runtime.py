@@ -18,7 +18,7 @@ from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_FLOOR
 from types import SimpleNamespace
 from typing import Any
 
-from src.config import get_mode
+from src.config import get_mode, state_path
 from src.contracts.decision_evidence import DecisionEvidence, EvidenceAsymmetryError
 from src.contracts.effective_kelly_context import EffectiveKellyContext
 from src.contracts.execution_intent import DecisionSourceContext
@@ -39,6 +39,8 @@ from src.state.portfolio import (
 )
 
 logger = logging.getLogger(__name__)
+
+SOURCE_WRITER_FRONTIER_STALE_SECONDS = 5 * 60
 
 
 # H2 critic R6 (2026-05-04, rebuild fixes branch): the previously-hardcoded
@@ -188,6 +190,55 @@ def _deps_utcnow_iso(deps) -> str:
         except Exception:
             pass
     return datetime.now(timezone.utc).isoformat()
+
+
+def _source_writer_frontier_status(now: datetime | None = None) -> dict[str, object]:
+    """Non-blocking source writer freshness for money-path frontier reports."""
+    now_utc = now if isinstance(now, datetime) else datetime.now(timezone.utc)
+    if now_utc.tzinfo is None:
+        now_utc = now_utc.replace(tzinfo=timezone.utc)
+    now_utc = now_utc.astimezone(timezone.utc)
+    status: dict[str, object] = {
+        "source_data_fresh": None,
+        "source_writer_fresh": False,
+        "observability_degraded": True,
+        "writer_budget_seconds": SOURCE_WRITER_FRONTIER_STALE_SECONDS,
+    }
+    try:
+        path = state_path("source_health.json")
+        status["path"] = str(path)
+        data = json.loads(path.read_text())
+    except Exception as exc:  # noqa: BLE001 - frontier diagnostics must not block trading.
+        status["issue"] = f"SOURCE_HEALTH_READ_FAILED:{type(exc).__name__}"
+        return status
+    written_at_raw = data.get("written_at") if isinstance(data, dict) else None
+    try:
+        written_at = datetime.fromisoformat(str(written_at_raw).replace("Z", "+00:00"))
+        if written_at.tzinfo is None:
+            written_at = written_at.replace(tzinfo=timezone.utc)
+        writer_age = (now_utc - written_at.astimezone(timezone.utc)).total_seconds()
+    except Exception:
+        status["issue"] = "SOURCE_HEALTH_WRITER_TIME_INVALID"
+        return status
+    sources = data.get("sources", {}) if isinstance(data, dict) else {}
+    stale_sources = [
+        str(name)
+        for name, payload in sources.items()
+        if isinstance(payload, dict) and str(payload.get("status", "")).upper() == "STALE"
+    ] if isinstance(sources, dict) else []
+    writer_fresh = writer_age <= SOURCE_WRITER_FRONTIER_STALE_SECONDS
+    status.update(
+        {
+            "written_at": written_at.astimezone(timezone.utc).isoformat(),
+            "writer_age_seconds": float(writer_age),
+            "source_writer_fresh": bool(writer_fresh),
+            "source_data_fresh": len(stale_sources) == 0,
+            "stale_sources": stale_sources[:10],
+            "observability_degraded": not writer_fresh,
+            "issue": "" if writer_fresh else "SOURCE_HEALTH_WRITER_OBSERVABILITY_STALE",
+        }
+    )
+    return status
 
 
 def _live_discovery_eval_budget_seconds(mode, env: str, params: dict | None) -> float | None:
@@ -3304,6 +3355,11 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
     _frontier("math_frontier")
     _frontier("family_frontier")
     _frontier("execution_frontier")
+    _frontier_set(
+        "source_frontier",
+        "source_writer_status",
+        _source_writer_frontier_status(decision_time),
+    )
 
     def _queue_derived_write(name: str, writer) -> None:
         if callable(writer):
@@ -4251,6 +4307,9 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                                     _detail,
                                     decision_time.isoformat(),
                                     conn=_no_trade_conn,
+                                    strategy_key=str(getattr(_nd, "strategy_key", "") or "") or None,
+                                    event_source=str(getattr(_nd, "edge_source", "") or "") or None,
+                                    shadow_runtime=str(env).lower() != "live",
                                 )
                             except Exception as _nte_exc:
                                 logger.warning(
