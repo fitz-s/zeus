@@ -40,3 +40,21 @@ Live must continuously refresh source/forecast/settlement/evaluator/sizing/venue
 - Full-analysis proof tests listed above.
 - `git diff --check`.
 - Planning-lock check for changed high-risk files.
+
+## 8. Current implementation status
+- Money Path Frontier Report and per-mode scheduler business liveness: implemented on main before this branch; this branch adds healthcheck consumption of per-mode scheduler business liveness.
+- FamilySelectionAuthority live `buy_no` fallback slots: implemented in this branch; live-disabled `buy_no` legs are diagnostic drops and no longer consume ranked executable fallback slots when live `buy_yes` candidates exist.
+- CanonicalOrderTruth closure gaps: implemented in this branch for terminal-remainder helper, review-required confirmed-fill clearance, review-clearance DB predicates, and exchange reconcile entry fill coverage.
+- PR #283 review repair: all-blocked live `buy_no` family selection no longer self-drops selected legs, evaluator now imports the native `buy_no` flag authority from family selection instead of owning a duplicate copy, and exchange reconcile feeds the order reducer deterministic ordered facts.
+- Current no-intent diagnosis remains: latest live evidence points mostly to pre-family math/strategy rejection (`ultra_low_price_not_authorized`, `model_conflict`, family dedup), not a proven downstream final-intent constructor failure.
+
+## 9. Current verification evidence
+- `py_compile`: healthcheck, family exposure, command recovery, exchange reconcile, venue command repo, and focused tests passed.
+- B1 focused relationship tests: 9 passed for canonical order/trade truth across command recovery and exchange reconcile.
+- B2 family tests with local sklearn stub: 7 passed, including command-only exposure and live-disabled `buy_no` fallback exclusion.
+- Full-analysis proof subset with local sklearn stub: 10 passed for active=false negRisk, ask-only BUY, passive EV, and no runtime no-trade schema rebuild.
+- Fill-finality gate: command recovery + exchange reconcile full files passed with local `apscheduler`/`sklearn` stubs (`169 passed`).
+- U2 ingest/projection gate: user channel ingest + provenance projections passed with local `apscheduler`/`sklearn` stubs (`83 passed`).
+- Live-safety gate: `tests/test_live_safety_invariants.py` passed with local sklearn stub (`123 passed`).
+- `tests/test_runtime_guards.py` no longer stalls on the chain-reconciliation test after adding a deterministic market-scanner stub, but the full-file local run currently fails 52 unrelated existing cases in this environment; targeted full-analysis runtime guard proof cases pass. Do not claim full runtime-guards gate until CI or a clean local runtime-guard environment proves it.
+- Topology/planning-lock: admitted routes used for family exposure, fill finality ledger, state review-clearance predicates, and healthcheck; `task.md` remains a user-directed tracker outside topology admission.

@@ -1055,6 +1055,43 @@ def test_local_order_open_uses_canonical_order_truth_over_later_weaker_fact(conn
     assert _local_order_is_open(conn, dict(command)) is False
 
 
+def test_entry_fill_covers_command_uses_canonical_order_truth_over_later_weaker_fact(conn):
+    """Relationship: later weak order facts cannot demote filled entry truth."""
+    from src.execution.exchange_reconcile import _entry_fill_covers_command
+    from src.state.venue_command_repo import append_order_fact
+
+    seed_command(conn, state="ACKED", size=5.0, price=0.34)
+    append_order_fact(
+        conn,
+        venue_order_id="ord-m5",
+        command_id="cmd-m5",
+        state="MATCHED",
+        remaining_size="0",
+        matched_size="4.99",
+        source="REST",
+        observed_at=NOW.isoformat(),
+        raw_payload_hash=hashlib.sha256(b"terminal-fill-normalized").hexdigest(),
+        raw_payload_json={"proof": "terminal-fill-normalized"},
+    )
+    append_order_fact(
+        conn,
+        venue_order_id="ord-m5",
+        command_id="cmd-m5",
+        state="RESTING",
+        remaining_size="0.01",
+        matched_size="4.99",
+        source="REST",
+        observed_at=(NOW + timedelta(seconds=5)).isoformat(),
+        raw_payload_hash=hashlib.sha256(b"later-weak-entry-fill").hexdigest(),
+        raw_payload_json={"proof": "later-weak-entry-fill"},
+    )
+    command = conn.execute(
+        "SELECT * FROM venue_commands WHERE command_id = 'cmd-m5'"
+    ).fetchone()
+
+    assert _entry_fill_covers_command(conn, dict(command), Decimal("4.99")) is True
+
+
 def test_failed_or_retrying_trade_fact_does_not_advance_command_fill_state(conn):
     from src.execution.exchange_reconcile import run_reconcile_sweep
 

@@ -139,7 +139,11 @@ def _canonical_order_truth_cte(
                                        WHEN UPPER(COALESCE(fact.state, '')) IN ('MATCHED', 'FILLED')
                                             AND CAST(COALESCE(fact.matched_size, '0') AS REAL) > 0
                                             AND CAST(COALESCE(fact.remaining_size, '0') AS REAL) = 0
-                                       THEN 500
+                                       THEN 600
+                                       WHEN UPPER(COALESCE(fact.state, '')) IN ('CANCEL_CONFIRMED', 'EXPIRED', 'VENUE_WIPED')
+                                            AND CAST(COALESCE(fact.matched_size, '0') AS REAL) > 0
+                                            AND CAST(COALESCE(fact.remaining_size, '0') AS REAL) = 0
+                                       THEN 550
                                        WHEN UPPER(COALESCE(fact.state, '')) IN ('PARTIALLY_MATCHED', 'PARTIAL')
                                             AND CAST(COALESCE(fact.matched_size, '0') AS REAL) > 0
                                        THEN 400
@@ -2467,12 +2471,10 @@ def _latest_terminal_remainder_order_fact_exists(
     if not _table_exists(conn, "venue_order_facts"):
         return False
     row = conn.execute(
-        """
+        "WITH " + _canonical_order_truth_cte() + """
         SELECT state, remaining_size, matched_size, source
-          FROM venue_order_facts
+          FROM canonical_order_truth
          WHERE command_id = ?
-         ORDER BY local_sequence DESC, fact_id DESC
-         LIMIT 1
         """,
         (command_id,),
     ).fetchone()
@@ -4409,15 +4411,14 @@ def clear_review_required_confirmed_fill(
     trade_id = str(fill_payload.get("trade_id") or "")
     venue_order_id = str(fill_payload.get("venue_order_id") or command.get("venue_order_id") or "")
     row = conn.execute(
-        """
+        "WITH " + _canonical_trade_fact_cte() + """
         SELECT *
-        FROM venue_trade_facts
+        FROM canonical_trade_fact
         WHERE command_id = ?
           AND trade_id = ?
           AND venue_order_id = ?
           AND state IN ('MATCHED', 'MINED', 'CONFIRMED')
-        ORDER BY local_sequence DESC, trade_fact_id DESC
-        LIMIT 1
+          AND CAST(COALESCE(filled_size, '0') AS REAL) > 0
         """,
         (command_id, trade_id, venue_order_id),
     ).fetchone()
