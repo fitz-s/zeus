@@ -45,6 +45,7 @@ _PIPELINE_A_STRATEGY_KEYS: frozenset[str] = frozenset({
     "neg_risk_basket",
     "settlement_capture",
     "resolution_window_maker",
+    "shoulder_impossible_tail_capture",  # D6: physical-bound deterministic → Pipeline A
 })
 
 # Sub-typed strategies: default to B; override to A on specific proof_type.

@@ -102,10 +102,14 @@ def ensure_tables(conn: sqlite3.Connection) -> None:
 
 
 def _migrate_evidence_tier_assignments_schema(conn: sqlite3.Connection) -> None:
+    from src.state.db import SCHEMA_VERSION as _CURRENT_SCHEMA_VERSION
     row = conn.execute(
         "SELECT sql FROM sqlite_master WHERE type='table' AND name='evidence_tier_assignments'"
     ).fetchone()
     table_sql = str(row[0] if row else "")
+    # Guard must also verify the current SCHEMA_VERSION is in the CHECK list.
+    # Without this, a prod-v27/v28 table passes the structural checks but
+    # rejects tribunal writes at schema_version=29 with an IntegrityError.
     if (
         "id" in table_sql
         and "schema_version" in table_sql
@@ -113,7 +117,7 @@ def _migrate_evidence_tier_assignments_schema(conn: sqlite3.Connection) -> None:
         and "verdict_kind" in table_sql
         and "tier IN (0, 1, 2, 3, 4, 5, 6, 7)" in table_sql
         and "effective_from" in table_sql
-        and "25, 26, 27, 28" in table_sql
+        and str(_CURRENT_SCHEMA_VERSION) in table_sql
     ):
         return
 

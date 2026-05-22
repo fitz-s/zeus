@@ -160,11 +160,15 @@ def _rebuild_stale_no_trade_events_table(conn: sqlite3.Connection) -> None:
         "SELECT sql FROM sqlite_master WHERE type='table' AND name='no_trade_events'"
     ).fetchone()
     table_sql = str(row[0] if row else "")
-    current_version_check = "14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28"
+    # Enum-iteration guard: rebuild if ANY NoTradeReason value is absent from the
+    # existing CHECK clause, or if the current SCHEMA_VERSION is not in the
+    # schema_version IN (...) list.  This replaces the former hardcoded
+    # "14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27" substring check which
+    # silently skips when a prod-v28 table is present, leaving new enum members out of
+    # the reason CHECK and causing IntegrityError on every shadow no_trade write.
     if (
-        NoTradeReason.MUTUALLY_EXCLUSIVE_FAMILY_DEDUP.value in table_sql
-        and NoTradeReason.CORR_HEDGE_REGIME_UNAVAILABLE.value in table_sql
-        and current_version_check in table_sql
+        not any(r.value not in table_sql for r in NoTradeReason)
+        and str(SCHEMA_VERSION) in table_sql
         and "schema_compatibility" in table_sql
         and "strategy_key" in table_sql
         and "event_source" in table_sql
