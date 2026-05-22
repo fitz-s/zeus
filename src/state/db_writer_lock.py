@@ -781,6 +781,9 @@ SQLITE_CONNECT_ALLOWLIST: frozenset[str] = frozenset(
         "scripts/rollback_phase3_t3.py",                 # operator_invoked: SCAFFOLD stub; run() raises NotImplementedError until T3 production pass
         # --- Phase 7 T4 (2026-05-21) ---
         "scripts/backfill_settlement_outcome_type.py",   # operator_invoked: backfills settlements_v2.outcome_type; writes under SAVEPOINT chunks when not --dry-run
+        # --- Track R-1a: shadow replay harness + promotion readiness job (2026-05-22) ---
+        "src/backtest/shadow_replay_harness.py",   # read_only_immutable_uri: opens live FCST+WORLD DBs via immutable=1 uri; writes only to caller-supplied temp_world_path (never live zeus-world.db); sentinel guard enforced
+        "src/analysis/promotion_readiness_job.py", # read_only_ro_uri: CLI opens world-db with mode=ro; pure-compute adjudicate (conn=None); no tier writes
     }
 )
 
