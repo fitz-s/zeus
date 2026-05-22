@@ -12052,6 +12052,75 @@ def test_executable_primary_valid_window_satisfies_crosscheck_comparability():
     assert context.crosscheck_valid_window == ("2026-01-15T05:00", "2026-01-16T04:00")
 
 
+def test_openmeteo_gfs_missing_issue_time_can_be_compared_with_matching_window_and_fresh_fetch():
+    target_date = "2026-01-15"
+    target_window = (
+        "2026-01-15T05:00:00+00:00",
+        "2026-01-16T04:00:00+00:00",
+    )
+    crosscheck_times = [
+        (datetime(2026, 1, 15, 5, tzinfo=timezone.utc) + timedelta(hours=i)).isoformat()
+        for i in range(24)
+    ]
+
+    context = evaluator_module._crosscheck_comparable_context(
+        primary_result={
+            "issue_time": "2026-01-14T00:00:00+00:00",
+            "source_id": "ecmwf_open_data",
+            "target_day_valid_window": target_window,
+        },
+        crosscheck_result={
+            "issue_time": None,
+            "source_id": "openmeteo_ensemble_gfs025",
+            "times": crosscheck_times,
+            "fetch_time": "2026-01-14T06:00:00+00:00",
+        },
+        primary_source_id="ecmwf_open_data",
+        crosscheck_source_id="openmeteo_ensemble_gfs025",
+        target_date=target_date,
+        timezone_name=NYC.timezone,
+    )
+
+    assert context.comparable is True
+    assert context.crosscheck_issue_time == ""
+    assert context.horizon_delta_hours == 6.0
+    assert context.non_comparable_reason == ""
+
+
+def test_openmeteo_gfs_missing_issue_time_with_stale_fetch_is_not_comparable():
+    target_date = "2026-01-15"
+    target_window = (
+        "2026-01-15T05:00:00+00:00",
+        "2026-01-16T04:00:00+00:00",
+    )
+    crosscheck_times = [
+        (datetime(2026, 1, 15, 5, tzinfo=timezone.utc) + timedelta(hours=i)).isoformat()
+        for i in range(24)
+    ]
+
+    context = evaluator_module._crosscheck_comparable_context(
+        primary_result={
+            "issue_time": "2026-01-14T00:00:00+00:00",
+            "source_id": "ecmwf_open_data",
+            "target_day_valid_window": target_window,
+        },
+        crosscheck_result={
+            "issue_time": None,
+            "source_id": "openmeteo_ensemble_gfs025",
+            "times": crosscheck_times,
+            "fetch_time": "2026-01-15T00:00:00+00:00",
+        },
+        primary_source_id="ecmwf_open_data",
+        crosscheck_source_id="openmeteo_ensemble_gfs025",
+        target_date=target_date,
+        timezone_name=NYC.timezone,
+    )
+
+    assert context.comparable is False
+    assert "crosscheck_missing_issue_time" in context.non_comparable_reason
+    assert "issue_time_delta_unavailable" in context.non_comparable_reason
+
+
 def test_gfs_crosscheck_failure_rejects_instead_of_defaulting_to_agree(monkeypatch):
     monkeypatch.setattr(evaluator_module, "get_mode", lambda: "test")
     candidate = MarketCandidate(
