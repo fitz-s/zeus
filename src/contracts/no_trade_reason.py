@@ -145,6 +145,7 @@ class NoTradeReason(StrEnum):
     # ── Phase 4 T4 candidate strategy gates ────────────────────────────────────
     # 2 members per 05_PHASE_4_FDR_FAMILY_CANDIDATES.md §T4 deferred candidates
     CORR_HEDGE_REGIME_UNAVAILABLE = auto()     # cross_market_correlation_hedge: regime UNKNOWN or store not fit
+    CORR_HEDGE_OBJECTIVE_BELOW_COST = auto()  # cross_market_correlation_hedge: w*ᵀe−(λ/2)w*ᵀΣw* ≤ 0; eᵀΣ⁻¹e ≤ cost gate
     NEGRISK_FAMILY_INCOMPLETE = auto()         # neg_risk_basket: full token book per family unavailable
     NEGRISK_NO_PROFITABLE_BASKET = auto()      # neg_risk_basket: book present but max(Π_Y(q*),Π_N(q*)) <= 0
 
