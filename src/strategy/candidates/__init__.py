@@ -451,6 +451,7 @@ from .cross_market_correlation_hedge import CrossMarketCorrelationHedge
 from .liquidity_provision_with_heartbeat import LiquidityProvisionWithHeartbeat
 from .center_sell_parity import CenterSellParity
 from .shoulder_impossible_tail_capture import ShoulderImpossibleTailCapture
+from .settlement_capture_shadow import PhysicalIntervalBound, SettlementCaptureShadow
 
 __all__ = [
     "_is_world_db_conn",
@@ -466,8 +467,10 @@ __all__ = [
     "LegIntent",
     "LiquidityProvisionWithHeartbeat",
     "NegRiskBasket",
+    "PhysicalIntervalBound",
     "PriceLevel",
     "ResolutionWindowMaker",
+    "SettlementCaptureShadow",
     "ShoulderImpossibleTailCapture",
     "StaleQuoteDetector",
     "StrategyProtocol",

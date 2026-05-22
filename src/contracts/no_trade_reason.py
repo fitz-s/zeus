@@ -161,5 +161,11 @@ class NoTradeReason(StrEnum):
     # ── Physical bound theorem failure gate ────────────────────────────────────
     SHOULDER_PHYSICAL_BOUND_NOT_EXCLUDES_TAIL = auto()  # physical bound >= threshold; theorem fails
 
+    # ── settlement_capture shadow: physical-interval theorem (STRATEGY_TAXONOMY_DIRECTIVE §1) ──
+    PHYSICAL_INTERVAL_DATA_GATED = auto()      # settlement_capture_shadow: Δ_phys⁺/QC input absent → no_trade until data wired
+    PHYSICAL_INTERVAL_OVERLAP = auto()         # settlement_capture_shadow: I_t overlaps B_i but neither ⊆ nor disjoint → ambiguous
+    PHYSICAL_INTERVAL_UNPROFITABLE = auto()    # settlement_capture_shadow: I_t⊆B_i or disjoint but a+phi≥1 → no positive profit
+    SETTLEMENT_CAPTURE_NOT_LOCKED = auto()     # settlement_capture_shadow: edge is not observation-locked (day0_nowcast scope)
+
     # ── Fallback (§13) ────────────────────────────────────────────────────────
     UNCATEGORIZED = auto()

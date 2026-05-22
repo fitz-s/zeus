@@ -13,7 +13,7 @@ PK: (market_slug, temperature_metric, target_date, observation_time, decision_se
   — matches decision_events natural key for FK-like joins (§5.2 "decision_natural_key
   FK-like reference"). decision_seq shared counter scope.
 
-schema_version CHECK includes 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28:
+schema_version CHECK includes 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29:
   - 14: original scaffold
   - 15: P2 T2 production pass
   - 16: MUTUALLY_EXCLUSIVE_FAMILY_DEDUP added (PR #249, 2026-05-21)
@@ -36,6 +36,10 @@ schema_version CHECK includes 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26
         event_source, and shadow_runtime provenance for evidence_report.
   - 27: P1/P2 architecture review (2026-05-22) — evidence lifecycle fields
         (revoke/expiry) in evidence_tier_assignments; day0_nowcast_entry strategy.
+  - 28: neg_risk_basket NEGRISK_NO_PROFITABLE_BASKET reason enum member.
+  - 29: settlement_capture_shadow: +4 NoTradeReason members
+        (PHYSICAL_INTERVAL_DATA_GATED, PHYSICAL_INTERVAL_OVERLAP,
+        PHYSICAL_INTERVAL_UNPROFITABLE, SETTLEMENT_CAPTURE_NOT_LOCKED).
 
 Note: _REASON_VALUES_SQL is enum-derived (iterates NoTradeReason) so adding
 SHOULDER_* members to the enum automatically extends the reason CHECK constraint —
@@ -49,7 +53,7 @@ import sqlite3
 from src.contracts.no_trade_reason import NoTradeReason
 
 # Schema version stamped into each row; stays in sync with db.py SCHEMA_VERSION.
-SCHEMA_VERSION = 28
+SCHEMA_VERSION = 29
 
 # Enum CHECK: every valid NoTradeReason value, joined for SQL IN clause.
 _REASON_VALUES_SQL = ", ".join(f"'{r.value}'" for r in NoTradeReason)
@@ -67,7 +71,7 @@ CREATE TABLE IF NOT EXISTS no_trade_events (
     event_source        TEXT,
     shadow_runtime      INTEGER NOT NULL DEFAULT 0 CHECK (shadow_runtime IN (0, 1)),
     observed_at         TEXT NOT NULL,
-    schema_version      INTEGER NOT NULL CHECK (schema_version IN (14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28)),
+    schema_version      INTEGER NOT NULL CHECK (schema_version IN (14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29)),
     schema_compatibility TEXT NOT NULL DEFAULT 'current'
         CHECK (schema_compatibility IN ('current', 'degraded')),
     PRIMARY KEY (market_slug, temperature_metric, target_date, observation_time, decision_seq)
@@ -87,7 +91,7 @@ CREATE TABLE no_trade_events_new (
     event_source        TEXT,
     shadow_runtime      INTEGER NOT NULL DEFAULT 0 CHECK (shadow_runtime IN (0, 1)),
     observed_at         TEXT NOT NULL,
-    schema_version      INTEGER NOT NULL CHECK (schema_version IN (14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28)),
+    schema_version      INTEGER NOT NULL CHECK (schema_version IN (14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29)),
     schema_compatibility TEXT NOT NULL DEFAULT 'current'
         CHECK (schema_compatibility IN ('current', 'degraded')),
     PRIMARY KEY (market_slug, temperature_metric, target_date, observation_time, decision_seq)
