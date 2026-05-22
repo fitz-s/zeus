@@ -14,6 +14,7 @@ manifests, tests, contracts, or authority docs before they become binding.
 | `zeus_refactor_plan_2026-04-16.md` | Legacy incremental refactor plan; extracted to canonical references, evidence only |
 | `zeus_system_constitution_2026-04-16.md` | Legacy refactor constitution snapshot; superseded by current authority/manifests, evidence only |
 | `authority_history/` | Demoted authority/governance history; evidence only, not active law |
+| `operations_packet_inventory_2026-05-22.md` | Generated operations packet inventory report (T4); evidence only |
 
 ## Rules
 

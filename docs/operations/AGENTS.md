@@ -127,6 +127,13 @@ Tracked top-level files (required for docs checks; class/purpose in docs_registr
 | `zeus_agent_runtime_compounding_plan_2026-05-16.md` | report |
 | `task_2026-04-26_ultimate_plan/` | active packet container |
 | `task_2026-05-21_mainline_completion_authority/` | task packet container |
+| `edge_observation/` | active monitoring |
+| `attribution_drift/` | active monitoring |
+| `ws_poll_reaction/` | active monitoring |
+| `calibration_observation/` | active monitoring |
+| `learning_loop_observation/` | active monitoring |
+| `docs/operations/archive/2026-Q2/` | closed packet archive |
+| `AGENTS.md` | operations router |
 
 Archived packet evidence (physically moved to `docs/operations/archive/<YYYY>-Q<N>/`) is
 listed in `docs/operations/archive/<YYYY>-Q<N>/INDEX.md`; do not re-list those packets here.
