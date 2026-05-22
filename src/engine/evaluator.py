@@ -2207,12 +2207,16 @@ def _load_model_bias_reference(conn, *, city_name: str, season: str, forecast_so
     }
 
 
+def _imminent_open_capture_candidate(candidate: MarketCandidate) -> bool:
+    return candidate.discovery_mode == DiscoveryMode.IMMINENT_OPEN_CAPTURE.value
+
+
 def _edge_source_for(candidate: MarketCandidate, edge: BinEdge) -> str:
     # P3 site 1 of 3 in evaluator (PLAN_v3 §6.P3). Migration is flag-gated
     # via ``is_settlement_day_dispatch``; flag OFF preserves byte-equal
     # legacy behavior (T6).
     from src.engine.dispatch import is_settlement_day_dispatch
-    if is_settlement_day_dispatch(candidate):
+    if is_settlement_day_dispatch(candidate) and not _imminent_open_capture_candidate(candidate):
         day0_truth = _day0_high_truth_classification_for_edge(candidate, edge)
         if day0_truth and day0_truth != "observation_locked":
             return "day0_nowcast_entry"
@@ -2233,7 +2237,7 @@ def _edge_source_for(candidate: MarketCandidate, edge: BinEdge) -> str:
 def _strategy_key_for(candidate: MarketCandidate, edge: BinEdge) -> str | None:
     # P3 site 2 of 3 in evaluator (PLAN_v3 §6.P3).
     from src.engine.dispatch import is_settlement_day_dispatch
-    if is_settlement_day_dispatch(candidate):
+    if is_settlement_day_dispatch(candidate) and not _imminent_open_capture_candidate(candidate):
         day0_truth = _day0_high_truth_classification_for_edge(candidate, edge)
         if day0_truth and day0_truth != "observation_locked":
             return "day0_nowcast_entry"
@@ -2241,7 +2245,7 @@ def _strategy_key_for(candidate: MarketCandidate, edge: BinEdge) -> str | None:
     if candidate.discovery_mode == DiscoveryMode.OPENING_HUNT.value:
         return "opening_inertia"
     if candidate.discovery_mode == DiscoveryMode.IMMINENT_OPEN_CAPTURE.value:
-        return "opening_inertia"
+        return "imminent_open_capture"
     from src.strategy.strategy_profile import _classify_via_registry
     _ctx = SimpleNamespace(edge=edge, candidate=candidate, market_phase=None, conn=None)
     if _classify_via_registry("shoulder_sell", _ctx) is not None:
@@ -2254,7 +2258,7 @@ def _strategy_key_for(candidate: MarketCandidate, edge: BinEdge) -> str | None:
 def _strategy_key_for_hypothesis(candidate: MarketCandidate, hypothesis: FullFamilyHypothesis) -> str | None:
     # P3 site 3 of 3 in evaluator (PLAN_v3 §6.P3).
     from src.engine.dispatch import is_settlement_day_dispatch
-    if is_settlement_day_dispatch(candidate):
+    if is_settlement_day_dispatch(candidate) and not _imminent_open_capture_candidate(candidate):
         # Hypothesis path cannot check bin-level observation-lock; approximate by
         # temperature_metric: HIGH edges on settlement day are predominantly
         # day0_nowcast_entry unless locked. Edge-level _strategy_key_for() is
@@ -2265,7 +2269,7 @@ def _strategy_key_for_hypothesis(candidate: MarketCandidate, hypothesis: FullFam
     if candidate.discovery_mode == DiscoveryMode.OPENING_HUNT.value:
         return "opening_inertia"
     if candidate.discovery_mode == DiscoveryMode.IMMINENT_OPEN_CAPTURE.value:
-        return "opening_inertia"
+        return "imminent_open_capture"
     from src.strategy.strategy_profile import _classify_via_registry
     _hyp_bin = SimpleNamespace(
         is_shoulder=hypothesis.is_shoulder,
@@ -2953,7 +2957,7 @@ def evaluate_candidate(
     # See ``src/engine/dispatch.py`` module docstring §"KNOWN UNMIGRATED
     # SIBLING" for the closure narrative.
     from src.engine.dispatch import is_settlement_day_dispatch
-    is_day0_mode = is_settlement_day_dispatch(candidate)
+    is_day0_mode = is_settlement_day_dispatch(candidate) and not _imminent_open_capture_candidate(candidate)
     # T4 F4: stash for deferred Day0 nowcast write (populated inside is_day0_mode block).
     _nowcast_write_params: "dict | None" = None
     selected_method = (
@@ -4835,6 +4839,8 @@ def evaluate_candidate(
                 candidate_support_index=bin_idx,
             )
             if edge_agreement_evidence.classification == "CONFLICT":
+                edge_source = _edge_source_for(candidate, edge)
+                strategy_key = _strategy_key_for(candidate, edge) or ""
                 decisions.append(EdgeDecision(
                     False,
                     edge=edge,
@@ -4852,6 +4858,8 @@ def evaluate_candidate(
                         "MODEL_CONFLICT_EDGE_UNSUPPORTED:"
                         f"{edge_agreement_evidence.to_detail_json()}"
                     ),
+                    edge_source=edge_source,
+                    strategy_key=strategy_key,
                 ))
                 continue
             if edge_agreement_evidence.classification == "SOFT_DISAGREE":

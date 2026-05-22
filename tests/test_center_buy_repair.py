@@ -9,15 +9,19 @@ from __future__ import annotations
 import json
 import sqlite3
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
 import src.engine.evaluator as evaluator_module
 from src.config import City
+from src.contracts.no_trade_reason import NoTradeReason
 from src.engine.discovery_mode import DiscoveryMode
 from src.engine.evaluator import MarketCandidate
 from src.strategy.market_analysis_family_scan import FullFamilyHypothesis
+from src.strategy.market_phase import MarketPhase
+from src.strategy.strategy_profile import live_safe_keys
 from src.state.portfolio import PortfolioState
 from src.types import BinEdge
 
@@ -238,7 +242,12 @@ def _no_op_oracle_patch_compat_shim(monkeypatch, tmp_path):
     return None
 
 
-def _candidate(*, discovery_mode: str = DiscoveryMode.UPDATE_REACTION.value) -> MarketCandidate:
+def _candidate(
+    *,
+    discovery_mode: str = DiscoveryMode.UPDATE_REACTION.value,
+    market_phase=None,
+    observation=None,
+) -> MarketCandidate:
     return MarketCandidate(
         city=NYC,
         target_date="2026-04-03",
@@ -250,6 +259,8 @@ def _candidate(*, discovery_mode: str = DiscoveryMode.UPDATE_REACTION.value) -> 
         hours_since_open=10.0,
         hours_to_resolution=30.0,
         discovery_mode=discovery_mode,
+        market_phase=market_phase,
+        observation=observation,
     )
 
 
@@ -305,6 +316,85 @@ def test_opening_inertia_low_price_entry_is_not_blocked_by_center_buy_guard(monk
     assert forecast_context["forecast_available_at"]
     assert forecast_context["decision_time"] == TEST_DECISION_TIME.isoformat()
     assert forecast_context["decision_time_status"] == "OK"
+
+
+def test_imminent_open_capture_keeps_registry_strategy_identity(monkeypatch, tmp_path):
+    _no_op_oracle_patch_compat_shim(monkeypatch, tmp_path)
+    clob = _patch_evaluator(monkeypatch, entry_price=0.06, p_posterior=0.12)
+    candidate = _candidate(discovery_mode=DiscoveryMode.IMMINENT_OPEN_CAPTURE.value)
+
+    decisions = evaluator_module.evaluate_candidate(
+        candidate,
+        conn=None,
+        portfolio=PortfolioState(bankroll=211.37),
+        clob=clob,
+        limits=evaluator_module.RiskLimits(min_order_usd=1.0),
+        decision_time=TEST_DECISION_TIME,
+    )
+
+    assert len(decisions) == 1
+    assert decisions[0].should_trade is True
+    assert decisions[0].edge_source == "imminent_open_capture"
+    assert decisions[0].strategy_key == "imminent_open_capture"
+    assert evaluator_module._edge_source_for(candidate, decisions[0].edge) == "imminent_open_capture"
+    assert evaluator_module._strategy_key_for(candidate, decisions[0].edge) == "imminent_open_capture"
+    assert "imminent_open_capture" in live_safe_keys()
+
+
+def test_imminent_open_capture_settlement_phase_uses_own_ens_strategy(monkeypatch, tmp_path):
+    _no_op_oracle_patch_compat_shim(monkeypatch, tmp_path)
+    clob = _patch_evaluator(monkeypatch, entry_price=0.06, p_posterior=0.12)
+    candidate = _candidate(
+        discovery_mode=DiscoveryMode.IMMINENT_OPEN_CAPTURE.value,
+        market_phase=MarketPhase.SETTLEMENT_DAY,
+        observation={"high_so_far": 39.0, "observation_time": TEST_DECISION_TIME.isoformat()},
+    )
+
+    decisions = evaluator_module.evaluate_candidate(
+        candidate,
+        conn=None,
+        portfolio=PortfolioState(bankroll=211.37),
+        clob=clob,
+        limits=evaluator_module.RiskLimits(min_order_usd=1.0),
+        decision_time=TEST_DECISION_TIME,
+    )
+
+    assert len(decisions) == 1
+    assert decisions[0].should_trade is True
+    assert decisions[0].edge_source == "imminent_open_capture"
+    assert decisions[0].strategy_key == "imminent_open_capture"
+    assert decisions[0].selected_method == "ens_member_counting"
+
+
+def test_imminent_open_capture_model_conflict_keeps_strategy_attribution(monkeypatch, tmp_path):
+    _no_op_oracle_patch_compat_shim(monkeypatch, tmp_path)
+    clob = _patch_evaluator(monkeypatch, entry_price=0.06, p_posterior=0.12)
+    candidate = _candidate(discovery_mode=DiscoveryMode.IMMINENT_OPEN_CAPTURE.value)
+
+    def _agreement(*args, **kwargs):
+        if kwargs.get("candidate_support_index") is None:
+            return SimpleNamespace(classification="SOFT_DISAGREE", to_detail_json=lambda: "{}")
+        return SimpleNamespace(
+            classification="CONFLICT",
+            to_detail_json=lambda: '{"jsd":0.5,"mode_gap":3}',
+        )
+
+    monkeypatch.setattr(evaluator_module, "analyze_model_agreement", _agreement)
+
+    decisions = evaluator_module.evaluate_candidate(
+        candidate,
+        conn=None,
+        portfolio=PortfolioState(bankroll=211.37),
+        clob=clob,
+        limits=evaluator_module.RiskLimits(min_order_usd=1.0),
+        decision_time=TEST_DECISION_TIME,
+    )
+
+    assert len(decisions) == 1
+    assert decisions[0].should_trade is False
+    assert decisions[0].rejection_reason_enum is NoTradeReason.MODEL_CONFLICT
+    assert decisions[0].edge_source == "imminent_open_capture"
+    assert decisions[0].strategy_key == "imminent_open_capture"
 
 
 def test_missing_forecast_evidence_blocks_before_snapshot_persistence(monkeypatch):
