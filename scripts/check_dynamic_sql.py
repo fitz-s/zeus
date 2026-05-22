@@ -144,9 +144,11 @@ _BASELINE_PER_FILE: dict[str, int] = {
     "src/state/no_trade_events.py": 2,
     "src/state/readiness_repo.py": 4,
     "src/state/source_run_repo.py": 4,
-    # db.py grew by 11 sites in P1/P2 (PRAGMA busy_timeout interpolations,
-    # registry-driven table_name expansions — all closed internal identifiers).
-    "src/state/db.py": 35,
+    # db.py grew by 8 more sites in P1/P2 architecture review (2026-05-22):
+    # strategy_key-CHECK migration helpers use f-string table names from
+    # hardcoded tuples ("probability_trace_fact", "strategy_health", etc.) —
+    # closed internal whitelist; no user-controlled identifier.
+    "src/state/db.py": 43,
     "src/state/decision_chain.py": 1,  # internal table-name constant; added P1
     "src/state/ledger.py": 8,
     "src/state/projection.py": 2,
@@ -203,6 +205,13 @@ _BASELINE_PER_FILE: dict[str, int] = {
     # 2026-05-21 PR #267: family_exclusive_dedup adds PRAGMA table_info()
     # lookups over schema/table names from closed internal callers.
     "src/strategy/family_exclusive_dedup.py": 2,
+    # 4 SAVEPOINT sites — name is hardcoded literal "regime_correlation_store_sp";
+    # no user-controlled input. File added in a prior PR; registered 2026-05-22.
+    "src/strategy/regime_correlation_store.py": 4,
+    # 2026-05-22 P1/P2 architecture review: 2 f-string SQL sites in
+    # build_evidence_report(). Both interpolate internal JOIN fragments and
+    # filter clauses built from closed internal parameters (no user input).
+    "src/analysis/evidence_report.py": 2,
     # Tail catch — fresh files with f-string SQL must be added explicitly.
 }
 

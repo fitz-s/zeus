@@ -2259,7 +2259,7 @@ def _strategy_key_for_hypothesis(candidate: MarketCandidate, hypothesis: FullFam
         # temperature_metric: HIGH edges on settlement day are predominantly
         # day0_nowcast_entry unless locked. Edge-level _strategy_key_for() is
         # authoritative for actual trade decisions.
-        if str(candidate.temperature_metric).lower() == "high":
+        if str(getattr(candidate, "temperature_metric", "") or "").lower() == "high":
             return "day0_nowcast_entry"
         return "settlement_capture"
     if candidate.discovery_mode == DiscoveryMode.OPENING_HUNT.value:

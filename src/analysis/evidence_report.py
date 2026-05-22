@@ -145,9 +145,17 @@ def build_evidence_report(
         if source is not None:
             _de_filters += " AND source = ?"
             _de_params.append(source)
-        if experiment_id is not None:
+        if experiment_id is not None and "regret_decompositions" in tables:
             _de_filters += " AND decision_event_id IN (SELECT decision_event_id FROM regret_decompositions WHERE experiment_id = ?)"
             _de_params.append(experiment_id)
+        if cohort_tag is not None and "regret_decompositions" in tables and "shadow_experiments" in tables:
+            _de_filters += (
+                " AND decision_event_id IN ("
+                "SELECT rd.decision_event_id FROM regret_decompositions rd"
+                " JOIN shadow_experiments se ON se.experiment_id = rd.experiment_id"
+                " WHERE se.cohort_tag = ?)"
+            )
+            _de_params.append(cohort_tag)
         n_decisions_row = conn.execute(
             f"SELECT COUNT(*) FROM decision_events {_de_filters}",
             _de_params,

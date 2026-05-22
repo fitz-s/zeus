@@ -1,5 +1,5 @@
 # Created: 2026-05-22
-# Last reused or audited: 2026-05-22
+# Last reused/audited: 2026-05-22
 # Authority basis: Architecture code review 2026-05-22 — P1/P2 findings
 #   F1: day0_nowcast_entry strategy authority
 #   F2: EvidenceReport denominator scoping
