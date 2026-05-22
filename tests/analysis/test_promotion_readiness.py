@@ -271,7 +271,10 @@ class TestNoTierWrite:
     def test_returns_report_not_none(self) -> None:
         """T3: assess() always returns a PromotionReadinessReport."""
         report = _make_report(ci_lower=None, n_settled=0)
-        validator = PromotionReadinessValidator(requires_settlement_gate=False)
+        validator = PromotionReadinessValidator(
+            tier_required_for_live=EvidenceTier.LIVE_PILOT_TINY,
+            requires_settlement_gate=False,
+        )
         result = validator.assess(report)
         assert isinstance(result, PromotionReadinessReport)
 
@@ -418,3 +421,101 @@ class TestSettlementGateMissingArgs:
         settlement_sig = next(s for s in result.signals if s.signal_name == "settlement_gate")
         assert not settlement_sig.passed
         assert "FAIL" in settlement_sig.rationale
+
+
+# ---------------------------------------------------------------------------
+# T7: Critic-identified missing invariants (PROMO_VALIDATOR_CRITIC.md)
+# ---------------------------------------------------------------------------
+
+class TestCriticMissingInvariants:
+
+    def test_no_operator_ref_raise_for_already_live_strategy(self) -> None:
+        """T7a: No ValueError for a strategy already at a live tier (NOT_READY, moot).
+
+        Routine health checks on live strategies must not throw just because
+        tier_current >= LIVE_PILOT_TINY. The raise only fires on a CROSSING.
+        (Critic MINOR: operator_ref guard conflated 'current tier happens to be live'
+        with 'recommending promotion into live'.)
+        """
+        report = _make_report(
+            tier_observed=EvidenceTier.LIVE_PILOT_TINY,
+            ci_lower=0.30,  # underperformance — NOT_READY
+            breakeven_win_rate=0.55,
+        )
+        validator = PromotionReadinessValidator(
+            tier_required_for_live=EvidenceTier.LIVE_PILOT_TINY,
+            requires_settlement_gate=False,
+        )
+        # Should not raise — verdict is NOT_READY, tier_target == tier_current
+        result = validator.assess(report, operator_ref=None)
+        assert result.verdict == ReadinessVerdict.NOT_READY
+        assert not result.operator_ref_required
+
+    def test_settlement_gate_exception_propagates_not_swallowed(self) -> None:
+        """T7b: An exception inside the settlement gate propagates (fail-loud).
+
+        assess() must not catch DB errors and degrade silently to READY.
+        """
+        import sqlite3 as _sqlite3
+
+        # A closed connection will raise OperationalError on execute
+        closed_conn = _sqlite3.connect(":memory:")
+        closed_conn.close()
+
+        report = _make_report(
+            tier_observed=EvidenceTier.SHADOW_PASS,
+            ci_lower=0.62,
+            breakeven_win_rate=0.55,
+        )
+        validator = PromotionReadinessValidator(
+            tier_required_for_live=EvidenceTier.LIVE_PILOT_TINY,
+            requires_settlement_gate=True,
+            coherent_threshold=5,
+        )
+        with pytest.raises(Exception):
+            validator.assess(
+                report,
+                city="NYC",
+                temperature_metric="high",
+                conn=closed_conn,
+            )
+
+    def test_ci_lower_exactly_at_breakeven_is_not_ready(self) -> None:
+        """T7c: ci_lower == breakeven exactly → FAIL (strict > required, not >=).
+
+        promotion_predicate uses ci_lower > breakeven + cost_of_capital (strict).
+        Boundary: breakeven=0.55, ci_lower=0.55 → NOT_READY.
+        """
+        report = _make_report(
+            tier_observed=EvidenceTier.SHADOW_PASS,
+            ci_lower=0.55,  # == breakeven, not strictly above
+            breakeven_win_rate=0.55,
+        )
+        validator = PromotionReadinessValidator(
+            tier_required_for_live=EvidenceTier.LIVE_PILOT_TINY,
+            requires_settlement_gate=False,
+        )
+        result = validator.assess(report)
+        assert result.verdict == ReadinessVerdict.NOT_READY
+        ci_sig = next(s for s in result.signals if s.signal_name == "evidence_ci")
+        assert not ci_sig.passed
+
+    def test_tier_target_ceiling_at_live_normal(self) -> None:
+        """T7d: tier_target is capped at LIVE_NORMAL(7) even when tier_current is LIVE_NORMAL.
+
+        min(7, ...) cap in assess() prevents an out-of-range EvidenceTier.
+        At LIVE_NORMAL the strategy is already at max tier; verdict is NOT_READY (moot).
+        """
+        report = _make_report(
+            tier_observed=EvidenceTier.LIVE_NORMAL,
+            ci_lower=0.99,  # very strong evidence, but already at max tier
+            breakeven_win_rate=0.55,
+        )
+        validator = PromotionReadinessValidator(
+            tier_required_for_live=EvidenceTier.LIVE_NORMAL,
+            requires_settlement_gate=False,
+        )
+        result = validator.assess(report, operator_ref=None)
+        assert result.tier_target == EvidenceTier.LIVE_NORMAL
+        assert result.tier_target.value <= 7  # cap invariant
+        assert result.verdict == ReadinessVerdict.NOT_READY  # already at required tier

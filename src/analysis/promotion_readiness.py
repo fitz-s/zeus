@@ -20,18 +20,21 @@ HARD CONSTRAINTS:
   N/A does NOT default to blocking; it defaults to PASS to avoid marking all
   non-settlement strategies as permanently NOT_READY.
 
-Design note: tribunal logic is re-evaluated inline (pure-compute) rather than
-calling adjudicate() which writes to evidence_tier_assignments. This preserves the
-"validator emits recommendation only" contract. See SESSION_CLOSURE_VERDICT.md §Part B.
+Design note: signal (b) delegates to promotion_predicate() from live_readiness_tribunal —
+the single canonical promotion gate — rather than re-deriving the inequality inline.
+This makes predicate divergence between the tribunal and the validator impossible
+(Fitz #4 / #279 finding #1). adjudicate() calls the same function.
+See SESSION_CLOSURE_VERDICT.md §Part B + PROMO_VALIDATOR_CRITIC.md MAJOR finding.
 """
 from __future__ import annotations
 
 import sqlite3
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 from typing import Optional
 
 from src.analysis.evidence_report import EvidenceReport
+from src.analysis.live_readiness_tribunal import promotion_predicate
 from src.contracts.evidence_tier import EvidenceTier
 
 
@@ -102,6 +105,11 @@ class PromotionReadinessValidator:
     ----------
     tier_required_for_live:
         Minimum EvidenceTier at which a strategy becomes live-eligible.
+        REQUIRED — no default. Callers MUST supply the per-strategy value from
+        StrategyProfile.evidence_tier_required_for_live (or equivalent registry
+        source). A loose default here (e.g. LIVE_PILOT_TINY) would silently apply
+        the cheapest gate to LIVE_NORMAL-required strategies, yielding false-READY.
+        (#279 finding #1 / Fitz #4: single source of tier authority.)
     cost_of_capital:
         Additional margin above breakeven required for the CI gate to pass
         (mirrors the tribunal's cost_of_capital parameter).
@@ -117,7 +125,7 @@ class PromotionReadinessValidator:
     def __init__(
         self,
         *,
-        tier_required_for_live: EvidenceTier = EvidenceTier.LIVE_PILOT_TINY,
+        tier_required_for_live: EvidenceTier,
         cost_of_capital: float = 0.0,
         requires_settlement_gate: bool = False,
         coherent_threshold: Optional[int] = None,
@@ -203,15 +211,22 @@ class PromotionReadinessValidator:
 
         verdict = ReadinessVerdict.READY if all_pass else ReadinessVerdict.NOT_READY
 
-        # Operator-ref guard: raise if recommending a live tier without operator approval.
-        if tier_target >= EvidenceTier.LIVE_PILOT_TINY and not (operator_ref or "").strip():
+        # Operator-ref guard: raise only when recommending a CROSSING into a live tier.
+        # A strategy already at or above LIVE_PILOT_TINY has verdict=NOT_READY (promotion
+        # is moot); raising there would block routine read-only health checks on live
+        # strategies without providing any safety value.
+        crossing_into_live = (
+            tier_target >= EvidenceTier.LIVE_PILOT_TINY
+            and tier_target > tier_current
+        )
+        if crossing_into_live and not (operator_ref or "").strip():
             raise ValueError(
                 f"Operator-gate violation: PromotionReadinessValidator recommends "
                 f"tier_target={tier_target.name} (>= LIVE_PILOT_TINY) but operator_ref "
                 f"is missing or blank. Supply operator_ref= to confirm operator approval."
             )
 
-        operator_ref_required = tier_target >= EvidenceTier.LIVE_PILOT_TINY
+        operator_ref_required = crossing_into_live
         failing = [s.signal_name for s in signals if not s.passed]
         if verdict == ReadinessVerdict.READY:
             summary = (
@@ -264,12 +279,26 @@ class PromotionReadinessValidator:
         ci_lower: Optional[float],
         breakeven: float,
     ) -> tuple[bool, str]:
-        """Pure-compute tribunal promotion predicate (no DB write).
+        """Delegate to promotion_predicate() — the single canonical promotion gate.
 
-        Mirrors adjudicate() promotion gate: tier < required AND ci_lower > threshold.
-        Does NOT call adjudicate() — that function writes to evidence_tier_assignments,
-        which would violate the validator's read-only contract.
+        promotion_predicate() lives in live_readiness_tribunal and is the same
+        function adjudicate() uses; both call sites share one source of truth so
+        divergence is structurally impossible (Fitz #4 / #279 finding #1).
         """
+        would_promote = promotion_predicate(
+            tier_current,
+            self._tier_required_for_live,
+            ci_lower,
+            breakeven,
+            self._cost_of_capital,
+        )
+        if would_promote:
+            threshold = breakeven + self._cost_of_capital
+            return True, (
+                f"PROMOTE: ci_lower={ci_lower:.4f} > threshold={threshold:.4f}; "
+                f"tribunal would emit PROMOTE {tier_current.name} → next tier"
+            )
+        # Not promoting — produce a human-readable rationale for the operator.
         if tier_current >= self._tier_required_for_live:
             return False, (
                 f"HOLD (moot): tier_observed={tier_current.name} >= "
@@ -278,11 +307,6 @@ class PromotionReadinessValidator:
         if ci_lower is None:
             return False, "HOLD: no settled evidence (ci_lower=None)"
         threshold = breakeven + self._cost_of_capital
-        if ci_lower > threshold:
-            return True, (
-                f"PROMOTE: ci_lower={ci_lower:.4f} > threshold={threshold:.4f}; "
-                f"tribunal would emit PROMOTE {tier_current.name} → next tier"
-            )
         if ci_lower < breakeven - self._cost_of_capital:
             return False, (
                 f"DEMOTE: ci_lower={ci_lower:.4f} < breakeven={breakeven:.4f} - "
