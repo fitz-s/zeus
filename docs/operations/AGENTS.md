@@ -31,8 +31,7 @@ index, or archive catalog.
 
 | File | Purpose |
 |------|---------|
-| `zeus_system_review_2026-05-16.md` | 2026-05-16 system review evidence (7-agent investigation; parent for compounding plan) |
-| `zeus_agent_runtime_compounding_plan_2026-05-16.md` | Wave 1 agent runtime compounding plan v2.4 (4-critic + A2 + pre-PR + bot revisions, traced in §9) |
+| `zeus_agent_runtime_compounding_plan_2026-05-16.md` | Wave 1 agent runtime compounding plan v2.4 (4-critic + A2 + pre-PR + bot revisions, traced in §9); parent system review archived to `archive/2026-Q2/zeus_system_review_2026-05-16.md` |
 
 Top-level standalone reports must register in `architecture/docs_registry.yaml`
 under `doc_class: report` with explicit `freshness_class` and `next_action`.
@@ -119,14 +118,20 @@ Tracked top-level files (required for docs checks; class/purpose in docs_registr
 | `POLICY.md` | operations policy |
 | `LIVE_LAUNCH_HANDOFF.md` | live launch handoff |
 | `PLIST_UPDATE_FOR_RELOCK.md` | packet evidence |
-| `live_rescue_ledger_2026-05-04.md` | packet evidence |
-| `CRON_PROPOSALS_F32_F35.md` | packet evidence |
-| `TRIVIAL_BATCH_NOTES.md` | packet evidence |
+| `CRON_PROPOSALS_F32_F35.md` | packet evidence (pending operator cron addition) |
 | `tigge_daemon_integration.md` | packet evidence |
-| `zeus_system_review_2026-05-16.md` | report |
 | `zeus_agent_runtime_compounding_plan_2026-05-16.md` | report |
-| `task_2026-04-26_ultimate_plan/` | active packet container |
-| `task_2026-05-21_mainline_completion_authority/` | task packet container |
+| `task_2026-05-21_mainline_completion_authority/` | task packet container (24 src refs) |
+| `task_2026-05-21_live_release_proof_p0p3/` | task packet container (src + scripts refs) |
+| `task_2026-05-21_live_side_effect_risk_boundaries/` | task packet container (src ref) |
+| `task_2026-05-21_strategy_vnext_phase3_shoulder/` | task packet container (12 src refs) |
+| `task_2026-05-21_strategy_vnext_phase5_regime_correlation/` | task packet container (3 src refs) |
+| `task_2026-05-21_strategy_vnext_phase6_evidence_ladder/` | task packet container (6 src refs) |
+| `task_2026-05-21_strategy_vnext_phase7_settlement_type_gate/` | task packet container (3 src refs) |
+| `task_2026-05-22_crosscheck_valid_window/` | task packet container (active in current/package.yaml) |
+| `task_2026-05-22_live_math_frontier/` | task packet container (active in current/package.yaml) |
+| `activation/` | active support (src/engine/dispatch.py + scripts/produce_activation_evidence.py refs) |
+| `live_egress/` | active support (src/venue/polymarket_v2_adapter.py ref) |
 | `edge_observation/` | active monitoring |
 | `attribution_drift/` | active monitoring |
 | `ws_poll_reaction/` | active monitoring |
