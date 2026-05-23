@@ -51,7 +51,6 @@ from src.state.decision_integrity_quarantine import (  # noqa: E402
     quarantine_selection_family_fact_for_noncontributing_forecast,
     quarantine_selection_hypothesis_fact_for_noncontributing_forecast,
 )
-from src.state.schema.decision_integrity_quarantine_schema import ensure_table  # noqa: E402
 
 
 def _parse_args() -> argparse.Namespace:
@@ -78,7 +77,7 @@ def _parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-def _connect_ro(path: pathlib.Path) -> sqlite3.Connection:
+def _connect_rw(path: pathlib.Path) -> sqlite3.Connection:
     conn = sqlite3.connect(str(path))
     conn.row_factory = sqlite3.Row
     return conn
@@ -97,7 +96,7 @@ def _run_world_tables(
     Opens world DB as main; ATTACHes forecasts as 'forecasts' (for snapshot join);
     ATTACHes trade as 'trade' (for writing decision_integrity_quarantine).
     """
-    conn = _connect_ro(world_db)
+    conn = _connect_rw(world_db)
     try:
         conn.execute("ATTACH DATABASE ? AS forecasts", (str(forecasts_db),))
         conn.execute("ATTACH DATABASE ? AS trade", (str(trade_db),))
@@ -120,6 +119,10 @@ def _run_world_tables(
                     UNIQUE(table_name, row_id, reason_code)
                 )
             """)
+            # SQLite CREATE INDEX syntax: schema prefix goes on the index NAME only;
+            # the table name in ON clause must be unqualified (SQLite resolves it via
+            # the schema prefix on the index name). i.e. trade.idx_name ON table (not
+            # ON trade.table). Both statements target trade.decision_integrity_quarantine.
             conn.execute("""
                 CREATE INDEX IF NOT EXISTS
                     trade.idx_decision_integrity_quarantine_table_row
@@ -158,7 +161,7 @@ def _run_forecasts_tables(
     Opens forecasts DB as main (ensemble_snapshots_v2 co-located);
     ATTACHes trade as 'trade' for writing decision_integrity_quarantine.
     """
-    conn = _connect_ro(forecasts_db)
+    conn = _connect_rw(forecasts_db)
     try:
         conn.execute("ATTACH DATABASE ? AS trade", (str(trade_db),))
         if dry_run is False:
@@ -174,6 +177,7 @@ def _run_forecasts_tables(
                     UNIQUE(table_name, row_id, reason_code)
                 )
             """)
+            # SQLite: schema prefix on index name only; ON clause table is unqualified.
             conn.execute("""
                 CREATE INDEX IF NOT EXISTS
                     trade.idx_decision_integrity_quarantine_table_row

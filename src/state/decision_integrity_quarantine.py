@@ -643,7 +643,6 @@ def quarantine_all_tables_for_noncontributing_forecast(
 
     INV-37: caller supplies conn; never auto-opens.
     """
-    attached = {row[1] for row in conn.execute("PRAGMA database_list").fetchall()}
     # Verify forecasts tables are reachable before starting any writes.
     try:
         conn.execute("SELECT 1 FROM ensemble_snapshots_v2 LIMIT 0")

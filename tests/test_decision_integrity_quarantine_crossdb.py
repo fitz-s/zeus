@@ -243,26 +243,34 @@ def test_reader_crossdb_attach(three_dbs, monkeypatch):
 # ---------------------------------------------------------------------------
 
 def test_ghost_table_defeats_exclusion_red(three_dbs, monkeypatch):
-    """Prove that calling ensure_table(conn) when world is main creates a ghost
-    quarantine table in world DB, which the reader fallback picks up and reads as
-    empty — so exclusion silently no-ops.
+    """Regression proof: ghost quarantine in world DB no-ops exclusion ONLY when
+    trade DB path is unreachable (branch-3 fallback fires).
 
-    This is the regression baseline for the CRITICAL finding in PR-E critic.
-    The test asserts RED behavior: with a ghost table present and a real quarantine
-    row only in trade DB, build_evidence_report returns n_decisions=1 (NOT excluded).
+    The CRITICAL finding showed the prior code preferred branch-3 (unqualified
+    ghost) over branch-2 (ATTACH trade) whenever a ghost table existed in world.
+    The fix reorders branches so branch-2 (ATTACH trade) fires first.
+
+    This test proves the remaining attack vector: if trade DB is missing from disk,
+    branch-3 fires and a ghost table yields an empty read → exclusion no-ops.
+    We document this by:
+      1. Creating a ghost in world DB.
+      2. Monkeypatching trade path to a nonexistent file (simulates deleted/missing trade DB).
+      3. Asserting n_decisions=1 (ghost fallback → no exclusion).
+
+    The companion GREEN test (test_run_world_tables_no_ghost_green) proves that
+    in normal operation (trade DB present) the ghost is bypassed and exclusion fires.
     """
     from src.analysis.evidence_report import build_evidence_report
 
     world_path, trade_path, forecasts_path = three_dbs
 
-    # Simulate the buggy behavior: call ensure_table on a world-main connection.
-    # This creates decision_integrity_quarantine in world's sqlite_master (ghost).
+    # Create a ghost quarantine table in world DB (simulates prior buggy ensure_table call).
     wconn_ghost = sqlite3.connect(str(world_path))
-    ensure_table(wconn_ghost)  # BUG: world is main → ghost table created in world
+    ensure_table(wconn_ghost)
     wconn_ghost.commit()
     wconn_ghost.close()
 
-    # Confirm the ghost table exists in world DB.
+    # Confirm ghost is in world DB.
     wconn_check = sqlite3.connect(str(world_path))
     world_tables = {
         row[0]
@@ -272,28 +280,20 @@ def test_ghost_table_defeats_exclusion_red(three_dbs, monkeypatch):
     }
     wconn_check.close()
     assert "decision_integrity_quarantine" in world_tables, (
-        "Ghost table must exist in world DB for this test to be meaningful"
+        "Ghost table must exist in world DB for this RED test to be meaningful"
     )
 
-    # Now quarantine xdb-dec-1 in TRADE DB (where it actually belongs).
-    now = datetime.now(timezone.utc).isoformat()
-    tconn = sqlite3.connect(str(trade_path))
-    tconn.execute(
-        """INSERT INTO decision_integrity_quarantine
-           (table_name, row_id, reason_code, forecast_snapshot_id, recorded_at, meta_json)
-           VALUES ('opportunity_fact', 'xdb-dec-1', ?, NULL, ?, '{}')""",
-        (REASON_NON_CONTRIBUTING, now),
-    )
-    tconn.commit()
-    tconn.close()
-
-    # Monkeypatch trade path (evidence_report auto-ATTACH logic).
+    # Monkeypatch trade path to a nonexistent file — branch-2 (ATTACH) skipped,
+    # branch-3 (ghost unqualified) fires.
     import src.state.db as _state_db
-    monkeypatch.setattr(_state_db, "_zeus_trade_db_path", lambda: str(trade_path))
+    monkeypatch.setattr(_state_db, "_zeus_trade_db_path", lambda: "/nonexistent/trade.db")
 
-    # Open world conn — evidence_report sees 'decision_integrity_quarantine' in
-    # world's sqlite_master (ghost), uses unqualified ref → reads EMPTY ghost →
-    # NOT EXISTS is always false → decision is NOT excluded.
+    # Insert the quarantine row into the ghost table in world DB so we can prove
+    # it's the wrong table: we put the row in the ghost, but in real production
+    # the row would be in trade (which is unreachable here). With ghost, the row IS
+    # present so exclusion actually fires. To demonstrate the hollow ghost attack,
+    # we leave the ghost EMPTY and just rely on the fact that the real trade quarantine
+    # is unreachable. Decision is counted (n_decisions=1 = NOT excluded from empty ghost).
     wconn = sqlite3.connect(str(world_path))
     wconn.row_factory = sqlite3.Row
 
@@ -302,9 +302,9 @@ def test_ghost_table_defeats_exclusion_red(three_dbs, monkeypatch):
     )
     wconn.close()
 
-    # RED: ghost table → exclusion no-ops → decision counted (n_decisions=1, NOT 0).
+    # RED: empty ghost selected, trade unreachable → exclusion no-ops → n_decisions=1.
     assert report.n_decisions == 1, (
-        f"RED scenario: expected 1 (ghost table defeats exclusion), got {report.n_decisions}"
+        f"RED: expected 1 (empty ghost → no exclusion), got {report.n_decisions}"
     )
 
 

@@ -159,6 +159,16 @@ def build_evidence_report(
     # Try to ATTACH the trade DB so we can read decision_integrity_quarantine
     # (which lives in zeus_trades.db) from this world-DB connection.
     # Safe to skip if the trade DB path is unavailable (tests, non-production envs).
+    #
+    # Priority order (ghost-table-safe):
+    #   1. trade already ATTACHed by caller → use trade-qualified ref
+    #   2. trade DB path exists on disk → ATTACH it, use trade-qualified ref
+    #   3. table co-located in main (test-only; no trade path) → use unqualified ref
+    #
+    # The unqualified fallback (3) is intentionally LAST so that a ghost
+    # decision_integrity_quarantine table in the world DB (e.g. from a mis-applied
+    # ensure_table call) never shadows the real trade table when the trade path is
+    # resolvable. Only a pure in-memory test DB with no trade path reaches branch 3.
     _quarantine_ref: str | None = None
     _trade_attached_here = False
     try:
@@ -166,15 +176,16 @@ def build_evidence_report(
         _trade_db_path = _zeus_trade_db_path()
         _attached_schemas = {row[1] for row in conn.execute("PRAGMA database_list").fetchall()}
         if "trade" in _attached_schemas:
-            # Already attached by caller.
+            # Branch 1: already attached by caller.
             _quarantine_ref = "trade.decision_integrity_quarantine"
-        elif "decision_integrity_quarantine" in tables:
-            # Co-located (in-memory test DB or legacy single-DB layout).
-            _quarantine_ref = "decision_integrity_quarantine"
         elif Path(_trade_db_path).exists():
+            # Branch 2: ATTACH trade DB (preferred over unqualified ghost fallback).
             conn.execute("ATTACH DATABASE ? AS trade", (str(_trade_db_path),))
             _trade_attached_here = True
             _quarantine_ref = "trade.decision_integrity_quarantine"
+        elif "decision_integrity_quarantine" in tables:
+            # Branch 3: co-located (pure in-memory test DB; trade path not resolvable).
+            _quarantine_ref = "decision_integrity_quarantine"
     except Exception:  # noqa: BLE001
         # Non-fatal: quarantine exclusion is best-effort on learning paths.
         pass
