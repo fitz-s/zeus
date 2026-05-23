@@ -421,6 +421,13 @@ class EdgeDecision:
     family_fallback_rank: int = 0
     family_fallback_candidate_count: int = 0
 
+    # OBS-AUTHORITY-FOUNDATION (2026-05-23): FK to the
+    # settlement_day_observation_authority row captured at decision time for
+    # day0/settlement candidates. None for non-settlement-day candidates and
+    # legacy callsites. Persisted to opportunity_fact.observation_authority_id
+    # so an operator can join an edge back to the runtime observation object.
+    observation_authority_id: Optional[str] = None
+
     def __post_init__(self) -> None:
         if self.decision_snapshot_id is None:
             raise ValueError(
