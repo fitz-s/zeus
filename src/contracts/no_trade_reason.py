@@ -140,6 +140,8 @@ class NoTradeReason(StrEnum):
     RESOLUTION_DISPUTED = auto()               # resolution_window_maker: venue resolution status contested
     LIQPROV_HEARTBEAT_ABSENT = auto()          # liquidity_provision_with_heartbeat: fill_probability field absent
     WEATHER_ALERT_SOURCE_UNTRUSTED = auto()    # weather_event_arbitrage: external alert feed not wired/trusted
+    WEATHER_ALERT_LR_TABLE_MISSING = auto()   # weather_event_arbitrage: alert LR table absent (not yet fitted)
+    WEATHER_ALERT_EDGE_NONPOSITIVE = auto()   # weather_event_arbitrage: p'⁻ − ask − φ ≤ 0; posterior below ask+fee
     RESOLUTION_TYPED_OUTCOME_UNAVAILABLE = auto()  # resolution_window_maker: typed SettlementOutcome not wired on context (data-gated)
 
     # ── Phase 4 T4 candidate strategy gates ────────────────────────────────────
