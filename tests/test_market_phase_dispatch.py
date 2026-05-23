@@ -1,6 +1,6 @@
 # Created: 2026-05-04
 # Last reused/audited: 2026-05-23
-# Authority basis: docs/operations/task_2026-05-04_strategy_redesign_day0_endgame/PLAN_v3.md §6.P3 + §8 T6 (mode-default preservation post-D-B).
+# Authority basis: docs/operations/task_2026-05-04_strategy_redesign_day0_endgame/PLAN_v3.md §6.P3 + §8 T6 (mode-default preservation post-D-B). Audited: critic a6d4e8bb1f0cb0de4.
 """D-B mode→phase migration tests (PLAN_v3 §6.P3).
 
 The ``ZEUS_MARKET_PHASE_DISPATCH`` flag default OFF preserves byte-equal
@@ -34,8 +34,8 @@ from src.engine.dispatch import (
 from src.strategy.market_phase import MarketPhase
 
 
-def _candidate(*, discovery_mode: str = "", market_phase=None) -> SimpleNamespace:
-    return SimpleNamespace(discovery_mode=discovery_mode, market_phase=market_phase)
+def _candidate(*, discovery_mode: str = "", market_phase=None, temperature_metric: str = "", observation=None) -> SimpleNamespace:
+    return SimpleNamespace(discovery_mode=discovery_mode, market_phase=market_phase, temperature_metric=temperature_metric, observation=observation)
 
 
 # ---------------------------------------------------------------------- #
