@@ -163,37 +163,42 @@ def dispatch_shadow_candidates(
 
     # Resolve world connection. Self-open if not provided (live path).
     # Mirrors write_decision_event's conn=None self-open pattern (cycle_runtime.py).
-    if world_conn is None:
+    _own_conn = world_conn is None
+    if _own_conn:
         from src.state.db import get_world_connection
         from src.state.db_writer_lock import WriteClass
         world_conn = get_world_connection(write_class=WriteClass.LIVE)
 
     try:
-        context = CandidateContext(
-            natural_key=natural_key,
-            observed_at=observed_at,
-            analysis=analysis,
-        )
-    except Exception as exc:
-        logger.exception(
-            "shadow_candidate_dispatch: failed to build CandidateContext — skipping all. "
-            "natural_key=%r observed_at=%r exc=%r",
-            natural_key, observed_at, exc,
-        )
-        return
-
-    for candidate in _ALL_SHADOW_CANDIDATES:
         try:
-            candidate.evaluate(
-                context=context,
-                conn=world_conn,
-                decision_time=decision_time,
+            context = CandidateContext(
+                natural_key=natural_key,
+                observed_at=observed_at,
+                analysis=analysis,
             )
         except Exception as exc:
             logger.exception(
-                "shadow_candidate_dispatch: candidate %r raised — skipping. exc=%r",
-                getattr(candidate, "strategy_key", repr(candidate)),
-                exc,
+                "shadow_candidate_dispatch: failed to build CandidateContext — skipping all. "
+                "natural_key=%r observed_at=%r exc=%r",
+                natural_key, observed_at, exc,
             )
-            # Per-candidate fail-open: continue to next candidate
-            continue
+            return
+
+        for candidate in _ALL_SHADOW_CANDIDATES:
+            try:
+                candidate.evaluate(
+                    context=context,
+                    conn=world_conn,
+                    decision_time=decision_time,
+                )
+            except Exception as exc:
+                logger.exception(
+                    "shadow_candidate_dispatch: candidate %r raised — skipping. exc=%r",
+                    getattr(candidate, "strategy_key", repr(candidate)),
+                    exc,
+                )
+                # Per-candidate fail-open: continue to next candidate
+                continue
+    finally:
+        if _own_conn and world_conn is not None:
+            world_conn.close()

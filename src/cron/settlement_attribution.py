@@ -79,7 +79,10 @@ def compute_realized_pnl(
         return None
 
     # Normalise side to token side: "YES" / "NO"
-    side_upper = (side or "").upper()
+    # Shadow candidates write 'buy_yes' / 'buy_no'; strip the 'buy_' prefix so
+    # the comparison below works for both live ('YES'/'NO') and shadow rows.
+    _side_raw = (side or "").upper()
+    side_upper = _side_raw.removeprefix("BUY_")  # 'BUY_YES' → 'YES', 'YES' → 'YES'
 
     # winning_bin from settlements_v2 is the bin-label that won (e.g. "above_67F").
     # For YES tokens the outcome is binary: the token wins if it resolves 1.0.
@@ -269,12 +272,17 @@ def run_attribution(
             stats["skipped_no_settlement"] += 1
             continue
 
-        # 3. Compute realized PnL
+        # 3. Compute realized PnL.
+        # Shadow candidates write target_size_usd=None (no real capital at risk).
+        # Use a $1 notional for research PnL so shadow rows are not silently skipped.
+        # The resulting PnL is per-dollar: comparable across strategies regardless of
+        # hypothetical sizing; not a real cash figure.
+        effective_size_usd = target_size_usd if target_size_usd is not None else 1.0
         realized_pnl = compute_realized_pnl(
             side=side,
             winning_bin=winning_bin,
             target_price=target_price,
-            target_size_usd=target_size_usd,
+            target_size_usd=effective_size_usd,
         )
         if realized_pnl is None:
             stats["skipped_bad_price"] += 1

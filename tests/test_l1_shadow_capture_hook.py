@@ -94,6 +94,16 @@ def _make_conn() -> sqlite3.Connection:
     return conn
 
 
+def _make_conn_at_path(db_path: str) -> sqlite3.Connection:
+    """File-based variant of _make_conn for tests that need conn to survive close()."""
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    conn.execute(_DECISION_EVENTS_DDL)
+    conn.execute(_NO_TRADE_EVENTS_DDL)
+    conn.commit()
+    return conn
+
+
 def _make_metrics(**kwargs: Any) -> SimpleNamespace:
     """Minimal metrics namespace sufficient for most candidates to produce no_trade."""
     defaults = dict(
@@ -448,9 +458,12 @@ class TestTradeConnFailOpenAndWorldWrite:
         }
         assert "decision_events" not in tables
 
-    def test_self_open_world_conn_writes_rows(self, monkeypatch):
+    def test_self_open_world_conn_writes_rows(self, monkeypatch, tmp_path):
         """(b) When world_conn is None, dispatch self-opens via get_world_connection()
         and rows land in that conn (COUNT(*) > 0 smoke).
+
+        Uses a file-based temp DB so we can re-open and query after dispatch closes
+        the self-opened connection (dispatch owns and closes its self-opened conn).
         """
         import src.engine.shadow_candidate_dispatch as scd
         from src.strategy.candidates import WeatherEventArbitrage
@@ -465,12 +478,19 @@ class TestTradeConnFailOpenAndWorldWrite:
         candidate = WeatherEventArbitrage(lr_table=_HighLRTable())
         monkeypatch.setattr(scd, "_ALL_SHADOW_CANDIDATES", [candidate])
 
-        # Build an in-memory world-shaped conn that will be returned by get_world_connection()
-        world_conn = _make_conn()
+        # Build a file-based world-shaped conn that survives close() + re-open.
+        db_path = str(tmp_path / "world_test.db")
+        world_conn = _make_conn_at_path(db_path)
 
-        # Monkeypatch get_world_connection in the dispatch module's import scope
+        # Monkeypatch get_world_connection to return a fresh connection to our file-based DB.
+        # dispatch_shadow_candidates self-opens (and closes) via this factory.
         import src.state.db as state_db
-        monkeypatch.setattr(state_db, "get_world_connection", lambda write_class=None: world_conn)
+        import sqlite3 as _sqlite3
+        monkeypatch.setattr(
+            state_db,
+            "get_world_connection",
+            lambda write_class=None: _make_conn_at_path(db_path),
+        )
 
         analysis = SimpleNamespace(
             metrics=_make_metrics(best_ask=__import__('decimal').Decimal("0.30")),
@@ -484,7 +504,7 @@ class TestTradeConnFailOpenAndWorldWrite:
         )
         nk = _make_natural_key()
 
-        # Call WITHOUT world_conn → triggers self-open path
+        # Call WITHOUT world_conn → triggers self-open path; conn is closed by dispatch
         scd.dispatch_shadow_candidates(
             analysis=analysis,
             natural_key=nk,
@@ -493,8 +513,16 @@ class TestTradeConnFailOpenAndWorldWrite:
             decision_time=_DECISION_TIME,
         )
 
-        # COUNT(*) > 0: rows landed in WORLD (the monkeypatched conn)
-        de_count = world_conn.execute("SELECT COUNT(*) FROM decision_events").fetchone()[0]
+        # Re-open the file-based DB to confirm rows landed (dispatch closed its conn)
+        verify_conn = _sqlite3.connect(db_path)
+        try:
+            de_count = verify_conn.execute(
+                "SELECT COUNT(*) FROM decision_events"
+            ).fetchone()[0]
+        finally:
+            verify_conn.close()
+        world_conn.close()
+
         assert de_count > 0, (
             f"Expected >0 decision_events rows in world conn after self-open dispatch, got {de_count}. "
             "MAJOR-1 regression: dispatch wrote to wrong DB."
