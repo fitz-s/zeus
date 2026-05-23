@@ -1,6 +1,6 @@
 # Created: 2026-05-03
 # Last reused/audited: 2026-05-15
-# Authority basis: docs/operations/archive/2026-Q2/task_2026-05-15_live_order_e2e_goal/LIVE_ORDER_E2E_GOAL_PLAN.md Gate 11/live-reader relationship.
+# Authority basis: docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_goal/LIVE_ORDER_E2E_GOAL_PLAN.md Gate 11/live-reader relationship.
 """Live-entry forecast blocker status tests."""
 
 from __future__ import annotations

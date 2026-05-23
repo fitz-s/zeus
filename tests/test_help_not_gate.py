@@ -2,7 +2,7 @@
 # Last reused or audited: 2026-05-06
 # Authority basis: ANTI_DRIFT_CHARTER §7 (INV-HELP-NOT-GATE); IMPLEMENTATION_PLAN Phase 3 day 48-50
 #   + PLAN §3 Phase 2 exit criteria: no hook fires on payload outside its intent
-#   + docs/operations/archive/2026-Q2/task_2026-05-06_hook_redesign/PLAN.md §5 (M4 original-intent contract)
+#   + docs/archive/2026-Q2/task_2026-05-06_hook_redesign/PLAN.md §5 (M4 original-intent contract)
 """INV-HELP-NOT-GATE mid-drift check — Phase 3 deliverable + Phase 2 hook extension.
 
 Three concrete assertions per ANTI_DRIFT_CHARTER §7:

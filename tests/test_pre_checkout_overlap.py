@@ -1,7 +1,7 @@
 # Created: 2026-05-06
 # Last reused or audited: 2026-05-06
 # Authority basis: PLAN §2.6 + critic-opus §0.5 (ATTACK 10 — 5s timeout)
-#   docs/operations/archive/2026-Q2/task_2026-05-06_hook_redesign/PLAN.md
+#   docs/archive/2026-Q2/task_2026-05-06_hook_redesign/PLAN.md
 
 """
 Tests for pre_checkout_uncommitted_overlap hook implementation.

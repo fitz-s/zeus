@@ -6,7 +6,7 @@
 #   _atomic_transition WHERE-state-guard primitive used by the operator CLI.
 # Reuse: Run on every PR touching src/execution/settlement_commands.py state
 #   machine or the submit_redeem function body. Authority basis:
-#   docs/operations/archive/2026-Q2/task_2026-05-16_deep_alignment_audit/SCAFFOLD_F14_F16.md §K.5 + §K.3 v5.
+#   docs/archive/2026-Q2/task_2026-05-16_deep_alignment_audit/SCAFFOLD_F14_F16.md §K.5 + §K.3 v5.
 #
 # F14 redeem cascade liveness — verifies submit_redeem's stub-detect branch
 # routes to REDEEM_OPERATOR_REQUIRED (NOT REDEEM_REVIEW_REQUIRED) when the

@@ -1,6 +1,6 @@
 # Created: 2026-05-18
 # Last reused or audited: 2026-05-18
-# Authority basis: docs/operations/archive/2026-Q2/task_2026-05-17_post_karachi_remediation/WAVE_2_PLAN.md §#36 F10
+# Authority basis: docs/archive/2026-Q2/task_2026-05-17_post_karachi_remediation/WAVE_2_PLAN.md §#36 F10
 #   "risk_state.db separate-process drift"
 # Lifecycle: created=2026-05-18; last_reviewed=2026-05-18; last_reused=never
 # Purpose: F10 (cross-DB freshness invariant) antibody — synthetic two-DB fixture

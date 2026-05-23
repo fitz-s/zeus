@@ -1,6 +1,6 @@
 # Created: 2026-05-15
 # Last reused or audited: 2026-05-19
-# Authority basis: docs/operations/archive/2026-Q2/task_2026-05-15_p3_topology_v_next_phase2_shadow/SCAFFOLD.md §5 probe6
+# Authority basis: docs/archive/2026-Q2/task_2026-05-15_p3_topology_v_next_phase2_shadow/SCAFFOLD.md §5 probe6
 #                  operator directive 2026-05-19 (hard_stop → advisory-only)
 """
 Probe 6 — Live-money surface advisory (previously HARD_STOP divergence).

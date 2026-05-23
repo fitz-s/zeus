@@ -1,7 +1,7 @@
 # Created: 2026-05-11
 # Last reused or audited: 2026-05-15
 # Authority basis: PLAN docs/operations/task_2026-05-11_forecast_db_split/PLAN.md §5.9;
-# docs/operations/archive/2026-Q2/task_2026-05-15_data_pipeline_live_rootfix/DATA_PIPELINE_ROOTFIX_PLAN.md.
+# docs/archive/2026-Q2/task_2026-05-15_data_pipeline_live_rootfix/DATA_PIPELINE_ROOTFIX_PLAN.md.
 """K1 forecast DB split plus live forecast-authority chain invariant tests.
 
 REL-1  init_schema_forecasts on :memory: creates all forecast-authority tables + correct schema version + indexes.

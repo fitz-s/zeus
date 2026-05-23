@@ -1,6 +1,6 @@
 # Created: 2026-05-15
 # Last reused or audited: 2026-05-15
-# Authority basis: docs/operations/archive/2026-Q2/task_2026-05-15_p9_authority_inventory_v2/SCAFFOLD.md (rev 1.2)
+# Authority basis: docs/archive/2026-Q2/task_2026-05-15_p9_authority_inventory_v2/SCAFFOLD.md (rev 1.2)
 """
 Tests for scripts/authority_inventory_v2.py (P9.1).
 

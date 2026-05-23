@@ -1,6 +1,6 @@
 # Created: 2026-05-15
 # Last reused or audited: 2026-05-15
-# Authority basis: docs/operations/archive/2026-Q2/task_2026-05-15_p2_companion_required_mechanism/SCAFFOLD.md §7 probe1
+# Authority basis: docs/archive/2026-Q2/task_2026-05-15_p2_companion_required_mechanism/SCAFFOLD.md §7 probe1
 """
 probe1 — companion_required missing companion emits MISSING_COMPANION issue.
 

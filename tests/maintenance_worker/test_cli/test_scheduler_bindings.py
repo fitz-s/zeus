@@ -1,6 +1,6 @@
 # Created: 2026-05-15
 # Last reused or audited: 2026-05-15
-# Authority basis: docs/operations/archive/2026-Q2/task_2026-05-15_p5_maintenance_worker_core/SCAFFOLD.md §3 cli/scheduler_bindings/
+# Authority basis: docs/archive/2026-Q2/task_2026-05-15_p5_maintenance_worker_core/SCAFFOLD.md §3 cli/scheduler_bindings/
 """
 Tests for maintenance_worker.cli.scheduler_bindings.
 

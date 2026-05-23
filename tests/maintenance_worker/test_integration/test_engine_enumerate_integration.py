@@ -1,6 +1,6 @@
 # Created: 2026-05-16
 # Last reused or audited: 2026-05-16
-# Authority basis: docs/operations/archive/2026-Q2/task_2026-05-16_doc_alignment_plan/WAVE_1.5_BATCH_A_CRITIC.md §C1+C2
+# Authority basis: docs/archive/2026-Q2/task_2026-05-16_doc_alignment_plan/WAVE_1.5_BATCH_A_CRITIC.md §C1+C2
 """
 Integration test: engine.run_tick() with real closed_packet_archive_proposal handler.
 

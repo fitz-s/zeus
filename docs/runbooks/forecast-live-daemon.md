@@ -6,7 +6,7 @@ or live venue side effects.
 
 Authority basis:
 
-- `docs/operations/archive/2026-Q2/task_2026-05-08_deep_alignment_audit/DATA_DAEMON_LIVE_EFFICIENCY_REFACTOR_PLAN.md`
+- `docs/archive/2026-Q2/task_2026-05-08_deep_alignment_audit/DATA_DAEMON_LIVE_EFFICIENCY_REFACTOR_PLAN.md`
 - `src/ingest_main.py` owner switch `ZEUS_FORECAST_LIVE_OWNER`
 - `src/ingest/forecast_live_daemon.py` forecast-live scheduler boundary
 

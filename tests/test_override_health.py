@@ -2,7 +2,7 @@
 # Last reused or audited: 2026-05-18
 # Lifecycle: created=2026-05-06; last_reviewed=2026-05-18; last_reused=2026-05-18
 # Authority basis: PLAN §3 Phase 3 M5 override health deliverable + §5 CHARTER M5
-#   docs/operations/archive/2026-Q2/task_2026-05-06_hook_redesign/PLAN.md
+#   docs/archive/2026-Q2/task_2026-05-06_hook_redesign/PLAN.md
 #   evidence/hook_redesign_critic_opus.md ATTACK 7
 # Purpose: Validate structured hook override health when the optional catalog exists.
 # Reuse: Run when .claude/hooks/registry.yaml or structured override catalog behavior changes.

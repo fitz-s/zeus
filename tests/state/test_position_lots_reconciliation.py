@@ -6,7 +6,7 @@
 Track G — Financial Reconciliation READ-side antibodies (F106, F108, F111).
 
 Source report:
-  docs/operations/archive/2026-Q2/task_2026-05-16_post_pr126_audit/RUN_16_track_G_financial_reconciliation.md
+  docs/archive/2026-Q2/task_2026-05-16_post_pr126_audit/RUN_16_track_G_financial_reconciliation.md
 
 Root cause (verbatim from §1 of report):
   "Schema mismatch: position_lots.position_id (INTEGER) ≠ position_current.position_id

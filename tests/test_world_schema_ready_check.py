@@ -1,5 +1,5 @@
 # Lifecycle: created=2026-05-01; last_reviewed=2026-05-16; last_reused=2026-05-16
-# Authority basis: docs/operations/task_2026-04-30_two_system_independence/design.md §4.2; docs/operations/archive/2026-Q2/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md
+# Authority basis: docs/operations/task_2026-04-30_two_system_independence/design.md §4.2; docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md
 #   + architect audit A-2; live continuous run hotfix 2026-05-16 replacing stale data-ingest sentinel dependency with direct DB schema checks.
 """Antibody for A-2: _startup_world_schema_ready_check() in src/main.py.
 

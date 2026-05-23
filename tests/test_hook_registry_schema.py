@@ -1,7 +1,7 @@
 # Created: 2026-05-06
 # Last reused or audited: 2026-05-06
 # Authority basis: PLAN §2.2 + §3 Phase 1 exit criteria
-#   docs/operations/archive/2026-Q2/task_2026-05-06_hook_redesign/PLAN.md
+#   docs/archive/2026-Q2/task_2026-05-06_hook_redesign/PLAN.md
 
 """
 YAML schema validation for .claude/hooks/registry.yaml and overrides.yaml.

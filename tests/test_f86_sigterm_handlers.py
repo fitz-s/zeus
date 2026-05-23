@@ -1,6 +1,6 @@
 # Created: 2026-05-18
 # Last reused or audited: 2026-05-18
-# Authority basis: docs/operations/archive/2026-Q2/task_2026-05-16_post_pr126_audit/RUN_15_track3_f91_f86_observability.md §TASK B
+# Authority basis: docs/archive/2026-Q2/task_2026-05-16_post_pr126_audit/RUN_15_track3_f91_f86_observability.md §TASK B
 # Lifecycle: created=2026-05-18; last_reviewed=2026-05-18; last_reused=never
 # Purpose: Antibody test — verify SIGTERM handlers present in all daemon entry-points and healthcheck reads last_exit_code.
 # Reuse: Run directly; no setup required. Structural grep; does not invoke signal handlers at runtime.

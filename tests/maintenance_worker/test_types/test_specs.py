@@ -1,6 +1,6 @@
 # Created: 2026-05-15
 # Last reused or audited: 2026-05-15
-# Authority basis: docs/operations/archive/2026-Q2/task_2026-05-15_p5_maintenance_worker_core/SCAFFOLD.md §3, §4, §5 (P5.0a)
+# Authority basis: docs/archive/2026-Q2/task_2026-05-15_p5_maintenance_worker_core/SCAFFOLD.md §3, §4, §5 (P5.0a)
 #                  SAFETY_CONTRACT.md §"Allowed Targets"
 """
 Tests for maintenance_worker.types.specs — TaskSpec, EngineConfig,
@@ -227,7 +227,7 @@ class TestProposalManifest:
 
     def test_moves_stored(self) -> None:
         src = REPO / "docs/operations/task_2026-05-01_old"
-        dst = REPO / "docs/operations/archive/2026-Q2/task_2026-05-01_old"
+        dst = REPO / "docs/archive/2026-Q2/task_2026-05-01_old"
         pm = ProposalManifest(
             task_id="archive_task",
             proposed_moves=((src, dst),),

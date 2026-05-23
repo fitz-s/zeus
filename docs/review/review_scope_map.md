@@ -187,7 +187,7 @@ deprioritized path warrants attention.
 docs/archives/**                    — provenance / cold storage
 docs/artifacts/**                   — past review snapshots / external evidence
 docs/reports/**                     — reporting outputs
-docs/operations/archive/**          — archived operations packets
+docs/archive/**          — archived operations packets
 docs/operations/task_*/**           — closed task packets (historical evidence)
 logs/**                             — log streams
 raw/**                              — raw ingest / fixture data

@@ -1,6 +1,6 @@
 # Created: 2026-05-15
 # Last reused or audited: 2026-05-15
-# Authority basis: docs/operations/archive/2026-Q2/task_2026-05-15_p5_maintenance_worker_core/SCAFFOLD.md §3 core/kill_switch.py
+# Authority basis: docs/archive/2026-Q2/task_2026-05-15_p5_maintenance_worker_core/SCAFFOLD.md §3 core/kill_switch.py
 #                  docs/operations/task_2026-05-15_runtime_improvement_engineering_package/02_daily_maintenance_agent/SAFETY_CONTRACT.md §"What If A Forbidden Mutation Already Happened"
 """
 Tests for maintenance_worker.core.kill_switch.

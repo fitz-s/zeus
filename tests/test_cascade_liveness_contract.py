@@ -5,7 +5,7 @@
 #   entry has a transition INTO it from src/ (ast walk over _transition / _atomic_transition).
 # Reuse: Run on every PR touching src/main.py scheduler block, src/execution/settlement_commands.py
 #   state machine, or architecture/cascade_liveness_contract.yaml. Authority basis:
-#   docs/operations/archive/2026-Q2/task_2026-05-16_deep_alignment_audit/SCAFFOLD_F14_F16.md §G.3 + §K.6 v5.
+#   docs/archive/2026-Q2/task_2026-05-16_deep_alignment_audit/SCAFFOLD_F14_F16.md §G.3 + §K.6 v5.
 #
 # Cascade-liveness antibody: enforces architecture/cascade_liveness_contract.yaml.
 # Every state-machine entry MUST have:

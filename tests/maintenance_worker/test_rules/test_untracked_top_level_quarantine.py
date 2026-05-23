@@ -1,6 +1,6 @@
 # Created: 2026-05-16
 # Last reused or audited: 2026-05-16
-# Authority basis: docs/operations/archive/2026-Q2/task_2026-05-16_doc_alignment_plan/PLAN.md §WAVE 1.5 STEP 2 B1
+# Authority basis: docs/archive/2026-Q2/task_2026-05-16_doc_alignment_plan/PLAN.md §WAVE 1.5 STEP 2 B1
 """
 Tests for maintenance_worker.rules.untracked_top_level_quarantine.
 
@@ -133,7 +133,7 @@ def test_file_under_task_packet_skipped(tmp_path: Path) -> None:
     entry = _make_entry()
 
     # Simulate an untracked file inside a task packet dir
-    packet_rel = "docs/operations/archive/2026-Q2/task_2026-05-16_doc_alignment_plan/some_artifact.md"
+    packet_rel = "docs/archive/2026-Q2/task_2026-05-16_doc_alignment_plan/some_artifact.md"
     packet_abs = tmp_path / packet_rel
     packet_abs.parent.mkdir(parents=True, exist_ok=True)
     packet_abs.write_text("artifact")

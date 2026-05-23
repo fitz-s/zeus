@@ -1,6 +1,6 @@
 # Created: 2026-05-14
 # Last reused or audited: 2026-05-18
-# Authority basis: docs/operations/archive/2026-Q2/task_2026-05-14_k1_followups/PLAN.md §1.1, §1.2, §3 (REV 4)
+# Authority basis: docs/archive/2026-Q2/task_2026-05-14_k1_followups/PLAN.md §1.1, §1.2, §3 (REV 4)
 #   Antibodies A1, A2 (subset as A4), A8 per PLAN §3
 #   INV-37 enforcement per architecture/invariants.yaml::INV-37
 #   PR-S4 (Bug #5) additions: test_a4_manifest_ready_for_boot_wiring +
@@ -427,7 +427,7 @@ class TestA8NoCrossDbWriteTransaction:
             # hole_scanner.main() opens world_conn (for data_coverage WRITES) and
             # forecasts_conn (for DataTable.OBSERVATIONS SELECT only — read-only).
             # The forecasts_conn is never written to; all writes go to world_conn.
-            # Authority: docs/operations/archive/2026-Q2/task_2026-05-14_k1_followups/PLAN.md §2 P3 C4;
+            # Authority: docs/archive/2026-Q2/task_2026-05-14_k1_followups/PLAN.md §2 P3 C4;
             #   IMPLEMENTATION_REVIEW_P3 N1 — narrowed from whole-file to per-function in P4.
             "src/data/hole_scanner.py::main",
             # _k2_hole_scanner_tick: same pattern as hole_scanner.main() — world_conn for

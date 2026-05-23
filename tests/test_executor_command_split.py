@@ -4,7 +4,7 @@
 # Created: 2026-04-26
 # Last reused/audited: 2026-05-20
 # Authority basis: docs/operations/task_2026-04-26_execution_state_truth_p1_command_bus/implementation_plan.md §P1.S3
-#                  + docs/operations/archive/2026-Q2/task_2026-05-15_live_order_e2e_goal/LIVE_ORDER_E2E_GOAL_PLAN.md
+#                  + docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_goal/LIVE_ORDER_E2E_GOAL_PLAN.md
 #                  + docs/operations/task_2026-05-21_live_side_effect_risk_boundaries/task.md P1-4 legacy execute_intent override.
 """INV-30 relationship tests: executor split build/persist/submit/ack.
 

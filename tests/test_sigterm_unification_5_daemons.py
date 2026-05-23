@@ -1,9 +1,9 @@
 # Created: 2026-05-18
 # Last reused or audited: 2026-05-18
 # Authority basis:
-#   docs/operations/archive/2026-Q2/task_2026-05-18_wave3_dispatches/WAVE3_BATCH_C_PER_FINDING_ACCOUNTING.md
+#   docs/archive/2026-Q2/task_2026-05-18_wave3_dispatches/WAVE3_BATCH_C_PER_FINDING_ACCOUNTING.md
 #     §SIGTERM log-string unification across all 5 daemons (carry-forward #5)
-#   docs/operations/archive/2026-Q2/task_2026-05-16_post_pr126_audit/RUN_15_track3_f91_f86_observability.md §F86
+#   docs/archive/2026-Q2/task_2026-05-16_post_pr126_audit/RUN_15_track3_f91_f86_observability.md §F86
 # Lifecycle: created=2026-05-18; last_reviewed=2026-05-18; last_reused=never
 # Purpose: F86 SIGTERM-unif antibody — assert all 5 live-trading-relevant
 #   daemons emit the unified `SIGTERM_RECEIVED pid=... ppid=... elapsed=...s`

@@ -1,6 +1,6 @@
 # Created: 2026-05-18
 # Last reused or audited: 2026-05-18
-# Authority basis: docs/operations/archive/2026-Q2/task_2026-05-17_post_karachi_remediation/WAVE_2_PLAN.md §#37 F11(v2)
+# Authority basis: docs/archive/2026-Q2/task_2026-05-17_post_karachi_remediation/WAVE_2_PLAN.md §#37 F11(v2)
 #   "BulkChunker LIVE chunk boundary visibility"
 # Lifecycle: created=2026-05-18; last_reviewed=2026-05-18; last_reused=never
 # Purpose: F11(v2) antibody — assert that after BulkChunker.commit_chunk() the

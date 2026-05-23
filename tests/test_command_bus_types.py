@@ -4,7 +4,7 @@
 # Reuse: Run when venue_commands schema, command bus enums, or snapshot-gated insert semantics change.
 # Authority basis: docs/operations/task_2026-04-26_execution_state_truth_p1_command_bus/implementation_plan.md §P1.S2;
 #                  architecture/invariants.yaml INV-29;
-#                  docs/operations/archive/2026-Q2/task_2026-05-15_live_order_e2e_goal/LIVE_ORDER_E2E_GOAL_PLAN.md.
+#                  docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_goal/LIVE_ORDER_E2E_GOAL_PLAN.md.
 """P1.S2 command_bus type-contract tests.
 
 Locks the typed surface so P1.S3+ executor work has stable invariants:

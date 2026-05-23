@@ -1,6 +1,6 @@
 # Created: 2026-05-15
 # Last reused or audited: 2026-05-15
-# Authority basis: docs/operations/archive/2026-Q2/task_2026-05-15_p5_maintenance_worker_core/SCAFFOLD.md §3 guards.py + §6 ND3
+# Authority basis: docs/archive/2026-Q2/task_2026-05-15_p5_maintenance_worker_core/SCAFFOLD.md §3 guards.py + §6 ND3
 """
 Tests for maintenance_worker.core.guards.
 

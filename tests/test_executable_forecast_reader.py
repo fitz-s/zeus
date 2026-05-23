@@ -1,6 +1,6 @@
 # Created: 2026-05-03
 # Last reused/audited: 2026-05-22
-# Authority basis: docs/operations/archive/2026-Q2/task_2026-05-14_data_daemon_live_efficiency/DATA_DAEMON_LIVE_EFFICIENCY_REFACTOR_PLAN.md
+# Authority basis: docs/archive/2026-Q2/task_2026-05-14_data_daemon_live_efficiency/DATA_DAEMON_LIVE_EFFICIENCY_REFACTOR_PLAN.md
 #   Phase 3 producer-readiness-only data daemon cutover path.
 """Executable forecast reader relationship tests."""
 

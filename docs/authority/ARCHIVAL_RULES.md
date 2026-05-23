@@ -84,20 +84,20 @@ failure flips it to `LOAD_BEARING_DESPITE_AGE`.
 For an `ARCHIVE_CANDIDATE` packet:
 
 1. Compute target path:
-   `docs/operations/archive/<YYYY>-Q<1-4>/<original-name>/`
+   `docs/archive/<YYYY>-Q<1-4>/<original-name>/`
 2. Verify target does not exist; if collision, append `.duplicate-<N>`.
 3. `git mv` the directory tree under git so history is preserved.
 4. Create stub at original path:
    ```
    docs/operations/<original-name>.archived  (single file, ~12 lines)
    ---
-   archived_to: docs/operations/archive/<YYYY>-Q<1-4>/<original-name>/
+   archived_to: docs/archive/<YYYY>-Q<1-4>/<original-name>/
    archived_at: <ISO date>
    archived_by: maintenance_agent
    last_modified_before_archive: <ISO date>
    exemption_checks_passed: 9/9  # check #0 (registry) + checks 1-8
    reference_grep_count: 0
-   restore_command: git mv docs/operations/archive/.../<name>/ docs/operations/<name>/
+   restore_command: git mv docs/archive/.../<name>/ docs/operations/<name>/
    ---
    ```
 5. Add a row to `02_daily_maintenance_agent/evidence_trail/<date>/archived.tsv`:
