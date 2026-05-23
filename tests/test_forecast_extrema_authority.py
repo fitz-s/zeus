@@ -1,6 +1,9 @@
 # Created: 2026-05-22
 # Last reused/audited: 2026-05-22
 # Authority basis: docs/operations/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md §PR-A
+# Lifecycle: created=2026-05-22; last_reviewed=2026-05-22; last_reused=never
+# Purpose: Unit + integration tests for ForecastExtremaAuthority classifier and reader ORDER BY ranking.
+# Reuse: Run when classify_forecast_extrema_authority, POSITIVE_ATTRIBUTION_STATUSES, or _snapshot_query_sql ORDER BY changes.
 """Tests for ForecastExtremaAuthority classifier and reader ORDER BY preference."""
 
 from __future__ import annotations

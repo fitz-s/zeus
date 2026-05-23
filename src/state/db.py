@@ -2533,10 +2533,6 @@ def init_schema(
     from src.state.schema.v2_schema import apply_v2_schema as _apply_v2_schema
     _apply_v2_schema(conn, forecast_tables=False)
 
-    # PR-E (2026-05-22): decision_integrity_quarantine table (SCHEMA_VERSION 32).
-    from src.state.schema.decision_integrity_quarantine_schema import ensure_table as _ensure_decision_integrity_quarantine_table
-    _ensure_decision_integrity_quarantine_table(conn)
-
     conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
     # db_chunk_boundary_events — K2 live-contention event log (Cluster B fix 2026-05-18)
@@ -3657,6 +3653,7 @@ def init_schema_world_only(conn: Optional[sqlite3.Connection] = None) -> None:
 _TRADE_CLASS_TABLES: frozenset[str] = frozenset({
     "_migrations_applied",
     "book_hash_transitions",
+    "decision_integrity_quarantine",
     "execution_fact",
     "executable_market_snapshots",
     "position_current",
@@ -4140,6 +4137,9 @@ def init_schema_trade_only(conn: sqlite3.Connection) -> None:
     init_snapshot_schema(conn)
     from src.state.schema.book_hash_transitions_schema import ensure_table as _ensure_book_hash_transitions_table
     _ensure_book_hash_transitions_table(conn)
+    # PR-E (2026-05-22): decision_integrity_quarantine lives on the trade DB.
+    from src.state.schema.decision_integrity_quarantine_schema import ensure_table as _ensure_decision_integrity_quarantine_table
+    _ensure_decision_integrity_quarantine_table(conn)
     try:
         conn.execute("ALTER TABLE trade_decisions ADD COLUMN env TEXT NOT NULL DEFAULT 'live';")
     except sqlite3.OperationalError:

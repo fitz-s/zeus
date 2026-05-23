@@ -1,6 +1,9 @@
 # Created: 2026-05-22
 # Last reused or audited: 2026-05-22
 # Authority basis: docs/operations/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md
+# Lifecycle: created=2026-05-22; last_reviewed=2026-05-22; last_reused=never
+# Purpose: Before/after measurement of PR-A forecast selection fix (read-only diagnostic).
+# Reuse: Run after PR-A merge to confirm contributing-run selection bias reduction for far-east cities.
 """
 PART 1: Before/after measurement of PR-A forecast selection fix.
 
@@ -10,24 +13,33 @@ Busan, Shenzhen, Qingdao, Tokyo) and controls (Amsterdam, Chicago).
 
 OLD ORDER BY: source_cycle_time DESC, available_at DESC, snapshot_id DESC
 NEW ORDER BY: (CASE WHEN contributes_to_target_extrema=1 AND
-              attribution NOT IN ('UNKNOWN','') AND NOT boundary_ambiguous
+              attribution IN positive_set AND NOT boundary_ambiguous
               THEN 0 ELSE 1 END) ASC, source_cycle_time DESC, available_at DESC,
               snapshot_id DESC
 
 Read-only: opens both DBs as read-only URIs; writes nothing.
+
+Usage:
+    python scripts/verify_forecast_offset_fix.py [--forecasts-db PATH] [--world-db PATH] [--date DATE]
 """
 from __future__ import annotations
 
+import argparse
 import json
+import pathlib
 import sqlite3
 import sys
+
+_REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from src.state.db import ZEUS_FORECASTS_DB_PATH, ZEUS_WORLD_DB_PATH  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
 
-FORECASTS_DB = "/Users/leofitz/.openclaw/workspace-venus/zeus/state/zeus-forecasts.db"
-WORLD_DB = "/Users/leofitz/.openclaw/workspace-venus/zeus/state/zeus-world.db"
 TARGET_DATE = "2026-05-22"
 TEMP_METRIC = "high"
 
@@ -86,18 +98,31 @@ def _round2(v: float | None) -> float | None:
     return round(v, 2) if v is not None else None
 
 
+def _parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--forecasts-db", default=str(ZEUS_FORECASTS_DB_PATH),
+                   help="Path to zeus-forecasts.db (default: src.state.db.ZEUS_FORECASTS_DB_PATH)")
+    p.add_argument("--world-db", default=str(ZEUS_WORLD_DB_PATH),
+                   help="Path to zeus-world.db (default: src.state.db.ZEUS_WORLD_DB_PATH)")
+    p.add_argument("--date", default=TARGET_DATE,
+                   help=f"Target date YYYY-MM-DD (default: {TARGET_DATE})")
+    return p.parse_args()
+
+
 def main() -> None:
+    args = _parse_args()
+    target_date = args.date
     # Open read-only
-    fc = sqlite3.connect(f"file:{FORECASTS_DB}?mode=ro", uri=True)
+    fc = sqlite3.connect(f"file:{args.forecasts_db}?mode=ro", uri=True)
     fc.row_factory = sqlite3.Row
-    wc = sqlite3.connect(f"file:{WORLD_DB}?mode=ro", uri=True)
+    wc = sqlite3.connect(f"file:{args.world_db}?mode=ro", uri=True)
     wc.row_factory = sqlite3.Row
 
     rows = []
     for city in ALL_CITIES:
-        old_row = fc.execute(SQL_OLD, (city, TARGET_DATE, TEMP_METRIC)).fetchone()
-        new_row = fc.execute(SQL_NEW, (city, TARGET_DATE, TEMP_METRIC)).fetchone()
-        obs_row = wc.execute(SQL_OBS, (city, TARGET_DATE)).fetchone()
+        old_row = fc.execute(SQL_OLD, (city, target_date, TEMP_METRIC)).fetchone()
+        new_row = fc.execute(SQL_NEW, (city, target_date, TEMP_METRIC)).fetchone()
+        obs_row = wc.execute(SQL_OBS, (city, target_date)).fetchone()
 
         old_fc = _max_members(old_row["members_json"]) if old_row else None
         new_fc = _max_members(new_row["members_json"]) if new_row else None
@@ -134,7 +159,7 @@ def main() -> None:
     )
     sep = "-" * len(header)
 
-    print(f"\nForecast Selection Fix: Before/After ({TARGET_DATE}, metric={TEMP_METRIC})")
+    print(f"\nForecast Selection Fix: Before/After ({target_date}, metric={TEMP_METRIC})")
     print(sep)
     print(header)
     print(sep)

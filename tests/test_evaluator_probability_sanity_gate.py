@@ -1,6 +1,9 @@
 # Created: 2026-05-22
 # Last reused or audited: 2026-05-22
 # Authority basis: docs/operations/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md §PR-D
+# Lifecycle: created=2026-05-22; last_reviewed=2026-05-22; last_reused=never
+# Purpose: Integration test for probability_sanity_gate wiring in evaluator — Amsterdam mirror case.
+# Reuse: Run when evaluator probability_sanity_gate call-site, validate_high_distribution signature, or NoTradeReason.PROBABILITY_SANITY_GATE changes.
 """Integration test for the probability_sanity_gate wired in evaluator.py.
 
 Scope: prove that the gate logic rejects pathological distributions using the

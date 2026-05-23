@@ -1,6 +1,9 @@
 # Created: 2026-05-22
 # Last reused or audited: 2026-05-22
 # Authority basis: docs/operations/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md §PR-E
+# Lifecycle: created=2026-05-22; last_reviewed=2026-05-22; last_reused=never
+# Purpose: Unit tests for decision_integrity_quarantine — quarantine logic, idempotency, ensure_table.
+# Reuse: Run when quarantine_decisions_for_noncontributing_forecast, ensure_table, or decision_integrity_quarantine schema changes.
 
 """PR-E — Tests for decision_integrity_quarantine tooling.
 

@@ -43,8 +43,8 @@ def build_day0_high_distribution(
             None → WMO asymmetric half-up.
         precision: settlement precision (1.0 = integer, 0.1 = one decimal).
         provenance: metadata string (observation source, snapshot id, etc.).
-            Stored in returned array's metadata attribute when debug is needed;
-            not used in arithmetic.
+            Accepted but not attached to the returned array (numpy ndarrays carry
+            no arbitrary metadata).  Callers may use for logging; not used in arithmetic.
 
     Returns:
         np.ndarray shape (n_members,) of settlement-rounded HIGH samples.

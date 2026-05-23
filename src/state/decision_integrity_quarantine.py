@@ -63,11 +63,12 @@ def quarantine_decisions_for_noncontributing_forecast(
     INV-37: caller supplies conn; never auto-opens.
 
     Note on the cross-DB join:
-        The query references 'forecasts.ensemble_snapshots_v2' — this requires the
-        forecasts DB to be ATTACHed as alias 'forecasts'. If the schema alias is absent,
-        the query fails with OperationalError; callers must pre-ATTACH.
-        In-memory tests may use a single DB with ensemble_snapshots_v2 as a bare table
-        (no alias needed) — see tests/test_decision_integrity_quarantine.py for pattern.
+        In production the query uses 'forecasts.ensemble_snapshots_v2', which requires
+        the forecasts DB to be ATTACHed as alias 'forecasts'.  When 'forecasts' is not
+        attached (detected via PRAGMA database_list), the query falls back to the
+        unqualified 'ensemble_snapshots_v2' — this supports in-memory test DBs that
+        carry the table without an ATTACH.
+        See tests/test_decision_integrity_quarantine.py for the test fixture pattern.
     """
     recorded_at = datetime.now(timezone.utc).isoformat()
 

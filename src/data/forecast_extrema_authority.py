@@ -26,13 +26,27 @@ class ForecastExtremaEligibility(Enum):
 
 
 # Attribution status values that are considered unambiguously positive.
-_POSITIVE_ATTRIBUTION_STATUSES = frozenset({
+# This is the single authoritative set referenced by both the classifier and
+# the SQL ORDER BY CASE in executable_forecast_reader.py.  Change here
+# propagates automatically to the SQL IN-list via POSITIVE_ATTRIBUTION_STATUS_SQL_IN_LIST.
+POSITIVE_ATTRIBUTION_STATUSES: frozenset[str] = frozenset({
     "EXPLICIT",
     "VERIFIED",
     "OK",
     "CONTRIBUTES",
     "FULLY_INSIDE_TARGET_LOCAL_DAY",
 })
+
+# SQL-ready IN-list literal derived from the positive set above.
+# e.g. "('CONTRIBUTES','EXPLICIT','FULLY_INSIDE_TARGET_LOCAL_DAY','OK','VERIFIED')"
+# Use this in ORDER BY CASE … IN <POSITIVE_ATTRIBUTION_STATUS_SQL_IN_LIST> to stay
+# in sync with the classifier without manual duplication.
+POSITIVE_ATTRIBUTION_STATUS_SQL_IN_LIST: str = (
+    "(" + ",".join(f"'{s}'" for s in sorted(POSITIVE_ATTRIBUTION_STATUSES)) + ")"
+)
+
+# Private alias kept for internal use within this module.
+_POSITIVE_ATTRIBUTION_STATUSES = POSITIVE_ATTRIBUTION_STATUSES
 
 
 @dataclass(frozen=True)

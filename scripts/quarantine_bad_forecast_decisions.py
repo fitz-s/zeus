@@ -2,6 +2,9 @@
 # Created: 2026-05-22
 # Last reused or audited: 2026-05-22
 # Authority basis: docs/operations/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md §PR-E
+# Lifecycle: created=2026-05-22; last_reviewed=2026-05-22; last_reused=never
+# Purpose: PR-E cleanup CLI — tag opportunity_fact rows backed by non-contributing forecasts (dry-run default).
+# Reuse: Run after PR-A/E merge to quarantine legacy bad-forecast decisions. Safe to re-run (idempotent).
 """PR-E cleanup CLI: quarantine opportunity_fact rows backed by non-contributing snapshots.
 
 Default mode is DRY-RUN — prints candidate counts without writing.

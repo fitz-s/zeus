@@ -5,7 +5,7 @@
 """PR-E — CREATE TABLE DDL for decision_integrity_quarantine (trade DB).
 
 Per §PR-E:
-  - New table under SCHEMA_VERSION 30→31 bump.
+  - New table under SCHEMA_VERSION 31→32 bump.
   - Tags opportunity_fact rows (and future fact tables) whose forecast snapshot
     had contributes_to_target_extrema=0 or attribution UNKNOWN.
   - NON-destructive: tag only, never delete source rows.
