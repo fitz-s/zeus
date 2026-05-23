@@ -59,10 +59,11 @@ the workflow look complete.
 
 Discrete `task_*` packet folders are agent-closeable by default once their
 work log, report, or committed code proves the task is complete or superseded.
-The closing agent must move the packet body to `docs/operations/archive/<YYYY>-Q<N>/`,
-update `docs/operations/archive/<YYYY>-Q<N>/INDEX.md`, remove active pointers,
+The closing agent must move the packet body to `docs/archive/<YYYY>-Q<N>/`,
+record the move in `docs/archive_registry.md`, remove active pointers,
 and promote any residual OPEN work into `docs/to-do-list/known_gaps.md` or a
-new admitted packet. Operator-only closeout is required only when the packet
+new admitted packet. Do NOT leave a stub file in `docs/operations/`.
+Operator-only closeout is required only when the packet
 itself says `awaiting operator`, `operator-deferred`, `STAGED, NOT COMMITTED`,
 or carries an active runtime-gating artifact.
 
@@ -78,12 +79,12 @@ the semantic task, one help, one friction, and one next topology delta or
 `.omx/context/` or invent `handoff` files in packet folders.
 
 Tracked packet evidence in this live router is limited to the current rows
-below. Closed packet evidence is archived under `docs/operations/archive/<YYYY>-Q<N>/` and
-indexed in `docs/operations/archive/<YYYY>-Q<N>/INDEX.md`; do not use archived packet folders as
+below. Closed packet evidence is archived under `docs/archive/<YYYY>-Q<N>/` and
+indexed in `docs/archive/<YYYY>-Q<N>/INDEX.md`; do not use archived packet folders as
 active workflow defaults. Active archival rules: `docs/authority/ARCHIVAL_RULES.md`.
 Note: ARCHIVAL_RULES.md now lives at `docs/authority/ARCHIVAL_RULES.md` (relocated from
 `docs/operations/task_2026-05-15_runtime_improvement_engineering_package/04_workspace_hygiene/`
-by W3 2026-05-17). A `.relocated` stub exists at the old path for reference.
+by W3 2026-05-17).
 
 ### Attached Package Inputs
 
@@ -101,7 +102,7 @@ Active routing summary (machine-routable via architecture/docs_registry.yaml):
 - Active task ledger: `docs/operations/current/task.md`
 - Active package: `docs/operations/current/package.yaml`
 - Legacy packets: see operations packet inventory report (T4)
-- Archive: `docs/operations/archive/<quarter>/INDEX.md`
+- Archive: `docs/archive/<quarter>/INDEX.md`
 - Monitoring: `docs/operations/<*_observation>/`
 
 Tracked top-level files (required for docs checks; class/purpose in docs_registry.yaml):
@@ -128,13 +129,14 @@ Tracked top-level files (required for docs checks; class/purpose in docs_registr
 | `ws_poll_reaction/` | active monitoring |
 | `calibration_observation/` | active monitoring |
 | `learning_loop_observation/` | active monitoring |
-| `docs/operations/archive/2026-Q2/` | closed packet archive |
+| `docs/archive/2026-Q2/` | closed packet archive (outside operations/) |
 | `AGENTS.md` | operations router |
 
-Archived packet evidence (physically moved to `docs/operations/archive/<YYYY>-Q<N>/`) is
-listed in `docs/operations/archive/<YYYY>-Q<N>/INDEX.md`; do not re-list those packets here.
-When a packet closes and is archived, create a stub at `docs/operations/<name>.archived`
-and add a row to the quarter INDEX. Active archival rules: see `docs/authority/ARCHIVAL_RULES.md`.
+Archived packet evidence (physically moved to `docs/archive/<YYYY>-Q<N>/`) is
+listed in `docs/archive/<YYYY>-Q<N>/INDEX.md`; do not re-list those packets here.
+When a packet closes and is archived, move it to `docs/archive/<YYYY>-Q<N>/` (gitignored,
+untracked) and add a row to `docs/archive_registry.md`. Do NOT leave a stub file in
+`docs/operations/`. Active archival rules: see `docs/authority/ARCHIVAL_RULES.md`.
 
 ## Single Operations Home
 

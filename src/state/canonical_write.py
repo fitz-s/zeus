@@ -7,7 +7,7 @@ Public symbols:
 """
 # Created: 2026-05-18
 # Last reused or audited: 2026-05-18
-# Authority basis: docs/operations/archive/2026-Q2/task_2026-05-17_post_karachi_remediation/
+# Authority basis: docs/archive/2026-Q2/task_2026-05-17_post_karachi_remediation/
 #                  LIFECYCLE_FINDINGS_DEFERRED.md (WAVE-3 Batch B, F108 reframe)
 from __future__ import annotations
 

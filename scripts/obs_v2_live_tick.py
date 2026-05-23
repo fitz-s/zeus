@@ -4,7 +4,7 @@
 # Last reused or audited: 2026-05-20
 # Purpose: Live rolling-window writer for observation_instants_v2 WU/OGIMET hourly rows.
 # Reuse: Run when ingest_main obs_v2 live-tick, hourly payload identity, or obs_v2 writer relationships change.
-# Authority basis: docs/operations/archive/2026-Q2/task_2026-05-17_post_karachi_remediation/F44_INVESTIGATION.md
+# Authority basis: docs/archive/2026-Q2/task_2026-05-17_post_karachi_remediation/F44_INVESTIGATION.md
 #   Root cause H2: observation_instants_v2 had no live-tick writer. This script provides the
 #   rolling-window live ingest for WU_ICAO and OGIMET_METAR cities. HKO_NATIVE (Hong Kong)
 #   is handled by the existing scripts/hko_ingest_tick.py --project-only path.

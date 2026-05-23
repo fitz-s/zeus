@@ -139,5 +139,5 @@ rules:
     blocking: false
     description: >
       Evidence files should live under docs/operations/current/evidence/<slug>/
-      or docs/operations/archive/. Legacy paths under docs/operations/task_*_*/evidence/
+      or docs/archive/. Legacy paths under docs/operations/task_*_*/evidence/
       are recognized and not double-warned.

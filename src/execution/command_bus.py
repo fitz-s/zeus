@@ -1,7 +1,7 @@
 # Created: 2026-04-26
 # Last reused/audited: 2026-05-15
 # Authority basis: docs/operations/task_2026-04-26_execution_state_truth_p1_command_bus/implementation_plan.md §P1.S2
-#                  + docs/operations/archive/2026-Q2/task_2026-05-15_live_order_e2e_goal/LIVE_ORDER_E2E_GOAL_PLAN.md
+#                  + docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_goal/LIVE_ORDER_E2E_GOAL_PLAN.md
 """Venue command bus — typed surface for the durable command journal.
 
 Pure type contract. No I/O, no DB, no side effects. P1.S3 wires the executor

@@ -128,7 +128,7 @@ to the table above and either archive or annotate its dir with
 
 ## Archived
 
-These items have been moved to `docs/operations/archive/` per `POLICY.md`.
+These items have been moved to `docs/archive/` (outside operations/) per `POLICY.md`.
 
 | Item | Status | Purpose |
 |---|---|---|

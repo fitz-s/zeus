@@ -3,7 +3,7 @@
 archive_may_batch_2026-05-16.py
 
 Executes the ARCHIVE_QUEUE_FOR_NEXT_PR.md batch migration for ROUTINE_ARCHIVE
-and HISTORICAL_LESSON entries from docs/operations/ → docs/operations/archive/2026-Q2/.
+and HISTORICAL_LESSON entries from docs/operations/ → docs/archive/2026-Q2/.
 
 Writes WAVE 2 .archived stubs at the original location for each entry.
 Appends INDEX.md rows for all migrated entries.
@@ -13,7 +13,7 @@ Usage:
   python3 scripts/archive_may_batch_2026-05-16.py --apply
 
 Created: 2026-05-16
-Authority basis: docs/operations/archive/2026-Q2/task_2026-05-16_doc_alignment_plan/ARCHIVE_QUEUE_FOR_NEXT_PR.md
+Authority basis: docs/archive/2026-Q2/task_2026-05-16_doc_alignment_plan/ARCHIVE_QUEUE_FOR_NEXT_PR.md
 """
 import argparse
 import subprocess
@@ -28,7 +28,7 @@ from datetime import date
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parent
 
-ARCHIVE_TARGET = REPO_ROOT / "docs/operations/archive/2026-Q2"
+ARCHIVE_TARGET = REPO_ROOT / "docs/archive/2026-Q2"
 OPS_DIR = REPO_ROOT / "docs/operations"
 INDEX_PATH = ARCHIVE_TARGET / "INDEX.md"
 
@@ -125,7 +125,7 @@ def git_mv(src: Path, dst: Path, dry: bool) -> None:
 
 def write_stub_dir(name: str, dry: bool) -> None:
     stub_path = OPS_DIR / f"{name}.archived"
-    archive_loc = f"docs/operations/archive/2026-Q2/{name}"
+    archive_loc = f"docs/archive/2026-Q2/{name}"
     restore_cmd = f"git mv {archive_loc} docs/operations/{name}"
     content = f"""---
 archived_to: {archive_loc}
@@ -146,7 +146,7 @@ migration_source: docs/operations/{name}
 
 def write_stub_file(name: str, dry: bool) -> None:
     stub_path = OPS_DIR / f"{name}.archived"
-    archive_loc = f"docs/operations/archive/2026-Q2/{name}"
+    archive_loc = f"docs/archive/2026-Q2/{name}"
     restore_cmd = f"git mv {archive_loc} docs/operations/{name}"
     content = f"""---
 archived_to: {archive_loc}

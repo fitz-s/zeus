@@ -1,7 +1,8 @@
 # Archive Registry
 
-**DEPRECATED 2026-05-16.** Archive content moved to `docs/operations/archive/<YYYY>-Q<N>/`.
-See `docs/operations/archive/2026-Q2/INDEX.md` for the 2026-Q2 migration index.
+**UPDATED 2026-05-23.** Archive content lives at `docs/archive/<YYYY>-Q<N>/` (outside operations/).
+See `docs/archive/2026-Q2/` for the 2026-Q2 archive. When archiving a packet, move it to
+`docs/archive/<YYYY>-Q<N>/` and add a row here. Do NOT leave a stub in `docs/operations/`.
 Active archival rules: `ARCHIVAL_RULES.md` (at `docs/authority/ARCHIVAL_RULES.md`).
 
 This file is retained to preserve back-references. Do not update it; it is historical only.

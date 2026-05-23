@@ -2,7 +2,7 @@
 
 # Created: 2026-05-17
 # Last reused or audited: 2026-05-17
-# Authority basis: docs/operations/archive/2026-Q2/task_2026-05-17_reference_authority_docs_phase/PLAN.md Part B
+# Authority basis: docs/archive/2026-Q2/task_2026-05-17_reference_authority_docs_phase/PLAN.md Part B
 # Lifecycle: created=2026-05-17; last_reviewed=2026-05-17; last_reused=never
 # Purpose: live verify reality_contracts YAML against Polymarket CLOB + Open-Meteo; renew last_verified on PASS
 # Reuse: re-run with --dry-run before --apply; check VERIFIER_REPORT.md for prior UNMAPPED contracts

@@ -1,7 +1,7 @@
 # Created: 2026-05-19
 # Last reused or audited: 2026-05-19
-# Authority basis: docs/operations/archive/2026-Q2/task_2026-05-17_strategy_vnext_phase0/PHASE_0_V4_ULTRAPLAN.md §H
-#                  docs/operations/archive/2026-Q2/task_2026-05-17_strategy_vnext_phase0/PHASE_0_V4_ADDENDUM.md
+# Authority basis: docs/archive/2026-Q2/task_2026-05-17_strategy_vnext_phase0/PHASE_0_V4_ULTRAPLAN.md §H
+#                  docs/archive/2026-Q2/task_2026-05-17_strategy_vnext_phase0/PHASE_0_V4_ADDENDUM.md
 # Lifecycle: created=2026-05-19; last_reviewed=2026-05-19; last_reused=2026-05-19
 # Purpose: Restore settlements_v2 provenance_json rows from pre-backfill snapshot
 # Reuse: operator_invoked only; requires --apply + snapshot file; never called by daemon

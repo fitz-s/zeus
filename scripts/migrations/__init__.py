@@ -3,7 +3,7 @@
 #   Each migration module at scripts/migrations/YYYYMM_*.py exposes def up(conn).
 #   Ledger table _migrations_applied tracks applied migrations in the target DB.
 # Reuse: Run through scripts/migrations/__main__.py or direct tests with db_identity.
-# Authority: docs/operations/archive/2026-Q2/task_2026-05-17_post_karachi_remediation/FIX_SEV1_BUNDLE.md §F23
+# Authority: docs/archive/2026-Q2/task_2026-05-17_post_karachi_remediation/FIX_SEV1_BUNDLE.md §F23
 import importlib.util
 import re
 import sqlite3

@@ -1912,8 +1912,8 @@ test_metadata:
     source_under_test:
       - src/contracts/day0_observation_context.py
     law_dependencies:
-      - docs/operations/archive/2026-Q2/task_2026-05-17_strategy_vnext_phase0/PHASE_0_V4_ADDENDUM.md
-      - docs/operations/archive/2026-Q2/task_2026-05-17_strategy_vnext_phase0/scaffolds/pr5_scaffold_report.md
+      - docs/archive/2026-Q2/task_2026-05-17_strategy_vnext_phase0/PHASE_0_V4_ADDENDUM.md
+      - docs/archive/2026-Q2/task_2026-05-17_strategy_vnext_phase0/scaffolds/pr5_scaffold_report.md
     notes: >
       R-5.1: BoundClassification enum exhaustiveness and 12-cell property matrix.
       Enum exhaustiveness: asserts exactly 3 members (DETERMINISTIC, BOUNDED_LIVE,
@@ -1942,8 +1942,8 @@ test_metadata:
       - src/signal/diurnal.py
       - src/contracts/dst_semantics.py
     law_dependencies:
-      - docs/operations/archive/2026-Q2/task_2026-05-17_strategy_vnext_phase0/PHASE_0_V4_ADDENDUM.md
-      - docs/operations/archive/2026-Q2/task_2026-05-17_strategy_vnext_phase0/scaffolds/pr5_scaffold_report.md
+      - docs/archive/2026-Q2/task_2026-05-17_strategy_vnext_phase0/PHASE_0_V4_ADDENDUM.md
+      - docs/archive/2026-Q2/task_2026-05-17_strategy_vnext_phase0/scaffolds/pr5_scaffold_report.md
     notes: >
       R-5.2: DST property tests for build_day0_temporal_context covering 3 archetypes.
       Archetype A: London 2026-03-29 spring-forward (GMT→BST, missing 01:00–01:59
@@ -1973,8 +1973,8 @@ test_metadata:
       - src/signal/day0_router.py
       - src/types/temperature.py
     law_dependencies:
-      - docs/operations/archive/2026-Q2/task_2026-05-17_strategy_vnext_phase0/PHASE_0_V4_ADDENDUM.md
-      - docs/operations/archive/2026-Q2/task_2026-05-17_strategy_vnext_phase0/scaffolds/pr5_scaffold_report.md
+      - docs/archive/2026-Q2/task_2026-05-17_strategy_vnext_phase0/PHASE_0_V4_ADDENDUM.md
+      - docs/archive/2026-Q2/task_2026-05-17_strategy_vnext_phase0/scaffolds/pr5_scaffold_report.md
     notes: >
       R-5.3: CelsiusBox/FahrenheitBox propagation boundary antibodies, mirroring F3
       PR #177 pattern from tests/types/test_celsius_box_arithmetic.py. CelsiusBox
@@ -2004,8 +2004,8 @@ test_metadata:
       - src/contracts/decision_group_id.py
       - src/state/schema/v2_schema.py
     law_dependencies:
-      - docs/operations/archive/2026-Q2/task_2026-05-17_strategy_vnext_phase0/PHASE_0_V4_ADDENDUM.md
-      - docs/operations/archive/2026-Q2/task_2026-05-17_strategy_vnext_phase0/scaffolds/pr4_scaffold_report.md
+      - docs/archive/2026-Q2/task_2026-05-17_strategy_vnext_phase0/PHASE_0_V4_ADDENDUM.md
+      - docs/archive/2026-Q2/task_2026-05-17_strategy_vnext_phase0/scaffolds/pr4_scaffold_report.md
     notes: >
       R-4.1: Three live (non-xfail) tests pin the ValueError contract for
       decision_group_id_v1_hash() input validation — empty market_id, negative
@@ -2030,7 +2030,7 @@ test_metadata:
     source_under_test:
       - src/calibration/platt.py
     law_dependencies:
-      - docs/operations/archive/2026-Q2/task_2026-05-17_strategy_vnext_phase0/PHASE_0_V4_ADDENDUM.md
+      - docs/archive/2026-Q2/task_2026-05-17_strategy_vnext_phase0/PHASE_0_V4_ADDENDUM.md
       - docs/reference/zeus_math_spec.md
     notes: >
       INV-eps-spec-conformance CI antibody: 5 live tests (no xfail) that fail
@@ -2057,9 +2057,9 @@ test_metadata:
       - scripts/audit_calibration_pairs_v2_null_groups.py
       - src/state/schema/v2_schema.py
     law_dependencies:
-      - docs/operations/archive/2026-Q2/task_2026-05-17_strategy_vnext_phase0/PHASE_0_V4_ADDENDUM.md
-      - docs/operations/archive/2026-Q2/task_2026-05-17_strategy_vnext_phase0/preflight/migration_dry_runs.json
-      - docs/operations/archive/2026-Q2/task_2026-05-17_strategy_vnext_phase0/scaffolds/pr4_scaffold_report.md
+      - docs/archive/2026-Q2/task_2026-05-17_strategy_vnext_phase0/PHASE_0_V4_ADDENDUM.md
+      - docs/archive/2026-Q2/task_2026-05-17_strategy_vnext_phase0/preflight/migration_dry_runs.json
+      - docs/archive/2026-Q2/task_2026-05-17_strategy_vnext_phase0/scaffolds/pr4_scaffold_report.md
     notes: >
       R-4.3: One live test (test_trigger_mode_blocks_null_insert_on_synthetic_fixture)
       validates the trigger SQL template end-to-end on a synthetic fixture DB —
@@ -2085,7 +2085,7 @@ test_metadata:
     source_under_test:
       - src/calibration/platt.py
     law_dependencies:
-      - docs/operations/archive/2026-Q2/task_2026-05-17_strategy_vnext_phase0/PHASE_0_V4_ADDENDUM.md
+      - docs/archive/2026-Q2/task_2026-05-17_strategy_vnext_phase0/PHASE_0_V4_ADDENDUM.md
     notes: >
       §14.10 ±inf roundtrip audit: 7 live tests (no xfail) confirm that
       P_CLAMP_LOW=0.01 / P_CLAMP_HIGH=0.99 prevent ±inf logit values in all
@@ -2111,7 +2111,7 @@ test_metadata:
     source_under_test:
       - src/contracts/decision_group_id.py
     law_dependencies:
-      - docs/operations/archive/2026-Q2/task_2026-05-17_strategy_vnext_phase0/PHASE_0_V4_ADDENDUM.md
+      - docs/archive/2026-Q2/task_2026-05-17_strategy_vnext_phase0/PHASE_0_V4_ADDENDUM.md
     notes: >
       R-4.5: AST + structural audit. Five live tests pin the importability,
       NewType-as-str-subtype property, callable + correct-signature contract,
@@ -2132,8 +2132,8 @@ test_metadata:
       - src/contracts/resolution_era.py
       - src/state/settlement_writers.py
     law_dependencies:
-      - docs/operations/archive/2026-Q2/task_2026-05-17_strategy_vnext_phase0/PHASE_0_V4_ULTRAPLAN.md
-      - docs/operations/archive/2026-Q2/task_2026-05-17_strategy_vnext_phase0/critic_1_pr1_settlement.md
+      - docs/archive/2026-Q2/task_2026-05-17_strategy_vnext_phase0/PHASE_0_V4_ULTRAPLAN.md
+      - docs/archive/2026-Q2/task_2026-05-17_strategy_vnext_phase0/critic_1_pr1_settlement.md
     notes: >
       Relationship tests R-1.1 and R-1.2. R-1.1: post-cutover market (settled_at >= 2026-02-21)
       dispatches to INTERNAL_RESOLVER_POST_2026_02_21; provenance_json contains
@@ -2156,7 +2156,7 @@ test_metadata:
       - src/ingest/harvester_truth_writer.py
       - src/state/settlement_writers.py
     law_dependencies:
-      - docs/operations/archive/2026-Q2/task_2026-05-17_strategy_vnext_phase0/PHASE_0_V4_ULTRAPLAN.md
+      - docs/archive/2026-Q2/task_2026-05-17_strategy_vnext_phase0/PHASE_0_V4_ULTRAPLAN.md
     notes: >
       Relationship test R-1.3. AST + line-scan audit asserting the literal string
       'harvester_live_uma_vote' does NOT appear in harvester.py or
@@ -2178,8 +2178,8 @@ test_metadata:
       - src/state/settlement_writers.py
       - src/state/db.py
     law_dependencies:
-      - docs/operations/archive/2026-Q2/task_2026-05-17_strategy_vnext_phase0/PHASE_0_V4_ULTRAPLAN.md
-      - docs/operations/archive/2026-Q2/task_2026-05-17_strategy_vnext_phase0/critic_1_pr1_settlement.md
+      - docs/archive/2026-Q2/task_2026-05-17_strategy_vnext_phase0/PHASE_0_V4_ULTRAPLAN.md
+      - docs/archive/2026-Q2/task_2026-05-17_strategy_vnext_phase0/critic_1_pr1_settlement.md
       - architecture/db_table_ownership.yaml
     notes: >
       Relationship test R-1.4. INV-37 ATTACH+SAVEPOINT compliance: monkey-patches
@@ -2201,8 +2201,8 @@ test_metadata:
     source_under_test:
       - src/state/uma_resolution_listener.py
     law_dependencies:
-      - docs/operations/archive/2026-Q2/task_2026-05-17_strategy_vnext_phase0/PHASE_0_V4_ULTRAPLAN.md
-      - docs/operations/archive/2026-Q2/task_2026-05-17_strategy_vnext_phase0/critic_1_pr1_settlement.md
+      - docs/archive/2026-Q2/task_2026-05-17_strategy_vnext_phase0/PHASE_0_V4_ULTRAPLAN.md
+      - docs/archive/2026-Q2/task_2026-05-17_strategy_vnext_phase0/critic_1_pr1_settlement.md
     notes: >
       Relationship test R-1.5. Polygon reorg safety: a uma_resolution row with
       confirmation_count < confirmations_required that is later invalidated by a chain
@@ -2224,8 +2224,8 @@ test_metadata:
       - src/state/settlement_writers.py
       - src/contracts/resolution_era.py
     law_dependencies:
-      - docs/operations/archive/2026-Q2/task_2026-05-17_strategy_vnext_phase0/PHASE_0_V4_ULTRAPLAN.md
-      - docs/operations/archive/2026-Q2/task_2026-05-17_strategy_vnext_phase0/preflight/migration_dry_runs.json
+      - docs/archive/2026-Q2/task_2026-05-17_strategy_vnext_phase0/PHASE_0_V4_ULTRAPLAN.md
+      - docs/archive/2026-Q2/task_2026-05-17_strategy_vnext_phase0/preflight/migration_dry_runs.json
     notes: >
       CI antibody: after PR 1 merge and backfill, SELECT COUNT(*) FROM settlements_v2
       WHERE provenance_json LIKE '%harvester_live_uma_vote%' AND settled_at >= '2026-02-21'
@@ -2496,7 +2496,7 @@ test_metadata:
     created: "2026-05-19"
     last_reused_or_audited: "2026-05-19"
     law_dependencies:
-      - docs/operations/archive/2026-Q2/task_2026-05-17_strategy_vnext_phase0/PHASE_0_V4_ADDENDUM.md
+      - docs/archive/2026-Q2/task_2026-05-17_strategy_vnext_phase0/PHASE_0_V4_ADDENDUM.md
       - scaffolds/pr27_scaffold.md
     notes: >
       R-EE.1–R-EE.4, R-EE.7–R-EE.8: INV-kelly-effective enforcement, bucket
@@ -2508,7 +2508,7 @@ test_metadata:
     created: "2026-05-19"
     last_reused_or_audited: "2026-05-19"
     law_dependencies:
-      - docs/operations/archive/2026-Q2/task_2026-05-17_strategy_vnext_phase0/PHASE_0_V4_ADDENDUM.md
+      - docs/archive/2026-Q2/task_2026-05-17_strategy_vnext_phase0/PHASE_0_V4_ADDENDUM.md
       - scaffolds/pr27_scaffold.md
     notes: >
       R-EE.5–R-EE.6: PR 2 wide_spread_display_substitution + depth_at_best_ask
@@ -2588,7 +2588,7 @@ test_metadata:
       - src/state/settlement_writers.py
       - src/contracts/resolution_era.py
     law_dependencies:
-      - docs/operations/archive/2026-Q2/task_2026-05-17_strategy_vnext_phase0/PHASE_0_V4_ULTRAPLAN.md
+      - docs/archive/2026-Q2/task_2026-05-17_strategy_vnext_phase0/PHASE_0_V4_ULTRAPLAN.md
       - preflight/eth_call_resolution_authority.json
     notes: >
       Runtime CI antibody for INV-ERA-2: re-fetches keccak256(eth_getCode(

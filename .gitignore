@@ -203,7 +203,7 @@ config/settings.json
 docs/**/*.xlsx
 docs/**/~$*
 docs/archives/
-docs/operations/archive/
+docs/archive/
 docs/historical_evidence/
 docs/artifacts/
 docs/reports/generated/

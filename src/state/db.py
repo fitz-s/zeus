@@ -248,7 +248,7 @@ def get_forecasts_connection_with_world(
     Callers MUST use this as a context manager and MUST NOT close the
     connection themselves — the ``finally`` block handles it.
 
-    Authority: docs/operations/archive/2026-Q2/task_2026-05-14_k1_followups/PLAN.md §2 P0
+    Authority: docs/archive/2026-Q2/task_2026-05-14_k1_followups/PLAN.md §2 P0
     CRITIC fix per IMPLEMENTATION_REVIEW_P0.md Pass D Option (a).
     """
     from src.state.db_writer_lock import (

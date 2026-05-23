@@ -158,7 +158,7 @@ SKIP_PREFIXES: list[str] = [
     "docs/archives/",
     "docs/artifacts/",
     "docs/reports/",
-    "docs/operations/archive/",
+    "docs/archive/",
     "docs/historical_evidence/",
     "logs/",
     "raw/",

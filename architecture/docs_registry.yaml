@@ -65,8 +65,8 @@ allowed_coverage_scopes:
 parent_coverage_allowed_patterns:
 - docs/reference/legacy/
 - docs/operations/task_*/
-- docs/operations/archive/2026-Q2/task_*/
-- docs/operations/archive/2026-Q2/
+- docs/archive/2026-Q2/task_*/
+- docs/archive/2026-Q2/
 - docs/operations/[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]_*/
 - docs/operations/*_package_*/
 - docs/operations/*_observation/
@@ -694,7 +694,7 @@ entries:
   contains_volatile_metrics: true
   current_tense_allowed: true
   refresh_source: packet_audit
-- path: docs/operations/archive/2026-Q2/zeus_system_review_2026-05-16.md
+- path: docs/archive/2026-Q2/zeus_system_review_2026-05-16.md
   doc_class: report
   default_read: false
   direct_reference_allowed: true
@@ -730,7 +730,7 @@ entries:
   contains_volatile_metrics: true
   current_tense_allowed: false
   refresh_source: n/a
-- path: docs/operations/archive/2026-Q2/2026-05-18_worktree_create_hook_cwd_leakage/
+- path: docs/archive/2026-Q2/2026-05-18_worktree_create_hook_cwd_leakage/
   doc_class: operations
   default_read: false
   direct_reference_allowed: false
@@ -777,7 +777,7 @@ entries:
   current_tense_allowed: false
   refresh_source: manual_operator_audit
 
-- path: docs/operations/archive/2026-Q2/
+- path: docs/archive/2026-Q2/
   doc_class: historical
   default_read: false
   direct_reference_allowed: false
@@ -1793,7 +1793,7 @@ entries:
   refresh_source: manual_operator_audit
 # WAVE 1 additions — 5 SCAFFOLD docs from PR #119 (2026-05-16)
 # Dup-check: grep for task_2026-05-15_runtime_improvement_engineering_package returned 0 hits before adding.
-- path: docs/operations/archive/2026-Q2/task_2026-05-15_runtime_improvement_engineering_package/01_topology_v_next/UNIVERSAL_TOPOLOGY_DESIGN.md
+- path: docs/archive/2026-Q2/task_2026-05-15_runtime_improvement_engineering_package/01_topology_v_next/UNIVERSAL_TOPOLOGY_DESIGN.md
   doc_class: authority
   default_read: true
   direct_reference_allowed: true
@@ -1811,7 +1811,7 @@ entries:
   contains_volatile_metrics: false
   current_tense_allowed: false
   refresh_source: manual_operator_audit
-- path: docs/operations/archive/2026-Q2/task_2026-05-15_runtime_improvement_engineering_package/01_topology_v_next/ZEUS_BINDING_LAYER.md
+- path: docs/archive/2026-Q2/task_2026-05-15_runtime_improvement_engineering_package/01_topology_v_next/ZEUS_BINDING_LAYER.md
   doc_class: authority
   default_read: true
   direct_reference_allowed: true
@@ -1829,7 +1829,7 @@ entries:
   contains_volatile_metrics: false
   current_tense_allowed: false
   refresh_source: manual_operator_audit
-- path: docs/operations/archive/2026-Q2/task_2026-05-15_runtime_improvement_engineering_package/02_daily_maintenance_agent/DESIGN.md
+- path: docs/archive/2026-Q2/task_2026-05-15_runtime_improvement_engineering_package/02_daily_maintenance_agent/DESIGN.md
   doc_class: authority
   default_read: true
   direct_reference_allowed: true
@@ -1847,7 +1847,7 @@ entries:
   contains_volatile_metrics: false
   current_tense_allowed: false
   refresh_source: manual_operator_audit
-- path: docs/operations/archive/2026-Q2/task_2026-05-15_runtime_improvement_engineering_package/02_daily_maintenance_agent/SAFETY_CONTRACT.md
+- path: docs/archive/2026-Q2/task_2026-05-15_runtime_improvement_engineering_package/02_daily_maintenance_agent/SAFETY_CONTRACT.md
   doc_class: authority
   default_read: true
   direct_reference_allowed: true
@@ -1865,7 +1865,7 @@ entries:
   contains_volatile_metrics: false
   current_tense_allowed: false
   refresh_source: manual_operator_audit
-- path: docs/operations/archive/2026-Q2/task_2026-05-15_runtime_improvement_engineering_package/02_daily_maintenance_agent/TASK_CATALOG.yaml
+- path: docs/archive/2026-Q2/task_2026-05-15_runtime_improvement_engineering_package/02_daily_maintenance_agent/TASK_CATALOG.yaml
   doc_class: authority
   default_read: true
   direct_reference_allowed: true

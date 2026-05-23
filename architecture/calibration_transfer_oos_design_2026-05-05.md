@@ -135,4 +135,4 @@ def evaluate_calibration_transfer_policy_with_evidence(
 ## Cross-references
 
 - `architecture/incomplete_migrations_2026-05-05.yaml` (to be created): registers PR #56 evidence-removal-without-replacement as a recurring failure pattern.
-- `docs/operations/archive/task_2026-05-04_tigge_ingest_resilience/POST_PR55_PR56_REALIGNMENT.md:54-55` — original TODO note acknowledging the gap.
+- `docs/archive/task_2026-05-04_tigge_ingest_resilience/POST_PR55_PR56_REALIGNMENT.md:54-55` — original TODO note acknowledging the gap.
