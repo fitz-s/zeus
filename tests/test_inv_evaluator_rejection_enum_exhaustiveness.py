@@ -98,6 +98,7 @@ MIGRATION_TABLE: list[tuple[int, str, str]] = [
     (3398, "has no executable token payload", "selected_edge_no_token_payload"),
     (3413, "strategy_key_unclassified", "strategy_key_unclassified"),
     (3427, "[ci_rejection_reason]", "confidence_band_insufficient"),
+    (3447, "[period_extrema_day0_guard]", "day0_no_forecast_hours_remain"),
     (3463, "[ultra_low_price_reason]", "center_buy_ultra_low_price"),
     (3479, "REENTRY_BLOCKED", "reentry_blocked"),
     (3494, "TOKEN_COOLDOWN", "token_cooldown"),
@@ -113,7 +114,7 @@ MIGRATION_TABLE: list[tuple[int, str, str]] = [
     (3850, "[reason] check_position_allowed", "risk_limits_exceeded"),
 ]
 
-assert len(MIGRATION_TABLE) == 69, f"Migration table must have 69 rows, got {len(MIGRATION_TABLE)}"
+assert len(MIGRATION_TABLE) == 70, f"Migration table must have 70 rows, got {len(MIGRATION_TABLE)}"
 
 
 def _get_evaluator_path() -> pathlib.Path:
@@ -197,7 +198,7 @@ def test_inv_evaluator_no_raw_string_literals_post_migration() -> None:
 
 
 def test_inv_evaluator_callsite_count() -> None:
-    """Structural: AST-counted rejection_reasons=[...] callsites == 69.
+    """Structural: AST-counted rejection_reasons=[...] callsites == 70.
 
     Fails if callsites are added or removed without updating the migration plan.
     No xfail -- count is a structural invariant.
