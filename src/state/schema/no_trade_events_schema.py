@@ -71,7 +71,7 @@ CREATE TABLE IF NOT EXISTS no_trade_events (
     event_source        TEXT,
     shadow_runtime      INTEGER NOT NULL DEFAULT 0 CHECK (shadow_runtime IN (0, 1)),
     observed_at         TEXT NOT NULL,
-    schema_version      INTEGER NOT NULL CHECK (schema_version IN (14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32)),
+    schema_version      INTEGER NOT NULL CHECK (schema_version IN (14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33)),
     schema_compatibility TEXT NOT NULL DEFAULT 'current'
         CHECK (schema_compatibility IN ('current', 'degraded')),
     PRIMARY KEY (market_slug, temperature_metric, target_date, observation_time, decision_seq)
@@ -91,7 +91,7 @@ CREATE TABLE no_trade_events_new (
     event_source        TEXT,
     shadow_runtime      INTEGER NOT NULL DEFAULT 0 CHECK (shadow_runtime IN (0, 1)),
     observed_at         TEXT NOT NULL,
-    schema_version      INTEGER NOT NULL CHECK (schema_version IN (14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32)),
+    schema_version      INTEGER NOT NULL CHECK (schema_version IN (14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33)),
     schema_compatibility TEXT NOT NULL DEFAULT 'current'
         CHECK (schema_compatibility IN ('current', 'degraded')),
     PRIMARY KEY (market_slug, temperature_metric, target_date, observation_time, decision_seq)
@@ -222,8 +222,8 @@ def _rebuild_stale_no_trade_events_table(conn: sqlite3.Connection) -> None:
             shadow_runtime,
             observed_at,
             CASE
-                WHEN schema_version IN (14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30) THEN schema_version
-                ELSE 28
+                WHEN schema_version IN (14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33) THEN schema_version
+                ELSE 33
             END,
             schema_compatibility
         FROM no_trade_events

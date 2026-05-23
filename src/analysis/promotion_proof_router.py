@@ -70,6 +70,9 @@ _PIPELINE_B_STRATEGY_KEYS: frozenset[str] = frozenset({
     # not covered by the base key aliases above — MAJOR-3 fix).
     "opening_inertia_relaxation",              # S2 OpeningInertiaRelaxation
     "imminent_open_capture_posterior_collapse",  # S3 ImminentOpenCapturePosteriorCollapse
+    # C-EPIC combination candidates (§13/§14) — explicit membership, not catch-all fallthrough.
+    "c1_joint_tail_bayes",                     # C1 JointTailBayes (shoulder_buy × weather_event)
+    "c2_opening_stale_fok",                    # C2 OpeningStaleQuoteFOK (opening_inertia × stale_quote)
 })
 
 

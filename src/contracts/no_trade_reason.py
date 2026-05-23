@@ -188,6 +188,17 @@ class NoTradeReason(StrEnum):
     PHYSICAL_INTERVAL_UNPROFITABLE = auto()    # settlement_capture_shadow: I_t⊆B_i or disjoint but a+phi≥1 → no positive profit
     SETTLEMENT_CAPTURE_NOT_LOCKED = auto()     # settlement_capture_shadow: edge is not observation-locked (day0_nowcast scope)
 
+    # ── C1: shoulder_buy × weather_event joint tail Bayes (§13) ───────────────
+    # Authority: STRATEGY_TAXONOMY_DIRECTIVE.md §13
+    JOINT_EVT_ALERT_UNWIRED = auto()          # c1_joint_tail_bayes: EVT tail model OR alert feed not wired → data-gated no_trade
+    JOINT_EVT_ALERT_LR_MISSING = auto()       # c1_joint_tail_bayes: LR table lookup returned None for (alertType, city, season, leadTime)
+    JOINT_EVT_TAIL_NO_EDGE = auto()           # c1_joint_tail_bayes: p⁻_tail(X,A) − a_YES − phi ≤ 0; joint posterior below ask+fee
+
+    # ── C2: opening_inertia × stale_quote opening-stale-FOK (§14) ─────────────
+    # Authority: STRATEGY_TAXONOMY_DIRECTIVE.md §14
+    OPENING_STALE_FOK_UNWIRED = auto()        # c2_opening_stale_fok: opening posterior (p⁻) OR stale-quote inputs not wired → data-gated
+    OPENING_STALE_FOK_NO_EDGE = auto()        # c2_opening_stale_fok: EV = Pr(F)·(p⁻ − a0 − phi) ≤ 0; no positive expected return
+
 
     # ── Probability sanity (day0 HIGH distribution gate) ─────────────────────
     PROBABILITY_SANITY_GATE = auto()            # validate_high_distribution failed before Kelly sizing
