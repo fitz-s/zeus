@@ -270,15 +270,30 @@ class TestFlagOnWritesDecisionEvents:
         """R-1(iii): flag ON + WeatherEventArbitrage enter → decision_events with strategy_key."""
         import src.engine.shadow_candidate_dispatch as scd
         from src.strategy.candidates import WeatherEventArbitrage
+        from src.strategy.bayes_alert import LRRecord
         monkeypatch.setattr(scd, "shadow_candidate_capture_enabled", lambda: True)
-        monkeypatch.setattr(scd, "_ALL_SHADOW_CANDIDATES", [WeatherEventArbitrage()])
+
+        # Supply a stub LR table that returns a high-LR record so the Bayes gate passes.
+        class _HighLRTable:
+            def lookup(self, **kwargs):  # noqa: ANN001
+                return LRRecord(point=6.0, lower=5.0, alert_type="ExtremeHeat",
+                                city="chicago", season="summer", lead_time_hours=12)
+
+        candidate = WeatherEventArbitrage(lr_table=_HighLRTable())
+        monkeypatch.setattr(scd, "_ALL_SHADOW_CANDIDATES", [candidate])
 
         conn = _make_conn()
-        # WeatherEventArbitrage enter condition: alert_source in trusted set + active_weather_alert=True
+        # WeatherEventArbitrage enter: trusted source + active alert + prior_p=0.10
+        # + LR=5.0 → p'⁻ ≈ 0.357; best_ask=0.30 → edge positive.
         analysis = SimpleNamespace(
-            metrics=_make_metrics(),
+            metrics=_make_metrics(best_ask=Decimal("0.30")),
             alert_source="noaa_alerts",
             active_weather_alert=True,
+            alert_prior_p=0.10,
+            alert_type="ExtremeHeat",
+            alert_city="chicago",
+            alert_season="summer",
+            alert_lead_time_hours=12,
         )
         nk = _make_natural_key()
 
@@ -306,16 +321,15 @@ class TestFlagOnWritesDecisionEvents:
         monkeypatch.setattr(scd, "_ALL_SHADOW_CANDIDATES", [LiquidityProvisionWithHeartbeat()])
 
         conn = _make_conn()
-        # LiquidityProvisionWithHeartbeat enter: fill_probability >= 0.30
+        # LiquidityProvisionWithHeartbeat enter (G2 interface):
+        # market_clob_adverse_selection.p_fair_lower_bound - maker_bid - adverse_selection_upper_bound > 0
+        # 0.65 - 0.55 - 0.05 = 0.05 > 0
         analysis = SimpleNamespace(
             metrics=_make_metrics(depth_at_best_ask=8),
-            passive_maker_estimate=SimpleNamespace(
-                expected_fill_probability=Decimal("0.55"),
-                queue_depth_ahead=None,
-                adverse_selection_score=Decimal("0.01"),
-                evidence_order_count=10,
-                evidence_fill_count=5,
-                evidence_source="venue_command_trade_history",
+            market_clob_adverse_selection=SimpleNamespace(
+                p_fair_lower_bound=Decimal("0.65"),
+                maker_bid=Decimal("0.55"),
+                adverse_selection_upper_bound=Decimal("0.05"),
             ),
         )
         nk = _make_natural_key()

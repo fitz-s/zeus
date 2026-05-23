@@ -504,15 +504,27 @@ class TestWeatherEventArbitrageRelationship:
     """R-test: weather_event_arbitrage enter→decision_events, no_trade→no_trade_events."""
 
     def test_enter_path_writes_decision_events_row_with_correct_strategy_key(self):
-        """Enter path: trusted alert + active → decision_events with correct strategy_key."""
-        conn = _make_conn()
-        candidate = WeatherEventArbitrage()
+        """Enter path: trusted alert + active + prior_p + LR table → decision_events."""
+        from src.strategy.bayes_alert import LRRecord
 
-        metrics = _make_metrics()
+        class _HighLRTable:
+            def lookup(self, **kwargs):  # noqa: ANN001
+                return LRRecord(point=6.0, lower=5.0, alert_type="ExtremeHeat",
+                                city="chicago", season="summer", lead_time_hours=12)
+
+        conn = _make_conn()
+        candidate = WeatherEventArbitrage(lr_table=_HighLRTable())
+
+        metrics = _make_metrics(best_ask=Decimal("0.30"))
         analysis = SimpleNamespace(
             metrics=metrics,
             alert_source="noaa_alerts",
             active_weather_alert=True,
+            alert_prior_p=0.10,
+            alert_type="ExtremeHeat",
+            alert_city="chicago",
+            alert_season="summer",
+            alert_lead_time_hours=12,
         )
         ctx = _make_context(conn, analysis)
 
@@ -585,16 +597,28 @@ class TestWeatherEventArbitrageRelationship:
         assert "candidate_strategy_key=weather_event_arbitrage" in rows[0]["reason_detail"]
 
     def test_neither_path_silently_drops(self):
-        conn = _make_conn()
-        candidate = WeatherEventArbitrage()
+        from src.strategy.bayes_alert import LRRecord
 
-        # Enter path
+        class _HighLRTable:
+            def lookup(self, **kwargs):  # noqa: ANN001
+                return LRRecord(point=6.0, lower=5.0, alert_type="ExtremeHeat",
+                                city="chicago", season="summer", lead_time_hours=12)
+
+        conn = _make_conn()
+        candidate = WeatherEventArbitrage(lr_table=_HighLRTable())
+
+        # Enter path: trusted alert + prior_p + LR table → decision_events
         ctx1 = _make_context(
             conn,
             SimpleNamespace(
-                metrics=_make_metrics(),
+                metrics=_make_metrics(best_ask=Decimal("0.30")),
                 alert_source="nws_alerts",
                 active_weather_alert=True,
+                alert_prior_p=0.10,
+                alert_type="ExtremeHeat",
+                alert_city="chicago",
+                alert_season="summer",
+                alert_lead_time_hours=12,
             ),
         )
         d1 = candidate.evaluate(context=ctx1, conn=conn, decision_time=_DECISION_TIME)
