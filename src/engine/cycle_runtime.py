@@ -1,3 +1,6 @@
+# Created: 2026-05-04
+# Last reused/audited: 2026-05-23
+# Authority basis: IOC forward-port (Fix C: allowed_discovery_modes_inverse) — 2026-05-23
 """Heavy runtime helpers extracted from cycle_runner.
 
 The goal is to keep `cycle_runner.py` focused on orchestration while preserving
@@ -64,11 +67,16 @@ def _canonical_strategy_keys() -> frozenset[str]:
 
 
 def _strategy_keys_by_discovery_mode() -> dict[str, frozenset[str]]:
-    """Inverse of cycle_axis_dispatch_mode: discovery_mode → set of strategies
-    routed under that mode by legacy clauses 1-4 short-circuit. Recomputed on
-    every call (cheap; registry has 6 entries)."""
-    from src.strategy.strategy_profile import cycle_axis_dispatch_inverse
-    return cycle_axis_dispatch_inverse()
+    """Discovery_mode → set of strategy_keys allowed in that mode.
+
+    Uses ``allowed_discovery_modes_inverse`` (multi-valued allowed-modes field)
+    instead of ``cycle_axis_dispatch_inverse`` (single dispatch-ownership field).
+    The ownership inversion was a latent bug: strategies spanning multiple modes
+    (e.g. opening_inertia over opening_hunt AND imminent_open_capture) were
+    phase-rejected in the non-owner mode. Recomputed on every call (cheap;
+    registry is small)."""
+    from src.strategy.strategy_profile import allowed_discovery_modes_inverse
+    return allowed_discovery_modes_inverse()
 
 
 # Module-level read for backward-compat. Tests / external callers that

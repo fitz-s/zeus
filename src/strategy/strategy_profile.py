@@ -1,5 +1,5 @@
 # Created: 2026-05-04
-# Last reused/audited: 2026-05-21
+# Last reused/audited: 2026-05-23
 # Authority basis: docs/operations/task_2026-05-04_oracle_kelly_evidence_rebuild/PLAN.md §A4 + Bug review §D (scattered strategy lists) + §E (LIVE_SAFE / _LIVE_ALLOWED divergence) + Phase 3 T2 (2026-05-21): _classify_via_registry SCAFFOLD per 04_PHASE_3_SHOULDER.md §2 T2.
 """StrategyProfile registry — single source of per-strategy authority.
 
@@ -584,6 +584,34 @@ def cycle_axis_dispatch_inverse() -> dict[str, frozenset[str]]:
         mode = profile.cycle_axis_dispatch_mode
         if mode:
             out.setdefault(mode, set()).add(key)
+    return {mode: frozenset(keys) for mode, keys in out.items()}
+
+
+def allowed_discovery_modes_inverse() -> dict[str, frozenset[str]]:
+    """Return discovery_mode → set of strategy_keys ALLOWED in that mode.
+
+    Built from each profile's ``allowed_discovery_modes`` (multi-valued), which
+    is the field whose meaning is "this strategy may be evaluated under these
+    discovery modes". This is the correct authority for the phase-rejection
+    gate — distinct from ``cycle_axis_dispatch_inverse`` which inverts the
+    SINGLE ``cycle_axis_dispatch_mode`` (dispatch *ownership*, i.e. which
+    strategy drives the cycle for a mode).
+
+    Using dispatch-ownership for phase gating was a latent bug: a strategy
+    whose family legitimately spans two discovery modes (e.g. ``opening_inertia``
+    over both ``opening_hunt`` and ``imminent_open_capture``) but owns dispatch
+    in only one was phase-mismatched in the other; and strategies with
+    ``cycle_axis_dispatch_mode: null`` (e.g. shadow ``day0_nowcast_entry``,
+    allowed in ``day0_capture``) were excluded from every mode's allowed set.
+
+    Strategies with an empty ``allowed_discovery_modes`` (blocked) contribute
+    nothing, matching the prior fail-closed posture for blocked strategies.
+    """
+    out: dict[str, set[str]] = {}
+    for key, profile in _ensure_loaded().items():
+        for mode in profile.allowed_discovery_modes:
+            if mode:
+                out.setdefault(mode, set()).add(key)
     return {mode: frozenset(keys) for mode, keys in out.items()}
 
 

@@ -1,5 +1,5 @@
 # Created: 2026-04-29
-# Last reused/audited: 2026-05-21
+# Last reused/audited: 2026-05-23
 # Lifecycle: created=2026-04-29; last_reviewed=2026-05-21; last_reused=2026-05-21
 # Purpose: Guard evaluator center-buy repair, forecast evidence causality, and snapshot persistence boundaries.
 # Reuse: Run when changing evaluator forecast evidence validation or ENS snapshot/p_raw persistence routing.
@@ -9,15 +9,19 @@ from __future__ import annotations
 import json
 import sqlite3
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
 import src.engine.evaluator as evaluator_module
 from src.config import City
+from src.contracts.no_trade_reason import NoTradeReason
 from src.engine.discovery_mode import DiscoveryMode
 from src.engine.evaluator import MarketCandidate
 from src.strategy.market_analysis_family_scan import FullFamilyHypothesis
+from src.strategy.market_phase import MarketPhase
+from src.strategy.strategy_profile import live_safe_keys
 from src.state.portfolio import PortfolioState
 from src.types import BinEdge
 
@@ -238,7 +242,12 @@ def _no_op_oracle_patch_compat_shim(monkeypatch, tmp_path):
     return None
 
 
-def _candidate(*, discovery_mode: str = DiscoveryMode.UPDATE_REACTION.value) -> MarketCandidate:
+def _candidate(
+    *,
+    discovery_mode: str = DiscoveryMode.UPDATE_REACTION.value,
+    market_phase=None,
+    observation=None,
+) -> MarketCandidate:
     return MarketCandidate(
         city=NYC,
         target_date="2026-04-03",
@@ -250,6 +259,8 @@ def _candidate(*, discovery_mode: str = DiscoveryMode.UPDATE_REACTION.value) -> 
         hours_since_open=10.0,
         hours_to_resolution=30.0,
         discovery_mode=discovery_mode,
+        market_phase=market_phase,
+        observation=observation,
     )
 
 
@@ -757,3 +768,120 @@ def test_snapshot_p_raw_persistence_failure_blocks_before_edge_selection(monkeyp
     assert decisions[0].rejection_reasons == ["ens_snapshot_p_raw_persistence_failed"]
     assert decisions[0].rejection_reason_detail == "ENS snapshot p_raw persistence failed: canonical p_raw unavailable"
     assert "ens_snapshot_p_raw_persistence" in decisions[0].applied_validations
+
+
+# ---------------------------------------------------------------------- #
+# IOC routing — Fix B forward-port (2026-05-23)
+# Guard: IOC candidates must NOT receive settlement_capture strategy_key
+# when observation-locked (day0_nowcast_entry path was already exited).
+# ---------------------------------------------------------------------- #
+
+
+def test_imminent_open_capture_keeps_registry_strategy_identity(monkeypatch, tmp_path):
+    """IOC candidate with standard price/posterior must route to
+    imminent_open_capture (not settlement_capture). settlement_capture
+    is day0_capture-only; labeling IOC candidates causes phase-mismatch
+    and they never trade.
+    """
+    _no_op_oracle_patch_compat_shim(monkeypatch, tmp_path)
+    clob = _patch_evaluator(monkeypatch, entry_price=0.06, p_posterior=0.12)
+    candidate = _candidate(discovery_mode=DiscoveryMode.IMMINENT_OPEN_CAPTURE.value)
+
+    decisions = evaluator_module.evaluate_candidate(
+        candidate,
+        conn=None,
+        portfolio=PortfolioState(bankroll=211.37),
+        clob=clob,
+        limits=evaluator_module.RiskLimits(min_order_usd=1.0),
+        decision_time=TEST_DECISION_TIME,
+    )
+
+    assert len(decisions) == 1
+    assert decisions[0].should_trade is True
+    assert decisions[0].edge_source == "imminent_open_capture"
+    assert decisions[0].strategy_key == "imminent_open_capture"
+    assert evaluator_module._edge_source_for(candidate, decisions[0].edge) == "imminent_open_capture"
+    assert evaluator_module._strategy_key_for(candidate, decisions[0].edge) == "imminent_open_capture"
+    assert "imminent_open_capture" in live_safe_keys()
+
+
+def test_imminent_open_capture_settlement_phase_uses_own_ens_strategy(monkeypatch):
+    """IOC candidate tagged SETTLEMENT_DAY phase (observation-locked path) must
+    NOT fall through to settlement_capture. Fix B guard intercepts observation-locked
+    IOC candidates and routes past settlement_capture to the imminent_open_capture
+    family. Tested via routing helpers to isolate the guard from settlement-obs
+    source policy (OBSERVATION_SOURCE_UNAUTHORIZED fires in evaluate_candidate
+    before edge selection when candidate.observation carries an invalid source).
+    """
+    monkeypatch.setenv("ZEUS_MARKET_PHASE_DISPATCH", "1")
+    from src.engine.evaluator import _edge_source_for, _strategy_key_for
+
+    # Open-high bin (is_open_high=True, low=38) + high_so_far=39 >= 38 →
+    # _day0_high_truth_classification returns "observation_locked" → Fix B guard fires.
+    bin_stub = SimpleNamespace(
+        is_shoulder=False, is_open_high=True, is_open_low=False,
+        low=38.0, high=None,
+    )
+    edge_stub = SimpleNamespace(direction="buy_yes", bin=bin_stub)
+
+    # Observation-locked IOC: high_so_far >= bin.low → "observation_locked"
+    # → Fix B guard fires → must NOT return settlement_capture.
+    candidate = _candidate(
+        discovery_mode=DiscoveryMode.IMMINENT_OPEN_CAPTURE.value,
+        market_phase=MarketPhase.SETTLEMENT_DAY,
+        observation={"high_so_far": 39.0, "observation_time": TEST_DECISION_TIME.isoformat()},
+    )
+
+    assert _edge_source_for(candidate, edge_stub) == "imminent_open_capture", (
+        "Fix B: observation-locked IOC must not receive settlement_capture edge_source"
+    )
+    assert _strategy_key_for(candidate, edge_stub) == "imminent_open_capture", (
+        "Fix B: observation-locked IOC must not receive settlement_capture strategy_key"
+    )
+
+
+def test_imminent_open_capture_model_conflict_keeps_strategy_attribution(monkeypatch, tmp_path):
+    """IOC candidate rejected for MODEL_CONFLICT: routing helpers must return
+    imminent_open_capture (not settlement_capture). The EdgeDecision from
+    evaluate_candidate carries edge_source='' on CONFLICT rejection (edge_source
+    is set only on the trade-path return, not on the SIGNAL_QUALITY early-exit),
+    so attribution is verified via the routing helpers rather than the decision.
+    """
+    _no_op_oracle_patch_compat_shim(monkeypatch, tmp_path)
+    clob = _patch_evaluator(monkeypatch, entry_price=0.06, p_posterior=0.12)
+    candidate = _candidate(discovery_mode=DiscoveryMode.IMMINENT_OPEN_CAPTURE.value)
+
+    def _agreement(*args, **kwargs):
+        if kwargs.get("candidate_support_index") is None:
+            return SimpleNamespace(classification="SOFT_DISAGREE", to_detail_json=lambda: "{}")
+        return SimpleNamespace(
+            classification="CONFLICT",
+            to_detail_json=lambda: '{"jsd":0.5,"mode_gap":3}',
+        )
+
+    monkeypatch.setattr(evaluator_module, "analyze_model_agreement", _agreement)
+
+    decisions = evaluator_module.evaluate_candidate(
+        candidate,
+        conn=None,
+        portfolio=PortfolioState(bankroll=211.37),
+        clob=clob,
+        limits=evaluator_module.RiskLimits(min_order_usd=1.0),
+        decision_time=TEST_DECISION_TIME,
+    )
+
+    assert len(decisions) == 1
+    assert decisions[0].should_trade is False
+    assert decisions[0].rejection_reason_enum is NoTradeReason.MODEL_CONFLICT
+
+    # Routing helpers confirm Fix B routes IOC candidates to imminent_open_capture,
+    # not settlement_capture, regardless of subsequent signal-quality rejection.
+    from src.engine.evaluator import _edge_source_for, _strategy_key_for
+    bin_stub = SimpleNamespace(is_shoulder=False, is_open_high=False, is_open_low=False)
+    edge_stub = SimpleNamespace(direction="buy_yes", bin=bin_stub)
+    assert _edge_source_for(candidate, edge_stub) == "imminent_open_capture", (
+        "Fix B: IOC candidate routing helper must not return settlement_capture"
+    )
+    assert _strategy_key_for(candidate, edge_stub) == "imminent_open_capture", (
+        "Fix B: IOC candidate strategy_key helper must not return settlement_capture"
+    )
