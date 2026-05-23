@@ -152,7 +152,7 @@ class JointTailBayes(BaseStrategyCandidate):
         context: CandidateContext,
         conn: sqlite3.Connection,
         decision_time: datetime,
-    ) -> CandidateDecision:
+    ) -> "Union[CandidateDecision, JointTailBayesDecision]":
         """Evaluate joint tail Bayes entry condition (§13).
 
         Returns:

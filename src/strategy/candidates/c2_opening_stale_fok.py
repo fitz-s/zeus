@@ -37,7 +37,7 @@ from __future__ import annotations
 import sqlite3
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import List, Optional
+from typing import List, Optional, Union
 
 from src.calibration.bounds import calibrated_bounds
 from src.contracts.no_trade_reason import NoTradeReason
@@ -97,12 +97,11 @@ class OpeningStaleQuoteFOK(BaseStrategyCandidate):
         - p_hat: float            — posterior point estimate
         - cal_p_hats: List[float] — conformal calibration set point estimates
         - cal_outcomes: List[int] — conformal calibration outcomes
-        - ask: float              — YES ask price at open (unrelaxed mid context)
 
       Stale-quote side (on analysis directly, not analysis.metrics):
-        - info_event_observed: bool          — canonical InfoEvent observed
-        - stale_quote_price: Optional[Decimal] — executable stale ask a0
-        - book_hash: Optional[str]           — current book hash
+        - info_event_observed: bool            — canonical InfoEvent observed
+        - stale_quote_price: Optional[Decimal] — executable stale ask a0 (the FOK limit price)
+        - book_hash: Optional[str]             — current book hash (None → feed not wired)
         - book_hash_transition_delta_ms: Optional[int] — ms since last hash change
 
     Data-gate: missing calibration OR missing stale-quote inputs → OPENING_STALE_FOK_UNWIRED.
@@ -129,11 +128,11 @@ class OpeningStaleQuoteFOK(BaseStrategyCandidate):
         context: CandidateContext,
         conn: sqlite3.Connection,
         decision_time: datetime,
-    ) -> CandidateDecision:
+    ) -> "Union[CandidateDecision, C2OpeningStaleDecision]":
         """Evaluate opening-stale-FOK entry condition (§14).
 
         Returns:
-          CandidateDecision(enter) if p⁻ − a0 − phi > 0 and all inputs wired (shadow enter).
+          C2OpeningStaleDecision (enter) if p⁻ − a0 − phi > 0 (shadow enter).
           CandidateDecision(no_trade, OPENING_STALE_FOK_UNWIRED) when inputs absent.
           CandidateDecision(no_trade, OPENING_STALE_FOK_NO_EDGE) when edge ≤ 0.
         """
@@ -181,14 +180,30 @@ class OpeningStaleQuoteFOK(BaseStrategyCandidate):
         # ── Gate 3: book hash staleness check ────────────────────────────────
         book_hash: Optional[str] = getattr(analysis, "book_hash", None)
         hash_delta_ms: Optional[int] = getattr(analysis, "book_hash_transition_delta_ms", None)
+
+        # book_hash=None means the book-hash feed is not wired (UNWIRED, not NO_EDGE).
+        if book_hash is None:
+            decision = CandidateDecision(
+                outcome="no_trade",
+                reason=NoTradeReason.OPENING_STALE_FOK_UNWIRED,
+                reason_detail=(
+                    "c2_opening_stale_fok data-gated (stale-quote side): "
+                    "book_hash absent; book-hash feed not wired."
+                ),
+            )
+            write_candidate_no_trade_row(conn, context, decision)
+            return decision
+
         stale = _is_book_hash_stale(
             book_hash=book_hash,
             book_hash_transition_delta_ms=hash_delta_ms,
         )
         if not stale:
+            # book_hash present but delta < threshold: book has responded to the info event,
+            # so the stale-quote edge is gone — this is NO_EDGE, not UNWIRED.
             decision = CandidateDecision(
                 outcome="no_trade",
-                reason=NoTradeReason.OPENING_STALE_FOK_UNWIRED,
+                reason=NoTradeReason.OPENING_STALE_FOK_NO_EDGE,
                 reason_detail=(
                     "c2_opening_stale_fok: book hash has responded to info event; "
                     "stale-quote edge is gone (book updated)."
@@ -202,7 +217,7 @@ class OpeningStaleQuoteFOK(BaseStrategyCandidate):
             p_lo, _ = calibrated_bounds(
                 p_hat, cal_p_hats, cal_outcomes, alpha=_DEFAULT_ALPHA
             )
-        except (ValueError, Exception) as exc:
+        except ValueError as exc:
             decision = CandidateDecision(
                 outcome="no_trade",
                 reason=NoTradeReason.OPENING_STALE_FOK_UNWIRED,

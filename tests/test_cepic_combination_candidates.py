@@ -1,6 +1,9 @@
 # Created: 2026-05-22
 # Last reused or audited: 2026-05-22
 # Authority basis: docs/operations/task_2026-05-21_mainline_completion_authority/STRATEGY_TAXONOMY_DIRECTIVE.md §13, §14
+# Lifecycle: created=2026-05-22; last_reviewed=2026-05-23; last_reused=never
+# Purpose: Relationship tests for C1 (JointTailBayes §13) and C2 (OpeningStaleQuoteFOK §14) combination candidates.
+# Reuse: Run when c1_joint_tail_bayes.py, c2_opening_stale_fok.py, or NoTradeReason C-EPIC members change.
 """C-EPIC combination strategy relationship tests.
 
 RELATIONSHIP TESTS for:
@@ -40,24 +43,30 @@ from src.strategy.candidates.c2_opening_stale_fok import OpeningStaleQuoteFOK
 
 
 # ---------------------------------------------------------------------------
-# R8 / R9: schema enum existence assertions (import-level)
+# R8 / R9: schema enum existence assertions — explicit test function
 # ---------------------------------------------------------------------------
 
-assert hasattr(NoTradeReason, "JOINT_EVT_ALERT_UNWIRED"), (
-    "NoTradeReason.JOINT_EVT_ALERT_UNWIRED must exist (C-EPIC §13)"
-)
-assert hasattr(NoTradeReason, "JOINT_EVT_ALERT_LR_MISSING"), (
-    "NoTradeReason.JOINT_EVT_ALERT_LR_MISSING must exist (C-EPIC §13)"
-)
-assert hasattr(NoTradeReason, "JOINT_EVT_TAIL_NO_EDGE"), (
-    "NoTradeReason.JOINT_EVT_TAIL_NO_EDGE must exist (C-EPIC §13)"
-)
-assert hasattr(NoTradeReason, "OPENING_STALE_FOK_UNWIRED"), (
-    "NoTradeReason.OPENING_STALE_FOK_UNWIRED must exist (C-EPIC §14)"
-)
-assert hasattr(NoTradeReason, "OPENING_STALE_FOK_NO_EDGE"), (
-    "NoTradeReason.OPENING_STALE_FOK_NO_EDGE must exist (C-EPIC §14)"
-)
+def test_cepic_no_trade_reason_enum_members_exist() -> None:
+    """R8/R9: All C-EPIC NoTradeReason enum members must exist (C-EPIC §13/§14).
+
+    Moved from module-level asserts to a test function so pytest reports them
+    as test failures (not collection errors) and they are never stripped by -O.
+    """
+    assert hasattr(NoTradeReason, "JOINT_EVT_ALERT_UNWIRED"), (
+        "NoTradeReason.JOINT_EVT_ALERT_UNWIRED must exist (C-EPIC §13)"
+    )
+    assert hasattr(NoTradeReason, "JOINT_EVT_ALERT_LR_MISSING"), (
+        "NoTradeReason.JOINT_EVT_ALERT_LR_MISSING must exist (C-EPIC §13)"
+    )
+    assert hasattr(NoTradeReason, "JOINT_EVT_TAIL_NO_EDGE"), (
+        "NoTradeReason.JOINT_EVT_TAIL_NO_EDGE must exist (C-EPIC §13)"
+    )
+    assert hasattr(NoTradeReason, "OPENING_STALE_FOK_UNWIRED"), (
+        "NoTradeReason.OPENING_STALE_FOK_UNWIRED must exist (C-EPIC §14)"
+    )
+    assert hasattr(NoTradeReason, "OPENING_STALE_FOK_NO_EDGE"), (
+        "NoTradeReason.OPENING_STALE_FOK_NO_EDGE must exist (C-EPIC §14)"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -510,6 +519,60 @@ class TestOpeningStaleQuoteFOKRelationships:
         row = conn.execute("SELECT strategy_key, outcome FROM decision_events").fetchone()
         assert row is not None
         assert row["strategy_key"] == "c2_opening_stale_fok"
+
+    def test_r7_data_gate_book_hash_none_is_unwired_not_no_edge(self) -> None:
+        """R7 Fix6: book_hash=None → OPENING_STALE_FOK_UNWIRED (feed not wired).
+
+        _is_book_hash_stale(book_hash=None, ...) returns False (book_hash absent).
+        Before Fix6, that returned OPENING_STALE_FOK_UNWIRED with wrong reason_detail
+        (said 'book updated') and worse could be confused with NO_EDGE.
+        After Fix6: book_hash is None is caught BEFORE calling _is_book_hash_stale,
+        returning UNWIRED with a clear 'feed not wired' message.
+        """
+        conn = _make_conn()
+        cal_p = [0.89, 0.90, 0.91, 0.92, 0.93]
+        cal_y = [1, 1, 1, 1, 1]
+        analysis = SimpleNamespace(
+            p_hat=0.90,
+            cal_p_hats=cal_p,
+            cal_outcomes=cal_y,
+            info_event_observed=True,
+            stale_quote_price=Decimal("0.40"),
+            book_hash=None,  # feed not wired
+            book_hash_transition_delta_ms=None,
+        )
+        ctx = _make_context(conn, analysis)
+        cand = OpeningStaleQuoteFOK()
+        dec = cand.evaluate(context=ctx, conn=conn, decision_time=_DT)
+
+        assert dec.outcome == "no_trade"
+        assert dec.reason == NoTradeReason.OPENING_STALE_FOK_UNWIRED
+        assert "not wired" in dec.reason_detail
+
+    def test_r7_fresh_book_is_no_edge_not_unwired(self) -> None:
+        """R7 Fix6: book_hash present but fresh (delta < threshold) → OPENING_STALE_FOK_NO_EDGE.
+
+        When book_hash is present but has responded to the info event (delta_ms < threshold),
+        the stale-quote premise is false. This is NO_EDGE (edge gone), not UNWIRED (feed missing).
+        """
+        conn = _make_conn()
+        cal_p = [0.89, 0.90, 0.91, 0.92, 0.93]
+        cal_y = [1, 1, 1, 1, 1]
+        analysis = SimpleNamespace(
+            p_hat=0.90,
+            cal_p_hats=cal_p,
+            cal_outcomes=cal_y,
+            info_event_observed=True,
+            stale_quote_price=Decimal("0.40"),
+            book_hash="hash-abc",
+            book_hash_transition_delta_ms=10,  # 10ms — book responded quickly (fresh)
+        )
+        ctx = _make_context(conn, analysis)
+        cand = OpeningStaleQuoteFOK()
+        dec = cand.evaluate(context=ctx, conn=conn, decision_time=_DT)
+
+        assert dec.outcome == "no_trade"
+        assert dec.reason == NoTradeReason.OPENING_STALE_FOK_NO_EDGE
 
     def test_c2_no_trade_when_edge_nonpositive(self) -> None:
         """C2 no_trade: p⁻ below ask → OPENING_STALE_FOK_NO_EDGE."""

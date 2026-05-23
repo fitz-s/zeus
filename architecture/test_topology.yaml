@@ -500,6 +500,8 @@ test_trust_policy:
     tests/test_l1_shadow_capture_hook.py: {created: "2026-05-22", last_used: "2026-05-22"}
     tests/test_promotion_proof_router_wave.py: {created: "2026-05-22", last_used: "2026-05-22"}
     tests/test_cross_market_portfolio_relationships.py: {created: "2026-05-22", last_used: "2026-05-22"}
+    # C-EPIC combination candidates wave (2026-05-23)
+    tests/test_cepic_combination_candidates.py: {created: "2026-05-23", last_used: "2026-05-23"}
 
 categories:
   core_law_antibody:
