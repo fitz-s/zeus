@@ -283,16 +283,25 @@ state_machines:
       accidental. They classify whether an ensemble snapshot's local-day window
       contributes to the target daily-extrema, and gate live selection so a
       post-peak non-contributing run cannot be used as daily-high authority.
-      Authority: docs/operations/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md.
+      P0 follow-up (2026-05-23): selection lifted to the full forecast-bundle
+      layer (enumerate all source_run_coverage cycles, rank by extrema authority);
+      NULL contribution now fails closed for CURRENT data_versions (UNKNOWN) and
+      passes through only for legacy versions (LEGACY_NULL_PASSTHROUGH, recorded
+      in applied_validations).
+      Authority: docs/operations/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md;
+      /Users/leofitz/.claude/jobs/866db2ea/P0_FOLLOWUP_BUNDLE_LAYER_SPEC.md.
     states:
       - FULL_CONTRIBUTOR
       - PARTIAL_CONTRIBUTOR
       - NON_CONTRIBUTOR
+      - UNKNOWN
+      - LEGACY_NULL_PASSTHROUGH
       - EXECUTABLE_FORECAST_NON_CONTRIBUTING_EXTREMA
       - EXECUTABLE_FORECAST_EXTREMA_AUTHORITY_UNKNOWN
     invariant_tests:
       - tests/test_forecast_extrema_authority.py
       - tests/test_forecast_offset_fix_regression.py
+      - tests/test_executable_forecast_bundle_selection.py
   ci_gate_env_var_keys:
     owner: .github/workflows/architecture_advisory_gates.yml
     description: >

@@ -256,6 +256,7 @@ test_trust_policy:
     tests/test_entry_forecast_config.py: {created: "2026-05-03", last_used: "2026-05-03"}
     tests/test_executable_forecast_reader.py: {created: "2026-05-03", last_used: "2026-05-14"}
     tests/test_executable_forecast_reader_member_floor.py: {created: "2026-05-19", last_used: "2026-05-19"}
+    tests/test_executable_forecast_bundle_selection.py: {created: "2026-05-23", last_used: "2026-05-23"}
     tests/test_ingest_boot_time_semantics.py: {created: "2026-05-02", last_used: "2026-05-02"}
     tests/test_ingest_grib_source_run_context.py: {created: "2026-05-03", last_used: "2026-05-03"}
     tests/test_live_entry_status.py: {created: "2026-05-03", last_used: "2026-05-03"}
@@ -2906,6 +2907,33 @@ test_metadata:
       with contributing/non-contributing snapshot fixtures.
     created: 2026-05-22
     last_reused_or_audited: 2026-05-22
+
+  tests/test_executable_forecast_bundle_selection.py:
+    modules: [data, signal, evaluator]
+    category: integration_antibody
+    kind: antibody
+    profile: p0_forecast_bundle_layer_selection
+    blocks_commit: true
+    asserted_invariants:
+      - FORECAST_BUNDLE_LAYER_PREFERS_CONTRIBUTING_CYCLE
+      - FORECAST_BUNDLE_EVIDENCE_COHERENCE_SAME_CANDIDATE
+      - FORECAST_NULL_CONTRIBUTION_FAILS_CLOSED_CURRENT_VERSION
+      - PROBABILITY_SANITY_GATE_USES_SETTLED_SAMPLES
+    source_under_test:
+      - src/data/executable_forecast_reader.py
+      - src/data/forecast_extrema_authority.py
+      - src/signal/probability_sanity.py
+    law_dependencies:
+      - docs/operations/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md
+    notes: >
+      P0 follow-up relationship tests: full-bundle-layer selection prefers a
+      contributing 00Z bundle over a later non-contributing 12Z bundle (DISTINCT
+      source_run_id/coverage_id per cycle, ONE surviving readiness_state row),
+      evidence coherence (selected snapshot in selected coverage), §2 NULL
+      fail-closed for current data_versions + legacy passthrough, and §3 settled-
+      sample contract for the probability sanity gate.
+    created: 2026-05-23
+    last_reused_or_audited: 2026-05-23
 
   tests/test_evaluator_probability_sanity_gate.py:
     modules: [signal, evaluator]

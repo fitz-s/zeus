@@ -4506,11 +4506,20 @@ def evaluate_candidate(
 
     # Probability sanity gate — day0 HIGH path only, fail-closed before Kelly sizing.
     if is_day0_mode and temperature_metric.is_high():
+        # §3 caller contract: hand the validator member samples in the SAME space
+        # as p_raw/p_cal (settlement-ROUNDED), not raw member extrema.  p_raw/p_cal
+        # are built from settlement-rounded samples (round_fn=settlement_semantics
+        # .round_values in the day0 path), so the point-bucket support count must
+        # compare against rounded samples — otherwise a raw 22.6°C member that
+        # settles to 23°C counts as 0 support for the [23,23] bin and false-blocks
+        # near boundaries.  The validator is sample-space-agnostic; rounding is
+        # owned here at the caller.
+        _settled_member_samples = settlement_semantics.round_values(analysis_member_extrema)
         _san_ok, _san_reason = validate_high_distribution(
             bins=bins,
             p_raw=p_raw,
             p_cal=p_cal,
-            member_samples=analysis_member_extrema,
+            member_samples=_settled_member_samples,
             market_prices=p_market,
             strategy_key=f"day0_high:{city.name}:{target_date}",
         )

@@ -1,7 +1,9 @@
 # Created: 2026-05-03
-# Last reused/audited: 2026-05-22
-# Authority basis: docs/operations/archive/2026-Q2/task_2026-05-14_data_daemon_live_efficiency/DATA_DAEMON_LIVE_EFFICIENCY_REFACTOR_PLAN.md
+# Last reused/audited: 2026-05-23
+# Authority basis: docs/operations/task_2026-05-14_data_daemon_live_efficiency/DATA_DAEMON_LIVE_EFFICIENCY_REFACTOR_PLAN.md
 #   Phase 3 evaluator consumes producer readiness without hot-path entry-readiness writes.
+#   P0 follow-up (2026-05-23): /Users/leofitz/.claude/jobs/866db2ea/P0_FOLLOWUP_BUNDLE_LAYER_SPEC.md
+#   §1 full-bundle-layer selection + §2 NULL fail-closed.
 """Executable forecast reader for V4 source-linked ensemble snapshots."""
 
 from __future__ import annotations
@@ -1195,6 +1197,14 @@ def read_executable_forecast(
     # keep PR #309's handling (a PARTIAL_CONTRIBUTOR bundle is allowed through,
     # exactly as the single-path snapshot reader did, since classify only
     # blocks NON_CONTRIBUTOR/UNKNOWN inside read_executable_forecast_snapshot).
+    #
+    # DEFENSIVE / defense-in-depth: in the normal flow these two branches are
+    # unreachable, because read_executable_forecast_snapshot already BLOCKS
+    # NON_CONTRIBUTOR and UNKNOWN snapshots (so _evaluate_candidate drops them
+    # and they never enter `candidates`).  An only-non-contributor scope thus
+    # surfaces its reason via the empty-candidate fallback above, not here.
+    # These checks remain as a fail-closed guard that stays correct if the
+    # snapshot reader's extrema policy ever diverges from the bundle ranker.
     if best.eligibility == ForecastExtremaEligibility.NON_CONTRIBUTOR:
         return ExecutableForecastBundleResult(
             "BLOCKED", "EXECUTABLE_FORECAST_NON_CONTRIBUTING_EXTREMA"

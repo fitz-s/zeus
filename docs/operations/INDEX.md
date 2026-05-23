@@ -159,6 +159,7 @@ These items have been moved to `docs/operations/archive/` per `POLICY.md`.
 | `scripts/check_pr_identity_collisions.py` + `.github/workflows/pr_identity_collision_check.yml` | Pre-merge identity-collision detection (P1).  Posts an advisory comment when two open PRs both add a class with the same name in identity-bearing files. |
 | `src/state/schema_introspection.py` | `has_columns()` helper (P2) — call this from any code path that depends on a column added by a staged migration. |
 | `src/runtime/clock_skew_probe.py` | NTP-style clock skew probe vs Polymarket REST Date: header. Caches result 60s. Returns int ms (local − venue) or None on probe failure. PR 6. |
+| `scripts/verify_forecast_bundle_selection.py` | Read-only operator diagnostic (P0 follow-up §7). Per city/date, compares the SELECTED forecast bundle (contributor-first ranking across all cycles) vs the LATEST snapshot; prints contributes flag, member-max, observed high, bias. SameSnap=False = bundle layer chose an earlier contributing cycle (cold-bias fix). |
 
 | `task_2026-05-06_hook_redesign/` | archived | hook redesign v1, superseded by v2 |
 | `task_2026-05-08_alignment_safe_implementation/` | archived | alignment repair implementation, merged |

@@ -1,6 +1,7 @@
 # Created: 2026-05-22
-# Last reused/audited: 2026-05-22
-# Authority basis: docs/operations/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md §PR-A
+# Last reused/audited: 2026-05-23
+# Authority basis: docs/operations/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md §PR-A;
+#   /Users/leofitz/.claude/jobs/866db2ea/P0_FOLLOWUP_BUNDLE_LAYER_SPEC.md §2 (NULL fail-closed).
 """Forecast extrema authority classifier.
 
 Classifies whether a fetched ensemble_snapshots_v2 row contributes to the

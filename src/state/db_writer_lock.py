@@ -787,6 +787,8 @@ SQLITE_CONNECT_ALLOWLIST: frozenset[str] = frozenset(
         "src/analysis/promotion_readiness_job.py", # read_only_ro_uri: CLI opens world-db with mode=ro; pure-compute adjudicate (conn=None); no tier writes
         # --- P0 forecast extrema authority measurement script (2026-05-22) ---
         "scripts/verify_forecast_offset_fix.py",   # read_only_ro_uri: opens forecasts+world DBs via file:...?mode=ro uri; SELECT-only; never writes
+        # --- P0 follow-up bundle-layer selection diagnostic (2026-05-23) ---
+        "scripts/verify_forecast_bundle_selection.py",  # read_only_ro_uri: opens forecasts+world DBs via file:...?mode=ro uri; SELECT-only; never writes
     }
 )
 

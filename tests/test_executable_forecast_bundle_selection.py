@@ -625,3 +625,50 @@ def test_legacy_null_contribution_passes_through_recorded() -> None:
         "forecast_extrema_authority_legacy_null_passthrough"
         in ens_result["extrema_authority_applied_validations"]
     )
+
+
+# 6.5 -----------------------------------------------------------------------
+def test_sanity_gate_uses_settled_samples_for_point_support() -> None:
+    """6.5 (§3): the day0 HIGH sanity gate must receive settlement-ROUNDED member
+    samples (the space p_raw/p_cal live in), not raw member extrema.  Raw [22.6]*51
+    settle to 23 under wmo_half_up; with p_cal[bin_23]=0.9 the settled samples give
+    full support and PASS, whereas raw 22.6 samples give 0 support for [23,23] and
+    would FALSE-BLOCK.  This proves the caller-side rounding contract."""
+    import numpy as np
+
+    from src.contracts.settlement_semantics import SettlementSemantics
+    from src.signal.probability_sanity import validate_high_distribution
+    from src.types.market import Bin
+
+    bins = [Bin(low=c, high=c, unit="C", label=f"{c}C") for c in (21.0, 22.0, 23.0, 24.0, 25.0)]
+    p_raw = np.array([0.02, 0.03, 0.90, 0.03, 0.02])
+    p_cal = np.array([0.02, 0.03, 0.90, 0.03, 0.02])
+    raw_members = np.full(51, 22.6)  # raw extrema, all just below 23
+
+    # WMO half-up at 1.0°C precision (the standard C-city settlement contract):
+    # 22.6 -> 23.  Mirrors settlement_semantics.round_values used to build p_raw.
+    sem = SettlementSemantics(
+        resolution_source="test",
+        measurement_unit="C",
+        precision=1.0,
+        rounding_rule="wmo_half_up",
+        finalization_time="12:00:00Z",
+    )
+    settled = sem.round_values(raw_members)
+
+    # Raw samples (the OLD, buggy input) would false-block: 0 support for [23,23].
+    ok_raw, reason_raw = validate_high_distribution(
+        bins=bins, p_raw=p_raw, p_cal=p_cal,
+        member_samples=raw_members, market_prices=None,
+        strategy_key="day0_high:Amsterdam:test-raw",
+    )
+    assert ok_raw is False
+    assert "POINT_BUCKET_HIGH_PROB_WITHOUT_MEMBER_SUPPORT" in (reason_raw or "")
+
+    # Settled samples (the §3 fix) pass: 22.6 -> 23 gives full support.
+    ok_settled, reason_settled = validate_high_distribution(
+        bins=bins, p_raw=p_raw, p_cal=p_cal,
+        member_samples=settled, market_prices=None,
+        strategy_key="day0_high:Amsterdam:test-settled",
+    )
+    assert ok_settled is True, f"settled samples should pass, got {reason_settled!r}"
