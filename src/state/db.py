@@ -894,7 +894,7 @@ def get_connection(
 # CI hook scripts/check_schema_version.py diffs the sqlite_master hash of
 # a fresh-init DB against tests/state/_schema_pinned_hash.txt and fails
 # the PR if SCHEMA_VERSION did not change in lockstep.
-SCHEMA_VERSION = 30  # 2026-05-22 stochastic+datagated wave: new NoTradeReason members from s3/s4/s5/g1/g2/g3/l1/l2
+SCHEMA_VERSION = 32  # 2026-05-22 PR-D: NoTradeReason.PROBABILITY_SANITY_GATE added (day0 HIGH sanity gate)
 
 
 def init_schema(
@@ -1382,7 +1382,7 @@ def init_schema(
             finality_confirmed_time    TEXT,
             clock_skew_estimate_ms_at_submit INTEGER,
             raw_orderbook_hash_transition_delta_ms INTEGER,
-            schema_version INTEGER NOT NULL CHECK (schema_version IN (12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30)),
+            schema_version INTEGER NOT NULL CHECK (schema_version IN (12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32)),
             source         TEXT NOT NULL CHECK (source IN ('phase0_backfill', 'live_decision', 'shadow_decision')),
             PRIMARY KEY (market_slug, temperature_metric, target_date, observation_time, decision_seq)
         );
@@ -2532,6 +2532,7 @@ def init_schema(
     # Phase 2: apply v2 schema (idempotent — safe to run on every boot).
     from src.state.schema.v2_schema import apply_v2_schema as _apply_v2_schema
     _apply_v2_schema(conn, forecast_tables=False)
+
     conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
     # db_chunk_boundary_events — K2 live-contention event log (Cluster B fix 2026-05-18)
@@ -2605,7 +2606,7 @@ def _migrate_decision_events_schema(conn: sqlite3.Connection) -> None:
             finality_confirmed_time    TEXT,
             clock_skew_estimate_ms_at_submit INTEGER,
             raw_orderbook_hash_transition_delta_ms INTEGER,
-            schema_version INTEGER NOT NULL CHECK (schema_version IN (12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30)),
+            schema_version INTEGER NOT NULL CHECK (schema_version IN (12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32)),
             source         TEXT NOT NULL CHECK (source IN ('phase0_backfill', 'live_decision', 'shadow_decision')),
             PRIMARY KEY (market_slug, temperature_metric, target_date, observation_time, decision_seq)
         )
@@ -2641,7 +2642,7 @@ def _migrate_decision_events_schema(conn: sqlite3.Connection) -> None:
             first_inclusion_block_time, finality_confirmed_time,
             clock_skew_estimate_ms_at_submit, raw_orderbook_hash_transition_delta_ms,
             CASE
-                WHEN schema_version IN (12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29)
+                WHEN schema_version IN (12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32)
                     THEN schema_version
                 ELSE 29
             END,
@@ -3652,6 +3653,7 @@ def init_schema_world_only(conn: Optional[sqlite3.Connection] = None) -> None:
 _TRADE_CLASS_TABLES: frozenset[str] = frozenset({
     "_migrations_applied",
     "book_hash_transitions",
+    "decision_integrity_quarantine",
     "execution_fact",
     "executable_market_snapshots",
     "position_current",
@@ -4135,6 +4137,9 @@ def init_schema_trade_only(conn: sqlite3.Connection) -> None:
     init_snapshot_schema(conn)
     from src.state.schema.book_hash_transitions_schema import ensure_table as _ensure_book_hash_transitions_table
     _ensure_book_hash_transitions_table(conn)
+    # PR-E (2026-05-22): decision_integrity_quarantine lives on the trade DB.
+    from src.state.schema.decision_integrity_quarantine_schema import ensure_table as _ensure_decision_integrity_quarantine_table
+    _ensure_decision_integrity_quarantine_table(conn)
     try:
         conn.execute("ALTER TABLE trade_decisions ADD COLUMN env TEXT NOT NULL DEFAULT 'live';")
     except sqlite3.OperationalError:

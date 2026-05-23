@@ -2844,5 +2844,148 @@ test_metadata:
       Tests verify classification precedence: LOAD_BEARING > RUNTIME_GATING >
       CURRENT_PACKAGE_INPUT > MONITORING_SURFACE > ARCHIVE_CANDIDATE.
       Advisory only; exit 0 always.
+
+  tests/test_probability_sanity.py:
+    modules: [signal]
+    category: unit_antibody
+    kind: antibody
+    profile: p0_forecast_extrema_authority_pr_d
+    blocks_commit: true
+    asserted_invariants:
+      - PROBABILITY_SANITY_GATE_ALL_BRANCHES
+    source_under_test:
+      - src/signal/probability_sanity.py
+    law_dependencies:
+      - docs/operations/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md
+    notes: >
+      Unit tests for validate_high_distribution covering: categorical pass, p_raw sum >1,
+      point-bucket high probability without member support, extreme market disagreement,
+      and multi-bin low-price rejection. Amsterdam 23°C@0.716/3¢ mirror case included.
+    created: 2026-05-22
+    last_reused_or_audited: 2026-05-22
+
+  tests/test_forecast_offset_fix_regression.py:
+    modules: [data]
+    category: regression_antibody
+    kind: antibody
+    profile: p0_forecast_extrema_authority_pr_a
+    blocks_commit: true
+    asserted_invariants:
+      - FORECAST_ORDER_BY_PREFERS_CONTRIBUTING_RUN
+    source_under_test:
+      - src/data/executable_forecast_reader.py
+      - src/data/forecast_extrema_authority.py
+    law_dependencies:
+      - docs/operations/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md
+    notes: >
+      Regression antibody for PR-A snapshot ORDER BY fix. Exercises production SQL
+      from _snapshot_query_sql against an in-memory fixture. Contributing 00Z must
+      rank above non-contributing 12Z in both far-east (Taipei) and control (Amsterdam)
+      scenarios.
+    created: 2026-05-22
+    last_reused_or_audited: 2026-05-22
+
+  tests/test_forecast_extrema_authority.py:
+    modules: [data]
+    category: unit_antibody
+    kind: antibody
+    profile: p0_forecast_extrema_authority_pr_a
+    blocks_commit: true
+    asserted_invariants:
+      - FORECAST_EXTREMA_AUTHORITY_CLASSIFIER_ALL_BRANCHES
+      - FORECAST_ORDER_BY_PREFERS_CONTRIBUTING_RUN
+    source_under_test:
+      - src/data/forecast_extrema_authority.py
+      - src/data/executable_forecast_reader.py
+    law_dependencies:
+      - docs/operations/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md
+    notes: >
+      Unit + integration tests for ForecastExtremaAuthority classifier and reader
+      ORDER BY preference. Covers FULL_CONTRIBUTOR, PARTIAL_CONTRIBUTOR, NON_CONTRIBUTOR,
+      UNKNOWN eligibility branches plus end-to-end read_executable_forecast_snapshot
+      with contributing/non-contributing snapshot fixtures.
+    created: 2026-05-22
+    last_reused_or_audited: 2026-05-22
+
+  tests/test_evaluator_probability_sanity_gate.py:
+    modules: [signal, evaluator]
+    category: integration_antibody
+    kind: antibody
+    profile: p0_forecast_extrema_authority_pr_d
+    blocks_commit: true
+    asserted_invariants:
+      - EVALUATOR_PROBABILITY_SANITY_GATE_WIRED
+    source_under_test:
+      - src/signal/probability_sanity.py
+    law_dependencies:
+      - docs/operations/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md
+    notes: >
+      Integration test for probability_sanity_gate wiring in evaluator. Tests
+      validate_high_distribution directly against evaluator-realistic inputs —
+      Amsterdam mirror case (23°C@0.716/3¢ with zero member support) must reject
+      at SIGNAL_QUALITY with NoTradeReason.PROBABILITY_SANITY_GATE.
+    created: 2026-05-22
+    last_reused_or_audited: 2026-05-22
+
+  tests/test_decision_integrity_quarantine.py:
+    modules: [state]
+    category: unit_antibody
+    kind: antibody
+    profile: p0_forecast_extrema_authority_pr_e
+    blocks_commit: true
+    asserted_invariants:
+      - DECISION_INTEGRITY_QUARANTINE_LOGIC
+      - DECISION_INTEGRITY_QUARANTINE_IDEMPOTENT
+    source_under_test:
+      - src/state/decision_integrity_quarantine.py
+      - src/state/schema/decision_integrity_quarantine_schema.py
+    law_dependencies:
+      - docs/operations/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md
+    notes: >
+      Unit tests for quarantine_decisions_for_noncontributing_forecast: only
+      contributes=0 and UNKNOWN attribution rows quarantined; contributes=1 rows
+      skipped; idempotency (run twice → no duplicates); ensure_table idempotency.
+      Uses in-memory single-DB (no ATTACH) fixture — fallback path exercised.
+    created: 2026-05-22
+    last_reused_or_audited: 2026-05-22
+
+  tests/test_day0_observation_reader.py:
+    modules: [data]
+    category: regression_antibody
+    kind: antibody
+    profile: p0_forecast_extrema_authority_pr_c
+    blocks_commit: true
+    asserted_invariants:
+      - DAY0_HIGH_SO_FAR_IS_MAX_OF_ALL_RUNNING_MAXES
+    source_under_test:
+      - src/data/day0_observation_reader.py
+    law_dependencies:
+      - docs/operations/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md
+    notes: >
+      Root C antibody: observation_instants_v2.running_max is non-monotonic (per-hour
+      bucket max). high_so_far must be MAX(running_max) over all qualifying rows, not
+      the running_max of the latest row. Amsterdam 2026-05-22 concrete case: peak=25.0
+      at 15:00 local, latest row=17.0 at 23:00 — naive reader returns 17.0 (wrong).
+    created: 2026-05-22
+    last_reused_or_audited: 2026-05-22
+
+  tests/test_day0_high_distribution.py:
+    modules: [signal]
+    category: unit_antibody
+    kind: antibody
+    profile: p0_forecast_extrema_authority_pr_b
+    blocks_commit: true
+    asserted_invariants:
+      - DAY0_HIGH_PHYSICAL_LAW_CURRENT_TEMP_CANNOT_LOWER_FUTURE_MAX
+      - DAY0_HIGH_P_VECTOR_NORMALIZED
+    source_under_test:
+      - src/signal/day0_high_distribution.py
+      - src/signal/day0_high_nowcast_signal.py
+    law_dependencies:
+      - docs/operations/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md
+    notes: >
+      Physical law invariants for Day0 HIGH: each sample = settle(max(observed_high,
+      future_member_max)); current_temp must never lower the future max. Covers
+      build_day0_high_distribution and p_vector normalization (sum=1.0).
     created: 2026-05-22
     last_reused_or_audited: 2026-05-22

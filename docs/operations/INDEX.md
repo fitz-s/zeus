@@ -33,6 +33,7 @@ expected to close out.  Keep them under their existing names.
 | `packet_scope_protocol.md` | active | Packet scope conventions. |
 | `tigge_daemon_integration.md` | active | TIGGE daemon wiring reference. |
 | `live_rescue_ledger_2026-05-04.md` | **review** | Per-day live-rescue log; needs rotation policy if this grows. |
+| `P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md` | active | P0 authority doc: PR-A snapshot ORDER BY fix, PR-B Day0 HIGH physical law, PR-C observation reader Root C, PR-D probability sanity gate, PR-E decision_integrity_quarantine. PR #309. |
 
 ## Task directories — closeout status
 

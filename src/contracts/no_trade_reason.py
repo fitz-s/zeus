@@ -189,5 +189,8 @@ class NoTradeReason(StrEnum):
     SETTLEMENT_CAPTURE_NOT_LOCKED = auto()     # settlement_capture_shadow: edge is not observation-locked (day0_nowcast scope)
 
 
+    # ── Probability sanity (day0 HIGH distribution gate) ─────────────────────
+    PROBABILITY_SANITY_GATE = auto()            # validate_high_distribution failed before Kelly sizing
+
     # ── Fallback (§13) ────────────────────────────────────────────────────────
     UNCATEGORIZED = auto()

@@ -276,7 +276,7 @@ class TestF4EvidenceTierLifecycle:
         conn = sqlite3.connect(":memory:")
         conn.execute(
             CREATE_EVIDENCE_TIER_ASSIGNMENTS_SQL.replace(
-                "DEFAULT 30 CHECK (schema_version IN (25, 26, 27, 28, 29, 30))",
+                "DEFAULT 32 CHECK (schema_version IN (25, 26, 27, 28, 29, 30, 31, 32))",
                 "DEFAULT 27 CHECK (schema_version IN (25, 26, 27))",
             )
         )
@@ -320,7 +320,7 @@ class TestF4EvidenceTierLifecycle:
             ).fetchall()
         ]
 
-        assert schema_versions == [27, 30]  # old row stays at 27; new row at current SCHEMA_VERSION=30
+        assert schema_versions == [27, 32]  # old row stays at 27; new row at current SCHEMA_VERSION=32
 
     def test_revoked_row_excluded_from_current_assignment(self) -> None:
         conn = _make_tier_db()

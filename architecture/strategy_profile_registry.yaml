@@ -151,7 +151,7 @@ day0_nowcast_entry:
   live_status: shadow
   evidence_tier: REPLAY_PASS
   evidence_tier_required_for_live: LIVE_PILOT_TINY
-  promotion_blockers: []
+  promotion_blockers: [P0_FORECAST_EXTREMA_AUTHORITY_REPAIR_PENDING]
   allowed_market_phases: [settlement_day]
   allowed_discovery_modes: [day0_capture]
   cycle_axis_dispatch_mode: null

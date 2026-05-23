@@ -1549,6 +1549,22 @@ tables:
       src/state/book_hash_transitions.py; producer wired in market_scanner.py.
       cycle_id=NULL for scanner-path rows; live cycle rows carry cycle_id.
 
+  - name: decision_integrity_quarantine
+    db: trade
+    schema_class: trade_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: "db.py:init_schema_trade_only + src.state.schema.decision_integrity_quarantine_schema.ensure_table"
+    pk_col: "[id]"
+    notes: >
+      P0 2026-05-22 (PR-E): non-destructive companion table tagging
+      opportunity_fact (and future) rows backed by non-contributing forecast
+      snapshots (contributes_to_target_extrema=0 / attribution UNKNOWN).
+      UNIQUE(table_name, row_id, reason_code). Writer
+      src/state/decision_integrity_quarantine.py; CLI
+      scripts/quarantine_bad_forecast_decisions.py (dry-run default). Co-located
+      on trade DB; cross-DB read-join against forecasts.ensemble_snapshots_v2.
+      Authority: docs/operations/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md.
+
   - name: exit_mutex_holdings
     db: trade
     schema_class: legacy_archived

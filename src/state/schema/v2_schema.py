@@ -777,6 +777,24 @@ def apply_v2_schema(conn: sqlite3.Connection, *, forecast_tables: bool = True) -
         """)
 
         # ----------------------------------------------------------------
+        # observation_hourly_extrema_v2 (PR-C compatibility view)
+        # Aliases running_max / running_min to hour_bucket_max / hour_bucket_min
+        # so call-sites can make the non-monotonic semantics explicit without
+        # any schema migration on the live table.  The original column names
+        # are preserved (no DROP / RENAME); this view is additive-only.
+        # Created AFTER the ADD COLUMN block so o.* includes all columns.
+        # ----------------------------------------------------------------
+        conn.execute("DROP VIEW IF EXISTS observation_hourly_extrema_v2")
+        conn.execute("""
+            CREATE VIEW observation_hourly_extrema_v2 AS
+                SELECT
+                    o.*,
+                    o.running_max AS hour_bucket_max,
+                    o.running_min AS hour_bucket_min
+                FROM observation_instants_v2 o
+        """)
+
+        # ----------------------------------------------------------------
         # historical_forecasts_v2
         # ----------------------------------------------------------------
         conn.execute("""

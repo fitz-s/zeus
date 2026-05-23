@@ -1349,3 +1349,56 @@ scripts:
     promotion_barrier: "Read-only diagnostic; output is advisory evidence and cannot authorize archiving."
     required_helpers: []
     required_tests: [tests/topology/test_operations_package_inventory.py]
+
+  scripts/quarantine_bad_forecast_decisions.py:
+    class: data_repair
+    status: active
+    lifecycle: p0_forecast_extrema_authority_pr_e
+    packet: docs/operations/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md
+    authority_scope: operator_invoked
+    dangerous_if_run: false
+    dry_run_default: true
+    apply_flag: "--apply"
+    target_db: state/zeus_trades.db
+    read_targets: [state/zeus-forecasts.db, state/zeus_trades.db]
+    write_targets: [state/zeus_trades.db]
+    canonical_command: "python scripts/quarantine_bad_forecast_decisions.py [--apply] [--trade-db PATH] [--forecasts-db PATH]"
+    external_inputs: []
+    delete_policy: retain_until_superseded
+    reuse_when: >
+      PR-E cleanup: tag opportunity_fact rows in zeus_trades.db backed by
+      non-contributing forecasts (contributes_to_target_extrema=0 or attribution
+      UNKNOWN). NON-destructive — tags rows via decision_integrity_quarantine,
+      never deletes. Idempotent (safe to re-run). Default is dry-run; pass --apply
+      to write quarantine rows.
+    do_not_use_when: "decision_integrity_quarantine table absent from zeus_trades.db — run init_schema_trade_only first."
+    promotion_barrier: "Requires PR-A and PR-E merged and zeus_trades.db schema updated."
+    unguarded_write_rationale: "Non-destructive tag-only writes to decision_integrity_quarantine; INSERT OR IGNORE enforces idempotency."
+    required_helpers: [src.state.decision_integrity_quarantine.quarantine_decisions_for_noncontributing_forecast]
+    required_tests: [tests/test_decision_integrity_quarantine.py]
+
+  scripts/verify_forecast_offset_fix.py:
+    class: diagnostic_report_writer
+    status: active
+    lifecycle: p0_forecast_extrema_authority_pr_a
+    packet: docs/operations/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md
+    authority_scope: read_only
+    dangerous_if_run: false
+    dry_run_default: true
+    apply_flag: null
+    target_db: state/zeus-forecasts.db
+    read_targets: [state/zeus-forecasts.db, state/zeus-world.db]
+    write_targets: [stdout]
+    canonical_command: "python scripts/verify_forecast_offset_fix.py [--forecasts-db PATH] [--world-db PATH] [--date DATE]"
+    external_inputs: []
+    delete_policy: retain_until_superseded
+    reuse_when: >
+      Post-PR-A diagnostic: compare OLD (latest-first) vs NEW (contributing-first)
+      snapshot selection for far-east cities and controls. Computes |bias| against
+      observed daily high and prints before/after table. Read-only — never writes.
+      Defaults to src.state.db.ZEUS_FORECASTS_DB_PATH and ZEUS_WORLD_DB_PATH.
+    do_not_use_when: "zeus-forecasts.db or zeus-world.db absent. Script exits cleanly with read error."
+    promotion_barrier: "Informational only — no gate. Run to verify PR-A selection change is effective."
+    unguarded_write_rationale: "Read-only SELECT; writes only to stdout."
+    required_helpers: []
+    required_tests: [tests/test_forecast_offset_fix_regression.py]

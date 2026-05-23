@@ -81,6 +81,7 @@ from src.engine.discovery_mode import DiscoveryMode
 from src.data.forecast_fetch_plan import data_version_for_track, track_for_metric
 from src.engine.time_context import lead_days_to_date_start, lead_hours_to_date_start
 from src.signal.day0_router import Day0Router, Day0SignalInputs
+from src.signal.probability_sanity import validate_high_distribution
 from src.signal.day0_high_nowcast_signal import (
     Day0HighNowcastSignal,
     NotApplicableHorizon as _NowcastNotApplicableHorizon,
@@ -4495,6 +4496,38 @@ def evaluate_candidate(
         logger.debug(
             "transfer_logit_sigma lookup failed (legacy DB or missing table): %s", _sigma_exc
         )
+
+    # Probability sanity gate — day0 HIGH path only, fail-closed before Kelly sizing.
+    if is_day0_mode and temperature_metric.is_high():
+        _san_ok, _san_reason = validate_high_distribution(
+            bins=bins,
+            p_raw=p_raw,
+            p_cal=p_cal,
+            member_samples=analysis_member_extrema,
+            market_prices=p_market,
+            strategy_key=f"day0_high:{city.name}:{target_date}",
+        )
+        if not _san_ok:
+            logger.warning(
+                "probability_sanity_gate rejected %s/%s: %s",
+                city.name, target_date, _san_reason,
+            )
+            return [EdgeDecision(
+                False,
+                decision_id=_decision_id(),
+                rejection_stage="SIGNAL_QUALITY",
+                rejection_reasons=[NoTradeReason.PROBABILITY_SANITY_GATE.value],
+                availability_status="DATA_AVAILABLE",
+                selected_method=selected_method,
+                applied_validations=[*entry_validations, "probability_sanity_gate"],
+                decision_snapshot_id=snapshot_id,
+                p_raw=p_raw,
+                p_cal=p_cal,
+                p_market=p_market,
+                agreement=agreement,
+                rejection_reason_enum=NoTradeReason.PROBABILITY_SANITY_GATE,
+                rejection_reason_detail=_san_reason,
+            )]
 
     analysis = MarketAnalysis(
         p_raw=p_raw,

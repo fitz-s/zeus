@@ -15,10 +15,11 @@ p_cal is np.ndarray, not scalar).
 Horizon guard: raises NotApplicableHorizon when inputs.hours_remaining > 6.
 Fail-closed: live mode must not relabel ensemble output as nowcast.
 
-settlement_samples() implements HIGH floor semantics:
-    anchored = max(ens_remaining, current_temp)   # HIGH: floor, not ceiling
-    blended  = w * anchored + (1-w) * current_temp
-    return max(obs_floor, blended)                # floor applied element-wise
+settlement_samples() implements HIGH physical law (PR-B fix 2026-05-22):
+    return settle(max(observed_high_so_far, future_member_max[i]))
+current_temp must NOT enter the value path — it can only lower future highs,
+violating the monotonicity of a daily-max statistic. current_temp is kept
+as a diagnostic / uncertainty input only (forecast_context()).
 
 Intentionally does NOT import day0_low_nowcast_signal (parallel-structure invariant).
 """
@@ -29,6 +30,7 @@ from typing import TYPE_CHECKING, Callable
 import numpy as np
 
 from src.contracts.settlement_semantics import apply_settlement_rounding
+from src.signal.day0_high_distribution import build_day0_high_distribution
 from src.signal.forecast_uncertainty import day0_nowcast_context
 
 if TYPE_CHECKING:
@@ -134,20 +136,21 @@ class Day0HighNowcastSignal:
         return apply_settlement_rounding(values, self._round_fn, self._precision)
 
     def settlement_samples(self) -> np.ndarray:
-        """HIGH floor semantics — mirrors Day0LowNowcastSignal with max instead of min.
+        """HIGH floor semantics — physical law: observation is a lower bound only.
 
-        Day's high cannot be below observed_high_so_far (floor, not ceiling).
+        Day's high = settle(max(observed_high_so_far, future_member_max)).
+        current_temp must NOT enter the value path (it can only lower samples,
+        violating the physical monotonicity of a daily-max statistic).
+        current_temp is preserved for diagnostics / uncertainty in forecast_context().
 
-        Algorithm:
-            anchored = max(ens_remaining[i], current_temp)  # floor: high can only rise
-            w        = _remaining_weight()
-            blended  = w * anchored + (1-w) * current_temp
-            final    = max(obs_floor, blended)              # floor from observation
+        Authority: docs/operations/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md §Physical law
         """
-        anchored = np.maximum(self.ens_remaining, self.current_temp)
-        w = self._remaining_weight()
-        blended = w * anchored + (1.0 - w) * self.current_temp
-        return self._settle(np.maximum(self.obs_floor, blended))
+        return build_day0_high_distribution(
+            observed_high_so_far=self.obs_floor,
+            future_member_maxes=self.ens_remaining,
+            round_fn=self._round_fn,
+            precision=self._precision,
+        )
 
     def p_bin(self, low: float | None, high: float | None) -> float:
         """Per-bin probability under nowcast distribution. Mirrors Day0LowNowcastSignal."""
