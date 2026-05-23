@@ -199,15 +199,19 @@ class TestClassifyForecastExtremaAuthority:
         auth = classify_forecast_extrema_authority(row)
         assert auth.eligibility == ForecastExtremaEligibility.LEGACY_NULL_PASSTHROUGH
 
-    def test_missing_version_contributes_none_is_passthrough(self):
-        # No data_version available -> conservative passthrough (not fail-closed).
+    def test_missing_data_version_is_unknown_fail_closed(self):
+        # p0-2-hardening: missing data_version (empty row / lookup failure) must
+        # fail-closed as UNKNOWN, NOT pass through as LEGACY_NULL_PASSTHROUGH.
+        # The earlier passthrough for None was the hidden hole this fix seals:
+        # _snapshot_row_for_classification returned {} on DB miss → data_version=None
+        # → silently treated as legacy passthrough, bypassing the P0 gate.
         row = {
             "contributes_to_target_extrema": None,
             "forecast_window_attribution_status": None,
             "boundary_ambiguous": 0,
         }
         auth = classify_forecast_extrema_authority(row)
-        assert auth.eligibility == ForecastExtremaEligibility.LEGACY_NULL_PASSTHROUGH
+        assert auth.eligibility == ForecastExtremaEligibility.UNKNOWN
 
     def test_unknown_contributes_1_attribution_unknown(self):
         row = {

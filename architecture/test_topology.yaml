@@ -2999,6 +2999,27 @@ test_metadata:
     created: 2026-05-22
     last_reused_or_audited: 2026-05-22
 
+  tests/test_no_latest_hour_running_max_antipattern.py:
+    modules: [data]
+    category: static_antibody
+    kind: antibody
+    profile: p0_forecast_extrema_authority_pr_c
+    blocks_commit: true
+    asserted_invariants:
+      - NO_PRODUCTION_READER_USES_LATEST_HOUR_RUNNING_MAX_ANTIPATTERN
+    source_under_test:
+      - src/data/day0_observation_reader.py
+    law_dependencies:
+      - docs/operations/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md
+    notes: >
+      Repo-static AST/regex guard: scans all src/**/*.py files and asserts none use
+      the (ORDER BY ... DESC, LIMIT 1, running_max/running_min) anti-pattern.
+      Root C antibody — the canonical fix is MAX(running_max) over all qualifying rows.
+      day0_observation_reader.py is allowlisted (permitted to mention the anti-pattern
+      in comments and required to use the correct MAX aggregation).
+    created: 2026-05-23
+    last_reused_or_audited: 2026-05-23
+
   tests/test_day0_high_distribution.py:
     modules: [signal]
     category: unit_antibody

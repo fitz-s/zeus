@@ -983,10 +983,18 @@ def _snapshot_row_for_classification(
     ``ExecutableForecastSnapshot`` does not carry the contributes/attribution
     columns, so classification needs the raw DB row.  Looked up by snapshot_id
     on the authoritative table.
+
+    p0-2-hardening: when the row is not found (table missing or snapshot_id
+    unknown), inject ``data_version`` from the snapshot object so the classifier
+    can apply the correct tri-state gate.  Without this, an empty dict yields
+    data_version=None, which previously fell through to LEGACY_NULL_PASSTHROUGH
+    instead of UNKNOWN (fail-closed).
     """
     table = _authority_table(conn, "ensemble_snapshots_v2")
     if table is None:
-        return {}
+        # Table not found — return sentinel with known data_version so the
+        # classifier fails closed (UNKNOWN) rather than passing through as legacy.
+        return {"data_version": snapshot.data_version}
     # SELECT * so the classifier sees every contributes/attribution column
     # without coupling this query to the exact schema column set (the
     # classifier already tolerates a missing short-alias attribution_status).
@@ -994,7 +1002,10 @@ def _snapshot_row_for_classification(
         f"SELECT * FROM {table} WHERE snapshot_id = ?",
         (snapshot.snapshot_id,),
     ).fetchone()
-    return dict(row) if row else {}
+    if row:
+        return dict(row)
+    # Row not found — sentinel with known data_version (same fail-closed rationale).
+    return {"data_version": snapshot.data_version}
 
 
 def _bundle_rank(candidate: ExecutableForecastBundleCandidate) -> tuple[int, float, float, int]:
