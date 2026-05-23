@@ -22,7 +22,7 @@ from scripts.topology_v_next.cli_integration_shim import (
     format_output,
     map_old_status_to_severity,
 )
-from scripts.topology_v_next.dataclasses import Severity
+from scripts.topology_v_next.topology_models import Severity
 
 
 class TestShimWireUpIntegration:

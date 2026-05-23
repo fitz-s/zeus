@@ -29,7 +29,7 @@ from datetime import datetime, UTC
 from typing import Any
 
 from scripts.topology_v_next.admission_engine import admit
-from scripts.topology_v_next.dataclasses import (
+from scripts.topology_v_next.topology_models import (
     AdmissionDecision,
     BindingLayer,
     Severity,
@@ -231,7 +231,7 @@ def _build_divergence_record(
 
     # Detect friction pattern hit (first one wins — admission engine sets at most one)
     friction_pattern_hit: str | None = None
-    from scripts.topology_v_next.dataclasses import FrictionPattern  # noqa: PLC0415
+    from scripts.topology_v_next.topology_models import FrictionPattern  # noqa: PLC0415
     for issue in decision.issues:
         code = getattr(issue, "code", None)
         if code and code.startswith("friction_"):

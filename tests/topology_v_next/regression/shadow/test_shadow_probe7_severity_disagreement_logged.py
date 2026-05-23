@@ -19,7 +19,7 @@ import pytest
 
 from scripts.topology_v_next.cli_integration_shim import maybe_shadow_compare
 from scripts.topology_v_next.divergence_logger import DivergenceRecord, log_divergence, daily_path
-from scripts.topology_v_next.dataclasses import Severity
+from scripts.topology_v_next.topology_models import Severity
 
 
 # Payload where old admission over-blocked a docs path; v_next admits it

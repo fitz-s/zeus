@@ -18,7 +18,7 @@ Public API (SCAFFOLD §1.1):
 Concurrency: O_APPEND + O_CREAT, single os.write per record. Multi-process-safe
 on POSIX (SCAFFOLD §4.3). Never raises on I/O failure — stderr + continue.
 
-Codex-importable: stdlib + .dataclasses (P1 types) only. No anthropic SDK.
+Codex-importable: stdlib + .topology_models (P1 types) only. No anthropic SDK.
 """
 from __future__ import annotations
 
@@ -30,7 +30,7 @@ from datetime import date, datetime, UTC
 from pathlib import Path
 from typing import Any
 
-from scripts.topology_v_next.dataclasses import Severity
+from scripts.topology_v_next.topology_models import Severity
 
 
 # ---------------------------------------------------------------------------

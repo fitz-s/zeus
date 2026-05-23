@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from scripts.topology_v_next.dataclasses import Intent, Severity
+from scripts.topology_v_next.topology_models import Intent, Severity
 from scripts.topology_v_next.intent_resolver import resolve_intent
 from scripts.topology_v_next.profile_loader import load_binding_layer, validate_binding_layer
 
@@ -65,7 +65,7 @@ class TestIntentEnumTooNarrow:
         This is the structural check for intent values that agents add without
         namespacing them correctly.
         """
-        from scripts.topology_v_next.dataclasses import BindingLayer, CoverageMap
+        from scripts.topology_v_next.topology_models import BindingLayer, CoverageMap
         # Build a binding where an intent_extension lacks namespace prefix
         # NOTE: This is a hypothetical — in practice the loader skips unknown enum values.
         # We test validate_binding_layer's namespace check on a binding built with

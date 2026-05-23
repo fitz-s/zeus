@@ -19,7 +19,7 @@ from pathlib import Path
 
 import pytest
 
-from scripts.topology_v_next.dataclasses import (
+from scripts.topology_v_next.topology_models import (
     BindingLayer,
     CoverageMap,
     Intent,
@@ -212,7 +212,7 @@ class TestValidateBindingLayer:
 
     def test_empty_profiles_warns(self):
         """A binding with no coverage profiles should warn."""
-        from scripts.topology_v_next.dataclasses import CoverageMap, BindingLayer
+        from scripts.topology_v_next.topology_models import CoverageMap, BindingLayer
         empty_cm = CoverageMap(profiles={}, orphaned=(), hard_stop_paths=())
         bl = BindingLayer(
             project_id="test",

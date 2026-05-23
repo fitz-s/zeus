@@ -18,7 +18,7 @@ import pytest
 
 from scripts.topology_v_next.cli_integration_shim import maybe_shadow_compare, format_output
 from scripts.topology_v_next.admission_engine import admit
-from scripts.topology_v_next.dataclasses import Severity
+from scripts.topology_v_next.topology_models import Severity
 
 
 # Files that produce advisory issues (missing_companion) with ok=True/False

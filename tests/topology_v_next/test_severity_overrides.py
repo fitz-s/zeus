@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import pytest
 
-from scripts.topology_v_next.dataclasses import IssueRecord, Severity
+from scripts.topology_v_next.topology_models import IssueRecord, Severity
 from scripts.topology_v_next.severity_overrides import apply_overrides, effective_severity
 
 

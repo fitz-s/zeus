@@ -3,7 +3,7 @@
 # Authority basis: docs/operations/task_2026-05-15_p1_topology_v_next_additive/SCAFFOLD.md §2.1
 #                  operator directive 2026-05-19 (LIVE_MONEY_SURFACE_TOUCHED added)
 """
-Unit tests for scripts/topology_v_next/dataclasses.py.
+Unit tests for scripts/topology_v_next/topology_models.py.
 
 Covers: frozen-ness, to_dict round-trip, Intent enum coverage (universal +
 zeus.* extensions), Severity ordering, FrictionPattern membership,
@@ -13,7 +13,7 @@ BindingLayer instantiation.
 import dataclasses
 import pytest
 
-from scripts.topology_v_next.dataclasses import (
+from scripts.topology_v_next.topology_models import (
     AdmissionDecision,
     BindingLayer,
     CohortDecl,

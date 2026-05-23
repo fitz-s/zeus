@@ -13,7 +13,7 @@ or case-insensitive comparison (SCAFFOLD §7 probe4, §8.4).
 from __future__ import annotations
 
 from scripts.topology_v_next.admission_engine import admit
-from scripts.topology_v_next.dataclasses import (
+from scripts.topology_v_next.topology_models import (
     BindingLayer,
     CoverageMap,
     Intent,

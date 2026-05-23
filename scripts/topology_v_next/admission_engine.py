@@ -25,7 +25,7 @@ import time
 from pathlib import PurePosixPath
 from typing import Any
 
-from scripts.topology_v_next.dataclasses import (
+from scripts.topology_v_next.topology_models import (
     AdmissionDecision,
     BindingLayer,
     DiagnosisEntry,

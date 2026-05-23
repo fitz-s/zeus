@@ -1,7 +1,8 @@
 # Created: 2026-05-15
-# Last reused or audited: 2026-05-15
+# Last reused or audited: 2026-05-22
 # Authority basis: docs/operations/task_2026-05-15_p1_topology_v_next_additive/SCAFFOLD.md §1.2
 #                  docs/operations/task_2026-05-15_runtime_improvement_engineering_package/01_topology_v_next/UNIVERSAL_TOPOLOGY_DESIGN.md §2, §12, §13
+# Renamed: 2026-05-22 — was dataclasses.py; shadowed stdlib dataclasses module (PR #304 Copilot finding)
 """
 Pure data declarations for topology v_next admission system.
 

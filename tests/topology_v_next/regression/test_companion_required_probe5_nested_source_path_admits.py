@@ -18,7 +18,7 @@ profile's glob coverage must trigger the gate and accept the companion correctly
 from __future__ import annotations
 
 from scripts.topology_v_next.admission_engine import admit
-from scripts.topology_v_next.dataclasses import (
+from scripts.topology_v_next.topology_models import (
     BindingLayer,
     CoverageMap,
     Intent,
