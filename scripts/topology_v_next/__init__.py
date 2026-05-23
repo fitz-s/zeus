@@ -42,7 +42,7 @@ __all__ = [
     "admit",
     # P3.3 shim
     "maybe_shadow_compare",
-    # dataclasses
+    # topology_models
     "AdmissionDecision",
     "BindingLayer",
     "CohortDecl",
