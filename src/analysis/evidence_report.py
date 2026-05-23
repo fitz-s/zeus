@@ -1,5 +1,5 @@
 # Created: 2026-05-21
-# Last reused or audited: 2026-05-21
+# Last reused or audited: 2026-05-23
 # Authority basis: docs/operations/task_2026-05-21_strategy_vnext_phase6_evidence_ladder/PHASE_6_PLAN.md §T4
 #                  + docs/operations/task_2026-05-21_mainline_completion_authority/07_PHASE_6_EVIDENCE_LADDER.md §Object model
 """EvidenceReport — per-strategy evidence aggregator.
@@ -106,7 +106,7 @@ def build_evidence_report(
     tier_observed: EvidenceTier,
     *,
     conn: sqlite3.Connection,
-    breakeven_win_rate: float = 0.5,
+    breakeven_win_rate: float | None = None,
     promotion_blockers: tuple[str, ...] = (),
     experiment_id: str | None = None,
     cohort_tag: str | None = None,
@@ -121,18 +121,34 @@ def build_evidence_report(
         mean_regret, joined through decision_events to verify strategy_key+source match
 
     Optional scoping:
-      - experiment_id: restrict denominator and regret rows to a single experiment
-      - cohort_tag:    restrict denominator and regret rows to a cohort
-      - source:        restrict denominator to a specific decision source
+      - experiment_id: restrict regret analytics to a single experiment;
+                       n_decisions denominator is NOT narrowed by experiment because
+                       decision_events has no experiment FK — unsettled decisions must
+                       remain in the denominator.
+      - cohort_tag:    restrict regret analytics to a cohort (same caveat)
+      - source:        restrict denominator, no_trade_events, AND regret analytics
+                       (via de.source JOIN on decision_events) to a specific source
                        ('phase0_backfill', 'live_decision', 'shadow_decision')
+
+    breakeven_win_rate must be supplied by the caller (strategy-specific value from
+    the profile registry). No default — a hardcoded 0.5 silently miscalibrates the
+    promotion gate for every strategy with a different fee structure.
 
     Sign convention: total_regret_usd > 0 means realized > counterfactual (WIN).
     Consistent with regret_decomposer.py SEV2-1 canonical convention.
 
     INV-37: caller supplies conn; never auto-opens.
     """
-    # Count decisions from decision_events (authoritative denominator).
-    # Scoped by source when provided so cross-source contamination is prevented.
+    if breakeven_win_rate is None:
+        raise ValueError(
+            "breakeven_win_rate must be supplied by caller; "
+            "no generic default — use strategy profile registry value."
+        )
+
+    # n_decisions: authoritative denominator from decision_events.
+    # Filtered by source when provided. NOT narrowed by experiment_id/cohort_tag
+    # because decision_events has no experiment FK — scoping via regret_decompositions
+    # would exclude unsettled decisions, corrupting the denominator (P1-7 fix).
     tables = {
         row[0]
         for row in conn.execute(
@@ -145,17 +161,6 @@ def build_evidence_report(
         if source is not None:
             _de_filters += " AND source = ?"
             _de_params.append(source)
-        if experiment_id is not None and "regret_decompositions" in tables:
-            _de_filters += " AND decision_event_id IN (SELECT decision_event_id FROM regret_decompositions WHERE experiment_id = ?)"
-            _de_params.append(experiment_id)
-        if cohort_tag is not None and "regret_decompositions" in tables and "shadow_experiments" in tables:
-            _de_filters += (
-                " AND decision_event_id IN ("
-                "SELECT rd.decision_event_id FROM regret_decompositions rd"
-                " JOIN shadow_experiments se ON se.experiment_id = rd.experiment_id"
-                " WHERE se.cohort_tag = ?)"
-            )
-            _de_params.append(cohort_tag)
         n_decisions_row = conn.execute(
             f"SELECT COUNT(*) FROM decision_events {_de_filters}",
             _de_params,
@@ -215,23 +220,20 @@ def build_evidence_report(
             for row in conn.execute("PRAGMA table_info(no_trade_events)").fetchall()
         }
         if "strategy_key" in no_trade_columns:
+            _nt_params: list = [strategy_id]
             if "schema_compatibility" in no_trade_columns:
-                n_no_trade_row = conn.execute(
-                    """
-                    SELECT COUNT(*) FROM no_trade_events
-                    WHERE strategy_key = ?
-                      AND schema_compatibility = 'current'
-                    """,
-                    (strategy_id,),
-                ).fetchone()
+                _nt_where = "WHERE strategy_key = ? AND schema_compatibility = 'current'"
             else:
-                n_no_trade_row = conn.execute(
-                    """
-                    SELECT COUNT(*) FROM no_trade_events
-                    WHERE strategy_key = ?
-                    """,
-                    (strategy_id,),
-                ).fetchone()
+                _nt_where = "WHERE strategy_key = ?"
+            # P1-8 fix: scope no_trade_events by source (via event_source column) when provided.
+            # no_trade_events has no experiment_id FK so experiment/cohort cannot be applied.
+            if source is not None and "event_source" in no_trade_columns:
+                _nt_where += " AND event_source = ?"
+                _nt_params.append(source)
+            n_no_trade_row = conn.execute(
+                f"SELECT COUNT(*) FROM no_trade_events {_nt_where}",
+                _nt_params,
+            ).fetchone()
             n_no_trades = int(n_no_trade_row[0] or 0)
         else:
             n_no_trade_row = conn.execute(

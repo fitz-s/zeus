@@ -105,6 +105,7 @@ class TestSourceFilterConsistency:
             EvidenceTier.SHADOW_PASS,
             conn=conn,
             source="shadow_decision",
+            breakeven_win_rate=0.5,
         )
         assert report.n_decisions == 1, f"n_decisions={report.n_decisions} should be 1 (shadow only)"
         assert report.n_settled == 1, f"n_settled={report.n_settled} should be 1 (shadow only)"
@@ -128,6 +129,7 @@ class TestSourceFilterConsistency:
             EvidenceTier.SHADOW_PASS,
             conn=conn,
             source="shadow_decision",
+            breakeven_win_rate=0.5,
         )
         assert report.n_decisions == 0
         assert report.n_settled == 0
@@ -136,10 +138,17 @@ class TestSourceFilterConsistency:
 
 
 class TestCohortTagFilterConsistency:
-    """cohort_tag filter must scope all three metrics consistently."""
+    """cohort_tag filter scopes regret analytics (n_settled, n_wins) but NOT n_decisions.
+
+    P1-7 design: n_decisions is the full strategy universe (no experiment/cohort FK on
+    decision_events). Scoping via regret_decompositions would exclude unsettled decisions
+    from the denominator, corrupting the CI. cohort_tag only filters regret rows.
+    """
 
     def test_cohort_tag_excludes_other_cohorts(self) -> None:
-        """MP-LEA-001: filtering by cohort-A must not count cohort-B regret rows."""
+        """MP-LEA-001: cohort-A regret filter must not count cohort-B regret rows.
+        n_decisions = full strategy universe (2 decisions); n_settled = cohort-A only (1).
+        """
         conn = _fresh_conn()
         _seed_chain(
             conn,
@@ -165,10 +174,15 @@ class TestCohortTagFilterConsistency:
             EvidenceTier.SHADOW_PASS,
             conn=conn,
             cohort_tag="cohort-A",
+            breakeven_win_rate=0.5,
         )
-        assert report.n_decisions == 1
+        # n_decisions = full strategy universe (no cohort FK on decision_events)
+        assert report.n_decisions == 2, (
+            f"n_decisions={report.n_decisions}: expected 2 (full strategy universe). "
+            "cohort_tag scopes regret analytics only, not the denominator (P1-7)."
+        )
         assert report.n_settled == 1
-        assert report.n_wins == 1, "cohort-A regret>0, cohort-B loss must not bleed in"
+        assert report.n_wins == 1, "cohort-A regret>0, cohort-B loss must not bleed into n_wins"
 
     def test_cohort_tag_loss_not_masked_by_other_cohort_wins(self) -> None:
         """Cohort filter prevents a winning cohort from masking a losing cohort's metrics."""
@@ -197,6 +211,7 @@ class TestCohortTagFilterConsistency:
             EvidenceTier.SHADOW_PASS,
             conn=conn,
             cohort_tag="cohort-loss",
+            breakeven_win_rate=0.5,
         )
         assert report.n_wins == 0, "loss cohort should show 0 wins"
         assert report.n_settled == 1
@@ -220,7 +235,7 @@ class TestBayesianPriorContract:
         """ci_lower must be None when n_settled=0 — prevents hardcoded-0.5 fallback."""
         conn = _fresh_conn()
         report = build_evidence_report(
-            "center_buy", EvidenceTier.SHADOW_PASS, conn=conn
+            "center_buy", EvidenceTier.SHADOW_PASS, conn=conn, breakeven_win_rate=0.5
         )
         assert report.ci_lower is None
         assert report.ci_upper is None
@@ -238,3 +253,53 @@ class TestBayesianPriorContract:
             f"Expected 0.55, got {report.breakeven_win_rate}. "
             "breakeven_win_rate must come from caller, not be hardcoded."
         )
+
+    def test_breakeven_win_rate_none_raises(self) -> None:
+        """P1-9 antibody: build_evidence_report must raise ValueError when
+        breakeven_win_rate is not supplied. No generic 0.5 default — every
+        strategy has a different breakeven from its fee structure."""
+        conn = _fresh_conn()
+        with pytest.raises(ValueError, match="breakeven_win_rate"):
+            build_evidence_report(
+                "center_buy",
+                EvidenceTier.SHADOW_PASS,
+                conn=conn,
+                # breakeven_win_rate intentionally omitted — should raise
+            )
+
+    def test_n_decisions_is_full_universe_when_cohort_scoped(self) -> None:
+        """P1-7 antibody: n_decisions must include unsettled decisions even when
+        cohort_tag is provided. Scoping n_decisions via regret_decompositions
+        excluded unsettled decisions (those with no regret row yet), corrupting
+        the Beta denominator by making n_decisions == n_settled."""
+        conn = _fresh_conn()
+        # Settled decision in cohort-A (has regret row)
+        _seed_chain(
+            conn,
+            de_id="de-settled",
+            strategy_key="center_buy",
+            source="shadow_decision",
+            experiment_id="exp-A",
+            cohort_tag="cohort-A",
+            regret=0.10,
+        )
+        # Unsettled decision for same strategy — no regret row, no shadow_experiment link
+        conn.execute(
+            _DE_SQL,
+            ("de-unsettled", "de-unsettled", UTC_NOW, UTC_NOW, "center_buy", UTC_NOW, "shadow_decision"),
+        )
+        conn.commit()
+
+        report = build_evidence_report(
+            "center_buy",
+            EvidenceTier.SHADOW_PASS,
+            conn=conn,
+            cohort_tag="cohort-A",
+            breakeven_win_rate=0.5,
+        )
+        assert report.n_decisions == 2, (
+            f"n_decisions={report.n_decisions}: unsettled decision must be counted in denominator. "
+            "cohort_tag scopes regret analytics only (P1-7 fix)."
+        )
+        assert report.n_settled == 1, "Only 1 decision has a regret row (settled)"
+        assert report.n_wins == 1

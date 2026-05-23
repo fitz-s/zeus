@@ -627,6 +627,7 @@ def test_t4_evidence_report_counts_structured_no_trade_rows(world_conn) -> None:
         "shoulder_sell",
         EvidenceTier.SHADOW_PASS,
         conn=world_conn,
+        breakeven_win_rate=0.55,
     )
     assert report.n_no_trades == 1
 

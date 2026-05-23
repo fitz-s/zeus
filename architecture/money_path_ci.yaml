@@ -141,8 +141,11 @@ segments:
       - architecture/test_quality.yaml
       - scripts/ci/**
       - .github/workflows/money-path-required.yml
+      - .github/copilot-instructions.md
+      - .github/instructions/**
       - tests/money_path/**
       - tests/test_money_path_semantic_ci.py
+      - tests/ci/test_copilot_instruction_contract.py
     relationship_tests:
       - tests/test_money_path_semantic_ci.py
       - tests/money_path/test_001_negrisk_tradeability_snapshot_submit.py
@@ -254,6 +257,7 @@ segments:
       - src/contracts/**
       - src/engine/evaluator.py
       - src/backtest/**
+      - architecture/strategy_profile_registry.yaml
     relationship_tests:
       - tests/test_evaluator_strategy_key_failclosed.py
       - tests/test_architecture_contracts.py

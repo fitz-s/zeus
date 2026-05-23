@@ -293,6 +293,17 @@ state_machines:
     invariant_tests:
       - tests/test_forecast_extrema_authority.py
       - tests/test_forecast_offset_fix_regression.py
+  ci_gate_env_var_keys:
+    owner: .github/workflows/architecture_advisory_gates.yml
+    description: >
+      CI gate configuration env var keys used across workflow files to document
+      when to review or sunset a gate. NOT a state machine — these are string
+      literals used as YAML dict keys in .github/workflows/*.yml env: blocks.
+      Registered here because the REVIEW prefix in GATE_REVIEW_CONDITION fires
+      the semantic classifier's REVIEW-prefix state check when this key appears
+      as a string literal in scripts/check_advisory_gates.py.
+    states:
+      - GATE_REVIEW_CONDITION
 
 schema_objects:
   authority_fabricating_defaults:
@@ -333,7 +344,7 @@ external_truth_sources:
 
 side_effect_calls:
   submit_order:
-    patterns: [client.submit, submit_order, create_order]
+    patterns: [client.submit, submit_order, create_order, place_limit_order, place_market_order, post_order, build_order]
     required_invariants: [MP-SIDE-001, MP-SIDE-002, MP-SIDE-003]
   redeem:
     patterns: [adapter.redeem, redeemPositions, eth_sendRawTransaction]
