@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # Created: 2026-05-16
 # Last reused or audited: 2026-05-16
-# Authority basis: docs/operations/archive/2026-Q2/task_2026-05-16_doc_alignment_plan/PLAN.md §WAVE 2
+# Authority basis: docs/archive/2026-Q2/task_2026-05-16_doc_alignment_plan/PLAN.md §WAVE 2
 """
 One-off migration script: move 28 archive entries from docs/archives/packets/
-to docs/operations/archive/2026-Q2/ with git mv, then create .archived stubs.
+to docs/archive/2026-Q2/ with git mv, then create .archived stubs.
 
 Usage:
     python scripts/archive_migration_2026-05-16.py --dry-run   # preview only
@@ -12,7 +12,7 @@ Usage:
 
 Log written to:
     state/maintenance_state/migration_2026-05-16.log
-    docs/operations/archive/2026-Q2/task_2026-05-16_doc_alignment_plan/migration_log.txt
+    docs/archive/2026-Q2/task_2026-05-16_doc_alignment_plan/migration_log.txt
 """
 
 import argparse
@@ -24,7 +24,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SOURCE_DIR = REPO_ROOT / "docs" / "archives" / "packets"
-TARGET_DIR = REPO_ROOT / "docs" / "operations" / "archive" / "2026-Q2"
+TARGET_DIR = REPO_ROOT / "docs" / "archive" / "2026-Q2"
 STUB_DIR = REPO_ROOT / "docs" / "operations"
 LOG_PATH_1 = REPO_ROOT / "state" / "maintenance_state" / "migration_2026-05-16.log"
 LOG_PATH_2 = REPO_ROOT / "docs" / "operations" / "task_2026-05-16_doc_alignment_plan" / "migration_log.txt"
@@ -42,10 +42,10 @@ def get_entries():
 
 def make_dir_stub(name: str, is_dir: bool) -> str:
     """Generate .archived stub content per ARCHIVAL_RULES.md:84-102."""
-    archived_to = f"docs/operations/archive/2026-Q2/{name}"
+    archived_to = f"docs/archive/2026-Q2/{name}"
     if not is_dir:
         # bare file — archived_to points to file path with extension
-        archived_to = f"docs/operations/archive/2026-Q2/{name}"
+        archived_to = f"docs/archive/2026-Q2/{name}"
     return f"""---
 archived_to: {archived_to}
 archived_at: {TODAY}
@@ -53,7 +53,7 @@ archived_by: maintenance_agent
 last_modified_before_archive: {TODAY}
 exemption_checks_passed: 9/9
 reference_grep_count: 0
-restore_command: git mv docs/operations/archive/2026-Q2/{name} docs/operations/{name}
+restore_command: git mv docs/archive/2026-Q2/{name} docs/operations/{name}
 entry_type: {"directory" if is_dir else "file"}
 migration_source: docs/archives/packets/{name}
 ---
@@ -91,7 +91,7 @@ def main():
     lines.append(f"# Mode: {'DRY-RUN' if dry_run else 'APPLY'}")
     lines.append(f"# Date: {TODAY}")
     lines.append(f"# Source: docs/archives/packets/")
-    lines.append(f"# Target: docs/operations/archive/2026-Q2/")
+    lines.append(f"# Target: docs/archive/2026-Q2/")
     lines.append("")
 
     # Pre-deletion check: all 28 entries confirmed present on disk

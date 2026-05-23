@@ -1,6 +1,6 @@
 # Created: 2026-05-14
 # Last reused/audited: 2026-05-23
-# Authority basis: docs/operations/archive/2026-Q2/task_2026-05-08_deep_alignment_audit/DATA_DAEMON_LIVE_EFFICIENCY_REFACTOR_PLAN.md section 6.1, section 6.2, and section 8 Phase 4; Phase 6 durable work journaling; docs/operations/archive/2026-Q2/task_2026-05-16_live_continuous_run_package/LIVE_CONTINUOUS_RUN_PACKAGE_PLAN.md source-health gate; a0d51d480b507f324 root-cause + docs/operations/live_review_may23.md (ECMWF 00z ingest schedule fix).
+# Authority basis: docs/archive/2026-Q2/task_2026-05-08_deep_alignment_audit/DATA_DAEMON_LIVE_EFFICIENCY_REFACTOR_PLAN.md section 6.1, section 6.2, and section 8 Phase 4; Phase 6 durable work journaling; docs/archive/2026-Q2/task_2026-05-16_live_continuous_run_package/LIVE_CONTINUOUS_RUN_PACKAGE_PLAN.md source-health gate; a0d51d480b507f324 root-cause + docs/operations/live_review_may23.md (ECMWF 00z ingest schedule fix).
 """Dedicated OpenData live forecast producer daemon.
 
 This module owns the ECMWF OpenData live forecast scheduler and the OpenData-only

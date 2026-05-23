@@ -1,6 +1,6 @@
 # Created: 2026-05-15
 # Last reused or audited: 2026-05-15
-# Authority basis: docs/operations/archive/2026-Q2/task_2026-05-15_p5_maintenance_worker_core/SCAFFOLD.md §3 (P5.3)
+# Authority basis: docs/archive/2026-Q2/task_2026-05-15_p5_maintenance_worker_core/SCAFFOLD.md §3 (P5.3)
 """
 Tests for maintenance_worker.rules.parser — load_task_catalog.
 
@@ -426,11 +426,11 @@ class TestEnvVarExpansion:
               - id: t1
                 schedule: daily
                 config:
-                  archive: docs/operations/archive/${YEAR}-Q${QUARTER}
+                  archive: docs/archive/${YEAR}-Q${QUARTER}
             """,
         )
         entries = load_task_catalog(p, env={"YEAR": "2026", "QUARTER": "2"})
-        assert entries[0].raw["config"]["archive"] == "docs/operations/archive/2026-Q2"
+        assert entries[0].raw["config"]["archive"] == "docs/archive/2026-Q2"
 
     def test_unknown_project_var_left_asis(self, tmp_path: Path) -> None:
         """${PROJECT_REPO} and other project vars are not resolved; left as-is."""

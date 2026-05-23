@@ -4,8 +4,8 @@
 #   live row for the same token. This is the schema-level antibody for the
 #   non-idempotent position-open defect (see docs F109 trace).
 #
-# Authority: docs/operations/archive/2026-Q2/task_2026-05-17_post_karachi_remediation/F109_*.md
-#            + this branch's docs/operations/archive/2026-Q2/task_2026-05-17_f109_fix/TRACE.md
+# Authority: docs/archive/2026-Q2/task_2026-05-17_post_karachi_remediation/F109_*.md
+#            + this branch's docs/archive/2026-Q2/task_2026-05-17_f109_fix/TRACE.md
 #
 # DEPLOY ORDER (mandatory):
 #   1. boot-time consolidator (src/state/position_duplicate_consolidator.py)

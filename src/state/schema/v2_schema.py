@@ -268,7 +268,7 @@ def _create_calibration_pairs_v2(conn: sqlite3.Connection) -> None:
             --   Produces notnull=1 in PRAGMA table_info but requires disk headroom.
             --   BLOCKED at current 22 GiB free — operator-coordinated separately.
             -- Preflight confirmed: 0 NULL rows as of 2026-05-17. See:
-            --   docs/operations/archive/2026-Q2/task_2026-05-17_strategy_vnext_phase0/preflight/migration_dry_runs.json
+            --   docs/archive/2026-Q2/task_2026-05-17_strategy_vnext_phase0/preflight/migration_dry_runs.json
             -- Column DDL unchanged until rebuild-mode migration runs:
             decision_group_id TEXT,
             bias_corrected INTEGER NOT NULL DEFAULT 0

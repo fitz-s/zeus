@@ -2,7 +2,7 @@
 # Last reused/audited: 2026-05-17
 # Authority basis: F40/F41 K1-reader regressions — prevent world-DB direct access
 # for forecast_class tables in scripts that cross DB boundaries post-K1-split.
-# See docs/operations/archive/2026-Q2/task_2026-05-17_post_karachi_remediation/FIX_K1_READERS.md §C
+# See docs/archive/2026-Q2/task_2026-05-17_post_karachi_remediation/FIX_K1_READERS.md §C
 """Antibody: scripts that were K1-misrouted must not regress to world-DB direct access.
 
 Scope: F40 (bridge_oracle_to_calibration) + F41 (evaluate_calibration_transfer_oos).

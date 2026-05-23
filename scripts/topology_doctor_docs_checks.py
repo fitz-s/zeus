@@ -1145,9 +1145,10 @@ def check_task_dir_sprawl_ceiling(api: Any, topology: dict[str, Any]) -> list[An
     in {active, transitional}.  Unregistered dirs and dirs with lifecycle_state in
     {historical, closed} must be archived immediately.
 
-    Fix: move the dir to docs/operations/archive/2026-Q2/<name>/, create a stub
-    file docs/operations/<name>.archived, and delete its docs_registry.yaml entry
-    (or update its path).  Route new work through docs/operations/current/plans/<slug>/
+    Fix: move the dir to docs/archive/2026-Q2/<name>/ and add a row to
+    docs/archive_registry.md. Do NOT leave a stub in docs/operations/.
+    Delete or update its docs_registry.yaml entry.
+    Route new work through docs/operations/current/plans/<slug>/
     using: python scripts/zpkt.py start <slug>.
 
     Read: architecture/docs_registry.yaml (lifecycle_state field),
@@ -1175,8 +1176,8 @@ def check_task_dir_sprawl_ceiling(api: Any, topology: dict[str, Any]) -> list[An
                         f"'{rel}' is not registered in architecture/docs_registry.yaml. "
                         "Steady-state is ZERO top-level task_* dirs; all work routes through "
                         "docs/operations/current/plans/<slug>/. "
-                        f"Fix: git mv docs/operations/{name} docs/operations/archive/2026-Q2/{name} "
-                        f"&& echo 'archived' > docs/operations/{name}.archived && git add -A. "
+                        f"Fix: git mv docs/operations/{name} docs/archive/2026-Q2/{name} "
+                        f"&& add a row to docs/archive_registry.md. Do NOT create a stub file. "
                         "Route new work: python scripts/zpkt.py start <slug>. "
                         "Read: architecture/docs_registry.yaml, docs/operations/current/package.yaml."
                     ),
@@ -1192,8 +1193,8 @@ def check_task_dir_sprawl_ceiling(api: Any, topology: dict[str, Any]) -> list[An
                         "and must be archived. "
                         "Steady-state is ZERO top-level task_* dirs; closed/historical dirs must not "
                         "remain at docs/operations/task_*/. "
-                        f"Fix: git mv docs/operations/{name} docs/operations/archive/2026-Q2/{name} "
-                        f"&& echo 'archived' > docs/operations/{name}.archived && git add -A. "
+                        f"Fix: git mv docs/operations/{name} docs/archive/2026-Q2/{name} "
+                        f"&& add a row to docs/archive_registry.md. Do NOT create a stub file. "
                         "Read: architecture/docs_registry.yaml, docs/operations/current/package.yaml."
                     ),
                 )

@@ -296,7 +296,7 @@ entries:
     allowed_action: keep_conditional
     rationale: >
       Companion-update: P8 authority-drift remediation 2026-05-15 (POSTMORTEM at
-      docs/operations/archive/2026-Q2/task_2026-05-15_p8_authority_drift_3_blocking/POSTMORTEM.md).
+      docs/archive/2026-Q2/task_2026-05-15_p8_authority_drift_3_blocking/POSTMORTEM.md).
       Doc was added ~2026-04-29 by calibration-weight authority packet without a
       companion yaml entry. Content is current and load-bearing; no drift found.
       Conditional load for calibration/Platt/LOW-track work. AGENTS.md conditional
@@ -315,7 +315,7 @@ entries:
     allowed_action: keep_conditional
     rationale: >
       Companion-update: P8 authority-drift remediation 2026-05-15 (POSTMORTEM at
-      docs/operations/archive/2026-Q2/task_2026-05-15_p8_authority_drift_3_blocking/POSTMORTEM.md).
+      docs/archive/2026-Q2/task_2026-05-15_p8_authority_drift_3_blocking/POSTMORTEM.md).
       Doc was added 2026-05-03 by Kelly asymmetric loss handoff packet without a
       companion yaml entry. Content is current; kelly.py implementation verified.
       Conditional load for Kelly sizing, per-city asymmetric loss, or DDD↔Kelly
@@ -336,7 +336,7 @@ entries:
     allowed_action: keep_conditional
     rationale: >
       Companion-update: P8 authority-drift remediation 2026-05-15 (POSTMORTEM at
-      docs/operations/archive/2026-Q2/task_2026-05-15_p8_authority_drift_3_blocking/POSTMORTEM.md).
+      docs/archive/2026-Q2/task_2026-05-15_p8_authority_drift_3_blocking/POSTMORTEM.md).
       Doc was added ~2026-05-03 by vendor-response registry packet without a
       companion yaml entry. Content is current; all cited files exist. Conditional
       load for any work touching vendor dependencies or source-change response.

@@ -1,6 +1,6 @@
 # Created: 2026-05-15
 # Last reused or audited: 2026-05-15
-# Authority basis: docs/operations/archive/2026-Q2/task_2026-05-15_p3_topology_v_next_phase2_shadow/SCAFFOLD.md §5 probe9
+# Authority basis: docs/archive/2026-Q2/task_2026-05-15_p3_topology_v_next_phase2_shadow/SCAFFOLD.md §5 probe9
 """
 Probe 9 — companion_skip_token NOT counted as divergence (P2 integration).
 

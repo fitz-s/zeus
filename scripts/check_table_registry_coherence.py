@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Created: 2026-05-14
 # Last reused or audited: 2026-05-14
-# Authority basis: docs/operations/archive/2026-Q2/task_2026-05-14_k1_followups/PLAN.md §1.2 #2 (REV 4)
+# Authority basis: docs/archive/2026-Q2/task_2026-05-14_k1_followups/PLAN.md §1.2 #2 (REV 4)
 """CI hook: bidirectional set-equality between registry and init_schema output.
 
 Runs on every PR touching src/state/**, architecture/db_table_ownership.yaml,

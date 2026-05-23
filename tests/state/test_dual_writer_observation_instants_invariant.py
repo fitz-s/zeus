@@ -1,6 +1,6 @@
 # Created: 2026-05-18
 # Last reused or audited: 2026-05-18
-# Authority basis: docs/operations/archive/2026-Q2/task_2026-05-16_deep_alignment_audit/FIX_PLAN.md §PR-M'
+# Authority basis: docs/archive/2026-Q2/task_2026-05-16_deep_alignment_audit/FIX_PLAN.md §PR-M'
 #                  src/data/tier_resolver.py (EXPECTED_SOURCE_BY_CITY — canonical city→source map)
 #                  src/main.py:1583 (S1_S2_SLA_HOURS = 4)
 """Antibody for F18 dual-writer freshness invariant.
@@ -19,7 +19,7 @@ ANTIBODY PROOF:
   leave v2 stale (last row > 4h behind v1's latest). The test MUST fail.
   Green path: v2 row is within 4h of v1's latest row. The test MUST pass.
 
-See docs/operations/archive/2026-Q2/task_2026-05-16_deep_alignment_audit/PR_M_REFRAME_BRIEF.md
+See docs/archive/2026-Q2/task_2026-05-16_deep_alignment_audit/PR_M_REFRAME_BRIEF.md
 for full analysis.
 """
 from __future__ import annotations

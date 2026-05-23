@@ -173,7 +173,7 @@ _FORBIDDEN_RULES: list[ForbiddenRule] = [
     ForbiddenRule("*/scripts", _GROUP_SOURCE, "scripts tree scripts/ root", prefix=False),
     ForbiddenRule("*/bin/*", _GROUP_SOURCE, "bin tree bin/**", prefix=False),
     ForbiddenRule("*/bin", _GROUP_SOURCE, "bin tree bin/ root", prefix=False),
-    # Source file extensions outside docs/operations/archive/** and STATE_DIR/**
+    # Source file extensions outside docs/archive/** and STATE_DIR/**
     # (Extension check is handled via _is_source_extension() logic below)
 
     # ── Group 2: Authority surfaces ───────────────────────────────────────
@@ -238,7 +238,7 @@ _FORBIDDEN_RULES: list[ForbiddenRule] = [
     ForbiddenRule("*/Library/LaunchDaemons/*", _GROUP_EXTERNAL, "~/Library/LaunchDaemons/**"),
 ]
 
-# Source code file extensions forbidden outside docs/operations/archive/** and STATE_DIR/**
+# Source code file extensions forbidden outside docs/archive/** and STATE_DIR/**
 _SOURCE_EXTENSIONS: frozenset[str] = frozenset(
     {".py", ".ts", ".rs", ".go", ".c", ".cpp", ".swift"}
 )
@@ -277,14 +277,14 @@ def _is_source_extension(path: Path, state_dir: Optional[Path] = None) -> bool:
     Return True if path has a source-code extension AND is not in an exempt location.
 
     Exempt locations (SAFETY_CONTRACT §"Forbidden Targets" Group 1):
-      - docs/operations/archive/**
+      - docs/archive/**
       - ${STATE_DIR}/**
     """
     if path.suffix.lower() not in _SOURCE_EXTENSIONS:
         return False
     path_str = str(path)
-    # Exempt: docs/operations/archive/
-    if "/docs/operations/archive/" in path_str:
+    # Exempt: docs/archive/
+    if "/docs/archive/" in path_str:
         return False
     # Exempt: STATE_DIR
     if state_dir is not None:

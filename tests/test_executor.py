@@ -3,7 +3,7 @@
 # Reuse: Run when executor order submission or portfolio save/load mechanics change.
 # Created: 2026-04-27
 # Last reused/audited: 2026-05-21
-# Authority basis: docs/operations/archive/2026-Q2/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md; R3 Z1 cutover guard audit.
+# Authority basis: docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md; R3 Z1 cutover guard audit.
 #                  + docs/operations/task_2026-05-21_live_side_effect_risk_boundaries/task.md P0-1 side-effect boundary fault injection.
 #                  + docs/operations/task_2026-05-21_live_side_effect_risk_boundaries/task.md P2-1 required live ATTACH seam.
 """Tests for executor and portfolio."""

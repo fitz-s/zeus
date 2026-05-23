@@ -66,7 +66,7 @@ def _make_harness_api(
     return api
 
 
-def _topology_with_cold_zone(cold_path: str = "docs/operations/archive/cold") -> dict[str, Any]:
+def _topology_with_cold_zone(cold_path: str = "docs/archive/cold") -> dict[str, Any]:
     """Return a minimal topology dict with one expected_empty zone."""
     return {
         "docs_subroots": [
@@ -82,11 +82,11 @@ def _topology_with_cold_zone(cold_path: str = "docs/operations/archive/cold") ->
 class TestCheckExpectedEmptyZones:
     def test_happy_case_gitkeep_only(self, tmp_path: Path) -> None:
         """Cold zone containing only .gitkeep must produce zero issues."""
-        cold_dir = tmp_path / "docs" / "operations" / "archive" / "cold"
+        cold_dir = tmp_path / "docs" / "archive" / "cold"
         cold_dir.mkdir(parents=True)
         (cold_dir / ".gitkeep").touch()
 
-        tracked = ["docs/operations/archive/cold/.gitkeep"]
+        tracked = ["docs/archive/cold/.gitkeep"]
         api = _make_api(tmp_path, tracked)
         topology = _topology_with_cold_zone()
 
@@ -107,12 +107,12 @@ class TestCheckExpectedEmptyZones:
 
     def test_failure_stray_file_in_cold_zone(self, tmp_path: Path) -> None:
         """Cold zone with a tracked non-.gitkeep file must raise expected_empty_violation."""
-        cold_dir = tmp_path / "docs" / "operations" / "archive" / "cold"
+        cold_dir = tmp_path / "docs" / "archive" / "cold"
         cold_dir.mkdir(parents=True)
         stray = cold_dir / "unexpected.md"
         stray.touch()
 
-        tracked = ["docs/operations/archive/cold/unexpected.md"]
+        tracked = ["docs/archive/cold/unexpected.md"]
         api = _make_api(tmp_path, tracked)
         topology = _topology_with_cold_zone()
 
@@ -120,7 +120,7 @@ class TestCheckExpectedEmptyZones:
 
         assert len(issues) == 1, f"Expected exactly 1 issue, got: {issues}"
         assert issues[0].code == "expected_empty_violation"
-        assert "docs/operations/archive/cold/unexpected.md" in issues[0].path
+        assert "docs/archive/cold/unexpected.md" in issues[0].path
 
     def test_non_expected_empty_zone_not_checked(self, tmp_path: Path) -> None:
         """Zones without expected_empty: true must not be flagged even with stray files."""

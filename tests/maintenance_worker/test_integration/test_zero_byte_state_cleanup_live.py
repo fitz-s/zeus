@@ -1,6 +1,6 @@
 # Created: 2026-05-16
 # Last reused or audited: 2026-05-16
-# Authority basis: docs/operations/archive/2026-Q2/task_2026-05-16_doc_alignment_plan/WAVE_1.5_BATCH_B_CRITIC.md §MB3
+# Authority basis: docs/archive/2026-Q2/task_2026-05-16_doc_alignment_plan/WAVE_1.5_BATCH_B_CRITIC.md §MB3
 """
 Integration test: engine.run_tick() → zero_byte_state_cleanup live path.
 

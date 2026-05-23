@@ -1,5 +1,5 @@
 # Lifecycle: created=2026-05-17; last_reviewed=2026-05-17; last_reused=never
-# Authority basis: docs/operations/archive/2026-Q2/task_2026-05-17_f109_fix/TRACE.md
+# Authority basis: docs/archive/2026-Q2/task_2026-05-17_f109_fix/TRACE.md
 #                  + feedback_no_manual_precedent_for_any_structural_defect
 #
 # Purpose: Programmatic, autonomous consolidation of position_current rows that

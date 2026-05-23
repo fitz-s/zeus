@@ -7,7 +7,7 @@
 #                  PR 37 review: clean-reconnect proof ignores resolved history
 #                  while preserving active side-effect state;
 #                  docs/operations/task_2026-05-08_object_invariance_wave27/PLAN.md;
-#                  docs/operations/archive/2026-Q2/task_2026-05-15_live_order_e2e_goal/LIVE_ORDER_E2E_GOAL_PLAN.md.
+#                  docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_goal/LIVE_ORDER_E2E_GOAL_PLAN.md.
 """M3: user-channel WS messages become U2 facts; gaps block new submit."""
 
 from __future__ import annotations

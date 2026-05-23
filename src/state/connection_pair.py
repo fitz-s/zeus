@@ -1,6 +1,6 @@
 # Lifecycle: created=2026-04-30; last_reviewed=2026-05-14; last_reused=never
 # Authority basis: docs/operations/task_2026-04-30_two_system_independence/design.md §3.2
-#   K1 followup: docs/operations/archive/2026-Q2/task_2026-05-14_k1_followups/PLAN.md §1.3 (REV 4)
+#   K1 followup: docs/archive/2026-Q2/task_2026-05-14_k1_followups/PLAN.md §1.3 (REV 4)
 """ConnectionPair / ConnectionTriple / TypedConnection — K1-aware DB connection holders.
 
 K1 split (2026-05-11) added zeus-forecasts.db as a second physical DB.

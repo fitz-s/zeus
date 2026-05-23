@@ -4356,7 +4356,7 @@ def test_operation_vector_admits_first_class_planning_packet():
 def test_operation_vector_admits_descriptive_planning_packet_name():
     digest = topology_doctor.build_digest(
         "operation planning packet: structural decisions, impact context, slice routes, and verification plan",
-        ["docs/operations/archive/2026-Q2/task_2026-05-14_data_daemon_live_efficiency/DATA_DAEMON_LIVE_EFFICIENCY_REFACTOR_PLAN.md"],
+        ["docs/archive/2026-Q2/task_2026-05-14_data_daemon_live_efficiency/DATA_DAEMON_LIVE_EFFICIENCY_REFACTOR_PLAN.md"],
         write_intent="edit",
     )
     card = digest["route_card"]
@@ -4370,8 +4370,8 @@ def test_operation_vector_admits_descriptive_planning_packet_name():
 @pytest.mark.parametrize(
     "path",
     [
-        "docs/operations/archive/2026-Q2/task_2026-05-14_data_daemon_live_efficiency/CRITIC_APPROVAL.md",
-        "docs/operations/archive/2026-Q2/task_2026-05-14_data_daemon_live_efficiency/phases/phase1/critic/review.md",
+        "docs/archive/2026-Q2/task_2026-05-14_data_daemon_live_efficiency/CRITIC_APPROVAL.md",
+        "docs/archive/2026-Q2/task_2026-05-14_data_daemon_live_efficiency/phases/phase1/critic/review.md",
     ],
 )
 def test_operation_vector_admits_planning_packet_critic_evidence(path):

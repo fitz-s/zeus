@@ -1,6 +1,6 @@
 # Created: 2026-05-14
 # Last reused or audited: 2026-05-14
-# Authority basis: docs/operations/archive/2026-Q2/task_2026-05-14_k1_followups/PLAN.md §2 P0
+# Authority basis: docs/archive/2026-Q2/task_2026-05-14_k1_followups/PLAN.md §2 P0
 """K1 P0 routing tests: daily_tick and catch_up_obs are called with a
 forecasts.db connection, not world.db.
 

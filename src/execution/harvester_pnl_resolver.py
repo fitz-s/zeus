@@ -1,5 +1,5 @@
 # Lifecycle: created=2026-04-30; last_reviewed=2026-05-16; last_reused=2026-05-16
-# Authority basis: docs/operations/task_2026-04-30_two_system_independence/design.md §5 Phase 1.5; docs/operations/archive/2026-Q2/task_2026-05-16_deep_alignment_audit/REPORT.md Finding #4
+# Authority basis: docs/operations/task_2026-04-30_two_system_independence/design.md §5 Phase 1.5; docs/archive/2026-Q2/task_2026-05-16_deep_alignment_audit/REPORT.md Finding #4
 """Trading-side P&L resolver (Phase 1.5 harvester split).
 
 Reads forecasts.settlements via get_forecasts_connection() (read-only).

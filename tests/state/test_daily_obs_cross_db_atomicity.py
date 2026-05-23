@@ -1,6 +1,6 @@
 # Created: 2026-05-14
 # Last reused or audited: 2026-05-14
-# Authority basis: docs/operations/archive/2026-Q2/task_2026-05-14_k1_followups/PLAN.md §2 P0
+# Authority basis: docs/archive/2026-Q2/task_2026-05-14_k1_followups/PLAN.md §2 P0
 #   IMPLEMENTATION_REVIEW_P0.md Pass D Option (a) / Pass C gap
 """Cross-DB SAVEPOINT atomicity smoke test for K1 P0 daily-obs routing fix.
 

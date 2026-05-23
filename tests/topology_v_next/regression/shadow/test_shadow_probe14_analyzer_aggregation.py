@@ -1,6 +1,6 @@
 # Created: 2026-05-15
 # Last reused or audited: 2026-05-15
-# Authority basis: docs/operations/archive/2026-Q2/task_2026-05-15_p3_topology_v_next_phase2_shadow/SCAFFOLD.md §5 probe14
+# Authority basis: docs/archive/2026-Q2/task_2026-05-15_p3_topology_v_next_phase2_shadow/SCAFFOLD.md §5 probe14
 """
 Probe 14 — Analyzer aggregation correctness (dual-metric P4 gate).
 

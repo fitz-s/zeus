@@ -1,7 +1,7 @@
 # Lifecycle: created=2026-05-17; last_reviewed=2026-05-18; last_reused=2026-05-18
 # Purpose: CLI entry point for scripts.migrations runner.
 #   Usage: python -m scripts.migrations apply [--dry-run] [--target=NAME] [--db-path=PATH]
-# Authority: docs/operations/archive/2026-Q2/task_2026-05-17_post_karachi_remediation/FIX_SEV1_BUNDLE.md §F23
+# Authority: docs/archive/2026-Q2/task_2026-05-17_post_karachi_remediation/FIX_SEV1_BUNDLE.md §F23
 """Migration runner CLI.
 
 When --target names a migration with TARGET_DB metadata, the runner opens that

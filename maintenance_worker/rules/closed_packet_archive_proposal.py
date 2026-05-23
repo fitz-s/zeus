@@ -58,7 +58,7 @@ VERDICT_ALREADY_ARCHIVED = "ALREADY_ARCHIVED"
 
 # Default config values (override via catalog raw dict)
 DEFAULT_TTL_DAYS = 60
-DEFAULT_ARCHIVE_DIR_PATTERN = "docs/operations/archive/{year}-Q{quarter}"
+DEFAULT_ARCHIVE_DIR_PATTERN = "docs/archive/{year}-Q{quarter}"
 
 
 # ---------------------------------------------------------------------------
@@ -714,6 +714,6 @@ def _mock_diff(decision: Any) -> tuple[str, ...]:
     path_str = str(getattr(decision, "path", decision))
     return (
         f"# dry-run proposal for closed_packet_archive_proposal",
-        f"# would execute: git mv {path_str} docs/operations/archive/<YYYY>-Q<N>/{Path(path_str).name}/",
+        f"# would execute: git mv {path_str} docs/archive/<YYYY>-Q<N>/{Path(path_str).name}/",
         f"# would create stub: docs/operations/{Path(path_str).name}.archived",
     )

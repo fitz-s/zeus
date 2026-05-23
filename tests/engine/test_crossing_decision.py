@@ -1,6 +1,6 @@
 # Created: 2026-05-17
 # Last reused/audited: 2026-05-17
-# Authority basis: docs/operations/archive/2026-Q2/task_2026-05-17_post_karachi_remediation/F34_COST_OF_FILL_STRUCTURAL.md
+# Authority basis: docs/archive/2026-Q2/task_2026-05-17_post_karachi_remediation/F34_COST_OF_FILL_STRUCTURAL.md
 #   F34 cost-of-fill optimizer — opt-in via ZEUS_TAKER_CROSSING_ENABLED=1.
 """Antibody tests for F34 cost-of-fill crossing decision.
 

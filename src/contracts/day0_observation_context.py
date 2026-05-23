@@ -2,7 +2,7 @@
 # Last reused or audited: 2026-05-19
 # Authority basis: PHASE_0_V4_ADDENDUM.md PR 5 row; INV-09, INV-16
 # Production code implemented in PR 5 (2026-05-19).
-# See docs/operations/archive/2026-Q2/task_2026-05-17_strategy_vnext_phase0/scaffolds/pr5_scaffold_report.md
+# See docs/archive/2026-Q2/task_2026-05-17_strategy_vnext_phase0/scaffolds/pr5_scaffold_report.md
 # for design notes, 12-cell matrix, and DST archetype set.
 """Day0 observation-context contracts: BoundClassification + Day0ObservationContext.
 

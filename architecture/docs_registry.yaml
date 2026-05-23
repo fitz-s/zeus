@@ -65,8 +65,8 @@ allowed_coverage_scopes:
 parent_coverage_allowed_patterns:
 - docs/reference/legacy/
 - docs/operations/task_*/
-- docs/operations/archive/2026-Q2/task_*/
-- docs/operations/archive/2026-Q2/
+- docs/archive/2026-Q2/task_*/
+- docs/archive/2026-Q2/
 - docs/operations/[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]_*/
 - docs/operations/*_package_*/
 - docs/operations/*_observation/
@@ -187,6 +187,24 @@ entries:
   contains_volatile_metrics: false
   current_tense_allowed: true
   refresh_source: code_and_manifest
+- path: docs/reports/AGENTS.md
+  doc_class: router
+  default_read: false
+  direct_reference_allowed: true
+  current_role: reports surface router; active subtree is authority_history/; dead snapshots are gitignored
+  canonical_replaced_by: []
+  next_action: keep
+  lifecycle_state: durable
+  coverage_scope: exact
+  parent_coverage_allowed: false
+  truth_profile: router
+  freshness_class: stable
+  supersedes: []
+  superseded_by: []
+  may_live_in_reference: false
+  contains_volatile_metrics: false
+  current_tense_allowed: false
+  refresh_source: manual_operator_audit
 - path: docs/reports/authority_history/zeus_dual_track_architecture.md
   doc_class: report
   default_read: false
@@ -694,24 +712,6 @@ entries:
   contains_volatile_metrics: true
   current_tense_allowed: true
   refresh_source: packet_audit
-- path: docs/operations/archive/2026-Q2/zeus_system_review_2026-05-16.md
-  doc_class: report
-  default_read: false
-  direct_reference_allowed: true
-  current_role: 2026-05-16 system review evidence (parent draft for agent runtime compounding plan)
-  canonical_replaced_by: []
-  next_action: retain_as_evidence
-  lifecycle_state: historical
-  coverage_scope: exact
-  parent_coverage_allowed: false
-  truth_profile: report_evidence
-  freshness_class: packet_bound
-  supersedes: []
-  superseded_by: []
-  may_live_in_reference: false
-  contains_volatile_metrics: true
-  current_tense_allowed: false
-  refresh_source: n/a
 - path: docs/operations/zeus_agent_runtime_compounding_plan_2026-05-16.md
   doc_class: report
   default_read: false
@@ -730,15 +730,6 @@ entries:
   contains_volatile_metrics: true
   current_tense_allowed: false
   refresh_source: n/a
-- path: docs/operations/archive/2026-Q2/2026-05-18_worktree_create_hook_cwd_leakage/
-  doc_class: operations
-  default_read: false
-  direct_reference_allowed: false
-  current_role: incident packet for WorktreeCreate hook cwd-leakage fix (PR #153); contains committed hook snapshot and antibody test reference
-  canonical_replaced_by: []
-  next_action: retain_as_evidence
-  lifecycle_state: historical
-
 - path: docs/operations/task_*/
   doc_class: operations
   default_read: false
@@ -757,44 +748,6 @@ entries:
   contains_volatile_metrics: false
   current_tense_allowed: false
   refresh_source: n/a
-
-- path: docs/operations/task_*.archived
-  doc_class: historical
-  default_read: false
-  direct_reference_allowed: false
-  current_role: archive stub files marking the original location of a moved task packet; YAML front-matter only, no content
-  canonical_replaced_by: []
-  next_action: keep
-  lifecycle_state: durable
-  coverage_scope: exact
-  parent_coverage_allowed: false
-  truth_profile: artifact_evidence
-  freshness_class: historical
-  supersedes: []
-  superseded_by: []
-  may_live_in_reference: false
-  contains_volatile_metrics: false
-  current_tense_allowed: false
-  refresh_source: manual_operator_audit
-
-- path: docs/operations/archive/2026-Q2/
-  doc_class: historical
-  default_read: false
-  direct_reference_allowed: false
-  current_role: Q2-2026 archive directory; contains moved task packets and their evidence
-  canonical_replaced_by: []
-  next_action: keep
-  lifecycle_state: durable
-  coverage_scope: descendants
-  parent_coverage_allowed: true
-  truth_profile: artifact_evidence
-  freshness_class: historical
-  supersedes: []
-  superseded_by: []
-  may_live_in_reference: false
-  contains_volatile_metrics: false
-  current_tense_allowed: false
-  refresh_source: manual_operator_audit
 
 - path: docs/operations/task_2026-04-29_design_simplification_audit/
   doc_class: operations
@@ -1790,98 +1743,6 @@ entries:
   may_live_in_reference: false
   contains_volatile_metrics: false
   current_tense_allowed: true
-  refresh_source: manual_operator_audit
-# WAVE 1 additions — 5 SCAFFOLD docs from PR #119 (2026-05-16)
-# Dup-check: grep for task_2026-05-15_runtime_improvement_engineering_package returned 0 hits before adding.
-- path: docs/operations/archive/2026-Q2/task_2026-05-15_runtime_improvement_engineering_package/01_topology_v_next/UNIVERSAL_TOPOLOGY_DESIGN.md
-  doc_class: authority
-  default_read: true
-  direct_reference_allowed: true
-  current_role: design authority for topology_v_next shadow system; governs admission_engine.py and profile loading
-  canonical_replaced_by: []
-  next_action: retain_as_evidence
-  lifecycle_state: historical
-  coverage_scope: exact
-  parent_coverage_allowed: false
-  truth_profile: authority
-  freshness_class: slow_changing
-  supersedes: []
-  superseded_by: []
-  may_live_in_reference: true
-  contains_volatile_metrics: false
-  current_tense_allowed: false
-  refresh_source: manual_operator_audit
-- path: docs/operations/archive/2026-Q2/task_2026-05-15_runtime_improvement_engineering_package/01_topology_v_next/ZEUS_BINDING_LAYER.md
-  doc_class: authority
-  default_read: true
-  direct_reference_allowed: true
-  current_role: zeus-specific binding for topology_v_next; defines safety_overrides.yaml schema and artifact_authority_status registry
-  canonical_replaced_by: []
-  next_action: retain_as_evidence
-  lifecycle_state: historical
-  coverage_scope: exact
-  parent_coverage_allowed: false
-  truth_profile: authority
-  freshness_class: slow_changing
-  supersedes: []
-  superseded_by: []
-  may_live_in_reference: true
-  contains_volatile_metrics: false
-  current_tense_allowed: false
-  refresh_source: manual_operator_audit
-- path: docs/operations/archive/2026-Q2/task_2026-05-15_runtime_improvement_engineering_package/02_daily_maintenance_agent/DESIGN.md
-  doc_class: authority
-  default_read: true
-  direct_reference_allowed: true
-  current_role: architecture authority for maintenance_worker; module structure, engine flow, and install contract
-  canonical_replaced_by: []
-  next_action: retain_as_evidence
-  lifecycle_state: historical
-  coverage_scope: exact
-  parent_coverage_allowed: false
-  truth_profile: authority
-  freshness_class: slow_changing
-  supersedes: []
-  superseded_by: []
-  may_live_in_reference: true
-  contains_volatile_metrics: false
-  current_tense_allowed: false
-  refresh_source: manual_operator_audit
-- path: docs/operations/archive/2026-Q2/task_2026-05-15_runtime_improvement_engineering_package/02_daily_maintenance_agent/SAFETY_CONTRACT.md
-  doc_class: authority
-  default_read: true
-  direct_reference_allowed: true
-  current_role: validator semantics and forbidden target groups for maintenance_worker; Path A/B invariants
-  canonical_replaced_by: []
-  next_action: retain_as_evidence
-  lifecycle_state: historical
-  coverage_scope: exact
-  parent_coverage_allowed: false
-  truth_profile: authority
-  freshness_class: slow_changing
-  supersedes: []
-  superseded_by: []
-  may_live_in_reference: true
-  contains_volatile_metrics: false
-  current_tense_allowed: false
-  refresh_source: manual_operator_audit
-- path: docs/operations/archive/2026-Q2/task_2026-05-15_runtime_improvement_engineering_package/02_daily_maintenance_agent/TASK_CATALOG.yaml
-  doc_class: authority
-  default_read: true
-  direct_reference_allowed: true
-  current_role: enumerates all 9 task types and schedules; TaskRegistry.from_catalog() reads this at runtime
-  canonical_replaced_by: []
-  next_action: retain_as_evidence
-  lifecycle_state: historical
-  coverage_scope: exact
-  parent_coverage_allowed: false
-  truth_profile: authority
-  freshness_class: slow_changing
-  supersedes: []
-  superseded_by: []
-  may_live_in_reference: true
-  contains_volatile_metrics: false
-  current_tense_allowed: false
   refresh_source: manual_operator_audit
 allowed_truth_profiles:
 - router

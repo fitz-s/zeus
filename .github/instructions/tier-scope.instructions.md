@@ -42,7 +42,7 @@ remains.
 ## Skip
 
 `.claude/worktrees/**`, `.omc/**`, `.zeus/**`, `docs/archives/**`,
-`docs/artifacts/**`, `docs/operations/archive/**`, `logs/**`, `raw/**`,
+`docs/artifacts/**`, `docs/archive/**`, `logs/**`, `raw/**`,
 `state/**`, `evidence/**`, generated/cache files.
 Canonical list: `docs/review/review_scope_map.md`.
 

@@ -1,6 +1,6 @@
 # Created: 2026-05-17
 # Last reused or audited: 2026-05-17
-# Authority basis: docs/operations/archive/2026-Q2/task_2026-05-17_post_karachi_remediation/WAVE2_PHASE_CRITIC.md
+# Authority basis: docs/archive/2026-Q2/task_2026-05-17_post_karachi_remediation/WAVE2_PHASE_CRITIC.md
 #                  MAJ-1 boot-wire dispatch brief
 """Antibody tests: F109 consolidator boot-wire invariants.
 

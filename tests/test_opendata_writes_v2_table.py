@@ -1,7 +1,7 @@
 # Created: 2026-05-01
 # Last reused/audited: 2026-05-15
 # Authority basis: Operator directive 2026-05-01 — antibody for Invariant A;
-#   docs/operations/archive/2026-Q2/task_2026-05-08_deep_alignment_audit/DATA_DAEMON_LIVE_EFFICIENCY_REFACTOR_PLAN.md
+#   docs/archive/2026-Q2/task_2026-05-08_deep_alignment_audit/DATA_DAEMON_LIVE_EFFICIENCY_REFACTOR_PLAN.md
 #   Phase 5 forecast authority chain ownership.
 """Antibody for Invariant A — Open Data writes target ensemble_snapshots_v2.
 

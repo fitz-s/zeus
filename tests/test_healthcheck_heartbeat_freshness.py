@@ -1,10 +1,10 @@
 # Created: 2026-05-18
 # Last reused or audited: 2026-05-18
 # Authority basis:
-#   docs/operations/archive/2026-Q2/task_2026-05-16_post_pr126_audit/RUN_15_track3_f91_f86_observability.md
+#   docs/archive/2026-Q2/task_2026-05-16_post_pr126_audit/RUN_15_track3_f91_f86_observability.md
 #     §"Recommended remediation order" priority 3 — "fold staleness checks
 #     into healthcheck.py"
-#   docs/operations/archive/2026-Q2/task_2026-05-18_wave3_dispatches/WAVE3_BATCH_C_PER_FINDING_ACCOUNTING.md
+#   docs/archive/2026-Q2/task_2026-05-18_wave3_dispatches/WAVE3_BATCH_C_PER_FINDING_ACCOUNTING.md
 #     carry-forward #1 (heartbeat alert-loop closure)
 # Lifecycle: created=2026-05-18; last_reviewed=2026-05-18; last_reused=never
 # Purpose: F91+F99+F100 antibody — assert scripts/healthcheck.py reads

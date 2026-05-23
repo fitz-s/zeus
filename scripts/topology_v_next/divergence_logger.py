@@ -1,6 +1,6 @@
 # Created: 2026-05-15
 # Last reused or audited: 2026-05-15
-# Authority basis: docs/operations/archive/2026-Q2/task_2026-05-15_p3_topology_v_next_phase2_shadow/SCAFFOLD.md
+# Authority basis: docs/archive/2026-Q2/task_2026-05-15_p3_topology_v_next_phase2_shadow/SCAFFOLD.md
 #                  §1.1 (public API), §4 (schema), §4.3 (concurrency contract),
 #                  §4.4 (OLD_STATUS_TO_NEW_SEVERITY), §4.5 (classify_divergence),
 #                  §9.1 (datetime.now(UTC) — NOT utcnow(), deprecated since 3.12)

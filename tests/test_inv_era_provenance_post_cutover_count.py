@@ -1,7 +1,7 @@
 # Created: 2026-05-19
 # Last reused or audited: 2026-05-19
-# Authority basis: docs/operations/archive/2026-Q2/task_2026-05-17_strategy_vnext_phase0/PHASE_0_V4_ULTRAPLAN.md §D.1
-#                  docs/operations/archive/2026-Q2/task_2026-05-17_strategy_vnext_phase0/PHASE_0_V4_ADDENDUM.md
+# Authority basis: docs/archive/2026-Q2/task_2026-05-17_strategy_vnext_phase0/PHASE_0_V4_ULTRAPLAN.md §D.1
+#                  docs/archive/2026-Q2/task_2026-05-17_strategy_vnext_phase0/PHASE_0_V4_ADDENDUM.md
 #                  preflight/migration_dry_runs.json (2829 BLEEDING rows, cutover 2026-02-21)
 """
 CI antibody: post-PR-1-merge provenance_json must not contain 'harvester_live_uma_vote'.

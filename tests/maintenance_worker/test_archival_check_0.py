@@ -133,10 +133,10 @@ class TestArchivalOkOverride:
     def test_current_historical_with_archival_ok_true_returns_archivable(
         self, tmp_path: Path
     ) -> None:
-        candidate = tmp_path / "docs/operations/archive/2026-Q2/task_2026-05-06_hook_redesign"
+        candidate = tmp_path / "docs/archive/2026-Q2/task_2026-05-06_hook_redesign"
         registry = _write_registry(tmp_path, [
             {
-                "path": "docs/operations/archive/2026-Q2/task_2026-05-06_hook_redesign",
+                "path": "docs/archive/2026-Q2/task_2026-05-06_hook_redesign",
                 "status": "CURRENT_HISTORICAL",
                 "last_confirmed": "2026-05-15",
                 "confirmation_ttl_days": 90,

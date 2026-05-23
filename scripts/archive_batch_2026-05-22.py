@@ -5,7 +5,7 @@ archive_batch_2026-05-22.py
 Executes the ARCHIVE_PREP_2026-05-22.md batch migration:
   - 16 ARCHIVABLE_NOW packets
   - 26 ARCHIVABLE_AFTER_REPOINT packets (including data_pipeline_live_rootfix)
-Total: 42 packets moved to docs/operations/archive/2026-Q2/
+Total: 42 packets moved to docs/archive/2026-Q2/
 
 Creates .archived stubs at original paths.
 Does NOT update INDEX.md or perform soft-ref repoints (handled separately).
@@ -15,7 +15,7 @@ Usage:
   python3 scripts/archive_batch_2026-05-22.py --apply
 
 Created: 2026-05-22
-Authority basis: docs/operations/archive/2026-Q2/ARCHIVE_PREP_2026-05-22.md
+Authority basis: docs/archive/2026-Q2/ARCHIVE_PREP_2026-05-22.md
 """
 import argparse
 import subprocess
@@ -25,7 +25,7 @@ from pathlib import Path
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parent
 
-ARCHIVE_TARGET = REPO_ROOT / "docs/operations/archive/2026-Q2"
+ARCHIVE_TARGET = REPO_ROOT / "docs/archive/2026-Q2"
 OPS_DIR = REPO_ROOT / "docs/operations"
 
 ARCHIVED_AT = "2026-05-22"
@@ -107,7 +107,7 @@ def git_mv(src: Path, dst: Path, dry: bool) -> None:
 
 def write_stub(name: str, ref_count: int, dry: bool) -> None:
     stub_path = OPS_DIR / f"{name}.archived"
-    archive_loc = f"docs/operations/archive/2026-Q2/{name}"
+    archive_loc = f"docs/archive/2026-Q2/{name}"
     restore_cmd = f"git mv {archive_loc} docs/operations/{name}"
     content = (
         f"---\n"

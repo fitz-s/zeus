@@ -1,6 +1,6 @@
 # Created: 2026-05-11
 # Last reused or audited: 2026-05-16
-# Authority basis: PLAN.md §10, critic v4 ACCEPT 2026-05-11; docs/operations/archive/2026-Q2/task_2026-05-16_deep_alignment_audit/REPORT.md Finding #4
+# Authority basis: PLAN.md §10, critic v4 ACCEPT 2026-05-11; docs/archive/2026-Q2/task_2026-05-16_deep_alignment_audit/REPORT.md Finding #4
 """Operator-invoked backfill for harvester settlements outside the 30-day live window.
 
 Usage:

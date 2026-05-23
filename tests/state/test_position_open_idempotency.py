@@ -1,6 +1,6 @@
 # Created: 2026-05-17
 # Last reused or audited: 2026-05-17
-# Authority basis: docs/operations/archive/2026-Q2/task_2026-05-17_f109_fix/TRACE.md
+# Authority basis: docs/archive/2026-Q2/task_2026-05-17_f109_fix/TRACE.md
 """Antibody tests for F109 — non-idempotent position-open.
 
 Covers:

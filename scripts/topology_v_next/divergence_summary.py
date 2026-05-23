@@ -1,6 +1,6 @@
 # Created: 2026-05-15
 # Last reused or audited: 2026-05-15
-# Authority basis: docs/operations/archive/2026-Q2/task_2026-05-15_p3_topology_v_next_phase2_shadow/SCAFFOLD.md
+# Authority basis: docs/archive/2026-Q2/task_2026-05-15_p3_topology_v_next_phase2_shadow/SCAFFOLD.md
 #                  §1.2 (public API), §6 (P4 gate metrics), §6.3 (dual-metric gate),
 #                  §6.4 (per-friction-pattern), §7 P3.2 (test list),
 #                  §9.1 (datetime.now(UTC) — NOT utcnow(), deprecated since 3.12)

@@ -30,11 +30,11 @@ Every `task_*` directory and every top-level `.md` is in exactly one of:
   the operator has declared this directory live in INDEX.md.
 - `closed` — the anchor PR is merged OR the operator has marked the
   operation done.  The dir may stay in place but a `STATUS.md` MUST
-  exist (see §4) OR it MUST be moved under `archive/`.
+  exist (see §4) OR it MUST be moved to `docs/archive/<YYYY>-Q<N>/`.
 - `superseded` — another operation replaced this one.  Same rule as
   `closed` but `STATUS.md` names the replacement.
 - `archive_candidate` — closed for ≥30 days with no new commits AND
-  no open follow-up PR cites it.  Move to `archive/` on next sweep.
+  no open follow-up PR cites it.  Move to `docs/archive/<YYYY>-Q<N>/` on next sweep.
 
 ## §3 — Creating a new task directory
 
@@ -58,8 +58,8 @@ When the anchor PR merges or the operator declares done:
    directories — closeout status".  Status: `closed` or `superseded`.
 2. Either:
    - **(preferred)** Move the directory to
-     `docs/operations/archive/<original-name>/`.  Add a one-line
-     redirect file at the original location pointing to archive.
+     `docs/archive/<YYYY>-Q<N>/<original-name>/` and add a row to
+     `docs/archive_registry.md`. Do NOT leave a stub in `docs/operations/`.
    - **(if cross-references exist)** Leave the directory in place but
      add `STATUS.md` containing:
      - closeout date

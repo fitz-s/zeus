@@ -1,6 +1,6 @@
 # Created: 2026-05-16
 # Last reused or audited: 2026-05-16
-# Authority basis: docs/operations/archive/2026-Q2/task_2026-05-16_doc_alignment_plan/PLAN.md §WAVE 1.5 STEP 2 B3
+# Authority basis: docs/archive/2026-Q2/task_2026-05-16_doc_alignment_plan/PLAN.md §WAVE 1.5 STEP 2 B3
 """
 Tests for maintenance_worker.rules.launchagent_backup_quarantine.
 

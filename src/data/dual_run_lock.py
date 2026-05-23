@@ -1,5 +1,5 @@
 # Lifecycle: created=2026-04-30; last_reviewed=2026-04-30; last_reused=2026-05-14
-# Authority basis: docs/operations/task_2026-04-30_two_system_independence/design.md §5 Phase 1 + docs/operations/archive/2026-Q2/task_2026-05-08_deep_alignment_audit/DATA_DAEMON_LIVE_EFFICIENCY_REFACTOR_PLAN.md §6.2.
+# Authority basis: docs/operations/task_2026-04-30_two_system_independence/design.md §5 Phase 1 + docs/archive/2026-Q2/task_2026-05-08_deep_alignment_audit/DATA_DAEMON_LIVE_EFFICIENCY_REFACTOR_PLAN.md §6.2.
 """Advisory per-table file lock for dual-run Phase 1.
 
 During Phase 1 both the monolith (src.main) and the ingest daemon
