@@ -787,8 +787,8 @@ def test_coverage_target_window_flows_unchanged_into_scope() -> None:
     Proven by: happy-path read succeeds when snapshot.local_day_start_utc
     matches the known coverage window (Europe/London 2026-05-08 = 2026-05-07T23:00
     in UTC).  The window is distinct from decision_time (2026-05-03T10:00) — if
-    `or now` ever substituted, the downstream SNAPSHOT_LOCAL_DAY_WINDOW_MISMATCH
-    check at L792 would BLOCK instead of passing.
+    `or now` ever substituted, the downstream snapshot-vs-coverage window equality
+    check would BLOCK instead of passing.
     """
     conn = _conn()
     scope = _scope()
@@ -823,14 +823,15 @@ def test_coverage_target_window_flows_unchanged_into_scope() -> None:
 
 def test_coverage_null_target_window_fail_closes() -> None:
     """Relationship test: when target_window_start/end_utc in the coverage row
-    cannot be parsed (empty / malformed), the reader MUST fail-closed with
-    COVERAGE_WINDOW_NULL rather than silently substituting `now` and producing
-    a scope with a wrong window that passes all downstream checks.
+    cannot be parsed (empty, malformed, or naive timestamp), the reader MUST
+    fail-closed with COVERAGE_WINDOW_UNPARSEABLE rather than silently
+    substituting `now` and producing a scope with a wrong window that passes
+    all downstream checks.
 
-    This is the F1 category-closing antibody.  Before the fix the `or now`
-    fallback at L769-770 silently continued with scope.target_window_start_utc
-    = decision_time, which emitted SNAPSHOT_LOCAL_DAY_WINDOW_MISMATCH (wrong
-    stage/code) instead of COVERAGE_WINDOW_NULL (correct early abort).
+    This is the F1 category-closing antibody.  Before the fix the silent
+    fallback continued with scope.target_window_start_utc = decision_time,
+    which emitted SNAPSHOT_LOCAL_DAY_WINDOW_MISMATCH (wrong stage/code) at a
+    later gate instead of aborting immediately with an honest reason code.
     """
     conn = _conn()
     _insert_snapshot(conn)
@@ -863,8 +864,8 @@ def test_coverage_null_target_window_fail_closes() -> None:
         "F1 fail-closed FAIL: read succeeded with unparseable coverage window. "
         "The `or now` fallback substituted query-time instead of blocking."
     )
-    assert result.reason_code == "COVERAGE_WINDOW_NULL", (
-        f"F1 fail-closed FAIL: expected reason_code='COVERAGE_WINDOW_NULL', "
-        f"got {result.reason_code!r}. The wrong-stage code means the `or now` "
-        f"substitution is still active at L769-770."
+    assert result.reason_code == "COVERAGE_WINDOW_UNPARSEABLE", (
+        f"F1 fail-closed FAIL: expected reason_code='COVERAGE_WINDOW_UNPARSEABLE', "
+        f"got {result.reason_code!r}. The wrong-stage code means the silent "
+        f"now-substitution is still active and the early-abort guard is missing."
     )

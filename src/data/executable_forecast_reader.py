@@ -762,7 +762,7 @@ def read_executable_forecast(
     coverage_window_start_utc = _parse_utc(coverage.get("target_window_start_utc"))
     coverage_window_end_utc = _parse_utc(coverage.get("target_window_end_utc"))
     if coverage_window_start_utc is None or coverage_window_end_utc is None:
-        return ExecutableForecastBundleResult("BLOCKED", "COVERAGE_WINDOW_NULL")
+        return ExecutableForecastBundleResult("BLOCKED", "COVERAGE_WINDOW_UNPARSEABLE")
 
     scope = ForecastTargetScope(
         city_id=city_id,
