@@ -29,6 +29,8 @@ import pytest
 from src.state import db as dbmod
 from src.state.ledger import load_architecture_kernel_sql
 
+# (no unittest.mock needed — tests drive the real builder + writer + stamp seam)
+
 
 @pytest.fixture
 def trade_conn(monkeypatch):
