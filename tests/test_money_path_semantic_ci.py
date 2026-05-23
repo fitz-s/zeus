@@ -129,3 +129,87 @@ def test_test_quality_gate_accepts_registered_money_path_tests() -> None:
 
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert "money-path test quality OK" in proc.stdout
+
+
+def test_submit_order_patterns_include_place_limit_order() -> None:
+    """P1-5 antibody: place_limit_order must be a registered submit_order side-effect pattern.
+    Missing patterns allow undetected order submission paths to bypass MP-SIDE invariants.
+    """
+    import yaml
+
+    objects_path = ROOT / "architecture" / "money_path_objects.yaml"
+    data = yaml.safe_load(objects_path.read_text(encoding="utf-8"))
+    patterns = data["side_effect_calls"]["submit_order"]["patterns"]
+    for expected in ("place_limit_order", "place_market_order", "post_order", "build_order"):
+        assert expected in patterns, (
+            f"{expected} missing from submit_order.patterns — "
+            "semantic classifier will not flag this as a side-effect path"
+        )
+
+
+def test_copilot_instruction_change_routes_to_self_defense_segment(tmp_path: Path) -> None:
+    """P1-2 antibody: .github/copilot-instructions.md changes must select MP-CI-001
+    and the self-defense tests. Without this, Copilot instruction drift is invisible
+    to the semantic CI gate.
+    """
+    diff = tmp_path / "diff.patch"
+    diff.write_text(
+        "diff --git a/.github/copilot-instructions.md b/.github/copilot-instructions.md\n"
+        "+++ b/.github/copilot-instructions.md\n"
+        "+# changed review guidance\n",
+        encoding="utf-8",
+    )
+
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "scripts/ci/semantic_diff_classifier.py",
+            "--diff-file",
+            str(diff),
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+
+    assert proc.returncode == 0, proc.stderr
+    payload = json.loads(proc.stdout)
+    assert "MP-CI-001" in payload["required_invariants"], (
+        f"MP-CI-001 not in {payload['required_invariants']} — "
+        ".github/copilot-instructions.md not routed to semantic_ci_self_defense segment"
+    )
+
+
+def test_strategy_profile_registry_change_routes_to_strategy_authority(tmp_path: Path) -> None:
+    """P1-6 antibody: architecture/strategy_profile_registry.yaml changes must select
+    MP-STR-001/STR-002 and the strategy_authority tests. Without this, registry changes
+    that add/remove strategies bypass the governance gate.
+    """
+    diff = tmp_path / "diff.patch"
+    diff.write_text(
+        "diff --git a/architecture/strategy_profile_registry.yaml"
+        " b/architecture/strategy_profile_registry.yaml\n"
+        "+++ b/architecture/strategy_profile_registry.yaml\n"
+        "+  new_strategy:\n"
+        "+    breakeven_win_rate: 0.52\n",
+        encoding="utf-8",
+    )
+
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "scripts/ci/semantic_diff_classifier.py",
+            "--diff-file",
+            str(diff),
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+
+    assert proc.returncode == 0, proc.stderr
+    payload = json.loads(proc.stdout)
+    assert "MP-STR-001" in payload["required_invariants"] or "MP-STR-002" in payload["required_invariants"], (
+        f"Neither MP-STR-001 nor MP-STR-002 in {payload['required_invariants']} — "
+        "architecture/strategy_profile_registry.yaml not routed to strategy_authority segment"
+    )

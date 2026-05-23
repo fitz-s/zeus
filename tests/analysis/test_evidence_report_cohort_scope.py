@@ -253,3 +253,53 @@ class TestBayesianPriorContract:
             f"Expected 0.55, got {report.breakeven_win_rate}. "
             "breakeven_win_rate must come from caller, not be hardcoded."
         )
+
+    def test_breakeven_win_rate_none_raises(self) -> None:
+        """P1-9 antibody: build_evidence_report must raise ValueError when
+        breakeven_win_rate is not supplied. No generic 0.5 default — every
+        strategy has a different breakeven from its fee structure."""
+        conn = _fresh_conn()
+        with pytest.raises(ValueError, match="breakeven_win_rate"):
+            build_evidence_report(
+                "center_buy",
+                EvidenceTier.SHADOW_PASS,
+                conn=conn,
+                # breakeven_win_rate intentionally omitted — should raise
+            )
+
+    def test_n_decisions_is_full_universe_when_cohort_scoped(self) -> None:
+        """P1-7 antibody: n_decisions must include unsettled decisions even when
+        cohort_tag is provided. Scoping n_decisions via regret_decompositions
+        excluded unsettled decisions (those with no regret row yet), corrupting
+        the Beta denominator by making n_decisions == n_settled."""
+        conn = _fresh_conn()
+        # Settled decision in cohort-A (has regret row)
+        _seed_chain(
+            conn,
+            de_id="de-settled",
+            strategy_key="center_buy",
+            source="shadow_decision",
+            experiment_id="exp-A",
+            cohort_tag="cohort-A",
+            regret=0.10,
+        )
+        # Unsettled decision for same strategy — no regret row, no shadow_experiment link
+        conn.execute(
+            _DE_SQL,
+            ("de-unsettled", "de-unsettled", UTC_NOW, UTC_NOW, "center_buy", UTC_NOW, "shadow_decision"),
+        )
+        conn.commit()
+
+        report = build_evidence_report(
+            "center_buy",
+            EvidenceTier.SHADOW_PASS,
+            conn=conn,
+            cohort_tag="cohort-A",
+            breakeven_win_rate=0.5,
+        )
+        assert report.n_decisions == 2, (
+            f"n_decisions={report.n_decisions}: unsettled decision must be counted in denominator. "
+            "cohort_tag scopes regret analytics only (P1-7 fix)."
+        )
+        assert report.n_settled == 1, "Only 1 decision has a regret row (settled)"
+        assert report.n_wins == 1
