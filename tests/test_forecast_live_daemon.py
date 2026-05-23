@@ -1,6 +1,9 @@
 # Created: 2026-05-14
 # Last reused/audited: 2026-05-23
+# Lifecycle: created=2026-05-14; last_reviewed=2026-05-23; last_reused=2026-05-23
 # Authority basis: docs/operations/archive/2026-Q2/task_2026-05-08_deep_alignment_audit/DATA_DAEMON_LIVE_EFFICIENCY_REFACTOR_PLAN.md section 6.1, section 6.2, section 8 Phase 4, and Phase 6 durable work journaling; docs/operations/archive/2026-Q2/task_2026-05-16_live_continuous_run_package/LIVE_CONTINUOUS_RUN_PACKAGE_PLAN.md source-health gate; fix/forecast-live-partial-retry 2026-05-19 (ECMWF incremental dissemination correction); a0d51d480b507f324 root-cause (ECMWF 00z ingest schedule fix — add 12z triggers, update FORECAST_LIVE_JOB_IDS).
+# Purpose: Relationship tests for the forecast-live daemon boundary — job registry, lock semantics, journaling, and source-health probe.
+# Reuse: Run when forecast_live_daemon.py job specs, run_opendata_track, or job journaling logic changes.
 """Relationship tests for the dedicated forecast-live daemon boundary."""
 
 from __future__ import annotations
