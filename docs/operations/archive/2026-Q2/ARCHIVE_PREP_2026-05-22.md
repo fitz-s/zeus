@@ -7,6 +7,20 @@ Grep scope: src/**, scripts/**, architecture/**, tests/**, docs/authority/**,
             docs/runbooks/**, docs/reference/** (NOT docs/operations/**, docs/reports/**)
 Archive destination prefix: docs/operations/archive/2026-Q2/
 
+**Scope limitation — docs/operations self-refs excluded:** The grep intentionally excludes
+`docs/operations/**` to avoid circular self-reference noise. This means refs from
+`docs/operations/INDEX.md` and `docs/operations/AGENTS.md` are NOT counted in the per-packet
+ref tallies below. Both files contain path entries for many task_ packets (confirmed: INDEX.md
+and AGENTS.md both list several "zero-ref" packets). Every archive batch PR must therefore also
+update INDEX.md (mark entries "archived"), AGENTS.md (remove or annotate entries), and the
+archive/2026-Q2/INDEX.md stub list. These are universal prerequisites for any batch, not
+packet-specific repoints, so they are called out here rather than repeated per packet.
+
+**Self-registration note:** This proposal doc (`ARCHIVE_PREP_2026-05-22.md`) lives under
+`docs/operations/archive/2026-Q2/` which is covered by the `docs/operations/archive/2026-Q2/INDEX.md`
+registry (it lists archive contents). It carries `Authority: false` in its status header —
+it is a planning artifact, not a durable reference doc requiring individual INDEX.md registration.
+
 ---
 
 ## 1. Packet Enumeration (54 total)
@@ -83,7 +97,12 @@ task_2026-05-22_live_math_frontier
 
 ---
 
-### ARCHIVABLE_NOW (17 packets — 0 inbound refs)
+### ARCHIVABLE_NOW (16 packets — 0 inbound refs in audited scope)
+
+These 16 packets have zero references in `src/**, scripts/**, architecture/**, tests/**,
+docs/authority/**, docs/runbooks/**, docs/reference/**`. All also require the universal
+prerequisite updates (docs/operations/INDEX.md, AGENTS.md, archive/2026-Q2/INDEX.md) noted
+in the scope limitation above.
 
 | Packet | Contents |
 |--------|----------|
@@ -104,17 +123,9 @@ task_2026-05-22_live_math_frontier
 | task_2026-05-21_money_path_semantic_ci | MONEY_PATH_SEMANTIC_CI_PLAN.md |
 | task_2026-05-22_live_math_frontier | PLAN.md |
 
-**Exception — classify as ARCHIVABLE_AFTER_REPOINT (1 soft ref):**
-
-| Packet | Ref | File:line | Nature |
-|--------|-----|-----------|--------|
-| task_2026-05-22_crosscheck_valid_window | CROSSCHECK_VALID_WINDOW_PLAN.md cited in authority-basis comment | tests/test_runtime_guards.py:5 | Soft (# Authority basis: comment) |
-
-Repoint: update `# Authority basis:` comment in `tests/test_runtime_guards.py` line 5 to use the archive path.
-
 ---
 
-### ARCHIVABLE_AFTER_REPOINT (24 packets — soft refs only)
+### ARCHIVABLE_AFTER_REPOINT (25 packets — soft refs only)
 
 All refs below are in one of these soft categories:
 - `# Authority basis:` / `# Authority:` headers in Python/YAML
@@ -131,6 +142,14 @@ All refs below are in one of these soft categories:
 - `PLAN-evidence:` comment in Python source
 
 **Detailed per-packet ref list:**
+
+#### task_2026-05-22_crosscheck_valid_window (1 ref)
+
+| File:line | Nature |
+|-----------|--------|
+| tests/test_runtime_guards.py:5 (# Authority basis: comment, path `docs/operations/task_2026-05-22_crosscheck_valid_window/CROSSCHECK_VALID_WINDOW_PLAN.md`) | Soft |
+
+Repoints needed (1 file): update `# Authority basis:` comment at line 5.
 
 #### task_2026-05-06_hook_redesign (10 refs)
 
@@ -408,9 +427,27 @@ Repoints needed (2 files — 1 script_manifest entry + 1 Python constant).
 
 Repoints needed (2 files, both soft).
 
+#### task_2026-05-17_strategy_vnext_phase0 (68 refs)
+
+All refs are soft: `architecture/script_manifest.yaml` `packet:` metadata fields,
+`architecture/digest_profiles.py` reference_reads and glob patterns (context payload, not
+path-validated), `src/state/schema/v2_schema.py` SQL comment, and ~58 Authority-basis
+headers throughout scripts/ and src/.
+
+Note: `architecture/script_manifest.yaml` contains `packet: docs/operations/task_2026-05-17_strategy_vnext_phase0`
+entries. Code inspection confirms that `topology_doctor._script_manifest_note_for_path()` looks
+up script entries by **filename only** (`Path(path).name`), not by the `packet:` field. The
+`packet:` field is advisory metadata. No `.exists()` check is performed; stale `packet:` values
+are silently ignored, not a hard gate. **Downgraded from MACHINE_ADJACENT to ARCHIVABLE_AFTER_REPOINT.**
+
+Required repoints (~68 entries across ~62 files, all soft):
+1. `architecture/script_manifest.yaml` — update 2 `packet:` entries
+2. `architecture/digest_profiles.py` — update ~8 reference_reads / glob entries
+3. Authority-basis comments across ~52 files in scripts/ and src/
+
 ---
 
-### MACHINE_ADJACENT_REPOINT (3 packets — runtime-validated paths)
+### MACHINE_ADJACENT_REPOINT (2 packets — runtime-validated paths)
 
 #### task_2026-04-26_ultimate_plan (267 refs — MACHINE_ADJACENT)
 
@@ -467,34 +504,6 @@ Validators: `scripts/topology_v_next/admission_engine.py::_check_authority_statu
 
 ---
 
-#### task_2026-05-17_strategy_vnext_phase0 (68 refs — MACHINE_ADJACENT)
-
-**Machine-adjacent ref:** `architecture/script_manifest.yaml:28-29`
-```yaml
-packet: docs/operations/task_2026-05-17_strategy_vnext_phase0
-```
-`topology_doctor` loads `script_manifest.yaml` and uses `packet:` field for script lineage and planning-lock context. Stale `packet:` path may cause mismatch in script ancestry checks (topology_doctor `_script_manifest_note_for_path`).
-
-Assessment: `packet:` is used for advisory lineage matching, not `.exists()` validation. Silently stale if moved, not a hard gate.
-
-**Machine-adjacent ref:** `src/state/schema/v2_schema.py:271` 
-```python
---   docs/operations/task_2026-05-17_strategy_vnext_phase0/preflight/migration_dry_runs.json
-```
-This is an SQL comment in a schema migration. Not loaded at runtime.
-
-**Soft refs (66 others):** digest_profiles.py reference_reads and glob patterns (context payload, not path-validated), Authority-basis headers.
-
-Required repoints before archiving:
-1. `architecture/script_manifest.yaml:28-29` — update 2 `packet:` entries
-2. `architecture/digest_profiles.py` — update ~8 reference_reads / glob entries
-3. Soft Authority-basis comments (~58 files)
-
-**Classification: MACHINE_ADJACENT_REPOINT**
-Validators: `scripts/topology_doctor.py::_script_manifest_note_for_path` (advisory)
-
----
-
 ### TRULY_STUCK (7 packets)
 
 These packets are structurally active (live strategy phases, active monitoring, or currently open work items with ongoing authority). Archiving would be premature — the work is still referenced by active system contracts and recent code changes.
@@ -536,9 +545,15 @@ Note: RUNTIME_GATING is distinct from TRULY_STUCK in that these packets are cite
 
 Ordered for operator-approved archive PR. Group A (zero-ref) can be done with no repoints; Group B requires soft comment/YAML updates; Group C requires machine-adjacent repoints.
 
-### Group A — ARCHIVABLE_NOW (17 packets, no repoints)
+### Group A — ARCHIVABLE_NOW (16 packets)
 
-Execute as one `git mv` batch. No other file touches needed.
+Universal prerequisites for ALL archive PRs (including Group A):
+- Update `docs/operations/INDEX.md` — mark each moved packet row "archived"
+- Update `docs/operations/AGENTS.md` — remove or annotate path entries for moved packets
+- Update `docs/operations/archive/2026-Q2/INDEX.md` — add stub entries for each moved packet
+- Produce `.archived` stubs per POLICY.md if required
+
+Packet-specific repoints for Group A: none (all 16 have zero refs in audited scope).
 
 ```
 git mv docs/operations/task_2026-05-08_alignment_safe_implementation docs/operations/archive/2026-Q2/
@@ -556,17 +571,17 @@ git mv docs/operations/task_2026-05-21_live_family_selection_economic_floor docs
 git mv docs/operations/task_2026-05-21_live_family_vector_fill_model docs/operations/archive/2026-Q2/
 git mv docs/operations/task_2026-05-21_live_side_specific_entry_authority docs/operations/archive/2026-Q2/
 git mv docs/operations/task_2026-05-21_money_path_semantic_ci docs/operations/archive/2026-Q2/
-git mv docs/operations/task_2026-05-22_crosscheck_valid_window docs/operations/archive/2026-Q2/  # +1 comment repoint
 git mv docs/operations/task_2026-05-22_live_math_frontier docs/operations/archive/2026-Q2/
 ```
 
-(task_2026-05-22_crosscheck_valid_window needs 1 comment repoint in tests/test_runtime_guards.py.)
+(task_2026-05-22_crosscheck_valid_window is now ARCHIVABLE_AFTER_REPOINT — see Group B1.)
 
-### Group B — ARCHIVABLE_AFTER_REPOINT (24 packets + soft repoints)
+### Group B — ARCHIVABLE_AFTER_REPOINT (25 packets + soft repoints)
 
-Subgroups ordered by repoint count (ascending):
+Subgroups ordered by repoint count (ascending). Each packet appears exactly once.
 
-**B1 — 2-3 repoints (recommend first):**
+**B1 — 1-3 repoints (recommend first):**
+- task_2026-05-22_crosscheck_valid_window (1 file — Authority-basis comment)
 - task_2026-05-15_p8_authority_drift_3_blocking (3 prose fields in 1 YAML)
 - task_2026-05-15_p9_authority_inventory_v2 (2 files)
 - task_2026-05-17_docs_taxonomy_design (2 files)
@@ -575,7 +590,6 @@ Subgroups ordered by repoint count (ascending):
 - task_2026-05-18_wave3_dispatches (2 files)
 
 **B2 — 4-8 repoints:**
-- task_2026-05-08_alignment_safe_implementation (already Group A — zero refs)
 - task_2026-05-06_hook_redesign (8 files)
 - task_2026-05-08_deep_alignment_audit (7 files)
 - task_2026-05-09_copilot_agent_sync (4 entries in 2 files)
@@ -583,7 +597,6 @@ Subgroups ordered by repoint count (ascending):
 - task_2026-05-16_live_continuous_run_package (7 files)
 - task_2026-05-16_post_pr126_audit (8 files)
 - task_2026-05-17_reference_authority_docs_phase (2 files, incl. Python constant)
-- task_2026-05-08_deep_alignment_audit (7 files)
 
 **B3 — 10-25 repoints:**
 - task_2026-05-14_data_daemon_live_efficiency (14 files)
@@ -592,21 +605,20 @@ Subgroups ordered by repoint count (ascending):
 - task_2026-05-15_live_order_e2e_verification (8 files)
 - task_2026-05-16_deep_alignment_audit (8 files)
 - task_2026-05-17_post_karachi_remediation (~24 files)
-- task_2026-05-17_live_order_survival (3 files)
 
 **B4 — 25+ repoints:**
 - task_2026-05-15_p1_topology_v_next_additive (~26 files)
 - task_2026-05-15_p2_companion_required_mechanism (~8 files)
 - task_2026-05-15_p3_topology_v_next_phase2_shadow (~16 files)
 - task_2026-05-15_p5_maintenance_worker_core (~25 files)
+- task_2026-05-17_strategy_vnext_phase0 (~62 files — all soft, incl. script_manifest packet: metadata)
 
-### Group C — MACHINE_ADJACENT_REPOINT (3 packets, hard preconditions)
+### Group C — MACHINE_ADJACENT_REPOINT (2 packets, hard preconditions)
 
 Must be done AFTER verifying the validators pass post-repoint:
 
-1. **task_2026-05-17_strategy_vnext_phase0** — update script_manifest.yaml `packet:` fields + digest_profiles.py globs. Run `topology_doctor --scripts` to verify.
-2. **task_2026-05-15_runtime_improvement_engineering_package** — update artifact_authority_status.yaml path keys + docs_registry.yaml entries. Run `topology_doctor --docs` to verify.
-3. **task_2026-04-26_ultimate_plan** — update `scripts/live_readiness_check.py` DEFAULT_EVIDENCE_ROOTS AND all topology.yaml `--plan-evidence` entries. Run `python scripts/live_readiness_check.py --no-run-commands` to verify. This is the highest-risk repoint.
+1. **task_2026-05-15_runtime_improvement_engineering_package** — update artifact_authority_status.yaml path keys + docs_registry.yaml entries. Run `topology_doctor --docs` to verify.
+2. **task_2026-04-26_ultimate_plan** — update `scripts/live_readiness_check.py` DEFAULT_EVIDENCE_ROOTS AND all topology.yaml `--plan-evidence` entries. Run `python scripts/live_readiness_check.py --no-run-commands` to verify. This is the highest-risk repoint.
 
 ### Keep / Do Not Archive
 
@@ -628,20 +640,21 @@ Must be done AFTER verifying the validators pass post-repoint:
 
 | Component | Est. LOC |
 |-----------|----------|
-| Group A: 17 git mv + 1 comment repoint | ~5 LOC changed (1 comment update) + 17 moves |
-| Group B1 (6 packets, ~20 repoints): comment/YAML value edits | ~25 LOC |
-| Group B2 (8 packets, ~50 repoints) | ~60 LOC |
-| Group B3 (7 packets, ~80 repoints) | ~95 LOC |
-| Group B4 (4 packets, ~75 repoints) | ~90 LOC |
-| Group C3 packets: live_readiness_check + topology.yaml + script_manifest + artifact_authority_status | ~35 LOC |
-| **TOTAL repoint edits** | **~310 LOC** |
-| **TOTAL git mv (moves)** | **44 moves** (Groups A+B+C = 17+24+3) |
+| Universal registry updates per batch PR (INDEX.md, AGENTS.md, archive INDEX.md) | ~20-40 LOC per PR |
+| Group A: 16 git mv, no packet-specific repoints | ~30 LOC (registry updates) + 16 moves |
+| Group B1 (7 packets, ~20 repoints): comment/YAML value edits | ~25 LOC |
+| Group B2 (7 packets, ~50 repoints) | ~60 LOC |
+| Group B3 (6 packets, ~80 repoints) | ~95 LOC |
+| Group B4 (5 packets, ~140 repoints, incl. strategy_vnext_phase0) | ~165 LOC |
+| Group C 2 packets: live_readiness_check + topology.yaml + artifact_authority_status | ~25 LOC |
+| **TOTAL repoint edits** | **~400 LOC** |
+| **TOTAL git mv (moves)** | **43 moves** (Groups A+B+C = 16+25+2) |
 
-A well-batched archive PR would show ~310 changed lines and 44 directory/file moves. This is above the 300-LOC threshold without counting moves. Recommend splitting:
-- **PR-Archive-A**: Group A only (17 moves + 1 repoint) — ~5 LOC, use ZEUS_PR_ALLOW_TINY=1
-- **PR-Archive-B**: Groups B1+B2 (14 packets, ~85 repoints) — ~85 LOC
-- **PR-Archive-C**: Groups B3+B4 (11 packets, ~155 repoints) — ~185 LOC
-- **PR-Archive-D**: Group C (3 high-risk packets, ~35 repoints) — ~35 LOC + careful validation
+Recommend splitting:
+- **PR-Archive-A**: Group A only (16 moves + registry updates) — ~30 LOC, use ZEUS_PR_ALLOW_TINY=1
+- **PR-Archive-B**: Groups B1+B2 (14 packets, ~85 repoints + registry updates) — ~120 LOC
+- **PR-Archive-C**: Groups B3+B4 (11 packets, ~220 repoints + registry updates) — ~280 LOC
+- **PR-Archive-D**: Group C (2 hard-validator packets, ~25 repoints + registry updates) — ~55 LOC + validation
 
 Each PR remains reviewable. Groups B and C can be batched differently depending on operator preference.
 
@@ -651,12 +664,17 @@ Each PR remains reviewable. Groups B and C can be batched differently depending 
 
 | Classification | Count |
 |----------------|-------|
-| ARCHIVABLE_NOW | 16 (+ crosscheck_valid_window at 1 soft ref = effectively 17 archivable) |
-| ARCHIVABLE_AFTER_REPOINT | 24 |
-| MACHINE_ADJACENT_REPOINT | 3 |
+| ARCHIVABLE_NOW | 16 |
+| ARCHIVABLE_AFTER_REPOINT | 25 (incl. task_2026-05-22_crosscheck_valid_window and task_2026-05-17_strategy_vnext_phase0, both reclassified from earlier draft) |
+| MACHINE_ADJACENT_REPOINT | 2 |
 | TRULY_STUCK | 7 |
 | RUNTIME_GATING | 2 |
-| **TOTAL** | **54** |
+| **TOTAL** | **52** |
 
-Total repoints if all ARCHIVABLE_AFTER_REPOINT are executed: ~305 file edits across ~200 unique files.
-Total machine-adjacent repoints: ~15 edits across 5 files (3 hard validators).
+Note: 54 packets enumerated in §1; 2 are RUNTIME_GATING (keep), hence 52 in the
+classification table. TRULY_STUCK + RUNTIME_GATING = 9 packets to keep.
+
+Total packet-specific repoints if all ARCHIVABLE_AFTER_REPOINT are executed: ~310 file edits
+across ~200 unique files. Universal registry updates (INDEX.md, AGENTS.md, archive INDEX.md)
+add ~30-40 LOC per batch PR on top.
+Total machine-adjacent repoints: ~10 edits across 3 files (2 hard validators).
