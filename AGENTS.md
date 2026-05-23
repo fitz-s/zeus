@@ -291,7 +291,7 @@ matching. Canonical values: `plan_only`, `audit`, `create_new`, `modify_existing
 - `plan_only` and `audit` are **whitelist-driven**: only paths matching their
   `admits_path_globs` are admitted; everything else → `out_of_scope_files` + `advisory_only`.
   Canonical scopes: `plan_only` admits `docs/**`; `audit` admits
-  `docs/operations/archive/**` (untracked on disk). Substantive plans MUST be packetized at
+  `docs/archive/**` (untracked on disk; index: `docs/archive_registry.md`). Substantive plans MUST be packetized at
   `docs/operations/current/plans/<slug>.md` (canonical under the single-operations-home law;
   see docs/operations/AGENTS.md §"Single Operations Home") or legacy
   `PLAN.md` (admitted via `create_new` typed_intent). Runtime tool scratch

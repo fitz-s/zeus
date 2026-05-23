@@ -82,9 +82,7 @@ Tracked packet evidence in this live router is limited to the current rows
 below. Closed packet evidence is archived under `docs/archive/<YYYY>-Q<N>/` and
 indexed in `docs/archive/<YYYY>-Q<N>/INDEX.md`; do not use archived packet folders as
 active workflow defaults. Active archival rules: `docs/authority/ARCHIVAL_RULES.md`.
-Note: ARCHIVAL_RULES.md now lives at `docs/authority/ARCHIVAL_RULES.md` (relocated from
-`docs/operations/task_2026-05-15_runtime_improvement_engineering_package/04_workspace_hygiene/`
-by W3 2026-05-17).
+Note: ARCHIVAL_RULES.md lives at `docs/authority/ARCHIVAL_RULES.md`.
 
 ### Attached Package Inputs
 
@@ -119,7 +117,6 @@ Tracked top-level files (required for docs checks; class/purpose in docs_registr
 | `POLICY.md` | operations policy |
 | `LIVE_LAUNCH_HANDOFF.md` | live launch handoff |
 | `PLIST_UPDATE_FOR_RELOCK.md` | packet evidence |
-| `CRON_PROPOSALS_F32_F35.md` | packet evidence (pending operator cron addition) |
 | `tigge_daemon_integration.md` | packet evidence |
 | `zeus_agent_runtime_compounding_plan_2026-05-16.md` | report |
 | `activation/` | active support (src/engine/dispatch.py + scripts/produce_activation_evidence.py refs) |

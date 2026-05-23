@@ -604,11 +604,6 @@ docs_subroots:
     requires_agents: true
     allow_non_markdown: true
     allowed_extensions: [".xlsx", ".csv", ".json"]
-  - path: "docs/artifacts"
-    role: evidence_artifact
-    requires_agents: true
-    allow_non_markdown: true
-    allowed_extensions: [".xlsx", ".csv", ".json"]
   - path: "docs/archive/cold"
     role: historical_archive
     visibility: historical_cold_storage

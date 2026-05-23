@@ -59,9 +59,8 @@ Freeze a new packet through this file before starting any implementation slice.
 
 ## Closed packet archive
 
-Closed or superseded packet bodies are in
-`docs/operations/archive/2026-Q2/` (index: `docs/archive_registry.md`; archive bodies are untracked on disk).
-Historical registry: `docs/archive_registry.md` (deprecated forwarding doc).
+Closed or superseded packet bodies are indexed in `docs/archive_registry.md`
+(archive bodies are untracked on disk under `docs/archive/`; not visible in tracked tree).
 
 ## Operations routing
 
