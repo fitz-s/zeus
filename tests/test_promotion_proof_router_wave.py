@@ -1,6 +1,9 @@
 # Created: 2026-05-22
 # Last reused or audited: 2026-05-22
 # Authority basis: docs/operations/task_2026-05-21_mainline_completion_authority/WAVE2_CRITIC_VERDICT.md MAJOR-3
+# Lifecycle: created=2026-05-22; last_reviewed=2026-05-22; last_reused=never
+# Purpose: Router exhaustiveness test — wave shadow strategy_keys route to correct promotion pipeline.
+# Reuse: Run when promotion_proof_router.py or _PIPELINE_B_STRATEGY_KEYS change.
 """Router exhaustiveness test — all 10 wave shadow strategies route correctly.
 
 Wave critic MAJOR-3: OpeningInertiaRelaxation and ImminentOpenCapturePosteriorCollapse

@@ -29,7 +29,6 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Optional
 
-from src.calibration.bounds import calibrated_bounds
 from src.contracts.no_trade_reason import NoTradeReason
 from src.state.decision_events import write_shadow_decision_event
 from src.strategy.bayes_alert import AlertLRStub, AlertLRTable, posterior_lower_bound

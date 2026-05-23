@@ -3,6 +3,9 @@
 # Authority basis: docs/operations/task_2026-05-21_mainline_completion_authority/STRATEGY_TAXONOMY_DIRECTIVE.md §8
 #                  + docs/reference/zeus_strategy_spec.md §12
 #                  + src/calibration/bounds.py (conformal lower bound)
+# Lifecycle: created=2026-05-22; last_reviewed=2026-05-22; last_reused=never
+# Purpose: Relationship tests for ShoulderBuyEVT candidate — EVT/conformal lower bound theorem.
+# Reuse: Run when shoulder_buy_evt.py, calibrated_bounds, or shoulder fee/edge math changes.
 """Relationship tests for shoulder_buy_evt — TESTS FIRST per Fitz methodology.
 
 Theorem tested (§8):

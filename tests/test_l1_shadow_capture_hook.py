@@ -1,6 +1,9 @@
 # Created: 2026-05-22
 # Last reused or audited: 2026-05-22
 # Authority basis: docs/operations/task_2026-05-21_mainline_completion_authority/PROMOTION_PIPELINE_DESIGN.md §4
+# Lifecycle: created=2026-05-22; last_reviewed=2026-05-22; last_reused=never
+# Purpose: L-1 relationship tests for dispatch_shadow_candidates — fail-open hook + K1 ghost-split proof.
+# Reuse: Run when shadow_candidate_dispatch.py, decision_events schema, or capture flag changes.
 """Track L-1 relationship tests — fail-open live shadow-capture hook.
 
 Three required relationship assertions (per PROMOTION_PIPELINE_DESIGN §4):

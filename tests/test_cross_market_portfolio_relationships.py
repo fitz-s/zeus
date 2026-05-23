@@ -2,6 +2,9 @@
 # Last reused or audited: 2026-05-22
 # Authority basis: docs/operations/task_2026-05-21_mainline_completion_authority/STRATEGY_TAXONOMY_DIRECTIVE.md §12
 #                  + docs/reference/zeus_strategy_spec.md §16.2
+# Lifecycle: created=2026-05-22; last_reviewed=2026-05-22; last_reused=never
+# Purpose: Cross-module relationship tests for cross_market_correlation_hedge portfolio reframe.
+# Reuse: Run when cross_market_correlation_hedge.py, Ledoit-Wolf shrinkage, or portfolio math changes.
 """Cross-module relationship tests for cross_market_correlation_hedge portfolio reframe.
 
 Four invariants (R1-R4) capturing the w*=Σ⁻¹e joint-distribution stat-arb theorem:
