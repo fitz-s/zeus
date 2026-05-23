@@ -66,6 +66,11 @@ LEGACY_EXTREMA_AUTHORITY_DATA_VERSIONS: frozenset[str] = frozenset({
     _ECMWF_OPENDATA_HIGH_DATA_VERSION_LEGACY,   # ecmwf_opendata_mx2t6_local_calendar_day_max_v1
     _ECMWF_OPENDATA_LOW_DATA_VERSION_LEGACY,    # ecmwf_opendata_mn2t6_local_calendar_day_min_v1
     _ECMWF_OPENDATA_LOW_CONTRACT_WINDOW_DATA_VERSION_LEGACY,  # ..._min_contract_window_v2
+    # NOTE: TIGGE mx2t6/mn2t6 families are intentionally absent. They are never
+    # requested by the executable read path (data_version_for_track returns only
+    # ECMWF_OPENDATA mx2t3/mn2t3 versions), so no legacy rows exist for them.
+    # Do NOT add TIGGE entries here to "fix" an apparent gap — doing so would
+    # silently allow TIGGE null-authority rows through the extrema gate.
 })
 
 # Token recorded in applied_validations when a legacy NULL row passes through.
