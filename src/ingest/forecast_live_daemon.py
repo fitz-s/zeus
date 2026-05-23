@@ -1,6 +1,6 @@
 # Created: 2026-05-14
-# Last reused/audited: 2026-05-16
-# Authority basis: docs/operations/archive/2026-Q2/task_2026-05-08_deep_alignment_audit/DATA_DAEMON_LIVE_EFFICIENCY_REFACTOR_PLAN.md section 6.1, section 6.2, and section 8 Phase 4; Phase 6 durable work journaling; docs/operations/archive/2026-Q2/task_2026-05-16_live_continuous_run_package/LIVE_CONTINUOUS_RUN_PACKAGE_PLAN.md source-health gate.
+# Last reused/audited: 2026-05-23
+# Authority basis: docs/operations/archive/2026-Q2/task_2026-05-08_deep_alignment_audit/DATA_DAEMON_LIVE_EFFICIENCY_REFACTOR_PLAN.md section 6.1, section 6.2, and section 8 Phase 4; Phase 6 durable work journaling; docs/operations/archive/2026-Q2/task_2026-05-16_live_continuous_run_package/LIVE_CONTINUOUS_RUN_PACKAGE_PLAN.md source-health gate; a0d51d480b507f324 root-cause + docs/operations/live_review_may23.md (ECMWF 00z ingest schedule fix).
 """Dedicated OpenData live forecast producer daemon.
 
 This module owns the ECMWF OpenData live forecast scheduler and the OpenData-only
@@ -33,8 +33,10 @@ _scheduler: Any | None = None
 # carry-forward #5.
 _PROCESS_START = time.monotonic()
 
-FORECAST_LIVE_DAILY_HIGH_JOB_ID = "forecast_live_opendata_daily_mx2t6"
-FORECAST_LIVE_DAILY_LOW_JOB_ID = "forecast_live_opendata_daily_mn2t6"
+FORECAST_LIVE_DAILY_HIGH_JOB_ID = "forecast_live_opendata_daily_mx2t6"       # 00z trigger
+FORECAST_LIVE_DAILY_HIGH_12Z_JOB_ID = "forecast_live_opendata_daily_mx2t6_12z"  # 12z trigger
+FORECAST_LIVE_DAILY_LOW_JOB_ID = "forecast_live_opendata_daily_mn2t6"        # 00z trigger
+FORECAST_LIVE_DAILY_LOW_12Z_JOB_ID = "forecast_live_opendata_daily_mn2t6_12z"   # 12z trigger
 FORECAST_LIVE_STARTUP_JOB_ID = "forecast_live_opendata_startup_catch_up"
 FORECAST_LIVE_SAFE_CYCLE_POLL_JOB_ID = "forecast_live_opendata_safe_cycle_poll"
 FORECAST_LIVE_HEARTBEAT_JOB_ID = "forecast_live_heartbeat"
@@ -57,7 +59,9 @@ _CURRENT_SOURCE_CYCLE_STATUSES = frozenset({"SUCCESS"})
 FORECAST_LIVE_JOB_IDS = frozenset(
     {
         FORECAST_LIVE_DAILY_HIGH_JOB_ID,
+        FORECAST_LIVE_DAILY_HIGH_12Z_JOB_ID,
         FORECAST_LIVE_DAILY_LOW_JOB_ID,
+        FORECAST_LIVE_DAILY_LOW_12Z_JOB_ID,
         FORECAST_LIVE_STARTUP_JOB_ID,
         FORECAST_LIVE_SAFE_CYCLE_POLL_JOB_ID,
         FORECAST_LIVE_HEARTBEAT_JOB_ID,
@@ -681,11 +685,25 @@ def _run_journaled_opendata_track_if_due(track: str) -> dict:
 
 @_scheduler_job(FORECAST_LIVE_DAILY_HIGH_JOB_ID)
 def _opendata_mx2t6_cycle() -> dict:
+    """00z cron trigger: fires at 08:10 UTC, after the 08:05 UTC safe_fetch window."""
+    return _run_journaled_opendata_track_if_due("mx2t6_high")
+
+
+@_scheduler_job(FORECAST_LIVE_DAILY_HIGH_12Z_JOB_ID)
+def _opendata_mx2t6_cycle_12z() -> dict:
+    """12z cron trigger: fires at 20:10 UTC, after the 20:05 UTC safe_fetch window."""
     return _run_journaled_opendata_track_if_due("mx2t6_high")
 
 
 @_scheduler_job(FORECAST_LIVE_DAILY_LOW_JOB_ID)
 def _opendata_mn2t6_cycle() -> dict:
+    """00z cron trigger: fires at 08:15 UTC, after the 08:05 UTC safe_fetch window."""
+    return _run_journaled_opendata_track_if_due("mn2t6_low")
+
+
+@_scheduler_job(FORECAST_LIVE_DAILY_LOW_12Z_JOB_ID)
+def _opendata_mn2t6_cycle_12z() -> dict:
+    """12z cron trigger: fires at 20:15 UTC, after the 20:05 UTC safe_fetch window."""
     return _run_journaled_opendata_track_if_due("mn2t6_low")
 
 
@@ -727,25 +745,61 @@ def forecast_live_job_specs(
                 "executor": "heartbeat",
             },
         ),
+        # ECMWF OpenData 00z run: safe_fetch window opens at 08:05 UTC (00:00 + 485 min).
+        # Trigger at 08:10 UTC (5-min margin).  The 5-min poll below covers transient
+        # misses; idempotent via source_run_id dedup in _run_journaled_opendata_track_if_due.
+        # Previous schedule was 07:30 UTC — 35 min before the safe_fetch window — which
+        # caused evaluate_safe_fetch to return SKIPPED_NOT_RELEASED → fallback to
+        # yesterday's 12z → ~20h staleness at the 14:00 UTC US open → all non-day0 blocked.
+        # Authority: a0d51d480b507f324 root-cause + docs/operations/live_review_may23.md.
         (
             _opendata_mx2t6_cycle,
             "cron",
             {
-                "hour": 7,
-                "minute": 30,
+                "hour": 8,
+                "minute": 10,
                 "id": FORECAST_LIVE_DAILY_HIGH_JOB_ID,
                 "max_instances": 1,
                 "coalesce": True,
                 "misfire_grace_time": 3600,
             },
         ),
+        # ECMWF OpenData 12z run: safe_fetch window opens at 20:05 UTC (12:00 + 485 min).
+        # Trigger at 20:10 UTC (5-min margin).
+        (
+            _opendata_mx2t6_cycle_12z,
+            "cron",
+            {
+                "hour": 20,
+                "minute": 10,
+                "id": FORECAST_LIVE_DAILY_HIGH_12Z_JOB_ID,
+                "max_instances": 1,
+                "coalesce": True,
+                "misfire_grace_time": 3600,
+            },
+        ),
+        # mn2t6 LOW track: same safe_fetch windows as mx2t6 HIGH.
+        # 00z trigger at 08:15 UTC (5-min offset from HIGH to stagger downloads).
         (
             _opendata_mn2t6_cycle,
             "cron",
             {
-                "hour": 7,
-                "minute": 35,
+                "hour": 8,
+                "minute": 15,
                 "id": FORECAST_LIVE_DAILY_LOW_JOB_ID,
+                "max_instances": 1,
+                "coalesce": True,
+                "misfire_grace_time": 3600,
+            },
+        ),
+        # 12z trigger at 20:15 UTC (5-min offset from HIGH).
+        (
+            _opendata_mn2t6_cycle_12z,
+            "cron",
+            {
+                "hour": 20,
+                "minute": 15,
+                "id": FORECAST_LIVE_DAILY_LOW_12Z_JOB_ID,
                 "max_instances": 1,
                 "coalesce": True,
                 "misfire_grace_time": 3600,

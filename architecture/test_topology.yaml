@@ -299,7 +299,9 @@ test_trust_policy:
     tests/test_forecast_target_contract_horizon.py: {created: "2026-05-08", last_used: "2026-05-08"}
     # F1 subprocess hardening — retry + timeout + stderr (REPORT §6.2).
     tests/test_ecmwf_open_data_subprocess_hardening.py: {created: "2026-05-08", last_used: "2026-05-14"}
-    tests/test_forecast_live_daemon.py: {created: "2026-05-14", last_used: "2026-05-14"}
+    tests/test_forecast_live_daemon.py: {created: "2026-05-14", last_used: "2026-05-23"}
+    # 2026-05-23 schedule fix: cron triggers must fire after safe_fetch windows (a0d51d480b507f324 root-cause).
+    tests/test_ecmwf_opendata_ingest_schedule.py: {created: "2026-05-23", last_used: "2026-05-23"}
     tests/test_check_data_pipeline_live_e2e.py: {created: "2026-05-15", last_used: "2026-05-15"}
     tests/test_check_live_order_e2e.py: {created: "2026-05-15", last_used: "2026-05-15"}
     tests/test_live_health_probe_forecast_owner.py: {created: "2026-05-15", last_used: "2026-05-18"}
@@ -589,6 +591,7 @@ categories:
     - tests/test_opendata_future_target_contract.py
     - tests/test_ecmwf_open_data_subprocess_hardening.py
     - tests/test_forecast_live_daemon.py
+    - tests/test_ecmwf_opendata_ingest_schedule.py
     - tests/test_ecmwf_open_data_step_hours.py
     - tests/test_forecast_target_contract_horizon.py
     - tests/test_readiness_state.py
@@ -1150,6 +1153,7 @@ law_gate:
       - tests/test_opendata_future_target_contract.py
       - tests/test_ecmwf_open_data_subprocess_hardening.py
       - tests/test_forecast_live_daemon.py
+      - tests/test_ecmwf_opendata_ingest_schedule.py
       - tests/test_check_data_pipeline_live_e2e.py
       - tests/test_check_live_order_e2e.py
       - tests/test_live_health_probe_forecast_owner.py

@@ -1,6 +1,6 @@
 # Created: 2026-05-14
-# Last reused/audited: 2026-05-19
-# Authority basis: docs/operations/archive/2026-Q2/task_2026-05-08_deep_alignment_audit/DATA_DAEMON_LIVE_EFFICIENCY_REFACTOR_PLAN.md section 6.1, section 6.2, section 8 Phase 4, and Phase 6 durable work journaling; docs/operations/archive/2026-Q2/task_2026-05-16_live_continuous_run_package/LIVE_CONTINUOUS_RUN_PACKAGE_PLAN.md source-health gate; fix/forecast-live-partial-retry 2026-05-19 (ECMWF incremental dissemination correction).
+# Last reused/audited: 2026-05-23
+# Authority basis: docs/operations/archive/2026-Q2/task_2026-05-08_deep_alignment_audit/DATA_DAEMON_LIVE_EFFICIENCY_REFACTOR_PLAN.md section 6.1, section 6.2, section 8 Phase 4, and Phase 6 durable work journaling; docs/operations/archive/2026-Q2/task_2026-05-16_live_continuous_run_package/LIVE_CONTINUOUS_RUN_PACKAGE_PLAN.md source-health gate; fix/forecast-live-partial-retry 2026-05-19 (ECMWF incremental dissemination correction); a0d51d480b507f324 root-cause (ECMWF 00z ingest schedule fix — add 12z triggers, update FORECAST_LIVE_JOB_IDS).
 """Relationship tests for the dedicated forecast-live daemon boundary."""
 
 from __future__ import annotations
@@ -37,8 +37,10 @@ def test_forecast_live_scheduler_registers_only_opendata_jobs_and_heartbeat() ->
 
     assert job_ids == FORECAST_LIVE_JOB_IDS
     assert job_ids == {
-        "forecast_live_opendata_daily_mx2t6",
-        "forecast_live_opendata_daily_mn2t6",
+        "forecast_live_opendata_daily_mx2t6",        # 00z trigger (08:10 UTC)
+        "forecast_live_opendata_daily_mx2t6_12z",    # 12z trigger (20:10 UTC)
+        "forecast_live_opendata_daily_mn2t6",        # 00z trigger (08:15 UTC)
+        "forecast_live_opendata_daily_mn2t6_12z",    # 12z trigger (20:15 UTC)
         "forecast_live_opendata_startup_catch_up",
         "forecast_live_opendata_safe_cycle_poll",
         "forecast_live_heartbeat",
