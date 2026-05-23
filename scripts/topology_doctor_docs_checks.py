@@ -107,8 +107,7 @@ DOCS_REGISTRY_PARENT_PATTERNS = (
     "docs/operations/[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]_*/",
     # active operations package (file_arrangement.yaml canonical path)
     "docs/operations/current/",
-    "docs/reports/",
-    "docs/artifacts/",
+    "docs/reports/authority_history/",
     "docs/to-do-list/",
     "docs/runbooks/",
     "docs/reference/legacy/",
