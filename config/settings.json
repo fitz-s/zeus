@@ -40,6 +40,13 @@
     "min_members_floor": 40,
     "_min_members_floor_rationale_2026_05_19": "ECMWF Open Data partial dissemination at 48-50 is statistically equivalent to full 51 for variance estimation under our Monte Carlo strategies. Strict 51-only gate caused 40-45% systematic discard for weeks. Floor of 40 keeps fail-closed for genuinely degraded ensembles (< 40 = unreliable variance) while admitting statistically-viable partial ensembles."
   },
+  "probability_sanity": {
+    "point_bucket_high_prob": 0.5,
+    "min_member_support": 0.25,
+    "low_price_threshold": 0.05,
+    "low_price_high_prob": 0.35,
+    "_probability_sanity_note_2026_05_23": "P0 follow-up §4: thresholds for validate_high_distribution (day0 HIGH sanity gate). point_bucket_high_prob/min_member_support guard the POINT_BUCKET_HIGH_PROB_WITHOUT_MEMBER_SUPPORT gate; low_price_threshold/low_price_high_prob guard EXTREME_MARKET_DISAGREEMENT_LOW_PRICE_HIGH_PROB. Values equal the prior hardcoded constants — externalized for operator tuning without behavior change. The validator falls back to these defaults if this block is absent."
+  },
   "entry_forecast": {
     "source_id": "ecmwf_open_data",
     "source_transport": "ensemble_snapshots_v2_db_reader",

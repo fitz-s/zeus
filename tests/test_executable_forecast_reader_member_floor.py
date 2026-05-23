@@ -79,7 +79,8 @@ def _insert_snapshot(conn: sqlite3.Connection, *, n_members: int = 51) -> None:
             source_cycle_time, source_release_time, source_available_at,
             training_allowed, causality_status, boundary_ambiguous,
             ambiguous_member_count, manifest_hash, provenance_json, authority,
-            members_unit, local_day_start_utc, step_horizon_hours
+            members_unit, local_day_start_utc, step_horizon_hours,
+            contributes_to_target_extrema, forecast_window_attribution_status
         ) VALUES (
             :city, :target_date, :temperature_metric, :physical_quantity,
             :observation_field, :issue_time, :valid_time, :available_at, :fetch_time,
@@ -88,7 +89,8 @@ def _insert_snapshot(conn: sqlite3.Connection, *, n_members: int = 51) -> None:
             :source_cycle_time, :source_release_time, :source_available_at,
             :training_allowed, :causality_status, :boundary_ambiguous,
             :ambiguous_member_count, :manifest_hash, :provenance_json, :authority,
-            :members_unit, :local_day_start_utc, :step_horizon_hours
+            :members_unit, :local_day_start_utc, :step_horizon_hours,
+            :contributes_to_target_extrema, :forecast_window_attribution_status
         )
         """,
         {
@@ -122,6 +124,8 @@ def _insert_snapshot(conn: sqlite3.Connection, *, n_members: int = 51) -> None:
             "members_unit": "degC",
             "local_day_start_utc": scope.target_window_start_utc.isoformat(),
             "step_horizon_hours": 144.0,
+            "contributes_to_target_extrema": 1,
+            "forecast_window_attribution_status": "FULLY_INSIDE_TARGET_LOCAL_DAY",
         },
     )
 

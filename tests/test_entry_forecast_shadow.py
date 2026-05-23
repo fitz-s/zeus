@@ -58,7 +58,8 @@ def _insert_snapshot(conn: sqlite3.Connection, *, linked: bool = True) -> None:
             source_cycle_time, source_release_time, source_available_at,
             training_allowed, causality_status, boundary_ambiguous,
             ambiguous_member_count, manifest_hash, provenance_json, authority,
-            members_unit, local_day_start_utc, step_horizon_hours
+            members_unit, local_day_start_utc, step_horizon_hours,
+            contributes_to_target_extrema, forecast_window_attribution_status
         ) VALUES (
             :city, :target_date, 'high', 'mx2t6_local_calendar_day_max',
             'high_temp', '2026-05-03T00:00:00+00:00', :target_date,
@@ -67,7 +68,8 @@ def _insert_snapshot(conn: sqlite3.Connection, *, linked: bool = True) -> None:
             :source_id, :source_transport, :source_run_id, :release_calendar_key,
             :source_cycle_time, :source_release_time, :source_available_at,
             1, 'OK', 0, 0, :manifest_hash, '{}', 'VERIFIED', 'degC',
-            :local_day_start_utc, 144.0
+            :local_day_start_utc, 144.0,
+            1, 'FULLY_INSIDE_TARGET_LOCAL_DAY'
         )
         """,
         {

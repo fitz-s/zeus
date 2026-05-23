@@ -67,6 +67,7 @@ def _insert_snapshot_row(
     boundary_ambiguous: int = 0,
     causality_status: str = "OK",
     authority: str = "VERIFIED",
+    data_version: str | None = None,
 ) -> None:
     scope = _scope(city)
     conn.execute(
@@ -106,7 +107,7 @@ def _insert_snapshot_row(
             "lead_hours": 144.0,
             "members_json": json.dumps(members_values),
             "model_version": "ecmwf_ens",
-            "data_version": scope.data_version,
+            "data_version": data_version or scope.data_version,
             "source_id": "ecmwf_open_data",
             "source_transport": "ensemble_snapshots_v2_db_reader",
             "source_run_id": source_run_id,
@@ -176,14 +177,37 @@ class TestClassifyForecastExtremaAuthority:
         assert auth.eligibility == ForecastExtremaEligibility.NON_CONTRIBUTOR
         assert auth.contributes_to_target_extrema is False
 
-    def test_unknown_contributes_none(self):
+    def test_current_version_contributes_none_is_unknown_fail_closed(self):
+        # P0 follow-up §2: NULL contribution on a CURRENT data_version fails closed.
+        row = {
+            "contributes_to_target_extrema": None,
+            "forecast_window_attribution_status": None,
+            "boundary_ambiguous": 0,
+            "data_version": ECMWF_OPENDATA_HIGH_DATA_VERSION,
+        }
+        auth = classify_forecast_extrema_authority(row)
+        assert auth.eligibility == ForecastExtremaEligibility.UNKNOWN
+
+    def test_legacy_version_contributes_none_is_passthrough(self):
+        # P0 follow-up §2: NULL contribution on a LEGACY data_version passes through.
+        row = {
+            "contributes_to_target_extrema": None,
+            "forecast_window_attribution_status": None,
+            "boundary_ambiguous": 0,
+            "data_version": "ecmwf_opendata_mx2t6_local_calendar_day_max_v1",
+        }
+        auth = classify_forecast_extrema_authority(row)
+        assert auth.eligibility == ForecastExtremaEligibility.LEGACY_NULL_PASSTHROUGH
+
+    def test_missing_version_contributes_none_is_passthrough(self):
+        # No data_version available -> conservative passthrough (not fail-closed).
         row = {
             "contributes_to_target_extrema": None,
             "forecast_window_attribution_status": None,
             "boundary_ambiguous": 0,
         }
         auth = classify_forecast_extrema_authority(row)
-        assert auth.eligibility == ForecastExtremaEligibility.UNKNOWN
+        assert auth.eligibility == ForecastExtremaEligibility.LEGACY_NULL_PASSTHROUGH
 
     def test_unknown_contributes_1_attribution_unknown(self):
         row = {
@@ -310,8 +334,38 @@ class TestReaderExtremaPreference:
         assert not result.ok
         assert result.reason_code == "EXECUTABLE_FORECAST_EXTREMA_AUTHORITY_UNKNOWN"
 
-    def test_null_contributes_passthrough(self):
-        """NULL contributes_to_target_extrema (legacy row) must pass through — no block."""
+    def test_current_version_null_contributes_blocks_fail_closed(self):
+        """P0 follow-up §2: NULL contributes on a CURRENT data_version now fails
+        closed (was passthrough). A live mx2t3 row with missing provenance must
+        not enter the trade chain."""
+        conn = _conn()
+        _insert_snapshot_row(
+            conn,
+            city=_TAIPEI_CITY,
+            source_cycle_time="2026-05-22T00:00:00+00:00",
+            available_at="2026-05-22T07:00:00+00:00",
+            contributes_to_target_extrema=None,
+            forecast_window_attribution_status=None,
+            members_values=[30.0 + i * 0.1 for i in range(51)],
+            source_run_id="run-taipei-current-null",
+        )
+        scope = _scope(_TAIPEI_CITY)  # data_version = ECMWF_OPENDATA_HIGH_DATA_VERSION (current)
+        result = read_executable_forecast_snapshot(
+            conn,
+            scope=scope,
+            source_id="ecmwf_open_data",
+            source_transport="ensemble_snapshots_v2_db_reader",
+            source_run_id="run-taipei-current-null",
+        )
+        assert not result.ok
+        assert result.reason_code == "EXECUTABLE_FORECAST_EXTREMA_AUTHORITY_UNKNOWN"
+
+    def test_legacy_version_null_contributes_passthrough(self):
+        """P0 follow-up §2: NULL contributes on a LEGACY data_version still passes
+        through (historical rows remain readable)."""
+        import dataclasses
+
+        legacy_version = "ecmwf_opendata_mx2t6_local_calendar_day_max_v1"
         conn = _conn()
         _insert_snapshot_row(
             conn,
@@ -322,8 +376,9 @@ class TestReaderExtremaPreference:
             forecast_window_attribution_status=None,
             members_values=[30.0 + i * 0.1 for i in range(51)],
             source_run_id="run-taipei-legacy",
+            data_version=legacy_version,
         )
-        scope = _scope(_TAIPEI_CITY)
+        scope = dataclasses.replace(_scope(_TAIPEI_CITY), data_version=legacy_version)
         result = read_executable_forecast_snapshot(
             conn,
             scope=scope,

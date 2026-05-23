@@ -1,7 +1,20 @@
 # Created: 2026-05-22
-# Last reused/audited: 2026-05-22
-# Authority basis: docs/operations/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md §PR-C
+# Last reused/audited: 2026-05-23
+# Authority basis: docs/operations/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md §PR-C;
+#   /Users/leofitz/.claude/jobs/866db2ea/P0_FOLLOWUP_BUNDLE_LAYER_SPEC.md §5
 """Day-0 observation extrema reader — semantics-correct high_so_far / low_so_far.
+
+WIRING STATUS (P0 follow-up §5, verdict 2026-05-23): DEFENSIVE HELPER ONLY — NOT
+WIRED into production.  ``read_day0_observed_extrema_v2`` has zero callers outside
+this module.  The LIVE production observed-so-far path is
+``src.data.observation_client`` (get_current_observation), which computes
+``high_so_far = max(...)`` over the selected WU rows (already MAX-correct, reading
+the live Weather Underground API rather than ``observation_instants_v2.running_max``).
+A repo-wide grep confirms NO production reader performs the
+``ORDER BY utc_timestamp DESC LIMIT 1`` + ``running_max`` anti-pattern this helper
+guards against.  Therefore Root C is NOT a production code path today; this reader
+is retained as a correct, tested fallback for any future consumer that reads from
+``observation_instants_v2`` directly.  Do NOT claim Root C covers production.
 
 Root C fix: observation_instants_v2.running_max is a PER-HOUR BUCKET maximum
 (non-monotonic across the day).  The live writer stores the hourly max for that

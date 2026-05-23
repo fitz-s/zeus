@@ -1399,6 +1399,31 @@ scripts:
       Defaults to src.state.db.ZEUS_FORECASTS_DB_PATH and ZEUS_WORLD_DB_PATH.
     do_not_use_when: "zeus-forecasts.db or zeus-world.db absent. Script exits cleanly with read error."
     promotion_barrier: "Informational only — no gate. Run to verify PR-A selection change is effective."
+
+  scripts/verify_forecast_bundle_selection.py:
+    class: diagnostic_report_writer
+    status: active
+    lifecycle: p0_forecast_bundle_layer_selection
+    packet: docs/operations/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md
+    authority_scope: read_only
+    dangerous_if_run: false
+    dry_run_default: true
+    apply_flag: null
+    target_db: state/zeus-forecasts.db
+    read_targets: [state/zeus-forecasts.db, state/zeus-world.db]
+    write_targets: [stdout]
+    canonical_command: "python scripts/verify_forecast_bundle_selection.py [--forecasts-db PATH] [--world-db PATH] [--date YYYY-MM-DD] [--metric high|low]"
+    external_inputs: []
+    delete_policy: retain_until_superseded
+    reuse_when: >
+      P0 follow-up diagnostic: for each city/date, compare the SELECTED bundle
+      (contributor-first ranking across all forecast cycles) vs the LATEST snapshot
+      (the single-path the old reader locked to). Prints selected/latest snapshot id,
+      contributes flag, member-max, observed high, and bias. SameSnap=False means the
+      bundle layer chose an earlier contributing cycle (the P0 cold-bias fix in action).
+      Read-only — never writes. Defaults to ZEUS_FORECASTS_DB_PATH / ZEUS_WORLD_DB_PATH.
+    do_not_use_when: "zeus-forecasts.db or zeus-world.db absent. Script exits cleanly with read error."
+    promotion_barrier: "Informational only — no gate. Run to confirm the bundle-layer selection fix is effective."
     unguarded_write_rationale: "Read-only SELECT; writes only to stdout."
     required_helpers: []
-    required_tests: [tests/test_forecast_offset_fix_regression.py]
+    required_tests: [tests/test_executable_forecast_bundle_selection.py]
