@@ -454,6 +454,7 @@ from .shoulder_impossible_tail_capture import ShoulderImpossibleTailCapture
 from .settlement_capture_shadow import PhysicalIntervalBound, SettlementCaptureShadow
 from .center_buy_calibrated_shadow import CenterBuyCalibratedShadow
 from .opening_inertia_relaxation import OpeningInertiaRelaxation, estimate_lambda
+from .imminent_open_capture_posterior_collapse import ImminentOpenCapturePosteriorCollapse
 
 __all__ = [
     "_is_world_db_conn",
@@ -467,6 +468,7 @@ __all__ = [
     "DeterministicEdgeDecision",
     "estimate_lambda",
     "FamilyOrderBookSnapshot",
+    "ImminentOpenCapturePosteriorCollapse",
     "LegBook",
     "LegIntent",
     "LiquidityProvisionWithHeartbeat",
