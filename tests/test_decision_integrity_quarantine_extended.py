@@ -37,6 +37,7 @@ if str(_SCRIPTS_DIR) not in sys.path:
 
 from src.state.decision_integrity_quarantine import (
     REASON_NON_CONTRIBUTING,
+    _de_natural_pk_hash,
     quarantine_all_tables_for_noncontributing_forecast,
     quarantine_calibration_pairs_v2_for_noncontributing_forecast,
     quarantine_decision_events_for_noncontributing_forecast,
@@ -404,7 +405,11 @@ def test_decision_events_contributes_zero_quarantined(de_db):
     _de_insert(de_db, decision_event_id="dec-evt-1", snapshot_id=snap_id)
     result = quarantine_decision_events_for_noncontributing_forecast(de_db)
     assert result["newly_quarantined"] == 1
-    assert "dec-evt-1" in _quarantined_ids(de_db, "decision_events")
+    # row_id is the 5-col natural PK hash (MAJOR-1 fix), not decision_event_id.
+    expected_id = _de_natural_pk_hash(
+        "BKK-high-ge30", "high", "2026-05-22", "2026-05-22T12:00:00", 1
+    )
+    assert expected_id in _quarantined_ids(de_db, "decision_events")
 
 
 def test_decision_events_contributes_one_skipped(de_db):
@@ -477,11 +482,13 @@ def test_promotion_readiness_excludes_quarantined_decisions():
     )
     assert report_before.n_decisions == 2
 
-    # Quarantine dec-evt-1.
+    # Quarantine dec-evt-1 under opportunity_fact (evidence_report filters on
+    # table_name='opportunity_fact' AND row_id = de.decision_event_id, per
+    # the 1-to-1 forecast linkage anchor for decision_events).
     conn.execute(
         """INSERT INTO decision_integrity_quarantine
            (table_name, row_id, reason_code, forecast_snapshot_id, recorded_at, meta_json)
-           VALUES ('decision_events', 'dec-evt-1', ?, NULL, ?, '{}')""",
+           VALUES ('opportunity_fact', 'dec-evt-1', ?, NULL, ?, '{}')""",
         (REASON_NON_CONTRIBUTING, now),
     )
     conn.commit()
@@ -579,11 +586,12 @@ def test_regret_decomposition_excludes_quarantined_rows():
     # Both settled regret rows visible.
     assert report_before.n_settled == 2
 
-    # Quarantine rde-evt-1's decision_event.
+    # Quarantine rde-evt-1 under opportunity_fact (evidence_report regret filter checks
+    # table_name='opportunity_fact' AND row_id = rd.decision_event_id, same anchor).
     conn.execute(
         """INSERT INTO decision_integrity_quarantine
            (table_name, row_id, reason_code, forecast_snapshot_id, recorded_at, meta_json)
-           VALUES ('decision_events', 'rde-evt-1', ?, NULL, ?, '{}')""",
+           VALUES ('opportunity_fact', 'rde-evt-1', ?, NULL, ?, '{}')""",
         (REASON_NON_CONTRIBUTING, now),
     )
     conn.commit()

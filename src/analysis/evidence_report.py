@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Optional
 
 from scipy.stats import beta as scipy_beta
@@ -155,9 +156,28 @@ def build_evidence_report(
             "SELECT name FROM sqlite_master WHERE type='table'"
         ).fetchall()
     }
-    # Detect whether decision_integrity_quarantine table is present so we can
-    # exclude quarantined rows from learning/promotion counts.
-    _has_quarantine = "decision_integrity_quarantine" in tables
+    # Try to ATTACH the trade DB so we can read decision_integrity_quarantine
+    # (which lives in zeus_trades.db) from this world-DB connection.
+    # Safe to skip if the trade DB path is unavailable (tests, non-production envs).
+    _quarantine_ref: str | None = None
+    _trade_attached_here = False
+    try:
+        from src.state.db import _zeus_trade_db_path  # local import; avoid circular at module load
+        _trade_db_path = _zeus_trade_db_path()
+        _attached_schemas = {row[1] for row in conn.execute("PRAGMA database_list").fetchall()}
+        if "trade" in _attached_schemas:
+            # Already attached by caller.
+            _quarantine_ref = "trade.decision_integrity_quarantine"
+        elif "decision_integrity_quarantine" in tables:
+            # Co-located (in-memory test DB or legacy single-DB layout).
+            _quarantine_ref = "decision_integrity_quarantine"
+        elif Path(_trade_db_path).exists():
+            conn.execute("ATTACH DATABASE ? AS trade", (str(_trade_db_path),))
+            _trade_attached_here = True
+            _quarantine_ref = "trade.decision_integrity_quarantine"
+    except Exception:  # noqa: BLE001
+        # Non-fatal: quarantine exclusion is best-effort on learning paths.
+        pass
 
     if "decision_events" in tables:
         _de_params: list = [strategy_id]
@@ -165,18 +185,19 @@ def build_evidence_report(
         if source is not None:
             _de_filters += " AND source = ?"
             _de_params.append(source)
-        # Exclude rows quarantined as non-contributing forecast extrema so
-        # corrupt-snapshot decisions do not inflate the denominator.
-        if _has_quarantine:
+        # Exclude decision_events rows whose opportunity_fact entry is quarantined
+        # (non-contributing forecast extrema). Uses the opportunity_fact quarantine
+        # row_id (= opportunity_fact.decision_id = decision_events.decision_event_id)
+        # rather than the decision_events hash row_id, since the link is 1-to-1 and
+        # decision_event_id IS unique on opportunity_fact.
+        if _quarantine_ref is not None:
             _de_filters += (
-                " AND NOT EXISTS ("
-                "SELECT 1 FROM decision_integrity_quarantine q"
-                " WHERE q.table_name = 'decision_events'"
-                " AND q.row_id = de.decision_event_id)"
+                f" AND NOT EXISTS ("
+                f"SELECT 1 FROM {_quarantine_ref} q"
+                f" WHERE q.table_name = 'opportunity_fact'"
+                f" AND q.row_id = de.decision_event_id)"
             )
-            _de_decision_sql = f"SELECT COUNT(*) FROM decision_events de {_de_filters}"
-        else:
-            _de_decision_sql = f"SELECT COUNT(*) FROM decision_events {_de_filters}"
+        _de_decision_sql = f"SELECT COUNT(*) FROM decision_events de {_de_filters}"
         n_decisions_row = conn.execute(_de_decision_sql, _de_params).fetchone()
         n_decisions = int(n_decisions_row[0] or 0)
     else:
@@ -212,12 +233,14 @@ def build_evidence_report(
             _rg_params.append(cohort_tag)
         # Exclude regret rows backed by quarantined decision_events
         # (non-contributing forecast extrema) from learning aggregates.
-        if _has_quarantine:
+        # Uses opportunity_fact quarantine (row_id = decision_id = decision_event_id)
+        # since that's the 1-to-1 forecast-linkage anchor.
+        if _quarantine_ref is not None:
             _rg_filter += (
-                " AND NOT EXISTS ("
-                "SELECT 1 FROM decision_integrity_quarantine q"
-                " WHERE q.table_name = 'decision_events'"
-                " AND q.row_id = rd.decision_event_id)"
+                f" AND NOT EXISTS ("
+                f"SELECT 1 FROM {_quarantine_ref} q"
+                f" WHERE q.table_name = 'opportunity_fact'"
+                f" AND q.row_id = rd.decision_event_id)"
             )
         regret_row = conn.execute(
             f"""
@@ -274,6 +297,13 @@ def build_evidence_report(
     ci_upper: Optional[float] = None
     if n_settled > 0:
         ci_lower, ci_upper = _bayesian_ci(n_wins, n_settled)
+
+    # Detach trade DB if we attached it in this call.
+    if _trade_attached_here:
+        try:
+            conn.execute("DETACH DATABASE trade")
+        except Exception:  # noqa: BLE001
+            pass
 
     return EvidenceReport(
         strategy_id=strategy_id,

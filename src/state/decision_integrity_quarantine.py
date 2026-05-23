@@ -35,6 +35,7 @@ INV-37: caller supplies conn; never auto-opens.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import sqlite3
@@ -138,15 +139,17 @@ def quarantine_decisions_for_noncontributing_forecast(
             "dry_run": dry_run,
         }
 
+    q_ref = _quarantine_ref(conn)
+
     # Count pre-existing quarantine rows for accurate delta.
     pre_count = conn.execute(
-        "SELECT COUNT(*) FROM decision_integrity_quarantine WHERE table_name=? AND reason_code=?",
+        f"SELECT COUNT(*) FROM {q_ref} WHERE table_name=? AND reason_code=?",
         (TARGET_TABLE, REASON_NON_CONTRIBUTING),
     ).fetchone()[0]
 
     # INSERT OR IGNORE — idempotent by UNIQUE(table_name, row_id, reason_code).
-    insert_sql = """
-        INSERT OR IGNORE INTO decision_integrity_quarantine
+    insert_sql = f"""
+        INSERT OR IGNORE INTO {q_ref}
             (table_name, row_id, reason_code, forecast_snapshot_id, recorded_at, meta_json)
         VALUES (?, ?, ?, ?, ?, ?)
     """
@@ -158,7 +161,7 @@ def quarantine_decisions_for_noncontributing_forecast(
     conn.executemany(insert_sql, rows_to_insert)
 
     post_count = conn.execute(
-        "SELECT COUNT(*) FROM decision_integrity_quarantine WHERE table_name=? AND reason_code=?",
+        f"SELECT COUNT(*) FROM {q_ref} WHERE table_name=? AND reason_code=?",
         (TARGET_TABLE, REASON_NON_CONTRIBUTING),
     ).fetchone()[0]
 
@@ -184,6 +187,17 @@ def quarantine_decisions_for_noncontributing_forecast(
 # Shared helper
 # ---------------------------------------------------------------------------
 
+def _quarantine_ref(conn: sqlite3.Connection) -> str:
+    """Return qualified or unqualified decision_integrity_quarantine reference.
+
+    In production, the quarantine table lives in the trade DB (zeus_trades.db),
+    which may be ATTACHed as 'trade' on a world or forecasts connection.
+    Falls back to unqualified name for in-memory test DBs.
+    """
+    attached = {row[1] for row in conn.execute("PRAGMA database_list").fetchall()}
+    return "trade.decision_integrity_quarantine" if "trade" in attached else "decision_integrity_quarantine"
+
+
 def _quarantine_table_via_snapshot(
     conn: sqlite3.Connection,
     *,
@@ -196,9 +210,14 @@ def _quarantine_table_via_snapshot(
     find_sql must SELECT (row_id TEXT, snapshot_id INTEGER|TEXT, source_run_id TEXT|NULL).
     Caller builds find_sql; this function handles INSERT OR IGNORE + counting.
 
+    The quarantine table is referenced via _quarantine_ref(conn), which qualifies
+    as 'trade.decision_integrity_quarantine' when the trade DB is ATTACHed, or falls
+    back to unqualified for test in-memory DBs.
+
     INV-37: caller supplies conn; never auto-opens.
     """
     recorded_at = datetime.now(timezone.utc).isoformat()
+    q_ref = _quarantine_ref(conn)
 
     try:
         candidates = conn.execute(find_sql).fetchall()
@@ -232,12 +251,12 @@ def _quarantine_table_via_snapshot(
         }
 
     pre_count = conn.execute(
-        "SELECT COUNT(*) FROM decision_integrity_quarantine WHERE table_name=? AND reason_code=?",
+        f"SELECT COUNT(*) FROM {q_ref} WHERE table_name=? AND reason_code=?",
         (target_table, REASON_NON_CONTRIBUTING),
     ).fetchone()[0]
 
-    insert_sql = """
-        INSERT OR IGNORE INTO decision_integrity_quarantine
+    insert_sql = f"""
+        INSERT OR IGNORE INTO {q_ref}
             (table_name, row_id, reason_code, forecast_snapshot_id, recorded_at, meta_json)
         VALUES (?, ?, ?, ?, ?, ?)
     """
@@ -255,7 +274,7 @@ def _quarantine_table_via_snapshot(
     conn.executemany(insert_sql, rows_to_insert)
 
     post_count = conn.execute(
-        "SELECT COUNT(*) FROM decision_integrity_quarantine WHERE table_name=? AND reason_code=?",
+        f"SELECT COUNT(*) FROM {q_ref} WHERE table_name=? AND reason_code=?",
         (target_table, REASON_NON_CONTRIBUTING),
     ).fetchone()[0]
 
@@ -439,6 +458,24 @@ def quarantine_selection_hypothesis_fact_for_noncontributing_forecast(
     )
 
 
+def _de_natural_pk_hash(
+    market_slug: str,
+    temperature_metric: str,
+    target_date: str,
+    observation_time: str,
+    decision_seq: int,
+) -> str:
+    """Return a deterministic hex-digest row_id for a decision_events row.
+
+    decision_event_id is only an INDEX (not UNIQUE) and may be the sentinel
+    'deid_v1_BACKSTOP_NULL_WRITER_BYPASS' for multiple rows. The natural PK
+    (market_slug, temperature_metric, target_date, observation_time, decision_seq)
+    is the true uniqueness anchor for decision_events rows.
+    """
+    key = f"{market_slug}|{temperature_metric}|{target_date}|{observation_time}|{decision_seq}"
+    return "de_pk_" + hashlib.sha256(key.encode()).hexdigest()[:32]
+
+
 def quarantine_decision_events_for_noncontributing_forecast(
     conn: sqlite3.Connection,
     *,
@@ -446,20 +483,28 @@ def quarantine_decision_events_for_noncontributing_forecast(
 ) -> dict:
     """Tag decision_events rows whose backing opportunity_fact snapshot is non-contributing.
 
-    Joins: decision_events.decision_event_id → opportunity_fact.decision_id
-           → opportunity_fact.snapshot_id → ensemble_snapshots_v2.
+    Joins: decision_events → opportunity_fact (via decision_event_id = decision_id)
+           → ensemble_snapshots_v2.
 
-    Only decision_events rows with a non-NULL decision_event_id are considered
-    (rows without a decision_event_id have no quarantine key).
+    row_id = _de_natural_pk_hash(market_slug, temperature_metric, target_date,
+                                  observation_time, decision_seq)
+    Using the 5-col natural PK hash avoids the BACKSTOP sentinel collision
+    (decision_event_id = 'deid_v1_BACKSTOP_NULL_WRITER_BYPASS' repeats across rows).
 
-    row_id = de.decision_event_id (TEXT).
+    Only rows with a non-NULL, non-BACKSTOP decision_event_id are linked to
+    opportunity_fact and tagged; pure-BACKSTOP rows (no decision_id in
+    opportunity_fact) are skipped — they have no forecast linkage to verify.
 
     INV-37: caller supplies conn; never auto-opens.
     """
     snap_ref = _snap_ref(conn)
     find_sql = f"""
         SELECT
-            de.decision_event_id AS row_id,
+            de.market_slug       AS market_slug,
+            de.temperature_metric AS temperature_metric,
+            de.target_date       AS target_date,
+            de.observation_time  AS observation_time,
+            de.decision_seq      AS decision_seq,
             of.snapshot_id       AS snapshot_id,
             esv.source_run_id    AS source_run_id
         FROM decision_events de
@@ -467,20 +512,107 @@ def quarantine_decision_events_for_noncontributing_forecast(
         JOIN {snap_ref} esv
           ON CAST(of.snapshot_id AS INTEGER) = esv.snapshot_id
         WHERE de.decision_event_id IS NOT NULL
+          AND de.decision_event_id != 'deid_v1_BACKSTOP_NULL_WRITER_BYPASS'
           AND of.snapshot_id IS NOT NULL
           AND esv.contributes_to_target_extrema IS NOT NULL
           AND (
               esv.contributes_to_target_extrema != 1
               OR COALESCE(esv.forecast_window_attribution_status, 'UNKNOWN') = 'UNKNOWN'
           )
-        ORDER BY de.decision_event_id
+        ORDER BY de.market_slug, de.temperature_metric, de.target_date,
+                 de.observation_time, de.decision_seq
     """
-    return _quarantine_table_via_snapshot(
-        conn,
-        target_table="decision_events",
-        find_sql=find_sql,
-        dry_run=dry_run,
+
+    recorded_at = datetime.now(timezone.utc).isoformat()
+    q_ref = _quarantine_ref(conn)
+
+    try:
+        raw_rows = conn.execute(find_sql).fetchall()
+    except sqlite3.OperationalError as exc:
+        msg = (
+            f"quarantine query for decision_events failed — "
+            f"ensure forecasts DB is ATTACHed as 'forecasts': {exc}"
+        )
+        logger.error(msg)
+        return {
+            "candidates_found": 0,
+            "already_quarantined": 0,
+            "newly_quarantined": 0,
+            "dry_run": dry_run,
+            "error": msg,
+        }
+
+    candidates_found = len(raw_rows)
+    logger.info(
+        "quarantine decision_events: found %d candidate rows with non-contributing snapshot",
+        candidates_found,
     )
+
+    if dry_run or candidates_found == 0:
+        return {
+            "candidates_found": candidates_found,
+            "already_quarantined": 0,
+            "newly_quarantined": 0,
+            "dry_run": dry_run,
+        }
+
+    pre_count = conn.execute(
+        f"SELECT COUNT(*) FROM {q_ref} WHERE table_name='decision_events' AND reason_code=?",
+        (REASON_NON_CONTRIBUTING,),
+    ).fetchone()[0]
+
+    insert_sql = f"""
+        INSERT OR IGNORE INTO {q_ref}
+            (table_name, row_id, reason_code, forecast_snapshot_id, recorded_at, meta_json)
+        VALUES ('decision_events', ?, ?, ?, ?, ?)
+    """
+    rows_to_insert = []
+    for row in raw_rows:
+        market_slug, temperature_metric, target_date, observation_time, decision_seq = (
+            row[0], row[1], row[2], row[3], row[4]
+        )
+        snapshot_id = str(row[5]) if row[5] is not None else None
+        source_run_id = row[6]
+        row_id = _de_natural_pk_hash(
+            market_slug, temperature_metric, target_date, observation_time, decision_seq
+        )
+        meta: dict = {
+            "source": "quarantine_decision_events_for_noncontributing_forecast",
+            "natural_pk": {
+                "market_slug": market_slug,
+                "temperature_metric": temperature_metric,
+                "target_date": target_date,
+                "observation_time": observation_time,
+                "decision_seq": int(decision_seq),
+            },
+        }
+        if source_run_id is not None:
+            meta["source_run_id"] = source_run_id
+        rows_to_insert.append(
+            (row_id, REASON_NON_CONTRIBUTING, snapshot_id, recorded_at, json.dumps(meta))
+        )
+    conn.executemany(insert_sql, rows_to_insert)
+
+    post_count = conn.execute(
+        f"SELECT COUNT(*) FROM {q_ref} WHERE table_name='decision_events' AND reason_code=?",
+        (REASON_NON_CONTRIBUTING,),
+    ).fetchone()[0]
+
+    newly_quarantined = post_count - pre_count
+    already_quarantined = candidates_found - newly_quarantined
+
+    logger.info(
+        "quarantine decision_events: newly=%d already=%d total_after=%d",
+        newly_quarantined,
+        already_quarantined,
+        post_count,
+    )
+    return {
+        "candidates_found": candidates_found,
+        "already_quarantined": already_quarantined,
+        "newly_quarantined": newly_quarantined,
+        "dry_run": False,
+    }
 
 
 def quarantine_all_tables_for_noncontributing_forecast(
@@ -488,19 +620,41 @@ def quarantine_all_tables_for_noncontributing_forecast(
     *,
     dry_run: bool = False,
 ) -> dict:
-    """Run quarantine across all supported tables.
+    """Run quarantine across all supported tables on a SINGLE connection.
 
-    Calls each per-table quarantine function and aggregates results.
-    Tables with no forecast linkage (no_trade_events, shadow_experiments,
-    calibration_pairs) are skipped by design.
+    This convenience wrapper requires conn to have BOTH 'forecasts' and 'trade'
+    ATTACHed (or be an in-memory test DB with all tables co-located).
 
-    For calibration_pairs_v2 this function uses the same conn — callers
-    that split forecasts/world connections should call
-    quarantine_calibration_pairs_v2_for_noncontributing_forecast separately
-    with their forecasts-DB conn.
+    IMPORTANT — K1 DB-split production usage:
+        calibration_pairs_v2 lives in zeus-forecasts.db (forecasts DB).
+        decision_integrity_quarantine lives in zeus_trades.db (trade DB).
+        World tables (opportunity_fact, decision_events, probability_trace_fact,
+        selection_family_fact, selection_hypothesis_fact) live in zeus-world.db.
+
+        For production: use the CLI scripts/quarantine_bad_forecast_decisions.py
+        which opens per-DB connections with correct ATTACHes. This wrapper is
+        intended for in-memory integration tests and operator one-shots where
+        all tables are co-located.
+
+    Raises ValueError if 'forecasts' is not attached/present (calibration_pairs_v2
+    cannot be quarantined without it and would silently no-op).
 
     INV-37: caller supplies conn; never auto-opens.
     """
+    attached = {row[1] for row in conn.execute("PRAGMA database_list").fetchall()}
+    # Verify forecasts tables are reachable before starting any writes.
+    try:
+        conn.execute("SELECT 1 FROM ensemble_snapshots_v2 LIMIT 0")
+    except sqlite3.OperationalError:
+        # Try forecasts-qualified name.
+        try:
+            conn.execute("SELECT 1 FROM forecasts.ensemble_snapshots_v2 LIMIT 0")
+        except sqlite3.OperationalError:
+            raise ValueError(
+                "quarantine_all_tables_for_noncontributing_forecast: "
+                "ensemble_snapshots_v2 not found — ensure the forecasts DB is "
+                "ATTACHed as 'forecasts' OR all tables are co-located (in-memory test)."
+            )
     # Mapping from function to the table name it quarantines.
     fn_table_pairs = [
         (quarantine_decisions_for_noncontributing_forecast, "opportunity_fact"),
