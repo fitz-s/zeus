@@ -1,7 +1,7 @@
 # Created: 2026-05-18
 # Last reused or audited: 2026-05-18
 # Authority basis: src/state/schema/v2_schema.py:640-669 (view design + v0 default)
-#                  docs/operations/task_2026-05-16_deep_alignment_audit/FIX_PLAN.md §PR-M'
+#                  docs/operations/archive/2026-Q2/task_2026-05-16_deep_alignment_audit/FIX_PLAN.md §PR-M'
 """Antibody: runtime code must NOT read observation_instants_current before the view is activated.
 
 Background

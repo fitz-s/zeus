@@ -4,7 +4,7 @@
 #   - Bootstrap entries are seeded on first table-create
 #   - F30: missing last_reviewed= header causes ValueError before apply
 # Reuse: Run when migration ledger, TARGET_DB routing, or metadata gates change.
-# Authority: docs/operations/task_2026-05-17_post_karachi_remediation/FIX_SEV1_BUNDLE.md §F23
+# Authority: docs/operations/archive/2026-Q2/task_2026-05-17_post_karachi_remediation/FIX_SEV1_BUNDLE.md §F23
 """Tests for the migration runner idempotency and header-drift enforcement."""
 import importlib
 import sqlite3

@@ -1,6 +1,6 @@
 # Created: 2026-05-18
 # Last reused or audited: 2026-05-18
-# Authority basis: docs/operations/task_2026-05-17_post_karachi_remediation/PR_I5_WEB3_WIRE.md (PR-I.5.c)
+# Authority basis: docs/operations/archive/2026-Q2/task_2026-05-17_post_karachi_remediation/PR_I5_WEB3_WIRE.md (PR-I.5.c)
 """Antibody tests for the PolymarketV2Adapter.redeem web3 wire.
 
 PR-I.5.c (2026-05-18) wires `redeemPositions` calldata + sign + broadcast via

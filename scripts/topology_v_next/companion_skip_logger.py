@@ -1,6 +1,6 @@
 # Created: 2026-05-15
 # Last reused or audited: 2026-05-15
-# Authority basis: docs/operations/task_2026-05-15_p2_companion_required_mechanism/SCAFFOLD.md §5, §5.1, §5.2
+# Authority basis: docs/operations/archive/2026-Q2/task_2026-05-15_p2_companion_required_mechanism/SCAFFOLD.md §5, §5.1, §5.2
 """
 Companion skip-token usage logger for topology v_next P2.1.
 

@@ -3,7 +3,7 @@
 # Last reused/audited: 2026-05-20
 # Purpose: Live data-pipeline verifier relationship tests.
 # Reuse: Run when forecast owner, data-pipeline E2E checks, or ingest daemon shutdown health relationships change.
-# Authority basis: docs/operations/task_2026-05-15_data_pipeline_live_rootfix/DATA_PIPELINE_ROOTFIX_PLAN.md live verifier process-ownership gate.
+# Authority basis: docs/operations/archive/2026-Q2/task_2026-05-15_data_pipeline_live_rootfix/DATA_PIPELINE_ROOTFIX_PLAN.md live verifier process-ownership gate.
 #                  2026-05-20 live stability hotfix: ingest SIGTERM second shutdown must not convert exit 0 to exit 1.
 """Tests for the live data-pipeline E2E verifier."""
 

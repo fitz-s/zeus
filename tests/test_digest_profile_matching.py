@@ -1011,8 +1011,8 @@ def test_data_daemon_live_efficiency_refactor_routes_to_dedicated_profile():
         "OpenData live forecast producer split readiness wiring no prod mutation "
         "no venue side effects",
         [
-            "docs/operations/task_2026-05-14_data_daemon_live_efficiency/DATA_DAEMON_LIVE_EFFICIENCY_REFACTOR_PLAN.md",
-            "docs/operations/task_2026-05-15_data_pipeline_live_rootfix/DATA_PIPELINE_ROOTFIX_PLAN.md",
+            "docs/operations/archive/2026-Q2/task_2026-05-14_data_daemon_live_efficiency/DATA_DAEMON_LIVE_EFFICIENCY_REFACTOR_PLAN.md",
+            "docs/operations/archive/2026-Q2/task_2026-05-15_data_pipeline_live_rootfix/DATA_PIPELINE_ROOTFIX_PLAN.md",
             "architecture/script_manifest.yaml",
             "src/ingest_main.py",
             "src/ingest/forecast_live_daemon.py",

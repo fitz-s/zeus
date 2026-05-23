@@ -1,6 +1,6 @@
 # Created: 2026-05-14
 # Last reused or audited: 2026-05-14
-# Authority basis: docs/operations/task_2026-05-14_k1_followups/PLAN.md §1.1 (REV 4)
+# Authority basis: docs/operations/archive/2026-Q2/task_2026-05-14_k1_followups/PLAN.md §1.1 (REV 4)
 """Zeus table ownership registry loader.
 
 Canonical source: architecture/db_table_ownership.yaml

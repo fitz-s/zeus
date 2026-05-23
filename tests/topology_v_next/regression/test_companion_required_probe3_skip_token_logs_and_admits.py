@@ -1,6 +1,6 @@
 # Created: 2026-05-15
 # Last reused or audited: 2026-05-15
-# Authority basis: docs/operations/task_2026-05-15_p2_companion_required_mechanism/SCAFFOLD.md §7 probe3
+# Authority basis: docs/operations/archive/2026-Q2/task_2026-05-15_p2_companion_required_mechanism/SCAFFOLD.md §7 probe3
 """
 probe3 — skip token honored → companion_skip_token_used ADVISORY + log row written.
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Created: 2026-05-14
 # Last reused or audited: 2026-05-14
-# Authority basis: docs/operations/task_2026-05-14_k1_followups/PLAN.md §3 A8 (REV 4)
+# Authority basis: docs/operations/archive/2026-Q2/task_2026-05-14_k1_followups/PLAN.md §3 A8 (REV 4)
 #   CRITIC_REVIEW_REV2 §3.2 / A8 AST writer-signature audit
 """CI hook: AST audit for writer-function connection-type signatures.
 

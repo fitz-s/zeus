@@ -2,7 +2,7 @@
 # Last reused or audited: 2026-05-18
 # Lifecycle: created=2026-05-06; last_reviewed=2026-05-18; last_reused=2026-05-18
 # Authority basis: PLAN §2.3 + critic-opus §0.5 (ATTACK 7 binding)
-#   docs/operations/task_2026-05-06_hook_redesign/PLAN.md
+#   docs/operations/archive/2026-Q2/task_2026-05-06_hook_redesign/PLAN.md
 #   evidence/hook_redesign_critic_opus.md
 # Purpose: Exercise structured override validation when the optional override catalog exists.
 # Reuse: Run when hook override validation or retired-catalog handling changes.

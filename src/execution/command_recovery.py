@@ -2,7 +2,7 @@
 # Purpose: Command recovery loop for unresolved venue command side effects.
 # Reuse: Run when command recovery, venue order payload normalization, or unknown side-effect resolution changes.
 # Authority basis: docs/operations/task_2026-04-26_execution_state_truth_p1_command_bus/implementation_plan.md §P1.S4
-#                  + docs/operations/task_2026-05-15_live_order_e2e_goal/LIVE_ORDER_E2E_GOAL_PLAN.md
+#                  + docs/operations/archive/2026-Q2/task_2026-05-15_live_order_e2e_goal/LIVE_ORDER_E2E_GOAL_PLAN.md
 """Command recovery loop — INV-31.
 
 At cycle start, scans venue_commands for rows in IN_FLIGHT_STATES and

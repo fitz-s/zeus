@@ -2,7 +2,7 @@
 # Last reused/audited: 2026-05-17
 # Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/Z2.yaml
 #                  + 2026-05-13 collateral_ledger singleton conn lifecycle remediation
-#                  + docs/operations/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md
+#                  + docs/operations/archive/2026-Q2/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md
 #                  + 2026-05-17 public CLOB HTTP reuse for live opening_hunt backpressure.
 #                  + 2026-05-17 riskguard/read-only bankroll lock remediation.
 """Polymarket CLOB API client. Spec §6.4.

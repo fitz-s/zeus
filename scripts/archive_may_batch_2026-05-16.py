@@ -13,7 +13,7 @@ Usage:
   python3 scripts/archive_may_batch_2026-05-16.py --apply
 
 Created: 2026-05-16
-Authority basis: docs/operations/task_2026-05-16_doc_alignment_plan/ARCHIVE_QUEUE_FOR_NEXT_PR.md
+Authority basis: docs/operations/archive/2026-Q2/task_2026-05-16_doc_alignment_plan/ARCHIVE_QUEUE_FOR_NEXT_PR.md
 """
 import argparse
 import subprocess
