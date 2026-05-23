@@ -32,7 +32,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install PyYAML pytest
+          python -m pip install -r requirements.txt
       - name: Describe gate contract
         run: |
           echo "owner=${GATE_OWNER}"
