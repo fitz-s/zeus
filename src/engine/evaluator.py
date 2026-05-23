@@ -351,6 +351,13 @@ class MarketCandidate:
     # (legacy fixture / pre-evidence path).
     market_phase_source: Optional[str] = None
     phase_evidence: Optional["MarketPhaseEvidence"] = None
+    # OBS-AUTHORITY-FOUNDATION (2026-05-23): id of the
+    # settlement_day_observation_authority row written by cycle_runtime right
+    # after the day0/settlement observation was fetched (or failed). Stamped on
+    # every EdgeDecision this candidate produces so opportunity_fact can join
+    # back to the runtime observation object. None for non-settlement-day
+    # candidates and legacy/test callers.
+    observation_authority_id: Optional[str] = None
 
     def __post_init__(self) -> None:
         if self.phase_evidence is not None:
