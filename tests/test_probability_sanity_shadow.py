@@ -1,6 +1,7 @@
-# Created: 2026-05-23
-# Last reused or audited: 2026-05-23
-# Authority basis: docs/reports/live_review_may23.md §P0-D
+# Lifecycle: created=2026-05-23; last_reviewed=2026-05-23; last_reused=never
+# Purpose: Antibody — P0-D shadow sanity telemetry for non-day0 HIGH strategies
+# Reuse: Verify P0-D elif block in evaluator.py line ~4571 is intact before relying on this test
+# Authority basis: docs/operations/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md §P0-D
 """P0-D antibody: shadow sanity telemetry for non-day0 forecast strategies.
 
 End-to-end tests driving evaluate_candidate (the real production entry point).

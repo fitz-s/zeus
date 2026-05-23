@@ -3033,7 +3033,7 @@ test_metadata:
       - src/engine/evaluator.py
       - src/signal/day0_window.py
     law_dependencies:
-      - docs/reports/live_review_may23.md
+      - docs/operations/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md
     notes: >
       P0-3 antibody: day0 remaining-window guard rejects whole-day period_extrema
       (mx2t3/mn2t3). Guard fires before any access to ens_result['members_hourly'].
@@ -3055,7 +3055,7 @@ test_metadata:
       - src/signal/probability_sanity.py
       - src/engine/evaluator.py
     law_dependencies:
-      - docs/reports/live_review_may23.md
+      - docs/operations/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md
     notes: >
       P0-D antibody: validate_high_distribution runs as shadow telemetry for non-day0
       strategies - logged only, not blocking. Day0 HIGH hard gate contract preserved.

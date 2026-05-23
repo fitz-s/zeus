@@ -1,6 +1,7 @@
-# Created: 2026-05-23
-# Last reused or audited: 2026-05-23
-# Authority basis: docs/reports/live_review_may23.md §P0-3
+# Lifecycle: created=2026-05-23; last_reviewed=2026-05-23; last_reused=never
+# Purpose: Antibody — evaluate_candidate must reject day0 period_extrema (P0-3 guard)
+# Reuse: Verify P0-3 guard at evaluator.py line ~3444 is intact before relying on this test
+# Authority basis: docs/operations/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md §P0-3
 """P0-3 antibody: evaluate_candidate must reject when day0 + period_extrema.
 
 End-to-end test driving evaluate_candidate (the real production entry point),

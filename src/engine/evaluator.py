@@ -4568,9 +4568,11 @@ def evaluate_candidate(
                 rejection_reason_enum=NoTradeReason.PROBABILITY_SANITY_GATE,
                 rejection_reason_detail=_san_reason,
             )]
-    else:
-        # P0-D shadow telemetry: run validate_high_distribution for non-day0 strategies
-        # (center_buy, opening_inertia, imminent_open_capture) — log only, do NOT block.
+    elif temperature_metric.is_high():
+        # P0-D shadow telemetry: run validate_high_distribution for non-day0 HIGH
+        # strategies (center_buy, opening_inertia, imminent_open_capture) — log only,
+        # do NOT block.  Gated to is_high() because validate_high_distribution is a
+        # HIGH-metric validator; LOW candidates are excluded here.
         # Promotes to hard gate after replay confirms threshold calibration.
         _shadow_settled = settlement_semantics.round_values(analysis_member_extrema)
         _shadow_ok, _shadow_reason = validate_high_distribution(
@@ -4583,7 +4585,7 @@ def evaluate_candidate(
         )
         if not _shadow_ok:
             logger.warning(
-                "[PROBABILITY_SANITY_SHADOW] strategy=%s city=%s date=%s reason=%s",
+                "[PROBABILITY_SANITY_SHADOW] strategy=%s city=%s date=%s metric=high reason=%s",
                 selected_method, city.name, target_date, _shadow_reason,
             )
 
