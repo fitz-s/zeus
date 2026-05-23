@@ -149,6 +149,41 @@ def _table_columns(conn: sqlite3.Connection, table_name: str) -> set[str]:
     return columns
 
 
+def _quarantine_ref_for_conn(conn: sqlite3.Connection) -> str | None:
+    """Return a qualified quarantine table ref if accessible, or None.
+
+    The decision_integrity_quarantine table lives in zeus_trades.db (trade DB).
+    For world/forecasts connections, the trade DB must be ATTACHed.
+    Returns:
+      'trade.decision_integrity_quarantine'  — if trade DB is already attached
+      'decision_integrity_quarantine'         — if table is co-located (test DB)
+      None                                   — if not accessible (skip exclusion)
+    """
+    attached = {row[1] for row in conn.execute("PRAGMA database_list").fetchall()}
+    if "trade" in attached:
+        return "trade.decision_integrity_quarantine"
+    # Co-located (in-memory test or legacy single-DB layout).
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='decision_integrity_quarantine'"
+    ).fetchone()
+    if row is not None:
+        return "decision_integrity_quarantine"
+    # Attempt to ATTACH the trade DB.
+    # Intentional: the ATTACH persists on conn for the life of the caller's query.
+    # refit_platt_v2 opens a short-lived connection per training run, so this is
+    # safe. Callers that reuse long-lived conns should pre-ATTACH trade themselves.
+    try:
+        from pathlib import Path as _Path
+        from src.state.db import _zeus_trade_db_path as _trade_path
+        _tp = _Path(_trade_path())
+        if _tp.exists():
+            conn.execute("ATTACH DATABASE ? AS trade", (str(_tp),))
+            return "trade.decision_integrity_quarantine"
+    except Exception:  # noqa: BLE001
+        pass
+    return None
+
+
 def _metric_spec_for_identity(metric_identity: MetricIdentity):
     for spec in METRIC_SPECS:
         if spec.identity == metric_identity:
@@ -481,6 +516,18 @@ def _fetch_pairs_for_bucket(
         where, params, column="horizon_profile", value=horizon_profile,
         default="full", columns=columns,
     )
+    # Exclude pairs quarantined as non-contributing forecast extrema so corrupt-
+    # snapshot training data does not contaminate Platt model fits.
+    # The quarantine table lives in the trade DB; _quarantine_ref_for_conn attaches
+    # it if needed and returns the qualified or unqualified ref.
+    _q_ref = _quarantine_ref_for_conn(conn)
+    if _q_ref is not None:
+        where.append(
+            f"NOT EXISTS ("
+            f"SELECT 1 FROM {_q_ref} q"
+            f" WHERE q.table_name = 'calibration_pairs_v2'"
+            f" AND q.row_id = CAST(pair_id AS TEXT))"
+        )
     return conn.execute(f"""
         SELECT p_raw, lead_days, outcome, range_label, decision_group_id
         FROM calibration_pairs_v2

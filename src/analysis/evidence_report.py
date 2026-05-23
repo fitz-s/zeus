@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Optional
 
 from scipy.stats import beta as scipy_beta
@@ -155,16 +156,60 @@ def build_evidence_report(
             "SELECT name FROM sqlite_master WHERE type='table'"
         ).fetchall()
     }
+    # Try to ATTACH the trade DB so we can read decision_integrity_quarantine
+    # (which lives in zeus_trades.db) from this world-DB connection.
+    # Safe to skip if the trade DB path is unavailable (tests, non-production envs).
+    #
+    # Priority order (ghost-table-safe):
+    #   1. trade already ATTACHed by caller → use trade-qualified ref
+    #   2. trade DB path exists on disk → ATTACH it, use trade-qualified ref
+    #   3. table co-located in main (test-only; no trade path) → use unqualified ref
+    #
+    # The unqualified fallback (3) is intentionally LAST so that a ghost
+    # decision_integrity_quarantine table in the world DB (e.g. from a mis-applied
+    # ensure_table call) never shadows the real trade table when the trade path is
+    # resolvable. Only a pure in-memory test DB with no trade path reaches branch 3.
+    _quarantine_ref: str | None = None
+    _trade_attached_here = False
+    try:
+        from src.state.db import _zeus_trade_db_path  # local import; avoid circular at module load
+        _trade_db_path = _zeus_trade_db_path()
+        _attached_schemas = {row[1] for row in conn.execute("PRAGMA database_list").fetchall()}
+        if "trade" in _attached_schemas:
+            # Branch 1: already attached by caller.
+            _quarantine_ref = "trade.decision_integrity_quarantine"
+        elif Path(_trade_db_path).exists():
+            # Branch 2: ATTACH trade DB (preferred over unqualified ghost fallback).
+            conn.execute("ATTACH DATABASE ? AS trade", (str(_trade_db_path),))
+            _trade_attached_here = True
+            _quarantine_ref = "trade.decision_integrity_quarantine"
+        elif "decision_integrity_quarantine" in tables:
+            # Branch 3: co-located (pure in-memory test DB; trade path not resolvable).
+            _quarantine_ref = "decision_integrity_quarantine"
+    except Exception:  # noqa: BLE001
+        # Non-fatal: quarantine exclusion is best-effort on learning paths.
+        pass
+
     if "decision_events" in tables:
         _de_params: list = [strategy_id]
         _de_filters = "WHERE strategy_key = ?"
         if source is not None:
             _de_filters += " AND source = ?"
             _de_params.append(source)
-        n_decisions_row = conn.execute(
-            f"SELECT COUNT(*) FROM decision_events {_de_filters}",
-            _de_params,
-        ).fetchone()
+        # Exclude decision_events rows whose opportunity_fact entry is quarantined
+        # (non-contributing forecast extrema). Uses the opportunity_fact quarantine
+        # row_id (= opportunity_fact.decision_id = decision_events.decision_event_id)
+        # rather than the decision_events hash row_id, since the link is 1-to-1 and
+        # decision_event_id IS unique on opportunity_fact.
+        if _quarantine_ref is not None:
+            _de_filters += (
+                f" AND NOT EXISTS ("
+                f"SELECT 1 FROM {_quarantine_ref} q"
+                f" WHERE q.table_name = 'opportunity_fact'"
+                f" AND q.row_id = de.decision_event_id)"
+            )
+        _de_decision_sql = f"SELECT COUNT(*) FROM decision_events de {_de_filters}"
+        n_decisions_row = conn.execute(_de_decision_sql, _de_params).fetchone()
         n_decisions = int(n_decisions_row[0] or 0)
     else:
         n_decisions = 0
@@ -197,6 +242,17 @@ def build_evidence_report(
         if cohort_tag is not None:
             _rg_filter += " AND se.cohort_tag = ?"
             _rg_params.append(cohort_tag)
+        # Exclude regret rows backed by quarantined decision_events
+        # (non-contributing forecast extrema) from learning aggregates.
+        # Uses opportunity_fact quarantine (row_id = decision_id = decision_event_id)
+        # since that's the 1-to-1 forecast-linkage anchor.
+        if _quarantine_ref is not None:
+            _rg_filter += (
+                f" AND NOT EXISTS ("
+                f"SELECT 1 FROM {_quarantine_ref} q"
+                f" WHERE q.table_name = 'opportunity_fact'"
+                f" AND q.row_id = rd.decision_event_id)"
+            )
         regret_row = conn.execute(
             f"""
             SELECT
@@ -252,6 +308,13 @@ def build_evidence_report(
     ci_upper: Optional[float] = None
     if n_settled > 0:
         ci_lower, ci_upper = _bayesian_ci(n_wins, n_settled)
+
+    # Detach trade DB if we attached it in this call.
+    if _trade_attached_here:
+        try:
+            conn.execute("DETACH DATABASE trade")
+        except Exception:  # noqa: BLE001
+            pass
 
     return EvidenceReport(
         strategy_id=strategy_id,

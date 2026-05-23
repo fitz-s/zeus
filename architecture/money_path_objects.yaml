@@ -330,6 +330,23 @@ state_machines:
       as a string literal in scripts/check_advisory_gates.py.
     states:
       - GATE_REVIEW_CONDITION
+  decision_integrity_quarantine_reason_codes:
+    owner: src/state/decision_integrity_quarantine.py
+    description: >
+      Reason code constants written into decision_integrity_quarantine.reason_code
+      (PR-E 2026-05-23). NOT a lifecycle state machine — each constant names a
+      specific taint category applied to fact-table rows. Registered so the CI
+      semantic classifier treats the all-caps constant as explicit, not accidental.
+      Tables tagged: opportunity_fact, calibration_pairs_v2, probability_trace_fact,
+      selection_family_fact, selection_hypothesis_fact, decision_events.
+      Tables skipped (no single-column row_id): no_trade_events, shadow_experiments,
+      calibration_pairs (legacy).
+      Authority: docs/operations/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md §PR-E.
+    states:
+      - QUARANTINED_NON_CONTRIBUTING_FORECAST_EXTREMA
+    invariant_tests:
+      - tests/test_decision_integrity_quarantine.py
+      - tests/test_decision_integrity_quarantine_extended.py
 
 schema_objects:
   authority_fabricating_defaults:

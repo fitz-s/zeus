@@ -2983,6 +2983,55 @@ test_metadata:
     created: 2026-05-22
     last_reused_or_audited: 2026-05-22
 
+  tests/test_decision_integrity_quarantine_extended.py:
+    modules: [state, analysis, calibration]
+    category: unit_antibody
+    kind: antibody
+    profile: p0_forecast_extrema_authority_pr_e
+    blocks_commit: true
+    asserted_invariants:
+      - DECISION_INTEGRITY_QUARANTINE_LOGIC
+      - DECISION_INTEGRITY_QUARANTINE_IDEMPOTENT
+      - QUARANTINE_DOWNSTREAM_EXCLUSION_EVIDENCE_REPORT
+      - QUARANTINE_DOWNSTREAM_EXCLUSION_PLATT_REFIT
+    source_under_test:
+      - src/state/decision_integrity_quarantine.py
+      - src/analysis/evidence_report.py
+      - scripts/refit_platt_v2.py
+    law_dependencies:
+      - docs/operations/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md
+    notes: >
+      PR-E extended quarantine: tag-coverage tests for calibration_pairs_v2,
+      probability_trace_fact, selection_family_fact, selection_hypothesis_fact,
+      decision_events. Downstream exclusion tests: test_promotion_readiness_excludes_quarantined_decisions
+      (build_evidence_report n_decisions), test_calibration_rebuild_excludes_quarantined_pairs
+      (_fetch_pairs_for_bucket), test_regret_decomposition_excludes_quarantined_rows
+      (build_evidence_report n_settled). quarantine_all_tables aggregation.
+    created: 2026-05-23
+
+  tests/test_decision_integrity_quarantine_crossdb.py:
+    modules: [state, analysis]
+    category: integration
+    kind: antibody
+    profile: p0_forecast_extrema_authority_pr_e
+    blocks_commit: true
+    asserted_invariants:
+      - QUARANTINE_CROSSDB_WRITE_TRADE_ATTACH
+      - QUARANTINE_CROSSDB_READER_AUTO_ATTACH
+    source_under_test:
+      - src/state/decision_integrity_quarantine.py
+      - src/analysis/evidence_report.py
+    law_dependencies:
+      - docs/operations/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md
+    notes: >
+      PR-E MINOR finding: cross-DB integration tests with separate world/trade/forecasts
+      tempfile SQLite DBs ATTACHed as production does. test_writer_crossdb_attach proves
+      quarantine rows land in trade DB (not world DB) and row_id is natural-PK hash.
+      test_reader_crossdb_attach proves evidence_report auto-ATTACHes trade DB and
+      applies opportunity_fact exclusion across the DB boundary.
+    created: 2026-05-23
+    last_reused_or_audited: 2026-05-23
+
   tests/test_day0_observation_reader.py:
     modules: [data]
     category: regression_antibody
