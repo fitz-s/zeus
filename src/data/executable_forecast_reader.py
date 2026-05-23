@@ -15,6 +15,7 @@ from typing import Any
 from src.config import settings
 from src.data.forecast_extrema_authority import (
     ForecastExtremaEligibility,
+    LEGACY_NULL_PASSTHROUGH_VALIDATION,
     POSITIVE_ATTRIBUTION_STATUS_SQL_IN_LIST,
     classify_forecast_extrema_authority,
 )
@@ -109,6 +110,10 @@ class ExecutableForecastEvidence:
     source_run_completeness_status: str
     coverage_completeness_status: str
     coverage_readiness_status: str | None
+    # P0 follow-up §2: validation tokens recorded by the bundle layer (e.g.
+    # forecast_extrema_authority_legacy_null_passthrough when a legacy NULL row
+    # passes through).  The evaluator appends these to its applied_validations.
+    applied_validations: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -168,6 +173,7 @@ class ExecutableForecastBundle:
             "coverage_completeness_status": self.evidence.coverage_completeness_status,
             "coverage_readiness_status": self.evidence.coverage_readiness_status,
             "executable_forecast_evidence": self.evidence,
+            "extrema_authority_applied_validations": list(self.evidence.applied_validations),
         }
 
 
@@ -315,6 +321,67 @@ def _source_run_coverage_by_id(conn: sqlite3.Connection, coverage_id: str) -> di
         (coverage_id,),
     ).fetchone()
     return dict(row) if row else None
+
+
+def _source_run_coverages_for_scope_sql(table: str) -> str:
+    # Enumerate ALL coverage rows for the (city/metric/source/data_version)
+    # scope — NOT LIMIT 1.  The source_run_coverage UNIQUE constraint includes
+    # source_run_id, so a single target local-day carries one coverage per
+    # forecast cycle (00Z, 12Z, …).  The single-path reader resolved exactly
+    # one (latest) coverage; this enumeration is the basis for full
+    # bundle-layer selection (P0 follow-up §1).  Newest-first ordering only
+    # sets a deterministic input order; the authoritative ranking is applied
+    # by ``_bundle_rank`` after extrema-authority classification.
+    if table == f"{FORECASTS_SCHEMA}.source_run_coverage":
+        prefix = "SELECT * FROM forecasts.source_run_coverage"
+    elif table == f"{WORLD_SCHEMA}.source_run_coverage":
+        prefix = "SELECT * FROM world.source_run_coverage"
+    elif table == "source_run_coverage":
+        prefix = "SELECT * FROM source_run_coverage"
+    else:
+        raise ValueError("unsupported source_run_coverage authority table")
+    return (
+        prefix
+        + """
+        WHERE city_id = ?
+          AND city_timezone = ?
+          AND target_local_date = ?
+          AND temperature_metric = ?
+          AND source_id = ?
+          AND source_transport = ?
+          AND data_version = ?
+        ORDER BY computed_at DESC, recorded_at DESC
+        """
+    )
+
+
+def _source_run_coverages_for_scope(
+    conn: sqlite3.Connection,
+    *,
+    city_id: str,
+    city_timezone: str,
+    target_local_date: date,
+    temperature_metric: str,
+    source_id: str,
+    source_transport: str,
+    data_version: str,
+) -> list[dict[str, Any]]:
+    table = _authority_table(conn, "source_run_coverage")
+    if table is None:
+        return []
+    rows = conn.execute(
+        _source_run_coverages_for_scope_sql(table),
+        (
+            city_id,
+            city_timezone,
+            target_local_date.isoformat(),
+            temperature_metric,
+            source_id,
+            source_transport,
+            data_version,
+        ),
+    ).fetchall()
+    return [dict(row) for row in rows]
 
 
 def _source_run_by_id_sql(table: str) -> str:
@@ -611,22 +678,21 @@ def read_executable_forecast_snapshot(
         return ExecutableForecastReadResult("BLOCKED", "EXECUTABLE_FORECAST_AUTHORITY_NOT_VERIFIED")
     if row.get("causality_status") != "OK" or int(row.get("boundary_ambiguous") or 0) != 0:
         return ExecutableForecastReadResult("BLOCKED", "EXECUTABLE_FORECAST_CAUSALITY_NOT_OK")
-    # P0 extrema authority: block if the selected snapshot has an explicit
-    # non-contributing or unknown-contributing determination.  Rows where
-    # contributes_to_target_extrema is NULL are legacy (pre-extractor) and
-    # pass through so existing data is not disrupted.  The ORDER BY CASE
-    # already prefers contributing rows before this typed fail-closed gate.
-    _contributes_raw = row.get("contributes_to_target_extrema")
-    if _contributes_raw is not None:
-        _extrema_auth = classify_forecast_extrema_authority(row)
-        if _extrema_auth.eligibility == ForecastExtremaEligibility.NON_CONTRIBUTOR:
-            return ExecutableForecastReadResult(
-                "BLOCKED", "EXECUTABLE_FORECAST_NON_CONTRIBUTING_EXTREMA"
-            )
-        if _extrema_auth.eligibility == ForecastExtremaEligibility.UNKNOWN:
-            return ExecutableForecastReadResult(
-                "BLOCKED", "EXECUTABLE_FORECAST_EXTREMA_AUTHORITY_UNKNOWN"
-            )
+    # P0 extrema authority (classifier-driven, §1/§2): block NON_CONTRIBUTOR and
+    # UNKNOWN.  UNKNOWN now includes a NULL contributes flag on a CURRENT
+    # data_version (fail-closed — a live mx2t3 row with missing provenance must
+    # not pass).  A NULL flag on a LEGACY data_version classifies as
+    # LEGACY_NULL_PASSTHROUGH and is allowed through (prior behavior preserved).
+    # data_version is read from the row by the classifier.
+    _extrema_auth = classify_forecast_extrema_authority(row)
+    if _extrema_auth.eligibility == ForecastExtremaEligibility.NON_CONTRIBUTOR:
+        return ExecutableForecastReadResult(
+            "BLOCKED", "EXECUTABLE_FORECAST_NON_CONTRIBUTING_EXTREMA"
+        )
+    if _extrema_auth.eligibility == ForecastExtremaEligibility.UNKNOWN:
+        return ExecutableForecastReadResult(
+            "BLOCKED", "EXECUTABLE_FORECAST_EXTREMA_AUTHORITY_UNKNOWN"
+        )
     if now_utc is not None:
         if now_utc.tzinfo is None or now_utc.utcoffset() is None:
             return ExecutableForecastReadResult("UNKNOWN_BLOCKED", "READ_NOW_INVALID")
@@ -664,6 +730,338 @@ def read_executable_forecast_snapshot(
         ),
     )
     return ExecutableForecastReadResult("LIVE_ELIGIBLE", "EXECUTABLE_FORECAST_READY", snapshot)
+
+
+@dataclass(frozen=True)
+class ExecutableForecastBundleCandidate:
+    """One fully-resolved, gate-passing forecast bundle candidate.
+
+    All four evidence layers (coverage, source_run, snapshot, derived
+    producer-readiness id) reference the SAME source_run_id/coverage_id — the
+    candidate is internally coherent before it enters ranking (P0 follow-up
+    §1.3 evidence coherence).  ``eligibility`` is the extrema-authority class of
+    the candidate's snapshot, used by ``_bundle_rank`` to prefer contributing
+    cycles over later non-contributing ones.
+    """
+
+    snapshot: ExecutableForecastSnapshot
+    evidence: ExecutableForecastEvidence
+    eligibility: ForecastExtremaEligibility
+    coverage: dict[str, Any]
+    source_run: dict[str, Any]
+    snapshot_row: dict[str, Any]
+
+
+def _evaluate_candidate(
+    conn: sqlite3.Connection,
+    *,
+    coverage: dict[str, Any],
+    producer: dict[str, Any],
+    entry: dict[str, Any] | None,
+    city_id: str,
+    city_name: str,
+    city_timezone: str,
+    target_local_date: date,
+    temperature_metric: str,
+    source_id: str,
+    source_transport: str,
+    data_version: str,
+    condition_id: str,
+    now: datetime,
+    require_entry_readiness: bool,
+) -> tuple[ExecutableForecastBundleCandidate | None, str | None]:
+    """Run the per-bundle causality + completeness + member-floor + coverage-
+    membership gates for a single ``coverage`` row.
+
+    Returns ``(candidate, None)`` when every gate passes, else ``(None, reason)``
+    where ``reason`` is the SAME single-path BLOCKED reason code the legacy
+    reader produced (diagnosability is preserved).  A candidate that fails any
+    gate is DROPPED from the candidate list rather than returned as a global
+    block (P0 follow-up §1.1).
+
+    Per-candidate producer-readiness handling (operator-surfaced, approach
+    (iii)): only ONE readiness_state row survives in the DB (write_readiness_state
+    UPSERTs on the scope tuple, which excludes source_run_id), so historical-cycle
+    producer rows are not retrievable.  The producer-readiness LIVE_ELIGIBLE
+    classification is, however, a pure function of the coverage row, and the
+    writer derives ``readiness_id = f"producer_readiness:{coverage_id}"``.  We
+    therefore (a) derive the producer_readiness_id from this candidate's
+    coverage_id for evidence coherence, and (b) use the coverage's own
+    ``computed_at`` as the per-candidate producer-readiness stamp in the
+    causal-order check.  The scope-level readiness liveness gate (status +
+    expires_at + entry-readiness presence) is applied once by the caller.
+    """
+    # Member floor BEFORE completeness/readiness gates (see read_executable_forecast
+    # docstring): PARTIAL coverage whose only shortfall is member count is judged
+    # against the statistical floor, not hard-blocked as SOURCE_RUN_PARTIAL.
+    expected_members = int(coverage.get("expected_members") or 0)
+    observed_members = int(coverage.get("observed_members") or 0)
+    min_floor = settings["ensemble"].get("min_members_floor", expected_members)
+    if expected_members <= 0 or observed_members < min_floor:
+        return None, "MISSING_EXPECTED_MEMBERS"
+    completeness_status = str(coverage.get("completeness_status") or "")
+    if completeness_status != "COMPLETE":
+        if completeness_status != "PARTIAL":
+            mapping = {
+                "MISSING": "FUTURE_TARGET_DATE_NOT_COVERED",
+                "NOT_RELEASED": "SOURCE_RUN_NOT_RELEASED",
+                "HORIZON_OUT_OF_RANGE": "SOURCE_RUN_HORIZON_OUT_OF_RANGE",
+            }
+            return None, mapping.get(completeness_status, "SOURCE_RUN_FAILED")
+    if completeness_status == "COMPLETE" and coverage.get("readiness_status") != "LIVE_ELIGIBLE":
+        return None, str(coverage.get("reason_code") or "SOURCE_RUN_COVERAGE_NOT_LIVE_ELIGIBLE")
+    # Per-candidate readiness liveness: an older (e.g. 00Z) coverage whose
+    # expires_at is already in the past relative to `now` must drop with
+    # READINESS_EXPIRED (mirrors _is_live_readiness on the scope-level row).
+    coverage_expires_at = _parse_utc(coverage.get("expires_at"))
+    if completeness_status == "COMPLETE":
+        if coverage_expires_at is None:
+            return None, "READINESS_EXPIRY_MISSING"
+        if coverage_expires_at <= now:
+            return None, "READINESS_EXPIRED"
+    expected_steps = _int_tuple(coverage.get("expected_steps_json"))
+    observed_steps = _int_tuple(coverage.get("observed_steps_json"))
+    if not set(expected_steps).issubset(set(observed_steps)):
+        return None, "MISSING_REQUIRED_STEPS"
+
+    source_run = _source_run_by_id(conn, str(coverage["source_run_id"]))
+    if source_run is None:
+        return None, "SOURCE_RUN_MISSING"
+    if source_run.get("status") not in {"SUCCESS", "PARTIAL"}:
+        return None, "SOURCE_RUN_FAILED"
+    if source_run.get("completeness_status") not in {"COMPLETE", "PARTIAL"}:
+        return None, "SOURCE_RUN_PARTIAL"
+
+    scope = ForecastTargetScope(
+        city_id=city_id,
+        city_name=city_name,
+        city_timezone=city_timezone,
+        target_local_date=target_local_date,
+        temperature_metric=temperature_metric,
+        data_version=data_version,
+        target_window_start_utc=_parse_utc(coverage.get("target_window_start_utc")) or now,
+        target_window_end_utc=_parse_utc(coverage.get("target_window_end_utc")) or now,
+        source_cycle_time=_parse_utc(source_run.get("source_cycle_time")) or now,
+        required_step_hours=expected_steps,
+        market_refs=(condition_id,),
+    )
+    snapshot_result = read_executable_forecast_snapshot(
+        conn,
+        scope=scope,
+        source_id=source_id,
+        source_transport=source_transport,
+        source_run_id=str(coverage["source_run_id"]),
+        now_utc=now,
+    )
+    if not snapshot_result.ok or snapshot_result.snapshot is None:
+        return None, snapshot_result.reason_code
+    snapshot = snapshot_result.snapshot
+    if snapshot.target_local_date != target_local_date:
+        return None, "SNAPSHOT_TARGET_DATE_MISMATCH"
+    if snapshot.temperature_metric != temperature_metric:
+        return None, "SNAPSHOT_METRIC_MISMATCH"
+    coverage_window_start = _parse_utc(coverage.get("target_window_start_utc"))
+    snapshot_window_start = _parse_utc(snapshot.local_day_start_utc)
+    if coverage_window_start is None or snapshot_window_start != coverage_window_start:
+        return None, "SNAPSHOT_LOCAL_DAY_WINDOW_MISMATCH"
+    if len(snapshot.members) < min_floor:
+        return None, "MISSING_EXPECTED_MEMBERS"
+    coverage_snapshot_ids = tuple(
+        int(item) for item in _json_list(coverage.get("snapshot_ids_json")) if str(item).isdigit()
+    )
+    if coverage_snapshot_ids and snapshot.snapshot_id not in coverage_snapshot_ids:
+        return None, "SNAPSHOT_NOT_IN_COVERAGE"
+
+    source_available_at = _parse_utc(source_run.get("source_available_at"))
+    captured_at = _parse_utc(source_run.get("captured_at"))
+    # Per-candidate producer-readiness stamp: the coverage's own computed_at is
+    # the wall-clock at which THIS coverage was classified ready (the value the
+    # writer would have stamped on its producer_readiness row).  Using it keeps
+    # the causal-order check coherent for non-latest cycles whose readiness_state
+    # row no longer exists in the DB.
+    producer_computed_at = _parse_utc(coverage.get("computed_at"))
+    if source_available_at is None:
+        return None, "SOURCE_AVAILABLE_AT_MISSING"
+    if captured_at is None:
+        return None, "SOURCE_RUN_CAPTURED_AT_MISSING"
+    if producer_computed_at is None:
+        return None, "READINESS_COMPUTED_AT_INVALID"
+    if require_entry_readiness:
+        entry_computed_at = _parse_utc(entry.get("computed_at")) if entry is not None else None
+        if entry_computed_at is None:
+            return None, "READINESS_COMPUTED_AT_INVALID"
+    else:
+        entry_computed_at = producer_computed_at
+    if source_available_at > captured_at:
+        return None, "SOURCE_AVAILABLE_AFTER_CAPTURE"
+    if source_available_at > now:
+        return None, "SOURCE_AVAILABLE_AFTER_DECISION_TIME"
+    if captured_at > now:
+        return None, "SOURCE_CAPTURED_AFTER_DECISION_TIME"
+    # Causal-order: capture <= producer-readiness <= entry-readiness.  The
+    # entry stamp is the live (scope-level) entry row; the producer stamp is
+    # this candidate's coverage computed_at.  When require_entry_readiness is
+    # False, entry_computed_at == producer_computed_at so the second clause is
+    # a no-op.  Note: when an older 00Z coverage is selected against a later
+    # entry-readiness row, producer_computed_at (00Z) <= entry_computed_at is
+    # the expected order, so the check holds.
+    if captured_at > producer_computed_at or producer_computed_at > entry_computed_at:
+        return None, "READINESS_TIMING_ORDER_INVALID"
+
+    # Classify the candidate's extrema authority against the raw DB row (which
+    # carries the contributes/attribution columns the snapshot dataclass drops).
+    snapshot_row = _snapshot_row_for_classification(conn, snapshot, source_id, source_transport)
+    eligibility = classify_forecast_extrema_authority(snapshot_row).eligibility
+    candidate_validations: tuple[str, ...] = ()
+    if eligibility == ForecastExtremaEligibility.LEGACY_NULL_PASSTHROUGH:
+        candidate_validations = (LEGACY_NULL_PASSTHROUGH_VALIDATION,)
+
+    producer_readiness_id = f"producer_readiness:{coverage['coverage_id']}"
+    evidence = ExecutableForecastEvidence(
+        forecast_source_id=source_id,
+        forecast_data_version=data_version,
+        source_transport=source_transport,
+        source_run_id=str(coverage["source_run_id"]),
+        release_calendar_key=str(coverage["release_calendar_key"]),
+        coverage_id=str(coverage["coverage_id"]),
+        producer_readiness_id=producer_readiness_id,
+        entry_readiness_id=str(entry["readiness_id"]) if entry is not None else None,
+        source_cycle_time=str(source_run["source_cycle_time"]),
+        source_issue_time=source_run.get("source_issue_time"),
+        source_release_time=str(source_run["source_release_time"]),
+        source_available_at=str(source_run["source_available_at"]),
+        fetch_started_at=source_run.get("fetch_started_at"),
+        fetch_finished_at=source_run.get("fetch_finished_at"),
+        captured_at=str(source_run["captured_at"]),
+        input_snapshot_ids=(snapshot.snapshot_id,),
+        raw_payload_hash=source_run.get("raw_payload_hash"),
+        manifest_hash=snapshot.manifest_hash or source_run.get("manifest_hash"),
+        target_local_date=target_local_date.isoformat(),
+        target_window_start_utc=str(coverage["target_window_start_utc"]),
+        target_window_end_utc=str(coverage["target_window_end_utc"]),
+        city_timezone=city_timezone,
+        required_steps=expected_steps,
+        observed_steps=observed_steps,
+        expected_members=expected_members,
+        observed_members=observed_members,
+        source_run_status=str(source_run.get("status") or ""),
+        source_run_completeness_status=str(source_run.get("completeness_status") or ""),
+        coverage_completeness_status=str(coverage.get("completeness_status") or ""),
+        coverage_readiness_status=(
+            None if coverage.get("readiness_status") is None else str(coverage.get("readiness_status"))
+        ),
+        applied_validations=candidate_validations,
+    )
+    candidate = ExecutableForecastBundleCandidate(
+        snapshot=snapshot,
+        evidence=evidence,
+        eligibility=eligibility,
+        coverage=coverage,
+        source_run=source_run,
+        snapshot_row=snapshot_row,
+    )
+    return candidate, None
+
+
+def _snapshot_row_for_classification(
+    conn: sqlite3.Connection,
+    snapshot: ExecutableForecastSnapshot,
+    source_id: str,
+    source_transport: str,
+) -> dict[str, Any]:
+    """Re-read the snapshot's extrema-authority columns for classification.
+
+    ``ExecutableForecastSnapshot`` does not carry the contributes/attribution
+    columns, so classification needs the raw DB row.  Looked up by snapshot_id
+    on the authoritative table.
+    """
+    table = _authority_table(conn, "ensemble_snapshots_v2")
+    if table is None:
+        return {}
+    # SELECT * so the classifier sees every contributes/attribution column
+    # without coupling this query to the exact schema column set (the
+    # classifier already tolerates a missing short-alias attribution_status).
+    row = conn.execute(
+        f"SELECT * FROM {table} WHERE snapshot_id = ?",
+        (snapshot.snapshot_id,),
+    ).fetchone()
+    return dict(row) if row else {}
+
+
+def _bundle_rank(candidate: ExecutableForecastBundleCandidate) -> tuple[int, float, float, int]:
+    """Sort key for candidate bundles — lower sorts first (min() wins).
+
+    Contributor class dominates: a FULL_CONTRIBUTOR (e.g. an earlier 00Z run)
+    outranks any non-full-contributor (e.g. a later 12Z post-peak run) REGARDLESS
+    of recency.  Recency (source_cycle_time, then available_at, then snapshot_id)
+    breaks ties only WITHIN the same contributor class (P0 follow-up §1.2).
+    """
+    contributor_rank = 0 if candidate.eligibility == ForecastExtremaEligibility.FULL_CONTRIBUTOR else 1
+    cycle_epoch = _epoch_or_zero(candidate.source_run.get("source_cycle_time"))
+    available_epoch = _epoch_or_zero(candidate.snapshot.available_at)
+    return (contributor_rank, -cycle_epoch, -available_epoch, -candidate.snapshot.snapshot_id)
+
+
+def _epoch_or_zero(value: object) -> float:
+    parsed = _parse_utc(value if isinstance(value, str) else None)
+    return parsed.timestamp() if parsed is not None else 0.0
+
+
+def _candidate_forecast_bundles(
+    conn: sqlite3.Connection,
+    *,
+    producer: dict[str, Any],
+    entry: dict[str, Any] | None,
+    city_id: str,
+    city_name: str,
+    city_timezone: str,
+    target_local_date: date,
+    temperature_metric: str,
+    source_id: str,
+    source_transport: str,
+    data_version: str,
+    condition_id: str,
+    now: datetime,
+    require_entry_readiness: bool,
+) -> list[ExecutableForecastBundleCandidate]:
+    """Enumerate every gate-passing forecast bundle for the scope.
+
+    One candidate per eligible source_run_coverage row (00Z, 12Z, …).  Each is
+    independently gated by ``_evaluate_candidate``; rows failing any gate are
+    dropped.  The returned list is unranked — the caller applies ``_bundle_rank``.
+    """
+    coverages = _source_run_coverages_for_scope(
+        conn,
+        city_id=city_id,
+        city_timezone=city_timezone,
+        target_local_date=target_local_date,
+        temperature_metric=temperature_metric,
+        source_id=source_id,
+        source_transport=source_transport,
+        data_version=data_version,
+    )
+    candidates: list[ExecutableForecastBundleCandidate] = []
+    for coverage in coverages:
+        candidate, _drop_reason = _evaluate_candidate(
+            conn,
+            coverage=coverage,
+            producer=producer,
+            entry=entry,
+            city_id=city_id,
+            city_name=city_name,
+            city_timezone=city_timezone,
+            target_local_date=target_local_date,
+            temperature_metric=temperature_metric,
+            source_id=source_id,
+            source_transport=source_transport,
+            data_version=data_version,
+            condition_id=condition_id,
+            now=now,
+            require_entry_readiness=require_entry_readiness,
+        )
+        if candidate is not None:
+            candidates.append(candidate)
+    return candidates
 
 
 def read_executable_forecast(
@@ -739,192 +1137,74 @@ def read_executable_forecast(
         if not entry.get("readiness_id"):
             return ExecutableForecastBundleResult("BLOCKED", "ENTRY_READINESS_MISSING")
 
-    coverage = _coverage_for_producer(conn, producer=producer)
-    if coverage is None:
-        return ExecutableForecastBundleResult("BLOCKED", "SOURCE_RUN_COVERAGE_MISSING")
-    # Apply the member floor BEFORE the completeness/readiness gates so that
-    # PARTIAL coverage rows where the only shortfall is member count (48-50 members
-    # in a 51-member ECMWF run) are evaluated against the statistical floor rather
-    # than hard-blocked by SOURCE_RUN_PARTIAL.  Step shortfall and other non-PARTIAL
-    # statuses still block unconditionally.
-    expected_members = int(coverage.get("expected_members") or 0)
-    observed_members = int(coverage.get("observed_members") or 0)
-    min_floor = settings["ensemble"].get("min_members_floor", expected_members)
-    if expected_members <= 0 or observed_members < min_floor:
-        return ExecutableForecastBundleResult("BLOCKED", "MISSING_EXPECTED_MEMBERS")
-    completeness_status = str(coverage.get("completeness_status") or "")
-    if completeness_status != "COMPLETE":
-        # PARTIAL is allowed when observed_members >= min_floor (checked above).
-        # All other non-COMPLETE statuses are unconditional blocks.
-        if completeness_status != "PARTIAL":
-            mapping = {
-                "MISSING": "FUTURE_TARGET_DATE_NOT_COVERED",
-                "NOT_RELEASED": "SOURCE_RUN_NOT_RELEASED",
-                "HORIZON_OUT_OF_RANGE": "SOURCE_RUN_HORIZON_OUT_OF_RANGE",
-            }
-            return ExecutableForecastBundleResult(
-                "BLOCKED",
-                mapping.get(completeness_status, "SOURCE_RUN_FAILED"),
-            )
-    if completeness_status == "COMPLETE" and coverage.get("readiness_status") != "LIVE_ELIGIBLE":
-        return ExecutableForecastBundleResult(
-            "BLOCKED",
-            str(coverage.get("reason_code") or "SOURCE_RUN_COVERAGE_NOT_LIVE_ELIGIBLE"),
-        )
-    expected_steps = _int_tuple(coverage.get("expected_steps_json"))
-    observed_steps = _int_tuple(coverage.get("observed_steps_json"))
-    if not set(expected_steps).issubset(set(observed_steps)):
-        return ExecutableForecastBundleResult("BLOCKED", "MISSING_REQUIRED_STEPS")
-    expected_members = int(coverage.get("expected_members") or 0)
-    observed_members = int(coverage.get("observed_members") or 0)
-    min_floor = settings["ensemble"].get("min_members_floor", expected_members)
-    if expected_members <= 0 or observed_members < min_floor:
-        return ExecutableForecastBundleResult("BLOCKED", "MISSING_EXPECTED_MEMBERS")
-
-    source_run = _source_run_by_id(conn, str(coverage["source_run_id"]))
-    if source_run is None:
-        return ExecutableForecastBundleResult("BLOCKED", "SOURCE_RUN_MISSING")
-    if source_run.get("status") not in {"SUCCESS", "PARTIAL"}:
-        return ExecutableForecastBundleResult("BLOCKED", "SOURCE_RUN_FAILED")
-    if source_run.get("completeness_status") not in {"COMPLETE", "PARTIAL"}:
-        return ExecutableForecastBundleResult("BLOCKED", "SOURCE_RUN_PARTIAL")
-
-    coverage_window_start_utc = _parse_utc(coverage.get("target_window_start_utc"))
-    coverage_window_end_utc = _parse_utc(coverage.get("target_window_end_utc"))
-    if coverage_window_start_utc is None or coverage_window_end_utc is None:
-        return ExecutableForecastBundleResult("BLOCKED", "COVERAGE_WINDOW_UNPARSEABLE")
-
-    scope = ForecastTargetScope(
+    # P0 follow-up §1: lift selection to the full forecast-bundle layer.
+    # Enumerate ALL eligible bundles (one per source_run_coverage cycle), gate
+    # each independently, then rank by extrema authority so an earlier 00Z
+    # FULL_CONTRIBUTOR outranks a later 12Z NON_CONTRIBUTOR.  The single-path
+    # reader (latest producer -> its coverage -> its snapshot) locked the bundle
+    # to whichever cycle was computed last; the contributor-first ORDER BY only
+    # reshuffled snapshots WITHIN that one run.  This enumeration is the fix.
+    candidates = _candidate_forecast_bundles(
+        conn,
+        producer=producer,
+        entry=entry,
         city_id=city_id,
         city_name=city_name,
         city_timezone=city_timezone,
         target_local_date=target_local_date,
         temperature_metric=temperature_metric,
-        data_version=data_version,
-        target_window_start_utc=coverage_window_start_utc,
-        target_window_end_utc=coverage_window_end_utc,
-        source_cycle_time=_parse_utc(source_run.get("source_cycle_time")) or now,
-        required_step_hours=expected_steps,
-        market_refs=(condition_id,),
-    )
-    snapshot_result = read_executable_forecast_snapshot(
-        conn,
-        scope=scope,
         source_id=source_id,
         source_transport=source_transport,
-        source_run_id=str(coverage["source_run_id"]),
-        now_utc=now,
+        data_version=data_version,
+        condition_id=condition_id,
+        now=now,
+        require_entry_readiness=require_entry_readiness,
     )
-    if not snapshot_result.ok or snapshot_result.snapshot is None:
-        return ExecutableForecastBundleResult("BLOCKED", snapshot_result.reason_code)
-    snapshot = snapshot_result.snapshot
-    if snapshot.target_local_date != target_local_date:
-        return ExecutableForecastBundleResult("BLOCKED", "SNAPSHOT_TARGET_DATE_MISMATCH")
-    if snapshot.temperature_metric != temperature_metric:
-        return ExecutableForecastBundleResult("BLOCKED", "SNAPSHOT_METRIC_MISMATCH")
-    coverage_window_start = _parse_utc(coverage.get("target_window_start_utc"))
-    snapshot_window_start = _parse_utc(snapshot.local_day_start_utc)
-    if coverage_window_start is None or snapshot_window_start != coverage_window_start:
-        return ExecutableForecastBundleResult("BLOCKED", "SNAPSHOT_LOCAL_DAY_WINDOW_MISMATCH")
-    if len(snapshot.members) < min_floor:
-        return ExecutableForecastBundleResult("BLOCKED", "MISSING_EXPECTED_MEMBERS")
-    coverage_snapshot_ids = tuple(int(item) for item in _json_list(coverage.get("snapshot_ids_json")) if str(item).isdigit())
-    if coverage_snapshot_ids and snapshot.snapshot_id not in coverage_snapshot_ids:
-        return ExecutableForecastBundleResult("BLOCKED", "SNAPSHOT_NOT_IN_COVERAGE")
+    if not candidates:
+        # No candidate passed every gate.  Fall back to the producer's own
+        # coverage ONCE to surface its specific single-path BLOCKED reason code
+        # (diagnosability is preserved — §1.3).  If the producer carries no
+        # coverage at all, that is SOURCE_RUN_COVERAGE_MISSING as before.
+        coverage = _coverage_for_producer(conn, producer=producer)
+        if coverage is None:
+            return ExecutableForecastBundleResult("BLOCKED", "SOURCE_RUN_COVERAGE_MISSING")
+        _candidate, drop_reason = _evaluate_candidate(
+            conn,
+            coverage=coverage,
+            producer=producer,
+            entry=entry,
+            city_id=city_id,
+            city_name=city_name,
+            city_timezone=city_timezone,
+            target_local_date=target_local_date,
+            temperature_metric=temperature_metric,
+            source_id=source_id,
+            source_transport=source_transport,
+            data_version=data_version,
+            condition_id=condition_id,
+            now=now,
+            require_entry_readiness=require_entry_readiness,
+        )
+        return ExecutableForecastBundleResult(
+            "BLOCKED", drop_reason or "SOURCE_RUN_COVERAGE_MISSING"
+        )
 
-    source_available_at = _parse_utc(source_run.get("source_available_at"))
-    captured_at = _parse_utc(source_run.get("captured_at"))
-    producer_computed_at = _parse_utc(producer.get("computed_at"))
-    if source_available_at is None:
-        return ExecutableForecastBundleResult("BLOCKED", "SOURCE_AVAILABLE_AT_MISSING")
-    if captured_at is None:
-        return ExecutableForecastBundleResult("BLOCKED", "SOURCE_RUN_CAPTURED_AT_MISSING")
-    if producer_computed_at is None:
-        return ExecutableForecastBundleResult("BLOCKED", "READINESS_COMPUTED_AT_INVALID")
-    if require_entry_readiness:
-        entry_computed_at = _parse_utc(entry.get("computed_at")) if entry is not None else None
-        if entry_computed_at is None:
-            return ExecutableForecastBundleResult("BLOCKED", "READINESS_COMPUTED_AT_INVALID")
-    else:
-        entry_computed_at = producer_computed_at
-    if source_available_at > captured_at:
-        return ExecutableForecastBundleResult("BLOCKED", "SOURCE_AVAILABLE_AFTER_CAPTURE")
-    # P0-2 codereview-may19-2 (2026-05-19): decision-time causality invariant.
-    #
-    # The forecast bundle used for a trade MUST have been published and ingested
-    # BEFORE the trade decision time. Two clean causality checks compare clocks
-    # that DO NOT have the UPSERT-rewriting hazard that killed the previous
-    # `entry_computed_at > now` check (producer/entry computed_at are writer
-    # wall-clocks; source_available_at and captured_at are source-clock stamps
-    # frozen at row-insert time, never rewritten):
-    #
-    #   source_available_at  — NWP run publication time on provider's clock
-    #   captured_at          — Zeus ingest fetch time (frozen at source-run insert)
-    #
-    # Without these checks the bundle reader can satisfy a frozen decision_time
-    # cycle with a source-run that didn't exist yet at the recorded decision_time.
-    # That's a causality leak: trades get evidence from the future. Operator
-    # 2026-05-19 directive: restore "available before decision" without
-    # re-introducing the cross-clock UPSERT bug.
-    if source_available_at > now:
-        return ExecutableForecastBundleResult("BLOCKED", "SOURCE_AVAILABLE_AFTER_DECISION_TIME")
-    if captured_at > now:
-        return ExecutableForecastBundleResult("BLOCKED", "SOURCE_CAPTURED_AFTER_DECISION_TIME")
-    # Causal-order check keeps the meaningful invariants:
-    #   capture <= producer-readiness <= entry-readiness
-    # The historical extra clause `entry_computed_at > now` compared the
-    # producer's stamp against the cycle's *frozen* decision_time, but the
-    # readiness writer (ECMWF ingest) UPSERTs rows in place — when ingest
-    # fires mid-cycle, the existing row's computed_at is replaced with a
-    # newer wall-clock from the writer thread, which is always >=
-    # the consumer cycle's frozen `now`. That produced READINESS_TIMING_ORDER_INVALID
-    # for every market in the cycle (decision_log id=1116 / 1117: 50/52 and
-    # 30/49 cities rejected with this code on 2026-05-19). The semantic
-    # claim "readiness was computed by the time we decided" cannot be
-    # enforced by comparing two different clocks against a frozen point —
-    # the producer's stamp is its own wall-clock; the consumer's `now` is
-    # the cycle-start clock. Removing the clause keeps the two genuine
-    # causal-order checks (which DO compare timestamps from the same write
-    # transaction) and unsticks live trading.
-    if captured_at > producer_computed_at or producer_computed_at > entry_computed_at:
-        return ExecutableForecastBundleResult("BLOCKED", "READINESS_TIMING_ORDER_INVALID")
-
-    evidence = ExecutableForecastEvidence(
-        forecast_source_id=source_id,
-        forecast_data_version=data_version,
-        source_transport=source_transport,
-        source_run_id=str(coverage["source_run_id"]),
-        release_calendar_key=str(coverage["release_calendar_key"]),
-        coverage_id=str(coverage["coverage_id"]),
-        producer_readiness_id=str(producer["readiness_id"]),
-        entry_readiness_id=str(entry["readiness_id"]) if entry is not None else None,
-        source_cycle_time=str(source_run["source_cycle_time"]),
-        source_issue_time=source_run.get("source_issue_time"),
-        source_release_time=str(source_run["source_release_time"]),
-        source_available_at=str(source_run["source_available_at"]),
-        fetch_started_at=source_run.get("fetch_started_at"),
-        fetch_finished_at=source_run.get("fetch_finished_at"),
-        captured_at=str(source_run["captured_at"]),
-        input_snapshot_ids=(snapshot.snapshot_id,),
-        raw_payload_hash=source_run.get("raw_payload_hash"),
-        manifest_hash=snapshot.manifest_hash or source_run.get("manifest_hash"),
-        target_local_date=target_local_date.isoformat(),
-        target_window_start_utc=str(coverage["target_window_start_utc"]),
-        target_window_end_utc=str(coverage["target_window_end_utc"]),
-        city_timezone=city_timezone,
-        required_steps=expected_steps,
-        observed_steps=observed_steps,
-        expected_members=expected_members,
-        observed_members=observed_members,
-        source_run_status=str(source_run.get("status") or ""),
-        source_run_completeness_status=str(source_run.get("completeness_status") or ""),
-        coverage_completeness_status=str(coverage.get("completeness_status") or ""),
-        coverage_readiness_status=(
-            None if coverage.get("readiness_status") is None else str(coverage.get("readiness_status"))
-        ),
-    )
+    best = min(candidates, key=_bundle_rank)
+    # Block semantics on the SELECTED (highest-ranked) candidate — §1.3.
+    # NON_CONTRIBUTOR / UNKNOWN are typed fail-closed; PARTIAL/boundary cases
+    # keep PR #309's handling (a PARTIAL_CONTRIBUTOR bundle is allowed through,
+    # exactly as the single-path snapshot reader did, since classify only
+    # blocks NON_CONTRIBUTOR/UNKNOWN inside read_executable_forecast_snapshot).
+    if best.eligibility == ForecastExtremaEligibility.NON_CONTRIBUTOR:
+        return ExecutableForecastBundleResult(
+            "BLOCKED", "EXECUTABLE_FORECAST_NON_CONTRIBUTING_EXTREMA"
+        )
+    if best.eligibility == ForecastExtremaEligibility.UNKNOWN:
+        return ExecutableForecastBundleResult(
+            "BLOCKED", "EXECUTABLE_FORECAST_EXTREMA_AUTHORITY_UNKNOWN"
+        )
     return ExecutableForecastBundleResult(
         "LIVE_ELIGIBLE",
         "EXECUTABLE_FORECAST_READY",
-        ExecutableForecastBundle(snapshot=snapshot, evidence=evidence),
+        ExecutableForecastBundle(snapshot=best.snapshot, evidence=best.evidence),
     )

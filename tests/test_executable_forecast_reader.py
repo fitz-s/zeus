@@ -62,6 +62,8 @@ def _insert_snapshot(
     causality_status: str = "OK",
     boundary_ambiguous: int = 0,
     local_day_start_utc: str | None = None,
+    contributes_to_target_extrema: int | None = 1,
+    forecast_window_attribution_status: str | None = "FULLY_INSIDE_TARGET_LOCAL_DAY",
 ) -> None:
     scope = _scope()
     conn.execute(
@@ -74,7 +76,8 @@ def _insert_snapshot(
             source_cycle_time, source_release_time, source_available_at,
             training_allowed, causality_status, boundary_ambiguous,
             ambiguous_member_count, manifest_hash, provenance_json, authority,
-            members_unit, local_day_start_utc, step_horizon_hours
+            members_unit, local_day_start_utc, step_horizon_hours,
+            contributes_to_target_extrema, forecast_window_attribution_status
         ) VALUES (
             :city, :target_date, :temperature_metric, :physical_quantity,
             :observation_field, :issue_time, :valid_time, :available_at, :fetch_time,
@@ -83,7 +86,8 @@ def _insert_snapshot(
             :source_cycle_time, :source_release_time, :source_available_at,
             :training_allowed, :causality_status, :boundary_ambiguous,
             :ambiguous_member_count, :manifest_hash, :provenance_json, :authority,
-            :members_unit, :local_day_start_utc, :step_horizon_hours
+            :members_unit, :local_day_start_utc, :step_horizon_hours,
+            :contributes_to_target_extrema, :forecast_window_attribution_status
         )
         """,
         {
@@ -117,6 +121,8 @@ def _insert_snapshot(
             "members_unit": "degC",
             "local_day_start_utc": local_day_start_utc or scope.target_window_start_utc.isoformat(),
             "step_horizon_hours": 144.0,
+            "contributes_to_target_extrema": contributes_to_target_extrema,
+            "forecast_window_attribution_status": forecast_window_attribution_status,
         },
     )
 
@@ -421,7 +427,11 @@ def test_full_reader_returns_evidence_bundle_with_separate_readiness_ids() -> No
     assert result.bundle is not None
     evidence = result.bundle.evidence
     assert evidence.coverage_id == "coverage-1"
-    assert evidence.producer_readiness_id == "producer-readiness-1"
+    # P0 follow-up §1.3: the bundle layer DERIVES producer_readiness_id from the
+    # selected candidate's coverage_id (writer formula producer_readiness:{cov}),
+    # so evidence coherence holds even though only the latest readiness_state row
+    # survives in the DB.
+    assert evidence.producer_readiness_id == "producer_readiness:coverage-1"
     assert evidence.entry_readiness_id == "entry-readiness-1"
     assert evidence.producer_readiness_id != evidence.entry_readiness_id
     ens_result = result.bundle.to_ens_result()
@@ -491,7 +501,9 @@ def test_full_reader_prefers_attached_forecasts_authority_and_keeps_entry_local(
     assert result.ok
     assert result.bundle is not None
     evidence = result.bundle.evidence
-    assert evidence.producer_readiness_id == "producer-readiness-forecast"
+    # Derived from coverage_id (see test above); the forecasts-attached path
+    # resolves the SAME coverage-1 so the derived id is identical.
+    assert evidence.producer_readiness_id == "producer_readiness:coverage-1"
     assert evidence.entry_readiness_id == "entry-readiness-1"
 
 
@@ -547,7 +559,7 @@ def test_full_reader_can_consume_producer_readiness_without_entry_readiness() ->
     assert result.ok
     assert result.bundle is not None
     evidence = result.bundle.evidence
-    assert evidence.producer_readiness_id == "producer-readiness-1"
+    assert evidence.producer_readiness_id == "producer_readiness:coverage-1"
     assert evidence.entry_readiness_id is None
 
 

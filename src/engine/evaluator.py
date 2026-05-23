@@ -3661,6 +3661,13 @@ def evaluate_candidate(
                 "period_extrema_members_adapter",
                 "mc_instrument_noise",
             ]
+            # P0 follow-up §2: surface the legacy-NULL-passthrough record (and any
+            # other extrema-authority validation tokens) the bundle layer attached,
+            # so the passthrough is auditable in the decision's applied_validations.
+            entry_validations.extend(
+                str(_token)
+                for _token in ens_result.get("extrema_authority_applied_validations", [])
+            )
         else:
             assert ens is not None
             p_raw = ens.p_raw_vector(bins, n_mc=ensemble_n_mc())

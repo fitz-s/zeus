@@ -511,3 +511,117 @@ def test_amsterdam_control_recency_wins_within_equal_contributor_class() -> None
     assert result.bundle.snapshot.snapshot_id == 200
     assert result.bundle.evidence.source_run_id == "run-12z"
     assert result.bundle.evidence.coverage_id == "cov-12z"
+
+
+# 6.7 -----------------------------------------------------------------------
+def test_current_ecmwf_opendata_null_contribution_blocks() -> None:
+    """6.7 (§2): a CURRENT ECMWF Open Data snapshot with NULL contribution must
+    fail closed — EXECUTABLE_FORECAST_EXTREMA_AUTHORITY_UNKNOWN — not pass through.
+    A live mx2t3 row with missing provenance would otherwise re-open the P0
+    cold-bias."""
+    conn = _conn()
+    _insert_snapshot(
+        conn,
+        snapshot_id=300,
+        source_run_id="run-null",
+        source_cycle_time="2026-05-08T00:00:00+00:00",
+        available_at="2026-05-08T05:00:00+00:00",
+        members_values=[18.0 + i * 0.1 for i in range(51)],
+        contributes_to_target_extrema=None,  # schema-drift / writer-bug shape
+        forecast_window_attribution_status=None,
+        data_version=ECMWF_OPENDATA_HIGH_DATA_VERSION,  # CURRENT version
+    )
+    _insert_source_run(
+        conn,
+        source_run_id="run-null",
+        source_cycle_time=_utc(2026, 5, 8, 0),
+        source_available_at=_utc(2026, 5, 8, 5),
+        captured_at=_utc(2026, 5, 8, 5, 10),
+    )
+    _insert_coverage(
+        conn,
+        coverage_id="cov-null",
+        source_run_id="run-null",
+        snapshot_ids=[300],
+        computed_at=_utc(2026, 5, 8, 5, 30),
+    )
+    _insert_latest_producer_readiness(
+        conn,
+        coverage_id="cov-null",
+        source_run_id="run-null",
+        computed_at=_utc(2026, 5, 8, 5, 30),
+    )
+
+    result = _read_full(conn)
+
+    assert not result.ok
+    assert result.reason_code == "EXECUTABLE_FORECAST_EXTREMA_AUTHORITY_UNKNOWN"
+
+
+# 6.8 -----------------------------------------------------------------------
+def test_legacy_null_contribution_passes_through_recorded() -> None:
+    """6.8 (§2): a LEGACY data_version snapshot with NULL contribution passes
+    through (prior behavior), and the passthrough is recorded in the bundle's
+    extrema_authority_applied_validations for auditability."""
+    legacy_version = "ecmwf_opendata_mx2t6_local_calendar_day_max_v1"
+    conn = _conn()
+    _insert_snapshot(
+        conn,
+        snapshot_id=400,
+        source_run_id="run-legacy",
+        source_cycle_time="2026-05-08T00:00:00+00:00",
+        available_at="2026-05-08T05:00:00+00:00",
+        members_values=[18.0 + i * 0.1 for i in range(51)],
+        contributes_to_target_extrema=None,
+        forecast_window_attribution_status=None,
+        data_version=legacy_version,
+    )
+    _insert_source_run(
+        conn,
+        source_run_id="run-legacy",
+        source_cycle_time=_utc(2026, 5, 8, 0),
+        source_available_at=_utc(2026, 5, 8, 5),
+        captured_at=_utc(2026, 5, 8, 5, 10),
+    )
+    _insert_coverage(
+        conn,
+        coverage_id="cov-legacy",
+        source_run_id="run-legacy",
+        snapshot_ids=[400],
+        computed_at=_utc(2026, 5, 8, 5, 30),
+        data_version=legacy_version,
+    )
+    _insert_latest_producer_readiness(
+        conn,
+        coverage_id="cov-legacy",
+        source_run_id="run-legacy",
+        computed_at=_utc(2026, 5, 8, 5, 30),
+        data_version=legacy_version,
+    )
+
+    scope = _scope()
+    result = read_executable_forecast(
+        conn,
+        city_id=scope.city_id,
+        city_name=scope.city_name,
+        city_timezone=scope.city_timezone,
+        target_local_date=scope.target_local_date,
+        temperature_metric=scope.temperature_metric,
+        source_id=_SOURCE_ID,
+        source_transport=_TRANSPORT,
+        data_version=legacy_version,
+        track=_TRACK,
+        strategy_key="entry_forecast",
+        market_family=_FAMILY,
+        condition_id=_CONDITION,
+        decision_time=_utc(2026, 5, 8, 6),
+        require_entry_readiness=False,
+    )
+
+    assert result.ok, f"expected LIVE_ELIGIBLE, got {result.status}/{result.reason_code}"
+    assert result.bundle is not None
+    ens_result = result.bundle.to_ens_result()
+    assert (
+        "forecast_extrema_authority_legacy_null_passthrough"
+        in ens_result["extrema_authority_applied_validations"]
+    )
