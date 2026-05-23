@@ -290,8 +290,8 @@ matching. Canonical values: `plan_only`, `audit`, `create_new`, `modify_existing
 
 - `plan_only` and `audit` are **whitelist-driven**: only paths matching their
   `admits_path_globs` are admitted; everything else → `out_of_scope_files` + `advisory_only`.
-  Canonical scopes: `plan_only` admits `docs/**`, `docs/historical_evidence/**`; `audit` admits
-  `docs/historical_evidence/**`. Substantive plans MUST be packetized at
+  Canonical scopes: `plan_only` admits `docs/**`; `audit` admits
+  `docs/operations/archive/**` (untracked on disk). Substantive plans MUST be packetized at
   `docs/operations/task_<YYYY-MM-DD>_<topic>/<TOPIC>_PLAN.md` or legacy
   `PLAN.md` (admitted via `create_new` typed_intent). Runtime tool scratch
   directories (`.omc/plans/**`,

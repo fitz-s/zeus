@@ -48,7 +48,7 @@ Freeze a new packet through this file before starting any implementation slice.
 
 | Surface | Status | Why it remains in operations |
 |---------|--------|------------------------------|
-| `docs/operations/task_2026-04-26_ultimate_plan/2026-05-01_live_alpha/evidence/tigge_ingest_decision_2026-05-01.md` | ACTIVE runtime-gating evidence | TIGGE `entry_primary` authorization depends on this evidence path; do not archive without a replacement operator-decision path. |
+| `docs/operations/current/evidence/ultimate_plan/tigge_ingest_decision_2026-05-01.md` | ACTIVE runtime-gating evidence | TIGGE `entry_primary` authorization depends on this evidence path; do not archive without a replacement operator-decision path. |
 
 ## Current fact and checklist companions
 
@@ -60,7 +60,7 @@ Freeze a new packet through this file before starting any implementation slice.
 ## Closed packet archive
 
 Closed or superseded packet bodies are in
-`docs/operations/archive/2026-Q2/` (see `docs/operations/archive/2026-Q2/INDEX.md`).
+`docs/operations/archive/2026-Q2/` (index: `docs/archive_registry.md`; archive bodies are untracked on disk).
 Historical registry: `docs/archive_registry.md` (deprecated forwarding doc).
 
 ## Operations routing
