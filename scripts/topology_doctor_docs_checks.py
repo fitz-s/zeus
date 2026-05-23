@@ -824,6 +824,8 @@ def check_active_operations_registry(api: Any, topology: dict[str, Any]) -> list
     issues.extend(check_multiple_active_pointers(api, topology))
     issues.extend(check_task_dirs_fully_unregistered(api, topology))
     issues.extend(check_stale_current_fact_referenced(api, topology))
+    issues.extend(check_task_dir_sprawl_ceiling(api, topology))
+    issues.extend(check_new_packet_outside_current(api, topology))
     return issues
 
 
@@ -1101,6 +1103,170 @@ def check_stale_current_fact_referenced(api: Any, topology: dict[str, Any]) -> l
                         f"The active task ({active_packet}) references this stale surface. "
                         f"Re-audit {surface_rel} (update 'Last audited:') before using it "
                         "for data or source planning decisions."
+                    ),
+                )
+            )
+    return issues
+
+
+# ---------------------------------------------------------------------------
+# H5: operations_task_dir_sprawl_ceiling
+# ---------------------------------------------------------------------------
+
+_TASK_DIR_DATE_PATTERN = re.compile(r"^task_(\d{4}-\d{2}-\d{2})_")
+
+
+def _lifecycle_state_for(rel: str, entries: list[dict[str, Any]]) -> str | None:
+    """Return lifecycle_state from the first docs_registry entry that covers *rel*, or None."""
+    rel_dir = rel.rstrip("/") + "/"
+    for entry in entries:
+        entry_path = str(entry.get("path") or "").rstrip("/") + "/"
+        # Exact dir match or wildcard pattern match via fnmatch
+        if entry_path == rel_dir or fnmatch.fnmatch(rel_dir, entry_path):
+            return str(entry.get("lifecycle_state") or "")
+        # Also try without trailing slash for file-pattern entries
+        entry_bare = str(entry.get("path") or "").rstrip("/")
+        if fnmatch.fnmatch(rel, entry_bare):
+            return str(entry.get("lifecycle_state") or "")
+    return None
+
+
+_SPRAWL_BLOCKED_STATES = frozenset({"historical", "closed"})
+
+
+def check_task_dir_sprawl_ceiling(api: Any, topology: dict[str, Any]) -> list[Any]:
+    """H5: any docs/operations/task_* dir that is closed, historical, or unregistered is RED.
+
+    Steady-state target is ZERO top-level docs/operations/task_* dirs.  All new
+    work routes through docs/operations/current/plans/<slug>/ via zpkt start.
+    A dir is allowed only if it has a docs_registry.yaml entry with lifecycle_state
+    in {active, transitional}.  Unregistered dirs and dirs with lifecycle_state in
+    {historical, closed} must be archived immediately.
+
+    Fix: move the dir to docs/operations/archive/2026-Q2/<name>/, create a stub
+    file docs/operations/<name>.archived, and delete its docs_registry.yaml entry
+    (or update its path).  Route new work through docs/operations/current/plans/<slug>/
+    using: python scripts/zpkt.py start <slug>.
+
+    Read: architecture/docs_registry.yaml (lifecycle_state field),
+    docs/operations/current/package.yaml (active package).
+    """
+    issues: list[Any] = []
+    task_dirs = operation_task_dirs(api)
+    if not task_dirs:
+        return issues
+
+    registry = api.load_docs_registry()
+    entries = list(registry.get("entries") or [])
+
+    for rel in sorted(task_dirs):
+        name = Path(rel).name
+        lifecycle = _lifecycle_state_for(rel, entries)
+
+        if lifecycle is None:
+            # Unregistered — must be archived
+            issues.append(
+                api._issue(
+                    "operations_task_dir_sprawl_ceiling",
+                    rel,
+                    (
+                        f"'{rel}' is not registered in architecture/docs_registry.yaml. "
+                        "Steady-state is ZERO top-level task_* dirs; all work routes through "
+                        "docs/operations/current/plans/<slug>/. "
+                        f"Fix: git mv docs/operations/{name} docs/operations/archive/2026-Q2/{name} "
+                        f"&& echo 'archived' > docs/operations/{name}.archived && git add -A. "
+                        "Route new work: python scripts/zpkt.py start <slug>. "
+                        "Read: architecture/docs_registry.yaml, docs/operations/current/package.yaml."
+                    ),
+                )
+            )
+        elif lifecycle in _SPRAWL_BLOCKED_STATES:
+            issues.append(
+                api._issue(
+                    "operations_task_dir_sprawl_ceiling",
+                    rel,
+                    (
+                        f"'{rel}' has lifecycle_state='{lifecycle}' in architecture/docs_registry.yaml "
+                        "and must be archived. "
+                        "Steady-state is ZERO top-level task_* dirs; closed/historical dirs must not "
+                        "remain at docs/operations/task_*/. "
+                        f"Fix: git mv docs/operations/{name} docs/operations/archive/2026-Q2/{name} "
+                        f"&& echo 'archived' > docs/operations/{name}.archived && git add -A. "
+                        "Read: architecture/docs_registry.yaml, docs/operations/current/package.yaml."
+                    ),
+                )
+            )
+    return issues
+
+
+# ---------------------------------------------------------------------------
+# H6: operations_new_packet_outside_current
+# ---------------------------------------------------------------------------
+
+_PACKAGE_CREATED_AT_PATTERN = re.compile(r"^created_at:\s*['\"]?(\d{4}-\d{2}-\d{2})['\"]?", re.MULTILINE)
+
+
+def _read_package_created_at(api: Any) -> date | None:
+    """Return created_at date from docs/operations/current/package.yaml, or None."""
+    pkg_path = api.ROOT / "docs" / "operations" / "current" / "package.yaml"
+    if not pkg_path.exists():
+        return None
+    text = pkg_path.read_text(encoding="utf-8", errors="ignore")
+    m = _PACKAGE_CREATED_AT_PATTERN.search(text)
+    if not m:
+        return None
+    try:
+        return date.fromisoformat(m.group(1))
+    except ValueError:
+        return None
+
+
+def check_new_packet_outside_current(api: Any, topology: dict[str, Any]) -> list[Any]:
+    """H6: any docs/operations/task_* dir dated >= current package creation is a route bypass.
+
+    Once docs/operations/current/package.yaml exists, all new work must use
+    docs/operations/current/plans/<slug>/ via zpkt start.  A top-level task_* dir
+    whose date prefix is on or after the package's created_at is a route bypass —
+    the agent mkdir'd it instead of using the canonical route.
+
+    Fix: python scripts/zpkt.py start <slug> creates docs/operations/current/plans/<slug>/.
+    If the existing dir contains valid work, move its content to the current plan dir
+    and archive the top-level dir.
+
+    Read: docs/operations/current/package.yaml, scripts/zpkt.py.
+    """
+    issues: list[Any] = []
+    task_dirs = operation_task_dirs(api)
+    if not task_dirs:
+        return issues
+
+    package_date = _read_package_created_at(api)
+    if package_date is None:
+        return issues  # No current package — check not applicable
+
+    for rel in sorted(task_dirs):
+        name = Path(rel).name
+        m = _TASK_DIR_DATE_PATTERN.match(name)
+        if not m:
+            continue  # Non-standard name — skip date comparison
+        try:
+            dir_date = date.fromisoformat(m.group(1))
+        except ValueError:
+            continue
+
+        if dir_date >= package_date:
+            issues.append(
+                api._issue(
+                    "operations_new_packet_outside_current",
+                    rel,
+                    (
+                        f"'{rel}' (dated {dir_date.isoformat()}) was created on or after "
+                        f"docs/operations/current/package.yaml (created_at: {package_date.isoformat()}). "
+                        "New work must route through docs/operations/current/plans/<slug>/. "
+                        "Fix: python scripts/zpkt.py start <slug>. "
+                        "If this dir contains valid work, move it to the current plan dir "
+                        "and archive the top-level dir. "
+                        "Read: docs/operations/current/package.yaml, scripts/zpkt.py."
                     ),
                 )
             )

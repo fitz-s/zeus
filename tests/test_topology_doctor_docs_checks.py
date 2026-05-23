@@ -1,13 +1,20 @@
 # Created: 2026-05-17
-# Last reused or audited: 2026-05-22
+# Last reused or audited: 2026-05-23
 # Authority basis: SCAFFOLD.md §3 topology verdict D7 + EXECUTION_PLAN.md W5 + Batch-C brief step 1.4
 #                  Phase-1 Harness plan (composed-marinating-rabin.md) checks H1-H4
+#                  H5-H6 sprawl antibody: scaffold_antibody.md (2026-05-23)
 """Tests for topology_doctor_docs_checks module.
 
 D7: check_expected_empty_zones enforces that zones declared expected_empty: true
 in topology.yaml contain only .gitkeep (or nothing at all — absent path is OK).
 
 H1-H4 (Harness): fail-closed steering checks for docs/operations pointer integrity.
+
+H5 (operations_task_dir_sprawl_ceiling): any unregistered or closed/historical
+task_* dir fires RED. Steady-state target is ZERO top-level task_* dirs.
+
+H6 (operations_new_packet_outside_current): any task_* dir dated >= current
+package.yaml created_at fires RED — it's a route bypass.
 """
 from __future__ import annotations
 
@@ -21,7 +28,9 @@ from scripts.topology_doctor_docs_checks import (
     check_current_state_freshness,
     check_expected_empty_zones,
     check_multiple_active_pointers,
+    check_new_packet_outside_current,
     check_stale_current_fact_referenced,
+    check_task_dir_sprawl_ceiling,
     check_task_dirs_fully_unregistered,
 )
 
@@ -367,4 +376,193 @@ class TestCheckStaleCurrentFactReferenced:
         )
         api = _make_harness_api(tmp_path)
         issues = check_stale_current_fact_referenced(api, {})
+        assert issues == []
+
+
+# H5: task_dir_sprawl_ceiling — break/restore meta-verify
+# ---------------------------------------------------------------------------
+
+
+class TestCheckTaskDirSprawlCeiling:
+    """H5: any unregistered or closed/historical task_* dir fires RED.
+
+    Antibody proof: each test creates the condition → asserts RED, then removes
+    the condition → asserts GREEN. This confirms the check catches what its
+    docstring claims.
+    """
+
+    def test_unregistered_task_dir_fires_then_green(self, tmp_path: Path) -> None:
+        """Break: unregistered task_* dir → RED. Restore: remove dir → GREEN."""
+        ops = tmp_path / "docs" / "operations"
+        task_dir = ops / "task_2026-05-01_test_unregistered"
+        task_dir.mkdir(parents=True)
+
+        api = _make_harness_api(tmp_path, registry_entries=[])
+        issues = check_task_dir_sprawl_ceiling(api, {})
+        assert len(issues) == 1
+        assert issues[0].code == "operations_task_dir_sprawl_ceiling"
+        assert "task_2026-05-01_test_unregistered" in issues[0].path
+        assert "not registered" in issues[0].message or "unregistered" in issues[0].message.lower()
+
+        # Restore: remove the dir
+        task_dir.rmdir()
+        issues_after = check_task_dir_sprawl_ceiling(api, {})
+        assert issues_after == []
+
+    def test_closed_lifecycle_fires_then_green(self, tmp_path: Path) -> None:
+        """Break: closed task_* dir → RED. Restore: update lifecycle to active → GREEN."""
+        ops = tmp_path / "docs" / "operations"
+        task_dir = ops / "task_2026-05-01_test_closed"
+        task_dir.mkdir(parents=True)
+
+        closed_entries = [
+            {
+                "path": "docs/operations/task_2026-05-01_test_closed/",
+                "lifecycle_state": "closed",
+                "doc_class": "operation_packet",
+            }
+        ]
+        api = _make_harness_api(tmp_path, registry_entries=closed_entries)
+        issues = check_task_dir_sprawl_ceiling(api, {})
+        assert len(issues) == 1
+        assert issues[0].code == "operations_task_dir_sprawl_ceiling"
+        assert "closed" in issues[0].message
+
+        # Restore: change lifecycle_state to active
+        active_entries = [
+            {
+                "path": "docs/operations/task_2026-05-01_test_closed/",
+                "lifecycle_state": "active",
+                "doc_class": "operation_packet",
+            }
+        ]
+        api_active = _make_harness_api(tmp_path, registry_entries=active_entries)
+        issues_after = check_task_dir_sprawl_ceiling(api_active, {})
+        assert issues_after == []
+
+    def test_historical_lifecycle_fires(self, tmp_path: Path) -> None:
+        """historical lifecycle_state also fires H5."""
+        ops = tmp_path / "docs" / "operations"
+        (ops / "task_2026-04-01_old_historical").mkdir(parents=True)
+
+        entries = [
+            {
+                "path": "docs/operations/task_2026-04-01_old_historical/",
+                "lifecycle_state": "historical",
+            }
+        ]
+        api = _make_harness_api(tmp_path, registry_entries=entries)
+        issues = check_task_dir_sprawl_ceiling(api, {})
+        assert len(issues) == 1
+        assert issues[0].code == "operations_task_dir_sprawl_ceiling"
+        assert "historical" in issues[0].message
+
+    def test_transitional_lifecycle_passes(self, tmp_path: Path) -> None:
+        """transitional is allowed — H5 should be silent."""
+        ops = tmp_path / "docs" / "operations"
+        (ops / "task_2026-05-01_transitional").mkdir(parents=True)
+
+        entries = [
+            {
+                "path": "docs/operations/task_2026-05-01_transitional/",
+                "lifecycle_state": "transitional",
+            }
+        ]
+        api = _make_harness_api(tmp_path, registry_entries=entries)
+        issues = check_task_dir_sprawl_ceiling(api, {})
+        assert issues == []
+
+    def test_active_lifecycle_passes(self, tmp_path: Path) -> None:
+        """active lifecycle_state is allowed — H5 should be silent."""
+        ops = tmp_path / "docs" / "operations"
+        (ops / "task_2026-05-01_active_work").mkdir(parents=True)
+
+        entries = [
+            {
+                "path": "docs/operations/task_2026-05-01_active_work/",
+                "lifecycle_state": "active",
+            }
+        ]
+        api = _make_harness_api(tmp_path, registry_entries=entries)
+        issues = check_task_dir_sprawl_ceiling(api, {})
+        assert issues == []
+
+    def test_no_task_dirs_is_silent(self, tmp_path: Path) -> None:
+        """No task_* dirs → GREEN. This is the steady-state target."""
+        (tmp_path / "docs" / "operations").mkdir(parents=True)
+        api = _make_harness_api(tmp_path, registry_entries=[])
+        issues = check_task_dir_sprawl_ceiling(api, {})
+        assert issues == []
+
+
+# H6: new_packet_outside_current — break/restore meta-verify
+# ---------------------------------------------------------------------------
+
+
+class TestCheckNewPacketOutsideCurrent:
+    """H6: task_* dir dated >= current package.yaml created_at fires RED.
+
+    Antibody proof: each test creates the condition → asserts RED, then removes
+    the condition → asserts GREEN.
+    """
+
+    def _write_package_yaml(self, tmp_path: Path, created_at: str) -> None:
+        current_dir = tmp_path / "docs" / "operations" / "current"
+        current_dir.mkdir(parents=True, exist_ok=True)
+        (current_dir / "package.yaml").write_text(
+            f"created_at: '{created_at}'\n", encoding="utf-8"
+        )
+
+    def test_task_dir_after_package_fires_then_green(self, tmp_path: Path) -> None:
+        """Break: task_* dir dated after package → RED. Restore: remove dir → GREEN."""
+        self._write_package_yaml(tmp_path, "2026-05-10")
+        task_dir = tmp_path / "docs" / "operations" / "task_2026-05-11_bypass"
+        task_dir.mkdir(parents=True)
+
+        api = _make_harness_api(tmp_path)
+        issues = check_new_packet_outside_current(api, {})
+        assert len(issues) == 1
+        assert issues[0].code == "operations_new_packet_outside_current"
+        assert "2026-05-11" in issues[0].message
+        assert "2026-05-10" in issues[0].message
+
+        # Restore: remove the dir
+        task_dir.rmdir()
+        issues_after = check_new_packet_outside_current(api, {})
+        assert issues_after == []
+
+    def test_same_date_as_package_fires(self, tmp_path: Path) -> None:
+        """Same date as package creation is a bypass (>= not just >)."""
+        self._write_package_yaml(tmp_path, "2026-05-22")
+        (tmp_path / "docs" / "operations" / "task_2026-05-22_same_day").mkdir(parents=True)
+
+        api = _make_harness_api(tmp_path)
+        issues = check_new_packet_outside_current(api, {})
+        assert len(issues) == 1
+        assert issues[0].code == "operations_new_packet_outside_current"
+
+    def test_task_dir_before_package_passes(self, tmp_path: Path) -> None:
+        """task_* dir dated before package creation is legacy — H6 is silent."""
+        self._write_package_yaml(tmp_path, "2026-05-22")
+        (tmp_path / "docs" / "operations" / "task_2026-05-15_legacy").mkdir(parents=True)
+
+        api = _make_harness_api(tmp_path)
+        issues = check_new_packet_outside_current(api, {})
+        assert issues == []
+
+    def test_no_package_yaml_is_silent(self, tmp_path: Path) -> None:
+        """If current/package.yaml is absent, H6 does not fire (not applicable)."""
+        (tmp_path / "docs" / "operations" / "task_2026-05-22_some_task").mkdir(parents=True)
+
+        api = _make_harness_api(tmp_path)
+        issues = check_new_packet_outside_current(api, {})
+        assert issues == []
+
+    def test_no_task_dirs_is_silent(self, tmp_path: Path) -> None:
+        """No task_* dirs → GREEN even with package.yaml present."""
+        self._write_package_yaml(tmp_path, "2026-05-10")
+        (tmp_path / "docs" / "operations").mkdir(parents=True, exist_ok=True)
+
+        api = _make_harness_api(tmp_path)
+        issues = check_new_packet_outside_current(api, {})
         assert issues == []
