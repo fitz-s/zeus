@@ -52,6 +52,9 @@ _EXPECTED_B: list[tuple[str, str | None]] = [
     # Wave-added distinct keys (MAJOR-3 fix — these were "routing-by-accident" before)
     ("opening_inertia_relaxation", None),              # S2 OpeningInertiaRelaxation
     ("imminent_open_capture_posterior_collapse", None),  # S3 ImminentOpenCapturePosteriorCollapse
+    # C-EPIC combination candidates (§13/§14) — explicit membership fix
+    ("c1_joint_tail_bayes", None),                     # C1 JointTailBayes
+    ("c2_opening_stale_fok", None),                    # C2 OpeningStaleQuoteFOK
 ]
 
 
@@ -90,4 +93,29 @@ class TestRouterExhaustiveness:
         assert "imminent_open_capture_posterior_collapse" in _PIPELINE_B_STRATEGY_KEYS, (
             "imminent_open_capture_posterior_collapse must be explicitly registered in "
             "_PIPELINE_B_STRATEGY_KEYS (MAJOR-3)"
+        )
+
+    def test_cepic_keys_not_routing_by_accident(self) -> None:
+        """C1/C2 combination strategy keys must be explicitly in _PIPELINE_B_STRATEGY_KEYS.
+
+        Both route to Pipeline B as calibrated-stochastic candidates (§13/§14).
+        This test asserts routing-by-membership, not routing-by-catch-all-default.
+        SGL wave critic MAJOR: c1_joint_tail_bayes and c2_opening_stale_fok were
+        falling to Pipeline B only via the unknown-key catch-all, not by contract.
+        """
+        from src.analysis.promotion_proof_router import _PIPELINE_B_STRATEGY_KEYS
+        assert "c1_joint_tail_bayes" in _PIPELINE_B_STRATEGY_KEYS, (
+            "c1_joint_tail_bayes must be explicitly registered in "
+            "_PIPELINE_B_STRATEGY_KEYS (C-EPIC MAJOR fix)"
+        )
+        assert "c2_opening_stale_fok" in _PIPELINE_B_STRATEGY_KEYS, (
+            "c2_opening_stale_fok must be explicitly registered in "
+            "_PIPELINE_B_STRATEGY_KEYS (C-EPIC MAJOR fix)"
+        )
+        # Also assert routing result, not just membership.
+        assert route_proof_class("c1_joint_tail_bayes") == "B", (
+            "c1_joint_tail_bayes must route to Pipeline B"
+        )
+        assert route_proof_class("c2_opening_stale_fok") == "B", (
+            "c2_opening_stale_fok must route to Pipeline B"
         )
