@@ -236,3 +236,143 @@ def test_reader_crossdb_attach(three_dbs, monkeypatch):
     assert report.n_decisions == 0, (
         f"Expected 0 decisions (quarantined), got {report.n_decisions}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Test 3 (RED): ghost quarantine table in world DB defeats reader exclusion
+# ---------------------------------------------------------------------------
+
+def test_ghost_table_defeats_exclusion_red(three_dbs, monkeypatch):
+    """Prove that calling ensure_table(conn) when world is main creates a ghost
+    quarantine table in world DB, which the reader fallback picks up and reads as
+    empty — so exclusion silently no-ops.
+
+    This is the regression baseline for the CRITICAL finding in PR-E critic.
+    The test asserts RED behavior: with a ghost table present and a real quarantine
+    row only in trade DB, build_evidence_report returns n_decisions=1 (NOT excluded).
+    """
+    from src.analysis.evidence_report import build_evidence_report
+
+    world_path, trade_path, forecasts_path = three_dbs
+
+    # Simulate the buggy behavior: call ensure_table on a world-main connection.
+    # This creates decision_integrity_quarantine in world's sqlite_master (ghost).
+    wconn_ghost = sqlite3.connect(str(world_path))
+    ensure_table(wconn_ghost)  # BUG: world is main → ghost table created in world
+    wconn_ghost.commit()
+    wconn_ghost.close()
+
+    # Confirm the ghost table exists in world DB.
+    wconn_check = sqlite3.connect(str(world_path))
+    world_tables = {
+        row[0]
+        for row in wconn_check.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()
+    }
+    wconn_check.close()
+    assert "decision_integrity_quarantine" in world_tables, (
+        "Ghost table must exist in world DB for this test to be meaningful"
+    )
+
+    # Now quarantine xdb-dec-1 in TRADE DB (where it actually belongs).
+    now = datetime.now(timezone.utc).isoformat()
+    tconn = sqlite3.connect(str(trade_path))
+    tconn.execute(
+        """INSERT INTO decision_integrity_quarantine
+           (table_name, row_id, reason_code, forecast_snapshot_id, recorded_at, meta_json)
+           VALUES ('opportunity_fact', 'xdb-dec-1', ?, NULL, ?, '{}')""",
+        (REASON_NON_CONTRIBUTING, now),
+    )
+    tconn.commit()
+    tconn.close()
+
+    # Monkeypatch trade path (evidence_report auto-ATTACH logic).
+    import src.state.db as _state_db
+    monkeypatch.setattr(_state_db, "_zeus_trade_db_path", lambda: str(trade_path))
+
+    # Open world conn — evidence_report sees 'decision_integrity_quarantine' in
+    # world's sqlite_master (ghost), uses unqualified ref → reads EMPTY ghost →
+    # NOT EXISTS is always false → decision is NOT excluded.
+    wconn = sqlite3.connect(str(world_path))
+    wconn.row_factory = sqlite3.Row
+
+    report = build_evidence_report(
+        "xdb_strat", 0, conn=wconn, breakeven_win_rate=0.52
+    )
+    wconn.close()
+
+    # RED: ghost table → exclusion no-ops → decision counted (n_decisions=1, NOT 0).
+    assert report.n_decisions == 1, (
+        f"RED scenario: expected 1 (ghost table defeats exclusion), got {report.n_decisions}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test 4 (GREEN): _run_world_tables --apply writes to trade only; exclusion fires
+# ---------------------------------------------------------------------------
+
+def test_run_world_tables_no_ghost_green(three_dbs, monkeypatch):
+    """Prove that _run_world_tables (fixed code, no ensure_table(conn)):
+      1. Does NOT create a ghost quarantine table in world DB.
+      2. Quarantine rows land only in trade DB.
+      3. build_evidence_report correctly excludes quarantined rows (n_decisions=0).
+
+    This is the GREEN proof for the CRITICAL finding fix.
+    """
+    import sys
+    from pathlib import Path as _Path
+
+    _SCRIPTS = _Path(__file__).parent.parent / "scripts"
+    if str(_SCRIPTS) not in sys.path:
+        sys.path.insert(0, str(_SCRIPTS))
+    import importlib
+    import quarantine_bad_forecast_decisions as _qbd
+    importlib.reload(_qbd)  # ensure we have the patched version
+
+    from src.analysis.evidence_report import build_evidence_report
+
+    world_path, trade_path, forecasts_path = three_dbs
+
+    # Apply quarantine via the CLI runner (apply=True).
+    results = _qbd._run_world_tables(
+        world_path, trade_path, forecasts_path, dry_run=False
+    )
+
+    # 1. World DB must NOT contain decision_integrity_quarantine.
+    wconn_check = sqlite3.connect(str(world_path))
+    world_tables = {
+        row[0]
+        for row in wconn_check.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()
+    }
+    wconn_check.close()
+    assert "decision_integrity_quarantine" not in world_tables, (
+        "Ghost table must NOT exist in world DB after _run_world_tables"
+    )
+
+    # 2. Quarantine row for opportunity_fact exists in TRADE DB.
+    tconn = sqlite3.connect(str(trade_path))
+    trade_count = tconn.execute(
+        "SELECT COUNT(*) FROM decision_integrity_quarantine WHERE table_name='opportunity_fact'"
+    ).fetchone()[0]
+    tconn.close()
+    assert trade_count == 1, f"Expected 1 quarantine row in trade DB, got {trade_count}"
+
+    # 3. evidence_report exclusion fires correctly (n_decisions=0).
+    import src.state.db as _state_db
+    monkeypatch.setattr(_state_db, "_zeus_trade_db_path", lambda: str(trade_path))
+
+    wconn = sqlite3.connect(str(world_path))
+    wconn.row_factory = sqlite3.Row
+
+    report = build_evidence_report(
+        "xdb_strat", 0, conn=wconn, breakeven_win_rate=0.52
+    )
+    wconn.close()
+
+    # GREEN: no ghost, trade-attached quarantine → exclusion fires → n_decisions=0.
+    assert report.n_decisions == 0, (
+        f"GREEN scenario: expected 0 decisions (excluded via trade quarantine), got {report.n_decisions}"
+    )

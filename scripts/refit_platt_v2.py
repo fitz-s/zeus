@@ -169,6 +169,9 @@ def _quarantine_ref_for_conn(conn: sqlite3.Connection) -> str | None:
     if row is not None:
         return "decision_integrity_quarantine"
     # Attempt to ATTACH the trade DB.
+    # Intentional: the ATTACH persists on conn for the life of the caller's query.
+    # refit_platt_v2 opens a short-lived connection per training run, so this is
+    # safe. Callers that reuse long-lived conns should pre-ATTACH trade themselves.
     try:
         from pathlib import Path as _Path
         from src.state.db import _zeus_trade_db_path as _trade_path

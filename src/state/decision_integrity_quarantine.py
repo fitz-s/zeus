@@ -473,6 +473,8 @@ def _de_natural_pk_hash(
     is the true uniqueness anchor for decision_events rows.
     """
     key = f"{market_slug}|{temperature_metric}|{target_date}|{observation_time}|{decision_seq}"
+    # [:32] = 128-bit hex prefix of SHA-256. Collision-safe for this key space
+    # (five structured fields with bounded cardinality). Not the full 256-bit digest.
     return "de_pk_" + hashlib.sha256(key.encode()).hexdigest()[:32]
 
 

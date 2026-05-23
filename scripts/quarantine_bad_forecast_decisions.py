@@ -102,9 +102,12 @@ def _run_world_tables(
         conn.execute("ATTACH DATABASE ? AS forecasts", (str(forecasts_db),))
         conn.execute("ATTACH DATABASE ? AS trade", (str(trade_db),))
         if dry_run is False:
-            ensure_table(conn.execute("PRAGMA trade.journal_mode") and conn)
-            # ensure_table on trade-qualified conn requires the trade schema.
-            # Use execute on the conn with 'trade' attached to create the table there.
+            # Create quarantine table in TRADE schema (trade-qualified DDL).
+            # Do NOT call ensure_table(conn) here — conn has world DB as main, so
+            # ensure_table's unqualified CREATE TABLE would write a ghost table into
+            # world's sqlite_master, causing the reader fallback branch in
+            # evidence_report.py to read the empty world ghost instead of the real
+            # trade table (silent quarantine-exclusion no-op in production).
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS trade.decision_integrity_quarantine (
                     id                       INTEGER PRIMARY KEY AUTOINCREMENT,
