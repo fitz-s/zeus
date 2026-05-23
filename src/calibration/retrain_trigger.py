@@ -31,7 +31,8 @@ from src.types.metric_identity import HIGH_LOCALDAY_MAX, MetricIdentity
 ENV_FLAG_NAME = "ZEUS_CALIBRATION_RETRAIN_ENABLED"
 OPERATOR_TOKEN_SECRET_ENV = "ZEUS_CALIBRATION_RETRAIN_OPERATOR_TOKEN_SECRET"
 ARTIFACT_PATTERN = (
-    "docs/operations/current/evidence/ultimate_plan/calibration_retrain_decision_*.md"
+    "docs/operations/task_2026-04-26_ultimate_plan/**/"
+    "docs/historical_evidence/calibration_retrain_decision_*.md"
 )
 
 
