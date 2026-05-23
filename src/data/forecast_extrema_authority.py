@@ -1,7 +1,8 @@
 # Created: 2026-05-22
 # Last reused/audited: 2026-05-23
 # Authority basis: docs/operations/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md §PR-A;
-#   /Users/leofitz/.claude/jobs/866db2ea/P0_FOLLOWUP_BUNDLE_LAYER_SPEC.md §2 (NULL fail-closed).
+#   /Users/leofitz/.claude/jobs/866db2ea/P0_FOLLOWUP_BUNDLE_LAYER_SPEC.md §2 (NULL fail-closed);
+#   p0-2-hardening-20260523: missing/unknown data_version now fail-closed (UNKNOWN), not legacy-passthrough.
 """Forecast extrema authority classifier.
 
 Classifies whether a fetched ensemble_snapshots_v2 row contributes to the
@@ -20,6 +21,9 @@ from src.contracts.ensemble_snapshot_provenance import (
     ECMWF_OPENDATA_HIGH_DATA_VERSION,
     ECMWF_OPENDATA_LOW_CONTRACT_WINDOW_DATA_VERSION,
     ECMWF_OPENDATA_LOW_DATA_VERSION,
+    _ECMWF_OPENDATA_HIGH_DATA_VERSION_LEGACY,
+    _ECMWF_OPENDATA_LOW_DATA_VERSION_LEGACY,
+    _ECMWF_OPENDATA_LOW_CONTRACT_WINDOW_DATA_VERSION_LEGACY,
 )
 
 
@@ -40,13 +44,28 @@ class ForecastExtremaEligibility(Enum):
 # A current ECMWF Open Data period-extrema snapshot with contributes_to_target_extrema
 # IS NULL is a schema-drift / writer-bug / missing-provenance signal — it must NOT
 # silently pass through (that would re-open the P0 cold-bias).  NULL is tolerated
-# ONLY for explicit legacy/pre-cutover data_versions (mx2t6 era, kept readable for
-# historical rows).  The current set is the live mx2t3 v1 HIGH/LOW versions plus the
-# LOW contract-window v2 (all written by the current ECMWF Open Data ingest).
+# ONLY for the explicitly-enumerated legacy/pre-cutover data_versions below (mx2t6 era).
+# Any other data_version — including None/missing — fails closed as UNKNOWN.
+#
+# p0-2-hardening: "missing data_version" (None) is now also fail-closed (UNKNOWN).
+# The earlier passthrough for None was a hidden hole: _snapshot_row_for_classification
+# returns {} when the DB row is not found; {} produces data_version=None; None fell
+# through to LEGACY_NULL_PASSTHROUGH, silently bypassing the P0 gate on schema
+# drift or missing provenance.  The only safe passthrough is EXPLICIT legacy versions.
 CURRENT_EXTREMA_AUTHORITY_REQUIRED_DATA_VERSIONS: frozenset[str] = frozenset({
     ECMWF_OPENDATA_HIGH_DATA_VERSION,            # ecmwf_opendata_mx2t3_local_calendar_day_max_v1
     ECMWF_OPENDATA_LOW_DATA_VERSION,             # ecmwf_opendata_mn2t3_local_calendar_day_min_v1
     ECMWF_OPENDATA_LOW_CONTRACT_WINDOW_DATA_VERSION,  # ..._min_contract_window_v2
+})
+
+# Explicit legacy data_versions for which a NULL contributes_to_target_extrema is
+# tolerated (pre-cutover mx2t6/mn2t6 era rows, written before the extrema-authority
+# extractor existed).  Historical rows in ensemble_snapshots_v2 remain readable.
+# DO NOT add new entries without a documented authority basis.
+LEGACY_EXTREMA_AUTHORITY_DATA_VERSIONS: frozenset[str] = frozenset({
+    _ECMWF_OPENDATA_HIGH_DATA_VERSION_LEGACY,   # ecmwf_opendata_mx2t6_local_calendar_day_max_v1
+    _ECMWF_OPENDATA_LOW_DATA_VERSION_LEGACY,    # ecmwf_opendata_mn2t6_local_calendar_day_min_v1
+    _ECMWF_OPENDATA_LOW_CONTRACT_WINDOW_DATA_VERSION_LEGACY,  # ..._min_contract_window_v2
 })
 
 # Token recorded in applied_validations when a legacy NULL row passes through.
@@ -186,32 +205,53 @@ def classify_forecast_extrema_authority(
             reason=f"contributes=1 but attribution_status not in positive set: {attribution_status!r}",
         )
 
-    # contributes is None or unrecognised value.  P0 follow-up §2: fail closed
-    # for CURRENT data_versions (a live mx2t3 snapshot with NULL contribution is
-    # a provenance hole that would re-open the cold-bias); pass through ONLY for
-    # explicit legacy/pre-cutover data_versions.
-    if data_version in CURRENT_EXTREMA_AUTHORITY_REQUIRED_DATA_VERSIONS:
+    # contributes is None or unrecognised value.  Tri-state gate (p0-2-hardening):
+    #
+    #   1. EXPLICIT LEGACY data_version → LEGACY_NULL_PASSTHROUGH (historical rows).
+    #   2. All other cases — including None/missing data_version, CURRENT versions,
+    #      or any unknown string — → UNKNOWN (fail-closed).
+    #
+    # Rationale for None→UNKNOWN: _snapshot_row_for_classification returns {} when
+    # the DB row is not found (table missing or snapshot_id unknown); {} yields
+    # data_version=None; previously None fell into LEGACY_NULL_PASSTHROUGH, silently
+    # bypassing the P0 gate on schema drift or missing provenance.  Only explicit
+    # legacy versions are safe to pass through.
+    if data_version in LEGACY_EXTREMA_AUTHORITY_DATA_VERSIONS:
         return ForecastExtremaAuthority(
-            eligibility=ForecastExtremaEligibility.UNKNOWN,
+            eligibility=ForecastExtremaEligibility.LEGACY_NULL_PASSTHROUGH,
             contributes_to_target_extrema=False,
             attribution_status=attribution_status,
             forecast_window_start_utc=forecast_window_start_utc,
             forecast_window_end_utc=forecast_window_end_utc,
             boundary_ambiguous=boundary_ambiguous,
             reason=(
-                f"contributes_to_target_extrema is NULL on current data_version "
-                f"{data_version!r} (fail-closed)"
+                f"contributes_to_target_extrema is NULL on legacy data_version "
+                f"{data_version!r} (passthrough)"
             ),
         )
+    # data_version is None, a current/known-live version, or any unrecognised
+    # string — fail closed.
+    if data_version in CURRENT_EXTREMA_AUTHORITY_REQUIRED_DATA_VERSIONS:
+        reason = (
+            f"contributes_to_target_extrema is NULL on current data_version "
+            f"{data_version!r} (fail-closed)"
+        )
+    elif data_version is None:
+        reason = (
+            "contributes_to_target_extrema is NULL and data_version is missing "
+            "(empty row or lookup failure) (fail-closed)"
+        )
+    else:
+        reason = (
+            f"contributes_to_target_extrema is NULL on unrecognised data_version "
+            f"{data_version!r} (fail-closed)"
+        )
     return ForecastExtremaAuthority(
-        eligibility=ForecastExtremaEligibility.LEGACY_NULL_PASSTHROUGH,
+        eligibility=ForecastExtremaEligibility.UNKNOWN,
         contributes_to_target_extrema=False,
         attribution_status=attribution_status,
         forecast_window_start_utc=forecast_window_start_utc,
         forecast_window_end_utc=forecast_window_end_utc,
         boundary_ambiguous=boundary_ambiguous,
-        reason=(
-            f"contributes_to_target_extrema is NULL on legacy data_version "
-            f"{data_version!r} (passthrough)"
-        ),
+        reason=reason,
     )
