@@ -357,44 +357,11 @@ CREATE TABLE IF NOT EXISTS opportunity_fact (
     recorded_at TEXT NOT NULL
 );
 
--- OBS-AUTHORITY-FOUNDATION (2026-05-23): persisted, auditable settlement-day /
--- day0 observation authority. One row written at decision time for EVERY
--- settlement-day/day0 candidate — including the missing/stale/low-coverage
--- failure cases that are otherwise invisible in the DB. This is the runtime
--- observation object (Day0ObservationContext) captured durably so an operator
--- can tell whether a tradeable-price day0 edge is observation-locked,
--- forecast-upside, or wrong-date/source. OBSERVABILITY ONLY: writing a row
--- does NOT change trade behavior, gate selection, or the price floor.
-CREATE TABLE IF NOT EXISTS settlement_day_observation_authority (
-    authority_id TEXT PRIMARY KEY,
-    city TEXT,
-    target_date TEXT,
-    temperature_metric TEXT
-        CHECK (temperature_metric IS NULL OR temperature_metric IN ('high', 'low')),
-    decision_time_utc TEXT,
-    market_phase TEXT,
-    source TEXT,
-    station_id TEXT,
-    observation_time_utc TEXT,
-    first_sample_time_utc TEXT,
-    last_sample_time_utc TEXT,
-    high_so_far REAL,
-    low_so_far REAL,
-    current_temp REAL,
-    sample_count INTEGER,
-    coverage_status TEXT,
-    freshness_status TEXT,
-    local_date_matches_target INTEGER
-        CHECK (local_date_matches_target IS NULL OR local_date_matches_target IN (0, 1)),
-    source_authorized_for_settlement INTEGER
-        CHECK (source_authorized_for_settlement IS NULL OR source_authorized_for_settlement IN (0, 1)),
-    persisted_surface_available INTEGER
-        CHECK (persisted_surface_available IS NULL OR persisted_surface_available IN (0, 1)),
-    payload_json TEXT,
-    recorded_at TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_settlement_day_obs_authority_city_target
-    ON settlement_day_observation_authority(city, target_date, decision_time_utc);
+-- NOTE: settlement_day_observation_authority (OBS-AUTHORITY-FOUNDATION
+-- 2026-05-23) is a TRADE-CLASS table — its DDL lives in db.py _TRADE_CLASS_DDL
+-- and is created only by init_schema_trade_only on zeus_trades.db (colocated
+-- with opportunity_fact's runtime write target). It is intentionally NOT
+-- created here so init_schema (world) does not pollute zeus-world.db with it.
 
 CREATE TABLE IF NOT EXISTS execution_fact (
     intent_id TEXT PRIMARY KEY,

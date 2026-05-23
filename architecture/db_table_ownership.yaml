@@ -901,6 +901,32 @@ tables:
       db.py SCHEMA_VERSION. Created on trade.db alongside settlement_commands.
       2026-05-19 P1-3.
 
+  - name: settlement_day_observation_authority
+    db: trade
+    schema_class: trade_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema_trade_only
+    pk_col: authority_id
+    notes: >
+      OBS-AUTHORITY-FOUNDATION 2026-05-23. Persisted, auditable settlement-day
+      / day0 observation authority — one row per settlement-day/day0 candidate
+      (including MISSING/STALE/LOW failure cases) captured at decision time so
+      an operator can tell whether a tradeable-price day0 edge is observation-
+      locked, forecast-upside, or wrong-date/source. Colocated on trade.db with
+      opportunity_fact (its runtime write target post-INV-37) so the audit
+      query joins same-DB. Writer: log_settlement_day_observation_authority
+      (src/state/db.py); written from cycle_runtime.execute_discovery_phase.
+      DDL lives in both architecture/2026_04_02_architecture_kernel.sql (world
+      via init_schema) and _TRADE_CLASS_DDL (trade via init_schema_trade_only);
+      registered trade because that is the runtime write target. SCHEMA_VERSION
+      34. Observability only — no trade-behavior dependency.
+      NOTE (flagged, not fixed by this packet): opportunity_fact itself is
+      registered db: world (canonical) but the runtime writer
+      (log_opportunity_fact) writes to trade.db post-INV-37 — a pre-existing
+      registry/runtime divergence. opportunity_fact gained two columns here:
+      observation_authority_id (FK to this table) + day0_context_json (per-edge
+      day0 truth classification), via kernel SQL + idempotent ALTER backfill.
+
   - name: shadow_signals
     db: world
     schema_class: world_class
