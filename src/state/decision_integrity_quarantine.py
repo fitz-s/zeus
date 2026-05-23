@@ -88,8 +88,12 @@ def quarantine_decisions_for_noncontributing_forecast(
         JOIN {snap_ref} esv
           ON CAST(of.snapshot_id AS INTEGER) = esv.snapshot_id
         WHERE of.snapshot_id IS NOT NULL
+          -- Align with the live reader gate (PR-A), which only acts when
+          -- contributes_to_target_extrema is EXPLICITLY set; legacy NULL rows
+          -- pass through live and must NOT be quarantined.
+          AND esv.contributes_to_target_extrema IS NOT NULL
           AND (
-              COALESCE(esv.contributes_to_target_extrema, 0) != 1
+              esv.contributes_to_target_extrema != 1
               OR COALESCE(esv.forecast_window_attribution_status, 'UNKNOWN') = 'UNKNOWN'
           )
         ORDER BY of.decision_id

@@ -89,10 +89,14 @@ def validate_high_distribution(
                 )
 
     # --- Gate 5: extreme market disagreement ---
+    # px == 0.0 means NO QUOTE (bin unquoted/non-executable/unmapped), NOT
+    # "market says impossible" — p_market is zero-initialized and only filled
+    # for executable+quoted bins. Require a real quote (0.0 < px) so an
+    # unquoted bin carrying high p_cal does not spuriously trip the gate.
     if market_prices is not None:
         market_prices = np.asarray(market_prices, dtype=np.float64)
         for i, (px, pc) in enumerate(zip(market_prices, p_cal)):
-            if float(px) < 0.05 and float(pc) > 0.35:
+            if 0.0 < float(px) < 0.05 and float(pc) > 0.35:
                 return (
                     False,
                     f"EXTREME_MARKET_DISAGREEMENT_LOW_PRICE_HIGH_PROB:"

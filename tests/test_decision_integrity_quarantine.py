@@ -210,15 +210,21 @@ def test_dry_run_writes_nothing(mem_db):
     assert _quarantine_count(mem_db) == 0
 
 
-def test_null_contributes_is_quarantined(mem_db):
-    """NULL contributes_to_target_extrema (legacy snapshot) is treated as non-contributing."""
+def test_null_contributes_is_not_quarantined(mem_db):
+    """NULL contributes_to_target_extrema (legacy snapshot) is NOT quarantined.
+
+    Aligns with the live reader gate (PR-A), which only acts when
+    contributes_to_target_extrema is EXPLICITLY set; legacy NULL rows passed
+    through live unblocked and were not bug-affected, so the cleanup must not
+    quarantine them (scope = exactly the decisions the bug touched).
+    """
     snap_id = _insert_snapshot(mem_db, contributes=None, attribution="OK")
     _insert_opportunity(mem_db, decision_id="dec-null", snapshot_id=snap_id)
 
     result = quarantine_decisions_for_noncontributing_forecast(mem_db)
 
-    assert result["candidates_found"] == 1
-    assert "dec-null" in _quarantined_ids(mem_db)
+    assert result["candidates_found"] == 0
+    assert "dec-null" not in _quarantined_ids(mem_db)
 
 
 def test_no_snapshot_id_skipped(mem_db):
