@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from _yaml_bootstrap import import_yaml
@@ -216,8 +217,10 @@ def ensure_review_contract_advisory(data: dict, errors: list[str]) -> None:
         errors.append("review-contract: missing check_review_instruction_coverage.py step")
 
     review_condition = rc.get("env", {}).get("GATE_REVIEW_CONDITION", "")
-    if "Promote" not in review_condition and "promote" not in review_condition:
-        errors.append("review-contract: promotion condition must state when to promote")
+    has_promote = bool(re.search(r"\bpromote\b", review_condition, re.IGNORECASE))
+    has_negated = bool(re.search(r"\b(?:do not|never|not)\s+promote\b", review_condition, re.IGNORECASE))
+    if not has_promote or has_negated:
+        errors.append("review-contract: promotion condition must state when to promote (positive, non-negated)")
 
 
 def ensure_no_external_blocking_references(data: dict, errors: list[str]) -> None:

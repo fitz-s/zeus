@@ -126,7 +126,8 @@ def build_evidence_report(
                        decision_events has no experiment FK — unsettled decisions must
                        remain in the denominator.
       - cohort_tag:    restrict regret analytics to a cohort (same caveat)
-      - source:        restrict denominator and no_trade_events to a specific source
+      - source:        restrict denominator, no_trade_events, AND regret analytics
+                       (via de.source JOIN on decision_events) to a specific source
                        ('phase0_backfill', 'live_decision', 'shadow_decision')
 
     breakeven_win_rate must be supplied by the caller (strategy-specific value from
