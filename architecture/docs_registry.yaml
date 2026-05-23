@@ -187,6 +187,24 @@ entries:
   contains_volatile_metrics: false
   current_tense_allowed: true
   refresh_source: code_and_manifest
+- path: docs/reports/AGENTS.md
+  doc_class: router
+  default_read: false
+  direct_reference_allowed: true
+  current_role: reports surface router; active subtree is authority_history/; dead snapshots are gitignored
+  canonical_replaced_by: []
+  next_action: keep
+  lifecycle_state: durable
+  coverage_scope: exact
+  parent_coverage_allowed: false
+  truth_profile: router
+  freshness_class: stable
+  supersedes: []
+  superseded_by: []
+  may_live_in_reference: false
+  contains_volatile_metrics: false
+  current_tense_allowed: false
+  refresh_source: manual_operator_audit
 - path: docs/reports/authority_history/zeus_dual_track_architecture.md
   doc_class: report
   default_read: false
