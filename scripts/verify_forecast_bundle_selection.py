@@ -1,6 +1,3 @@
-# Created: 2026-05-23
-# Last reused or audited: 2026-05-23
-# Authority basis: /Users/leofitz/.claude/jobs/866db2ea/P0_FOLLOWUP_BUNDLE_LAYER_SPEC.md §7
 # Lifecycle: created=2026-05-23; last_reviewed=2026-05-23; last_reused=never
 # Purpose: Read-only operator diagnostic — bundle-layer selection vs latest-cycle for each city/date.
 # Reuse: Run after the bundle-layer fix to confirm the SELECTED bundle is a contributing

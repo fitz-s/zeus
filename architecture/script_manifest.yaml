@@ -1426,4 +1426,4 @@ scripts:
     promotion_barrier: "Informational only — no gate. Run to confirm the bundle-layer selection fix is effective."
     unguarded_write_rationale: "Read-only SELECT; writes only to stdout."
     required_helpers: []
-    required_tests: [tests/test_forecast_offset_fix_regression.py]
+    required_tests: [tests/test_executable_forecast_bundle_selection.py]

@@ -1,11 +1,12 @@
-# Created: 2026-05-23
-# Last reused or audited: 2026-05-23
-# Authority basis: /Users/leofitz/.claude/jobs/866db2ea/P0_FOLLOWUP_BUNDLE_LAYER_SPEC.md §1, §6
+# Lifecycle: created=2026-05-23; last_reviewed=2026-05-23; last_reused=never
 # Purpose: Relationship tests proving full-bundle-layer forecast selection prefers a
 #   contributing 00Z bundle over a later non-contributing 12Z bundle. These are the
 #   tests the production fix must satisfy: DISTINCT source_run_id / coverage_id per
 #   cycle, but only ONE readiness_state row (the latest, pointing at the 12Z coverage)
 #   — the real production shape (write_readiness_state UPSERTs on the scope tuple).
+# Reuse: Run when _candidate_forecast_bundles, _bundle_rank, _evaluate_candidate, or
+#   classify_forecast_extrema_authority changes. Authority: docs/operations/
+#   task_2026-05-21_mainline_completion_authority/ and P0_FOLLOWUP_BUNDLE_LAYER_SPEC §1,§6.
 """Relationship tests for executable forecast bundle-layer selection (P0 follow-up).
 
 The production bug (PR #309 trace, 2026-05-23): read_executable_forecast() resolved

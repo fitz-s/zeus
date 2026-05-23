@@ -45,17 +45,14 @@ def _sanity_thresholds() -> dict[str, float]:
     back to the default, so the gate's behavior is unchanged when config is absent.
     """
     block: dict[str, Any] = {}
-    try:
-        from src.config import settings
+    from src.config import settings
 
-        try:
-            raw = settings["probability_sanity"]
-        except (KeyError, TypeError):
-            raw = None
-        if isinstance(raw, dict):
-            block = raw
-    except Exception:
-        block = {}
+    try:
+        raw = settings["probability_sanity"]
+    except (KeyError, TypeError):
+        raw = None
+    if isinstance(raw, dict):
+        block = raw
     return {
         "point_bucket_high_prob": float(
             block.get("point_bucket_high_prob", _DEFAULT_POINT_BUCKET_HIGH_PROB)
