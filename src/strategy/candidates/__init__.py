@@ -284,7 +284,16 @@ def _candidate_strategy_key_for_reason(reason: Optional["NoTradeReason"]) -> str
         NoTradeReason.RESOLUTION_DISPUTED: "resolution_window_maker",
         NoTradeReason.RESOLUTION_TYPED_OUTCOME_UNAVAILABLE: "resolution_window_maker",
         NoTradeReason.LIQPROV_HEARTBEAT_ABSENT: "liquidity_provision_with_heartbeat",
+        NoTradeReason.LIQPROV_ADVERSE_SELECTION_UNWIRED: "liquidity_provision_with_heartbeat",
         NoTradeReason.WEATHER_ALERT_SOURCE_UNTRUSTED: "weather_event_arbitrage",
+        NoTradeReason.WEATHER_ALERT_LR_TABLE_MISSING: "weather_event_arbitrage",
+        NoTradeReason.WEATHER_ALERT_EDGE_NONPOSITIVE: "weather_event_arbitrage",
+        NoTradeReason.CENTER_SELL_MODEL_NO_CALIBRATION_UNAVAILABLE: "center_sell_model_no",
+        NoTradeReason.CENTER_SELL_MODEL_NO_NO_EDGE: "center_sell_model_no",
+        NoTradeReason.EVT_TAIL_MODEL_UNWIRED: "shoulder_buy_evt",
+        NoTradeReason.SHOULDER_BUY_LOWER_BOUND_NOT_POSITIVE: "shoulder_buy_evt",
+        NoTradeReason.IMMINENT_CALIBRATION_UNAVAILABLE: "imminent_open_capture_posterior_collapse",
+        NoTradeReason.IMMINENT_NO_EDGE: "imminent_open_capture_posterior_collapse",
         NoTradeReason.CORR_HEDGE_REGIME_UNAVAILABLE: "cross_market_correlation_hedge",
         NoTradeReason.NEGRISK_FAMILY_INCOMPLETE: "neg_risk_basket",
         NoTradeReason.NEGRISK_NO_PROFITABLE_BASKET: "neg_risk_basket",
@@ -450,8 +459,13 @@ from .neg_risk_basket import NegRiskBasket
 from .cross_market_correlation_hedge import CrossMarketCorrelationHedge
 from .liquidity_provision_with_heartbeat import LiquidityProvisionWithHeartbeat
 from .center_sell_parity import CenterSellParity
+from .center_sell_model_no import CenterSellModelNo
 from .shoulder_impossible_tail_capture import ShoulderImpossibleTailCapture
 from .settlement_capture_shadow import PhysicalIntervalBound, SettlementCaptureShadow
+from .center_buy_calibrated_shadow import CenterBuyCalibratedShadow
+from .opening_inertia_relaxation import OpeningInertiaRelaxation, estimate_lambda
+from .imminent_open_capture_posterior_collapse import ImminentOpenCapturePosteriorCollapse
+from .shoulder_buy_evt import ShoulderBuyEVT
 
 __all__ = [
     "_is_world_db_conn",
@@ -459,18 +473,24 @@ __all__ = [
     "CandidateContext",
     "CandidateDecision",
     "CandidateMetadata",
+    "CenterBuyCalibratedShadow",
+    "CenterSellModelNo",
     "CenterSellParity",
     "CrossMarketCorrelationHedge",
     "DeterministicEdgeDecision",
+    "estimate_lambda",
     "FamilyOrderBookSnapshot",
+    "ImminentOpenCapturePosteriorCollapse",
     "LegBook",
     "LegIntent",
     "LiquidityProvisionWithHeartbeat",
     "NegRiskBasket",
+    "OpeningInertiaRelaxation",
     "PhysicalIntervalBound",
     "PriceLevel",
     "ResolutionWindowMaker",
     "SettlementCaptureShadow",
+    "ShoulderBuyEVT",
     "ShoulderImpossibleTailCapture",
     "StaleQuoteDetector",
     "StrategyProtocol",

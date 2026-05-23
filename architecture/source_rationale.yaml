@@ -1746,6 +1746,73 @@ files:
     why: R3 A1 non-executable strategy candidate identity stub for benchmark registration.
     downstream:
     - src/strategy/candidates/__init__.py
+  src/strategy/candidates/center_buy_calibrated_shadow.py:
+    zone: K3_extension
+    authority_role: strategy_candidate_stub
+    why: Wave stochastic-datagated shadow candidate — center-buy calibrated posterior shadow.
+    downstream:
+    - src/strategy/candidates/__init__.py
+  src/strategy/candidates/center_sell_model_no.py:
+    zone: K3_extension
+    authority_role: strategy_candidate_stub
+    why: Wave stochastic-datagated shadow candidate — center-sell model-NO signal.
+    downstream:
+    - src/strategy/candidates/__init__.py
+  src/strategy/candidates/center_sell_parity.py:
+    zone: K3_extension
+    authority_role: strategy_candidate_stub
+    why: Wave stochastic-datagated shadow candidate — center-sell parity.
+    downstream:
+    - src/strategy/candidates/__init__.py
+  src/strategy/candidates/imminent_open_capture_posterior_collapse.py:
+    zone: K3_extension
+    authority_role: strategy_candidate_stub
+    why: Wave stochastic-datagated shadow candidate — imminent open posterior collapse.
+    downstream:
+    - src/strategy/candidates/__init__.py
+  src/strategy/candidates/opening_inertia_relaxation.py:
+    zone: K3_extension
+    authority_role: strategy_candidate_stub
+    why: Wave stochastic-datagated shadow candidate — opening inertia relaxation signal.
+    downstream:
+    - src/strategy/candidates/__init__.py
+  src/strategy/candidates/settlement_capture_shadow.py:
+    zone: K3_extension
+    authority_role: strategy_candidate_stub
+    why: Wave stochastic-datagated shadow candidate — settlement capture physical-interval shadow.
+    downstream:
+    - src/strategy/candidates/__init__.py
+  src/strategy/candidates/shoulder_buy_evt.py:
+    zone: K3_extension
+    authority_role: strategy_candidate_stub
+    why: Wave stochastic-datagated shadow candidate — shoulder-buy EVT/conformal tail-underpricing.
+    downstream:
+    - src/strategy/candidates/__init__.py
+  src/strategy/candidates/shoulder_impossible_tail_capture.py:
+    zone: K3_extension
+    authority_role: strategy_candidate_stub
+    why: Wave stochastic-datagated shadow candidate — shoulder impossible-tail capture.
+    downstream:
+    - src/strategy/candidates/__init__.py
+  src/engine/shadow_candidate_dispatch.py:
+    zone: K2_runtime
+    authority_role: shadow_pipeline_orchestrator
+    why: Wave stochastic-datagated capture pipeline — dispatches shadow candidates to world DB.
+    downstream:
+    - src/engine/cycle_runtime.py
+    - tests/test_l1_shadow_capture_hook.py
+  src/analysis/promotion_proof_router.py:
+    zone: K3_extension
+    authority_role: shadow_pipeline_router
+    why: Wave CI evidence routing — routes shadow strategy_keys to pipeline A/B for promotion proof.
+    downstream:
+    - tests/test_promotion_proof_router_wave.py
+  src/cron/settlement_attribution.py:
+    zone: K3_extension
+    authority_role: shadow_attribution_cron
+    why: Wave shadow PnL attribution cron — computes realized shadow PnL from WORLD.decision_events.
+    downstream:
+    - tests/test_p1_findings_evidence_risk.py
   src/state/AGENTS.md:
     zone: docs
     authority_role: registry

@@ -41,7 +41,7 @@ CREATE TABLE IF NOT EXISTS evidence_tier_assignments (
     rationale      TEXT,
     operator_ref   TEXT,
     verdict_reason TEXT,
-    schema_version INTEGER NOT NULL DEFAULT 29 CHECK (schema_version IN (25, 26, 27, 28, 29)),
+    schema_version INTEGER NOT NULL DEFAULT 30 CHECK (schema_version IN (25, 26, 27, 28, 29, 30)),
     assignment_source TEXT NOT NULL DEFAULT 'tribunal'
         CHECK (assignment_source IN ('tribunal', 'operator_override', 'migration')),
     verdict_kind   TEXT NOT NULL DEFAULT 'MIGRATION'

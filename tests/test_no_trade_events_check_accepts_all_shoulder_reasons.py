@@ -53,9 +53,9 @@ def test_c1_check_constraint_includes_all_shoulder_reason_strings():
 
     table_sql = row[0]
     shoulder_members = [m for m in NoTradeReason if m.name.startswith("SHOULDER_")]
-    # Updated 2026-05-22: 7 members (was 6) — +SHOULDER_PHYSICAL_BOUND_NOT_EXCLUDES_TAIL
-    assert len(shoulder_members) == 7, (
-        f"Expected 7 SHOULDER_* members, got {len(shoulder_members)}"
+    # Updated 2026-05-22: 8 members (was 7) — +SHOULDER_BUY_LOWER_BOUND_NOT_POSITIVE (shoulder_buy_evt v30)
+    assert len(shoulder_members) == 8, (
+        f"Expected 8 SHOULDER_* members, got {len(shoulder_members)}"
     )
 
     missing_in_check = []

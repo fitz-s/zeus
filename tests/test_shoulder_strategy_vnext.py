@@ -200,14 +200,15 @@ def test_p_3_6_shoulder_no_trade_reason_members_present():
 
 
 def test_p_3_6_shoulder_no_trade_reason_count():
-    """P-3-6: Exactly 7 SHOULDER_* prefixed members in NoTradeReason.
+    """P-3-6: Exactly 8 SHOULDER_* prefixed members in NoTradeReason.
 
-    Updated 2026-05-22: +1 SHOULDER_PHYSICAL_BOUND_NOT_EXCLUDES_TAIL for
-    shoulder_impossible_tail_capture theorem-failure gate (was 6).
+    Updated 2026-05-22: +1 SHOULDER_BUY_LOWER_BOUND_NOT_POSITIVE for
+    shoulder_buy_evt theorem-failure gate (was 7).
+    History: 6 original Phase-3 members → +SHOULDER_PHYSICAL_BOUND_NOT_EXCLUDES_TAIL (v29) → +SHOULDER_BUY_LOWER_BOUND_NOT_POSITIVE (v30).
     """
     from src.contracts.no_trade_reason import NoTradeReason
 
     shoulder_members = [m for m in NoTradeReason if m.name.startswith("SHOULDER_")]
-    assert len(shoulder_members) == 7, (
-        f"Expected 7 SHOULDER_* members, got {len(shoulder_members)}: {shoulder_members}"
+    assert len(shoulder_members) == 8, (
+        f"Expected 8 SHOULDER_* members, got {len(shoulder_members)}: {shoulder_members}"
     )

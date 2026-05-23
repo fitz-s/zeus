@@ -495,6 +495,11 @@ test_trust_policy:
     tests/test_phase4_t4_candidates.py: {created: "2026-05-21", last_used: "2026-05-21"}
     # Phase 6 T1+T2+T3+T4 (2026-05-21): EvidenceTier + ShadowExperimentRegistry + RegretDecomposer + LiveReadinessTribunal.
     tests/test_strategy_profile_evidence_tier.py: {created: "2026-05-21", last_used: "2026-05-21"}
+    # Wave stochastic-datagated (2026-05-22): shadow capture pipeline + new candidates.
+    tests/test_shoulder_buy_evt.py: {created: "2026-05-22", last_used: "2026-05-22"}
+    tests/test_l1_shadow_capture_hook.py: {created: "2026-05-22", last_used: "2026-05-22"}
+    tests/test_promotion_proof_router_wave.py: {created: "2026-05-22", last_used: "2026-05-22"}
+    tests/test_cross_market_portfolio_relationships.py: {created: "2026-05-22", last_used: "2026-05-22"}
 
 categories:
   core_law_antibody:

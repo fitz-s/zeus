@@ -212,11 +212,54 @@ def test_inv_evaluator_callsite_count() -> None:
     )
 
 
+
+# Shadow-candidate reasons added by wave/stochastic-datagated-20260522.
+# These are written by candidate.evaluate() (shadow dispatch path), NOT by
+# evaluator.py rejection_reasons=[...] callsites. They legitimately have no
+# MIGRATION_TABLE entry — adding them to the evaluator callsite plan would be
+# category-wrong (they belong in the shadow-candidate evidence pipeline, not
+# the T2 evaluator migration). Added 2026-05-22 by wave critic MAJOR-2 fix.
+_SHADOW_CANDIDATE_REASONS: FrozenSet[str] = frozenset({
+    # CenterSellParity (pre-wave — no evaluator callsite)
+    "center_pair_parity_book_unavailable",
+    "center_pair_parity_no_edge",
+    # CenterSellModelNo (S4)
+    "center_sell_model_no_calibration_unavailable",
+    "center_sell_model_no_no_edge",
+    # CrossMarketCorrelationHedge (G3)
+    "corr_hedge_objective_below_cost",
+    # ShoulderBuyEVT (S5)
+    "evt_tail_model_unwired",
+    # ImminentOpenCapturePosteriorCollapse (S3)
+    "imminent_calibration_unavailable",
+    "imminent_no_edge",
+    # LiquidityProvisionWithHeartbeat (G2)
+    "liqprov_adverse_selection_unwired",
+    # SettlementCaptureShadow — physical interval gates (pre-wave shadow)
+    "physical_envelope_unwired",
+    "physical_interval_data_gated",
+    "physical_interval_overlap",
+    "physical_interval_unprofitable",
+    "resolution_typed_outcome_unavailable",
+    "settlement_capture_not_locked",
+    # ShoulderBuyEVT (S5)
+    "shoulder_buy_lower_bound_not_positive",
+    # ShoulderImpossibleTailCapture (pre-wave shadow)
+    "shoulder_physical_bound_not_excludes_tail",
+    # WeatherEventArbitrage (G1)
+    "weather_alert_edge_nonpositive",
+    "weather_alert_lr_table_missing",
+})
+
+
 def test_inv_no_orphan_enum_members() -> None:
     """INV-B: every NoTradeReason member must appear in the migration table.
 
     Orphan members = enum values with no callsite plan = incomplete migration.
     UNCATEGORIZED is exempt (it is the section 13 fallback, not a migration target).
+    _SHADOW_CANDIDATE_REASONS are exempt: written by candidate.evaluate() in the
+    shadow-dispatch pipeline, not by evaluator.py callsites, so MIGRATION_TABLE
+    coverage would be category-wrong for them.
     xfail until T2 production pass verifies full coverage.
     """
     from src.contracts.no_trade_reason import NoTradeReason
@@ -224,9 +267,13 @@ def test_inv_no_orphan_enum_members() -> None:
     planned_members: FrozenSet[str] = frozenset(
         row[2] for row in MIGRATION_TABLE
     )
-    # UNCATEGORIZED is intentionally exempt (section 13 fallback)
+    # UNCATEGORIZED is intentionally exempt (section 13 fallback).
+    # _SHADOW_CANDIDATE_REASONS are exempt: shadow-dispatch pipeline reasons,
+    # not evaluator.py callsite reasons (wave/stochastic-datagated-20260522).
     all_members: FrozenSet[str] = frozenset(
-        r.value for r in NoTradeReason if r != NoTradeReason.UNCATEGORIZED
+        r.value for r in NoTradeReason
+        if r != NoTradeReason.UNCATEGORIZED
+        and r.value not in _SHADOW_CANDIDATE_REASONS
     )
 
     orphan_members = all_members - planned_members
