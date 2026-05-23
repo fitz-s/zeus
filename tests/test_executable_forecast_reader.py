@@ -773,3 +773,99 @@ def test_full_reader_still_blocks_genuine_causal_order_violation() -> None:
         f"expected READINESS_TIMING_ORDER_INVALID. The captured_at > producer_computed_at "
         f"check has been weakened along with the > now removal."
     )
+
+
+# ── F1: coverage target_window relationship tests ─────────────────────────────
+
+
+def test_coverage_target_window_flows_unchanged_into_scope() -> None:
+    """Relationship test: Module A (coverage write) → Module B (reader) window
+    invariant. The target_window_start/end_utc stored in the coverage row must
+    flow UNCHANGED into the ForecastTargetScope and not be silently replaced by
+    the query-time `now`.
+
+    Proven by: happy-path read succeeds when snapshot.local_day_start_utc
+    matches the known coverage window (Europe/London 2026-05-08 = 2026-05-07T23:00
+    in UTC).  The window is distinct from decision_time (2026-05-03T10:00) — if
+    `or now` ever substituted, the downstream snapshot-vs-coverage window equality
+    check would BLOCK instead of passing.
+    """
+    conn = _conn()
+    scope = _scope()
+    # London BST: 2026-05-08 local midnight = 2026-05-07T23:00:00+00:00 UTC
+    expected_window_start = scope.target_window_start_utc
+    _insert_snapshot(conn, local_day_start_utc=expected_window_start.isoformat())
+    _insert_source_run(conn)
+    _insert_coverage(conn)
+    _insert_readiness(
+        conn,
+        strategy_key=PRODUCER_READINESS_STRATEGY_KEY,
+        readiness_id="producer-readiness-1",
+        dependency_json={"coverage_id": "coverage-1"},
+    )
+    _insert_readiness(
+        conn,
+        strategy_key="entry_forecast",
+        readiness_id="entry-readiness-1",
+        market_family="family-1",
+        condition_id="condition-123",
+    )
+
+    result = _read_full(conn)
+
+    assert result.ok, (
+        f"F1 relationship invariant FAIL: coverage window={expected_window_start.isoformat()} "
+        f"failed to flow through into scope; got reason_code={result.reason_code!r}. "
+        f"The `or now` fallback may have substituted the wrong window."
+    )
+    assert result.reason_code == "EXECUTABLE_FORECAST_READY"
+
+
+def test_coverage_null_target_window_fail_closes() -> None:
+    """Relationship test: when target_window_start/end_utc in the coverage row
+    cannot be parsed (empty, malformed, or naive timestamp), the reader MUST
+    fail-closed with COVERAGE_WINDOW_UNPARSEABLE rather than silently
+    substituting `now` and producing a scope with a wrong window that passes
+    all downstream checks.
+
+    This is the F1 category-closing antibody.  Before the fix the silent
+    fallback continued with scope.target_window_start_utc = decision_time,
+    which emitted SNAPSHOT_LOCAL_DAY_WINDOW_MISMATCH (wrong stage/code) at a
+    later gate instead of aborting immediately with an honest reason code.
+    """
+    conn = _conn()
+    _insert_snapshot(conn)
+    _insert_source_run(conn)
+    _insert_coverage(conn)
+    # Corrupt both target_window columns to unparseable values (empty strings
+    # satisfy NOT NULL but fail _parse_utc — same failure mode as a row written
+    # under a schema version that predates the columns being populated).
+    conn.execute(
+        "UPDATE source_run_coverage SET target_window_start_utc = '', "
+        "target_window_end_utc = '' WHERE coverage_id = 'coverage-1'"
+    )
+    _insert_readiness(
+        conn,
+        strategy_key=PRODUCER_READINESS_STRATEGY_KEY,
+        readiness_id="producer-readiness-1",
+        dependency_json={"coverage_id": "coverage-1"},
+    )
+    _insert_readiness(
+        conn,
+        strategy_key="entry_forecast",
+        readiness_id="entry-readiness-1",
+        market_family="family-1",
+        condition_id="condition-123",
+    )
+
+    result = _read_full(conn)
+
+    assert not result.ok, (
+        "F1 fail-closed FAIL: read succeeded with unparseable coverage window. "
+        "The `or now` fallback substituted query-time instead of blocking."
+    )
+    assert result.reason_code == "COVERAGE_WINDOW_UNPARSEABLE", (
+        f"F1 fail-closed FAIL: expected reason_code='COVERAGE_WINDOW_UNPARSEABLE', "
+        f"got {result.reason_code!r}. The wrong-stage code means the silent "
+        f"now-substitution is still active and the early-abort guard is missing."
+    )

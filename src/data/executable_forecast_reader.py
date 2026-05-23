@@ -759,6 +759,11 @@ def read_executable_forecast(
     if source_run.get("completeness_status") not in {"COMPLETE", "PARTIAL"}:
         return ExecutableForecastBundleResult("BLOCKED", "SOURCE_RUN_PARTIAL")
 
+    coverage_window_start_utc = _parse_utc(coverage.get("target_window_start_utc"))
+    coverage_window_end_utc = _parse_utc(coverage.get("target_window_end_utc"))
+    if coverage_window_start_utc is None or coverage_window_end_utc is None:
+        return ExecutableForecastBundleResult("BLOCKED", "COVERAGE_WINDOW_UNPARSEABLE")
+
     scope = ForecastTargetScope(
         city_id=city_id,
         city_name=city_name,
@@ -766,8 +771,8 @@ def read_executable_forecast(
         target_local_date=target_local_date,
         temperature_metric=temperature_metric,
         data_version=data_version,
-        target_window_start_utc=_parse_utc(coverage.get("target_window_start_utc")) or now,
-        target_window_end_utc=_parse_utc(coverage.get("target_window_end_utc")) or now,
+        target_window_start_utc=coverage_window_start_utc,
+        target_window_end_utc=coverage_window_end_utc,
         source_cycle_time=_parse_utc(source_run.get("source_cycle_time")) or now,
         required_step_hours=expected_steps,
         market_refs=(condition_id,),
