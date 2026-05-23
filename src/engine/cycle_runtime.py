@@ -834,6 +834,11 @@ def _reprice_decision_from_executable_snapshot(
     decision,
     snapshot_fields: dict,
     final_intent_context: dict | None = None,
+    *,
+    _shadow_market_slug: str = "",
+    _shadow_temperature_metric: str = "",
+    _shadow_target_date: str = "",
+    _shadow_observation_time: str = "",
 ) -> float | None:
     """Reprice a selected entry decision from the executable snapshot book.
 
@@ -954,6 +959,39 @@ def _reprice_decision_from_executable_snapshot(
         _vnext_wide_spread = bool(_vnext_metrics.wide_spread_display_substitution)
     except Exception:
         _vnext_wide_spread = False
+    # ---------------------------------------------------------------------------
+    # Track L-1: shadow candidate dispatch (fail-open, flag-gated, default OFF)
+    # PROMOTION_PIPELINE_DESIGN §4: reuses already-computed _vnext_metrics;
+    # any exception is caught and logged — the live decision is never affected.
+    # Natural key params threaded from outer execute_discovery_phase loop via
+    # _shadow_market_slug / _shadow_temperature_metric / _shadow_target_date /
+    # _shadow_observation_time — ExecutableMarketSnapshotV2 does NOT carry them.
+    # ---------------------------------------------------------------------------
+    _vnext_metrics_computed = locals().get("_vnext_metrics")
+    try:
+        from src.engine.shadow_candidate_dispatch import dispatch_shadow_candidates
+        if _vnext_metrics_computed is not None and _shadow_market_slug:
+            from types import SimpleNamespace as _SimpleNamespace
+            from src.contracts.decision_natural_key import make_decision_natural_key
+            _shadow_nk = make_decision_natural_key(
+                market_slug=_shadow_market_slug,
+                temperature_metric=_shadow_temperature_metric,
+                target_date=_shadow_target_date,
+                observation_time=_shadow_observation_time,
+                decision_seq=0,
+            )
+            dispatch_shadow_candidates(
+                analysis=_SimpleNamespace(metrics=_vnext_metrics_computed),
+                natural_key=_shadow_nk,
+                observed_at=_shadow_observation_time,
+                conn=conn,
+                decision_time=datetime.now(tz=timezone.utc),
+            )
+    except Exception:
+        logger.exception(
+            "shadow_candidate_dispatch: outer guard caught exception — "
+            "live cycle unaffected."
+        )
     _reprice_order_type = str(final_intent_context.get("order_type") or "GTC").strip().upper()
     strategy_key_for_live_quality = _resolve_strategy_key(decision)
     # W2 is post-only passive maker sizing. Live strategy decisions consume
@@ -4834,11 +4872,24 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                             if callable(_reprice_fn):
                                 snapshot_best_ask = _reprice_fn(conn, d, snapshot_fields, final_intent_context)
                             else:
+                                # Derive observation_time for shadow dispatch (natural key only;
+                                # not used in live pricing). candidate.observation carries it.
+                                _cand_obs = candidate.observation
+                                if isinstance(_cand_obs, dict):
+                                    _shadow_obs_time = str(_cand_obs.get("observation_time", "") or "")
+                                elif _cand_obs is not None:
+                                    _shadow_obs_time = str(getattr(_cand_obs, "observation_time", "") or "")
+                                else:
+                                    _shadow_obs_time = ""
                                 snapshot_best_ask = _reprice_decision_from_executable_snapshot(
                                     conn,
                                     d,
                                     snapshot_fields,
                                     final_intent_context,
+                                    _shadow_market_slug=str(candidate.slug or ""),
+                                    _shadow_temperature_metric=str(candidate.temperature_metric or ""),
+                                    _shadow_target_date=str(candidate.target_date or ""),
+                                    _shadow_observation_time=_shadow_obs_time,
                                 )
                         except Exception as exc:
                             summary["no_trades"] += 1
