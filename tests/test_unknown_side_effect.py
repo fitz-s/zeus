@@ -4,7 +4,7 @@
 # Reuse: Run when executor submit exception handling, venue command recovery,
 #        or idempotency/economic-intent duplicate blocking changes.
 # Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/M2.yaml
-#                  + docs/operations/task_2026-05-15_live_order_e2e_goal/LIVE_ORDER_E2E_GOAL_PLAN.md
+#                  + docs/operations/archive/2026-Q2/task_2026-05-15_live_order_e2e_goal/LIVE_ORDER_E2E_GOAL_PLAN.md
 """M2: post-side-effect submit uncertainty must not become semantic rejection."""
 
 from __future__ import annotations

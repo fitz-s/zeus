@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Created: 2026-05-15
 # Last reused or audited: 2026-05-15
-# Authority basis: docs/operations/task_2026-05-15_data_pipeline_live_rootfix/DATA_PIPELINE_ROOTFIX_PLAN.md
+# Authority basis: docs/operations/archive/2026-Q2/task_2026-05-15_data_pipeline_live_rootfix/DATA_PIPELINE_ROOTFIX_PLAN.md
 """Live data-pipeline end-to-end diagnostic.
 
 This checker is intentionally live-only: it reads the active process table and

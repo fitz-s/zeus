@@ -11,7 +11,7 @@ Usage:
 # Lifecycle: created=2026-04-07; last_reviewed=2026-05-15; last_reused=2026-05-15
 # Purpose: Diagnose truth-surface integrity, training-readiness blockers, and fact-table authority labels.
 # Reuse: Inspect docs/operations/current_data_state.md and the active packet receipt before using as closeout evidence.
-# Authority basis: docs/operations/task_2026-05-14_k1_followups/PLAN.md §4.5 (K1 broken-script remediation)
+# Authority basis: docs/operations/archive/2026-Q2/task_2026-05-14_k1_followups/PLAN.md §4.5 (K1 broken-script remediation)
 
 from __future__ import annotations
 

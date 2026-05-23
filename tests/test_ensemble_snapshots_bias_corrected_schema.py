@@ -2,7 +2,7 @@
 # Last reused/audited: 2026-05-15
 # Authority basis: docs/operations/task_2026-04-26_full_data_midstream_fix_plan/
 #                  phases/task_2026-04-26_phase2_adjacent_fixes/plan.md slice P2-B1;
-#                  docs/operations/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md forecasts DB p_raw authority.
+#                  docs/operations/archive/2026-Q2/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md forecasts DB p_raw authority.
 """Slice P2-B1 relationship + idempotency tests.
 
 PR #19 phase 2 originally protected the legacy

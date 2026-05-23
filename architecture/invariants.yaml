@@ -744,5 +744,5 @@ invariants:
     capability_tags: [K1_db_split]
     relationship_tests:
       - tests/state/test_daily_obs_cross_db_atomicity.py
-    basis: docs/operations/task_2026-05-14_k1_followups/PLAN.md §0.3 + §3 A7
+    basis: docs/operations/archive/2026-Q2/task_2026-05-14_k1_followups/PLAN.md §0.3 + §3 A7
     added: 2026-05-14

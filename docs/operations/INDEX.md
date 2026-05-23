@@ -4,7 +4,7 @@
 must be registered here.  If it isn't on this page, it's a candidate
 for archival — see `POLICY.md` for the closeout rule.
 
-**Last reviewed:** 2026-05-17.
+**Last reviewed:** 2026-05-22.
 
 ---
 
@@ -50,14 +50,14 @@ directory should EITHER be moved under `archive/` OR keep a
 | `task_2026-05-05_object_invariance_mainline/` | `7357aac7ef..e0b4c00276` | **closed** — object-meaning invariance mainline closeout ledger | 2026-05-05 |
 | `task_2026-05-05_object_invariance_wave5/` through `wave8/`, `wave11/`–`wave21/` | `dfb1451af6` | **closed** — object-meaning invariance remediation waves 5-21 | 2026-05-05 |
 | `task_2026-05-06_calibration_quality_blockers/` | `ff5c09f283..be302b9111` | **closed** — calibration quality launch-blocker (12 quarantined Platts + fit-time guard) | 2026-05-06 |
-| `task_2026-05-06_hook_redesign/` | superseded | **closed** — hook redesign v1; superseded by v2 | 2026-05-06 |
+| `task_2026-05-06_hook_redesign/` | superseded | **archived** — moved to archive/2026-Q2/ — hook redesign v1; superseded by v2 | 2026-05-06 |
 | `task_2026-05-06_topology_redesign/` | superseded | **closed** — topology redesign v1; superseded by v2 | 2026-05-06 |
 | ~~`task_2026-05-07_hook_redesign_v2/`~~ | `d99bbf9500` | **dir absent** — hook ecosystem v2 merged into main `.claude/settings.json`; directory no longer exists | 2026-05-07 |
 | `task_2026-05-07_navigation_topology_v2/` | `fe8d0d79a5` | **closed** — topology v2 navigation upgrade, merged | 2026-05-07 |
 | `task_2026-05-07_recalibration_after_low_high_alignment/` | `1d9859d90a` | **closed** — LOW/HIGH recalibration recovery, merged | 2026-05-07 |
 | `task_2026-05-07_object_invariance_wave24/`–`wave26/` | `d7db6ba2ef` | **closed** — object-meaning invariance waves 24-26 | 2026-05-07 |
-| `task_2026-05-08_deep_alignment_audit/` | pre-PR #88 | **closed** — deep alignment audit, findings drove repair | 2026-05-08 |
-| `task_2026-05-08_alignment_safe_implementation/` | `2f436a6b21` | **closed** — alignment repair implementation, merged | 2026-05-08 |
+| `task_2026-05-08_deep_alignment_audit/` | pre-PR #88 | **archived** — moved to archive/2026-Q2/ — deep alignment audit, findings drove repair | 2026-05-08 |
+| `task_2026-05-08_alignment_safe_implementation/` | `2f436a6b21` | **archived** — moved to archive/2026-Q2/ — alignment repair implementation, merged | 2026-05-08 |
 | ~~`task_2026-05-08_alignment_repair_workflow/`~~ | workflow record | **deleted 2026-05-17** — closed, 0 active refs | 2026-05-08 |
 | ~~`task_2026-05-08_100_blocked_horizon_audit/`~~ | diagnostic | **deleted 2026-05-17** — closed, 0 active refs | 2026-05-08 |
 | `task_2026-05-08_262_london_f_to_c/` | `9cc3d5fefd` | **closed** — London °F→°C settlement semantics fix, merged | 2026-05-08 |
@@ -72,7 +72,7 @@ directory should EITHER be moved under `archive/` OR keep a
 | ~~`task_2026-05-08_track_a6_run/`~~ | evidence packet | **deleted 2026-05-17** — closed, 0 active refs | 2026-05-08 |
 | `task_2026-05-08_object_invariance_wave27/`–`wave42/` | `214a805ef2` | **closed** — object-meaning invariance waves 27-42 | 2026-05-08 |
 | `task_2026-05-08_object_invariance_remaining_mainline/` | `e0b4c00276` | **closed** — remaining mainline invariance closeout | 2026-05-08 |
-| `task_2026-05-09_copilot_agent_sync/` | planning packet | **active** — Copilot/VS Code agent sync planning; open for implementation | 2026-05-09 |
+| `task_2026-05-09_copilot_agent_sync/` | planning packet | **archived** — moved to archive/2026-Q2/ — Copilot/VS Code agent sync planning; open for implementation | 2026-05-09 |
 | ~~`task_2026-05-09_daemon_restart_and_backfill/`~~ | operations run | **deleted 2026-05-17** — closed, 0 active refs | 2026-05-09 |
 | `task_2026-05-09_post_s4_residuals_topology/` | evidence packet | **closed** — post-S4 topology residuals audit | 2026-05-09 |
 | `task_2026-05-09_pr_workflow_failure/` | incident record | **closed** — PR workflow failure, resolved | 2026-05-09 |
@@ -80,38 +80,38 @@ directory should EITHER be moved under `archive/` OR keep a
 | `task_2026-05-11_ecmwf_download_replacement/` | `eba80d2b9d` | **closed** — ECMWF download replacement, merged | 2026-05-11 |
 | `task_2026-05-11_tigge_vm_to_zeus_db/` | `eba80d2b9d` | **closed** — TIGGE VM-to-Zeus DB wiring, merged | 2026-05-11 |
 | `task_2026-05-14_attach_path_index_fix/` | `eba80d2b9d` | **closed** — K1 attach-path index fix, merged | 2026-05-14 |
-| `task_2026-05-14_data_daemon_live_efficiency/` | `eba80d2b9d` | **closed** — data-daemon live-efficiency refactor, merged | 2026-05-14 |
-| `task_2026-05-14_k1_followups/` | `2e00271cee` | **closed** — K1 followup seam repairs, merged | 2026-05-14 |
-| `task_2026-05-15_data_pipeline_live_rootfix/` | `595be616e3` | **closed** — live data pipeline root-cause fix, merged | 2026-05-15 |
-| `task_2026-05-15_live_order_e2e_goal/` | branch: feat/live-order-e2e | **active** — live order E2E proof: data→evaluator→executor→venue record | 2026-05-15 |
-| `task_2026-05-15_live_order_e2e_verification/` | evidence packet | **active** — E2E verification plan and critic approval | 2026-05-15 |
+| `task_2026-05-14_data_daemon_live_efficiency/` | `eba80d2b9d` | **archived** — moved to archive/2026-Q2/ — data-daemon live-efficiency refactor, merged | 2026-05-14 |
+| `task_2026-05-14_k1_followups/` | `2e00271cee` | **archived** — moved to archive/2026-Q2/ — K1 followup seam repairs, merged | 2026-05-14 |
+| `task_2026-05-15_data_pipeline_live_rootfix/` | `595be616e3` | **archived** — moved to archive/2026-Q2/ — live data pipeline root-cause fix, merged | 2026-05-15 |
+| `task_2026-05-15_live_order_e2e_goal/` | branch: feat/live-order-e2e | **archived** — moved to archive/2026-Q2/ — live order E2E proof: data→evaluator→executor→venue record | 2026-05-15 |
+| `task_2026-05-15_live_order_e2e_verification/` | evidence packet | **archived** — moved to archive/2026-Q2/ — E2E verification plan and critic approval | 2026-05-15 |
 | ~~`task_2026-05-15_p_drift_remediation/`~~ | `3f73872236` | **deleted 2026-05-17** — closed, 0 active refs | 2026-05-15 |
-| `task_2026-05-15_p1_topology_v_next_additive/` | `7235165807..1ebf1a7079` | **closed** — topology v-next additive phase 1, merged | 2026-05-15 |
-| `task_2026-05-15_p2_companion_required_mechanism/` | `1f2158a14e..16690c36f6` | **closed** — companion-required mechanism, merged | 2026-05-15 |
-| `task_2026-05-15_p3_topology_v_next_phase2_shadow/` | `95617f5300..010d930941` | **closed** — topology v-next phase 2 shadow mode, merged | 2026-05-15 |
-| `task_2026-05-15_p5_maintenance_worker_core/` | `8f2eddf3d0..ea857404d5` | **closed** — maintenance worker core scaffold, merged | 2026-05-15 |
-| `task_2026-05-15_p8_authority_drift_3_blocking/` | `89ac23f7f1` | **closed** — authority drift blocking fixes, merged | 2026-05-15 |
-| `task_2026-05-15_p9_authority_inventory_v2/` | `3262f2c080..8f54c8392c` | **closed** — authority inventory v2, merged | 2026-05-15 |
-| `task_2026-05-15_p10_module_consolidation_planning/` | planning packet | **active** — module consolidation planning; open for implementation | 2026-05-15 |
+| `task_2026-05-15_p1_topology_v_next_additive/` | `7235165807..1ebf1a7079` | **archived** — moved to archive/2026-Q2/ — topology v-next additive phase 1, merged | 2026-05-15 |
+| `task_2026-05-15_p2_companion_required_mechanism/` | `1f2158a14e..16690c36f6` | **archived** — moved to archive/2026-Q2/ — companion-required mechanism, merged | 2026-05-15 |
+| `task_2026-05-15_p3_topology_v_next_phase2_shadow/` | `95617f5300..010d930941` | **archived** — moved to archive/2026-Q2/ — topology v-next phase 2 shadow mode, merged | 2026-05-15 |
+| `task_2026-05-15_p5_maintenance_worker_core/` | `8f2eddf3d0..ea857404d5` | **archived** — moved to archive/2026-Q2/ — maintenance worker core scaffold, merged | 2026-05-15 |
+| `task_2026-05-15_p8_authority_drift_3_blocking/` | `89ac23f7f1` | **archived** — moved to archive/2026-Q2/ — authority drift blocking fixes, merged | 2026-05-15 |
+| `task_2026-05-15_p9_authority_inventory_v2/` | `3262f2c080..8f54c8392c` | **archived** — moved to archive/2026-Q2/ — authority inventory v2, merged | 2026-05-15 |
+| `task_2026-05-15_p10_module_consolidation_planning/` | planning packet | **archived** — moved to archive/2026-Q2/ — module consolidation planning; open for implementation | 2026-05-15 |
 | `task_2026-05-15_runtime_improvement_engineering_package/` | `d6eac5d21a..44b12a372b` | **active** — runtime improvement engineering package; ACTIVE_LAW | 2026-05-15 |
-| `task_2026-05-15_autonomous_agent_runtime_audit/` | audit packet | **active** — autonomous agent runtime audit; IN_PROGRESS | 2026-05-15 |
+| `task_2026-05-15_autonomous_agent_runtime_audit/` | audit packet | **archived** — moved to archive/2026-Q2/ — autonomous agent runtime audit; IN_PROGRESS | 2026-05-15 |
 | ~~`task_2026-05-15_claude_md_drift_audit/`~~ | audit packet | **deleted 2026-05-17** — closed, 0 refs | 2026-05-15 |
-| `task_2026-05-16_deep_alignment_audit/` | audit packet | **closed** — post-PR-#121 deep alignment audit; findings applied | 2026-05-16 |
-| `task_2026-05-16_doc_alignment_plan/` | this PR (feat/doc-alignment-2026-05-16) | **active** — post-PR-#119 authority doc + semantic drift refresh (大扫除) | 2026-05-16 |
-| `task_2026-05-16_live_continuous_run_package/` | `feat/live-continuous-run-2026-05-16` | **closed** — live continuous-run package plan + critic approval, merged PR #123 | 2026-05-16 |
-| `task_2026-05-17_docs_taxonomy_design/` | `feat/docs-taxonomy-design-2026-05-17` | **closed** — docs taxonomy design + W1-W6 execution + PR #136 merge | 2026-05-17 |
-| `task_2026-05-17_reference_authority_docs_phase/` | audit packet | **active** — reference + authority docs citation audit phase (drift repair) | 2026-05-17 |
+| `task_2026-05-16_deep_alignment_audit/` | audit packet | **archived** — moved to archive/2026-Q2/ — post-PR-#121 deep alignment audit; findings applied | 2026-05-16 |
+| `task_2026-05-16_doc_alignment_plan/` | this PR (feat/doc-alignment-2026-05-16) | **archived** — moved to archive/2026-Q2/ — post-PR-#119 authority doc + semantic drift refresh (大扫除) | 2026-05-16 |
+| `task_2026-05-16_live_continuous_run_package/` | `feat/live-continuous-run-2026-05-16` | **archived** — moved to archive/2026-Q2/ — live continuous-run package plan + critic approval, merged PR #123 | 2026-05-16 |
+| `task_2026-05-17_docs_taxonomy_design/` | `feat/docs-taxonomy-design-2026-05-17` | **archived** — moved to archive/2026-Q2/ — docs taxonomy design + W1-W6 execution + PR #136 merge | 2026-05-17 |
+| `task_2026-05-17_reference_authority_docs_phase/` | audit packet | **archived** — moved to archive/2026-Q2/ — reference + authority docs citation audit phase (drift repair) | 2026-05-17 |
 | `2026-05-18_worktree_create_hook_cwd_leakage/` | PR #153 | **active** — incident packet: WorktreeCreate hook cwd-leakage fix + committed snapshot + antibody test | 2026-05-18 |
 | `task_2026-05-19_strategy_vnext_phase1/` | PR #214 (T1-A), PR #215 (T1-B) | **active** — Phase 1 T1: decision_events table + natural-key writer + backfill + antibody (PHASE_1_ULTRAPLAN.md Path D v3) | 2026-05-19 |
 | `task_2026-05-20_strategy_vnext_phase2/` | PR #220 (T1) | **active** — Phase 2 T1: book_hash_transitions table + writer + producer wiring + antibody (PHASE_2_ULTRAPLAN.md v3.1, SCHEMA_VERSION 14) | 2026-05-20 |
-| `task_2026-05-20_live_substrate_bookhash_ownership/` | PR #223 | **active** — live substrate ownership repair: co-locate executable_market_snapshots and book_hash_transitions on trade DB | 2026-05-20 |
-| `task_2026-05-21_live_family_vector_fill_model/` | PR #252 | **active** — remaining family vector, passive fill model, topology, order reducer, source-quality and liveness fixes after #246/#249 | 2026-05-21 |
-| `task_2026-05-21_live_contract_authority_pass/` | PR #253 | **active** — contract authority pass for tradability, passive EV, order truth, family exposure, and business-plane health after endpoint-asymmetry review | 2026-05-21 |
-| `task_2026-05-21_money_path_semantic_ci/` | PR #257 | **active** — money-path semantic CI object registry, classifier, invariant coverage, and test-quality gate | 2026-05-21 |
+| `task_2026-05-20_live_substrate_bookhash_ownership/` | PR #223 | **archived** — moved to archive/2026-Q2/ — live substrate ownership repair: co-locate executable_market_snapshots and book_hash_transitions on trade DB | 2026-05-20 |
+| `task_2026-05-21_live_family_vector_fill_model/` | PR #252 | **archived** — moved to archive/2026-Q2/ — remaining family vector, passive fill model, topology, order reducer, source-quality and liveness fixes after #246/#249 | 2026-05-21 |
+| `task_2026-05-21_live_contract_authority_pass/` | PR #253 | **archived** — moved to archive/2026-Q2/ — contract authority pass for tradability, passive EV, order truth, family exposure, and business-plane health after endpoint-asymmetry review | 2026-05-21 |
+| `task_2026-05-21_money_path_semantic_ci/` | PR #257 | **archived** — moved to archive/2026-Q2/ — money-path semantic CI object registry, classifier, invariant coverage, and test-quality gate | 2026-05-21 |
 | `task_2026-05-21_live_release_proof_p0p3/` | branch: `fix/live-release-proof-p0p3-20260521` | **active** — P0-P3 live release proof blockers: release gate, schema fail-closed, negRisk tradeability, lifecycle replay, redeem semantics, Kelly proof, required money-path CI | 2026-05-21 |
-| `task_2026-05-21_evidence_tier_tribunal_authority/` | PR #279 | **active** — EvidenceTier, Tribunal, no-trade provenance, and runtime strategy authority repair packet | 2026-05-21 |
-| `task_2026-05-22_live_math_frontier/` | PR #285 | **active** — live math-frontier edge trace, Day0 observation-fused bootstrap, source writer observability, and no-trade attribution repair | 2026-05-22 |
-| `task_2026-05-22_crosscheck_valid_window/` | PR #287 | **active** — executable forecast valid-window provenance repair for crosscheck comparability | 2026-05-22 |
+| `task_2026-05-21_evidence_tier_tribunal_authority/` | PR #279 | **archived** — moved to archive/2026-Q2/ — EvidenceTier, Tribunal, no-trade provenance, and runtime strategy authority repair packet | 2026-05-21 |
+| `task_2026-05-22_live_math_frontier/` | PR #285 | **archived** — moved to archive/2026-Q2/ — live math-frontier edge trace, Day0 observation-fused bootstrap, source writer observability, and no-trade attribution repair | 2026-05-22 |
+| `task_2026-05-22_crosscheck_valid_window/` | PR #287 | **archived** — moved to archive/2026-Q2/ — executable forecast valid-window provenance repair for crosscheck comparability | 2026-05-22 |
 | `task_2026-05-21_mainline_completion_authority/` | PR #284 | **active** — Phase 1-7 mainline completion authority package: closure verdict, promotion-validator critic, completion report, and #77 promotion-readiness validator | 2026-05-22 |
 
 ## Active operation (only one allowed unless explicit branching)
@@ -159,6 +159,48 @@ These items have been moved to `docs/operations/archive/` per `POLICY.md`.
 | `src/state/schema_introspection.py` | `has_columns()` helper (P2) — call this from any code path that depends on a column added by a staged migration. |
 | `src/runtime/clock_skew_probe.py` | NTP-style clock skew probe vs Polymarket REST Date: header. Caches result 60s. Returns int ms (local − venue) or None on probe failure. PR 6. |
 
+| `task_2026-05-06_hook_redesign/` | archived | hook redesign v1, superseded by v2 |
+| `task_2026-05-08_alignment_safe_implementation/` | archived | alignment repair implementation, merged |
+| `task_2026-05-08_deep_alignment_audit/` | archived | deep alignment audit, findings applied |
+| `task_2026-05-09_copilot_agent_sync/` | archived | Copilot agent sync planning |
+| `task_2026-05-14_data_daemon_live_efficiency/` | archived | data-daemon live-efficiency refactor, merged |
+| `task_2026-05-14_k1_followups/` | archived | K1 followup seam repairs, merged |
+| `task_2026-05-15_autonomous_agent_runtime_audit/` | archived | autonomous agent runtime audit |
+| `task_2026-05-15_data_pipeline_live_rootfix/` | archived | live data pipeline root-cause fix, merged |
+| `task_2026-05-15_live_order_e2e_goal/` | archived | live order E2E proof goal packet |
+| `task_2026-05-15_live_order_e2e_verification/` | archived | E2E verification plan and critic approval |
+| `task_2026-05-15_p10_module_consolidation_planning/` | archived | module consolidation planning |
+| `task_2026-05-15_p1_topology_v_next_additive/` | archived | topology v-next additive phase 1, merged |
+| `task_2026-05-15_p2_companion_required_mechanism/` | archived | companion-required mechanism, merged |
+| `task_2026-05-15_p3_topology_v_next_phase2_shadow/` | archived | topology v-next phase 2 shadow mode, merged |
+| `task_2026-05-15_p5_maintenance_worker_core/` | archived | maintenance worker core scaffold, merged |
+| `task_2026-05-15_p8_authority_drift_3_blocking/` | archived | authority drift blocking fixes, merged |
+| `task_2026-05-15_p9_authority_inventory_v2/` | archived | authority inventory v2, merged |
+| `task_2026-05-16_deep_alignment_audit/` | archived | post-PR-#121 deep alignment audit, findings applied |
+| `task_2026-05-16_doc_alignment_plan/` | archived | post-PR-#119 authority doc refresh (大扫除) |
+| `task_2026-05-16_live_continuous_run_package/` | archived | live continuous-run package, merged PR #123 |
+| `task_2026-05-16_post_pr126_audit/` | archived | post-PR-#126 audit |
+| `task_2026-05-17_docs_taxonomy_design/` | archived | docs taxonomy design, PR #136 merged |
+| `task_2026-05-17_f109_fix/` | archived | F109 consolidator boot wire fix |
+| `task_2026-05-17_live_order_survival/` | archived | live order survival engineering |
+| `task_2026-05-17_post_karachi_remediation/` | archived | post-Karachi DST remediation |
+| `task_2026-05-17_reference_authority_docs_phase/` | archived | reference + authority docs citation audit |
+| `task_2026-05-17_strategy_vnext_phase0/` | archived | strategy v-next Phase 0 scaffold |
+| `task_2026-05-18_live_reduce_only_reconcile_loop/` | archived | live reduce-only reconcile loop fix |
+| `task_2026-05-18_wave3_dispatches/` | archived | Wave 3 dispatch coordination |
+| `task_2026-05-20_live_substrate_bookhash_ownership/` | archived | live substrate ownership repair, merged PR #223 |
+| `task_2026-05-20_pr221_review_fixes/` | archived | PR #221 review fixes |
+| `task_2026-05-21_evidence_tier_tribunal_authority/` | archived | EvidenceTier, Tribunal, no-trade provenance, merged PR #279 |
+| `task_2026-05-21_live_authority_shadow_risk_followup/` | archived | live authority shadow risk followup |
+| `task_2026-05-21_live_contract_authority_pass/` | archived | contract authority pass, merged PR #253 |
+| `task_2026-05-21_live_entry_order_management/` | archived | live entry order management |
+| `task_2026-05-21_live_family_selection_complete/` | archived | live family selection completion |
+| `task_2026-05-21_live_family_selection_economic_floor/` | archived | live family selection economic floor |
+| `task_2026-05-21_live_family_vector_fill_model/` | archived | live family vector fill model, merged PR #252 |
+| `task_2026-05-21_live_side_specific_entry_authority/` | archived | live side-specific entry authority |
+| `task_2026-05-21_money_path_semantic_ci/` | archived | money-path semantic CI, merged PR #257 |
+| `task_2026-05-22_crosscheck_valid_window/` | archived | executable forecast valid-window provenance repair, merged PR #287 |
+| `task_2026-05-22_live_math_frontier/` | archived | live math-frontier edge trace, merged PR #285 |
 ## Triage backlog (one-time cleanup, 2026-05-04)
 
 Items above marked **review** or **archive candidate** need an

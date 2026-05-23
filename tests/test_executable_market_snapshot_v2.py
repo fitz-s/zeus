@@ -2,7 +2,7 @@
 # Lifecycle: created=2026-04-27; last_reviewed=2026-05-20; last_reused=2026-05-20
 # Purpose: U1 snapshot antibodies plus pricing-semantics contract scaffolding.
 # Reuse: Run when executable snapshots, venue_commands gating, or V2 market preflight semantics change.
-# Authority basis: docs/operations/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md
+# Authority basis: docs/operations/archive/2026-Q2/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md
 #                  docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/U1.yaml
 #                  docs/operations/task_2026-04-30_reality_semantics_refactor_package/evidence/source_package/zeus_pricing_semantics_cutover_package/04_multiphase_execution_plan.md
 """Executable snapshot, command freshness, and corrected pricing contract tests."""

@@ -375,7 +375,7 @@ scripts:
   obs_v2_live_tick.py:
     class: etl_writer
     module_owner: data
-    packet: docs/operations/task_2026-05-17_post_karachi_remediation
+    packet: docs/operations/archive/2026-Q2/task_2026-05-17_post_karachi_remediation
     required_helpers: [src.data.tier_resolver, src.data.observation_instants_v2_writer, src.data.wu_hourly_client, src.data.ogimet_hourly_client, src.state.db_writer_lock]
     external_inputs: [WU historical.json, Ogimet METAR]
     target_db: state/zeus-world.db
@@ -467,7 +467,7 @@ scripts:
   check_data_pipeline_live_e2e.py:
     # Created: 2026-05-15
     # Last reused or audited: 2026-05-15
-    # Authority basis: docs/operations/task_2026-05-15_data_pipeline_live_rootfix/DATA_PIPELINE_ROOTFIX_PLAN.md
+    # Authority basis: docs/operations/archive/2026-Q2/task_2026-05-15_data_pipeline_live_rootfix/DATA_PIPELINE_ROOTFIX_PLAN.md
     class: diagnostic
     lifecycle: long_lived
     status: active
@@ -487,7 +487,7 @@ scripts:
   check_live_order_e2e.py:
     # Created: 2026-05-15
     # Last reused or audited: 2026-05-15
-    # Authority basis: docs/operations/task_2026-05-15_live_order_e2e_goal/LIVE_ORDER_E2E_GOAL_PLAN.md
+    # Authority basis: docs/operations/archive/2026-Q2/task_2026-05-15_live_order_e2e_goal/LIVE_ORDER_E2E_GOAL_PLAN.md
     class: diagnostic
     lifecycle: long_lived
     status: active
@@ -530,7 +530,7 @@ scripts:
   live_health_probe.py:
     # Created: 2026-05-11
     # Last reused or audited: 2026-05-18
-    # Authority basis: docs/operations/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md; docs/operations/task_2026-05-16_live_continuous_run_package/LIVE_CONTINUOUS_RUN_PACKAGE_PLAN.md Phase C
+    # Authority basis: docs/operations/archive/2026-Q2/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md; docs/operations/archive/2026-Q2/task_2026-05-16_live_continuous_run_package/LIVE_CONTINUOUS_RUN_PACKAGE_PLAN.md Phase C
     class: diagnostic
     lifecycle: long_lived
     status: active
@@ -732,7 +732,7 @@ scripts:
     module_owner: scripts
     status: scaffold
     lifecycle: phase0_pr4
-    packet: docs/operations/task_2026-05-17_strategy_vnext_phase0
+    packet: docs/operations/archive/2026-Q2/task_2026-05-17_strategy_vnext_phase0
     authority_scope: read_only_audit
     reuse_when: "Pre-migration audit: count NULL decision_group_id rows on calibration_pairs_v2 and calibration_pairs_v2_archived_2026_05_11."
     do_not_use_when: "Never use as proof of successful migration; it is read-only preflight only."
@@ -752,7 +752,7 @@ scripts:
     module_owner: scripts
     status: scaffold
     lifecycle: phase0_pr4
-    packet: docs/operations/task_2026-05-17_strategy_vnext_phase0
+    packet: docs/operations/archive/2026-Q2/task_2026-05-17_strategy_vnext_phase0
     dangerous_if_run: true
     dry_run_default: true
     apply_flag: "--apply"
@@ -769,7 +769,7 @@ scripts:
     module_owner: scripts
     status: scaffold
     lifecycle: phase0_pr4
-    packet: docs/operations/task_2026-05-17_strategy_vnext_phase0
+    packet: docs/operations/archive/2026-Q2/task_2026-05-17_strategy_vnext_phase0
     dangerous_if_run: true
     dry_run_default: true
     apply_flag: "--apply"
@@ -1161,7 +1161,7 @@ scripts:
     read_targets: [config/reality_contracts/*.yaml]
     write_targets:
       - config/reality_contracts/*.yaml
-      - docs/operations/task_2026-05-17_reference_authority_docs_phase/VERIFIER_REPORT.md
+      - docs/operations/archive/2026-Q2/task_2026-05-17_reference_authority_docs_phase/VERIFIER_REPORT.md
     dry_run_default: true
     apply_flag: "--apply"
     target_db: none
@@ -1179,7 +1179,7 @@ scripts:
     module_owner: execution
     status: active
     lifecycle: phase0_pr36
-    packet: docs/operations/task_2026-05-17_strategy_vnext_phase0
+    packet: docs/operations/archive/2026-Q2/task_2026-05-17_strategy_vnext_phase0
     authority_scope: repair_write
     dangerous_if_run: true
     dry_run_default: true
@@ -1230,7 +1230,7 @@ scripts:
     module_owner: engine
     status: active
     lifecycle: phase0_pr36
-    packet: docs/operations/task_2026-05-17_strategy_vnext_phase0
+    packet: docs/operations/archive/2026-Q2/task_2026-05-17_strategy_vnext_phase0
     authority_scope: repair_write
     dangerous_if_run: true
     dry_run_default: true

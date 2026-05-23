@@ -65,6 +65,8 @@ allowed_coverage_scopes:
 parent_coverage_allowed_patterns:
 - docs/reference/legacy/
 - docs/operations/task_*/
+- docs/operations/archive/2026-Q2/task_*/
+- docs/operations/archive/2026-Q2/
 - docs/operations/[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]_*/
 - docs/operations/*_package_*/
 - docs/operations/*_observation/
@@ -838,6 +840,44 @@ entries:
   contains_volatile_metrics: false
   current_tense_allowed: false
   refresh_source: n/a
+
+- path: docs/operations/task_*.archived
+  doc_class: historical
+  default_read: false
+  direct_reference_allowed: false
+  current_role: archive stub files marking the original location of a moved task packet; YAML front-matter only, no content
+  canonical_replaced_by: []
+  next_action: keep
+  lifecycle_state: durable
+  coverage_scope: exact
+  parent_coverage_allowed: false
+  truth_profile: artifact_evidence
+  freshness_class: historical
+  supersedes: []
+  superseded_by: []
+  may_live_in_reference: false
+  contains_volatile_metrics: false
+  current_tense_allowed: false
+  refresh_source: manual_operator_audit
+
+- path: docs/operations/archive/2026-Q2/
+  doc_class: historical
+  default_read: false
+  direct_reference_allowed: false
+  current_role: Q2-2026 archive directory; contains moved task packets and their evidence
+  canonical_replaced_by: []
+  next_action: keep
+  lifecycle_state: durable
+  coverage_scope: descendants
+  parent_coverage_allowed: true
+  truth_profile: artifact_evidence
+  freshness_class: historical
+  supersedes: []
+  superseded_by: []
+  may_live_in_reference: false
+  contains_volatile_metrics: false
+  current_tense_allowed: false
+  refresh_source: manual_operator_audit
 
 - path: docs/operations/task_2026-04-29_design_simplification_audit/
   doc_class: operations

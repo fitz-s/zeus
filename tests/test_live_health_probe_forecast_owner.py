@@ -3,7 +3,7 @@
 # Reuse: Run when live_health_probe process/heartbeat classification or forecast-live launch ownership changes.
 # Created: 2026-05-15
 # Last reused or audited: 2026-05-18
-# Authority basis: docs/operations/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md; docs/operations/task_2026-05-16_live_continuous_run_package/LIVE_CONTINUOUS_RUN_PACKAGE_PLAN.md Phase C; 2026-05-17 volatile runtime-artifact code-plane contract.
+# Authority basis: docs/operations/archive/2026-Q2/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md; docs/operations/archive/2026-Q2/task_2026-05-16_live_continuous_run_package/LIVE_CONTINUOUS_RUN_PACKAGE_PLAN.md Phase C; 2026-05-17 volatile runtime-artifact code-plane contract.
 
 from __future__ import annotations
 

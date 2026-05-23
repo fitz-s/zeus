@@ -1,7 +1,7 @@
 # Created: 2026-05-19
 # Last reused or audited: 2026-05-19
-# Authority basis: docs/operations/task_2026-05-17_strategy_vnext_phase0/PHASE_0_V4_ULTRAPLAN.md §D.1
-#                  docs/operations/task_2026-05-17_strategy_vnext_phase0/critic_1_pr1_settlement.md P7-2
+# Authority basis: docs/operations/archive/2026-Q2/task_2026-05-17_strategy_vnext_phase0/PHASE_0_V4_ULTRAPLAN.md §D.1
+#                  docs/operations/archive/2026-Q2/task_2026-05-17_strategy_vnext_phase0/critic_1_pr1_settlement.md P7-2
 #                  src/state/uma_resolution_listener.py:496 (record_resolution INSERT OR IGNORE)
 """
 Relationship test R-1.5: uma_resolution_listener late revalidation + reorg safety.

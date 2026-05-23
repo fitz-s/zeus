@@ -1,6 +1,6 @@
 # Created: 2026-05-15
 # Last reused or audited: 2026-05-15
-# Authority basis: docs/operations/task_2026-05-15_p1_topology_v_next_additive/SCAFFOLD.md §1.9
+# Authority basis: docs/operations/archive/2026-Q2/task_2026-05-15_p1_topology_v_next_additive/SCAFFOLD.md §1.9
 """
 Companion Loop Break — thin shim per Universal §9.
 

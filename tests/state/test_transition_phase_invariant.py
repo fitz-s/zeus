@@ -1,6 +1,6 @@
 # Created: 2026-05-18
 # Last reused or audited: 2026-05-18
-# Authority basis: docs/operations/task_2026-05-17_post_karachi_remediation/
+# Authority basis: docs/operations/archive/2026-Q2/task_2026-05-17_post_karachi_remediation/
 #                  LIFECYCLE_FINDINGS_DEFERRED.md
 #                  (WAVE-3 Batch B, F108 reframe — transition_phase helper
 #                  centralizes the 6 unpaired _mark_pending_exit call sites

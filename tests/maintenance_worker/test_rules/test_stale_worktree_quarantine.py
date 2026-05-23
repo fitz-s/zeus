@@ -1,6 +1,6 @@
 # Created: 2026-05-16
 # Last reused or audited: 2026-05-16
-# Authority basis: docs/operations/task_2026-05-16_doc_alignment_plan/PLAN.md §WAVE 1.5 STEP 2
+# Authority basis: docs/operations/archive/2026-Q2/task_2026-05-16_doc_alignment_plan/PLAN.md §WAVE 1.5 STEP 2
 """
 Tests for maintenance_worker.rules.stale_worktree_quarantine.
 

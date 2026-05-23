@@ -1,6 +1,6 @@
 # Created: 2026-05-14
 # Last reused/audited: 2026-05-19
-# Authority basis: docs/operations/task_2026-05-08_deep_alignment_audit/DATA_DAEMON_LIVE_EFFICIENCY_REFACTOR_PLAN.md section 6.1, section 6.2, section 8 Phase 4, and Phase 6 durable work journaling; docs/operations/task_2026-05-16_live_continuous_run_package/LIVE_CONTINUOUS_RUN_PACKAGE_PLAN.md source-health gate; fix/forecast-live-partial-retry 2026-05-19 (ECMWF incremental dissemination correction).
+# Authority basis: docs/operations/archive/2026-Q2/task_2026-05-08_deep_alignment_audit/DATA_DAEMON_LIVE_EFFICIENCY_REFACTOR_PLAN.md section 6.1, section 6.2, section 8 Phase 4, and Phase 6 durable work journaling; docs/operations/archive/2026-Q2/task_2026-05-16_live_continuous_run_package/LIVE_CONTINUOUS_RUN_PACKAGE_PLAN.md source-health gate; fix/forecast-live-partial-retry 2026-05-19 (ECMWF incremental dissemination correction).
 """Relationship tests for the dedicated forecast-live daemon boundary."""
 
 from __future__ import annotations

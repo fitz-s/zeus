@@ -1,8 +1,8 @@
 # Created: 2026-05-19
 # Last reused or audited: 2026-05-19
-# Authority basis: docs/operations/task_2026-05-17_strategy_vnext_phase0/PHASE_0_V4_ULTRAPLAN.md §D.1
-#                  docs/operations/task_2026-05-17_strategy_vnext_phase0/critic_1_pr1_settlement.md P7-3
-#                  docs/operations/task_2026-05-17_strategy_vnext_phase0/PHASE_0_V4_ADDENDUM.md
+# Authority basis: docs/operations/archive/2026-Q2/task_2026-05-17_strategy_vnext_phase0/PHASE_0_V4_ULTRAPLAN.md §D.1
+#                  docs/operations/archive/2026-Q2/task_2026-05-17_strategy_vnext_phase0/critic_1_pr1_settlement.md P7-3
+#                  docs/operations/archive/2026-Q2/task_2026-05-17_strategy_vnext_phase0/PHASE_0_V4_ADDENDUM.md
 """
 Migration script: quarantine settlement_commands in-flight at the era flip boundary.
 

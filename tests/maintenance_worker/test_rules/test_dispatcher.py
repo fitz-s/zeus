@@ -1,6 +1,6 @@
 # Created: 2026-05-16
 # Last reused or audited: 2026-05-16
-# Authority basis: docs/operations/task_2026-05-16_doc_alignment_plan/PLAN.md §WAVE 1.5 STEP 1
+# Authority basis: docs/operations/archive/2026-Q2/task_2026-05-16_doc_alignment_plan/PLAN.md §WAVE 1.5 STEP 1
 """
 Integration tests for MaintenanceEngine._dispatch_by_task_id.
 

@@ -1,6 +1,6 @@
 # Created: 2026-05-15
 # Last reused or audited: 2026-05-19
-# Authority basis: docs/operations/task_2026-05-15_p1_topology_v_next_additive/SCAFFOLD.md §2.2, §5.2
+# Authority basis: docs/operations/archive/2026-Q2/task_2026-05-15_p1_topology_v_next_additive/SCAFFOLD.md §2.2, §5.2
 #                  operator directive 2026-05-19 (hard_stop → advisory-only)
 """
 Friction regression: ADVISORY_OUTPUT_INVISIBILITY (P1.3 deliverable).

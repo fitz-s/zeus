@@ -1,6 +1,6 @@
 # Created: 2026-05-17
 # Last reused or audited: 2026-05-17
-# Authority basis: docs/operations/task_2026-05-17_post_karachi_remediation/F44_INVESTIGATION.md
+# Authority basis: docs/operations/archive/2026-Q2/task_2026-05-17_post_karachi_remediation/F44_INVESTIGATION.md
 #   Antibody for F44: observation_instants_v2 writer dead since 2026-05-10.
 #   These tests catch the "dead-writer" category permanently by asserting
 #   MAX(target_date) is within a defined SLA window.

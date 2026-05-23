@@ -3,7 +3,7 @@
 # Reuse: Run when live health predicates, launchd contracts, or readiness/status summary health fields change.
 # Created: 2026-03-26
 # Last reused or audited: 2026-05-21
-# Authority basis: docs/operations/task_2026-05-14_k1_followups/PLAN.md §4.5 (K1 broken-script remediation); docs/operations/task_2026-05-16_live_continuous_run_package/LIVE_CONTINUOUS_RUN_PACKAGE_PLAN.md Phase C; 2026-05-17 riskguard live DB-holder health contract.
+# Authority basis: docs/operations/archive/2026-Q2/task_2026-05-14_k1_followups/PLAN.md §4.5 (K1 broken-script remediation); docs/operations/archive/2026-Q2/task_2026-05-16_live_continuous_run_package/LIVE_CONTINUOUS_RUN_PACKAGE_PLAN.md Phase C; 2026-05-17 riskguard live DB-holder health contract.
 """Zeus health check for Venus/OpenClaw monitoring.
 
 Reads mode-qualified state written by the running daemon.
@@ -36,7 +36,7 @@ SETTLEMENT_TRUTH_STALE_SECONDS = int(os.environ.get("ZEUS_SETTLEMENT_TRUTH_STALE
 LIVE_HEALTH_COMPOSITE_STALE_SECONDS = 6 * 60
 
 # WAVE-4 F91+F99+F100 — daemon heartbeat staleness budgets, per
-# docs/operations/task_2026-05-16_post_pr126_audit/RUN_15_track3_f91_f86_observability.md
+# docs/operations/archive/2026-Q2/task_2026-05-16_post_pr126_audit/RUN_15_track3_f91_f86_observability.md
 # §"Recommended remediation order" priority 3 ("fold staleness checks into
 # healthcheck.py"). Each budget is the cadence × ~3 with headroom so a single
 # missed write does not page; ~2 missed in a row does.

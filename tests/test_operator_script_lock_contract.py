@@ -1,6 +1,6 @@
 # Created: 2026-05-17
 # Last reused or audited: 2026-05-17
-# Authority basis: docs/operations/task_2026-05-17_post_karachi_remediation/F22_WRITER_LOCK_FIX.md
+# Authority basis: docs/operations/archive/2026-Q2/task_2026-05-17_post_karachi_remediation/F22_WRITER_LOCK_FIX.md
 """CI antibody: operator-named scripts that open a read-write SQLite connection
 must either:
   (a) use the db_writer_lock / register_known_connection / acquire_writer_lock

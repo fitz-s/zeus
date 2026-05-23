@@ -1460,7 +1460,7 @@ digest_profiles:
     allowed_files:
       - ".github/instructions/**"
       - ".github/copilot-instructions.md"
-      - "docs/operations/task_2026-05-09_copilot_agent_sync/**"
+      - "docs/operations/archive/2026-Q2/task_2026-05-09_copilot_agent_sync/**"
       - "docs/operations/AGENTS.md"
     forbidden_files:
       - "src/**"
@@ -1561,7 +1561,7 @@ digest_profiles:
       - "docs/operations/AGENTS.md"
       - "docs/operations/current_state.md"
       - "docs/operations/runtime_artifact_inventory.md"
-      - "docs/operations/task_2026-05-09_copilot_agent_sync/**"
+      - "docs/operations/archive/2026-Q2/task_2026-05-09_copilot_agent_sync/**"
       - "docs/archives/packets/task_2026-04-29_topology_graph_runtime_upgrade/**"
       - "docs/archives/packets/task_2026-04-29_topology_profile_resolver_stability/**"
       - "docs/archives/packets/task_2026-04-30_merge_protocol_conflict_first/**"
@@ -4604,8 +4604,8 @@ digest_profiles:
       single_terms_can_select: false
       min_confidence: 0.5
     file_patterns:
-      - "docs/operations/task_2026-05-14_data_daemon_live_efficiency/**"
-      - "docs/operations/task_2026-05-15_data_pipeline_live_rootfix/**"
+      - "docs/operations/archive/2026-Q2/task_2026-05-14_data_daemon_live_efficiency/**"
+      - "docs/operations/archive/2026-Q2/task_2026-05-15_data_pipeline_live_rootfix/**"
       - "docs/operations/AGENTS.md"
       - "docs/reference/AGENTS.md"
       - "docs/reference/modules/ingest.md"
@@ -4662,8 +4662,8 @@ digest_profiles:
       - "TIGGE/backfill/refit/replay/offline training must not share the live forecast daemon scheduler."
       - "This profile does not authorize settlement source routing changes, calibration retrain/refit, city config edits, production DB mutation, or live venue side effects."
     allowed_files:
-      - "docs/operations/task_2026-05-14_data_daemon_live_efficiency/**"
-      - "docs/operations/task_2026-05-15_data_pipeline_live_rootfix/**"
+      - "docs/operations/archive/2026-Q2/task_2026-05-14_data_daemon_live_efficiency/**"
+      - "docs/operations/archive/2026-Q2/task_2026-05-15_data_pipeline_live_rootfix/**"
       - "docs/operations/AGENTS.md"
       - "docs/reference/AGENTS.md"
       - "docs/reference/modules/ingest.md"
@@ -4743,7 +4743,7 @@ digest_profiles:
       - "pytest -q -p no:cacheprovider tests/test_digest_profile_matching.py::test_data_daemon_live_efficiency_refactor_routes_to_dedicated_profile"
       - "python3 scripts/digest_profiles_export.py --check"
       - "python3 scripts/topology_doctor.py --map-maintenance --map-maintenance-mode advisory --changed-files <files>"
-      - "python3 scripts/topology_doctor.py --planning-lock --changed-files <files> --plan-evidence docs/operations/task_2026-05-14_data_daemon_live_efficiency/DATA_DAEMON_LIVE_EFFICIENCY_REFACTOR_PLAN.md"
+      - "python3 scripts/topology_doctor.py --planning-lock --changed-files <files> --plan-evidence docs/operations/archive/2026-Q2/task_2026-05-14_data_daemon_live_efficiency/DATA_DAEMON_LIVE_EFFICIENCY_REFACTOR_PLAN.md"
     downstream:
       - "src/engine/evaluator.py"
       - "src/data/executable_forecast_reader.py"
@@ -4834,7 +4834,7 @@ digest_profiles:
       - "pytest -q -p no:cacheprovider tests/test_digest_profile_matching.py::test_ddd_runtime_config_authority_repair_routes_to_dedicated_profile"
       - "python3 scripts/digest_profiles_export.py --check"
       - "python3 scripts/topology_doctor.py --map-maintenance --map-maintenance-mode advisory --changed-files <files>"
-      - "python3 scripts/topology_doctor.py --planning-lock --changed-files <files> --plan-evidence docs/operations/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md"
+      - "python3 scripts/topology_doctor.py --planning-lock --changed-files <files> --plan-evidence docs/operations/archive/2026-Q2/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md"
     downstream:
       - "src/engine/evaluator.py"
       - "live opening_hunt decision gating"
@@ -8288,7 +8288,7 @@ digest_profiles:
       - "tests/test_calibration_pairs_v2_migration.py"
       - "tests/test_outer_bin_inf_roundtrip.py"
       - "tests/test_decision_group_id_newtype_audit.py"
-      - "docs/operations/task_2026-05-17_strategy_vnext_phase0/scaffolds/pr4_scaffold_report.md"
+      - "docs/operations/archive/2026-Q2/task_2026-05-17_strategy_vnext_phase0/scaffolds/pr4_scaffold_report.md"
       - "architecture/script_manifest.yaml"
     required_law:
       - "DecisionGroupId is a NewType guard; raw str must never be passed where DecisionGroupId is required."
@@ -8309,7 +8309,7 @@ digest_profiles:
       - "tests/test_calibration_pairs_v2_migration.py"
       - "tests/test_outer_bin_inf_roundtrip.py"
       - "tests/test_decision_group_id_newtype_audit.py"
-      - "docs/operations/task_2026-05-17_strategy_vnext_phase0/scaffolds/pr4_scaffold_report.md"
+      - "docs/operations/archive/2026-Q2/task_2026-05-17_strategy_vnext_phase0/scaffolds/pr4_scaffold_report.md"
       - "architecture/topology.yaml"
       - "architecture/script_manifest.yaml"
     forbidden_files:
@@ -8329,8 +8329,8 @@ digest_profiles:
       - "Migration scripts must not execute against live DB; dry_run=True is mandatory default."
       - "Do not touch zeus-world.db or zeus-forecasts.db in this PR."
     reference_reads:
-      - "docs/operations/task_2026-05-17_strategy_vnext_phase0/PHASE_0_V4_ADDENDUM.md"
-      - "docs/operations/task_2026-05-17_strategy_vnext_phase0/preflight/migration_dry_runs.json"
+      - "docs/operations/archive/2026-Q2/task_2026-05-17_strategy_vnext_phase0/PHASE_0_V4_ADDENDUM.md"
+      - "docs/operations/archive/2026-Q2/task_2026-05-17_strategy_vnext_phase0/preflight/migration_dry_runs.json"
       - "docs/reference/zeus_math_spec.md"
 
   - id: "phase0-pr27-effective-kelly"
@@ -8364,7 +8364,7 @@ digest_profiles:
       - "src/engine/cycle_runtime.py"
       - "src/engine/replay.py"
     reference_reads:
-      - "docs/operations/task_2026-05-17_strategy_vnext_phase0/PHASE_0_V4_ADDENDUM.md"
-      - "docs/operations/task_2026-05-17_strategy_vnext_phase0/critic_2_pr2_pr7_kelly.md"
+      - "docs/operations/archive/2026-Q2/task_2026-05-17_strategy_vnext_phase0/PHASE_0_V4_ADDENDUM.md"
+      - "docs/operations/archive/2026-Q2/task_2026-05-17_strategy_vnext_phase0/critic_2_pr2_pr7_kelly.md"
       - "scaffolds/pr27_scaffold.md"
       - "scaffolds/pr27_scaffold_critic.md"
