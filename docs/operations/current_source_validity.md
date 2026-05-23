@@ -1,6 +1,6 @@
 # Current Source Validity
 
-Status: active current-fact surface
+Status: STALE_FOR_LIVE — do not use for live source planning; last audited (2026-05-03) exceeds 14-day max staleness
 Last audited: 2026-05-03T00:00Z for Paris source-contract conversion completion; 2026-04-30T00:23:50Z for Paris source-contract monitor refresh; 2026-04-21 for broad provider audit
 Max staleness: 14 days for source/backfill/routing planning
 Evidence packet: `docs/operations/task_2026-04-21_gate_f_data_backfill/step1b_source_validity.md`

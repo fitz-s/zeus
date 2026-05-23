@@ -1,7 +1,7 @@
 # Created: 2026-05-04
 # Last reused/audited: 2026-05-15
 # Authority basis: docs/operations/task_2026-05-04_strategy_redesign_day0_endgame/PLAN_v3.md §P0 — APScheduler UTC invariant;
-# docs/operations/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md live scheduler collision proof.
+# docs/operations/archive/2026-Q2/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md live scheduler collision proof.
 """P0 antibody: ``BlockingScheduler`` in ``src/main.py`` MUST be
 constructed with ``timezone=ZoneInfo("UTC")``.
 

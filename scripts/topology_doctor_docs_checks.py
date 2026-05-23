@@ -13,6 +13,7 @@ from __future__ import annotations
 import fnmatch
 import json
 import re
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -104,6 +105,8 @@ DOCS_REGISTRY_PARENT_PATTERNS = (
     "docs/operations/attribution_drift/",
     # date-prefixed incident/operation packets (e.g. 2026-05-18_*)
     "docs/operations/[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]_*/",
+    # active operations package (file_arrangement.yaml canonical path)
+    "docs/operations/current/",
     "docs/reports/",
     "docs/artifacts/",
     "docs/to-do-list/",
@@ -818,4 +821,288 @@ def check_active_operations_registry(api: Any, topology: dict[str, Any]) -> list
     issues.extend(check_operations_task_folders(api, topology))
     issues.extend(check_runtime_plan_inventory(api, topology))
     issues.extend(check_current_state_receipt_bound(api, topology))
+    issues.extend(check_current_state_freshness(api, topology))
+    issues.extend(check_multiple_active_pointers(api, topology))
+    issues.extend(check_task_dirs_fully_unregistered(api, topology))
+    issues.extend(check_stale_current_fact_referenced(api, topology))
+    return issues
+
+
+# ---------------------------------------------------------------------------
+# Harness checks (H1-H4): agent-guiding fail-closed steering gates
+# ---------------------------------------------------------------------------
+
+_DATE_PATTERN = re.compile(r"(\d{4}-\d{2}-\d{2})")
+
+
+def _parse_first_date(text: str) -> date | None:
+    """Return the first ISO-8601 date found in *text*, or None."""
+    m = _DATE_PATTERN.search(text)
+    if not m:
+        return None
+    try:
+        return date.fromisoformat(m.group(1))
+    except ValueError:
+        return None
+
+
+def check_current_state_freshness(
+    api: Any, topology: dict[str, Any], max_days: int = 14
+) -> list[Any]:
+    """H1: current_state.md must have been updated within *max_days*.
+
+    Reads the ``Last updated: YYYY-MM-DD`` line in current_state.md.
+    If that date is absent or older than *max_days* ago, emits
+    ``operations_current_state_stale`` so the next agent knows it must
+    refresh the pointer before reading it as ground truth.
+
+    Fix: update ``Last updated:`` in docs/operations/current_state.md to
+    today's date and revise the status section to reflect current HEAD.
+    """
+    issues: list[Any] = []
+    registry = topology.get("active_operations_registry") or {}
+    rel = str(registry.get("current_state") or "docs/operations/current_state.md")
+    path = api.ROOT / rel
+    if not path.exists():
+        return issues  # missing file is caught by check_active_operations_registry
+
+    text = path.read_text(encoding="utf-8", errors="ignore")
+    last_updated_match = re.search(r"^Last updated:\s*(\d{4}-\d{2}-\d{2})", text, re.MULTILINE)
+    if not last_updated_match:
+        issues.append(
+            api._issue(
+                "operations_current_state_stale",
+                rel,
+                (
+                    "current_state.md is missing 'Last updated: YYYY-MM-DD' header; "
+                    "add it with today's date before this file can serve as the live pointer"
+                ),
+            )
+        )
+        return issues
+
+    try:
+        last_updated = date.fromisoformat(last_updated_match.group(1))
+    except ValueError:
+        issues.append(
+            api._issue(
+                "operations_current_state_stale",
+                rel,
+                f"current_state.md 'Last updated' is not a valid ISO date: {last_updated_match.group(1)!r}",
+            )
+        )
+        return issues
+
+    today = date.today()
+    age_days = (today - last_updated).days
+    if age_days > max_days:
+        issues.append(
+            api._issue(
+                "operations_current_state_stale",
+                rel,
+                (
+                    f"current_state.md was last updated {age_days} days ago "
+                    f"({last_updated.isoformat()}); exceeds {max_days}-day freshness window. "
+                    f"Update 'Last updated:' to {today.isoformat()} and revise status section."
+                ),
+            )
+        )
+    return issues
+
+
+def check_multiple_active_pointers(api: Any, topology: dict[str, Any]) -> list[Any]:
+    """H2: exactly one surface may claim 'Active execution packet'.
+
+    Scans current_state.md for all occurrences of the ``Active execution
+    packet:`` label.  If more than one distinct path is found, emits
+    ``operations_multiple_active_pointers`` so the agent resolves the
+    conflict before proceeding.
+
+    Fix: edit docs/operations/current_state.md so only ONE line uses the
+    'Active execution packet:' label; demote or remove the extras.
+    """
+    issues: list[Any] = []
+    registry = topology.get("active_operations_registry") or {}
+    rel = str(registry.get("current_state") or "docs/operations/current_state.md")
+    path = api.ROOT / rel
+    if not path.exists():
+        return issues
+
+    text = path.read_text(encoding="utf-8", errors="ignore")
+    pattern = re.compile(r"^-\s+Active execution packet:\s+`([^`]+)`", re.MULTILINE)
+    matches = pattern.findall(text)
+    distinct = sorted(set(matches))
+    if len(distinct) > 1:
+        issues.append(
+            api._issue(
+                "operations_multiple_active_pointers",
+                rel,
+                (
+                    f"current_state.md declares {len(distinct)} distinct 'Active execution packet' "
+                    f"pointers — only one is allowed. "
+                    f"Found: {', '.join(distinct)}. "
+                    "Remove all but the current active packet."
+                ),
+            )
+        )
+    return issues
+
+
+def check_task_dirs_fully_unregistered(api: Any, topology: dict[str, Any]) -> list[Any]:
+    """H3: every docs/operations/task_* dir must be registered in BOTH AGENTS.md
+    AND docs_registry.yaml.
+
+    Existing check_operations_task_folders covers AGENTS.md registration.
+    This check adds the second gate: docs_registry.yaml coverage.  A task
+    directory is unregistered only when BOTH registrations are absent
+    simultaneously — if either covers it, the check passes for that dir.
+
+    Fix: add a descendant-coverage entry for the missing task directory in
+    architecture/docs_registry.yaml, and register the dir in
+    docs/operations/AGENTS.md.
+    """
+    issues: list[Any] = []
+    task_dirs = operation_task_dirs(api)
+    if not task_dirs:
+        return issues
+
+    # AGENTS.md registration set
+    agents_path = api.ROOT / "docs" / "operations" / "AGENTS.md"
+    registered_agents: set[str] = (
+        api._registry_entries(agents_path, include_directory_tokens=True)
+        if agents_path.exists()
+        else set()
+    )
+
+    # docs_registry.yaml coverage
+    registry = api.load_docs_registry()
+    entries = list(registry.get("entries") or [])
+
+    for rel in sorted(task_dirs):
+        name = Path(rel).name
+
+        in_agents = (
+            name in registered_agents
+            or f"{name}/" in registered_agents
+            or rel in registered_agents
+            or f"{rel}/" in registered_agents
+        )
+
+        in_registry = docs_registry_covers(rel, entries) or docs_registry_covers(f"{rel}/", entries)
+
+        if not in_agents and not in_registry:
+            issues.append(
+                api._issue(
+                    "operations_task_dir_fully_unregistered",
+                    rel,
+                    (
+                        f"task directory '{rel}' is absent from BOTH "
+                        "docs/operations/AGENTS.md File Registry AND "
+                        "architecture/docs_registry.yaml. "
+                        f"Fix: add a descendant-coverage entry for '{rel}/' "
+                        "in architecture/docs_registry.yaml (coverage_scope: descendants, "
+                        "parent_coverage_allowed: true), and add the directory name to "
+                        "the docs/operations/AGENTS.md File Registry table."
+                    ),
+                )
+            )
+    return issues
+
+
+_MAX_STALENESS_PATTERN = re.compile(r"^Max staleness:\s*(\d+)\s*days?", re.MULTILINE | re.IGNORECASE)
+_LAST_AUDITED_PATTERN = re.compile(r"^Last audited:\s*(\d{4}-\d{2}-\d{2})", re.MULTILINE)
+
+CURRENT_FACT_SURFACES = (
+    "docs/operations/current_data_state.md",
+    "docs/operations/current_source_validity.md",
+)
+
+
+def _surface_is_stale(api: Any, surface_rel: str) -> tuple[bool, str]:
+    """Return (is_stale, reason).  Reads max staleness and last-audited date."""
+    path = api.ROOT / surface_rel
+    if not path.exists():
+        return False, ""
+    text = path.read_text(encoding="utf-8", errors="ignore")
+
+    max_days_match = _MAX_STALENESS_PATTERN.search(text)
+    if not max_days_match:
+        return False, ""  # No declared max staleness — skip
+    try:
+        max_days = int(max_days_match.group(1))
+    except ValueError:
+        return False, ""
+
+    audited_match = _LAST_AUDITED_PATTERN.search(text)
+    if not audited_match:
+        return True, f"{surface_rel} has no 'Last audited: YYYY-MM-DD' line"
+    try:
+        last_audited = date.fromisoformat(audited_match.group(1))
+    except ValueError:
+        return False, ""
+
+    age_days = (date.today() - last_audited).days
+    if age_days > max_days:
+        return True, (
+            f"{surface_rel} was last audited {age_days} days ago "
+            f"({last_audited.isoformat()}); max staleness is {max_days} days"
+        )
+    return False, ""
+
+
+def check_stale_current_fact_referenced(api: Any, topology: dict[str, Any]) -> list[Any]:
+    """H4: a stale current-fact surface must not be referenced by the active task.
+
+    Reads current_data_state.md and current_source_validity.md.  For each,
+    checks whether its declared ``Max staleness`` is exceeded.  Then checks
+    whether the active execution packet (from current_state.md) references
+    the stale surface.  If so, emits ``operations_stale_current_fact_referenced``
+    so the agent re-audits the surface before using it.
+
+    Fix: re-audit the listed surface and update its 'Last audited:' date,
+    or stop referencing it from the active task until it is re-audited.
+    """
+    issues: list[Any] = []
+    registry = topology.get("active_operations_registry") or {}
+    cs_rel = str(registry.get("current_state") or "docs/operations/current_state.md")
+    cs_path = api.ROOT / cs_rel
+    if not cs_path.exists():
+        return issues
+
+    cs_text = cs_path.read_text(encoding="utf-8", errors="ignore")
+    active_packet = current_state_label_value(cs_text, "Active execution packet")
+    if not active_packet:
+        return issues  # no active packet — nothing to cross-reference
+
+    # Read the active task text (best-effort; skip if missing)
+    task_text = ""
+    packet_dir = Path(active_packet).parent.as_posix()
+    task_candidates = [
+        api.ROOT / active_packet,
+        api.ROOT / packet_dir / "task.md",
+        api.ROOT / packet_dir / "AGENTS.md",
+    ]
+    for candidate in task_candidates:
+        if candidate.exists():
+            task_text += candidate.read_text(encoding="utf-8", errors="ignore") + "\n"
+
+    for surface_rel in CURRENT_FACT_SURFACES:
+        is_stale, reason = _surface_is_stale(api, surface_rel)
+        if not is_stale:
+            continue
+        # Check whether the active packet or current_state references the stale surface
+        referenced = surface_rel in cs_text or (task_text and surface_rel in task_text)
+        if referenced:
+            issues.append(
+                api._issue(
+                    "operations_stale_current_fact_referenced",
+                    surface_rel,
+                    (
+                        f"{reason}. "
+                        f"The active task ({active_packet}) references this stale surface. "
+                        f"Re-audit {surface_rel} (update 'Last audited:') before using it "
+                        "for data or source planning decisions."
+                    ),
+                )
+            )
     return issues

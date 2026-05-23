@@ -2,7 +2,7 @@
 # Lifecycle: created=2026-04-07; last_reviewed=2026-05-15; last_reused=2026-05-15
 # Purpose: Venus daemon-independent sensing report, including source-contract drift watch, quarantine, and diagnostic authority labels.
 # Reuse: Run from Venus/cron for runtime truth sensing; inspect architecture/script_manifest.yaml before changing write targets.
-# Authority basis: docs/operations/task_2026-05-14_k1_followups/PLAN.md §4.5 (K1 broken-script remediation)
+# Authority basis: docs/operations/archive/2026-Q2/task_2026-05-14_k1_followups/PLAN.md §4.5 (K1 broken-script remediation)
 """Venus sensing report generator.
 
 Collects ALL truth surface data Venus needs into one JSON file.

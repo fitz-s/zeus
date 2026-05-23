@@ -1,6 +1,6 @@
 # Created: 2026-05-15
 # Last reused or audited: 2026-05-15
-# Authority basis: docs/operations/task_2026-05-15_p2_companion_required_mechanism/SCAFFOLD.md §7 probe4
+# Authority basis: docs/operations/archive/2026-Q2/task_2026-05-15_p2_companion_required_mechanism/SCAFFOLD.md §7 probe4
 """
 probe4 — path match is exact (PurePosixPath normalization, case-sensitive).
 
@@ -13,7 +13,7 @@ or case-insensitive comparison (SCAFFOLD §7 probe4, §8.4).
 from __future__ import annotations
 
 from scripts.topology_v_next.admission_engine import admit
-from scripts.topology_v_next.dataclasses import (
+from scripts.topology_v_next.topology_models import (
     BindingLayer,
     CoverageMap,
     Intent,

@@ -1,6 +1,6 @@
 # Created: 2026-05-15
 # Last reused or audited: 2026-05-15
-# Authority basis: docs/operations/task_2026-05-15_p3_topology_v_next_phase2_shadow/SCAFFOLD.md §7 P3.3
+# Authority basis: docs/operations/archive/2026-Q2/task_2026-05-15_p3_topology_v_next_phase2_shadow/SCAFFOLD.md §7 P3.3
 """
 Integration test: cli_integration_shim wire-up in topology_doctor.run_navigation().
 
@@ -22,7 +22,7 @@ from scripts.topology_v_next.cli_integration_shim import (
     format_output,
     map_old_status_to_severity,
 )
-from scripts.topology_v_next.dataclasses import Severity
+from scripts.topology_v_next.topology_models import Severity
 
 
 class TestShimWireUpIntegration:

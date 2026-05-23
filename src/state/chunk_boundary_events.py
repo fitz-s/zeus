@@ -1,6 +1,6 @@
 # Created: 2026-05-18
 # Last reused or audited: 2026-05-18
-# Authority basis: docs/operations/task_2026-05-17_post_karachi_remediation/WAVE_2_PLAN.md §#37 F11
+# Authority basis: docs/operations/archive/2026-Q2/task_2026-05-17_post_karachi_remediation/WAVE_2_PLAN.md §#37 F11
 #   "BulkChunker LIVE chunk boundary observability — DB_CHUNK_BOUNDARY event table"
 """Chunk-boundary event emission for BulkChunker LIVE-yield observability.
 

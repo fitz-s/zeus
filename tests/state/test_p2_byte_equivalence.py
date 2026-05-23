@@ -1,7 +1,7 @@
 # Created: 2026-05-14
 # Last reused or audited: 2026-05-14
-# Authority basis: docs/operations/task_2026-05-14_k1_followups/PLAN.md §2 (P2 DDL byte-equivalence gate);
-#   docs/operations/task_2026-05-14_k1_followups/IMPLEMENTATION_REVIEW_P3.md N2/N4
+# Authority basis: docs/operations/archive/2026-Q2/task_2026-05-14_k1_followups/PLAN.md §2 (P2 DDL byte-equivalence gate);
+#   docs/operations/archive/2026-Q2/task_2026-05-14_k1_followups/IMPLEMENTATION_REVIEW_P3.md N2/N4
 #   INV-37 enforcement per architecture/invariants.yaml::INV-37
 """P2 DDL byte-equivalence and ATTACH-guard regression tests.
 

@@ -1,6 +1,6 @@
 # Created: 2026-05-15
 # Last reused or audited: 2026-05-15
-# Authority basis: docs/operations/task_2026-05-15_p3_topology_v_next_phase2_shadow/SCAFFOLD.md
+# Authority basis: docs/operations/archive/2026-Q2/task_2026-05-15_p3_topology_v_next_phase2_shadow/SCAFFOLD.md
 #                  §1.2 (public API), §6 (P4 gate metrics), §6.3 (dual-metric gate),
 #                  §6.4 (per-friction-pattern), §7 P3.2 (test list),
 #                  §9.1 (datetime.now(UTC) — NOT utcnow(), deprecated since 3.12)
@@ -40,7 +40,7 @@ from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Iterator
 
-from scripts.topology_v_next.dataclasses import FrictionPattern
+from scripts.topology_v_next.topology_models import FrictionPattern
 from scripts.topology_v_next.divergence_logger import (
     DivergenceRecord,
     classify_divergence,

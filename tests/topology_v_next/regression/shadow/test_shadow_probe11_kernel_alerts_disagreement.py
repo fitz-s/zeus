@@ -1,6 +1,6 @@
 # Created: 2026-05-15
 # Last reused or audited: 2026-05-19
-# Authority basis: docs/operations/task_2026-05-15_p3_topology_v_next_phase2_shadow/SCAFFOLD.md §5 probe11
+# Authority basis: docs/operations/archive/2026-Q2/task_2026-05-15_p3_topology_v_next_phase2_shadow/SCAFFOLD.md §5 probe11
 #                  operator directive 2026-05-19 (hard_stop → advisory-only)
 """
 Probe 11 — Kernel alerts for credentials path (advisory-only per operator directive).

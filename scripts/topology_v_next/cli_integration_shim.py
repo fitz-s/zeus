@@ -1,6 +1,6 @@
 # Created: 2026-05-15
 # Last reused or audited: 2026-05-15
-# Authority basis: docs/operations/task_2026-05-15_p3_topology_v_next_phase2_shadow/SCAFFOLD.md §1.3, §2, §3, §4, §8
+# Authority basis: docs/operations/archive/2026-Q2/task_2026-05-15_p3_topology_v_next_phase2_shadow/SCAFFOLD.md §1.3, §2, §3, §4, §8
 """
 CLI Integration Shim for topology v_next shadow blocking (P3.3).
 
@@ -29,7 +29,7 @@ from datetime import datetime, UTC
 from typing import Any
 
 from scripts.topology_v_next.admission_engine import admit
-from scripts.topology_v_next.dataclasses import (
+from scripts.topology_v_next.topology_models import (
     AdmissionDecision,
     BindingLayer,
     Severity,
@@ -231,7 +231,7 @@ def _build_divergence_record(
 
     # Detect friction pattern hit (first one wins — admission engine sets at most one)
     friction_pattern_hit: str | None = None
-    from scripts.topology_v_next.dataclasses import FrictionPattern  # noqa: PLC0415
+    from scripts.topology_v_next.topology_models import FrictionPattern  # noqa: PLC0415
     for issue in decision.issues:
         code = getattr(issue, "code", None)
         if code and code.startswith("friction_"):

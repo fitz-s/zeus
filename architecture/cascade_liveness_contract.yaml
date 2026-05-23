@@ -1,6 +1,6 @@
 # Created: 2026-05-16
 # Last reused or audited: 2026-05-16
-# Authority basis: docs/operations/task_2026-05-16_deep_alignment_audit/SCAFFOLD_F14_F16.md §G.2 + §K.6 v5
+# Authority basis: docs/operations/archive/2026-Q2/task_2026-05-16_deep_alignment_audit/SCAFFOLD_F14_F16.md §G.2 + §K.6 v5
 #
 # Cascade liveness contract — the registry of state-machine tables in src/
 # that REQUIRE a scheduled APScheduler poller to drive them, plus optional
@@ -29,7 +29,7 @@ state_machines:
     terminal_states_with_operator_action:
       - state: REDEEM_OPERATOR_REQUIRED
         max_age_hours: 24
-        operator_runbook: docs/operations/task_2026-05-16_deep_alignment_audit/KARACHI_2026_05_17_MANUAL_FALLBACK.md
+        operator_runbook: docs/operations/archive/2026-Q2/task_2026-05-16_deep_alignment_audit/KARACHI_2026_05_17_MANUAL_FALLBACK.md
         escalation_action: "Path C trigger per SCAFFOLD §I.4 if exceeded; arm manual fallback runbook §3"
         cli_invocation: "python -m scripts.operator_record_redeem <condition_id> <tx_hash>"
     required_pollers:
@@ -54,7 +54,7 @@ state_machines:
     terminal_states_with_operator_action:
       - state: WRAP_FAILED
         max_age_hours: 24
-        operator_runbook: docs/operations/task_2026-05-16_deep_alignment_audit/KARACHI_2026_05_17_MANUAL_FALLBACK.md
+        operator_runbook: docs/operations/archive/2026-Q2/task_2026-05-16_deep_alignment_audit/KARACHI_2026_05_17_MANUAL_FALLBACK.md
         escalation_action: "Investigate wrap failure; re-queue via enqueue_wrap_if_balance_above_threshold after root cause resolved"
         cli_invocation: "python -m scripts.operator_record_wrap <command_id> --resolution <note>"
     required_pollers:

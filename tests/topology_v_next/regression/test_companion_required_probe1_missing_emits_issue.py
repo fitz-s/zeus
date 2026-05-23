@@ -1,6 +1,6 @@
 # Created: 2026-05-15
 # Last reused or audited: 2026-05-15
-# Authority basis: docs/operations/task_2026-05-15_p2_companion_required_mechanism/SCAFFOLD.md §7 probe1
+# Authority basis: docs/operations/archive/2026-Q2/task_2026-05-15_p2_companion_required_mechanism/SCAFFOLD.md §7 probe1
 """
 probe1 — companion_required missing companion emits MISSING_COMPANION issue.
 
@@ -15,7 +15,7 @@ Assert: decision.severity == Severity.ADVISORY (P2.a),
 from __future__ import annotations
 
 from scripts.topology_v_next.admission_engine import admit
-from scripts.topology_v_next.dataclasses import (
+from scripts.topology_v_next.topology_models import (
     BindingLayer,
     CohortDecl,
     CoverageMap,

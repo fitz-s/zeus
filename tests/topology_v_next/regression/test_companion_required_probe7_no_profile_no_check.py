@@ -1,6 +1,6 @@
 # Created: 2026-05-15
 # Last reused or audited: 2026-05-15
-# Authority basis: docs/operations/task_2026-05-15_p2_companion_required_mechanism/SCAFFOLD.md §3.2
+# Authority basis: docs/operations/archive/2026-Q2/task_2026-05-15_p2_companion_required_mechanism/SCAFFOLD.md §3.2
 """
 probe7 — when profile_matched is None, _check_companion_required is a no-op.
 
@@ -12,7 +12,7 @@ The companion gate should never add its own issue on top of an already-blocked a
 from __future__ import annotations
 
 from scripts.topology_v_next.admission_engine import admit, _check_companion_required
-from scripts.topology_v_next.dataclasses import (
+from scripts.topology_v_next.topology_models import (
     BindingLayer,
     CoverageMap,
     Intent,

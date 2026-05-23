@@ -1,7 +1,7 @@
 # Created: 2026-05-15
 # Last reused or audited: 2026-05-15
-# Authority basis: docs/operations/task_2026-05-15_p1_topology_v_next_additive/SCAFFOLD.md §1.5, §4, §5.3, §5.4
-#                  docs/operations/task_2026-05-15_p2_companion_required_mechanism/SCAFFOLD.md §3, §3.1, §3.2
+# Authority basis: docs/operations/archive/2026-Q2/task_2026-05-15_p1_topology_v_next_additive/SCAFFOLD.md §1.5, §4, §5.3, §5.4
+#                  docs/operations/archive/2026-Q2/task_2026-05-15_p2_companion_required_mechanism/SCAFFOLD.md §3, §3.1, §3.2
 """
 Admission Engine for topology v_next.
 
@@ -25,7 +25,7 @@ import time
 from pathlib import PurePosixPath
 from typing import Any
 
-from scripts.topology_v_next.dataclasses import (
+from scripts.topology_v_next.topology_models import (
     AdmissionDecision,
     BindingLayer,
     DiagnosisEntry,

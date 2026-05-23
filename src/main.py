@@ -15,7 +15,7 @@ Advisory file lock infrastructure (src.data.dual_run_lock) is retained in code
 
 # Created: pre-Phase-0 (K2 scheduler wiring via 27bedbd; P9A run_mode observability via 7081634)
 # Last reused/audited: 2026-05-18
-# Authority basis: Phase 3 two-system independence — docs/operations/task_2026-04-30_two_system_independence/design.md §5 Phase 3; docs/operations/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md
+# Authority basis: Phase 3 two-system independence — docs/operations/task_2026-04-30_two_system_independence/design.md §5 Phase 3; docs/operations/archive/2026-Q2/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md
 #                  + 2026-05-17 CLOB venue-heartbeat critical-path split
 
 import functools
@@ -238,7 +238,7 @@ def _wu_daily_dispatch() -> None:
 # with *_INTENT_CREATED / *_REQUESTED rows MUST have a registered scheduler
 # poller. Without these, settlement_commands rows enqueued by
 # harvester_pnl_resolver would sit forever (the F14 SEV-0 defect documented
-# in docs/operations/task_2026-05-16_deep_alignment_audit/).
+# in docs/operations/archive/2026-Q2/task_2026-05-16_deep_alignment_audit/).
 #
 # _redeem_submitter_cycle: polls REDEEM_INTENT_CREATED, calls submit_redeem
 #   (which transitions stub-deferred rows to REDEEM_OPERATOR_REQUIRED per

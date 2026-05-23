@@ -1,8 +1,8 @@
 # Created: 2026-05-18
 # Last reused or audited: 2026-05-18
 # Authority basis:
-#   docs/operations/task_2026-05-17_post_karachi_remediation/F22_WRITER_LOCK_FIX.md
-#   docs/operations/task_2026-05-17_post_karachi_remediation/OPS_FORENSICS.md §F22
+#   docs/operations/archive/2026-Q2/task_2026-05-17_post_karachi_remediation/F22_WRITER_LOCK_FIX.md
+#   docs/operations/archive/2026-Q2/task_2026-05-17_post_karachi_remediation/OPS_FORENSICS.md §F22
 # Lifecycle: created=2026-05-18; last_reviewed=2026-05-18; last_reused=never
 # Purpose: F22 carry-forward — surface `# WRITER_LOCK_DEFER_REVIEW=YYYY-MM-DD`
 #   markers that have outlived the 30-day defer window so they cannot accumulate
@@ -30,7 +30,7 @@ Bypass
 ------
 A marker can be renewed by bumping its date when an operator confirms the defer
 should continue.  The ops-doc entry in
-`docs/operations/task_2026-05-17_post_karachi_remediation/F22_WRITER_LOCK_FIX.md`
+`docs/operations/archive/2026-Q2/task_2026-05-17_post_karachi_remediation/F22_WRITER_LOCK_FIX.md`
 must explain why the contract retrofit cannot ship yet.
 
 Meta-verify (sed-break/restore)
@@ -157,7 +157,7 @@ def test_defer_marker_within_window(script: Path | None) -> None:
         "      Then delete the WRITER_LOCK_DEFER_REVIEW line.\n"
         "  (b) Confirm the script is retired and delete it (plus any callers).\n"
         "  (c) Bump the marker date to today AND record the renewed defer rationale\n"
-        "      in docs/operations/task_2026-05-17_post_karachi_remediation/F22_WRITER_LOCK_FIX.md\n"
+        "      in docs/operations/archive/2026-Q2/task_2026-05-17_post_karachi_remediation/F22_WRITER_LOCK_FIX.md\n"
         "      (re-deferring is a deliberate operator decision; do not bump silently).\n"
     )
 

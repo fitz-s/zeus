@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Created: 2026-05-16
 # Last reused or audited: 2026-05-16
-# Authority basis: docs/operations/task_2026-05-16_doc_alignment_plan/PLAN.md §WAVE 2
+# Authority basis: docs/operations/archive/2026-Q2/task_2026-05-16_doc_alignment_plan/PLAN.md §WAVE 2
 """
 One-off migration script: move 28 archive entries from docs/archives/packets/
 to docs/operations/archive/2026-Q2/ with git mv, then create .archived stubs.
@@ -12,7 +12,7 @@ Usage:
 
 Log written to:
     state/maintenance_state/migration_2026-05-16.log
-    docs/operations/task_2026-05-16_doc_alignment_plan/migration_log.txt
+    docs/operations/archive/2026-Q2/task_2026-05-16_doc_alignment_plan/migration_log.txt
 """
 
 import argparse

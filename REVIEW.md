@@ -264,6 +264,18 @@ python3 scripts/topology_doctor.py --map-maintenance --changed-files <files>
 These commands are not required for AI reviewers; they are tools the human
 author or human reviewer can use to pre-prune the review surface.
 
+To machine-classify the PR diff into Tiers and get an advisory check:
+
+```
+python3 scripts/review_scope_collect.py --base origin/main
+python3 scripts/review_scope_collect.py --base origin/main --json
+```
+
+The collector groups changed paths into Tier 0/1/2/3 using the definitions in
+§4 above.  Exit 1 (advisory) when Tier-0 files are touched without test files
+in the diff; exit 0 otherwise.  The CI job `.github/workflows/review-scope.yml`
+runs this automatically on every PR (advisory, non-blocking).
+
 ---
 
 ## 9. Reviewer behavior contract

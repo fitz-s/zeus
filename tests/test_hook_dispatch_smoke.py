@@ -1,7 +1,7 @@
 # Created: 2026-05-06
 # Last reused or audited: 2026-05-06
 # Authority basis: PLAN §3 Phase 1 exit criteria + critic-opus ATTACK 4 §0.5
-#   docs/operations/task_2026-05-06_hook_redesign/PLAN.md
+#   docs/operations/archive/2026-Q2/task_2026-05-06_hook_redesign/PLAN.md
 
 """
 Smoke tests for .claude/hooks/dispatch.py.

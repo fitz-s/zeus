@@ -1,6 +1,6 @@
 # Created: 2026-05-15
 # Last reused or audited: 2026-05-15
-# Authority basis: docs/operations/task_2026-05-15_p1_topology_v_next_additive/SCAFFOLD.md §1.1, §8 P1.3
+# Authority basis: docs/operations/archive/2026-Q2/task_2026-05-15_p1_topology_v_next_additive/SCAFFOLD.md §1.1, §8 P1.3
 """
 topology_v_next — P1 complete public API.
 
@@ -21,7 +21,7 @@ __version__ = "0.1.0-p3.3"
 
 from scripts.topology_v_next.admission_engine import admit
 from scripts.topology_v_next.cli_integration_shim import maybe_shadow_compare
-from scripts.topology_v_next.dataclasses import (
+from scripts.topology_v_next.topology_models import (
     AdmissionDecision,
     BindingLayer,
     CohortDecl,
@@ -42,7 +42,7 @@ __all__ = [
     "admit",
     # P3.3 shim
     "maybe_shadow_compare",
-    # dataclasses
+    # topology_models
     "AdmissionDecision",
     "BindingLayer",
     "CohortDecl",

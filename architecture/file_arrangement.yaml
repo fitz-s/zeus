@@ -1,0 +1,143 @@
+schema_version: 1
+metadata:
+  created: "2026-05-22"
+  owner_packet: "docs-convergence-20260522 PR-T0 advisory file-arrangement kernel"
+  enforcement: advisory
+  not_authority_over:
+    - runtime code
+    - canonical DB truth
+    - live state
+  note: >
+    This manifest tells agents WHERE a file belongs and WHAT to read.
+    It never blocks. Every rule has severity warn and blocking false.
+    Enforcement is by critic-agent review only.
+
+active_operations_package:
+  pointer_file: docs/operations/current_state.md
+  manifest: docs/operations/current/package.yaml
+  new_top_level_operations_task_default: disallow_advisory
+  human_override_allowed: true
+
+artifact_kinds:
+  - id: operation_plan
+    canonical_path: "docs/operations/current/plans/<slug>/PLAN.md"
+    authority: true
+    legacy_paths:
+      - "docs/operations/task_*_*/PLAN.md"
+      - "docs/operations/task_*_*/*.md"
+
+  - id: operation_scope
+    canonical_path: "docs/operations/current/plans/<slug>/scope.yaml"
+    authority: true
+    note: sibling scope.yaml next to PLAN.md
+    legacy_paths:
+      - "docs/operations/task_*_*/scope.yaml"
+
+  - id: operation_evidence
+    canonical_path: "docs/operations/current/evidence/<slug>/<file>"
+    authority: false
+    legacy_paths:
+      - "docs/operations/task_*_*/evidence/**"
+      - "docs/operations/task_*_*/*_EVIDENCE*"
+
+  - id: operation_report
+    canonical_path: "docs/operations/current/reports/<slug>.md"
+    authority: false
+    note: generated report; must declare non-authority at top
+    legacy_paths:
+      - "docs/operations/task_*_*/*_REPORT*"
+      - "docs/operations/task_*_*/reports/*.md"
+
+  - id: operation_closeout
+    canonical_path: "docs/operations/current/closeouts/<slug>_<date>.md"
+    authority: false
+    legacy_paths:
+      - "docs/operations/task_*_*/closeout*.md"
+
+  - id: agent_runtime_capsule
+    canonical_path: "docs/operations/current/agent_runtime/capsules/<ts>_<slug>.md"
+    authority: false
+    legacy_paths:
+      - "docs/operations/task_*_*/capsules/*.md"
+      - ".omx/context/**/*.md"
+
+  - id: active_task_ledger
+    canonical_path: "docs/operations/current/task.md"
+    authority: false
+    legacy_paths:
+      - "docs/operations/task_*_*/task.md"
+
+  - id: current_pointer
+    canonical_path: "docs/operations/current_state.md"
+    authority: true
+    note: single pointer; must name the active package
+
+  - id: known_gap
+    canonical_path: "docs/to-do-list/known_gaps.md"
+    authority: false
+
+  - id: durable_reference
+    canonical_path: "docs/reference/<topic>.md"
+    authority: false
+
+  - id: authority_law
+    canonical_path: "docs/authority/<topic>.md"
+    authority: true
+
+  - id: generated_report
+    canonical_path: "docs/reports/<slug>.md"
+    authority: false
+    note: must declare non-authority; generated content only
+
+  - id: runtime_scratch
+    canonical_path: ".omx/"
+    authority: false
+    note: also state/ for DB-backed scratch; both are non-authority
+
+rules:
+  - id: no_new_top_level_operation_task_by_default
+    severity: warn
+    blocking: false
+    description: >
+      New docs/operations/task_<date>_<slug>/ top-level dirs are advisory-discouraged.
+      Use docs/operations/current/plans/<slug>/ instead.
+      Human override is allowed; this is an advisory only.
+
+  - id: current_state_must_point_to_active_package
+    severity: warn
+    blocking: false
+    description: >
+      docs/operations/current_state.md should name the active package manifest
+      at docs/operations/current/package.yaml.
+      Advisory when current/ does not yet exist.
+
+  - id: root_task_must_be_pointer_or_named_active
+    severity: warn
+    blocking: false
+    description: >
+      A docs/operations/task_<date>_<slug>/ directory at the root level should
+      either be named as the active package in current_state.md or migrated under
+      docs/operations/current/.
+
+  - id: generated_report_must_declare_non_authority
+    severity: warn
+    blocking: false
+    description: >
+      Files classified as generated_report or operation_report should include an
+      explicit non-authority marker near the top (e.g. "authority: false" or
+      "This is a generated report and is not an authority source.").
+
+  - id: plan_requires_scope_sidecar
+    severity: warn
+    blocking: false
+    description: >
+      An operation_plan file (PLAN.md) should have a sibling scope.yaml in the
+      same directory. Advisory when missing.
+
+  - id: operation_evidence_must_be_under_current_or_archive
+    severity: warn
+    blocking: false
+    description: >
+      Evidence files should live under docs/operations/current/evidence/<slug>/
+      or docs/operations/archive/. Legacy paths under docs/operations/task_*_*/evidence/
+      are recognized and not double-warned.

@@ -1,6 +1,6 @@
 # Created: 2026-05-15
 # Last reused or audited: 2026-05-15
-# Authority basis: docs/operations/task_2026-05-15_p3_topology_v_next_phase2_shadow/SCAFFOLD.md
+# Authority basis: docs/operations/archive/2026-Q2/task_2026-05-15_p3_topology_v_next_phase2_shadow/SCAFFOLD.md
 #                  §1.1 (public API), §4 (schema), §4.3 (concurrency contract),
 #                  §4.4 (OLD_STATUS_TO_NEW_SEVERITY), §4.5 (classify_divergence),
 #                  §9.1 (datetime.now(UTC) — NOT utcnow(), deprecated since 3.12)
@@ -18,7 +18,7 @@ Public API (SCAFFOLD §1.1):
 Concurrency: O_APPEND + O_CREAT, single os.write per record. Multi-process-safe
 on POSIX (SCAFFOLD §4.3). Never raises on I/O failure — stderr + continue.
 
-Codex-importable: stdlib + .dataclasses (P1 types) only. No anthropic SDK.
+Codex-importable: stdlib + .topology_models (P1 types) only. No anthropic SDK.
 """
 from __future__ import annotations
 
@@ -30,7 +30,7 @@ from datetime import date, datetime, UTC
 from pathlib import Path
 from typing import Any
 
-from scripts.topology_v_next.dataclasses import Severity
+from scripts.topology_v_next.topology_models import Severity
 
 
 # ---------------------------------------------------------------------------

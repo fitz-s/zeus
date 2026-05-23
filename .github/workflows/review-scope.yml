@@ -1,0 +1,96 @@
+name: review-scope
+
+# Advisory job: groups PR diff into Tier 0/1/2/3 per REVIEW.md §4.
+# Exits 1 (advisory-fail) only when Tier-0 files are changed without
+# corresponding test files in the diff.  continue-on-error keeps this
+# non-blocking for the build; the annotation remains visible in the PR UI.
+#
+# Authority basis: REVIEW.md §4; scripts/review_scope_collect.py
+# Gate owner: PR review workflow (Fitz)
+# Review condition: promote continue-on-error to false only if the team
+#   decides to hard-block on Tier-0-without-tests.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+concurrency:
+  group: review-scope-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review-scope-advisory:
+    name: review-scope (advisory)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 3
+    env:
+      GATE_OWNER: "PR review workflow (Fitz)"
+      GATE_RATIONALE: >
+        Advisory tier-classification pass.  Tier-0 files changed without test
+        files in the diff triggers exit 1 (advisory warning).  All other
+        outcomes exit 0.  continue-on-error keeps this non-blocking.
+      GATE_REVIEW_CONDITION: >
+        Promote continue-on-error to false only after explicit team decision
+        to hard-block Tier-0-without-tests merges.
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: "pip"
+
+      - name: Describe gate contract
+        run: |
+          echo "owner=${GATE_OWNER}"
+          echo "rationale=${GATE_RATIONALE}"
+          echo "review_condition=${GATE_REVIEW_CONDITION}"
+
+      - name: Collect review scope (human table)
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          python scripts/review_scope_collect.py \
+            --base "$BASE_SHA" \
+            || echo "ADVISORY: review-scope collector exited non-zero (see above)"
+
+      - name: Collect review scope (JSON summary)
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          python scripts/review_scope_collect.py \
+            --base "$BASE_SHA" \
+            --json \
+            | tee /tmp/review_scope.json \
+            || true
+
+      - name: Emit step summary
+        if: always()
+        run: |
+          {
+            echo "## review-scope advisory"
+            echo ""
+            if [ -f /tmp/review_scope.json ]; then
+              T0=$(python -c "import json,sys; d=json.load(open('/tmp/review_scope.json')); print(d['summary']['tier0'])")
+              T1=$(python -c "import json,sys; d=json.load(open('/tmp/review_scope.json')); print(d['summary']['tier1'])")
+              T2=$(python -c "import json,sys; d=json.load(open('/tmp/review_scope.json')); print(d['summary']['tier2'])")
+              T3=$(python -c "import json,sys; d=json.load(open('/tmp/review_scope.json')); print(d['summary']['tier3'])")
+              FAIL=$(python -c "import json,sys; d=json.load(open('/tmp/review_scope.json')); print(d['summary']['advisory_fail'])")
+              echo "| Tier | Count |"
+              echo "|------|-------|"
+              echo "| Tier 0 (live money / runtime safety) | ${T0} |"
+              echo "| Tier 1 (data / probability / persistence) | ${T1} |"
+              echo "| Tier 2 (tests / validation) | ${T2} |"
+              echo "| Tier 3 (docs / instructions / agents) | ${T3} |"
+              echo ""
+              echo "**Advisory fail:** ${FAIL}"
+            else
+              echo "JSON summary unavailable."
+            fi
+            echo ""
+            echo "Authority: REVIEW.md §4 | scripts/review_scope_collect.py"
+          } >> "$GITHUB_STEP_SUMMARY"

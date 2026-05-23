@@ -1,0 +1,54 @@
+name: topology-file-arrangement
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+concurrency:
+  group: topology-file-arrangement-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  topology-file-arrangement-advisory:
+    name: topology-file-arrangement (advisory)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    env:
+      GATE_OWNER: "PR-T0 advisory file-arrangement kernel owner"
+      GATE_RATIONALE: >
+        The file-arrangement kernel is advisory only. Findings are warnings, never blocks.
+        Test failures are crashes and do block (the advisory-invariant proof must stay green).
+        The audit command exits 0 on any number of warnings; only Python crashes produce non-zero.
+      GATE_REVIEW_CONDITION: >
+        Promote continue-on-error to false (blocking) only after docs/operations/current/ exists (T1)
+        and the advisory finding count drops to near zero.
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: "pip"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+      - name: Describe gate contract
+        run: |
+          echo "owner=${GATE_OWNER}"
+          echo "rationale=${GATE_RATIONALE}"
+          echo "review_condition=${GATE_REVIEW_CONDITION}"
+      - name: Run advisory-invariant proof tests
+        run: pytest -q tests/topology/test_file_arrangement.py
+      - name: Run file-arrangement advisory audit (exit always 0 on findings)
+        run: python scripts/topology_doctor.py --file-arrangement-audit --json
+      - name: Summarize advisory stance
+        if: always()
+        run: |
+          {
+            echo "## topology-file-arrangement advisory lane"
+            echo "- All ArrangementFindings have blocking=False (enforced by __post_init__)"
+            echo "- Audit exits 0 on any number of warnings; only crashes produce non-zero"
+            echo "- continue-on-error is intentional until docs/operations/current/ exists (T1)"
+            echo "- promotion condition: ${GATE_REVIEW_CONDITION}"
+          } >> "$GITHUB_STEP_SUMMARY"

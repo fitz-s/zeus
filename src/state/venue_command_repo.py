@@ -1,8 +1,8 @@
 # Created: 2026-04-26
 # Last reused/audited: 2026-05-21
 # Authority basis: docs/operations/task_2026-05-08_object_invariance_wave27/PLAN.md
-#                  + docs/operations/task_2026-05-15_live_order_e2e_goal/LIVE_ORDER_E2E_GOAL_PLAN.md
-#                  + docs/operations/task_2026-05-17_live_order_survival/LIVE_ORDER_SURVIVAL_PLAN.md S5
+#                  + docs/operations/archive/2026-Q2/task_2026-05-15_live_order_e2e_goal/LIVE_ORDER_E2E_GOAL_PLAN.md
+#                  + docs/operations/archive/2026-Q2/task_2026-05-17_live_order_survival/LIVE_ORDER_SURVIVAL_PLAN.md S5
 """Durable command journal — append-only repo API for venue_commands / venue_command_events.
 
 Public API:

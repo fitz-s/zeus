@@ -1,6 +1,6 @@
 # Created: 2026-05-15
 # Last reused or audited: 2026-05-15
-# Authority basis: docs/operations/task_2026-05-15_p3_topology_v_next_phase2_shadow/SCAFFOLD.md §5 probe2
+# Authority basis: docs/operations/archive/2026-Q2/task_2026-05-15_p3_topology_v_next_phase2_shadow/SCAFFOLD.md §5 probe2
 """
 Probe 2 — UNION_SCOPE_EXPANSION: v_next uses cohort declaration to admit via cohort.
 
@@ -15,7 +15,7 @@ import pytest
 
 from scripts.topology_v_next.cli_integration_shim import maybe_shadow_compare, format_output
 from scripts.topology_v_next.admission_engine import admit
-from scripts.topology_v_next.dataclasses import Severity
+from scripts.topology_v_next.topology_models import Severity
 
 
 # Both files are in the calibration profile — cohort-adjacent test

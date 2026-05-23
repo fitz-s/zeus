@@ -1,6 +1,6 @@
 # Created: 2026-05-18
 # Last reused or audited: 2026-05-18
-# Authority basis: docs/operations/task_2026-05-17_post_karachi_remediation/PR_I5_WEB3_WIRE.md §7 risk #4
+# Authority basis: docs/operations/archive/2026-Q2/task_2026-05-17_post_karachi_remediation/PR_I5_WEB3_WIRE.md §7 risk #4
 #                  ("adapter constructor gap: PolymarketV2Adapter() at main.py:226 passes no args;
 #                   signer_key required — this must be fixed first")
 #                  + Wave-3 Batch A retry brief 2026-05-18 (PR-I.5.b adapter signer_key wire)

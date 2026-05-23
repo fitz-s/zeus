@@ -1,6 +1,6 @@
 # Created: 2026-05-15
 # Last reused or audited: 2026-05-15
-# Authority basis: docs/operations/task_2026-05-15_p5_maintenance_worker_core/SCAFFOLD.md §3, §6 (P5.0a)
+# Authority basis: docs/operations/archive/2026-Q2/task_2026-05-15_p5_maintenance_worker_core/SCAFFOLD.md §3, §6 (P5.0a)
 #                  SAFETY_CONTRACT.md §(a) "READ is not exempt", line 100 MKDIR explicit
 """
 Tests for maintenance_worker.types.operations.Operation enum.

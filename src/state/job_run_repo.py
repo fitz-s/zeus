@@ -1,6 +1,6 @@
 # Created: 2026-05-02
 # Last reused/audited: 2026-05-14
-# Authority basis: docs/operations/task_2026-05-02_data_daemon_readiness/PLAN.md PR45b job-run provenance contract; docs/operations/task_2026-05-08_deep_alignment_audit/DATA_DAEMON_LIVE_EFFICIENCY_REFACTOR_PLAN.md Phase 6 release-key identity.
+# Authority basis: docs/operations/task_2026-05-02_data_daemon_readiness/PLAN.md PR45b job-run provenance contract; docs/operations/archive/2026-Q2/task_2026-05-08_deep_alignment_audit/DATA_DAEMON_LIVE_EFFICIENCY_REFACTOR_PLAN.md Phase 6 release-key identity.
 """Repository helpers for the data-daemon job_run table."""
 
 from __future__ import annotations

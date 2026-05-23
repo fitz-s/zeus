@@ -1,7 +1,7 @@
 # Created: 2026-05-18
 # Last reused or audited: 2026-05-18
 # Authority basis: docs/operations/TRIVIAL_BATCH_NOTES.md (F89 RETRACT 3213fc2c),
-#   docs/operations/task_2026-05-16_post_pr126_audit/RUN_15_track3_f91_f86_observability.md §F101
+#   docs/operations/archive/2026-Q2/task_2026-05-16_post_pr126_audit/RUN_15_track3_f91_f86_observability.md §F101
 # Lifecycle: created=2026-05-18; last_reviewed=2026-05-18; last_reused=never
 # Purpose: F89 semantic retract + F101 heartbeat schema registry documentation antibody.
 # Reuse: Run directly; no setup required. Update HEARTBEAT_SCHEMA_REGISTRY when new writers are added.

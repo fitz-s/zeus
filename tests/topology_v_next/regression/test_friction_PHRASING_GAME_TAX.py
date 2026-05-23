@@ -1,6 +1,6 @@
 # Created: 2026-05-15
 # Last reused or audited: 2026-05-15
-# Authority basis: docs/operations/task_2026-05-15_p1_topology_v_next_additive/SCAFFOLD.md §2.2
+# Authority basis: docs/operations/archive/2026-Q2/task_2026-05-15_p1_topology_v_next_additive/SCAFFOLD.md §2.2
 """
 Friction regression: PHRASING_GAME_TAX (P1.2 engine-internal variant).
 
@@ -17,7 +17,7 @@ from __future__ import annotations
 import pytest
 
 from scripts.topology_v_next.admission_engine import admit
-from scripts.topology_v_next.dataclasses import (
+from scripts.topology_v_next.topology_models import (
     BindingLayer,
     CoverageMap,
     Intent,
@@ -25,7 +25,7 @@ from scripts.topology_v_next.dataclasses import (
 
 
 def _make_binding() -> BindingLayer:
-    from scripts.topology_v_next.dataclasses import BindingLayer, CoverageMap
+    from scripts.topology_v_next.topology_models import BindingLayer, CoverageMap
     cm = CoverageMap(
         profiles={
             "agent_runtime": (

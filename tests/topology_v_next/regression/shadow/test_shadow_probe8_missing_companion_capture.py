@@ -1,6 +1,6 @@
 # Created: 2026-05-15
 # Last reused or audited: 2026-05-15
-# Authority basis: docs/operations/task_2026-05-15_p3_topology_v_next_phase2_shadow/SCAFFOLD.md §5 probe8
+# Authority basis: docs/operations/archive/2026-Q2/task_2026-05-15_p3_topology_v_next_phase2_shadow/SCAFFOLD.md §5 probe8
 """
 Probe 8 — MISSING_COMPANION shadow event captured (P2 integration).
 
@@ -16,7 +16,7 @@ import pytest
 
 from scripts.topology_v_next.cli_integration_shim import maybe_shadow_compare, format_output
 from scripts.topology_v_next.admission_engine import admit
-from scripts.topology_v_next.dataclasses import Severity
+from scripts.topology_v_next.topology_models import Severity
 
 
 # src/data/replay_x.py matches modify_data_replay_surface profile

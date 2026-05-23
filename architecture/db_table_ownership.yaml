@@ -1,7 +1,7 @@
 # Zeus DB table ownership registry — canonical authority for table→DB mapping.
 #
 # Created: 2026-05-14
-# Authority basis: docs/operations/task_2026-05-14_k1_followups/PLAN.md §1.1 (REV 4)
+# Authority basis: docs/operations/archive/2026-Q2/task_2026-05-14_k1_followups/PLAN.md §1.1 (REV 4)
 #                  K1 DB split commit eba80d2b9d (2026-05-11)
 #
 # Schema fields per PLAN §1.1:
@@ -34,7 +34,7 @@ metadata:
   created: "2026-05-14"
   updated: "2026-05-17"
   owner_packet: "K1 DB split followup — task_2026-05-14_k1_followups"
-  plan_ref: "docs/operations/task_2026-05-14_k1_followups/PLAN.md §1.1 (REV 4)"
+  plan_ref: "docs/operations/archive/2026-Q2/task_2026-05-14_k1_followups/PLAN.md §1.1 (REV 4)"
   k1_split_commit: "eba80d2b9d"
   cutover_evidence:
     - description: >

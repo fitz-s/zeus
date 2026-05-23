@@ -1,7 +1,7 @@
 # Created: 2026-05-18
 # Last reused or audited: 2026-05-18
 # Authority basis:
-#   docs/operations/task_2026-05-16_post_pr126_audit/RUN_16_track_F_position_lifecycle_correctness.md (F107)
+#   docs/operations/archive/2026-Q2/task_2026-05-16_post_pr126_audit/RUN_16_track_F_position_lifecycle_correctness.md (F107)
 #   scripts/migrations/202605_position_events_occurred_at_iso_check.py
 # Lifecycle: created=2026-05-18; last_reviewed=2026-05-18; last_reused=never
 # Purpose: F107 antibody — verify scripts/migrations/202605_position_events_occurred_at_iso_check.py

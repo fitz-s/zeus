@@ -1,6 +1,6 @@
 # Created: 2026-05-15
 # Last reused or audited: 2026-05-15
-# Authority basis: docs/operations/task_2026-05-15_p1_topology_v_next_additive/SCAFFOLD.md §2.2, §5.2
+# Authority basis: docs/operations/archive/2026-Q2/task_2026-05-15_p1_topology_v_next_additive/SCAFFOLD.md §2.2, §5.2
 """
 Friction-pattern regression: LEXICAL_PROFILE_MISS (intent_resolver component).
 
@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from scripts.topology_v_next.dataclasses import Intent, Severity
+from scripts.topology_v_next.topology_models import Intent, Severity
 from scripts.topology_v_next.intent_resolver import resolve_intent
 from scripts.topology_v_next.profile_loader import load_binding_layer
 

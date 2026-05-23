@@ -254,6 +254,21 @@ state_machines:
     invariant_tests:
       - tests/contracts/test_settlement_outcome.py
       - tests/test_position_lifecycle_state.py
+  operations_governance_classification:
+    owner: scripts/operations_package_inventory.py
+    description: >
+      Docs-governance classification enum used by the operations package inventory
+      report. NOT a money-path state machine — these are operator-facing labels for
+      classifying stale/active documentation packets, not trading commands or
+      lifecycle states. Registered here because the CI semantic classifier's
+      ACK-prefix check fires on pACKage/pACKet substrings within CURRENT_PACKAGE_INPUT
+      and PACKET, and the UNKNOWN prefix fires on UNKNOWN_OPERATOR_DECISION.
+    states:
+      - CURRENT_PACKAGE_INPUT
+      - UNKNOWN_OPERATOR_DECISION
+      - PACKET
+    invariant_tests:
+      - tests/topology/test_operations_package_inventory.py
 
 schema_objects:
   authority_fabricating_defaults:

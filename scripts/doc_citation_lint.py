@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Created: 2026-05-17
 # Last reused or audited: 2026-05-17
-# Authority basis: docs/operations/task_2026-05-17_docs_taxonomy_design/SCAFFOLD.md §4 FM-01/FM-04
+# Authority basis: docs/operations/archive/2026-Q2/task_2026-05-17_docs_taxonomy_design/SCAFFOLD.md §4 FM-01/FM-04
 #                  + EXECUTION_PLAN.md §2 W2 + D2 contract (locked sha8 format)
 """doc_citation_lint.py — Citation-rot detector for Zeus docs.
 

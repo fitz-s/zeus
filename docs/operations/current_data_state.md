@@ -1,6 +1,6 @@
 # Current Data State
 
-Status: active current-fact surface — partially stale; K1 split row (point 1) superseded
+Status: STALE_FOR_LIVE — do not use for live data planning; last audited (2026-04-28) exceeds 14-day max staleness. Partially stale; K1 split row (point 1) superseded
 Last audited: 2026-04-28 (HIGH `physical_quantity` migration + LOW settlements backfill); K1 split addendum 2026-05-16
 Max staleness: 14 days for data/backfill/schema planning
 Evidence packets:

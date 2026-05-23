@@ -1,6 +1,6 @@
 # Created: 2026-05-15
 # Last reused or audited: 2026-05-15
-# Authority basis: docs/operations/task_2026-05-15_p1_topology_v_next_additive/SCAFFOLD.md §1.3, §2.1
+# Authority basis: docs/operations/archive/2026-Q2/task_2026-05-15_p1_topology_v_next_additive/SCAFFOLD.md §1.3, §2.1
 """
 Unit tests for scripts/topology_v_next/profile_loader.py.
 
@@ -19,7 +19,7 @@ from pathlib import Path
 
 import pytest
 
-from scripts.topology_v_next.dataclasses import (
+from scripts.topology_v_next.topology_models import (
     BindingLayer,
     CoverageMap,
     Intent,
@@ -212,7 +212,7 @@ class TestValidateBindingLayer:
 
     def test_empty_profiles_warns(self):
         """A binding with no coverage profiles should warn."""
-        from scripts.topology_v_next.dataclasses import CoverageMap, BindingLayer
+        from scripts.topology_v_next.topology_models import CoverageMap, BindingLayer
         empty_cm = CoverageMap(profiles={}, orphaned=(), hard_stop_paths=())
         bl = BindingLayer(
             project_id="test",

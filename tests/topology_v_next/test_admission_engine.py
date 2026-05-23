@@ -1,6 +1,6 @@
 # Created: 2026-05-15
 # Last reused or audited: 2026-05-19
-# Authority basis: docs/operations/task_2026-05-15_p1_topology_v_next_additive/SCAFFOLD.md §2.1
+# Authority basis: docs/operations/archive/2026-Q2/task_2026-05-15_p1_topology_v_next_additive/SCAFFOLD.md §2.1
 #                  operator directive 2026-05-19 (topology advisory-only conversion)
 """
 Unit tests for scripts/topology_v_next/admission_engine.py.
@@ -21,7 +21,7 @@ import time
 import pytest
 
 from scripts.topology_v_next.admission_engine import admit, _check_authority_status
-from scripts.topology_v_next.dataclasses import (
+from scripts.topology_v_next.topology_models import (
     AdmissionDecision,
     BindingLayer,
     CohortDecl,
