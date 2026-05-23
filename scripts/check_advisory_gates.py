@@ -30,6 +30,7 @@ REQUIRED_ADVISORY_JOBS = {
     "semgrep-zeus",
     "replay-parity",
     "topology-full-strict",
+    "review-contract",
 }
 
 REQUIRED_TRIGGER_PATHS = {
@@ -198,6 +199,27 @@ def ensure_blocking_topology_jobs(data: dict, errors: list[str]) -> None:
             errors.append(f"law-gate-tests: missing {test_file}")
 
 
+def ensure_review_contract_advisory(data: dict, errors: list[str]) -> None:
+    jobs = data.get("jobs", {})
+    rc = jobs.get("review-contract", {})
+    if not rc:
+        return  # already flagged by ensure_jobs
+
+    steps = "\n".join(
+        step.get("run", "")
+        for step in rc.get("steps", [])
+        if isinstance(step, dict)
+    )
+    if "check_copilot_instruction_budget.py" not in steps:
+        errors.append("review-contract: missing check_copilot_instruction_budget.py step")
+    if "check_review_instruction_coverage.py" not in steps:
+        errors.append("review-contract: missing check_review_instruction_coverage.py step")
+
+    review_condition = rc.get("env", {}).get("GATE_REVIEW_CONDITION", "")
+    if "Promote" not in review_condition and "promote" not in review_condition:
+        errors.append("review-contract: promotion condition must state when to promote")
+
+
 def ensure_no_external_blocking_references(data: dict, errors: list[str]) -> None:
     rendered = WORKFLOW_PATH.read_text()
     for forbidden in FORBIDDEN_EXTERNAL_REFERENCES:
@@ -219,6 +241,7 @@ def main() -> int:
     ensure_jobs(data, errors)
     ensure_blocking_topology_jobs(data, errors)
     ensure_semgrep_and_replay_are_advisory(data, errors)
+    ensure_review_contract_advisory(data, errors)
     ensure_no_external_blocking_references(data, errors)
 
     if errors:

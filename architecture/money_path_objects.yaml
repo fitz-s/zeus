@@ -333,7 +333,7 @@ external_truth_sources:
 
 side_effect_calls:
   submit_order:
-    patterns: [client.submit, submit_order, create_order]
+    patterns: [client.submit, submit_order, create_order, place_limit_order, place_market_order, post_order, build_order]
     required_invariants: [MP-SIDE-001, MP-SIDE-002, MP-SIDE-003]
   redeem:
     patterns: [adapter.redeem, redeemPositions, eth_sendRawTransaction]

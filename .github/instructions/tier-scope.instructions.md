@@ -9,7 +9,7 @@ Review by runtime risk, not file order.
 
 ## Order
 
-Read PR body's "AI Review Scope" first. Group changed paths into Tiers.
+Group changed paths into Tiers using the path patterns below.
 Exhaust Tier 0 before Tier 1. Tier 2 verifies 0/1. Tier 3 only if budget
 remains.
 

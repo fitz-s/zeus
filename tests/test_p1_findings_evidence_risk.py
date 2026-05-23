@@ -199,6 +199,7 @@ class TestF2EvidenceReportDenominatorScoping:
             EvidenceTier.SHADOW_PASS,
             conn=conn,
             source="shadow_decision",
+            breakeven_win_rate=0.5,
         )
         assert report.n_decisions == 1, f"Expected 1, got {report.n_decisions}"
 
@@ -211,7 +212,8 @@ class TestF2EvidenceReportDenominatorScoping:
         conn.commit()
 
         report = build_evidence_report(
-            "settlement_capture", EvidenceTier.SHADOW_PASS, conn=conn
+            "settlement_capture", EvidenceTier.SHADOW_PASS, conn=conn,
+            breakeven_win_rate=0.5,
         )
         assert report.n_decisions == 3
 
@@ -233,7 +235,7 @@ class TestF3RegretJoinCorrectness:
         conn.commit()
 
         report = build_evidence_report(
-            "center_buy", EvidenceTier.SHADOW_PASS, conn=conn
+            "center_buy", EvidenceTier.SHADOW_PASS, conn=conn, breakeven_win_rate=0.5,
         )
         # The regret row must NOT count because de-sc.strategy_key = settlement_capture ≠ center_buy
         assert report.n_settled == 0, f"Cross-strategy contamination: n_settled={report.n_settled}"
@@ -246,7 +248,8 @@ class TestF3RegretJoinCorrectness:
         _seed_evidence(conn, strategy_key="settlement_capture", total_regret=0.05)
 
         report = build_evidence_report(
-            "settlement_capture", EvidenceTier.SHADOW_PASS, conn=conn
+            "settlement_capture", EvidenceTier.SHADOW_PASS, conn=conn,
+            breakeven_win_rate=0.5,
         )
         assert report.n_settled == 1
         assert report.n_wins == 1  # regret > 0 = win
