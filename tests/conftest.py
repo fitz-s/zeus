@@ -272,6 +272,8 @@ _WLA_RESIDUAL_ALLOWLIST = frozenset({
     # --- src/ daemon sites: pending Track A.6 (#246) ---
     "src/data/market_scanner.py",       # pending_track_a6: daemon INSERT writes to market_events_v2; no db_writer_lock yet
     "src/state/chunk_boundary_events.py",  # pending_track_a6: F11 daemon-thread observability write; intentionally separate conn from BulkChunker's conn to avoid lock-order conflict; failure-silent
+    # --- scripts/ utilities: standalone CLI tools, not daemon src/ ---
+    "scripts/quarantine_bad_forecast_decisions.py",  # pending_track_a6: standalone quarantine CLI; PR-E work in progress
 })
 
 # Effective allowlist: canonical infra + residual (Track A.6 daemon sites only;

@@ -894,7 +894,7 @@ def get_connection(
 # CI hook scripts/check_schema_version.py diffs the sqlite_master hash of
 # a fresh-init DB against tests/state/_schema_pinned_hash.txt and fails
 # the PR if SCHEMA_VERSION did not change in lockstep.
-SCHEMA_VERSION = 30  # 2026-05-22 stochastic+datagated wave: new NoTradeReason members from s3/s4/s5/g1/g2/g3/l1/l2; PR-C: observation_hourly_extrema_v2 compat view
+SCHEMA_VERSION = 32  # 2026-05-22 PR-D: NoTradeReason.PROBABILITY_SANITY_GATE added (day0 HIGH sanity gate)
 
 
 def init_schema(
@@ -2532,6 +2532,11 @@ def init_schema(
     # Phase 2: apply v2 schema (idempotent — safe to run on every boot).
     from src.state.schema.v2_schema import apply_v2_schema as _apply_v2_schema
     _apply_v2_schema(conn, forecast_tables=False)
+
+    # PR-E (2026-05-22): decision_integrity_quarantine table (SCHEMA_VERSION 32).
+    from src.state.schema.decision_integrity_quarantine_schema import ensure_table as _ensure_decision_integrity_quarantine_table
+    _ensure_decision_integrity_quarantine_table(conn)
+
     conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
     # db_chunk_boundary_events — K2 live-contention event log (Cluster B fix 2026-05-18)
