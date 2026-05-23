@@ -199,6 +199,10 @@ def _rebuild_stale_no_trade_events_table(conn: sqlite3.Connection) -> None:
 
     conn.execute("DROP TABLE IF EXISTS no_trade_events_new")
     conn.execute(_CREATE_TABLE_REBUILD_SQL)
+
+    # Pre-migration row count: used to detect silent drops from INSERT OR IGNORE.
+    _pre_count = conn.execute("SELECT COUNT(*) FROM no_trade_events").fetchone()[0]
+
     conn.execute(
         """
         INSERT OR IGNORE INTO no_trade_events_new (
@@ -218,12 +222,25 @@ def _rebuild_stale_no_trade_events_table(conn: sqlite3.Connection) -> None:
             shadow_runtime,
             observed_at,
             CASE
-                WHEN schema_version IN (14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28) THEN schema_version
+                WHEN schema_version IN (14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30) THEN schema_version
                 ELSE 28
             END,
             schema_compatibility
         FROM no_trade_events
         """
     )
+
+    # Post-migration row count: assert no rows were silently dropped by INSERT OR IGNORE.
+    # A mismatch here means legacy rows violate the new CHECK constraint — investigate
+    # before proceeding (do not silently lose provenance rows).
+    _post_count = conn.execute("SELECT COUNT(*) FROM no_trade_events_new").fetchone()[0]
+    if _post_count != _pre_count:
+        raise RuntimeError(
+            f"no_trade_events migration: {_pre_count} rows before INSERT OR IGNORE but only "
+            f"{_post_count} rows transferred. {_pre_count - _post_count} rows were silently "
+            "dropped — likely CHECK constraint violations on the new schema. "
+            "Investigate before retrying migration."
+        )
+
     conn.execute("DROP TABLE no_trade_events")
     conn.execute("ALTER TABLE no_trade_events_new RENAME TO no_trade_events")

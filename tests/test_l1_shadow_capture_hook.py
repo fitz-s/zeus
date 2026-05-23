@@ -166,7 +166,7 @@ class TestFlagOffNoOp:
             analysis=analysis,
             natural_key=nk,
             observed_at=_OBS_TIME,
-            conn=conn,
+            world_conn=conn,
             decision_time=_DECISION_TIME,
         )
 
@@ -210,7 +210,7 @@ class TestFailOpen:
             analysis=analysis,
             natural_key=nk,
             observed_at=_OBS_TIME,
-            conn=conn,
+            world_conn=conn,
             decision_time=_DECISION_TIME,
         )
 
@@ -252,7 +252,7 @@ class TestFailOpen:
             analysis=analysis,
             natural_key=nk,
             observed_at=_OBS_TIME,
-            conn=conn,
+            world_conn=conn,
             decision_time=_DECISION_TIME,
         )
 
@@ -301,7 +301,7 @@ class TestFlagOnWritesDecisionEvents:
             analysis=analysis,
             natural_key=nk,
             observed_at=_OBS_TIME,
-            conn=conn,
+            world_conn=conn,
             decision_time=_DECISION_TIME,
         )
 
@@ -338,7 +338,7 @@ class TestFlagOnWritesDecisionEvents:
             analysis=analysis,
             natural_key=nk,
             observed_at=_OBS_TIME,
-            conn=conn,
+            world_conn=conn,
             decision_time=_DECISION_TIME,
         )
 
@@ -370,7 +370,7 @@ class TestFlagOnWritesDecisionEvents:
             analysis=analysis,
             natural_key=nk,
             observed_at=_OBS_TIME,
-            conn=conn,
+            world_conn=conn,
             decision_time=_DECISION_TIME,
         )
 
@@ -378,3 +378,124 @@ class TestFlagOnWritesDecisionEvents:
         nte_rows = conn.execute("SELECT reason FROM no_trade_events").fetchall()
         assert len(nte_rows) == 1
         assert "weather_alert_source_untrusted" in nte_rows[0]["reason"]
+
+
+# ---------------------------------------------------------------------------
+# R-4 (MAJOR-4): trade-shaped conn → fail-open + rows land in WORLD (not trade DB)
+# ---------------------------------------------------------------------------
+
+class TestTradeConnFailOpenAndWorldWrite:
+    """MAJOR-1 regression guard.
+
+    Before the MAJOR-1 fix, dispatch_shadow_candidates received the live
+    trade-DB conn. decision_events / no_trade_events live in WORLD, not trade-DB
+    → OperationalError "no such table" → fail-open → 0 rows in live.
+
+    After the fix, dispatch self-opens a world conn via get_world_connection().
+    This test:
+      (a) Verifies fail-open when a trade-shaped conn (missing target tables) is
+          injected as the world conn (simulates pre-fix behaviour in isolation).
+      (b) Verifies that rows land in the monkeypatched world conn when
+          get_world_connection() is patched to return an in-memory world DB.
+    """
+
+    def test_trade_shaped_conn_is_fail_open(self, monkeypatch):
+        """(a) Passing a trade-shaped conn (no decision_events table) → no crash."""
+        import src.engine.shadow_candidate_dispatch as scd
+        from src.strategy.candidates import WeatherEventArbitrage
+        from src.strategy.bayes_alert import LRRecord
+        monkeypatch.setattr(scd, "shadow_candidate_capture_enabled", lambda: True)
+
+        class _HighLRTable:
+            def lookup(self, **kwargs):
+                return LRRecord(point=6.0, lower=5.0, alert_type="ExtremeHeat",
+                                city="chicago", season="summer", lead_time_hours=12)
+
+        candidate = WeatherEventArbitrage(lr_table=_HighLRTable())
+        monkeypatch.setattr(scd, "_ALL_SHADOW_CANDIDATES", [candidate])
+
+        # Trade-shaped conn: only has trade tables, NOT decision_events / no_trade_events
+        trade_conn = sqlite3.connect(":memory:")
+        trade_conn.execute(
+            "CREATE TABLE orders (order_id TEXT PRIMARY KEY, side TEXT, size REAL)"
+        )
+        trade_conn.commit()
+
+        analysis = SimpleNamespace(
+            metrics=_make_metrics(best_ask=__import__('decimal').Decimal("0.30")),
+            alert_source="noaa_alerts",
+            active_weather_alert=True,
+            alert_prior_p=0.10,
+            alert_type="ExtremeHeat",
+            alert_city="chicago",
+            alert_season="summer",
+            alert_lead_time_hours=12,
+        )
+        nk = _make_natural_key()
+
+        # Must not raise — fail-open contract must absorb "no such table" errors
+        scd.dispatch_shadow_candidates(
+            analysis=analysis,
+            natural_key=nk,
+            observed_at=_OBS_TIME,
+            world_conn=trade_conn,   # intentionally wrong conn — regression probe
+            decision_time=_DECISION_TIME,
+        )
+        # Confirm trade conn still has no decision_events table (not created by dispatch)
+        tables = {
+            r[0] for r in
+            trade_conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+        }
+        assert "decision_events" not in tables
+
+    def test_self_open_world_conn_writes_rows(self, monkeypatch):
+        """(b) When world_conn is None, dispatch self-opens via get_world_connection()
+        and rows land in that conn (COUNT(*) > 0 smoke).
+        """
+        import src.engine.shadow_candidate_dispatch as scd
+        from src.strategy.candidates import WeatherEventArbitrage
+        from src.strategy.bayes_alert import LRRecord
+        monkeypatch.setattr(scd, "shadow_candidate_capture_enabled", lambda: True)
+
+        class _HighLRTable:
+            def lookup(self, **kwargs):
+                return LRRecord(point=6.0, lower=5.0, alert_type="ExtremeHeat",
+                                city="chicago", season="summer", lead_time_hours=12)
+
+        candidate = WeatherEventArbitrage(lr_table=_HighLRTable())
+        monkeypatch.setattr(scd, "_ALL_SHADOW_CANDIDATES", [candidate])
+
+        # Build an in-memory world-shaped conn that will be returned by get_world_connection()
+        world_conn = _make_conn()
+
+        # Monkeypatch get_world_connection in the dispatch module's import scope
+        import src.state.db as state_db
+        monkeypatch.setattr(state_db, "get_world_connection", lambda write_class=None: world_conn)
+
+        analysis = SimpleNamespace(
+            metrics=_make_metrics(best_ask=__import__('decimal').Decimal("0.30")),
+            alert_source="noaa_alerts",
+            active_weather_alert=True,
+            alert_prior_p=0.10,
+            alert_type="ExtremeHeat",
+            alert_city="chicago",
+            alert_season="summer",
+            alert_lead_time_hours=12,
+        )
+        nk = _make_natural_key()
+
+        # Call WITHOUT world_conn → triggers self-open path
+        scd.dispatch_shadow_candidates(
+            analysis=analysis,
+            natural_key=nk,
+            observed_at=_OBS_TIME,
+            # world_conn intentionally omitted
+            decision_time=_DECISION_TIME,
+        )
+
+        # COUNT(*) > 0: rows landed in WORLD (the monkeypatched conn)
+        de_count = world_conn.execute("SELECT COUNT(*) FROM decision_events").fetchone()[0]
+        assert de_count > 0, (
+            f"Expected >0 decision_events rows in world conn after self-open dispatch, got {de_count}. "
+            "MAJOR-1 regression: dispatch wrote to wrong DB."
+        )

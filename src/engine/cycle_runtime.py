@@ -984,7 +984,10 @@ def _reprice_decision_from_executable_snapshot(
                 analysis=_SimpleNamespace(metrics=_vnext_metrics_computed),
                 natural_key=_shadow_nk,
                 observed_at=_shadow_observation_time,
-                conn=conn,
+                # world_conn intentionally omitted: dispatch self-opens a world-DB
+                # connection via get_world_connection(). Passing the live trade-DB
+                # conn here caused K1 ghost-split (MAJOR-1): decision_events lives
+                # in WORLD, not trade-DB → "no such table" → fail-open → 0 rows.
                 decision_time=datetime.now(tz=timezone.utc),
             )
     except Exception:

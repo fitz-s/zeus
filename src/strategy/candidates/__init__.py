@@ -465,6 +465,7 @@ from .settlement_capture_shadow import PhysicalIntervalBound, SettlementCaptureS
 from .center_buy_calibrated_shadow import CenterBuyCalibratedShadow
 from .opening_inertia_relaxation import OpeningInertiaRelaxation, estimate_lambda
 from .imminent_open_capture_posterior_collapse import ImminentOpenCapturePosteriorCollapse
+from .shoulder_buy_evt import ShoulderBuyEVT
 
 __all__ = [
     "_is_world_db_conn",
@@ -489,6 +490,7 @@ __all__ = [
     "PriceLevel",
     "ResolutionWindowMaker",
     "SettlementCaptureShadow",
+    "ShoulderBuyEVT",
     "ShoulderImpossibleTailCapture",
     "StaleQuoteDetector",
     "StrategyProtocol",

@@ -83,17 +83,23 @@ def _build_candidate_list() -> List[Any]:
     Called once at module level; result stored in _ALL_SHADOW_CANDIDATES.
     """
     from src.strategy.candidates import (
+        CenterBuyCalibratedShadow,
+        CenterSellModelNo,
         CenterSellParity,
         CrossMarketCorrelationHedge,
+        ImminentOpenCapturePosteriorCollapse,
         LiquidityProvisionWithHeartbeat,
         NegRiskBasket,
+        OpeningInertiaRelaxation,
         ResolutionWindowMaker,
         SettlementCaptureShadow,
+        ShoulderBuyEVT,
         ShoulderImpossibleTailCapture,
         StaleQuoteDetector,
         WeatherEventArbitrage,
     )
     return [
+        # Original 9 (pre-wave)
         WeatherEventArbitrage(),
         LiquidityProvisionWithHeartbeat(),
         StaleQuoteDetector(),
@@ -103,6 +109,12 @@ def _build_candidate_list() -> List[Any]:
         CrossMarketCorrelationHedge(),
         NegRiskBasket(),
         SettlementCaptureShadow(),
+        # Wave-added stochastic candidates (S1-S5)
+        CenterBuyCalibratedShadow(),
+        OpeningInertiaRelaxation(),
+        ImminentOpenCapturePosteriorCollapse(),
+        CenterSellModelNo(),
+        ShoulderBuyEVT(),
     ]
 
 
@@ -119,7 +131,7 @@ def dispatch_shadow_candidates(
     analysis: Any,
     natural_key: "DecisionNaturalKey",
     observed_at: str,
-    conn: sqlite3.Connection,
+    world_conn: sqlite3.Connection | None = None,
     decision_time: datetime,
 ) -> None:
     """Dispatch all shadow candidates against the given analysis.
@@ -135,13 +147,26 @@ def dispatch_shadow_candidates(
                        object with a .metrics attribute). Passed through as-is.
         natural_key:   DecisionNaturalKey for the current market / observation.
         observed_at:   ISO-8601 UTC timestamp of the observation.
-        conn:          DB connection. World-DB in live; in-memory in tests.
+        world_conn:    WORLD-DB connection. Must point to the world DB (owns
+                       decision_events / no_trade_events). If None, self-opens
+                       via get_world_connection(write_class=WriteClass.LIVE).
+                       Callers MUST NOT pass the trade-DB conn here — the
+                       candidate writers route on _is_world_db_conn() and will
+                       silently fail to write if given a trade-DB connection
+                       (K1 ghost-split, MAJOR-1).
         decision_time: Wall-clock time of the decision (for decision_events rows).
     """
     if not shadow_candidate_capture_enabled():
         return
 
     from src.strategy.candidates import CandidateContext, write_candidate_no_trade_row
+
+    # Resolve world connection. Self-open if not provided (live path).
+    # Mirrors write_decision_event's conn=None self-open pattern (cycle_runtime.py).
+    if world_conn is None:
+        from src.state.db import get_world_connection
+        from src.state.db_writer_lock import WriteClass
+        world_conn = get_world_connection(write_class=WriteClass.LIVE)
 
     try:
         context = CandidateContext(
@@ -161,7 +186,7 @@ def dispatch_shadow_candidates(
         try:
             candidate.evaluate(
                 context=context,
-                conn=conn,
+                conn=world_conn,
                 decision_time=decision_time,
             )
         except Exception as exc:
