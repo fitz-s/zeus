@@ -138,7 +138,8 @@ class NoTradeReason(StrEnum):
     # 4 members per 05_PHASE_4_FDR_FAMILY_CANDIDATES.md §"NoTradeReason additions"
     STALE_QUOTE_FILL_INFEASIBLE = auto()       # stale_quote_detector: book hash stale post info-event
     RESOLUTION_DISPUTED = auto()               # resolution_window_maker: venue resolution status contested
-    LIQPROV_HEARTBEAT_ABSENT = auto()          # liquidity_provision_with_heartbeat: fill_probability field absent
+    LIQPROV_HEARTBEAT_ABSENT = auto()          # liquidity_provision_with_heartbeat: fill_probability field absent (legacy; no longer emitted post-adverse-selection reframe)
+    LIQPROV_ADVERSE_SELECTION_UNWIRED = auto() # liquidity_provision_with_heartbeat: AS(q,τ) from full-market CLOB data not wired → data-gated no_trade
     WEATHER_ALERT_SOURCE_UNTRUSTED = auto()    # weather_event_arbitrage: external alert feed not wired/trusted
     WEATHER_ALERT_LR_TABLE_MISSING = auto()   # weather_event_arbitrage: alert LR table absent (not yet fitted)
     WEATHER_ALERT_EDGE_NONPOSITIVE = auto()   # weather_event_arbitrage: p'⁻ − ask − φ ≤ 0; posterior below ask+fee

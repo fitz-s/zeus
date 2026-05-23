@@ -161,137 +161,326 @@ _DECISION_TIME = datetime(2026, 6, 15, 10, 0, 0)
 
 
 # ---------------------------------------------------------------------------
-# LiquidityProvisionWithHeartbeat relationship tests
+# LiquidityProvisionWithHeartbeat relationship tests — adverse-selection model
+#
+# Reframe per STRATEGY_TAXONOMY_DIRECTIVE.md §11 + zeus_strategy_spec.md §15.
+# EV_maker = Pr(F)·[p_fair − q_bid − AS]; sign = p⁻_fair − q_bid − AS⁺ > 0.
+# Pr(F) decides volume, NOT sign. Data-gated: AS from full-market CLOB unwired.
 # ---------------------------------------------------------------------------
 
+def _make_as_estimate(
+    p_fair_lower: Decimal = Decimal("0.50"),
+    maker_bid: Decimal = Decimal("0.45"),
+    as_upper: Decimal = Decimal("0.02"),
+) -> SimpleNamespace:
+    """Mock market_clob_adverse_selection on analysis.
+
+    Fields:
+      p_fair_lower_bound: calibrated lower bound on fair price (p⁻_fair).
+      maker_bid:          quote bid price (q_bid).
+      adverse_selection_upper_bound: AS⁺ = E[p_after−p_before|F] upper bound.
+    """
+    return SimpleNamespace(
+        p_fair_lower_bound=p_fair_lower,
+        maker_bid=maker_bid,
+        adverse_selection_upper_bound=as_upper,
+        source="full_market_clob_public_trades",  # NOT Zeus self-history
+    )
+
+
 class TestLiquidityProvisionWithHeartbeatRelationship:
-    """R-test: liqprov_with_heartbeat enter→decision_events, no_trade→no_trade_events."""
+    """R-tests: adverse-selection maker model (§11/§15 reframe).
 
-    def test_enter_path_writes_decision_events_row_with_correct_strategy_key(self):
-        """Enter path: fill_probability sufficient → decision_events row with correct strategy_key."""
-        conn = _make_conn()
+    Core invariants:
+      1. Pr(F) does NOT drive sign — varying fill_probability with fixed AS does not flip outcome.
+      2. AS bound drives sign — varying AS across the threshold flips outcome.
+      3. Data-gated: AS-estimator absent → LIQPROV_ADVERSE_SELECTION_UNWIRED, never enter.
+      4. No self-reference: legacy fill_probability present but AS absent → still no_trade.
+      5. Post-only maker: phi uses fee_rate=0 (maker fee is zero per §0 + §15.2).
+      6. Enter→decision_events row; no_trade→no_trade_events row.
+    """
+
+    # ── R1: Pr(F) decides volume, NOT sign ─────────────────────────────────
+
+    def test_fill_probability_does_not_determine_sign(self):
+        """R1 — Sign-volume separation: varying Pr(F) with fixed AS does not flip decision.
+
+        Hold p⁻_fair=0.55, q_bid=0.45, AS⁺=0.02 → edge=0.08 > 0 → always enter.
+        Vary fill_probability across 0.01 and 0.99. Decision must be 'enter' both times.
+        """
+        conn1 = _make_conn()
+        conn2 = _make_conn()
         candidate = LiquidityProvisionWithHeartbeat()
 
-        metrics = _make_metrics(depth_at_best_ask=8)
-        analysis = SimpleNamespace(
-            metrics=metrics,
-            passive_maker_estimate=_make_passive_estimate(Decimal("0.55")),
+        # Low fill probability (0.01)
+        analysis_low = SimpleNamespace(
+            metrics=_make_metrics(),
+            market_clob_adverse_selection=_make_as_estimate(
+                p_fair_lower=Decimal("0.55"),
+                maker_bid=Decimal("0.45"),
+                as_upper=Decimal("0.02"),
+            ),
+            passive_maker_estimate=SimpleNamespace(expected_fill_probability=Decimal("0.01")),
         )
-        ctx = _make_context(conn, analysis)
+        d_low = candidate.evaluate(
+            context=_make_context(conn1, analysis_low),
+            conn=conn1,
+            decision_time=_DECISION_TIME,
+        )
 
-        decision = candidate.evaluate(context=ctx, conn=conn, decision_time=_DECISION_TIME)
+        # High fill probability (0.99)
+        analysis_high = SimpleNamespace(
+            metrics=_make_metrics(),
+            market_clob_adverse_selection=_make_as_estimate(
+                p_fair_lower=Decimal("0.55"),
+                maker_bid=Decimal("0.45"),
+                as_upper=Decimal("0.02"),
+            ),
+            passive_maker_estimate=SimpleNamespace(expected_fill_probability=Decimal("0.99")),
+        )
+        d_high = candidate.evaluate(
+            context=_make_context(conn2, analysis_high),
+            conn=conn2,
+            decision_time=_DECISION_TIME,
+        )
 
-        assert decision.outcome == "enter", f"Expected enter, got {decision.outcome}"
+        assert d_low.outcome == "enter", (
+            f"R1 violation: low fill_prob=0.01 should enter (AS in budget); got {d_low.outcome}"
+        )
+        assert d_high.outcome == "enter", (
+            f"R1 violation: high fill_prob=0.99 should enter (AS in budget); got {d_high.outcome}"
+        )
 
-        rows = conn.execute(
-            "SELECT strategy_key, source FROM decision_events WHERE market_slug=?",
-            (ctx.natural_key[0],),
-        ).fetchall()
-        assert len(rows) == 1, f"Expected 1 decision_events row, got {len(rows)}"
-        assert rows[0]["strategy_key"] == "liquidity_provision_with_heartbeat"
-        assert rows[0]["source"] == "shadow_decision"
+    # ── R2: AS bound drives sign ────────────────────────────────────────────
 
-    def test_enter_path_missing_anchor_records_unknown_legacy_not_gamma_explicit(self):
-        conn = _make_conn()
+    def test_as_bound_determines_sign_at_threshold(self):
+        """R2 — AS bound drives sign: straddling p⁻_fair − q_bid flips the decision.
+
+        p⁻_fair=0.55, q_bid=0.45 → threshold for AS = 0.10.
+        AS⁺=0.09 → edge=0.01>0 → enter.
+        AS⁺=0.11 → edge=−0.01<0 → no_trade.
+        """
+        conn_enter = _make_conn()
+        conn_no_trade = _make_conn()
         candidate = LiquidityProvisionWithHeartbeat()
-        metrics = _make_metrics(depth_at_best_ask=8, polymarket_end_anchor_source=None)
-        analysis = SimpleNamespace(
-            metrics=metrics,
-            passive_maker_estimate=_make_passive_estimate(Decimal("0.55")),
+
+        # Below threshold → enter
+        analysis_enter = SimpleNamespace(
+            metrics=_make_metrics(),
+            market_clob_adverse_selection=_make_as_estimate(
+                p_fair_lower=Decimal("0.55"),
+                maker_bid=Decimal("0.45"),
+                as_upper=Decimal("0.09"),
+            ),
         )
-        ctx = _make_context(conn, analysis)
-
-        decision = candidate.evaluate(context=ctx, conn=conn, decision_time=_DECISION_TIME)
-
-        assert decision.outcome == "enter"
-        row = conn.execute(
-            "SELECT source, polymarket_end_anchor_source FROM decision_events WHERE market_slug=?",
-            (ctx.natural_key[0],),
-        ).fetchone()
-        assert row["source"] == "shadow_decision"
-        assert row["polymarket_end_anchor_source"] == "unknown_legacy"
-
-    def test_no_trade_path_writes_no_trade_events_row_with_correct_reason(self):
-        """No-trade path: fill_prob below minimum → no_trade_events row with LIQPROV_HEARTBEAT_ABSENT."""
-        conn = _make_conn()
-        candidate = LiquidityProvisionWithHeartbeat()
-
-        metrics = _make_metrics(depth_at_best_ask=5)
-        analysis = SimpleNamespace(
-            metrics=metrics,
-            passive_maker_estimate=_make_passive_estimate(Decimal("0.10")),  # below 0.30
-        )
-        ctx = _make_context(conn, analysis)
-
-        decision = candidate.evaluate(context=ctx, conn=conn, decision_time=_DECISION_TIME)
-
-        assert decision.outcome == "no_trade", f"Expected no_trade, got {decision.outcome}"
-        assert decision.reason == NoTradeReason.LIQPROV_HEARTBEAT_ABSENT
-
-        rows = conn.execute(
-            "SELECT reason, schema_compatibility, reason_detail FROM no_trade_events WHERE market_slug=?",
-            (ctx.natural_key[0],),
-        ).fetchall()
-        assert len(rows) == 1, f"Expected 1 no_trade_events row, got {len(rows)}"
-        assert rows[0]["reason"] == NoTradeReason.LIQPROV_HEARTBEAT_ABSENT.value
-        assert rows[0]["schema_compatibility"] == "current"
-        assert "shadow_runtime=true" in rows[0]["reason_detail"]
-        assert (
-            "candidate_strategy_key=liquidity_provision_with_heartbeat"
-            in rows[0]["reason_detail"]
+        d_enter = candidate.evaluate(
+            context=_make_context(conn_enter, analysis_enter),
+            conn=conn_enter,
+            decision_time=_DECISION_TIME,
         )
 
-    def test_missing_field_guard_passive_estimate_absent_writes_no_trade_row(self):
-        """T3 required missing-field guard: passive_maker_estimate absent → LIQPROV_HEARTBEAT_ABSENT.
+        # Above threshold → no_trade
+        analysis_no_trade = SimpleNamespace(
+            metrics=_make_metrics(),
+            market_clob_adverse_selection=_make_as_estimate(
+                p_fair_lower=Decimal("0.55"),
+                maker_bid=Decimal("0.45"),
+                as_upper=Decimal("0.11"),
+            ),
+        )
+        d_no_trade = candidate.evaluate(
+            context=_make_context(conn_no_trade, analysis_no_trade),
+            conn=conn_no_trade,
+            decision_time=_DECISION_TIME,
+        )
 
-        Per plan §T3: the missing-field guard path must be exercised (NoTradeReason
-        emission, not just happy-path enter). This is the canonical test for that.
+        assert d_enter.outcome == "enter", (
+            f"R2 violation: AS=0.09 < 0.10 threshold → expected enter; got {d_enter.outcome}"
+        )
+        assert d_no_trade.outcome == "no_trade", (
+            f"R2 violation: AS=0.11 > 0.10 threshold → expected no_trade; got {d_no_trade.outcome}"
+        )
+
+    # ── R3: Data-gated: AS-estimator absent → LIQPROV_ADVERSE_SELECTION_UNWIRED ──
+
+    def test_as_data_absent_emits_adverse_selection_unwired_no_trade(self):
+        """R3 — Data-gate: market_clob_adverse_selection absent → LIQPROV_ADVERSE_SELECTION_UNWIRED.
+
+        External CLOB order-flow data for AS estimation is unwired. Until wired,
+        the strategy must emit no_trade with this specific reason.
         """
         conn = _make_conn()
         candidate = LiquidityProvisionWithHeartbeat()
 
-        # No passive_maker_estimate attribute at all
-        metrics = _make_metrics()
-        analysis = SimpleNamespace(metrics=metrics)
+        # No market_clob_adverse_selection attribute — data not wired
+        analysis = SimpleNamespace(metrics=_make_metrics())
         ctx = _make_context(conn, analysis)
 
         decision = candidate.evaluate(context=ctx, conn=conn, decision_time=_DECISION_TIME)
 
-        # The missing-field guard fires
-        assert decision.outcome == "no_trade"
-        assert decision.reason == NoTradeReason.LIQPROV_HEARTBEAT_ABSENT
-        assert "fill_probability absent" in (decision.reason_detail or ""), (
-            f"Expected 'fill_probability absent' in reason_detail; got {decision.reason_detail!r}"
+        assert decision.outcome == "no_trade", (
+            f"R3 violation: AS data absent must emit no_trade; got {decision.outcome}"
+        )
+        assert decision.reason == NoTradeReason.LIQPROV_ADVERSE_SELECTION_UNWIRED, (
+            f"R3 violation: reason must be LIQPROV_ADVERSE_SELECTION_UNWIRED; got {decision.reason}"
+        )
+        assert "adverse selection" in (decision.reason_detail or "").lower(), (
+            f"Expected 'adverse selection' in reason_detail; got {decision.reason_detail!r}"
         )
 
         rows = conn.execute(
             "SELECT reason, schema_compatibility, reason_detail FROM no_trade_events"
         ).fetchall()
         assert len(rows) == 1
-        assert rows[0]["reason"] == NoTradeReason.LIQPROV_HEARTBEAT_ABSENT.value
+        assert rows[0]["reason"] == NoTradeReason.LIQPROV_ADVERSE_SELECTION_UNWIRED.value
         assert rows[0]["schema_compatibility"] == "current"
-        assert (
-            "candidate_strategy_key=liquidity_provision_with_heartbeat"
-            in rows[0]["reason_detail"]
-        )
+        assert "candidate_strategy_key=liquidity_provision_with_heartbeat" in rows[0]["reason_detail"]
 
-    def test_neither_path_silently_drops(self):
+    # ── R4: No self-reference: legacy fill_prob present but AS absent → no_trade ──
+
+    def test_legacy_fill_probability_present_but_as_absent_still_no_trade(self):
+        """R4 — No self-reference: passive_maker_estimate (venue-command fill prob) present
+        but market_clob_adverse_selection absent → still no_trade.
+
+        Proves the new implementation does NOT use Zeus's own fill-probability
+        as a sign oracle. The AS field is the gating input, not fill_probability.
+        """
         conn = _make_conn()
         candidate = LiquidityProvisionWithHeartbeat()
 
+        # Legacy field present but AS estimator absent
+        analysis = SimpleNamespace(
+            metrics=_make_metrics(),
+            passive_maker_estimate=_make_passive_estimate(Decimal("0.90")),
+            # No market_clob_adverse_selection
+        )
+        ctx = _make_context(conn, analysis)
+
+        decision = candidate.evaluate(context=ctx, conn=conn, decision_time=_DECISION_TIME)
+
+        assert decision.outcome == "no_trade", (
+            "R4 violation: even with high fill_probability (legacy), "
+            f"AS absent must block entry; got {decision.outcome}"
+        )
+        assert decision.reason == NoTradeReason.LIQPROV_ADVERSE_SELECTION_UNWIRED, (
+            f"R4 violation: reason must be LIQPROV_ADVERSE_SELECTION_UNWIRED; got {decision.reason}"
+        )
+
+    # ── R5: Maker fee = 0 (structural) ─────────────────────────────────────
+
+    def test_maker_fee_zero_in_ev_computation(self):
+        """R5 — Maker fee is zero: post-only guarantees maker role; phi(q, p, 0) = 0.
+
+        With AS⁺=0.09 (edge positive), entry occurs. Edge stored on decision
+        must equal p⁻_fair − q_bid − AS⁺ (no fee deduction, fee=0 for maker).
+        Authority: STRATEGY_TAXONOMY_DIRECTIVE §11 + zeus_strategy_spec §15.2.
+        """
+        conn = _make_conn()
+        candidate = LiquidityProvisionWithHeartbeat()
+
+        p_fair_lower = Decimal("0.55")
+        maker_bid = Decimal("0.45")
+        as_upper = Decimal("0.09")
+        expected_edge = p_fair_lower - maker_bid - as_upper  # 0.01, no fee
+
+        analysis = SimpleNamespace(
+            metrics=_make_metrics(),
+            market_clob_adverse_selection=_make_as_estimate(
+                p_fair_lower=p_fair_lower,
+                maker_bid=maker_bid,
+                as_upper=as_upper,
+            ),
+        )
+        ctx = _make_context(conn, analysis)
+
+        decision = candidate.evaluate(context=ctx, conn=conn, decision_time=_DECISION_TIME)
+
+        assert decision.outcome == "enter", f"R5: expected enter; got {decision.outcome}"
+        # Decision row in decision_events should store the correct edge
+        row = conn.execute(
+            "SELECT edge FROM decision_events WHERE market_slug=?",
+            (ctx.natural_key[0],),
+        ).fetchone()
+        assert row is not None
+        stored_edge = Decimal(str(row["edge"]))
+        assert stored_edge == expected_edge, (
+            f"R5 violation: edge in decision_events={stored_edge} "
+            f"!= p⁻−bid−AS⁺={expected_edge} (maker fee must be 0)"
+        )
+
+    # ── R6: Writer coverage ─────────────────────────────────────────────────
+
+    def test_enter_writes_decision_events_row_with_correct_strategy_key(self):
+        """R6a — Enter path writes decision_events row with strategy_key='liquidity_provision_with_heartbeat'."""
+        conn = _make_conn()
+        candidate = LiquidityProvisionWithHeartbeat()
+
+        analysis = SimpleNamespace(
+            metrics=_make_metrics(),
+            market_clob_adverse_selection=_make_as_estimate(
+                p_fair_lower=Decimal("0.55"),
+                maker_bid=Decimal("0.45"),
+                as_upper=Decimal("0.02"),
+            ),
+        )
+        ctx = _make_context(conn, analysis)
+
+        decision = candidate.evaluate(context=ctx, conn=conn, decision_time=_DECISION_TIME)
+
+        assert decision.outcome == "enter"
+        rows = conn.execute(
+            "SELECT strategy_key, source FROM decision_events WHERE market_slug=?",
+            (ctx.natural_key[0],),
+        ).fetchall()
+        assert len(rows) == 1, f"R6a: expected 1 decision_events row, got {len(rows)}"
+        assert rows[0]["strategy_key"] == "liquidity_provision_with_heartbeat"
+        assert rows[0]["source"] == "shadow_decision"
+
+    def test_no_trade_writes_no_trade_events_row(self):
+        """R6b — No-trade path (AS data absent) writes no_trade_events row."""
+        conn = _make_conn()
+        candidate = LiquidityProvisionWithHeartbeat()
+
+        analysis = SimpleNamespace(metrics=_make_metrics())
+        ctx = _make_context(conn, analysis)
+
+        decision = candidate.evaluate(context=ctx, conn=conn, decision_time=_DECISION_TIME)
+
+        assert decision.outcome == "no_trade"
+        rows = conn.execute(
+            "SELECT reason, schema_compatibility, reason_detail FROM no_trade_events WHERE market_slug=?",
+            (ctx.natural_key[0],),
+        ).fetchall()
+        assert len(rows) == 1, f"R6b: expected 1 no_trade_events row, got {len(rows)}"
+        assert rows[0]["reason"] == NoTradeReason.LIQPROV_ADVERSE_SELECTION_UNWIRED.value
+        assert rows[0]["schema_compatibility"] == "current"
+        assert "shadow_runtime=true" in rows[0]["reason_detail"]
+        assert "candidate_strategy_key=liquidity_provision_with_heartbeat" in rows[0]["reason_detail"]
+
+    def test_neither_path_silently_drops(self):
+        """Both enter and no_trade paths produce non-None decisions."""
+        conn = _make_conn()
+        candidate = LiquidityProvisionWithHeartbeat()
+
+        # Enter path (edge positive)
         ctx1 = _make_context(
             conn,
             SimpleNamespace(
-                metrics=_make_metrics(depth_at_best_ask=5),
-                passive_maker_estimate=_make_passive_estimate(Decimal("0.80")),
+                metrics=_make_metrics(),
+                market_clob_adverse_selection=_make_as_estimate(
+                    p_fair_lower=Decimal("0.55"),
+                    maker_bid=Decimal("0.45"),
+                    as_upper=Decimal("0.02"),
+                ),
             ),
         )
         d1 = candidate.evaluate(context=ctx1, conn=conn, decision_time=_DECISION_TIME)
         assert d1 is not None
 
+        # No-trade path (AS absent)
         ctx2 = _make_context(
             conn,
-            SimpleNamespace(metrics=_make_metrics()),  # no passive_estimate
+            SimpleNamespace(metrics=_make_metrics()),
             observation_time="2026-06-15T11:00:00+00:00",
         )
         d2 = candidate.evaluate(context=ctx2, conn=conn, decision_time=_DECISION_TIME)
