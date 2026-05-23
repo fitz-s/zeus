@@ -82,7 +82,7 @@ def _topology_with_cold_zone(cold_path: str = "docs/archive/cold") -> dict[str, 
 class TestCheckExpectedEmptyZones:
     def test_happy_case_gitkeep_only(self, tmp_path: Path) -> None:
         """Cold zone containing only .gitkeep must produce zero issues."""
-        cold_dir = tmp_path / "docs" / "operations" / "archive" / "cold"
+        cold_dir = tmp_path / "docs" / "archive" / "cold"
         cold_dir.mkdir(parents=True)
         (cold_dir / ".gitkeep").touch()
 
@@ -107,7 +107,7 @@ class TestCheckExpectedEmptyZones:
 
     def test_failure_stray_file_in_cold_zone(self, tmp_path: Path) -> None:
         """Cold zone with a tracked non-.gitkeep file must raise expected_empty_violation."""
-        cold_dir = tmp_path / "docs" / "operations" / "archive" / "cold"
+        cold_dir = tmp_path / "docs" / "archive" / "cold"
         cold_dir.mkdir(parents=True)
         stray = cold_dir / "unexpected.md"
         stray.touch()

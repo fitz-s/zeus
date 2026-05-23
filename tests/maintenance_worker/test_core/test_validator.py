@@ -183,7 +183,7 @@ def test_guarantee_b_relative_path_expanded(tmp_path: Path) -> None:
 def test_guarantee_b_allowed_path_not_tripped_by_canonicalization(tmp_path: Path) -> None:
     """Allowed paths must not become forbidden after canonicalization."""
     v = _validator(tmp_path)
-    archive_dir = tmp_path / "docs" / "operations" / "archive" / "2026-Q2"
+    archive_dir = tmp_path / "docs" / "archive" / "2026-Q2"
     archive_dir.mkdir(parents=True)
     allowed_file = archive_dir / "old_task.py"
     allowed_file.touch()
@@ -656,7 +656,7 @@ def test_allowed_state_dir_write_new(tmp_path: Path) -> None:
 
 def test_allowed_archive_operations_dir(tmp_path: Path) -> None:
     v = _validator(tmp_path)
-    archive_dir = tmp_path / "docs" / "operations" / "archive" / "2026-Q2"
+    archive_dir = tmp_path / "docs" / "archive" / "2026-Q2"
     archive_dir.mkdir(parents=True)
     archive_file = archive_dir / "old_task"
     archive_file.mkdir()
@@ -795,7 +795,7 @@ def test_source_extension_outside_archive_forbidden(tmp_path: Path) -> None:
 def test_source_extension_inside_archive_allowed(tmp_path: Path) -> None:
     """A .py file inside docs/archive/ is ALLOWED (archived packet)."""
     v = _validator(tmp_path)
-    archive_py = tmp_path / "docs" / "operations" / "archive" / "2026-Q1" / "script.py"
+    archive_py = tmp_path / "docs" / "archive" / "2026-Q1" / "script.py"
     archive_py.parent.mkdir(parents=True)
     archive_py.touch()
     assert v.validate_action(archive_py, Operation.READ) == ALLOWED

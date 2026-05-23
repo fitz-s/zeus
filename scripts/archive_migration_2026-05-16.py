@@ -24,7 +24,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SOURCE_DIR = REPO_ROOT / "docs" / "archives" / "packets"
-TARGET_DIR = REPO_ROOT / "docs" / "operations" / "archive" / "2026-Q2"
+TARGET_DIR = REPO_ROOT / "docs" / "archive" / "2026-Q2"
 STUB_DIR = REPO_ROOT / "docs" / "operations"
 LOG_PATH_1 = REPO_ROOT / "state" / "maintenance_state" / "migration_2026-05-16.log"
 LOG_PATH_2 = REPO_ROOT / "docs" / "operations" / "task_2026-05-16_doc_alignment_plan" / "migration_log.txt"
