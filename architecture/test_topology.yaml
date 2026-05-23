@@ -3019,3 +3019,46 @@ test_metadata:
       build_day0_high_distribution and p_vector normalization (sum=1.0).
     created: 2026-05-22
     last_reused_or_audited: 2026-05-22
+
+  tests/test_day0_period_extrema_guard.py:
+    modules: [signal, evaluator, contracts]
+    category: integration_antibody
+    kind: antibody
+    profile: p0_3_period_extrema_day0_guard
+    blocks_commit: true
+    asserted_invariants:
+      - DAY0_REMAINING_WINDOW_REJECTS_PERIOD_EXTREMA_HIGH
+      - DAY0_REMAINING_WINDOW_REJECTS_PERIOD_EXTREMA_LOW
+    source_under_test:
+      - src/engine/evaluator.py
+      - src/signal/day0_window.py
+    law_dependencies:
+      - docs/reports/live_review_may23.md
+    notes: >
+      P0-3 antibody: day0 remaining-window guard rejects whole-day period_extrema
+      (mx2t3/mn2t3). Guard fires before any access to ens_result['members_hourly'].
+      Covers HIGH and LOW symmetry. Uses DAY0_NO_FORECAST_HOURS_REMAIN (existing enum)
+      with detail containing 'DAY0_REMAINING_WINDOW_UNAVAILABLE'. Schema bump deferred.
+    created: 2026-05-23
+    last_reused_or_audited: 2026-05-23
+
+  tests/test_probability_sanity_shadow.py:
+    modules: [signal, evaluator]
+    category: integration_antibody
+    kind: antibody
+    profile: p0_d_probability_sanity_shadow
+    blocks_commit: true
+    asserted_invariants:
+      - NON_DAY0_SANITY_SHADOW_LOGS_NOT_BLOCKS
+      - DAY0_HIGH_HARD_GATE_CONTRACT_PRESERVED
+    source_under_test:
+      - src/signal/probability_sanity.py
+      - src/engine/evaluator.py
+    law_dependencies:
+      - docs/reports/live_review_may23.md
+    notes: >
+      P0-D antibody: validate_high_distribution runs as shadow telemetry for non-day0
+      strategies - logged only, not blocking. Day0 HIGH hard gate contract preserved.
+      Shadow log line uses [PROBABILITY_SANITY_SHADOW] prefix for grep-ability.
+    created: 2026-05-23
+    last_reused_or_audited: 2026-05-23

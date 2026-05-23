@@ -1,7 +1,9 @@
 # Created: prior
-# Last reused/audited: 2026-05-21
+# Last reused/audited: 2026-05-23
 # Authority basis: phase 1K live decision snapshot causality gate
 #   Phase 3 live evaluator consumes forecast producer readiness instead of direct-fetching OpenData.
+#   P0-3 (2026-05-23): period_extrema guard before remaining_member_extrema_for_day0 call.
+#   P0-D (2026-05-23): shadow sanity telemetry for non-day0 strategies.
 """Evaluator: takes a market candidate, returns an EdgeDecision or NoTradeCase.
 
 Contains ALL business logic for edge detection. Doesn't know about scheduling,
@@ -3432,6 +3434,28 @@ def evaluate_candidate(
     if is_day0_mode:
         temporal_context = day0_temporal_context
 
+        # P0-3: whole-day period_extrema (mx2t3/mn2t3) represent the full local day,
+        # not a future sub-window. They cannot be filtered by >= now_local to produce
+        # a valid remaining-window estimate. Fail-closed before accessing members_hourly
+        # (which is absent when using_period_extrema=True).
+        # Note: using DAY0_NO_FORECAST_HOURS_REMAIN (existing enum) rather than a new
+        # member to avoid SCHEMA_VERSION bump; detail captures DAY0_REMAINING_WINDOW_UNAVAILABLE
+        # as the specific diagnosis per sequencing guidance.
+        if using_period_extrema:
+            return [_make_rejection_decision(
+                rejection_stage="SIGNAL_QUALITY",
+                rejection_reasons=[NoTradeReason.DAY0_NO_FORECAST_HOURS_REMAIN.value],
+                availability_status="DATA_UNAVAILABLE",
+                selected_method=selected_method,
+                applied_validations=["day0_observation", "ens_fetch", "period_extrema_day0_guard"],
+                rejection_reason_enum=NoTradeReason.DAY0_NO_FORECAST_HOURS_REMAIN,
+                rejection_reason_detail=(
+                    "DAY0_REMAINING_WINDOW_UNAVAILABLE: whole-day period_extrema "
+                    "(mx2t3/mn2t3) cannot represent remaining future sub-window; "
+                    "hourly members required for day0 remaining-window estimation"
+                ),
+            )]
+
         extrema, hours_remaining = remaining_member_extrema_for_day0(
             ens_result["members_hourly"],
             ens_result["times"],
@@ -4544,6 +4568,24 @@ def evaluate_candidate(
                 rejection_reason_enum=NoTradeReason.PROBABILITY_SANITY_GATE,
                 rejection_reason_detail=_san_reason,
             )]
+    else:
+        # P0-D shadow telemetry: run validate_high_distribution for non-day0 strategies
+        # (center_buy, opening_inertia, imminent_open_capture) — log only, do NOT block.
+        # Promotes to hard gate after replay confirms threshold calibration.
+        _shadow_settled = settlement_semantics.round_values(analysis_member_extrema)
+        _shadow_ok, _shadow_reason = validate_high_distribution(
+            bins=bins,
+            p_raw=p_raw,
+            p_cal=p_cal,
+            member_samples=_shadow_settled,
+            market_prices=p_market,
+            strategy_key=f"shadow:{city.name}:{target_date}:{selected_method}",
+        )
+        if not _shadow_ok:
+            logger.warning(
+                "[PROBABILITY_SANITY_SHADOW] strategy=%s city=%s date=%s reason=%s",
+                selected_method, city.name, target_date, _shadow_reason,
+            )
 
     analysis = MarketAnalysis(
         p_raw=p_raw,
