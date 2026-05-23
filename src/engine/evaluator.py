@@ -1,5 +1,5 @@
 # Created: prior
-# Last reused/audited: 2026-05-21
+# Last reused/audited: 2026-05-23
 # Authority basis: phase 1K live decision snapshot causality gate
 #   Phase 3 live evaluator consumes forecast producer readiness instead of direct-fetching OpenData.
 """Evaluator: takes a market candidate, returns an EdgeDecision or NoTradeCase.
@@ -2208,6 +2208,24 @@ def _load_model_bias_reference(conn, *, city_name: str, season: str, forecast_so
     }
 
 
+def _imminent_open_capture_candidate(candidate: MarketCandidate) -> bool:
+    """True when the candidate was discovered in IMMINENT_OPEN_CAPTURE mode.
+
+    Used to suppress ONLY the observation-locked ``settlement_capture``
+    fall-through for IOC candidates: settlement_capture is allowed exclusively
+    in ``day0_capture`` discovery mode, so an IOC candidate labeled
+    settlement_capture phase-mismatches (and never trades). Such IOC candidates
+    instead fall through to the opening-inertia family (the canonical durable
+    ``strategy_key`` for IOC; ``edge_source`` carries the finer
+    ``imminent_open_capture`` discovery tag).
+
+    Forecast-upside (``day0_nowcast_entry``) is NOT suppressed for IOC — that
+    path is reached before this guard and is preserved (see
+    test_imminent_forecast_upside_does_not_masquerade_as_settlement_capture).
+    """
+    return candidate.discovery_mode == DiscoveryMode.IMMINENT_OPEN_CAPTURE.value
+
+
 def _edge_source_for(candidate: MarketCandidate, edge: BinEdge) -> str:
     # P3 site 1 of 3 in evaluator (PLAN_v3 §6.P3). Migration is flag-gated
     # via ``is_settlement_day_dispatch``; flag OFF preserves byte-equal
@@ -2217,7 +2235,13 @@ def _edge_source_for(candidate: MarketCandidate, edge: BinEdge) -> str:
         day0_truth = _day0_high_truth_classification_for_edge(candidate, edge)
         if day0_truth and day0_truth != "observation_locked":
             return "day0_nowcast_entry"
-        return "settlement_capture"
+        if not _imminent_open_capture_candidate(candidate):
+            return "settlement_capture"
+        # IOC observation-locked: fall through to the opening-inertia family
+        # (edge_source=imminent_open_capture). settlement_capture is only valid
+        # in day0_capture mode, so labeling an IOC candidate settlement_capture
+        # would phase-mismatch. day0_nowcast_entry (forecast-upside) above is
+        # unaffected — IOC keeps it.
     if candidate.discovery_mode == DiscoveryMode.OPENING_HUNT.value:
         return "opening_inertia"
     if candidate.discovery_mode == DiscoveryMode.IMMINENT_OPEN_CAPTURE.value:
@@ -2238,7 +2262,11 @@ def _strategy_key_for(candidate: MarketCandidate, edge: BinEdge) -> str | None:
         day0_truth = _day0_high_truth_classification_for_edge(candidate, edge)
         if day0_truth and day0_truth != "observation_locked":
             return "day0_nowcast_entry"
-        return "settlement_capture"
+        if not _imminent_open_capture_candidate(candidate):
+            return "settlement_capture"
+        # IOC observation-locked: fall through to opening_inertia (the canonical
+        # durable family for IOC). settlement_capture is day0_capture-only; an
+        # IOC candidate labeled settlement_capture phase-mismatches.
     if candidate.discovery_mode == DiscoveryMode.OPENING_HUNT.value:
         return "opening_inertia"
     if candidate.discovery_mode == DiscoveryMode.IMMINENT_OPEN_CAPTURE.value:
@@ -2262,7 +2290,10 @@ def _strategy_key_for_hypothesis(candidate: MarketCandidate, hypothesis: FullFam
         # authoritative for actual trade decisions.
         if str(getattr(candidate, "temperature_metric", "") or "").lower() == "high":
             return "day0_nowcast_entry"
-        return "settlement_capture"
+        if not _imminent_open_capture_candidate(candidate):
+            return "settlement_capture"
+        # IOC non-HIGH settlement-day hypothesis: fall through to opening_inertia
+        # (settlement_capture is day0_capture-only → would phase-mismatch).
     if candidate.discovery_mode == DiscoveryMode.OPENING_HUNT.value:
         return "opening_inertia"
     if candidate.discovery_mode == DiscoveryMode.IMMINENT_OPEN_CAPTURE.value:

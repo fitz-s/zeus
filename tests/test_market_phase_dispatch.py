@@ -1,5 +1,5 @@
 # Created: 2026-05-04
-# Last reused/audited: 2026-05-04
+# Last reused/audited: 2026-05-23
 # Authority basis: docs/operations/task_2026-05-04_strategy_redesign_day0_endgame/PLAN_v3.md §6.P3 + §8 T6 (mode-default preservation post-D-B).
 """D-B mode→phase migration tests (PLAN_v3 §6.P3).
 
@@ -418,3 +418,83 @@ def test_evaluator_strategy_key_three_sites_consistent(
     assert _edge_source_for(cand, edge_stub) == "settlement_capture"
     assert _strategy_key_for(cand, edge_stub) == "settlement_capture"
     assert _strategy_key_for_hypothesis(cand, hypothesis_stub) == "settlement_capture"
+
+
+# ---------------------------------------------------------------------- #
+# Fix C forward-port — phase gate must use allowed_discovery_modes
+# ---------------------------------------------------------------------- #
+
+
+def test_phase_gate_uses_allowed_discovery_modes_not_dispatch_owner() -> None:
+    """Regression antibody (2026-05-22 live stall): the phase-rejection gate
+    must key off ``allowed_discovery_modes`` (multi-valued, which modes a strategy
+    MAY be evaluated under), NOT ``cycle_axis_dispatch_mode`` (dispatch ownership,
+    single-valued). Pre-fix, the gate inverted dispatch ownership, which excluded:
+
+    1. Strategies with ``cycle_axis_dispatch_mode: null`` (e.g. ``day0_nowcast_entry``
+       in day0_capture mode) — these were absent from every mode's allowed set even
+       though their ``allowed_discovery_modes`` correctly listed their mode.
+
+    2. Strategies spanning multiple allowed modes but owning dispatch in only one
+       (e.g. ``opening_inertia`` owns ``opening_hunt`` but is listed as allowed in
+       ``imminent_open_capture`` in the YAML when that config is present).
+
+    In origin/main's YAML: ``imminent_open_capture`` is its own dedicated strategy
+    profile (allowed_discovery_modes: [imminent_open_capture]). The key invariant
+    demonstrating Fix C's value is that ``day0_nowcast_entry`` (dispatch_mode: null)
+    is correctly included in the day0_capture mode's allowed set via
+    allowed_discovery_modes_inverse(), but excluded by cycle_axis_dispatch_inverse().
+    """
+    from src.engine.cycle_runtime import _strategy_phase_rejection_reason
+    from src.strategy.strategy_profile import (
+        allowed_discovery_modes_inverse,
+        cycle_axis_dispatch_inverse,
+    )
+
+    allowed_inv = allowed_discovery_modes_inverse()
+    dispatch_inv = cycle_axis_dispatch_inverse()
+
+    # Fix C key invariant: day0_nowcast_entry has cycle_axis_dispatch_mode: null
+    # so dispatch_inverse omits it from day0_capture; allowed_discovery_modes_inverse
+    # correctly includes it (allowed_discovery_modes: [day0_capture]).
+    assert "day0_nowcast_entry" in allowed_inv.get("day0_capture", frozenset()), (
+        "Fix C: day0_nowcast_entry must appear in day0_capture allowed set "
+        "(allowed_discovery_modes=[day0_capture])"
+    )
+    assert "day0_nowcast_entry" not in dispatch_inv.get("day0_capture", frozenset()), (
+        "Pre-fix state confirmation: dispatch_inverse omits day0_nowcast_entry "
+        "(cycle_axis_dispatch_mode=null)"
+    )
+
+    # imminent_open_capture strategy is the canonical IOC family in origin/main;
+    # it must be phase-allowed in imminent_open_capture mode.
+    assert "imminent_open_capture" in allowed_inv.get("imminent_open_capture", frozenset())
+    assert (
+        _strategy_phase_rejection_reason(
+            "imminent_open_capture", DiscoveryMode.IMMINENT_OPEN_CAPTURE
+        )
+        is None
+    ), "imminent_open_capture strategy must not be phase-rejected in IOC mode"
+
+    # day0_nowcast_entry must not be phase-rejected in day0_capture mode
+    # (this was broken pre-Fix C: dispatch_inverse excluded it from day0_capture).
+    assert (
+        _strategy_phase_rejection_reason(
+            "day0_nowcast_entry", DiscoveryMode.DAY0_CAPTURE
+        )
+        is None
+    ), "Fix C: day0_nowcast_entry must be phase-allowed in day0_capture mode"
+
+    # settlement_capture stays day0_capture-only: rejected outside it, allowed inside.
+    assert (
+        _strategy_phase_rejection_reason(
+            "settlement_capture", DiscoveryMode.IMMINENT_OPEN_CAPTURE
+        )
+        is not None
+    ), "settlement_capture must be phase-rejected in imminent_open_capture mode"
+    assert (
+        _strategy_phase_rejection_reason(
+            "settlement_capture", DiscoveryMode.DAY0_CAPTURE
+        )
+        is None
+    ), "settlement_capture must be phase-allowed in day0_capture mode"
