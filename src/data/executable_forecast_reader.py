@@ -13,6 +13,10 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 from src.config import settings
+from src.data.forecast_extrema_authority import (
+    ForecastExtremaEligibility,
+    classify_forecast_extrema_authority,
+)
 from src.data.producer_readiness import PRODUCER_READINESS_STRATEGY_KEY
 from src.data.forecast_target_contract import ForecastTargetScope
 from src.state.readiness_repo import get_entry_readiness
@@ -430,7 +434,7 @@ def _snapshot_query_sql(table: str, *, source_run_id_present: bool) -> str:
               AND source_id = ?
               AND source_transport = ?
               AND source_run_id = ?
-            ORDER BY source_cycle_time DESC, available_at DESC, snapshot_id DESC
+            ORDER BY (CASE WHEN COALESCE(contributes_to_target_extrema,0)=1 AND COALESCE(forecast_window_attribution_status,'') NOT IN ('UNKNOWN','') AND COALESCE(boundary_ambiguous,0)=0 THEN 0 ELSE 1 END) ASC, source_cycle_time DESC, available_at DESC, snapshot_id DESC
             LIMIT 1
             """
         return """
@@ -447,7 +451,7 @@ def _snapshot_query_sql(table: str, *, source_run_id_present: bool) -> str:
               AND data_version = ?
               AND source_id = ?
               AND source_transport = ?
-            ORDER BY source_cycle_time DESC, available_at DESC, snapshot_id DESC
+            ORDER BY (CASE WHEN COALESCE(contributes_to_target_extrema,0)=1 AND COALESCE(forecast_window_attribution_status,'') NOT IN ('UNKNOWN','') AND COALESCE(boundary_ambiguous,0)=0 THEN 0 ELSE 1 END) ASC, source_cycle_time DESC, available_at DESC, snapshot_id DESC
             LIMIT 1
             """
     elif table == f"{WORLD_SCHEMA}.ensemble_snapshots_v2":
@@ -467,7 +471,7 @@ def _snapshot_query_sql(table: str, *, source_run_id_present: bool) -> str:
               AND source_id = ?
               AND source_transport = ?
               AND source_run_id = ?
-            ORDER BY source_cycle_time DESC, available_at DESC, snapshot_id DESC
+            ORDER BY (CASE WHEN COALESCE(contributes_to_target_extrema,0)=1 AND COALESCE(forecast_window_attribution_status,'') NOT IN ('UNKNOWN','') AND COALESCE(boundary_ambiguous,0)=0 THEN 0 ELSE 1 END) ASC, source_cycle_time DESC, available_at DESC, snapshot_id DESC
             LIMIT 1
             """
         return """
@@ -484,7 +488,7 @@ def _snapshot_query_sql(table: str, *, source_run_id_present: bool) -> str:
               AND data_version = ?
               AND source_id = ?
               AND source_transport = ?
-            ORDER BY source_cycle_time DESC, available_at DESC, snapshot_id DESC
+            ORDER BY (CASE WHEN COALESCE(contributes_to_target_extrema,0)=1 AND COALESCE(forecast_window_attribution_status,'') NOT IN ('UNKNOWN','') AND COALESCE(boundary_ambiguous,0)=0 THEN 0 ELSE 1 END) ASC, source_cycle_time DESC, available_at DESC, snapshot_id DESC
             LIMIT 1
             """
     elif table == "ensemble_snapshots_v2":
@@ -504,7 +508,7 @@ def _snapshot_query_sql(table: str, *, source_run_id_present: bool) -> str:
               AND source_id = ?
               AND source_transport = ?
               AND source_run_id = ?
-            ORDER BY source_cycle_time DESC, available_at DESC, snapshot_id DESC
+            ORDER BY (CASE WHEN COALESCE(contributes_to_target_extrema,0)=1 AND COALESCE(forecast_window_attribution_status,'') NOT IN ('UNKNOWN','') AND COALESCE(boundary_ambiguous,0)=0 THEN 0 ELSE 1 END) ASC, source_cycle_time DESC, available_at DESC, snapshot_id DESC
             LIMIT 1
             """
         return """
@@ -521,7 +525,7 @@ def _snapshot_query_sql(table: str, *, source_run_id_present: bool) -> str:
               AND data_version = ?
               AND source_id = ?
               AND source_transport = ?
-            ORDER BY source_cycle_time DESC, available_at DESC, snapshot_id DESC
+            ORDER BY (CASE WHEN COALESCE(contributes_to_target_extrema,0)=1 AND COALESCE(forecast_window_attribution_status,'') NOT IN ('UNKNOWN','') AND COALESCE(boundary_ambiguous,0)=0 THEN 0 ELSE 1 END) ASC, source_cycle_time DESC, available_at DESC, snapshot_id DESC
             LIMIT 1
             """
     else:
@@ -597,6 +601,22 @@ def read_executable_forecast_snapshot(
         return ExecutableForecastReadResult("BLOCKED", "EXECUTABLE_FORECAST_AUTHORITY_NOT_VERIFIED")
     if row.get("causality_status") != "OK" or int(row.get("boundary_ambiguous") or 0) != 0:
         return ExecutableForecastReadResult("BLOCKED", "EXECUTABLE_FORECAST_CAUSALITY_NOT_OK")
+    # P0 extrema authority: block if the selected snapshot has an explicit
+    # non-contributing or unknown-contributing determination.  Rows where
+    # contributes_to_target_extrema is NULL are legacy (pre-extractor) and
+    # pass through so existing data is not disrupted.  The ORDER BY CASE
+    # already prefers contributing rows before this typed fail-closed gate.
+    _contributes_raw = row.get("contributes_to_target_extrema")
+    if _contributes_raw is not None:
+        _extrema_auth = classify_forecast_extrema_authority(row)
+        if _extrema_auth.eligibility == ForecastExtremaEligibility.NON_CONTRIBUTOR:
+            return ExecutableForecastReadResult(
+                "BLOCKED", "EXECUTABLE_FORECAST_NON_CONTRIBUTING_EXTREMA"
+            )
+        if _extrema_auth.eligibility == ForecastExtremaEligibility.UNKNOWN:
+            return ExecutableForecastReadResult(
+                "BLOCKED", "EXECUTABLE_FORECAST_EXTREMA_AUTHORITY_UNKNOWN"
+            )
     if now_utc is not None:
         if now_utc.tzinfo is None or now_utc.utcoffset() is None:
             return ExecutableForecastReadResult("UNKNOWN_BLOCKED", "READ_NOW_INVALID")
