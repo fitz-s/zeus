@@ -348,6 +348,12 @@ CREATE TABLE IF NOT EXISTS opportunity_fact (
     -- Idempotent ALTER in log_opportunity_fact backfills production trade DBs
     -- whose opportunity_fact predates this column.
     observation_authority_id TEXT,
+    -- OBS-AUTHORITY-FOUNDATION FIX-2 (2026-05-23): per-edge day0 observation-lock
+    -- classification payload (JSON). day0_truth_classification + observed
+    -- high/low + candidate bin bounds + settlement_capture eligibility. This is
+    -- what makes "is this day0 edge observation-locked, forecast-upside, or
+    -- wrong?" answerable per opportunity row. NULL for non-day0/non-HIGH rows.
+    day0_context_json TEXT,
     recorded_at TEXT NOT NULL
 );
 

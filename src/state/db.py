@@ -6874,6 +6874,65 @@ def _coerce_optional_float(value) -> float | None:
     return f if f == f and f not in (float("inf"), float("-inf")) else None
 
 
+def _build_day0_context_json(candidate, decision) -> str | None:
+    """Build the per-edge day0 observation-lock classification payload.
+
+    OBS-AUTHORITY-FOUNDATION FIX-2 (2026-05-23). For settlement-day HIGH buy_yes
+    edges, persists day0_truth_classification + observed high/low + candidate bin
+    bounds + settlement-capture eligibility so an operator can tell whether a
+    day0 edge is observation-locked, forecast-upside, or wrong. Returns None for
+    rows where no day0 classification applies (non-HIGH, no edge, no observation,
+    or the classifier returns None). Total + fail-soft — never raises.
+    """
+    try:
+        edge = getattr(decision, "edge", None)
+        observation = getattr(candidate, "observation", None)
+        if edge is None or observation is None:
+            return None
+        from src.engine.evaluator import day0_high_truth_classification_for_edge
+
+        classification = day0_high_truth_classification_for_edge(candidate, edge)
+        if classification is None:
+            return None
+
+        edge_bin = getattr(edge, "bin", None)
+        bin_low = _coerce_optional_float(getattr(edge_bin, "low", None))
+        bin_high = _coerce_optional_float(getattr(edge_bin, "high", None))
+        direction = str(getattr(edge, "direction", "") or "")
+        observed_high = _coerce_optional_float(getattr(observation, "high_so_far", None))
+        observed_low = _coerce_optional_float(getattr(observation, "low_so_far", None))
+        current_temp = _coerce_optional_float(getattr(observation, "current_temp", None))
+        obs_time = getattr(observation, "observation_time", None)
+        obs_source = getattr(observation, "source", None)
+        hours_remaining = _coerce_optional_float(getattr(candidate, "hours_to_resolution", None))
+
+        # settlement_capture is reserved for facts already locked by canonical
+        # observation. Eligible only when observation-locked AND buy_yes.
+        eligible = classification == "observation_locked" and direction == "buy_yes"
+        ineligible_reason = None
+        if not eligible:
+            ineligible_reason = f"classification={classification};direction={direction}"
+
+        payload = {
+            "day0_truth_classification": classification,
+            "observed_high_so_far": observed_high,
+            "observed_low_so_far": observed_low,
+            "current_temp": current_temp,
+            "candidate_bin_low": bin_low,
+            "candidate_bin_high": bin_high,
+            "observation_source": str(obs_source or "") or None,
+            "observation_time": str(obs_time) if obs_time is not None else None,
+            "hours_remaining": hours_remaining,
+            "settlement_capture_eligible": bool(eligible),
+            "settlement_capture_ineligible_reason": ineligible_reason,
+            "observation_authority_id": str(getattr(decision, "observation_authority_id", "") or "") or None,
+        }
+        return json.dumps(payload, ensure_ascii=False, sort_keys=True)
+    except Exception as exc:  # noqa: BLE001 - durable telemetry is fail-soft.
+        logger.warning("Failed to build day0_context_json: %s", exc)
+        return None
+
+
 def log_opportunity_fact(
     conn: sqlite3.Connection | None,  # Deprecated: ignored; function opens its own trade connection (INV-37 fix, wave-2)
     *,
@@ -6905,13 +6964,15 @@ def log_opportunity_fact(
         # created by init_schema_trade_only's _TRADE_CLASS_DDL — see the table's
         # legacy_archived registry note). Idempotent backfill so the INSERT's new
         # column resolves. Cheap PRAGMA + at-most-once ALTER.
-        if "observation_authority_id" not in _table_columns(_wconn, "opportunity_fact"):
-            try:
-                _wconn.execute(
-                    "ALTER TABLE opportunity_fact ADD COLUMN observation_authority_id TEXT;"
-                )
-            except sqlite3.OperationalError:
-                pass  # concurrent add / already present
+        _of_columns = _table_columns(_wconn, "opportunity_fact")
+        for _new_col in ("observation_authority_id", "day0_context_json"):
+            if _new_col not in _of_columns:
+                try:
+                    _wconn.execute(
+                        f"ALTER TABLE opportunity_fact ADD COLUMN {_new_col} TEXT;"
+                    )
+                except sqlite3.OperationalError:
+                    pass  # concurrent add / already present
 
         edge = getattr(decision, "edge", None)
         direction = str(getattr(edge, "direction", "") or "unknown")
@@ -6953,6 +7014,8 @@ def log_opportunity_fact(
         if rejection_reasons:
             rejection_reason_json = json.dumps(list(rejection_reasons), ensure_ascii=False)
 
+        day0_context_json = _build_day0_context_json(candidate, decision)
+
         _wconn.execute(
             """
             INSERT INTO opportunity_fact (
@@ -6977,9 +7040,10 @@ def log_opportunity_fact(
                 availability_status,
                 should_trade,
                 observation_authority_id,
+                day0_context_json,
                 recorded_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(decision_id) DO UPDATE SET
                 candidate_id=excluded.candidate_id,
                 city=excluded.city,
@@ -7002,6 +7066,9 @@ def log_opportunity_fact(
                 should_trade=excluded.should_trade,
                 observation_authority_id=COALESCE(
                     excluded.observation_authority_id, opportunity_fact.observation_authority_id
+                ),
+                day0_context_json=COALESCE(
+                    excluded.day0_context_json, opportunity_fact.day0_context_json
                 ),
                 recorded_at=COALESCE(opportunity_fact.recorded_at, excluded.recorded_at)
             """,
@@ -7032,6 +7099,7 @@ def log_opportunity_fact(
                 _normalize_opportunity_availability_status(getattr(decision, "availability_status", "")),
                 int(bool(should_trade)),
                 str(getattr(decision, "observation_authority_id", "") or "") or None,
+                day0_context_json,
                 recorded_at,
             ),
         )

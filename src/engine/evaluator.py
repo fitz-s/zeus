@@ -2374,6 +2374,20 @@ def _day0_high_truth_classification_for_edge(
     return "observation_partial_unresolved"
 
 
+def day0_high_truth_classification_for_edge(
+    candidate: MarketCandidate,
+    edge: BinEdge,
+) -> str | None:
+    """Public wrapper for _day0_high_truth_classification_for_edge.
+
+    OBS-AUTHORITY-FOUNDATION FIX-2 (2026-05-23). Lets the durable opportunity_
+    fact writer (src/state/db.py) compute the same observation-lock truth string
+    the evaluator uses for edge_source/strategy_key, so it can be persisted per
+    opportunity row without duplicating the classification logic.
+    """
+    return _day0_high_truth_classification_for_edge(candidate, edge)
+
+
 def _entry_ci_rejection_reason(candidate: MarketCandidate, edge: BinEdge) -> str | None:
     if candidate.discovery_mode not in {
         DiscoveryMode.DAY0_CAPTURE.value,

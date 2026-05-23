@@ -3323,6 +3323,27 @@ def _observation_time_to_local_date(observation_time, timezone_name: str):
         return None
 
 
+def _normalize_observation_coverage_status(raw: str) -> str:
+    """Map the two runtime coverage/availability vocabularies onto the canonical
+    MISSING / STALE / LOW / OK set the operator audit query expects.
+
+    Success path emits OK / DIAGNOSTIC_FALLBACK (obs.coverage_status); failure
+    path emits DATA_UNAVAILABLE / DATA_STALE / RATE_LIMITED / CHAIN_UNAVAILABLE
+    (_availability_status_for_exception). The raw value is preserved in
+    payload_json; this is only the canonical column value.
+    """
+    value = str(raw or "").strip().upper()
+    if value in {"OK"}:
+        return "OK"
+    if value in {"DATA_STALE", "STALE", "RATE_LIMITED"}:
+        return "STALE"
+    if value in {"DIAGNOSTIC_FALLBACK", "LOW"}:
+        return "LOW"
+    if value in {"DATA_UNAVAILABLE", "CHAIN_UNAVAILABLE", "MISSING", "", "UNKNOWN"}:
+        return "MISSING"
+    return "MISSING"
+
+
 def build_settlement_day_observation_authority_row(
     *,
     city,
@@ -3355,7 +3376,8 @@ def build_settlement_day_observation_authority_row(
     authority_id = uuid.uuid4().hex
     city_name = getattr(city, "name", None) or (str(city) if city else None)
     timezone_name = getattr(city, "timezone", "") or ""
-    cov = str(coverage_status or "").strip().upper() or "UNKNOWN"
+    cov_raw = str(coverage_status or "").strip().upper() or "UNKNOWN"
+    cov = _normalize_observation_coverage_status(cov_raw)
     metric = str(temperature_metric or "").strip().lower() or None
     if metric not in (None, "high", "low"):
         metric = None
@@ -3382,7 +3404,10 @@ def build_settlement_day_observation_authority_row(
             "local_date_matches_target": None,
             "source_authorized_for_settlement": None,
             "persisted_surface_available": 0,
-            "payload_json": json.dumps({"observation": None, "coverage_status": cov}, sort_keys=True),
+            "payload_json": json.dumps(
+                {"observation": None, "coverage_status": cov, "coverage_status_raw": cov_raw},
+                sort_keys=True,
+            ),
             "recorded_at": recorded_at,
         }
 
@@ -3432,7 +3457,8 @@ def build_settlement_day_observation_authority_row(
             "coverage_status": obs_coverage,
             "observation_available_at": getattr(observation, "observation_available_at", None),
         },
-        "coverage_status": cov,
+        "coverage_status": _normalize_observation_coverage_status(obs_coverage),
+        "coverage_status_raw": obs_coverage,
         "obs_local_date": obs_local_date.isoformat() if obs_local_date is not None else None,
     }
 
@@ -3452,7 +3478,7 @@ def build_settlement_day_observation_authority_row(
         "low_so_far": _f(getattr(observation, "low_so_far", None)),
         "current_temp": _f(getattr(observation, "current_temp", None)),
         "sample_count": int(sample_count) if isinstance(sample_count, (int, float)) else None,
-        "coverage_status": obs_coverage,
+        "coverage_status": _normalize_observation_coverage_status(obs_coverage),
         "freshness_status": freshness,
         "local_date_matches_target": local_match,
         "source_authorized_for_settlement": source_authorized,
