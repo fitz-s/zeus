@@ -74,7 +74,7 @@ def _strategy_keys_by_discovery_mode() -> dict[str, frozenset[str]]:
     The ownership inversion was a latent bug: strategies spanning multiple modes
     (e.g. opening_inertia over opening_hunt AND imminent_open_capture) were
     phase-rejected in the non-owner mode. Recomputed on every call (cheap;
-    registry has 6 entries)."""
+    registry is small)."""
     from src.strategy.strategy_profile import allowed_discovery_modes_inverse
     return allowed_discovery_modes_inverse()
 
