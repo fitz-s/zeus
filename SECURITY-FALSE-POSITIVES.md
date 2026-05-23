@@ -53,6 +53,48 @@
 
 ---
 
+## [REVIEW-SAFE: STRATEGY_KEY_CONSTANTS] — `_STRATEGY_KEY` module constants in candidate strategy files
+
+**Constants**:
+- `_STRATEGY_KEY = "c1_joint_tail_bayes"` in `src/strategy/candidates/c1_joint_tail_bayes.py:67`
+- `_STRATEGY_KEY = "c2_opening_stale_fok"` in `src/strategy/candidates/c2_opening_stale_fok.py`
+
+**Why scanners flag them**: the variable name `_STRATEGY_KEY` contains `_KEY`, which triggers gitleaks' `generic-api-key` rule. The assigned string values (`c1_joint_tail_bayes`, `c2_opening_stale_fok`) have borderline entropy.
+
+**Why they are cleared**:
+1. **Human-readable identifiers**: these are strategy taxonomy labels used to tag DB rows and routing decisions, not credentials.
+2. **No access surface**: the values are never passed to an external API, used for authentication, or treated as tokens anywhere in the codebase.
+3. **Naming convention**: the `_KEY` suffix follows the existing Zeus pattern for strategy identification constants (see `opening_inertia_relaxation.py`, `shoulder_buy_evt.py`, etc.).
+
+**Operator ruling 2026-05-23**: "strategy key constants are taxonomy labels, not secrets — path + value allowlist them per the SECURITY-FALSE-POSITIVES protocol."
+
+**Durable references**:
+- `.gitleaks.toml` allowlist entry (path + regex scoped to the two candidate files).
+
+---
+
+## [REVIEW-SAFE: SCHEMA_PINNED_HASH] — Schema integrity pin in `tests/state/_schema_pinned_hash.txt`
+
+**Constant**: a single 64-char SHA256 hex digest written by `scripts/check_schema_version.py --write-pin`.
+
+**Location**: `tests/state/_schema_pinned_hash.txt` (one line, regenerated on each SCHEMA_VERSION bump).
+
+**Why scanners flag it**: a 64-char lowercase hex string that matches generic-api-key / generic-secret patterns.
+
+**Why it is cleared**:
+1. **Not a secret**: the value is the SHA256 hash of `sqlite_master` DDL strings for a fresh in-memory DB. No credential, token, or private data is involved.
+2. **Fully deterministic**: any developer can reproduce it by running `python scripts/check_schema_version.py --write-pin` against the same schema source.
+3. **Public derivation**: the hash is derived from schema DDL committed in the same repo — there is nothing to protect.
+4. **Path-scoped**: the allowlist covers only `tests/state/_schema_pinned_hash.txt`, not any other `.txt` file.
+
+**Operator ruling 2026-05-23**: "schema pinned hash is a deterministic DDL digest, not a secret — path-allowlist it."
+
+**Durable references**:
+- `scripts/check_schema_version.py` — generates the value.
+- `.gitleaks.toml` allowlist entry (path-scoped: `tests/state/_schema_pinned_hash\.txt`).
+
+---
+
 ## How to add a new entry
 
 When the operator clears another false-positive:

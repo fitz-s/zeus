@@ -41,3 +41,23 @@ description = "Test fixtures with synthetic IDs (operator-cleared 2026-05-01)"
 paths = [
     '''tests/.*\.py''',
 ]
+
+[[allowlists]]
+description = "SCHEMA_PINNED_HASH — tests/state/_schema_pinned_hash.txt contains a single SHA256 hex digest of the DB schema sqlite_master dump. It is a structural integrity pin, not a secret. Path-scoped allowlist: only this file. See SECURITY-FALSE-POSITIVES.md [REVIEW-SAFE: SCHEMA_PINNED_HASH]."
+regexes = [
+    '''[0-9a-f]{64}''',
+]
+paths = [
+    '''tests/state/_schema_pinned_hash\.txt''',
+]
+
+[[allowlists]]
+description = "STRATEGY_KEY_CONSTANTS — _STRATEGY_KEY = 'c1_*' / 'c2_*' module-level constants in candidate strategy files. The variable name _STRATEGY_KEY triggers gitleaks generic-api-key because of '_KEY'; the value is a human-readable strategy identifier, not a credential. See SECURITY-FALSE-POSITIVES.md [REVIEW-SAFE: STRATEGY_KEY_CONSTANTS]."
+regexes = [
+    '''c1_joint_tail_bayes''',
+    '''c2_opening_stale_fok''',
+]
+paths = [
+    '''src/strategy/candidates/c1_joint_tail_bayes\.py''',
+    '''src/strategy/candidates/c2_opening_stale_fok\.py''',
+]
