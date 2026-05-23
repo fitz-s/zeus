@@ -70,6 +70,7 @@ parent_coverage_allowed_patterns:
 - docs/operations/*_observation/
 - docs/operations/ws_poll_reaction/
 - docs/operations/attribution_drift/
+- docs/operations/current/
 - docs/reports/
 - docs/artifacts/
 - docs/to-do-list/
@@ -415,6 +416,44 @@ entries:
   contains_volatile_metrics: false
   current_tense_allowed: true
   refresh_source: packet_audit
+- path: task.md
+  doc_class: operations
+  default_read: false
+  direct_reference_allowed: true
+  current_role: thin pointer to docs/operations/current/task.md (active task ledger)
+  canonical_replaced_by:
+  - docs/operations/current/task.md
+  next_action: keep
+  lifecycle_state: active
+  coverage_scope: exact
+  parent_coverage_allowed: false
+  truth_profile: router
+  freshness_class: packet_bound
+  supersedes: []
+  superseded_by: []
+  may_live_in_reference: false
+  contains_volatile_metrics: false
+  current_tense_allowed: true
+  refresh_source: packet_audit
+- path: docs/operations/current/task.md
+  doc_class: operations
+  default_read: false
+  direct_reference_allowed: true
+  current_role: canonical active task ledger; live recovery workflow, analysis references, implementation status, and verification evidence
+  canonical_replaced_by: []
+  next_action: keep
+  lifecycle_state: active
+  coverage_scope: exact
+  parent_coverage_allowed: false
+  truth_profile: volatile_current_fact
+  freshness_class: packet_bound
+  supersedes:
+  - task.md
+  superseded_by: []
+  may_live_in_reference: false
+  contains_volatile_metrics: true
+  current_tense_allowed: true
+  refresh_source: packet_audit
 - path: docs/operations/AGENTS.md
   doc_class: operations
   default_read: false
@@ -632,6 +671,24 @@ entries:
   superseded_by: []
   may_live_in_reference: false
   contains_volatile_metrics: true
+  current_tense_allowed: true
+  refresh_source: packet_audit
+- path: docs/operations/current/
+  doc_class: operations
+  default_read: true
+  direct_reference_allowed: true
+  current_role: active operations package; plans, evidence, reports, closeouts for current live recovery workflow
+  canonical_replaced_by: []
+  next_action: keep
+  lifecycle_state: active
+  coverage_scope: descendants
+  parent_coverage_allowed: true
+  truth_profile: report_evidence
+  freshness_class: packet_bound
+  supersedes: []
+  superseded_by: []
+  may_live_in_reference: false
+  contains_volatile_metrics: false
   current_tense_allowed: true
   refresh_source: packet_audit
 - path: docs/operations/observations_k1_migration.md

@@ -1,0 +1,16 @@
+id: live_math_frontier
+status: active
+owner: operator
+frontier: evaluator_math_strategy
+allowed_files:
+  - src/engine/evaluator.py
+  - src/engine/market_analysis.py
+  - src/engine/no_trade_reason.py
+  - tests/test_model_agreement.py
+  - tests/test_market_analysis.py
+forbidden_files: []
+live_side_effects_allowed: false
+tests:
+  - tests/test_model_agreement.py
+  - tests/test_market_analysis.py
+closeout_required: true

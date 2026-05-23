@@ -1,0 +1,15 @@
+id: crosscheck_valid_window
+status: active
+owner: operator
+frontier: evaluator_source_comparability
+allowed_files:
+  - src/engine/evaluator.py
+  - src/ingest/source_router.py
+  - tests/test_model_agreement.py
+  - tests/test_market_analysis.py
+forbidden_files: []
+live_side_effects_allowed: false
+tests:
+  - tests/test_model_agreement.py
+  - tests/test_market_analysis.py
+closeout_required: true

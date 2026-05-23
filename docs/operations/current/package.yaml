@@ -1,0 +1,78 @@
+schema_version: 1
+kind: OperationPackage
+package_id: current_live_recovery
+status: active
+owner: operator
+created_at: "2026-05-22"
+updated_at: "2026-05-22"
+
+role:
+  authority_behavior: pointer_and_evidence
+  is_architecture_law: false
+  is_runtime_truth: false
+  note: >
+    This package collects active plans, evidence, reports, and closeouts for
+    the current live recovery workflow. It is an advisory file-management
+    container, not a new authority plane. Architecture law still lives in
+    docs/authority/, architecture/, tests, and executable source.
+
+current_frontier:
+  class: source_math_strategy
+  terminal_reason: SOURCE_COMPARABILITY_FAILED
+  last_non_empty_frontier: evaluator_source_comparability
+  detail: >
+    opening_hunt rejects candidates as CROSSCHECK_UNAVAILABLE with
+    SOURCE_COMPARABILITY_FAILED because Open-Meteo GFS025 diagnostic
+    payloads do not expose true issue_time. Current branch allows
+    source-limited crosscheck only when target-day valid windows match
+    and diagnostic fetch/capture time is fresh relative to primary issue.
+
+active_subtasks:
+  - id: live_math_frontier
+    plan: docs/operations/current/plans/live_math_frontier/PLAN.md
+    scope: evaluator_math_strategy
+    blocks_live_completion: true
+  - id: crosscheck_valid_window
+    plan: docs/operations/current/plans/crosscheck_valid_window/PLAN.md
+    scope: evaluator_source_comparability
+    blocks_live_completion: true
+
+monitor_surfaces:
+  - path: docs/operations/edge_observation/
+    role: active monitoring; operator-managed rolling evidence
+  - path: docs/operations/attribution_drift/
+    role: active monitoring; operator-managed rolling evidence
+  - path: docs/operations/ws_poll_reaction/
+    role: active monitoring; operator-managed rolling evidence
+  - path: docs/operations/calibration_observation/
+    role: active monitoring; operator-managed rolling evidence
+  - path: docs/operations/learning_loop_observation/
+    role: active monitoring; operator-managed rolling evidence
+
+artifact_policy:
+  plans: docs/operations/current/plans/
+  evidence: docs/operations/current/evidence/
+  reports: docs/operations/current/reports/
+  closeouts: docs/operations/current/closeouts/
+  generated: docs/operations/current/reports/
+  agent_runtime: docs/operations/current/agent_runtime/
+
+closeout_policy:
+  required_fields:
+    - changed_files
+    - tests_run
+    - live_side_effects
+    - current_frontier_delta
+    - residual_work
+    - rollback
+  residual_work_target: docs/to-do-list/known_gaps.md
+
+archive_policy:
+  archive_target: docs/operations/archive/2026-Q2/current_live_recovery/
+  archive_requires_human: true
+
+supersedes:
+  - path: docs/operations/task_2026-05-22_live_math_frontier/
+    note: legacy packet; reference only, not moved
+  - path: docs/operations/task_2026-05-22_crosscheck_valid_window/
+    note: legacy packet; reference only, not moved

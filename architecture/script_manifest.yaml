@@ -829,6 +829,7 @@ scripts:
   topology_doctor_script_checks.py: {class: utility, canonical_command: DO_NOT_RUN, reason: imported by topology_doctor.py for script-manifest checker family}
   topology_doctor_source_checks.py: {class: utility, canonical_command: DO_NOT_RUN, reason: imported by topology_doctor.py for source-rationale/scoped-AGENTS checker family}
   topology_doctor_test_checks.py: {class: utility, canonical_command: DO_NOT_RUN, reason: imported by topology_doctor.py for test-topology checker family}
+  topology_v_next/file_arrangement.py: {class: utility, canonical_command: DO_NOT_RUN, reason: imported by topology_doctor.py for PR-T0 advisory file-arrangement kernel; exposes ArrangementFinding + 5 public functions; blocking=False invariant enforced in __post_init__}
   topology_section_audit.py:
     class: utility
     reason: "Read-only harness-debate audit utility for topology.yaml section recent-usage and replacement/sunset evidence; report artifacts are non-authority."
@@ -906,14 +907,20 @@ scripts:
     reason: >
       Packet Runtime (zpkt) — unified agent-runtime CLI for packet lifecycle
       management (start, status, scope, commit, setup, close, audit-bypass,
-      park, unpark). Owns scope.yaml-driven soft-warn enforcement and creates
-      isolated git worktrees for concurrent packet work. Writes only to packet
-      directories under docs/operations/, .zpkt-cache/ status digests, and the
-      configured githooks path; does not touch canonical DBs.
+      park, unpark). Default `zpkt start <slug>` creates work under
+      docs/operations/current/plans/<slug>/ (PLAN.md + scope.yaml with new
+      schema: id, status, owner, frontier, allowed_files, forbidden_files,
+      live_side_effects_allowed, supersedes, tests, closeout_required).
+      Use --new-package / --legacy-top-level to create a legacy top-level
+      task_<date>_<slug>/ directory (operator-gated, prints advisory WARNING).
+      Owns scope.yaml-driven soft-warn enforcement and creates isolated git
+      worktrees for concurrent packet work. Writes only to packet directories
+      under docs/operations/, .zpkt-cache/ status digests, and the configured
+      githooks path; does not touch canonical DBs.
     read_targets: [repo, docs/operations, .zpkt-cache]
     write_targets: [docs/operations, .zpkt-cache, .git/config (core.hooksPath via setup), stdout]
     required_helpers: [scripts._zpkt_scope]
-    required_tests: [tests/test_zpkt.py, tests/test_pscb_hook.py]
+    required_tests: [tests/test_zpkt.py, tests/test_pscb_hook.py, tests/test_zpkt_current_package.py]
   _zpkt_scope.py:
     class: utility
     module_owner: scripts
@@ -1318,3 +1325,27 @@ scripts:
     unguarded_write_rationale: "N/A — SCAFFOLD stub; run() raises NotImplementedError."
     required_helpers: [src.state.schema.shoulder_exposure_ledger_schema.ensure_table]
     required_tests: [tests/test_shoulder_exposure_ledger.py]
+  operations_package_inventory.py:
+    class: diagnostic
+    module_owner: docs_system
+    status: active
+    lifecycle: long_lived
+    packet: docs/operations/task_2026-05-22_docs_convergence_topology_t4
+    authority_scope: diagnostic_non_promotion
+    dangerous_if_run: false
+    dry_run_default: true
+    apply_flag: null
+    target_db: null
+    read_targets: [docs/operations, architecture, repo]
+    write_targets: [stdout]
+    canonical_command: "python3 scripts/operations_package_inventory.py [--json] [--repo-root PATH]"
+    external_inputs: []
+    delete_policy: retain_until_superseded
+    reuse_when: >
+      Classify all docs/operations/task_* directories by archival safety
+      before any T5 archiving wave. Produces advisory human table or JSON.
+      Exit 0 always.
+    do_not_use_when: "Task is a one-off archiving action; use ARCHIVAL_RULES.md exemption protocol directly."
+    promotion_barrier: "Read-only diagnostic; output is advisory evidence and cannot authorize archiving."
+    required_helpers: []
+    required_tests: [tests/topology/test_operations_package_inventory.py]

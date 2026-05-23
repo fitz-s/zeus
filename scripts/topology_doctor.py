@@ -961,6 +961,56 @@ def _docs_checks():
     return topology_doctor_docs_checks
 
 
+def _file_arrangement():
+    """Lazy-import wrapper for scripts/topology_v_next/file_arrangement.py (PR-T0 kernel)."""
+    try:
+        from scripts.topology_v_next import file_arrangement
+    except ModuleNotFoundError:  # direct script execution from scripts/
+        import topology_v_next.file_arrangement as file_arrangement  # type: ignore[no-redef]
+    return file_arrangement
+
+
+def run_arrange(artifact_kind: str, slug: str, filename: str = "") -> dict[str, Any]:
+    """Return advisory recommend_path result for the given artifact_kind + slug.
+
+    Always returns a dict; never raises. Exit: always 0.
+    """
+    fa = _file_arrangement()
+    manifest = fa.load_file_arrangement_manifest(ROOT)
+    path = fa.recommend_path(
+        artifact_kind=artifact_kind,
+        slug=slug,
+        filename=filename or f"{slug}.md",
+        root=ROOT,
+        manifest=manifest,
+    )
+    return {"recommended_path": str(path), "artifact_kind": artifact_kind, "slug": slug}
+
+
+def run_file_arrangement_audit() -> dict[str, Any]:
+    """Run the advisory file-arrangement audit. Exit: always 0 (findings are warnings).
+
+    Returns dict with keys: ok (always True), findings (list[dict]).
+    """
+    fa = _file_arrangement()
+    manifest = fa.load_file_arrangement_manifest(ROOT)
+    findings = fa.audit_file_arrangement(ROOT, manifest)
+    return {
+        "ok": True,
+        "advisory": True,
+        "finding_count": len(findings),
+        "findings": [f.to_dict() for f in findings],
+    }
+
+
+def run_explain_path(path: str) -> dict[str, Any]:
+    """Return advisory ArrangementFinding for the given path. Exit: always 0."""
+    fa = _file_arrangement()
+    manifest = fa.load_file_arrangement_manifest(ROOT)
+    finding = fa.explain_path(path, ROOT, manifest)
+    return finding.to_dict()
+
+
 def _docs_mode_excluded_roots(topology: dict[str, Any]) -> list[Path]:
     return _docs_checks().docs_mode_excluded_roots(sys.modules[__name__], topology)
 
@@ -1032,6 +1082,22 @@ def run_current_state_receipt_bound() -> StrictResult:
 
 def _check_active_operations_registry(topology: dict[str, Any]) -> list[TopologyIssue]:
     return _docs_checks().check_active_operations_registry(sys.modules[__name__], topology)
+
+
+def _check_current_state_freshness(topology: dict[str, Any], max_days: int = 14) -> list[TopologyIssue]:
+    return _docs_checks().check_current_state_freshness(sys.modules[__name__], topology, max_days)
+
+
+def _check_multiple_active_pointers(topology: dict[str, Any]) -> list[TopologyIssue]:
+    return _docs_checks().check_multiple_active_pointers(sys.modules[__name__], topology)
+
+
+def _check_task_dirs_fully_unregistered(topology: dict[str, Any]) -> list[TopologyIssue]:
+    return _docs_checks().check_task_dirs_fully_unregistered(sys.modules[__name__], topology)
+
+
+def _check_stale_current_fact_referenced(topology: dict[str, Any]) -> list[TopologyIssue]:
+    return _docs_checks().check_stale_current_fact_referenced(sys.modules[__name__], topology)
 
 
 def _check_root_and_state_classification(topology: dict[str, Any]) -> list[TopologyIssue]:

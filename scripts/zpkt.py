@@ -181,32 +181,91 @@ def normalize_package_name(raw: str | None) -> str | None:
 def cmd_start(args: argparse.Namespace) -> int:
     root = repo_root()
     slug = slugify(args.name)
-    packet = make_packet_name(slug, today=args.date)
-    package = normalize_package_name(args.package)
-    packet_path = f"{package}/phases/{packet}" if package else packet
-    package_dir = root / PACKET_ROOT / package if package else None
-    if package_dir is not None and not package_dir.is_dir():
-        die(f"package folder not found: {package_dir}")
-    packet_dir = root / PACKET_ROOT / packet_path
-    if packet_dir.exists():
-        die(f"packet folder already exists: {packet_dir}")
+    use_legacy = getattr(args, "new_package", False) or getattr(args, "legacy_top_level", False)
+
+    if use_legacy:
+        # Legacy / operator-gated path: top-level task_YYYY-MM-DD_<slug>/ dir.
+        print(
+            "zpkt WARNING: --new-package/--legacy-top-level creates a top-level "
+            "docs/operations/task_*/ directory. Opening a new top-level package is "
+            "operator-gated. Prefer the default path (docs/operations/current/plans/<slug>/).",
+            file=sys.stderr,
+        )
+        packet = make_packet_name(slug, today=args.date)
+        package = normalize_package_name(args.package)
+        packet_path = f"{package}/phases/{packet}" if package else packet
+        package_dir = root / PACKET_ROOT / package if package else None
+        if package_dir is not None and not package_dir.is_dir():
+            die(f"package folder not found: {package_dir}")
+        packet_dir = root / PACKET_ROOT / packet_path
+        if packet_dir.exists():
+            die(f"packet folder already exists: {packet_dir}")
+
+        branch = args.branch or f"p2-{slug}".replace("_", "-")
+        worktree_path: Path | None
+        if args.inplace:
+            worktree_path = root
+            info(
+                f"--inplace: reusing current worktree at {root}; "
+                "scope tracking still applies."
+            )
+            existing = run_git("branch", "--list", branch, cwd=root, check=False)
+            if not existing.stdout.strip():
+                run_git("switch", "-c", branch, cwd=root)
+            else:
+                run_git("switch", branch, cwd=root)
+        else:
+            worktree_path = (root.parent / f"zeus-{slug.replace('_', '-')}").resolve()
+            if worktree_path.exists():
+                die(f"worktree path already exists: {worktree_path}")
+            run_git("worktree", "add", str(worktree_path), "-b", branch, "HEAD", cwd=root)
+            info(f"worktree created at {worktree_path} on branch {branch}")
+
+        target = worktree_path
+        pkt_dir = target / PACKET_ROOT / packet_path
+        pkt_dir.mkdir(parents=True, exist_ok=True)
+
+        write_packet_skeleton(pkt_dir=pkt_dir, packet=packet, branch=branch, worktree=target)
+        set_active_packet(target, packet_path)
+
+        print(json.dumps({
+            "ok": True,
+            "packet": packet,
+            "packet_path": packet_path,
+            "package": package,
+            "branch": branch,
+            "worktree": str(target),
+            "next_steps": [
+                f"cd {target}",
+                "zpkt status",
+                "zpkt scope add <files>   # widen scope as you discover what you'll touch",
+            ],
+        }, indent=2))
+        return 0
+
+    # Default path: create inside docs/operations/current/plans/<slug>/
+    package = normalize_package_name(getattr(args, "package", None))
+    if package:
+        die("--package is not supported with the default (current/plans/) path; use --new-package for multi-phase work inside a legacy top-level package")
+
+    current_plan_rel = f"current/plans/{slug}"
+    current_plan_dir = root / PACKET_ROOT / current_plan_rel
+    if current_plan_dir.exists():
+        die(f"plan folder already exists: {current_plan_dir}")
 
     branch = args.branch or f"p2-{slug}".replace("_", "-")
-    worktree_path: Path | None
     if args.inplace:
         worktree_path = root
         info(
             f"--inplace: reusing current worktree at {root}; "
             "scope tracking still applies."
         )
-        # Create branch in current worktree if it doesn't exist.
         existing = run_git("branch", "--list", branch, cwd=root, check=False)
         if not existing.stdout.strip():
             run_git("switch", "-c", branch, cwd=root)
         else:
             run_git("switch", branch, cwd=root)
     else:
-        # Place the worktree as a sibling of the main repo dir.
         worktree_path = (root.parent / f"zeus-{slug.replace('_', '-')}").resolve()
         if worktree_path.exists():
             die(f"worktree path already exists: {worktree_path}")
@@ -214,26 +273,58 @@ def cmd_start(args: argparse.Namespace) -> int:
         info(f"worktree created at {worktree_path} on branch {branch}")
 
     target = worktree_path
-    pkt_dir = target / PACKET_ROOT / packet_path
+    pkt_dir = target / PACKET_ROOT / current_plan_rel
     pkt_dir.mkdir(parents=True, exist_ok=True)
 
-    write_packet_skeleton(pkt_dir=pkt_dir, packet=packet, branch=branch, worktree=target)
-    set_active_packet(target, packet_path)
+    write_current_package_skeleton(pkt_dir=pkt_dir, slug=slug, branch=branch)
+    set_active_packet(target, current_plan_rel)
 
     print(json.dumps({
         "ok": True,
-        "packet": packet,
-        "packet_path": packet_path,
-        "package": package,
+        "slug": slug,
+        "plan_path": f"docs/operations/{current_plan_rel}/PLAN.md",
+        "scope_path": f"docs/operations/{current_plan_rel}/scope.yaml",
+        "packet_path": current_plan_rel,
         "branch": branch,
         "worktree": str(target),
         "next_steps": [
             f"cd {target}",
             "zpkt status",
-            "zpkt scope add <files>   # widen scope as you discover what you'll touch",
         ],
     }, indent=2))
     return 0
+
+
+def write_current_package_skeleton(*, pkt_dir: Path, slug: str, branch: str) -> None:
+    """Write PLAN.md + scope.yaml with the new current/plans/<slug>/ schema."""
+    plan = pkt_dir / "PLAN.md"
+    if not plan.exists():
+        plan.write_text(
+            f"# {slug} -- Plan\n\n"
+            f"Date: {datetime.now(timezone.utc).strftime('%Y-%m-%d')}\n"
+            f"Branch: `{branch}`\n"
+            "Status: active\n\n"
+            "## Background\n\n_TODO: link to motivating audit / prior conversation._\n\n"
+            "## Scope\n\n_See sibling scope.yaml for machine-readable scope._\n\n"
+            "## Deliverables\n- _TODO_\n\n"
+            "## Verification\n- _TODO_\n",
+            encoding="utf-8",
+        )
+    scope_path = pkt_dir / "scope.yaml"
+    if not scope_path.exists():
+        scope_doc = {
+            "id": slug,
+            "status": "active",
+            "owner": "agent",
+            "frontier": [],
+            "allowed_files": [f"docs/operations/current/plans/{slug}/**"],
+            "forbidden_files": list(DEFAULT_OUT_OF_SCOPE),
+            "live_side_effects_allowed": False,
+            "supersedes": None,
+            "tests": [],
+            "closeout_required": True,
+        }
+        scope_path.write_text(yaml.safe_dump(scope_doc, sort_keys=False), encoding="utf-8")
 
 
 def write_packet_skeleton(*, pkt_dir: Path, packet: str, branch: str, worktree: Path) -> None:
@@ -682,8 +773,23 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("name", help="short slug or human title (will be slugified)")
     sp.add_argument("--branch", help="branch name (default: derived from slug)")
     sp.add_argument("--date", help="ISO date for packet folder (default: today UTC)")
-    sp.add_argument("--package", help="existing top-level package folder for multi-phase work")
+    sp.add_argument("--package", help="existing top-level package folder for multi-phase work (only valid with --new-package)")
     sp.add_argument("--inplace", action="store_true", help="reuse current worktree (rare)")
+    sp.add_argument(
+        "--new-package",
+        action="store_true",
+        dest="new_package",
+        help=(
+            "Create a legacy top-level docs/operations/task_<date>_<slug>/ directory "
+            "(operator-gated; prints advisory WARNING). Default: off (uses current/plans/<slug>/)."
+        ),
+    )
+    sp.add_argument(
+        "--legacy-top-level",
+        action="store_true",
+        dest="legacy_top_level",
+        help="Alias for --new-package.",
+    )
     sp.set_defaults(func=cmd_start)
 
     sp = sub.add_parser("status", help="one-call digest")
