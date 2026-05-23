@@ -212,6 +212,11 @@ _BASELINE_PER_FILE: dict[str, int] = {
     # build_evidence_report(). Both interpolate internal JOIN fragments and
     # filter clauses built from closed internal parameters (no user input).
     "src/analysis/evidence_report.py": 2,
+    # 2026-05-22 wave/stochastic-datagated assembly: L-2 settlement_attribution
+    # adds 3 SAVEPOINT sites. Name is `l2_attr_{decision_event_id[:16].replace('-', '_')}`
+    # where decision_event_id is an internal DB UUID — closed source, no user input.
+    # Pattern matches exchange_reconcile.py SAVEPOINT registrations.
+    "src/cron/settlement_attribution.py": 3,
     # Tail catch — fresh files with f-string SQL must be added explicitly.
 }
 
