@@ -136,6 +136,29 @@ listed in `docs/operations/archive/<YYYY>-Q<N>/INDEX.md`; do not re-list those p
 When a packet closes and is archived, create a stub at `docs/operations/<name>.archived`
 and add a row to the quarter INDEX. Active archival rules: see `docs/authority/ARCHIVAL_RULES.md`.
 
+## Single Operations Home
+
+All planning, goals, and ongoing-operation files must live under `docs/operations/current/`.
+Nothing goes in `.omc/`, `.claude/`, `.omx/`, or the repo root.
+
+| Artifact | Canonical location |
+|---|---|
+| Active session goal | `docs/operations/current/GOAL.md` |
+| Plans (flat files) | `docs/operations/current/plans/<name>.md` |
+| Scope sidecars | `docs/operations/current/plans/<name>/scope.yaml` |
+| Evidence / reports | `docs/operations/current/evidence/`, `current/reports/` |
+
+**H7 (`planning_file_outside_operations`)**: fires RED when any `*.md` plan/goal/scaffold
+file exists in `.omc/plans`, `.omc/research`, repo-local `.claude/plans`, `.omx`, or the
+repo root (`*PLAN*.md`, `*GOAL*.md`, `*SCAFFOLD*.md`). Fix: move to `docs/operations/current/`.
+
+**H8 (`session_goal_not_in_current`)**: fires RED when `current/package.yaml` exists but
+`current/GOAL.md` is absent, or when a `GOAL.md`/`OBJECTIVE.md` lives outside `current/`.
+Fix: create `docs/operations/current/GOAL.md` seeded from `package.yaml` + `task.md`.
+
+Use `python scripts/zpkt.py start <slug>` to create a new plan — it writes the flat
+`current/plans/<slug>.md` and `current/GOAL.md` (if not present) automatically.
+
 ## Rules
 
 - `current_state.md` stays thin: current program, active packet, required

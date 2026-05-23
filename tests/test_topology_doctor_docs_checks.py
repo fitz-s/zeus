@@ -29,6 +29,8 @@ from scripts.topology_doctor_docs_checks import (
     check_expected_empty_zones,
     check_multiple_active_pointers,
     check_new_packet_outside_current,
+    check_planning_file_outside_operations,
+    check_session_goal_not_in_current,
     check_stale_current_fact_referenced,
     check_task_dir_sprawl_ceiling,
     check_task_dirs_fully_unregistered,
@@ -565,4 +567,151 @@ class TestCheckNewPacketOutsideCurrent:
 
         api = _make_harness_api(tmp_path)
         issues = check_new_packet_outside_current(api, {})
+        assert issues == []
+
+
+# H7: planning_file_outside_operations — break/restore meta-verify
+# ---------------------------------------------------------------------------
+
+
+class TestCheckPlanningFileOutsideOperations:
+    """H7: plan/goal/scaffold *.md outside docs/operations/ fires RED.
+
+    Antibody proof: each test creates the condition → asserts RED, then removes
+    the condition → asserts GREEN.
+    """
+
+    def test_omc_plans_file_fires_then_green(self, tmp_path: Path) -> None:
+        """Break: .omc/plans/x_plan.md → RED. Restore: remove → GREEN."""
+        omc_plans = tmp_path / ".omc" / "plans"
+        omc_plans.mkdir(parents=True)
+        plan_file = omc_plans / "x_plan.md"
+        plan_file.write_text("# X Plan\n", encoding="utf-8")
+
+        api = _make_harness_api(tmp_path)
+        issues = check_planning_file_outside_operations(api, {})
+        assert len(issues) == 1
+        assert issues[0].code == "planning_file_outside_operations"
+        assert ".omc/plans/x_plan.md" in issues[0].path
+
+        # Restore
+        plan_file.unlink()
+        issues_after = check_planning_file_outside_operations(api, {})
+        assert issues_after == []
+
+    def test_omc_research_file_fires(self, tmp_path: Path) -> None:
+        """Break: .omc/research/notes.md → RED."""
+        omc_research = tmp_path / ".omc" / "research"
+        omc_research.mkdir(parents=True)
+        (omc_research / "notes.md").write_text("# Notes\n", encoding="utf-8")
+
+        api = _make_harness_api(tmp_path)
+        issues = check_planning_file_outside_operations(api, {})
+        assert len(issues) == 1
+        assert issues[0].code == "planning_file_outside_operations"
+
+    def test_repo_root_goal_fires(self, tmp_path: Path) -> None:
+        """Break: GOAL.md at repo root → RED. Restore: remove → GREEN."""
+        goal_file = tmp_path / "GOAL.md"
+        goal_file.write_text("# Root goal\n", encoding="utf-8")
+
+        api = _make_harness_api(tmp_path)
+        issues = check_planning_file_outside_operations(api, {})
+        assert len(issues) == 1
+        assert issues[0].code == "planning_file_outside_operations"
+
+        # Restore
+        goal_file.unlink()
+        issues_after = check_planning_file_outside_operations(api, {})
+        assert issues_after == []
+
+    def test_file_inside_docs_operations_is_silent(self, tmp_path: Path) -> None:
+        """File under docs/operations/ is the correct home — H7 is silent."""
+        ops_dir = tmp_path / "docs" / "operations" / "current" / "plans"
+        ops_dir.mkdir(parents=True)
+        (ops_dir / "my_plan.md").write_text("# Plan\n", encoding="utf-8")
+
+        api = _make_harness_api(tmp_path)
+        issues = check_planning_file_outside_operations(api, {})
+        assert issues == []
+
+    def test_empty_scan_dirs_is_silent(self, tmp_path: Path) -> None:
+        """No plan files anywhere → GREEN."""
+        api = _make_harness_api(tmp_path)
+        issues = check_planning_file_outside_operations(api, {})
+        assert issues == []
+
+
+# H8: session_goal_not_in_current — break/restore meta-verify
+# ---------------------------------------------------------------------------
+
+
+class TestCheckSessionGoalNotInCurrent:
+    """H8: package.yaml present but GOAL.md absent fires RED; goal in wrong dir fires RED.
+
+    Antibody proof: each test creates the condition → asserts RED, then restores
+    the condition → asserts GREEN.
+    """
+
+    def _write_package_yaml(self, tmp_path: Path) -> None:
+        current_dir = tmp_path / "docs" / "operations" / "current"
+        current_dir.mkdir(parents=True, exist_ok=True)
+        (current_dir / "package.yaml").write_text(
+            "package_id: test_pkg\nstatus: active\ncreated_at: '2026-05-22'\n",
+            encoding="utf-8",
+        )
+
+    def test_no_goal_md_fires_then_green(self, tmp_path: Path) -> None:
+        """Break: package.yaml present, no GOAL.md → RED. Add GOAL.md → GREEN."""
+        self._write_package_yaml(tmp_path)
+        current_dir = tmp_path / "docs" / "operations" / "current"
+
+        api = _make_harness_api(tmp_path)
+        issues = check_session_goal_not_in_current(api, {})
+        assert len(issues) == 1
+        assert issues[0].code == "session_goal_not_in_current"
+        assert "GOAL.md is absent" in issues[0].message
+
+        # Restore: add GOAL.md
+        (current_dir / "GOAL.md").write_text("# Goal\n", encoding="utf-8")
+        issues_after = check_session_goal_not_in_current(api, {})
+        assert issues_after == []
+
+    def test_goal_in_wrong_dir_fires_then_green(self, tmp_path: Path) -> None:
+        """Break: GOAL.md in .omc/plans/ → RED. Remove → GREEN."""
+        self._write_package_yaml(tmp_path)
+        # Also create GOAL.md in current/ so trigger 1 doesn't fire
+        current_dir = tmp_path / "docs" / "operations" / "current"
+        (current_dir / "GOAL.md").write_text("# Correct goal\n", encoding="utf-8")
+
+        wrong_dir = tmp_path / ".omc" / "plans"
+        wrong_dir.mkdir(parents=True)
+        wrong_goal = wrong_dir / "GOAL.md"
+        wrong_goal.write_text("# Wrong location\n", encoding="utf-8")
+
+        api = _make_harness_api(tmp_path)
+        issues = check_session_goal_not_in_current(api, {})
+        assert len(issues) == 1
+        assert issues[0].code == "session_goal_not_in_current"
+        assert ".omc/plans/GOAL.md" in issues[0].path
+
+        # Restore
+        wrong_goal.unlink()
+        issues_after = check_session_goal_not_in_current(api, {})
+        assert issues_after == []
+
+    def test_no_package_yaml_is_silent(self, tmp_path: Path) -> None:
+        """No package.yaml → H8 trigger 1 does not fire."""
+        api = _make_harness_api(tmp_path)
+        issues = check_session_goal_not_in_current(api, {})
+        assert issues == []
+
+    def test_goal_in_correct_location_is_silent(self, tmp_path: Path) -> None:
+        """package.yaml + GOAL.md both in current/ → GREEN."""
+        self._write_package_yaml(tmp_path)
+        current_dir = tmp_path / "docs" / "operations" / "current"
+        (current_dir / "GOAL.md").write_text("# Goal\n", encoding="utf-8")
+
+        api = _make_harness_api(tmp_path)
+        issues = check_session_goal_not_in_current(api, {})
         assert issues == []

@@ -826,6 +826,8 @@ def check_active_operations_registry(api: Any, topology: dict[str, Any]) -> list
     issues.extend(check_stale_current_fact_referenced(api, topology))
     issues.extend(check_task_dir_sprawl_ceiling(api, topology))
     issues.extend(check_new_packet_outside_current(api, topology))
+    issues.extend(check_planning_file_outside_operations(api, topology))
+    issues.extend(check_session_goal_not_in_current(api, topology))
     return issues
 
 
@@ -1270,4 +1272,159 @@ def check_new_packet_outside_current(api: Any, topology: dict[str, Any]) -> list
                     ),
                 )
             )
+    return issues
+
+
+# ---------------------------------------------------------------------------
+# H7: planning_file_outside_operations
+# ---------------------------------------------------------------------------
+
+_PLAN_FILENAME_PATTERNS = (
+    "*PLAN*.md",
+    "*GOAL*.md",
+    "*SCAFFOLD*.md",
+)
+
+_PLAN_SCAN_RELPATHS = (
+    ".omc/plans",
+    ".omc/research",
+    ".claude/plans",
+    ".omx",
+)
+
+
+def check_planning_file_outside_operations(api: Any, topology: dict[str, Any]) -> list[Any]:
+    """H7: any plan/goal/scaffold *.md outside docs/operations/ is a topology violation.
+
+    Scans repo-local directories that agents commonly use as planning scratch
+    space:  .omc/plans, .omc/research, .claude/plans (repo-local only — ~/.claude
+    is outside the repo and is implicitly excluded by ROOT-anchoring), .omx,
+    and the repo root for *PLAN*.md / *GOAL*.md / *SCAFFOLD*.md glob patterns.
+
+    Reference only — never deletes. Steers agents toward the single operations
+    home at docs/operations/current/.
+
+    Fix: move planning files to docs/operations/current/ (goals→GOAL.md,
+    plans→plans/<name>.md).  See docs/operations/AGENTS.md.
+    """
+    issues: list[Any] = []
+    root = api.ROOT
+
+    found: list[Path] = []
+
+    # Scan well-known relpaths
+    for reldir in _PLAN_SCAN_RELPATHS:
+        scan_dir = root / reldir
+        if not scan_dir.exists():
+            continue
+        for p in scan_dir.rglob("*.md"):
+            found.append(p)
+
+    # Repo-root glob for *PLAN*.md / *GOAL*.md / *SCAFFOLD*.md
+    for pattern in _PLAN_FILENAME_PATTERNS:
+        for p in root.glob(pattern):
+            if p.is_file():
+                found.append(p)
+
+    ops_home = root / "docs" / "operations"
+
+    for p in found:
+        try:
+            rel = p.relative_to(root).as_posix()
+        except ValueError:
+            continue
+        # Skip files already inside docs/operations/ (correct home)
+        try:
+            p.relative_to(ops_home)
+            continue
+        except ValueError:
+            pass
+        issues.append(
+            api._issue(
+                "planning_file_outside_operations",
+                rel,
+                (
+                    f"Planning file '{rel}' is outside the operations home. "
+                    "Move planning + goals to docs/operations/current/ "
+                    "(the single operations folder). "
+                    "See docs/operations/AGENTS.md."
+                ),
+            )
+        )
+    return issues
+
+
+# ---------------------------------------------------------------------------
+# H8: session_goal_not_in_current
+# ---------------------------------------------------------------------------
+
+_GOAL_FILENAMES = frozenset({"GOAL.md", "goal.md", "OBJECTIVE.md"})
+
+
+def check_session_goal_not_in_current(api: Any, topology: dict[str, Any]) -> list[Any]:
+    """H8: current/package.yaml present → current/GOAL.md must exist; goals outside current/ fire RED.
+
+    Two triggers:
+    1. docs/operations/current/package.yaml exists but docs/operations/current/GOAL.md
+       is absent — the active session has no canonical goal anchor.
+    2. A GOAL.md/goal.md/OBJECTIVE.md file exists outside docs/operations/current/ —
+       goal is scattered rather than consolidated.
+
+    Fix: create docs/operations/current/GOAL.md summarising the active session
+    objective (read current/package.yaml + current/task.md for content).
+    See docs/operations/AGENTS.md.
+    """
+    issues: list[Any] = []
+    root = api.ROOT
+    current_dir = root / "docs" / "operations" / "current"
+    pkg_path = current_dir / "package.yaml"
+    goal_path = current_dir / "GOAL.md"
+
+    # Trigger 1: package present but GOAL.md absent
+    if pkg_path.exists() and not goal_path.exists():
+        issues.append(
+            api._issue(
+                "session_goal_not_in_current",
+                "docs/operations/current/",
+                (
+                    "docs/operations/current/package.yaml exists but GOAL.md is absent. "
+                    "Create docs/operations/current/GOAL.md with the active session objective "
+                    "(seed from current/package.yaml + current/task.md). "
+                    "See docs/operations/AGENTS.md."
+                ),
+            )
+        )
+
+    # Trigger 2: goal/objective file outside current/
+    # Use rglob("*.md") and filter by exact name to avoid macOS HFS+ case-insensitive
+    # double-matches when iterating multiple name variants from _GOAL_FILENAMES.
+    seen: set[Path] = set()
+    for p in root.rglob("*.md"):
+        if not p.is_file():
+            continue
+        if p.name not in _GOAL_FILENAMES:
+            continue
+        if p in seen:
+            continue
+        seen.add(p)
+        try:
+            p.relative_to(current_dir)
+            continue  # Correct location — skip
+        except ValueError:
+            pass
+        try:
+            rel = p.relative_to(root).as_posix()
+        except ValueError:
+            continue
+        issues.append(
+            api._issue(
+                "session_goal_not_in_current",
+                rel,
+                (
+                    f"Goal/objective file '{rel}' is outside docs/operations/current/. "
+                    "Consolidate all session goals into docs/operations/current/GOAL.md. "
+                    "See docs/operations/AGENTS.md."
+                ),
+            )
+        )
     return issues

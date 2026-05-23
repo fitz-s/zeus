@@ -1108,6 +1108,14 @@ def _check_new_packet_outside_current(topology: dict[str, Any]) -> list[Topology
     return _docs_checks().check_new_packet_outside_current(sys.modules[__name__], topology)
 
 
+def _check_planning_file_outside_operations(topology: dict[str, Any]) -> list[TopologyIssue]:
+    return _docs_checks().check_planning_file_outside_operations(sys.modules[__name__], topology)
+
+
+def _check_session_goal_not_in_current(topology: dict[str, Any]) -> list[TopologyIssue]:
+    return _docs_checks().check_session_goal_not_in_current(sys.modules[__name__], topology)
+
+
 def _check_root_and_state_classification(topology: dict[str, Any]) -> list[TopologyIssue]:
     return _registry_checks().check_root_and_state_classification(sys.modules[__name__], topology)
 
