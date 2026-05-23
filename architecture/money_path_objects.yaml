@@ -293,6 +293,17 @@ state_machines:
     invariant_tests:
       - tests/test_forecast_extrema_authority.py
       - tests/test_forecast_offset_fix_regression.py
+  ci_gate_env_var_keys:
+    owner: .github/workflows/architecture_advisory_gates.yml
+    description: >
+      CI gate configuration env var keys used across workflow files to document
+      when to review or sunset a gate. NOT a state machine — these are string
+      literals used as YAML dict keys in .github/workflows/*.yml env: blocks.
+      Registered here because the REVIEW prefix in GATE_REVIEW_CONDITION fires
+      the semantic classifier's REVIEW-prefix state check when this key appears
+      as a string literal in scripts/check_advisory_gates.py.
+    states:
+      - GATE_REVIEW_CONDITION
 
 schema_objects:
   authority_fabricating_defaults:
