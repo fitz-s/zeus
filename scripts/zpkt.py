@@ -243,15 +243,23 @@ def cmd_start(args: argparse.Namespace) -> int:
         }, indent=2))
         return 0
 
-    # Default path: create inside docs/operations/current/plans/<slug>/
+    # Default path: create flat plan at docs/operations/current/plans/<slug>.md
+    # Scope sidecar (scope.yaml) lives in current/plans/<slug>/ for zpkt scope/close compat.
     package = normalize_package_name(getattr(args, "package", None))
     if package:
         die("--package is not supported with the default (current/plans/) path; use --new-package for multi-phase work inside a legacy top-level package")
 
+    # Flat plan file (primary artifact, single-operations-home law)
+    flat_plan_rel = f"current/plans/{slug}.md"
+    flat_plan_path = root / PACKET_ROOT / flat_plan_rel
+    if flat_plan_path.exists():
+        die(f"plan file already exists: {flat_plan_path}")
+
+    # Scope sidecar dir (kept for zpkt scope/close/commit compatibility)
     current_plan_rel = f"current/plans/{slug}"
     current_plan_dir = root / PACKET_ROOT / current_plan_rel
     if current_plan_dir.exists():
-        die(f"plan folder already exists: {current_plan_dir}")
+        die(f"plan scope dir already exists: {current_plan_dir}")
 
     branch = args.branch or f"p2-{slug}".replace("_", "-")
     if args.inplace:
@@ -273,18 +281,38 @@ def cmd_start(args: argparse.Namespace) -> int:
         info(f"worktree created at {worktree_path} on branch {branch}")
 
     target = worktree_path
+    # Flat plan file at current/plans/<slug>.md (canonical; replaces PLAN.md inside dir)
+    target_flat_plan = target / PACKET_ROOT / flat_plan_rel
+    target_flat_plan.parent.mkdir(parents=True, exist_ok=True)
+    write_flat_plan(path=target_flat_plan, slug=slug, branch=branch)
+
+    # Scope sidecar dir for zpkt scope/close/commit compatibility
     pkt_dir = target / PACKET_ROOT / current_plan_rel
     pkt_dir.mkdir(parents=True, exist_ok=True)
+    write_scope_sidecar(pkt_dir=pkt_dir, slug=slug, branch=branch)
 
-    write_current_package_skeleton(pkt_dir=pkt_dir, slug=slug, branch=branch)
+    # Write GOAL.md into current/ if not already present
+    goal_path = target / PACKET_ROOT / "current" / "GOAL.md"
+    if not goal_path.exists():
+        goal_path.parent.mkdir(parents=True, exist_ok=True)
+        goal_path.write_text(
+            f"# Session Goal\n\n"
+            f"Slug: `{slug}`\n"
+            f"Branch: `{branch}`\n\n"
+            "_TODO: document the active session objective here._\n"
+            "_Seed from docs/operations/current/package.yaml + current/task.md._\n",
+            encoding="utf-8",
+        )
+
     set_active_packet(target, current_plan_rel)
 
     print(json.dumps({
         "ok": True,
         "slug": slug,
-        "plan_path": f"docs/operations/{current_plan_rel}/PLAN.md",
+        "plan_path": f"docs/operations/{flat_plan_rel}",
         "scope_path": f"docs/operations/{current_plan_rel}/scope.yaml",
         "packet_path": current_plan_rel,
+        "goal_path": "docs/operations/current/GOAL.md",
         "branch": branch,
         "worktree": str(target),
         "next_steps": [
@@ -295,8 +323,56 @@ def cmd_start(args: argparse.Namespace) -> int:
     return 0
 
 
+def write_flat_plan(*, path: Path, slug: str, branch: str) -> None:
+    """Write flat plan file at current/plans/<slug>.md (canonical plan artifact).
+
+    This is the primary plan surface under the single-operations-home law.
+    The file lives at docs/operations/current/plans/<slug>.md (not inside a subdir).
+    """
+    if not path.exists():
+        path.write_text(
+            f"# {slug} -- Plan\n\n"
+            f"Date: {datetime.now(timezone.utc).strftime('%Y-%m-%d')}\n"
+            f"Branch: `{branch}`\n"
+            "Status: active\n\n"
+            "## Background\n\n_TODO: link to motivating audit / prior conversation._\n\n"
+            "## Scope\n\n_See sibling scope dir for machine-readable scope.yaml._\n\n"
+            "## Deliverables\n- _TODO_\n\n"
+            "## Verification\n- _TODO_\n",
+            encoding="utf-8",
+        )
+
+
+def write_scope_sidecar(*, pkt_dir: Path, slug: str, branch: str) -> None:
+    """Write scope.yaml inside current/plans/<slug>/ sidecar dir.
+
+    Kept separate from the flat plan file so zpkt scope/close/commit can
+    locate scope.yaml via scope_path_for(root, 'current/plans/<slug>').
+    DEPRECATED: per-slug subdir creation for plan content; plan goes in flat file.
+    """
+    scope_path = pkt_dir / "scope.yaml"
+    if not scope_path.exists():
+        scope_doc = {
+            "id": slug,
+            "status": "active",
+            "owner": "agent",
+            "frontier": [],
+            "allowed_files": [f"docs/operations/current/plans/{slug}.md"],
+            "forbidden_files": list(DEFAULT_OUT_OF_SCOPE),
+            "live_side_effects_allowed": False,
+            "supersedes": None,
+            "tests": [],
+            "closeout_required": True,
+        }
+        scope_path.write_text(yaml.safe_dump(scope_doc, sort_keys=False), encoding="utf-8")
+
+
 def write_current_package_skeleton(*, pkt_dir: Path, slug: str, branch: str) -> None:
-    """Write PLAN.md + scope.yaml with the new current/plans/<slug>/ schema."""
+    """Write PLAN.md + scope.yaml with the new current/plans/<slug>/ schema.
+
+    DEPRECATED: use write_flat_plan + write_scope_sidecar for new zpkt start invocations.
+    Kept for backward-compatibility with callers that may pass an existing pkt_dir.
+    """
     plan = pkt_dir / "PLAN.md"
     if not plan.exists():
         plan.write_text(

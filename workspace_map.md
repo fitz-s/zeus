@@ -24,7 +24,7 @@ Use it after `AGENTS.md` to answer two questions quickly:
 | tracked derived context | Tracked artifacts that help review and retrieval but are not authority | `.code-review-graph/graph.db` | Read as derived context, never as law |
 | historical cold storage | Historical bodies and bundles that may exist locally but are not part of the default boot path | `docs/archives/**`, local archive bundles | Do not default-read; route through `docs/archive_registry.md` |
 | runtime-local scratch and control | Runtime state, DBs, locks, and ignored planning scratch | `state/**`, `.omx/**`, `.omc/**` | Treat as runtime context, not repo law |
-| generated evidence sinks | Reports, checklists, workbooks, and raw captures | `docs/reports/**`, `docs/to-do-list/**`, `docs/artifacts/**`, `raw/**` | Evidence only unless promoted through a packet |
+| generated evidence sinks | Reports, checklists, workbooks, and raw captures | `docs/reports/authority_history/**`, `docs/to-do-list/**`, `raw/**`; artifacts/historical_evidence untracked on disk | Evidence only unless promoted through a packet |
 
 ## Directory router
 
@@ -43,15 +43,15 @@ Use it after `AGENTS.md` to answer two questions quickly:
 | `docs/reference/legacy/` | Demoted historical reference snapshots (`legacy_reference_*.md`); doc_class `legacy_reference` per 2026-05-17 W6 | `docs/reference/legacy/AGENTS.md` |
 | `docs/operations/` | Live control pointer, active packets (.archived stubs dropped 2026-05-17 — git is backup, docs/archives/packets/ holds canonical) | `docs/operations/AGENTS.md` |
 | `docs/runbooks/` | Operator runbooks | `docs/runbooks/AGENTS.md` |
-| `docs/reports/` | Generated diagnostic reports (7 legacy_reference_*.md moved to docs/reference/legacy/ per W6) | `docs/reports/AGENTS.md` |
+| `docs/reports/authority_history/` | Durable authority history ADRs and delivery boundary (kept tracked; rest of docs/reports/ is untracked archive) | `docs/reports/authority_history/` |
 | `docs/to-do-list/` | Active checklist workbooks | `docs/to-do-list/AGENTS.md` |
-| `docs/artifacts/` | Active evidence artifacts | `docs/artifacts/AGENTS.md` |
 | `architecture/` | Machine-checkable workspace law | `architecture/AGENTS.md` |
 | `config/` | Runtime settings and reality contracts | `config/AGENTS.md` |
 | `.code-review-graph/` | Tracked derived online context | graph status via `python3 scripts/topology_doctor.py --code-review-graph-status --json` |
 | `state/` | Runtime DBs and local control files | classify before treating as truth |
 | `raw/` | Raw external evidence captures | `raw/AGENTS.md` |
-| `docs/historical_evidence/` | Historical evidence trails: gate decisions, baselines, override records from past packets | per-subdir inspect |
+| artifacts (untracked) | Review artifacts untracked 2026-05-23 — bodies on disk, gitignored. See `docs/archive_registry.md`. | untracked |
+| historical evidence (untracked) | Historical evidence trails untracked 2026-05-23 — bodies on disk, gitignored. | untracked |
 | `.agents/` | Repo-local workflow skills and AI handoff guidance | `.agents/skills/AGENTS.md` |
 
 ## Machine manifests

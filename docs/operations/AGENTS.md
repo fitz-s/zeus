@@ -31,8 +31,7 @@ index, or archive catalog.
 
 | File | Purpose |
 |------|---------|
-| `zeus_system_review_2026-05-16.md` | 2026-05-16 system review evidence (7-agent investigation; parent for compounding plan) |
-| `zeus_agent_runtime_compounding_plan_2026-05-16.md` | Wave 1 agent runtime compounding plan v2.4 (4-critic + A2 + pre-PR + bot revisions, traced in §9) |
+| `zeus_agent_runtime_compounding_plan_2026-05-16.md` | Wave 1 agent runtime compounding plan v2.4 (4-critic + A2 + pre-PR + bot revisions, traced in §9); parent system review archived to `archive/2026-Q2/zeus_system_review_2026-05-16.md` |
 
 Top-level standalone reports must register in `architecture/docs_registry.yaml`
 under `doc_class: report` with explicit `freshness_class` and `next_action`.
@@ -119,14 +118,11 @@ Tracked top-level files (required for docs checks; class/purpose in docs_registr
 | `POLICY.md` | operations policy |
 | `LIVE_LAUNCH_HANDOFF.md` | live launch handoff |
 | `PLIST_UPDATE_FOR_RELOCK.md` | packet evidence |
-| `live_rescue_ledger_2026-05-04.md` | packet evidence |
-| `CRON_PROPOSALS_F32_F35.md` | packet evidence |
-| `TRIVIAL_BATCH_NOTES.md` | packet evidence |
+| `CRON_PROPOSALS_F32_F35.md` | packet evidence (pending operator cron addition) |
 | `tigge_daemon_integration.md` | packet evidence |
-| `zeus_system_review_2026-05-16.md` | report |
 | `zeus_agent_runtime_compounding_plan_2026-05-16.md` | report |
-| `task_2026-04-26_ultimate_plan/` | active packet container |
-| `task_2026-05-21_mainline_completion_authority/` | task packet container |
+| `activation/` | active support (src/engine/dispatch.py + scripts/produce_activation_evidence.py refs) |
+| `live_egress/` | active support (src/venue/polymarket_v2_adapter.py ref) |
 | `edge_observation/` | active monitoring |
 | `attribution_drift/` | active monitoring |
 | `ws_poll_reaction/` | active monitoring |
@@ -139,6 +135,29 @@ Archived packet evidence (physically moved to `docs/operations/archive/<YYYY>-Q<
 listed in `docs/operations/archive/<YYYY>-Q<N>/INDEX.md`; do not re-list those packets here.
 When a packet closes and is archived, create a stub at `docs/operations/<name>.archived`
 and add a row to the quarter INDEX. Active archival rules: see `docs/authority/ARCHIVAL_RULES.md`.
+
+## Single Operations Home
+
+All planning, goals, and ongoing-operation files must live under `docs/operations/current/`.
+Nothing goes in `.omc/`, `.claude/`, `.omx/`, or the repo root.
+
+| Artifact | Canonical location |
+|---|---|
+| Active session goal | `docs/operations/current/GOAL.md` |
+| Plans (flat files) | `docs/operations/current/plans/<name>.md` |
+| Scope sidecars | `docs/operations/current/plans/<name>/scope.yaml` |
+| Evidence / reports | `docs/operations/current/evidence/`, `current/reports/` |
+
+**H7 (`planning_file_outside_operations`)**: fires RED when any `*.md` plan/goal/scaffold
+file exists in `.omc/plans`, `.omc/research`, repo-local `.claude/plans`, `.omx`, or the
+repo root (`*PLAN*.md`, `*GOAL*.md`, `*SCAFFOLD*.md`). Fix: move to `docs/operations/current/`.
+
+**H8 (`session_goal_not_in_current`)**: fires RED when `current/package.yaml` exists but
+`current/GOAL.md` is absent, or when a `GOAL.md`/`OBJECTIVE.md` lives outside `current/`.
+Fix: create `docs/operations/current/GOAL.md` seeded from `package.yaml` + `task.md`.
+
+Use `python scripts/zpkt.py start <slug>` to create a new plan — it writes the flat
+`current/plans/<slug>.md` and `current/GOAL.md` (if not present) automatically.
 
 ## Rules
 

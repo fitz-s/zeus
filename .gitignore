@@ -203,8 +203,12 @@ config/settings.json
 docs/**/*.xlsx
 docs/**/~$*
 docs/archives/
+docs/operations/archive/
+docs/historical_evidence/
+docs/artifacts/
 docs/reports/generated/
-docs/artifacts/generated/
+# dead top-level report snapshots untracked in 2026-05-23 housekeeping (bodies on disk)
+docs/reports/*.md
 # Evidence data dumps in operations tasks (market snapshots, settlement/obs corpora).
 docs/operations/**/evidence/*.json
 # P3 topology v_next shadow divergence JSONL — raw per-call records, never committed.

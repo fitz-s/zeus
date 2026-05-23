@@ -107,8 +107,7 @@ DOCS_REGISTRY_PARENT_PATTERNS = (
     "docs/operations/[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]_*/",
     # active operations package (file_arrangement.yaml canonical path)
     "docs/operations/current/",
-    "docs/reports/",
-    "docs/artifacts/",
+    "docs/reports/authority_history/",
     "docs/to-do-list/",
     "docs/runbooks/",
     "docs/reference/legacy/",
@@ -825,6 +824,10 @@ def check_active_operations_registry(api: Any, topology: dict[str, Any]) -> list
     issues.extend(check_multiple_active_pointers(api, topology))
     issues.extend(check_task_dirs_fully_unregistered(api, topology))
     issues.extend(check_stale_current_fact_referenced(api, topology))
+    issues.extend(check_task_dir_sprawl_ceiling(api, topology))
+    issues.extend(check_new_packet_outside_current(api, topology))
+    issues.extend(check_planning_file_outside_operations(api, topology))
+    issues.extend(check_session_goal_not_in_current(api, topology))
     return issues
 
 
@@ -1105,4 +1108,323 @@ def check_stale_current_fact_referenced(api: Any, topology: dict[str, Any]) -> l
                     ),
                 )
             )
+    return issues
+
+
+# ---------------------------------------------------------------------------
+# H5: operations_task_dir_sprawl_ceiling
+# ---------------------------------------------------------------------------
+
+_TASK_DIR_DATE_PATTERN = re.compile(r"^task_(\d{4}-\d{2}-\d{2})_")
+
+
+def _lifecycle_state_for(rel: str, entries: list[dict[str, Any]]) -> str | None:
+    """Return lifecycle_state from the first docs_registry entry that covers *rel*, or None."""
+    rel_dir = rel.rstrip("/") + "/"
+    for entry in entries:
+        entry_path = str(entry.get("path") or "").rstrip("/") + "/"
+        # Exact dir match or wildcard pattern match via fnmatch
+        if entry_path == rel_dir or fnmatch.fnmatch(rel_dir, entry_path):
+            return str(entry.get("lifecycle_state") or "")
+        # Also try without trailing slash for file-pattern entries
+        entry_bare = str(entry.get("path") or "").rstrip("/")
+        if fnmatch.fnmatch(rel, entry_bare):
+            return str(entry.get("lifecycle_state") or "")
+    return None
+
+
+_SPRAWL_BLOCKED_STATES = frozenset({"historical", "closed"})
+
+
+def check_task_dir_sprawl_ceiling(api: Any, topology: dict[str, Any]) -> list[Any]:
+    """H5: any docs/operations/task_* dir that is closed, historical, or unregistered is RED.
+
+    Steady-state target is ZERO top-level docs/operations/task_* dirs.  All new
+    work routes through docs/operations/current/plans/<slug>/ via zpkt start.
+    A dir is allowed only if it has a docs_registry.yaml entry with lifecycle_state
+    in {active, transitional}.  Unregistered dirs and dirs with lifecycle_state in
+    {historical, closed} must be archived immediately.
+
+    Fix: move the dir to docs/operations/archive/2026-Q2/<name>/, create a stub
+    file docs/operations/<name>.archived, and delete its docs_registry.yaml entry
+    (or update its path).  Route new work through docs/operations/current/plans/<slug>/
+    using: python scripts/zpkt.py start <slug>.
+
+    Read: architecture/docs_registry.yaml (lifecycle_state field),
+    docs/operations/current/package.yaml (active package).
+    """
+    issues: list[Any] = []
+    task_dirs = operation_task_dirs(api)
+    if not task_dirs:
+        return issues
+
+    registry = api.load_docs_registry()
+    entries = list(registry.get("entries") or [])
+
+    for rel in sorted(task_dirs):
+        name = Path(rel).name
+        lifecycle = _lifecycle_state_for(rel, entries)
+
+        if lifecycle is None:
+            # Unregistered — must be archived
+            issues.append(
+                api._issue(
+                    "operations_task_dir_sprawl_ceiling",
+                    rel,
+                    (
+                        f"'{rel}' is not registered in architecture/docs_registry.yaml. "
+                        "Steady-state is ZERO top-level task_* dirs; all work routes through "
+                        "docs/operations/current/plans/<slug>/. "
+                        f"Fix: git mv docs/operations/{name} docs/operations/archive/2026-Q2/{name} "
+                        f"&& echo 'archived' > docs/operations/{name}.archived && git add -A. "
+                        "Route new work: python scripts/zpkt.py start <slug>. "
+                        "Read: architecture/docs_registry.yaml, docs/operations/current/package.yaml."
+                    ),
+                )
+            )
+        elif lifecycle in _SPRAWL_BLOCKED_STATES:
+            issues.append(
+                api._issue(
+                    "operations_task_dir_sprawl_ceiling",
+                    rel,
+                    (
+                        f"'{rel}' has lifecycle_state='{lifecycle}' in architecture/docs_registry.yaml "
+                        "and must be archived. "
+                        "Steady-state is ZERO top-level task_* dirs; closed/historical dirs must not "
+                        "remain at docs/operations/task_*/. "
+                        f"Fix: git mv docs/operations/{name} docs/operations/archive/2026-Q2/{name} "
+                        f"&& echo 'archived' > docs/operations/{name}.archived && git add -A. "
+                        "Read: architecture/docs_registry.yaml, docs/operations/current/package.yaml."
+                    ),
+                )
+            )
+    return issues
+
+
+# ---------------------------------------------------------------------------
+# H6: operations_new_packet_outside_current
+# ---------------------------------------------------------------------------
+
+_PACKAGE_CREATED_AT_PATTERN = re.compile(r"^created_at:\s*['\"]?(\d{4}-\d{2}-\d{2})['\"]?", re.MULTILINE)
+
+
+def _read_package_created_at(api: Any) -> date | None:
+    """Return created_at date from docs/operations/current/package.yaml, or None."""
+    pkg_path = api.ROOT / "docs" / "operations" / "current" / "package.yaml"
+    if not pkg_path.exists():
+        return None
+    text = pkg_path.read_text(encoding="utf-8", errors="ignore")
+    m = _PACKAGE_CREATED_AT_PATTERN.search(text)
+    if not m:
+        return None
+    try:
+        return date.fromisoformat(m.group(1))
+    except ValueError:
+        return None
+
+
+def check_new_packet_outside_current(api: Any, topology: dict[str, Any]) -> list[Any]:
+    """H6: any docs/operations/task_* dir dated >= current package creation is a route bypass.
+
+    Once docs/operations/current/package.yaml exists, all new work must use
+    docs/operations/current/plans/<slug>/ via zpkt start.  A top-level task_* dir
+    whose date prefix is on or after the package's created_at is a route bypass —
+    the agent mkdir'd it instead of using the canonical route.
+
+    Fix: python scripts/zpkt.py start <slug> creates docs/operations/current/plans/<slug>/.
+    If the existing dir contains valid work, move its content to the current plan dir
+    and archive the top-level dir.
+
+    Read: docs/operations/current/package.yaml, scripts/zpkt.py.
+    """
+    issues: list[Any] = []
+    task_dirs = operation_task_dirs(api)
+    if not task_dirs:
+        return issues
+
+    package_date = _read_package_created_at(api)
+    if package_date is None:
+        return issues  # No current package — check not applicable
+
+    for rel in sorted(task_dirs):
+        name = Path(rel).name
+        m = _TASK_DIR_DATE_PATTERN.match(name)
+        if not m:
+            continue  # Non-standard name — skip date comparison
+        try:
+            dir_date = date.fromisoformat(m.group(1))
+        except ValueError:
+            continue
+
+        if dir_date >= package_date:
+            issues.append(
+                api._issue(
+                    "operations_new_packet_outside_current",
+                    rel,
+                    (
+                        f"'{rel}' (dated {dir_date.isoformat()}) was created on or after "
+                        f"docs/operations/current/package.yaml (created_at: {package_date.isoformat()}). "
+                        "New work must route through docs/operations/current/plans/<slug>/. "
+                        "Fix: python scripts/zpkt.py start <slug>. "
+                        "If this dir contains valid work, move it to the current plan dir "
+                        "and archive the top-level dir. "
+                        "Read: docs/operations/current/package.yaml, scripts/zpkt.py."
+                    ),
+                )
+            )
+    return issues
+
+
+# ---------------------------------------------------------------------------
+# H7: planning_file_outside_operations
+# ---------------------------------------------------------------------------
+
+_PLAN_FILENAME_PATTERNS = (
+    "*PLAN*.md",
+    "*GOAL*.md",
+    "*SCAFFOLD*.md",
+)
+
+_PLAN_SCAN_RELPATHS = (
+    ".omc/plans",
+    ".omc/research",
+    ".claude/plans",
+    ".omx",
+)
+
+
+def check_planning_file_outside_operations(api: Any, topology: dict[str, Any]) -> list[Any]:
+    """H7: any plan/goal/scaffold *.md outside docs/operations/ is a topology violation.
+
+    Scans repo-local directories that agents commonly use as planning scratch
+    space:  .omc/plans, .omc/research, .claude/plans (repo-local only — ~/.claude
+    is outside the repo and is implicitly excluded by ROOT-anchoring), .omx,
+    and the repo root for *PLAN*.md / *GOAL*.md / *SCAFFOLD*.md glob patterns.
+
+    Reference only — never deletes. Steers agents toward the single operations
+    home at docs/operations/current/.
+
+    Fix: move planning files to docs/operations/current/ (goals→GOAL.md,
+    plans→plans/<name>.md).  See docs/operations/AGENTS.md.
+    """
+    issues: list[Any] = []
+    root = api.ROOT
+
+    found: list[Path] = []
+
+    # Scan well-known relpaths
+    for reldir in _PLAN_SCAN_RELPATHS:
+        scan_dir = root / reldir
+        if not scan_dir.exists():
+            continue
+        for p in scan_dir.rglob("*.md"):
+            found.append(p)
+
+    # Repo-root glob for *PLAN*.md / *GOAL*.md / *SCAFFOLD*.md
+    for pattern in _PLAN_FILENAME_PATTERNS:
+        for p in root.glob(pattern):
+            if p.is_file():
+                found.append(p)
+
+    ops_home = root / "docs" / "operations"
+
+    for p in found:
+        try:
+            rel = p.relative_to(root).as_posix()
+        except ValueError:
+            continue
+        # Skip files already inside docs/operations/ (correct home)
+        try:
+            p.relative_to(ops_home)
+            continue
+        except ValueError:
+            pass
+        issues.append(
+            api._issue(
+                "planning_file_outside_operations",
+                rel,
+                (
+                    f"Planning file '{rel}' is outside the operations home. "
+                    "Move planning + goals to docs/operations/current/ "
+                    "(the single operations folder). "
+                    "See docs/operations/AGENTS.md."
+                ),
+            )
+        )
+    return issues
+
+
+# ---------------------------------------------------------------------------
+# H8: session_goal_not_in_current
+# ---------------------------------------------------------------------------
+
+_GOAL_FILENAMES = frozenset({"GOAL.md", "goal.md", "OBJECTIVE.md"})
+
+
+def check_session_goal_not_in_current(api: Any, topology: dict[str, Any]) -> list[Any]:
+    """H8: current/package.yaml present → current/GOAL.md must exist; goals outside current/ fire RED.
+
+    Two triggers:
+    1. docs/operations/current/package.yaml exists but docs/operations/current/GOAL.md
+       is absent — the active session has no canonical goal anchor.
+    2. A GOAL.md/goal.md/OBJECTIVE.md file exists outside docs/operations/current/ —
+       goal is scattered rather than consolidated.
+
+    Fix: create docs/operations/current/GOAL.md summarising the active session
+    objective (read current/package.yaml + current/task.md for content).
+    See docs/operations/AGENTS.md.
+    """
+    issues: list[Any] = []
+    root = api.ROOT
+    current_dir = root / "docs" / "operations" / "current"
+    pkg_path = current_dir / "package.yaml"
+    goal_path = current_dir / "GOAL.md"
+
+    # Trigger 1: package present but GOAL.md absent
+    if pkg_path.exists() and not goal_path.exists():
+        issues.append(
+            api._issue(
+                "session_goal_not_in_current",
+                "docs/operations/current/",
+                (
+                    "docs/operations/current/package.yaml exists but GOAL.md is absent. "
+                    "Create docs/operations/current/GOAL.md with the active session objective "
+                    "(seed from current/package.yaml + current/task.md). "
+                    "See docs/operations/AGENTS.md."
+                ),
+            )
+        )
+
+    # Trigger 2: goal/objective file outside current/
+    # Use rglob("*.md") and filter by exact name to avoid macOS HFS+ case-insensitive
+    # double-matches when iterating multiple name variants from _GOAL_FILENAMES.
+    seen: set[Path] = set()
+    for p in root.rglob("*.md"):
+        if not p.is_file():
+            continue
+        if p.name not in _GOAL_FILENAMES:
+            continue
+        if p in seen:
+            continue
+        seen.add(p)
+        try:
+            p.relative_to(current_dir)
+            continue  # Correct location — skip
+        except ValueError:
+            pass
+        try:
+            rel = p.relative_to(root).as_posix()
+        except ValueError:
+            continue
+        issues.append(
+            api._issue(
+                "session_goal_not_in_current",
+                rel,
+                (
+                    f"Goal/objective file '{rel}' is outside docs/operations/current/. "
+                    "Consolidate all session goals into docs/operations/current/GOAL.md. "
+                    "See docs/operations/AGENTS.md."
+                ),
+            )
+        )
     return issues

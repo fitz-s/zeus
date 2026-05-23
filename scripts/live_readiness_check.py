@@ -31,7 +31,7 @@ from typing import Callable, Iterable, Sequence
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_EVIDENCE_ROOTS = (
     ROOT / "docs/operations/task_2026-04-26_polymarket_clob_v2_migration/evidence",
-    ROOT / "docs/operations/task_2026-04-26_ultimate_plan/r3/evidence",
+    ROOT / "docs/operations/current/evidence/ultimate_plan",
 )
 EVIDENCE_HMAC_SECRET_ENV = "ZEUS_LIVE_READINESS_EVIDENCE_HMAC_SECRET"
 PASS = "PASS"

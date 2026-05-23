@@ -290,14 +290,18 @@ matching. Canonical values: `plan_only`, `audit`, `create_new`, `modify_existing
 
 - `plan_only` and `audit` are **whitelist-driven**: only paths matching their
   `admits_path_globs` are admitted; everything else → `out_of_scope_files` + `advisory_only`.
-  Canonical scopes: `plan_only` admits `docs/**`, `docs/historical_evidence/**`; `audit` admits
-  `docs/historical_evidence/**`. Substantive plans MUST be packetized at
-  `docs/operations/task_<YYYY-MM-DD>_<topic>/<TOPIC>_PLAN.md` or legacy
+  Canonical scopes: `plan_only` admits `docs/**`; `audit` admits
+  `docs/operations/archive/**` (untracked on disk). Substantive plans MUST be packetized at
+  `docs/operations/current/plans/<slug>.md` (canonical under the single-operations-home law;
+  see docs/operations/AGENTS.md §"Single Operations Home") or legacy
   `PLAN.md` (admitted via `create_new` typed_intent). Runtime tool scratch
   directories (`.omc/plans/**`,
   `.omc/research/**`, `.omx/plans/**`) are explicitly **blocked** by both
   `plan_only` and `audit` — they are `scratch_runtime_artifact`
   (`architecture/artifact_lifecycle.yaml`) and never plan/research targets.
+  H7 (`planning_file_outside_operations`) fires RED when plan/goal/scaffold files exist
+  in those scratch dirs. H8 (`session_goal_not_in_current`) fires RED when the active
+  package has no `docs/operations/current/GOAL.md`.
 - `create_new` / `refactor` trigger K2 companion-loop-break: manifest companion must be
   in `--files` for auto-admit. Batch cap 50 pairs; excess blocked with `blocked_by_batch_cap`.
 - All other intents go through normal profile match with K1 severity tier.
