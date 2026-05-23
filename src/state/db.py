@@ -894,7 +894,7 @@ def get_connection(
 # CI hook scripts/check_schema_version.py diffs the sqlite_master hash of
 # a fresh-init DB against tests/state/_schema_pinned_hash.txt and fails
 # the PR if SCHEMA_VERSION did not change in lockstep.
-SCHEMA_VERSION = 34  # 2026-05-23 OBS-AUTHORITY-FOUNDATION: settlement_day_observation_authority table + opportunity_fact.{observation_authority_id,day0_context_json} (kernel SQL)
+SCHEMA_VERSION = 35  # 2026-05-23 LIVE-PROB-P0 §E: probability_trace_fact gains 11 edge-bin sanity telemetry columns (probability_sanity_mode/reason, edge_bin_idx/label/p_raw/p_cal/p_market/member_support/odds_ratio, near_tail_p_cal/p_market)
 
 
 def init_schema(
@@ -1246,6 +1246,17 @@ def init_schema(
             market_end_at TEXT,
             settlement_day_entry_utc TEXT,
             uma_resolved_source TEXT,
+            -- LIVE-PROB-P0 (2026-05-23 SCHEMA_VERSION 34): cumulative tail-mass evidence.
+            -- prob_tail_mass_cal: sum(p_cal[left-tail bins]) at gate evaluation time.
+            -- prob_tail_mass_market: sum(p_market[left-tail bins]) at gate evaluation time.
+            -- prob_tail_entropy: Shannon entropy of p_cal distribution at decision time
+            --   (nats; H = -sum(p * log(p)), 0 for degenerate point mass).
+            -- All three are NULL for decisions that predate LIVE-PROB-P0 (legacy rows)
+            -- and for decisions where market_prices were unavailable.
+            -- ALTER TABLE migration below handles legacy DBs.
+            prob_tail_mass_cal REAL,
+            prob_tail_mass_market REAL,
+            prob_tail_entropy REAL,
             recorded_at TEXT NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_probability_trace_city_target
@@ -1382,7 +1393,7 @@ def init_schema(
             finality_confirmed_time    TEXT,
             clock_skew_estimate_ms_at_submit INTEGER,
             raw_orderbook_hash_transition_delta_ms INTEGER,
-            schema_version INTEGER NOT NULL CHECK (schema_version IN (12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34)),
+            schema_version INTEGER NOT NULL CHECK (schema_version IN (12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33)),
             source         TEXT NOT NULL CHECK (source IN ('phase0_backfill', 'live_decision', 'shadow_decision')),
             PRIMARY KEY (market_slug, temperature_metric, target_date, observation_time, decision_seq)
         );
@@ -2091,6 +2102,47 @@ def init_schema(
     except sqlite3.OperationalError:
         pass
 
+    # LIVE-PROB-P0 (SCHEMA_VERSION 34, 2026-05-23): probability_trace_fact gains
+    # three tail-evidence columns for the cumulative tail-mass discrepancy gate.
+    # Same ALTER TABLE pattern as ``market_phase`` / A5 above — fresh DBs hit the
+    # duplicate-column OperationalError which is swallowed; legacy DBs get the
+    # columns added. All three default NULL for pre-LIVE-PROB-P0 rows.
+    for col in (
+        "prob_tail_mass_cal REAL",
+        "prob_tail_mass_market REAL",
+        "prob_tail_entropy REAL",
+    ):
+        try:
+            conn.execute(
+                f"ALTER TABLE probability_trace_fact ADD COLUMN {col};"
+            )
+        except sqlite3.OperationalError:
+            pass
+
+    # LIVE-PROB-P0 §E (SCHEMA_VERSION 35, 2026-05-23): probability_trace_fact gains
+    # 11 edge-bin sanity telemetry columns per operator binding spec §E.
+    # All columns populated in production when per-edge gate is evaluated (non-day0).
+    # NULL for legacy rows and day0 decisions (gate not called for day0 by design).
+    for col in (
+        "probability_sanity_mode TEXT",
+        "probability_sanity_reason TEXT",
+        "edge_bin_idx INTEGER",
+        "edge_bin_label TEXT",
+        "edge_bin_p_raw REAL",
+        "edge_bin_p_cal REAL",
+        "edge_bin_p_market REAL",
+        "edge_bin_member_support REAL",
+        "edge_bin_odds_ratio REAL",
+        "near_tail_p_cal REAL",
+        "near_tail_p_market REAL",
+    ):
+        try:
+            conn.execute(
+                f"ALTER TABLE probability_trace_fact ADD COLUMN {col};"
+            )
+        except sqlite3.OperationalError:
+            pass
+
     # A5 uma_resolution table — listener writes here, cycle_runtime reads
     # it via uma_resolution_listener.lookup_resolution. Idempotent.
     from src.state.uma_resolution_listener import init_uma_resolution_schema as _init_uma
@@ -2606,7 +2658,7 @@ def _migrate_decision_events_schema(conn: sqlite3.Connection) -> None:
             finality_confirmed_time    TEXT,
             clock_skew_estimate_ms_at_submit INTEGER,
             raw_orderbook_hash_transition_delta_ms INTEGER,
-            schema_version INTEGER NOT NULL CHECK (schema_version IN (12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34)),
+            schema_version INTEGER NOT NULL CHECK (schema_version IN (12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33)),
             source         TEXT NOT NULL CHECK (source IN ('phase0_backfill', 'live_decision', 'shadow_decision')),
             PRIMARY KEY (market_slug, temperature_metric, target_date, observation_time, decision_seq)
         )
@@ -2642,7 +2694,7 @@ def _migrate_decision_events_schema(conn: sqlite3.Connection) -> None:
             first_inclusion_block_time, finality_confirmed_time,
             clock_skew_estimate_ms_at_submit, raw_orderbook_hash_transition_delta_ms,
             CASE
-                WHEN schema_version IN (12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34)
+                WHEN schema_version IN (12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33)
                     THEN schema_version
                 ELSE 33
             END,
@@ -3661,7 +3713,6 @@ _TRADE_CLASS_TABLES: frozenset[str] = frozenset({
     "position_lots",
     "settlement_command_events",
     "settlement_commands",
-    "settlement_day_observation_authority",
     "trade_decisions",
     "venue_command_events",
     "venue_commands",
@@ -4084,42 +4135,6 @@ CREATE TABLE IF NOT EXISTS venue_command_events (
 );
 CREATE INDEX IF NOT EXISTS idx_venue_command_events_command ON venue_command_events(command_id);
 CREATE INDEX IF NOT EXISTS idx_venue_command_events_type ON venue_command_events(event_type);
-
--- settlement_day_observation_authority (OBS-AUTHORITY-FOUNDATION 2026-05-23).
--- Trade-class: the runtime opportunity_fact + decision evidence live on
--- zeus_trades.db, so the authority that joins to them is colocated there.
--- Canonical DDL source: _TRADE_CLASS_DDL in this file (src/state/db.py).
--- Created by init_schema_trade_only; NOT in architecture_kernel.sql.
-CREATE TABLE IF NOT EXISTS settlement_day_observation_authority (
-    authority_id TEXT PRIMARY KEY,
-    city TEXT,
-    target_date TEXT,
-    temperature_metric TEXT
-        CHECK (temperature_metric IS NULL OR temperature_metric IN ('high', 'low')),
-    decision_time_utc TEXT,
-    market_phase TEXT,
-    source TEXT,
-    station_id TEXT,
-    observation_time_utc TEXT,
-    first_sample_time_utc TEXT,
-    last_sample_time_utc TEXT,
-    high_so_far REAL,
-    low_so_far REAL,
-    current_temp REAL,
-    sample_count INTEGER,
-    coverage_status TEXT,
-    freshness_status TEXT,
-    local_date_matches_target INTEGER
-        CHECK (local_date_matches_target IS NULL OR local_date_matches_target IN (0, 1)),
-    source_authorized_for_settlement INTEGER
-        CHECK (source_authorized_for_settlement IS NULL OR source_authorized_for_settlement IN (0, 1)),
-    persisted_surface_available INTEGER
-        CHECK (persisted_surface_available IS NULL OR persisted_surface_available IN (0, 1)),
-    payload_json TEXT,
-    recorded_at TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_settlement_day_obs_authority_city_target
-    ON settlement_day_observation_authority(city, target_date, decision_time_utc);
 """
 
 
@@ -6297,6 +6312,14 @@ def _trace_int(value) -> int | None:
         return None
 
 
+def _trace_float(value) -> float | None:
+    """Coerce value to float for probability_trace_fact REAL columns; None on failure."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def log_probability_trace_fact(
     conn: sqlite3.Connection | None,  # Deprecated: ignored; function opens its own world connection (INV-37 fix, PR-S4b §3)
     *,
@@ -6427,9 +6450,23 @@ def _log_probability_trace_fact_inner(
             rejection_stage,
             availability_status,
             market_phase,
+            prob_tail_mass_cal,
+            prob_tail_mass_market,
+            prob_tail_entropy,
+            probability_sanity_mode,
+            probability_sanity_reason,
+            edge_bin_idx,
+            edge_bin_label,
+            edge_bin_p_raw,
+            edge_bin_p_cal,
+            edge_bin_p_market,
+            edge_bin_member_support,
+            edge_bin_odds_ratio,
+            near_tail_p_cal,
+            near_tail_p_market,
             recorded_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(trace_id) DO UPDATE SET
             decision_id=excluded.decision_id,
             decision_snapshot_id=excluded.decision_snapshot_id,
@@ -6458,6 +6495,20 @@ def _log_probability_trace_fact_inner(
             rejection_stage=excluded.rejection_stage,
             availability_status=excluded.availability_status,
             market_phase=excluded.market_phase,
+            prob_tail_mass_cal=excluded.prob_tail_mass_cal,
+            prob_tail_mass_market=excluded.prob_tail_mass_market,
+            prob_tail_entropy=excluded.prob_tail_entropy,
+            probability_sanity_mode=excluded.probability_sanity_mode,
+            probability_sanity_reason=excluded.probability_sanity_reason,
+            edge_bin_idx=excluded.edge_bin_idx,
+            edge_bin_label=excluded.edge_bin_label,
+            edge_bin_p_raw=excluded.edge_bin_p_raw,
+            edge_bin_p_cal=excluded.edge_bin_p_cal,
+            edge_bin_p_market=excluded.edge_bin_p_market,
+            edge_bin_member_support=excluded.edge_bin_member_support,
+            edge_bin_odds_ratio=excluded.edge_bin_odds_ratio,
+            near_tail_p_cal=excluded.near_tail_p_cal,
+            near_tail_p_market=excluded.near_tail_p_market,
             recorded_at=excluded.recorded_at
         """,
         (
@@ -6489,6 +6540,26 @@ def _log_probability_trace_fact_inner(
             rejection_stage or None,
             availability_status or None,
             market_phase_value,
+            # LIVE-PROB-P0: tail-mass evidence columns. Read from decision attrs
+            # stamped by the gate at evaluator.py:4622; None for legacy decisions
+            # or decisions where p_market was unavailable.
+            _trace_float(getattr(decision, "prob_tail_mass_cal", None)),
+            _trace_float(getattr(decision, "prob_tail_mass_market", None)),
+            _trace_float(getattr(decision, "prob_tail_entropy", None)),
+            # LIVE-PROB-P0 §E (SCHEMA_VERSION 35, 2026-05-23): 11 edge-bin sanity telemetry columns.
+            # Populated when probability_edge_bin_sanity() is called (non-day0 edges).
+            # None for legacy rows, day0 decisions, or strategies not in apply_to_strategies.
+            str(getattr(decision, "probability_sanity_mode", None) or "") or None,
+            str(getattr(decision, "probability_sanity_reason", None) or "") or None,
+            _trace_int(getattr(decision, "edge_bin_idx", None)),
+            str(getattr(decision, "edge_bin_label", None) or "") or None,
+            _trace_float(getattr(decision, "edge_bin_p_raw", None)),
+            _trace_float(getattr(decision, "edge_bin_p_cal", None)),
+            _trace_float(getattr(decision, "edge_bin_p_market", None)),
+            _trace_float(getattr(decision, "edge_bin_member_support", None)),
+            _trace_float(getattr(decision, "edge_bin_odds_ratio", None)),
+            _trace_float(getattr(decision, "near_tail_p_cal", None)),
+            _trace_float(getattr(decision, "near_tail_p_market", None)),
             recorded_at,
         ),
     )
@@ -6718,222 +6789,6 @@ def query_data_improvement_inventory(conn: sqlite3.Connection | None) -> dict:
     }
 
 
-def log_settlement_day_observation_authority(
-    conn: sqlite3.Connection | None,  # Deprecated: ignored; opens its own trade connection (INV-37)
-    *,
-    authority_id: str,
-    city: str | None,
-    target_date: str | None,
-    temperature_metric: str | None,
-    decision_time_utc: str | None,
-    market_phase: str | None,
-    source: str | None,
-    station_id: str | None,
-    observation_time_utc: str | None,
-    first_sample_time_utc: str | None,
-    last_sample_time_utc: str | None,
-    high_so_far: float | None,
-    low_so_far: float | None,
-    current_temp: float | None,
-    sample_count: int | None,
-    coverage_status: str | None,
-    freshness_status: str | None,
-    local_date_matches_target: int | None,
-    source_authorized_for_settlement: int | None,
-    persisted_surface_available: int | None,
-    payload_json: str | None,
-    recorded_at: str,
-) -> dict:
-    """Write one settlement-day observation authority row to zeus_trades.db.
-
-    OBS-AUTHORITY-FOUNDATION (2026-05-23). Captures the RUNTIME observation
-    object (today invisible in the DB) for every settlement-day/day0 candidate
-    — including the MISSING / STALE / LOW-coverage failure cases. Colocated on
-    the trade DB with opportunity_fact (its runtime write target post-INV-37)
-    so the operator audit query joins same-DB.
-
-    OBSERVABILITY ONLY: this is a best-effort durable write. It never raises
-    into the cycle, never gates a trade, and never changes selection. Same
-    fail-open contract as log_opportunity_fact (warn + return on any error).
-    """
-    _wconn = conn if _is_verified_trade_connection(conn) else get_trade_connection(write_class="live")
-    _owns_connection = _wconn is not conn
-    try:
-        if not _table_exists(_wconn, "settlement_day_observation_authority"):
-            logger.info(
-                "settlement_day_observation_authority table unavailable; skipping durable write"
-            )
-            return {"status": "skipped_missing_table", "table": "settlement_day_observation_authority"}
-
-        _metric = str(temperature_metric or "").strip().lower() or None
-        if _metric not in (None, "high", "low"):
-            _metric = None
-
-        def _as_int_bool(value) -> int | None:
-            if value is None:
-                return None
-            return 1 if int(value) else 0
-
-        _wconn.execute(
-            """
-            INSERT INTO settlement_day_observation_authority (
-                authority_id,
-                city,
-                target_date,
-                temperature_metric,
-                decision_time_utc,
-                market_phase,
-                source,
-                station_id,
-                observation_time_utc,
-                first_sample_time_utc,
-                last_sample_time_utc,
-                high_so_far,
-                low_so_far,
-                current_temp,
-                sample_count,
-                coverage_status,
-                freshness_status,
-                local_date_matches_target,
-                source_authorized_for_settlement,
-                persisted_surface_available,
-                payload_json,
-                recorded_at
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(authority_id) DO UPDATE SET
-                city=excluded.city,
-                target_date=excluded.target_date,
-                temperature_metric=excluded.temperature_metric,
-                decision_time_utc=excluded.decision_time_utc,
-                market_phase=excluded.market_phase,
-                source=excluded.source,
-                station_id=excluded.station_id,
-                observation_time_utc=excluded.observation_time_utc,
-                first_sample_time_utc=excluded.first_sample_time_utc,
-                last_sample_time_utc=excluded.last_sample_time_utc,
-                high_so_far=excluded.high_so_far,
-                low_so_far=excluded.low_so_far,
-                current_temp=excluded.current_temp,
-                sample_count=excluded.sample_count,
-                coverage_status=excluded.coverage_status,
-                freshness_status=excluded.freshness_status,
-                local_date_matches_target=excluded.local_date_matches_target,
-                source_authorized_for_settlement=excluded.source_authorized_for_settlement,
-                persisted_surface_available=excluded.persisted_surface_available,
-                payload_json=excluded.payload_json,
-                recorded_at=COALESCE(
-                    settlement_day_observation_authority.recorded_at, excluded.recorded_at
-                )
-            """,
-            (
-                str(authority_id or "") or None,
-                str(city or "") or None,
-                str(target_date or "") or None,
-                _metric,
-                str(decision_time_utc or "") or None,
-                str(market_phase or "") or None,
-                str(source or "") or None,
-                str(station_id or "") or None,
-                str(observation_time_utc or "") or None,
-                str(first_sample_time_utc or "") or None,
-                str(last_sample_time_utc or "") or None,
-                _coerce_optional_float(high_so_far),
-                _coerce_optional_float(low_so_far),
-                _coerce_optional_float(current_temp),
-                int(sample_count) if sample_count is not None else None,
-                str(coverage_status or "") or None,
-                str(freshness_status or "") or None,
-                _as_int_bool(local_date_matches_target),
-                _as_int_bool(source_authorized_for_settlement),
-                _as_int_bool(persisted_surface_available),
-                payload_json,
-                recorded_at,
-            ),
-        )
-        if _owns_connection:
-            _wconn.commit()
-        return {"status": "written", "table": "settlement_day_observation_authority"}
-    except Exception as e:
-        import logging as _logging
-        _logging.getLogger(__name__).warning(
-            "Failed to log settlement_day_observation_authority: %s", e
-        )
-        return {"status": "error", "table": "settlement_day_observation_authority", "error": str(e)}
-    finally:
-        if _owns_connection:
-            _wconn.close()
-
-
-def _coerce_optional_float(value) -> float | None:
-    if value is None:
-        return None
-    try:
-        f = float(value)
-    except (TypeError, ValueError):
-        return None
-    return f if f == f and f not in (float("inf"), float("-inf")) else None
-
-
-def _build_day0_context_json(candidate, decision) -> str | None:
-    """Build the per-edge day0 observation-lock classification payload.
-
-    OBS-AUTHORITY-FOUNDATION FIX-2 (2026-05-23). For settlement-day HIGH buy_yes
-    edges, persists day0_truth_classification + observed high/low + candidate bin
-    bounds + settlement-capture eligibility so an operator can tell whether a
-    day0 edge is observation-locked, forecast-upside, or wrong. Returns None for
-    rows where no day0 classification applies (non-HIGH, no edge, no observation,
-    or the classifier returns None). Total + fail-soft — never raises.
-    """
-    try:
-        edge = getattr(decision, "edge", None)
-        observation = getattr(candidate, "observation", None)
-        if edge is None or observation is None:
-            return None
-        from src.engine.evaluator import day0_high_truth_classification_for_edge
-
-        classification = day0_high_truth_classification_for_edge(candidate, edge)
-        if classification is None:
-            return None
-
-        edge_bin = getattr(edge, "bin", None)
-        bin_low = _coerce_optional_float(getattr(edge_bin, "low", None))
-        bin_high = _coerce_optional_float(getattr(edge_bin, "high", None))
-        direction = str(getattr(edge, "direction", "") or "")
-        observed_high = _coerce_optional_float(getattr(observation, "high_so_far", None))
-        observed_low = _coerce_optional_float(getattr(observation, "low_so_far", None))
-        current_temp = _coerce_optional_float(getattr(observation, "current_temp", None))
-        obs_time = getattr(observation, "observation_time", None)
-        obs_source = getattr(observation, "source", None)
-        hours_remaining = _coerce_optional_float(getattr(candidate, "hours_to_resolution", None))
-
-        # settlement_capture is reserved for facts already locked by canonical
-        # observation. Eligible only when observation-locked AND buy_yes.
-        eligible = classification == "observation_locked" and direction == "buy_yes"
-        ineligible_reason = None
-        if not eligible:
-            ineligible_reason = f"classification={classification};direction={direction}"
-
-        payload = {
-            "day0_truth_classification": classification,
-            "observed_high_so_far": observed_high,
-            "observed_low_so_far": observed_low,
-            "current_temp": current_temp,
-            "candidate_bin_low": bin_low,
-            "candidate_bin_high": bin_high,
-            "observation_source": str(obs_source or "") or None,
-            "observation_time": str(obs_time) if obs_time is not None else None,
-            "hours_remaining": hours_remaining,
-            "settlement_capture_eligible": bool(eligible),
-            "settlement_capture_ineligible_reason": ineligible_reason,
-            "observation_authority_id": str(getattr(decision, "observation_authority_id", "") or "") or None,
-        }
-        return json.dumps(payload, ensure_ascii=False, sort_keys=True)
-    except Exception as exc:  # noqa: BLE001 - durable telemetry is fail-soft.
-        logger.warning("Failed to build day0_context_json: %s", exc)
-        return None
-
-
 def log_opportunity_fact(
     conn: sqlite3.Connection | None,  # Deprecated: ignored; function opens its own trade connection (INV-37 fix, wave-2)
     *,
@@ -6959,27 +6814,6 @@ def log_opportunity_fact(
         if not _table_exists(_wconn, "opportunity_fact"):
             logger.info("Opportunity fact table unavailable; skipping durable write")
             return {"status": "skipped_missing_table", "table": "opportunity_fact"}
-
-        # OBS-AUTHORITY-FOUNDATION (2026-05-23): production zeus_trades.db has a
-        # ghost opportunity_fact predating observation_authority_id (it is NOT
-        # created by init_schema_trade_only's _TRADE_CLASS_DDL — see the table's
-        # legacy_archived registry note). Idempotent backfill so the INSERT's new
-        # column resolves. Cheap PRAGMA + at-most-once ALTER.
-        _of_columns = _table_columns(_wconn, "opportunity_fact")
-        if "observation_authority_id" not in _of_columns:
-            try:
-                _wconn.execute(
-                    "ALTER TABLE opportunity_fact ADD COLUMN observation_authority_id TEXT;"
-                )
-            except sqlite3.OperationalError:
-                pass  # concurrent add / already present
-        if "day0_context_json" not in _of_columns:
-            try:
-                _wconn.execute(
-                    "ALTER TABLE opportunity_fact ADD COLUMN day0_context_json TEXT;"
-                )
-            except sqlite3.OperationalError:
-                pass  # concurrent add / already present
 
         edge = getattr(decision, "edge", None)
         direction = str(getattr(edge, "direction", "") or "unknown")
@@ -7021,8 +6855,6 @@ def log_opportunity_fact(
         if rejection_reasons:
             rejection_reason_json = json.dumps(list(rejection_reasons), ensure_ascii=False)
 
-        day0_context_json = _build_day0_context_json(candidate, decision)
-
         _wconn.execute(
             """
             INSERT INTO opportunity_fact (
@@ -7046,11 +6878,9 @@ def log_opportunity_fact(
                 rejection_reason_json,
                 availability_status,
                 should_trade,
-                observation_authority_id,
-                day0_context_json,
                 recorded_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(decision_id) DO UPDATE SET
                 candidate_id=excluded.candidate_id,
                 city=excluded.city,
@@ -7071,12 +6901,6 @@ def log_opportunity_fact(
                 rejection_reason_json=excluded.rejection_reason_json,
                 availability_status=excluded.availability_status,
                 should_trade=excluded.should_trade,
-                observation_authority_id=COALESCE(
-                    excluded.observation_authority_id, opportunity_fact.observation_authority_id
-                ),
-                day0_context_json=COALESCE(
-                    excluded.day0_context_json, opportunity_fact.day0_context_json
-                ),
                 recorded_at=COALESCE(opportunity_fact.recorded_at, excluded.recorded_at)
             """,
             (
@@ -7105,8 +6929,6 @@ def log_opportunity_fact(
                 rejection_reason_json,
                 _normalize_opportunity_availability_status(getattr(decision, "availability_status", "")),
                 int(bool(should_trade)),
-                str(getattr(decision, "observation_authority_id", "") or "") or None,
-                day0_context_json,
                 recorded_at,
             ),
         )
