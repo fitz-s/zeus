@@ -124,19 +124,18 @@ def test_runtime_observation_authority_persisted_before_day0_evaluation(trade_co
     assert local_match == 1
     assert surface == 1
 
-    # Step 3: the candidate carries the authority id, and the decision-stamp
-    # invariant (the loop in execute_discovery_phase) propagates it to every
-    # EdgeDecision the candidate produces.
+    # Step 3: the candidate carries the authority id, and the PRODUCTION
+    # decision-stamp helper (the exact code execute_discovery_phase calls)
+    # propagates it to every EdgeDecision the candidate produces. Driving the
+    # real helper means deleting the stamp from the cycle breaks this test.
+    from src.engine.cycle_runtime import stamp_observation_authority_id_onto_decisions
+
     candidate = SimpleNamespace(observation_authority_id=authority_id)
     decisions = [
         EdgeDecision(should_trade=False, decision_id="d1", decision_snapshot_id="s1"),
         EdgeDecision(should_trade=True, decision_id="d2", decision_snapshot_id="s2"),
     ]
-    _auth_id = getattr(candidate, "observation_authority_id", None)
-    if _auth_id and decisions:
-        for _decision in decisions:
-            if getattr(_decision, "observation_authority_id", None) is None:
-                _decision.observation_authority_id = _auth_id
+    stamp_observation_authority_id_onto_decisions(candidate, decisions)
 
     assert all(d.observation_authority_id == authority_id for d in decisions), (
         "every EdgeDecision must reference the candidate's observation authority id"

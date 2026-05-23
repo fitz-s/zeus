@@ -3344,6 +3344,26 @@ def _normalize_observation_coverage_status(raw: str) -> str:
     return "MISSING"
 
 
+def stamp_observation_authority_id_onto_decisions(candidate, decisions) -> None:
+    """Propagate candidate.observation_authority_id onto every EdgeDecision.
+
+    OBS-AUTHORITY-FOUNDATION (2026-05-23). The durable opportunity_fact row links
+    back to the runtime observation object via this id. Only fills decisions that
+    don't already carry one (an evaluator may set it directly in a future
+    package); never clears an existing id. Fail-soft on frozen/foreign decision
+    objects — observability must not perturb the cycle.
+    """
+    auth_id = getattr(candidate, "observation_authority_id", None)
+    if not auth_id or not decisions:
+        return
+    for decision in decisions:
+        if getattr(decision, "observation_authority_id", None) is None:
+            try:
+                decision.observation_authority_id = auth_id
+            except Exception:  # noqa: BLE001 - frozen/foreign decision objects.
+                pass
+
+
 def build_settlement_day_observation_authority_row(
     *,
     city,
@@ -4494,16 +4514,7 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
             # OBS-AUTHORITY-FOUNDATION (2026-05-23): stamp the candidate's
             # observation authority id onto every EdgeDecision so the durable
             # opportunity_fact row links back to the runtime observation object.
-            # Only fills decisions that don't already carry one (evaluator may
-            # set it directly in a future package); never clears an existing id.
-            _auth_id = getattr(candidate, "observation_authority_id", None)
-            if _auth_id and decisions:
-                for _decision in decisions:
-                    if getattr(_decision, "observation_authority_id", None) is None:
-                        try:
-                            _decision.observation_authority_id = _auth_id
-                        except Exception:  # noqa: BLE001 - frozen/foreign decision objects.
-                            pass
+            stamp_observation_authority_id_onto_decisions(candidate, decisions)
             _frontier_increment("math_frontier", "evaluator_candidates")
             if decisions:
                 _frontier_increment("math_frontier", "evaluator_decisions", len(decisions))
