@@ -24,7 +24,7 @@ from typing import Any
 
 import yaml
 
-from scripts.topology_v_next.dataclasses import (
+from scripts.topology_v_next.topology_models import (
     BindingLayer,
     CohortDecl,
     CoverageMap,

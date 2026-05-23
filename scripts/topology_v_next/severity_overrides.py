@@ -18,7 +18,7 @@ Properties:
 """
 from __future__ import annotations
 
-from scripts.topology_v_next.dataclasses import IssueRecord, Severity
+from scripts.topology_v_next.topology_models import IssueRecord, Severity
 
 
 # ---------------------------------------------------------------------------

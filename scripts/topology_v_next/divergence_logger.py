@@ -30,7 +30,7 @@ from datetime import date, datetime, UTC
 from pathlib import Path
 from typing import Any
 
-from scripts.topology_v_next.dataclasses import Severity
+from scripts.topology_v_next.topology_models import Severity
 
 
 # ---------------------------------------------------------------------------

@@ -40,7 +40,7 @@ from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Iterator
 
-from scripts.topology_v_next.dataclasses import FrictionPattern
+from scripts.topology_v_next.topology_models import FrictionPattern
 from scripts.topology_v_next.divergence_logger import (
     DivergenceRecord,
     classify_divergence,

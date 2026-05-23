@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from scripts.topology_v_next.dataclasses import Intent, Severity
+from scripts.topology_v_next.topology_models import Intent, Severity
 from scripts.topology_v_next.intent_resolver import resolve_intent
 from scripts.topology_v_next.profile_loader import load_binding_layer
 

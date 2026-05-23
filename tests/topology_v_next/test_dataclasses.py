@@ -13,7 +13,7 @@ BindingLayer instantiation.
 import dataclasses
 import pytest
 
-from scripts.topology_v_next.dataclasses import (
+from scripts.topology_v_next.topology_models import (
     AdmissionDecision,
     BindingLayer,
     CohortDecl,

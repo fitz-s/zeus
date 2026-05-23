@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import pytest
 
-from scripts.topology_v_next.dataclasses import (
+from scripts.topology_v_next.topology_models import (
     BindingLayer,
     CohortDecl,
     CoverageMap,

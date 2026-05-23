@@ -16,7 +16,7 @@ import pytest
 
 from scripts.topology_v_next.cli_integration_shim import maybe_shadow_compare, format_output
 from scripts.topology_v_next.admission_engine import admit
-from scripts.topology_v_next.dataclasses import Severity
+from scripts.topology_v_next.topology_models import Severity
 
 
 # src/data/replay_x.py matches modify_data_replay_surface profile

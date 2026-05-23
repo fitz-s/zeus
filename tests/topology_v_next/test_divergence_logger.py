@@ -25,7 +25,7 @@ from pathlib import Path
 
 import pytest
 
-from scripts.topology_v_next.dataclasses import Severity
+from scripts.topology_v_next.topology_models import Severity
 from scripts.topology_v_next.divergence_logger import (
     OLD_STATUS_TO_NEW_SEVERITY,
     DivergenceRecord,

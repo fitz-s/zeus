@@ -26,7 +26,7 @@ from pathlib import Path
 
 import pytest
 
-from scripts.topology_v_next.dataclasses import FrictionPattern, Severity
+from scripts.topology_v_next.topology_models import FrictionPattern, Severity
 from scripts.topology_v_next.divergence_logger import (
     DivergenceRecord,
     log_divergence,

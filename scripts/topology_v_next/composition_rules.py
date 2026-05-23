@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import fnmatch
 
-from scripts.topology_v_next.dataclasses import (
+from scripts.topology_v_next.topology_models import (
     BindingLayer,
     CohortDecl,
     Intent,
