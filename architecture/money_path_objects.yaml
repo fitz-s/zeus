@@ -52,6 +52,10 @@ economic_objects:
         meaning: "Venue execution fact."
       settlement_value:
         meaning: "Weather/source settlement physical value."
+      mid:
+        meaning: "Market mid-price (bid-ask midpoint); used in price-discovery rate estimation for shadow candidates. Never executable fill price."
+        live_entry_allowed: false
+        forbidden_uses: ["submitted limit price", "fill fact"]
   identity:
     fields:
       market_id:
