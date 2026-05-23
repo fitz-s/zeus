@@ -474,24 +474,6 @@ entries:
   contains_volatile_metrics: false
   current_tense_allowed: true
   refresh_source: n/a
-- path: docs/operations/data_rebuild_plan.md
-  doc_class: operations
-  default_read: false
-  direct_reference_allowed: true
-  current_role: deferred data rebuild plan
-  canonical_replaced_by: []
-  next_action: keep
-  lifecycle_state: transitional
-  coverage_scope: exact
-  parent_coverage_allowed: false
-  truth_profile: router
-  freshness_class: stable
-  supersedes: []
-  superseded_by: []
-  may_live_in_reference: false
-  contains_volatile_metrics: false
-  current_tense_allowed: true
-  refresh_source: n/a
 - path: docs/operations/known_gaps.md
   doc_class: operations
   default_read: false
@@ -585,24 +567,6 @@ entries:
   contains_volatile_metrics: true
   current_tense_allowed: true
   refresh_source: packet_audit
-- path: docs/operations/runtime_artifact_inventory.md
-  doc_class: operations
-  default_read: false
-  direct_reference_allowed: true
-  current_role: runtime-local planning artifact inventory
-  canonical_replaced_by: []
-  next_action: keep
-  lifecycle_state: active
-  coverage_scope: exact
-  parent_coverage_allowed: false
-  truth_profile: router
-  freshness_class: stable
-  supersedes: []
-  superseded_by: []
-  may_live_in_reference: false
-  contains_volatile_metrics: false
-  current_tense_allowed: true
-  refresh_source: n/a
 - path: docs/operations/packet_scope_protocol.md
   doc_class: operations
   default_read: false
@@ -693,24 +657,6 @@ entries:
   contains_volatile_metrics: false
   current_tense_allowed: true
   refresh_source: packet_audit
-- path: docs/operations/observations_k1_migration.md
-  doc_class: operations
-  default_read: false
-  direct_reference_allowed: true
-  current_role: K1 dual-atom observations migration design note
-  canonical_replaced_by: []
-  next_action: keep
-  lifecycle_state: active
-  coverage_scope: exact
-  parent_coverage_allowed: false
-  truth_profile: report_evidence
-  freshness_class: packet_bound
-  supersedes: []
-  superseded_by: []
-  may_live_in_reference: false
-  contains_volatile_metrics: false
-  current_tense_allowed: true
-  refresh_source: packet_audit
 - path: docs/operations/tigge_daemon_integration.md
   doc_class: operations
   default_read: false
@@ -748,33 +694,14 @@ entries:
   contains_volatile_metrics: true
   current_tense_allowed: true
   refresh_source: packet_audit
-- path: docs/operations/active_unfinished_backlog.md
-  doc_class: operations
-  default_read: false
-  direct_reference_allowed: true
-  current_role: active index of unfinished work extracted from archived or closed operations packets; points to archive bodies without making them active workflow defaults
-  canonical_replaced_by: []
-  next_action: keep
-  lifecycle_state: active
-  coverage_scope: exact
-  parent_coverage_allowed: false
-  truth_profile: router
-  freshness_class: packet_bound
-  supersedes:
-    - docs/archives/packets/task_2026-04-13_remaining_repair_backlog.md
-  superseded_by: []
-  may_live_in_reference: false
-  contains_volatile_metrics: false
-  current_tense_allowed: true
-  refresh_source: n/a
-- path: docs/operations/zeus_system_review_2026-05-16.md
+- path: docs/operations/archive/2026-Q2/zeus_system_review_2026-05-16.md
   doc_class: report
   default_read: false
   direct_reference_allowed: true
   current_role: 2026-05-16 system review evidence (parent draft for agent runtime compounding plan)
   canonical_replaced_by: []
   next_action: retain_as_evidence
-  lifecycle_state: active
+  lifecycle_state: historical
   coverage_scope: exact
   parent_coverage_allowed: false
   truth_profile: report_evidence
@@ -803,24 +730,14 @@ entries:
   contains_volatile_metrics: true
   current_tense_allowed: false
   refresh_source: n/a
-- path: docs/operations/2026-05-18_worktree_create_hook_cwd_leakage/
+- path: docs/operations/archive/2026-Q2/2026-05-18_worktree_create_hook_cwd_leakage/
   doc_class: operations
   default_read: false
   direct_reference_allowed: false
   current_role: incident packet for WorktreeCreate hook cwd-leakage fix (PR #153); contains committed hook snapshot and antibody test reference
   canonical_replaced_by: []
-  next_action: archive_after_closeout
-  lifecycle_state: active
-  coverage_scope: descendants
-  parent_coverage_allowed: true
-  truth_profile: package_input
-  freshness_class: packet_bound
-  supersedes: []
-  superseded_by: []
-  may_live_in_reference: false
-  contains_volatile_metrics: false
-  current_tense_allowed: false
-  refresh_source: n/a
+  next_action: retain_as_evidence
+  lifecycle_state: historical
 
 - path: docs/operations/task_*/
   doc_class: operations
@@ -955,24 +872,7 @@ entries:
   contains_volatile_metrics: false
   current_tense_allowed: false
   refresh_source: n/a
-- path: docs/operations/*_package_*/
-  doc_class: package_input
-  default_read: false
-  direct_reference_allowed: false
-  current_role: attached package inputs
-  canonical_replaced_by: []
-  next_action: archive_after_closeout
-  lifecycle_state: transitional
-  coverage_scope: descendants
-  parent_coverage_allowed: true
-  truth_profile: package_input
-  freshness_class: packet_bound
-  supersedes: []
-  superseded_by: []
-  may_live_in_reference: false
-  contains_volatile_metrics: false
-  current_tense_allowed: false
-  refresh_source: n/a
+
 - path: docs/reference/zeus_domain_model.md
   doc_class: reference
   default_read: true
