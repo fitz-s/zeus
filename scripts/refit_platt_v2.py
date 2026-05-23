@@ -149,6 +149,14 @@ def _table_columns(conn: sqlite3.Connection, table_name: str) -> set[str]:
     return columns
 
 
+def _has_quarantine_table(conn: sqlite3.Connection) -> bool:
+    """True if decision_integrity_quarantine table is present in the open DB."""
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='decision_integrity_quarantine'"
+    ).fetchone()
+    return row is not None
+
+
 def _metric_spec_for_identity(metric_identity: MetricIdentity):
     for spec in METRIC_SPECS:
         if spec.identity == metric_identity:
@@ -481,6 +489,15 @@ def _fetch_pairs_for_bucket(
         where, params, column="horizon_profile", value=horizon_profile,
         default="full", columns=columns,
     )
+    # Exclude pairs quarantined as non-contributing forecast extrema so corrupt-
+    # snapshot training data does not contaminate Platt model fits.
+    if _has_quarantine_table(conn):
+        where.append(
+            "NOT EXISTS ("
+            "SELECT 1 FROM decision_integrity_quarantine q"
+            " WHERE q.table_name = 'calibration_pairs_v2'"
+            " AND q.row_id = CAST(pair_id AS TEXT))"
+        )
     return conn.execute(f"""
         SELECT p_raw, lead_days, outcome, range_label, decision_group_id
         FROM calibration_pairs_v2

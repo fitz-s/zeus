@@ -155,16 +155,29 @@ def build_evidence_report(
             "SELECT name FROM sqlite_master WHERE type='table'"
         ).fetchall()
     }
+    # Detect whether decision_integrity_quarantine table is present so we can
+    # exclude quarantined rows from learning/promotion counts.
+    _has_quarantine = "decision_integrity_quarantine" in tables
+
     if "decision_events" in tables:
         _de_params: list = [strategy_id]
         _de_filters = "WHERE strategy_key = ?"
         if source is not None:
             _de_filters += " AND source = ?"
             _de_params.append(source)
-        n_decisions_row = conn.execute(
-            f"SELECT COUNT(*) FROM decision_events {_de_filters}",
-            _de_params,
-        ).fetchone()
+        # Exclude rows quarantined as non-contributing forecast extrema so
+        # corrupt-snapshot decisions do not inflate the denominator.
+        if _has_quarantine:
+            _de_filters += (
+                " AND NOT EXISTS ("
+                "SELECT 1 FROM decision_integrity_quarantine q"
+                " WHERE q.table_name = 'decision_events'"
+                " AND q.row_id = de.decision_event_id)"
+            )
+            _de_decision_sql = f"SELECT COUNT(*) FROM decision_events de {_de_filters}"
+        else:
+            _de_decision_sql = f"SELECT COUNT(*) FROM decision_events {_de_filters}"
+        n_decisions_row = conn.execute(_de_decision_sql, _de_params).fetchone()
         n_decisions = int(n_decisions_row[0] or 0)
     else:
         n_decisions = 0
@@ -197,6 +210,15 @@ def build_evidence_report(
         if cohort_tag is not None:
             _rg_filter += " AND se.cohort_tag = ?"
             _rg_params.append(cohort_tag)
+        # Exclude regret rows backed by quarantined decision_events
+        # (non-contributing forecast extrema) from learning aggregates.
+        if _has_quarantine:
+            _rg_filter += (
+                " AND NOT EXISTS ("
+                "SELECT 1 FROM decision_integrity_quarantine q"
+                " WHERE q.table_name = 'decision_events'"
+                " AND q.row_id = rd.decision_event_id)"
+            )
         regret_row = conn.execute(
             f"""
             SELECT
