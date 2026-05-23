@@ -452,6 +452,7 @@ from .liquidity_provision_with_heartbeat import LiquidityProvisionWithHeartbeat
 from .center_sell_parity import CenterSellParity
 from .shoulder_impossible_tail_capture import ShoulderImpossibleTailCapture
 from .settlement_capture_shadow import PhysicalIntervalBound, SettlementCaptureShadow
+from .center_buy_calibrated_shadow import CenterBuyCalibratedShadow
 
 __all__ = [
     "_is_world_db_conn",
@@ -459,6 +460,7 @@ __all__ = [
     "CandidateContext",
     "CandidateDecision",
     "CandidateMetadata",
+    "CenterBuyCalibratedShadow",
     "CenterSellParity",
     "CrossMarketCorrelationHedge",
     "DeterministicEdgeDecision",
