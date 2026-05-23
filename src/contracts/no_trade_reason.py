@@ -152,6 +152,12 @@ class NoTradeReason(StrEnum):
     CENTER_PAIR_PARITY_BOOK_UNAVAILABLE = auto()  # center_sell: binary_book_snapshot absent on analysis
     CENTER_PAIR_PARITY_NO_EDGE = auto()           # center_sell: a_YES+a_NO+fees >= 1 at q*; no deterministic arb
 
+    # ── shoulder_buy_evt data-gate and theorem gate (2026-05-22) ──────────────
+    # DATA-GATED: EVT tail model covariates or calibration set not yet wired.
+    # Authority: STRATEGY_TAXONOMY_DIRECTIVE.md §8 + zeus_strategy_spec.md §12
+    EVT_TAIL_MODEL_UNWIRED = auto()                     # shoulder_buy_evt: covariates/raw_prob/cal_set absent
+    SHOULDER_BUY_LOWER_BOUND_NOT_POSITIVE = auto()      # shoulder_buy_evt: p⁻_u − a_YES − phi ≤ 0; no edge
+
     # ── shoulder_impossible_tail_capture data-gate (2026-05-22) ────────────────
     # DATA-GATED: physical envelope input (Δ_phys⁺/Δ_phys⁻ from station/season empirical
     # envelope) is not yet wired. Emitted until the envelope feed lands.
