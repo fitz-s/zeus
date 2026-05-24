@@ -894,7 +894,7 @@ def get_connection(
 # CI hook scripts/check_schema_version.py diffs the sqlite_master hash of
 # a fresh-init DB against tests/state/_schema_pinned_hash.txt and fails
 # the PR if SCHEMA_VERSION did not change in lockstep.
-SCHEMA_VERSION = 34  # 2026-05-23 OBS-AUTHORITY-FOUNDATION: settlement_day_observation_authority table + opportunity_fact.{observation_authority_id,day0_context_json} (kernel SQL)
+SCHEMA_VERSION = 35  # 2026-05-23 LIVE-PROB-P0 §E: probability_trace_fact gains 11 edge-bin sanity telemetry columns (probability_sanity_mode/reason, edge_bin_idx/label/p_raw/p_cal/p_market/member_support/odds_ratio, near_tail_p_cal/p_market)
 
 
 def init_schema(
@@ -1246,6 +1246,17 @@ def init_schema(
             market_end_at TEXT,
             settlement_day_entry_utc TEXT,
             uma_resolved_source TEXT,
+            -- LIVE-PROB-P0 (2026-05-23 SCHEMA_VERSION 34): cumulative tail-mass evidence.
+            -- prob_tail_mass_cal: sum(p_cal[left-tail bins]) at gate evaluation time.
+            -- prob_tail_mass_market: sum(p_market[left-tail bins]) at gate evaluation time.
+            -- prob_tail_entropy: Shannon entropy of p_cal distribution at decision time
+            --   (nats; H = -sum(p * log(p)), 0 for degenerate point mass).
+            -- All three are NULL for decisions that predate LIVE-PROB-P0 (legacy rows)
+            -- and for decisions where market_prices were unavailable.
+            -- ALTER TABLE migration below handles legacy DBs.
+            prob_tail_mass_cal REAL,
+            prob_tail_mass_market REAL,
+            prob_tail_entropy REAL,
             recorded_at TEXT NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_probability_trace_city_target
@@ -1382,7 +1393,7 @@ def init_schema(
             finality_confirmed_time    TEXT,
             clock_skew_estimate_ms_at_submit INTEGER,
             raw_orderbook_hash_transition_delta_ms INTEGER,
-            schema_version INTEGER NOT NULL CHECK (schema_version IN (12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34)),
+            schema_version INTEGER NOT NULL CHECK (schema_version IN (12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35)),
             source         TEXT NOT NULL CHECK (source IN ('phase0_backfill', 'live_decision', 'shadow_decision')),
             PRIMARY KEY (market_slug, temperature_metric, target_date, observation_time, decision_seq)
         );
@@ -2091,6 +2102,47 @@ def init_schema(
     except sqlite3.OperationalError:
         pass
 
+    # LIVE-PROB-P0 (SCHEMA_VERSION 34, 2026-05-23): probability_trace_fact gains
+    # three tail-evidence columns for the cumulative tail-mass discrepancy gate.
+    # Same ALTER TABLE pattern as ``market_phase`` / A5 above — fresh DBs hit the
+    # duplicate-column OperationalError which is swallowed; legacy DBs get the
+    # columns added. All three default NULL for pre-LIVE-PROB-P0 rows.
+    for col in (
+        "prob_tail_mass_cal REAL",
+        "prob_tail_mass_market REAL",
+        "prob_tail_entropy REAL",
+    ):
+        try:
+            conn.execute(
+                f"ALTER TABLE probability_trace_fact ADD COLUMN {col};"
+            )
+        except sqlite3.OperationalError:
+            pass
+
+    # LIVE-PROB-P0 §E (SCHEMA_VERSION 35, 2026-05-23): probability_trace_fact gains
+    # 11 edge-bin sanity telemetry columns per operator binding spec §E.
+    # All columns populated in production when per-edge gate is evaluated (non-day0).
+    # NULL for legacy rows and day0 decisions (gate not called for day0 by design).
+    for col in (
+        "probability_sanity_mode TEXT",
+        "probability_sanity_reason TEXT",
+        "edge_bin_idx INTEGER",
+        "edge_bin_label TEXT",
+        "edge_bin_p_raw REAL",
+        "edge_bin_p_cal REAL",
+        "edge_bin_p_market REAL",
+        "edge_bin_member_support REAL",
+        "edge_bin_odds_ratio REAL",
+        "near_tail_p_cal REAL",
+        "near_tail_p_market REAL",
+    ):
+        try:
+            conn.execute(
+                f"ALTER TABLE probability_trace_fact ADD COLUMN {col};"
+            )
+        except sqlite3.OperationalError:
+            pass
+
     # A5 uma_resolution table — listener writes here, cycle_runtime reads
     # it via uma_resolution_listener.lookup_resolution. Idempotent.
     from src.state.uma_resolution_listener import init_uma_resolution_schema as _init_uma
@@ -2606,7 +2658,7 @@ def _migrate_decision_events_schema(conn: sqlite3.Connection) -> None:
             finality_confirmed_time    TEXT,
             clock_skew_estimate_ms_at_submit INTEGER,
             raw_orderbook_hash_transition_delta_ms INTEGER,
-            schema_version INTEGER NOT NULL CHECK (schema_version IN (12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34)),
+            schema_version INTEGER NOT NULL CHECK (schema_version IN (12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35)),
             source         TEXT NOT NULL CHECK (source IN ('phase0_backfill', 'live_decision', 'shadow_decision')),
             PRIMARY KEY (market_slug, temperature_metric, target_date, observation_time, decision_seq)
         )
@@ -2642,9 +2694,9 @@ def _migrate_decision_events_schema(conn: sqlite3.Connection) -> None:
             first_inclusion_block_time, finality_confirmed_time,
             clock_skew_estimate_ms_at_submit, raw_orderbook_hash_transition_delta_ms,
             CASE
-                WHEN schema_version IN (12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34)
+                WHEN schema_version IN (12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35)
                     THEN schema_version
-                ELSE 33
+                ELSE 35
             END,
             CASE
                 WHEN source IN ('phase0_backfill', 'live_decision', 'shadow_decision')
@@ -6297,6 +6349,14 @@ def _trace_int(value) -> int | None:
         return None
 
 
+def _trace_float(value) -> float | None:
+    """Coerce value to float for probability_trace_fact REAL columns; None on failure."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def log_probability_trace_fact(
     conn: sqlite3.Connection | None,  # Deprecated: ignored; function opens its own world connection (INV-37 fix, PR-S4b §3)
     *,
@@ -6396,6 +6456,38 @@ def _log_probability_trace_fact_inner(
         if candidate_phase is not None:
             market_phase_value = candidate_phase.value if hasattr(candidate_phase, "value") else str(candidate_phase)
 
+    # Idempotent ALTER TABLE migration for LIVE-PROB-P0 columns (SV=34 tail-mass
+    # + SV=35 edge-bin sanity telemetry).  Mirrors the opportunity_fact pattern in
+    # log_opportunity_fact: check existing columns once, issue ALTER only if absent.
+    # Necessary so the INSERT below succeeds on existing DBs that predate SV=34/35
+    # (the same gap init_schema's ALTER loop covers for boot-path callers, but this
+    # writer can be called on a DB opened without init_schema — e.g. test fixtures
+    # or daemon paths that open a pre-existing world DB directly).
+    _ptf_cols = _table_columns(conn, "probability_trace_fact")
+    for _col, _type in (
+        ("prob_tail_mass_cal", "REAL"),
+        ("prob_tail_mass_market", "REAL"),
+        ("prob_tail_entropy", "REAL"),
+        ("probability_sanity_mode", "TEXT"),
+        ("probability_sanity_reason", "TEXT"),
+        ("edge_bin_idx", "INTEGER"),
+        ("edge_bin_label", "TEXT"),
+        ("edge_bin_p_raw", "REAL"),
+        ("edge_bin_p_cal", "REAL"),
+        ("edge_bin_p_market", "REAL"),
+        ("edge_bin_member_support", "REAL"),
+        ("edge_bin_odds_ratio", "REAL"),
+        ("near_tail_p_cal", "REAL"),
+        ("near_tail_p_market", "REAL"),
+    ):
+        if _col not in _ptf_cols:
+            try:
+                conn.execute(
+                    f"ALTER TABLE probability_trace_fact ADD COLUMN {_col} {_type};"
+                )
+            except sqlite3.OperationalError:
+                pass  # concurrent add / already present
+
     conn.execute(
         """
         INSERT INTO probability_trace_fact (
@@ -6427,9 +6519,23 @@ def _log_probability_trace_fact_inner(
             rejection_stage,
             availability_status,
             market_phase,
+            prob_tail_mass_cal,
+            prob_tail_mass_market,
+            prob_tail_entropy,
+            probability_sanity_mode,
+            probability_sanity_reason,
+            edge_bin_idx,
+            edge_bin_label,
+            edge_bin_p_raw,
+            edge_bin_p_cal,
+            edge_bin_p_market,
+            edge_bin_member_support,
+            edge_bin_odds_ratio,
+            near_tail_p_cal,
+            near_tail_p_market,
             recorded_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(trace_id) DO UPDATE SET
             decision_id=excluded.decision_id,
             decision_snapshot_id=excluded.decision_snapshot_id,
@@ -6458,6 +6564,20 @@ def _log_probability_trace_fact_inner(
             rejection_stage=excluded.rejection_stage,
             availability_status=excluded.availability_status,
             market_phase=excluded.market_phase,
+            prob_tail_mass_cal=excluded.prob_tail_mass_cal,
+            prob_tail_mass_market=excluded.prob_tail_mass_market,
+            prob_tail_entropy=excluded.prob_tail_entropy,
+            probability_sanity_mode=excluded.probability_sanity_mode,
+            probability_sanity_reason=excluded.probability_sanity_reason,
+            edge_bin_idx=excluded.edge_bin_idx,
+            edge_bin_label=excluded.edge_bin_label,
+            edge_bin_p_raw=excluded.edge_bin_p_raw,
+            edge_bin_p_cal=excluded.edge_bin_p_cal,
+            edge_bin_p_market=excluded.edge_bin_p_market,
+            edge_bin_member_support=excluded.edge_bin_member_support,
+            edge_bin_odds_ratio=excluded.edge_bin_odds_ratio,
+            near_tail_p_cal=excluded.near_tail_p_cal,
+            near_tail_p_market=excluded.near_tail_p_market,
             recorded_at=excluded.recorded_at
         """,
         (
@@ -6489,6 +6609,26 @@ def _log_probability_trace_fact_inner(
             rejection_stage or None,
             availability_status or None,
             market_phase_value,
+            # LIVE-PROB-P0: tail-mass evidence columns. Read from decision attrs
+            # stamped by the gate at evaluator.py:4622; None for legacy decisions
+            # or decisions where p_market was unavailable.
+            _trace_float(getattr(decision, "prob_tail_mass_cal", None)),
+            _trace_float(getattr(decision, "prob_tail_mass_market", None)),
+            _trace_float(getattr(decision, "prob_tail_entropy", None)),
+            # LIVE-PROB-P0 §E (SCHEMA_VERSION 35, 2026-05-23): 11 edge-bin sanity telemetry columns.
+            # Populated when probability_edge_bin_sanity() is called (non-day0 edges).
+            # None for legacy rows, day0 decisions, or strategies not in apply_to_strategies.
+            str(getattr(decision, "probability_sanity_mode", None) or "") or None,
+            str(getattr(decision, "probability_sanity_reason", None) or "") or None,
+            _trace_int(getattr(decision, "edge_bin_idx", None)),
+            str(getattr(decision, "edge_bin_label", None) or "") or None,
+            _trace_float(getattr(decision, "edge_bin_p_raw", None)),
+            _trace_float(getattr(decision, "edge_bin_p_cal", None)),
+            _trace_float(getattr(decision, "edge_bin_p_market", None)),
+            _trace_float(getattr(decision, "edge_bin_member_support", None)),
+            _trace_float(getattr(decision, "edge_bin_odds_ratio", None)),
+            _trace_float(getattr(decision, "near_tail_p_cal", None)),
+            _trace_float(getattr(decision, "near_tail_p_market", None)),
             recorded_at,
         ),
     )
@@ -6934,6 +7074,8 @@ def _build_day0_context_json(candidate, decision) -> str | None:
         return None
 
 
+
+
 def log_opportunity_fact(
     conn: sqlite3.Connection | None,  # Deprecated: ignored; function opens its own trade connection (INV-37 fix, wave-2)
     *,
@@ -7120,6 +7262,7 @@ def log_opportunity_fact(
     finally:
         if _owns_connection:
             _wconn.close()
+
 
 
 def log_availability_fact(

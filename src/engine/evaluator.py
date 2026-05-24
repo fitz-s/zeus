@@ -83,7 +83,12 @@ from src.engine.discovery_mode import DiscoveryMode
 from src.data.forecast_fetch_plan import data_version_for_track, track_for_metric
 from src.engine.time_context import lead_days_to_date_start, lead_hours_to_date_start
 from src.signal.day0_router import Day0Router, Day0SignalInputs
-from src.signal.probability_sanity import validate_high_distribution
+from src.signal.probability_sanity import (
+    check_cumulative_tail_discrepancy,
+    check_edge_bin_tail_discrepancy,
+    probability_edge_bin_sanity,
+    validate_high_distribution,
+)
 from src.signal.day0_high_nowcast_signal import (
     Day0HighNowcastSignal,
     NotApplicableHorizon as _NowcastNotApplicableHorizon,
@@ -434,6 +439,30 @@ class EdgeDecision:
     # legacy callsites. Persisted to opportunity_fact.observation_authority_id
     # so an operator can join an edge back to the runtime observation object.
     observation_authority_id: Optional[str] = None
+
+    # LIVE-PROB-P0 (2026-05-23): cumulative tail-mass evidence for
+    # probability_trace_fact persistence. Set by the gate at evaluator.py:4622
+    # when check_cumulative_tail_discrepancy is called; None on pre-gate paths
+    # (day0, legacy callers, decisions where p_market is unavailable).
+    prob_tail_mass_cal: Optional[float] = None
+    prob_tail_mass_market: Optional[float] = None
+    prob_tail_entropy: Optional[float] = None
+
+    # LIVE-PROB-P0 §E (2026-05-23): per-edge-bin sanity telemetry columns.
+    # Set by probability_edge_bin_sanity at the per-edge gate site (~5077).
+    # All populated when the gate is evaluated; None for day0 / pre-gate paths.
+    # ALL columns must be populated in production (no dead columns per critic INV).
+    probability_sanity_mode: Optional[str] = None
+    probability_sanity_reason: Optional[str] = None
+    edge_bin_idx: Optional[int] = None
+    edge_bin_label: Optional[str] = None
+    edge_bin_p_raw: Optional[float] = None
+    edge_bin_p_cal: Optional[float] = None
+    edge_bin_p_market: Optional[float] = None
+    edge_bin_member_support: Optional[float] = None
+    edge_bin_odds_ratio: Optional[float] = None
+    near_tail_p_cal: Optional[float] = None
+    near_tail_p_market: Optional[float] = None
 
     def __post_init__(self) -> None:
         if self.decision_snapshot_id is None:
@@ -4648,6 +4677,43 @@ def evaluate_candidate(
                 selected_method, city.name, target_date, _shadow_reason,
             )
 
+    # LIVE-PROB-P0 (2026-05-23): symmetric cumulative tail-mass discrepancy gate.
+    # Covers ALL temperature_metric (HIGH and LOW), ALL non-day0 strategies.
+    # day0 path excluded (is_day0_mode guard); see day0 rails above.
+    # TELEMETRY ONLY at this site: check_cumulative_tail_discrepancy computes
+    # family-level tail_cal/tail_mkt/entropy for audit columns and logs when the
+    # family gate would fire — but does NOT return a rejection here.
+    # REJECTION is at the per-edge level (below, in "for edge in filtered:" loop)
+    # via check_edge_bin_tail_discrepancy, BEFORE the economic floor.
+    # Decoupled: family telemetry fires even when the edge-bin check passes, so the
+    # schema-34 columns carry audit evidence regardless of rejection outcome.
+    # See REPLAY_TAIL_GATE.md for family-gate FP analysis (59 FPs at family level
+    # with tail_min_bins=2 collapsed to expected ~0 at edge-bin level).
+    _tail_evidence: dict | None = None
+    if not is_day0_mode:
+        _tail_ok, _tail_reason, _tail_evidence = check_cumulative_tail_discrepancy(
+            bins=bins,
+            p_cal=p_cal,
+            market_prices=p_market,
+        )
+        if not _tail_ok:
+            _metric_str = (
+                temperature_metric.value
+                if hasattr(temperature_metric, "value")
+                else str(temperature_metric)
+            )
+            _ev_str = (
+                f"tail_cal={_tail_evidence['tail_cal']:.4f},"
+                f"tail_mkt={_tail_evidence['tail_mkt']:.4f},"
+                f"entropy={_tail_evidence['entropy']:.4f}"
+                if _tail_evidence is not None
+                else "evidence=None"
+            )
+            logger.warning(
+                "[PROB_TAIL_FAMILY_TELEMETRY] strategy=%s city=%s date=%s metric=%s reason=%s %s",
+                selected_method, city.name, target_date, _metric_str, _tail_reason, _ev_str,
+            )
+
     analysis = MarketAnalysis(
         p_raw=p_raw,
         p_cal=p_cal,
@@ -4823,7 +4889,7 @@ def evaluate_candidate(
                 if len(native_no_quote_unavailable_labels) > 3:
                     labels = f"{labels},..."
                 rejection_reasons.append(f"BUY_NO_NATIVE_QUOTE_UNAVAILABLE:{labels}")
-        return [EdgeDecision(
+        _fdr_no_filtered_rej = EdgeDecision(
             False,
             decision_id=_decision_id(),
             rejection_stage=stage,
@@ -4849,7 +4915,13 @@ def evaluate_candidate(
                 else NoTradeReason.UNCATEGORIZED
             ),
             rejection_reason_detail="; ".join(rejection_reasons),
-        )]
+        )
+        # LIVE-PROB-P0 schema-34: stamp tail evidence if gate fired in shadow mode.
+        if _tail_evidence is not None and _fdr_no_filtered_rej.prob_tail_mass_cal is None:
+            _fdr_no_filtered_rej.prob_tail_mass_cal = _tail_evidence.get("tail_cal")
+            _fdr_no_filtered_rej.prob_tail_mass_market = _tail_evidence.get("tail_mkt")
+            _fdr_no_filtered_rej.prob_tail_entropy = _tail_evidence.get("entropy")
+        return [_fdr_no_filtered_rej]
 
     n_edges_after_fdr_before_family_preselection = len(filtered)
     family_decision = build_weather_family_decision(
@@ -4918,7 +4990,12 @@ def evaluate_candidate(
     projected_city_exposure_usd: dict[str, float] = defaultdict(float)
     projected_cluster_exposure_usd: dict[str, float] = defaultdict(float)
     decisions = list(family_preselection_rejections)
+    # LIVE-PROB-P0 §E: per-edge edge-bin telemetry, stamped onto decisions at loop-at-exit.
+    # Each iteration records its telemetry dict here (keyed by decisions-list index range);
+    # loop-at-exit stamps newly-appended decisions with the per-iteration telemetry.
+    _edge_iter_telemetry_list: list[tuple[int, int, dict]] = []  # (start_idx, end_idx, telemetry)
     for edge in filtered:
+        _decisions_before_edge = len(decisions)
         decision_validations = list(entry_validations)
         family_fallback_rank = family_fallback_rank_by_edge_id.get(id(edge), 0)
         family_fallback_candidate = (
@@ -5050,6 +5127,90 @@ def evaluate_candidate(
         source_quality_haircut = _source_quality_kelly_haircut(strategy_key, ens_result)
         if source_quality_haircut != 1.0:
             decision_validations.append(f"partial_source_kelly_haircut_{source_quality_haircut:g}x")
+        # LIVE-PROB-P0 per-edge phantom gate (operator binding spec §B, 2026-05-23):
+        # probability_edge_bin_sanity fires only when edge bin is sub-floor, gap>=min_edge_gap,
+        # ratio >= odds_ratio_threshold, AND settled_member_support < min_edge_bin_member_support.
+        # CRITICAL SAFETY: strong member support (p_raw[bin] >= 0.05) → unconditional PASS.
+        # Mode ("hard"|"shadow") read from probability_edge_bin_sanity config block.
+        # day0 guard consistent with family-gate above.
+        if not is_day0_mode:
+            _eb_ok, _eb_reason, _eb_telemetry = probability_edge_bin_sanity(
+                selected_bin_idx=bin_idx,
+                bins=bins,
+                p_raw=p_raw,
+                p_cal=p_cal,
+                p_market=p_market,
+                direction=str(getattr(edge, "direction", "")),
+                metric=str(temperature_metric or ""),
+                strategy_key=str(strategy_key or ""),
+                market_phase=str(getattr(candidate, "market_phase", "") or ""),
+            )
+            # Stamp §E telemetry onto a sentinel so it flows to all downstream decisions.
+            _eb_telemetry_dict = _eb_telemetry  # always a dict, even on pass path
+            _eb_gate_mode = _eb_telemetry_dict.get("probability_sanity_mode", "hard")
+            if not _eb_ok:
+                if _eb_gate_mode == "hard":
+                    # Determine specific NoTradeReason from reason code prefix
+                    _eb_reason_str = str(_eb_reason or "")
+                    if "PROBABILITY_LOW_PRICE_EDGE_BIN_DISAGREEMENT" in _eb_reason_str:
+                        _eb_enum = NoTradeReason.PROBABILITY_LOW_PRICE_EDGE_BIN_DISAGREEMENT
+                    elif "PROBABILITY_EDGE_BIN_UNSUPPORTED" in _eb_reason_str:
+                        _eb_enum = NoTradeReason.PROBABILITY_EDGE_BIN_UNSUPPORTED
+                    elif "PROBABILITY_TAIL_SHAPE_ANOMALY_HARD" in _eb_reason_str:
+                        _eb_enum = NoTradeReason.PROBABILITY_TAIL_SHAPE_ANOMALY_HARD
+                    else:
+                        _eb_enum = NoTradeReason.PROBABILITY_SANITY_GATE
+                    logger.warning(
+                        "[PROB_EDGE_BIN_SANITY_HARD] strategy=%s city=%s date=%s bin_idx=%s "
+                        "support=%.4f reason=%s",
+                        selected_method, city.name, target_date, bin_idx,
+                        _eb_telemetry_dict.get("edge_bin_member_support", 0.0), _eb_reason,
+                    )
+                    _eb_rej = EdgeDecision(
+                        False,
+                        edge=edge,
+                        decision_id=_decision_id(),
+                        rejection_stage="SIGNAL_QUALITY",
+                        rejection_reasons=[_eb_enum.value],
+                        selected_method=selected_method,
+                        applied_validations=[*decision_validations, "probability_edge_bin_sanity_gate"],
+                        decision_snapshot_id=snapshot_id,
+                        edge_source=edge_source,
+                        strategy_key=strategy_key,
+                        rejection_reason_enum=_eb_enum,
+                        rejection_reason_detail=_eb_reason,
+                    )
+                    if _tail_evidence is not None:
+                        _eb_rej.prob_tail_mass_cal = _tail_evidence.get("tail_cal")
+                        _eb_rej.prob_tail_mass_market = _tail_evidence.get("tail_mkt")
+                        _eb_rej.prob_tail_entropy = _tail_evidence.get("entropy")
+                    # Stamp §E telemetry columns
+                    _eb_rej.probability_sanity_mode = _eb_telemetry_dict.get("probability_sanity_mode")
+                    _eb_rej.probability_sanity_reason = _eb_telemetry_dict.get("probability_sanity_reason")
+                    _eb_rej.edge_bin_idx = _eb_telemetry_dict.get("edge_bin_idx")
+                    _eb_rej.edge_bin_label = _eb_telemetry_dict.get("edge_bin_label")
+                    _eb_rej.edge_bin_p_raw = _eb_telemetry_dict.get("edge_bin_p_raw")
+                    _eb_rej.edge_bin_p_cal = _eb_telemetry_dict.get("edge_bin_p_cal")
+                    _eb_rej.edge_bin_p_market = _eb_telemetry_dict.get("edge_bin_p_market")
+                    _eb_rej.edge_bin_member_support = _eb_telemetry_dict.get("edge_bin_member_support")
+                    _eb_rej.edge_bin_odds_ratio = _eb_telemetry_dict.get("edge_bin_odds_ratio")
+                    _eb_rej.near_tail_p_cal = _eb_telemetry_dict.get("near_tail_p_cal")
+                    _eb_rej.near_tail_p_market = _eb_telemetry_dict.get("near_tail_p_market")
+                    decisions.append(_eb_rej)
+                    continue
+                else:  # shadow
+                    logger.warning(
+                        "[PROB_EDGE_BIN_SANITY_SHADOW] strategy=%s city=%s date=%s bin_idx=%s "
+                        "support=%.4f reason=%s",
+                        selected_method, city.name, target_date, bin_idx,
+                        _eb_telemetry_dict.get("edge_bin_member_support", 0.0), _eb_reason,
+                    )
+            # Carry telemetry dict forward so loop-at-exit can stamp it on all decisions
+            # (both rejection path above and pass-through path here reach this point
+            # only on shadow mode or pass — bind to local _edge_bin_telemetry).
+            _edge_bin_telemetry = _eb_telemetry_dict
+        else:
+            _edge_bin_telemetry = None
         entry_price_floor_reason = _strategy_entry_price_floor_block_reason(strategy_key, edge)
         if entry_price_floor_reason:
             price_floor_enum = _live_entry_economic_floor_no_trade_reason(entry_price_floor_reason)
@@ -5749,10 +5910,51 @@ def evaluate_candidate(
             projected_total_exposure_usd += size
             projected_city_exposure_usd[city.name] += size
             projected_cluster_exposure_usd[cluster_key] += size
+        # LIVE-PROB-P0 §E: record edge-bin telemetry for decisions added this iteration.
+        # Only the trade path reaches here (all rejection paths `continue` earlier).
+        # _edge_bin_telemetry set in gate block; None for day0 or when gate not run.
+        _ebt = locals().get("_edge_bin_telemetry")
+        if _ebt is not None:
+            _edge_iter_telemetry_list.append(
+                (_decisions_before_edge, len(decisions), _ebt)
+            )
 
     if _fdr_fallback or _fdr_family_size:
         from dataclasses import replace
         decisions = [replace(d, fdr_fallback_fired=_fdr_fallback, fdr_family_size=_fdr_family_size) for d in decisions]
+
+    # LIVE-PROB-P0 (schema-34): stamp tail-mass evidence onto ALL returned decisions
+    # so probability_trace_fact columns are populated regardless of gate mode.
+    # Hard-reject path already stamps the single _rej decision (evaluator.py ~4708);
+    # the `is None` guard makes this idempotent. Shadow mode fires the gate but
+    # continues to analysis — without this loop, shadow-mode decisions get None for
+    # all three columns because no hard-reject EdgeDecision is returned.
+    if _tail_evidence is not None:
+        for _d in decisions:
+            if getattr(_d, "prob_tail_mass_cal", None) is None:
+                _d.prob_tail_mass_cal = _tail_evidence.get("tail_cal")
+                _d.prob_tail_mass_market = _tail_evidence.get("tail_mkt")
+                _d.prob_tail_entropy = _tail_evidence.get("entropy")
+
+    # LIVE-PROB-P0 §E: stamp edge-bin telemetry onto trade decisions.
+    # Hard-reject decisions are stamped inline above. Trade decisions and
+    # shadow-mode pass-through decisions are stamped here using index ranges
+    # recorded at each iteration's end (trade path only reaches loop-end).
+    for _start, _end, _et in _edge_iter_telemetry_list:
+        for _d in decisions[_start:_end]:
+            if getattr(_d, "probability_sanity_mode", None) is None:
+                _d.probability_sanity_mode = _et.get("probability_sanity_mode")
+                _d.probability_sanity_reason = _et.get("probability_sanity_reason")
+                _d.edge_bin_idx = _et.get("edge_bin_idx")
+                _d.edge_bin_label = _et.get("edge_bin_label")
+                _d.edge_bin_p_raw = _et.get("edge_bin_p_raw")
+                _d.edge_bin_p_cal = _et.get("edge_bin_p_cal")
+                _d.edge_bin_p_market = _et.get("edge_bin_p_market")
+                _d.edge_bin_member_support = _et.get("edge_bin_member_support")
+                _d.edge_bin_odds_ratio = _et.get("edge_bin_odds_ratio")
+                _d.near_tail_p_cal = _et.get("near_tail_p_cal")
+                _d.near_tail_p_market = _et.get("near_tail_p_market")
+
     return decisions
 
 
