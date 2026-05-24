@@ -538,7 +538,7 @@ def discover_market_events(city_names: list[str], dry_run: bool = False):
         matched_cities.add(city.name)
 
         target_date = event.get("target_date")
-        event_id = event.get("event_id", "")
+        market_slug = event.get("slug", "")
         temperature_metric = event.get("temperature_metric") or "high"
         for outcome in event.get("outcomes", []):
             try:
@@ -549,11 +549,11 @@ def discover_market_events(city_names: list[str], dry_run: bool = False):
                      range_label, range_low, range_high, created_at)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
                 """, (
-                    event_id,
+                    market_slug,
                     city.name,
                     target_date,
                     temperature_metric,
-                    outcome.get("market_id", ""),
+                    outcome.get("condition_id", ""),
                     outcome.get("token_id", ""),
                     outcome.get("title", ""),
                     outcome.get("range_low"),
