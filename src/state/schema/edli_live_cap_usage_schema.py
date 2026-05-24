@@ -7,7 +7,7 @@ import sqlite3
 
 CREATE_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS edli_live_cap_usage (
-    usage_id TEXT PRIMARY KEY,
+    usage_id TEXT NOT NULL PRIMARY KEY,
     cap_name TEXT NOT NULL,
     usage_date TEXT NOT NULL,
     event_id TEXT NOT NULL,

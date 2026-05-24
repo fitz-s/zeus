@@ -7,7 +7,7 @@ import sqlite3
 
 CREATE_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS event_dead_letters (
-    dead_letter_id TEXT PRIMARY KEY,
+    dead_letter_id TEXT NOT NULL PRIMARY KEY,
     consumer_name TEXT NOT NULL,
     event_id TEXT NOT NULL,
     failure_stage TEXT NOT NULL,

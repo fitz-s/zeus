@@ -7,6 +7,7 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from src.events.event_writer import EventWriter, EventWriteResult
 from src.events.opportunity_event import Day0ExtremeUpdatedPayload, OpportunityEvent, make_day0_extreme_updated_event
@@ -197,6 +198,115 @@ def authority_row_to_observation(row: dict[str, Any]) -> dict[str, Any]:
         "rounding_rule": payload.get("rounding_rule"),
         "observation_context_id": str(row.get("authority_id") or ""),
     }
+
+
+def observation_context_to_live_observation(
+    *,
+    city: Any,
+    target_date: str,
+    metric: str,
+    observation: Any,
+    observation_context_id: str = "",
+) -> dict[str, Any]:
+    """Convert a Day0ObservationContext into a live-authority EDLI observation.
+
+    This is the online source hook: it consumes the actual observation object
+    returned by the settlement-bound Day0 provider path. The separate
+    settlement_day_observation_authority scanner remains catch-up/evidence and
+    defaults to OBSERVABILITY_ONLY.
+    """
+
+    observation_time = str(getattr(observation, "observation_time", "") or "")
+    available_at = str(getattr(observation, "observation_available_at", "") or "")
+    station_id = str(getattr(observation, "station_id", "") or "").strip().upper()
+    expected_station = str(getattr(city, "wu_station", "") or "").strip().upper()
+    source = str(getattr(observation, "source", "") or "")
+    coverage_status = str(getattr(observation, "coverage_status", "") or "").upper()
+    unit = str(getattr(observation, "unit", "") or "").upper()
+    city_unit = str(getattr(city, "settlement_unit", "") or "").upper()
+    city_source_type = str(getattr(city, "settlement_source_type", "") or "")
+
+    local_date_status, dst_status = _observation_local_date_status(
+        observation_time=observation_time,
+        city_timezone=str(getattr(city, "timezone", "") or ""),
+        target_date=str(target_date),
+    )
+    source_match_status = (
+        "MATCH"
+        if city_source_type == "wu_icao" and source == "wu_api" and coverage_status == "OK"
+        else "MISMATCH"
+    )
+    station_match_status = (
+        "MATCH"
+        if expected_station and _station_matches(station_id, expected_station)
+        else "MISMATCH"
+    )
+    metric_match_status = "MATCH" if str(metric) in {"high", "low"} else "MISMATCH"
+    rounding_status = "MATCH" if unit and city_unit and unit == city_unit else "MISMATCH"
+    source_authorized_status = (
+        "AUTHORIZED"
+        if source_match_status == "MATCH" and station_match_status == "MATCH" and rounding_status == "MATCH"
+        else "UNAUTHORIZED"
+    )
+    live_authority_status = (
+        "LIVE_AUTHORITY"
+        if (
+            available_at
+            and source_match_status == "MATCH"
+            and local_date_status == "MATCH"
+            and station_match_status == "MATCH"
+            and dst_status == "UNAMBIGUOUS"
+            and metric_match_status == "MATCH"
+            and rounding_status == "MATCH"
+            and source_authorized_status == "AUTHORIZED"
+        )
+        else "NON_LIVE_AUTHORITY"
+    )
+    raw_value = getattr(observation, "high_so_far", None) if str(metric) == "high" else getattr(observation, "low_so_far", None)
+    if raw_value is None:
+        raw_value = getattr(observation, "current_temp", None)
+    if raw_value is None:
+        raise ValueError("Day0ObservationContext has no high/low/current_temp value")
+    return {
+        "city": str(getattr(city, "name", "") or ""),
+        "target_date": str(target_date),
+        "metric": str(metric),
+        "settlement_source": source,
+        "station_id": station_id,
+        "observation_time": observation_time,
+        "observation_available_at": available_at,
+        "raw_value": float(raw_value),
+        "high_so_far": getattr(observation, "high_so_far", None),
+        "low_so_far": getattr(observation, "low_so_far", None),
+        "source_match_status": source_match_status,
+        "local_date_status": local_date_status,
+        "station_match_status": station_match_status,
+        "dst_status": dst_status,
+        "metric_match_status": metric_match_status,
+        "rounding_status": rounding_status,
+        "source_authorized_status": source_authorized_status,
+        "live_authority_status": live_authority_status,
+        "settlement_unit": unit or city_unit,
+        "settlement_precision": 1.0,
+        "rounding_rule": "wmo_half_up",
+        "observation_context_id": observation_context_id,
+    }
+
+
+def _station_matches(station_id: str, expected_station: str) -> bool:
+    return station_id == expected_station or station_id.startswith(f"{expected_station}:")
+
+
+def _observation_local_date_status(*, observation_time: str, city_timezone: str, target_date: str) -> tuple[str, str]:
+    try:
+        parsed = datetime.fromisoformat(str(observation_time).replace("Z", "+00:00"))
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            return "UNKNOWN", "AMBIGUOUS"
+        local = parsed.astimezone(ZoneInfo(city_timezone))
+        expected = datetime.fromisoformat(str(target_date)[:10]).date()
+        return ("MATCH" if local.date() == expected else "MISMATCH"), "UNAMBIGUOUS"
+    except (ValueError, TypeError, OSError):
+        return "UNKNOWN", "AMBIGUOUS"
 
 
 def _parse_utc(value: str, field_name: str) -> datetime:

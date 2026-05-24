@@ -5,8 +5,11 @@ from __future__ import annotations
 
 import sqlite3
 
+import pytest
+
 from src.state.db import init_schema
 from src.strategy.live_inference.no_trade_regret import (
+    NoTradeRegretHindsightError,
     NoTradeRegretEvent,
     NoTradeRegretLedger,
     classify_fillable_bucket,
@@ -62,25 +65,40 @@ def test_event_without_market_slug_still_writes_regret_ledger():
 def test_later_outcome_join_after_settlement_only():
     conn, ledger = _ledger()
     ledger.insert_idempotent(
-        NoTradeRegretEvent(
-            "event-1",
-            "EXECUTABLE_QUOTE",
-            "NO_DEPTH",
-            "WOULD_HAVE_WON_BUT_UNFILLABLE",
-            later_outcome="WIN",
-            would_have_won=True,
-            would_have_filled=False,
-        )
+        NoTradeRegretEvent("event-1", "EXECUTABLE_QUOTE", "NO_DEPTH", "NO_DEPTH")
+    )
+    ledger.enrich_after_settlement(
+        event_id="event-1",
+        rejection_stage="EXECUTABLE_QUOTE",
+        rejection_reason="NO_DEPTH",
+        later_outcome="WIN",
+        would_have_won=True,
+        would_have_filled=False,
+        settlement_proof="settlement-row-1",
     )
     row = conn.execute("SELECT later_outcome FROM no_trade_regret_events").fetchone()
     assert row[0] == "WIN"
 
 
+def test_live_insert_denies_hindsight_fields():
+    _conn, ledger = _ledger()
+    with pytest.raises(NoTradeRegretHindsightError, match="live no-trade regret insert"):
+        ledger.insert_idempotent(
+            NoTradeRegretEvent(
+                "event-1",
+                "EXECUTABLE_QUOTE",
+                "NO_DEPTH",
+                "WOULD_HAVE_WON_BUT_UNFILLABLE",
+                later_outcome="WIN",
+                would_have_won=True,
+                would_have_filled=False,
+            )
+        )
+
+
 def test_live_reader_denies_outcome_columns():
     _conn, ledger = _ledger()
-    ledger.insert_idempotent(
-        NoTradeRegretEvent("event-1", "EXECUTABLE_QUOTE", "NO_DEPTH", "NO_DEPTH", later_outcome="WIN")
-    )
+    ledger.insert_idempotent(NoTradeRegretEvent("event-1", "EXECUTABLE_QUOTE", "NO_DEPTH", "NO_DEPTH"))
     row = ledger.live_reader_rows()[0]
     assert "later_outcome" not in row
     assert "would_have_won" not in row

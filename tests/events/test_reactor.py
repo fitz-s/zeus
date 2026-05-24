@@ -4,11 +4,12 @@
 from __future__ import annotations
 
 import sqlite3
+import json
 from datetime import datetime, timezone
 
 from src.events.event_store import EventStore
 from src.events.opportunity_event import Day0ExtremeUpdatedPayload, MarketBookEventPayload, make_day0_extreme_updated_event, make_opportunity_event
-from src.events.reactor import OpportunityEventReactor, ReactorConfig
+from src.events.reactor import EventSubmissionReceipt, OpportunityEventReactor, ReactorConfig
 from src.state.db import init_schema
 
 
@@ -71,14 +72,34 @@ def _market_event():
 def _reactor(store, *, gates=True, config=None):
     rejected = []
     submitted = []
+    def _submit(event):
+        payload = json.loads(event.payload_json)
+        submitted.append(event.event_id)
+        return EventSubmissionReceipt(
+            submitted=True,
+            event_id=event.event_id,
+            causal_snapshot_id=event.causal_snapshot_id,
+            city=payload.get("city"),
+            target_date=payload.get("target_date"),
+            metric=payload.get("metric"),
+            trade_score_positive=True,
+            fdr_pass=True,
+            fdr_family_id="family-1",
+            fdr_hypothesis_count=2,
+            kelly_pass=True,
+            kelly_execution_price_type="ExecutionPrice",
+            kelly_price_fee_deducted=True,
+            kelly_size_usd=1.0,
+            kelly_cost_basis_id="cost-1",
+            final_intent_id="intent-1",
+        )
+
     reactor = OpportunityEventReactor(
         store,
         source_truth_gate=lambda _event: gates,
         executable_snapshot_gate=lambda _event: gates,
-        fdr_gate=lambda _event: gates,
-        kelly_gate=lambda _event: gates,
         riskguard_gate=lambda _event: gates,
-        final_intent_submit=lambda event: submitted.append(event.event_id),
+        final_intent_submit=_submit,
         reject=lambda event, stage, reason: rejected.append((event.event_id, stage, reason)),
         config=config or ReactorConfig(),
     )
@@ -123,6 +144,52 @@ def test_sibling_family_logged_once():
     reactor, _rejected, _submitted = _reactor(store)
     reactor.process_pending(decision_time=datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc))
     assert reactor.family_log_count() == 1
+
+
+def test_receipt_without_money_path_proof_is_rejected():
+    _conn, store = _store()
+    event = _day0_event()
+    store.insert_or_ignore(event)
+    rejected = []
+    submitted = []
+
+    def _submit(event):
+        payload = json.loads(event.payload_json)
+        submitted.append(event.event_id)
+        return EventSubmissionReceipt(
+            submitted=True,
+            event_id=event.event_id,
+            causal_snapshot_id=event.causal_snapshot_id,
+            city=payload.get("city"),
+            target_date=payload.get("target_date"),
+            metric=payload.get("metric"),
+            trade_score_positive=True,
+            fdr_pass=True,
+            fdr_family_id="family-1",
+            fdr_hypothesis_count=2,
+            kelly_pass=False,
+            kelly_execution_price_type="float",
+            kelly_price_fee_deducted=False,
+            kelly_size_usd=0.0,
+            final_intent_id="intent-1",
+        )
+
+    reactor = OpportunityEventReactor(
+        store,
+        source_truth_gate=lambda _event: True,
+        executable_snapshot_gate=lambda _event: True,
+        riskguard_gate=lambda _event: True,
+        final_intent_submit=_submit,
+        reject=lambda event, stage, reason: rejected.append((event.event_id, stage, reason)),
+        config=ReactorConfig(tiny_live_max_orders_per_day=1),
+    )
+
+    result = reactor.process_pending(decision_time=datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc))
+
+    assert submitted == [event.event_id]
+    assert result.rejected == 1
+    assert rejected[0][1] == "KELLY"
+    assert rejected[0][2] == "EDLI_KELLY_PROOF_MISSING"
 
 
 def test_live_day0_requires_tiny_cap():
@@ -224,8 +291,6 @@ def test_reactor_rejections_write_no_trade_regret_events():
         store,
         source_truth_gate=lambda _event: True,
         executable_snapshot_gate=lambda _event: True,
-        fdr_gate=lambda _event: True,
-        kelly_gate=lambda _event: True,
         riskguard_gate=lambda _event: True,
         final_intent_submit=lambda _event: None,
         reject=lambda event, stage, reason: rejected.append((event.event_id, stage, reason)),
@@ -244,8 +309,6 @@ def test_reactor_exception_dead_letters_event():
         store,
         source_truth_gate=lambda _event: (_ for _ in ()).throw(RuntimeError("boom")),
         executable_snapshot_gate=lambda _event: True,
-        fdr_gate=lambda _event: True,
-        kelly_gate=lambda _event: True,
         riskguard_gate=lambda _event: True,
         final_intent_submit=lambda _event: None,
         reject=lambda _event, _stage, _reason: None,

@@ -7,7 +7,7 @@ import sqlite3
 
 CREATE_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS execution_feasibility_evidence (
-    evidence_id TEXT PRIMARY KEY,
+    evidence_id TEXT NOT NULL PRIMARY KEY,
     event_id TEXT NOT NULL,
     condition_id TEXT NOT NULL,
     token_id TEXT NOT NULL,

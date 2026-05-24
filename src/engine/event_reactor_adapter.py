@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from datetime import datetime, timezone
-from typing import Callable
+from typing import Any, Callable
 
 from src.events.event_store import EventStore
 from src.events.opportunity_event import OpportunityEvent
@@ -27,12 +27,9 @@ def build_event_reactor(
     *,
     source_truth_gate,
     executable_snapshot_gate,
-    fdr_gate,
-    kelly_gate,
     riskguard_gate,
     final_intent_submit,
     reject,
-    trade_score_gate=None,
     config: ReactorConfig | None = None,
     regret_ledger=None,
 ) -> OpportunityEventReactor:
@@ -40,9 +37,6 @@ def build_event_reactor(
         store,
         source_truth_gate=source_truth_gate,
         executable_snapshot_gate=executable_snapshot_gate,
-        trade_score_gate=trade_score_gate,
-        fdr_gate=fdr_gate,
-        kelly_gate=kelly_gate,
         riskguard_gate=riskguard_gate,
         final_intent_submit=final_intent_submit,
         reject=reject,
@@ -97,6 +91,12 @@ def executable_snapshot_gate_from_trade_conn(
         params: list[object] = [checked_at.isoformat()]
         binding = _event_snapshot_binding(payload, event=event, columns=columns)
         if binding is None:
+            binding = _event_family_snapshot_binding(
+                trade_conn,
+                payload,
+                columns=columns,
+            )
+        if binding is None:
             return False
         binding_predicate, binding_params = binding
         predicates.append(binding_predicate)
@@ -131,28 +131,6 @@ def riskguard_allows_new_entries(*, get_current_level: Callable[[], RiskLevel]) 
         return get_current_level() == RiskLevel.GREEN
 
     return _gate
-
-
-def edli_payload_fdr_gate(event: OpportunityEvent) -> bool:
-    """Require durable full-family FDR evidence in the event payload."""
-
-    payload = _payload(event)
-    return (
-        bool(payload.get("fdr_family_id"))
-        and int(payload.get("fdr_hypothesis_count") or 0) > 0
-        and payload.get("fdr_pass") is True
-    )
-
-
-def edli_payload_kelly_gate(event: OpportunityEvent) -> bool:
-    """Require typed Kelly evidence in the event payload."""
-
-    payload = _payload(event)
-    return (
-        payload.get("kelly_execution_price_type") == "ExecutionPrice"
-        and payload.get("kelly_price_fee_deducted") is True
-        and float(payload.get("kelly_size_usd") or 0.0) > 0.0
-    )
 
 
 def edli_trade_score_gate(event: OpportunityEvent) -> bool:
@@ -203,27 +181,54 @@ def submit_existing_cycle_for_event(
     event: OpportunityEvent,
     *,
     run_cycle: Callable,
+    taker_fok_fak_live_enabled: bool = False,
 ) -> EventSubmissionReceipt:
     """Trigger established money path only when it returns event-bound proof."""
 
     mode = discovery_mode_for_event(event)
-    summary = run_cycle(mode)
+    context = cycle_context_from_event(event)
+    context["taker_fok_fak_live_enabled"] = bool(taker_fok_fak_live_enabled)
+    try:
+        summary = run_cycle(mode, edli_event_context=context)
+    except TypeError as exc:
+        if "edli_event_context" not in str(exc):
+            raise
+        return EventSubmissionReceipt(
+            False,
+            event.event_id,
+            event.causal_snapshot_id,
+            reason="EDLI_EVENT_CONTEXT_UNSUPPORTED_BY_CYCLE_RUNNER",
+        )
     if not isinstance(summary, dict):
         return EventSubmissionReceipt(False, event.event_id, event.causal_snapshot_id, reason="EXISTING_CYCLE_NO_SUMMARY")
-    submitted = bool(
-        int(summary.get("entry_orders_submitted", 0) or 0) > 0
-        or int(summary.get("submit_attempts", 0) or 0) > 0
-        or int(summary.get("final_intents_built", 0) or 0) > 0
-    )
+    submitted = bool(summary.get("edli_submit_accepted"))
     if not submitted:
-        return EventSubmissionReceipt(False, event.event_id, event.causal_snapshot_id, reason="EXISTING_CYCLE_NO_SUBMIT")
+        return EventSubmissionReceipt(
+            False,
+            event.event_id,
+            event.causal_snapshot_id,
+            reason=str(summary.get("edli_submit_reason") or "EXISTING_CYCLE_NO_SUBMIT"),
+        )
     receipt = EventSubmissionReceipt(
         submitted=True,
         event_id=str(summary.get("edli_event_id") or ""),
         causal_snapshot_id=summary.get("causal_snapshot_id"),
+        city=summary.get("city"),
+        target_date=summary.get("target_date"),
+        metric=summary.get("metric"),
         condition_id=summary.get("condition_id"),
         token_id=summary.get("token_id"),
         executable_snapshot_id=summary.get("executable_snapshot_id"),
+        trade_score_positive=bool(summary.get("edli_trade_score_positive")),
+        fdr_pass=bool(summary.get("edli_fdr_pass")),
+        fdr_family_id=summary.get("edli_fdr_family_id"),
+        fdr_hypothesis_count=int(summary.get("edli_fdr_hypothesis_count") or 0),
+        kelly_pass=bool(summary.get("edli_kelly_pass")),
+        kelly_execution_price_type=summary.get("edli_kelly_execution_price_type"),
+        kelly_price_fee_deducted=bool(summary.get("edli_kelly_price_fee_deducted")),
+        kelly_size_usd=float(summary.get("edli_kelly_size_usd") or 0.0),
+        kelly_cost_basis_id=summary.get("edli_kelly_cost_basis_id"),
+        final_intent_id=summary.get("edli_final_intent_id"),
         reason=str(summary.get("edli_submit_reason") or "event_bound_existing_cycle_submit"),
     )
     if not receipt.event_id:
@@ -236,12 +241,35 @@ def submit_existing_cycle_for_event(
     return receipt
 
 
+def cycle_context_from_event(event: OpportunityEvent) -> dict[str, Any]:
+    payload = _payload(event)
+    return {
+        "event_id": event.event_id,
+        "event_type": event.event_type,
+        "entity_key": event.entity_key,
+        "causal_snapshot_id": event.causal_snapshot_id,
+        "city": _nonnull(payload.get("city")),
+        "target_date": _nonnull(payload.get("target_date")),
+        "metric": _nonnull(payload.get("metric") or payload.get("temperature_metric")),
+        "condition_id": _nonnull(payload.get("condition_id")),
+        "token_id": _nonnull(payload.get("token_id")),
+        "executable_snapshot_id": _nonnull(payload.get("executable_snapshot_id")),
+        "payload": dict(payload),
+        "available_at": event.available_at,
+        "received_at": event.received_at,
+    }
+
+
 def _payload(event: OpportunityEvent) -> dict[str, object]:
     try:
         parsed = json.loads(event.payload_json)
     except json.JSONDecodeError:
         return {}
     return parsed if isinstance(parsed, dict) else {}
+
+
+def _nonnull(value: object) -> str:
+    return str(value or "").strip()
 
 
 def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
@@ -264,7 +292,7 @@ def _event_snapshot_binding(
     event: OpportunityEvent,
     columns: set[str],
 ) -> tuple[str, list[object]] | None:
-    snapshot_id = str(payload.get("executable_snapshot_id") or event.causal_snapshot_id or "")
+    snapshot_id = str(payload.get("executable_snapshot_id") or "")
     if snapshot_id and "snapshot_id" in columns:
         return "snapshot_id = ?", [snapshot_id]
     condition_id = str(payload.get("condition_id") or "")
@@ -275,4 +303,68 @@ def _event_snapshot_binding(
         return "condition_id = ?", [condition_id]
     if token_id:
         return "(yes_token_id = ? OR no_token_id = ?)", [token_id, token_id]
+    return None
+
+
+def _event_family_snapshot_binding(
+    conn: sqlite3.Connection,
+    payload: dict[str, object],
+    *,
+    columns: set[str],
+) -> tuple[str, list[object]] | None:
+    """Bind family-level EDLI events through canonical market topology.
+
+    Forecast and Day0 events are family facts, not child-token facts. They may
+    legitimately lack condition/token ids, but they still must bind through the
+    forecast-owned market topology table before any executable snapshot can
+    satisfy the quote gate. This is deliberately stricter than city slug
+    matching: city/date/metric must resolve to a market_events_v2 child whose
+    condition/token matches the executable snapshot row.
+    """
+
+    if "condition_id" not in columns:
+        return None
+    city = str(payload.get("city") or "").strip()
+    target_date = str(payload.get("target_date") or "").strip()
+    metric = str(payload.get("metric") or payload.get("temperature_metric") or "").strip()
+    if not (city and target_date and metric):
+        return None
+    table_ref = _market_events_table_ref(conn)
+    if table_ref is None:
+        return None
+    return (
+        f"""
+        EXISTS (
+            SELECT 1
+            FROM {table_ref} AS mev
+            WHERE mev.city = ?
+              AND mev.target_date = ?
+              AND mev.temperature_metric = ?
+              AND COALESCE(mev.outcome, '') = ''
+              AND COALESCE(mev.condition_id, '') != ''
+              AND mev.condition_id = executable_market_snapshots.condition_id
+              AND (
+                    COALESCE(mev.token_id, '') = ''
+                 OR mev.token_id = executable_market_snapshots.yes_token_id
+                 OR mev.token_id = executable_market_snapshots.no_token_id
+              )
+        )
+        """,
+        [city, target_date, metric],
+    )
+
+
+def _market_events_table_ref(conn: sqlite3.Connection) -> str | None:
+    try:
+        attached = {str(row[1]) for row in conn.execute("PRAGMA database_list").fetchall()}
+        if "forecasts" in attached:
+            exists = conn.execute(
+                "SELECT 1 FROM forecasts.sqlite_master WHERE type='table' AND name='market_events_v2'"
+            ).fetchone()
+            if exists is not None:
+                return "forecasts.market_events_v2"
+    except Exception:
+        pass
+    if _table_exists(conn, "market_events_v2"):
+        return "market_events_v2"
     return None

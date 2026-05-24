@@ -1151,98 +1151,102 @@ def _reprice_decision_from_executable_snapshot(
         depth_sweep_limit_float = float(depth_sweep_limit_decimal)
         edge_aware_taker_selected = True
     if best_ask_edge > 0.0 and (best_ask_inside_slippage_budget or edge_aware_taker_selected):
-        size_at_depth_limit = _size_at_execution_price_boundary(
-            p_posterior=float(decision.edge.p_posterior),
-            entry_price=depth_sweep_limit_float,
-            fee_rate=taker_fee_rate,
-            sizing_bankroll=sizing_bankroll,
-            kelly_multiplier=kelly_multiplier,
-            effective_context=_taker_effective_context,  # W4
-        )
-        if size_at_depth_limit <= 0.0:
-            final_best_ask = None
+        if not allow_taker_upgrade:
+            best_ask_inside_slippage_budget = False
+            edge_aware_taker_selected = False
         else:
-            best_ask_sweep = simulate_clob_sweep(
-                snapshot=snapshot,
-                direction=str(decision.edge.direction),
-                requested_size_kind="notional_usd",
-                requested_size_value=Decimal(str(size_at_depth_limit)),
-                limit_price=depth_sweep_limit_decimal,
+            size_at_depth_limit = _size_at_execution_price_boundary(
+                p_posterior=float(decision.edge.p_posterior),
+                entry_price=depth_sweep_limit_float,
+                fee_rate=taker_fee_rate,
+                sizing_bankroll=sizing_bankroll,
+                kelly_multiplier=kelly_multiplier,
+                effective_context=_taker_effective_context,  # W4
             )
-            if best_ask_sweep.depth_status != "PASS":
-                if ask_only_entry_book:
+            if size_at_depth_limit <= 0.0:
+                final_best_ask = None
+            else:
+                best_ask_sweep = simulate_clob_sweep(
+                    snapshot=snapshot,
+                    direction=str(decision.edge.direction),
+                    requested_size_kind="notional_usd",
+                    requested_size_value=Decimal(str(size_at_depth_limit)),
+                    limit_price=depth_sweep_limit_decimal,
+                )
+                if best_ask_sweep.depth_status != "PASS":
+                    if ask_only_entry_book:
+                        raise ValueError(
+                            "EXECUTABLE_ASK_ONLY_PASSIVE_PRIOR_UNAVAILABLE: "
+                            f"taker depth constrained status={best_ask_sweep.depth_status} "
+                            f"visible_best_ask_usd={float(best_ask_sweep.gross_notional):.6f} "
+                            f"required_usd={size_at_depth_limit:.6f}"
+                        )
                     raise ValueError(
-                        "EXECUTABLE_ASK_ONLY_PASSIVE_PRIOR_UNAVAILABLE: "
-                        f"taker depth constrained status={best_ask_sweep.depth_status} "
+                        "EXECUTABLE_TAKER_DEPTH_CONSTRAINED: "
                         f"visible_best_ask_usd={float(best_ask_sweep.gross_notional):.6f} "
                         f"required_usd={size_at_depth_limit:.6f}"
                     )
-                raise ValueError(
-                    "EXECUTABLE_TAKER_DEPTH_CONSTRAINED: "
-                    f"visible_best_ask_usd={float(best_ask_sweep.gross_notional):.6f} "
-                    f"required_usd={size_at_depth_limit:.6f}"
-                )
-            if direction.startswith("buy_"):
-                marketable_buy_submitted_shares = _quantize_submit_shares(
-                    str(direction),
-                    max(best_ask_sweep.filled_shares, snapshot.min_order_size),
-                    final_limit_price=depth_sweep_limit_decimal,
-                    order_type="FOK",
-                )
-                marketable_buy_submitted_notional_usd = (
-                    marketable_buy_submitted_shares * depth_sweep_limit_decimal
-                )
-            if (
-                marketable_buy_submitted_notional_usd is not None
-                and marketable_buy_submitted_notional_usd < marketable_buy_min_notional_usd
-            ):
-                if ask_only_entry_book:
-                    raise ValueError(
-                        "EXECUTABLE_ASK_ONLY_MARKETABLE_BUY_BELOW_MIN_NOTIONAL_NO_PASSIVE_BID: "
-                        f"required_usd={float(marketable_buy_submitted_notional_usd):.6f} "
-                        f"marketable_min_usd={float(marketable_buy_min_notional_usd):.6f} "
-                        f"best_ask={best_ask_float:.6f}"
+                if direction.startswith("buy_"):
+                    marketable_buy_submitted_shares = _quantize_submit_shares(
+                        str(direction),
+                        max(best_ask_sweep.filled_shares, snapshot.min_order_size),
+                        final_limit_price=depth_sweep_limit_decimal,
+                        order_type="FOK",
                     )
-                passive_cap = _floor_to_tick(
-                    min(
-                        snapshot_limit_decimal,
-                        best_ask - tick_size_decimal,
-                        positive_edge_cap_decimal,
-                    ),
-                    tick_size_decimal,
-                )
+                    marketable_buy_submitted_notional_usd = (
+                        marketable_buy_submitted_shares * depth_sweep_limit_decimal
+                    )
                 if (
-                    best_bid is not None
-                    and passive_cap < best_bid <= positive_edge_cap_decimal
-                    and best_bid < best_ask
+                    marketable_buy_submitted_notional_usd is not None
+                    and marketable_buy_submitted_notional_usd < marketable_buy_min_notional_usd
                 ):
-                    passive_cap = best_bid
-                if passive_cap <= Decimal("0") or passive_cap >= best_ask:
-                    raise ValueError(
-                        "EXECUTABLE_MARKETABLE_BUY_BELOW_MIN_NOTIONAL_NO_PASSIVE_PRICE: "
-                        f"required_usd={float(marketable_buy_submitted_notional_usd):.6f} "
-                        f"marketable_min_usd={float(marketable_buy_min_notional_usd):.6f} "
-                        f"best_bid={float(best_bid):.6f} best_ask={best_ask_float:.6f}"
+                    if ask_only_entry_book:
+                        raise ValueError(
+                            "EXECUTABLE_ASK_ONLY_MARKETABLE_BUY_BELOW_MIN_NOTIONAL_NO_PASSIVE_BID: "
+                            f"required_usd={float(marketable_buy_submitted_notional_usd):.6f} "
+                            f"marketable_min_usd={float(marketable_buy_min_notional_usd):.6f} "
+                            f"best_ask={best_ask_float:.6f}"
+                        )
+                    passive_cap = _floor_to_tick(
+                        min(
+                            snapshot_limit_decimal,
+                            best_ask - tick_size_decimal,
+                            positive_edge_cap_decimal,
+                        ),
+                        tick_size_decimal,
                     )
-                snapshot_limit_decimal = passive_cap
-                snapshot_limit_price = float(snapshot_limit_decimal)
-                final_price = snapshot_limit_price
-                corrected_candidate_price = snapshot_limit_price
-                corrected_candidate_expected_fill = snapshot_limit_price
-                corrected_candidate_size = repriced_size_at_snapshot_vwmp
-                repriced_size = repriced_size_at_snapshot_vwmp
-                marketable_buy_below_venue_min = True
-                passive_maker_repositioned = True
-                passive_maker_reposition_reason = (
-                    "marketable_buy_notional_below_venue_min_repositioned_passive"
-                )
-            else:
-                final_best_ask = depth_sweep_limit_float
-                final_price = depth_sweep_limit_float
-                repriced_size = size_at_depth_limit
-                corrected_candidate_price = depth_sweep_limit_float
-                corrected_candidate_expected_fill = float(best_ask_sweep.average_price or best_ask_float)
-                corrected_candidate_size = size_at_depth_limit
+                    if (
+                        best_bid is not None
+                        and passive_cap < best_bid <= positive_edge_cap_decimal
+                        and best_bid < best_ask
+                    ):
+                        passive_cap = best_bid
+                    if passive_cap <= Decimal("0") or passive_cap >= best_ask:
+                        raise ValueError(
+                            "EXECUTABLE_MARKETABLE_BUY_BELOW_MIN_NOTIONAL_NO_PASSIVE_PRICE: "
+                            f"required_usd={float(marketable_buy_submitted_notional_usd):.6f} "
+                            f"marketable_min_usd={float(marketable_buy_min_notional_usd):.6f} "
+                            f"best_bid={float(best_bid):.6f} best_ask={best_ask_float:.6f}"
+                        )
+                    snapshot_limit_decimal = passive_cap
+                    snapshot_limit_price = float(snapshot_limit_decimal)
+                    final_price = snapshot_limit_price
+                    corrected_candidate_price = snapshot_limit_price
+                    corrected_candidate_expected_fill = snapshot_limit_price
+                    corrected_candidate_size = repriced_size_at_snapshot_vwmp
+                    repriced_size = repriced_size_at_snapshot_vwmp
+                    marketable_buy_below_venue_min = True
+                    passive_maker_repositioned = True
+                    passive_maker_reposition_reason = (
+                        "marketable_buy_notional_below_venue_min_repositioned_passive"
+                    )
+                else:
+                    final_best_ask = depth_sweep_limit_float
+                    final_price = depth_sweep_limit_float
+                    repriced_size = size_at_depth_limit
+                    corrected_candidate_price = depth_sweep_limit_float
+                    corrected_candidate_expected_fill = float(best_ask_sweep.average_price or best_ask_float)
+                    corrected_candidate_size = size_at_depth_limit
 
     if ask_only_entry_book and final_best_ask is None:
         raise ValueError(
@@ -2102,6 +2106,698 @@ def _record_final_intent_frontier(
     }
     frontier.setdefault("attempts", []).append(attempt)
     return attempt
+
+
+def _edli_context_value(context: dict | None, key: str) -> str:
+    if not isinstance(context, dict):
+        return ""
+    return str(context.get(key) or "").strip()
+
+
+def _edli_market_matches_context(market: dict, context: dict | None) -> bool:
+    if not context:
+        return True
+    city_name = str(
+        getattr(market.get("city"), "name", "")
+        or market.get("city_name")
+        or market.get("city")
+        or ""
+    )
+    expected_city = _edli_context_value(context, "city")
+    if expected_city and city_name != expected_city:
+        return False
+    expected_date = _edli_context_value(context, "target_date")
+    if expected_date and str(market.get("target_date") or "") != expected_date:
+        return False
+    expected_metric = _edli_context_value(context, "metric")
+    if expected_metric and str(market.get("temperature_metric") or "") != expected_metric:
+        return False
+    expected_condition = _edli_context_value(context, "condition_id")
+    if expected_condition:
+        condition = str(market.get("condition_id") or market.get("conditionId") or "")
+        if not condition or condition != expected_condition:
+            return False
+    expected_token = _edli_context_value(context, "token_id")
+    if expected_token:
+        outcomes = market.get("outcomes") or []
+        tokens = {
+            str(outcome.get("token_id") or outcome.get("asset_id") or "")
+            for outcome in outcomes
+            if isinstance(outcome, dict)
+        }
+        no_tokens = {
+            str(outcome.get("no_token_id") or "")
+            for outcome in outcomes
+            if isinstance(outcome, dict)
+        }
+        if expected_token not in tokens and expected_token not in no_tokens:
+            return False
+    return True
+
+
+def _filter_markets_for_edli_event(markets: list[dict], context: dict | None, summary: dict) -> list[dict]:
+    if not context:
+        return markets
+    before = len(markets)
+    filtered = [market for market in markets if _edli_market_matches_context(market, context)]
+    summary["edli_event_id"] = _edli_context_value(context, "event_id")
+    summary["causal_snapshot_id"] = _edli_context_value(context, "causal_snapshot_id")
+    summary["edli_event_market_filter_before"] = before
+    summary["edli_event_market_filter_after"] = len(filtered)
+    if not filtered:
+        summary["edli_submit_reason"] = "EDLI_EVENT_NO_MATCHING_MARKET"
+    return filtered
+
+
+def _stamp_edli_context_on_candidate(candidate: Any, context: dict | None) -> None:
+    if not context:
+        return
+    setattr(candidate, "edli_event_id", _edli_context_value(context, "event_id"))
+    setattr(candidate, "edli_causal_snapshot_id", _edli_context_value(context, "causal_snapshot_id"))
+    setattr(candidate, "edli_event_context", dict(context))
+
+
+def _filter_decisions_for_edli_event(decisions: list[Any], context: dict | None, summary: dict) -> list[Any]:
+    if not context:
+        return decisions
+    event_type = _edli_context_value(context, "event_type")
+    causal_snapshot_id = _edli_context_value(context, "causal_snapshot_id")
+    if event_type != "FORECAST_SNAPSHOT_READY" or not causal_snapshot_id:
+        return decisions
+    filtered = [
+        decision
+        for decision in decisions
+        if str(getattr(decision, "decision_snapshot_id", "") or "") == causal_snapshot_id
+    ]
+    summary["edli_forecast_decision_filter_before"] = len(decisions)
+    summary["edli_forecast_decision_filter_after"] = len(filtered)
+    if not filtered:
+        summary["edli_submit_reason"] = "EDLI_FORECAST_CAUSAL_SNAPSHOT_MISMATCH"
+    return filtered
+
+
+def _edli_trade_score_from_decision(decision: Any, final_intent: Any, reprice_payload: dict) -> tuple[bool, float, dict]:
+    from src.strategy.live_inference.trade_score import TradeScoreInputs, robust_trade_score
+
+    edge = getattr(decision, "edge", None)
+    if edge is None or final_intent is None:
+        return False, 0.0, {}
+    validations = {str(value) for value in (getattr(decision, "applied_validations", None) or [])}
+    if "edli_live_bin_inference_applied" not in validations:
+        return False, 0.0, {"blocked": "EDLI_LIVE_BIN_INFERENCE_MISSING"}
+    passive_context = getattr(final_intent, "passive_maker_context", None)
+    if passive_context is not None:
+        p_fill_lcb = float(getattr(passive_context, "expected_fill_probability", 0.0) or 0.0)
+        adverse_selection = float(getattr(passive_context, "adverse_selection_score", 0.0) or 0.0)
+    else:
+        p_fill_lcb = 1.0
+        adverse_selection = 0.0
+    inference_proof = getattr(decision, "edli_live_inference_proof", None)
+    if not isinstance(inference_proof, dict) or "p_live_selected" not in inference_proof:
+        return False, 0.0, {"blocked": "EDLI_LIVE_BIN_INFERENCE_PROOF_MISSING"}
+    q_5pct = float(inference_proof.get("q_5pct", getattr(edge, "ci_lower", 0.0)) or 0.0)
+    q_posterior = float(inference_proof.get("p_live_selected") or 0.0)
+    c_fee_adjusted = float(getattr(final_intent, "fee_adjusted_execution_price", 0.0) or 0.0)
+    c_stress = float(
+        reprice_payload.get("corrected_candidate_limit_price")
+        or getattr(final_intent, "final_limit_price", c_fee_adjusted)
+        or c_fee_adjusted
+    )
+    lambda_source = float(reprice_payload.get("lambda_source") or 0.0)
+    lambda_tail = float(reprice_payload.get("lambda_tail") or 0.0)
+    lambda_corr = float(reprice_payload.get("lambda_corr") or 0.0)
+    lambda_adverse = max(0.0, adverse_selection)
+    lambda_edge = lambda_source + lambda_tail + lambda_corr + lambda_adverse
+    lambda_stress = float(
+        reprice_payload.get("lambda_stress")
+        or max(lambda_edge, float(reprice_payload.get("best_ask_slippage_bps") or 0.0) / 10000.0)
+    )
+    inputs = TradeScoreInputs(
+        p_fill_lcb=p_fill_lcb,
+        q_5pct=q_5pct,
+        q_posterior=q_posterior,
+        c_95pct=c_fee_adjusted,
+        c_stress=c_stress,
+        lambda_edge=lambda_edge,
+        lambda_stress=lambda_stress,
+    )
+    score = robust_trade_score(inputs)
+    return score > 0.0, score, {
+        "p_fill_lcb": p_fill_lcb,
+        "q_5pct": q_5pct,
+        "q_posterior": q_posterior,
+        "c_95pct": c_fee_adjusted,
+        "c_stress": c_stress,
+        "lambda_source": lambda_source,
+        "lambda_tail": lambda_tail,
+        "lambda_corr": lambda_corr,
+        "lambda_adverse": lambda_adverse,
+        "lambda_edge": lambda_edge,
+        "lambda_stress": lambda_stress,
+    }
+
+
+def _edli_metric_value(candidate: Any) -> str:
+    metric = getattr(candidate, "temperature_metric", "")
+    return str(getattr(metric, "value", metric) or "").strip()
+
+
+def _edli_canonical_fdr_family_id(candidate: Any, decision: Any) -> str:
+    try:
+        from src.strategy.selection_family import make_hypothesis_family_id
+
+        return make_hypothesis_family_id(
+            cycle_mode=str(getattr(candidate, "discovery_mode", "") or "unknown"),
+            city=str(getattr(getattr(candidate, "city", None), "name", "") or ""),
+            target_date=str(getattr(candidate, "target_date", "") or ""),
+            temperature_metric=_edli_metric_value(candidate),
+            discovery_mode=str(getattr(candidate, "discovery_mode", "") or ""),
+            decision_snapshot_id=str(getattr(decision, "decision_snapshot_id", "") or ""),
+        )
+    except Exception:
+        return ""
+
+
+def _edli_durable_fdr_proof(conn: Any, *, family_id: str, decision: Any) -> tuple[bool | None, int]:
+    """Return durable full-family proof when the live DB tables are available.
+
+    ``None`` means the caller did not provide a DB/table surface, so tests and
+    synthetic callers fall back to in-memory decision proof. ``False`` means the
+    live surface exists but does not prove the family denominator.
+    """
+
+    if conn is None:
+        return False, 0
+    if not family_id:
+        return False, 0
+    family_table = _edli_table_ref(conn, "selection_family_fact")
+    hypothesis_table = _edli_table_ref(conn, "selection_hypothesis_fact")
+    if family_table is None or hypothesis_table is None:
+        return False, 0
+    decision_snapshot_id = str(getattr(decision, "decision_snapshot_id", "") or "")
+    family_row = conn.execute(
+        f"""
+        SELECT family_id, meta_json
+        FROM {family_table}
+        WHERE family_id = ?
+          AND COALESCE(decision_snapshot_id, '') = ?
+        """,
+        (family_id, decision_snapshot_id),
+    ).fetchone()
+    if family_row is None:
+        return False, 0
+    family_meta_raw = family_row["meta_json"] if hasattr(family_row, "keys") else family_row[1]
+    try:
+        family_meta = json.loads(family_meta_raw or "{}")
+    except (TypeError, ValueError):
+        family_meta = {}
+    expected_tested = int(family_meta.get("tested_hypotheses") or 0)
+    expected_selected = int(family_meta.get("selected_post_fdr") or 0)
+    family_edli = family_meta.get("edli_live_inference")
+    decision_edli = getattr(decision, "edli_live_inference_proof", None)
+    if isinstance(decision_edli, dict):
+        if not isinstance(family_edli, dict):
+            return False, 0
+        if str(family_edli.get("family_hash") or "") != str(decision_edli.get("family_hash") or ""):
+            return False, 0
+        if family_edli.get("applied_before_fdr") is not True:
+            return False, 0
+    row = conn.execute(
+        f"""
+        SELECT
+            COUNT(*) AS tested_count,
+            SUM(CASE WHEN selected_post_fdr = 1 THEN 1 ELSE 0 END) AS selected_count
+        FROM {hypothesis_table}
+        WHERE family_id = ?
+          AND tested = 1
+        """,
+        (family_id,),
+    ).fetchone()
+    tested_count = int(row["tested_count"] if hasattr(row, "keys") else row[0]) if row is not None else 0
+    selected_count = int(row["selected_count"] if hasattr(row, "keys") else row[1] or 0) if row is not None else 0
+    edge = getattr(decision, "edge", None)
+    edge_label = str(getattr(getattr(edge, "bin", None), "label", "") or "")
+    edge_direction = str(getattr(edge, "direction", "") or "")
+    selected_edge_row = None
+    if edge_label and edge_direction:
+        selected_edge_row = conn.execute(
+            f"""
+            SELECT 1
+            FROM {hypothesis_table}
+            WHERE family_id = ?
+              AND range_label = ?
+              AND direction = ?
+              AND tested = 1
+              AND selected_post_fdr = 1
+            LIMIT 1
+            """,
+            (family_id, edge_label, edge_direction),
+        ).fetchone()
+        if selected_edge_row is not None and isinstance(decision_edli, dict):
+            edge_meta = conn.execute(
+                f"""
+                SELECT meta_json
+                FROM {hypothesis_table}
+                WHERE family_id = ?
+                  AND range_label = ?
+                  AND direction = ?
+                  AND tested = 1
+                  AND selected_post_fdr = 1
+                LIMIT 1
+                """,
+                (family_id, edge_label, edge_direction),
+            ).fetchone()
+            try:
+                raw_meta = edge_meta["meta_json"] if hasattr(edge_meta, "keys") else edge_meta[0]
+                hypothesis_meta = json.loads(raw_meta or "{}")
+            except Exception:
+                hypothesis_meta = {}
+            if str(hypothesis_meta.get("edli_live_inference_family_hash") or "") != str(
+                decision_edli.get("family_hash") or ""
+            ):
+                selected_edge_row = None
+    expected_count_ok = expected_tested > 0 and tested_count == expected_tested
+    selected_count_ok = expected_selected > 0 and selected_count == expected_selected
+    selected_edge_ok = selected_edge_row is not None
+    return expected_count_ok and selected_count_ok and selected_edge_ok, tested_count
+
+
+def _stamp_edli_submit_summary(
+    summary: dict,
+    *,
+    context: dict | None,
+    conn: Any | None = None,
+    candidate: Any,
+    decision: Any,
+    snapshot_fields: dict,
+    final_intent: Any,
+    reprice_payload: dict,
+    trade_score: float,
+    trade_score_inputs: dict,
+) -> None:
+    if not context:
+        return
+    tokens = getattr(decision, "tokens", {}) if isinstance(getattr(decision, "tokens", None), dict) else {}
+    edge = getattr(decision, "edge", None)
+    summary["edli_event_id"] = _edli_context_value(context, "event_id")
+    summary["causal_snapshot_id"] = _edli_context_value(context, "causal_snapshot_id")
+    summary["city"] = str(getattr(getattr(candidate, "city", None), "name", "") or "")
+    summary["target_date"] = str(getattr(candidate, "target_date", "") or "")
+    summary["metric"] = _edli_metric_value(candidate)
+    summary["condition_id"] = str(snapshot_fields.get("condition_id") or tokens.get("condition_id") or "")
+    summary["token_id"] = str(getattr(final_intent, "selected_token_id", "") or "")
+    summary["executable_snapshot_id"] = str(getattr(final_intent, "snapshot_id", "") or snapshot_fields.get("executable_snapshot_id") or "")
+    summary["edli_final_intent_id"] = str(getattr(final_intent, "hypothesis_id", "") or "")
+    summary["edli_submit_reason"] = "event_bound_final_intent_submit"
+    summary["edli_trade_score"] = float(trade_score)
+    summary["edli_trade_score_inputs"] = dict(trade_score_inputs)
+    summary["edli_trade_score_positive"] = trade_score > 0.0
+    fdr_family_size = int(getattr(decision, "fdr_family_size", 0) or 0)
+    canonical_family_id = _edli_canonical_fdr_family_id(candidate, decision)
+    durable_fdr_pass, durable_hypothesis_count = _edli_durable_fdr_proof(
+        conn,
+        family_id=canonical_family_id,
+        decision=decision,
+    )
+    summary["edli_fdr_family_id"] = canonical_family_id or str(getattr(final_intent, "hypothesis_id", "") or "").rsplit(":", 1)[0]
+    if durable_fdr_pass is None:
+        summary["edli_fdr_hypothesis_count"] = fdr_family_size
+        summary["edli_fdr_pass"] = fdr_family_size > 0 and bool(getattr(decision, "fdr_fallback_fired", False)) is False
+    else:
+        summary["edli_fdr_hypothesis_count"] = durable_hypothesis_count
+        summary["edli_fdr_pass"] = durable_fdr_pass and bool(getattr(decision, "fdr_fallback_fired", False)) is False
+    kelly_price_proof = getattr(decision, "kelly_execution_price", None)
+    summary["edli_kelly_pass"] = (
+        float(getattr(decision, "size_usd", 0.0) or 0.0) > 0.0
+        and kelly_price_proof is not None
+        and kelly_price_proof.__class__.__name__ == "ExecutionPrice"
+        and bool(getattr(kelly_price_proof, "fee_deducted", False))
+        and bool(getattr(decision, "edli_kelly_cost_basis_id", ""))
+        and getattr(decision, "edli_kelly_cost_basis_id", "") == str(getattr(final_intent, "cost_basis_id", "") or "")
+    )
+    summary["edli_kelly_execution_price_type"] = "" if kelly_price_proof is None else kelly_price_proof.__class__.__name__
+    summary["edli_kelly_price_fee_deducted"] = bool(getattr(kelly_price_proof, "fee_deducted", False))
+    summary["edli_kelly_size_usd"] = float(getattr(decision, "size_usd", 0.0) or 0.0)
+    summary["edli_kelly_cost_basis_id"] = str(getattr(decision, "edli_kelly_cost_basis_id", "") or "")
+    summary["edli_candidate_binding"] = {
+        "city": summary["city"],
+        "target_date": summary["target_date"],
+        "metric": summary["metric"],
+        "bin": str(getattr(getattr(edge, "bin", None), "label", "") or ""),
+        "direction": str(getattr(edge, "direction", "") or ""),
+        "decision_id": str(getattr(decision, "decision_id", "") or ""),
+        "final_intent_id": str(getattr(final_intent, "hypothesis_id", "") or ""),
+        "cost_basis_id": str(getattr(final_intent, "cost_basis_id", "") or ""),
+    }
+
+
+def _assert_edli_pre_submit_fdr_proof(*, conn: Any, candidate: Any, decision: Any) -> tuple[str, int]:
+    family_id = _edli_canonical_fdr_family_id(candidate, decision)
+    durable_fdr_pass, durable_hypothesis_count = _edli_durable_fdr_proof(
+        conn,
+        family_id=family_id,
+        decision=decision,
+    )
+    if not durable_fdr_pass:
+        raise ValueError(
+            "EDLI_FDR_PROOF_MISSING_OR_INCOMPLETE:"
+            f"family_id={family_id or 'missing'} count={durable_hypothesis_count}"
+        )
+    setattr(decision, "edli_pre_submit_fdr_family_id", family_id)
+    setattr(decision, "edli_pre_submit_fdr_hypothesis_count", durable_hypothesis_count)
+    return family_id, durable_hypothesis_count
+
+
+def _edli_conn_has_table(conn, table_name: str) -> bool:
+    try:
+        return conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name = ?",
+            (table_name,),
+        ).fetchone() is not None
+    except Exception:
+        return False
+
+
+def _edli_attached_table_exists(conn: Any, schema: str, table_name: str) -> bool:
+    if schema != "world":
+        return False
+    try:
+        return conn.execute(
+            f"SELECT 1 FROM {schema}.sqlite_master WHERE type='table' AND name = ?",
+            (table_name,),
+        ).fetchone() is not None
+    except Exception:
+        return False
+
+
+def _edli_table_ref(conn: Any, table_name: str) -> str | None:
+    if table_name not in {"selection_family_fact", "selection_hypothesis_fact"}:
+        return None
+    try:
+        attached = {str(row[1]) for row in conn.execute("PRAGMA database_list").fetchall()}
+        if "world" in attached and _edli_attached_table_exists(conn, "world", table_name):
+            return f"world.{table_name}"
+    except Exception:
+        pass
+    if _edli_conn_has_table(conn, table_name):
+        return table_name
+    return None
+
+
+def _mark_edli_live_inference_family_applied(decisions: list[Any], context: dict | None, *, candidate: Any | None = None) -> None:
+    if not context or not decisions:
+        return
+    preselection_proof = getattr(candidate, "edli_live_inference_family_proof", None) if candidate is not None else None
+    if isinstance(preselection_proof, dict):
+        for decision in decisions:
+            _stamp_edli_live_inference_preselection_proof(decision, preselection_proof)
+        return
+    state = _edli_family_state_from_decisions(decisions)
+    event_type = _edli_context_value(context, "event_type")
+    context_payload = context.get("payload") if isinstance(context.get("payload"), dict) else {}
+    if event_type == "DAY0_EXTREME_UPDATED":
+        from src.strategy.live_inference.state import apply_day0_mask
+
+        state = apply_day0_mask(state, _edli_day0_family_mask(state.probabilities, context_payload))
+    elif event_type == "FORECAST_SNAPSHOT_READY":
+        from src.strategy.live_inference.bayesian_factors import assert_forecast_complete_for_live
+
+        assert_forecast_complete_for_live(str(context_payload.get("completeness_status") or ""))
+        causal_snapshot_id = _edli_context_value(context, "causal_snapshot_id")
+        payload_snapshot_id = str(context_payload.get("snapshot_id") or "")
+        if not causal_snapshot_id or payload_snapshot_id != causal_snapshot_id:
+            raise ValueError("EDLI_FORECAST_CAUSAL_SNAPSHOT_PROOF_MISSING")
+        for decision in decisions:
+            if str(getattr(decision, "decision_snapshot_id", "") or "") != causal_snapshot_id:
+                raise ValueError("EDLI_FORECAST_CAUSAL_SNAPSHOT_PROOF_MISSING")
+        # Forecast family state is already the evaluator posterior from the causal
+        # snapshot. EDLI may prove and carry it forward, but must not reapply the
+        # same forecast innovation as another LLR.
+    for decision in decisions:
+        _mark_edli_live_inference_applied(decision, context, family_state=state)
+
+
+def _stamp_edli_live_inference_preselection_proof(decision: Any, family_proof: dict[str, Any]) -> None:
+    validations = list(getattr(decision, "applied_validations", None) or [])
+    setattr(decision, "applied_validations", validations)
+    edge = getattr(decision, "edge", None)
+    payload = dict(family_proof)
+    if edge is not None:
+        direction = str(getattr(edge, "direction", "") or "")
+        p_live_selected = _bounded_probability(float(getattr(edge, "p_posterior", 0.0) or 0.0), fallback=0.5)
+        p_live_yes = 1.0 - p_live_selected if direction in {"buy_no", "sell_no"} else p_live_selected
+        q_floor = _bounded_probability(float(getattr(edge, "ci_lower", p_live_selected) or p_live_selected), fallback=p_live_selected)
+        payload.update(
+            {
+                "q_posterior": p_live_selected,
+                "q_5pct": q_floor,
+                "p_live_yes": p_live_yes,
+                "p_live_selected": p_live_selected,
+                "bin": str(getattr(getattr(edge, "bin", None), "label", "") or ""),
+                "direction": direction,
+                "sizing_probability_overridden": False,
+                "preselection_probability_authority": True,
+            }
+        )
+    if "edli_live_bin_inference_applied" not in validations:
+        validations.append("edli_live_bin_inference_applied")
+    setattr(decision, "applied_validations", validations)
+    setattr(decision, "edli_live_inference_proof", payload)
+
+
+def _edli_family_state_from_decisions(decisions: list[Any]):
+    from src.strategy.live_inference.state import LiveBinState
+
+    values: dict[str, float] = {}
+    for decision in decisions:
+        edge = getattr(decision, "edge", None)
+        label = str(getattr(getattr(edge, "bin", None), "label", "") or "")
+        if not label or label in values:
+            continue
+        values[label] = _edli_edge_yes_probability(edge)
+    if not values:
+        values["selected"] = 1.0
+    return LiveBinState(values, datetime.now(timezone.utc)).normalized()
+
+
+def _edli_edge_yes_probability(edge: Any) -> float:
+    probability = _bounded_probability(float(getattr(edge, "p_posterior", 0.5) or 0.5), fallback=0.5)
+    direction = str(getattr(edge, "direction", "") or "")
+    return 1.0 - probability if direction in {"buy_no", "sell_no"} else probability
+
+
+def _edli_day0_family_mask(probabilities: dict[str, float], payload: dict[str, Any]) -> dict[str, float]:
+    metric = str(payload.get("metric") or "").lower()
+    try:
+        rounded = int(payload.get("rounded_value"))
+    except (TypeError, ValueError):
+        return {label: 1.0 for label in probabilities}
+    mask: dict[str, float] = {}
+    for label in probabilities:
+        low, high = _edli_parse_bin_bounds(label)
+        mask[label] = _edli_day0_bin_mask(metric=metric, rounded=rounded, low=low, high=high)
+    return mask
+
+
+def _mark_edli_live_inference_applied(decision: Any, context: dict | None, *, family_state: Any | None = None) -> None:
+    if not context:
+        return
+    from src.strategy.live_inference.bayesian_factors import (
+        apply_capped_llr,
+        assert_forecast_complete_for_live,
+    )
+    from src.strategy.live_inference.state import LiveBinState, apply_day0_mask
+
+    validations = list(getattr(decision, "applied_validations", None) or [])
+    setattr(decision, "applied_validations", validations)
+    payload: dict[str, Any] = {}
+    event_type = _edli_context_value(context, "event_type")
+    context_payload = context.get("payload") if isinstance(context.get("payload"), dict) else {}
+    edge = getattr(decision, "edge", None)
+    bin_label = str(getattr(getattr(edge, "bin", None), "label", "") or "selected")
+    q_posterior = _bounded_probability(float(getattr(edge, "p_posterior", 0.0) or 0.0), fallback=0.5)
+    q_floor = _bounded_probability(float(getattr(edge, "ci_lower", q_posterior) or q_posterior), fallback=q_posterior)
+    prior = _bounded_probability(
+        float(
+            getattr(edge, "p_market", None)
+            or getattr(edge, "market_probability", None)
+            or getattr(edge, "p_prior", None)
+            or 0.5
+        ),
+        fallback=0.5,
+    )
+    state = family_state or LiveBinState(
+        {bin_label: prior, "__edli_other__": max(1e-9, 1.0 - prior)},
+        datetime.now(timezone.utc),
+    ).normalized()
+    if event_type == "DAY0_EXTREME_UPDATED":
+        mask = _edli_day0_family_mask(state.probabilities, context_payload)
+        if family_state is None:
+            state = apply_day0_mask(state, mask)
+        payload["factor"] = "day0_absorbing_boundary"
+        payload["boundary_applied"] = True
+        payload["day0_mask"] = mask
+    elif event_type == "FORECAST_SNAPSHOT_READY":
+        assert_forecast_complete_for_live(str(context_payload.get("completeness_status") or ""))
+        causal_snapshot_id = _edli_context_value(context, "causal_snapshot_id")
+        payload_snapshot_id = str(context_payload.get("snapshot_id") or "")
+        decision_snapshot_id = str(getattr(decision, "decision_snapshot_id", "") or "")
+        if not causal_snapshot_id or decision_snapshot_id != causal_snapshot_id or payload_snapshot_id != causal_snapshot_id:
+            raise ValueError("EDLI_FORECAST_CAUSAL_SNAPSHOT_PROOF_MISSING")
+        if family_state is None:
+            llr = _logit(q_posterior) - _logit(prior)
+            state = apply_capped_llr(
+                state,
+                {bin_label: llr, "__edli_other__": -llr},
+                llr_cap=1.0,
+            )
+        payload["factor"] = "forecast_complete_causal_snapshot" if family_state is not None else "forecast_complete_capped_llr"
+        payload["llr_cap_applied"] = family_state is None
+        payload["llr_single_application"] = family_state is not None
+        payload["source_run_id"] = str(context_payload.get("source_run_id") or "")
+        payload["snapshot_hash"] = str(context_payload.get("snapshot_hash") or "")
+        payload["causal_snapshot_id"] = causal_snapshot_id
+    else:
+        payload["factor"] = "event_prior"
+    if edge is not None:
+        p_live_yes = float(state.probabilities.get(bin_label, 0.0))
+        direction = str(getattr(edge, "direction", "") or "")
+        p_live_selected = 1.0 - p_live_yes if direction in {"buy_no", "sell_no"} else p_live_yes
+        payload["q_posterior"] = float(getattr(edge, "p_posterior", 0.0) or 0.0)
+        payload["q_5pct"] = q_floor
+        payload["p_live_yes"] = p_live_yes
+        payload["p_live_selected"] = p_live_selected
+        payload["p_live_other"] = float(state.probabilities.get("__edli_other__", 0.0))
+        payload["bin"] = bin_label
+        payload["direction"] = direction
+        payload["pre_edli_posterior"] = float(getattr(edge, "p_posterior", 0.0) or 0.0)
+        _edli_apply_p_live_to_decision_edge(
+            decision,
+            p_live_selected=p_live_selected,
+            q_lcb=float(payload["q_5pct"]),
+        )
+        payload["sizing_probability_overridden"] = True
+    if "edli_live_bin_inference_applied" not in validations:
+        validations.append("edli_live_bin_inference_applied")
+    setattr(decision, "applied_validations", validations)
+    setattr(decision, "edli_live_inference_proof", payload)
+
+
+def _bounded_probability(value: float, *, fallback: float) -> float:
+    if not math.isfinite(value) or value <= 0.0 or value >= 1.0:
+        return max(1e-9, min(1.0 - 1e-9, fallback))
+    return max(1e-9, min(1.0 - 1e-9, value))
+
+
+def _logit(value: float) -> float:
+    bounded = _bounded_probability(value, fallback=0.5)
+    return math.log(bounded / (1.0 - bounded))
+
+
+def _edli_day0_mask_for_edge(edge: Any, payload: dict[str, Any]) -> dict[str, float]:
+    bin_obj = getattr(edge, "bin", None)
+    bin_label = str(getattr(bin_obj, "label", "") or "selected")
+    metric = str(payload.get("metric") or "").lower()
+    try:
+        rounded = int(payload.get("rounded_value"))
+    except (TypeError, ValueError):
+        return {bin_label: 1.0, "__edli_other__": 1.0}
+    low = getattr(bin_obj, "low", None)
+    high = getattr(bin_obj, "high", None)
+    low_value = None if low is None else float(low)
+    high_value = None if high is None else float(high)
+    selected_mask = _edli_day0_bin_mask(metric=metric, rounded=rounded, low=low_value, high=high_value)
+    if selected_mask == 0.0:
+        return {bin_label: 0.0, "__edli_other__": 1.0}
+    if high_value is None or low_value is None:
+        return {bin_label: selected_mask, "__edli_other__": 1.0 - selected_mask}
+    return {bin_label: 1.0, "__edli_other__": 1.0}
+
+
+def _edli_day0_bin_mask(*, metric: str, rounded: int, low: float | None, high: float | None) -> float:
+    if metric == "high":
+        if high is None and low is not None and rounded >= low:
+            return 1.0
+        if high is not None and rounded > high:
+            return 0.0
+    if metric == "low":
+        if low is None and high is not None and rounded <= high:
+            return 1.0
+        if low is not None and rounded < low:
+            return 0.0
+    return 1.0
+
+
+def _edli_parse_bin_bounds(label: str) -> tuple[float | None, float | None]:
+    import re
+
+    text = str(label or "")
+    numbers = [float(item) for item in re.findall(r"(?<![\d.])-?\d+(?:\.\d+)?", text)]
+    lower_text = text.lower()
+    if not numbers:
+        return None, None
+    if any(marker in lower_text for marker in ("+", "or higher", "and above", "or more")):
+        return numbers[0], None
+    if any(marker in lower_text for marker in ("or below", "or lower", "and below", "or less")):
+        return None, numbers[0]
+    if len(numbers) >= 2:
+        return numbers[0], numbers[1]
+    return numbers[0], numbers[0]
+
+
+def _edli_apply_p_live_to_decision_edge(decision: Any, *, p_live_selected: float, q_lcb: float) -> None:
+    """Make downstream repricing/Kelly consume EDLI event-time probability."""
+
+    edge = getattr(decision, "edge", None)
+    if edge is None:
+        return
+    p_live = max(0.0, min(1.0, float(p_live_selected)))
+    q_floor = max(0.0, min(1.0, float(q_lcb)))
+    entry_price = float(getattr(edge, "entry_price", 0.0) or 0.0)
+    updates = {
+        "p_posterior": p_live,
+        "ci_lower": q_floor,
+        "edge": p_live - entry_price,
+        "forward_edge": p_live - entry_price,
+    }
+    try:
+        decision.edge = replace(edge, **{key: value for key, value in updates.items() if hasattr(edge, key)})
+    except Exception:
+        for key, value in updates.items():
+            if hasattr(edge, key):
+                try:
+                    setattr(edge, key, value)
+                except Exception:
+                    pass
+
+
+def _stamp_edli_kelly_execution_price(decision: Any, final_intent: Any, reprice_payload: dict) -> None:
+    from src.contracts.execution_price import ExecutionPrice
+
+    shadow = reprice_payload.get("corrected_pricing_shadow")
+    if not isinstance(shadow, dict):
+        raise ValueError("EDLI_KELLY_EXECUTION_PRICE_PROOF_MISSING")
+    final_cost_basis_id = str(getattr(final_intent, "cost_basis_id", "") or "")
+    shadow_cost_basis_id = str(shadow.get("cost_basis_id") or "")
+    if not final_cost_basis_id or final_cost_basis_id != shadow_cost_basis_id:
+        raise ValueError("EDLI_KELLY_COST_BASIS_MISMATCH")
+    final_fee_price = Decimal(str(getattr(final_intent, "fee_adjusted_execution_price")))
+    shadow_fee_price = Decimal(str(shadow.get("candidate_fee_adjusted_execution_price")))
+    if final_fee_price != shadow_fee_price:
+        raise ValueError("EDLI_KELLY_EXECUTION_PRICE_MISMATCH")
+    repriced_size = Decimal(str(reprice_payload.get("repriced_size_usd")))
+    decision_size = Decimal(str(getattr(decision, "size_usd", "")))
+    if repriced_size != decision_size:
+        raise ValueError("EDLI_KELLY_SIZE_NOT_REPRICED_FROM_EXECUTABLE_COST")
+    price = ExecutionPrice(
+        value=float(final_fee_price),
+        price_type="fee_adjusted",
+        fee_deducted=True,
+        currency="probability_units",
+    )
+    price.assert_kelly_safe()
+    setattr(decision, "kelly_execution_price", price)
+    setattr(decision, "edli_kelly_cost_basis_id", final_cost_basis_id)
 
 
 def _dedupe_steps(steps: list[str]) -> list[str]:
@@ -3508,7 +4204,22 @@ def build_settlement_day_observation_authority_row(
     }
 
 
-def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mode, summary: dict, entry_bankroll: float, decision_time, *, env: str, deps):
+def execute_discovery_phase(
+    conn,
+    clob,
+    portfolio,
+    artifact,
+    tracker,
+    limits,
+    mode,
+    summary: dict,
+    entry_bankroll: float,
+    decision_time,
+    *,
+    env: str,
+    deps,
+    edli_event_context: dict | None = None,
+):
     portfolio_dirty = False
     tracker_dirty = False
     _initialize_entry_order_summary(summary)
@@ -3696,6 +4407,72 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
             f"settlement_day_observation_authority:{authority_id}", _write
         )
         return authority_id
+
+    def _queue_edli_day0_observation_event(
+        *,
+        city,
+        target_date: str,
+        temperature_metric,
+        observation,
+        observation_context_id: str,
+    ) -> None:
+        """Queue EDLI Day0 event emission from the live observation object.
+
+        This is intentionally separate from settlement_day_observation_authority:
+        the authority table is observability evidence, while this hook receives
+        the actual settlement-bound Day0ObservationContext before evaluation.
+        """
+
+        try:
+            from src.config import settings
+
+            edli_cfg = settings.get("edli_v1", {})
+            if not (
+                edli_cfg.get("enabled")
+                and edli_cfg.get("event_writer_enabled")
+                and edli_cfg.get("day0_extreme_trigger_enabled")
+            ):
+                return
+        except Exception:
+            return
+        if observation is None:
+            return
+
+        def _write() -> None:
+            from src.contracts.settlement_semantics import SettlementSemantics
+            from src.events.event_writer import EventWriter
+            from src.events.triggers.day0_extreme_updated import (
+                Day0ExtremeUpdatedTrigger,
+                observation_context_to_live_observation,
+            )
+            from src.state.db import get_world_connection
+
+            live_observation = observation_context_to_live_observation(
+                city=city,
+                target_date=target_date,
+                metric=str(temperature_metric),
+                observation=observation,
+                observation_context_id=observation_context_id,
+            )
+            world_conn = get_world_connection(write_class="live")
+            try:
+                result = Day0ExtremeUpdatedTrigger(EventWriter(world_conn)).emit_from_observation(
+                    observation=live_observation,
+                    settlement_semantics=SettlementSemantics.for_city(city),
+                    decision_time=decision_time,
+                    received_at=decision_time.isoformat(),
+                )
+                world_conn.commit()
+            finally:
+                world_conn.close()
+            summary["edli_day0_live_hook_last_event_id"] = result.event_id
+            summary["edli_day0_live_hook_inserted"] = int(summary.get("edli_day0_live_hook_inserted", 0) or 0) + int(result.inserted)
+            summary["edli_day0_live_hook_duplicates"] = int(summary.get("edli_day0_live_hook_duplicates", 0) or 0) + int(result.duplicate)
+
+        _queue_derived_write(
+            f"edli_day0_live_observation_event:{observation_context_id or uuid.uuid4().hex}",
+            _write,
+        )
 
     def _record_opportunity_fact(candidate, decision, *, should_trade: bool, rejection_stage: str, rejection_reasons: list[str]):
         def _write(
@@ -4196,6 +4973,8 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                 "dropped_by_max_hours_to_resolution",
                 before_count - len(markets),
             )
+    markets = _filter_markets_for_edli_event(markets, edli_event_context, summary)
+    _frontier_set("market_frontier", "after_edli_event_filter", len(markets))
     scan_authority = market_snapshot.authority if market_snapshot is not None else _market_scan_authority()
     summary["market_scan_authority"] = scan_authority
     _record_forward_market_substrate(markets, scan_authority)
@@ -4466,6 +5245,7 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
             market_phase_source=market_phase_evidence.phase_source,
             phase_evidence=market_phase_evidence,
         )
+        _stamp_edli_context_on_candidate(candidate, edli_event_context)
         summary["candidates"] += 1
         _frontier_increment("candidate_frontier", "candidate_objects_built")
 
@@ -4486,6 +5266,13 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                 observation=obs,
                 coverage_status=_obs_coverage,
             ) or None
+            _queue_edli_day0_observation_event(
+                city=city,
+                target_date=market["target_date"],
+                temperature_metric=candidate.temperature_metric,
+                observation=obs,
+                observation_context_id=str(candidate.observation_authority_id or ""),
+            )
 
         try:
             # B091: forward the cycle's authoritative decision_time to the
@@ -4515,6 +5302,13 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
             # observation authority id onto every EdgeDecision so the durable
             # opportunity_fact row links back to the runtime observation object.
             stamp_observation_authority_id_onto_decisions(candidate, decisions)
+            decisions = _filter_decisions_for_edli_event(decisions, edli_event_context, summary)
+            if edli_event_context:
+                _mark_edli_live_inference_family_applied(
+                    decisions,
+                    edli_event_context,
+                    candidate=candidate,
+                )
             _frontier_increment("math_frontier", "evaluator_candidates")
             if decisions:
                 _frontier_increment("math_frontier", "evaluator_decisions", len(decisions))
@@ -5159,7 +5953,14 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                                     snapshot_fields["executable_snapshot_id"],
                                     deps,
                                 ),
-                                "allow_taker_upgrade": True,
+                                "allow_taker_upgrade": (
+                                    bool((edli_event_context or {}).get("taker_fok_fak_live_enabled"))
+                                    if edli_event_context
+                                    else True
+                                ),
+                                "edli_taker_fok_fak_live_enabled": bool(
+                                    (edli_event_context or {}).get("taker_fok_fak_live_enabled")
+                                ),
                                 "cancel_after": decision_time + timedelta(seconds=timeout_seconds),
                                 "resolution_window": candidate.target_date,
                                 "correlation_key": (
@@ -5273,6 +6074,7 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                         rejection_reasons=[],
                     )
                     result = None
+                    final_intent = None
                     family_fallback_attempt_accepted = False
                     live_frontier_stage = "final_intent_contract"
                     live_frontier_attempt_counted = False
@@ -5316,6 +6118,33 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                                 != final_intent.hypothesis_id
                             ):
                                 raise ValueError("FINAL_EXECUTION_INTENT_ID_MISMATCH")
+                            edli_trade_score = 0.0
+                            edli_trade_score_inputs: dict = {}
+                            if edli_event_context:
+                                _assert_edli_pre_submit_fdr_proof(
+                                    conn=conn,
+                                    candidate=candidate,
+                                    decision=d,
+                                )
+                                try:
+                                    conn.commit()
+                                except Exception as exc:
+                                    raise ValueError("EDLI_FDR_PROOF_DURABILITY_COMMIT_FAILED") from exc
+                                _stamp_edli_kelly_execution_price(d, final_intent, reprice_payload)
+                                (
+                                    edli_trade_score_positive,
+                                    edli_trade_score,
+                                    edli_trade_score_inputs,
+                                ) = _edli_trade_score_from_decision(
+                                    d,
+                                    final_intent,
+                                    reprice_payload,
+                                )
+                                if not edli_trade_score_positive:
+                                    raise ValueError(
+                                        "EDLI_TRADE_SCORE_NON_POSITIVE:"
+                                        f"{edli_trade_score:.12f}"
+                                    )
                             try:
                                 corrected_candidate_limit = Decimal(
                                     str(reprice_payload["corrected_candidate_limit_price"])
@@ -5707,6 +6536,29 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                             runtime_order_status=runtime_order_status,
                             command_state=_cmd_state,
                         )
+                        if edli_event_context:
+                            final_intent_for_edli = locals().get("final_intent")
+                            if final_intent_for_edli is None:
+                                summary["edli_submit_reason"] = "FINAL_INTENT_RECEIPT_MISSING"
+                            else:
+                                _stamp_edli_submit_summary(
+                                    summary,
+                                    context=edli_event_context,
+                                    conn=conn,
+                                    candidate=candidate,
+                                    decision=d,
+                                    snapshot_fields=snapshot_fields,
+                                    final_intent=final_intent_for_edli,
+                                    reprice_payload=reprice_payload,
+                                    trade_score=edli_trade_score,
+                                    trade_score_inputs=edli_trade_score_inputs,
+                                )
+                                summary["edli_submit_accepted"] = True
+                                summary["edli_submit_command_state"] = _cmd_state
+                    elif edli_event_context and result.status == "rejected":
+                        summary["edli_submit_reason"] = getattr(result, "reason", None) or "submit_rejected"
+                    elif edli_event_context and _cmd_in_flight:
+                        summary["edli_submit_reason"] = f"SUBMIT_NOT_DURABLE:{_cmd_state}"
                     if runtime_order_status in ("filled", "pending") and _cmd_durable:
                         pos = materialize_position(
                             candidate,

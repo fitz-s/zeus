@@ -7,7 +7,7 @@ import sqlite3
 
 CREATE_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS no_trade_regret_events (
-    regret_event_id TEXT PRIMARY KEY,
+    regret_event_id TEXT NOT NULL PRIMARY KEY,
     event_id TEXT NOT NULL,
     rejection_stage TEXT NOT NULL,
     rejection_reason TEXT NOT NULL,

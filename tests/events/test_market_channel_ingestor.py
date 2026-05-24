@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import sqlite3
+from datetime import datetime, timezone
 
 import pytest
 
@@ -20,6 +21,7 @@ from src.events.triggers.market_channel_ingestor import (
     assert_market_channel_not_fill_authority,
     assert_user_channel_fill_authority,
     feasibility_evidence_from_quote,
+    invalidate_executable_snapshots_for_market_channel_action,
     insert_execution_feasibility_evidence,
 )
 from src.state.db import init_schema
@@ -279,6 +281,52 @@ def test_tick_size_change_invokes_refresh_callback():
     assert actions == [action]
 
 
+def test_market_channel_condition_refresh_does_not_fallback_to_unrelated_markets():
+    from src.main import _edli_filter_markets_for_condition
+
+    markets = [
+        {"condition_id": "condition-top", "outcomes": []},
+        {"condition_id": "condition-other", "outcomes": [{"condition_id": "condition-child"}]},
+    ]
+
+    assert _edli_filter_markets_for_condition(markets, "condition-top") == [markets[0]]
+    assert _edli_filter_markets_for_condition(markets, "condition-child") == [markets[1]]
+    assert _edli_filter_markets_for_condition(markets, "missing-condition") == []
+
+
+def test_tick_size_change_invalidates_bound_executable_snapshot_until_refreshed():
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE executable_market_snapshots (
+            snapshot_id TEXT,
+            condition_id TEXT,
+            yes_token_id TEXT,
+            no_token_id TEXT,
+            freshness_deadline TEXT
+        )
+        """
+    )
+    conn.execute(
+        "INSERT INTO executable_market_snapshots VALUES (?,?,?,?,?)",
+        ("snapshot-1", "condition-1", "yes-1", "no-1", "2026-05-24T12:05:00+00:00"),
+    )
+
+    count = invalidate_executable_snapshots_for_market_channel_action(
+        conn,
+        MarketChannelAction(
+            refresh_snapshot=True,
+            reason="tick_size_change",
+            condition_id="condition-1",
+            token_id="yes-1",
+        ),
+        invalidated_at=datetime(2026, 5, 24, 12, 0, tzinfo=timezone.utc),
+    )
+
+    assert count == 1
+    assert conn.execute("SELECT freshness_deadline FROM executable_market_snapshots").fetchone()[0] == "2026-05-24T11:59:59+00:00"
+
+
 def test_new_market_message_emits_discovery_event_without_shadow_module():
     _conn, writer = _conn_writer()
     ingestor = MarketChannelIngestor(writer, active_token_ids={"token-1"}, token_metadata=_metadata())
@@ -296,6 +344,23 @@ def test_new_market_message_emits_discovery_event_without_shadow_module():
     assert event is not None
     assert event.event_type == "NEW_MARKET_DISCOVERED"
     assert event.source == "polymarket_market_channel"
+
+
+def test_new_market_message_does_not_default_unmapped_token_to_yes():
+    _conn, writer = _conn_writer()
+    ingestor = MarketChannelIngestor(writer, active_token_ids={"token-1"})
+
+    event = ingestor.event_from_message(
+        {
+            "event_type": "new_market",
+            "condition_id": "0xnew",
+            "clob_token_ids": ["token-1", "token-2"],
+            "timestamp": "1766789469958",
+        },
+        received_at="2026-05-24T10:00:00+00:00",
+    )
+
+    assert event is None
 
 
 def test_feasibility_evidence_from_quote_is_evidence_only():

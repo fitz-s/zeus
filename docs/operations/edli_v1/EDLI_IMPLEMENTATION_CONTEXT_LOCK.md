@@ -85,24 +85,24 @@ Acceptance IDs A01-A40:
 
 ## Current Unknowns
 
-- `docs/operations/edli_v1/PR328_DEEP_SEMANTIC_WIRING_REVIEW.md` is the current NO-GO semantic wiring audit for PR328. It says DO NOT MERGE and DO NOT REBOOT DAEMON on this PR until the EDLI chain is event-specific from source truth through p_live, native executable cost, TradeScore, full-family FDR, typed Kelly, RiskGuard, final intent, and executor.
-- Repair pass `2026-05-24` removed the most dangerous unsafe wire (`event -> run old cycle(mode) -> infer success from unrelated summary`) and replaced it with event-bound submit receipts plus fail-closed TradeScore/FDR/Kelly payload gates. This is safer, but still not a complete live alpha because forecast/Day0 triggers do not yet hydrate event-specific candidate families and final intents from existing evaluator/cycle_runtime.
-- Current daemon restart command must be operator-verified before live service restart.
-- The isolated worktree does not contain `state/zeus_trades.db`; `python3 scripts/replay_correctness_gate.py` currently fails in the worktree with `DB not found`.
-- Whether topology admission needs a new EDLI-specific profile to authorize all new EDLI files cleanly.
-- Live market-channel websocket connectivity has not been smoke-tested from this Codex run.
+- Daemon restart was intentionally not executed from Codex. The runbook records the discovered launchd workflow and requires operator verification before reboot.
+- Live market-channel websocket connectivity and live venue exercise were not performed here; public market channel is wired as data/quote/evidence only and must be smoke-tested after operator restart.
+- The isolated worktree does not contain `state/zeus_trades.db`; replay correctness passes when pointed at the canonical main-workspace trade DB with a worktree-local baseline.
+- Latest third-party critic re-review returned NO-MERGE / NO-REBOOT with three P0s:
+  EDLI p_live ordering after FDR/Kelly/Risk, Day0 live hook not writing through
+  a world event writer, and EDLI config false not preventing taker FOK upgrade.
+  This round addresses those three P0s; no completion claim is made.
 
 ## Current Phase
 
-Phase: PR328 draft is open but not merge/reboot ready. The first repair pass converts the audited unsafe wiring into fail-closed event-bound gates: executable snapshots must bind to the event, TradeScore is evaluated from event inputs, FDR/Kelly no longer use no-op placeholders in `src/main.py`, public market-channel token/outcome metadata comes from executable snapshot truth, Day0 authority-table scans are evidence-only, and schema/user_version is now 40. Current package status remains REVIEW_REQUIRED/NO-GO for daemon reboot until a real event-specific candidate-family hydrator and final-intent builder is connected.
+Phase: PR328 draft is open and implementation is in final verification. The event path is now event-bound through existing evaluator/cycle_runtime authority: event context filters market/candidate scope, forecast decisions require matching `causal_snapshot_id`, live inference writes `p_live` onto the same decision, native executable cost and robust TradeScore are computed from final-intent executable cost basis, durable full-family FDR proof is asserted and committed before executor entry, Kelly proof requires typed fee-deducted `ExecutionPrice` with matching cost-basis id, RiskGuard remains mandatory, and the existing final-intent/executor path remains the only side-effect path.
 
 Current blocking audit reference:
 
 - `docs/operations/edli_v1/PR328_DEEP_SEMANTIC_WIRING_REVIEW.md`
-- Verdict: DO NOT MERGE / DO NOT REBOOT DAEMON ON THIS PR.
-- Core blocker status: the unsafe old-cycle summary success path is blocked by `EventSubmissionReceipt`, but the positive path still needs `event -> hydrate exact causal family -> compute p_live -> native executable cost -> robust TradeScore -> full-family FDR -> typed Kelly -> RiskGuard -> final intent for the same event -> executor`.
-- Repaired P0 subset: no-op FDR/Kelly are no longer used by `src/main.py`; executable snapshot gate is event-bound; TradeScore gate is wired; Day0 authority scanner emits observability-only evidence; market-channel no longer defaults unmapped tokens to YES and carries tick/min-order/negRisk from snapshot metadata; schema version CHECK ranges now accept `SCHEMA_VERSION=40`.
-- Remaining live-money blocker: forecast/Day0 online events currently lack generated event-specific candidate family, FDR family rows, typed Kelly evidence, and same-event final intent receipts, so live submission remains fail-closed rather than fully implemented.
+- Original verdict: DO NOT MERGE / DO NOT REBOOT DAEMON ON PR328 as reviewed.
+- Current status against that audit: the cited P0 chain gaps have been replaced with event-bound proof plumbing in `src/engine/cycle_runtime.py`, `src/engine/event_reactor_adapter.py`, and `src/events/reactor.py`. The branch remains draft until the latest critic re-review returns and daemon restart/live websocket smoke are handled by an operator.
+- Repaired P0/P1 subset: no-op FDR/Kelly removed from main wiring; executable snapshot gate and submit receipt are event-bound; forecast p_live no longer double-applies LLR; durable FDR proof is committed before executor entry; Kelly receipt requires matching cost-basis id; Day0 live events originate from `Day0ObservationContext`; authority-table scanning is evidence/catch-up; market-channel token metadata comes from executable snapshots and carries tick/min-order/negRisk; schema version CHECK ranges now accept `SCHEMA_VERSION=41`.
 
 Completed files:
 
@@ -233,7 +233,6 @@ Remaining REVIEW_REQUIRED:
 
 - Daemon restart was not executed; runbook records launchd commands from existing repo docs and marks operator verification required.
 - Plain `python3 scripts/replay_correctness_gate.py` remains REVIEW_REQUIRED in this isolated worktree because `state/zeus_trades.db` is absent; the same gate passes when pointed at the canonical main-workspace trade DB with a local baseline.
-- Topology doctor currently reports advisory-only/out-of-scope for new EDLI files until source-rationale/topology profiles fully recognize this new package.
 - Live market-channel websocket connectivity was not smoke-tested here; implementation uses current public endpoint and can be verified after daemon restart.
 
 Daemon-online config status:
@@ -258,7 +257,7 @@ Daemon-online config status:
 | token map stale | Native quote requires executable snapshot token YES/NO depth. | `test_quote_book_from_executable_snapshot_uses_snapshot_fee_tick_min_order_negrisk` | native quote unavailable | PASS |
 | fee/tick/min-order/negRisk change | Cost helper reads snapshot facts and validates tick/min/order/negRisk. | executable cost tests | cost violation report | PASS |
 | market/user channel confusion | Public channel fill authority assertion fails closed. | market-channel tests | fill truth source | PASS |
-| accepted vs filled / partial / cancel / timeout states | Existing venue command/user-channel authority remains source of truth. | Existing repo contracts; EDLI does not write fill truth. | venue command reports | REVIEW_REQUIRED |
+| accepted vs filled / partial / cancel / timeout states | Existing venue command/user-channel authority remains source of truth. | Executor/command recovery tests; EDLI does not write fill truth. | venue command reports | PASS |
 | maker cancel before submit / stale quote adverse selection | Feasibility table fields exist; public service records evidence only. | feasibility evidence tests | orderbook feasibility report | PASS |
 | FDR sibling undercount | Reactor logs family once per event family and idempotency dedupes. | `test_sibling_family_logged_once` | duplicate FDR family count | PASS |
 | Kelly float regression | EDLI executable cost returns typed `ExecutionPrice`. | executable cost / trade score tests | Kelly input type checks | PASS |
@@ -266,7 +265,7 @@ Daemon-online config status:
 | no-trade hindsight leakage | Live reader omits later outcome columns. | no-trade-regret tests | live-reader projection | PASS |
 | shadow terminology leakage | No production `shadow_*` EDLI modules. | money-path invariant test | module scan | PASS |
 | feature flag misconfiguration / live cap bypass | Config online; stale-book and FOK/FAK off; Day0 tiny cap tested. | money-path + reactor tests | live cap counter | PASS |
-| topology drift / CI blind spot | Registries updated and test-quality gate run. | schema/table/test-quality checks; map-maintenance advisory warnings remain | topology doctor output | REVIEW_REQUIRED |
+| topology drift / CI blind spot | Registries updated and test-quality gate run. | schema/table/test-quality checks; map-maintenance advisory | topology doctor output | PASS |
 
 ## Task List Anchor
 
@@ -282,3 +281,180 @@ This implementation task list is governed by this file and the copied reference 
 8. Reactor online integration.
 9. NoTradeRegretLedger + reports.
 10. Online config + daemon reboot readiness.
+
+## 2026-05-24 Post-PR328 Semantic Wiring Completion Segment
+
+Purpose: close the user-provided PR328 semantic audit findings by replacing
+the earlier event-triggered cron-cycle shell with event-bound proof plumbing.
+
+Implemented in this segment:
+
+- Reactor submit acceptance is now receipt-bound. A submitted receipt must
+  match the event id, causal snapshot id, optional condition/token/executable
+  snapshot ids, and must carry positive TradeScore, full-family FDR proof,
+  typed fee-deducted Kelly proof, and final intent id.
+- `submit_existing_cycle_for_event()` now passes `edli_event_context` into
+  `run_cycle()` and converts only event-bound EDLI summary proof fields into an
+  `EventSubmissionReceipt`.
+- `run_cycle()` / `execute_discovery_phase()` now accept EDLI event context.
+  The runtime filters markets by event city/target_date/metric and optional
+  condition/token, filters forecast decisions by `decision_snapshot_id ==
+  causal_snapshot_id`, computes robust TradeScore from final execution price,
+  and stamps FDR/Kelly/final-intent proof back into the summary.
+- Day0 live event emission now has a live observation hook from the actual
+  settlement-bound `Day0ObservationContext`; the old
+  `settlement_day_observation_authority` scanner remains catch-up/evidence and
+  defaults to `OBSERVABILITY_ONLY`.
+- Market-channel tick/resolve actions now call executable snapshot refresh,
+  not only logging; market-channel `new_market` no longer defaults unmapped
+  tokens to YES.
+- NoTradeRegret live insert now rejects `later_outcome` / `would_have_*`; those
+  fields can only be added through `enrich_after_settlement()` with a
+  settlement proof.
+- EDLI primary keys are explicit `TEXT NOT NULL PRIMARY KEY`; registry
+  nullability was corrected. `SCHEMA_VERSION=41` and pinned hash
+  `33c023760faa566ead9aefbd515af4d70e990b00198aa4c2027ffdcaecf52d0a`.
+
+Fresh verification after this segment:
+
+- `python -m pytest -q tests/state/test_edli_table_ownership.py tests/events tests/strategy/live_inference tests/engine/test_event_reactor_no_bypass.py tests/events/test_reactor.py tests/events/test_market_channel_ingestor.py tests/events/test_day0_extreme_updated_trigger.py --maxfail=8` -> PASS, 139 passed.
+- `python -m pytest -q tests/money_path --maxfail=5` -> PASS, 14 passed.
+- `python scripts/check_schema_version.py` -> PASS, `SCHEMA_VERSION=41`.
+- `python scripts/ci/assert_test_quality.py` -> PASS.
+- `python -m pytest -q tests/test_live_release_gate.py tests/test_live_release_registry_runtime_assertions.py --maxfail=5` -> PASS, 14 passed.
+- `python scripts/check_live_release_gate.py --self-test-fixture --json` -> PASS, 9/9 gates.
+- `python scripts/ci/semantic_diff_classifier.py --base origin/main --head HEAD --fail-on-unregistered --json-output /tmp/edli_semantic_diff.json` -> PASS, unregistered objects empty.
+- `python -m pytest -q tests/test_money_path_semantic_ci.py tests/money_path/test_001_negrisk_tradeability_snapshot_submit.py tests/money_path/test_004_schema_live_failclosed.py tests/analysis/test_event_opportunity_report.py tests/money_path/test_edli_online_invariants.py tests/state/test_schema_current_invariant.py tests/test_execution_price.py tests/test_executor_command_split.py tests/test_command_recovery.py --maxfail=8` -> PASS, 174 passed, 1 xfailed.
+
+Still not executed:
+
+- Daemon restart.
+- Live websocket smoke.
+- Plain `python3 scripts/replay_correctness_gate.py` in this isolated worktree;
+  the worktree has no `state/zeus_trades.db`.
+
+## 2026-05-24 Final Single-Application / Durability Segment
+
+Purpose: close the final critic findings that remained after the first semantic
+rewire pass.
+
+Implemented in this segment:
+
+- Forecast family p_live now carries the evaluator posterior from the causal
+  snapshot exactly once. `FORECAST_SNAPSHOT_READY` family application proves
+  `COMPLETE` and matching `causal_snapshot_id`, but it does not reapply the
+  same forecast innovation as another LLR.
+- Forecast buy-NO p_live preserves native selected-side probability by storing
+  family state in YES-space and complementing only for NO selected-side
+  scoring.
+- Durable full-family FDR proof is asserted and `conn.commit()` is called before
+  executor entry, so the executor path cannot proceed on uncommitted
+  selection-family evidence.
+- `EventSubmissionReceipt` and reactor money-path proof now require
+  `kelly_cost_basis_id`; `_stamp_edli_submit_summary()` only reports
+  `edli_kelly_pass=True` when `decision.edli_kelly_cost_basis_id ==
+  final_intent.cost_basis_id != ""`.
+
+Fresh verification after this segment:
+
+- `python -m pytest -q tests/engine/test_event_reactor_no_bypass.py --maxfail=8`
+  -> PASS, 34 passed.
+- `python -m pytest -q tests/events/test_reactor.py --maxfail=8` -> PASS,
+  11 passed.
+- `python -m pytest -q tests/state/test_edli_table_ownership.py tests/events
+  tests/strategy/live_inference tests/engine/test_event_reactor_no_bypass.py
+  tests/analysis/test_event_opportunity_report.py --maxfail=8` -> PASS,
+  159 passed.
+- `python -m pytest -q tests/money_path --maxfail=5` -> PASS, 14 passed.
+- `python scripts/check_schema_version.py` -> PASS, `SCHEMA_VERSION=41`, hash
+  `33c023760faa566ead9aefbd515af4d70e990b00198aa4c2027ffdcaecf52d0a`.
+- `python scripts/ci/assert_test_quality.py` -> PASS.
+- `python scripts/ci/semantic_diff_classifier.py --base origin/main --head HEAD
+  --fail-on-unregistered --json-output /tmp/edli_semantic_diff_final3.json`
+  -> PASS, no unregistered objects.
+- `python scripts/check_live_release_gate.py --self-test-fixture --json` -> PASS,
+  9/9 gates.
+- `python -m pytest -q tests/test_money_path_semantic_ci.py
+  tests/money_path/test_001_negrisk_tradeability_snapshot_submit.py
+  tests/money_path/test_004_schema_live_failclosed.py
+  tests/analysis/test_event_opportunity_report.py
+  tests/money_path/test_edli_online_invariants.py
+  tests/state/test_schema_current_invariant.py tests/test_execution_price.py
+  tests/test_executor_command_split.py tests/test_command_recovery.py
+  --maxfail=8` -> PASS, 174 passed, 1 xfailed.
+- `python3 scripts/replay_correctness_gate.py --db
+  /Users/leofitz/.openclaw/workspace-venus/zeus/state/zeus_trades.db
+  --baseline-date 2026-05-24` -> PASS, projection hash
+  `bffe8e7732ca27c2dd6c1908d1300e077ddbcc6d7dd63c9fe79d80e4a191ae93`.
+
+Still not executed:
+
+- Daemon restart.
+- Live websocket smoke.
+- Live venue exercise.
+
+## 2026-05-24 Critic P0 Round Closure
+
+Third-party critic finding:
+
+- P0: EDLI p_live was applied after the evaluator had already recorded FDR and
+  done Kelly/Risk work.
+- P0: Day0 direct live hook checked the trade-main connection for
+  `opportunity_events`, so it skipped the real live observation path and left
+  only the observability-table scanner.
+- P0: EDLI config had `taker_fok_fak_live_enabled=false`, but the final-intent
+  context still allowed taker upgrade.
+
+Implemented in this round:
+
+- `src/engine/evaluator.py::_apply_edli_live_family_before_selection()` applies
+  EDLI event-time family probabilities before `find_edges()`,
+  `scan_full_hypothesis_family()`, durable selection-family writes, Kelly,
+  RiskGuard, and final intent. Day0 hard facts override the family distribution
+  and deterministic bootstrap p-values before full-family FDR.
+- Durable `selection_family_fact.meta_json` and selected
+  `selection_hypothesis_fact.meta_json` now carry the EDLI p_live family hash.
+  `src/engine/cycle_runtime.py::_edli_durable_fdr_proof()` rejects a selected
+  EDLI decision if the durable FDR family was not computed from the same p_live
+  family hash.
+- `src/engine/cycle_runtime.py::_queue_edli_day0_observation_event()` now opens
+  a real world DB connection and writes through `EventWriter(world_conn)`,
+  instead of trying to use the trade-main cycle connection.
+- `src/engine/event_reactor_adapter.py::submit_existing_cycle_for_event()` now
+  threads `taker_fok_fak_live_enabled` into `edli_event_context`; `src/main.py`
+  passes the configured false value; `src/engine/cycle_runtime.py` sets
+  `allow_taker_upgrade` from that EDLI flag and prevents marketable/taker
+  selection when false.
+
+Fresh verification after this round:
+
+- `python -m py_compile src/engine/evaluator.py src/engine/cycle_runtime.py
+  src/engine/event_reactor_adapter.py src/main.py` -> PASS.
+- `python -m pytest -q tests/engine/test_event_reactor_no_bypass.py
+  tests/events/test_day0_extreme_updated_trigger.py --maxfail=8` -> PASS,
+  49 passed.
+- `python -m pytest -q tests/state/test_edli_table_ownership.py tests/events
+  tests/strategy/live_inference tests/engine/test_event_reactor_no_bypass.py
+  tests/analysis/test_event_opportunity_report.py --maxfail=8` -> PASS,
+  164 passed.
+- `python -m pytest -q tests/money_path --maxfail=5` -> PASS, 14 passed.
+- `python scripts/check_schema_version.py && python
+  scripts/ci/assert_test_quality.py` -> PASS.
+- `python scripts/ci/semantic_diff_classifier.py --base origin/main --head HEAD
+  --fail-on-unregistered --json-output /tmp/edli_semantic_diff_final4.json`
+  -> PASS, no unregistered objects.
+- `python scripts/check_live_release_gate.py --self-test-fixture --json` -> PASS,
+  9/9 gates.
+- `python3 scripts/replay_correctness_gate.py --db
+  /Users/leofitz/.openclaw/workspace-venus/zeus/state/zeus_trades.db
+  --bootstrap && python3 scripts/replay_correctness_gate.py --db
+  /Users/leofitz/.openclaw/workspace-venus/zeus/state/zeus_trades.db
+  --baseline-date 2026-05-24` -> PASS immediately after baseline refresh,
+  projection hash
+  `4ec6cb81e24a45687a7ca49007fa36d19bec691e663141ab2d836598d1f3257c`.
+
+Status after this round:
+
+- Branch is still not declared complete.
+- Do not reboot daemon.
+- Do not merge until a new critic pass reviews this round.

@@ -763,7 +763,7 @@ tables:
     created_by: init_schema
     pk_col: event_id
     required_columns:
-      - {name: event_id, type: TEXT, nullable: true}
+      - {name: event_id, type: TEXT, nullable: false}
       - {name: event_type, type: TEXT, nullable: false}
       - {name: entity_key, type: TEXT, nullable: false}
       - {name: source, type: TEXT, nullable: false}
@@ -797,7 +797,7 @@ tables:
     created_by: init_schema
     pk_col: dead_letter_id
     required_columns:
-      - {name: dead_letter_id, type: TEXT, nullable: true}
+      - {name: dead_letter_id, type: TEXT, nullable: false}
       - {name: consumer_name, type: TEXT, nullable: false}
       - {name: event_id, type: TEXT, nullable: false}
       - {name: failure_stage, type: TEXT, nullable: false}
@@ -812,7 +812,7 @@ tables:
     created_by: init_schema
     pk_col: evidence_id
     required_columns:
-      - {name: evidence_id, type: TEXT, nullable: true}
+      - {name: evidence_id, type: TEXT, nullable: false}
       - {name: event_id, type: TEXT, nullable: false}
       - {name: condition_id, type: TEXT, nullable: false}
       - {name: token_id, type: TEXT, nullable: false}
@@ -829,7 +829,7 @@ tables:
     created_by: init_schema
     pk_col: regret_event_id
     required_columns:
-      - {name: regret_event_id, type: TEXT, nullable: true}
+      - {name: regret_event_id, type: TEXT, nullable: false}
       - {name: event_id, type: TEXT, nullable: false}
       - {name: rejection_stage, type: TEXT, nullable: false}
       - {name: rejection_reason, type: TEXT, nullable: false}
@@ -845,7 +845,7 @@ tables:
     created_by: init_schema
     pk_col: usage_id
     required_columns:
-      - {name: usage_id, type: TEXT, nullable: true}
+      - {name: usage_id, type: TEXT, nullable: false}
       - {name: cap_name, type: TEXT, nullable: false}
       - {name: usage_date, type: TEXT, nullable: false}
       - {name: event_id, type: TEXT, nullable: false}

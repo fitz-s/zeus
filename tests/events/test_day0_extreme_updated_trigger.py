@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import sqlite3
 from datetime import datetime, timezone
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -13,6 +15,7 @@ from src.events.triggers.day0_extreme_updated import (
     Day0ExtremeUpdatedTrigger,
     authority_row_to_observation,
     build_day0_extreme_updated_event,
+    observation_context_to_live_observation,
 )
 from src.state.db import init_schema
 
@@ -50,6 +53,87 @@ def _observation(**overrides):
     }
     base.update(overrides)
     return base
+
+
+def test_cycle_runtime_day0_live_hook_uses_world_event_writer_not_trade_main_conn():
+    source = Path("src/engine/cycle_runtime.py").read_text()
+    hook_index = source.index("def _queue_edli_day0_observation_event(")
+    hook_body = source[hook_index:source.index("def _record_opportunity_fact", hook_index)]
+
+    assert "from src.state.db import get_world_connection" in hook_body
+    assert "world_conn = get_world_connection(write_class=\"live\")" in hook_body
+    assert "EventWriter(world_conn)" in hook_body
+    assert "_edli_conn_has_table(conn, \"opportunity_events\")" not in hook_body
+
+
+def test_observation_context_live_hook_marks_wu_station_match_live_authority():
+    city = SimpleNamespace(
+        name="Chicago",
+        timezone="America/Chicago",
+        settlement_unit="F",
+        settlement_source_type="wu_icao",
+        wu_station="KMDW",
+    )
+    context = SimpleNamespace(
+        source="wu_api",
+        station_id="KMDW:9",
+        observation_time="2026-05-24T18:00:00+00:00",
+        observation_available_at="2026-05-24T18:07:00+00:00",
+        high_so_far=74.2,
+        low_so_far=61.0,
+        current_temp=73.0,
+        unit="F",
+        coverage_status="OK",
+    )
+
+    observation = observation_context_to_live_observation(
+        city=city,
+        target_date="2026-05-24",
+        metric="high",
+        observation=context,
+        observation_context_id="ctx-1",
+    )
+
+    assert observation["source_match_status"] == "MATCH"
+    assert observation["station_match_status"] == "MATCH"
+    assert observation["local_date_status"] == "MATCH"
+    assert observation["dst_status"] == "UNAMBIGUOUS"
+    assert observation["rounding_status"] == "MATCH"
+    assert observation["source_authorized_status"] == "AUTHORIZED"
+    assert observation["live_authority_status"] == "LIVE_AUTHORITY"
+    assert observation["observation_available_at"] == "2026-05-24T18:07:00+00:00"
+
+
+def test_observation_context_live_hook_blocks_diagnostic_fallback():
+    city = SimpleNamespace(
+        name="Chicago",
+        timezone="America/Chicago",
+        settlement_unit="F",
+        settlement_source_type="wu_icao",
+        wu_station="KMDW",
+    )
+    context = SimpleNamespace(
+        source="openmeteo_hourly",
+        station_id="",
+        observation_time="2026-05-24T18:00:00+00:00",
+        observation_available_at="2026-05-24T18:07:00+00:00",
+        high_so_far=74.2,
+        low_so_far=61.0,
+        current_temp=73.0,
+        unit="F",
+        coverage_status="DIAGNOSTIC_FALLBACK",
+    )
+
+    observation = observation_context_to_live_observation(
+        city=city,
+        target_date="2026-05-24",
+        metric="high",
+        observation=context,
+    )
+
+    assert observation["source_match_status"] == "MISMATCH"
+    assert observation["station_match_status"] == "MISMATCH"
+    assert observation["live_authority_status"] == "NON_LIVE_AUTHORITY"
 
 
 def test_day0_event_uses_observation_available_at():

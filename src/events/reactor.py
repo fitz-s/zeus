@@ -28,9 +28,22 @@ class EventSubmissionReceipt:
     submitted: bool
     event_id: str
     causal_snapshot_id: str | None = None
+    city: str | None = None
+    target_date: str | None = None
+    metric: str | None = None
     condition_id: str | None = None
     token_id: str | None = None
     executable_snapshot_id: str | None = None
+    trade_score_positive: bool = False
+    fdr_pass: bool = False
+    fdr_family_id: str | None = None
+    fdr_hypothesis_count: int = 0
+    kelly_pass: bool = False
+    kelly_execution_price_type: str | None = None
+    kelly_price_fee_deducted: bool = False
+    kelly_size_usd: float = 0.0
+    kelly_cost_basis_id: str | None = None
+    final_intent_id: str | None = None
     reason: str = ""
 
 
@@ -61,21 +74,15 @@ class OpportunityEventReactor:
         *,
         source_truth_gate: Gate,
         executable_snapshot_gate: Gate,
-        fdr_gate: Gate,
-        kelly_gate: Gate,
         riskguard_gate: Gate,
         final_intent_submit: Submit,
         reject: Reject,
-        trade_score_gate: Gate | None = None,
         config: ReactorConfig | None = None,
         regret_ledger: Any | None = None,
     ) -> None:
         self._store = store
         self._source_truth_gate = source_truth_gate
         self._executable_snapshot_gate = executable_snapshot_gate
-        self._trade_score_gate = trade_score_gate or (lambda _event: True)
-        self._fdr_gate = fdr_gate
-        self._kelly_gate = kelly_gate
         self._riskguard_gate = riskguard_gate
         self._submit = final_intent_submit
         self._reject = reject
@@ -126,16 +133,7 @@ class OpportunityEventReactor:
         if not self._executable_snapshot_gate(event):
             self._reject_event(event, "EXECUTABLE_QUOTE", "EXECUTABLE_SNAPSHOT_BLOCKED", result)
             return
-        if not self._trade_score_gate(event):
-            self._reject_event(event, "TRADE_SCORE", "TRADE_SCORE_BLOCKED", result)
-            return
         self._log_family_once(event)
-        if not self._fdr_gate(event):
-            self._reject_event(event, "FDR", "FDR_REJECTED", result)
-            return
-        if not self._kelly_gate(event):
-            self._reject_event(event, "KELLY", "KELLY_TOO_SMALL", result)
-            return
         if not self._riskguard_gate(event):
             self._reject_event(event, "RISK_GUARD", "RISK_GUARD_BLOCKED", result)
             return
@@ -149,6 +147,10 @@ class OpportunityEventReactor:
         if receipt is None or not _receipt_matches_event(event, receipt):
             reason = receipt.reason if receipt is not None and receipt.reason else "EVENT_SUBMISSION_RECEIPT_MISSING_OR_UNBOUND"
             self._reject_event(event, "EXECUTOR_EXPRESSIBILITY", reason, result)
+            return
+        proof_stage, proof_reason = _receipt_money_path_blocker(receipt)
+        if proof_stage is not None:
+            self._reject_event(event, proof_stage, proof_reason, result)
             return
         if event.event_type == "DAY0_EXTREME_UPDATED":
             self._day0_live_orders_today += 1
@@ -250,7 +252,7 @@ def _receipt_matches_event(event: OpportunityEvent, receipt: EventSubmissionRece
     if event.causal_snapshot_id and receipt.causal_snapshot_id != event.causal_snapshot_id:
         return False
     payload = _payload_dict(event)
-    for field in ("condition_id", "token_id"):
+    for field in ("city", "target_date", "metric", "condition_id", "token_id"):
         expected = payload.get(field)
         observed = getattr(receipt, field)
         if expected and observed != expected:
@@ -259,6 +261,22 @@ def _receipt_matches_event(event: OpportunityEvent, receipt: EventSubmissionRece
     if executable_snapshot_id and receipt.executable_snapshot_id != executable_snapshot_id:
         return False
     return True
+
+
+def _receipt_money_path_blocker(receipt: EventSubmissionReceipt) -> tuple[str | None, str]:
+    if not receipt.trade_score_positive:
+        return "TRADE_SCORE", receipt.reason or "TRADE_SCORE_BLOCKED"
+    if not receipt.fdr_pass or not receipt.fdr_family_id or receipt.fdr_hypothesis_count <= 0:
+        return "FDR", receipt.reason or "FDR_REJECTED"
+    if receipt.kelly_execution_price_type != "ExecutionPrice" or receipt.kelly_price_fee_deducted is not True:
+        return "KELLY", receipt.reason or "EDLI_KELLY_PROOF_MISSING"
+    if not receipt.kelly_cost_basis_id:
+        return "KELLY", receipt.reason or "EDLI_KELLY_COST_BASIS_MISSING"
+    if not receipt.kelly_pass or receipt.kelly_size_usd <= 0.0:
+        return "KELLY", receipt.reason or "KELLY_TOO_SMALL"
+    if not receipt.final_intent_id:
+        return "EXECUTOR_EXPRESSIBILITY", receipt.reason or "FINAL_INTENT_RECEIPT_MISSING"
+    return None, ""
 
 
 def _day0_hard_fact_payload_live_eligible(event: OpportunityEvent) -> bool:

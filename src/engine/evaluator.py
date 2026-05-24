@@ -2373,6 +2373,118 @@ def _strategy_key_for_hypothesis(candidate: MarketCandidate, hypothesis: FullFam
     return None
 
 
+def _canonical_json_hash(payload: dict) -> str:
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    ).hexdigest()
+
+
+def _edli_context_for_candidate(candidate: MarketCandidate) -> dict | None:
+    context = getattr(candidate, "edli_event_context", None)
+    return dict(context) if isinstance(context, dict) else None
+
+
+def _edli_payload(context: dict) -> dict:
+    payload = context.get("payload")
+    return dict(payload) if isinstance(payload, dict) else {}
+
+
+def _edli_day0_mask_for_analysis(analysis: MarketAnalysis, payload: dict) -> np.ndarray:
+    metric = str(payload.get("metric") or "").strip().lower()
+    try:
+        rounded = float(payload["rounded_value"])
+    except (KeyError, TypeError, ValueError):
+        return np.ones(len(analysis.bins), dtype=float)
+    mask = np.ones(len(analysis.bins), dtype=float)
+    for idx, bin_obj in enumerate(analysis.bins):
+        low = None if bin_obj.low is None else float(bin_obj.low)
+        high = None if bin_obj.high is None else float(bin_obj.high)
+        if metric == "high":
+            if high is None:
+                mask[idx] = 1.0 if low is not None and rounded >= low else 1.0
+            elif rounded > high:
+                mask[idx] = 0.0
+        elif metric == "low":
+            if low is None:
+                mask[idx] = 1.0 if high is not None and rounded <= high else 1.0
+            elif rounded < low:
+                mask[idx] = 0.0
+    return mask
+
+
+def _apply_edli_live_family_before_selection(
+    *,
+    candidate: MarketCandidate,
+    analysis: MarketAnalysis,
+    decision_snapshot_id: str,
+) -> dict | None:
+    """Apply EDLI event-time family probabilities before FDR/Kelly/Risk.
+
+    This is the ordering boundary required by EDLI: event-specific p_live is
+    part of the tested family, not a post-selection mutation of a single edge.
+    """
+
+    context = _edli_context_for_candidate(candidate)
+    if not context:
+        return None
+    event_type = str(context.get("event_type") or "")
+    payload = _edli_payload(context)
+    causal_snapshot_id = str(context.get("causal_snapshot_id") or "")
+    probabilities = np.asarray(analysis.p_posterior, dtype=float)
+    factor = "event_prior"
+    if event_type == "FORECAST_SNAPSHOT_READY":
+        completeness = str(payload.get("completeness_status") or "")
+        if completeness != "COMPLETE":
+            raise ValueError(f"EDLI_FORECAST_NOT_LIVE_COMPLETE:{completeness or 'missing'}")
+        if not causal_snapshot_id or str(payload.get("snapshot_id") or "") != causal_snapshot_id:
+            raise ValueError("EDLI_FORECAST_CAUSAL_SNAPSHOT_PROOF_MISSING")
+        if str(decision_snapshot_id or "") != causal_snapshot_id:
+            raise ValueError("EDLI_FORECAST_CAUSAL_SNAPSHOT_PROOF_MISSING")
+        factor = "forecast_complete_causal_snapshot"
+    elif event_type == "DAY0_EXTREME_UPDATED":
+        mask = _edli_day0_mask_for_analysis(analysis, payload)
+        probabilities = probabilities * mask
+        total = float(probabilities.sum())
+        if total > 0.0:
+            probabilities = probabilities / total
+        factor = "day0_absorbing_boundary"
+    else:
+        return None
+
+    analysis.p_posterior = probabilities
+    analysis._bootstrap_cache.clear()
+    if event_type == "DAY0_EXTREME_UPDATED":
+        def _edli_bootstrap_bin(bin_idx: int, _n: int) -> tuple[float, float, float]:
+            edge = float(probabilities[bin_idx] - analysis.p_market[bin_idx])
+            return edge, edge, (0.0 if edge > 0.0 else 1.0)
+
+        def _edli_bootstrap_bin_no(bin_idx: int, _n: int) -> tuple[float, float, float]:
+            p_market_no = analysis.buy_no_market_price(bin_idx)
+            edge = float((1.0 - probabilities[bin_idx]) - p_market_no)
+            return edge, edge, (0.0 if edge > 0.0 else 1.0)
+
+        analysis._bootstrap_bin = _edli_bootstrap_bin  # type: ignore[method-assign]
+        analysis._bootstrap_bin_no = _edli_bootstrap_bin_no  # type: ignore[method-assign]
+    family = {
+        getattr(bin_obj, "label", str(idx)): float(probabilities[idx])
+        for idx, bin_obj in enumerate(analysis.bins)
+    }
+    proof = {
+        "event_id": str(context.get("event_id") or ""),
+        "event_type": event_type,
+        "causal_snapshot_id": causal_snapshot_id,
+        "factor": factor,
+        "probability_space": "yes",
+        "applied_before_fdr": True,
+        "applied_before_kelly": True,
+        "applied_before_risk": True,
+        "family": family,
+        "family_hash": _canonical_json_hash(family),
+    }
+    setattr(candidate, "edli_live_inference_family_proof", proof)
+    return proof
+
+
 def _day0_high_truth_classification_for_edge(
     candidate: MarketCandidate,
     edge: BinEdge,
@@ -2573,6 +2685,7 @@ def _record_selection_family_facts(
     selected_method: str,
     recorded_at: str,
     decision_time_status: str | None = None,
+    edli_live_inference: dict | None = None,
 ) -> dict:
     """Persist tested selection hypotheses without changing active selection."""
     if conn is None:
@@ -2699,6 +2812,8 @@ def _record_selection_family_facts(
                 "selected_method": selected_method,
             },
         )
+        if edli_live_inference is not None:
+            meta["edli_live_inference"] = dict(edli_live_inference)
         meta["tested_hypotheses"] += 1
         meta["passed_prefilter"] += int(bool(row.get("passed_prefilter")))
         meta["selected_post_fdr"] += int(row.get("selected_post_fdr") or 0)
@@ -2760,6 +2875,11 @@ def _record_selection_family_facts(
                 "p_market": row["p_market"],
                 "p_posterior": row["p_posterior"],
                 "entry_price": row["entry_price"],
+                "edli_live_inference_family_hash": (
+                    None
+                    if edli_live_inference is None
+                    else edli_live_inference.get("family_hash")
+                ),
             },
         )
         if result.get("status") == "written":
@@ -4781,6 +4901,11 @@ def evaluate_candidate(
             "uncertainty": analysis.sigma_context(),
             "location": analysis.mean_context(),
         }
+    edli_live_inference_proof = _apply_edli_live_family_before_selection(
+        candidate=candidate,
+        analysis=analysis,
+        decision_snapshot_id=snapshot_id,
+    )
     if day0_forecast_context is not None:
         forecast_context["day0"] = day0_forecast_context
     forecast_issue_time = _snapshot_issue_time_value(ens_result)
@@ -4896,6 +5021,7 @@ def evaluate_candidate(
             selected_method=selected_method,
             recorded_at=_recorded_at,
             decision_time_status=_decision_time_status,
+            edli_live_inference=edli_live_inference_proof,
         )
     except Exception as exc:
         logger.warning("Failed to record selection family facts: %s", exc)

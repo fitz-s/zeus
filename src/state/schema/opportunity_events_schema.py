@@ -7,7 +7,7 @@ import sqlite3
 
 CREATE_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS opportunity_events (
-    event_id TEXT PRIMARY KEY,
+    event_id TEXT NOT NULL PRIMARY KEY,
     event_type TEXT NOT NULL CHECK (event_type IN (
         'FORECAST_SNAPSHOT_READY',
         'DAY0_EXTREME_UPDATED',

@@ -6,7 +6,7 @@ import asyncio
 import json
 import sqlite3
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
 from src.events.event_coalescer import EventCoalescer
@@ -256,10 +256,14 @@ class MarketChannelIngestor:
         if self._active_token_ids and not (set(token_ids) & self._active_token_ids):
             return None
         token_id = token_ids[0] if token_ids else str(message.get("asset_id") or "")
+        metadata = self._token_metadata.get(token_id)
+        outcome_label = str(getattr(metadata, "outcome_label", "") or message.get("outcome_label") or "").upper()
+        if outcome_label not in {"YES", "NO"}:
+            return None
         payload = MarketBookEventPayload(
             condition_id=str(message.get("condition_id") or message.get("market") or ""),
             token_id=token_id,
-            outcome_label="YES",
+            outcome_label=outcome_label,  # type: ignore[arg-type]
             event_type="NEW_MARKET_DISCOVERED",
             quote_seen_at=_timestamp_ms_to_iso(message.get("timestamp")) or received_at,
             depth_json=json.dumps(message, sort_keys=True, default=str),
@@ -361,6 +365,54 @@ def active_weather_token_metadata_from_snapshots(
                 ),
             )
     return metadata
+
+
+def invalidate_executable_snapshots_for_market_channel_action(
+    conn: sqlite3.Connection,
+    action: MarketChannelAction,
+    *,
+    invalidated_at: datetime,
+) -> int:
+    """Force event-bound executable snapshots stale after public venue changes.
+
+    Public market-channel messages are not fill truth, but tick-size and market
+    lifecycle changes are executable-quote authority changes. Until the REST
+    snapshot refresh succeeds, any previously captured snapshot for the affected
+    condition/token must fail the freshness gate.
+    """
+
+    if not action.refresh_snapshot or not _table_exists(conn, "executable_market_snapshots"):
+        return 0
+    columns = _table_columns(conn, "executable_market_snapshots")
+    if "freshness_deadline" not in columns:
+        return 0
+    predicates: list[str] = []
+    params: list[object] = []
+    if action.condition_id and "condition_id" in columns:
+        predicates.append("condition_id = ?")
+        params.append(action.condition_id)
+    if action.token_id:
+        token_predicates = []
+        if "yes_token_id" in columns:
+            token_predicates.append("yes_token_id = ?")
+            params.append(action.token_id)
+        if "no_token_id" in columns:
+            token_predicates.append("no_token_id = ?")
+            params.append(action.token_id)
+        if token_predicates:
+            predicates.append("(" + " OR ".join(token_predicates) + ")")
+    if not predicates:
+        return 0
+    stale_deadline = (invalidated_at.astimezone(UTC) - timedelta(seconds=1)).isoformat()
+    cur = conn.execute(
+        f"""
+        UPDATE executable_market_snapshots
+           SET freshness_deadline = ?
+         WHERE {' OR '.join(predicates)}
+        """,
+        (stale_deadline, *params),
+    )
+    return int(cur.rowcount or 0)
 
 
 @dataclass

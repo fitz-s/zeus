@@ -2387,9 +2387,6 @@ def _edli_event_reactor_cycle() -> None:
     if not edli_cfg.get("enabled") or not edli_cfg.get("event_writer_enabled"):
         return
     from src.engine.event_reactor_adapter import (
-        edli_payload_fdr_gate,
-        edli_payload_kelly_gate,
-        edli_trade_score_gate,
         edli_source_truth_gate,
         executable_snapshot_gate_from_trade_conn,
         riskguard_allows_new_entries,
@@ -2398,11 +2395,11 @@ def _edli_event_reactor_cycle() -> None:
     from src.events.event_store import EventStore
     from src.events.reactor import OpportunityEventReactor, ReactorConfig
     from src.riskguard.riskguard import get_current_level
-    from src.state.db import get_trade_connection_read_only, get_world_connection
+    from src.state.db import get_trade_connection_with_world_required, get_world_connection
     from src.strategy.live_inference.no_trade_regret import NoTradeRegretLedger
 
     conn = get_world_connection()
-    trade_conn = get_trade_connection_read_only()
+    trade_conn = get_trade_connection_with_world_required(write_class=None)
     try:
         now = datetime.now(timezone.utc)
         received_at = now.isoformat()
@@ -2431,7 +2428,11 @@ def _edli_event_reactor_cycle() -> None:
                 logger.warning("EDLI existing-cycle trigger skipped: cycle_lock_busy")
                 return False
             try:
-                return submit_existing_cycle_for_event(event, run_cycle=run_cycle)
+                return submit_existing_cycle_for_event(
+                    event,
+                    run_cycle=run_cycle,
+                    taker_fok_fak_live_enabled=bool(edli_cfg.get("taker_fok_fak_live_enabled", False)),
+                )
             finally:
                 _cycle_lock.release()
 
@@ -2439,9 +2440,6 @@ def _edli_event_reactor_cycle() -> None:
             store,
             source_truth_gate=edli_source_truth_gate,
             executable_snapshot_gate=executable_snapshot_gate_from_trade_conn(trade_conn),
-            trade_score_gate=edli_trade_score_gate,
-            fdr_gate=edli_payload_fdr_gate,
-            kelly_gate=edli_payload_kelly_gate,
             riskguard_gate=riskguard_allows_new_entries(get_current_level=get_current_level),
             final_intent_submit=_submit_via_existing_cycle,
             reject=lambda _event, _stage, _reason: None,
@@ -2545,6 +2543,25 @@ def _edli_day0_settlement_semantics(observation: dict):
     )
 
 
+def _edli_filter_markets_for_condition(markets: list[dict], condition_id: str | None) -> list[dict]:
+    condition = str(condition_id or "").strip()
+    if not condition:
+        return list(markets)
+    filtered = []
+    for market in markets:
+        if str(market.get("condition_id") or market.get("market_id") or "") == condition:
+            filtered.append(market)
+            continue
+        outcomes = market.get("outcomes", []) or []
+        if any(
+            str(outcome.get("condition_id") or outcome.get("market_id") or "") == condition
+            for outcome in outcomes
+            if isinstance(outcome, dict)
+        ):
+            filtered.append(market)
+    return filtered
+
+
 @_scheduler_job("edli_market_channel_ingestor")
 def _edli_market_channel_ingestor_cycle() -> None:
     """EDLI market-channel online data-service bootstrap.
@@ -2601,6 +2618,7 @@ def _edli_market_channel_ingestor_cycle() -> None:
             MarketChannelAction,
             MarketChannelIngestor,
             MarketChannelOnlineService,
+            invalidate_executable_snapshots_for_market_channel_action,
             run_market_channel_service_forever,
         )
         from src.state.db import get_world_connection
@@ -2608,11 +2626,48 @@ def _edli_market_channel_ingestor_cycle() -> None:
         world_conn = get_world_connection(write_class="live")
         try:
             def _refresh_snapshot_action(action: MarketChannelAction) -> None:
+                from src.data.market_scanner import (
+                    find_slug_pattern_weather_markets,
+                    refresh_executable_market_substrate_snapshots,
+                )
+                from src.state.db import get_trade_connection
+
+                trade_conn = get_trade_connection(write_class="live")
+                try:
+                    invalidated = invalidate_executable_snapshots_for_market_channel_action(
+                        trade_conn,
+                        action,
+                        invalidated_at=datetime.now(timezone.utc),
+                    )
+                    if invalidated:
+                        trade_conn.commit()
+                    markets = find_slug_pattern_weather_markets(min_hours_to_resolution=0.0)
+                    if action.condition_id:
+                        markets = _edli_filter_markets_for_condition(markets, action.condition_id)
+                        if not markets:
+                            logger.warning(
+                                "EDLI market-channel refresh skipped: condition_id=%s not found in active weather markets",
+                                action.condition_id,
+                            )
+                            return
+                    summary = refresh_executable_market_substrate_snapshots(
+                        trade_conn,
+                        markets=markets,
+                        clob=clob,
+                        captured_at=datetime.now(timezone.utc),
+                        scan_authority=f"EDLI_MARKET_CHANNEL:{action.reason}",
+                        max_outcomes=20,
+                        budget_seconds=15.0,
+                    )
+                    trade_conn.commit()
+                finally:
+                    trade_conn.close()
                 logger.info(
-                    "EDLI market-channel requested executable snapshot refresh: reason=%s token_id=%s condition_id=%s",
+                    "EDLI market-channel refreshed executable snapshots: reason=%s token_id=%s condition_id=%s summary=%s",
                     action.reason,
                     action.token_id,
                     action.condition_id,
+                    summary,
                 )
 
             with PolymarketClient() as clob:

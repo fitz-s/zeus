@@ -540,7 +540,21 @@ def _execute_monitoring_phase(conn, clob: PolymarketClient, portfolio, artifact:
     return _runtime.execute_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary, deps=sys.modules[__name__])
 
 
-def _execute_discovery_phase(conn, clob, portfolio, artifact: CycleArtifact, tracker, limits, mode, summary: dict, entry_bankroll: float, decision_time: datetime, *, env: str):
+def _execute_discovery_phase(
+    conn,
+    clob,
+    portfolio,
+    artifact: CycleArtifact,
+    tracker,
+    limits,
+    mode,
+    summary: dict,
+    entry_bankroll: float,
+    decision_time: datetime,
+    *,
+    env: str,
+    edli_event_context: dict | None = None,
+):
     return _runtime.execute_discovery_phase(
         conn,
         clob,
@@ -553,11 +567,12 @@ def _execute_discovery_phase(conn, clob, portfolio, artifact: CycleArtifact, tra
         entry_bankroll,
         decision_time,
         env=env,
+        edli_event_context=edli_event_context,
         deps=sys.modules[__name__],
     )
 
 
-def run_cycle(mode: DiscoveryMode) -> dict:
+def run_cycle(mode: DiscoveryMode, *, edli_event_context: dict | None = None) -> dict:
     decision_time = _utcnow()
     summary = {
         "mode": mode.value,
@@ -571,6 +586,8 @@ def run_cycle(mode: DiscoveryMode) -> dict:
         "entry_orders_filled_immediate": 0,
         "no_trades": 0,
     }
+    if edli_event_context:
+        summary["edli_event_context"] = dict(edli_event_context)
 
     # S-4 fix (architect audit 2026-04-30, recovery 2026-05-01) — per-cycle
     # freshness gate. evaluate_freshness_mid_run is imported at module level so
@@ -1029,7 +1046,20 @@ def run_cycle(mode: DiscoveryMode) -> dict:
         block_registry=_block_registry,
     ):
         try:
-            p_dirty, t_dirty = _execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mode, summary, entry_bankroll, decision_time, env=get_mode())
+            p_dirty, t_dirty = _execute_discovery_phase(
+                conn,
+                clob,
+                portfolio,
+                artifact,
+                tracker,
+                limits,
+                mode,
+                summary,
+                entry_bankroll,
+                decision_time,
+                env=get_mode(),
+                edli_event_context=edli_event_context,
+            )
             portfolio_dirty = portfolio_dirty or p_dirty
             tracker_dirty = tracker_dirty or t_dirty
         except Exception as exc:

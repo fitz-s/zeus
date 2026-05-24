@@ -86,11 +86,19 @@ class NoTradeRegretEvent:
     would_have_filled: bool | None = None
 
 
+class NoTradeRegretHindsightError(ValueError):
+    pass
+
+
 class NoTradeRegretLedger:
     def __init__(self, conn: sqlite3.Connection) -> None:
         self.conn = conn
 
     def insert_idempotent(self, event: NoTradeRegretEvent) -> str:
+        if _has_hindsight_fields(event):
+            raise NoTradeRegretHindsightError(
+                "live no-trade regret insert cannot include later_outcome/would_have_* fields"
+            )
         regret_event_id = stable_event_id(event.event_id, event.rejection_stage, event.rejection_reason)
         self.conn.execute(
             """
@@ -144,6 +152,39 @@ class NoTradeRegretLedger:
         )
         if _has_compatibility_natural_key(event):
             self._write_no_trade_events_compatibility(event)
+        return regret_event_id
+
+    def enrich_after_settlement(
+        self,
+        *,
+        event_id: str,
+        rejection_stage: str,
+        rejection_reason: str,
+        later_outcome: str,
+        would_have_won: bool,
+        would_have_filled: bool,
+        settlement_proof: str,
+    ) -> str:
+        if not settlement_proof:
+            raise NoTradeRegretHindsightError("settlement_proof is required for hindsight enrichment")
+        regret_event_id = stable_event_id(event_id, rejection_stage, rejection_reason)
+        cur = self.conn.execute(
+            """
+            UPDATE no_trade_regret_events
+               SET later_outcome = ?,
+                   would_have_won = ?,
+                   would_have_filled = ?
+             WHERE regret_event_id = ?
+            """,
+            (
+                later_outcome,
+                int(would_have_won),
+                int(would_have_filled),
+                regret_event_id,
+            ),
+        )
+        if cur.rowcount != 1:
+            raise NoTradeRegretHindsightError("cannot enrich missing no_trade_regret_event")
         return regret_event_id
 
     def live_reader_rows(self) -> list[dict[str, object]]:
@@ -208,4 +249,12 @@ def _has_compatibility_natural_key(event: NoTradeRegretEvent) -> bool:
         and bool(event.target_date)
         and bool(event.observation_time)
         and event.decision_seq is not None
+    )
+
+
+def _has_hindsight_fields(event: NoTradeRegretEvent) -> bool:
+    return (
+        event.later_outcome is not None
+        or event.would_have_won is not None
+        or event.would_have_filled is not None
     )
