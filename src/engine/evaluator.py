@@ -356,6 +356,13 @@ class MarketCandidate:
     # (legacy fixture / pre-evidence path).
     market_phase_source: Optional[str] = None
     phase_evidence: Optional["MarketPhaseEvidence"] = None
+    # OBS-AUTHORITY-FOUNDATION (2026-05-23): id of the
+    # settlement_day_observation_authority row written by cycle_runtime right
+    # after the day0/settlement observation was fetched (or failed). Stamped on
+    # every EdgeDecision this candidate produces so opportunity_fact can join
+    # back to the runtime observation object. None for non-settlement-day
+    # candidates and legacy/test callers.
+    observation_authority_id: Optional[str] = None
 
     def __post_init__(self) -> None:
         if self.phase_evidence is not None:
@@ -425,6 +432,13 @@ class EdgeDecision:
     rejection_reason_detail: Optional[str] = None
     family_fallback_rank: int = 0
     family_fallback_candidate_count: int = 0
+
+    # OBS-AUTHORITY-FOUNDATION (2026-05-23): FK to the
+    # settlement_day_observation_authority row captured at decision time for
+    # day0/settlement candidates. None for non-settlement-day candidates and
+    # legacy callsites. Persisted to opportunity_fact.observation_authority_id
+    # so an operator can join an edge back to the runtime observation object.
+    observation_authority_id: Optional[str] = None
 
     # LIVE-PROB-P0 (2026-05-23): cumulative tail-mass evidence for
     # probability_trace_fact persistence. Set by the gate at evaluator.py:4622
