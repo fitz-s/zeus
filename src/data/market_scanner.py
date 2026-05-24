@@ -102,6 +102,37 @@ class MarketEventsPersistenceResult:
             payload["error"] = self.error
         return payload
 
+    def __int__(self) -> int:
+        return self.inserted
+
+    def __index__(self) -> int:
+        return self.inserted
+
+    def _compare_int(self, other: object, op) -> bool | NotImplemented:
+        if isinstance(other, int):
+            return op(self.inserted, other)
+        if isinstance(other, MarketEventsPersistenceResult):
+            return op(self.inserted, other.inserted)
+        return NotImplemented
+
+    def __eq__(self, other: object) -> bool:
+        compared = self._compare_int(other, lambda left, right: left == right)
+        if compared is NotImplemented:
+            return False
+        return compared
+
+    def __lt__(self, other: object) -> bool | NotImplemented:
+        return self._compare_int(other, lambda left, right: left < right)
+
+    def __le__(self, other: object) -> bool | NotImplemented:
+        return self._compare_int(other, lambda left, right: left <= right)
+
+    def __gt__(self, other: object) -> bool | NotImplemented:
+        return self._compare_int(other, lambda left, right: left > right)
+
+    def __ge__(self, other: object) -> bool | NotImplemented:
+        return self._compare_int(other, lambda left, right: left >= right)
+
 
 @dataclass(frozen=True)
 class SourceContractCheck:
