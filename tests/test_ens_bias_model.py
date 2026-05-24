@@ -102,3 +102,31 @@ def test_bias_sign_convention_matches_forecast_minus_actual():
     assert post.bias < 0  # cold
     # downstream correction: corrected = raw - bias = raw - (-1.2) = raw + 1.2 (warmer)
     assert (0.0 - post.bias) > 0
+
+
+# --- pre-MC application + train/serve guard ---
+
+def test_apply_bias_to_extrema_warms_cold_forecast():
+    import numpy as np
+    from src.calibration.ens_bias_model import apply_bias_to_extrema, PosteriorBias
+    raw = np.array([18.0, 19.0, 20.0])
+    post = PosteriorBias(bias=-1.5, sd=0.5, weight_live=0.9, n_live=80)
+    corrected = apply_bias_to_extrema(raw, post)
+    # corrected = raw - bias = raw - (-1.5) = raw + 1.5 (warmer)
+    assert np.allclose(corrected, raw + 1.5)
+    assert float(corrected.mean()) > float(raw.mean())
+
+
+def test_train_serve_guard_blocks_live_correction_without_corrected_platt():
+    from src.calibration.ens_bias_model import assert_bias_state_consistent
+    # enabling live correction while Platt was fit on uncorrected pairs MUST raise
+    with pytest.raises(ValueError, match="train/serve"):
+        assert_bias_state_consistent(live_bias_enabled=True, platt_bias_corrected=False)
+
+
+def test_train_serve_guard_allows_consistent_states():
+    from src.calibration.ens_bias_model import assert_bias_state_consistent
+    assert_bias_state_consistent(live_bias_enabled=True, platt_bias_corrected=True) is None
+    assert_bias_state_consistent(live_bias_enabled=False, platt_bias_corrected=False) is None
+    # correction off but corrected Platt present is benign (does not raise)
+    assert_bias_state_consistent(live_bias_enabled=False, platt_bias_corrected=True) is None

@@ -217,3 +217,34 @@ def fit_bucket(
         live = LiveResidual(e_bar=e_bar, n=len(opendata_residuals), sigma2=var_o)
 
     return posterior_bias(prior, live, paired_delta_abs=paired_delta_abs)
+
+
+def apply_bias_to_extrema(member_extrema, posterior: PosteriorBias):
+    """Apply the posterior bias correction to per-member daily extrema, PRE-Monte-Carlo.
+
+    ``corrected = raw - bias`` (bias = forecast - actual), so a cold (negative)
+    bias warms the forecast. Correction MUST happen here, before binning + MC +
+    rounding, because those steps are non-linear (you cannot shift the posterior
+    probability vector instead). Accepts a numpy array; returns a numpy array.
+    """
+    import numpy as np
+
+    arr = np.asarray(member_extrema, dtype=float)
+    return arr - posterior.bias
+
+
+def assert_bias_state_consistent(*, live_bias_enabled: bool, platt_bias_corrected: bool) -> None:
+    """Train/serve invariant: if live signals are bias-corrected, the active Platt
+    model MUST have been fit on bias_corrected=1 calibration pairs.
+
+    Enabling live correction while Platt was trained on uncorrected p_raw moves the
+    live p_raw into a different calibration input space (out-of-domain inference).
+    Raises ValueError on that mismatch; all other states are benign.
+    """
+    if live_bias_enabled and not platt_bias_corrected:
+        raise ValueError(
+            "train/serve bias-state mismatch: live bias correction is enabled but the "
+            "active Platt model was fit on uncorrected calibration_pairs "
+            "(bias_corrected=0). Recompute corrected pairs and refit Platt before "
+            "enabling bias_correction."
+        )
