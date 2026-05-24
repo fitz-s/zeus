@@ -342,8 +342,26 @@ CREATE TABLE IF NOT EXISTS opportunity_fact (
         'chain_unavailable'
     )),
     should_trade INTEGER NOT NULL CHECK (should_trade IN (0, 1)),
+    -- OBS-AUTHORITY-FOUNDATION (2026-05-23): FK to the settlement-day
+    -- observation authority row captured at decision time. NULL for legacy
+    -- rows and non-settlement-day candidates (no day0/settlement obs fetched).
+    -- Idempotent ALTER in log_opportunity_fact backfills production trade DBs
+    -- whose opportunity_fact predates this column.
+    observation_authority_id TEXT,
+    -- OBS-AUTHORITY-FOUNDATION FIX-2 (2026-05-23): per-edge day0 observation-lock
+    -- classification payload (JSON). day0_truth_classification + observed
+    -- high/low + candidate bin bounds + settlement_capture eligibility. This is
+    -- what makes "is this day0 edge observation-locked, forecast-upside, or
+    -- wrong?" answerable per opportunity row. NULL for non-day0/non-HIGH rows.
+    day0_context_json TEXT,
     recorded_at TEXT NOT NULL
 );
+
+-- NOTE: settlement_day_observation_authority (OBS-AUTHORITY-FOUNDATION
+-- 2026-05-23) is a TRADE-CLASS table — its DDL lives in db.py _TRADE_CLASS_DDL
+-- and is created only by init_schema_trade_only on zeus_trades.db (colocated
+-- with opportunity_fact's runtime write target). It is intentionally NOT
+-- created here so init_schema (world) does not pollute zeus-world.db with it.
 
 CREATE TABLE IF NOT EXISTS execution_fact (
     intent_id TEXT PRIMARY KEY,

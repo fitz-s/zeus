@@ -396,6 +396,62 @@ def _k2_obs_v2_tick():
         logger.info("K2 obs_v2_tick: written=%d failed=%s", written, failed or "none")
 
 
+@_scheduler_job("ingest_k2_hko_tick")
+def _k2_hko_tick():
+    """HKO hourly accumulator fetch + v2 projection for Hong Kong.
+
+    Runs hourly at minute=30, offset from obs_v2 (:15) and harvester (:45).
+    Decoupled from the trading daemon per operator directive 2026-04-23
+    ("daemon-live和polymarket数据/天气数据采集本不应该混为一谈").
+
+    scripts/hko_ingest_tick.py acquires db_writer_lock(BULK) only in its
+    CLI main() path. When called via module-level functions (as done here),
+    the lock is NOT acquired inside those functions — ingest_main is
+    responsible for any lock coordination at this call site (currently
+    guarded by acquire_lock("hko_tick") above). Called as functions to
+    avoid subprocess overhead and inherit the daemon's DB path resolution.
+    """
+    from src.data.dual_run_lock import acquire_lock
+    from pathlib import Path
+
+    with acquire_lock("hko_tick") as acquired:
+        if not acquired:
+            logger.info("ingest k2_hko_tick skipped_lock_held")
+            return
+        _REPO_ROOT = Path(__file__).resolve().parent.parent
+        db_path = _REPO_ROOT / "state" / "zeus-world.db"
+        # Import the standalone script's two entry-point functions directly.
+        # hko_ingest_tick.py is already in SQLITE_CONNECT_ALLOWLIST.
+        import sys as _sys
+        if str(_REPO_ROOT) not in _sys.path:
+            _sys.path.insert(0, str(_REPO_ROOT))
+        from scripts.hko_ingest_tick import (
+            tick_accumulator,
+            project_accumulator_to_v2,
+            DEFAULT_LOG_PATH,
+        )
+        from src.state.db_writer_lock import WriteClass, db_writer_lock
+        import sqlite3 as _sqlite3
+        data_version = "v1.wu-native"
+        with db_writer_lock(db_path, WriteClass.BULK):
+            conn = _sqlite3.connect(str(db_path))
+            try:
+                tick_result = tick_accumulator(conn, DEFAULT_LOG_PATH)
+                project_result = project_accumulator_to_v2(
+                    conn, data_version, DEFAULT_LOG_PATH
+                )
+            finally:
+                conn.close()
+        logger.info(
+            "K2 hko_tick: tick_ok=%s candidates=%s written=%s build_errors=%s",
+            tick_result.get("tick_ok"),
+            project_result.get("candidates"),
+            project_result.get("written"),
+            project_result.get("build_errors"),
+        )
+        return {**tick_result, **project_result}
+
+
 # Staleness threshold for boot-time force-fetch.  A once-per-day cron
 # (forecasts at 07:30 UTC, solar at 00:30 UTC) that was missed while the
 # daemon was offline leaves the table stale.  If max captured_at / fetched_at
@@ -1446,6 +1502,15 @@ def main() -> None:
     _scheduler.add_job(
         _k2_obs_v2_tick, "cron",
         minute=15, id="ingest_k2_obs_v2",
+        max_instances=1, coalesce=True, misfire_grace_time=3600,
+    )
+    # HKO hourly accumulator + v2 projection — runs at :30, offset from
+    # obs_v2 (:15) and harvester (:45) to avoid lock contention.
+    # Closes the gap: hko_ingest_tick.py was designed standalone but was
+    # never wired into the daemon scheduler (FIX-5 HKO gap).
+    _scheduler.add_job(
+        _k2_hko_tick, "cron",
+        minute=30, id="ingest_k2_hko",
         max_instances=1, coalesce=True, misfire_grace_time=3600,
     )
     _scheduler.add_job(

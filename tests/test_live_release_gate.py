@@ -27,6 +27,7 @@ def _make_world_db(path: Path) -> None:
     conn = sqlite3.connect(str(path))
     try:
         init_schema(conn)
+        conn.commit()
     finally:
         conn.close()
 

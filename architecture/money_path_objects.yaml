@@ -348,6 +348,16 @@ state_machines:
       - tests/test_decision_integrity_quarantine.py
       - tests/test_decision_integrity_quarantine_extended.py
 
+  obs_coverage_status:
+    description: >
+      Observation coverage status emitted by ObservationClient and stamped on
+      settlement_day_observation_authority rows. DIAGNOSTIC_FALLBACK indicates
+      the obs pipeline returned a result but via a degraded/fallback path (e.g.
+      stale open-meteo archive). Observability-only — never gates a trade.
+      OBS-AUTHORITY-FOUNDATION 2026-05-23.
+    states:
+      - DIAGNOSTIC_FALLBACK
+
 schema_objects:
   authority_fabricating_defaults:
     - VERIFIED
@@ -362,6 +372,37 @@ schema_objects:
   historical_truth_policy_required_for:
     - scripts/migrations/**
     - scripts/migrate_*.py
+  observability_surfaces:
+    # OBS-AUTHORITY-FOUNDATION 2026-05-23. Persisted, auditable settlement-day
+    # observation authority. Observability only — these objects record runtime
+    # observation truth + per-edge day0 classification so the operator can audit
+    # whether a tradeable-price day0 edge is observation-locked, forecast-upside,
+    # or wrong-date/source. NOT executable economic objects; do not gate trades.
+    settlement_day_observation_authority:
+      db: trade
+      pk: authority_id
+      writer: src/state/db.py::log_settlement_day_observation_authority
+      written_from: src/engine/cycle_runtime.py::execute_discovery_phase
+      builder: src/engine/cycle_runtime.py::build_settlement_day_observation_authority_row
+      meaning: >
+        One row per settlement-day/day0 candidate at decision time (including
+        MISSING/STALE/LOW coverage failure cases). Captures high_so_far /
+        low_so_far / current_temp / source / station_id / observation_time +
+        derived audit flags local_date_matches_target,
+        source_authorized_for_settlement, persisted_surface_available.
+      required_tests: [tests/test_settlement_day_observation_authority.py]
+    opportunity_fact_day0_context:
+      fields: [observation_authority_id, day0_context_json]
+      table: opportunity_fact
+      meaning: >
+        observation_authority_id FKs an opportunity row to its
+        settlement_day_observation_authority row. day0_context_json holds the
+        per-edge day0 truth classification (observation_locked /
+        observation_floor_plus_forecast_upside / observation_excludes_bin /
+        observation_partial_unresolved / observation_unknown) + observed
+        high/low + candidate bin bounds + settlement_capture eligibility.
+      classification_source: src/engine/evaluator.py::day0_high_truth_classification_for_edge
+      required_tests: [tests/test_settlement_day_observation_authority.py]
 
 external_truth_sources:
   gamma:

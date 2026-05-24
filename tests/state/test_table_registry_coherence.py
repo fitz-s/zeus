@@ -42,7 +42,12 @@ import pytest
 
 _REPO_ROOT = Path(__file__).parent.parent.parent
 
-EXPECTED_RUNTIME_TRADE_TABLES = frozenset({
+# Pre-PR-S4b heritage: trade-class tables that pre-PR-S4b init_schema(trade_conn)
+# also created on world.db, so a legacy_archived ghost shell is expected on world
+# for these. Post-K1-split tables (decision_integrity_quarantine 2026-05-22,
+# settlement_day_observation_authority 2026-05-23) are trade-only and have no
+# world ghost — they are NOT in this set.
+PRE_PR_S4B_HERITAGE_TRADE_TABLES = frozenset({
     "book_hash_transitions",
     "execution_fact",
     "executable_market_snapshots",
@@ -51,6 +56,27 @@ EXPECTED_RUNTIME_TRADE_TABLES = frozenset({
     "position_lots",
     "settlement_command_events",
     "settlement_commands",
+    "trade_decisions",
+    "venue_command_events",
+    "venue_commands",
+    "venue_order_facts",
+    "venue_submission_envelopes",
+    "venue_trade_facts",
+})
+
+EXPECTED_RUNTIME_TRADE_TABLES = frozenset({
+    "book_hash_transitions",
+    "decision_integrity_quarantine",  # PR-E 2026-05-22: trade-class quarantine
+    "execution_fact",
+    "executable_market_snapshots",
+    "position_current",
+    "position_events",
+    "position_lots",
+    "settlement_command_events",
+    "settlement_commands",
+    # OBS-AUTHORITY-FOUNDATION 2026-05-23: persisted settlement-day observation
+    # authority (created by init_schema_trade_only via _TRADE_CLASS_DDL).
+    "settlement_day_observation_authority",
     "trade_decisions",
     "venue_command_events",
     "venue_commands",
@@ -617,15 +643,18 @@ class TestA4ManifestReadyForBootWiring:
             f"missing from registry: {sorted(missing_trade)}."
         )
 
-        # (3) 12 ghost shells declared legacy_archived on world.db
+        # (3) pre-PR-S4b heritage tables have legacy_archived ghost shells on
+        # world.db. Post-K1-split trade-only tables (decision_integrity_
+        # quarantine, settlement_day_observation_authority) have no world ghost
+        # and are excluded via PRE_PR_S4B_HERITAGE_TRADE_TABLES.
         missing_ghost = [
-            name for name in EXPECTED_RUNTIME_TRADE_TABLES
+            name for name in PRE_PR_S4B_HERITAGE_TRADE_TABLES
             if (_REGISTRY.get((name, DBIdentity.WORLD)) is None
                 or _REGISTRY[(name, DBIdentity.WORLD)].schema_class != SchemaClass.LEGACY_ARCHIVED)
         ]
         assert not missing_ghost, (
-            f"MANIFEST READINESS FAIL: these trade tables lack legacy_archived "
-            f"ghost shell on world.db: {sorted(missing_ghost)}."
+            f"MANIFEST READINESS FAIL: these pre-PR-S4b heritage tables lack "
+            f"legacy_archived ghost shell on world.db: {sorted(missing_ghost)}."
         )
 
     def test_a4_manifest_schema_version_is_2(self):

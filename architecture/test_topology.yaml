@@ -249,6 +249,7 @@ test_trust_policy:
     tests/test_exchange_reconcile.py: {created: "2026-04-27", last_used: "2026-05-08"}
     tests/test_order_truth_reducer.py: {created: "2026-05-21", last_used: "2026-05-21"}
     tests/test_settlement_commands.py: {created: "2026-04-27", last_used: "2026-04-27"}
+    tests/test_settlement_day_observation_authority.py: {created: "2026-05-23", last_used: "2026-05-23"}
     tests/test_fake_polymarket_venue.py: {created: "2026-04-27", last_used: "2026-04-27"}
     tests/test_strategy_benchmark.py: {created: "2026-04-27", last_used: "2026-04-27"}
     tests/test_risk_allocator.py: {created: "2026-04-27", last_used: "2026-04-27"}

@@ -351,6 +351,13 @@ class MarketCandidate:
     # (legacy fixture / pre-evidence path).
     market_phase_source: Optional[str] = None
     phase_evidence: Optional["MarketPhaseEvidence"] = None
+    # OBS-AUTHORITY-FOUNDATION (2026-05-23): id of the
+    # settlement_day_observation_authority row written by cycle_runtime right
+    # after the day0/settlement observation was fetched (or failed). Stamped on
+    # every EdgeDecision this candidate produces so opportunity_fact can join
+    # back to the runtime observation object. None for non-settlement-day
+    # candidates and legacy/test callers.
+    observation_authority_id: Optional[str] = None
 
     def __post_init__(self) -> None:
         if self.phase_evidence is not None:
@@ -420,6 +427,13 @@ class EdgeDecision:
     rejection_reason_detail: Optional[str] = None
     family_fallback_rank: int = 0
     family_fallback_candidate_count: int = 0
+
+    # OBS-AUTHORITY-FOUNDATION (2026-05-23): FK to the
+    # settlement_day_observation_authority row captured at decision time for
+    # day0/settlement candidates. None for non-settlement-day candidates and
+    # legacy callsites. Persisted to opportunity_fact.observation_authority_id
+    # so an operator can join an edge back to the runtime observation object.
+    observation_authority_id: Optional[str] = None
 
     def __post_init__(self) -> None:
         if self.decision_snapshot_id is None:
@@ -2358,6 +2372,20 @@ def _day0_high_truth_classification_for_edge(
     if edge_bin.high is not None and observed_high > float(edge_bin.high):
         return "observation_excludes_bin"
     return "observation_partial_unresolved"
+
+
+def day0_high_truth_classification_for_edge(
+    candidate: MarketCandidate,
+    edge: BinEdge,
+) -> str | None:
+    """Public wrapper for _day0_high_truth_classification_for_edge.
+
+    OBS-AUTHORITY-FOUNDATION FIX-2 (2026-05-23). Lets the durable opportunity_
+    fact writer (src/state/db.py) compute the same observation-lock truth string
+    the evaluator uses for edge_source/strategy_key, so it can be persisted per
+    opportunity row without duplicating the classification logic.
+    """
+    return _day0_high_truth_classification_for_edge(candidate, edge)
 
 
 def _entry_ci_rejection_reason(candidate: MarketCandidate, edge: BinEdge) -> str | None:

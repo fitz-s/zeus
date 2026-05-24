@@ -15,8 +15,10 @@ import logging
 import math
 import os
 import time
+import uuid
 from dataclasses import is_dataclass, replace
 from datetime import date, datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_FLOOR
 from types import SimpleNamespace
 from typing import Any
@@ -3286,6 +3288,226 @@ def _availability_status_for_exception(exc: Exception) -> str:
     return "DATA_UNAVAILABLE"
 
 
+def _observation_time_to_local_date(observation_time, timezone_name: str):
+    """Best-effort local date of an observation timestamp. None when un-parseable.
+
+    Accepts ISO strings, epoch seconds, or datetime. Total (never raises) —
+    this is observability instrumentation that must not perturb the cycle.
+    """
+    if observation_time is None:
+        return None
+    try:
+        tz = ZoneInfo(timezone_name)
+    except Exception:
+        return None
+    dt = None
+    try:
+        if isinstance(observation_time, datetime):
+            dt = observation_time
+        elif isinstance(observation_time, (int, float)):
+            dt = datetime.fromtimestamp(float(observation_time), tz=timezone.utc)
+        else:
+            raw = str(observation_time).strip()
+            if not raw:
+                return None
+            dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except Exception:
+        return None
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    try:
+        return dt.astimezone(tz).date()
+    except Exception:
+        return None
+
+
+def _normalize_observation_coverage_status(raw: str) -> str:
+    """Map the two runtime coverage/availability vocabularies onto the canonical
+    MISSING / STALE / LOW / OK set the operator audit query expects.
+
+    Success path emits OK / DIAGNOSTIC_FALLBACK (obs.coverage_status); failure
+    path emits DATA_UNAVAILABLE / DATA_STALE / RATE_LIMITED / CHAIN_UNAVAILABLE
+    (_availability_status_for_exception). The raw value is preserved in
+    payload_json; this is only the canonical column value.
+    """
+    value = str(raw or "").strip().upper()
+    if value in {"OK"}:
+        return "OK"
+    if value in {"DATA_STALE", "STALE", "RATE_LIMITED"}:
+        return "STALE"
+    if value in {"DIAGNOSTIC_FALLBACK", "LOW"}:
+        return "LOW"
+    if value in {"DATA_UNAVAILABLE", "CHAIN_UNAVAILABLE", "MISSING", "", "UNKNOWN"}:
+        return "MISSING"
+    return "MISSING"
+
+
+def stamp_observation_authority_id_onto_decisions(candidate, decisions) -> None:
+    """Propagate candidate.observation_authority_id onto every EdgeDecision.
+
+    OBS-AUTHORITY-FOUNDATION (2026-05-23). The durable opportunity_fact row links
+    back to the runtime observation object via this id. Only fills decisions that
+    don't already carry one (an evaluator may set it directly in a future
+    package); never clears an existing id. Fail-soft on frozen/foreign decision
+    objects — observability must not perturb the cycle.
+    """
+    auth_id = getattr(candidate, "observation_authority_id", None)
+    if not auth_id or not decisions:
+        return
+    for decision in decisions:
+        if getattr(decision, "observation_authority_id", None) is None:
+            try:
+                decision.observation_authority_id = auth_id
+            except Exception:  # noqa: BLE001 - frozen/foreign decision objects.
+                pass
+
+
+def build_settlement_day_observation_authority_row(
+    *,
+    city,
+    target_date: str,
+    temperature_metric,
+    decision_time,
+    market_phase,
+    observation,
+    coverage_status: str,
+    recorded_at: str,
+) -> dict:
+    """Assemble one settlement_day_observation_authority row from the RUNTIME
+    observation object (or its absence on the missing/stale/low cases).
+
+    OBS-AUTHORITY-FOUNDATION (2026-05-23). Pure + total: computes the derived
+    audit fields (local_date_matches_target, source_authorized_for_settlement,
+    persisted_surface_available, freshness_status) without touching the DB or
+    raising. ``observation`` is a Day0ObservationContext or None.
+
+    Field semantics:
+      source_authorized_for_settlement — 1 when the obs came from the
+        settlement-bound source path (coverage_status == "OK"); 0 for diagnostic
+        fallbacks; None when no obs was fetched.
+      local_date_matches_target — 1 when the observation timestamp's local date
+        (city tz) equals target_date. The whole-point field for catching
+        wrong-date/source fakes. None when un-computable or no obs.
+      persisted_surface_available — 1 when a runtime obs object existed at
+        decision time; 0 when the fetch failed / was skipped.
+    """
+    authority_id = uuid.uuid4().hex
+    city_name = getattr(city, "name", None) or (str(city) if city else None)
+    timezone_name = getattr(city, "timezone", "") or ""
+    cov_raw = str(coverage_status or "").strip().upper() or "UNKNOWN"
+    cov = _normalize_observation_coverage_status(cov_raw)
+    metric = str(temperature_metric or "").strip().lower() or None
+    if metric not in (None, "high", "low"):
+        metric = None
+
+    if observation is None:
+        return {
+            "authority_id": authority_id,
+            "city": city_name,
+            "target_date": str(target_date or "") or None,
+            "temperature_metric": metric,
+            "decision_time_utc": decision_time.isoformat() if hasattr(decision_time, "isoformat") else str(decision_time),
+            "market_phase": str(getattr(market_phase, "value", market_phase) or "") or None,
+            "source": None,
+            "station_id": None,
+            "observation_time_utc": None,
+            "first_sample_time_utc": None,
+            "last_sample_time_utc": None,
+            "high_so_far": None,
+            "low_so_far": None,
+            "current_temp": None,
+            "sample_count": None,
+            "coverage_status": cov,
+            "freshness_status": "MISSING",
+            "local_date_matches_target": None,
+            "source_authorized_for_settlement": None,
+            "persisted_surface_available": 0,
+            "payload_json": json.dumps(
+                {"observation": None, "coverage_status": cov, "coverage_status_raw": cov_raw},
+                sort_keys=True,
+            ),
+            "recorded_at": recorded_at,
+        }
+
+    obs_source = getattr(observation, "source", None)
+    obs_station = getattr(observation, "station_id", None)
+    obs_time = getattr(observation, "observation_time", None)
+    first_t = getattr(observation, "first_sample_time", None)
+    last_t = getattr(observation, "last_sample_time", None)
+    obs_coverage = str(getattr(observation, "coverage_status", "") or cov).strip().upper() or "UNKNOWN"
+    sample_count = getattr(observation, "sample_count", None)
+
+    # source_authorized_for_settlement: settlement-bound path yields
+    # coverage_status="OK"; diagnostic fallbacks yield "DIAGNOSTIC_FALLBACK".
+    source_authorized = 1 if obs_coverage == "OK" else 0
+
+    # local_date_matches_target: compare obs timestamp local date to target_date.
+    local_match = None
+    obs_local_date = _observation_time_to_local_date(obs_time, timezone_name)
+    if obs_local_date is not None and target_date:
+        try:
+            target_d = date.fromisoformat(str(target_date)[:10])
+            local_match = 1 if obs_local_date == target_d else 0
+        except (ValueError, TypeError):
+            local_match = None
+
+    # freshness_status: derived from coverage. OK obs is FRESH; diagnostic or
+    # other coverage is DEGRADED (the settlement source did not produce it).
+    freshness = "FRESH" if obs_coverage == "OK" else "DEGRADED"
+
+    def _f(value):
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    payload = {
+        "observation": {
+            "source": obs_source,
+            "station_id": obs_station,
+            "observation_time": str(obs_time) if obs_time is not None else None,
+            "high_so_far": _f(getattr(observation, "high_so_far", None)),
+            "low_so_far": _f(getattr(observation, "low_so_far", None)),
+            "current_temp": _f(getattr(observation, "current_temp", None)),
+            "unit": getattr(observation, "unit", None),
+            "causality_status": getattr(observation, "causality_status", None),
+            "sample_count": int(sample_count) if isinstance(sample_count, (int, float)) else None,
+            "coverage_status": obs_coverage,
+            "observation_available_at": getattr(observation, "observation_available_at", None),
+        },
+        "coverage_status": _normalize_observation_coverage_status(obs_coverage),
+        "coverage_status_raw": obs_coverage,
+        "obs_local_date": obs_local_date.isoformat() if obs_local_date is not None else None,
+    }
+
+    return {
+        "authority_id": authority_id,
+        "city": city_name,
+        "target_date": str(target_date or "") or None,
+        "temperature_metric": metric,
+        "decision_time_utc": decision_time.isoformat() if hasattr(decision_time, "isoformat") else str(decision_time),
+        "market_phase": str(getattr(market_phase, "value", market_phase) or "") or None,
+        "source": str(obs_source or "") or None,
+        "station_id": str(obs_station or "") or None,
+        "observation_time_utc": str(obs_time) if obs_time is not None else None,
+        "first_sample_time_utc": str(first_t) if first_t is not None else None,
+        "last_sample_time_utc": str(last_t) if last_t is not None else None,
+        "high_so_far": _f(getattr(observation, "high_so_far", None)),
+        "low_so_far": _f(getattr(observation, "low_so_far", None)),
+        "current_temp": _f(getattr(observation, "current_temp", None)),
+        "sample_count": int(sample_count) if isinstance(sample_count, (int, float)) else None,
+        "coverage_status": _normalize_observation_coverage_status(obs_coverage),
+        "freshness_status": freshness,
+        "local_date_matches_target": local_match,
+        "source_authorized_for_settlement": source_authorized,
+        "persisted_surface_available": 1,
+        "payload_json": json.dumps(payload, sort_keys=True),
+        "recorded_at": recorded_at,
+    }
+
+
 def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mode, summary: dict, entry_bankroll: float, decision_time, *, env: str, deps):
     portfolio_dirty = False
     tracker_dirty = False
@@ -3432,6 +3654,48 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
             log_microstructure(conn, **payload)
 
         _queue_derived_write("microstructure", _write)
+
+    def _record_settlement_day_observation_authority(
+        *,
+        city,
+        target_date: str,
+        temperature_metric,
+        market_phase,
+        observation,
+        coverage_status: str,
+    ) -> str:
+        """Build + queue the authority row; return its authority_id for stamping.
+
+        OBS-AUTHORITY-FOUNDATION (2026-05-23). Observability only: returns the
+        id synchronously (so the candidate/decisions can reference it) and
+        queues the durable write through the same fail-soft derived-write path
+        as the other facts. Never raises into the cycle.
+        """
+        try:
+            row = build_settlement_day_observation_authority_row(
+                city=city,
+                target_date=target_date,
+                temperature_metric=temperature_metric,
+                decision_time=decision_time,
+                market_phase=market_phase,
+                observation=observation,
+                coverage_status=coverage_status,
+                recorded_at=decision_time.isoformat(),
+            )
+        except Exception as exc:  # noqa: BLE001 - instrumentation is fail-soft.
+            deps.logger.warning("Failed to build observation authority row: %s", exc)
+            return ""
+        authority_id = str(row.get("authority_id") or "")
+
+        def _write(payload=dict(row)) -> None:
+            from src.state.db import log_settlement_day_observation_authority
+
+            log_settlement_day_observation_authority(conn, **payload)
+
+        _queue_derived_write(
+            f"settlement_day_observation_authority:{authority_id}", _write
+        )
+        return authority_id
 
     def _record_opportunity_fact(candidate, decision, *, should_trade: bool, rejection_stage: str, rejection_reasons: list[str]):
         def _write(
@@ -4122,6 +4386,20 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                 _frontier_increment("candidate_frontier", "observation_unavailable")
                 deps.logger.warning("Skipping candidate for %s: %s", city.name, e)
                 availability_status = _availability_status_for_exception(e)
+                # OBS-AUTHORITY-FOUNDATION: capture the MISSING observation case
+                # — the candidate is dropped here so it never reaches the durable
+                # opportunity_fact path, but the runtime "we tried and got
+                # nothing" fact is exactly what was previously invisible. Write
+                # an authority row (observation=None) so the operator audit sees
+                # the attempted settlement-day fetch and its failure coverage.
+                _record_settlement_day_observation_authority(
+                    city=city,
+                    target_date=market["target_date"],
+                    temperature_metric=market.get("temperature_metric"),
+                    market_phase=market_phase,
+                    observation=None,
+                    coverage_status=availability_status,
+                )
                 _record_availability_fact(
                     status=availability_status,
                     reasons=[str(e)],
@@ -4191,6 +4469,24 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
         summary["candidates"] += 1
         _frontier_increment("candidate_frontier", "candidate_objects_built")
 
+        # OBS-AUTHORITY-FOUNDATION (2026-05-23): for settlement-day/day0
+        # candidates (the only ones for which a day0/settlement observation was
+        # fetched), persist the runtime observation object as an auditable
+        # authority row and stamp its id onto the candidate so every EdgeDecision
+        # it produces can join back to the observation. Covers the OK case here;
+        # the MISSING case was captured in the obs-fetch except handler above.
+        # Observability only — does not change selection or trade behavior.
+        if should_fetch_observation:
+            _obs_coverage = str(getattr(obs, "coverage_status", "") or "") or "UNKNOWN"
+            candidate.observation_authority_id = _record_settlement_day_observation_authority(
+                city=city,
+                target_date=market["target_date"],
+                temperature_metric=candidate.temperature_metric,
+                market_phase=market_phase,
+                observation=obs,
+                coverage_status=_obs_coverage,
+            ) or None
+
         try:
             # B091: forward the cycle's authoritative decision_time to the
             # evaluator so per-cycle `recorded_at` timestamps derive from
@@ -4215,6 +4511,10 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                     entry_bankroll=entry_bankroll,
                     decision_time=decision_time,
                 )
+            # OBS-AUTHORITY-FOUNDATION (2026-05-23): stamp the candidate's
+            # observation authority id onto every EdgeDecision so the durable
+            # opportunity_fact row links back to the runtime observation object.
+            stamp_observation_authority_id_onto_decisions(candidate, decisions)
             _frontier_increment("math_frontier", "evaluator_candidates")
             if decisions:
                 _frontier_increment("math_frontier", "evaluator_decisions", len(decisions))
