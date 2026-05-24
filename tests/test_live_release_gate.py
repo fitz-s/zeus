@@ -381,7 +381,7 @@ def test_release_gate_passes_with_recent_redeem_tx_hashed(tmp_path: Path) -> Non
 
 
 # ---------------------------------------------------------------------------
-# P0-1/P1-7 antibody: NULL expires_at LIVE_ELIGIBLE row must fail gate
+# P0-1/P1-6 antibody: NULL expires_at LIVE_ELIGIBLE row must fail gate
 # ---------------------------------------------------------------------------
 
 
@@ -390,7 +390,7 @@ def test_release_gate_fails_when_live_eligible_has_null_expires_at(tmp_path: Pat
 
     Canonical write_readiness_state() rejects LIVE_ELIGIBLE without expires_at.
     The gate must enforce the same constraint so a non-canonical row cannot pass.
-    review5.23 P0-1 + P1-7.
+    review5.23 P0-1 + P1-6.
     """
     # Create supporting files via _make_gate_args (creates world/trade DBs + JSON files)
     # but skip forecasts DB so we can inject a null-expiry row ourselves.

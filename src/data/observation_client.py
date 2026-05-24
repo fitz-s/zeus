@@ -153,12 +153,16 @@ def _compute_day0_coverage_status(
     """Pure helper — determine Day0 coverage_status from first-sample time.
 
     Returns "WINDOW_INCOMPLETE" when the first sample arrives strictly more than
-    `grace_hours` after local midnight (i.e. first_hour > grace_hours).
+    `grace_hours` after local midnight (i.e. elapsed_hours > grace_hours).
     At exactly grace_hours the sample is still within the window → "OK" or
     "LOW_COVERAGE" per sample count.  Extracted for testability.
+
+    Elapsed hours are computed via timedelta subtraction (not ``hour + minute/60``)
+    so that DST fall-back days (where 01:xx appears twice) are handled correctly.
     """
-    first_hour = first_local.hour + first_local.minute / 60.0
-    if first_hour > grace_hours:
+    _local_midnight = first_local.replace(hour=0, minute=0, second=0, microsecond=0, fold=0)
+    elapsed_hours = (first_local - _local_midnight).total_seconds() / 3600.0
+    if elapsed_hours > grace_hours:
         return "WINDOW_INCOMPLETE"
     elif n_samples < min_samples:
         return "LOW_COVERAGE"

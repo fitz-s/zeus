@@ -34,6 +34,8 @@ expected to close out.  Keep them under their existing names.
 | `tigge_daemon_integration.md` | active | TIGGE daemon wiring reference. |
 | `live_rescue_ledger_2026-05-04.md` | **review** | Per-day live-rescue log; needs rotation policy if this grows. |
 | `P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md` | active | P0 authority doc: PR-A snapshot ORDER BY fix, PR-B Day0 HIGH physical law, PR-C observation reader Root C, PR-D probability sanity gate, PR-E decision_integrity_quarantine. PR #309. |
+| `review5_23_findings.md` | active | review5.23 findings catalogue (P0-1, P1-1 through P1-8, P2-1 through P2-3). Authority for PR #326 fix scope. |
+| `review5_23_triage.md` | active | review5.23 triage status — per-finding fix status, PR anchors, open items. Updated by PR #326. |
 
 ## Task directories — closeout status
 

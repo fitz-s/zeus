@@ -2402,8 +2402,12 @@ def _day0_high_truth_classification_for_edge(
     try:
         sem = SettlementSemantics.for_city(candidate.city)
         observed_high = sem.round_single(observed_high_raw)
-    except Exception:
-        observed_high = observed_high_raw
+    except Exception as exc:
+        logger.warning(
+            "settlement_semantics_rounding_failed city=%s: %s — candidate rejected",
+            candidate.city, exc,
+        )
+        return "settlement_semantics_unavailable"
     edge_bin = edge.bin
     if edge_bin.is_open_high:
         try:

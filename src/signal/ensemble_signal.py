@@ -202,8 +202,10 @@ def p_raw_vector_from_maxes(
             partition (cover the real line including shoulders) for the result
             to sum to 1.0; the caller is responsible for grid completeness.
         n_mc: Monte Carlo iterations. Defaults to ``ensemble_n_mc()`` (10,000).
-        rng: numpy Generator. Callers should seed externally for reproducible
-            tests; defaults to ``np.random.default_rng()``.
+        rng: numpy Generator. When ``None`` (default), a deterministic seed is
+            derived from ``member_maxes``, ``city``, ``n_mc``, and ``bins``
+            via SHA-256 so results are reproducible across calls with the same
+            inputs (review5.23 P1-3). Pass an explicit Generator to override.
 
     Returns:
         np.ndarray shape (n_bins,). If the grid is complete the vector sums to
