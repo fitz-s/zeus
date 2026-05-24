@@ -3713,6 +3713,7 @@ _TRADE_CLASS_TABLES: frozenset[str] = frozenset({
     "position_lots",
     "settlement_command_events",
     "settlement_commands",
+    "settlement_day_observation_authority",
     "trade_decisions",
     "venue_command_events",
     "venue_commands",
@@ -4135,6 +4136,42 @@ CREATE TABLE IF NOT EXISTS venue_command_events (
 );
 CREATE INDEX IF NOT EXISTS idx_venue_command_events_command ON venue_command_events(command_id);
 CREATE INDEX IF NOT EXISTS idx_venue_command_events_type ON venue_command_events(event_type);
+
+-- settlement_day_observation_authority (OBS-AUTHORITY-FOUNDATION 2026-05-23).
+-- Trade-class: the runtime opportunity_fact + decision evidence live on
+-- zeus_trades.db, so the authority that joins to them is colocated there.
+-- Canonical DDL source: _TRADE_CLASS_DDL in this file (src/state/db.py).
+-- Created by init_schema_trade_only; NOT in architecture_kernel.sql.
+CREATE TABLE IF NOT EXISTS settlement_day_observation_authority (
+    authority_id TEXT PRIMARY KEY,
+    city TEXT,
+    target_date TEXT,
+    temperature_metric TEXT
+        CHECK (temperature_metric IS NULL OR temperature_metric IN ('high', 'low')),
+    decision_time_utc TEXT,
+    market_phase TEXT,
+    source TEXT,
+    station_id TEXT,
+    observation_time_utc TEXT,
+    first_sample_time_utc TEXT,
+    last_sample_time_utc TEXT,
+    high_so_far REAL,
+    low_so_far REAL,
+    current_temp REAL,
+    sample_count INTEGER,
+    coverage_status TEXT,
+    freshness_status TEXT,
+    local_date_matches_target INTEGER
+        CHECK (local_date_matches_target IS NULL OR local_date_matches_target IN (0, 1)),
+    source_authorized_for_settlement INTEGER
+        CHECK (source_authorized_for_settlement IS NULL OR source_authorized_for_settlement IN (0, 1)),
+    persisted_surface_available INTEGER
+        CHECK (persisted_surface_available IS NULL OR persisted_surface_available IN (0, 1)),
+    payload_json TEXT,
+    recorded_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_settlement_day_obs_authority_city_target
+    ON settlement_day_observation_authority(city, target_date, decision_time_utc);
 """
 
 
@@ -6789,6 +6826,224 @@ def query_data_improvement_inventory(conn: sqlite3.Connection | None) -> dict:
     }
 
 
+def log_settlement_day_observation_authority(
+    conn: sqlite3.Connection | None,  # Deprecated: ignored; opens its own trade connection (INV-37)
+    *,
+    authority_id: str,
+    city: str | None,
+    target_date: str | None,
+    temperature_metric: str | None,
+    decision_time_utc: str | None,
+    market_phase: str | None,
+    source: str | None,
+    station_id: str | None,
+    observation_time_utc: str | None,
+    first_sample_time_utc: str | None,
+    last_sample_time_utc: str | None,
+    high_so_far: float | None,
+    low_so_far: float | None,
+    current_temp: float | None,
+    sample_count: int | None,
+    coverage_status: str | None,
+    freshness_status: str | None,
+    local_date_matches_target: int | None,
+    source_authorized_for_settlement: int | None,
+    persisted_surface_available: int | None,
+    payload_json: str | None,
+    recorded_at: str,
+) -> dict:
+    """Write one settlement-day observation authority row to zeus_trades.db.
+
+    OBS-AUTHORITY-FOUNDATION (2026-05-23). Captures the RUNTIME observation
+    object (today invisible in the DB) for every settlement-day/day0 candidate
+    — including the MISSING / STALE / LOW-coverage failure cases. Colocated on
+    the trade DB with opportunity_fact (its runtime write target post-INV-37)
+    so the operator audit query joins same-DB.
+
+    OBSERVABILITY ONLY: this is a best-effort durable write. It never raises
+    into the cycle, never gates a trade, and never changes selection. Same
+    fail-open contract as log_opportunity_fact (warn + return on any error).
+    """
+    _wconn = conn if _is_verified_trade_connection(conn) else get_trade_connection(write_class="live")
+    _owns_connection = _wconn is not conn
+    try:
+        if not _table_exists(_wconn, "settlement_day_observation_authority"):
+            logger.info(
+                "settlement_day_observation_authority table unavailable; skipping durable write"
+            )
+            return {"status": "skipped_missing_table", "table": "settlement_day_observation_authority"}
+
+        _metric = str(temperature_metric or "").strip().lower() or None
+        if _metric not in (None, "high", "low"):
+            _metric = None
+
+        def _as_int_bool(value) -> int | None:
+            if value is None:
+                return None
+            return 1 if int(value) else 0
+
+        _wconn.execute(
+            """
+            INSERT INTO settlement_day_observation_authority (
+                authority_id,
+                city,
+                target_date,
+                temperature_metric,
+                decision_time_utc,
+                market_phase,
+                source,
+                station_id,
+                observation_time_utc,
+                first_sample_time_utc,
+                last_sample_time_utc,
+                high_so_far,
+                low_so_far,
+                current_temp,
+                sample_count,
+                coverage_status,
+                freshness_status,
+                local_date_matches_target,
+                source_authorized_for_settlement,
+                persisted_surface_available,
+                payload_json,
+                recorded_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(authority_id) DO UPDATE SET
+                city=excluded.city,
+                target_date=excluded.target_date,
+                temperature_metric=excluded.temperature_metric,
+                decision_time_utc=excluded.decision_time_utc,
+                market_phase=excluded.market_phase,
+                source=excluded.source,
+                station_id=excluded.station_id,
+                observation_time_utc=excluded.observation_time_utc,
+                first_sample_time_utc=excluded.first_sample_time_utc,
+                last_sample_time_utc=excluded.last_sample_time_utc,
+                high_so_far=excluded.high_so_far,
+                low_so_far=excluded.low_so_far,
+                current_temp=excluded.current_temp,
+                sample_count=excluded.sample_count,
+                coverage_status=excluded.coverage_status,
+                freshness_status=excluded.freshness_status,
+                local_date_matches_target=excluded.local_date_matches_target,
+                source_authorized_for_settlement=excluded.source_authorized_for_settlement,
+                persisted_surface_available=excluded.persisted_surface_available,
+                payload_json=excluded.payload_json,
+                recorded_at=COALESCE(
+                    settlement_day_observation_authority.recorded_at, excluded.recorded_at
+                )
+            """,
+            (
+                str(authority_id or "") or None,
+                str(city or "") or None,
+                str(target_date or "") or None,
+                _metric,
+                str(decision_time_utc or "") or None,
+                str(market_phase or "") or None,
+                str(source or "") or None,
+                str(station_id or "") or None,
+                str(observation_time_utc or "") or None,
+                str(first_sample_time_utc or "") or None,
+                str(last_sample_time_utc or "") or None,
+                _coerce_optional_float(high_so_far),
+                _coerce_optional_float(low_so_far),
+                _coerce_optional_float(current_temp),
+                int(sample_count) if sample_count is not None else None,
+                str(coverage_status or "") or None,
+                str(freshness_status or "") or None,
+                _as_int_bool(local_date_matches_target),
+                _as_int_bool(source_authorized_for_settlement),
+                _as_int_bool(persisted_surface_available),
+                payload_json,
+                recorded_at,
+            ),
+        )
+        if _owns_connection:
+            _wconn.commit()
+        return {"status": "written", "table": "settlement_day_observation_authority"}
+    except Exception as e:
+        import logging as _logging
+        _logging.getLogger(__name__).warning(
+            "Failed to log settlement_day_observation_authority: %s", e
+        )
+        return {"status": "error", "table": "settlement_day_observation_authority", "error": str(e)}
+    finally:
+        if _owns_connection:
+            _wconn.close()
+
+
+def _coerce_optional_float(value) -> float | None:
+    if value is None:
+        return None
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return None
+    return f if f == f and f not in (float("inf"), float("-inf")) else None
+
+
+def _build_day0_context_json(candidate, decision) -> str | None:
+    """Build the per-edge day0 observation-lock classification payload.
+
+    OBS-AUTHORITY-FOUNDATION FIX-2 (2026-05-23). For settlement-day HIGH buy_yes
+    edges, persists day0_truth_classification + observed high/low + candidate bin
+    bounds + settlement-capture eligibility so an operator can tell whether a
+    day0 edge is observation-locked, forecast-upside, or wrong. Returns None for
+    rows where no day0 classification applies (non-HIGH, no edge, no observation,
+    or the classifier returns None). Total + fail-soft — never raises.
+    """
+    try:
+        edge = getattr(decision, "edge", None)
+        observation = getattr(candidate, "observation", None)
+        if edge is None or observation is None:
+            return None
+        from src.engine.evaluator import day0_high_truth_classification_for_edge
+
+        classification = day0_high_truth_classification_for_edge(candidate, edge)
+        if classification is None:
+            return None
+
+        edge_bin = getattr(edge, "bin", None)
+        bin_low = _coerce_optional_float(getattr(edge_bin, "low", None))
+        bin_high = _coerce_optional_float(getattr(edge_bin, "high", None))
+        direction = str(getattr(edge, "direction", "") or "")
+        observed_high = _coerce_optional_float(getattr(observation, "high_so_far", None))
+        observed_low = _coerce_optional_float(getattr(observation, "low_so_far", None))
+        current_temp = _coerce_optional_float(getattr(observation, "current_temp", None))
+        obs_time = getattr(observation, "observation_time", None)
+        obs_source = getattr(observation, "source", None)
+        hours_remaining = _coerce_optional_float(getattr(candidate, "hours_to_resolution", None))
+
+        # settlement_capture is reserved for facts already locked by canonical
+        # observation. Eligible only when observation-locked AND buy_yes.
+        eligible = classification == "observation_locked" and direction == "buy_yes"
+        ineligible_reason = None
+        if not eligible:
+            ineligible_reason = f"classification={classification};direction={direction}"
+
+        payload = {
+            "day0_truth_classification": classification,
+            "observed_high_so_far": observed_high,
+            "observed_low_so_far": observed_low,
+            "current_temp": current_temp,
+            "candidate_bin_low": bin_low,
+            "candidate_bin_high": bin_high,
+            "observation_source": str(obs_source or "") or None,
+            "observation_time": str(obs_time) if obs_time is not None else None,
+            "hours_remaining": hours_remaining,
+            "settlement_capture_eligible": bool(eligible),
+            "settlement_capture_ineligible_reason": ineligible_reason,
+            "observation_authority_id": str(getattr(decision, "observation_authority_id", "") or "") or None,
+        }
+        return json.dumps(payload, ensure_ascii=False, sort_keys=True)
+    except Exception as exc:  # noqa: BLE001 - durable telemetry is fail-soft.
+        logger.warning("Failed to build day0_context_json: %s", exc)
+        return None
+
+
+
+
 def log_opportunity_fact(
     conn: sqlite3.Connection | None,  # Deprecated: ignored; function opens its own trade connection (INV-37 fix, wave-2)
     *,
@@ -6814,6 +7069,27 @@ def log_opportunity_fact(
         if not _table_exists(_wconn, "opportunity_fact"):
             logger.info("Opportunity fact table unavailable; skipping durable write")
             return {"status": "skipped_missing_table", "table": "opportunity_fact"}
+
+        # OBS-AUTHORITY-FOUNDATION (2026-05-23): production zeus_trades.db has a
+        # ghost opportunity_fact predating observation_authority_id (it is NOT
+        # created by init_schema_trade_only's _TRADE_CLASS_DDL — see the table's
+        # legacy_archived registry note). Idempotent backfill so the INSERT's new
+        # column resolves. Cheap PRAGMA + at-most-once ALTER.
+        _of_columns = _table_columns(_wconn, "opportunity_fact")
+        if "observation_authority_id" not in _of_columns:
+            try:
+                _wconn.execute(
+                    "ALTER TABLE opportunity_fact ADD COLUMN observation_authority_id TEXT;"
+                )
+            except sqlite3.OperationalError:
+                pass  # concurrent add / already present
+        if "day0_context_json" not in _of_columns:
+            try:
+                _wconn.execute(
+                    "ALTER TABLE opportunity_fact ADD COLUMN day0_context_json TEXT;"
+                )
+            except sqlite3.OperationalError:
+                pass  # concurrent add / already present
 
         edge = getattr(decision, "edge", None)
         direction = str(getattr(edge, "direction", "") or "unknown")
@@ -6855,6 +7131,8 @@ def log_opportunity_fact(
         if rejection_reasons:
             rejection_reason_json = json.dumps(list(rejection_reasons), ensure_ascii=False)
 
+        day0_context_json = _build_day0_context_json(candidate, decision)
+
         _wconn.execute(
             """
             INSERT INTO opportunity_fact (
@@ -6878,9 +7156,11 @@ def log_opportunity_fact(
                 rejection_reason_json,
                 availability_status,
                 should_trade,
+                observation_authority_id,
+                day0_context_json,
                 recorded_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(decision_id) DO UPDATE SET
                 candidate_id=excluded.candidate_id,
                 city=excluded.city,
@@ -6901,6 +7181,12 @@ def log_opportunity_fact(
                 rejection_reason_json=excluded.rejection_reason_json,
                 availability_status=excluded.availability_status,
                 should_trade=excluded.should_trade,
+                observation_authority_id=COALESCE(
+                    excluded.observation_authority_id, opportunity_fact.observation_authority_id
+                ),
+                day0_context_json=COALESCE(
+                    excluded.day0_context_json, opportunity_fact.day0_context_json
+                ),
                 recorded_at=COALESCE(opportunity_fact.recorded_at, excluded.recorded_at)
             """,
             (
@@ -6929,6 +7215,8 @@ def log_opportunity_fact(
                 rejection_reason_json,
                 _normalize_opportunity_availability_status(getattr(decision, "availability_status", "")),
                 int(bool(should_trade)),
+                str(getattr(decision, "observation_authority_id", "") or "") or None,
+                day0_context_json,
                 recorded_at,
             ),
         )
@@ -6942,6 +7230,7 @@ def log_opportunity_fact(
     finally:
         if _owns_connection:
             _wconn.close()
+
 
 
 def log_availability_fact(
