@@ -58,7 +58,8 @@ New files only. No scheduler / schema / ingestion-function / calendar edits.
   (degraded ≥ 0.8×, expired ≥ 1.0×).
 - `scripts/source_contract_lint.py` — INTER-REGISTRY COHERENCE (not a new registry). Assertions:
     1. calendar.source_id ⊆ data_sources_registry.sources[].id
-    2. forecast_source_registry primary ⇒ calendar live_authorization=true
+    2. forecast_source_registry entry_primary ROLE ⇒ calendar live_authorization=true
+       (diagnostic-only / experimental-backfill ⇒ NOT live; keyed on allowed_roles + backfill_only, not tier)
     3. partial_policy=SHADOW_ONLY ⇒ live_authorization=false
     4. backfill_only=true ⇒ live_authorization=false
     5. code data_version param (snapshot_ingest_contract mx2t3) matches SDK param (ecmwf_open_data.py:145);

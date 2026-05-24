@@ -33,21 +33,22 @@ FORECAST_LIVE_PROVENANCE: frozenset[str] = frozenset({
     "data_version",          # semantic product identity (e.g. mx2t3 vs mx2t6)
     "captured_at",
 })
-# Settlement-adjacent observation rows (WU/HKO/Ogimet).
+# Settlement-adjacent observation rows (WU/HKO/Ogimet) — REAL `observations` schema column
+# names (PR review #329 E): source/station_id/fetched_at/target_date, NOT source_id/captured_at.
 OBSERVATION_LIVE_PROVENANCE: frozenset[str] = frozenset({
-    "source_id", "target_local_date", "observation_time_utc", "captured_at",
+    "source", "station_id", "target_date", "fetched_at",
 })
-# Polymarket market-topology rows (Gamma).
+# Polymarket market-topology rows (Gamma / market_events_v2) — uses created_at, not captured_at.
 MARKET_TOPOLOGY_PROVENANCE: frozenset[str] = frozenset({
-    "condition_id", "captured_at",
+    "condition_id", "created_at",
 })
 # Polymarket executable-market snapshots (CLOB) — quote-time, not source-run semantics.
 EXECUTABLE_MARKET_SNAPSHOT_PROVENANCE: frozenset[str] = frozenset({
     "condition_id", "captured_at", "freshness_deadline", "authority_tier",
 })
-# Authenticated venue user-channel facts (WS).
+# Authenticated venue user-channel facts (WS) — writer uses observed_at, not received_at.
 VENUE_USER_CHANNEL_PROVENANCE: frozenset[str] = frozenset({
-    "condition_id", "received_at",
+    "condition_id", "observed_at",
 })
 
 FAMILY_REQUIRED_PROVENANCE: dict[str, frozenset[str]] = {
@@ -63,15 +64,17 @@ REQUIRED_LIVE_PROVENANCE: frozenset[str] = FORECAST_LIVE_PROVENANCE
 
 READINESS_GATE_FLAG = "ZEUS_FRONTIER_READINESS_GATE"
 
-# ALLOW-LIST (fail-closed, PR review #329 F5): only these authority tiers may authorize live
-# readiness. Anything not listed — including "" / unknown — CANNOT (the prior deny-list let
-# unknown tiers through, contradicting the fail-closed contract).
-_LIVE_AUTHORITY_TIERS: frozenset[str] = frozenset({
-    "DERIVED_FROM_DISSEMINATION",     # ECMWF Open Data live forecast
-    "LIVE",
-    "SETTLEMENT_VENUE",               # venue-resolved settlement truth
-    "OBSERVED",                       # settlement-adjacent observed fact
-})
+# ALLOW-LIST (fail-closed, PR review #329 F5). PER-FAMILY (F6/F-R2-F): a CLOB tier is live for
+# executable snapshots but NOT for forecasts. Default (no family) = forecast tiers only.
+FAMILY_LIVE_AUTHORITY_TIERS: dict[str, frozenset[str]] = {
+    "forecast": frozenset({"DERIVED_FROM_DISSEMINATION", "LIVE"}),
+    "observation": frozenset({"OBSERVED", "WU", "HKO", "NOAA"}),
+    "market": frozenset({"GAMMA"}),
+    "executable_snapshot": frozenset({"CLOB", "GAMMA", "DATA"}),
+    "venue_user": frozenset({"CLOB", "CHAIN"}),
+    "settlement": frozenset({"SETTLEMENT_VENUE", "GAMMA", "CHAIN"}),
+}
+_LIVE_AUTHORITY_TIERS: frozenset[str] = FAMILY_LIVE_AUTHORITY_TIERS["forecast"]
 
 
 def live_reader_requires_provenance() -> bool:
@@ -98,15 +101,20 @@ def can_authorize_live_readiness(
     authority_tier: str,
     live_authorized: bool,
     *,
+    family: str = "forecast",
     allowed_tiers: Optional[frozenset[str]] = None,
 ) -> bool:
     """Fail-closed ALLOW-LIST: authorizes live readiness only if explicitly live_authorized AND
-    the authority tier is in the allow-list. Unknown/empty tier ⇒ False.
+    the authority tier is in the FAMILY's allow-list. Unknown/empty tier ⇒ False.
 
-    ``allowed_tiers`` lets a family pass its own live-authority set; defaults to the global
-    live-tier allow-list.
+    Per-family (PR review #329 F/R2-F): a CLOB tier authorizes an executable-snapshot row but
+    NOT a forecast row. ``allowed_tiers`` overrides the family set; unknown family ⇒ empty set
+    (fail-closed). Default family = forecast.
     """
     if not live_authorized:
         return False
-    tiers = allowed_tiers if allowed_tiers is not None else _LIVE_AUTHORITY_TIERS
+    if allowed_tiers is not None:
+        tiers = allowed_tiers
+    else:
+        tiers = FAMILY_LIVE_AUTHORITY_TIERS.get(family, frozenset())
     return (authority_tier or "").strip().upper() in tiers

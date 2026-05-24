@@ -69,10 +69,26 @@ def test_provenance_required_fields_are_family_specific() -> None:
         {"condition_id", "captured_at", "freshness_deadline", "authority_tier"},
         "executable_snapshot",
     ) == []
-    # market topology row:
-    assert missing_live_provenance({"condition_id", "captured_at"}, "market") == []
+    # market topology row uses REAL market_events_v2 column created_at (not captured_at):
+    assert missing_live_provenance({"condition_id", "created_at"}, "market") == []
+    assert "created_at" in missing_live_provenance({"condition_id", "captured_at"}, "market")
+    # observation uses REAL observations columns (source/station_id/target_date/fetched_at):
+    assert missing_live_provenance(
+        {"source", "station_id", "target_date", "fetched_at"}, "observation") == []
     # unknown family fails closed (never "complete"):
     assert missing_live_provenance({"anything"}, "no_such_family")
+
+
+def test_live_authority_is_family_specific() -> None:
+    """F (R2): CLOB authorizes an executable-snapshot/venue row but NOT a forecast row;
+    GAMMA authorizes market topology; unknown family fails closed."""
+    from src.data.temporal_provenance import can_authorize_live_readiness
+
+    assert can_authorize_live_readiness("CLOB", True, family="executable_snapshot") is True
+    assert can_authorize_live_readiness("CLOB", True, family="forecast") is False
+    assert can_authorize_live_readiness("GAMMA", True, family="market") is True
+    assert can_authorize_live_readiness("DERIVED_FROM_DISSEMINATION", True, family="forecast") is True
+    assert can_authorize_live_readiness("CLOB", True, family="no_such_family") is False
 
 
 # ---- PR8: lane separation ----

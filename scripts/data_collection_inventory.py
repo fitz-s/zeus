@@ -19,6 +19,7 @@ in source_job_registry.JOB_REGISTRY — so the registry can never silently fall 
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 import re
 import sys
@@ -40,16 +41,36 @@ _DAEMON_FILES = (
 
 
 def _scheduled_job_ids() -> set[str]:
-    """Every id=... passed to .add_job(...) in the daemon modules (incl. ID constants resolved)."""
+    """Every id=... passed to .add_job(...) in the daemon modules, via AST (PR review #329 I).
+
+    Regex stopped at the first ')', so an id= after a nested call — e.g.
+    ``add_job(..., run_date=_dt_now.now(), id="ingest_k2_startup_catch_up")`` — was missed,
+    blinding the registry-mirror antibody to startup/date-trigger jobs. AST resolves the id
+    keyword whether it is a string literal or a module-level constant (forecast_live uses
+    ``id=FORECAST_LIVE_*_JOB_ID`` constants).
+    """
     ids: set[str] = set()
     for f in _DAEMON_FILES:
-        text = f.read_text(encoding="utf-8")
-        # direct string ids on add_job
-        for m in re.finditer(r"\.add_job\([^)]*?id\s*=\s*[\"']([^\"']+)[\"']", text, re.DOTALL):
-            ids.add(m.group(1))
-        # forecast_live uses ID constants — resolve `NAME = "forecast_live_..."`
-        for m in re.finditer(r'^[A-Z0-9_]*JOB_ID\s*=\s*"([^"]+)"', text, re.MULTILINE):
-            ids.add(m.group(1))
+        tree = ast.parse(f.read_text(encoding="utf-8"), filename=str(f))
+        # module-level NAME = "literal" constant map (resolves id=CONSTANT references)
+        consts: dict[str, str] = {}
+        for node in tree.body:
+            if isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant) \
+                    and isinstance(node.value.value, str):
+                for tgt in node.targets:
+                    if isinstance(tgt, ast.Name):
+                        consts[tgt.id] = node.value.value
+        for call in ast.walk(tree):
+            if not (isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute)
+                    and call.func.attr == "add_job"):
+                continue
+            for kw in call.keywords:
+                if kw.arg != "id":
+                    continue
+                if isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, str):
+                    ids.add(kw.value.value)
+                elif isinstance(kw.value, ast.Name) and kw.value.id in consts:
+                    ids.add(consts[kw.value.id])
     return ids
 
 

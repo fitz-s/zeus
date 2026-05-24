@@ -112,6 +112,8 @@ _BLOCK_PARTIAL = "PARTIAL_RUN"
 _BLOCK_READINESS = "READINESS_BLOCKED"
 _BLOCK_NOT_LIVE = "NOT_LIVE_AUTHORIZED"
 _BLOCK_UNKNOWN = "UNKNOWN_BLOCKED"
+_BLOCK_SHORT_HORIZON = "SHORT_HORIZON_ONLY"     # latest cycle is a 06/18 short horizon (not live-authorized)
+_BLOCK_COVERAGE_UNKNOWN = "COVERAGE_UNKNOWN"    # no per-target coverage proof — cannot assert OK
 
 _ACTION = {
     _BLOCK_OK: "none",
@@ -119,9 +121,11 @@ _ACTION = {
     _BLOCK_STALE: "investigate fetch path; source past freshness ceiling",
     _BLOCK_DOWN: "check source_health; provider/endpoint failing",
     _BLOCK_PARTIAL: "wait for complete run or confirm shorter-horizon target",
-    _BLOCK_READINESS: "inspect readiness_state reason_codes",
+    _BLOCK_READINESS: "inspect readiness_state / source_run_coverage reason_codes",
     _BLOCK_NOT_LIVE: "none — shadow/backfill source, not live-eligible by design",
     _BLOCK_UNKNOWN: "no source_run for this partition — confirm scheduler ran",
+    _BLOCK_SHORT_HORIZON: "latest cycle is a 06/18 short horizon (not live-authorized); wait for 00/12 full",
+    _BLOCK_COVERAGE_UNKNOWN: "no per-target coverage rows — cannot prove all targets ready",
 }
 
 
@@ -130,6 +134,7 @@ def _classify(
     now: datetime,
     safe_fetch_not_before: Optional[datetime],
     have_run: bool,
+    run_track: Optional[str],
     source_run_status: Optional[str],
     completeness_status: Optional[str],
     partial_policy: str,
@@ -137,14 +142,17 @@ def _classify(
     readiness_expires_at: Optional[datetime],
     freshness_state: str,
     health_consecutive_failures: Optional[int],
+    coverage: _CoverageSummary,
 ) -> str:
     """Single-reason blocker classification, fail-closed ordering.
 
-    Non-live sources are NOT_LIVE_AUTHORIZED (informational, not a fault). For live sources,
-    the order surfaces the EARLIEST upstream cause. Uses the REAL source_run vocabulary
-    (status SUCCESS/PARTIAL/FAILED/NOT_RELEASED/SKIPPED_NOT_RELEASED; completeness
-    COMPLETE/PARTIAL/MISSING/HORIZON_OUT_OF_RANGE/NOT_RELEASED) — PR review #329 F2. A row that
-    says NOT_RELEASED/MISSING must NEVER classify OK.
+    Non-live sources are NOT_LIVE_AUTHORIZED (informational). For live sources the order surfaces
+    the EARLIEST upstream cause. Uses REAL source_run vocabulary (F2). Two #329-R2 gates:
+      * SHORT_HORIZON_ONLY (A): a live entry whose latest cycle is a 06/18 *short_horizon* track
+        is NOT live-authorized (the calendar cycle_profile marks short cycles live_authorization=
+        false) — never OK on a short cycle.
+      * COVERAGE gate (B): OK requires non-empty per-target coverage with zero blocked; a single
+        readiness row cannot prove all targets ready, so absent coverage ⇒ COVERAGE_UNKNOWN.
     """
     if role != _LIVE:
         return _BLOCK_NOT_LIVE
@@ -156,14 +164,16 @@ def _classify(
     st = (source_run_status or "").strip().upper()
     comp = (completeness_status or "").strip().upper()
 
-    # Past safe-fetch but the source itself reports not-released → abnormal (upstream overdue),
-    # never OK. (Before safe-fetch was already returned NOT_RELEASED above.)
+    # Past safe-fetch but the source itself reports not-released → abnormal (upstream overdue).
     if st in ("NOT_RELEASED", "SKIPPED_NOT_RELEASED") or comp == "NOT_RELEASED":
         return _BLOCK_READINESS
     if health_consecutive_failures is not None and health_consecutive_failures >= 3:
         return _BLOCK_DOWN
     if freshness_state == "EXPIRED":
         return _BLOCK_STALE
+    # A: latest available cycle is a short-horizon (06/18) one — not live-authorized.
+    if (run_track or "").endswith("_short_horizon"):
+        return _BLOCK_SHORT_HORIZON
     if st == "FAILED" or comp in ("MISSING", "HORIZON_OUT_OF_RANGE"):
         return _BLOCK_READINESS
     if comp in ("PARTIAL", "INCOMPLETE") and partial_policy == "BLOCK_LIVE":
@@ -171,6 +181,11 @@ def _classify(
     if readiness_status and readiness_status.upper() not in ("READY", "LIVE_ELIGIBLE", "OK"):
         return _BLOCK_READINESS
     if readiness_expires_at is not None and now >= readiness_expires_at:
+        return _BLOCK_READINESS
+    # B: do not assert OK without per-target coverage proof.
+    if coverage.total == 0:
+        return _BLOCK_COVERAGE_UNKNOWN
+    if coverage.blocked > 0:
         return _BLOCK_READINESS
     return _BLOCK_OK
 
@@ -285,6 +300,42 @@ def _latest_readiness(
     )
 
 
+@dataclass(frozen=True)
+class _CoverageSummary:
+    """Per-target readiness aggregate from source_run_coverage (PR review #329 B)."""
+
+    total: int
+    ready: int
+    blocked: int
+
+
+def _coverage_summary(conn: sqlite3.Connection, source_id: str, track: str) -> _CoverageSummary:
+    """Aggregate source_run_coverage readiness across ALL targets for (source_id, track).
+
+    The frontier must NOT assert OK from a single sampled readiness row (a hole in target B is
+    invisible). This counts per-target coverage; OK requires non-empty coverage with zero blocked.
+    """
+    rows = []
+    try:
+        cur = conn.execute(
+            f"""
+            SELECT readiness_status, completeness_status FROM source_run_coverage
+            WHERE source_id = ? AND {_track_match_sql('track', has_release_key=True)}
+            """,
+            (source_id, *_track_match_params(source_id, track, has_release_key=True)),
+        )
+        rows = list(cur.fetchall())
+    except sqlite3.OperationalError as exc:
+        if "no such" in str(exc).lower():   # table or column absent
+            return _CoverageSummary(0, 0, 0)
+        raise
+
+    ready_states = {"LIVE_ELIGIBLE", "READY", "OK"}
+    ready = sum(1 for r in rows if str(r["readiness_status"]).upper() in ready_states)
+    blocked = len(rows) - ready
+    return _CoverageSummary(total=len(rows), ready=ready, blocked=blocked)
+
+
 def compute_frontier(
     *,
     role_filter: Optional[str] = None,
@@ -352,14 +403,18 @@ def compute_frontier(
             cf = h.get("consecutive_failures")
             cf = int(cf) if isinstance(cf, (int, float)) else None
 
+            coverage = _coverage_summary(conn, source_id, track) if role == _LIVE \
+                else _CoverageSummary(0, 0, 0)
             blocker = _classify(
                 role=role, now=now, safe_fetch_not_before=safe_fetch,
                 have_run=run is not None,
+                run_track=(run["track"] if run else None),
                 source_run_status=(run["status"] if run else None),
                 completeness_status=completeness,
                 partial_policy=policy.partial_policy.value,
                 readiness_status=readiness_status, readiness_expires_at=readiness_expires,
                 freshness_state=freshness, health_consecutive_failures=cf,
+                coverage=coverage,
             )
 
             rows.append(FrontierRow(

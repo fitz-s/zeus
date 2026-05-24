@@ -160,3 +160,13 @@ def test_assertion2_keys_on_roles_not_tier_no_false_drift() -> None:
     findings = run_assertion_2_primary_tier_implies_live_authorized()
     omp = [f for f in findings if f.get("source_id") == "openmeteo_previous_runs"]
     assert omp == [], f"diagnostic-only source wrongly flagged: {omp}"
+
+
+def test_assertion2_tigge_experimental_backfill_not_flagged() -> None:
+    """G: TIGGE is entry_primary in its role menu but experimental + operator-gated +
+    backfill_only — assertion 2 must NOT flag it as missing live_authorization."""
+    from scripts.source_contract_lint import run_assertion_2_primary_tier_implies_live_authorized
+
+    findings = run_assertion_2_primary_tier_implies_live_authorized()
+    tigge = [f for f in findings if "tigge" in str(f.get("source_id", ""))]
+    assert tigge == [], f"TIGGE wrongly flagged by assertion 2: {tigge}"

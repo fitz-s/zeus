@@ -842,7 +842,7 @@ scripts:
     required_tests: [tests/test_source_contract_lint.py]
     reason: >
       PR1 of data_temporal_kernel program. Enforces 6 inter-registry coherence assertions:
-      (1) calendar source_id in data_sources_registry; (2) primary forecast tier implies live_authorization;
+      (1) calendar source_id in data_sources_registry; (2) entry_primary ROLE implies live_authorization (keyed on allowed_roles+backfill_only, not tier);
       (3) SHADOW_ONLY implies not live; (4) backfill_only implies not live;
       (5) code data_version param matches SDK param (calendar drift advisory);
       (6) HKO never carries WU/VHHH station mapping. Zero behavior change; read-only.

@@ -124,13 +124,16 @@ def validate_lane_separation(specs: list[JobBuildSpec] | None = None) -> list[st
     """
     from src.data.source_job_registry import JOB_REGISTRY
 
-    specs = specs or build_job_specs()
-    by_id = {s.job_id: s for s in specs}
+    specs = specs if specs is not None else build_job_specs()
     violations: list[str] = []
-    for job_id, job in JOB_REGISTRY.items():
-        ec = by_id[job_id].executor_class
-        if ec == "live_db" and job.role in ("derived", "diagnostic", "backfill"):
+    # Iterate the PASSED specs (which may be owner-filtered), not the global registry —
+    # otherwise an owner-filtered spec list KeyErrors on the other daemon's jobs (PR review #329 D).
+    for s in specs:
+        job = JOB_REGISTRY.get(s.job_id)
+        if job is None:
+            continue
+        if s.executor_class == "live_db" and job.role in ("derived", "diagnostic", "backfill"):
             violations.append(
-                f"{job_id}: role={job.role} on live_db lane — would starve live ingest behind ETL"
+                f"{s.job_id}: role={job.role} on live_db lane — would starve live ingest behind ETL"
             )
     return violations

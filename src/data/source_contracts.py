@@ -68,6 +68,9 @@ class SourceContract:
 
     # Read THROUGH from data_sources_registry (None when the registry lacks coverage,
     # e.g. the tigge/tigge_mars alias gap — surfaced, not papered over).
+    # ACTIVATION BARRIER (PR review #329 K): a downstream consumer (job registry / frontier /
+    # rate-limit manager) MUST treat family=None as an explicit unresolved-alias finding and
+    # refuse to derive routing from it — resolve the alias in the authoritative registry first.
     family: Optional[str]
     publisher: Optional[str]
 

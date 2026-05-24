@@ -5,6 +5,15 @@
 #   extracted from src/ingest_main.py + src/ingest/forecast_live_daemon.py add_job() calls (2026-05-24).
 """Machine-readable inventory of every scheduled data-collection job — PR3 (advisory).
 
+SCOPE (PR review #329 C): this registry mirrors the two K2 INGEST daemons only —
+``src/ingest_main.py`` and ``src/ingest/forecast_live_daemon.py``. It does NOT yet cover the
+data-collection jobs scheduled in ``src/main.py`` (the trading-lane daemon): ``market_discovery``
+(Gamma topology + CLOB executable-snapshot capture), ``venue_heartbeat``, the user-WS ingestor,
+``harvester``, ``wu_daily``. So this is a *forecast/observation ingest-daemon* inventory, NOT a
+complete Zeus data-collection inventory; the Polymarket/CLOB/venue live collectors are a tracked
+future addition (add with source_ids polymarket_gamma/clob/data_api/user_ws). Do not read a clean
+``--check`` as "all data collection is registered".
+
 PR3 does NOT replace the scheduler. It declares, in one typed place, every job the two
 daemons (``src/ingest_main.py``, ``src/ingest/forecast_live_daemon.py``) currently register —
 owner, role, current executor, whether it writes a DB, lock key — so:
@@ -37,7 +46,9 @@ class SourceJobSpec:
     role: Role
     current_executor: Executor
     writes_db: bool                         # audited: does the tick write a canonical DB?
-    source_id: Optional[str] = None         # the data source this job serves, if any
+    source_id: Optional[str] = None         # primary data source (singular convenience accessor)
+    source_ids: tuple[str, ...] = ()        # ALL canonical sources this job touches (PR review #329 H);
+                                            # multi-source jobs (obs_v2, market_scan) declare several
     callable_ref: Optional[str] = None      # function name in the owner module
     file_only: bool = False                 # writes only files/JSON (safe for fast/io executor)
     owner_gated: bool = False               # registration is conditional (e.g. OpenData ownership env)
@@ -61,7 +72,8 @@ _INGEST_MAIN: tuple[SourceJobSpec, ...] = (
     SourceJobSpec("ingest_k2_hole_scanner", "ingest_main", "backfill", "default", True,
                   callable_ref="_k2_hole_scanner_tick"),
     SourceJobSpec("ingest_k2_obs_v2", "ingest_main", "live", "default", True,
-                  callable_ref="_k2_obs_v2_tick"),
+                  source_ids=("wu_icao_history", "ogimet_metar"),
+                  callable_ref="_k2_obs_v2_tick", notes="multi-source: WU ICAO + Ogimet METAR via tier router"),
     SourceJobSpec("ingest_k2_hko_tick", "ingest_main", "live", "default", True,
                   source_id="hko_daily_api", callable_ref="_k2_hko_tick",
                   notes="job id ingest_k2_hko_tick (aligned to callable by upstream #324 HKO "
@@ -105,7 +117,8 @@ _INGEST_MAIN: tuple[SourceJobSpec, ...] = (
     SourceJobSpec("ingest_etl_forecast_skill", "ingest_main", "derived", "default", True,
                   callable_ref="_etl_forecast_skill_tick"),
     SourceJobSpec("ingest_market_scan", "ingest_main", "live", "default", True,
-                  source_id="polymarket_gamma", callable_ref="_market_scan_tick"),
+                  source_id="polymarket_gamma", source_ids=("polymarket_gamma", "polymarket_clob"),
+                  callable_ref="_market_scan_tick", notes="multi-source: Gamma topology + CLOB snapshots"),
     SourceJobSpec("ingest_oracle_bridge", "ingest_main", "derived", "fast", False,
                   callable_ref="_bridge_oracle_tick", file_only=True,
                   notes="writes data/oracle_error_rates.json artifact; verify file-only (PR8)"),

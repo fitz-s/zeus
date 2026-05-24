@@ -9,7 +9,8 @@
 
 Checks 6 assertions across 3 registries:
   1. calendar.source_id ⊆ data_sources_registry.sources[].id
-  2. forecast_source_registry primary tier ⇒ calendar live_authorization=true
+  2. forecast_source_registry entry_primary ROLE ⇒ calendar live_authorization=true
+     (and diagnostic-only / experimental-backfill ⇒ NOT live; keyed on allowed_roles, not tier)
   3. calendar partial_policy=SHADOW_ONLY ⇒ live_authorization=false
   4. calendar backfill_only=true ⇒ live_authorization=false
   5. code data_version param (snapshot_ingest_contract) matches SDK param (ecmwf_open_data.py);
@@ -107,7 +108,7 @@ def run_assertion_1_calendar_source_in_registry() -> list[dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
-# Assertion 2: forecast_source_registry primary tier ⇒ calendar live_authorization=true
+# Assertion 2: forecast_source_registry entry_primary role ⇒ calendar live_authorization=true
 # ---------------------------------------------------------------------------
 
 def run_assertion_2_primary_tier_implies_live_authorized() -> list[dict[str, Any]]:
@@ -129,16 +130,33 @@ def run_assertion_2_primary_tier_implies_live_authorized() -> list[dict[str, Any
         sid = entry["source_id"]
         calendar_live[sid] = calendar_live.get(sid, False) or bool(entry.get("live_authorization", False))
 
+    # Calendar backfill_only per source (a backfill-only source is never expected live).
+    calendar_backfill: dict[str, bool] = {}
+    for entry in entries:
+        sid = entry["source_id"]
+        calendar_backfill[sid] = calendar_backfill.get(sid, False) or bool(entry.get("backfill_only", False))
+
     findings = []
     for source_id, spec in SOURCES.items():
         roles = tuple(getattr(spec, "allowed_roles", ()) or ())
         live_auth = calendar_live.get(source_id)
-        if "entry_primary" in roles and live_auth is False:
+        # PR review #329 G: entry_primary alone does NOT imply live. An experimental /
+        # operator-gated / disabled-by-default / backfill-only source legitimately carries
+        # entry_primary in its role menu while being live_authorization=false. Only a source
+        # that is a genuine live candidate must be live-authorized.
+        is_live_candidate = (
+            "entry_primary" in roles
+            and getattr(spec, "tier", "") != "experimental"
+            and not getattr(spec, "requires_operator_decision", False)
+            and getattr(spec, "enabled_by_default", True)
+            and not calendar_backfill.get(source_id, False)
+        )
+        if is_live_candidate and live_auth is False:
             findings.append(_make_finding(
                 assertion=2, level="drift",
                 message=(
-                    f"forecast source={source_id!r} has role entry_primary but calendar "
-                    f"live_authorization=false — entry-primary forecast sources must be live-authorized"
+                    f"forecast source={source_id!r} is a live entry-primary candidate but calendar "
+                    f"live_authorization=false — must be live-authorized"
                 ),
                 source_id=source_id,
             ))
