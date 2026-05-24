@@ -1428,6 +1428,57 @@ scripts:
     required_helpers: []
     required_tests: [tests/test_executable_forecast_bundle_selection.py]
 
+  scripts/tradeable_edge_frontier.py:
+    class: diagnostic_report_writer
+    status: active
+    lifecycle: prob_forecast_correctness_20260523
+    packet: docs/operations/task_2026-05-23_probability_phantom_edge/
+    authority_scope: read_only
+    dangerous_if_run: false
+    dry_run_default: true
+    apply_flag: null
+    target_db: state/zeus_trades.db
+    read_targets: [state/zeus_trades.db]
+    write_targets: [stdout]
+    canonical_command: "python scripts/tradeable_edge_frontier.py [--since N d|YYYY-MM-DD] [--phantom-cal-threshold F] [--db PATH]"
+    external_inputs: []
+    delete_policy: retain_until_superseded
+    reuse_when: >
+      Diagnostic: distinguish TRADEABLE-PRICED vs PHANTOM vs SUB-FLOOR vs PRICE-MISSING
+      edges per strategy. Answers "real edges or only phantoms?" by reading
+      opportunity_fact (zeus_trades.db READ-ONLY). K1-compliant read-only path.
+    do_not_use_when: "zeus_trades.db absent or no opportunity_fact rows."
+    promotion_barrier: "Informational only — no gate. Exit 0 always."
+    unguarded_write_rationale: "Read-only SELECT; writes only to stdout."
+    required_helpers: [src/state/db.py]
+    required_tests: []
+
+  scripts/replay_probability_edge_bin_sanity.py:
+    class: diagnostic_report_writer
+    status: active
+    lifecycle: prob_forecast_correctness_20260523
+    packet: docs/operations/task_2026-05-23_probability_phantom_edge/
+    authority_scope: read_only
+    dangerous_if_run: false
+    dry_run_default: true
+    apply_flag: null
+    target_db: state/zeus-world.db
+    read_targets: [state/zeus-world.db]
+    write_targets: [docs/reports/live_prob_p0_edge_bin_sanity_20260523.md]
+    canonical_command: "python scripts/replay_probability_edge_bin_sanity.py"
+    external_inputs: []
+    delete_policy: retain_until_superseded
+    reuse_when: >
+      Replay LIVE-PROB-P0 §B gate (probability_edge_bin_sanity) against historical
+      probability_trace_fact rows. Validates FP=0 for argmax-p_cal proxy; generates
+      docs/reports/live_prob_p0_edge_bin_sanity_20260523.md. Used during gate
+      development and acceptance verification (IMPL_SPEC_operator.md §D.4).
+    do_not_use_when: "zeus-world.db absent or probability_trace_fact empty."
+    promotion_barrier: "Acceptance-only replay script; not a runtime gate."
+    unguarded_write_rationale: "Writes only to docs/reports/ (non-DB)."
+    required_helpers: [src/signal/probability_sanity.py]
+    required_tests: []
+
   scripts/obs_coverage_report.py:
     class: diagnostic_report_writer
     status: active
