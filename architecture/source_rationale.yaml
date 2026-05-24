@@ -327,6 +327,13 @@ files:
     why: Single world-DB writer for append-only opportunity_events and separate mutable processing state.
     downstream:
     - src/state/db.py
+  src/events/no_submit_receipts.py:
+    zone: K2_runtime
+    authority_role: edli_no_submit_receipt_ledger
+    why: Durable positive-proof ledger writer for accepted EDLI no-submit final-intent receipts; records proof evidence without asserting venue submission.
+    downstream:
+    - src/events/reactor.py
+    - src/state/schema/edli_no_submit_receipts_schema.py
   src/events/event_writer.py:
     zone: K2_runtime
     authority_role: edli_single_event_writer
@@ -2449,6 +2456,14 @@ files:
     downstream:
     - src/state/db.py
     - src/strategy/live_inference/no_trade_regret.py
+  src/state/schema/edli_no_submit_receipts_schema.py:
+    zone: K2_runtime
+    authority_role: edli_no_submit_receipts_schema_owner
+    why: EDLI v1 durable accepted no-submit receipt DDL owner; records proof receipts without implying executor or venue submission.
+    downstream:
+    - src/state/db.py
+    - src/events/no_submit_receipts.py
+    - src/events/reactor.py
   src/state/schema/edli_live_cap_usage_schema.py:
     zone: K2_runtime
     authority_role: edli_live_cap_usage_schema_owner

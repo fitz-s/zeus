@@ -868,6 +868,23 @@ tables:
       EDLI v1 event-triggered rejection ledger. Hindsight columns exist for
       post-settlement analysis but are excluded from live readers.
 
+  - name: edli_no_submit_receipts
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: receipt_id
+    required_columns:
+      - {name: receipt_id, type: TEXT, nullable: false}
+      - {name: event_id, type: TEXT, nullable: false}
+      - {name: decision_time, type: TEXT, nullable: false}
+      - {name: side_effect_status, type: TEXT, nullable: false}
+      - {name: receipt_json, type: TEXT, nullable: false}
+      - {name: receipt_hash, type: TEXT, nullable: false}
+    notes: >
+      EDLI v1 durable accepted no-submit receipt ledger. Rows preserve the
+      event-bound proof output without asserting executor or venue submission.
+
   - name: edli_live_cap_usage
     db: world
     schema_class: world_class

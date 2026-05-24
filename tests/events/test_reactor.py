@@ -76,7 +76,8 @@ def _reactor(store, *, gates=True, config=None):
         payload = json.loads(event.payload_json)
         submitted.append(event.event_id)
         return EventSubmissionReceipt(
-            submitted=True,
+            submitted=False,
+            proof_accepted=True,
             event_id=event.event_id,
             causal_snapshot_id=event.causal_snapshot_id,
             city=payload.get("city"),
@@ -137,6 +138,87 @@ def test_duplicate_event_not_double_counted():
     assert len(submitted) == 1
 
 
+def test_successful_no_submit_receipt_is_persisted_before_processed():
+    conn, store = _store()
+    event = _day0_event()
+    store.insert_or_ignore(event)
+    reactor, _rejected, _submitted = _reactor(store)
+
+    result = reactor.process_pending(decision_time=datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc))
+
+    assert result.proof_accepted == 1
+    receipt_row = conn.execute(
+        """
+        SELECT event_id, side_effect_status, receipt_json, receipt_hash
+        FROM edli_no_submit_receipts
+        WHERE event_id = ?
+        """,
+        (event.event_id,),
+    ).fetchone()
+    assert receipt_row is not None
+    assert receipt_row[0] == event.event_id
+    assert receipt_row[1] == "NO_SUBMIT"
+    assert '"proof_accepted":true' in receipt_row[2]
+    assert len(receipt_row[3]) == 64
+    status = conn.execute(
+        """
+        SELECT processing_status
+        FROM opportunity_event_processing
+        WHERE event_id = ?
+        """,
+        (event.event_id,),
+    ).fetchone()[0]
+    assert status == "processed"
+
+
+def test_no_submit_receipt_ledger_is_idempotent_for_duplicate_event():
+    conn, _event_store = _store()
+    from src.events.no_submit_receipts import EdliNoSubmitReceiptLedger
+
+    receipt = EventSubmissionReceipt(
+        submitted=False,
+        proof_accepted=True,
+        event_id="event-1",
+        causal_snapshot_id="snapshot-1",
+        city="Chicago",
+        target_date="2026-05-24",
+        metric="high",
+        condition_id="condition-1",
+        token_id="yes-1",
+        candidate_id="candidate-1",
+        executable_snapshot_id="exec-1",
+        family_id="family-1",
+        bin_label="70-71F",
+        direction="buy_yes",
+        q_live=0.8,
+        q_lcb_5pct=0.7,
+        c_fee_adjusted=0.4,
+        c_cost_95pct=0.41,
+        p_fill_lcb=0.05,
+        trade_score=0.1,
+        native_quote_available=True,
+        source_status="MATCH",
+        family_complete=True,
+        trade_score_positive=True,
+        fdr_pass=True,
+        fdr_family_id="fdr-family-1",
+        fdr_hypothesis_count=2,
+        kelly_pass=True,
+        kelly_execution_price_type="ExecutionPrice",
+        kelly_price_fee_deducted=True,
+        kelly_size_usd=1.0,
+        kelly_cost_basis_id="kelly-cost-1",
+        final_intent_id="intent-1",
+        side_effect_status="NO_SUBMIT",
+    )
+    ledger = EdliNoSubmitReceiptLedger(conn)
+
+    ledger.insert_idempotent(receipt, decision_time=datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc))
+    ledger.insert_idempotent(receipt, decision_time=datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc))
+
+    assert conn.execute("SELECT COUNT(*) FROM edli_no_submit_receipts").fetchone()[0] == 1
+
+
 def test_reactor_passes_decision_time_to_submit():
     _conn, store = _store()
     event = _day0_event()
@@ -148,7 +230,8 @@ def test_reactor_passes_decision_time_to_submit():
         seen.append((submitted_event.event_id, submitted_decision_time))
         payload = json.loads(submitted_event.payload_json)
         return EventSubmissionReceipt(
-            submitted=True,
+            submitted=False,
+            proof_accepted=True,
             event_id=submitted_event.event_id,
             causal_snapshot_id=submitted_event.causal_snapshot_id,
             city=payload.get("city"),
@@ -198,7 +281,8 @@ def test_receipt_without_money_path_proof_is_rejected():
         payload = json.loads(event.payload_json)
         submitted.append(event.event_id)
         return EventSubmissionReceipt(
-            submitted=True,
+            submitted=False,
+            proof_accepted=True,
             event_id=event.event_id,
             causal_snapshot_id=event.causal_snapshot_id,
             city=payload.get("city"),

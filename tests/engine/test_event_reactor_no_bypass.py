@@ -634,7 +634,8 @@ def test_runtime_receipt_uses_event_bound_final_intent_contract():
     event = _bound_forecast_event()
     receipt = _receipt(event, _trade_conn_with_snapshot())
 
-    assert receipt.submitted is True
+    assert receipt.proof_accepted is True
+    assert receipt.submitted is False
     assert receipt.event_id == event.event_id
     assert receipt.causal_snapshot_id == event.causal_snapshot_id
     assert receipt.trade_score_positive is True
@@ -658,7 +659,7 @@ def test_forecast_trigger_event_without_q_or_token_fields_builds_no_submit_recei
     event = _forecast_event()
     receipt = _receipt(event, _trade_conn_with_snapshot())
 
-    assert receipt.submitted is True
+    assert receipt.proof_accepted is True
     assert receipt.token_id == "yes-1"
     assert receipt.q_live is not None
     assert receipt.q_live > 0.83
@@ -757,7 +758,7 @@ def test_forecast_receipt_does_not_require_old_probability_or_selection_facts():
 
     receipt = _receipt(event, conn)
 
-    assert receipt.submitted is True
+    assert receipt.proof_accepted is True
     assert receipt.q_live is not None
     assert receipt.q_live > 0.83
     assert receipt.fdr_pass is True
@@ -776,7 +777,7 @@ def test_forecast_receipt_uses_separate_forecast_authority_connection():
 
     receipt = _receipt(event, trade_conn, forecast_conn=forecast_conn, topology_conn=forecast_conn)
 
-    assert receipt.submitted is True
+    assert receipt.proof_accepted is True
     assert receipt.q_live is not None
     assert receipt.q_live > 0.83
     assert receipt.side_effect_status == "NO_SUBMIT"
@@ -866,7 +867,7 @@ def test_receipt_uses_world_calibration_authority_not_forecast_conn():
         calibration_conn=calibration_conn,
     )
 
-    assert receipt.submitted is True
+    assert receipt.proof_accepted is True
     assert receipt.q_live is not None
     assert receipt.side_effect_status == "NO_SUBMIT"
 
@@ -913,7 +914,7 @@ def test_p_cal_json_available_after_event_is_ignored_when_calibrator_authority_e
 
     receipt = _receipt(event, conn)
 
-    assert receipt.submitted is True
+    assert receipt.proof_accepted is True
     assert receipt.side_effect_status == "NO_SUBMIT"
 
 
@@ -996,8 +997,30 @@ def test_forecast_reader_revalidation_uses_reactor_decision_time(monkeypatch):
 
     receipt = _receipt(event, conn, decision_time=decision_time)
 
-    assert receipt.submitted is True
+    assert receipt.proof_accepted is True
     assert captured == [decision_time]
+
+
+def test_executable_snapshot_freshness_uses_reactor_decision_time():
+    event = _bound_forecast_event()
+    conn = _trade_conn_with_snapshot()
+    conn.execute("UPDATE executable_market_snapshots SET freshness_deadline = '2026-05-24T08:12:30+00:00'")
+
+    receipt = _receipt(event, conn, decision_time=datetime(2026, 5, 24, 8, 12, tzinfo=timezone.utc))
+
+    assert receipt.proof_accepted is True
+    assert receipt.side_effect_status == "NO_SUBMIT"
+
+
+def test_executable_snapshot_stale_at_decision_time_blocks_receipt():
+    event = _bound_forecast_event()
+    conn = _trade_conn_with_snapshot()
+    conn.execute("UPDATE executable_market_snapshots SET freshness_deadline = '2026-05-24T08:11:59+00:00'")
+
+    receipt = _receipt(event, conn, decision_time=datetime(2026, 5, 24, 8, 12, tzinfo=timezone.utc))
+
+    assert receipt.submitted is False
+    assert receipt.reason == "EVENT_BOUND_EXECUTABLE_SNAPSHOT_MISSING"
 
 
 def test_coverage_expired_between_event_available_and_decision_blocks_receipt(monkeypatch):
@@ -1055,7 +1078,7 @@ def test_real_snapshot_depth_at_best_ask_authorizes_selected_token_cost():
 
     receipt = _receipt(event, conn)
 
-    assert receipt.submitted is True
+    assert receipt.proof_accepted is True
     assert receipt.c_fee_adjusted == 0.40
     assert receipt.native_quote_available is True
     assert receipt.p_fill_lcb == 0.05
@@ -1125,7 +1148,7 @@ def test_forecast_receipt_uses_attached_forecasts_market_topology():
 
     receipt = _receipt(event, conn, forecast_conn=conn, topology_conn=conn)
 
-    assert receipt.submitted is True
+    assert receipt.proof_accepted is True
     assert receipt.fdr_hypothesis_count == 4
 
 
@@ -1171,7 +1194,7 @@ def test_day0_receipt_uses_latest_forecast_source_and_absorbing_boundary_not_old
 
     receipt = _receipt(event, conn)
 
-    assert receipt.submitted is True
+    assert receipt.proof_accepted is True
     assert receipt.condition_id == "condition-2"
     assert receipt.token_id == "yes-2"
     assert receipt.q_live is not None

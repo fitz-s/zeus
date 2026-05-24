@@ -25,9 +25,9 @@ Reject = Callable[[OpportunityEvent, str, str], None]
 class EventSubmissionReceipt:
     """Proof that an executor-facing intent belongs to the current EDLI event.
 
-    ``submitted`` means the EDLI reactor accepted the event-bound money-path
-    proof. It does not imply a venue side effect. ``side_effect_status`` is the
-    authority for whether the executor boundary was crossed.
+    ``proof_accepted`` means the EDLI reactor accepted the event-bound
+    money-path proof. ``submitted`` is reserved for real executor/venue submit
+    semantics and must stay false for ``side_effect_status=NO_SUBMIT``.
     """
 
     submitted: bool
@@ -39,6 +39,7 @@ class EventSubmissionReceipt:
     condition_id: str | None = None
     token_id: str | None = None
     outcome_label: str | None = None
+    candidate_id: str | None = None
     executable_snapshot_id: str | None = None
     family_id: str | None = None
     bin_label: str | None = None
@@ -64,6 +65,11 @@ class EventSubmissionReceipt:
     final_intent_id: str | None = None
     side_effect_status: str = "NO_SUBMIT"
     reason: str = ""
+    proof_accepted: bool | None = None
+
+    def __post_init__(self) -> None:
+        if self.proof_accepted is None:
+            object.__setattr__(self, "proof_accepted", bool(self.submitted))
 
 
 Submit = Callable[[OpportunityEvent, datetime], bool | None | EventSubmissionReceipt]
@@ -82,9 +88,13 @@ class ReactorConfig:
 class ReactorResult:
     processed: int = 0
     rejected: int = 0
-    submitted: int = 0
+    proof_accepted: int = 0
     dead_lettered: int = 0
     rejection_reasons: list[str] = field(default_factory=list)
+
+    @property
+    def submitted(self) -> int:
+        return self.proof_accepted
 
 
 class OpportunityEventReactor:
@@ -110,8 +120,10 @@ class OpportunityEventReactor:
         self._regret_ledger = regret_ledger
         self._family_logged: set[str] = set()
         self._day0_live_orders_today = 0
+        from src.events.no_submit_receipts import EdliNoSubmitReceiptLedger
         from src.strategy.live_inference.promotion_ledger import EdliLiveCapLedger
 
+        self._no_submit_receipt_ledger = EdliNoSubmitReceiptLedger(store.conn)
         self._live_cap_ledger = EdliLiveCapLedger(store.conn)
 
     def process_pending(self, *, decision_time: datetime, limit: int = 100) -> ReactorResult:
@@ -185,7 +197,9 @@ class OpportunityEventReactor:
                 decision_time=decision_time,
                 notional_usd=self._config.tiny_live_max_notional_usd,
             )
-        result.submitted += 1
+        if receipt.side_effect_status == "NO_SUBMIT":
+            self._no_submit_receipt_ledger.insert_idempotent(receipt, decision_time=decision_time)
+        result.proof_accepted += 1
 
     def _reject_event(
         self,
@@ -343,7 +357,8 @@ def _submission_receipt(
         )
     if submit_result is None:
         return EventSubmissionReceipt(
-            submitted=True,
+            submitted=False,
+            proof_accepted=True,
             event_id=event.event_id,
             causal_snapshot_id=event.causal_snapshot_id,
             reason="legacy_injected_test_submit",

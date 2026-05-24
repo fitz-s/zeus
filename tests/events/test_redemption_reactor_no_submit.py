@@ -11,6 +11,7 @@ from src.events.event_store import EventStore
 from src.events.opportunity_event import ForecastSnapshotReadyPayload, make_opportunity_event
 from src.events.reactor import EventSubmissionReceipt, OpportunityEventReactor, ReactorConfig
 from src.state.schema.edli_live_cap_usage_schema import ensure_table as ensure_edli_live_cap_usage_schema
+from src.state.schema.edli_no_submit_receipts_schema import ensure_table as ensure_edli_no_submit_receipts_schema
 from src.state.schema.event_dead_letters_schema import ensure_table as ensure_event_dead_letters_schema
 from src.state.schema.no_trade_regret_events_schema import ensure_table as ensure_no_trade_regret_events_schema
 from src.state.schema.opportunity_event_processing_schema import ensure_table as ensure_opportunity_event_processing_schema
@@ -75,6 +76,7 @@ def test_reactor_blocks_final_intent_when_live_submit_disabled():
     ensure_opportunity_event_processing_schema(conn)
     ensure_event_dead_letters_schema(conn)
     ensure_no_trade_regret_events_schema(conn)
+    ensure_edli_no_submit_receipts_schema(conn)
     ensure_edli_live_cap_usage_schema(conn)
     store = EventStore(conn)
     event = _event()
@@ -127,6 +129,7 @@ def test_no_submit_fdr_rejection_is_classified_as_fdr_not_executor_expressibilit
     ensure_opportunity_event_processing_schema(conn)
     ensure_event_dead_letters_schema(conn)
     ensure_no_trade_regret_events_schema(conn)
+    ensure_edli_no_submit_receipts_schema(conn)
     ensure_edli_live_cap_usage_schema(conn)
     store = EventStore(conn)
     event = _event()
@@ -174,6 +177,7 @@ def test_no_submit_kelly_rejection_is_classified_as_kelly_not_executor_expressib
     ensure_opportunity_event_processing_schema(conn)
     ensure_event_dead_letters_schema(conn)
     ensure_no_trade_regret_events_schema(conn)
+    ensure_edli_no_submit_receipts_schema(conn)
     ensure_edli_live_cap_usage_schema(conn)
     store = EventStore(conn)
     event = _event()

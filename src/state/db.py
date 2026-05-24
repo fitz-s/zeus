@@ -894,7 +894,7 @@ def get_connection(
 # CI hook scripts/check_schema_version.py diffs the sqlite_master hash of
 # a fresh-init DB against tests/state/_schema_pinned_hash.txt and fails
 # the PR if SCHEMA_VERSION did not change in lockstep.
-SCHEMA_VERSION = 41  # 2026-05-27 merge #349+#352: FT-ship F2 (model_bias_ens_v2 in init_schema, world.db fresh-boot safe) merged with #352 Part-3 F1/F4 (position_events.event_type CHECK gains 'REVIEW_REQUIRED'). Prior: 40 = #352 durable authority projection + REVIEW_REQUIRED event type.
+SCHEMA_VERSION = 42  # 2026-05-24 EDLI v1: durable no-submit receipt ledger.
 
 
 def init_schema(
@@ -2573,6 +2573,10 @@ def init_schema(
     # EDLI v1 (2026-05-24): event-triggered no-trade regret ledger.
     from src.state.schema.no_trade_regret_events_schema import ensure_table as _ensure_no_trade_regret_events_table
     _ensure_no_trade_regret_events_table(conn)
+
+    # EDLI v1 (2026-05-24): durable accepted no-submit receipt ledger.
+    from src.state.schema.edli_no_submit_receipts_schema import ensure_table as _ensure_edli_no_submit_receipts_table
+    _ensure_edli_no_submit_receipts_table(conn)
 
     # EDLI v1 (2026-05-24): durable tiny live-cap usage ledger.
     from src.state.schema.edli_live_cap_usage_schema import ensure_table as _ensure_edli_live_cap_usage_table

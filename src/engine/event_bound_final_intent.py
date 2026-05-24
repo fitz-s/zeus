@@ -96,9 +96,11 @@ def serialize_event_bound_final_intent_receipt(
     """
 
     receipt.execution_price.assert_kelly_safe()
+    submitted = receipt.side_effect_status == "SUBMITTED"
     return {
         "schema": RECEIPT_SCHEMA,
-        "submitted": True,
+        "proof_accepted": True,
+        "submitted": submitted,
         "event_id": receipt.event_id,
         "causal_snapshot_id": receipt.causal_snapshot_id,
         "family_id": receipt.family_id,

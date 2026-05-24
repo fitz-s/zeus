@@ -14,6 +14,7 @@ EDLI_WORLD_TABLES = {
     "event_dead_letters",
     "execution_feasibility_evidence",
     "no_trade_regret_events",
+    "edli_no_submit_receipts",
     "edli_live_cap_usage",
 }
 

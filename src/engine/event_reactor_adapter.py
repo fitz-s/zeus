@@ -211,7 +211,12 @@ def build_event_bound_no_submit_receipt(
     if not family_topology_rows:
         return EventSubmissionReceipt(False, event.event_id, event.causal_snapshot_id, reason="EVENT_BOUND_MARKET_TOPOLOGY_MISSING")
     family_condition_ids = tuple(str(row.get("condition_id") or "") for row in family_topology_rows)
-    family_rows = _latest_snapshot_rows_for_event_family(trade_conn, event, condition_ids=family_condition_ids)
+    family_rows = _latest_snapshot_rows_for_event_family(
+        trade_conn,
+        event,
+        condition_ids=family_condition_ids,
+        fresh_at=decision_time,
+    )
     if not family_rows:
         return EventSubmissionReceipt(False, event.event_id, event.causal_snapshot_id, reason="EVENT_BOUND_EXECUTABLE_SNAPSHOT_MISSING")
     snapshot_token_maps = _snapshot_token_maps_by_condition(family_rows)
@@ -573,6 +578,7 @@ def _event_submission_receipt_from_typed_receipt_payload(
         condition_id=raw_receipt.get("condition_id"),
         token_id=raw_receipt.get("token_id"),
         outcome_label=raw_receipt.get("outcome_label"),
+        candidate_id=raw_receipt.get("candidate_id"),
         executable_snapshot_id=raw_receipt.get("executable_snapshot_id"),
         family_id=raw_receipt.get("family_id"),
         bin_label=raw_receipt.get("bin_label"),
@@ -598,6 +604,7 @@ def _event_submission_receipt_from_typed_receipt_payload(
         final_intent_id=raw_receipt.get("final_intent_id"),
         side_effect_status="NO_SUBMIT",
         reason=str(raw_receipt.get("reason") or "event_bound_final_intent_no_submit"),
+        proof_accepted=bool(raw_receipt.get("proof_accepted")),
     )
 
 
