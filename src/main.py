@@ -1127,6 +1127,7 @@ def _start_venue_background_maintenance_async(adapter=None) -> str:
 
 _user_channel_ingestor = None
 _user_channel_thread = None
+_edli_market_channel_thread = None
 
 
 USER_CHANNEL_REQUIRED_ENV_VARS = (
@@ -2373,6 +2374,266 @@ def _assert_live_safe_strategies_or_exit(*, refresh_state: bool = True) -> None:
     assert_live_safe_strategies_under_live_mode(enabled_strategies)
 
 
+@_scheduler_job("edli_event_reactor")
+def _edli_event_reactor_cycle() -> None:
+    """EDLI event-reactor scheduler hook.
+
+    Cut 10 wires daemon scheduling and schema/config readiness. The live-money
+    submit adapter still uses injected gates; until an event is explicitly
+    accepted by those gates, this job is conservative and side-effect free.
+    """
+
+    edli_cfg = settings.get("edli_v1", {})
+    if not edli_cfg.get("enabled") or not edli_cfg.get("event_writer_enabled"):
+        return
+    from src.engine.event_reactor_adapter import (
+        edli_source_truth_gate,
+        executable_snapshot_gate_from_trade_conn,
+        existing_cycle_downstream_gate,
+        riskguard_allows_new_entries,
+        submit_existing_cycle_for_event,
+    )
+    from src.events.event_store import EventStore
+    from src.events.reactor import OpportunityEventReactor, ReactorConfig
+    from src.riskguard.riskguard import get_current_level
+    from src.state.db import get_trade_connection_read_only, get_world_connection
+    from src.strategy.live_inference.no_trade_regret import NoTradeRegretLedger
+
+    conn = get_world_connection()
+    trade_conn = get_trade_connection_read_only()
+    try:
+        now = datetime.now(timezone.utc)
+        received_at = now.isoformat()
+        if edli_cfg.get("forecast_snapshot_trigger_enabled"):
+            _edli_emit_forecast_snapshot_events(
+                conn,
+                decision_time=now,
+                received_at=received_at,
+                limit=50,
+            )
+        if edli_cfg.get("day0_extreme_trigger_enabled"):
+            _edli_emit_day0_extreme_events(
+                conn,
+                trade_conn,
+                decision_time=now,
+                received_at=received_at,
+                limit=100,
+            )
+        conn.commit()
+        store = EventStore(conn)
+        regret_ledger = NoTradeRegretLedger(conn)
+
+        def _submit_via_existing_cycle(event):
+            acquired = _cycle_lock.acquire(blocking=False)
+            if not acquired:
+                logger.warning("EDLI existing-cycle trigger skipped: cycle_lock_busy")
+                return False
+            try:
+                return submit_existing_cycle_for_event(event, run_cycle=run_cycle)
+            finally:
+                _cycle_lock.release()
+
+        reactor = OpportunityEventReactor(
+            store,
+            source_truth_gate=edli_source_truth_gate,
+            executable_snapshot_gate=executable_snapshot_gate_from_trade_conn(trade_conn),
+            fdr_gate=existing_cycle_downstream_gate,
+            kelly_gate=existing_cycle_downstream_gate,
+            riskguard_gate=riskguard_allows_new_entries(get_current_level=get_current_level),
+            final_intent_submit=_submit_via_existing_cycle,
+            reject=lambda _event, _stage, _reason: None,
+            regret_ledger=regret_ledger,
+            config=ReactorConfig(
+                reactor_mode=str(edli_cfg.get("reactor_mode", "live")),
+                taker_fok_fak_live_enabled=bool(edli_cfg.get("taker_fok_fak_live_enabled", False)),
+                tiny_live_max_notional_usd=float(edli_cfg.get("tiny_live_max_notional_usd", 5.0)),
+                tiny_live_max_orders_per_day=int(edli_cfg.get("tiny_live_max_orders_per_day", 1)),
+            ),
+        )
+        reactor.process_pending(decision_time=now, limit=50)
+        conn.commit()
+    finally:
+        trade_conn.close()
+        conn.close()
+
+
+def _edli_emit_forecast_snapshot_events(
+    world_conn,
+    *,
+    decision_time: datetime,
+    received_at: str,
+    limit: int,
+) -> int:
+    """Emit EDLI forecast events from committed forecast DB rows."""
+
+    from src.events.event_writer import EventWriter
+    from src.events.triggers.forecast_snapshot_ready import (
+        ForecastSnapshotReadyTrigger,
+        executable_forecast_live_eligible_reader,
+    )
+    from src.state.db import get_forecasts_connection_read_only
+
+    forecasts_conn = get_forecasts_connection_read_only()
+    try:
+        trigger = ForecastSnapshotReadyTrigger(
+            EventWriter(world_conn),
+            live_eligibility_reader=executable_forecast_live_eligible_reader(forecasts_conn),
+        )
+        return len(
+            trigger.scan_committed_snapshots(
+                forecasts_conn=forecasts_conn,
+                decision_time=decision_time,
+                received_at=received_at,
+                limit=limit,
+            )
+        )
+    finally:
+        forecasts_conn.close()
+
+
+def _edli_emit_day0_extreme_events(
+    world_conn,
+    trade_conn,
+    *,
+    decision_time: datetime,
+    received_at: str,
+    limit: int,
+) -> int:
+    """Emit EDLI Day0 extreme events from durable observation authority rows."""
+
+    from src.events.event_writer import EventWriter
+    from src.events.triggers.day0_extreme_updated import Day0ExtremeUpdatedTrigger
+
+    trigger = Day0ExtremeUpdatedTrigger(EventWriter(world_conn))
+    return len(
+        trigger.scan_authority_rows(
+            observation_conn=trade_conn,
+            settlement_semantics=_edli_day0_settlement_semantics,
+            decision_time=decision_time,
+            received_at=received_at,
+            limit=limit,
+        )
+    )
+
+
+def _edli_day0_settlement_semantics(observation: dict):
+    """Resolve Day0 settlement semantics from authority payload fields."""
+
+    from src.contracts.settlement_semantics import SettlementSemantics
+
+    station = str(observation.get("station_id") or observation.get("city") or "UNKNOWN")
+    unit = str(observation.get("settlement_unit") or "F").upper()
+    rounding_rule = str(observation.get("rounding_rule") or "wmo_half_up")
+    precision_raw = observation.get("settlement_precision")
+    try:
+        precision = float(precision_raw) if precision_raw is not None else 1.0
+    except (TypeError, ValueError):
+        precision = 1.0
+    if unit not in {"F", "C"}:
+        unit = "F"
+    if rounding_rule not in {"wmo_half_up", "floor", "ceil", "oracle_truncate"}:
+        rounding_rule = "wmo_half_up"
+    return SettlementSemantics(
+        resolution_source=f"EDLI_DAY0_{station}",
+        measurement_unit=unit,
+        precision=precision,
+        rounding_rule=rounding_rule,
+        finalization_time="12:00:00Z",
+    )
+
+
+@_scheduler_job("edli_market_channel_ingestor")
+def _edli_market_channel_ingestor_cycle() -> None:
+    """EDLI market-channel online data-service bootstrap.
+
+    This daemon-side job discovers active weather tokens and prepares the public
+    market-channel ingestor/quote cache. Actual fills remain user-channel or
+    reconcile authority only.
+    """
+
+    edli_cfg = settings.get("edli_v1", {})
+    if not edli_cfg.get("enabled") or not edli_cfg.get("market_channel_ingestor_enabled"):
+        return
+    global _edli_market_channel_thread
+    if _edli_market_channel_thread is not None and _edli_market_channel_thread.is_alive():
+        _write_scheduler_health(
+            "edli_market_channel_ingestor",
+            failed=False,
+            extra={
+                "thread": "alive",
+                "quote_cache_enabled": bool(edli_cfg.get("market_channel_quote_cache_enabled", False)),
+                "fill_authority": "user_channel_or_reconcile_only",
+            },
+        )
+        return
+
+    from src.events.triggers.market_channel_ingestor import active_weather_token_ids_from_snapshots
+    from src.state.db import get_trade_connection
+
+    trade_conn = get_trade_connection(write_class=None)
+    try:
+        token_ids = active_weather_token_ids_from_snapshots(trade_conn)
+    finally:
+        trade_conn.close()
+
+    if not token_ids:
+        _write_scheduler_health(
+            "edli_market_channel_ingestor",
+            failed=False,
+            extra={
+                "active_weather_token_ids": 0,
+                "quote_cache_enabled": bool(edli_cfg.get("market_channel_quote_cache_enabled", False)),
+                "fill_authority": "user_channel_or_reconcile_only",
+                "skipped": "no_active_weather_tokens",
+            },
+        )
+        return
+
+    def _runner() -> None:
+        from src.data.polymarket_client import PolymarketClient
+        from src.events.event_writer import EventWriter
+        from src.events.triggers.market_channel_ingestor import (
+            MarketChannelIngestor,
+            MarketChannelOnlineService,
+            run_market_channel_service_forever,
+        )
+        from src.state.db import get_world_connection
+
+        world_conn = get_world_connection(write_class="live")
+        try:
+            with PolymarketClient() as clob:
+                service = MarketChannelOnlineService(
+                    MarketChannelIngestor(EventWriter(world_conn), active_token_ids=token_ids),
+                    fetch_orderbook=clob.get_orderbook_snapshot,
+                )
+                run_market_channel_service_forever(
+                    service,
+                    logger=logger,
+                    commit=world_conn.commit,
+                )
+        finally:
+            world_conn.close()
+
+    _edli_market_channel_thread = threading.Thread(
+        target=_runner,
+        name="edli-market-channel",
+        daemon=True,
+    )
+    _edli_market_channel_thread.start()
+    _write_scheduler_health(
+        "edli_market_channel_ingestor",
+        failed=False,
+        extra={
+            "active_weather_token_ids": len(token_ids),
+            "quote_cache_enabled": bool(edli_cfg.get("market_channel_quote_cache_enabled", False)),
+            "fill_authority": "user_channel_or_reconcile_only",
+            "thread": "started",
+            "rest_seed_status": "polymarket_public_orderbook",
+            "websocket_endpoint": "polymarket_public_market_channel",
+        },
+    )
+
+
 def main():
     _start = time.monotonic()  # F86: process start time for SIGTERM elapsed log
     mode = get_mode()
@@ -2583,6 +2844,26 @@ def main():
         max_instances=1,
         coalesce=True,
     )
+    if settings.get("edli_v1", {}).get("enabled"):
+        scheduler.add_job(
+            _edli_event_reactor_cycle,
+            "interval",
+            minutes=1,
+            id="edli_event_reactor",
+            next_run_time=_utc_run_time_after(OPENING_HUNT_FIRST_DELAY_SECONDS + 45.0),
+            max_instances=1,
+            coalesce=True,
+        )
+    if settings.get("edli_v1", {}).get("market_channel_ingestor_enabled"):
+        scheduler.add_job(
+            _edli_market_channel_ingestor_cycle,
+            "interval",
+            minutes=1,
+            id="edli_market_channel_ingestor",
+            next_run_time=_utc_run_time_after(OPENING_HUNT_FIRST_DELAY_SECONDS + 20.0),
+            max_instances=1,
+            coalesce=True,
+        )
     scheduler.add_job(_harvester_cycle, "interval", hours=1, id="harvester")
     scheduler.add_job(_write_heartbeat, "interval", seconds=60, id="heartbeat",
                       max_instances=1, coalesce=True)

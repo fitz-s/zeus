@@ -125,6 +125,57 @@ modules:
       - tests/test_evaluator_strategy_key_failclosed.py
     graph_appendix_status: LOCAL_GRAPH_QUERY_REQUIRED
     archive_extraction_status: partial
+  events:
+    path: src/events
+    scoped_agents: src/events/AGENTS.md
+    module_book: null
+    priority: edli_v1
+    maturity: initial
+    zone: source
+    authority_role: event_sourced_opportunity_runtime
+    high_risk_files:
+      - src/events/event_store.py
+      - src/events/opportunity_event.py
+      - src/events/event_writer.py
+      - src/events/event_coalescer.py
+      - src/events/dead_letter.py
+      - src/events/replay.py
+      - src/events/triggers/forecast_snapshot_ready.py
+      - src/events/triggers/day0_extreme_updated.py
+      - src/events/triggers/market_channel_ingestor.py
+      - src/events/reactor.py
+    public_entry_files:
+      - src/events/event_store.py
+      - src/events/opportunity_event.py
+      - src/events/event_writer.py
+    law_dependencies:
+      - AGENTS.md
+      - architecture/db_table_ownership.yaml
+      - architecture/money_path_objects.yaml
+      - architecture/money_path_ci.yaml
+    current_fact_dependencies:
+      - docs/operations/edli_v1/EDLI_IMPLEMENTATION_CONTEXT_LOCK.md
+      - docs/operations/edli_v1/REPO_REALITY_CROSS_REFERENCE.md
+    required_tests:
+      - tests/events/test_opportunity_event.py
+      - tests/events/test_event_store_idempotency.py
+      - tests/events/test_event_writer_single_writer.py
+      - tests/events/test_market_event_coalescer.py
+      - tests/events/test_forecast_snapshot_ready.py
+      - tests/events/test_day0_extreme_updated_trigger.py
+      - tests/strategy/live_inference/test_day0_absorbing_boundary.py
+      - tests/strategy/live_inference/test_live_bin_inference.py
+      - tests/strategy/live_inference/test_executable_cost.py
+      - tests/strategy/live_inference/test_trade_score.py
+      - tests/events/test_market_channel_ingestor.py
+      - tests/events/test_reactor.py
+      - tests/engine/test_event_reactor_no_bypass.py
+      - tests/strategy/live_inference/test_no_trade_regret.py
+      - tests/analysis/test_event_opportunity_report.py
+      - tests/money_path/test_edli_online_invariants.py
+      - tests/state/test_edli_table_ownership.py
+    graph_appendix_status: LOCAL_GRAPH_QUERY_REQUIRED
+    archive_extraction_status: not_started
   data:
     path: src/data
     scoped_agents: src/data/AGENTS.md

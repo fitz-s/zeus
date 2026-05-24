@@ -29,6 +29,23 @@ test_trust_policy:
   # Tests not in this list require audit before running.
   trusted_tests:
     tests/test_alpha_target_coherence.py: {created: "2026-04-07", last_used: "2026-04-23"}
+    tests/events/test_opportunity_event.py: {created: "2026-05-24", last_used: "2026-05-24"}
+    tests/events/test_event_store_idempotency.py: {created: "2026-05-24", last_used: "2026-05-24"}
+    tests/events/test_event_writer_single_writer.py: {created: "2026-05-24", last_used: "2026-05-24"}
+    tests/events/test_market_event_coalescer.py: {created: "2026-05-24", last_used: "2026-05-24"}
+    tests/events/test_forecast_snapshot_ready.py: {created: "2026-05-24", last_used: "2026-05-24"}
+    tests/events/test_day0_extreme_updated_trigger.py: {created: "2026-05-24", last_used: "2026-05-24"}
+    tests/strategy/live_inference/test_day0_absorbing_boundary.py: {created: "2026-05-24", last_used: "2026-05-24"}
+    tests/strategy/live_inference/test_live_bin_inference.py: {created: "2026-05-24", last_used: "2026-05-24"}
+    tests/strategy/live_inference/test_executable_cost.py: {created: "2026-05-24", last_used: "2026-05-24"}
+    tests/strategy/live_inference/test_trade_score.py: {created: "2026-05-24", last_used: "2026-05-24"}
+    tests/events/test_market_channel_ingestor.py: {created: "2026-05-24", last_used: "2026-05-24"}
+    tests/events/test_reactor.py: {created: "2026-05-24", last_used: "2026-05-24"}
+    tests/engine/test_event_reactor_no_bypass.py: {created: "2026-05-24", last_used: "2026-05-24"}
+    tests/strategy/live_inference/test_no_trade_regret.py: {created: "2026-05-24", last_used: "2026-05-24"}
+    tests/analysis/test_event_opportunity_report.py: {created: "2026-05-24", last_used: "2026-05-24"}
+    tests/money_path/test_edli_online_invariants.py: {created: "2026-05-24", last_used: "2026-05-24"}
+    tests/state/test_edli_table_ownership.py: {created: "2026-05-24", last_used: "2026-05-24"}
     # task_2026-05-04_oracle_kelly_evidence_rebuild antibodies (A1-A7).
     # All packet-specific test files registered here so topology_doctor
     # accepts them as trusted; the rebuild floor (test_authority_rebuild_invariants)

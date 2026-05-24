@@ -756,6 +756,104 @@ tables:
     created_by: init_schema
     pk_col: null
 
+  - name: opportunity_events
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: event_id
+    required_columns:
+      - {name: event_id, type: TEXT, nullable: true}
+      - {name: event_type, type: TEXT, nullable: false}
+      - {name: entity_key, type: TEXT, nullable: false}
+      - {name: source, type: TEXT, nullable: false}
+      - {name: observed_at, type: TEXT, nullable: false}
+      - {name: available_at, type: TEXT, nullable: false}
+      - {name: received_at, type: TEXT, nullable: false}
+      - {name: idempotency_key, type: TEXT, nullable: false}
+      - {name: payload_json, type: TEXT, nullable: false}
+    notes: >
+      EDLI v1 append-only opportunity event log. Event rows are immutable;
+      mutable consumer progress is stored in opportunity_event_processing.
+
+  - name: opportunity_event_processing
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: "[consumer_name, event_id]"
+    required_columns:
+      - {name: consumer_name, type: TEXT, nullable: false}
+      - {name: event_id, type: TEXT, nullable: false}
+      - {name: processing_status, type: TEXT, nullable: false}
+      - {name: attempt_count, type: INTEGER, nullable: false}
+    notes: >
+      EDLI v1 mutable per-consumer processing state for immutable opportunity_events.
+
+  - name: event_dead_letters
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: dead_letter_id
+    required_columns:
+      - {name: dead_letter_id, type: TEXT, nullable: true}
+      - {name: consumer_name, type: TEXT, nullable: false}
+      - {name: event_id, type: TEXT, nullable: false}
+      - {name: failure_stage, type: TEXT, nullable: false}
+    notes: >
+      EDLI v1 dead-letter record for event processing failures. No SQLite FK is
+      declared so cross-DB FK illusions cannot be introduced.
+
+  - name: execution_feasibility_evidence
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: evidence_id
+    required_columns:
+      - {name: evidence_id, type: TEXT, nullable: true}
+      - {name: event_id, type: TEXT, nullable: false}
+      - {name: condition_id, type: TEXT, nullable: false}
+      - {name: token_id, type: TEXT, nullable: false}
+      - {name: direction, type: TEXT, nullable: false}
+      - {name: quote_seen_at, type: TEXT, nullable: false}
+    notes: >
+      EDLI v1 executable quote/book feasibility evidence. Public market channel
+      rows are evidence only and cannot assert accepted/fill truth.
+
+  - name: no_trade_regret_events
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: regret_event_id
+    required_columns:
+      - {name: regret_event_id, type: TEXT, nullable: true}
+      - {name: event_id, type: TEXT, nullable: false}
+      - {name: rejection_stage, type: TEXT, nullable: false}
+      - {name: rejection_reason, type: TEXT, nullable: false}
+      - {name: regret_bucket, type: TEXT, nullable: false}
+    notes: >
+      EDLI v1 event-triggered rejection ledger. Hindsight columns exist for
+      post-settlement analysis but are excluded from live readers.
+
+  - name: edli_live_cap_usage
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: usage_id
+    required_columns:
+      - {name: usage_id, type: TEXT, nullable: true}
+      - {name: cap_name, type: TEXT, nullable: false}
+      - {name: usage_date, type: TEXT, nullable: false}
+      - {name: event_id, type: TEXT, nullable: false}
+      - {name: notional_usd, type: REAL, nullable: false}
+    notes: >
+      EDLI v1 durable pilot live-cap usage ledger. Day0 hard-fact live cap
+      checks are persisted here so daemon scheduler ticks cannot reset caps.
+
   - name: outcome_fact
     db: world
     schema_class: world_class

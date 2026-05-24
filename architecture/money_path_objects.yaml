@@ -348,6 +348,19 @@ state_machines:
     invariant_tests:
       - tests/test_decision_integrity_quarantine.py
       - tests/test_decision_integrity_quarantine_extended.py
+  edli_opportunity_event_processing:
+    owner: src/events/event_store.py
+    states:
+      - pending
+      - processing
+      - processed
+      - failed
+      - dead_letter
+      - expired
+      - ignored
+    invariant_tests:
+      - tests/events/test_event_store_idempotency.py
+      - tests/state/test_edli_table_ownership.py
 
   obs_coverage_status:
     description: >
@@ -374,6 +387,48 @@ schema_objects:
     - scripts/migrations/**
     - scripts/migrate_*.py
   observability_surfaces:
+    edli_opportunity_events:
+      db: world
+      pk: event_id
+      writer: src/events/event_store.py::EventStore.insert_or_ignore
+      meaning: >
+        Append-only opportunity event log for EDLI v1. Event rows carry
+        observed_at, available_at, received_at, payload_hash, idempotency_key,
+        and causal_snapshot_id; mutable processing state is separate.
+      required_tests:
+        - tests/events/test_opportunity_event.py
+        - tests/events/test_event_store_idempotency.py
+        - tests/state/test_edli_table_ownership.py
+    edli_execution_feasibility_evidence:
+      db: world
+      pk: evidence_id
+      writer: src/events/triggers/market_channel_ingestor.py::insert_execution_feasibility_evidence
+      meaning: >
+        Public market-channel and submit-window evidence about quote depth,
+        book hashes, latency, and hypothetical FOK/FAK feasibility. This is
+        never accepted/fill truth; user channel and reconciliation remain the
+        only fill authorities.
+      required_tests:
+        - tests/events/test_market_channel_ingestor.py
+    edli_no_trade_regret_events:
+      db: world
+      pk: regret_event_id
+      writer: src/strategy/live_inference/no_trade_regret.py::NoTradeRegretLedger.insert_idempotent
+      meaning: >
+        Event-triggered rejection ledger. Live readers must not expose
+        later_outcome, would_have_won, would_have_filled, or regret_bucket.
+      required_tests:
+        - tests/strategy/live_inference/test_no_trade_regret.py
+    edli_live_cap_usage:
+      db: world
+      pk: usage_id
+      writer: src/strategy/live_inference/promotion_ledger.py::EdliLiveCapLedger.reserve_day0
+      meaning: >
+        Durable EDLI pilot live-cap ledger. Prevents Day0 hard-fact live order
+        count/notional caps from resetting when the daemon scheduler constructs
+        a fresh reactor instance.
+      required_tests:
+        - tests/events/test_reactor.py
     # OBS-AUTHORITY-FOUNDATION 2026-05-23. Persisted, auditable settlement-day
     # observation authority. Observability only — these objects record runtime
     # observation truth + per-edge day0 classification so the operator can audit

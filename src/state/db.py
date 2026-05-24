@@ -894,7 +894,7 @@ def get_connection(
 # CI hook scripts/check_schema_version.py diffs the sqlite_master hash of
 # a fresh-init DB against tests/state/_schema_pinned_hash.txt and fails
 # the PR if SCHEMA_VERSION did not change in lockstep.
-SCHEMA_VERSION = 35  # 2026-05-23 LIVE-PROB-P0 §E: probability_trace_fact gains 11 edge-bin sanity telemetry columns (probability_sanity_mode/reason, edge_bin_idx/label/p_raw/p_cal/p_market/member_support/odds_ratio, near_tail_p_cal/p_market)
+SCHEMA_VERSION = 39  # 2026-05-24 EDLI v1: durable live-cap usage ledger.
 
 
 def init_schema(
@@ -2557,6 +2557,26 @@ def init_schema(
     # Phase 2 T2 (2026-05-20): no_trade_events table + indices (SCHEMA_VERSION 15).
     from src.state.schema.no_trade_events_schema import migrate_no_trade_events_schema as _migrate_no_trade_events_schema
     _migrate_no_trade_events_schema(conn)
+
+    # EDLI v1 (2026-05-24): append-only opportunity event store tables.
+    from src.state.schema.opportunity_events_schema import ensure_table as _ensure_opportunity_events_table
+    from src.state.schema.opportunity_event_processing_schema import ensure_table as _ensure_opportunity_event_processing_table
+    from src.state.schema.event_dead_letters_schema import ensure_table as _ensure_event_dead_letters_table
+    _ensure_opportunity_events_table(conn)
+    _ensure_opportunity_event_processing_table(conn)
+    _ensure_event_dead_letters_table(conn)
+
+    # EDLI v1 (2026-05-24): executable quote/book feasibility evidence.
+    from src.state.schema.execution_feasibility_evidence_schema import ensure_table as _ensure_execution_feasibility_evidence_table
+    _ensure_execution_feasibility_evidence_table(conn)
+
+    # EDLI v1 (2026-05-24): event-triggered no-trade regret ledger.
+    from src.state.schema.no_trade_regret_events_schema import ensure_table as _ensure_no_trade_regret_events_table
+    _ensure_no_trade_regret_events_table(conn)
+
+    # EDLI v1 (2026-05-24): durable tiny live-cap usage ledger.
+    from src.state.schema.edli_live_cap_usage_schema import ensure_table as _ensure_edli_live_cap_usage_table
+    _ensure_edli_live_cap_usage_table(conn)
 
     # 2026-05-21 live authority follow-up: decision_events CHECK constraints
     # must admit shadow_decision / unknown_legacy before PRAGMA user_version is
