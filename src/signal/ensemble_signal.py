@@ -211,26 +211,28 @@ def p_raw_vector_from_maxes(
     """
     if n_mc is None:
         n_mc = ensemble_n_mc()
-    if rng is None:
-        # review5.23 P1-3 Phase A: derive a deterministic seed from the physical
-        # inputs so that two evaluations of the same snapshot yield bit-identical
-        # p_raw.  Seed = sha256(sorted member_maxes | n_mc | sigma | bin labels).
-        # Callers that need non-determinism must supply an explicit rng.
-        _sig_for_seed = sigma_instrument_for_city(city)
-        _h = hashlib.sha256()
-        _h.update(struct.pack(">q", n_mc))
-        _h.update(struct.pack(">d", _sig_for_seed.value))
-        for _v in sorted(float(x) for x in np.asarray(member_maxes, dtype=float)):
-            _h.update(struct.pack(">d", _v))
-        for _b in bins:
-            _h.update(str(_b).encode())
-        rng = np.random.default_rng(int(_h.hexdigest()[:16], 16))
 
     member_maxes = np.asarray(member_maxes, dtype=float)
     if member_maxes.ndim != 1 or len(member_maxes) == 0:
         raise ValueError("member_maxes must be a non-empty one-dimensional array")
     if not np.isfinite(member_maxes).all():
         raise ValueError("member_maxes must contain only finite values")
+
+    if rng is None:
+        # review5.23 P1-3 Phase A: derive a deterministic seed from the physical
+        # inputs so that two evaluations of the same snapshot yield bit-identical
+        # p_raw.  Seed = sha256(sorted member_maxes | n_mc | sigma | bin labels).
+        # Callers that need non-determinism must supply an explicit rng.
+        # Seed is derived AFTER finiteness validation so NaN cannot affect sort order.
+        _sig_for_seed = sigma_instrument_for_city(city)
+        _h = hashlib.sha256()
+        _h.update(struct.pack(">q", n_mc))
+        _h.update(struct.pack(">d", _sig_for_seed.value))
+        for _v in sorted(member_maxes.tolist()):
+            _h.update(struct.pack(">d", _v))
+        for _b in bins:
+            _h.update(str(_b).encode())
+        rng = np.random.default_rng(int(_h.hexdigest()[:16], 16))
 
     n_bins = len(bins)
     n_members = len(member_maxes)

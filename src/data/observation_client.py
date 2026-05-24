@@ -143,6 +143,28 @@ _DAY0_COVERAGE_WINDOW_GRACE_HOURS = 2
 _DAY0_MIN_SAMPLE_COUNT = 4  # below this, coverage is LOW even if window is intact
 
 
+def _compute_day0_coverage_status(
+    first_local: datetime,
+    n_samples: int,
+    *,
+    grace_hours: float = _DAY0_COVERAGE_WINDOW_GRACE_HOURS,
+    min_samples: int = _DAY0_MIN_SAMPLE_COUNT,
+) -> str:
+    """Pure helper — determine Day0 coverage_status from first-sample time.
+
+    Returns "WINDOW_INCOMPLETE" when the first sample arrives strictly more than
+    `grace_hours` after local midnight (i.e. first_hour > grace_hours).
+    At exactly grace_hours the sample is still within the window → "OK" or
+    "LOW_COVERAGE" per sample count.  Extracted for testability.
+    """
+    first_hour = first_local.hour + first_local.minute / 60.0
+    if first_hour > grace_hours:
+        return "WINDOW_INCOMPLETE"
+    elif n_samples < min_samples:
+        return "LOW_COVERAGE"
+    return "OK"
+
+
 def _coerce_reference_time(value: datetime | str | None) -> datetime:
     if value is None:
         return datetime.now(timezone.utc)
@@ -361,16 +383,7 @@ def _fetch_wu_observation(
         last_local = selected[-1][1]
         n_samples = len(selected)
         # review5.23 P1-1: prove coverage interval starts at/near local-day start.
-        # "OK" requires the first sample within _DAY0_COVERAGE_WINDOW_GRACE_HOURS of
-        # midnight AND sufficient samples.  A window that starts mid-morning cannot
-        # claim the day-so-far extrema are truly the local-day extrema.
-        first_hour = first_local.hour + first_local.minute / 60.0
-        if first_hour > _DAY0_COVERAGE_WINDOW_GRACE_HOURS:
-            coverage_status = "WINDOW_INCOMPLETE"
-        elif n_samples < _DAY0_MIN_SAMPLE_COUNT:
-            coverage_status = "LOW_COVERAGE"
-        else:
-            coverage_status = "OK"
+        coverage_status = _compute_day0_coverage_status(first_local, n_samples)
         return Day0ObservationContext(
             high_so_far=float(high_so_far),
             low_so_far=float(low_so_far),

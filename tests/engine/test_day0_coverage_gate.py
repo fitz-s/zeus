@@ -8,9 +8,11 @@ regardless of window completeness.  _day0_observation_quality_rejection_reason()
 was not checking coverage_status.
 
 Post-fix:
-  - _fetch_wu_observation() computes WINDOW_INCOMPLETE when first sample is
-    outside the local-day-start grace window (>= _DAY0_COVERAGE_WINDOW_GRACE_HOURS
-    hours after midnight).
+  - _compute_day0_coverage_status() (pure helper in observation_client) returns
+    WINDOW_INCOMPLETE when first sample arrives strictly more than
+    _DAY0_COVERAGE_WINDOW_GRACE_HOURS hours after local midnight (first_hour > grace).
+    At exactly grace_hours the sample is still within the window → "OK" / "LOW_COVERAGE".
+  - _fetch_wu_observation() calls _compute_day0_coverage_status() and stores the result.
   - _day0_observation_quality_rejection_reason() blocks WINDOW_INCOMPLETE so
     evaluator rejects day0 candidates whose extrema cannot be trusted.
 """
@@ -25,6 +27,7 @@ from src.data.observation_client import (
     Day0ObservationContext,
     _DAY0_COVERAGE_WINDOW_GRACE_HOURS,
     _DAY0_MIN_SAMPLE_COUNT,
+    _compute_day0_coverage_status,
 )
 from src.engine.evaluator import _day0_observation_quality_rejection_reason
 from src.types.metric_identity import HIGH_LOCALDAY_MAX, LOW_LOCALDAY_MIN
@@ -125,3 +128,57 @@ class TestCoverageStatusConstants:
 
     def test_min_sample_count_is_positive(self) -> None:
         assert _DAY0_MIN_SAMPLE_COUNT >= 1
+
+
+class TestComputeDay0CoverageStatusBoundary:
+    """Boundary tests for _compute_day0_coverage_status (pure helper).
+
+    Pins the exact boundary semantics: first_hour STRICTLY GREATER THAN grace_hours
+    triggers WINDOW_INCOMPLETE; exactly at grace_hours is still within the window.
+    """
+
+    _GRACE = _DAY0_COVERAGE_WINDOW_GRACE_HOURS
+    _MIN = _DAY0_MIN_SAMPLE_COUNT
+
+    def _dt(self, hour: int, minute: int = 0) -> datetime:
+        return datetime(2026, 5, 24, hour, minute, 0, tzinfo=timezone.utc)
+
+    def test_before_grace_window_is_ok(self) -> None:
+        """T_P1_1e: first sample at 01:59 local → well within grace window → OK."""
+        status = _compute_day0_coverage_status(self._dt(1, 59), n_samples=self._MIN)
+        assert status == "OK", f"Expected OK for 01:59, got {status!r}"
+
+    def test_exactly_at_grace_boundary_is_ok(self) -> None:
+        """T_P1_1f: first sample exactly at grace_hours:00 → still within window → OK.
+
+        The check is strictly-greater-than (not >=), so first_hour == grace_hours is OK.
+        """
+        status = _compute_day0_coverage_status(
+            self._dt(self._GRACE, 0), n_samples=self._MIN
+        )
+        assert status == "OK", (
+            f"Expected OK at exactly {self._GRACE}:00 (within grace window), got {status!r}"
+        )
+
+    def test_one_minute_past_grace_is_window_incomplete(self) -> None:
+        """T_P1_1g: first sample at grace_hours:01 → strictly past grace → WINDOW_INCOMPLETE."""
+        status = _compute_day0_coverage_status(
+            self._dt(self._GRACE, 1), n_samples=self._MIN
+        )
+        assert status == "WINDOW_INCOMPLETE", (
+            f"Expected WINDOW_INCOMPLETE at {self._GRACE}:01, got {status!r}"
+        )
+
+    def test_mid_morning_is_window_incomplete(self) -> None:
+        """T_P1_1h: first sample at 08:00 → clearly outside window → WINDOW_INCOMPLETE."""
+        status = _compute_day0_coverage_status(self._dt(8, 0), n_samples=self._MIN)
+        assert status == "WINDOW_INCOMPLETE"
+
+    def test_within_window_but_few_samples_is_low_coverage(self) -> None:
+        """T_P1_1i: early first sample but too few → LOW_COVERAGE (not WINDOW_INCOMPLETE)."""
+        status = _compute_day0_coverage_status(
+            self._dt(1, 0), n_samples=self._MIN - 1
+        )
+        assert status == "LOW_COVERAGE", (
+            f"Expected LOW_COVERAGE for {self._MIN - 1} samples, got {status!r}"
+        )

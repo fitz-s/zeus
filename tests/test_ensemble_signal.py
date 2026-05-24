@@ -446,3 +446,19 @@ class TestDeterministicMCSeed:
             member_maxes, NYC, NYC_SEMANTICS, NYC_BINS, n_mc=n_mc, rng=rng_fixed2
         )
         np.testing.assert_array_equal(p_explicit, p_explicit2)
+
+    def test_permuted_member_maxes_produce_identical_p_raw(self) -> None:
+        """T_P1_3d: same multiset in different insertion order → same seed → same p_raw.
+
+        The seed derivation sorts member_maxes before hashing, so permutations of the
+        same values must yield bit-identical p_raw.  This is the central invariant of
+        the sorted-hash design and was not covered by the other antibodies.
+        """
+        maxes_a = np.array([20.0, 22.5, 18.0, 21.0, 19.5], dtype=float)
+        maxes_b = np.array([22.5, 18.0, 21.0, 19.5, 20.0], dtype=float)  # same, shuffled
+        n_mc = 500
+        p_a = p_raw_vector_from_maxes(maxes_a, NYC, NYC_SEMANTICS, NYC_BINS, n_mc=n_mc)
+        p_b = p_raw_vector_from_maxes(maxes_b, NYC, NYC_SEMANTICS, NYC_BINS, n_mc=n_mc)
+        np.testing.assert_array_equal(p_a, p_b, err_msg=(
+            "Permuted member_maxes must produce identical p_raw — sorted hash invariant broken"
+        ))
