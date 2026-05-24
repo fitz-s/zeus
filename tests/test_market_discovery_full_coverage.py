@@ -381,3 +381,77 @@ def test_clob_latency_cannot_overrun_budget():
         f"Must abort before all 10 cities when budget={BUDGET_SECONDS}s. "
         f"attempted={summary.get('attempted')}, elapsed={elapsed:.1f}s."
     )
+
+
+# ---------------------------------------------------------------------------
+# P1-2: tag-fetch loop is bounded by wall-clock budget
+# ---------------------------------------------------------------------------
+
+def test_fetch_events_by_tags_stops_when_budget_exhausted(monkeypatch):
+    """P1-2 (TAG_LOOP_BUDGET_BOUND): _fetch_events_by_tags must stop iterating
+    TAG_SLUGS once the discovery budget is exhausted.
+
+    Without the budget check at the top of the tag loop, 51 tags × up to 10
+    pages × _gamma_get(timeout=15, retries=3) can block for many minutes.
+    This test proves the budget gate fires inside the tag loop.
+
+    Design:
+    - Monkeypatch TAG_SLUGS to 10 slugs and _discovery_total_budget_seconds_from_env
+      to 0.05s (50ms), so the budget expires after the first tag call.
+    - Each _gamma_get call sleeps 0.04s so one call eats most of the budget.
+    - Assert that fewer than 10 tag-id calls were made (loop exited early).
+
+    RED on pre-fix code (no budget check inside loop): all 10 tags are fetched
+    regardless of budget.
+    GREEN post-fix: loop exits after budget expires (~1-2 tags fetched).
+    """
+    import src.data.market_scanner as ms_mod
+
+    FAKE_TAG_SLUGS = [f"fake-tag-{i}" for i in range(10)]
+    BUDGET_SECONDS = 0.05  # 50ms — expires after first slow tag call
+    SLEEP_PER_TAG = 0.04   # each tag-id call sleeps 40ms
+
+    tag_calls: list[str] = []
+
+    original_gamma_get = ms_mod._gamma_get
+
+    def _slow_gamma_get(path, **kwargs):
+        import time as _time
+        import httpx
+        if path.startswith("/tags/slug/"):
+            tag_calls.append(path)
+            _time.sleep(SLEEP_PER_TAG)
+            # Return a valid-looking tag response
+            slug = path.split("/")[-1]
+            mock_resp = MagicMock()
+            mock_resp.status_code = 200
+            mock_resp.json.return_value = {"id": f"tag-id-{slug}"}
+            return mock_resp
+        # For /events calls, return empty list so we don't recurse into pagination
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.raise_for_status.return_value = None
+        mock_resp.json.return_value = []
+        return mock_resp
+
+    monkeypatch.setattr(ms_mod, "TAG_SLUGS", FAKE_TAG_SLUGS)
+    monkeypatch.setattr(ms_mod, "_gamma_get", _slow_gamma_get)
+    monkeypatch.setattr(
+        ms_mod,
+        "_discovery_total_budget_seconds_from_env",
+        lambda: BUDGET_SECONDS,
+    )
+
+    import time as _time
+    t0 = _time.monotonic()
+    # include_slug_pattern=False to avoid touching the slug-pattern path
+    result = ms_mod._fetch_events_by_tags(include_slug_pattern=False)
+    elapsed = _time.monotonic() - t0
+
+    assert len(tag_calls) < len(FAKE_TAG_SLUGS), (
+        f"Tag loop must exit early when budget={BUDGET_SECONDS}s expires. "
+        f"Got {len(tag_calls)}/{len(FAKE_TAG_SLUGS)} tag calls. "
+        f"Pre-fix failure: no budget check inside loop → all 10 tags fetched. "
+        f"elapsed={elapsed:.3f}s"
+    )
+    assert isinstance(result, list), "Must return a list even when budget exhausted early"

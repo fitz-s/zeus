@@ -1280,6 +1280,18 @@ def _fetch_events_by_tags(*, include_slug_pattern: bool = True) -> list[dict]:
     _discovery_start = time.monotonic()
     _discovery_total_budget = _discovery_total_budget_seconds_from_env()
     for tag_slug in TAG_SLUGS:
+        # Wall-clock budget check: stop fetching tags if the total discovery
+        # budget (_discovery_total_budget_seconds_from_env, default 75s) is
+        # exhausted.  Without this check, 51 tags × up to 10 pages ×
+        # _gamma_get(timeout=15, retries=3) could block for many minutes,
+        # causing the 5-minute market_discovery job to overrun/skip runs.
+        if time.monotonic() - _discovery_start >= _discovery_total_budget:
+            logger.info(
+                "tag discovery budget exhausted after %d/%d tags; stopping early",
+                TAG_SLUGS.index(tag_slug),
+                len(TAG_SLUGS),
+            )
+            break
         try:
             # Resolve tag ID
             resp = _gamma_get(f"/tags/slug/{tag_slug}")
@@ -1329,9 +1341,18 @@ def _fetch_events_by_tags(*, include_slug_pattern: bool = True) -> list[dict]:
             # and at least one child with acceptingOrders=True.  CLOB cross-check
             # is skipped here (clob_crosscheck=False) — the per-child CLOB call
             # serialises hundreds of HTTP requests for a full 50-city tag scan,
-            # inflating discovery from <90s to ~10min.  The downstream
-            # refresh_executable_market_substrate_snapshots is the sole bounded
-            # CLOB validator and will reject archived outcomes within its budget.
+            # inflating discovery from <90s to ~10min.
+            #
+            # CLOB-archived safety: events admitted here with acceptingOrders=True
+            # (Gamma data only) may still be CLOB-archived.  That is safe because
+            # capture_executable_market_snapshot (called by
+            # refresh_executable_market_substrate_snapshots for each outcome)
+            # makes a fresh _fetch_clob_market_info call and then invokes
+            # _build_executable_tradeability_status, which reads raw_clob_market
+            # "archived" and raises ExecutableSnapshotCaptureError if archived=True
+            # (reason="clob_archived").  The exception is caught in the refresh
+            # loop (failed += 1); the market is never inserted into
+            # executable_market_snapshots and therefore never becomes tradeable.
             events = [e for e in events if _event_has_active_children(e, now_utc, clob_crosscheck=False)]
 
             for event in events:
