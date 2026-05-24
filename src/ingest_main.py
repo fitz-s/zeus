@@ -57,7 +57,13 @@ def _forecast_live_owner() -> str:
 
 
 def _ingest_main_owns_opendata() -> bool:
-    return _forecast_live_owner() != "forecast_live"
+    # PR4 data_temporal_kernel: route ownership through the single registry authority so the
+    # registry and the daemons can never disagree. Behavior-identical to the prior
+    # `_forecast_live_owner() != "forecast_live"` (active_opendata_owner returns "ingest_main"
+    # iff the env token is not "forecast_live").
+    from src.data.source_job_registry import active_opendata_owner
+
+    return active_opendata_owner(_forecast_live_owner()) == "ingest_main"
 
 
 def _graceful_shutdown(signum, frame) -> None:
@@ -895,6 +901,10 @@ _UMA_DEFAULT_INITIAL_LOOKBACK_BLOCKS = 50_000
 # Max blocks to advance per tick once cursor exists. Provider-friendly chunking;
 # any backlog drains over multiple ticks while keeping each request bounded.
 _UMA_MAX_BLOCKS_PER_TICK = 100_000
+# Once the cursor passes era_end_block, the UMA era is exhausted for this process: latch so
+# subsequent ticks return immediately without repeating the eth_blockNumber RPC + DB open
+# (PR review #329). Reset only on process restart; default-off path never sets it.
+_uma_era_exhausted = False
 
 
 def _uma_optional_settings() -> tuple[str, str, int, int]:
@@ -919,6 +929,30 @@ def _uma_optional_settings() -> tuple[str, str, int, int]:
     )
 
 
+def _uma_era_end_block() -> int:
+    """Optional UMA-era end block (PR5 data_temporal_kernel).
+
+    UMA OO V2 weather settlement is HISTORICAL: post-2026-02-21 Polymarket uses the internal
+    automatic resolver (Gamma is canonical). Scanning Polygon past the UMA era wastes RPC
+    budget on blocks that can hold no relevant UMA settle event. When the operator configures
+    ``settings["uma"]["era_end_block"]`` (> 0), the listener will not scan past it.
+
+    Returns 0 when unconfigured — the listener then behaves EXACTLY as before (no era cap).
+    """
+    from src.config import settings
+
+    try:
+        uma_cfg = settings["uma"]
+    except KeyError:
+        return 0
+    if not isinstance(uma_cfg, dict):
+        return 0
+    try:
+        return max(0, int(uma_cfg.get("era_end_block", 0) or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
 @_scheduler_job("ingest_uma_resolution_listener")
 def _uma_resolution_listener_tick():
     """Poll Polygon RPC for UMA OO Settle events — 5-min interval.
@@ -940,6 +974,11 @@ def _uma_resolution_listener_tick():
     default executor pool. Condition_id lookup uses a fresh read-only connection
     that does not block writers.
     """
+    global _uma_era_exhausted
+    # Era already exhausted this process — skip the RPC + DB open entirely (PR review #329).
+    if _uma_era_exhausted:
+        return
+
     from src.state.uma_resolution_listener import (
         UmaHttpRpcClient,
         get_last_scanned_block,
@@ -1020,6 +1059,21 @@ def _uma_resolution_listener_tick():
             else:
                 from_block = cursor + 1
             to_block = min(from_block + max_per_tick - 1, head_block)
+
+            # PR5 era guard: UMA OO V2 is historical (pre-2026-02-21 cutover to Gamma).
+            # When era_end_block is configured, never scan past it. era_end_block=0 disables
+            # the guard (behavior-identical to pre-PR5).
+            era_end_block = _uma_era_end_block()
+            if era_end_block > 0:
+                if from_block > era_end_block:
+                    _uma_era_exhausted = True   # latch: no RPC+DB on subsequent ticks
+                    logger.info(
+                        "ingest_uma_resolution_listener: from_block=%s past era_end_block=%s; "
+                        "UMA era exhausted — latching off for this process",
+                        from_block, era_end_block,
+                    )
+                    return
+                to_block = min(to_block, era_end_block)
 
             if to_block < from_block:
                 logger.debug(
@@ -1354,6 +1408,96 @@ def _calibration_auto_promote_tick():
 # Main entry point
 # ---------------------------------------------------------------------------
 
+def _ingest_main_job_specs() -> list[tuple]:
+    """Every ingest_main scheduled job as (callable, trigger, kwargs) — the ONE source consumed by
+    BOTH the legacy add_job loop and the registry builder (PR #329 A). OpenData jobs are conditional
+    on _ingest_main_owns_opendata() exactly as the hand-coded scheduler was, so the live OpenData
+    singleton is preserved. Trigger params are byte-identical to the pre-#329 add_job calls; the
+    registry path additionally normalizes executor-lane + concurrency from the build spec (the
+    intended PR8/F10 behavior)."""
+    from datetime import datetime as _dt_now
+
+    now = _dt_now.now()
+    specs: list[tuple] = [
+        (_k2_daily_obs_tick, "cron", dict(minute=0, id="ingest_k2_daily_obs",
+            max_instances=1, coalesce=True, misfire_grace_time=1800)),
+        (_k2_hourly_instants_tick, "cron", dict(minute=7, id="ingest_k2_hourly_instants",
+            max_instances=1, coalesce=True, misfire_grace_time=1800)),
+        (_k2_solar_daily_tick, "cron", dict(hour=0, minute=30, id="ingest_k2_solar_daily",
+            max_instances=1, coalesce=True, misfire_grace_time=3600)),
+        (_k2_forecasts_daily_tick, "cron", dict(hour=7, minute=30, id="ingest_k2_forecasts_daily",
+            max_instances=1, coalesce=True, misfire_grace_time=3600)),
+        (_k2_hole_scanner_tick, "cron", dict(hour=4, minute=0, id="ingest_k2_hole_scanner",
+            max_instances=1, coalesce=True, misfire_grace_time=3600)),
+        (_k2_obs_v2_tick, "cron", dict(minute=15, id="ingest_k2_obs_v2",
+            max_instances=1, coalesce=True, misfire_grace_time=3600)),
+        (_k2_hko_tick, "cron", dict(minute=30, id="ingest_k2_hko_tick",
+            max_instances=1, coalesce=True, misfire_grace_time=3600)),
+        (_etl_recalibrate, "cron", dict(hour=6, minute=0, id="ingest_etl_recalibrate")),
+        (_harvester_truth_writer_tick, "cron", dict(minute=45, id="ingest_harvester_truth_writer",
+            max_instances=1, coalesce=True, misfire_grace_time=1800)),
+        (_automation_analysis_cycle, "cron", dict(hour=9, minute=0, id="ingest_automation_analysis",
+            max_instances=1, coalesce=True)),
+    ]
+
+    # ECMWF Open Data daily live jobs — conditional on ingest_main owning OpenData (singleton).
+    if _ingest_main_owns_opendata():
+        specs += [
+            (_opendata_mx2t6_cycle, "cron", dict(hour=7, minute=30, id="ingest_opendata_daily_mx2t6",
+                max_instances=1, coalesce=True, misfire_grace_time=3600)),
+            (_opendata_mn2t6_cycle, "cron", dict(hour=7, minute=35, id="ingest_opendata_daily_mn2t6",
+                max_instances=1, coalesce=True, misfire_grace_time=3600)),
+        ]
+    else:
+        logger.info("OpenData daily jobs not registered in ingest_main: %s=%s",
+                    FORECAST_LIVE_OWNER_ENV, _forecast_live_owner())
+
+    specs += [
+        (_tigge_archive_backfill_cycle, "cron", dict(hour=14, minute=0,
+            id="ingest_tigge_archive_backfill", max_instances=1, coalesce=True, misfire_grace_time=3600)),
+        (_k2_startup_catch_up, "date", dict(run_date=now, id="ingest_k2_startup_catch_up",
+            max_instances=1, coalesce=True, misfire_grace_time=None)),
+        (_tigge_startup_catch_up, "date", dict(run_date=now, id="ingest_tigge_startup_catch_up",
+            max_instances=1, coalesce=True, misfire_grace_time=None)),
+    ]
+
+    # OpenData boot-time catch-up — conditional on ownership (matches the daily jobs above).
+    if _ingest_main_owns_opendata():
+        specs.append(
+            (_opendata_startup_catch_up, "date", dict(run_date=now, id="ingest_opendata_startup_catch_up",
+                max_instances=1, coalesce=True, misfire_grace_time=None)))
+    else:
+        logger.info("OpenData startup job not registered in ingest_main: %s=%s",
+                    FORECAST_LIVE_OWNER_ENV, _forecast_live_owner())
+
+    specs += [
+        (_source_health_probe_tick, "interval", dict(minutes=10, id="ingest_source_health_probe",
+            max_instances=1, coalesce=True, executor="fast")),
+        (_station_migration_probe_tick, "interval", dict(minutes=60, id="ingest_station_migration_probe",
+            max_instances=1, coalesce=True)),
+        (_drift_detector_tick, "cron", dict(hour=6, minute=0, id="ingest_drift_detector",
+            max_instances=1, coalesce=True, misfire_grace_time=3600)),
+        (_ingest_status_rollup_tick, "interval", dict(minutes=5, id="ingest_status_rollup",
+            max_instances=1, coalesce=True, executor="fast")),
+        (_write_ingest_heartbeat, "interval", dict(seconds=60, id="ingest_heartbeat",
+            max_instances=1, coalesce=True, executor="fast")),
+        (_uma_resolution_listener_tick, "interval", dict(minutes=5, id="ingest_uma_resolution_listener",
+            max_instances=1, coalesce=True, executor="fast")),
+        (_etl_forecast_skill_tick, "cron", dict(hour=3, minute=0, id="ingest_etl_forecast_skill",
+            max_instances=1, coalesce=True, misfire_grace_time=3600)),
+        (_market_scan_tick, "interval", dict(minutes=30, id="ingest_market_scan",
+            max_instances=1, coalesce=True)),
+        (_bridge_oracle_tick, "cron", dict(hour=10, minute=5, id="ingest_oracle_bridge",
+            max_instances=1, coalesce=True, misfire_grace_time=600, executor="fast")),
+        (_bridge_oracle_startup_catch_up, "date", dict(run_date=now,
+            id="ingest_oracle_bridge_startup_catch_up", max_instances=1, coalesce=True,
+            misfire_grace_time=None, executor="fast")),
+        (_calibration_auto_promote_tick, "cron", dict(day_of_week="sun", hour=4, minute=30,
+            id="ingest_calibration_auto_promote", max_instances=1, coalesce=True, misfire_grace_time=3600)),
+    ]
+    return specs
+
+
 def main() -> None:
     global _scheduler
     from apscheduler.executors.pool import ThreadPoolExecutor as _APSchedulerThreadPoolExecutor
@@ -1459,248 +1603,38 @@ def main() -> None:
     # "fast" if it provably does not write to state/zeus-world.db.
     #
     # See memory: feedback_sqlite_wal_multi_writer_starvation.md.
-    _scheduler = BlockingScheduler(
-        executors={
-            "default": _APSchedulerThreadPoolExecutor(max_workers=1),
-            "fast": _APSchedulerThreadPoolExecutor(max_workers=4),
-        },
+    specs = _ingest_main_job_specs()
+
+    from src.data.scheduler_adapter import (
+        build_registry_scheduler,
+        data_collection_mode,
+        job_defs_from_specs,
+        registry_executor_pools,
     )
 
-    from src.config import settings
-
-    # Mirrors src/main.py APScheduler block for ingest jobs only.
-    _scheduler.add_job(
-        _k2_daily_obs_tick, "cron",
-        minute=0, id="ingest_k2_daily_obs",
-        max_instances=1, coalesce=True, misfire_grace_time=1800,
-    )
-    _scheduler.add_job(
-        _k2_hourly_instants_tick, "cron",
-        minute=7, id="ingest_k2_hourly_instants",
-        max_instances=1, coalesce=True, misfire_grace_time=1800,
-    )
-    _scheduler.add_job(
-        _k2_solar_daily_tick, "cron",
-        hour=0, minute=30, id="ingest_k2_solar_daily",
-        max_instances=1, coalesce=True, misfire_grace_time=3600,
-    )
-    _scheduler.add_job(
-        _k2_forecasts_daily_tick, "cron",
-        hour=7, minute=30, id="ingest_k2_forecasts_daily",
-        max_instances=1, coalesce=True, misfire_grace_time=3600,
-    )
-    _scheduler.add_job(
-        _k2_hole_scanner_tick, "cron",
-        hour=4, minute=0, id="ingest_k2_hole_scanner",
-        max_instances=1, coalesce=True, misfire_grace_time=3600,
-    )
-    # F44 fix: live rolling-window ingest for observation_instants_v2.
-    # Runs hourly at :15, offset from hourly_instants (:07) and other ticks.
-    # Ogimet cities have 21s inter-request rate limit enforced by client module;
-    # expect ~10-15 min runtime for a full 50-city pass. misfire_grace_time=3600
-    # allows one missed tick before the next fires.
-    _scheduler.add_job(
-        _k2_obs_v2_tick, "cron",
-        minute=15, id="ingest_k2_obs_v2",
-        max_instances=1, coalesce=True, misfire_grace_time=3600,
-    )
-    # HKO hourly accumulator + v2 projection — runs at :30, offset from
-    # obs_v2 (:15) and harvester (:45) to avoid lock contention.
-    # Closes the gap: hko_ingest_tick.py was designed standalone but was
-    # never wired into the daemon scheduler (FIX-5 HKO gap).
-    _scheduler.add_job(
-        _k2_hko_tick, "cron",
-        minute=30, id="ingest_k2_hko_tick",
-        max_instances=1, coalesce=True, misfire_grace_time=3600,
-    )
-    _scheduler.add_job(
-        _etl_recalibrate, "cron",
-        hour=6, minute=0, id="ingest_etl_recalibrate",
-    )
-    # Phase 1.5: harvester truth writer — hourly, offset to minute=45 to avoid
-    # collision with trading-side harvester_pnl_resolver (runs at minute=0 via main.py).
-    _scheduler.add_job(
-        _harvester_truth_writer_tick, "cron",
-        minute=45, id="ingest_harvester_truth_writer",
-        max_instances=1, coalesce=True, misfire_grace_time=1800,
-    )
-    _scheduler.add_job(
-        _automation_analysis_cycle, "cron",
-        hour=9, minute=0, id="ingest_automation_analysis",
-        max_instances=1, coalesce=True,
-    )
-
-    # ECMWF Open Data — same-day live source (~6-8h latency, no embargo).
-    # 07:30 UTC mx2t6 / 07:35 UTC mn2t6 — picks up the 00Z run as soon as
-    # it is reliably available. settings.discovery.ecmwf_open_data_times_utc
-    # may add additional refreshes; we still register the per-track ticks at
-    # 07:30/07:35 unconditionally so the freshness invariant holds even if
-    # settings is misconfigured.
-    if _ingest_main_owns_opendata():
-        _scheduler.add_job(
-            _opendata_mx2t6_cycle, "cron",
-            hour=7, minute=30, id="ingest_opendata_daily_mx2t6",
-            max_instances=1, coalesce=True, misfire_grace_time=3600,
-        )
-        _scheduler.add_job(
-            _opendata_mn2t6_cycle, "cron",
-            hour=7, minute=35, id="ingest_opendata_daily_mn2t6",
-            max_instances=1, coalesce=True, misfire_grace_time=3600,
+    _mode = data_collection_mode()
+    if _mode == "registry":
+        # REGISTRY mode (default, PR #329 A): build jobs FROM the registry with executor-lane
+        # routing + a fail-fast boot assert (a registry/daemon job-set mismatch halts boot rather
+        # than booting a divergent schedule). The hand-coded loop below is the LEGACY rollback path.
+        _scheduler = BlockingScheduler(executors=registry_executor_pools())
+        build_registry_scheduler(
+            _scheduler, "ingest_main", job_defs_from_specs(specs),
+            forecast_live_owner_env=_forecast_live_owner(), logger=logger,
         )
     else:
-        logger.info(
-            "OpenData daily jobs not registered in ingest_main: %s=%s",
-            FORECAST_LIVE_OWNER_ENV,
-            _forecast_live_owner(),
+        # LEGACY mode (ZEUS_USE_LEGACY_DATA_COLLECTION=1 / ZEUS_DATA_COLLECTION_MODE=legacy): the
+        # original hand-coded 2-pool scheduler. Trigger params come from the SAME spec list, so the
+        # only difference from pre-#329 is the registry path's lane/concurrency normalization.
+        # See memory: feedback_sqlite_wal_multi_writer_starvation.md.
+        _scheduler = BlockingScheduler(
+            executors={
+                "default": _APSchedulerThreadPoolExecutor(max_workers=1),
+                "fast": _APSchedulerThreadPoolExecutor(max_workers=4),
+            },
         )
-
-    # TIGGE archive backfill — 14:00 UTC, target = today - 2 days (post-embargo).
-    # Distinct from the live Open Data feed; serves the Platt training set and
-    # historical audit trail. Renamed from ingest_tigge_daily so health
-    # dashboards and operators see the role explicitly.
-    _scheduler.add_job(
-        _tigge_archive_backfill_cycle, "cron",
-        hour=14, minute=0, id="ingest_tigge_archive_backfill",
-        max_instances=1, coalesce=True, misfire_grace_time=3600,
-    )
-
-    # Boot-time catch-up fires immediately via 'date' trigger.
-    from datetime import datetime as _dt_now
-    _scheduler.add_job(
-        _k2_startup_catch_up, "date",
-        run_date=_dt_now.now(),
-        id="ingest_k2_startup_catch_up",
-        max_instances=1, coalesce=True, misfire_grace_time=None,
-    )
-
-    # TIGGE boot-time catch-up — fires once at daemon start to fill missed days
-    # (capped at src.data.tigge_pipeline.MAX_LOOKBACK_DAYS).
-    _scheduler.add_job(
-        _tigge_startup_catch_up, "date",
-        run_date=_dt_now.now(),
-        id="ingest_tigge_startup_catch_up",
-        max_instances=1, coalesce=True, misfire_grace_time=None,
-    )
-
-    # Open Data boot-time catch-up — fires once at daemon start so a fresh
-    # ingest doesn't wait until the next 07:30 cron tick to backfill.
-    if _ingest_main_owns_opendata():
-        _scheduler.add_job(
-            _opendata_startup_catch_up, "date",
-            run_date=_dt_now.now(),
-            id="ingest_opendata_startup_catch_up",
-            max_instances=1, coalesce=True, misfire_grace_time=None,
-        )
-    else:
-        logger.info(
-            "OpenData startup job not registered in ingest_main: %s=%s",
-            FORECAST_LIVE_OWNER_ENV,
-            _forecast_live_owner(),
-        )
-
-    # Phase 2: source health probe every 10 minutes (§2.1) — APPENDED END
-    # File-only writer (state/source_health.json) — runs on "fast" executor
-    # so it doesn't starve behind a long DB writer (Fix #4 refinement).
-    _scheduler.add_job(
-        _source_health_probe_tick, "interval",
-        minutes=10, id="ingest_source_health_probe",
-        max_instances=1, coalesce=True,
-        executor="fast",
-    )
-
-    # 2026-05-01: Station-migration probe — hourly (Invariant F).
-    _scheduler.add_job(
-        _station_migration_probe_tick, "interval",
-        minutes=60, id="ingest_station_migration_probe",
-        max_instances=1, coalesce=True,
-    )
-
-    # Phase 2: drift detector daily at UTC 06:00 (§2.2) — APPENDED END
-    _scheduler.add_job(
-        _drift_detector_tick, "cron",
-        hour=6, minute=0, id="ingest_drift_detector",
-        max_instances=1, coalesce=True, misfire_grace_time=3600,
-    )
-
-    # Phase 2: ingest status rollup every 5 minutes (§2.5) — APPENDED END
-    # Reads from DB (concurrent reads OK under WAL) and writes
-    # state/ingest_status.json (file-only). Runs on "fast" executor so
-    # observability doesn't starve behind a long DB writer (Fix #4 refinement).
-    _scheduler.add_job(
-        _ingest_status_rollup_tick, "interval",
-        minutes=5, id="ingest_status_rollup",
-        max_instances=1, coalesce=True,
-        executor="fast",
-    )
-
-    # 60s heartbeat — pure file write to state/daemon-heartbeat-ingest.json,
-    # no DB. Must run on "fast" executor — the heartbeat-sensor liveness
-    # contract requires this file to update every minute regardless of
-    # what DB writers are doing (Fix #4 refinement, observed regression
-    # post initial single-writer fix).
-    _scheduler.add_job(
-        _write_ingest_heartbeat, "interval",
-        seconds=60, id="ingest_heartbeat",
-        max_instances=1, coalesce=True,
-        executor="fast",
-    )
-
-    # 2026-05-07 Task #2: UMA resolution listener — every 5 minutes.
-    # Runs on "fast" executor: HTTP-bound, writes at most 1 row per resolution,
-    # negligible DB contention vs the single-writer default pool.
-    # Short-circuits when settings.uma.polygon_rpc_url is not configured (default-OFF).
-    _scheduler.add_job(
-        _uma_resolution_listener_tick, "interval",
-        minutes=5, id="ingest_uma_resolution_listener",
-        max_instances=1, coalesce=True,
-        executor="fast",
-    )
-
-    # 2026-05-07 Task #4: forecast_skill ETL — daily at 03:00 UTC.
-    # Subprocess writes to zeus-world.db (forecast_skill, model_bias);
-    # runs on default executor to serialise with other DB writers.
-    _scheduler.add_job(
-        _etl_forecast_skill_tick, "cron",
-        hour=3, minute=0, id="ingest_etl_forecast_skill",
-        max_instances=1, coalesce=True, misfire_grace_time=3600,
-    )
-
-    # 2026-05-07 STALE fix: Gamma market scan — every 30 minutes.
-    # Keeps market_events_v2 fresh when the trading daemon (src/main.py) is paused.
-    # INSERT OR IGNORE makes it idempotent.
-    # Runs on default executor (writes to zeus-forecasts.db via _persist_market_events_to_db).
-    _scheduler.add_job(
-        _market_scan_tick, "interval",
-        minutes=30, id="ingest_market_scan",
-        max_instances=1, coalesce=True,
-    )
-
-    # F35: Oracle bridge — daily at 10:05 UTC.
-    # Writes data/oracle_error_rates.json (file-only); runs on the "fast"
-    # executor so the subprocess cannot starve DB-writing ingest jobs.
-    # Eliminates the cross-repo cron entry that would otherwise be required.
-    _scheduler.add_job(
-        _bridge_oracle_tick, "cron",
-        hour=10, minute=5, id="ingest_oracle_bridge",
-        max_instances=1, coalesce=True, misfire_grace_time=600,
-        executor="fast",
-    )
-    _scheduler.add_job(
-        _bridge_oracle_startup_catch_up, "date",
-        run_date=_dt_now.now(),
-        id="ingest_oracle_bridge_startup_catch_up",
-        max_instances=1, coalesce=True, misfire_grace_time=None,
-        executor="fast",
-    )
-
-    # F9: Calibration auto-promote — weekly Sunday 04:30 UTC.
-    # Guarded by ZEUS_CALIBRATION_AUTO_PROMOTE_ENABLED (default OFF).
-    # Operator must also set ZEUS_CALIBRATION_STAGE_DB_PATH before enabling.
-    _scheduler.add_job(
-        _calibration_auto_promote_tick, "cron",
-        day_of_week="sun", hour=4, minute=30, id="ingest_calibration_auto_promote",
-        max_instances=1, coalesce=True, misfire_grace_time=3600,
-    )
+        for _fn, _trigger, _kwargs in specs:
+            _scheduler.add_job(_fn, _trigger, **_kwargs)
 
     jobs = [j.id for j in _scheduler.get_jobs()]
     logger.info("Ingest scheduler ready. %d jobs: %s", len(jobs), jobs)

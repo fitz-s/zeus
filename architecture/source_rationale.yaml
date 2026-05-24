@@ -782,6 +782,144 @@ files:
     - src/data/hole_scanner.py
     - future F2 calibration retrain loop
     - future F3 TIGGE ingest stub
+  src/data/source_time.py:
+    zone: K2_runtime
+    authority_role: temporal_policy_reader
+    why: >
+      PR1 of data_temporal_kernel program. Provides typed temporal semantics (TimePlane,
+      LateArrivalPolicy, TemporalPolicy) derived from config/source_release_calendar.yaml.
+      Computes safe_fetch_not_before and freshness-state ladder from max_source_lag_seconds.
+      ZERO hardcoded temporal constants — all values derive from the calendar entry.
+      NOT_DAEMON_WIRED: read-only advisory module; daemon activation deferred to later PR.
+    hazards:
+    - NOT_DAEMON_WIRED
+    downstream:
+    - scripts/source_contract_lint.py
+    - src/data/source_contracts.py
+    - future PR2 src/data/collection_frontier.py
+  src/data/source_contracts.py:
+    zone: K2_runtime
+    authority_role: composed_source_contract_view
+    why: >
+      PR1 of data_temporal_kernel program. Read-through COMPOSING VIEW (not a registry):
+      binds one source_release_calendar entry (via TemporalPolicy) to its data_sources_registry
+      family/publisher and forecast_source_registry tier/roles. Re-declares ZERO facts;
+      live_authorization/backfill_only delegate to TemporalPolicy. Reshaped from the spec's
+      standalone SourceContract per operator directive 2026-05-24 to avoid a 4th parallel registry.
+      NOT_DAEMON_WIRED: read-only advisory module; downstream consumers (job registry, frontier) deferred.
+    hazards:
+    - NOT_DAEMON_WIRED
+    - SOURCE_TRUTH_PLANE_COLLAPSE
+    downstream:
+    - future PR3 src/data/source_job_registry.py
+    - src/data/collection_frontier.py
+  src/data/collection_frontier.py:
+    zone: K2_runtime
+    authority_role: collection_frontier_reader
+    why: >
+      PR2 of data_temporal_kernel program. READ-ONLY in-memory temporal frontier: per
+      (source_id, track) computes source_issue/release, safe_fetch (via TemporalPolicy),
+      freshness (on SOURCE/EVENT time — backfill write-time cannot fake freshness), readiness,
+      and a single live_blocker reason (NOT_RELEASED/STALE_SOURCE/SOURCE_DOWN/PARTIAL_RUN/
+      READINESS_BLOCKED/NOT_LIVE_AUTHORIZED/UNKNOWN_BLOCKED). PR #329 C: now FEDERATES over all
+      live data families (observation/market_topology/settlement probed on their own event-time
+      tables; executable_market/venue_user_ws/solar/diagnostic degrade to honest COVERAGE_UNKNOWN
+      where truth is outside the forecasts conn). Reads forecasts DB best-effort. The COMPUTE is
+      read-only; persistence lives in frontier_store (PR #329 D). NOT_DAEMON_WIRED.
+    hazards:
+    - NOT_DAEMON_WIRED
+    - SOURCE_TRUTH_PLANE_COLLAPSE
+    downstream:
+    - scripts/data_collection_frontier_report.py
+    - src/data/frontier_store.py
+  src/data/frontier_store.py:
+    zone: K2_runtime
+    authority_role: source_time_frontier_writer
+    why: >
+      PR #329 D of data_temporal_kernel. Persists the computed frontier into the
+      source_time_frontier table (SCHEMA_FORECASTS_VERSION 7) and reads it back, so live health
+      reads a stored authority instead of recomputing in ad-hoc scripts. persist_frontier UPSERTs
+      idempotently by (source_id, family, partition_key) and enforces the backfill-cannot-refresh-
+      live invariant in the UPSERT WHERE clause (a non-live authority never overwrites a live
+      DERIVED_FROM_DISSEMINATION row). latest_event_time = event-time plane; computed_at =
+      write-time provenance only. WRITER is callable but NOT yet daemon-wired (operator-gated
+      activation); the schema bump itself gates the live daemon on restart until migrated.
+    hazards:
+    - NOT_DAEMON_WIRED
+    - SCHEMA_VERSION_BUMP_DAEMON_HALT
+    - SOURCE_TRUTH_PLANE_COLLAPSE
+    downstream:
+    - src/state/db.py::_create_source_time_frontier
+  src/data/source_job_registry.py:
+    zone: K2_runtime
+    authority_role: scheduled_job_inventory
+    why: >
+      PR3 of data_temporal_kernel program. ADVISORY machine-readable inventory of every job
+      the two daemons (ingest_main, forecast_live_daemon) schedule — owner, role, current
+      executor, writes_db, source_id, lock/file-only. Mirror of current reality + classification;
+      does NOT replace the scheduler (PR6 generates APScheduler from it later). Powers
+      data_collection_inventory (--check fails if a scheduled add_job id is unregistered) and
+      data_collection_efficiency_audit (flags DB writers on the file-only fast executor +
+      OpenData multi-owner). NOT_DAEMON_WIRED.
+    hazards:
+    - NOT_DAEMON_WIRED
+    downstream:
+    - scripts/data_collection_inventory.py
+    - scripts/data_collection_efficiency_audit.py
+    - future PR6 src/data/scheduler_adapter.py
+  src/data/source_watermarks.py:
+    zone: K2_runtime
+    authority_role: source_partition_watermark_reader
+    why: >
+      PR5 of data_temporal_kernel program. IN-MEMORY, read-only watermark (last attempted/
+      successful/non-empty partition) per (source_id, track) derived from source_run. Partitions
+      ordered by target_local_date (source identity), NOT write time — a catch-up's fresh
+      captured_at cannot advance the successful watermark past where the data actually reaches.
+      Persisted watermark table deferred (forecast-class schema bump → operator-gated). NOT_DAEMON_WIRED.
+    hazards:
+    - NOT_DAEMON_WIRED
+    downstream:
+    - src/data/backfill_planner.py
+  src/data/backfill_planner.py:
+    zone: K2_runtime
+    authority_role: bounded_backfill_planner
+    why: >
+      PR5 of data_temporal_kernel program. Pure-logic bounded backfill planner. BackfillTask is
+      never live_authorized (enforced, init=False); plan_backfill refuses unbounded windows and
+      refuses role='live' (backfill is non-live by design). Antibody against catch-up scanning a
+      giant range or backfill setting live readiness. NOT_DAEMON_WIRED.
+    hazards:
+    - NOT_DAEMON_WIRED
+    - SOURCE_TRUTH_PLANE_COLLAPSE
+    downstream: []
+  src/data/scheduler_adapter.py:
+    zone: K2_runtime
+    authority_role: registry_to_scheduler_planner
+    why: >
+      PR6 of data_temporal_kernel program. PURE planner: resolves source_job_registry jobs into
+      per-job executor classes (live_db/backfill_db/derived_db/io/heartbeat) so DB writers never
+      share the file-only executor that starves heartbeats. Structural home of the UMA-off-fast
+      fix (writes_db ⇒ *_db class by construction; UMA historical ⇒ backfill_db).
+      Daemon wiring is operator-gated behind ZEUS_SCHEDULER_REGISTRY_ENABLED (default off) —
+      this module changes NO runtime behavior on its own. NOT_DAEMON_WIRED.
+    hazards:
+    - NOT_DAEMON_WIRED
+    downstream:
+    - future operator-gated ingest_main scheduler activation
+  src/data/temporal_provenance.py:
+    zone: K2_runtime
+    authority_role: row_provenance_contract_and_live_gate
+    why: >
+      PR7 of data_temporal_kernel program. Declares REQUIRED_LIVE_PROVENANCE (source_id,
+      source_run_id, source_issue_time, target_local_date, data_version, captured_at) + validator;
+      and can_authorize_live_readiness() (reconstructed/archive/shadow/backfill tiers can NEVER
+      authorize live). live_reader_requires_provenance() gated behind ZEUS_FRONTIER_READINESS_GATE
+      (default off). Schema migration adding missing columns is operator-gated (forecast-class
+      SCHEMA_FORECASTS_VERSION bump). NOT_DAEMON_WIRED.
+    hazards:
+    - NOT_DAEMON_WIRED
+    - SOURCE_TRUTH_PLANE_COLLAPSE
+    downstream: []
   src/data/tigge_client.py:
     zone: K2_runtime
     authority_role: dormant_forecast_ingest_stub

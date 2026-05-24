@@ -810,6 +810,74 @@ scripts:
   resume_backfills_sequential.sh: {class: runtime_support, canonical_command: "nohup bash scripts/resume_backfills_sequential.sh > state/rebuild-nohup-$(date +%Y%m%d-%H%M%S).out 2>&1 & disown"}
   run_replay.py: {class: diagnostic, write_targets: [state/zeus_backtest.db, stdout]}
   semantic_linter.py: {class: enforcement, required_tests: [tests/test_semantic_linter.py]}
+  source_contract_lint.py:
+    # Created: 2026-05-24
+    # Last reused or audited: 2026-05-24
+    # Authority basis: docs/operations/current/plans/data_temporal_kernel/PLAN.md
+    class: enforcement
+    lifecycle: long_lived
+    status: active
+    authority_scope: inter_registry_coherence_read_only
+    canonical_command: "python3 scripts/source_contract_lint.py [--strict]"
+    read_targets: [config/source_release_calendar.yaml, architecture/data_sources_registry_2026_05_08.yaml, src/data/forecast_source_registry.py, src/contracts/snapshot_ingest_contract.py, src/data/ecmwf_open_data.py, architecture/data_sources_registry_2026_05_08.yaml]
+    write_targets: [stdout]
+    dry_run_default: true
+    apply_flag: null
+    target_db: null
+    external_inputs: []
+    dangerous_if_run: false
+    delete_policy: retain_until_superseded
+    reuse_when: >
+      Run to verify inter-registry coherence across source_release_calendar, data_sources_registry,
+      forecast_source_registry, and code contracts. Advisory by default (exit 0 with drift/warning findings);
+      use --strict for CI enforcement after calendar-fix PR resolves known mx2t6→mx2t3 drift.
+    do_not_use_when: >
+      As a live-trading gate or as a substitute for the typed TemporalPolicy (src/data/source_time.py).
+      Output is advisory; it does not authorize DB writes or live order placement.
+    promotion_barrier: >
+      Advisory today; known drift (calendar mx2t6 vs code mx2t3, tigge vs tigge_mars alias,
+      openmeteo_previous_runs primary-tier vs live_authorization=false) trips --strict on main.
+      Promote to blocking CI gate after calendar-fix PR (data_temporal_kernel PR2+).
+    required_helpers: [src.data.forecast_source_registry, src.data.source_time]
+    required_tests: [tests/test_source_contract_lint.py]
+    reason: >
+      PR1 of data_temporal_kernel program. Enforces 6 inter-registry coherence assertions:
+      (1) calendar source_id in data_sources_registry; (2) entry_primary ROLE implies live_authorization (keyed on allowed_roles+backfill_only, not tier);
+      (3) SHADOW_ONLY implies not live; (4) backfill_only implies not live;
+      (5) code data_version param matches SDK param (calendar drift advisory);
+      (6) HKO never carries WU/VHHH station mapping. Zero behavior change; read-only.
+  data_collection_frontier_report.py:
+    # Created: 2026-05-24
+    # Last reused or audited: 2026-05-24
+    # Authority basis: docs/operations/current/plans/data_temporal_kernel/PLAN.md
+    class: diagnostic
+    lifecycle: long_lived
+    status: active
+    authority_scope: read_only_operator_report
+    canonical_command: "python3 scripts/data_collection_frontier_report.py [--role live|backfill|shadow] [--table|--json] [--source <id> --explain]"
+    read_targets: [config/source_release_calendar.yaml, state/zeus-forecasts.db, state/source_health.json, state/daemon-heartbeat-ingest.json]
+    write_targets: [stdout]
+    dry_run_default: true
+    apply_flag: null
+    target_db: null
+    external_inputs: []
+    dangerous_if_run: false
+    delete_policy: retain_until_superseded
+    reuse_when: >
+      PR2 of data_temporal_kernel. Operator temporal debugger: renders the in-memory
+      collection frontier (src/data/collection_frontier) and explains a source's live blocker.
+      READ-ONLY; persists nothing; missing forecasts table fails closed to UNKNOWN_BLOCKED.
+    do_not_use_when: >
+      As a live gate or readiness authority. It reports; it does not authorize.
+    promotion_barrier: >
+      Persisted source_time_frontier table is deferred to operator-gated PR2b
+      (forecast-class table → SCHEMA_FORECASTS_VERSION bump → live daemon schema gate).
+    required_helpers: [src.data.collection_frontier, src.data.source_time]
+    required_tests: [tests/test_collection_frontier.py]
+    reason: >
+      PR2 of data_temporal_kernel program. Read-only operator frontier report.
+  data_collection_inventory.py: {class: diagnostic, canonical_command: "python3 scripts/data_collection_inventory.py [--check|--json]", required_tests: [tests/test_source_job_registry.py], reason: "PR3 data_temporal_kernel: advisory job inventory; --check fails if a scheduled add_job id is missing from src/data/source_job_registry.JOB_REGISTRY (registry-mirrors-scheduler antibody). Read-only."}
+  data_collection_efficiency_audit.py: {class: diagnostic, canonical_command: "python3 scripts/data_collection_efficiency_audit.py [--blocking]", required_tests: [tests/test_source_job_registry.py], reason: "PR3 data_temporal_kernel: advisory structural audit; flags DB writers on the file-only fast executor (UMA listener) + OpenData multi-owner. Read-only; --blocking exits 1 on faults."}
   snapshot_checksum.py: {class: enforcement, canonical_command: ".venv/bin/python scripts/snapshot_checksum.py --verify-all", reason: "SHA-256 rollback snapshot integrity tool; replaces MD5 (collision-broken) on the data-readiness rollback chain (pre-pg/pb/pf/pe_2026-04-23 snapshots). Streaming 4 MiB chunks so multi-GB DB files do not blow memory. Existing .md5 sidecars preserved for audit continuity. Follow-up to data-readiness workstream closure (docs/operations/task_2026-04-23_data_readiness_remediation/first_principles.md)."}
   test_currency_audit.py: {class: enforcement, canonical_command: ".venv/bin/python scripts/test_currency_audit.py", reason: "T1.e midstream guardian panel dated-header audit; reads architecture/test_topology.yaml::midstream_guardian_panel and validates each listed file carries Created/Last reused audited/Authority basis markers per ~/CLAUDE.md file-header provenance rule"}
   topology_doctor_artifact_checks.py: {class: utility, canonical_command: DO_NOT_RUN, reason: imported by topology_doctor.py for artifact/work-record checker family}
