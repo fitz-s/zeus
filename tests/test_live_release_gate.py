@@ -13,7 +13,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import subprocess
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from scripts.check_live_release_gate import (
@@ -50,19 +50,20 @@ def _make_forecasts_db(path: Path, *, with_live_eligible: bool = True) -> None:
         init_schema_forecasts(conn)
         if with_live_eligible:
             now_iso = datetime.now(timezone.utc).isoformat()
+            expires_iso = (datetime.now(timezone.utc) + timedelta(hours=24)).isoformat()
             conn.execute(
                 """
                 INSERT OR IGNORE INTO readiness_state
                     (readiness_id, scope_key, scope_type,
                      city_id, city_timezone, target_local_date, temperature_metric,
-                     status, computed_at, token_ids_json, reason_codes_json,
-                     dependency_json, provenance_json)
+                     strategy_key, status, computed_at, expires_at, token_ids_json,
+                     reason_codes_json, dependency_json, provenance_json)
                 VALUES
                     ('test-r1', 'test:city_metric:test:UTC:2026-06-01:high:v1',
                      'city_metric', 'test', 'UTC', '2026-06-01', 'high',
-                     'LIVE_ELIGIBLE', ?, '[]', '[]', '{}', '{}')
+                     'producer_readiness_v1', 'LIVE_ELIGIBLE', ?, ?, '[]', '[]', '{}', '{}')
                 """,
-                (now_iso,),
+                (now_iso, expires_iso),
             )
             conn.commit()
     finally:
@@ -377,3 +378,114 @@ def test_release_gate_passes_with_recent_redeem_tx_hashed(tmp_path: Path) -> Non
 
     assert report.status == PASS
     assert any(r.name == "redeem_state" and r.status == PASS for r in report.results)
+
+
+# ---------------------------------------------------------------------------
+# P0-1/P1-7 antibody: NULL expires_at LIVE_ELIGIBLE row must fail gate
+# ---------------------------------------------------------------------------
+
+
+def test_release_gate_fails_when_live_eligible_has_null_expires_at(tmp_path: Path) -> None:
+    """Gate must FAIL if LIVE_ELIGIBLE readiness row has NULL expires_at.
+
+    Canonical write_readiness_state() rejects LIVE_ELIGIBLE without expires_at.
+    The gate must enforce the same constraint so a non-canonical row cannot pass.
+    review5.23 P0-1 + P1-7.
+    """
+    # Create supporting files via _make_gate_args (creates world/trade DBs + JSON files)
+    # but skip forecasts DB so we can inject a null-expiry row ourselves.
+    _make_gate_args(tmp_path, with_forecasts_db=False)
+
+    forecasts_db = tmp_path / "zeus-forecasts.db"
+    conn = sqlite3.connect(str(forecasts_db))
+    try:
+        init_schema_forecasts(conn)
+        now_iso = datetime.now(timezone.utc).isoformat()
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO readiness_state
+                (readiness_id, scope_key, scope_type,
+                 city_id, city_timezone, target_local_date, temperature_metric,
+                 status, computed_at, token_ids_json, reason_codes_json,
+                 dependency_json, provenance_json)
+            VALUES
+                ('null-expiry-r1', 'test:city_metric:test:UTC:2026-06-01:high:v1',
+                 'city_metric', 'test', 'UTC', '2026-06-01', 'high',
+                 'LIVE_ELIGIBLE', ?, '[]', '[]', '{}', '{}')
+            """,
+            (now_iso,),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    args = parse_args([
+        "--expected-sha", "sha-a",
+        "--loaded-sha-file", str(tmp_path / "loaded_sha.json"),
+        "--world-db", str(tmp_path / "zeus-world.db"),
+        "--forecasts-db", str(forecasts_db),
+        "--trade-db", str(tmp_path / "zeus_trades.db"),
+        "--source-health-json", str(tmp_path / "source_health.json"),
+        "--status-json", str(tmp_path / "status_summary.json"),
+        "--paper-proof-json", str(tmp_path / "paper_proof.json"),
+        "--source-max-age-seconds", str(24 * 60 * 60),
+        "--status-max-age-seconds", str(24 * 60 * 60),
+    ])
+
+    report = evaluate_release_gate(args)
+
+    assert report.status == FAIL, "Gate must FAIL when LIVE_ELIGIBLE row has NULL expires_at"
+    assert any(
+        r.name == "forecast_executable_bundle" and r.status == FAIL for r in report.results
+    ), "forecast_executable_bundle gate must FAIL for null-expiry row"
+
+
+def test_release_gate_fails_when_live_eligible_has_null_strategy_key(tmp_path: Path) -> None:
+    """Gate must FAIL if LIVE_ELIGIBLE readiness row has NULL strategy_key.
+    Canonical writer always sets strategy_key; a row without it is non-canonical.
+    review5.23 P0-1 (minimal fix) + P1-6."""
+    _make_gate_args(tmp_path, with_forecasts_db=False)
+
+    forecasts_db = tmp_path / "zeus-forecasts.db"
+    conn = sqlite3.connect(str(forecasts_db))
+    try:
+        init_schema_forecasts(conn)
+        now_iso = datetime.now(timezone.utc).isoformat()
+        expires_iso = (datetime.now(timezone.utc) + timedelta(hours=24)).isoformat()
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO readiness_state
+                (readiness_id, scope_key, scope_type,
+                 city_id, city_timezone, target_local_date, temperature_metric,
+                 status, computed_at, expires_at, token_ids_json, reason_codes_json,
+                 dependency_json, provenance_json)
+            VALUES
+                ('null-strategy-r1', 'test:city_metric:test:UTC:2026-06-01:high:v1',
+                 'city_metric', 'test', 'UTC', '2026-06-01', 'high',
+                 'LIVE_ELIGIBLE', ?, ?, '[]', '[]', '{}', '{}')
+            """,
+            (now_iso, expires_iso),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    args = parse_args([
+        "--expected-sha", "sha-a",
+        "--loaded-sha-file", str(tmp_path / "loaded_sha.json"),
+        "--world-db", str(tmp_path / "zeus-world.db"),
+        "--forecasts-db", str(forecasts_db),
+        "--trade-db", str(tmp_path / "zeus_trades.db"),
+        "--source-health-json", str(tmp_path / "source_health.json"),
+        "--status-json", str(tmp_path / "status_summary.json"),
+        "--paper-proof-json", str(tmp_path / "paper_proof.json"),
+        "--source-max-age-seconds", str(24 * 60 * 60),
+        "--status-max-age-seconds", str(24 * 60 * 60),
+    ])
+
+    report = evaluate_release_gate(args)
+
+    assert report.status == FAIL, "Gate must FAIL when LIVE_ELIGIBLE row has NULL strategy_key"
+    assert any(
+        r.name == "forecast_executable_bundle" and r.status == FAIL for r in report.results
+    ), "forecast_executable_bundle gate must FAIL for null-strategy_key row"

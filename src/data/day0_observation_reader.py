@@ -1,7 +1,7 @@
 # Created: 2026-05-22
 # Last reused/audited: 2026-05-23
 # Authority basis: docs/operations/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md §PR-C;
-#   /Users/leofitz/.claude/jobs/866db2ea/P0_FOLLOWUP_BUNDLE_LAYER_SPEC.md §5
+#   docs/operations/task_2026-05-22_forecast_bundle_layer_fix/SPEC.md §5
 """Day-0 observation extrema reader — semantics-correct high_so_far / low_so_far.
 
 WIRING STATUS (P0 follow-up §5, verdict 2026-05-23): DEFENSIVE HELPER ONLY — NOT

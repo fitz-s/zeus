@@ -2,7 +2,7 @@
 # Report: LIVE-PROB-P0 Gate 6 — probability_edge_bin_sanity
 
 **Generated:** 2026-05-23T23:43:16Z
-**Authority:** /Users/leofitz/.claude/jobs/866db2ea/IMPL_SPEC_operator.md §A + §B + §D.4
+**Authority:** docs/operations/task_2026-05-23_probability_phantom_edge/FIX_PLAN.md §A + §B + §D.4
 **DB:** /Users/leofitz/.openclaw/workspace-venus/zeus/state/zeus-world.db
 
 ---
@@ -115,4 +115,4 @@ Reason codes: PROBABILITY_EDGE_BIN_UNSUPPORTED | PROBABILITY_LOW_PRICE_EDGE_BIN_
 ```
 
 ---
-*Authority: /Users/leofitz/.claude/jobs/866db2ea/IMPL_SPEC_operator.md §A §B §D.4*
+*Authority: docs/operations/task_2026-05-23_probability_phantom_edge/FIX_PLAN.md §A §B §D.4*

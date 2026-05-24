@@ -1,9 +1,9 @@
 # Created: 2026-05-22
 # Last reused or audited: 2026-05-23
 # Authority basis: docs/operations/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md §PR-D;
-#   /Users/leofitz/.claude/jobs/866db2ea/P0_FOLLOWUP_BUNDLE_LAYER_SPEC.md §3, §4;
+#   docs/operations/task_2026-05-22_forecast_bundle_layer_fix/SPEC.md §3, §4;
 #   docs/operations/task_2026-05-23_probability_phantom_edge/FIX_PLAN.md §3 §4 (LIVE-PROB-P0);
-#   /Users/leofitz/.claude/jobs/866db2ea/IMPL_SPEC_operator.md §B §E §F (2026-05-23 operator spec)
+#   docs/operations/task_2026-05-23_probability_phantom_edge/FIX_PLAN.md §B §E §F (2026-05-23 operator spec)
 """Probability sanity validator for HIGH distribution outputs.
 
 Gates:
