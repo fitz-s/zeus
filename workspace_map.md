@@ -32,6 +32,7 @@ Use it after `AGENTS.md` to answer two questions quickly:
 |------|------|-----------|
 | `src/` | Runtime source code | `src/AGENTS.md`, then package `AGENTS.md` |
 | `src/events/` | EDLI redemption R1 event facts and event-bound candidate-family proof kernel | `src/events/AGENTS.md` |
+| `src/strategy/live_inference/` | EDLI redemption event-bound inference, native executable cost, and robust TradeScore proof kernels | `src/strategy/live_inference/AGENTS.md` |
 | `src/venue/` | Live venue adapter boundary | `src/venue/AGENTS.md`, `docs/reference/modules/venue.md` |
 | `src/strategy/` | Strategy, benchmark, FDR/Kelly, and candidate-stub boundary | `src/strategy/AGENTS.md`, `docs/reference/modules/strategy.md` |
 | `src/risk_allocator/` | R3 A2 capital allocation, cap policy, governor state, and kill-switch enforcement | `src/risk_allocator/AGENTS.md`, `docs/reference/modules/riskguard.md` |

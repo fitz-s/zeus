@@ -358,6 +358,30 @@ state_machines:
       OBS-AUTHORITY-FOUNDATION 2026-05-23.
     states:
       - DIAGNOSTIC_FALLBACK
+  edli_redemption_decision:
+    description: >
+      EDLI redemption proof-kernel states. These are semantic construction and
+      rejection states only; they do not authorize live venue side effects.
+    owner: src/events/decision_engine.py
+    states:
+      - CANDIDATE_FAMILY_READY
+      - FINAL_INTENT_READY
+      - INTENT_BUILT
+      - NO_TRADE
+      - DEAD_LETTER
+      - NO_SUBMIT
+      - SUBMITTED
+      - LIVE_SUBMIT_DISABLED
+      - PARTIAL_ALLOWED
+      - PARTIAL_BLOCKED
+      - EXPECTED_STEPS_UNKNOWN
+      - FINAL_INTENT_RECEIPT_MISSING
+      - TIMEOUT_UNKNOWN
+    invariant_tests:
+      - tests/events/test_event_candidate_binding.py
+      - tests/events/test_event_bound_decision_engine_no_runtime.py
+      - tests/events/test_redemption_forecast_day0_authority.py
+      - tests/events/test_redemption_reactor_no_submit.py
 
 schema_objects:
   authority_fabricating_defaults:

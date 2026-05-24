@@ -173,6 +173,11 @@ package_defaults:
     authority_role: strategy_math
     gates:
     - pytest -q tests/test_market_analysis.py tests/test_fdr.py tests/test_kelly.py
+  src/strategy/live_inference:
+    zone: K3_extension
+    authority_role: edli_live_inference_proof_kernel
+    gates:
+    - pytest -q tests/strategy/live_inference
   src/backtest:
     zone: K3_extension
     authority_role: backtest_diagnostic
@@ -248,6 +253,87 @@ files:
     why: R1 no-runtime decision skeleton that produces an event-bound candidate family or no-trade rejection without scheduler, run_cycle, executor, venue, websocket, or submit paths.
     downstream:
     - src/events/candidate_binding.py
+  src/events/forecast_completeness.py:
+    zone: K2_runtime
+    authority_role: edli_forecast_temporal_authority
+    why: R2 proof kernel for forecast source-availability semantics, cycle-specific expected steps, COMPLETE-only live eligibility, and partial evidence no-trade classification.
+    downstream:
+    - src/events/triggers/forecast_snapshot_ready.py
+  src/events/day0_authority.py:
+    zone: K2_runtime
+    authority_role: edli_day0_live_authority
+    why: R3 proof kernel requiring explicit source/station/local-date/DST/metric/rounding/source-authorization matches and SettlementSemantics rounding before Day0 hard facts can authorize live decisions.
+    downstream:
+    - src/events/triggers/day0_extreme_updated.py
+  src/events/money_path_adapters.py:
+    zone: K2_runtime
+    authority_role: edli_fdr_kelly_risk_adapter_contracts
+    why: R6 no-submit adapter contracts proving full-family FDR denominator, typed ExecutionPrice Kelly input, and RiskGuard pass/fail semantics.
+    downstream:
+    - src/events/decision_engine.py
+    - src/engine/event_bound_final_intent.py
+  src/events/reactor.py:
+    zone: K2_runtime
+    authority_role: edli_reactor_no_submit_shell
+    why: R8/R9 reactor shell that calls EventBoundDecisionEngine and blocks final-intent-ready results when live submit is disabled; forbidden from run_cycle, venue adapter, or executor imports.
+    downstream:
+    - src/events/decision_engine.py
+  src/events/triggers/__init__.py:
+    zone: package_marker
+    authority_role: package_marker
+    why: Marks EDLI trigger helper package as importable.
+  src/events/triggers/forecast_snapshot_ready.py:
+    zone: K2_runtime
+    authority_role: edli_forecast_snapshot_ready_trigger_contract
+    why: R2 trigger-facing facade over forecast temporal authority proof kernel.
+    downstream:
+    - src/events/forecast_completeness.py
+  src/events/triggers/day0_extreme_updated.py:
+    zone: K2_runtime
+    authority_role: edli_day0_extreme_trigger_contract
+    why: R3 trigger-facing facade over Day0 live-authority proof kernel.
+    downstream:
+    - src/events/day0_authority.py
+  src/events/triggers/market_channel_ingestor.py:
+    zone: K2_runtime
+    authority_role: edli_public_market_channel_guard
+    why: R4 public market-channel guard proving quote/book/tick evidence cannot write fill truth or create live directional trades.
+  src/strategy/live_inference/AGENTS.md:
+    zone: docs
+    authority_role: edli_live_inference_router
+    why: Scoped guidance for EDLI redemption live-inference proof kernels.
+  src/strategy/live_inference/__init__.py:
+    zone: package_marker
+    authority_role: package_marker
+    why: Marks EDLI live-inference package as importable.
+  src/strategy/live_inference/state.py:
+    zone: K3_extension
+    authority_role: edli_live_bin_state
+    why: R4 normalized live-bin probability state with zero-mass fail-closed behavior.
+  src/strategy/live_inference/absorbing_boundary.py:
+    zone: K3_extension
+    authority_role: edli_day0_absorbing_boundary
+    why: R4 Day0 absorbing-boundary mask using SettlementSemantics before inference normalization.
+  src/strategy/live_inference/bayesian_factors.py:
+    zone: K3_extension
+    authority_role: edli_bounded_bayesian_factors
+    why: R4 capped likelihood-ratio helper for forecast innovation factors.
+  src/strategy/live_inference/inference_engine.py:
+    zone: K3_extension
+    authority_role: edli_event_bound_inference_engine
+    why: R4 event-bound live inference kernel; COMPLETE forecasts only and public orderbook events do not change q_live.
+  src/strategy/live_inference/executable_cost.py:
+    zone: K3_extension
+    authority_role: edli_native_executable_cost
+    why: R5 native YES/NO ask/bid book-walk cost kernel using typed fee-adjusted ExecutionPrice and rejecting midpoint/display/last-trade/complement sources.
+  src/strategy/live_inference/trade_score.py:
+    zone: K3_extension
+    authority_role: edli_robust_trade_score
+    why: R5 robust executable TradeScore formula requiring Kelly-safe ExecutionPrice costs.
+  src/engine/event_bound_final_intent.py:
+    zone: K2_runtime
+    authority_role: edli_event_bound_final_intent_receipt
+    why: R7 no-executor final-intent receipt contract that binds event/family/candidate/snapshot/TradeScore/FDR/Kelly/Risk evidence before any side-effect PR may submit.
   src/main.py:
     zone: K2_runtime
     authority_role: live_daemon_entry

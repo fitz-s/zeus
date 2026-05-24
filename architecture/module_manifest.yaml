@@ -137,10 +137,18 @@ modules:
       - src/events/opportunity_event.py
       - src/events/candidate_binding.py
       - src/events/decision_engine.py
+      - src/events/forecast_completeness.py
+      - src/events/day0_authority.py
+      - src/events/money_path_adapters.py
+      - src/events/reactor.py
     public_entry_files:
       - src/events/opportunity_event.py
       - src/events/candidate_binding.py
       - src/events/decision_engine.py
+      - src/events/forecast_completeness.py
+      - src/events/day0_authority.py
+      - src/events/money_path_adapters.py
+      - src/events/reactor.py
     law_dependencies:
       - AGENTS.md
       - docs/operations/edli_v1/PR328_REDEMPTION_PACKAGE.md
@@ -151,6 +159,35 @@ modules:
     required_tests:
       - tests/events/test_event_candidate_binding.py
       - tests/events/test_event_bound_decision_engine_no_runtime.py
+      - tests/events/test_redemption_forecast_day0_authority.py
+      - tests/events/test_redemption_market_channel_guard.py
+      - tests/events/test_redemption_fdr_kelly_risk_adapters.py
+      - tests/events/test_redemption_reactor_no_submit.py
+    graph_appendix_status: LOCAL_GRAPH_QUERY_REQUIRED
+    archive_extraction_status: not_started
+  live_inference:
+    path: src/strategy/live_inference
+    scoped_agents: src/strategy/live_inference/AGENTS.md
+    module_book: null
+    priority: edli_redemption_r4_r5
+    maturity: initial
+    zone: source
+    authority_role: event_bound_inference_cost_score_proof_kernel
+    high_risk_files:
+      - src/strategy/live_inference/inference_engine.py
+      - src/strategy/live_inference/executable_cost.py
+      - src/strategy/live_inference/trade_score.py
+    public_entry_files:
+      - src/strategy/live_inference/inference_engine.py
+      - src/strategy/live_inference/executable_cost.py
+      - src/strategy/live_inference/trade_score.py
+    law_dependencies:
+      - src/strategy/AGENTS.md
+      - docs/operations/edli_v1/PR328_REDEMPTION_PACKAGE.md
+    current_fact_dependencies:
+      - docs/operations/edli_v1/REDEMPTION_ROOT_CAUSE.md
+    required_tests:
+      - tests/strategy/live_inference/test_redemption_inference_cost_score.py
     graph_appendix_status: LOCAL_GRAPH_QUERY_REQUIRED
     archive_extraction_status: not_started
   data:

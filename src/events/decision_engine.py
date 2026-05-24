@@ -15,7 +15,7 @@ from src.events.candidate_binding import (
 from src.events.opportunity_event import OpportunityEvent, OpportunityEventValidationError
 
 
-R1DecisionStatus = Literal["CANDIDATE_FAMILY_READY", "NO_TRADE"]
+R1DecisionStatus = Literal["CANDIDATE_FAMILY_READY", "FINAL_INTENT_READY", "NO_TRADE"]
 
 
 @dataclass(frozen=True)
@@ -31,6 +31,7 @@ class EventBoundDecisionResult:
     status: R1DecisionStatus
     event_id: str
     candidate_family: EventBoundCandidateFamily | None
+    final_intent_ready: bool = False
     rejection_reason: str | None = None
 
 
