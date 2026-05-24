@@ -1,18 +1,18 @@
 # Hierarchical ENS Bias Correction — Test Results (2026-05-24)
 
 Branch: `claude/ens-bias-hierarchical`. Runner: `.venv/bin/python -m pytest -v`.
-Python 3.14.3, pytest 9.0.2.
+Python 3.14.3 local (CI uses 3.13), pytest 9.0.2.
 
 ## Summary
 
-**31 passed** (after PR pre-check blocker fixes + degF/legacy-TIGGE/disagreement-gating round) — all TDD red-first (each test confirmed failing before its
+**32 passed** (after PR pre-check + degF/legacy-TIGGE/disagreement round + double-count regression fix) — all TDD red-first (each test confirmed failing before its
 implementation landed).
 
 | File | Tests | Scope |
 |---|---|---|
-| `tests/test_ens_bias_model.py` | 9 | posterior shrinkage estimator + pre-MC application + train/serve guard |
-| `tests/test_ens_bias_fit.py` | 7 | bucket fitter (robust mean, transfer-floor prior, min-n, paired-delta) |
-| `tests/test_ens_bias_repo.py` | 5 | DB residual loader + `model_bias_ens_v2` store |
+| `tests/test_ens_bias_model.py` | 10 | posterior shrinkage estimator + pre-MC application + train/serve guard |
+| `tests/test_ens_bias_fit.py` | 8 | bucket fitter (robust mean, transfer-floor prior, min-n, paired-delta) |
+| `tests/test_ens_bias_repo.py` | 14 | DB residual loader + `model_bias_ens_v2` store |
 
 ## What each test proves
 
@@ -135,3 +135,12 @@ need the disagreement/tail-variance gating + (separately) Platt p_cal refit.
 manifest registration (source_rationale/test_topology); table ownership (db_table_ownership);
 settlement-known-time leakage cutoff; downstream gate that scales correction by confidence /
 applies Kelly haircut when disagreement_high; calibration_pairs recompute + Platt refit + live wiring.
+
+
+## Doc-list note (Copilot #334)
+The per-test enumerations above are illustrative, not exhaustive; the authoritative
+list is the test files themselves (model 10, fit 8, repo 14 = 32). New since the
+first draft: test_posterior_flags_disagreement_and_widens_sd,
+test_var_of_mean_does_not_double_count_transfer_for_single_sample, and the repo
+degF/contributor/leakage/LOW/read-safety/legacy-passthrough tests. Bug fixed:
+_var_of_mean no longer double-counts V_TRANSFER for a single-sample prior.

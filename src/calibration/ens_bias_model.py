@@ -189,7 +189,10 @@ def _var_of_mean(xs: list[float], floor: float) -> float:
     """Variance of the sample mean = sample_variance / n, with a small floor."""
     n = len(xs)
     if n < 2:
-        return max(floor, V_TRANSFER_DEFAULT)
+        # n<2 has no sample variance; return only the small floor. The caller
+        # (fit_bucket) adds the transfer-uncertainty term separately — adding it
+        # here too would double-count it for a 1-sample prior (Copilot #334).
+        return floor
     return max(statistics.variance(xs) / n, floor)
 
 

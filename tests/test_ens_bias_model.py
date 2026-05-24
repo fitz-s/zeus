@@ -1,8 +1,6 @@
-# Created: 2026-05-24
-# Last reused/audited: 2026-05-24
-# Authority basis: operator hierarchical-bias adjudication 2026-05-24
-#   (HIERARCHICAL_LIVE_PRODUCT_BIAS_CORRECTION_REQUIRED); empirical-Bayes
-#   posterior shrinkage of TIGGE structural prior + OpenData live likelihood.
+# Lifecycle: created=2026-05-24; last_reviewed=2026-05-24; last_reused=never
+# Purpose: Relationship + unit tests for the empirical-Bayes posterior shrinkage estimator, pre-MC application, train/serve guard, and disagreement gating.
+# Reuse: Inspect ens_bias_model.posterior_bias/fit_bucket before reuse.
 """Relationship tests (cross-module invariant) for the hierarchical ENS bias estimator.
 
 Invariant under test (forecast-product → live-correction boundary):

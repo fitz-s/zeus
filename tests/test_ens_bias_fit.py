@@ -1,9 +1,6 @@
-# Created: 2026-05-24
-# Last reused/audited: 2026-05-24
-# Authority basis: operator hierarchical-bias adjudication 2026-05-24 §10.2
-#   (robust estimators, minimum n_eff, TIGGE prior + OpenData likelihood, with
-#   an irreducible transfer-uncertainty floor on the prior variance so abundant
-#   live evidence can overcome a different-product prior).
+# Lifecycle: created=2026-05-24; last_reviewed=2026-05-24; last_reused=never
+# Purpose: Unit tests for the bucket fitter: robust mean, transfer-floor prior (single-sample no double-count), min-n, paired-delta.
+# Reuse: Inspect ens_bias_model.fit_bucket before reuse.
 """TDD tests for the bucket fitter: residual samples -> PosteriorBias.
 
 The fitter is the pure (no-DB) layer that turns per-bucket residual samples
@@ -85,3 +82,13 @@ def test_fit_bucket_robust_to_a_few_outlier_days():
     post = fit_bucket(tigge, opendata)
     # robust mean keeps it near -1.5, not dragged toward the -12 tail
     assert post.bias > -2.5, f"outlier days must not dominate, bias={post.bias}"
+
+
+def test_var_of_mean_does_not_double_count_transfer_for_single_sample():
+    # 1-sample TIGGE prior: v0 must be ~ var_floor + v_transfer (single), NOT 2x v_transfer.
+    from src.calibration.ens_bias_model import fit_bucket, V_TRANSFER_DEFAULT
+    post = fit_bucket([-1.0], [], v_transfer=V_TRANSFER_DEFAULT, var_floor=1e-6)
+    v0 = post.sd ** 2
+    assert v0 == pytest.approx(1e-6 + V_TRANSFER_DEFAULT, abs=1e-5), (
+        f"single-sample prior v0 must add transfer once, got {v0}"
+    )

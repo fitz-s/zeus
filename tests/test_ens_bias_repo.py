@@ -1,7 +1,6 @@
-# Created: 2026-05-24
-# Last reused/audited: 2026-05-24
-# Authority basis: operator hierarchical-bias adjudication 2026-05-24 §9 + PR #334 pre-check
-#   blockers (unit->degC, authority/contributor/causality filters, leakage cutoff, read safety).
+# Lifecycle: created=2026-05-24; last_reviewed=2026-05-24; last_reused=never
+# Purpose: DB I/O tests: degC unit normalization, authority/contributor/causality/boundary filters, leakage cutoff, LOW metric, model_bias_ens_v2 store, read safety.
+# Reuse: Inspect ens_bias_repo before reuse.
 """TDD tests for the ENS bias DB I/O layer (residual loader + model_bias_ens_v2 store).
 
 In-memory fixture with the columns the loader reads. Residuals are normalized to
