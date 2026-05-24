@@ -901,6 +901,10 @@ _UMA_DEFAULT_INITIAL_LOOKBACK_BLOCKS = 50_000
 # Max blocks to advance per tick once cursor exists. Provider-friendly chunking;
 # any backlog drains over multiple ticks while keeping each request bounded.
 _UMA_MAX_BLOCKS_PER_TICK = 100_000
+# Once the cursor passes era_end_block, the UMA era is exhausted for this process: latch so
+# subsequent ticks return immediately without repeating the eth_blockNumber RPC + DB open
+# (PR review #329). Reset only on process restart; default-off path never sets it.
+_uma_era_exhausted = False
 
 
 def _uma_optional_settings() -> tuple[str, str, int, int]:
@@ -970,6 +974,11 @@ def _uma_resolution_listener_tick():
     default executor pool. Condition_id lookup uses a fresh read-only connection
     that does not block writers.
     """
+    global _uma_era_exhausted
+    # Era already exhausted this process — skip the RPC + DB open entirely (PR review #329).
+    if _uma_era_exhausted:
+        return
+
     from src.state.uma_resolution_listener import (
         UmaHttpRpcClient,
         get_last_scanned_block,
@@ -1057,9 +1066,10 @@ def _uma_resolution_listener_tick():
             era_end_block = _uma_era_end_block()
             if era_end_block > 0:
                 if from_block > era_end_block:
-                    logger.debug(
+                    _uma_era_exhausted = True   # latch: no RPC+DB on subsequent ticks
+                    logger.info(
                         "ingest_uma_resolution_listener: from_block=%s past era_end_block=%s; "
-                        "UMA era ended — skipping scan",
+                        "UMA era exhausted — latching off for this process",
                         from_block, era_end_block,
                     )
                     return

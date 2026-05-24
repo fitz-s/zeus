@@ -1,3 +1,6 @@
+# Lifecycle: created=2026-05-24; last_reviewed=2026-05-24; last_reused=never
+# Purpose: Row-level provenance contract + derived/live lane separation.
+# Reuse: Inspect docs/operations/current/plans/data_temporal_kernel/PLAN.md + the target module before relying on it.
 # Created: 2026-05-24
 # Last reused or audited: 2026-05-24
 # Authority basis: docs/operations/current/plans/data_temporal_kernel/PLAN.md (PR7, PR8);

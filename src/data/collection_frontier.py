@@ -250,12 +250,13 @@ def compute_frontier(
     READ-ONLY. ``role_filter`` limits to 'live'/'backfill'/'shadow'. ``conn`` (a forecasts
     connection) and ``now`` are injectable for tests; otherwise opened/derived here.
     """
-    import yaml
+    from src.data.source_time import _calendar_index
 
     now = now or _utcnow()
     health = _load_health()
 
-    entries: list[dict[str, Any]] = yaml.safe_load(_CALENDAR_PATH.read_text()).get("entries", [])
+    # Single mtime-cached calendar parse shared with load_temporal_policy (no per-row re-read).
+    entries: list[dict[str, Any]] = list(_calendar_index().values())
 
     own_conn = conn is None
     if own_conn:

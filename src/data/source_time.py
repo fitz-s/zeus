@@ -49,6 +49,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import Enum
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal, Optional
 
@@ -256,22 +257,41 @@ def _derive_partition_grain(
     return "date"
 
 
-def load_temporal_policy(calendar_id: str) -> TemporalPolicy:
-    """Build a :class:`TemporalPolicy` for ``calendar_id`` from the release calendar.
+@lru_cache(maxsize=4)
+def _load_calendar_index(mtime_ns: int) -> dict[str, dict[str, Any]]:
+    """Parse the release calendar ONCE and index entries by calendar_id.
 
-    Reads exactly ONE entry. Raises ``KeyError`` if not found. All temporal facts come
-    from the entry; calendar-silent fields keep their structural defaults / ``None``.
+    Keyed by the file's mtime so repeated calls (e.g. the frontier loop iterating every
+    entry) reuse a single parse, while an edited calendar still triggers a fresh read.
+    The ``mtime_ns`` arg is the cache key — callers pass it via ``_calendar_index()``.
     """
     with _CALENDAR_PATH.open() as f:
         data = yaml.safe_load(f)
+    return {
+        e["calendar_id"]: e
+        for e in data.get("entries", [])
+        if isinstance(e, dict) and e.get("calendar_id")
+    }
 
-    entries: list[dict[str, Any]] = data.get("entries", [])
-    entry = next((e for e in entries if e.get("calendar_id") == calendar_id), None)
+
+def _calendar_index() -> dict[str, dict[str, Any]]:
+    """Current calendar index (cached by mtime)."""
+    return _load_calendar_index(_CALENDAR_PATH.stat().st_mtime_ns)
+
+
+def load_temporal_policy(calendar_id: str) -> TemporalPolicy:
+    """Build a :class:`TemporalPolicy` for ``calendar_id`` from the release calendar.
+
+    Reads exactly ONE entry (from an mtime-cached parse — no re-parse per call). Raises
+    ``KeyError`` if not found. All temporal facts come from the entry; calendar-silent
+    fields keep their structural defaults / ``None``.
+    """
+    index = _calendar_index()
+    entry = index.get(calendar_id)
     if entry is None:
-        available = [e.get("calendar_id") for e in entries]
         raise KeyError(
             f"calendar_id {calendar_id!r} not found in source_release_calendar.yaml. "
-            f"Available: {available}"
+            f"Available: {sorted(index)}"
         )
 
     partial_policy = _coerce_partial_policy(entry.get("partial_policy"))

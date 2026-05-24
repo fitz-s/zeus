@@ -1,3 +1,6 @@
+# Lifecycle: created=2026-05-24; last_reviewed=2026-05-24; last_reused=never
+# Purpose: Tests for the 6 inter-registry coherence assertions incl. mx2t3/mx2t6 drift xfail.
+# Reuse: Inspect docs/operations/current/plans/data_temporal_kernel/PLAN.md + the target module before relying on it.
 # Created: 2026-05-24
 # Last reused or audited: 2026-05-24
 # Authority basis: docs/operations/current/plans/data_temporal_kernel/PLAN.md
