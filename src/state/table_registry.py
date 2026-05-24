@@ -448,6 +448,21 @@ def assert_writer_jobs_registered(ingest_main_source: str | None = None) -> None
     registered_decorators: set[str] = set()
     wired_jobs: set[str] = set()
 
+    # APScheduler kwargs that mark a dict / dict()-call as a job spec (PR #329 A). Distinguishes a
+    # real job-spec entry from any unrelated dict that happens to carry an "id" key.
+    _SCHEDULER_SPEC_KEYS = frozenset({
+        "trigger", "max_instances", "coalesce", "misfire_grace_time", "executor",
+        "seconds", "minutes", "hours", "hour", "minute", "day_of_week",
+        "run_date", "next_run_time",
+    })
+
+    def _harvest_spec_id(keys: set, id_value) -> None:
+        # A job-spec carries "id" + ≥1 APScheduler spec key; record the id constant.
+        if "id" not in keys or not (keys & _SCHEDULER_SPEC_KEYS):
+            return
+        if isinstance(id_value, ast.Constant) and isinstance(id_value.value, str):
+            wired_jobs.add(id_value.value)
+
     for node in ast.walk(tree):
         # Scan decorators
         if isinstance(node, ast.FunctionDef):
@@ -461,7 +476,13 @@ def assert_writer_jobs_registered(ingest_main_source: str | None = None) -> None
                 if decorator.args and isinstance(decorator.args[0], ast.Constant):
                     registered_decorators.add(str(decorator.args[0].value))
 
-        # Scan _scheduler.add_job(..., id="...")
+        # Scan job wiring. THREE shapes are valid (PR #329 A replaced the hand-coded add_job
+        # calls with a spec list consumed by build_registry_scheduler / the legacy add_job loop):
+        #   1. literal  _scheduler.add_job(..., id="X")            (pre-#329 form)
+        #   2. dict()    dict(id="X", <spec key>=...)              (_ingest_main_job_specs entries)
+        #   3. dict {}   {"id": "X", <spec key>: ...}              (dict-literal spec form)
+        # Harvesting only shape (1) made every writer job look unwired once #329 moved wiring to the
+        # spec list — the FATAL boot crash this guard must not produce against its own daemon.
         if isinstance(node, ast.Call):
             func = node.func
             if (
@@ -473,6 +494,19 @@ def assert_writer_jobs_registered(ingest_main_source: str | None = None) -> None
                 for keyword in node.keywords:
                     if keyword.arg == "id" and isinstance(keyword.value, ast.Constant):
                         wired_jobs.add(str(keyword.value.value))
+            elif isinstance(func, ast.Name) and func.id == "dict":
+                # shape 2: dict(id="X", minute=0, ...) job-spec constructor
+                kw_names = {kw.arg for kw in node.keywords if kw.arg}
+                id_val = next((kw.value for kw in node.keywords if kw.arg == "id"), None)
+                _harvest_spec_id(kw_names, id_val)
+
+        # shape 3: {"id": "X", <spec key>: ...} job-spec dict literal
+        if isinstance(node, ast.Dict):
+            str_keys = {k.value for k in node.keys
+                        if isinstance(k, ast.Constant) and isinstance(k.value, str)}
+            id_val = next((v for k, v in zip(node.keys, node.values)
+                           if isinstance(k, ast.Constant) and k.value == "id"), None)
+            _harvest_spec_id(str_keys, id_val)
 
     # --- 3. Cross-check ---
     missing_wiring: list[str] = []
