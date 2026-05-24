@@ -3201,6 +3201,8 @@ _FORECAST_TABLES = (
     "market_microstructure_snapshots",
     # Phase 7 T3 — SCHEMA_FORECASTS_VERSION 6 (2026-05-21)
     "settlement_capture_verifications",
+    # Data Temporal Kernel — SCHEMA_FORECASTS_VERSION 7 PR #329 D (2026-05-24)
+    "source_time_frontier",
 )
 
 
