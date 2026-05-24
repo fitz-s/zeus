@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 # Lifecycle: created=2026-05-23; last_reviewed=2026-05-23; last_reused=never
 # Authority basis: operator FIX-5 CORE-P0 spec — observation coverage monitoring tool
+# Purpose: Read-only per-city obs freshness report (age vs budget across wu_pws /
+#          open_meteo / hko). Surfaces which cities are gated/stale before fills.
+# Reuse: Run manually or in CI to verify obs pipeline health. Read-only — never
+#        writes to any DB. See architecture/script_manifest.yaml for full spec.
 """Observation coverage report — read-only monitoring script.
 
 Purpose: surface which settlement cities have fresh vs stale/missing

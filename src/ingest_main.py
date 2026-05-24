@@ -404,10 +404,12 @@ def _k2_hko_tick():
     Decoupled from the trading daemon per operator directive 2026-04-23
     ("daemon-live和polymarket数据/天气数据采集本不应该混为一谈").
 
-    scripts/hko_ingest_tick.py manages its own db_writer_lock(BULK) and
-    the writer-lock antibody allowlist already includes the script.  Call
-    it directly via its module-level functions to avoid subprocess overhead
-    and to inherit the daemon's existing DB path resolution.
+    scripts/hko_ingest_tick.py acquires db_writer_lock(BULK) only in its
+    CLI main() path. When called via module-level functions (as done here),
+    the lock is NOT acquired inside those functions — ingest_main is
+    responsible for any lock coordination at this call site (currently
+    guarded by acquire_lock("hko_tick") above). Called as functions to
+    avoid subprocess overhead and inherit the daemon's DB path resolution.
     """
     from src.data.dual_run_lock import acquire_lock
     from pathlib import Path

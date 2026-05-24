@@ -222,8 +222,8 @@ def _rebuild_stale_no_trade_events_table(conn: sqlite3.Connection) -> None:
             shadow_runtime,
             observed_at,
             CASE
-                WHEN schema_version IN (14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33) THEN schema_version
-                ELSE 33
+                WHEN schema_version IN (14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34) THEN schema_version
+                ELSE 34
             END,
             schema_compatibility
         FROM no_trade_events

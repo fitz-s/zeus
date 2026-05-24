@@ -916,9 +916,9 @@ tables:
       opportunity_fact (its runtime write target post-INV-37) so the audit
       query joins same-DB. Writer: log_settlement_day_observation_authority
       (src/state/db.py); written from cycle_runtime.execute_discovery_phase.
-      DDL lives in both architecture/2026_04_02_architecture_kernel.sql (world
-      via init_schema) and _TRADE_CLASS_DDL (trade via init_schema_trade_only);
-      registered trade because that is the runtime write target. SCHEMA_VERSION
+      DDL lives in _TRADE_CLASS_DDL (src/state/db.py); created by
+      init_schema_trade_only. architecture/2026_04_02_architecture_kernel.sql
+      does NOT define this table — it only contains a NOTE referencing it. SCHEMA_VERSION
       34. Observability only — no trade-behavior dependency.
       NOTE (flagged, not fixed by this packet): opportunity_fact itself is
       registered db: world (canonical) but the runtime writer

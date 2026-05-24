@@ -4085,10 +4085,11 @@ CREATE TABLE IF NOT EXISTS venue_command_events (
 CREATE INDEX IF NOT EXISTS idx_venue_command_events_command ON venue_command_events(command_id);
 CREATE INDEX IF NOT EXISTS idx_venue_command_events_type ON venue_command_events(event_type);
 
--- settlement_day_observation_authority (OBS-AUTHORITY-FOUNDATION 2026-05-23;
--- DDL kept byte-identical to architecture/2026_04_02_architecture_kernel.sql).
+-- settlement_day_observation_authority (OBS-AUTHORITY-FOUNDATION 2026-05-23).
 -- Trade-class: the runtime opportunity_fact + decision evidence live on
 -- zeus_trades.db, so the authority that joins to them is colocated there.
+-- Canonical DDL source: _TRADE_CLASS_DDL in this file (src/state/db.py).
+-- Created by init_schema_trade_only; NOT in architecture_kernel.sql.
 CREATE TABLE IF NOT EXISTS settlement_day_observation_authority (
     authority_id TEXT PRIMARY KEY,
     city TEXT,
@@ -6965,14 +6966,20 @@ def log_opportunity_fact(
         # legacy_archived registry note). Idempotent backfill so the INSERT's new
         # column resolves. Cheap PRAGMA + at-most-once ALTER.
         _of_columns = _table_columns(_wconn, "opportunity_fact")
-        for _new_col in ("observation_authority_id", "day0_context_json"):
-            if _new_col not in _of_columns:
-                try:
-                    _wconn.execute(
-                        f"ALTER TABLE opportunity_fact ADD COLUMN {_new_col} TEXT;"
-                    )
-                except sqlite3.OperationalError:
-                    pass  # concurrent add / already present
+        if "observation_authority_id" not in _of_columns:
+            try:
+                _wconn.execute(
+                    "ALTER TABLE opportunity_fact ADD COLUMN observation_authority_id TEXT;"
+                )
+            except sqlite3.OperationalError:
+                pass  # concurrent add / already present
+        if "day0_context_json" not in _of_columns:
+            try:
+                _wconn.execute(
+                    "ALTER TABLE opportunity_fact ADD COLUMN day0_context_json TEXT;"
+                )
+            except sqlite3.OperationalError:
+                pass  # concurrent add / already present
 
         edge = getattr(decision, "edge", None)
         direction = str(getattr(edge, "direction", "") or "unknown")

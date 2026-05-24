@@ -2,6 +2,13 @@
 # Last reused/audited: 2026-05-23
 # Authority basis: OBS-AUTHORITY-FOUNDATION (auditability foundation for the
 #                  live-stall day0_nowcast_entry root cause). FIX-1 + FIX-2.
+# Lifecycle: created=2026-05-23; last_reviewed=2026-05-23; last_reused=never
+# Purpose: Relationship tests for the settlement-day observation authority
+#          foundation (FIX-1: authority row persisted at decision time;
+#          FIX-2: day0_context_json stamped on opportunity_fact).
+# Reuse: Run when changing cycle_runtime observation-authority capture,
+#        log_settlement_day_observation_authority, or log_opportunity_fact
+#        day0_context_json path.
 """Relationship tests for the settlement-day observation authority foundation.
 
 These verify the CROSS-MODULE invariants, not just functions:
@@ -22,8 +29,6 @@ import json
 import sqlite3
 from datetime import datetime, timezone
 from types import SimpleNamespace
-from unittest.mock import MagicMock
-
 import pytest
 
 from src.state import db as dbmod
