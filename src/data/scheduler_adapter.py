@@ -237,8 +237,17 @@ def expected_registry_job_ids(owner_daemon: str, forecast_live_owner_env: str) -
             continue
         if j.dispatch_kind == "long_running":   # threads are not add_job'able
             continue
-        if j.owner_gated and j.owner_daemon != opendata_owner:
-            continue                            # OpenData job on the non-owning daemon
+        if j.owner_gated:
+            # OpenData ownership asymmetry (PR #329 review #2): ingest_main runs REGARDLESS of
+            # OpenData ownership (it does obs/market/settlement ingest always), so its OpenData
+            # jobs are gated on being the active owner. forecast_live_daemon, by deployment, only
+            # runs WHEN it owns OpenData (it is the dedicated owner daemon) — so its owner-gated
+            # jobs are always part of its expected set. Gating forecast_live on the env var would
+            # crash its boot assert (8 jobs built vs 2 expected) if ZEUS_FORECAST_LIVE_OWNER were
+            # ever unset — a total forecast-collection outage one env var away. Encode the invariant
+            # here instead of relying on the plist.
+            if owner_daemon == "ingest_main" and opendata_owner != "ingest_main":
+                continue                        # ingest_main is not the active OpenData owner
         ids.add(j.job_id)
     return ids
 
@@ -255,7 +264,13 @@ def registry_executor_pools() -> dict[str, object]:
         "backfill_db": ThreadPoolExecutor(max_workers=1),
         "derived_db": ThreadPoolExecutor(max_workers=1),
         "io": ThreadPoolExecutor(max_workers=2),
-        "heartbeat": ThreadPoolExecutor(max_workers=1),
+        # heartbeat lane carries the 60s liveness file write AND the file-only diagnostics
+        # (source_health probe ~minutes/network-bound, status rollup ~DB-reader). PR #329 review
+        # #1: a single worker would let a slow probe delay the 60s heartbeat past the supervisor's
+        # 30s restart-seed threshold -> false daemon-dead restart (the exact Fix #4 regression the
+        # legacy 4-worker 'fast' pool prevented). Multi-worker so the liveness heartbeat always has
+        # a free slot. These are file-only writers (no DB lock contention), so parallelism is safe.
+        "heartbeat": ThreadPoolExecutor(max_workers=3),
     }
 
 

@@ -262,3 +262,42 @@ def test_forecast_live_legacy_and_registry_triggers_are_equivalent() -> None:
         for jid, (_fn, trig, tkw) in fld._job_defs_from_specs(specs).items()
     }
     assert legacy == registry, "forecast_live legacy vs registry trigger divergence (cadence drift risk)"
+
+
+def test_forecast_live_boot_assert_holds_in_both_owner_envs(monkeypatch) -> None:
+    """PR #329 review #2+#3: forecast_live_daemon only runs as the OpenData owner, so its expected
+    registry set is its full 8 jobs REGARDLESS of ZEUS_FORECAST_LIVE_OWNER — the boot assert must
+    not crash the forecast daemon (total OpenData-collection outage) if the env var is unset. This
+    is the coverage gap that let the fragility hide while 46 tests passed."""
+    import src.ingest.forecast_live_daemon as fld
+    from datetime import datetime, timezone
+    from src.data.scheduler_adapter import (
+        build_registry_scheduler, expected_registry_job_ids, job_defs_from_specs,
+    )
+
+    specs = fld.forecast_live_job_specs(startup_run_date=datetime(2026, 5, 24, tzinfo=timezone.utc))
+    job_defs = job_defs_from_specs(specs)
+    assert len(job_defs) == 8
+
+    for env in ("", "forecast_live", "ingest_main"):
+        expected = expected_registry_job_ids("forecast_live_daemon", env)
+        assert set(job_defs) == expected, (
+            f"forecast_live boot assert would FAIL with ZEUS_FORECAST_LIVE_OWNER={env!r}: "
+            f"built 8 vs expected {len(expected)} (daemon refuses to boot -> OpenData outage)"
+        )
+        # and the build actually succeeds (no RuntimeError) in each env:
+        built = build_registry_scheduler(_FakeScheduler(), "forecast_live_daemon", job_defs,
+                                         forecast_live_owner_env=env)
+        assert len(built) == 8
+
+
+def test_ingest_main_opendata_still_env_gated() -> None:
+    """The #2 fix must NOT break the ingest_main side of the singleton: ingest_main (which runs
+    regardless of ownership) still drops OpenData when it is not the active owner."""
+    from src.data.scheduler_adapter import expected_registry_job_ids
+
+    owns = expected_registry_job_ids("ingest_main", "ingest_main")
+    not_owns = expected_registry_job_ids("ingest_main", "forecast_live")
+    assert "ingest_opendata_daily_mx2t6" in owns
+    assert "ingest_opendata_daily_mx2t6" not in not_owns   # singleton preserved
+    assert len(owns) - len(not_owns) == 3                  # the 3 OpenData jobs (2 daily + startup)
