@@ -155,3 +155,46 @@ def opendata_owners() -> list[SourceJobSpec]:
         j for j in JOB_REGISTRY.values()
         if j.source_id == "ecmwf_open_data" and j.role == "live" and not j.job_id.endswith("startup_catch_up")
     ]
+
+
+# ---------------------------------------------------------------------------
+# OpenData ownership authority (PR4). Single source of truth for "which daemon owns
+# OpenData live production", mirroring ingest_main's historical env switch. PR4 routes
+# ingest_main._ingest_main_owns_opendata through active_opendata_owner so the registry and
+# the daemons can never disagree; PR6 generates the scheduler from the same function.
+# ---------------------------------------------------------------------------
+
+OPENDATA_FORECAST_LIVE_TOKEN = "forecast_live"
+
+
+def active_opendata_owner(forecast_live_owner_env: str) -> str:
+    """The daemon that owns OpenData live production for the given env value.
+
+    Mirrors ingest_main exactly: env == 'forecast_live' -> 'forecast_live_daemon',
+    anything else (incl. unset/default 'ingest_main') -> 'ingest_main'.
+    """
+    token = (forecast_live_owner_env or "").strip().lower()
+    return "forecast_live_daemon" if token == OPENDATA_FORECAST_LIVE_TOKEN else "ingest_main"
+
+
+def active_opendata_jobs(forecast_live_owner_env: str) -> list[SourceJobSpec]:
+    """OpenData live jobs that are ACTIVE under the given owner env (the singleton's set)."""
+    owner = active_opendata_owner(forecast_live_owner_env)
+    return [j for j in opendata_owners() if j.owner_daemon == owner]
+
+
+def assert_opendata_singleton(forecast_live_owner_env: str) -> str:
+    """Confirm exactly one daemon owns OpenData under this env; return its name.
+
+    Fail-closed: raises RuntimeError if the resolved owner has NO registered OpenData live
+    jobs (a mis-registration that would silently leave OpenData unproduced).
+    """
+    owner = active_opendata_owner(forecast_live_owner_env)
+    active = active_opendata_jobs(forecast_live_owner_env)
+    if not active:
+        all_owners = sorted({j.owner_daemon for j in opendata_owners()})
+        raise RuntimeError(
+            f"OpenData singleton violation: env owner={owner!r} has no registered OpenData "
+            f"live jobs (registry owners={all_owners}). Refusing to proceed with no producer."
+        )
+    return owner

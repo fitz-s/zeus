@@ -57,7 +57,13 @@ def _forecast_live_owner() -> str:
 
 
 def _ingest_main_owns_opendata() -> bool:
-    return _forecast_live_owner() != "forecast_live"
+    # PR4 data_temporal_kernel: route ownership through the single registry authority so the
+    # registry and the daemons can never disagree. Behavior-identical to the prior
+    # `_forecast_live_owner() != "forecast_live"` (active_opendata_owner returns "ingest_main"
+    # iff the env token is not "forecast_live").
+    from src.data.source_job_registry import active_opendata_owner
+
+    return active_opendata_owner(_forecast_live_owner()) == "ingest_main"
 
 
 def _graceful_shutdown(signum, frame) -> None:

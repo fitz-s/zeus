@@ -23,7 +23,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from src.data.source_job_registry import JOB_REGISTRY  # noqa: E402
+from src.data.source_job_registry import (  # noqa: E402
+    JOB_REGISTRY,
+    active_opendata_owner,
+    assert_opendata_singleton,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 _DAEMON_FILES = (
@@ -73,13 +77,43 @@ def cmd_render(as_json: bool) -> int:
     return 0
 
 
+def cmd_scheduler_preview(forecast_live_owner: str) -> int:
+    """Dry-run: show which jobs would be ACTIVE under a given ZEUS_FORECAST_LIVE_OWNER value.
+
+    owner_gated OpenData jobs are active only on the resolved owner daemon. Read-only.
+    """
+    owner = active_opendata_owner(forecast_live_owner)
+    try:
+        assert_opendata_singleton(forecast_live_owner)
+        singleton = "OK"
+    except RuntimeError as exc:
+        singleton = f"VIOLATION: {exc}"
+    print(f"ZEUS_FORECAST_LIVE_OWNER={forecast_live_owner!r} -> OpenData owner: {owner}")
+    print(f"OpenData singleton: {singleton}")
+    print()
+    header = f"{'ACTIVE':7} {'JOB_ID':44} {'OWNER':22} {'ROLE'}"
+    print(header)
+    print("-" * len(header))
+    for j in sorted(JOB_REGISTRY.values(), key=lambda x: (x.owner_daemon, x.job_id)):
+        # owner_gated jobs are active only on the resolved owner daemon; others always active.
+        active = (j.owner_daemon == owner) if j.owner_gated else True
+        print(f"{'yes' if active else 'no':7} {j.job_id:44.44} {j.owner_daemon:22.22} {j.role}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description="Data-collection job inventory (advisory).")
     p.add_argument("--check", action="store_true", help="fail if a scheduled job is unregistered")
     p.add_argument("--json", action="store_true", help="emit JSON")
+    p.add_argument("--scheduler-preview", action="store_true",
+                   help="dry-run: show jobs active under --forecast-live-owner")
+    p.add_argument("--forecast-live-owner", default="ingest_main",
+                   help="ZEUS_FORECAST_LIVE_OWNER value to preview (default: ingest_main)")
     args = p.parse_args(argv)
     if args.check:
         return cmd_check()
+    if args.scheduler_preview:
+        return cmd_scheduler_preview(args.forecast_live_owner)
     return cmd_render(args.json)
 
 
