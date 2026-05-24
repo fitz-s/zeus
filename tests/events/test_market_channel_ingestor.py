@@ -332,6 +332,37 @@ def test_market_channel_refresh_action_budget_limits_work():
     assert actions == [first]
 
 
+def test_market_channel_refresh_budget_still_invalidates_dropped_actions():
+    _conn, writer = _conn_writer()
+    invalidated = []
+    refreshed = []
+    service = MarketChannelOnlineService(
+        MarketChannelIngestor(writer, active_token_ids={"token-1"}, token_metadata=_metadata()),
+        invalidate_snapshot=invalidated.append,
+        refresh_snapshot=refreshed.append,
+        max_refresh_actions_per_window=1,
+    )
+    first = MarketChannelAction(
+        refresh_snapshot=True,
+        reason="tick_size_change",
+        token_id="token-1",
+        condition_id="0xcondition-1",
+    )
+    second = MarketChannelAction(
+        refresh_snapshot=True,
+        reason="market_resolved",
+        token_id="token-2",
+        condition_id="0xcondition-2",
+    )
+
+    service._handle_action(first)
+    service._handle_action(second)
+
+    assert invalidated == [first, second]
+    assert refreshed == [first]
+    assert service.refresh_action_dropped_count == 1
+
+
 def test_market_channel_condition_refresh_does_not_fallback_to_unrelated_markets():
     from src.main import _edli_filter_markets_for_condition
 

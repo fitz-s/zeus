@@ -423,6 +423,7 @@ class MarketChannelOnlineService:
 
     ingestor: MarketChannelIngestor
     fetch_orderbook: RestOrderbookFetch | None = None
+    invalidate_snapshot: Callable[[MarketChannelAction], None] | None = None
     refresh_snapshot: Callable[[MarketChannelAction], None] | None = None
     connected: bool = False
     gap_start: str | None = None
@@ -538,6 +539,8 @@ class MarketChannelOnlineService:
     def _handle_action(self, action: MarketChannelAction) -> None:
         if not action.refresh_snapshot:
             return
+        if self.invalidate_snapshot is not None:
+            self.invalidate_snapshot(action)
         now = datetime.now(UTC)
         if (
             self._refresh_window_start is None

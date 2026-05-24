@@ -2642,11 +2642,7 @@ def _edli_market_channel_ingestor_cycle() -> None:
 
         world_conn = get_world_connection(write_class="live")
         try:
-            def _refresh_snapshot_action(action: MarketChannelAction) -> None:
-                from src.data.market_scanner import (
-                    find_weather_markets,
-                    refresh_executable_market_substrate_snapshots,
-                )
+            def _invalidate_snapshot_action(action: MarketChannelAction) -> None:
                 from src.state.db import get_trade_connection
 
                 trade_conn = get_trade_connection(write_class="live")
@@ -2658,6 +2654,18 @@ def _edli_market_channel_ingestor_cycle() -> None:
                     )
                     if invalidated:
                         trade_conn.commit()
+                finally:
+                    trade_conn.close()
+
+            def _refresh_snapshot_action(action: MarketChannelAction) -> None:
+                from src.data.market_scanner import (
+                    find_weather_markets,
+                    refresh_executable_market_substrate_snapshots,
+                )
+                from src.state.db import get_trade_connection
+
+                trade_conn = get_trade_connection(write_class="live")
+                try:
                     markets = find_weather_markets(
                         min_hours_to_resolution=0.0,
                         include_slug_pattern=True,
@@ -2699,6 +2707,7 @@ def _edli_market_channel_ingestor_cycle() -> None:
                         coalescer=EventCoalescer(max_market_keys=1000),
                     ),
                     fetch_orderbook=clob.get_orderbook_snapshot,
+                    invalidate_snapshot=_invalidate_snapshot_action,
                     refresh_snapshot=_refresh_snapshot_action,
                     max_refresh_actions_per_window=_edli_bounded_positive_int(
                         edli_cfg,

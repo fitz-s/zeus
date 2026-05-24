@@ -181,7 +181,10 @@ Acceptance IDs A01-A40:
   within a window and caps accepted refreshes with
   `edli_v1.market_channel_refresh_max_actions_per_window=5` /
   `market_channel_refresh_window_seconds=60`, reducing tick/resolve storm risk
-  before the required live DB-concurrency smoke.
+  before the required live DB-concurrency smoke. A follow-up critic finding
+  noted capped refresh actions still must invalidate affected executable
+  snapshots; invalidation now runs as a separate lightweight callback before the
+  capped expensive refresh callback.
 
 ## Current Phase
 
@@ -229,7 +232,7 @@ Fresh verification after latest calibration/fill/backpressure repair:
 - `python -m pytest -q tests/events tests/engine/test_event_reactor_no_bypass.py
   tests/strategy/live_inference tests/money_path
   tests/state/test_edli_table_ownership.py --maxfail=10` -> PASS,
-  222 passed.
+  223 passed.
 - `python scripts/check_schema_version.py && python
   scripts/check_table_registry_coherence.py && python
   scripts/ci/assert_test_quality.py` -> PASS.
