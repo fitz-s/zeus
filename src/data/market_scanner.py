@@ -108,7 +108,7 @@ class MarketEventsPersistenceResult:
     def __index__(self) -> int:
         return self.inserted
 
-    def _compare_int(self, other: object, op) -> bool | NotImplemented:
+    def _compare_int(self, other: object, op) -> Any:
         if isinstance(other, int):
             return op(self.inserted, other)
         if isinstance(other, MarketEventsPersistenceResult):
@@ -121,16 +121,16 @@ class MarketEventsPersistenceResult:
             return False
         return compared
 
-    def __lt__(self, other: object) -> bool | NotImplemented:
+    def __lt__(self, other: object) -> Any:
         return self._compare_int(other, lambda left, right: left < right)
 
-    def __le__(self, other: object) -> bool | NotImplemented:
+    def __le__(self, other: object) -> Any:
         return self._compare_int(other, lambda left, right: left <= right)
 
-    def __gt__(self, other: object) -> bool | NotImplemented:
+    def __gt__(self, other: object) -> Any:
         return self._compare_int(other, lambda left, right: left > right)
 
-    def __ge__(self, other: object) -> bool | NotImplemented:
+    def __ge__(self, other: object) -> Any:
         return self._compare_int(other, lambda left, right: left >= right)
 
 
