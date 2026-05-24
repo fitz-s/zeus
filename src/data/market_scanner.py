@@ -1204,7 +1204,9 @@ def _clob_market_is_live(condition_id: str) -> bool | None:
     return not archived and eob
 
 
-def _event_has_active_children(event: dict, now_utc: datetime) -> bool:
+def _event_has_active_children(
+    event: dict, now_utc: datetime, *, clob_crosscheck: bool = True
+) -> bool:
     """Tradeability gate for Polymarket negRisk multi-outcome events.
 
     Polymarket negRisk semantic (verified 2026-05-19): for multi-outcome events,
@@ -1215,10 +1217,23 @@ def _event_has_active_children(event: dict, now_utc: datetime) -> bool:
     An event is admitted iff:
       1. endDate is present, parseable, and >= now_utc — OR endDate is missing/
          unparseable (best-effort; missing endDate is deferred to _parse_event)
-      2. At least one child market has acceptingOrders=True AND passes CLOB
-         archived cross-check (Gamma lies for archived markets post-V2 cutover
-         2026-05-11; CLOB /markets/{cid} is authoritative). If CLOB is
-         unreachable, Gamma's acceptingOrders is trusted as fallback.
+      2. At least one child market has acceptingOrders=True AND (when
+         ``clob_crosscheck=True``) passes CLOB archived cross-check (Gamma lies
+         for archived markets post-V2 cutover 2026-05-11; CLOB /markets/{cid}
+         is authoritative). If CLOB is unreachable, Gamma's acceptingOrders is
+         trusted as fallback.
+
+    Args:
+        clob_crosscheck: When True (default), each ``acceptingOrders=True``
+            child is cross-checked against CLOB to reject archived markets.
+            When False, Gamma's ``acceptingOrders`` is accepted on its own
+            (equivalent to the CLOB-unreachable fallback path).  Pass
+            ``clob_crosscheck=False`` only on the DISCOVERY scan path — the
+            downstream ``refresh_executable_market_substrate_snapshots`` is the
+            sole bounded CLOB validator and will skip non-tradeable outcomes
+            within its budget.  Discovery with ``clob_crosscheck=True`` issues
+            one HTTP call per child per event, making a 50-city scan take ~10
+            minutes instead of <90 seconds.
     """
     end_str = event.get("endDate") or event.get("end_date")
     if end_str:
@@ -1233,16 +1248,27 @@ def _event_has_active_children(event: dict, now_utc: datetime) -> bool:
     for child in children:
         if child.get("acceptingOrders") is not True:
             continue
-        cid = child.get("conditionId") or child.get("condition_id")
-        if cid:
-            clob_live = _clob_market_is_live(cid)
-            if clob_live is False:
-                # CLOB is authoritative: market is archived despite Gamma claim
-                continue
-            # clob_live=True: confirmed live; clob_live=None: CLOB unreachable,
-            # fall back to Gamma trust
+        if clob_crosscheck:
+            cid = child.get("conditionId") or child.get("condition_id")
+            if cid:
+                clob_live = _clob_market_is_live(cid)
+                if clob_live is False:
+                    # CLOB is authoritative: market is archived despite Gamma claim
+                    continue
+                # clob_live=True: confirmed live; clob_live=None: CLOB unreachable,
+                # fall back to Gamma trust
         return True
     return False
+
+
+def _discovery_total_budget_seconds_from_env() -> float:
+    """Total wall-clock budget for the full discovery scan (tag + slug paths).
+
+    Defaults to 75 s so the combined tag-fetch + slug-fallback stays under the
+    90 s daemon tick gate with ~15 s margin for network variance.
+    Override with ZEUS_MARKET_DISCOVERY_TOTAL_BUDGET_SECONDS.
+    """
+    return _positive_float_env("ZEUS_MARKET_DISCOVERY_TOTAL_BUDGET_SECONDS", 75.0)
 
 
 def _fetch_events_by_tags(*, include_slug_pattern: bool = True) -> list[dict]:
@@ -1251,6 +1277,8 @@ def _fetch_events_by_tags(*, include_slug_pattern: bool = True) -> list[dict]:
     all_events = []
     seen_ids = set()
     now_utc = datetime.now(timezone.utc)
+    _discovery_start = time.monotonic()
+    _discovery_total_budget = _discovery_total_budget_seconds_from_env()
     for tag_slug in TAG_SLUGS:
         try:
             # Resolve tag ID
@@ -1298,8 +1326,13 @@ def _fetch_events_by_tags(*, include_slug_pattern: bool = True) -> list[dict]:
                 offset += 50
 
             # Client-side tradeability gate: keep only events with future endDate
-            # and at least one child with acceptingOrders=True.
-            events = [e for e in events if _event_has_active_children(e, now_utc)]
+            # and at least one child with acceptingOrders=True.  CLOB cross-check
+            # is skipped here (clob_crosscheck=False) — the per-child CLOB call
+            # serialises hundreds of HTTP requests for a full 50-city tag scan,
+            # inflating discovery from <90s to ~10min.  The downstream
+            # refresh_executable_market_substrate_snapshots is the sole bounded
+            # CLOB validator and will reject archived outcomes within its budget.
+            events = [e for e in events if _event_has_active_children(e, now_utc, clob_crosscheck=False)]
 
             for event in events:
                 event_id = event.get("id") or event.get("slug")
@@ -1323,8 +1356,14 @@ def _fetch_events_by_tags(*, include_slug_pattern: bool = True) -> list[dict]:
     # Slug-pattern fallback: pick up newly-opened markets not yet tagged.
     # seen_ids is passed by reference so slug discovery deduplicates against
     # tag results without a separate pass.
+    # Budget: remaining time from the total-discovery budget so that the
+    # tag-fetch + slug-fetch combined stay under the wall-clock gate.
     if include_slug_pattern:
-        slug_events = _fetch_events_by_slug_pattern(seen_ids, now_utc)
+        _elapsed = time.monotonic() - _discovery_start
+        _slug_budget = max(5.0, _discovery_total_budget - _elapsed)
+        slug_events = _fetch_events_by_slug_pattern(
+            seen_ids, now_utc, budget_seconds=_slug_budget
+        )
         all_events.extend(slug_events)
         if slug_events:
             logger.info(
@@ -1482,7 +1521,7 @@ def _fetch_events_by_slug_pattern(
             event_id = event.get("id") or event.get("slug")
             if event_id in seen_ids:
                 continue
-            if not _event_has_active_children(event, now_utc):
+            if not _event_has_active_children(event, now_utc, clob_crosscheck=False):
                 continue
             seen_ids.add(event_id)
             event["_discovery_path"] = "slug_pattern"
@@ -1519,7 +1558,7 @@ def _fetch_events_by_keyword(keyword: str) -> list[dict]:
         })
         resp.raise_for_status()
         events = resp.json()
-        return [e for e in events if _event_has_active_children(e, now_utc)]
+        return [e for e in events if _event_has_active_children(e, now_utc, clob_crosscheck=False)]
     except httpx.HTTPError as e:
         logger.warning("Keyword fetch failed: %s", e)
         return []
@@ -3093,6 +3132,12 @@ def refresh_executable_market_substrate_snapshots(
     captured = captured_at or datetime.now(timezone.utc)
     per_city_limit = _snapshot_max_outcomes_from_env(max_outcomes)
     attempted = inserted = skipped = failed = 0
+    # cap_truncated counts outcomes dropped by per-city cap or budget (true
+    # truncation).  skipped counts all filtered-out outcomes (missing cid,
+    # non-executable, expired, duplicate sides, missing no_token) — the two
+    # are kept separate so truncated=1 signals genuine cap/budget pressure, not
+    # routine filter noise.
+    cap_truncated = 0
     failures: list[dict[str, str]] = []
     seen_snapshot_sides: set[tuple[str, str]] = set()
 
@@ -3145,6 +3190,7 @@ def refresh_executable_market_substrate_snapshots(
     for city_key in sorted(city_candidates):
         city_list = sorted(city_candidates[city_key], key=lambda item: (item[0], item[1]))
         if len(city_list) > per_city_limit:
+            cap_truncated += len(city_list) - per_city_limit
             skipped += len(city_list) - per_city_limit
             city_list = city_list[:per_city_limit]
         per_city_sorted.append(city_list)
@@ -3163,6 +3209,7 @@ def refresh_executable_market_substrate_snapshots(
     ):
         if time.monotonic() >= deadline:
             budget_exhausted = True
+            cap_truncated += len(selected_candidates) - index
             skipped += len(selected_candidates) - index
             break
         attempted += 1
@@ -3195,7 +3242,7 @@ def refresh_executable_market_substrate_snapshots(
         "inserted": inserted,
         "skipped": skipped,
         "failed": failed,
-        "truncated": int(skipped > 0 or budget_exhausted),
+        "truncated": int(cap_truncated > 0 or budget_exhausted),
         "budget_exhausted": int(budget_exhausted),
     }
     if failures:

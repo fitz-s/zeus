@@ -39,33 +39,46 @@ _CITY_SLUG_RE = re.compile(r"in-([a-z-]+)-on-")
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _slug(city_slug: str, metric: str) -> str:
-    return f"{metric}-temperature-in-{city_slug}-on-2026-05-25"
+def _slug(city_slug: str, metric: str, target_date: str = "2026-05-25") -> str:
+    return f"{metric}-temperature-in-{city_slug}-on-{target_date}"
 
 
-def _make_market(city_name: str, idx: int, metric: str = "highest") -> dict:
+def _make_market(
+    city_name: str,
+    idx: int,
+    metric: str = "highest",
+    target_date: str = "2026-05-25",
+) -> dict:
     """Build an enriched event dict matching market_scanner parse output.
 
-    Each (city_name, metric) pair gets a distinct slug and condition_id, so
-    a single city_name can appear as both 'highest' and 'lowest' slugs.
-    The ``city`` key carries the City object -- production ``_parse_event`` sets
-    this; tests must mirror it for city_key extraction to work correctly.
+    Each (city_name, metric, target_date) triple gets a distinct slug and
+    condition_id, so a single city_name can appear across multiple slugs.
+    The ``city`` key carries the City object -- production ``_parse_event``
+    sets this; tests must mirror it for city_key extraction to work correctly.
+
+    The ``target_date`` axis is critical for the R1 antibody: pre-fix code that
+    keys per-event (slug/event_id) would give N×per_city_limit snapshots when a
+    city has N (metric, date) combinations.  Post-fix per-city keying caps the
+    total at per_city_limit regardless of slug count.
     """
     city_slug = city_name.lower().replace(" ", "-")
-    # idx encodes (city_ordinal * 10 + metric_ordinal) to ensure distinct cids
+    # cid_int encodes (city_ordinal * 1000 + date_ordinal * 10 + metric_ordinal)
+    # to guarantee distinct cids across (city, date, metric) triples.
     metric_ord = 0 if metric == "highest" else 1
-    cid_int = idx * 10 + metric_ord
+    # Use a stable date → ordinal mapping so tests are deterministic.
+    date_ord = int(target_date.replace("-", "")) % 1000
+    cid_int = (idx * 1000 + date_ord * 10 + metric_ord) % (2**16)
     cid = f"0x{cid_int:04x}" + "0" * 60
     cid = cid[:66]
     no_token = f"0x{cid_int:04x}" + "1" * 60
     no_token = no_token[:66]
     return {
-        "event_id": f"evt-{city_slug}-{metric}-001",
-        "slug": _slug(city_slug, metric),
-        "title": f"{metric.capitalize()} temperature in {city_name} on May 25?",
+        "event_id": f"evt-{city_slug}-{metric}-{target_date}",
+        "slug": _slug(city_slug, metric, target_date),
+        "title": f"{metric.capitalize()} temperature in {city_name} on {target_date}?",
         # City object -- mirrors _parse_event output; city_key extraction uses .name
         "city": ms.cities_by_name.get(city_name, city_name),
-        "target_date": "2026-05-25",
+        "target_date": target_date,
         "temperature_metric": metric,
         "hours_to_resolution": 36.0,
         "hours_since_open": 2.0,
@@ -163,26 +176,31 @@ def _city_name_from_slug(slug: str) -> str | None:
 # ---------------------------------------------------------------------------
 
 def test_per_city_cap_applies_across_slugs_not_per_slug(monkeypatch):
-    """R1 (PER_CITY_CAP_NOT_PER_SLUG): cities with multiple slugs (high+low)
-    are capped per-city.  40 cities x 2 slugs each = 80 input markets.
+    """R1 (PER_CITY_CAP_NOT_PER_SLUG): cities with multiple slugs (high/low × 3
+    dates) are capped per-city.  30 cities × 6 slugs each = 180 input markets.
 
-    Uses max_outcomes=2 (2 candidates per city limit) to make the pre-fix
-    failure concrete:
-    - Each slug produces 2 candidate directions (buy_yes + buy_no).
-    - Pre-fix (city_key=slug): 2 slug-buckets x min(2,2) = 4 per city -> OVER limit of 2.
-    - Post-fix (city_key=city.name): 1 city-bucket capped at 2 -> exactly at limit.
+    Uses max_outcomes=2 (tight per-city cap) to make the pre-fix failure
+    concrete across BOTH the slug axis AND the event_id axis:
+    - Each (city, metric, date) triple produces 2 candidate directions.
+    - Pre-fix (city_key=slug or event_id): 6 buckets × 2 = 12 snapshots/city → OVER.
+    - Post-fix (city_key=city.name): 1 bucket capped at 2 → PASSES.
 
     RED on pre-fix code: over_limit dict is non-empty (every multi-slug city exceeds 2).
-    GREEN post-fix: no city exceeds 2, and >=35 distinct cities are covered.
+    GREEN post-fix: no city exceeds 2, and >=25 distinct cities are covered.
     """
-    all_city_names = list(ms.cities_by_name.keys())[:40]
-    # Two slugs per city: highest + lowest temperature
+    TARGET_DATES = ["2026-05-25", "2026-05-26", "2026-05-27"]
+    METRICS = ["highest", "lowest"]
+    # 2 metrics × 3 dates = 6 slugs per city; each slug has 2 directions = 12 candidates/city
+    CANDIDATES_PER_CITY_PRE_FIX = len(TARGET_DATES) * len(METRICS) * 2  # = 12
+
+    all_city_names = list(ms.cities_by_name.keys())[:30]
     markets = []
     for idx, name in enumerate(all_city_names, start=1):
-        markets.append(_make_market(name, idx, metric="highest"))
-        markets.append(_make_market(name, idx, metric="lowest"))
+        for metric in METRICS:
+            for tdate in TARGET_DATES:
+                markets.append(_make_market(name, idx, metric=metric, target_date=tdate))
 
-    per_city_limit = 2  # tight cap: 2 directions max per city; pre-fix gives 4
+    per_city_limit = 2  # tight cap; pre-fix gives 12 per city
 
     captured_slugs: list[str] = []
 
@@ -211,21 +229,23 @@ def test_per_city_cap_applies_across_slugs_not_per_slug(monkeypatch):
 
     distinct_cities = set(city_snapshot_counts.keys())
 
-    # >=35 of 40 cities must be covered (breadth-first ensures coverage)
-    assert len(distinct_cities) >= 35, (
-        f"substrate refresh must cover >=35 of 40 input cities "
+    # >=25 of 30 cities must be covered (breadth-first ensures coverage)
+    assert len(distinct_cities) >= 25, (
+        f"substrate refresh must cover >=25 of 30 input cities "
         f"(per-city breadth-first). Got {len(distinct_cities)} cities: "
         f"{sorted(distinct_cities)}. Summary: {summary}."
     )
 
-    # No city may exceed per_city_limit snapshots (per-CITY cap, not per-slug).
-    # Pre-fix: city_key=slug -> 2 slug-buckets x 2 directions = 4 per city -> FAILS here.
+    # No city may exceed per_city_limit snapshots (per-CITY cap, not per-slug or per-event).
+    # Pre-fix: city_key=slug/event_id -> {CANDIDATES_PER_CITY_PRE_FIX} candidates/city -> FAILS.
     # Post-fix: city_key=city.name -> 1 bucket capped at 2 -> PASSES.
     over_limit = {c: n for c, n in city_snapshot_counts.items() if n > per_city_limit}
     assert not over_limit, (
         f"Per-city cap must be <={per_city_limit} snapshots per city. "
         f"Cities over limit: {over_limit}. "
-        "Pre-fix failure: city_key=slug gives 2x snapshots per city when 2 slugs exist."
+        f"Pre-fix failure: city_key=slug/event_id gives up to "
+        f"{CANDIDATES_PER_CITY_PRE_FIX} snapshots/city when {len(TARGET_DATES)} "
+        f"dates × {len(METRICS)} metrics exist."
     )
 
 
