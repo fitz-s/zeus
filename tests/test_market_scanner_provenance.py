@@ -372,7 +372,7 @@ def test_slug_pattern_discovery_rotates_under_request_budget(monkeypatch):
     monkeypatch.setattr(ms, "SLUG_DISCOVERY_PREFIXES", ["highest-temperature-in-{city}-on-{date}"])
     monkeypatch.setattr(ms, "_SLUG_DISCOVERY_CURSOR", 0)
     monkeypatch.setattr(ms, "_gamma_get", fake_gamma_get)
-    monkeypatch.setattr(ms, "_event_has_active_children", lambda _event, _now: True)
+    monkeypatch.setattr(ms, "_event_has_active_children", lambda _event, _now, **_kwargs: True)
 
     now = datetime(2026, 5, 20, 10, 0, tzinfo=timezone.utc)
     first = ms._fetch_events_by_slug_pattern(
@@ -3161,10 +3161,18 @@ class TestForwardMarketSubstrateProducer:
             def get_fee_rate(self, token_id: str) -> float:
                 return 0
 
+        # Shared city object so both markets hash to the same city_key bucket.
+        # city_key = city.name; without "city" field both fall to "_unknown" (same bucket).
+        # Using explicit SimpleNamespace ensures .name attribute is present.
+        from types import SimpleNamespace as _SNS
+        _shared_city = _SNS(name="Chicago")
+
         def market(slug: str, condition_id: str, start_at: str, end_at: str) -> dict:
             return {
                 "event_id": slug,
                 "slug": slug,
+                # Both markets belong to the same city so per-city cap applies.
+                "city": _shared_city,
                 "hours_since_open": (
                     captured_at - datetime.fromisoformat(start_at.replace("Z", "+00:00"))
                 ).total_seconds() / 3600,

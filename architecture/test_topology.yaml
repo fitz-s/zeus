@@ -2437,6 +2437,29 @@ test_metadata:
     created: 2026-05-19
     last_reused_or_audited: 2026-05-19
 
+  tests/test_market_discovery_full_coverage.py:
+    modules: [data, main]
+    category: core_law_antibody
+    profile: fix_market_discovery_full_city_coverage_2026_05_24
+    blocks_commit: true
+    asserted_invariants:
+      - DISCOVERY-CYCLE-CALLS-FULL-TAG-SCAN
+      - SUBSTRATE-REFRESH-BREADTH-FIRST-CITY-COVERAGE
+    source_under_test:
+      - src/main.py
+      - src/data/market_scanner.py
+    law_dependencies:
+      - architecture/invariants.yaml
+    notes: >
+      Relationship antibody for fix/market-discovery-full-city-coverage.
+      Regressed by #203 (slug-only wiring) + #221 (slug-only retained) to 7
+      cities from 51. R1 asserts substrate refresh covers ≥35 of 40 input
+      cities (breadth-first per-city selection vs global top-8 cap). R2 asserts
+      _market_discovery_cycle calls find_weather_markets (full tag-query, 51
+      cities) rather than find_slug_pattern_weather_markets (14-city slug-only).
+    created: 2026-05-24
+    last_reused_or_audited: 2026-05-24
+
   tests/test_settlement_commands_hexbytes_serializer.py:
     modules: [execution, state, venue]
     category: core_law_antibody
