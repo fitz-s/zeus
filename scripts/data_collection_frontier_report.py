@@ -81,7 +81,7 @@ def _fmt_age(seconds: Optional[float]) -> str:
 
 
 def _render_table(rows: list[FrontierRow]) -> str:
-    header = f"{'SOURCE':28} {'TRACK':14} {'ROLE':9} {'FRESH':9} {'AGE':>7} {'BLOCKER':20} ACTION"
+    header = f"{'source':28} {'track':14} {'role':9} {'fresh':9} {'age':>7} {'blocker':20} action"
     lines = [header, "-" * len(header)]
     for r in rows:
         lines.append(

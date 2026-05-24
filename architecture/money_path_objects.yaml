@@ -359,6 +359,37 @@ state_machines:
     states:
       - DIAGNOSTIC_FALLBACK
 
+  collection_frontier:
+    owner: src/data/collection_frontier.py
+    description: >
+      ADVISORY data-collection temporal-frontier vocabulary (PR #329 data_temporal_kernel).
+      NOT a trading lifecycle: these are read-only blocker/disposition tokens describing
+      forecast/source-collection readiness UPSTREAM of the money path. Registered so the
+      money-path semantic-diff classifier recognizes the tokens this advisory layer introduces
+      (per mesh-maintenance: new semantic vocabulary must be registered). They never gate a
+      trade; the live trading lane consumes readiness_state, not these labels.
+    states:
+      - OK                            # collection_frontier live_blocker values
+      - NOT_RELEASED
+      - STALE_SOURCE
+      - SOURCE_DOWN
+      - PARTIAL_RUN
+      - READINESS_BLOCKED
+      - NOT_LIVE_AUTHORIZED
+      - UNKNOWN_BLOCKED
+      - SHORT_HORIZON_ONLY
+      - COVERAGE_UNKNOWN
+      - BLOCK_LIVE                     # PartialPolicy values
+      - SHADOW_ONLY
+      - REPLACE_SAME_IDEMPOTENCY_KEY   # LateArrivalPolicy values
+      - APPEND_REVISION
+      - QUARANTINE
+      - IGNORE_IF_LIVE_CLOSED
+      - BACKFILL_ONLY
+    invariant_tests:
+      - tests/test_collection_frontier.py
+      - tests/test_temporal_provenance_and_lanes.py
+
 schema_objects:
   authority_fabricating_defaults:
     - VERIFIED
