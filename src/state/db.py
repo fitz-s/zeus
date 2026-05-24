@@ -6456,6 +6456,38 @@ def _log_probability_trace_fact_inner(
         if candidate_phase is not None:
             market_phase_value = candidate_phase.value if hasattr(candidate_phase, "value") else str(candidate_phase)
 
+    # Idempotent ALTER TABLE migration for LIVE-PROB-P0 columns (SV=34 tail-mass
+    # + SV=35 edge-bin sanity telemetry).  Mirrors the opportunity_fact pattern in
+    # log_opportunity_fact: check existing columns once, issue ALTER only if absent.
+    # Necessary so the INSERT below succeeds on existing DBs that predate SV=34/35
+    # (the same gap init_schema's ALTER loop covers for boot-path callers, but this
+    # writer can be called on a DB opened without init_schema — e.g. test fixtures
+    # or daemon paths that open a pre-existing world DB directly).
+    _ptf_cols = _table_columns(conn, "probability_trace_fact")
+    for _col, _type in (
+        ("prob_tail_mass_cal", "REAL"),
+        ("prob_tail_mass_market", "REAL"),
+        ("prob_tail_entropy", "REAL"),
+        ("probability_sanity_mode", "TEXT"),
+        ("probability_sanity_reason", "TEXT"),
+        ("edge_bin_idx", "INTEGER"),
+        ("edge_bin_label", "TEXT"),
+        ("edge_bin_p_raw", "REAL"),
+        ("edge_bin_p_cal", "REAL"),
+        ("edge_bin_p_market", "REAL"),
+        ("edge_bin_member_support", "REAL"),
+        ("edge_bin_odds_ratio", "REAL"),
+        ("near_tail_p_cal", "REAL"),
+        ("near_tail_p_market", "REAL"),
+    ):
+        if _col not in _ptf_cols:
+            try:
+                conn.execute(
+                    f"ALTER TABLE probability_trace_fact ADD COLUMN {_col} {_type};"
+                )
+            except sqlite3.OperationalError:
+                pass  # concurrent add / already present
+
     conn.execute(
         """
         INSERT INTO probability_trace_fact (
