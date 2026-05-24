@@ -178,6 +178,7 @@ def p_raw_vector_from_maxes(
     *,
     n_mc: int | None = None,
     rng: np.random.Generator | None = None,
+    extra_member_sigma: float = 0.0,
 ) -> np.ndarray:
     """Monte Carlo P_raw vector from per-member daily maxes.
 
@@ -230,6 +231,10 @@ def p_raw_vector_from_maxes(
         _h = hashlib.sha256()
         _h.update(struct.pack(">q", n_mc))
         _h.update(struct.pack(">d", _sig_for_seed.value))
+        # Only perturb the seed when a residual sigma is actually applied, so the
+        # extra_member_sigma=0.0 path stays bit-identical to the legacy behavior.
+        if extra_member_sigma:
+            _h.update(struct.pack(">d", float(extra_member_sigma)))
         for _v in sorted(member_maxes.tolist()):
             _h.update(struct.pack(">d", _v))
         for _b in bins:
@@ -240,9 +245,12 @@ def p_raw_vector_from_maxes(
     n_members = len(member_maxes)
     p = np.zeros(n_bins)
     sig = sigma_instrument_for_city(city)
+    # Combine instrument noise with the (optional) forecast/station residual SD in
+    # quadrature. extra_member_sigma=0.0 => effective sigma == instrument sigma exactly.
+    effective_sigma = float(np.hypot(sig.value, extra_member_sigma))
 
     for _ in range(n_mc):
-        noised = member_maxes + rng.normal(0, sig.value, n_members)
+        noised = member_maxes + rng.normal(0, effective_sigma, n_members)
         measured = settlement_semantics.round_values(noised)
 
         p += bin_counts_from_array(measured, bins)
