@@ -34,10 +34,39 @@ from src.data.source_job_registry import (  # noqa: E402
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+# Strict registry-MIRROR daemons: every scheduled add_job id here MUST be in JOB_REGISTRY.
+# (These two daemons are also the ones that build-from-registry in registry mode.)
 _DAEMON_FILES = (
     REPO_ROOT / "src" / "ingest_main.py",
     REPO_ROOT / "src" / "ingest" / "forecast_live_daemon.py",
 )
+
+# src/main.py is the TRADING daemon: its scheduler mixes data-collection jobs with trading-cycle
+# and execution/chain jobs. PR #329 review B requires the registry to COVER its data-collection
+# jobs — but the trading/chain jobs must NOT be forced into a data-collection registry. So we
+# DECLARE the partition explicitly (advisor point 4): we do not ask the script to infer "is this
+# data collection". Every scheduled add_job id in src/main must be in exactly one of these two
+# sets; an id in neither fails --check, forcing a conscious classification of any new job.
+_SRC_MAIN_FILE = REPO_ROOT / "src" / "main.py"
+
+# Data-collection jobs in src/main — these MUST be registered in JOB_REGISTRY (operator B list).
+# (user_ws_ingestor is a long-running thread, not an add_job, so it is registered but never
+# appears in the scheduled-id scan.)
+_SRC_MAIN_DATA_COLLECTION_JOB_IDS: frozenset[str] = frozenset({
+    "market_discovery", "venue_heartbeat", "harvester", "wu_daily",
+})
+
+# Explicitly NON-data-collection src/main jobs: trading-cycle modes + execution/chain ops +
+# the daemon's own heartbeat. Declared so --check can tell "known non-collection" apart from
+# "new unclassified job". update_reaction_* uses an f-string id (not a static literal) so it is
+# not extracted; it is a trading-cycle mode and intentionally not covered.
+_SRC_MAIN_NON_COLLECTION_JOB_IDS: frozenset[str] = frozenset({
+    "opening_hunt", "day0_capture", "imminent_open_capture",  # CycleRunner trading modes
+    "heartbeat",                                              # daemon heartbeat (file-only)
+    "redeem_submitter", "redeem_reconciler",                  # chain redemption ops
+    "wrap_intent_creator", "wrap_submitter", "wrap_reconciler",  # chain wrap ops
+    "deployment_freshness",                                   # deploy-freshness gate
+})
 
 
 # APScheduler keyword args that mark a dict as a job-spec (used to tell a real job-spec dict
@@ -75,8 +104,13 @@ def _scheduled_job_ids() -> set[str]:
          We harvest the id from any dict literal carrying an ``"id"`` key plus ≥1 APScheduler
          spec key (so unrelated dicts with an "id" key are not mistaken for job specs).
     """
+    return _scheduled_ids_in(_DAEMON_FILES)
+
+
+def _scheduled_ids_in(files: tuple[Path, ...]) -> set[str]:
+    """Extract scheduled add_job ids from the given files (both call shapes; see _scheduled_job_ids)."""
     ids: set[str] = set()
-    for f in _DAEMON_FILES:
+    for f in files:
         tree = ast.parse(f.read_text(encoding="utf-8"), filename=str(f))
         # module-level NAME = "literal" constant map (resolves id=CONSTANT references)
         consts: dict[str, str] = {}
@@ -109,6 +143,30 @@ def _scheduled_job_ids() -> set[str]:
     return ids
 
 
+def _src_main_partition_violations() -> list[str]:
+    """PR #329 review B: every scheduled add_job id in src/main.py must be classified as either a
+    registered data-collection job or an explicit non-collection job. Returns violation strings:
+
+      * UNCLASSIFIED: a scheduled id in neither set — a new src/main job nobody triaged. Forces a
+        conscious decision (add to the registry as data-collection, or to the non-collection set).
+      * UNREGISTERED: a declared data-collection id missing from JOB_REGISTRY — coverage gap.
+
+    This is the antibody that keeps the registry honest about src/main once it claims to cover it.
+    """
+    scheduled = _scheduled_ids_in((_SRC_MAIN_FILE,))
+    known = _SRC_MAIN_DATA_COLLECTION_JOB_IDS | _SRC_MAIN_NON_COLLECTION_JOB_IDS
+    violations: list[str] = []
+    for jid in sorted(scheduled - known):
+        violations.append(
+            f"UNCLASSIFIED src/main job {jid!r}: not in data-collection nor non-collection set "
+            f"(classify it: register in JOB_REGISTRY, or add to _SRC_MAIN_NON_COLLECTION_JOB_IDS)"
+        )
+    for jid in sorted(_SRC_MAIN_DATA_COLLECTION_JOB_IDS):
+        if jid not in JOB_REGISTRY:
+            violations.append(f"UNREGISTERED src/main data-collection job {jid!r}: declared collection but missing from JOB_REGISTRY")
+    return violations
+
+
 def _orphan_callable_refs() -> list[str]:
     """Registry jobs whose callable_ref no longer exists as a `def` in its owner daemon.
 
@@ -119,6 +177,7 @@ def _orphan_callable_refs() -> list[str]:
     daemon_src = {
         "ingest_main": (REPO_ROOT / "src" / "ingest_main.py").read_text(encoding="utf-8"),
         "forecast_live_daemon": (REPO_ROOT / "src" / "ingest" / "forecast_live_daemon.py").read_text(encoding="utf-8"),
+        "main": _SRC_MAIN_FILE.read_text(encoding="utf-8"),
     }
     orphans: list[str] = []
     for job in JOB_REGISTRY.values():
@@ -135,10 +194,11 @@ def cmd_check() -> int:
     scheduled = _scheduled_job_ids()
     registered = set(JOB_REGISTRY)
 
-    missing = sorted(scheduled - registered)          # scheduled but unregistered
+    missing = sorted(scheduled - registered)          # scheduled but unregistered (ingest daemons)
     orphans = _orphan_callable_refs()                 # registered but callable deleted
+    src_main = _src_main_partition_violations()        # src/main collection/non-collection partition
 
-    if missing or orphans:
+    if missing or orphans or src_main:
         if missing:
             print(f"data_collection_inventory --check: {len(missing)} scheduled job(s) NOT in registry:")
             for j in missing:
@@ -147,12 +207,17 @@ def cmd_check() -> int:
             print(f"data_collection_inventory --check: {len(orphans)} registry job(s) with ORPHAN callable_ref:")
             for o in orphans:
                 print(f"  ORPHAN: {o}")
+        if src_main:
+            print(f"data_collection_inventory --check: {len(src_main)} src/main partition violation(s):")
+            for v in src_main:
+                print(f"  {v}")
         return 1
 
-    extra = len(registered) - len(scheduled)          # startup-catch-up / direct-call jobs
+    extra = len(registered) - len(scheduled)          # startup-catch-up / direct-call / src-main / long-running jobs
     print(
-        f"data_collection_inventory --check: OK — {len(scheduled)} scheduled add_job id(s) registered, "
-        f"plus {extra} direct-call/startup job(s) ({len(registered)} total); no orphan callables."
+        f"data_collection_inventory --check: OK — {len(scheduled)} ingest-daemon scheduled add_job id(s) "
+        f"registered, plus {extra} direct-call/startup/src-main/long-running job(s) ({len(registered)} "
+        f"total); src/main partition clean; no orphan callables."
     )
     return 0
 

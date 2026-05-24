@@ -32,6 +32,52 @@ def test_inventory_check_passes() -> None:
     assert cmd_check() == 0
 
 
+def test_all_data_collection_add_jobs_across_ingest_forecast_and_main_are_registered() -> None:
+    """PR #329 review B acceptance: scan ALL THREE daemons — ingest_main, forecast_live_daemon,
+    AND src/main — and require every data-collection job to be registered. For src/main the
+    data-collection set is declared (not inferred); each declared id must be in JOB_REGISTRY.
+    RED before this PR: src/main collectors (market_discovery/venue_heartbeat/harvester/wu_daily)
+    were not in JOB_REGISTRY at all."""
+    from scripts.data_collection_inventory import (
+        _SRC_MAIN_DATA_COLLECTION_JOB_IDS,
+        _scheduled_job_ids,
+    )
+    from src.data.source_job_registry import JOB_REGISTRY
+
+    # ingest_main + forecast_live: every scheduled id registered (strict mirror)
+    assert _scheduled_job_ids() <= set(JOB_REGISTRY)
+    # src/main declared data-collection jobs: all registered
+    assert _SRC_MAIN_DATA_COLLECTION_JOB_IDS <= set(JOB_REGISTRY), (
+        f"src/main data-collection jobs missing from registry: "
+        f"{sorted(_SRC_MAIN_DATA_COLLECTION_JOB_IDS - set(JOB_REGISTRY))}"
+    )
+    # the long-running user-WS ingestor (not an add_job) is covered too:
+    assert "user_ws_ingestor" in JOB_REGISTRY
+    assert JOB_REGISTRY["user_ws_ingestor"].dispatch_kind == "long_running"
+
+
+def test_src_main_partition_requires_every_scheduled_job_classified() -> None:
+    """ANTIBODY (advisor point 4): every scheduled add_job id in src/main must be in exactly one
+    of {data-collection (registered), explicit non-collection}. A new unclassified job fails
+    --check, forcing a conscious decision — so a future data collector added to the trading daemon
+    can't silently escape registry coverage."""
+    from scripts.data_collection_inventory import (
+        _SRC_MAIN_DATA_COLLECTION_JOB_IDS,
+        _SRC_MAIN_FILE,
+        _SRC_MAIN_NON_COLLECTION_JOB_IDS,
+        _scheduled_ids_in,
+        _src_main_partition_violations,
+    )
+
+    assert _src_main_partition_violations() == []
+    # the partition is total over src/main's statically-resolvable scheduled ids:
+    scheduled = _scheduled_ids_in((_SRC_MAIN_FILE,))
+    known = _SRC_MAIN_DATA_COLLECTION_JOB_IDS | _SRC_MAIN_NON_COLLECTION_JOB_IDS
+    assert scheduled <= known, f"unclassified src/main jobs: {sorted(scheduled - known)}"
+    # execution/chain ops are explicitly NON-collection (not falsely registered as collectors):
+    assert {"redeem_submitter", "wrap_submitter", "deployment_freshness"} <= _SRC_MAIN_NON_COLLECTION_JOB_IDS
+
+
 def test_dict_unpacked_forecast_live_ids_are_extracted() -> None:
     """ANTIBODY (PR #329 review P1): forecast_live_daemon schedules via
     ``add_job(func, trigger, **kwargs)`` where the id lives inside a job-spec DICT

@@ -89,6 +89,13 @@ def build_job_specs(owner_daemon: Optional[str] = None) -> list[JobBuildSpec]:
     """
     specs: list[JobBuildSpec] = []
     for j in JOB_REGISTRY.values():
+        # COVER vs BUILD (PR #329 review A): the registry-built scheduler is for the two INGEST
+        # daemons only. src/main (the trading daemon) is COVERED in the registry for inventory /
+        # frontier / singleton, but its hand-coded scheduler is never rebuilt — so its jobs must
+        # not be emitted as build specs. Long-running jobs (the user-WS thread) are not add_job'able
+        # at all. Either would, if built, double-schedule a live producer.
+        if j.owner_daemon == "main" or j.dispatch_kind == "long_running":
+            continue
         if owner_daemon is not None and j.owner_daemon != owner_daemon:
             continue
         ec = executor_class_for(j)

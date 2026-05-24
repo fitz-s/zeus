@@ -3,20 +3,23 @@
 # Authority basis: operator "Zeus Data Ingest + Collection Efficiency Refactor" spec §7
 #   (Job registry) + §4 (scheduler/ownership map); docs/operations/current/plans/data_temporal_kernel/PLAN.md;
 #   extracted from src/ingest_main.py + src/ingest/forecast_live_daemon.py add_job() calls (2026-05-24).
-"""Machine-readable inventory of every scheduled data-collection job — PR3 (advisory).
+"""Machine-readable inventory of every data-collection job — PR3 + PR #329 review B.
 
-SCOPE (PR review #329 C): this registry mirrors the two K2 INGEST daemons only —
-``src/ingest_main.py`` and ``src/ingest/forecast_live_daemon.py``. It does NOT yet cover the
-data-collection jobs scheduled in ``src/main.py`` (the trading-lane daemon): ``market_discovery``
-(Gamma topology + CLOB executable-snapshot capture), ``venue_heartbeat``, the user-WS ingestor,
-``harvester``, ``wu_daily``. So this is a *forecast/observation ingest-daemon* inventory, NOT a
-complete Zeus data-collection inventory; the Polymarket/CLOB/venue live collectors are a tracked
-future addition (add with source_ids polymarket_gamma/clob/data_api/user_ws). Do not read a clean
-``--check`` as "all data collection is registered".
+SCOPE: this registry now covers ALL THREE daemons' data-collection jobs —
+``src/ingest_main.py``, ``src/ingest/forecast_live_daemon.py`` (the K2 ingest daemons) AND the
+data-collection jobs of ``src/main.py`` (the trading daemon): ``market_discovery`` (Gamma
+topology + CLOB executable snapshots), ``venue_heartbeat``, the user-WS ingestor (a long-running
+thread, ``dispatch_kind='long_running'``), ``harvester``, ``wu_daily``. The trading-cycle modes
+(opening_hunt / day0_capture / imminent_open_capture / update_reaction) and the execution/chain
+ops (redeem_* / wrap_* / deployment_freshness / heartbeat) are NOT data collection and are NOT
+registered here — they are the explicit non-collection set in data_collection_inventory.py.
 
-PR3 does NOT replace the scheduler. It declares, in one typed place, every job the two
-daemons (``src/ingest_main.py``, ``src/ingest/forecast_live_daemon.py``) currently register —
-owner, role, current executor, whether it writes a DB, lock key — so:
+COVER vs BUILD (PR #329 review A): registry coverage of ``src/main`` is for inventory + frontier
++ singleton enforcement only. ``src/main`` keeps its hand-coded trading scheduler — only the two
+ingest daemons build their scheduler FROM this registry. The trading loop is never rebuilt.
+
+This registry declares, in one typed place, every data-collection job across the three daemons —
+owner, role, current executor, whether it writes a DB, source(s), family, dispatch kind — so:
 
   * the inventory CLI can render the source/job/table matrix,
   * the efficiency audit can flag structural problems (a DB writer on the file-only "fast"
@@ -35,6 +38,18 @@ from typing import Literal, Optional
 
 Role = Literal["live", "backfill", "shadow", "settlement", "derived", "diagnostic"]
 Executor = Literal["default", "fast"]  # the CURRENT two APScheduler executors in ingest_main
+# How the daemon dispatches the job (PR #329 review B; advisor point 2). The user-WS ingestor is
+# NOT an add_job — it is a long-running thread (src/main._start_user_channel_ingestor_if_enabled),
+# so frontier/singleton coverage must model it without pretending it is a scheduled job.
+DispatchKind = Literal["scheduled", "long_running", "startup"]
+
+# Data family for cross-source coverage (PR #329 review C). Each family has its OWN truth table /
+# freshness / readiness semantics — the frontier federates over these, it does NOT force every
+# family onto the forecast source_run model.
+Family = Literal[
+    "forecast", "observation", "solar", "market_topology", "executable_market",
+    "venue_user_ws", "settlement", "diagnostic",
+]
 
 
 @dataclass(frozen=True)
@@ -42,7 +57,7 @@ class SourceJobSpec:
     """One scheduled job's declared identity + classification (mirror of current reality)."""
 
     job_id: str
-    owner_daemon: str                       # "ingest_main" | "forecast_live_daemon"
+    owner_daemon: str                       # "ingest_main" | "forecast_live_daemon" | "main"
     role: Role
     current_executor: Executor
     writes_db: bool                         # audited: does the tick write a canonical DB?
@@ -53,6 +68,8 @@ class SourceJobSpec:
     file_only: bool = False                 # writes only files/JSON (safe for fast/io executor)
     owner_gated: bool = False               # registration is conditional (e.g. OpenData ownership env)
     misfire_grace_time: Optional[int] = None  # real APScheduler grace (sec); None = adapter default
+    dispatch_kind: DispatchKind = "scheduled"  # scheduled add_job | long_running thread | startup one-shot
+    family: Optional[Family] = None         # data family (coverage/frontier federation key, PR #329 C)
     notes: str = ""
 
     @property
@@ -70,33 +87,36 @@ class SourceJobSpec:
 
 _INGEST_MAIN: tuple[SourceJobSpec, ...] = (
     SourceJobSpec("ingest_k2_daily_obs", "ingest_main", "live", "default", True,
-                  source_id="wu_icao_history", callable_ref="_k2_daily_obs_tick"),
+                  source_id="wu_icao_history", callable_ref="_k2_daily_obs_tick", family="observation"),
     SourceJobSpec("ingest_k2_hourly_instants", "ingest_main", "live", "default", True,
-                  callable_ref="_k2_hourly_instants_tick"),
+                  callable_ref="_k2_hourly_instants_tick", family="observation"),
     SourceJobSpec("ingest_k2_solar_daily", "ingest_main", "derived", "default", True,
-                  source_id="openmeteo_archive", callable_ref="_k2_solar_daily_tick"),
+                  source_id="openmeteo_archive", callable_ref="_k2_solar_daily_tick", family="solar"),
     SourceJobSpec("ingest_k2_forecasts_daily", "ingest_main", "live", "default", True,
-                  callable_ref="_k2_forecasts_daily_tick"),
+                  callable_ref="_k2_forecasts_daily_tick", family="forecast"),
     SourceJobSpec("ingest_k2_hole_scanner", "ingest_main", "backfill", "default", True,
                   callable_ref="_k2_hole_scanner_tick"),
     SourceJobSpec("ingest_k2_obs_v2", "ingest_main", "live", "default", True,
                   source_ids=("wu_icao_history", "ogimet_metar"),
-                  callable_ref="_k2_obs_v2_tick", notes="multi-source: WU ICAO + Ogimet METAR via tier router"),
+                  callable_ref="_k2_obs_v2_tick", family="observation",
+                  notes="multi-source: WU ICAO + Ogimet METAR via tier router"),
     SourceJobSpec("ingest_k2_hko_tick", "ingest_main", "live", "default", True,
-                  source_id="hko_daily_api", callable_ref="_k2_hko_tick",
+                  source_id="hko_daily_api", callable_ref="_k2_hko_tick", family="observation",
                   notes="job id ingest_k2_hko_tick (aligned to callable by upstream #324 HKO "
                         "job-id boot-crash fix); callable _k2_hko_tick"),
     SourceJobSpec("ingest_etl_recalibrate", "ingest_main", "derived", "default", True,
                   callable_ref="_etl_recalibrate"),
     SourceJobSpec("ingest_harvester_truth_writer", "ingest_main", "settlement", "default", True,
-                  source_id="polymarket_gamma", callable_ref="_harvester_truth_writer_tick"),
+                  source_id="polymarket_gamma", callable_ref="_harvester_truth_writer_tick", family="settlement"),
     SourceJobSpec("ingest_automation_analysis", "ingest_main", "derived", "default", True,
                   callable_ref="_automation_analysis_cycle"),
     SourceJobSpec("ingest_opendata_daily_mx2t6", "ingest_main", "live", "default", True,
-                  source_id="ecmwf_open_data", callable_ref="_opendata_mx2t6_cycle", owner_gated=True, misfire_grace_time=3600,
+                  source_id="ecmwf_open_data", callable_ref="_opendata_mx2t6_cycle", owner_gated=True,
+                  misfire_grace_time=3600, family="forecast",
                   notes="registered only when ingest_main owns OpenData (ZEUS_FORECAST_LIVE_OWNER!=forecast_live)"),
     SourceJobSpec("ingest_opendata_daily_mn2t6", "ingest_main", "live", "default", True,
-                  source_id="ecmwf_open_data", callable_ref="_opendata_mn2t6_cycle", owner_gated=True, misfire_grace_time=3600,
+                  source_id="ecmwf_open_data", callable_ref="_opendata_mn2t6_cycle", owner_gated=True,
+                  misfire_grace_time=3600, family="forecast",
                   notes="registered only when ingest_main owns OpenData"),
     SourceJobSpec("ingest_tigge_archive_backfill", "ingest_main", "backfill", "default", True,
                   source_id="tigge", callable_ref="_tigge_archive_backfill_cycle", misfire_grace_time=3600),
@@ -120,13 +140,15 @@ _INGEST_MAIN: tuple[SourceJobSpec, ...] = (
                   notes="writes state/daemon-heartbeat-ingest.json only"),
     SourceJobSpec("ingest_uma_resolution_listener", "ingest_main", "settlement", "fast", True,
                   source_id="polymarket_uma_oo_v2", callable_ref="_uma_resolution_listener_tick",
+                  family="settlement",
                   notes="AUDIT FLAG: writes DB (record_resolution) on the file-only 'fast' executor; "
                         "historical UMA era (pre-2026-02-21). PR8 moves DB-write off fast."),
     SourceJobSpec("ingest_etl_forecast_skill", "ingest_main", "derived", "default", True,
                   callable_ref="_etl_forecast_skill_tick"),
     SourceJobSpec("ingest_market_scan", "ingest_main", "live", "default", True,
                   source_id="polymarket_gamma", source_ids=("polymarket_gamma", "polymarket_clob"),
-                  callable_ref="_market_scan_tick", notes="multi-source: Gamma topology + CLOB snapshots"),
+                  callable_ref="_market_scan_tick", family="market_topology",
+                  notes="multi-source: Gamma topology + CLOB snapshots"),
     SourceJobSpec("ingest_oracle_bridge", "ingest_main", "derived", "fast", False,
                   callable_ref="_bridge_oracle_tick", file_only=True,
                   notes="writes data/oracle_error_rates.json artifact; verify file-only (PR8)"),
@@ -155,7 +177,43 @@ _FORECAST_LIVE: tuple[SourceJobSpec, ...] = (
                   file_only=True),
 )
 
-JOB_REGISTRY: dict[str, SourceJobSpec] = {j.job_id: j for j in (*_INGEST_MAIN, *_FORECAST_LIVE)}
+# ---------------------------------------------------------------------------
+# src/main.py — the TRADING daemon. PR #329 review B: registry must cover its data-collection
+# jobs too (it previously excluded them). These are COVERED for inventory/frontier/singleton —
+# src/main keeps its hand-coded scheduler (only ingest_main + forecast_live build-from-registry;
+# the trading loop is NOT rebuilt). Only the operator-listed data-collection surfaces are here:
+# market_discovery, venue_heartbeat, user-WS, harvester, wu_daily. The trading-cycle modes
+# (opening_hunt/day0_capture/imminent_open_capture/update_reaction) and the execution/chain ops
+# (redeem_*/wrap_*/deployment_freshness/heartbeat) are NOT data collection — they are declared as
+# the explicit non-collection set in scripts/data_collection_inventory.py, not registered here.
+# ---------------------------------------------------------------------------
+_SRC_MAIN: tuple[SourceJobSpec, ...] = (
+    SourceJobSpec("market_discovery", "main", "live", "default", True,
+                  source_id="polymarket_gamma", source_ids=("polymarket_gamma", "polymarket_clob"),
+                  callable_ref="_market_discovery_cycle", family="executable_market",
+                  notes="Gamma topology + CLOB executable-market snapshots -> trade DB"),
+    SourceJobSpec("venue_heartbeat", "main", "live", "default", False,
+                  source_id="polymarket_clob", callable_ref="_start_venue_heartbeat_loop_if_needed",
+                  family="venue_user_ws", file_only=True,
+                  notes="CLOB auth/readiness/venue status loop starter; writes venue-status state"),
+    SourceJobSpec("harvester", "main", "derived", "default", True,
+                  source_id="polymarket_gamma", callable_ref="_harvester_cycle", family=None,
+                  notes="trading-side P&L resolver: READS forecasts.settlements (produced by "
+                        "ingest_harvester_truth_writer) + writes decision_log. CONSUMER of settlement "
+                        "truth, NOT a producer — so it does not own the settlement family (verified "
+                        "2026-05-24: producer/consumer split, not dual-production)."),
+    SourceJobSpec("wu_daily", "main", "live", "default", True,
+                  source_id="wu_icao_history", callable_ref="_wu_daily_dispatch", family="observation",
+                  notes="K2 WU daily observation collection; WuDailyScheduler gates per-city"),
+    SourceJobSpec("user_ws_ingestor", "main", "live", "default", True,
+                  source_id="polymarket_user_ws", callable_ref="_start_user_channel_ingestor_if_enabled",
+                  dispatch_kind="long_running", family="venue_user_ws",
+                  notes="long-running THREAD (not add_job): user-channel WS -> market_events_v2 order/trade facts"),
+)
+
+JOB_REGISTRY: dict[str, SourceJobSpec] = {
+    j.job_id: j for j in (*_INGEST_MAIN, *_FORECAST_LIVE, *_SRC_MAIN)
+}
 
 
 def jobs_by_owner(owner_daemon: str) -> list[SourceJobSpec]:
@@ -169,6 +227,60 @@ def fast_executor_db_writers() -> list[SourceJobSpec]:
     single-writer lock). Any job here with writes_db=True violates that contract.
     """
     return [j for j in JOB_REGISTRY.values() if j.current_executor == "fast" and j.writes_db]
+
+
+def live_producing_jobs() -> list[SourceJobSpec]:
+    """Jobs that LIVE-produce a data family (role live or settlement; not backfill/startup).
+
+    Excludes owner_gated jobs (OpenData): those are intentionally registered on BOTH ingest
+    daemons but are mutually exclusive at runtime via active_opendata_owner / assert_opendata_
+    singleton — the OpenData singleton already guarantees one live owner, so they must not be
+    double-counted as a cross-family duplicate here (PR #329 review E)."""
+    return [
+        j for j in JOB_REGISTRY.values()
+        if j.role in ("live", "settlement")
+        and not j.owner_gated
+        and j.dispatch_kind != "startup"
+        and not j.job_id.endswith("startup_catch_up")
+    ]
+
+
+# Known-safe duplicate live producers (PR #329 review E). Each entry is a (family, source_id)
+# pair produced by >1 daemon ON PURPOSE, with the reason it is NOT a singleton violation. The
+# duplicate check below treats these as acknowledged; anything NOT here is a real violation that
+# forces an ownership decision. Keep this list short and every entry justified — a dead entry
+# (no live collision) is itself a lint smell, so only add one when the collision is real + safe.
+_ACKNOWLEDGED_DUPLICATE_LIVE_OWNERS: dict[tuple[str, str], str] = {
+    # (none currently — the market_events_v2 topology overlap is a TABLE-level idempotent
+    # secondary write, not a FAMILY-authority duplicate: market_scan owns market_topology,
+    # market_discovery owns executable_market, so they do not collide at the family grain.)
+}
+
+
+def duplicate_live_family_owners() -> dict[tuple[str, str], list[str]]:
+    """(family, source_id) pairs produced LIVE by >1 distinct owner_daemon (PR #329 review E).
+
+    Returns the FULL map of candidate duplicates (including acknowledged ones) keyed by
+    (family, source_id) -> sorted distinct owner daemons. Only jobs that declare a ``family``
+    are considered (an untyped live job cannot be checked for cross-family ownership)."""
+    owners: dict[tuple[str, str], set[str]] = {}
+    for j in live_producing_jobs():
+        if j.family is None:
+            continue
+        for src in (j.all_source_ids or ((j.source_id,) if j.source_id else ())):
+            owners.setdefault((j.family, src), set()).add(j.owner_daemon)
+    return {k: sorted(v) for k, v in owners.items() if len(v) > 1}
+
+
+def unacknowledged_duplicate_live_owners() -> dict[tuple[str, str], list[str]]:
+    """Duplicate live producers NOT in the acknowledged allow-list — real singleton violations.
+
+    This is the fail-closed E gate: after registry activation, no data family+source may have
+    more than one live owner daemon unless it is an explicitly justified idempotent overlap."""
+    return {
+        k: v for k, v in duplicate_live_family_owners().items()
+        if k not in _ACKNOWLEDGED_DUPLICATE_LIVE_OWNERS
+    }
 
 
 def opendata_owners() -> list[SourceJobSpec]:
