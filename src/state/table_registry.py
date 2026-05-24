@@ -534,7 +534,7 @@ def assert_writer_jobs_registered(ingest_main_source: str | None = None) -> None
         if add_id not in wired_jobs:
             missing_wiring.append(
                 f"  table '{table_name}' declares daemon_writer='{raw_job_id}' "
-                f"but no _scheduler.add_job(..., id='{add_id}') found in ingest_main.py"
+                f"but no scheduler job wiring (add_job / spec id='{add_id}') found in ingest_main.py"
             )
 
     # Internal code consistency (excluding known daemon-infrastructure jobs with no table registry mappings)
@@ -547,7 +547,7 @@ def assert_writer_jobs_registered(ingest_main_source: str | None = None) -> None
         if add_id not in wired_jobs:
             missing_wiring.append(
                 f"  @_scheduler_job('{dec_id}') is present but no matching "
-                f"_scheduler.add_job(..., id='{add_id}') found"
+                f"scheduler job wiring (add_job / spec id='{add_id}') found"
             )
 
     for add_id in sorted(wired_jobs):

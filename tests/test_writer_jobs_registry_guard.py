@@ -1,3 +1,7 @@
+# Lifecycle: created=2026-05-24; last_reviewed=2026-05-24; last_reused=never
+# Purpose: Boot-path coverage for assert_writer_jobs_registered — guard must accept the PR #329
+#   registry spec-list wiring (dict(id=)) and still fail a genuinely unwired writer.
+# Reuse: Inspect src/state/table_registry.py + src/ingest_main.py::_ingest_main_job_specs first.
 # Created: 2026-05-24
 # Last reused or audited: 2026-05-24
 # Authority basis: PR #329 A (registry-built scheduler replaces hand-coded add_job);
