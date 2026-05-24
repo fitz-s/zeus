@@ -386,9 +386,14 @@ state_machines:
       - QUARANTINE
       - IGNORE_IF_LIVE_CLOSED
       - BACKFILL_ONLY
+      - DERIVED_FROM_DISSEMINATION   # source_time_frontier authority_tier values (PR #329 D)
+      - BACKFILL
+      - RECONSTRUCTED
+      - UNVERIFIED
     invariant_tests:
       - tests/test_collection_frontier.py
       - tests/test_temporal_provenance_and_lanes.py
+      - tests/test_frontier_store.py
 
 schema_objects:
   authority_fabricating_defaults:
