@@ -101,12 +101,39 @@ def cmd_scheduler_preview(forecast_live_owner: str) -> int:
     return 0
 
 
+def cmd_executor_plan() -> int:
+    """Dry-run: show the executor class each job would get under the registry-built scheduler
+    (PR6). Read-only; the live daemon is unaffected unless ZEUS_SCHEDULER_REGISTRY_ENABLED=1."""
+    from src.data.scheduler_adapter import (
+        build_job_specs,
+        scheduler_registry_enabled,
+        validate_executor_assignment,
+    )
+
+    specs = build_job_specs()
+    print(f"registry-built scheduler enabled: {scheduler_registry_enabled()} (flag default off)")
+    violations = validate_executor_assignment(specs)
+    print(f"executor-assignment violations: {len(violations)}")
+    for v in violations:
+        print(f"  VIOLATION: {v}")
+    print()
+    header = f"{'JOB_ID':44} {'EXECUTOR':12} {'INST':>4} {'COALESCE':9} OWNER"
+    print(header)
+    print("-" * len(header))
+    for s in sorted(specs, key=lambda x: (x.executor_class, x.job_id)):
+        print(f"{s.job_id:44.44} {s.executor_class:12} {s.max_instances:>4} "
+              f"{str(s.coalesce):9} {s.owner_daemon}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description="Data-collection job inventory (advisory).")
     p.add_argument("--check", action="store_true", help="fail if a scheduled job is unregistered")
     p.add_argument("--json", action="store_true", help="emit JSON")
     p.add_argument("--scheduler-preview", action="store_true",
                    help="dry-run: show jobs active under --forecast-live-owner")
+    p.add_argument("--executor-plan", action="store_true",
+                   help="dry-run: show registry-assigned executor class per job (PR6)")
     p.add_argument("--forecast-live-owner", default="ingest_main",
                    help="ZEUS_FORECAST_LIVE_OWNER value to preview (default: ingest_main)")
     args = p.parse_args(argv)
@@ -114,6 +141,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_check()
     if args.scheduler_preview:
         return cmd_scheduler_preview(args.forecast_live_owner)
+    if args.executor_plan:
+        return cmd_executor_plan()
     return cmd_render(args.json)
 
 
