@@ -2354,6 +2354,7 @@ def _build_executable_tradeability_status(
     accepting_orders: bool | None,
     child_active: bool,
     child_closed: bool | None,
+    require_explicit_clob_tradeability: bool = False,
 ) -> ExecutableTradeabilityStatus:
     """Build the scanner/snapshot shared tradeability authority object."""
 
@@ -2363,7 +2364,7 @@ def _build_executable_tradeability_status(
     if raw_child_active is None:
         raw_child_active = _boolish_market_field(gamma_market_raw, "active", "isActive")
     clob_archived = _boolish_market_field(raw_clob_market, "archived", "isArchived")
-    if clob_archived is None:
+    if clob_archived is None and not require_explicit_clob_tradeability:
         clob_archived = False
     clob_enable_order_book = _boolish_market_field(
         raw_clob_market,
@@ -2371,7 +2372,7 @@ def _build_executable_tradeability_status(
         "enableOrderBook",
         "orderbookEnabled",
     )
-    if clob_enable_order_book is None:
+    if clob_enable_order_book is None and not require_explicit_clob_tradeability:
         clob_enable_order_book = True
 
     executable_allowed = bool(
@@ -2381,8 +2382,12 @@ def _build_executable_tradeability_status(
     )
     if accepting_orders is not True:
         reason = "accepting_orders_not_true"
+    elif clob_archived is None:
+        reason = "clob_archived_missing"
     elif clob_archived is not False:
         reason = "clob_archived"
+    elif clob_enable_order_book is None:
+        reason = "clob_orderbook_status_missing"
     elif clob_enable_order_book is not True:
         reason = "clob_orderbook_disabled"
     else:
@@ -2482,6 +2487,10 @@ def capture_executable_market_snapshot(
     gamma_market_raw = outcome.get("gamma_market_raw")
     if not isinstance(gamma_market_raw, dict):
         gamma_market_raw = _minimal_gamma_payload(market, outcome)
+    reconstructed_tradability = (
+        str(gamma_market_raw.get("tradability_authority") or "").strip()
+        == "persisted_snapshot_reconstruction"
+    )
 
     active = _optional_bool_fact((outcome, gamma_market_raw), ("active", "isActive"), default=False)
     child_closed = _boolish_market_field(outcome, "closed", "isClosed")
@@ -2493,10 +2502,20 @@ def capture_executable_market_snapshot(
     accepting_orders = _boolish_market_field(outcome, "accepting_orders", "acceptingOrders")
     if accepting_orders is None:
         accepting_orders = _boolish_market_field(gamma_market_raw, "acceptingOrders", "accepting_orders")
-    if accepting_orders is not True or enable_orderbook is not True:
-        raise ExecutableSnapshotCaptureError("Gamma child market is not currently tradable")
 
     raw_clob_market = _fetch_clob_market_info(clob, condition_id)
+    if reconstructed_tradability:
+        accepting_orders = _boolish_market_field(raw_clob_market, "accepting_orders", "acceptingOrders")
+        clob_orderbook = _boolish_market_field(
+            raw_clob_market,
+            "enable_order_book",
+            "enableOrderBook",
+            "orderbookEnabled",
+        )
+        if clob_orderbook is not None:
+            enable_orderbook = clob_orderbook
+    elif accepting_orders is not True or enable_orderbook is not True:
+        raise ExecutableSnapshotCaptureError("Gamma child market is not currently tradable")
     raw_orderbook = _fetch_orderbook_snapshot(clob, selected_token)
     fee_details = _fetch_fee_details(clob, selected_token)
     _assert_clob_identity(
@@ -2515,6 +2534,7 @@ def capture_executable_market_snapshot(
         accepting_orders=accepting_orders,
         child_active=active,
         child_closed=child_closed,
+        require_explicit_clob_tradeability=reconstructed_tradability,
     )
     if not tradeability_status.executable_allowed:
         raise ExecutableSnapshotCaptureError(
@@ -2993,6 +3013,7 @@ def read_persisted_weather_markets(
                         "closed": bool(token_snapshot.get("closed")),
                         "enable_orderbook": bool(token_snapshot.get("enable_orderbook")),
                         "acceptingOrders": bool(token_snapshot.get("accepting_orders")),
+                        "tradability_authority": "persisted_snapshot_reconstruction",
                     },
                     "token_map_raw": _json_object(token_snapshot.get("token_map_json")),
                 }
@@ -3125,6 +3146,17 @@ def _snapshot_refresh_priority(
     return (2, open_age, time_to_resolution)
 
 
+def _snapshot_refresh_city_key(market: dict[str, Any]) -> str:
+    city = market.get("city")
+    name = getattr(city, "name", None)
+    if name:
+        return str(name)
+    if isinstance(city, str) and city.strip():
+        return city.strip()
+    slug = str(market.get("slug") or market.get("event_slug") or "")
+    return slug or "_unknown"
+
+
 def refresh_executable_market_substrate_snapshots(
     conn,
     *,
@@ -3161,17 +3193,16 @@ def refresh_executable_market_substrate_snapshots(
     cap_truncated = 0
     failures: list[dict[str, str]] = []
     seen_snapshot_sides: set[tuple[str, str]] = set()
+    candidate_cities: set[str] = set()
+    candidate_count = 0
 
-    # Group candidates by city slug for breadth-first interleaving.
-    # city_candidates: city_key → sorted list of (priority, ordinal, market, outcome, cid, dir)
+    # Group candidates by city for breadth-first interleaving.
+    # city_candidates: city_key -> sorted list of (priority, ordinal, market, outcome, cid, dir)
     city_candidates: dict[str, list[tuple]] = {}
     ordinal = 0
 
     for market in markets or []:
-        _city_obj = market.get("city")
-        city_key = getattr(_city_obj, "name", None) or (
-            _city_obj if isinstance(_city_obj, str) else None
-        ) or "_unknown"
+        city_key = _snapshot_refresh_city_key(market)
         for outcome in market.get("outcomes", []) or []:
             ordinal += 1
             condition_id = str(outcome.get("condition_id") or outcome.get("market_id") or "").strip()
@@ -3194,6 +3225,8 @@ def refresh_executable_market_substrate_snapshots(
                     skipped += 1
                     continue
                 seen_snapshot_sides.add(snapshot_side)
+                candidate_count += 1
+                candidate_cities.add(city_key)
                 city_candidates.setdefault(city_key, []).append(
                     (
                         _snapshot_refresh_priority(market, outcome, captured=captured),
@@ -3223,6 +3256,12 @@ def refresh_executable_market_substrate_snapshots(
         for city_list in per_city_sorted:
             if slot < len(city_list):
                 selected_candidates.append(city_list[slot])
+    selected_cities = {
+        _snapshot_refresh_city_key(market)
+        for _priority, _ordinal, market, _outcome, _condition_id, _direction in selected_candidates
+    }
+    inserted_cities: set[str] = set()
+    budget_truncated_cities: set[str] = set()
     deadline = time.monotonic() + _snapshot_budget_seconds_from_env(budget_seconds)
     budget_exhausted = False
     for index, (_priority, _ordinal, market, outcome, condition_id, direction) in enumerate(
@@ -3232,6 +3271,10 @@ def refresh_executable_market_substrate_snapshots(
             budget_exhausted = True
             cap_truncated += len(selected_candidates) - index
             skipped += len(selected_candidates) - index
+            budget_truncated_cities = {
+                _snapshot_refresh_city_key(remaining_market)
+                for _priority, _ordinal, remaining_market, _outcome, _condition_id, _direction in selected_candidates[index:]
+            }
             break
         attempted += 1
         decision = SimpleNamespace(
@@ -3253,17 +3296,36 @@ def refresh_executable_market_substrate_snapshots(
                 execution_side="BUY",
             )
             inserted += 1
+            inserted_cities.add(_snapshot_refresh_city_key(market))
         except Exception as exc:
             failed += 1
             if len(failures) < 3:
                 failures.append({"condition_id": condition_id, "error": str(exc)})
 
+    truncated = bool(candidate_count > len(selected_candidates) or cap_truncated > 0 or budget_exhausted)
+    if not candidate_count:
+        coverage_status = "NO_EXECUTABLE_CANDIDATES"
+    elif inserted == 0:
+        coverage_status = "NONE"
+    elif budget_exhausted or failed or inserted < len(selected_candidates) or len(inserted_cities) < len(candidate_cities):
+        coverage_status = "PARTIAL"
+    else:
+        coverage_status = "FULL"
     summary = {
+        "discovered_event_count": len(markets or []),
+        "executable_snapshot_candidate_count": candidate_count,
+        "selected_executable_snapshot_count": len(selected_candidates),
+        "executable_candidate_city_count": len(candidate_cities),
+        "selected_executable_city_count": len(selected_cities),
+        "fresh_executable_city_count": len(inserted_cities),
+        "budget_truncated_city_count": len(budget_truncated_cities),
+        "uncaptured_candidate_city_count": max(0, len(candidate_cities) - len(inserted_cities)),
+        "executable_substrate_coverage_status": coverage_status,
         "attempted": attempted,
         "inserted": inserted,
         "skipped": skipped,
         "failed": failed,
-        "truncated": int(cap_truncated > 0 or budget_exhausted),
+        "truncated": int(truncated),
         "budget_exhausted": int(budget_exhausted),
     }
     if failures:

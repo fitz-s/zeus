@@ -1,7 +1,7 @@
 # Created: 2026-04-27
-# Last reused/audited: 2026-05-21
+# Last reused/audited: 2026-05-24
 # Authority basis: R3 R1 settlement/redeem command ledger packet
-# Lifecycle: created=2026-04-27; last_reviewed=2026-05-21; last_reused=2026-05-21
+# Lifecycle: created=2026-04-27; last_reviewed=2026-05-24; last_reused=2026-05-24
 # Purpose: Lock R3 R1 redeem command durability, Q-FX-1 gating, and tx-hash recovery.
 # Reuse: Run for settlement/redeem, harvester redemption, collateral FX gate, or payout-asset changes.
 # Authority basis update: docs/operations/task_2026-05-21_live_side_effect_risk_boundaries/task.md P0-2 redeem side-effect transaction boundary.
@@ -119,6 +119,43 @@ class FakeWeb3:
         self.eth = FakeEth(receipts)
 
 
+STANDARD_CTF_PAYOUT_TOPIC = "0x2682012a4a4f1973119f1c9b90745d1bd91fa2bab387344f044cb3586864d18d"
+STANDARD_CTF_ADDRESS = "0x4d97dcd97ec945f40cf65f87097ace5ea0476045"
+
+
+def standard_ctf_receipt(
+    condition_id: str,
+    *,
+    tx_hash: str,
+    payout: int = 1_000_000,
+    block_number: int = 100,
+    data_condition_id: str | None = None,
+    index_sets: tuple[int, ...] = (1,),
+) -> dict:
+    condition_word = (data_condition_id or condition_id).lower().removeprefix("0x").rjust(64, "0")
+    words = [
+        condition_word,
+        f"{96:064x}",
+        f"{payout:064x}",
+        f"{len(index_sets):064x}",
+        *(f"{index_set:064x}" for index_set in index_sets),
+    ]
+    return {
+        "status": 1,
+        "blockNumber": block_number,
+        "transactionHash": tx_hash,
+        "logs": [
+            {
+                "address": STANDARD_CTF_ADDRESS,
+                "topics": [
+                    STANDARD_CTF_PAYOUT_TOPIC,
+                ],
+                "data": "0x" + "".join(words),
+            }
+        ],
+    }
+
+
 def states(conn, command_id):
     return [
         row["event_type"]
@@ -150,10 +187,11 @@ def test_redeem_lifecycle_atomic_states(conn, monkeypatch):
 
     monkeypatch.setenv("ZEUS_PUSD_FX_CLASSIFIED", FXClassification.FX_LINE_ITEM.value)
     allow_redemption(monkeypatch)
-    _insert_world_snapshot(conn, "condition-r1")  # Thread 3 fix: world schema required
+    condition_id = "0x" + "a" * 64
+    _insert_world_snapshot(conn, condition_id)  # Thread 3 fix: world schema required
 
     command_id = request_redeem(
-        "condition-r1",
+        condition_id,
         "pUSD",
         market_id="market-r1",
         pusd_amount_micro=1_250_000,
@@ -168,7 +206,7 @@ def test_redeem_lifecycle_atomic_states(conn, monkeypatch):
     assert command(conn, command_id)["tx_hash"] == "0xabc"
 
     [confirmed] = reconcile_pending_redeems(
-        FakeWeb3({"0xabc": {"status": 1, "blockNumber": 100, "transactionHash": "0xabc"}}),
+        FakeWeb3({"0xabc": standard_ctf_receipt(condition_id, tx_hash="0xabc", payout=1_250_000)}),
         conn,
     )
     row = command(conn, command_id)
@@ -470,16 +508,297 @@ def test_redeem_crash_after_tx_hash_recovers_by_chain_receipt(conn, monkeypatch)
 
     monkeypatch.setenv("ZEUS_PUSD_FX_CLASSIFIED", FXClassification.TRADING_PNL_INFLOW.value)
     allow_redemption(monkeypatch)
-    _insert_world_snapshot(conn, "condition-crash")  # Thread 3 fix: world schema required
-    command_id = request_redeem("condition-crash", "pUSD", market_id="market-crash", conn=conn, requested_at=NOW)
+    condition_id = "0x" + "b" * 64
+    _insert_world_snapshot(conn, condition_id)  # Thread 3 fix: world schema required
+    command_id = request_redeem(
+        condition_id,
+        "pUSD",
+        market_id="market-crash",
+        pusd_amount_micro=1_000_000,
+        conn=conn,
+        requested_at=NOW,
+    )
     submit_redeem(command_id, FakeRedeemAdapter({"success": True, "transaction_hash": "0xcrash"}), object(), conn=conn)
 
     # Simulated process crash/restart: recovery only needs the durable tx_hash anchor.
     assert command(conn, command_id)["state"] == SettlementState.REDEEM_TX_HASHED.value
-    results = reconcile_pending_redeems(FakeWeb3({"0xcrash": {"status": 1, "blockNumber": 109}}), conn)
+    results = reconcile_pending_redeems(
+        FakeWeb3({
+            "0xcrash": standard_ctf_receipt(
+                condition_id,
+                tx_hash="0xcrash",
+                block_number=109,
+            )
+        }),
+        conn,
+    )
 
     assert [result.state for result in results] == [SettlementState.REDEEM_CONFIRMED]
     assert command(conn, command_id)["confirmation_count"] == 2
+
+
+def test_standard_ctf_receipt_without_payout_log_requires_review(conn, monkeypatch):
+    from src.execution.settlement_commands import SettlementState, reconcile_pending_redeems, request_redeem, submit_redeem
+
+    monkeypatch.setenv("ZEUS_PUSD_FX_CLASSIFIED", FXClassification.TRADING_PNL_INFLOW.value)
+    allow_redemption(monkeypatch)
+    _insert_world_snapshot(conn, "condition-standard-no-proof", neg_risk=0)
+    command_id = request_redeem(
+        "condition-standard-no-proof",
+        "pUSD",
+        market_id="market-standard-no-proof",
+        conn=conn,
+        requested_at=NOW,
+    )
+    submit_redeem(command_id, FakeRedeemAdapter({"success": True, "transaction_hash": "0xstandardnop"}), object(), conn=conn)
+
+    [result] = reconcile_pending_redeems(
+        FakeWeb3({
+            "0xstandardnop": {
+                "status": 1,
+                "blockNumber": 109,
+                "transactionHash": "0xstandardnop",
+                "logs": [],
+            }
+        }),
+        conn,
+    )
+
+    assert result.state is SettlementState.REDEEM_REVIEW_REQUIRED
+    assert result.error_payload is not None
+    assert result.error_payload["errorCode"] == "REDEEM_STANDARD_CTF_REVIEW_REQUIRED"
+    assert command(conn, command_id)["state"] == SettlementState.REDEEM_REVIEW_REQUIRED.value
+
+
+def test_standard_ctf_receipt_wrong_condition_requires_review(conn, monkeypatch):
+    from src.execution.settlement_commands import SettlementState, reconcile_pending_redeems, request_redeem, submit_redeem
+
+    monkeypatch.setenv("ZEUS_PUSD_FX_CLASSIFIED", FXClassification.TRADING_PNL_INFLOW.value)
+    allow_redemption(monkeypatch)
+    condition_id = "0x" + "c" * 64
+    _insert_world_snapshot(conn, condition_id, neg_risk=0)
+    command_id = request_redeem(
+        condition_id,
+        "pUSD",
+        market_id="market-standard-wrong",
+        conn=conn,
+        requested_at=NOW,
+    )
+    submit_redeem(command_id, FakeRedeemAdapter({"success": True, "transaction_hash": "0xstandardwrong"}), object(), conn=conn)
+
+    [result] = reconcile_pending_redeems(
+        FakeWeb3({
+            "0xstandardwrong": standard_ctf_receipt(
+                condition_id,
+                tx_hash="0xstandardwrong",
+                data_condition_id="0x" + "9" * 64,
+            )
+        }),
+        conn,
+    )
+
+    assert result.state is SettlementState.REDEEM_REVIEW_REQUIRED
+    assert result.error_payload is not None
+    assert result.error_payload["errorCode"] == "REDEEM_STANDARD_CTF_WRONG_CONDITION"
+
+
+def test_standard_ctf_receipt_scans_past_unrelated_wrong_condition_log(conn, monkeypatch):
+    from src.execution.settlement_commands import SettlementState, reconcile_pending_redeems, request_redeem, submit_redeem
+
+    monkeypatch.setenv("ZEUS_PUSD_FX_CLASSIFIED", FXClassification.TRADING_PNL_INFLOW.value)
+    allow_redemption(monkeypatch)
+    condition_id = "0x" + "e" * 64
+    _insert_world_snapshot(conn, condition_id, neg_risk=0)
+    command_id = request_redeem(
+        condition_id,
+        "pUSD",
+        market_id="market-standard-multilog",
+        pusd_amount_micro=1_000_000,
+        conn=conn,
+        requested_at=NOW,
+    )
+    submit_redeem(command_id, FakeRedeemAdapter({"success": True, "transaction_hash": "0xstandardmulti"}), object(), conn=conn)
+    wrong_first = standard_ctf_receipt(
+        condition_id,
+        tx_hash="0xstandardmulti",
+        data_condition_id="0x" + "9" * 64,
+    )
+    correct_second = standard_ctf_receipt(condition_id, tx_hash="0xstandardmulti")
+    receipt = dict(wrong_first)
+    receipt["logs"] = [wrong_first["logs"][0], correct_second["logs"][0]]
+
+    [result] = reconcile_pending_redeems(
+        FakeWeb3({"0xstandardmulti": receipt}),
+        conn,
+    )
+
+    assert result.state is SettlementState.REDEEM_CONFIRMED
+    assert result.error_payload is None
+
+
+def test_standard_ctf_receipt_amount_mismatch_requires_review(conn, monkeypatch):
+    from src.execution.settlement_commands import SettlementState, reconcile_pending_redeems, request_redeem, submit_redeem
+
+    monkeypatch.setenv("ZEUS_PUSD_FX_CLASSIFIED", FXClassification.TRADING_PNL_INFLOW.value)
+    allow_redemption(monkeypatch)
+    condition_id = "0x" + "f" * 64
+    _insert_world_snapshot(conn, condition_id, neg_risk=0)
+    command_id = request_redeem(
+        condition_id,
+        "pUSD",
+        market_id="market-standard-underpaid",
+        pusd_amount_micro=2_520_000,
+        conn=conn,
+        requested_at=NOW,
+    )
+    submit_redeem(command_id, FakeRedeemAdapter({"success": True, "transaction_hash": "0xstandardunder"}), object(), conn=conn)
+
+    [result] = reconcile_pending_redeems(
+        FakeWeb3({
+            "0xstandardunder": standard_ctf_receipt(
+                condition_id,
+                tx_hash="0xstandardunder",
+                payout=1,
+            )
+        }),
+        conn,
+    )
+
+    assert result.state is SettlementState.REDEEM_REVIEW_REQUIRED
+    assert result.error_payload is not None
+    assert result.error_payload["errorCode"] == "REDEEM_STANDARD_CTF_AMOUNT_MISMATCH"
+    assert result.error_payload["expected_payout_micro"] == 2_520_000
+    assert result.error_payload["payout_from_receipt"] == 1
+
+
+def test_standard_ctf_receipt_amount_within_tolerance_confirms(conn, monkeypatch):
+    from src.execution.settlement_commands import SettlementState, reconcile_pending_redeems, request_redeem, submit_redeem
+
+    monkeypatch.setenv("ZEUS_PUSD_FX_CLASSIFIED", FXClassification.TRADING_PNL_INFLOW.value)
+    allow_redemption(monkeypatch)
+    condition_id = "0x" + "2" * 64
+    _insert_world_snapshot(conn, condition_id, neg_risk=0)
+    command_id = request_redeem(
+        condition_id,
+        "pUSD",
+        market_id="market-standard-tolerance",
+        pusd_amount_micro=2_520_000,
+        conn=conn,
+        requested_at=NOW,
+    )
+    submit_redeem(command_id, FakeRedeemAdapter({"success": True, "transaction_hash": "0xstandardtol"}), object(), conn=conn)
+
+    [result] = reconcile_pending_redeems(
+        FakeWeb3({
+            "0xstandardtol": standard_ctf_receipt(
+                condition_id,
+                tx_hash="0xstandardtol",
+                payout=2_519_000,
+            )
+        }),
+        conn,
+    )
+
+    assert result.state is SettlementState.REDEEM_CONFIRMED
+    assert result.error_payload is None
+
+
+def test_standard_ctf_receipt_missing_expected_amount_requires_review(conn, monkeypatch):
+    from src.execution.settlement_commands import SettlementState, reconcile_pending_redeems, request_redeem, submit_redeem
+
+    monkeypatch.setenv("ZEUS_PUSD_FX_CLASSIFIED", FXClassification.TRADING_PNL_INFLOW.value)
+    allow_redemption(monkeypatch)
+    condition_id = "0x" + "3" * 64
+    _insert_world_snapshot(conn, condition_id, neg_risk=0)
+    command_id = request_redeem(
+        condition_id,
+        "pUSD",
+        market_id="market-standard-missing-expected",
+        conn=conn,
+        requested_at=NOW,
+    )
+    submit_redeem(command_id, FakeRedeemAdapter({"success": True, "transaction_hash": "0xstandardmissing"}), object(), conn=conn)
+
+    [result] = reconcile_pending_redeems(
+        FakeWeb3({
+            "0xstandardmissing": standard_ctf_receipt(
+                condition_id,
+                tx_hash="0xstandardmissing",
+                payout=1_000_000,
+            )
+        }),
+        conn,
+    )
+
+    assert result.state is SettlementState.REDEEM_REVIEW_REQUIRED
+    assert result.error_payload is not None
+    assert result.error_payload["errorCode"] == "REDEEM_STANDARD_CTF_AMOUNT_MISSING"
+    assert result.error_payload["expected_payout_micro"] is None
+
+
+def test_standard_ctf_receipt_zero_payout_requires_review(conn, monkeypatch):
+    from src.execution.settlement_commands import SettlementState, reconcile_pending_redeems, request_redeem, submit_redeem
+
+    monkeypatch.setenv("ZEUS_PUSD_FX_CLASSIFIED", FXClassification.TRADING_PNL_INFLOW.value)
+    allow_redemption(monkeypatch)
+    condition_id = "0x" + "d" * 64
+    _insert_world_snapshot(conn, condition_id, neg_risk=0)
+    command_id = request_redeem(
+        condition_id,
+        "pUSD",
+        market_id="market-standard-zero",
+        conn=conn,
+        requested_at=NOW,
+    )
+    submit_redeem(command_id, FakeRedeemAdapter({"success": True, "transaction_hash": "0xstandardzero"}), object(), conn=conn)
+
+    [result] = reconcile_pending_redeems(
+        FakeWeb3({
+            "0xstandardzero": standard_ctf_receipt(
+                condition_id,
+                tx_hash="0xstandardzero",
+                payout=0,
+            )
+        }),
+        conn,
+    )
+
+    assert result.state is SettlementState.REDEEM_REVIEW_REQUIRED
+    assert result.error_payload is not None
+    assert result.error_payload["errorCode"] == "REDEEM_STANDARD_CTF_ZERO_PAYOUT"
+
+
+def test_standard_ctf_real_abi_zero_payout_with_nonzero_index_set_requires_review(conn, monkeypatch):
+    from src.execution.settlement_commands import SettlementState, reconcile_pending_redeems, request_redeem, submit_redeem
+
+    monkeypatch.setenv("ZEUS_PUSD_FX_CLASSIFIED", FXClassification.TRADING_PNL_INFLOW.value)
+    allow_redemption(monkeypatch)
+    condition_id = "0x" + "1" * 64
+    _insert_world_snapshot(conn, condition_id, neg_risk=0)
+    command_id = request_redeem(
+        condition_id,
+        "pUSD",
+        market_id="market-standard-abi-zero",
+        conn=conn,
+        requested_at=NOW,
+    )
+    submit_redeem(command_id, FakeRedeemAdapter({"success": True, "transaction_hash": "0xstandardabizero"}), object(), conn=conn)
+
+    [result] = reconcile_pending_redeems(
+        FakeWeb3({
+            "0xstandardabizero": standard_ctf_receipt(
+                condition_id,
+                tx_hash="0xstandardabizero",
+                payout=0,
+                index_sets=(1,),
+            )
+        }),
+        conn,
+    )
+
+    assert result.state is SettlementState.REDEEM_REVIEW_REQUIRED
+    assert result.error_payload is not None
+    assert result.error_payload["errorCode"] == "REDEEM_STANDARD_CTF_ZERO_PAYOUT"
 
 
 def test_redeem_failure_does_not_mark_position_settled(conn, monkeypatch):

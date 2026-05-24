@@ -840,6 +840,9 @@ def _evaluate_candidate(
     coverage_window_end_utc = _parse_utc(coverage.get("target_window_end_utc"))
     if coverage_window_start_utc is None or coverage_window_end_utc is None:
         return None, "COVERAGE_WINDOW_UNPARSEABLE"
+    source_cycle_time = _parse_utc(source_run.get("source_cycle_time"))
+    if source_cycle_time is None:
+        return None, "SOURCE_CYCLE_TIME_UNPARSEABLE"
 
     scope = ForecastTargetScope(
         city_id=city_id,
@@ -850,7 +853,7 @@ def _evaluate_candidate(
         data_version=data_version,
         target_window_start_utc=coverage_window_start_utc,
         target_window_end_utc=coverage_window_end_utc,
-        source_cycle_time=_parse_utc(source_run.get("source_cycle_time")) or now,
+        source_cycle_time=source_cycle_time,
         required_step_hours=expected_steps,
         market_refs=(condition_id,),
     )

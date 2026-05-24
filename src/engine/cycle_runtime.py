@@ -901,11 +901,10 @@ def _market_dict_from_snapshot(snapshot) -> dict:
     """Build the minimal Gamma ``market`` dict capture_executable_market_snapshot needs
     from a persisted executable snapshot's identity facts.
 
-    Market identity (condition/question/token ids, slug, neg_risk) does NOT go stale —
-    only the orderbook prices do, and those are re-fetched fresh from CLOB inside capture.
-    Tradability flags are asserted True here; the authoritative re-check is CLOB-side in
-    capture (tradeability_status / crossed-book / identity asserts), so a market that has
-    actually closed is still rejected there.
+    Market identity (condition/question/token ids, slug, neg_risk) does NOT go stale.
+    Tradability does. This payload is explicitly marked as reconstructed so
+    capture_executable_market_snapshot ignores stale Gamma accepting-order facts
+    and requires current CLOB archived/orderbook/accepting-orders authority.
     """
 
     def _iso(value):
@@ -921,9 +920,9 @@ def _market_dict_from_snapshot(snapshot) -> dict:
         "id": gamma_market_id,
         "conditionId": condition_id,
         "questionID": question_id,
+        "tradability_authority": "persisted_snapshot_reconstruction",
         "active": True,  # identity-pass only; CLOB re-checks tradeability_status authoritatively
         "closed": False,  # identity-pass only; CLOB re-checks tradeability_status authoritatively
-        "acceptingOrders": True,  # identity-pass only; CLOB re-checks tradeability_status authoritatively
         "enableOrderBook": True,  # identity-pass only; CLOB re-checks tradeability_status authoritatively
         "negRisk": neg_risk,
         "clobTokenIds": [yes_token, no_token],
@@ -940,7 +939,6 @@ def _market_dict_from_snapshot(snapshot) -> dict:
         # and _assert_clob_identity against live CLOB — those are the authoritative gates.
         "active": True,
         "closed": False,
-        "accepting_orders": True,
         "enable_orderbook": True,
         "executable": True,
         "neg_risk": neg_risk,

@@ -1,10 +1,10 @@
-# Lifecycle: created=2026-05-21; last_reviewed=2026-05-21; last_reused=2026-05-22
+# Lifecycle: created=2026-05-21; last_reviewed=2026-05-21; last_reused=2026-05-24
 # Purpose: Integrated money-path lifecycle replay across command, order, trade,
 #   position, settlement, redeem, and telemetry crash/restart boundaries.
 # Reuse: Run before live-money release claims or when touching execution,
 #   recovery, reconcile, settlement, decision-event, or no-trade state.
 # Created: 2026-05-21
-# Last reused/audited: 2026-05-22
+# Last reused/audited: 2026-05-24
 # Authority basis: docs/operations/task_2026-05-21_live_release_proof_p0p3/task.md P0-4
 """Integrated money-path lifecycle replay with crash/restart boundaries."""
 
@@ -308,6 +308,13 @@ def _write_position_current(conn: sqlite3.Connection) -> None:
 def _receipt(tx_hash: str) -> dict[str, object]:
     from src.venue.polymarket_v2_adapter import POLYGON_CTF_ADDRESS
 
+    words = [
+        "0" * 64,
+        f"{96:064x}",
+        f"{2_520_000:064x}",
+        f"{1:064x}",
+        f"{2:064x}",
+    ]
     return {
         "status": 1,
         "transactionHash": tx_hash,
@@ -315,8 +322,8 @@ def _receipt(tx_hash: str) -> dict[str, object]:
         "logs": [
             {
                 "address": POLYGON_CTF_ADDRESS.lower(),
-                "topics": [PAYOUT_TOPIC],
-                "data": "0x",
+                "topics": [PAYOUT_TOPIC, "cond-live"],
+                "data": "0x" + "".join(words),
             }
         ],
     }

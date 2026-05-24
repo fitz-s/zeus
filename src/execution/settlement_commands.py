@@ -1540,6 +1540,109 @@ def reconcile_pending_redeems(web3: Any, conn: sqlite3.Connection) -> list[Settl
                         )
                     )
                     continue
+            else:
+                _command_condition_id = str(row["condition_id"]).lower()
+                _standard_error_code: Optional[str] = None
+                _standard_payout: Optional[int] = None
+                _standard_condition_matched = False
+                _standard_topic_seen = False
+
+                for _log in receipt_payload.get("logs", []):
+                    _addr = _to_hex_str(_log.get("address") or "")
+                    if _addr != _stdctf_addr:
+                        continue
+                    _topics = _log.get("topics") or []
+                    if not _topics or _to_hex_str(_topics[0]) != _PAYOUT_REDEMPTION_TOPIC:
+                        continue
+                    _standard_topic_seen = True
+                    _condition_values = [_to_hex_str(topic) for topic in _topics[1:]]
+                    _raw_data = _log.get("data") or ""
+                    _data_hex = _to_hex_str(_raw_data) if _raw_data else ""
+                    if _data_hex.startswith("0x"):
+                        _data_hex = _data_hex[2:]
+                    _words = [
+                        _data_hex[i : i + 64]
+                        for i in range(0, len(_data_hex), 64)
+                        if len(_data_hex[i : i + 64]) == 64
+                    ]
+                    _condition_from_data = "0x" + _words[0].lower() if _words else ""
+                    if _command_condition_id not in _condition_values and _condition_from_data != _command_condition_id:
+                        continue
+                    _standard_condition_matched = True
+                    try:
+                        if len(_words) < 3:
+                            _standard_error_code = "REDEEM_STANDARD_CTF_REVIEW_REQUIRED"
+                            break
+                        _standard_payout = int(_words[2], 16)
+                        if _standard_payout == 0:
+                            _standard_error_code = "REDEEM_STANDARD_CTF_ZERO_PAYOUT"
+                            break
+                        _expected_raw = row["pusd_amount_micro"]
+                        if _expected_raw is None or int(_expected_raw) <= 0:
+                            _standard_error_code = "REDEEM_STANDARD_CTF_AMOUNT_MISSING"
+                            break
+                        _expected_payout = int(_expected_raw)
+                        _amount_diff = abs(_standard_payout - _expected_payout)
+                        _amount_tolerance = max(1, int(_expected_payout * 0.001))
+                        if _amount_diff > _amount_tolerance:
+                            _standard_error_code = "REDEEM_STANDARD_CTF_AMOUNT_MISMATCH"
+                            break
+                    except Exception:
+                        _standard_error_code = "REDEEM_STANDARD_CTF_REVIEW_REQUIRED"
+                        break
+                    break
+
+                if not _standard_condition_matched and _standard_error_code is None:
+                    _standard_error_code = (
+                        "REDEEM_STANDARD_CTF_REVIEW_REQUIRED"
+                        if not _standard_topic_seen
+                        else "REDEEM_STANDARD_CTF_WRONG_CONDITION"
+                    )
+
+                if _standard_error_code is not None:
+                    _review_error = {
+                        "errorCode": _standard_error_code,
+                        "condition_id": str(row["condition_id"]),
+                        "payout_from_receipt": _standard_payout,
+                        "expected_payout_micro": (
+                            int(row["pusd_amount_micro"])
+                            if row["pusd_amount_micro"] is not None
+                            else None
+                        ),
+                        "tx_hash": tx_hash,
+                    }
+                    logger.warning(
+                        "[%s] command_id=%s condition_id=%s payout_from_receipt=%s tx_hash=%s",
+                        _standard_error_code,
+                        row["command_id"],
+                        row["condition_id"],
+                        _standard_payout,
+                        tx_hash,
+                    )
+                    with _savepoint(conn):
+                        _transition(
+                            conn,
+                            str(row["command_id"]),
+                            SettlementState.REDEEM_REVIEW_REQUIRED,
+                            payload=receipt_payload,
+                            block_number=block_number,
+                            confirmation_count=confirmation_count,
+                            error_payload=_review_error,
+                            terminal=True,
+                            recorded_at=_coerce_time(None),
+                        )
+                    results.append(
+                        SettlementResult(
+                            str(row["command_id"]),
+                            SettlementState.REDEEM_REVIEW_REQUIRED,
+                            tx_hash=tx_hash,
+                            block_number=block_number,
+                            confirmation_count=confirmation_count,
+                            error_payload=_review_error,
+                            raw_response=receipt_payload,
+                        )
+                    )
+                    continue
 
             state_after = SettlementState.REDEEM_CONFIRMED
             error_payload = None

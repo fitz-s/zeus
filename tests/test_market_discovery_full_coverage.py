@@ -14,8 +14,8 @@ Three tests:
      each with <= per_city_limit snapshots.
   R2 (MARKET_DISCOVERY_CYCLE_USES_FULL_SCAN): _market_discovery_cycle calls
      find_weather_markets (tag-query path), not slug-only fallback.
-  HANG (CLOB_LATENCY_CANNOT_OVERRUN_BUDGET): even when each CLOB call sleeps 3s,
-     refresh_executable_market_substrate_snapshots completes under budget x 1.5.
+  HANG (CLOB_LATENCY_CANNOT_OVERRUN_BUDGET): simulated slow CLOB capture advances
+     the clock and refresh_executable_market_substrate_snapshots stops at budget.
 """
 from __future__ import annotations
 
@@ -247,6 +247,10 @@ def test_per_city_cap_applies_across_slugs_not_per_slug(monkeypatch):
         f"{CANDIDATES_PER_CITY_PRE_FIX} snapshots/city when {len(TARGET_DATES)} "
         f"dates × {len(METRICS)} metrics exist."
     )
+    assert summary["selected_executable_city_count"] == 30
+    assert summary["fresh_executable_city_count"] == 30
+    assert summary["budget_truncated_city_count"] == 0
+    assert summary["executable_substrate_coverage_status"] == "FULL"
 
 
 # ---------------------------------------------------------------------------
@@ -314,14 +318,14 @@ def test_market_discovery_cycle_calls_find_weather_markets_not_slug_only(monkeyp
 # HANG: CLOB latency cannot overrun wall-clock budget
 # ---------------------------------------------------------------------------
 
-def test_clob_latency_cannot_overrun_budget():
-    """HANG (CLOB_LATENCY_CANNOT_OVERRUN_BUDGET): even when each mock-capture
-    call sleeps 3s, the full refresh must complete under budget.
+def test_clob_latency_cannot_overrun_budget(monkeypatch):
+    """HANG (CLOB_LATENCY_CANNOT_OVERRUN_BUDGET): simulated slow mock-capture
+    advances the clock, and the full refresh must stop at budget.
 
     Design:
     - 10 cities x 1 slug each = 10 markets, each with 1 outcome.
     - per_city_limit=1, budget=10s (tight, forces early abort after ~3 captures).
-    - Each mock_capture sleeps 3s.
+    - Each mock_capture advances the monotonic clock by 3s.
 
     The budget gate (checked between each capture) aborts after ~3 captures
     regardless of CLOB latency. This proves the gate actually fires.
@@ -333,9 +337,9 @@ def test_clob_latency_cannot_overrun_budget():
 
     This is RED before budget gate is wired: without budget_seconds, the refresh
     would attempt all 10 cities (30s of sleep). With budget_seconds=10, it stops
-    after ~3 captures (~9-12s).
+    after ~4 simulated captures (~12s) without sleeping in CI.
     """
-    SLEEP_PER_CAPTURE = 3.0  # seconds per mock capture call
+    SLEEP_PER_CAPTURE = 3.0  # simulated seconds per mock capture call
     BUDGET_SECONDS = 10.0    # tight budget to force early abort
     MAX_ELAPSED_SECONDS = BUDGET_SECONDS + SLEEP_PER_CAPTURE + 2.0  # = 15s
 
@@ -343,15 +347,22 @@ def test_clob_latency_cannot_overrun_budget():
     markets = [_make_market(name, idx, metric="highest") for idx, name in enumerate(all_city_names, start=1)]
 
     capture_calls = []
+    fake_now = 0.0
+
+    def _fake_monotonic() -> float:
+        return fake_now
+
+    monkeypatch.setattr(ms.time, "monotonic", _fake_monotonic)
 
     def _slow_capture(conn, *, market, decision, clob, captured_at, scan_authority, execution_side="BUY"):
-        time.sleep(SLEEP_PER_CAPTURE)
+        nonlocal fake_now
+        fake_now += SLEEP_PER_CAPTURE
         capture_calls.append(market.get("slug", ""))
 
     clob = _make_clob_mock()
     conn = _make_in_memory_trade_db()
 
-    t0 = time.monotonic()
+    t0 = ms.time.monotonic()
     with patch("src.data.market_scanner.capture_executable_market_snapshot", side_effect=_slow_capture):
         summary = refresh_executable_market_substrate_snapshots(
             conn,
@@ -362,7 +373,7 @@ def test_clob_latency_cannot_overrun_budget():
             budget_seconds=BUDGET_SECONDS,
             max_outcomes=1,
         )
-    elapsed = time.monotonic() - t0
+    elapsed = ms.time.monotonic() - t0
 
     assert elapsed < MAX_ELAPSED_SECONDS, (
         f"refresh must complete in < {MAX_ELAPSED_SECONDS:.1f}s even with "
@@ -375,14 +386,16 @@ def test_clob_latency_cannot_overrun_budget():
         f"budget_exhausted must be 1 when budget={BUDGET_SECONDS}s and each capture "
         f"takes {SLEEP_PER_CAPTURE}s. Got summary={summary}."
     )
+    assert summary.get("budget_truncated_city_count", 0) > 0, (
+        f"budget_truncated_city_count must count only cities not reached because "
+        f"the budget gate tripped. Got summary={summary}."
+    )
 
     # Must have attempted fewer than all 10 cities
     assert summary.get("attempted", 0) < 10, (
         f"Must abort before all 10 cities when budget={BUDGET_SECONDS}s. "
         f"attempted={summary.get('attempted')}, elapsed={elapsed:.1f}s."
     )
-
-
 # ---------------------------------------------------------------------------
 # P1-2: tag-fetch loop is bounded by wall-clock budget
 # ---------------------------------------------------------------------------
