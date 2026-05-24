@@ -839,6 +839,63 @@ def _attach_corrected_pricing_authority(
     return payload
 
 
+def _ensure_fresh_executable_snapshot(
+    conn,
+    snapshot_id: str,
+    *,
+    now: datetime,
+    clob: Any = None,
+    decision: Any = None,
+    market: dict | None = None,
+):
+    """Return a snapshot that satisfies the 30s freshness gate, re-capturing if stale.
+
+    Root cause (2026-05-24, docs/operations/EXEC_FRESHNESS_ROOTCAUSE_2026-05-24.md):
+    the 5-min mode run's discovery→reprice latency exceeds the 30s freshness window,
+    so the persisted cycle snapshot is already stale at submit and reprice raised
+    ``executable_snapshot_stale`` — killing real above-floor edges. The 30s gate is
+    correct (never submit on a stale book); the defect was reusing the cycle snapshot
+    instead of re-capturing fresh.
+
+    Behaviour:
+    - fresh persisted snapshot → returned as-is (no network).
+    - stale + a live CLOB client (and decision/market identity) → re-capture a fresh
+      single-market snapshot via the validated ``capture_executable_market_snapshot``
+      primitive and return it.
+    - stale + no client → raise ``executable_snapshot_stale`` (safety gate preserved).
+    """
+    from src.contracts.executable_market_snapshot_v2 import is_fresh
+    from src.state.snapshot_repo import get_snapshot
+
+    snapshot = get_snapshot(conn, snapshot_id)
+    if snapshot is None:
+        raise ValueError(f"EXECUTABLE_SNAPSHOT_UNAVAILABLE: {snapshot_id}")
+    if is_fresh(snapshot, now):
+        return snapshot
+    # Stale: re-capture fresh for this single market when a client is available.
+    if clob is None or decision is None or not market:
+        raise ValueError("executable_snapshot_stale")
+    from src.data.market_scanner import capture_executable_market_snapshot
+
+    try:
+        fields = capture_executable_market_snapshot(
+            conn,
+            market=market,
+            decision=decision,
+            clob=clob,
+            captured_at=now,
+            scan_authority="VERIFIED",
+            execution_side="BUY",
+        )
+    except Exception as exc:  # noqa: BLE001 — any capture failure preserves the stale gate
+        raise ValueError(f"executable_snapshot_stale_recapture_failed:{exc}") from exc
+    new_id = str(fields.get("executable_snapshot_id") or "")
+    fresh = get_snapshot(conn, new_id) if new_id else None
+    if fresh is None or not is_fresh(fresh, now):
+        raise ValueError("executable_snapshot_stale")
+    return fresh
+
+
 def _reprice_decision_from_executable_snapshot(
     conn,
     decision,
