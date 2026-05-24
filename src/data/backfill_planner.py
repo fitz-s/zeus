@@ -20,6 +20,11 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 
+import re
+
+_ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
 class UnboundedBackfillRefused(ValueError):
     """Raised when an unbounded backfill window is requested without explicit allowance."""
 
@@ -70,6 +75,18 @@ def plan_backfill(
         raise UnboundedBackfillRefused(
             f"unbounded backfill for {source_id!r} allowed but no concrete bounds resolved; "
             f"resolve partition_start/partition_end before planning tasks"
+        )
+
+    # PR review #329 F11: the < comparison below is lexicographic, which is only correct for
+    # ISO-8601 dates (YYYY-MM-DD sort == chronological). Block/cycle/numeric partition grains
+    # would mis-order under lexicographic compare ("100" < "9"). PR5 supports DATE partitions
+    # only; typed PartitionKey ordering for block/cycle grains is future work. Fail closed on
+    # non-ISO bounds rather than silently mis-ordering.
+    if not (_ISO_DATE_RE.match(partition_start) and _ISO_DATE_RE.match(partition_end)):
+        raise UnboundedBackfillRefused(
+            f"non-ISO-date partition bounds for {source_id!r} "
+            f"(start={partition_start!r}, end={partition_end!r}); this planner supports "
+            f"YYYY-MM-DD date partitions only (block/cycle grains need typed PartitionKey)"
         )
 
     if partition_end < partition_start:

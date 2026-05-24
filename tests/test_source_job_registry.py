@@ -64,3 +64,14 @@ def test_opendata_producers_span_both_daemons() -> None:
     daemons = {j.owner_daemon for j in owners}
     assert daemons == {"ingest_main", "forecast_live_daemon"}
     assert all(j.owner_gated for j in owners), "OpenData producers must be env-gated"
+
+
+def test_job_registry_uses_canonical_source_ids() -> None:
+    """F8: job registry source_id must be the canonical data-source ID (wu_icao_history), not a
+    short alias (wu_icao), so a future join to source contracts/frontier does not lose it."""
+    from src.data.source_job_registry import JOB_REGISTRY
+
+    daily = JOB_REGISTRY["ingest_k2_daily_obs"]
+    assert daily.source_id == "wu_icao_history"
+    # no remaining short 'wu_icao' alias:
+    assert not any(j.source_id == "wu_icao" for j in JOB_REGISTRY.values())

@@ -111,51 +111,43 @@ def run_assertion_1_calendar_source_in_registry() -> list[dict[str, Any]]:
 # ---------------------------------------------------------------------------
 
 def run_assertion_2_primary_tier_implies_live_authorized() -> list[dict[str, Any]]:
-    """Return findings for forecast_source_registry primary-tier sources
-    whose calendar entry does not carry live_authorization=true.
+    """Coherence: a forecast source whose ROLE includes 'entry_primary' must have calendar
+    live_authorization=true; a diagnostic-only source must NOT (PR review #329 F7).
 
-    KNOWN: openmeteo_previous_runs is primary tier but calendar says live_authorization=false.
-    This is surfaced as a drift warning. The allowed_roles=('diagnostic',) in the registry
-    indicates it is not live-trading eligible, which is consistent with the calendar.
+    The prior version keyed on ``tier == "primary"``, which is WRONG: tier='primary' means
+    "primary forecast TABLE", not live-trading authority. openmeteo_previous_runs is
+    tier=primary but allowed_roles=('diagnostic',) with calendar live_authorization=false —
+    a CONSISTENT shadow/diagnostic source, not drift. Keying on allowed_roles removes the
+    permanent false-positive and prevents a future --strict from forcing a diagnostic source
+    into live authority.
     """
-    # Import at call time to avoid circular import at module level
-    # (lint script is advisory; it's OK to import runtime registry here)
     from src.data.forecast_source_registry import SOURCES
 
     entries = _load_calendar()
-    # Build map: source_id -> max live_authorization across its entries
     calendar_live: dict[str, bool] = {}
     for entry in entries:
         sid = entry["source_id"]
-        # If ANY calendar entry for this source is live_authorized, mark it true
-        if calendar_live.get(sid) is None:
-            calendar_live[sid] = bool(entry.get("live_authorization", False))
-        else:
-            calendar_live[sid] = calendar_live[sid] or bool(entry.get("live_authorization", False))
+        calendar_live[sid] = calendar_live.get(sid, False) or bool(entry.get("live_authorization", False))
 
     findings = []
     for source_id, spec in SOURCES.items():
-        if spec.tier != "primary":
-            continue
-        live_auth = calendar_live.get(source_id, None)
-        if live_auth is None:
+        roles = tuple(getattr(spec, "allowed_roles", ()) or ())
+        live_auth = calendar_live.get(source_id)
+        if "entry_primary" in roles and live_auth is False:
             findings.append(_make_finding(
-                assertion=2,
-                level="drift",
+                assertion=2, level="drift",
                 message=(
-                    f"forecast_source_registry primary source={source_id!r} "
-                    f"has no calendar entry — cannot verify live_authorization"
+                    f"forecast source={source_id!r} has role entry_primary but calendar "
+                    f"live_authorization=false — entry-primary forecast sources must be live-authorized"
                 ),
                 source_id=source_id,
             ))
-        elif live_auth is False:
+        elif roles == ("diagnostic",) and live_auth is True:
             findings.append(_make_finding(
-                assertion=2,
-                level="drift",
+                assertion=2, level="violation",
                 message=(
-                    f"forecast_source_registry primary source={source_id!r} "
-                    f"has calendar live_authorization=false — "
-                    f"primary sources expected to be live-authorized"
+                    f"forecast source={source_id!r} is diagnostic-only but calendar "
+                    f"live_authorization=true — diagnostic sources must NOT be live-authorized"
                 ),
                 source_id=source_id,
             ))

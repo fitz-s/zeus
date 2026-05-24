@@ -47,6 +47,34 @@ def test_backfill_shadow_cannot_authorize_live() -> None:
     assert can_authorize_live_readiness("DERIVED_FROM_DISSEMINATION", False) is False  # not authorized
 
 
+def test_unknown_authority_tier_is_fail_closed() -> None:
+    """F5: ALLOW-LIST fail-closed — an empty/unknown authority tier must NOT authorize live
+    (the prior deny-list let unknown tiers through)."""
+    from src.data.temporal_provenance import can_authorize_live_readiness
+
+    assert can_authorize_live_readiness("", True) is False
+    assert can_authorize_live_readiness("UNKNOWN", True) is False
+    assert can_authorize_live_readiness("SOMETHING_NEW", True) is False
+
+
+def test_provenance_required_fields_are_family_specific() -> None:
+    """F6: provenance is keyed by data family — a venue/market row is NOT held to forecast
+    source_run fields (source_run_id/source_issue_time), and unknown family fails closed."""
+    from src.data.temporal_provenance import missing_live_provenance
+
+    # forecast row needs source_run identity:
+    assert missing_live_provenance({"source_id", "captured_at"}, "forecast")
+    # an executable-market snapshot is complete WITHOUT source_run_id/source_issue_time:
+    assert missing_live_provenance(
+        {"condition_id", "captured_at", "freshness_deadline", "authority_tier"},
+        "executable_snapshot",
+    ) == []
+    # market topology row:
+    assert missing_live_provenance({"condition_id", "captured_at"}, "market") == []
+    # unknown family fails closed (never "complete"):
+    assert missing_live_provenance({"anything"}, "no_such_family")
+
+
 # ---- PR8: lane separation ----
 
 def test_derived_jobs_not_on_live_lane() -> None:

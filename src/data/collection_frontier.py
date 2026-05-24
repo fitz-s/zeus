@@ -130,6 +130,7 @@ def _classify(
     now: datetime,
     safe_fetch_not_before: Optional[datetime],
     have_run: bool,
+    source_run_status: Optional[str],
     completeness_status: Optional[str],
     partial_policy: str,
     readiness_status: Optional[str],
@@ -140,8 +141,10 @@ def _classify(
     """Single-reason blocker classification, fail-closed ordering.
 
     Non-live sources are NOT_LIVE_AUTHORIZED (informational, not a fault). For live sources,
-    the order surfaces the EARLIEST upstream cause: not-released < no-run < source-down <
-    stale < partial < readiness.
+    the order surfaces the EARLIEST upstream cause. Uses the REAL source_run vocabulary
+    (status SUCCESS/PARTIAL/FAILED/NOT_RELEASED/SKIPPED_NOT_RELEASED; completeness
+    COMPLETE/PARTIAL/MISSING/HORIZON_OUT_OF_RANGE/NOT_RELEASED) — PR review #329 F2. A row that
+    says NOT_RELEASED/MISSING must NEVER classify OK.
     """
     if role != _LIVE:
         return _BLOCK_NOT_LIVE
@@ -149,12 +152,21 @@ def _classify(
         return _BLOCK_NOT_RELEASED
     if not have_run:
         return _BLOCK_UNKNOWN
+
+    st = (source_run_status or "").strip().upper()
+    comp = (completeness_status or "").strip().upper()
+
+    # Past safe-fetch but the source itself reports not-released → abnormal (upstream overdue),
+    # never OK. (Before safe-fetch was already returned NOT_RELEASED above.)
+    if st in ("NOT_RELEASED", "SKIPPED_NOT_RELEASED") or comp == "NOT_RELEASED":
+        return _BLOCK_READINESS
     if health_consecutive_failures is not None and health_consecutive_failures >= 3:
         return _BLOCK_DOWN
     if freshness_state == "EXPIRED":
         return _BLOCK_STALE
-    if completeness_status and completeness_status.lower() in ("partial", "incomplete") \
-            and partial_policy == "BLOCK_LIVE":
+    if st == "FAILED" or comp in ("MISSING", "HORIZON_OUT_OF_RANGE"):
+        return _BLOCK_READINESS
+    if comp in ("PARTIAL", "INCOMPLETE") and partial_policy == "BLOCK_LIVE":
         return _BLOCK_PARTIAL
     if readiness_status and readiness_status.upper() not in ("READY", "LIVE_ELIGIBLE", "OK"):
         return _BLOCK_READINESS
@@ -196,46 +208,80 @@ def _safe_fetchone(conn: sqlite3.Connection, sql: str, params: tuple[Any, ...]) 
     return row
 
 
+def _like_escape(s: str) -> str:
+    r"""Escape SQL LIKE wildcards. Calendar tracks/source_ids contain underscores (mx2t6_high,
+    ecmwf_open_data) which are LIKE single-char wildcards — must be escaped (ESCAPE '\')."""
+    return s.replace("\\", "\\\\").replace("_", "\\_").replace("%", "\\%")
+
+
+def _track_match_sql(column: str, *, has_release_key: bool) -> str:
+    """SQL fragment matching a calendar track against the REAL written track.
+
+    Real OpenData rows write the HORIZON-EXPANDED track (mx2t6_high_full_horizon), NOT the bare
+    calendar track (mx2t6_high) — PR review #329 F1. Match: exact OR prefix. ``source_run`` and
+    ``source_run_coverage`` ALSO carry ``release_calendar_key`` ('source_id:track:horizon'), so
+    include it there; ``readiness_state`` has NO such column, so match on track only.
+    """
+    base = f"({column} = ? OR {column} LIKE ? ESCAPE '\\'"
+    if has_release_key:
+        return base + " OR release_calendar_key LIKE ? ESCAPE '\\')"
+    return base + ")"
+
+
+def _track_match_params(source_id: str, track: str, *, has_release_key: bool) -> tuple[str, ...]:
+    et = _like_escape(track)
+    if has_release_key:
+        return (track, f"{et}\\_%", f"{_like_escape(source_id)}:{et}:%")
+    return (track, f"{et}\\_%")
+
+
 def _latest_source_run(
     conn: sqlite3.Connection, source_id: str, track: str
 ) -> Optional[sqlite3.Row]:
-    """Latest source_run for (source_id, track) by source_issue_time then recorded_at."""
+    """Latest source_run for (source_id, calendar track) by source_issue_time then recorded_at.
+
+    Matches the real horizon-expanded track / release_calendar_key, not the bare calendar track.
+    """
     return _safe_fetchone(
         conn,
-        """
-        SELECT source_id, track, source_issue_time, source_release_time, source_available_at,
-               fetch_started_at, captured_at, imported_at, target_local_date,
+        f"""
+        SELECT source_id, track, release_calendar_key, source_issue_time, source_release_time,
+               source_available_at, fetch_started_at, captured_at, imported_at, target_local_date,
                completeness_status, status, recorded_at
         FROM source_run
-        WHERE source_id = ? AND track = ?
+        WHERE source_id = ? AND {_track_match_sql('track', has_release_key=True)}
         ORDER BY COALESCE(source_issue_time, '') DESC, COALESCE(recorded_at, '') DESC
         LIMIT 1
         """,
-        (source_id, track),
+        (source_id, *_track_match_params(source_id, track, has_release_key=True)),
     )
 
 
 def _latest_readiness(
     conn: sqlite3.Connection, source_id: str, track: str, target_local_date: Optional[str]
 ) -> Optional[sqlite3.Row]:
+    """Latest readiness_state for (source_id, calendar track [, target_local_date]).
+
+    Track match is prefix/key aware (readiness rows also carry the horizon-expanded track).
+    """
     if target_local_date:
         return _safe_fetchone(
             conn,
-            """
+            f"""
             SELECT status, expires_at, computed_at FROM readiness_state
-            WHERE source_id = ? AND track = ? AND target_local_date = ?
+            WHERE source_id = ? AND {_track_match_sql('track', has_release_key=False)} AND target_local_date = ?
             ORDER BY COALESCE(computed_at, '') DESC LIMIT 1
             """,
-            (source_id, track, target_local_date),
+            (source_id, *_track_match_params(source_id, track, has_release_key=False), target_local_date),
         )
     return _safe_fetchone(
         conn,
-        """
+        f"""
         SELECT status, expires_at, computed_at FROM readiness_state
-        WHERE source_id = ? AND track = ?
+        WHERE source_id = ? AND {_track_match_sql('track', has_release_key=False)}
         ORDER BY COALESCE(computed_at, '') DESC LIMIT 1
         """,
-        (source_id, track),
+        (source_id, *_track_match_params(source_id, track, has_release_key=False)),
     )
 
 
@@ -308,7 +354,9 @@ def compute_frontier(
 
             blocker = _classify(
                 role=role, now=now, safe_fetch_not_before=safe_fetch,
-                have_run=run is not None, completeness_status=completeness,
+                have_run=run is not None,
+                source_run_status=(run["status"] if run else None),
+                completeness_status=completeness,
                 partial_policy=policy.partial_policy.value,
                 readiness_status=readiness_status, readiness_expires_at=readiness_expires,
                 freshness_state=freshness, health_consecutive_failures=cf,

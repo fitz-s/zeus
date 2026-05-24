@@ -47,28 +47,42 @@ def _safe_rows(conn: sqlite3.Connection, sql: str, params: tuple[Any, ...]) -> l
     return list(cur.fetchall())
 
 
-def compute_watermark(conn: sqlite3.Connection, source_id: str, track: str) -> SourceWatermark:
-    """Derive the watermark for (source_id, track) from source_run (read-only).
+def _like_escape(s: str) -> str:
+    return s.replace("\\", "\\\\").replace("_", "\\_").replace("%", "\\%")
 
-    Partitions are ordered by ``target_local_date`` (the source/local-day identity), NOT by
-    write time, so a late/backfilled write for an old partition cannot advance the successful
-    watermark beyond where the data actually reaches.
+
+def compute_watermark(conn: sqlite3.Connection, source_id: str, track: str) -> SourceWatermark:
+    """Derive the watermark for (source_id, calendar track) from source_run (read-only).
+
+    Partition identity is the SOURCE identity, ordered NOT by write time — a late/backfilled
+    write for an old partition cannot advance the successful watermark (PR review #329 F3).
+
+    OpenData source-level source_run rows carry NO target_local_date (that lives in
+    source_run_coverage); they are keyed by source_issue_time (the cycle). So the partition is
+    COALESCE(target_local_date, source_issue_time, source_cycle_time) — forcing
+    target_local_date IS NOT NULL (the prior version) made the watermark EMPTY for the single
+    most important live forecast producer. The track match is prefix/key aware because real
+    rows write the horizon-expanded track (mx2t6_high_full_horizon), not the bare calendar track.
     """
     conn.row_factory = sqlite3.Row
+    et = _like_escape(track)
     rows = _safe_rows(
         conn,
         """
-        SELECT target_local_date, status, observed_members
+        SELECT COALESCE(target_local_date, source_issue_time, source_cycle_time) AS partition_key,
+               status, observed_members
         FROM source_run
-        WHERE source_id = ? AND track = ? AND target_local_date IS NOT NULL
-        ORDER BY target_local_date ASC
+        WHERE source_id = ?
+          AND (track = ? OR track LIKE ? ESCAPE '\\' OR release_calendar_key LIKE ? ESCAPE '\\')
+          AND COALESCE(target_local_date, source_issue_time, source_cycle_time) IS NOT NULL
+        ORDER BY partition_key ASC
         """,
-        (source_id, track),
+        (source_id, track, f"{et}\\_%", f"{_like_escape(source_id)}:{et}:%"),
     )
 
-    attempted = [r["target_local_date"] for r in rows]
+    attempted = [r["partition_key"] for r in rows]
     ok = {"ok", "complete", "success"}
-    successful = [r["target_local_date"] for r in rows if str(r["status"]).lower() in ok]
+    successful = [r["partition_key"] for r in rows if str(r["status"]).lower() in ok]
 
     def _nonempty(r: sqlite3.Row) -> bool:
         m = r["observed_members"]
@@ -77,7 +91,7 @@ def compute_watermark(conn: sqlite3.Connection, source_id: str, track: str) -> S
         except (TypeError, ValueError):
             return False
 
-    non_empty = [r["target_local_date"] for r in rows if _nonempty(r)]
+    non_empty = [r["partition_key"] for r in rows if _nonempty(r)]
 
     return SourceWatermark(
         source_id=source_id,

@@ -6,7 +6,14 @@
 # Last reused or audited: 2026-05-24
 # Authority basis: operator "Zeus Data Ingest + Collection Efficiency Refactor" spec §10;
 #   docs/operations/current/plans/data_temporal_kernel/PLAN.md; src/data/collection_frontier.py.
-"""Operator-facing data-collection frontier report — PR2 of the Data Temporal Kernel program.
+"""Operator-facing FORECAST collection frontier report — PR2 of the Data Temporal Kernel program.
+
+SCOPE (PR review #329 F4): this report covers ONLY forecast sources declared in
+config/source_release_calendar.yaml (ECMWF Open Data, Open-Meteo previous-runs, TIGGE archive).
+It does NOT yet cover WU/HKO/Ogimet observations, Polymarket Gamma topology, CLOB executable
+snapshots, the user WebSocket, or settlement-event lag. Do not read a clean forecast frontier
+as "all live data collection is healthy" — the non-forecast surfaces are out of scope until a
+later PR adds them.
 
 READ-ONLY. Renders the in-memory frontier (src/data/collection_frontier.compute_frontier)
 as a table or JSON, or explains a single source's live blocker. Writes nothing.
@@ -119,9 +126,16 @@ def main(argv: Optional[list[str]] = None) -> int:
         return 0
 
     if args.json:
-        print(json.dumps([_row_to_dict(r) for r in rows], indent=2))
+        print(json.dumps({
+            "scope": "forecast_release_calendar_only",
+            "scope_note": "ECMWF/Open-Meteo/TIGGE only; excludes WU/HKO/Ogimet obs, "
+                          "Polymarket Gamma/CLOB, user WS, settlement lag",
+            "rows": [_row_to_dict(r) for r in rows],
+        }, indent=2))
         return 0
 
+    print("SCOPE: forecast release-calendar sources only (ECMWF/Open-Meteo/TIGGE) — "
+          "NOT WU/HKO/Ogimet obs, Polymarket Gamma/CLOB, user WS, or settlement lag.")
     print(_render_table(rows))
     return 0
 

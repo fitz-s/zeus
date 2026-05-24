@@ -150,3 +150,13 @@ def test_code_data_version_param_matches_calendar_or_lint_flags_drift() -> None:
     assert len(drift_findings) == 0, (
         f"Calendar param drift still present (expected after calendar-fix PR): {drift_findings}"
     )
+
+
+def test_assertion2_keys_on_roles_not_tier_no_false_drift() -> None:
+    """F7: diagnostic-only primary-tier source (openmeteo_previous_runs) must NOT produce a
+    drift finding — assertion 2 keys on allowed_roles (entry_primary), not tier=='primary'."""
+    from scripts.source_contract_lint import run_assertion_2_primary_tier_implies_live_authorized
+
+    findings = run_assertion_2_primary_tier_implies_live_authorized()
+    omp = [f for f in findings if f.get("source_id") == "openmeteo_previous_runs"]
+    assert omp == [], f"diagnostic-only source wrongly flagged: {omp}"

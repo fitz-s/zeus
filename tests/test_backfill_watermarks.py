@@ -1,93 +1,112 @@
 # Lifecycle: created=2026-05-24; last_reviewed=2026-05-24; last_reused=never
-# Purpose: Watermark (source-time not write-time) + bounded backfill + UMA era-guard default.
+# Purpose: Watermark against REAL source_run shape (NULL target_local_date / source_issue_time
+#   cycle partition, horizon-expanded track) + bounded backfill (ISO guard) + UMA era latch.
 # Reuse: Inspect docs/operations/current/plans/data_temporal_kernel/PLAN.md + the target module before relying on it.
-# Created: 2026-05-24
-# Last reused or audited: 2026-05-24
-# Authority basis: docs/operations/current/plans/data_temporal_kernel/PLAN.md (PR5);
-#   operator spec §7 (Watermarks, Backfill planner) + §"Backfill can look fresh".
-"""PR5: source watermarks (in-memory) + bounded backfill planner + UMA era guard default."""
+"""PR5 + PR review #329 F3/F11: watermarks on real OpenData source_run shape; backfill ISO guard."""
 from __future__ import annotations
 
 import sqlite3
 
 import pytest
 
+_SR_COLS = [
+    "source_id", "track", "release_calendar_key", "source_issue_time", "source_cycle_time",
+    "target_local_date", "status", "observed_members",
+]
+
 
 def _conn() -> sqlite3.Connection:
     c = sqlite3.connect(":memory:")
-    c.execute(
-        "CREATE TABLE source_run (source_id TEXT, track TEXT, target_local_date TEXT, "
-        "status TEXT, observed_members INTEGER, captured_at TEXT)"
-    )
+    c.execute(f"CREATE TABLE source_run ({' TEXT, '.join(_SR_COLS)} TEXT)")
     return c
 
 
-def _ins(c: sqlite3.Connection, date: str, status: str, members: int, captured: str) -> None:
+def _ins(c: sqlite3.Connection, **kw: object) -> None:
     c.execute(
-        "INSERT INTO source_run (source_id, track, target_local_date, status, observed_members, captured_at) "
-        "VALUES ('ecmwf_open_data','mx2t6_high',?,?,?,?)",
-        (date, status, members, captured),
+        f"INSERT INTO source_run ({', '.join(_SR_COLS)}) VALUES ({', '.join('?' for _ in _SR_COLS)})",
+        tuple(kw.get(col) for col in _SR_COLS),
     )
 
 
-def test_watermark_tracks_partitions_by_source_date_not_write_time() -> None:
-    """ANTIBODY: a catch-up writing a FRESH captured_at for an OLD partition must not advance
-    the successful watermark — partitions order by target_local_date, not write time."""
+# Real OpenData source-level identity: horizon-expanded track, release_calendar_key, NO target_local_date.
+def _high(issue: str, status: str, members: int) -> dict:
+    return dict(
+        source_id="ecmwf_open_data", track="mx2t6_high_full_horizon",
+        release_calendar_key="ecmwf_open_data:mx2t6_high:full",
+        source_issue_time=issue, source_cycle_time=issue, target_local_date=None,
+        status=status, observed_members=members,
+    )
+
+
+def test_opendata_watermark_uses_source_issue_time_when_target_local_date_null() -> None:
+    """F3: OpenData source_run has NULL target_local_date — watermark must still advance using
+    source_issue_time (the cycle partition), and match the horizon-expanded track."""
     from src.data.source_watermarks import compute_watermark
 
     c = _conn()
-    _ins(c, "2026-05-20", "ok", 51, "2026-05-20T09:00:00Z")        # real latest success
-    _ins(c, "2026-05-18", "ok", 51, "2026-05-24T11:59:00Z")        # OLD partition, FRESH write (catch-up)
-    _ins(c, "2026-05-21", "failed", 0, "2026-05-21T09:00:00Z")     # newer date but failed
+    _ins(c, **_high("2026-05-20T00:00:00Z", "SUCCESS", 51))
+    _ins(c, **_high("2026-05-22T00:00:00Z", "SUCCESS", 51))
+    _ins(c, **_high("2026-05-23T12:00:00Z", "FAILED", 0))
 
-    wm = compute_watermark(c, "ecmwf_open_data", "mx2t6_high")
-    assert wm.last_attempted_partition == "2026-05-21"            # latest attempt (incl failed)
-    assert wm.last_successful_partition == "2026-05-20"           # NOT 2026-05-18 (fresh write ignored)
-    assert wm.last_non_empty_partition == "2026-05-20"
+    wm = compute_watermark(c, "ecmwf_open_data", "mx2t6_high")   # calendar track
+    assert wm.last_attempted_partition == "2026-05-23T12:00:00Z"
+    assert wm.last_successful_partition == "2026-05-22T00:00:00Z"   # NOT empty (the F3 bug)
     assert wm.successful_count == 2
+
+
+def test_catch_up_cannot_mask_staleness_by_issue_time() -> None:
+    """An old cycle re-attempted does not advance the successful watermark past a newer cycle."""
+    from src.data.source_watermarks import compute_watermark
+
+    c = _conn()
+    _ins(c, **_high("2026-05-23T00:00:00Z", "SUCCESS", 51))
+    _ins(c, **_high("2026-05-18T00:00:00Z", "SUCCESS", 51))   # old cycle, inserted later
+    wm = compute_watermark(c, "ecmwf_open_data", "mx2t6_high")
+    assert wm.last_successful_partition == "2026-05-23T00:00:00Z"   # ordered by issue, not insert/write
 
 
 def test_watermark_empty_on_missing_table() -> None:
     from src.data.source_watermarks import compute_watermark
 
-    c = sqlite3.connect(":memory:")  # no source_run table
-    wm = compute_watermark(c, "ecmwf_open_data", "mx2t6_high")
-    assert wm.last_successful_partition is None
-    assert wm.attempted_count == 0
+    wm = compute_watermark(sqlite3.connect(":memory:"), "ecmwf_open_data", "mx2t6_high")
+    assert wm.last_successful_partition is None and wm.attempted_count == 0
 
 
 def test_backfill_planner_bounds_windows() -> None:
     from src.data.backfill_planner import UnboundedBackfillRefused, plan_backfill
 
-    tasks = plan_backfill("tigge", "backfill", "2026-05-01", "2026-05-03")
-    assert len(tasks) == 1 and tasks[0].partition_start == "2026-05-01"
+    assert len(plan_backfill("tigge", "backfill", "2026-05-01", "2026-05-03")) == 1
+    with pytest.raises(UnboundedBackfillRefused):
+        plan_backfill("tigge", "backfill", None, "2026-05-03")
+    with pytest.raises(UnboundedBackfillRefused):
+        plan_backfill("tigge", "backfill", "2026-05-03", "2026-05-01")
+    with pytest.raises(UnboundedBackfillRefused):
+        plan_backfill("tigge", "backfill", None, None, allow_unbounded=True)
+
+
+def test_backfill_planner_rejects_non_iso_partitions() -> None:
+    """F11: lexicographic window compare is only valid for ISO dates — non-ISO (e.g. block
+    numbers) must be refused, not silently mis-ordered."""
+    from src.data.backfill_planner import UnboundedBackfillRefused, plan_backfill
 
     with pytest.raises(UnboundedBackfillRefused):
-        plan_backfill("tigge", "backfill", None, "2026-05-03")          # missing start
+        plan_backfill("uma", "backfill", "9", "100")          # block numbers, not ISO
     with pytest.raises(UnboundedBackfillRefused):
-        plan_backfill("tigge", "backfill", "2026-05-03", "2026-05-01")  # end < start
-    with pytest.raises(UnboundedBackfillRefused):
-        plan_backfill("tigge", "backfill", None, None, allow_unbounded=True)  # allowed but no bounds
+        plan_backfill("tigge", "backfill", "2026-05-01", "20260503")  # non-ISO end
 
 
 def test_backfill_is_never_live() -> None:
-    from src.data.backfill_planner import (
-        UnboundedBackfillRefused,
-        assert_backfill_not_live,
-        plan_backfill,
-    )
+    from src.data.backfill_planner import UnboundedBackfillRefused, assert_backfill_not_live, plan_backfill
 
-    # A live role can never request backfill.
     with pytest.raises(UnboundedBackfillRefused):
         plan_backfill("ecmwf_open_data", "live", "2026-05-01", "2026-05-03")
-
     task = plan_backfill("tigge", "backfill", "2026-05-01", "2026-05-03")[0]
     assert task.live_authorization is False
-    assert_backfill_not_live(task)  # does not raise
+    assert_backfill_not_live(task)
 
 
 def test_uma_era_guard_default_is_behavior_preserving() -> None:
-    """era_end_block defaults to 0 (disabled) → the UMA listener scans exactly as before PR5."""
-    from src.ingest_main import _uma_era_end_block
+    from src.ingest_main import _uma_era_end_block, _uma_era_exhausted
 
     assert _uma_era_end_block() == 0
+    assert _uma_era_exhausted is False

@@ -51,7 +51,7 @@ class SourceJobSpec:
 
 _INGEST_MAIN: tuple[SourceJobSpec, ...] = (
     SourceJobSpec("ingest_k2_daily_obs", "ingest_main", "live", "default", True,
-                  source_id="wu_icao", callable_ref="_k2_daily_obs_tick"),
+                  source_id="wu_icao_history", callable_ref="_k2_daily_obs_tick"),
     SourceJobSpec("ingest_k2_hourly_instants", "ingest_main", "live", "default", True,
                   callable_ref="_k2_hourly_instants_tick"),
     SourceJobSpec("ingest_k2_solar_daily", "ingest_main", "derived", "default", True,

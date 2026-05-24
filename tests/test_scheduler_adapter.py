@@ -53,12 +53,28 @@ def test_executor_class_assignments_by_role() -> None:
     assert by_id["ingest_source_health_probe"].executor_class == "heartbeat"   # file-only
 
 
-def test_db_writers_coalesce_single_instance() -> None:
-    """DB writers run single-instance + coalesce (serial SQLite writer); heartbeats run hot."""
+def test_all_jobs_single_instance_coalesce_preserved() -> None:
+    """F10: every job (incl. heartbeat/health/status) is single-instance + coalesce, matching
+    the current scheduler. The prior 3/coalesce=False for non-DB jobs would have made
+    heartbeats/health overlap on activation — not behavior-preserving."""
     from src.data.scheduler_adapter import build_job_specs
 
     for s in build_job_specs():
-        if s.is_db_writer:
-            assert s.max_instances == 1 and s.coalesce is True
-        else:
-            assert s.max_instances == 3 and s.coalesce is False
+        assert s.max_instances == 1, f"{s.job_id} max_instances must be 1"
+        assert s.coalesce is True, f"{s.job_id} must coalesce"
+
+
+def test_build_job_specs_owner_filter() -> None:
+    """F9: build_job_specs(owner) must return ONLY that daemon's jobs — otherwise activation
+    would cross-schedule both daemons and bypass the OpenData singleton."""
+    from src.data.scheduler_adapter import build_job_specs
+
+    ingest = build_job_specs("ingest_main")
+    assert ingest and all(s.owner_daemon == "ingest_main" for s in ingest)
+    assert not any(s.job_id.startswith("forecast_live_") for s in ingest)
+
+    fl = build_job_specs("forecast_live_daemon")
+    assert fl and all(s.owner_daemon == "forecast_live_daemon" for s in fl)
+    assert not any(s.job_id.startswith("ingest_") for s in fl)
+
+    assert len(build_job_specs()) == len(ingest) + len(fl)   # None = full inventory

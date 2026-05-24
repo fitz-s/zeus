@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from typing import Literal
+from typing import Literal, Optional
 
 from src.data.source_job_registry import JOB_REGISTRY, SourceJobSpec
 
@@ -74,18 +74,30 @@ class JobBuildSpec:
         return self.executor_class.endswith("_db")
 
 
-def build_job_specs() -> list[JobBuildSpec]:
-    """Resolve every registry job into a JobBuildSpec (pure; adds nothing to a live scheduler)."""
+def build_job_specs(owner_daemon: Optional[str] = None) -> list[JobBuildSpec]:
+    """Resolve registry jobs into JobBuildSpecs (pure; adds nothing to a live scheduler).
+
+    ``owner_daemon`` (PR review #329 F9): when given, return ONLY that daemon's jobs. Activation
+    MUST pass it — otherwise a single daemon would build BOTH daemons' jobs (cross-daemon
+    scheduling + bypass of the OpenData singleton). Default None = full inventory (preview only).
+
+    Concurrency (PR review #329 F10): every job is single-instance + coalesce, matching the
+    current ingest_main scheduler (the fast-executor file-only jobs already use
+    max_instances=1/coalesce=True to prevent overlapping JSON writers; the default executor is
+    single-worker). The prior role-derived 3/coalesce=False would have made heartbeats/health
+    overlap on activation — NOT behavior-preserving.
+    """
     specs: list[JobBuildSpec] = []
     for j in JOB_REGISTRY.values():
+        if owner_daemon is not None and j.owner_daemon != owner_daemon:
+            continue
         ec = executor_class_for(j)
-        # DB writers coalesce + single-instance (the SQLite writer is serial); heartbeats run hot.
         specs.append(JobBuildSpec(
             job_id=j.job_id,
             owner_daemon=j.owner_daemon,
             executor_class=ec,
-            max_instances=1 if ec.endswith("_db") else 3,
-            coalesce=ec.endswith("_db"),
+            max_instances=1,                       # serial — preserve current anti-overlap
+            coalesce=True,                          # merge missed runs, never stack
             misfire_grace_time=300 if ec.endswith("_db") else 60,
         ))
     return specs
