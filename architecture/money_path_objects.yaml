@@ -361,6 +361,25 @@ state_machines:
     invariant_tests:
       - tests/events/test_event_store_idempotency.py
       - tests/state/test_edli_table_ownership.py
+  edli_live_inference_gate_status:
+    owner: src/events/reactor.py
+    description: >
+      EDLI v1 online forecast/rejection/gate labels. These are not venue order
+      states and do not prove fill truth; they classify forecast completeness,
+      FDR/no-trade rejection evidence, and existing-cycle submission outcomes.
+      Registered so the semantic CI classifier treats EDLI all-caps evidence
+      labels as explicit money-path objects.
+    states:
+      - PARTIAL_ALLOWED
+      - PARTIAL_BLOCKED
+      - UNKNOWN_REVIEW_REQUIRED
+      - FDR_REJECTED
+      - EXISTING_CYCLE_NO_SUBMIT
+    invariant_tests:
+      - tests/events/test_forecast_snapshot_ready.py
+      - tests/events/test_reactor.py
+      - tests/engine/test_event_reactor_no_bypass.py
+      - tests/strategy/live_inference/test_no_trade_regret.py
 
   obs_coverage_status:
     description: >

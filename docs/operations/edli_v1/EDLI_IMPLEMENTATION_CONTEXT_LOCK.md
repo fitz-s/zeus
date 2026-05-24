@@ -193,7 +193,7 @@ Final wiring segment:
 
 Final verification snapshot:
 
-- `python scripts/check_schema_version.py` -> PASS, hash `ad20a9a15e8b7e4b426a99b59899a5697158ddbca9af8051bd9b3dcb4a732422`, `SCHEMA_VERSION=39`.
+- `python scripts/check_schema_version.py` -> PASS, hash `d171ecff4cf03a193956ccd8384008dad2a355662378ac0ce85b2e37bf48514d`, `SCHEMA_VERSION=39`.
 - `python scripts/check_table_registry_coherence.py` -> PASS.
 - `python scripts/ci/assert_test_quality.py` -> PASS.
 - `python -m pytest -q tests/state/test_edli_table_ownership.py tests/events tests/strategy/live_inference tests/engine/test_event_reactor_no_bypass.py tests/analysis/test_event_opportunity_report.py --maxfail=8` -> PASS, 92 passed.
