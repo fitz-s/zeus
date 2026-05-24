@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, time, timezone
 from decimal import Decimal
 from typing import Any, Callable
 
@@ -104,6 +104,7 @@ def executable_snapshot_gate_from_trade_conn(
     trade_conn: sqlite3.Connection,
     *,
     now: datetime | None = None,
+    topology_conn: sqlite3.Connection | None = None,
 ) -> Callable[[OpportunityEvent], bool]:
     """Return a gate requiring a fresh executable snapshot bound to the event."""
 
@@ -117,7 +118,7 @@ def executable_snapshot_gate_from_trade_conn(
         if not required <= columns:
             return False
         payload = _payload(event)
-        family_topology_rows = _event_family_market_topology_rows(trade_conn, payload)
+        family_topology_rows = _event_family_market_topology_rows(topology_conn or trade_conn, payload)
         if not family_topology_rows:
             return False
         condition_ids = tuple(str(row.get("condition_id") or "") for row in family_topology_rows)
@@ -159,13 +160,8 @@ def event_bound_no_submit_adapter_from_trade_conn(
     trade_conn: sqlite3.Connection,
     *,
     get_current_level: Callable[[], RiskLevel],
-) -> Callable[[OpportunityEvent], EventSubmissionReceipt]:
-    """Build a proof-only final-intent receipt adapter for EDLI events."""
-
-    def _submit(event: OpportunityEvent) -> EventSubmissionReceipt:
-        return build_event_bound_no_submit_receipt(
-            event,
-            trade_conn=trade_conn,
+            forecast_conn=forecast_conn,
+            topology_conn=topology_conn,
             get_current_level=get_current_level,
         )
 
@@ -177,58 +173,7 @@ def build_event_bound_no_submit_receipt(
     *,
     trade_conn: sqlite3.Connection,
     get_current_level: Callable[[], RiskLevel],
-) -> EventSubmissionReceipt:
-    """Produce a typed no-submit EDLI proof without running the cycle runner."""
-
-    payload = _payload(event)
-    family_topology_rows = _event_family_market_topology_rows(trade_conn, payload)
-    if not family_topology_rows:
-        return EventSubmissionReceipt(False, event.event_id, event.causal_snapshot_id, reason="EVENT_BOUND_MARKET_TOPOLOGY_MISSING")
-    family_condition_ids = tuple(str(row.get("condition_id") or "") for row in family_topology_rows)
-    family_rows = _latest_snapshot_rows_for_event_family(trade_conn, event, condition_ids=family_condition_ids)
-    if not family_rows:
-        return EventSubmissionReceipt(False, event.event_id, event.causal_snapshot_id, reason="EVENT_BOUND_EXECUTABLE_SNAPSHOT_MISSING")
-    snapshot_token_maps = _snapshot_token_maps_by_condition(family_rows)
-    missing_snapshot_conditions = sorted(set(family_condition_ids) - set(snapshot_token_maps))
-    if missing_snapshot_conditions:
-        return EventSubmissionReceipt(
-            False,
-            event.event_id,
-            event.causal_snapshot_id,
-            reason="FDR_FULL_FAMILY_PROOF_MISSING:missing executable snapshots for sibling conditions "
-            + ",".join(missing_snapshot_conditions),
-            family_complete=False,
-        )
-    topology = tuple(
-        _topology_candidate_from_market_event(row, snapshot_token_maps[str(row.get("condition_id") or "")], payload)
-        for row in family_topology_rows
-    )
-    row = _selected_snapshot_row_for_event(family_rows, payload)
-    if row is None:
-        return EventSubmissionReceipt(False, event.event_id, event.causal_snapshot_id, reason="EVENT_BOUND_SELECTED_SNAPSHOT_MISSING")
-    decision = EventBoundDecisionEngine().evaluate(
-        EventBoundDecisionRequest(
-            event=event,
-            market_topology=topology,
-            decision_time=datetime.now(UTC),
-            market_topology_source="executable_market_snapshots",
-        )
-    )
-    if decision.status != "CANDIDATE_FAMILY_READY" or decision.candidate_family is None:
-        return EventSubmissionReceipt(
-            False,
-            event.event_id,
-            event.causal_snapshot_id,
-            reason=decision.rejection_reason or "EVENT_BOUND_CANDIDATE_BINDING_FAILED",
-        )
-    family = decision.candidate_family
-    try:
-        proofs = _generate_candidate_proofs(
-            event=event,
-            payload=payload,
-            family=family,
-            snapshot_rows=family_rows,
-            trade_conn=trade_conn,
+            forecast_conn=source_conn,
         )
     except ValueError as exc:
         return EventSubmissionReceipt(
@@ -681,8 +626,23 @@ def _canonical_probability_and_fdr_proof(
     family,
     conn: sqlite3.Connection,
 ) -> tuple[dict[str, float], dict[tuple[str, str], float], dict[tuple[str, str], float], dict[tuple[str, str], bool]]:
-    probability_rows = _canonical_probability_rows(conn, event=event, family=family)
-    hypothesis_rows = _canonical_hypothesis_rows(conn, event=event, family=family)
+    snapshot = _forecast_snapshot_row_for_event(conn, event=event, family=family, allow_latest=allow_latest_snapshot)
+    if snapshot is None:
+        if allow_latest_snapshot:
+            raise ValueError("Day0 base forecast snapshot missing for event-bound inference")
+        raise ValueError("causal forecast snapshot missing for event-bound inference")
+    analysis = _market_analysis_from_event_snapshot(
+        conn=conn,
+        snapshot=snapshot,
+        family=family,
+        native_costs=native_costs,
+        payload=_payload(event),
+    )
+    hypotheses = scan_full_hypothesis_family(analysis, n_bootstrap=edge_n_bootstrap())
+    hypothesis_by_label_direction = {
+        (hypothesis.range_label, hypothesis.direction): hypothesis
+        for hypothesis in hypotheses
+    }
     q_by_condition: dict[str, float] = {}
     lcb_by_direction: dict[tuple[str, str], float] = {}
     p_values: dict[tuple[str, str], float] = {}
@@ -756,54 +716,85 @@ def _canonical_probability_rows(
         tuple(params),
     )
     names = [description[0] for description in cur.description]
-    out: dict[tuple[str, str], dict[str, Any]] = {}
-    for row in cur.fetchall():
-        item = {name: row[name] for name in names} if isinstance(row, sqlite3.Row) else dict(zip(names, row))
-        key = (_nonnull(item.get("range_label")), _nonnull(item.get("direction")))
-        if key[0] and key[1] and key not in out and item.get("p_posterior") is not None:
-            out[key] = item
-    return out
+    snapshot = {name: row[name] for name in names} if isinstance(row, sqlite3.Row) else dict(zip(names, row))
+    reason = _forecast_snapshot_reader_block_reason(
+        conn,
+        snapshot=snapshot,
+        event=event,
+        family=family,
+        allow_latest=allow_latest,
+    )
+    if reason is not None:
+        raise ValueError(reason)
+    return snapshot
 
 
 def _canonical_hypothesis_rows(
     conn: sqlite3.Connection,
     *,
-    event: OpportunityEvent,
+    conn: sqlite3.Connection,
+    snapshot: dict[str, Any],
     family,
-) -> dict[tuple[str, str], dict[str, Any]]:
-    hypothesis_ref = _authority_table_ref(conn, "selection_hypothesis_fact")
-    family_ref = _authority_table_ref(conn, "selection_family_fact")
-    if hypothesis_ref is None:
-        raise ValueError("canonical selection_hypothesis_fact table missing")
-    columns = _table_ref_columns(conn, hypothesis_ref)
-    required = {"city", "target_date", "range_label", "direction", "p_value", "ci_lower"}
-    if not required.issubset(columns):
-        raise ValueError("canonical selection_hypothesis_fact schema missing required columns")
-    join_clause = ""
-    predicates = ["h.city = ?", "h.target_date = ?", "COALESCE(h.range_label, '') != ''"]
-    params: list[object] = [family.city, family.target_date]
-    if family_ref is not None and event.causal_snapshot_id:
-        join_clause = f"LEFT JOIN {family_ref} f ON h.family_id = f.family_id"
-        predicates.append("(f.decision_snapshot_id = ? OR f.decision_snapshot_id IS NULL OR f.decision_snapshot_id = '')")
-        params.append(event.causal_snapshot_id)
-    select_fields = [
-        "h.range_label AS range_label",
-        "h.direction AS direction",
-        "h.p_value AS p_value",
-        "h.ci_lower AS ci_lower",
-        _qualified_optional_expr(columns, "passed_prefilter", "h"),
-        _qualified_optional_expr(columns, "recorded_at", "h"),
-    ]
-    cur = conn.execute(
-        f"""
-        SELECT {', '.join(select_fields)}
-        FROM {hypothesis_ref} h
-        {join_clause}
-        WHERE {' AND '.join(predicates)}
-          AND h.direction IN ('buy_yes', 'buy_no')
-        ORDER BY recorded_at DESC
-        """,
-        tuple(params),
+    native_costs: dict[tuple[str, str], tuple[dict[str, Any] | None, ExecutionPrice | None, float, float | None, str | None]],
+    payload: dict[str, object],
+) -> MarketAnalysis:
+    bins = list(family.bins)
+    members = _snapshot_members(snapshot)
+    p_raw = _snapshot_p_raw(snapshot, family=family, bins=bins, members=members, payload=payload)
+    p_cal = _snapshot_p_cal(
+        conn,
+        snapshot=snapshot,
+        family=family,
+        bins=bins,
+        p_raw=p_raw,
+        payload=payload,
+    )
+    if family.event_type == "DAY0_EXTREME_UPDATED":
+        p_raw = _apply_day0_mask_to_probability_vector(payload=payload, family=family, vector=p_raw)
+        p_cal = _apply_day0_mask_to_probability_vector(payload=payload, family=family, vector=p_cal)
+    p_market_yes: list[float] = []
+    p_market_no: list[float] = []
+    buy_no_available: list[bool] = []
+    executable_mask: list[bool] = []
+    for candidate in family.candidates:
+        condition_id = str(candidate.condition_id or "")
+        yes_cost = native_costs.get((condition_id, "buy_yes"))
+        no_cost = native_costs.get((condition_id, "buy_no"))
+        yes_price = yes_cost[1].value if yes_cost is not None and yes_cost[1] is not None else None
+        no_price = no_cost[1].value if no_cost is not None and no_cost[1] is not None else None
+        p_market_yes.append(float(yes_price) if yes_price is not None else 0.999999)
+        p_market_no.append(float(no_price) if no_price is not None else 0.999999)
+        buy_no_available.append(no_price is not None)
+        executable_mask.append(yes_price is not None or no_price is not None)
+    sampler = None
+    if snapshot.get("p_raw_json") not in {None, ""} or family.event_type == "DAY0_EXTREME_UPDATED":
+        static_p_cal = np.asarray(p_cal, dtype=float)
+
+        def _static_sampler(_analysis, _n_members):
+            return static_p_cal
+
+        sampler = _static_sampler
+    return MarketAnalysis(
+        p_raw=np.asarray(p_raw, dtype=float),
+        p_cal=np.asarray(p_cal, dtype=float),
+        p_market=np.asarray(p_market_yes, dtype=float),
+        p_market_no=np.asarray(p_market_no, dtype=float),
+        buy_no_quote_available=np.asarray(buy_no_available, dtype=bool),
+        executable_mask=np.asarray(executable_mask, dtype=bool),
+        alpha=float(settings["edge"]["base_alpha"]["level1"]),
+        bins=bins,
+        member_maxes=members,
+        unit=_snapshot_unit(snapshot, payload),
+        precision=float(snapshot.get("members_precision") or 1.0),
+        round_fn=None,
+        city_name=family.city,
+        season="",
+        forecast_source=str(snapshot.get("source_id") or payload.get("source_id") or ""),
+        bias_corrected=False,
+        market_complete=True,
+        posterior_mode=MODEL_ONLY_POSTERIOR_MODE,
+        bootstrap_probability_sampler=sampler,
+        bootstrap_signal_type="edli_event_bound_day0" if family.event_type == "DAY0_EXTREME_UPDATED" else "edli_event_bound_forecast",
     )
     names = [description[0] for description in cur.description]
     out: dict[tuple[str, str], dict[str, Any]] = {}
@@ -815,7 +806,144 @@ def _canonical_hypothesis_rows(
     return out
 
 
-def _apply_day0_mask_to_canonical_probabilities(
+def _snapshot_members(snapshot: dict[str, Any]) -> np.ndarray:
+    members = _json_list(snapshot.get("members_json"))
+    values = np.asarray([float(item) for item in members if item is not None], dtype=float)
+    if values.ndim != 1 or values.size == 0 or not np.isfinite(values).all():
+        raise ValueError("causal forecast snapshot members_json invalid")
+    return values
+
+
+def _snapshot_p_raw(
+    snapshot: dict[str, Any],
+    *,
+    family,
+    bins: list[Bin],
+    members: np.ndarray,
+    payload: dict[str, object],
+) -> np.ndarray:
+    raw_json = snapshot.get("p_raw_json")
+    if raw_json not in {None, ""}:
+        arr = np.asarray(_json_list(raw_json), dtype=float)
+    else:
+        city = runtime_cities_by_name().get(family.city)
+        if city is None:
+            raise ValueError(f"city config missing for event-bound forecast inference: {family.city}")
+        semantics = SettlementSemantics.for_city(city)
+        arr = p_raw_vector_from_maxes(members, city, semantics, bins)
+    if arr.shape != (len(bins),) or not np.isfinite(arr).all() or np.any(arr < 0.0):
+        raise ValueError("event-bound p_raw vector invalid")
+    total = float(arr.sum())
+    if total <= 0.0:
+        raise ValueError("event-bound p_raw vector has zero mass")
+    arr = arr / total
+    return arr
+
+
+def _snapshot_p_cal(
+    conn: sqlite3.Connection,
+    *,
+    snapshot: dict[str, Any],
+    family,
+    bins: list[Bin],
+    p_raw: np.ndarray,
+    payload: dict[str, object],
+) -> np.ndarray:
+    cal_json = snapshot.get("p_cal_json")
+    if cal_json not in {None, ""}:
+        arr = np.asarray(_json_list(cal_json), dtype=float)
+        if _valid_probability_vector(arr, len(bins)):
+            return arr / float(arr.sum())
+        raise ValueError("CALIBRATION_AUTHORITY_MISSING:p_cal_json invalid")
+
+    city = runtime_cities_by_name().get(family.city)
+    if city is None:
+        raise ValueError(f"CALIBRATION_AUTHORITY_MISSING:city config missing for {family.city}")
+
+    source_id = _nonnull(snapshot.get("source_id") or payload.get("source_id"))
+    issue_time = _nonnull(snapshot.get("issue_time") or snapshot.get("source_cycle_time") or payload.get("cycle"))
+    lead_days = _snapshot_lead_days(snapshot=snapshot, family=family, payload=payload)
+    if not source_id or not issue_time:
+        raise ValueError("CALIBRATION_AUTHORITY_MISSING:forecast provenance missing")
+
+    from src.calibration.forecast_calibration_domain import derive_phase2_keys_from_ens_result
+    from src.calibration.manager import get_calibrator
+    from src.calibration.platt import calibrate_and_normalize
+    from src.data.forecast_source_registry import calibration_source_id_for_lookup
+
+    cycle, raw_source_id, horizon_profile = derive_phase2_keys_from_ens_result(
+        {
+            "issue_time": issue_time,
+            "source_id": source_id,
+            "horizon_profile": snapshot.get("horizon_profile") or payload.get("horizon_profile"),
+        }
+    )
+    calibration_source_id = calibration_source_id_for_lookup(raw_source_id)
+    if calibration_source_id is None:
+        raise ValueError("CALIBRATION_AUTHORITY_MISSING:unsupported forecast source")
+    try:
+        cal, _level = get_calibrator(
+            conn,
+            city,
+            str(family.target_date),
+            temperature_metric=family.metric,
+            cycle=cycle,
+            source_id=calibration_source_id,
+            horizon_profile=horizon_profile,
+        )
+    except sqlite3.Error as exc:
+        raise ValueError("CALIBRATION_AUTHORITY_MISSING:calibration store unavailable") from exc
+    if cal is None:
+        raise ValueError("CALIBRATION_AUTHORITY_MISSING:no Platt calibrator")
+    p_cal = calibrate_and_normalize(
+        np.asarray(p_raw, dtype=float),
+        cal,
+        lead_days,
+        bin_widths=[candidate.width for candidate in bins],
+    )
+    if not _valid_probability_vector(p_cal, len(bins)):
+        raise ValueError("CALIBRATION_AUTHORITY_MISSING:p_cal invalid")
+    return p_cal
+
+
+def _snapshot_lead_days(*, snapshot: dict[str, Any], family, payload: dict[str, object]) -> float:
+    lead_hours = _optional_float(snapshot.get("lead_hours") or payload.get("lead_hours"))
+    if lead_hours is not None and lead_hours >= 0.0:
+        return lead_hours / 24.0
+    issue = _parse_utc(snapshot.get("issue_time") or snapshot.get("source_cycle_time") or payload.get("cycle"))
+    try:
+        target_day = date.fromisoformat(str(family.target_date))
+    except ValueError as exc:
+        raise ValueError("CALIBRATION_AUTHORITY_MISSING:target date invalid") from exc
+    if issue is None:
+        raise ValueError("CALIBRATION_AUTHORITY_MISSING:lead_days missing")
+    target_start = datetime.combine(target_day, time.min, tzinfo=UTC)
+    return max(0.0, (target_start - issue).total_seconds() / 86400.0)
+
+
+def _valid_probability_vector(value: np.ndarray, expected_len: int) -> bool:
+    arr = np.asarray(value, dtype=float)
+    return (
+        arr.shape == (expected_len,)
+        and bool(np.isfinite(arr).all())
+        and bool(np.all(arr >= 0.0))
+        and float(arr.sum()) > 0.0
+    )
+
+
+def _snapshot_unit(snapshot: dict[str, Any], payload: dict[str, object]) -> str:
+    unit = _nonnull(snapshot.get("settlement_unit") or snapshot.get("unit") or payload.get("unit") or payload.get("temperature_unit"))
+    if unit in {"F", "C"}:
+        return unit
+    members_unit = _nonnull(snapshot.get("members_unit"))
+    if members_unit == "degC":
+        return "C"
+    if members_unit == "degF":
+        return "F"
+    return "F"
+
+
+def _apply_day0_mask_to_generated_probabilities(
     *,
     payload: dict[str, object],
     family,
@@ -1073,13 +1201,12 @@ def _native_quote_book_from_snapshot_row(row: dict[str, Any]):
     no_token_id = str(row.get("no_token_id") or "")
     yes_depth = _depth_for_token_or_label(depth, token_id=yes_token_id, label="YES")
     no_depth = _depth_for_token_or_label(depth, token_id=no_token_id, label="NO")
-    if yes_depth is None or no_depth is None:
-        yes_ask = row.get("orderbook_top_ask") if str(row.get("selected_outcome_token_id") or "") == yes_token_id else None
-        no_ask = row.get("orderbook_top_ask") if str(row.get("selected_outcome_token_id") or "") == no_token_id else None
-        yes_bid = row.get("orderbook_top_bid") if str(row.get("selected_outcome_token_id") or "") == yes_token_id else None
-        no_bid = row.get("orderbook_top_bid") if str(row.get("selected_outcome_token_id") or "") == no_token_id else None
-        yes_depth = {"asks": _single_level(yes_ask, min_order_size), "bids": _single_level(yes_bid, min_order_size)}
-        no_depth = {"asks": _single_level(no_ask, min_order_size), "bids": _single_level(no_bid, min_order_size)}
+    if yes_depth is None:
+        yes_depth = _explicit_depth_for_selected_token(row, token_id=yes_token_id, min_order_size=min_order_size)
+    if no_depth is None:
+        no_depth = _explicit_depth_for_selected_token(row, token_id=no_token_id, min_order_size=min_order_size)
+    yes_depth = yes_depth or {}
+    no_depth = no_depth or {}
     return NativeQuoteBook(
         yes_asks=_parse_quote_levels(yes_depth.get("asks", ())),
         no_asks=_parse_quote_levels(no_depth.get("asks", ())),
@@ -1137,10 +1264,46 @@ def _depth_for_token_or_label(depth: object, *, token_id: str, label: str) -> di
     return None
 
 
-def _single_level(price: object, size: Decimal) -> list[dict[str, str]]:
-    if price in {None, "", "ABSENT"}:
+def _explicit_depth_for_selected_token(
+    row: dict[str, Any],
+    *,
+    token_id: str,
+    min_order_size: Decimal,
+) -> dict[str, object] | None:
+    if _nonnull(row.get("selected_outcome_token_id")) != token_id:
+        return None
+    ask_price = row.get("orderbook_top_ask")
+    bid_price = row.get("orderbook_top_bid")
+    ask_size = _decimal_from_optional(
+        row.get("depth_at_best_ask")
+        or row.get("orderbook_top_ask_size")
+        or row.get("best_ask_size")
+    )
+    bid_size = _decimal_from_optional(
+        row.get("depth_at_best_bid")
+        or row.get("orderbook_top_bid_size")
+        or row.get("best_bid_size")
+    )
+    asks = _explicit_level(ask_price, ask_size, min_order_size=min_order_size)
+    bids = _explicit_level(bid_price, bid_size, min_order_size=min_order_size)
+    if not asks and not bids:
+        return None
+    return {"asks": asks, "bids": bids}
+
+
+def _explicit_level(price: object, size: Decimal | None, *, min_order_size: Decimal) -> list[dict[str, str]]:
+    if price in {None, "", "ABSENT"} or size is None or size < min_order_size:
         return []
     return [{"price": str(price), "size": str(size)}]
+
+
+def _decimal_from_optional(value: object) -> Decimal | None:
+    if value in {None, "", "ABSENT"}:
+        return None
+    try:
+        return Decimal(str(value))
+    except Exception:
+        return None
 
 
 def _p_fill_lcb_for_direction(book, *, direction: str, shares: Decimal) -> float:
@@ -1235,6 +1398,116 @@ def _optional_bool(value: object) -> bool | None:
     if lowered in {"0", "false", "no"}:
         return False
     return None
+
+
+def _parse_utc(value: object) -> datetime | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        return None
+    return parsed.astimezone(UTC)
+
+
+def _forecast_snapshot_reader_block_reason(
+    conn: sqlite3.Connection,
+    *,
+    snapshot: dict[str, Any],
+    event: OpportunityEvent,
+    family,
+    allow_latest: bool,
+) -> str | None:
+    if event.event_type not in {"FORECAST_SNAPSHOT_READY", "DAY0_EXTREME_UPDATED"}:
+        return None
+    source_run_id = _nonnull(snapshot.get("source_run_id") or _payload(event).get("source_run_id"))
+    if not source_run_id:
+        return "FORECAST_READER_REVALIDATION_FAILED:source_run_id_missing"
+    source_run_table = _authority_table_ref(conn, "source_run")
+    coverage_table = _authority_table_ref(conn, "source_run_coverage")
+    if source_run_table is None or coverage_table is None:
+        return "FORECAST_READER_REVALIDATION_FAILED:source_run_authority_missing"
+    source_run = _row_by_id(conn, source_run_table, "source_run_id", source_run_id)
+    if source_run is None:
+        return "FORECAST_READER_REVALIDATION_FAILED:source_run_missing"
+    if source_run.get("status") not in {"SUCCESS", "PARTIAL"}:
+        return f"FORECAST_READER_REVALIDATION_FAILED:source_run_status_{source_run.get('status')}"
+    if source_run.get("completeness_status") not in {"COMPLETE", "PARTIAL"}:
+        return f"FORECAST_READER_REVALIDATION_FAILED:source_run_completeness_{source_run.get('completeness_status')}"
+    coverage = _coverage_row_for_snapshot(
+        conn,
+        coverage_table,
+        source_run_id=source_run_id,
+        family=family,
+        snapshot=snapshot,
+    )
+    if coverage is None:
+        return "FORECAST_READER_REVALIDATION_FAILED:coverage_missing"
+    if coverage.get("completeness_status") != "COMPLETE":
+        return f"FORECAST_READER_REVALIDATION_FAILED:coverage_{coverage.get('completeness_status')}"
+    if coverage.get("readiness_status") != "LIVE_ELIGIBLE":
+        return f"FORECAST_READER_REVALIDATION_FAILED:readiness_{coverage.get('readiness_status')}"
+    expires_at = _parse_utc(coverage.get("expires_at"))
+    if expires_at is None:
+        return "FORECAST_READER_REVALIDATION_FAILED:coverage_expiry_missing"
+    decision_time = _parse_utc(event.received_at if allow_latest else event.available_at)
+    if decision_time is not None and expires_at <= decision_time:
+        return "FORECAST_READER_REVALIDATION_FAILED:coverage_expired"
+    expected = set(_json_list(coverage.get("expected_steps_json")))
+    observed = set(_json_list(coverage.get("observed_steps_json")))
+    if not expected or not expected.issubset(observed):
+        return "FORECAST_READER_REVALIDATION_FAILED:required_steps_missing"
+    return None
+
+
+def _row_by_id(conn: sqlite3.Connection, table_ref: str, id_col: str, value: str) -> dict[str, Any] | None:
+    cur = conn.execute(f"SELECT * FROM {table_ref} WHERE {id_col} = ? LIMIT 1", (value,))
+    row = cur.fetchone()
+    if row is None:
+        return None
+    names = [description[0] for description in cur.description]
+    return {name: row[name] for name in names} if isinstance(row, sqlite3.Row) else dict(zip(names, row))
+
+
+def _coverage_row_for_snapshot(
+    conn: sqlite3.Connection,
+    table_ref: str,
+    *,
+    source_run_id: str,
+    family,
+    snapshot: dict[str, Any],
+) -> dict[str, Any] | None:
+    columns = _table_ref_columns(conn, table_ref)
+    predicates = ["source_run_id = ?"]
+    params: list[object] = [source_run_id]
+    for column, value in (
+        ("city", family.city),
+        ("target_local_date", family.target_date),
+        ("temperature_metric", family.metric),
+        ("source_id", snapshot.get("source_id")),
+        ("source_transport", snapshot.get("source_transport")),
+        ("data_version", snapshot.get("data_version")),
+    ):
+        if column in columns and value not in {None, ""}:
+            predicates.append(f"{column} = ?")
+            params.append(value)
+    cur = conn.execute(
+        f"""
+        SELECT *
+        FROM {table_ref}
+        WHERE {' AND '.join(predicates)}
+        ORDER BY computed_at DESC, recorded_at DESC
+        LIMIT 1
+        """,
+        tuple(params),
+    )
+    row = cur.fetchone()
+    if row is None:
+        return None
+    names = [description[0] for description in cur.description]
+    return {name: row[name] for name in names} if isinstance(row, sqlite3.Row) else dict(zip(names, row))
 
 
 def _payload(event: OpportunityEvent) -> dict[str, object]:

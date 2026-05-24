@@ -2429,10 +2429,15 @@ def _edli_event_reactor_cycle() -> None:
         reactor = OpportunityEventReactor(
             store,
             source_truth_gate=edli_source_truth_gate,
-            executable_snapshot_gate=executable_snapshot_gate_from_trade_conn(trade_conn),
+            executable_snapshot_gate=executable_snapshot_gate_from_trade_conn(
+                trade_conn,
+                topology_conn=forecasts_conn,
+            ),
             riskguard_gate=riskguard_allows_new_entries(get_current_level=get_current_level),
             final_intent_submit=event_bound_no_submit_adapter_from_trade_conn(
                 trade_conn,
+                forecast_conn=forecasts_conn,
+                topology_conn=forecasts_conn,
                 get_current_level=get_current_level,
             ),
             reject=lambda _event, _stage, _reason: None,

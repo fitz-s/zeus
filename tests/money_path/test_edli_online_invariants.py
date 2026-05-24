@@ -1,6 +1,7 @@
 # Created: 2026-05-24
 # Last reused/audited: 2026-05-24
-# Authority basis: EDLI v1 implementation prompt §16 final online config and §21 A16-A40.
+# Authority basis: EDLI PR332 deploy-ready review; Day0 must not be advertised
+# live while the online observation-context hook is absent.
 from __future__ import annotations
 
 import json
@@ -15,9 +16,9 @@ def test_edli_online_config_enabled_with_stale_book_and_fok_off():
     assert edli["event_writer_enabled"] is True
     assert edli["forecast_snapshot_trigger_enabled"] is True
     assert edli["forecast_complete_live_enabled"] is True
-    assert edli["day0_extreme_trigger_enabled"] is True
+    assert edli["day0_extreme_trigger_enabled"] is False
     assert edli["day0_authority_catchup_scanner_enabled"] is False
-    assert edli["day0_hard_fact_live_enabled"] is True
+    assert edli["day0_hard_fact_live_enabled"] is False
     assert edli["market_channel_ingestor_enabled"] is True
     assert edli["market_channel_quote_cache_enabled"] is True
     assert edli["no_trade_regret_enabled"] is True

@@ -109,27 +109,16 @@ Acceptance IDs A01-A40:
   `385d5c4af940ae82b52bd39197df13d463242bfb` and returned NO-GO with P1/P2
   findings. The review and applied repair are saved at
   `docs/operations/edli_v1/CRITIC_PR332_TRIGGER_REPAIR_REVIEW.md`.
-
-## Current Phase
-
-Phase: PR328 draft is open and implementation is in final verification. The event path is now event-bound through existing evaluator/cycle_runtime authority: event context filters market/candidate scope, forecast decisions require matching `causal_snapshot_id`, live inference writes `p_live` onto the same decision, native executable cost and robust TradeScore are computed from final-intent executable cost basis, durable full-family FDR proof is asserted and committed before executor entry, Kelly proof requires typed fee-deducted `ExecutionPrice` with matching cost-basis id, RiskGuard remains mandatory, and the existing final-intent/executor path remains the only side-effect path.
-
-Current blocking audit reference:
-
-- `docs/operations/edli_v1/PR328_DEEP_SEMANTIC_WIRING_REVIEW.md`
-- `docs/operations/edli_v1/PR332_REAL_TRIGGER_HYDRATION_REVIEW.md`
-- `docs/operations/edli_v1/CRITIC_PR332_TRIGGER_REPAIR_REVIEW.md`
+- `docs/operations/edli_v1/PR332_EVENT_BOUND_GENERATION_REVIEW.md`
+- `docs/operations/edli_v1/PR332_DEPLOY_READY_REVIEW.md`
 - Original verdict: DO NOT MERGE / DO NOT REBOOT DAEMON ON PR328 as reviewed.
-- Current status against the latest audit: the payload-injected proof verifier
-  path has been replaced in `src/engine/event_reactor_adapter.py` with
-  adapter-side hydration/inference/native-cost/FDR/Kelly proof generation from
-  repo authorities. The post-repair critic found the first hydration patch still
-  used noncanonical probability/FDR approximation; that path has now been
-  replaced with canonical fact hydration and fail-closed behavior when those
-  facts are missing. The branch remains draft until latest CI and follow-up
-  review return and daemon restart/live websocket smoke are handled by an
-  operator.
-- Repaired P0/P1 subset: no-op FDR/Kelly removed from main wiring; executable snapshot gate and submit receipt are event-bound; forecast p_live no longer double-applies LLR; durable FDR proof is committed before executor entry; Kelly receipt requires matching cost-basis id; Day0 live events originate from `Day0ObservationContext`; authority-table scanning is evidence/catch-up; market-channel token metadata comes from executable snapshots and carries tick/min-order/negRisk; schema version CHECK ranges now accept `SCHEMA_VERSION=41`.
+- Current status against the latest audit: payload-injected proof and old
+  decision-fact proof preconditions have both been removed from the runtime
+  no-submit adapter. Forecast/Day0 proof now comes from source snapshot
+  hydration plus generated full-family hypotheses. Old probability/FDR fact
+  tables may still exist for compatibility tests, but `src/engine/event_reactor_adapter.py`
+  no longer queries them as receipt authority.
+- Repaired P0/P1 subset: no-op FDR/Kelly removed from main wiring; executable snapshot gate and submit receipt are event-bound; forecast p_live no longer double-applies LLR; durable FDR proof is committed before executor entry; Kelly receipt requires matching cost-basis id; Day0 live flags are fail-closed until an online `Day0ObservationContext` hook is wired; authority-table scanning is evidence/catch-up; market-channel token metadata comes from executable snapshots and carries tick/min-order/negRisk; schema version CHECK ranges now accept `SCHEMA_VERSION=41`; market topology reads forecasts authority; calibrated probability authority is mandatory for EDLI proof; top-ask-only quotes cannot create liquidity.
 
 Completed files:
 
