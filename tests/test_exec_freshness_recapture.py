@@ -63,6 +63,15 @@ class _FakeClob:
     def get_fee_rate(self, token_id: str) -> float:
         return 0.0
 
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def close(self):
+        return None
+
 
 def _market() -> dict:
     return {
@@ -203,3 +212,38 @@ def test_fresh_snapshot_passthrough_no_recapture(conn):
     helper = _import_helper()
     snap = helper(conn, "snap-stale", now=NOW, clob=_Boom(), decision=_decision(), market=_market())
     assert snap is not None and is_fresh(snap, NOW)
+
+
+def test_reprice_recapture_wiring_opens_client_and_returns_fresh(conn, monkeypatch):
+    """Integration: the reprice-time wrapper builds market-from-snapshot, opens a client,
+    re-captures, and returns a fresh snapshot with a NEW id (so reprice propagates it)."""
+    import src.data.polymarket_client as pmc
+    from src.engine.cycle_runtime import _reprice_recapture_fresh_snapshot
+
+    monkeypatch.setattr(pmc, "PolymarketClient", lambda: _FakeClob())
+    monkeypatch.delenv("ZEUS_REPRICE_RECAPTURE_DISABLED", raising=False)
+
+    stale_at = NOW - (FRESHNESS_WINDOW_DEFAULT + timedelta(seconds=30))
+    insert_snapshot(conn, _stale_snapshot(captured_at=stale_at))
+    stale = get_snapshot(conn, "snap-stale")
+
+    fresh = _reprice_recapture_fresh_snapshot(
+        conn, "snap-stale", decision=_decision(), stale_snapshot=stale, now=NOW
+    )
+    assert fresh is not None
+    assert is_fresh(fresh, NOW)
+    assert fresh.snapshot_id != "snap-stale", "re-capture mints a new id reprice must propagate"
+
+
+def test_reprice_recapture_disabled_preserves_stale_gate(conn, monkeypatch):
+    """Kill-switch ZEUS_REPRICE_RECAPTURE_DISABLED → no re-capture, 30s gate preserved."""
+    from src.engine.cycle_runtime import _reprice_recapture_fresh_snapshot
+
+    monkeypatch.setenv("ZEUS_REPRICE_RECAPTURE_DISABLED", "1")
+    stale_at = NOW - (FRESHNESS_WINDOW_DEFAULT + timedelta(seconds=30))
+    insert_snapshot(conn, _stale_snapshot(captured_at=stale_at))
+    stale = get_snapshot(conn, "snap-stale")
+    with pytest.raises(ValueError, match="executable_snapshot_stale"):
+        _reprice_recapture_fresh_snapshot(
+            conn, "snap-stale", decision=_decision(), stale_snapshot=stale, now=NOW
+        )

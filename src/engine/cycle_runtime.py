@@ -896,6 +896,91 @@ def _ensure_fresh_executable_snapshot(
     return fresh
 
 
+def _market_dict_from_snapshot(snapshot) -> dict:
+    """Build the minimal Gamma ``market`` dict capture_executable_market_snapshot needs
+    from a persisted executable snapshot's identity facts.
+
+    Market identity (condition/question/token ids, slug, neg_risk) does NOT go stale —
+    only the orderbook prices do, and those are re-fetched fresh from CLOB inside capture.
+    Tradability flags are asserted True here; the authoritative re-check is CLOB-side in
+    capture (tradeability_status / crossed-book / identity asserts), so a market that has
+    actually closed is still rejected there.
+    """
+
+    def _iso(value):
+        return value.isoformat() if hasattr(value, "isoformat") else value
+
+    yes_token = str(getattr(snapshot, "yes_token_id", "") or "")
+    no_token = str(getattr(snapshot, "no_token_id", "") or "")
+    condition_id = str(getattr(snapshot, "condition_id", "") or "")
+    question_id = str(getattr(snapshot, "question_id", "") or "")
+    gamma_market_id = str(getattr(snapshot, "gamma_market_id", "") or condition_id)
+    neg_risk = bool(getattr(snapshot, "neg_risk", False))
+    gamma_market_raw = {
+        "id": gamma_market_id,
+        "conditionId": condition_id,
+        "questionID": question_id,
+        "active": True,
+        "closed": False,
+        "acceptingOrders": True,
+        "enableOrderBook": True,
+        "negRisk": neg_risk,
+        "clobTokenIds": [yes_token, no_token],
+    }
+    outcome = {
+        "token_id": yes_token,
+        "no_token_id": no_token,
+        "condition_id": condition_id,
+        "market_id": condition_id,
+        "question_id": question_id,
+        "gamma_market_id": gamma_market_id,
+        "active": True,
+        "closed": False,
+        "accepting_orders": True,
+        "enable_orderbook": True,
+        "executable": True,
+        "neg_risk": neg_risk,
+        "market_start_at": _iso(getattr(snapshot, "market_start_at", None)),
+        "market_end_at": _iso(getattr(snapshot, "market_end_at", None)),
+        "market_close_at": _iso(getattr(snapshot, "market_close_at", None)),
+        "token_map_raw": dict(
+            getattr(snapshot, "token_map_raw", None) or {"YES": yes_token, "NO": no_token}
+        ),
+        "raw_gamma_payload_hash": str(getattr(snapshot, "raw_gamma_payload_hash", "") or ""),
+        "gamma_market_raw": gamma_market_raw,
+    }
+    return {
+        "event_id": str(getattr(snapshot, "event_id", "") or ""),
+        "slug": str(getattr(snapshot, "event_slug", "") or ""),
+        "outcomes": [outcome],
+    }
+
+
+def _reprice_recapture_fresh_snapshot(conn, snapshot_id, *, decision, stale_snapshot, now):
+    """Open a short-lived public CLOB client and re-capture a fresh snapshot for ONE market.
+
+    Activates the fresh-at-submit path (see docs/operations/EXEC_FRESHNESS_ROOTCAUSE_2026-05-24.md):
+    the persisted cycle snapshot is stale because the mode run's discovery->reprice latency
+    exceeds the 30s window. PolymarketClient() public orderbook reads need no auth/keychain
+    (httpx _public_http), so this is a read-only fresh price fetch — it places no orders.
+    Disabled via ZEUS_REPRICE_RECAPTURE_DISABLED (then the 30s stale gate is preserved).
+    """
+    if os.environ.get("ZEUS_REPRICE_RECAPTURE_DISABLED"):
+        raise ValueError("executable_snapshot_stale")
+    from src.data.polymarket_client import PolymarketClient
+
+    market = _market_dict_from_snapshot(stale_snapshot)
+    with PolymarketClient() as clob:
+        return _ensure_fresh_executable_snapshot(
+            conn,
+            snapshot_id,
+            now=now,
+            clob=clob,
+            decision=decision,
+            market=market,
+        )
+
+
 def _reprice_decision_from_executable_snapshot(
     conn,
     decision,
@@ -931,8 +1016,26 @@ def _reprice_decision_from_executable_snapshot(
         raise ValueError(f"EXECUTABLE_SNAPSHOT_UNAVAILABLE: {snapshot_id}")
     from src.contracts.executable_market_snapshot_v2 import is_fresh
 
-    if not is_fresh(snapshot, datetime.now(timezone.utc)):
-        raise ValueError("executable_snapshot_stale")
+    _now_reprice = datetime.now(timezone.utc)
+    if not is_fresh(snapshot, _now_reprice):
+        # Fresh-at-submit re-capture: the persisted cycle snapshot has aged past the
+        # 30s window (discovery->reprice latency); re-capture one fresh single-market
+        # snapshot rather than rejecting a real edge.  Raises executable_snapshot_stale
+        # when re-capture is disabled or unavailable (safety gate preserved).
+        snapshot = _reprice_recapture_fresh_snapshot(
+            conn,
+            snapshot_id,
+            decision=decision,
+            stale_snapshot=snapshot,
+            now=_now_reprice,
+        )
+        # _snapshot_id is content+time-based: re-capture mints a NEW id. Propagate it so
+        # downstream trade provenance (final intent / recorded executable_snapshot_id)
+        # references the fresh snapshot the order was actually priced against.
+        if str(getattr(snapshot, "snapshot_id", "") or "") != snapshot_id:
+            snapshot_id = str(snapshot.snapshot_id)
+            if isinstance(snapshot_fields, dict):
+                snapshot_fields["executable_snapshot_id"] = snapshot_id
     from src.config import settings
     from src.contracts import (
         Direction,
