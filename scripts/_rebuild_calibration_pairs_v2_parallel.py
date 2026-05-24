@@ -69,6 +69,12 @@ def _mc_compute_worker(payload: dict) -> dict:
         n_mc (int | None)
         seed (int | None)
 
+    Optional error-model keys (present iff the rebuild ran with --error-model
+    AND the bucket had a usable model):
+        error_bias_native (float)        members - this is subtracted PRE-MC
+        error_extra_sigma_native (float) widens the MC predictive draw
+    When absent the MC path is byte-identical to the legacy rebuild.
+
     Output dict keys:
         snapshot_id (int)
         p_raw_vec (list[float] | None)
@@ -103,14 +109,30 @@ def _mc_compute_worker(payload: dict) -> dict:
         member_maxes = np.asarray(payload["member_maxes"], dtype=float)
         settlement_value = float(payload["settlement_value"])
 
-        p_raw_vec = p_raw_vector_from_maxes(
-            member_maxes,
-            city,
-            sem,
-            bins,
-            n_mc=payload.get("n_mc"),
-            rng=rng,
-        )
+        # Predictive-error correction (opt-in). The °C→native conversion + fit
+        # happened in main (_pre_compute_snapshot_v2); the worker only applies the
+        # already-native scalars. Absent keys => byte-identical legacy MC.
+        error_bias = payload.get("error_bias_native")
+        extra_sigma = payload.get("error_extra_sigma_native")
+        if error_bias is not None:
+            p_raw_vec = p_raw_vector_from_maxes(
+                member_maxes - float(error_bias),
+                city,
+                sem,
+                bins,
+                n_mc=payload.get("n_mc"),
+                rng=rng,
+                extra_member_sigma=float(extra_sigma),
+            )
+        else:
+            p_raw_vec = p_raw_vector_from_maxes(
+                member_maxes,
+                city,
+                sem,
+                bins,
+                n_mc=payload.get("n_mc"),
+                rng=rng,
+            )
         winning_bin = grid.bin_for_value(settlement_value)
         return {
             "snapshot_id": snapshot_id,
@@ -148,6 +170,8 @@ def run_parallel_rebuild(
     n_mc: Optional[int],
     seed_base: Optional[int] = None,
     stats: Any = None,
+    error_model_family: Optional[str] = None,
+    error_cache: Optional[dict] = None,
 ) -> None:
     """Process every (city, snapshots) bucket using compute-in-workers + write-in-main.
 
@@ -162,6 +186,8 @@ def run_parallel_rebuild(
         raise ValueError("run_parallel_rebuild: stats (RebuildStatsV2) is required")
     if not city_buckets:
         return
+    if error_cache is None:
+        error_cache = {}
 
     # Lazy import — avoids circular import at module load (parallel module is
     # imported from inside rebuild_v2() in the same script).
@@ -201,29 +227,50 @@ def run_parallel_rebuild(
 
                 # ---- Step A: pre-process in main; build payloads for survivors.
                 payloads: list[dict] = []
-                # snap_index maps snapshot_id -> (snapshot_row, settlement_value)
-                # for the writer step. Holding settlement_value here avoids an
-                # extra _fetch_verified_observation round-trip during write.
-                snap_index: dict[int, tuple[sqlite3.Row, float]] = {}
+                # snap_index maps snapshot_id -> (snapshot_row, settlement_value,
+                # applied_error_model_family) for the writer step. Holding
+                # settlement_value here avoids an extra _fetch_verified_observation
+                # round-trip during write; applied_family carries the per-snapshot
+                # correction provenance (fail-open buckets => 'none').
+                snap_index: dict[int, tuple[sqlite3.Row, float, str]] = {}
                 for snap in city_snaps:
                     survivor = _pre_compute_snapshot_v2(
                         conn, snap, city, spec=spec, stats=stats,
+                        error_model_family=error_model_family,
+                        error_cache=error_cache,
                     )
                     if survivor is None:
                         continue
                     sid = int(snap["snapshot_id"])
-                    snap_index[sid] = (snap, float(survivor["settlement_value"]))
+                    # applied_family records whether THIS snapshot's bucket had a
+                    # usable model — a fail-open bucket leaves the survivor
+                    # unannotated and writes 'none'/bias_corrected=0.
+                    _eb = survivor.get("error_bias_native")
+                    applied_family = (
+                        error_model_family
+                        if (error_model_family and _eb is not None)
+                        else "none"
+                    )
+                    snap_index[sid] = (
+                        snap, float(survivor["settlement_value"]), applied_family,
+                    )
                     seed = (
                         (int(seed_base) ^ sid) if seed_base is not None else None
                     )
-                    payloads.append({
+                    payload = {
                         "snapshot_id": sid,
                         "city_name": city.name,
                         "member_maxes": survivor["member_maxes"],
                         "settlement_value": survivor["settlement_value"],
                         "n_mc": n_mc,
                         "seed": seed,
-                    })
+                    }
+                    if _eb is not None:
+                        payload["error_bias_native"] = _eb
+                        payload["error_extra_sigma_native"] = survivor[
+                            "error_extra_sigma_native"
+                        ]
+                    payloads.append(payload)
 
                 # ---- Step B: parallel MC compute over the survivors.
                 if payloads:
@@ -240,7 +287,7 @@ def run_parallel_rebuild(
                                 f"{result.get('snapshot_id')}: {result['error']}"
                             )
                         sid = int(result["snapshot_id"])
-                        snap, settlement_value = snap_index[sid]
+                        snap, settlement_value, applied_family = snap_index[sid]
                         _write_snapshot_pairs_v2(
                             conn,
                             snap,
@@ -251,6 +298,8 @@ def run_parallel_rebuild(
                             bin_labels=result["bin_labels"],
                             winning_bin_label=result["winning_bin_label"],
                             stats=stats,
+                            bias_corrected=(applied_family != "none"),
+                            error_model_family=applied_family,
                         )
 
                 conn.execute("RELEASE SAVEPOINT v2_rebuild_bucket")

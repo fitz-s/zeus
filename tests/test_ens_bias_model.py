@@ -130,6 +130,52 @@ def test_train_serve_guard_allows_consistent_states():
     assert_bias_state_consistent(live_bias_enabled=False, platt_bias_corrected=True) is None
 
 
+def test_train_serve_guard_blocks_error_model_family_mismatch():
+    from src.calibration.ens_bias_model import assert_bias_state_consistent
+    # live serves full_transport_v1-corrected p_raw, but active Platt was fit on a
+    # DIFFERENT family ('none') — out-of-domain even though bias_corrected=1 both.
+    with pytest.raises(ValueError, match="error-model mismatch"):
+        assert_bias_state_consistent(
+            live_bias_enabled=True,
+            platt_bias_corrected=True,
+            live_error_model_family="full_transport_v1",
+            active_platt_error_model_family="none",
+        )
+    # reverse mismatch (live none, Platt corrected family) also raises
+    with pytest.raises(ValueError, match="error-model mismatch"):
+        assert_bias_state_consistent(
+            live_bias_enabled=True,
+            platt_bias_corrected=True,
+            live_error_model_family="none",
+            active_platt_error_model_family="full_transport_v1",
+        )
+
+
+def test_train_serve_guard_allows_matching_error_model_family():
+    from src.calibration.ens_bias_model import assert_bias_state_consistent
+    # matching family is the green path
+    assert_bias_state_consistent(
+        live_bias_enabled=True,
+        platt_bias_corrected=True,
+        live_error_model_family="full_transport_v1",
+        active_platt_error_model_family="full_transport_v1",
+    ) is None
+    # None/'none' compare equal (uncorrected family across representations)
+    assert_bias_state_consistent(
+        live_bias_enabled=True,
+        platt_bias_corrected=True,
+        live_error_model_family=None,
+        active_platt_error_model_family="none",
+    ) is None
+    # family axis is not checked when correction is OFF (benign)
+    assert_bias_state_consistent(
+        live_bias_enabled=False,
+        platt_bias_corrected=True,
+        live_error_model_family="none",
+        active_platt_error_model_family="full_transport_v1",
+    ) is None
+
+
 def test_posterior_flags_disagreement_and_widens_sd():
     # Chicago-like: tight prior cold, tight live neutral -> they disagree far more than
     # their combined SD explains -> posterior must flag disagreement + widen reported sd.

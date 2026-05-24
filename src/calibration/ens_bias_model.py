@@ -245,13 +245,28 @@ def apply_bias_to_extrema(member_extrema, posterior: PosteriorBias):
     return arr - posterior.bias
 
 
-def assert_bias_state_consistent(*, live_bias_enabled: bool, platt_bias_corrected: bool) -> None:
+def assert_bias_state_consistent(
+    *,
+    live_bias_enabled: bool,
+    platt_bias_corrected: bool,
+    live_error_model_family: str | None = None,
+    active_platt_error_model_family: str | None = None,
+) -> None:
     """Train/serve invariant: if live signals are bias-corrected, the active Platt
-    model MUST have been fit on bias_corrected=1 calibration pairs.
+    model MUST have been fit on bias_corrected=1 calibration pairs AND (when an
+    error-model family is in play) the SAME predictive-error family.
 
     Enabling live correction while Platt was trained on uncorrected p_raw moves the
     live p_raw into a different calibration input space (out-of-domain inference).
-    Raises ValueError on that mismatch; all other states are benign.
+    The error-model family is a finer axis of the same input space: a Platt fit on
+    'full_transport_v1'-corrected pairs is NOT valid for serving 'none'-corrected
+    live p_raw (or vice versa), even though both have bias_corrected=1. Raises
+    ValueError on either mismatch; all other states are benign.
+
+    ``live_error_model_family`` / ``active_platt_error_model_family`` are optional
+    for backward compatibility: when BOTH are None the family axis is not checked
+    (legacy callers that only track the boolean). When provided, they are compared
+    with 'none'/None treated as the uncorrected family.
     """
     if live_bias_enabled and not platt_bias_corrected:
         raise ValueError(
@@ -260,6 +275,21 @@ def assert_bias_state_consistent(*, live_bias_enabled: bool, platt_bias_correcte
             "(bias_corrected=0). Recompute corrected pairs and refit Platt before "
             "enabling bias_correction."
         )
+
+    # Error-model family axis. Only checked when the caller supplies at least one
+    # family value; normalize None -> 'none' so an uncorrected family compares
+    # equal across the None/'none' representations.
+    if live_error_model_family is not None or active_platt_error_model_family is not None:
+        live_family = (live_error_model_family or "none")
+        platt_family = (active_platt_error_model_family or "none")
+        if live_bias_enabled and live_family != platt_family:
+            raise ValueError(
+                "train/serve error-model mismatch: live bias correction is enabled "
+                f"under error_model_family={live_family!r} but the active Platt model "
+                f"was fit under error_model_family={platt_family!r}. The corrected "
+                "p_raw lives in a different calibration input space; refit Platt on "
+                "pairs built under the SAME family before enabling correction."
+            )
 
 
 def transport_bias_prior(
