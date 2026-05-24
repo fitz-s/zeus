@@ -220,3 +220,6 @@ operator decision in the next housekeeping pass:
    dir is a smell; needs an internal INDEX or thinning.
 3. `live_rescue_ledger_2026-05-04.md` — needs a per-day rotation
    policy or it'll keep growing.
+
+## Registered model-layer artifacts (2026-05-24)
+- `ENS_BIAS_HIERARCHICAL_TEST_RESULTS_2026-05-24.md` — PR #334 hierarchical ENS bias foundation test results (model layer; not live-wired).
