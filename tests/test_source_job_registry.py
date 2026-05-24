@@ -1,0 +1,63 @@
+# Created: 2026-05-24
+# Last reused or audited: 2026-05-24
+# Authority basis: docs/operations/current/plans/data_temporal_kernel/PLAN.md (PR3);
+#   operator spec §"Job registry" + §4 (ownership map).
+"""Relationship tests for the job registry + inventory/audit CLIs (PR3, advisory).
+
+Key antibody: the registry must MIRROR the scheduler — a scheduled add_job id that is not
+declared in JOB_REGISTRY fails --check, so the inventory can never silently go stale.
+"""
+from __future__ import annotations
+
+
+def test_every_scheduled_job_is_registered() -> None:
+    """ANTIBODY: every id passed to .add_job() (or a *_JOB_ID constant) in the two daemons
+    must be declared in JOB_REGISTRY. This is the registry-mirrors-reality gate."""
+    from scripts.data_collection_inventory import _scheduled_job_ids
+    from src.data.source_job_registry import JOB_REGISTRY
+
+    scheduled = _scheduled_job_ids()
+    assert scheduled, "expected to extract scheduled job ids from the daemon modules"
+    missing = scheduled - set(JOB_REGISTRY)
+    assert not missing, f"scheduled jobs missing from registry: {sorted(missing)}"
+
+
+def test_inventory_check_passes() -> None:
+    """The --check CLI returns 0 when the registry covers every scheduled job."""
+    from scripts.data_collection_inventory import cmd_check
+
+    assert cmd_check() == 0
+
+
+def test_audit_flags_fast_executor_db_writer() -> None:
+    """The efficiency audit must surface the UMA listener (DB write on the file-only fast
+    executor) — the audit-confirmed structural fault."""
+    from scripts.data_collection_efficiency_audit import run_audit
+    from src.data.source_job_registry import fast_executor_db_writers
+
+    writers = {j.job_id for j in fast_executor_db_writers()}
+    assert "ingest_uma_resolution_listener" in writers
+
+    faults = run_audit()
+    assert any("fast_executor_db_writer" in f and "uma_resolution_listener" in f for f in faults)
+
+
+def test_file_only_fast_jobs_not_flagged_as_db_writers() -> None:
+    """Heartbeat / status-rollup / source-health on fast are file-only and must NOT be
+    flagged as DB writers."""
+    from src.data.source_job_registry import fast_executor_db_writers
+
+    flagged = {j.job_id for j in fast_executor_db_writers()}
+    for ok in ("ingest_heartbeat", "ingest_status_rollup", "ingest_source_health_probe"):
+        assert ok not in flagged
+
+
+def test_opendata_producers_span_both_daemons() -> None:
+    """OpenData live producers are declared in BOTH daemons (env-gated at runtime). The audit
+    surfaces this so PR4 can enforce a runtime singleton."""
+    from src.data.source_job_registry import opendata_owners
+
+    owners = opendata_owners()
+    daemons = {j.owner_daemon for j in owners}
+    assert daemons == {"ingest_main", "forecast_live_daemon"}
+    assert all(j.owner_gated for j in owners), "OpenData producers must be env-gated"
