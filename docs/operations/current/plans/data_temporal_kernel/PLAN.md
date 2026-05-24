@@ -75,7 +75,7 @@ New files only. No scheduler / schema / ingestion-function / calendar edits.
 - Manifest companions (K2 loop-break): register new files in script_manifest.yaml, test_topology.yaml,
   source_rationale.yaml.
 
-## Downstream PR map (program; not this branch)
+## PR2-PR8 (this branch) — as-built + operator-gated deferrals
 
 - PR2 (RESHAPED, as-built): collection_frontier.py + data_collection_frontier_report.py — IN-MEMORY
   frontier from existing surfaces (source_run/readiness_state/job_run/coverage + health/heartbeat JSON),

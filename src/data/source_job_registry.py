@@ -62,9 +62,10 @@ _INGEST_MAIN: tuple[SourceJobSpec, ...] = (
                   callable_ref="_k2_hole_scanner_tick"),
     SourceJobSpec("ingest_k2_obs_v2", "ingest_main", "live", "default", True,
                   callable_ref="_k2_obs_v2_tick"),
-    SourceJobSpec("ingest_k2_hko", "ingest_main", "live", "default", True,
+    SourceJobSpec("ingest_k2_hko_tick", "ingest_main", "live", "default", True,
                   source_id="hko_daily_api", callable_ref="_k2_hko_tick",
-                  notes="job id ingest_k2_hko; callable _k2_hko_tick"),
+                  notes="job id ingest_k2_hko_tick (aligned to callable by upstream #324 HKO "
+                        "job-id boot-crash fix); callable _k2_hko_tick"),
     SourceJobSpec("ingest_etl_recalibrate", "ingest_main", "derived", "default", True,
                   callable_ref="_etl_recalibrate"),
     SourceJobSpec("ingest_harvester_truth_writer", "ingest_main", "settlement", "default", True,

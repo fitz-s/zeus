@@ -50,16 +50,51 @@ def _scheduled_job_ids() -> set[str]:
     return ids
 
 
+def _orphan_callable_refs() -> list[str]:
+    """Registry jobs whose callable_ref no longer exists as a `def` in its owner daemon.
+
+    Reverse-direction guard: scheduled⊆registered alone would miss a registry job whose
+    callable was deleted from the daemon. Jobs without a callable_ref (e.g. forecast_live
+    wrapper jobs) are skipped — they have no single resolvable function name.
+    """
+    daemon_src = {
+        "ingest_main": (REPO_ROOT / "src" / "ingest_main.py").read_text(encoding="utf-8"),
+        "forecast_live_daemon": (REPO_ROOT / "src" / "ingest" / "forecast_live_daemon.py").read_text(encoding="utf-8"),
+    }
+    orphans: list[str] = []
+    for job in JOB_REGISTRY.values():
+        ref = job.callable_ref
+        if not ref:
+            continue
+        src = daemon_src.get(job.owner_daemon, "")
+        if not re.search(rf"\bdef {re.escape(ref)}\s*\(", src):
+            orphans.append(f"{job.job_id} -> {job.owner_daemon}.{ref} (callable not found)")
+    return orphans
+
+
 def cmd_check() -> int:
     scheduled = _scheduled_job_ids()
     registered = set(JOB_REGISTRY)
-    missing = sorted(scheduled - registered)
-    if missing:
-        print(f"data_collection_inventory --check: {len(missing)} scheduled job(s) NOT in registry:")
-        for j in missing:
-            print(f"  MISSING: {j}")
+
+    missing = sorted(scheduled - registered)          # scheduled but unregistered
+    orphans = _orphan_callable_refs()                 # registered but callable deleted
+
+    if missing or orphans:
+        if missing:
+            print(f"data_collection_inventory --check: {len(missing)} scheduled job(s) NOT in registry:")
+            for j in missing:
+                print(f"  MISSING: {j}")
+        if orphans:
+            print(f"data_collection_inventory --check: {len(orphans)} registry job(s) with ORPHAN callable_ref:")
+            for o in orphans:
+                print(f"  ORPHAN: {o}")
         return 1
-    print(f"data_collection_inventory --check: OK — all {len(scheduled)} scheduled job ids registered.")
+
+    extra = len(registered) - len(scheduled)          # startup-catch-up / direct-call jobs
+    print(
+        f"data_collection_inventory --check: OK — {len(scheduled)} scheduled add_job id(s) registered, "
+        f"plus {extra} direct-call/startup job(s) ({len(registered)} total); no orphan callables."
+    )
     return 0
 
 
