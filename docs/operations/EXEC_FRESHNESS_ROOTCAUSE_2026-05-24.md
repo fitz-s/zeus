@@ -57,6 +57,38 @@ MUST trigger a fresh re-capture and yield a valid repriced best-ask, NOT raise
 `executable_snapshot_stale`. Prove RED before fix (stub the stale snapshot, assert the
 raise pre-fix), GREEN after (assert re-capture called + no raise).
 
+## Wiring design (the remaining integration step — execute exactly)
+
+Helper `_ensure_fresh_executable_snapshot` is LANDED + unit-tested. To activate on the
+live path, wire `_reprice_decision_from_executable_snapshot` (cycle_runtime.py:842):
+
+1. Replace the inline get_snapshot + is_fresh (lines 872-878) with: load snapshot;
+   if `is_fresh` → use it; else (stale) call the helper with a live CLOB client +
+   a market dict built from the stale snapshot's identity.
+2. **Client lifecycle:** add `_reprice_recapture_fresh_snapshot(conn, snapshot_id,
+   decision, stale_snapshot, now)` that, when recapture is enabled (live mode +
+   not disabled by a kill-switch env e.g. ZEUS_REPRICE_RECAPTURE_DISABLED), opens a
+   short-lived `PolymarketClient(public_http_timeout=ZEUS_REPRICE_RECAPTURE_TIMEOUT_SECONDS
+   default 5)` and calls the helper inside the `with`. When disabled/no client →
+   raise `executable_snapshot_stale` (unchanged safety). Verify PolymarketClient public
+   orderbook reads need no auth/keychain (orderbook is public) before relying on it.
+3. **Market dict:** `_market_dict_from_snapshot(snapshot)` → one outcome carrying
+   condition_id, question_id, token_id (yes), no_token_id, enable_orderbook=True,
+   accepting_orders=True, active, closed, market_end_at, token_map_raw,
+   raw_gamma_payload_hash + gamma_market_raw (or rely on capture's _minimal_gamma_payload).
+   Orderbook/neg_risk/tick/min_order come FRESH from the CLOB fetch inside capture.
+4. **snapshot_id propagation (CORRECTNESS — capture mints a NEW id, _snapshot_id is
+   content+time-based, market_scanner.py:2495):** after re-capture, if
+   `snapshot.snapshot_id != snapshot_id`, set `snapshot_id = snapshot.snapshot_id` AND
+   `snapshot_fields["executable_snapshot_id"] = snapshot_id` (mutating the dict flows the
+   fresh id to the caller's final-intent build). Otherwise the trade records the stale id
+   against fresh pricing → provenance mismatch / downstream rejection.
+5. **Integration test (write before wiring):** a decision whose persisted snapshot is
+   stale, run through reprice with a fake clob, must (a) NOT raise executable_snapshot_stale,
+   (b) leave `snapshot_fields["executable_snapshot_id"]` == the fresh snapshot id,
+   (c) price the order from the fresh book. Unit helper test (test_exec_freshness_recapture.py)
+   already covers the helper in isolation.
+
 ## Deploy ordering (advisor)
 
 1. Land this exec-freshness fix (test GREEN, worktree, paper replay).
