@@ -70,6 +70,7 @@ parent_coverage_allowed_patterns:
 - docs/operations/[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]_*/
 - docs/operations/*_package_*/
 - docs/operations/*_observation/
+- docs/operations/edli_v1/
 - docs/operations/ws_poll_reaction/
 - docs/operations/attribution_drift/
 - docs/operations/current/
@@ -748,6 +749,25 @@ entries:
   contains_volatile_metrics: false
   current_tense_allowed: false
   refresh_source: n/a
+
+- path: docs/operations/edli_v1/
+  doc_class: operations
+  default_read: false
+  direct_reference_allowed: true
+  current_role: EDLI v1 implementation package, reference spec copy, redemption evidence, critic reports, and no-submit daemon runbooks
+  canonical_replaced_by: []
+  next_action: retain_as_evidence
+  lifecycle_state: active
+  coverage_scope: descendants
+  parent_coverage_allowed: true
+  truth_profile: package_input
+  freshness_class: packet_bound
+  supersedes: []
+  superseded_by: []
+  may_live_in_reference: false
+  contains_volatile_metrics: true
+  current_tense_allowed: true
+  refresh_source: packet_audit
 
 - path: docs/operations/task_2026-04-29_design_simplification_audit/
   doc_class: operations

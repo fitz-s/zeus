@@ -68,6 +68,25 @@
     "log_only_until_replay_fp_zero": true,
     "_note_2026_05_24": "LIVE-PROB-P0 \u00a7F operator binding spec (2026-05-23); apply-metrics enforcement added 2026-05-24. GATE SEMANTICS: pure market-deference \u2014 any strictly-sub-floor (0 < p_mkt < 0.05) edge bin with cal/mkt ratio>=3.0 in a contiguous tail run>=2 is REJECTED. BIMODAL PROTECTION: bins with p_raw>=0.05 AND p_mkt>=0.05 (market and members agree on the secondary mode) PASS unconditionally \u2014 at the exact equality boundary p_mkt==0.05, BIMODAL PROTECTION takes precedence. For bins with p_mkt strictly below 0.05 the market disagrees regardless of member count; rejection applies and member support appears in telemetry only. APPLY-METRICS: hard mode fires when metric IN apply_to_metrics (i.e. HIGH); LOW is unvalidated \u2192 shadow/log-only. apply_to_strategies is ADVISORY METADATA ONLY \u2014 NOT a hard gate filter. Excluding any active live strategy (e.g. opening_inertia, the highest-volume live strategy) would create a phantom hole. The hard gate applies to ALL non-day0 strategies for the listed metric(s). FP=0 proven for HIGH across all strategies. Authority: /Users/leofitz/.claude/jobs/866db2ea/IMPL_SPEC_operator.md \u00a7F."
   },
+  "edli_v1": {
+    "enabled": true,
+    "reactor_mode": "live_no_submit",
+    "event_writer_enabled": true,
+    "forecast_snapshot_trigger_enabled": true,
+    "forecast_complete_live_enabled": true,
+    "day0_extreme_trigger_enabled": true,
+    "day0_authority_catchup_scanner_enabled": false,
+    "day0_hard_fact_live_enabled": true,
+    "market_channel_ingestor_enabled": true,
+    "market_channel_quote_cache_enabled": true,
+    "no_trade_regret_enabled": true,
+    "reports_enabled": true,
+    "stale_book_directional_trading_enabled": false,
+    "real_order_submit_enabled": false,
+    "taker_fok_fak_live_enabled": false,
+    "tiny_live_max_notional_usd": 5.0,
+    "tiny_live_max_orders_per_day": 1
+  },
   "entry_forecast": {
     "source_id": "ecmwf_open_data",
     "source_transport": "ensemble_snapshots_v2_db_reader",

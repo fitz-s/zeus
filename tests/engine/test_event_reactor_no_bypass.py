@@ -1,0 +1,495 @@
+# Created: 2026-05-24
+# Last reused/audited: 2026-05-24
+# Authority basis: EDLI v1 no-submit redemption proof; reactor must not use venue or broad cycle runtime.
+from __future__ import annotations
+
+import ast
+import json
+import sqlite3
+from dataclasses import replace
+from pathlib import Path
+
+from src.engine.event_reactor_adapter import (
+    build_event_bound_no_submit_receipt,
+    edli_source_truth_gate,
+    edli_trade_score_gate,
+)
+from src.events.opportunity_event import ForecastSnapshotReadyPayload, make_opportunity_event
+from src.riskguard.risk_level import RiskLevel
+
+
+def _forecast_event(completeness: str = "COMPLETE"):
+    payload = ForecastSnapshotReadyPayload(
+        city="Chicago",
+        target_date="2026-05-25",
+        metric="high",
+        source_id="ecmwf_open_data",
+        source_run_id="run-1",
+        cycle="2026-05-24T00:00:00+00:00",
+        track="operational",
+        snapshot_id="snapshot-1",
+        snapshot_hash="hash-1",
+        captured_at="2026-05-24T08:00:00+00:00",
+        available_at="2026-05-24T08:10:00+00:00",
+        required_fields_present=True,
+        required_steps_present=True,
+        member_count=51,
+        min_members_floor=40,
+        completeness_status=completeness,  # type: ignore[arg-type]
+        required_steps=[0, 3, 6],
+        observed_steps=[0, 3, 6],
+        expected_members=51,
+        source_run_status="SUCCESS",
+        source_run_completeness_status="COMPLETE",
+        coverage_completeness_status="COMPLETE",
+        coverage_readiness_status="LIVE_ELIGIBLE",
+    )
+    return make_opportunity_event(
+        event_type="FORECAST_SNAPSHOT_READY",
+        entity_key="Chicago|2026-05-25|high|run-1",
+        source="forecast_snapshot_ready_trigger",
+        observed_at=payload.captured_at,
+        available_at=payload.available_at,
+        received_at="2026-05-24T08:11:00+00:00",
+        causal_snapshot_id=payload.snapshot_id,
+        payload=payload,
+    )
+
+
+def _bound_forecast_event(*, token_id: str = "yes-1", fdr_condition_count: int = 2):
+    event = _forecast_event()
+    payload = json.loads(event.payload_json)
+    condition_id = "condition-2" if token_id.endswith("-2") else "condition-1"
+    payload.update(
+        {
+            "condition_id": condition_id,
+            "token_id": token_id,
+            "unit": "F",
+        }
+    )
+    return replace(event, payload_json=json.dumps(payload, sort_keys=True, separators=(",", ":")))
+
+
+def _trade_conn_with_snapshot(
+    *,
+    selected_ask: str = "0.40",
+    no_selected_ask: str = "0.80",
+    condition_count: int = 2,
+    snapshot_condition_count: int | None = None,
+):
+    if snapshot_condition_count is None:
+        snapshot_condition_count = condition_count
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE executable_market_snapshots (
+            snapshot_id TEXT PRIMARY KEY,
+            condition_id TEXT NOT NULL,
+            yes_token_id TEXT NOT NULL,
+            no_token_id TEXT NOT NULL,
+            selected_outcome_token_id TEXT,
+            outcome_label TEXT,
+            orderbook_top_ask TEXT NOT NULL,
+            orderbook_top_bid TEXT NOT NULL DEFAULT '0.39',
+            orderbook_depth_json TEXT NOT NULL DEFAULT '{}',
+            min_tick_size TEXT NOT NULL DEFAULT '0.01',
+            min_order_size TEXT NOT NULL DEFAULT '5',
+            fee_details_json TEXT NOT NULL DEFAULT '{}',
+            neg_risk INTEGER NOT NULL DEFAULT 0,
+            freshness_deadline TEXT NOT NULL,
+            captured_at TEXT NOT NULL,
+            active INTEGER NOT NULL,
+            closed INTEGER NOT NULL,
+            event_slug TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO executable_market_snapshots VALUES (
+            'snapshot-exec-1', 'condition-1', 'yes-1', 'no-1', 'yes-1', 'YES',
+            ?, '0.39', ?, '0.01', '5', '{"fee_rate_fraction":0.0}', 0, '2026-05-25T00:00:00+00:00',
+            '2026-05-24T08:12:00+00:00', 1, 0, 'chicago-temperature-high'
+        )
+        """,
+        (
+            selected_ask,
+            json.dumps(
+                {
+                    "YES": {"asks": [{"price": selected_ask, "size": "100"}], "bids": [{"price": "0.39", "size": "100"}]},
+                    "NO": {"asks": [{"price": no_selected_ask, "size": "100"}], "bids": [{"price": "0.19", "size": "100"}]},
+                },
+                separators=(",", ":"),
+            ),
+        ),
+    )
+    conn.execute(
+        """
+        INSERT INTO executable_market_snapshots VALUES (
+            'snapshot-exec-1-no', 'condition-1', 'yes-1', 'no-1', 'no-1', 'NO',
+            ?, '0.19', ?, '0.01', '5', '{"fee_rate_fraction":0.0}', 0, '2026-05-25T00:00:00+00:00',
+            '2026-05-24T08:12:00+00:00', 1, 0, 'chicago-temperature-high'
+        )
+        """,
+        (
+            no_selected_ask,
+            json.dumps(
+                {
+                    "YES": {"asks": [{"price": selected_ask, "size": "100"}], "bids": [{"price": "0.39", "size": "100"}]},
+                    "NO": {"asks": [{"price": no_selected_ask, "size": "100"}], "bids": [{"price": "0.19", "size": "100"}]},
+                },
+                separators=(",", ":"),
+            ),
+        ),
+    )
+    for index in range(2, snapshot_condition_count + 1):
+        conn.execute(
+            """
+            INSERT INTO executable_market_snapshots VALUES (
+                ?, ?, ?, ?, ?, 'YES',
+                '0.48', '0.47', ?, '0.01', '5', '{"fee_rate_fraction":0.0}', 0, '2026-05-25T00:00:00+00:00',
+                '2026-05-24T08:12:00+00:00', 1, 0, 'chicago-temperature-high'
+            )
+            """,
+            (
+                f"snapshot-exec-{index}",
+                f"condition-{index}",
+                f"yes-{index}",
+                f"no-{index}",
+                f"yes-{index}",
+                json.dumps(
+                    {
+                        "YES": {"asks": [{"price": "0.48", "size": "100"}], "bids": [{"price": "0.47", "size": "100"}]},
+                        "NO": {"asks": [{"price": "0.60", "size": "100"}], "bids": [{"price": "0.40", "size": "100"}]},
+                    },
+                    separators=(",", ":"),
+                ),
+            ),
+        )
+    conn.execute(
+        """
+        CREATE TABLE market_events_v2 (
+            city TEXT,
+            target_date TEXT,
+            temperature_metric TEXT,
+            outcome TEXT,
+            condition_id TEXT,
+            token_id TEXT,
+            market_slug TEXT,
+            range_label TEXT,
+            range_low REAL,
+            range_high REAL
+        )
+        """
+    )
+    rows = []
+    for index in range(1, condition_count + 1):
+        rows.append(
+            (
+                f"{70 + index - 1}-{71 + index - 1}°F",
+                f"condition-{index}",
+                f"yes-{index}",
+                f"chicago-high-{index}",
+                f"{70 + index - 1}-{71 + index - 1}°F",
+                float(70 + index - 1),
+                float(71 + index - 1),
+            )
+        )
+    conn.executemany(
+        """
+        INSERT INTO market_events_v2 VALUES (
+            'Chicago', '2026-05-25', 'high', ?, ?, ?, ?, ?, ?, ?
+        )
+        """,
+        rows,
+    )
+    conn.execute(
+        """
+        CREATE TABLE probability_trace_fact (
+            trace_id TEXT PRIMARY KEY,
+            decision_id TEXT,
+            decision_snapshot_id TEXT,
+            city TEXT,
+            target_date TEXT,
+            range_label TEXT,
+            direction TEXT,
+            p_posterior REAL,
+            recorded_at TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE selection_family_fact (
+            family_id TEXT PRIMARY KEY,
+            decision_snapshot_id TEXT,
+            city TEXT,
+            target_date TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE selection_hypothesis_fact (
+            hypothesis_id TEXT PRIMARY KEY,
+            family_id TEXT,
+            city TEXT,
+            target_date TEXT,
+            range_label TEXT,
+            direction TEXT,
+            p_value REAL,
+            ci_lower REAL,
+            passed_prefilter INTEGER,
+            recorded_at TEXT
+        )
+        """
+    )
+    conn.execute(
+        "INSERT INTO selection_family_fact VALUES ('canonical-family-1', 'snapshot-1', 'Chicago', '2026-05-25')"
+    )
+    probability_rows = []
+    hypothesis_rows = []
+    for index in range(1, condition_count + 1):
+        label = f"{70 + index - 1}-{71 + index - 1}°F"
+        yes_q = 0.80 if index == 1 else 0.20
+        no_q = 1.0 - yes_q
+        probability_rows.extend(
+            [
+                (f"trace-yes-{index}", f"decision-yes-{index}", "snapshot-1", "Chicago", "2026-05-25", label, "buy_yes", yes_q, "2026-05-24T08:12:00+00:00"),
+                (f"trace-no-{index}", f"decision-no-{index}", "snapshot-1", "Chicago", "2026-05-25", label, "buy_no", no_q, "2026-05-24T08:12:00+00:00"),
+            ]
+        )
+        hypothesis_rows.extend(
+            [
+                (f"hyp-yes-{index}", "canonical-family-1", "Chicago", "2026-05-25", label, "buy_yes", 0.001 if index == 1 else 0.80, 0.72 if index == 1 else 0.12, 1, "2026-05-24T08:12:00+00:00"),
+                (f"hyp-no-{index}", "canonical-family-1", "Chicago", "2026-05-25", label, "buy_no", 0.90 if index == 1 else 0.85, 0.12 if index == 1 else 0.72, 1, "2026-05-24T08:12:00+00:00"),
+            ]
+        )
+    conn.executemany(
+        "INSERT INTO probability_trace_fact VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        probability_rows,
+    )
+    conn.executemany(
+        "INSERT INTO selection_hypothesis_fact VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        hypothesis_rows,
+    )
+    return conn
+
+
+def test_reactor_never_imports_venue_adapter():
+    tree = ast.parse(Path("src/events/reactor.py").read_text())
+    imports = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imports.extend(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            imports.append(node.module or "")
+    assert all("venue_adapter" not in imported for imported in imports)
+
+
+def test_engine_adapter_has_no_cycle_or_executor_boundary():
+    source = Path("src/engine/event_reactor_adapter.py").read_text()
+    assert "venue_adapter" not in source
+    assert "execute_final_intent" not in source
+    assert "run_cycle" not in source
+    assert "submit_existing_cycle_for_event" not in source
+    assert "edli_submit_accepted" not in source
+    assert "final_intents_built" not in source
+
+
+def test_adapter_source_truth_allows_complete_forecast_only():
+    complete = _forecast_event("COMPLETE")
+    partial_payload = json.loads(complete.payload_json)
+    partial_payload["completeness_status"] = "PARTIAL_ALLOWED"
+    partial = replace(complete, payload_json=json.dumps(partial_payload, sort_keys=True, separators=(",", ":")))
+
+    assert edli_source_truth_gate(complete) is True
+    assert edli_source_truth_gate(partial) is False
+
+
+def test_adapter_trade_score_gate_treats_trigger_events_as_hydration_inputs():
+    event = _forecast_event()
+    payload = json.loads(event.payload_json)
+    payload.update(
+        {
+            "p_fill_lcb": 0.5,
+            "q_5pct": 0.62,
+            "q_posterior": 0.64,
+            "c_95pct": 0.55,
+            "c_stress": 0.56,
+            "lambda_edge": 0.01,
+            "lambda_stress": 0.01,
+        }
+    )
+    positive = replace(event, payload_json=json.dumps(payload, sort_keys=True, separators=(",", ":")))
+    payload["c_95pct"] = 0.70
+    negative = replace(event, payload_json=json.dumps(payload, sort_keys=True, separators=(",", ":")))
+
+    assert edli_trade_score_gate(positive) is True
+    assert edli_trade_score_gate(negative) is True
+    assert edli_trade_score_gate(event) is True
+
+
+def test_runtime_receipt_uses_event_bound_final_intent_contract():
+    event = _bound_forecast_event()
+    receipt = build_event_bound_no_submit_receipt(
+        event,
+        trade_conn=_trade_conn_with_snapshot(),
+        get_current_level=lambda: RiskLevel.GREEN,
+    )
+
+    assert receipt.submitted is True
+    assert receipt.event_id == event.event_id
+    assert receipt.causal_snapshot_id == event.causal_snapshot_id
+    assert receipt.trade_score_positive is True
+    assert receipt.trade_score is not None
+    assert receipt.trade_score > 0
+    assert receipt.q_live is not None
+    assert receipt.q_live > 0.75
+    assert receipt.c_fee_adjusted is not None
+    assert receipt.family_complete is True
+    assert receipt.fdr_pass is True
+    assert receipt.fdr_hypothesis_count == 4
+    assert receipt.kelly_execution_price_type == "ExecutionPrice"
+    assert receipt.kelly_price_fee_deducted is True
+    assert receipt.kelly_size_usd > 0
+    assert receipt.side_effect_status == "NO_SUBMIT"
+
+
+def test_forecast_trigger_event_without_q_or_token_fields_builds_no_submit_receipt():
+    event = _forecast_event()
+    receipt = build_event_bound_no_submit_receipt(
+        event,
+        trade_conn=_trade_conn_with_snapshot(),
+        get_current_level=lambda: RiskLevel.GREEN,
+    )
+
+    assert receipt.submitted is True
+    assert receipt.token_id == "yes-1"
+    assert receipt.trade_score is not None
+    assert receipt.fdr_hypothesis_count == 4
+    assert receipt.kelly_execution_price_type == "ExecutionPrice"
+    assert receipt.side_effect_status == "NO_SUBMIT"
+
+
+def test_family_candidates_use_market_event_range_bounds_not_payload_default():
+    event = _forecast_event()
+    receipt = build_event_bound_no_submit_receipt(
+        event,
+        trade_conn=_trade_conn_with_snapshot(),
+        get_current_level=lambda: RiskLevel.GREEN,
+    )
+
+    assert receipt.bin_label == "70-71°F"
+    assert receipt.bin_label != "0-1°F"
+
+
+def test_selected_snapshot_row_not_first_still_binds_matching_candidate():
+    event = _bound_forecast_event(token_id="yes-2")
+    receipt = build_event_bound_no_submit_receipt(
+        event,
+        trade_conn=_trade_conn_with_snapshot(),
+        get_current_level=lambda: RiskLevel.GREEN,
+    )
+
+    assert receipt.condition_id == "condition-2"
+    assert receipt.token_id == "yes-2"
+    assert receipt.bin_label == "71-72°F"
+
+
+def test_runtime_receipt_uses_selected_no_snapshot_not_yes_side_ask():
+    event = _bound_forecast_event(token_id="no-1")
+    receipt = build_event_bound_no_submit_receipt(
+        event,
+        trade_conn=_trade_conn_with_snapshot(selected_ask="0.10", no_selected_ask="0.80"),
+        get_current_level=lambda: RiskLevel.GREEN,
+    )
+
+    assert receipt.submitted is False
+    assert receipt.token_id == "no-1"
+    assert receipt.executable_snapshot_id == "snapshot-exec-1-no"
+    assert receipt.c_fee_adjusted is not None
+    assert receipt.c_fee_adjusted >= 0.80
+    assert receipt.reason == "TRADE_SCORE_NON_POSITIVE"
+
+
+def test_runtime_receipt_rejects_selected_no_when_only_yes_side_snapshot_exists():
+    event = _bound_forecast_event(token_id="no-1")
+    conn = _trade_conn_with_snapshot()
+    conn.execute("DELETE FROM executable_market_snapshots WHERE selected_outcome_token_id = 'no-1'")
+    conn.execute(
+        """
+        UPDATE executable_market_snapshots
+        SET orderbook_depth_json = ?
+        WHERE selected_outcome_token_id = 'yes-1'
+        """,
+        (json.dumps({"YES": {"asks": [{"price": "0.40", "size": "100"}], "bids": []}}, separators=(",", ":")),),
+    )
+
+    receipt = build_event_bound_no_submit_receipt(
+        event,
+        trade_conn=conn,
+        get_current_level=lambda: RiskLevel.GREEN,
+    )
+
+    assert receipt.submitted is False
+    assert receipt.reason.startswith("EXECUTABLE_NATIVE_ASK_MISSING")
+
+
+def test_runtime_receipt_rejects_when_family_topology_has_missing_sibling_snapshot():
+    event = _bound_forecast_event(fdr_condition_count=3)
+    receipt = build_event_bound_no_submit_receipt(
+        event,
+        trade_conn=_trade_conn_with_snapshot(condition_count=3, snapshot_condition_count=2),
+        get_current_level=lambda: RiskLevel.GREEN,
+    )
+
+    assert receipt.submitted is False
+    assert receipt.reason.startswith("FDR_FULL_FAMILY_PROOF_MISSING")
+    assert receipt.family_complete is False
+
+
+def test_runtime_receipt_generates_fdr_from_family_not_event_payload():
+    event = _bound_forecast_event()
+    payload = json.loads(event.payload_json)
+    payload.pop("fdr_hypotheses", None)
+    event = replace(event, payload_json=json.dumps(payload, sort_keys=True, separators=(",", ":")))
+
+    receipt = build_event_bound_no_submit_receipt(
+        event,
+        trade_conn=_trade_conn_with_snapshot(),
+        get_current_level=lambda: RiskLevel.GREEN,
+    )
+
+    assert receipt.fdr_hypothesis_count == 4
+    assert receipt.reason != "FDR_FULL_FAMILY_PROOF_MISSING"
+
+
+def test_runtime_receipt_rejects_missing_native_ask_instead_of_defaulting_midpoint():
+    event = _bound_forecast_event()
+    receipt = build_event_bound_no_submit_receipt(
+        event,
+        trade_conn=_trade_conn_with_snapshot(selected_ask=""),
+        get_current_level=lambda: RiskLevel.GREEN,
+    )
+
+    assert receipt.submitted is False
+    assert receipt.reason.startswith("EXECUTABLE_NATIVE_ASK_MISSING")
+
+
+def test_runtime_receipt_uses_runtime_kelly_authority_not_event_payload():
+    event = _bound_forecast_event()
+    payload = json.loads(event.payload_json)
+    payload["bankroll_usd"] = 0
+    payload["kelly_multiplier"] = 0
+    event = replace(event, payload_json=json.dumps(payload, sort_keys=True, separators=(",", ":")))
+
+    receipt = build_event_bound_no_submit_receipt(
+        event,
+        trade_conn=_trade_conn_with_snapshot(),
+        get_current_level=lambda: RiskLevel.GREEN,
+    )
+
+    assert receipt.kelly_pass is True
+    assert receipt.kelly_size_usd > 0
+    assert receipt.reason != "KELLY_PROOF_MISSING"

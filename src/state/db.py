@@ -2558,6 +2558,26 @@ def init_schema(
     from src.state.schema.no_trade_events_schema import migrate_no_trade_events_schema as _migrate_no_trade_events_schema
     _migrate_no_trade_events_schema(conn)
 
+    # EDLI v1 (2026-05-24): append-only opportunity event store tables.
+    from src.state.schema.opportunity_events_schema import ensure_table as _ensure_opportunity_events_table
+    from src.state.schema.opportunity_event_processing_schema import ensure_table as _ensure_opportunity_event_processing_table
+    from src.state.schema.event_dead_letters_schema import ensure_table as _ensure_event_dead_letters_table
+    _ensure_opportunity_events_table(conn)
+    _ensure_opportunity_event_processing_table(conn)
+    _ensure_event_dead_letters_table(conn)
+
+    # EDLI v1 (2026-05-24): executable quote/book feasibility evidence.
+    from src.state.schema.execution_feasibility_evidence_schema import ensure_table as _ensure_execution_feasibility_evidence_table
+    _ensure_execution_feasibility_evidence_table(conn)
+
+    # EDLI v1 (2026-05-24): event-triggered no-trade regret ledger.
+    from src.state.schema.no_trade_regret_events_schema import ensure_table as _ensure_no_trade_regret_events_table
+    _ensure_no_trade_regret_events_table(conn)
+
+    # EDLI v1 (2026-05-24): durable tiny live-cap usage ledger.
+    from src.state.schema.edli_live_cap_usage_schema import ensure_table as _ensure_edli_live_cap_usage_table
+    _ensure_edli_live_cap_usage_table(conn)
+
     # 2026-05-21 live authority follow-up: decision_events CHECK constraints
     # must admit shadow_decision / unknown_legacy before PRAGMA user_version is
     # stamped current. CREATE TABLE IF NOT EXISTS cannot upgrade stale CHECKs.
@@ -2626,6 +2646,7 @@ def _migrate_decision_events_schema(conn: sqlite3.Connection) -> None:
         "unknown_legacy" in table_sql
         and "shadow_decision" in table_sql
         and "12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28" in table_sql
+        and str(SCHEMA_VERSION) in table_sql
     ):
         conn.execute("DROP TABLE IF EXISTS decision_events_new")
         return
@@ -2703,7 +2724,7 @@ def _migrate_decision_events_schema(conn: sqlite3.Connection) -> None:
             CASE
                 WHEN schema_version IN (12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41)
                     THEN schema_version
-                ELSE 36
+                ELSE 41
             END,
             CASE
                 WHEN source IN ('phase0_backfill', 'live_decision', 'shadow_decision')
@@ -4609,6 +4630,30 @@ def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
         (table,),
     ).fetchone()
     return row is not None
+
+
+def _attached_table_exists(conn: sqlite3.Connection, schema: str, table: str) -> bool:
+    if schema not in {"world", "forecasts"}:
+        return False
+    row = conn.execute(
+        f"SELECT 1 FROM {schema}.sqlite_master WHERE type = 'table' AND name = ?",
+        (table,),
+    ).fetchone()
+    return row is not None
+
+
+def _selection_fact_table_ref(conn: sqlite3.Connection, table: str) -> str | None:
+    if table not in {"selection_family_fact", "selection_hypothesis_fact"}:
+        return None
+    try:
+        attached = {str(row[1]) for row in conn.execute("PRAGMA database_list").fetchall()}
+        if "world" in attached and _attached_table_exists(conn, "world", table):
+            return f"world.{table}"
+    except sqlite3.Error:
+        pass
+    if _table_exists(conn, table):
+        return table
+    return None
 
 
 def _table_has_unique_key(
@@ -6769,13 +6814,14 @@ def log_selection_family_fact(
 ) -> dict:
     if conn is None:
         return {"status": "skipped_no_connection", "table": "selection_family_fact"}
-    if not _table_exists(conn, "selection_family_fact"):
+    table_ref = _selection_fact_table_ref(conn, "selection_family_fact")
+    if table_ref is None:
         return {"status": "skipped_missing_table", "table": "selection_family_fact"}
     if not family_id:
         return {"status": "skipped_missing_family_id", "table": "selection_family_fact"}
     conn.execute(
-        """
-        INSERT INTO selection_family_fact (
+        f"""
+        INSERT INTO {table_ref} (
             family_id, cycle_mode, decision_snapshot_id, city, target_date,
             strategy_key, discovery_mode, created_at, meta_json, decision_time_status
         )
@@ -6832,7 +6878,8 @@ def log_selection_hypothesis_fact(
 ) -> dict:
     if conn is None:
         return {"status": "skipped_no_connection", "table": "selection_hypothesis_fact"}
-    if not _table_exists(conn, "selection_hypothesis_fact"):
+    table_ref = _selection_fact_table_ref(conn, "selection_hypothesis_fact")
+    if table_ref is None:
         return {"status": "skipped_missing_table", "table": "selection_hypothesis_fact"}
     if not hypothesis_id:
         return {"status": "skipped_missing_hypothesis_id", "table": "selection_hypothesis_fact"}
@@ -6840,8 +6887,8 @@ def log_selection_hypothesis_fact(
         return {"status": "skipped_missing_family_id", "table": "selection_hypothesis_fact"}
     direction_value = direction if direction in {"buy_yes", "buy_no"} else "unknown"
     conn.execute(
-        """
-        INSERT INTO selection_hypothesis_fact (
+        f"""
+        INSERT INTO {table_ref} (
             hypothesis_id, family_id, decision_id, candidate_id, city, target_date,
             range_label, direction, p_value, q_value, ci_lower, ci_upper, edge,
             tested, passed_prefilter, selected_post_fdr, rejection_stage,
