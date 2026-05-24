@@ -93,13 +93,15 @@ def _reactor(store, *, gates=True, config=None):
             kelly_price_fee_deducted=True,
             kelly_size_usd=1.0,
             kelly_cost_basis_id="cost-1",
+            kelly_decision_id="kelly-1",
+            risk_decision_id="risk-1",
             final_intent_id="intent-1",
         )
 
     reactor = OpportunityEventReactor(
         store,
         source_truth_gate=lambda _event: gates,
-        executable_snapshot_gate=lambda _event: gates,
+        executable_snapshot_gate=lambda _event, _decision_time: gates,
         riskguard_gate=lambda _event: gates,
         final_intent_submit=_submit,
         reject=lambda event, stage, reason: rejected.append((event.event_id, stage, reason)),
@@ -150,7 +152,8 @@ def test_successful_no_submit_receipt_is_persisted_before_processed():
     assert result.proof_accepted == 1
     receipt_row = conn.execute(
         """
-        SELECT event_id, side_effect_status, receipt_json, receipt_hash
+        SELECT event_id, side_effect_status, receipt_json, receipt_hash,
+               kelly_decision_id, risk_decision_id
         FROM edli_no_submit_receipts
         WHERE event_id = ?
         """,
@@ -161,6 +164,8 @@ def test_successful_no_submit_receipt_is_persisted_before_processed():
     assert receipt_row[1] == "NO_SUBMIT"
     assert '"proof_accepted":true' in receipt_row[2]
     assert len(receipt_row[3]) == 64
+    assert receipt_row[4] == "kelly-1"
+    assert receipt_row[5] == "risk-1"
     status = conn.execute(
         """
         SELECT processing_status
@@ -209,6 +214,8 @@ def test_no_submit_receipt_ledger_is_idempotent_for_duplicate_event():
         kelly_price_fee_deducted=True,
         kelly_size_usd=1.0,
         kelly_cost_basis_id="kelly-cost-1",
+        kelly_decision_id="kelly-decision-1",
+        risk_decision_id="risk-decision-1",
         final_intent_id="intent-1",
         side_effect_status="NO_SUBMIT",
     )
@@ -218,6 +225,10 @@ def test_no_submit_receipt_ledger_is_idempotent_for_duplicate_event():
     ledger.insert_idempotent(receipt, decision_time=datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc))
 
     assert conn.execute("SELECT COUNT(*) FROM edli_no_submit_receipts").fetchone()[0] == 1
+    row = conn.execute(
+        "SELECT kelly_decision_id, risk_decision_id FROM edli_no_submit_receipts WHERE event_id = 'event-1'"
+    ).fetchone()
+    assert row == ("kelly-decision-1", "risk-decision-1")
 
 
 def test_no_submit_receipt_ledger_rejects_duplicate_hash_drift():
@@ -241,6 +252,8 @@ def test_no_submit_receipt_ledger_rejects_duplicate_hash_drift():
         kelly_price_fee_deducted=True,
         kelly_size_usd=1.0,
         kelly_cost_basis_id="kelly-cost-1",
+        kelly_decision_id="kelly-decision-1",
+        risk_decision_id="risk-decision-1",
         final_intent_id="intent-1",
         side_effect_status="NO_SUBMIT",
     )
@@ -284,6 +297,8 @@ def test_receipt_hash_drift_dead_letters_event_before_processed():
         kelly_price_fee_deducted=True,
         kelly_size_usd=2.0,
         kelly_cost_basis_id="cost-1",
+        kelly_decision_id="kelly-old",
+        risk_decision_id="risk-old",
         final_intent_id="intent-1",
         side_effect_status="NO_SUBMIT",
     )
@@ -342,7 +357,7 @@ def test_reactor_passes_decision_time_to_submit():
     OpportunityEventReactor(
         store,
         source_truth_gate=lambda _event: True,
-        executable_snapshot_gate=lambda _event: True,
+        executable_snapshot_gate=lambda _event, _decision_time: True,
         riskguard_gate=lambda _event: True,
         final_intent_submit=_submit,
         reject=lambda _event, _stage, _reason: None,
@@ -392,7 +407,7 @@ def test_receipt_without_money_path_proof_is_rejected():
     reactor = OpportunityEventReactor(
         store,
         source_truth_gate=lambda _event: True,
-        executable_snapshot_gate=lambda _event: True,
+        executable_snapshot_gate=lambda _event, _decision_time: True,
         riskguard_gate=lambda _event: True,
         final_intent_submit=_submit,
         reject=lambda event, stage, reason: rejected.append((event.event_id, stage, reason)),
@@ -438,7 +453,7 @@ def test_reactor_blocks_real_order_side_effect_when_no_submit_mode():
     reactor = OpportunityEventReactor(
         store,
         source_truth_gate=lambda _event: True,
-        executable_snapshot_gate=lambda _event: True,
+        executable_snapshot_gate=lambda _event, _decision_time: True,
         riskguard_gate=lambda _event: True,
         final_intent_submit=_submit,
         reject=lambda event, stage, reason: rejected.append((event.event_id, stage, reason)),
@@ -551,7 +566,7 @@ def test_reactor_rejections_write_no_trade_regret_events():
     reactor = OpportunityEventReactor(
         store,
         source_truth_gate=lambda _event: True,
-        executable_snapshot_gate=lambda _event: True,
+        executable_snapshot_gate=lambda _event, _decision_time: True,
         riskguard_gate=lambda _event: True,
         final_intent_submit=lambda _event, _decision_time: None,
         reject=lambda event, stage, reason: rejected.append((event.event_id, stage, reason)),
@@ -569,7 +584,7 @@ def test_reactor_exception_dead_letters_event():
     reactor = OpportunityEventReactor(
         store,
         source_truth_gate=lambda _event: (_ for _ in ()).throw(RuntimeError("boom")),
-        executable_snapshot_gate=lambda _event: True,
+        executable_snapshot_gate=lambda _event, _decision_time: True,
         riskguard_gate=lambda _event: True,
         final_intent_submit=lambda _event, _decision_time: None,
         reject=lambda _event, _stage, _reason: None,

@@ -18,6 +18,7 @@ from src.events.opportunity_event import OpportunityEvent, assert_available_for_
 UTC = timezone.utc
 
 Gate = Callable[[OpportunityEvent], bool]
+ExecutableSnapshotGate = Callable[[OpportunityEvent, datetime], bool]
 Reject = Callable[[OpportunityEvent, str, str], None]
 
 
@@ -62,6 +63,8 @@ class EventSubmissionReceipt:
     kelly_price_fee_deducted: bool = False
     kelly_size_usd: float = 0.0
     kelly_cost_basis_id: str | None = None
+    kelly_decision_id: str | None = None
+    risk_decision_id: str | None = None
     final_intent_id: str | None = None
     side_effect_status: str = "NO_SUBMIT"
     reason: str = ""
@@ -103,7 +106,7 @@ class OpportunityEventReactor:
         store: EventStore,
         *,
         source_truth_gate: Gate,
-        executable_snapshot_gate: Gate,
+        executable_snapshot_gate: ExecutableSnapshotGate,
         riskguard_gate: Gate,
         final_intent_submit: Submit,
         reject: Reject,
@@ -162,7 +165,7 @@ class OpportunityEventReactor:
         if not self._source_truth_gate(event):
             self._reject_event(event, "SOURCE_TRUTH", "SOURCE_TRUTH_BLOCKED", result)
             return
-        if not self._executable_snapshot_gate(event):
+        if not self._executable_snapshot_gate(event, decision_time.astimezone(UTC)):
             self._reject_event(event, "EXECUTABLE_QUOTE", "EXECUTABLE_SNAPSHOT_BLOCKED", result)
             return
         self._log_family_once(event)

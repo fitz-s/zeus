@@ -28,6 +28,8 @@ CREATE TABLE IF NOT EXISTS edli_no_submit_receipts (
     fdr_family_id TEXT,
     fdr_hypothesis_count INTEGER NOT NULL DEFAULT 0,
     kelly_cost_basis_id TEXT,
+    kelly_decision_id TEXT,
+    risk_decision_id TEXT,
     kelly_size_usd REAL NOT NULL DEFAULT 0.0,
     receipt_json TEXT NOT NULL,
     receipt_hash TEXT NOT NULL,
@@ -50,5 +52,13 @@ CREATE INDEX IF NOT EXISTS idx_edli_no_submit_receipts_decision_time
 
 def ensure_table(conn: sqlite3.Connection) -> None:
     conn.execute(CREATE_TABLE_SQL)
+    _ensure_column(conn, "kelly_decision_id", "TEXT")
+    _ensure_column(conn, "risk_decision_id", "TEXT")
     conn.execute(CREATE_EVENT_INDEX_SQL)
     conn.execute(CREATE_DECISION_TIME_INDEX_SQL)
+
+
+def _ensure_column(conn: sqlite3.Connection, column_name: str, column_sql: str) -> None:
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(edli_no_submit_receipts)").fetchall()}
+    if column_name not in columns:
+        conn.execute(f"ALTER TABLE edli_no_submit_receipts ADD COLUMN {column_name} {column_sql}")

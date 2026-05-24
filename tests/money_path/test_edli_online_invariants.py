@@ -19,7 +19,7 @@ def test_edli_online_config_enabled_with_stale_book_and_fok_off():
     assert edli["day0_extreme_trigger_enabled"] is False
     assert edli["day0_authority_catchup_scanner_enabled"] is False
     assert edli["day0_hard_fact_live_enabled"] is False
-    assert edli["market_channel_ingestor_enabled"] is True
+    assert edli["market_channel_ingestor_enabled"] is False
     assert edli["market_channel_quote_cache_enabled"] is True
     assert edli["no_trade_regret_enabled"] is True
     assert edli["reports_enabled"] is True
@@ -34,6 +34,16 @@ def test_edli_online_config_enabled_with_stale_book_and_fok_off():
     assert edli["taker_fok_fak_live_enabled"] is False
     assert edli["tiny_live_max_notional_usd"] == 5.0
     assert edli["tiny_live_max_orders_per_day"] == 1
+
+
+def test_pr332_scope_marks_day0_and_market_channel_as_disabled_followups():
+    settings = json.loads(Path("config/settings.json").read_text())
+    edli = settings["edli_v1"]
+
+    assert edli["day0_extreme_trigger_enabled"] is False
+    assert edli["day0_hard_fact_live_enabled"] is False
+    assert edli["day0_authority_catchup_scanner_enabled"] is False
+    assert edli["market_channel_ingestor_enabled"] is False
 
 
 def test_edli_reactor_job_wired_without_removing_scheduler_jobs():

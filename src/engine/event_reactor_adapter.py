@@ -105,13 +105,20 @@ def executable_snapshot_gate_from_trade_conn(
     *,
     now: datetime | None = None,
     topology_conn: sqlite3.Connection | None = None,
-) -> Callable[[OpportunityEvent], bool]:
+) -> Callable[[OpportunityEvent, datetime], bool]:
     """Return a gate requiring a fresh executable snapshot bound to the event."""
 
-    checked_at = (now or datetime.now(UTC)).astimezone(UTC)
+    fallback_checked_at = now.astimezone(UTC) if now is not None else None
 
-    def _gate(event: OpportunityEvent) -> bool:
+    def _gate(event: OpportunityEvent, decision_time: datetime) -> bool:
         if topology_conn is None:
+            return False
+        checked_at = (
+            decision_time.astimezone(UTC)
+            if decision_time.tzinfo is not None and decision_time.utcoffset() is not None
+            else fallback_checked_at
+        )
+        if checked_at is None:
             return False
         if not _table_exists(trade_conn, "executable_market_snapshots"):
             return False
@@ -601,6 +608,8 @@ def _event_submission_receipt_from_typed_receipt_payload(
         kelly_price_fee_deducted=bool(raw_receipt.get("kelly_price_fee_deducted")),
         kelly_size_usd=float(raw_receipt.get("kelly_size_usd") or 0.0),
         kelly_cost_basis_id=raw_receipt.get("kelly_cost_basis_id"),
+        kelly_decision_id=raw_receipt.get("kelly_decision_id"),
+        risk_decision_id=raw_receipt.get("risk_decision_id"),
         final_intent_id=raw_receipt.get("final_intent_id"),
         side_effect_status="NO_SUBMIT",
         reason=str(raw_receipt.get("reason") or "event_bound_final_intent_no_submit"),
@@ -1585,14 +1594,14 @@ def _forecast_snapshot_reader_block_reason(
         return None
     source_run_id = _nonnull(snapshot.get("source_run_id") or _payload(event).get("source_run_id"))
     if not source_run_id:
-        return "FORECAST_READER_REVALIDATION_FAILED:source_run_id_missing"
+        return "FORECAST_READER_SCOPE_CONSTRUCTION_MISSING:source_run_id_missing"
     source_run_table = _authority_table_ref(conn, "source_run")
     coverage_table = _authority_table_ref(conn, "source_run_coverage")
     if source_run_table is None or coverage_table is None:
-        return "FORECAST_READER_REVALIDATION_FAILED:source_run_authority_missing"
+        return "FORECAST_READER_SCOPE_CONSTRUCTION_MISSING:source_run_authority_missing"
     source_run = _row_by_id(conn, source_run_table, "source_run_id", source_run_id)
     if source_run is None:
-        return "FORECAST_READER_REVALIDATION_FAILED:source_run_missing"
+        return "FORECAST_READER_SCOPE_CONSTRUCTION_MISSING:source_run_missing"
     coverage = _coverage_row_for_snapshot(
         conn,
         coverage_table,
@@ -1601,8 +1610,7 @@ def _forecast_snapshot_reader_block_reason(
         snapshot=snapshot,
     )
     if coverage is None:
-        return "FORECAST_READER_REVALIDATION_FAILED:coverage_missing"
-    required_steps = tuple(int(step) for step in _json_list(coverage.get("expected_steps_json")) if str(step) != "")
+        return "FORECAST_READER_SCOPE_CONSTRUCTION_MISSING:coverage_missing"
     reader_reason = _executable_forecast_reader_authority_block_reason(
         conn,
         snapshot=snapshot,
@@ -1612,7 +1620,6 @@ def _forecast_snapshot_reader_block_reason(
         family=family,
         allow_latest=allow_latest,
         decision_time=decision_time,
-        required_steps=required_steps,
     )
     if reader_reason is not None:
         return reader_reason
@@ -1629,18 +1636,13 @@ def _executable_forecast_reader_authority_block_reason(
     family,
     allow_latest: bool,
     decision_time: datetime,
-    required_steps: tuple[int, ...],
 ) -> str | None:
     """Revalidate forecast eligibility through the canonical executable reader."""
 
     try:
         from src.data.executable_forecast_reader import SOURCE_TRANSPORT, read_executable_forecast
-        from src.data.forecast_target_contract import ForecastTargetScope
 
         target_date = date.fromisoformat(str(coverage.get("target_local_date") or family.target_date))
-        source_cycle_time = _parse_utc(source_run.get("source_cycle_time") or snapshot.get("source_cycle_time"))
-        target_window_start = _parse_utc(coverage.get("target_window_start_utc"))
-        target_window_end = _parse_utc(coverage.get("target_window_end_utc"))
         source_id = _nonnull(coverage.get("source_id") or source_run.get("source_id") or snapshot.get("source_id"))
         source_transport = _nonnull(coverage.get("source_transport") or snapshot.get("source_transport") or SOURCE_TRANSPORT)
         data_version = _nonnull(coverage.get("data_version") or snapshot.get("data_version"))
@@ -1648,39 +1650,21 @@ def _executable_forecast_reader_authority_block_reason(
         track = _nonnull(coverage.get("track") or source_run.get("track") or snapshot.get("track") or _payload(event).get("track"))
         condition_id = _nonnull(_payload(event).get("condition_id") or (family.condition_ids[0] if family.condition_ids else ""))
         if (
-            source_cycle_time is None
-            or target_window_start is None
-            or target_window_end is None
-            or decision_time is None
-            or not source_id
+            not source_id
             or not source_transport
             or not data_version
             or not source_run_id
             or not track
             or not condition_id
-            or not required_steps
         ):
-            return "FORECAST_READER_LIVE_ELIGIBILITY_BLOCKED:scope_incomplete"
-        scope = ForecastTargetScope(
+            return "FORECAST_READER_SCOPE_CONSTRUCTION_MISSING:scope_incomplete"
+        result = read_executable_forecast(
+            conn,
             city_id=str(coverage.get("city_id") or family.city),
             city_name=str(coverage.get("city") or family.city),
             city_timezone=str(coverage.get("city_timezone") or "UTC"),
             target_local_date=target_date,
             temperature_metric=family.metric,
-            source_cycle_time=source_cycle_time,
-            data_version=data_version,
-            target_window_start_utc=target_window_start,
-            target_window_end_utc=target_window_end,
-            required_step_hours=required_steps,
-            market_refs=tuple(str(candidate.condition_id or "") for candidate in family.candidates),
-        )
-        result = read_executable_forecast(
-            conn,
-            city_id=scope.city_id,
-            city_name=scope.city_name,
-            city_timezone=scope.city_timezone,
-            target_local_date=scope.target_local_date,
-            temperature_metric=scope.temperature_metric,
             source_id=source_id,
             source_transport=source_transport,
             data_version=data_version,

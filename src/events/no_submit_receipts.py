@@ -65,7 +65,7 @@ class EdliNoSubmitReceiptLedger:
                 executable_snapshot_id, final_intent_id, side_effect_status,
                 q_live, q_lcb_5pct, c_fee_adjusted, c_cost_95pct, p_fill_lcb,
                 trade_score, fdr_family_id, fdr_hypothesis_count,
-                kelly_cost_basis_id, kelly_size_usd,
+                kelly_cost_basis_id, kelly_decision_id, risk_decision_id, kelly_size_usd,
                 receipt_json, receipt_hash, created_at, schema_version
             ) VALUES (
                 :receipt_id, :event_id, :causal_snapshot_id, :decision_time,
@@ -73,7 +73,7 @@ class EdliNoSubmitReceiptLedger:
                 :executable_snapshot_id, :final_intent_id, :side_effect_status,
                 :q_live, :q_lcb_5pct, :c_fee_adjusted, :c_cost_95pct, :p_fill_lcb,
                 :trade_score, :fdr_family_id, :fdr_hypothesis_count,
-                :kelly_cost_basis_id, :kelly_size_usd,
+                :kelly_cost_basis_id, :kelly_decision_id, :risk_decision_id, :kelly_size_usd,
                 :receipt_json, :receipt_hash, :created_at, :schema_version
             )
             """,
@@ -99,6 +99,8 @@ class EdliNoSubmitReceiptLedger:
                 "fdr_family_id": receipt.fdr_family_id,
                 "fdr_hypothesis_count": receipt.fdr_hypothesis_count,
                 "kelly_cost_basis_id": receipt.kelly_cost_basis_id,
+                "kelly_decision_id": receipt.kelly_decision_id,
+                "risk_decision_id": receipt.risk_decision_id,
                 "kelly_size_usd": receipt.kelly_size_usd,
                 "receipt_json": receipt_json,
                 "receipt_hash": receipt_hash,

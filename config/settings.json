@@ -77,7 +77,7 @@
     "day0_extreme_trigger_enabled": false,
     "day0_authority_catchup_scanner_enabled": false,
     "day0_hard_fact_live_enabled": false,
-    "market_channel_ingestor_enabled": true,
+    "market_channel_ingestor_enabled": false,
     "market_channel_quote_cache_enabled": true,
     "no_trade_regret_enabled": true,
     "reports_enabled": true,

@@ -18,10 +18,14 @@ from src.engine.event_reactor_adapter import (
     edli_source_truth_gate,
     edli_trade_score_gate,
     executable_snapshot_gate_from_trade_conn,
+    _snapshot_p_cal,
     _snapshot_p_raw,
 )
-from src.events.opportunity_event import ForecastSnapshotReadyPayload, make_opportunity_event
+from src.config import runtime_cities_by_name
+from src.contracts.settlement_semantics import SettlementSemantics
+from src.events.opportunity_event import Day0ExtremeUpdatedPayload, ForecastSnapshotReadyPayload, make_day0_extreme_updated_event, make_opportunity_event
 from src.riskguard.risk_level import RiskLevel
+from src.signal.ensemble_signal import p_raw_vector_from_maxes
 from src.types.market import Bin
 
 DECISION_TIME = datetime(2026, 5, 24, 8, 12, tzinfo=timezone.utc)
@@ -749,6 +753,64 @@ def test_edli_runtime_recomputes_p_raw_from_members_not_unproven_snapshot_json()
     assert p_raw[1] < 0.3
 
 
+def test_edli_p_raw_matches_current_entry_forecast_signal_for_fixture():
+    family = SimpleNamespace(city="Chicago")
+    bins = [Bin(70, 71, "F", "70-71°F"), Bin(72, 73, "F", "72-73°F")]
+    members = np.asarray([70.5] * 41 + [72.5] * 10, dtype=float)
+    city = runtime_cities_by_name()["Chicago"]
+    semantics = SettlementSemantics.for_city(city)
+
+    edli_p_raw = _snapshot_p_raw({}, family=family, bins=bins, members=members, payload={})
+    entry_p_raw = p_raw_vector_from_maxes(members, city, semantics, bins)
+
+    np.testing.assert_allclose(edli_p_raw, entry_p_raw, rtol=0.0, atol=0.0)
+
+
+def test_edli_p_cal_matches_existing_evaluator_platt_path_for_same_snapshot_and_family():
+    from src.calibration.forecast_calibration_domain import derive_phase2_keys_from_ens_result
+    from src.calibration.manager import get_calibrator
+    from src.calibration.platt import calibrate_and_normalize
+    from src.data.forecast_source_registry import calibration_source_id_for_lookup
+
+    conn = _trade_conn_with_snapshot()
+    snapshot = dict(conn.execute("SELECT * FROM ensemble_snapshots_v2 WHERE snapshot_id = '1'").fetchone())
+    family = SimpleNamespace(city="Chicago", target_date="2026-05-25", metric="high")
+    bins = [Bin(70, 71, "F", "70-71°F"), Bin(71, 72, "F", "71-72°F")]
+    members = np.asarray(json.loads(snapshot["members_json"]), dtype=float)
+    p_raw = _snapshot_p_raw(snapshot, family=family, bins=bins, members=members, payload={})
+
+    edli_p_cal = _snapshot_p_cal(
+        conn,
+        snapshot=snapshot,
+        family=family,
+        bins=bins,
+        p_raw=p_raw,
+        payload={},
+        decision_time=DECISION_TIME,
+    )
+    cycle, raw_source_id, horizon_profile = derive_phase2_keys_from_ens_result(
+        {
+            "issue_time": snapshot["source_cycle_time"],
+            "source_id": snapshot["source_id"],
+            "horizon_profile": snapshot.get("horizon_profile"),
+        }
+    )
+    cal_source_id = calibration_source_id_for_lookup(raw_source_id)
+    cal, _level = get_calibrator(
+        conn,
+        runtime_cities_by_name()["Chicago"],
+        "2026-05-25",
+        temperature_metric="high",
+        cycle=cycle,
+        source_id=cal_source_id,
+        horizon_profile=horizon_profile,
+    )
+    assert cal is not None
+    expected = calibrate_and_normalize(p_raw, cal, 32.0 / 24.0, bin_widths=[candidate.width for candidate in bins])
+
+    np.testing.assert_allclose(edli_p_cal, expected, rtol=0.0, atol=0.0)
+
+
 def test_family_candidates_use_market_event_range_bounds_not_payload_default():
     event = _forecast_event()
     receipt = _receipt(event, _trade_conn_with_snapshot())
@@ -871,14 +933,31 @@ def test_executable_snapshot_gate_uses_forecast_topology_authority_connection():
     trade_conn.execute("DROP TABLE market_events_v2")
     gate = executable_snapshot_gate_from_trade_conn(trade_conn, topology_conn=forecast_conn)
 
-    assert gate(event) is True
+    assert gate(event, DECISION_TIME) is True
+
+
+def test_executable_snapshot_gate_uses_reactor_decision_time_not_construction_clock():
+    event = _bound_forecast_event()
+    trade_conn = _trade_conn_with_snapshot()
+    forecast_conn = _trade_conn_with_snapshot()
+    forecast_conn.execute("DROP TABLE executable_market_snapshots")
+    trade_conn.execute("DROP TABLE market_events_v2")
+    trade_conn.execute("UPDATE executable_market_snapshots SET freshness_deadline = '2026-05-24T08:12:30+00:00'")
+    gate = executable_snapshot_gate_from_trade_conn(
+        trade_conn,
+        topology_conn=forecast_conn,
+        now=datetime(2026, 5, 24, 9, 0, tzinfo=timezone.utc),
+    )
+
+    assert gate(event, datetime(2026, 5, 24, 8, 12, tzinfo=timezone.utc)) is True
+    assert gate(event, datetime(2026, 5, 24, 8, 13, tzinfo=timezone.utc)) is False
 
 
 def test_executable_snapshot_gate_requires_topology_authority_connection():
     event = _bound_forecast_event()
     gate = executable_snapshot_gate_from_trade_conn(_trade_conn_with_snapshot())
 
-    assert gate(event) is False
+    assert gate(event, DECISION_TIME) is False
 
 
 def test_receipt_requires_explicit_forecast_and_topology_authority_connections():

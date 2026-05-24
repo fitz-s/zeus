@@ -107,7 +107,7 @@ def test_reactor_blocks_final_intent_when_live_submit_disabled():
     result = OpportunityEventReactor(
         store,
         source_truth_gate=lambda _event: True,
-        executable_snapshot_gate=lambda _event: True,
+        executable_snapshot_gate=lambda _event, _decision_time: True,
         riskguard_gate=lambda _event: True,
         final_intent_submit=_submit,
         reject=lambda event, stage, reason: rejected.append((event.event_id, stage, reason)),
@@ -155,7 +155,7 @@ def test_no_submit_fdr_rejection_is_classified_as_fdr_not_executor_expressibilit
     result = OpportunityEventReactor(
         store,
         source_truth_gate=lambda _event: True,
-        executable_snapshot_gate=lambda _event: True,
+        executable_snapshot_gate=lambda _event, _decision_time: True,
         riskguard_gate=lambda _event: True,
         final_intent_submit=_submit,
         reject=lambda event, stage, reason: rejected.append((event.event_id, stage, reason)),
@@ -206,7 +206,7 @@ def test_no_submit_kelly_rejection_is_classified_as_kelly_not_executor_expressib
     result = OpportunityEventReactor(
         store,
         source_truth_gate=lambda _event: True,
-        executable_snapshot_gate=lambda _event: True,
+        executable_snapshot_gate=lambda _event, _decision_time: True,
         riskguard_gate=lambda _event: True,
         final_intent_submit=_submit,
         reject=lambda event, stage, reason: rejected.append((event.event_id, stage, reason)),
