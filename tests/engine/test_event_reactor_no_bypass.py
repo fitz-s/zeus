@@ -28,7 +28,7 @@ def _forecast_event(completeness: str = "COMPLETE"):
         source_run_id="run-1",
         cycle="2026-05-24T00:00:00+00:00",
         track="operational",
-        snapshot_id="snapshot-1",
+        snapshot_id="1",
         snapshot_hash="hash-1",
         captured_at="2026-05-24T08:00:00+00:00",
         available_at="2026-05-24T08:10:00+00:00",
@@ -81,6 +81,7 @@ def _trade_conn_with_snapshot(
     if snapshot_condition_count is None:
         snapshot_condition_count = condition_count
     conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
     conn.execute(
         """
         CREATE TABLE executable_market_snapshots (
@@ -219,10 +220,25 @@ def _trade_conn_with_snapshot(
             source_id TEXT,
             source_transport TEXT,
             source_run_id TEXT,
+            release_calendar_key TEXT,
             source_cycle_time TEXT,
+            source_release_time TEXT,
+            source_available_at TEXT,
             issue_time TEXT,
+            valid_time TEXT,
+            fetch_time TEXT,
+            manifest_hash TEXT,
             lead_hours REAL,
             data_version TEXT,
+            local_day_start_utc TEXT,
+            step_horizon_hours REAL,
+            first_member_observed_time TEXT,
+            run_complete_time TEXT,
+            raw_orderbook_hash_transition_delta_ms INTEGER,
+            contributes_to_target_extrema INTEGER,
+            forecast_window_attribution_status TEXT,
+            forecast_window_start_utc TEXT,
+            forecast_window_end_utc TEXT,
             available_at TEXT NOT NULL,
             authority TEXT,
             causality_status TEXT,
@@ -233,7 +249,7 @@ def _trade_conn_with_snapshot(
     conn.execute(
         """
         INSERT INTO ensemble_snapshots_v2 VALUES (
-            'snapshot-1',
+            '1',
             'Chicago',
             '2026-05-25',
             'high',
@@ -245,10 +261,25 @@ def _trade_conn_with_snapshot(
             'ecmwf_open_data',
             'ensemble_snapshots_v2_db_reader',
             'run-1',
+            'ecmwf_open_data',
             '2026-05-24T00:00:00+00:00',
+            '2026-05-24T07:00:00+00:00',
+            '2026-05-24T08:10:00+00:00',
             '2026-05-24T00:00:00+00:00',
+            '2026-05-25',
+            '2026-05-24T08:10:00+00:00',
+            'hash-manifest',
             32.0,
-            'ecmwf_open_data_local_calendar_day_max_v1',
+            'ecmwf_opendata_mx2t3_local_calendar_day_max_v1',
+            '2026-05-25T05:00:00+00:00',
+            32.0,
+            '2026-05-24T07:10:00+00:00',
+            '2026-05-24T08:05:00+00:00',
+            50,
+            1,
+            'FULLY_INSIDE_TARGET_LOCAL_DAY',
+            '2026-05-25T05:00:00+00:00',
+            '2026-05-26T05:00:00+00:00',
             '2026-05-24T08:10:00+00:00',
             'VERIFIED',
             'OK',
@@ -304,7 +335,7 @@ def _trade_conn_with_snapshot(
         """
     )
     conn.execute(
-        "INSERT INTO selection_family_fact VALUES ('canonical-family-1', 'snapshot-1', 'Chicago', '2026-05-25')"
+        "INSERT INTO selection_family_fact VALUES ('canonical-family-1', '1', 'Chicago', '2026-05-25')"
     )
     probability_rows = []
     hypothesis_rows = []
@@ -314,8 +345,8 @@ def _trade_conn_with_snapshot(
         no_q = 1.0 - yes_q
         probability_rows.extend(
             [
-                (f"trace-yes-{index}", f"decision-yes-{index}", "snapshot-1", "Chicago", "2026-05-25", label, "buy_yes", yes_q, "2026-05-24T08:12:00+00:00"),
-                (f"trace-no-{index}", f"decision-no-{index}", "snapshot-1", "Chicago", "2026-05-25", label, "buy_no", no_q, "2026-05-24T08:12:00+00:00"),
+                (f"trace-yes-{index}", f"decision-yes-{index}", "1", "Chicago", "2026-05-25", label, "buy_yes", yes_q, "2026-05-24T08:12:00+00:00"),
+                (f"trace-no-{index}", f"decision-no-{index}", "1", "Chicago", "2026-05-25", label, "buy_no", no_q, "2026-05-24T08:12:00+00:00"),
             ]
         )
         hypothesis_rows.extend(
@@ -433,7 +464,7 @@ def _insert_forecast_reader_authority(conn: sqlite3.Connection) -> None:
             '2026-05-24T08:10:00+00:00', '2026-05-24T08:10:00+00:00',
             '2026-05-25T05:00:00+00:00', '2026-05-26T05:00:00+00:00',
             '2026-05-25', 'Chicago', 'America/Chicago', 'high',
-            'temperature', 'high_temp', 'ecmwf_open_data_local_calendar_day_max_v1',
+            'temperature', 'high_temp', 'ecmwf_opendata_mx2t3_local_calendar_day_max_v1',
             51, 51, '[0,3,6]', '[0,3,6]', 3, 3,
             'COMPLETE', 0, 'hash-raw', 'hash-manifest', 'SUCCESS', NULL
         )
@@ -452,8 +483,8 @@ def _insert_forecast_reader_authority(conn: sqlite3.Connection) -> None:
             'coverage-1', 'run-1', 'ecmwf_open_data', 'ensemble_snapshots_v2_db_reader',
             'ecmwf_open_data', 'operational', 'Chicago', 'Chicago', 'America/Chicago',
             '2026-05-25', 'high', 'temperature', 'high_temp',
-            'ecmwf_open_data_local_calendar_day_max_v1', 51, 51, '[0,3,6]', '[0,3,6]',
-            '["snapshot-1"]', '2026-05-25T05:00:00+00:00', '2026-05-26T05:00:00+00:00',
+            'ecmwf_opendata_mx2t3_local_calendar_day_max_v1', 51, 51, '[0,3,6]', '[0,3,6]',
+            '["1"]', '2026-05-25T05:00:00+00:00', '2026-05-26T05:00:00+00:00',
             'COMPLETE', 'LIVE_ELIGIBLE', NULL, '2026-05-24T08:10:00+00:00',
             '2026-05-25T00:00:00+00:00'
         )
@@ -470,6 +501,7 @@ def _receipt(event, conn: sqlite3.Connection, **kwargs):
         forecast_conn=forecast_conn,
         topology_conn=topology_conn,
         get_current_level=kwargs.pop("get_current_level", lambda: RiskLevel.GREEN),
+        bankroll_usd_provider=kwargs.pop("bankroll_usd_provider", lambda: 100.0),
         **kwargs,
     )
 
@@ -741,6 +773,26 @@ def test_receipt_revalidates_source_run_coverage_snapshot_ids():
     assert "FORECAST_READER_REVALIDATION_FAILED:coverage_snapshot_mismatch" in receipt.reason
 
 
+def test_receipt_revalidates_executable_forecast_reader_authority(monkeypatch):
+    from types import SimpleNamespace
+
+    from src.data import executable_forecast_reader
+
+    event = _bound_forecast_event()
+    conn = _trade_conn_with_snapshot()
+
+    monkeypatch.setattr(
+        executable_forecast_reader,
+        "read_executable_forecast_snapshot",
+        lambda *_args, **_kwargs: SimpleNamespace(ok=False, snapshot=None, reason_code="READER_TEST_BLOCK"),
+    )
+
+    receipt = _receipt(event, conn)
+
+    assert receipt.submitted is False
+    assert "FORECAST_READER_LIVE_ELIGIBILITY_BLOCKED:READER_TEST_BLOCK" in receipt.reason
+
+
 def test_top_ask_without_depth_does_not_create_fillable_quote():
     event = _bound_forecast_event()
     conn = _trade_conn_with_snapshot(selected_ask="0.40")
@@ -759,11 +811,57 @@ def test_top_ask_without_depth_does_not_create_fillable_quote():
     assert receipt.native_quote_available is False
 
 
+def test_real_snapshot_depth_at_best_ask_authorizes_selected_token_cost():
+    event = _bound_forecast_event()
+    conn = _trade_conn_with_snapshot(selected_ask="0.40")
+    conn.execute("ALTER TABLE executable_market_snapshots ADD COLUMN depth_at_best_ask TEXT")
+    conn.execute(
+        """
+        UPDATE executable_market_snapshots
+        SET orderbook_depth_json = '{}',
+            depth_at_best_ask = '100'
+        """
+    )
+
+    receipt = _receipt(event, conn)
+
+    assert receipt.submitted is True
+    assert receipt.c_fee_adjusted == 0.40
+    assert receipt.native_quote_available is True
+
+
+def test_no_submit_default_bankroll_path_does_not_live_fetch_wallet(monkeypatch):
+    from src.runtime import bankroll_provider
+
+    event = _bound_forecast_event()
+    conn = _trade_conn_with_snapshot()
+
+    def _explode_current(**_kwargs):
+        raise AssertionError("no-submit proof must not live-fetch wallet bankroll")
+
+    monkeypatch.setattr(bankroll_provider, "current", _explode_current)
+    monkeypatch.setattr(bankroll_provider, "cached", lambda **_kwargs: None)
+
+    receipt = build_event_bound_no_submit_receipt(
+        event,
+        trade_conn=conn,
+        forecast_conn=conn,
+        topology_conn=conn,
+        get_current_level=lambda: RiskLevel.GREEN,
+    )
+
+    assert receipt.submitted is False
+    assert receipt.reason == "KELLY_PROOF_MISSING:bankroll_provider_unavailable"
+
+
 def test_forecast_receipt_uses_attached_forecasts_market_topology():
     event = _bound_forecast_event()
     conn = _trade_conn_with_snapshot()
     conn.execute("ALTER TABLE market_events_v2 RENAME TO attached_market_events_v2")
     conn.execute("ATTACH DATABASE ':memory:' AS forecasts")
+    conn.execute("CREATE TABLE forecasts.ensemble_snapshots_v2 AS SELECT * FROM ensemble_snapshots_v2")
+    conn.execute("CREATE TABLE forecasts.source_run AS SELECT * FROM source_run")
+    conn.execute("CREATE TABLE forecasts.source_run_coverage AS SELECT * FROM source_run_coverage")
     conn.execute(
         """
         CREATE TABLE forecasts.market_events_v2 (

@@ -53,9 +53,24 @@ Implemented after this review:
 - Production-shaped regression tests now cover separate trade/forecast connections, calibration authority, source-run revalidation, and top-ask-without-depth rejection.
 - Follow-up Codex-only critic review on commit `80aa85e` found two remaining proof gaps: source-run coverage did not require `snapshot_ids_json` to contain the causal snapshot, and the public adapter/gate still allowed implicit trade-connection fallback when forecast/topology connections were omitted.
 - Those follow-up gaps are repaired in the current worktree: receipt-time coverage revalidation now requires `snapshot_ids_json` to contain the hydrated snapshot and, for forecast events, the event `causal_snapshot_id`; the no-submit receipt builder and executable snapshot gate fail closed when explicit forecast/topology authority connections are absent. Regression tests cover both.
+- Latest follow-up repair also closes two additional deploy-readiness gaps from the review:
+  receipt-time forecast proof now calls the canonical
+  `read_executable_forecast_snapshot()` reader and requires the returned
+  snapshot id to match the hydrated/event causal snapshot; SQL checks remain
+  only a pre-hydration guard. No-submit Kelly bankroll now uses an injected
+  deterministic provider in tests or the runtime bankroll cache only; it does
+  not call the live wallet fetch path from the proof-only adapter.
+- Regression coverage now includes canonical reader blocking, production-shaped
+  `depth_at_best_ask` quote authorization, top-ask-without-depth rejection, and
+  no-submit default bankroll path not calling `bankroll_provider.current()`.
 
 Still not deploy-ready:
 
-- Full pytest sweep remains unproven in this patch set.
+- Full pytest sweep remains non-passing in this patch set: latest local run
+  stopped at `1207 passed / 9 failed / 1 error / 10 skipped / 19 deselected`.
+  Failures are the existing missing `mypy`, missing maintenance-worker
+  `TASK_CATALOG.yaml`, crossing-decision passive-fill fixture, and maintenance
+  untracked-quarantine expectation lanes; they still require pass or explicit
+  baseline waiver before deploy-ready.
 - Daemon restart / live market-channel websocket / user-channel smoke remain unrun.
 - RiskGuard proof depth, Day0 boundary receipt reporting, and market-channel concurrency smoke remain follow-up deploy gates.

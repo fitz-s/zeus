@@ -162,9 +162,20 @@ def event_bound_no_submit_adapter_from_trade_conn(
     trade_conn: sqlite3.Connection,
     *,
     get_current_level: Callable[[], RiskLevel],
+    forecast_conn: sqlite3.Connection | None = None,
+    topology_conn: sqlite3.Connection | None = None,
+    bankroll_usd_provider: Callable[[], float | None] | None = None,
+) -> Callable[[OpportunityEvent], EventSubmissionReceipt]:
+    """Build a proof-only final-intent receipt adapter for EDLI events."""
+
+    def _submit(event: OpportunityEvent) -> EventSubmissionReceipt:
+        return build_event_bound_no_submit_receipt(
+            event,
+            trade_conn=trade_conn,
             forecast_conn=forecast_conn,
             topology_conn=topology_conn,
             get_current_level=get_current_level,
+            bankroll_usd_provider=bankroll_usd_provider,
         )
 
     return _submit
@@ -177,6 +188,7 @@ def build_event_bound_no_submit_receipt(
     get_current_level: Callable[[], RiskLevel],
     forecast_conn: sqlite3.Connection | None = None,
     topology_conn: sqlite3.Connection | None = None,
+    bankroll_usd_provider: Callable[[], float | None] | None = None,
 ) -> EventSubmissionReceipt:
     """Produce a typed no-submit EDLI proof without running the cycle runner."""
 
@@ -387,7 +399,11 @@ def build_event_bound_no_submit_receipt(
         )
     kelly_cost_basis_id = f"edli_cost:{event.event_id}:{selected_token_id}"
     try:
-        bankroll_usd = _runtime_bankroll_usd()
+        bankroll_usd = (
+            _bankroll_usd_from_provider(bankroll_usd_provider)
+            if bankroll_usd_provider is not None
+            else _runtime_bankroll_usd(cached_only=True)
+        )
         kelly_multiplier = _runtime_kelly_multiplier()
         kelly = evaluate_kelly(
             kelly_decision_id=f"edli_kelly:{event.event_id}:{selected_token_id}",
@@ -1404,10 +1420,24 @@ def _robust_trade_score_from_generated_inputs(
     return float(receipt.score)
 
 
-def _runtime_bankroll_usd() -> float:
+def _bankroll_usd_from_provider(provider: Callable[[], float | None]) -> float:
+    value = provider()
+    if value is None:
+        raise ValueError("bankroll_provider_unavailable")
+    bankroll_usd = float(value)
+    if bankroll_usd <= 0:
+        raise ValueError("bankroll_provider_nonpositive")
+    return bankroll_usd
+
+
+def _runtime_bankroll_usd(*, cached_only: bool = False) -> float:
     from src.runtime import bankroll_provider
 
-    bankroll = bankroll_provider.current()
+    bankroll = (
+        bankroll_provider.cached()
+        if cached_only and hasattr(bankroll_provider, "cached")
+        else bankroll_provider.current()
+    )
     if bankroll is None:
         raise ValueError("bankroll_provider_unavailable")
     if bankroll.authority != "canonical" or bankroll.source != "polymarket_wallet":
@@ -1529,6 +1559,89 @@ def _forecast_snapshot_reader_block_reason(
     observed = set(_json_list(coverage.get("observed_steps_json")))
     if not expected or not expected.issubset(observed):
         return "FORECAST_READER_REVALIDATION_FAILED:required_steps_missing"
+    reader_reason = _executable_forecast_reader_authority_block_reason(
+        conn,
+        snapshot=snapshot,
+        source_run=source_run,
+        coverage=coverage,
+        event=event,
+        family=family,
+        allow_latest=allow_latest,
+        required_steps=tuple(int(step) for step in expected),
+    )
+    if reader_reason is not None:
+        return reader_reason
+    return None
+
+
+def _executable_forecast_reader_authority_block_reason(
+    conn: sqlite3.Connection,
+    *,
+    snapshot: dict[str, Any],
+    source_run: dict[str, Any],
+    coverage: dict[str, Any],
+    event: OpportunityEvent,
+    family,
+    allow_latest: bool,
+    required_steps: tuple[int, ...],
+) -> str | None:
+    """Revalidate forecast eligibility through the canonical executable reader."""
+
+    try:
+        from src.data.executable_forecast_reader import SOURCE_TRANSPORT, read_executable_forecast_snapshot
+        from src.data.forecast_target_contract import ForecastTargetScope
+
+        target_date = date.fromisoformat(str(coverage.get("target_local_date") or family.target_date))
+        source_cycle_time = _parse_utc(source_run.get("source_cycle_time") or snapshot.get("source_cycle_time"))
+        target_window_start = _parse_utc(coverage.get("target_window_start_utc"))
+        target_window_end = _parse_utc(coverage.get("target_window_end_utc"))
+        decision_time = _parse_utc(event.received_at if allow_latest else event.available_at)
+        source_id = _nonnull(coverage.get("source_id") or source_run.get("source_id") or snapshot.get("source_id"))
+        source_transport = _nonnull(coverage.get("source_transport") or snapshot.get("source_transport") or SOURCE_TRANSPORT)
+        data_version = _nonnull(coverage.get("data_version") or snapshot.get("data_version"))
+        source_run_id = _nonnull(source_run.get("source_run_id") or snapshot.get("source_run_id"))
+        if (
+            source_cycle_time is None
+            or target_window_start is None
+            or target_window_end is None
+            or decision_time is None
+            or not source_id
+            or not source_transport
+            or not data_version
+            or not source_run_id
+            or not required_steps
+        ):
+            return "FORECAST_READER_LIVE_ELIGIBILITY_BLOCKED:scope_incomplete"
+        scope = ForecastTargetScope(
+            city_id=str(coverage.get("city_id") or family.city),
+            city_name=str(coverage.get("city") or family.city),
+            city_timezone=str(coverage.get("city_timezone") or "UTC"),
+            target_local_date=target_date,
+            temperature_metric=family.metric,
+            source_cycle_time=source_cycle_time,
+            data_version=data_version,
+            target_window_start_utc=target_window_start,
+            target_window_end_utc=target_window_end,
+            required_step_hours=required_steps,
+            market_refs=tuple(str(candidate.condition_id or "") for candidate in family.candidates),
+        )
+        result = read_executable_forecast_snapshot(
+            conn,
+            scope=scope,
+            source_id=source_id,
+            source_transport=source_transport,
+            source_run_id=source_run_id,
+            now_utc=decision_time,
+        )
+    except (sqlite3.Error, ValueError, TypeError, KeyError) as exc:
+        return f"FORECAST_READER_LIVE_ELIGIBILITY_BLOCKED:{exc}"
+    if not result.ok or result.snapshot is None:
+        return f"FORECAST_READER_LIVE_ELIGIBILITY_BLOCKED:{result.reason_code}"
+    selected_snapshot_id = _nonnull(snapshot.get("snapshot_id"))
+    if _nonnull(result.snapshot.snapshot_id) != selected_snapshot_id:
+        return "FORECAST_READER_SNAPSHOT_MISMATCH"
+    if not allow_latest and _nonnull(event.causal_snapshot_id) != selected_snapshot_id:
+        return "FORECAST_READER_CAUSAL_SNAPSHOT_MISMATCH"
     return None
 
 

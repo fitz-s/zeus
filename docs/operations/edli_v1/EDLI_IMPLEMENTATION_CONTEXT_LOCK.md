@@ -148,6 +148,14 @@ Acceptance IDs A01-A40:
   were omitted. Both are repaired in the current worktree: coverage must bind
   to the hydrated snapshot and forecast causal snapshot, and missing explicit
   forecast/topology authority connections fail closed.
+- Latest repair after the deploy-ready review: receipt-time forecast proof now
+  delegates to canonical `read_executable_forecast_snapshot()` and rejects if
+  the reader blocks or returns a snapshot id different from the hydrated/event
+  causal snapshot. The no-submit Kelly proof no longer calls the live wallet
+  bankroll path by default; it uses an injected proof provider or cached
+  bankroll only and fails closed when unavailable. Tests now cover canonical
+  reader blocking, production-shaped `depth_at_best_ask` quote proof, and
+  no-submit wallet-fetch avoidance.
 
 ## Current Phase
 
@@ -176,6 +184,12 @@ Current blocking audit reference:
   tables may still exist for compatibility tests, but `src/engine/event_reactor_adapter.py`
   no longer queries them as receipt authority.
 - Repaired P0/P1 subset: no-op FDR/Kelly removed from main wiring; executable snapshot gate and submit receipt are event-bound; forecast p_live no longer double-applies LLR; durable FDR proof is committed before executor entry; Kelly receipt requires matching cost-basis id; Day0 live flags are fail-closed until an online `Day0ObservationContext` hook is wired; authority-table scanning is evidence/catch-up; market-channel token metadata comes from executable snapshots and carries tick/min-order/negRisk; schema version CHECK ranges now accept `SCHEMA_VERSION=41`; market topology reads forecasts authority; calibrated probability authority is mandatory for EDLI proof; top-ask-only quotes cannot create liquidity.
+- Latest remaining deploy blockers: full sweep still needs pass or waiver
+  (latest local run stopped at `1207 passed / 9 failed / 1 error / 10 skipped /
+  19 deselected`); daemon restart, market-channel websocket, user-channel
+  authority, and DB concurrency smokes remain unrun; RiskGuard proof is still
+  top-level `RiskLevel.GREEN` only and Day0 boundary receipts still lack
+  explicit fact-true/killed-bin reporting.
 
 Completed files:
 
