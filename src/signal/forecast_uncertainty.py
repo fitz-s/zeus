@@ -1,3 +1,6 @@
+# Created: 2026-04-18
+# Last reused or audited: 2026-05-23
+# Authority basis: FIX-3 task brief + docs/operations/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md
 """Forecast-layer uncertainty policy seams.
 
 Phase-1 de-hardcode starts by centralizing where forecast/measurement sigma is
@@ -388,6 +391,14 @@ def day0_blended_highs(
     compressed below their own remaining-member high.  The historical
     observation_weight/backbone arguments remain in the seam for compatibility
     and diagnostics, but they must not change the physical settlement value.
+
+    Physical law (FIX-3 ruling, 2026-05-23):
+        final_high >= cumulative_observed_max, ALWAYS.
+        A measured temperature cannot be un-seen.
+        pre_peak: obs is morning low → max picks forecast (forecast-dominated). OK.
+        post_peak: obs is realized peak → max picks obs (obs-dominated). OK.
+        Blend violates the invariant at intermediate w (produces sub-obs samples).
+        Correct form: np.maximum(obs, remaining) at all times.
     """
     import numpy as np
 
