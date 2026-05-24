@@ -75,3 +75,15 @@ def test_job_registry_uses_canonical_source_ids() -> None:
     assert daily.source_id == "wu_icao_history"
     # no remaining short 'wu_icao' alias:
     assert not any(j.source_id == "wu_icao" for j in JOB_REGISTRY.values())
+
+
+def test_all_source_ids_includes_primary_and_secondaries() -> None:
+    """F8: all_source_ids unions primary source_id + source_ids (dedup, single field to read)."""
+    from src.data.source_job_registry import JOB_REGISTRY
+
+    scan = JOB_REGISTRY["ingest_market_scan"]
+    assert set(scan.all_source_ids) == {"polymarket_gamma", "polymarket_clob"}
+    daily = JOB_REGISTRY["ingest_k2_daily_obs"]
+    assert daily.all_source_ids == ("wu_icao_history",)
+    obs = JOB_REGISTRY["ingest_k2_obs_v2"]
+    assert set(obs.all_source_ids) == {"wu_icao_history", "ogimet_metar"}

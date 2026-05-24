@@ -61,6 +61,12 @@ def _row_to_dict(r: FrontierRow) -> dict[str, Any]:
         "freshness_age_seconds": r.freshness_age_seconds,
         "live_blocker": r.live_blocker,
         "operator_action": r.operator_action,
+        "latest_source_run_id": r.latest_source_run_id,
+        "coverage_total": r.coverage_total,
+        "coverage_ready": r.coverage_ready,
+        "coverage_blocked": r.coverage_blocked,
+        "coverage_expired": r.coverage_expired,
+        "coverage_partial": r.coverage_partial,
         "health_consecutive_failures": r.health_consecutive_failures,
         "health_last_success_at": _iso(r.health_last_success_at),
         "health_degraded_since": _iso(r.health_degraded_since),
@@ -97,7 +103,9 @@ def _render_explain(rows: list[FrontierRow], source: str) -> str:
             "role", "target_local_date", "source_issue_time", "source_release_time",
             "safe_fetch_not_before", "latest_success_at", "captured_at", "imported_at",
             "completeness_status", "readiness_status", "readiness_expires_at",
-            "freshness_state", "freshness_age_seconds", "health_consecutive_failures",
+            "freshness_state", "freshness_age_seconds", "latest_source_run_id",
+            "coverage_total", "coverage_ready", "coverage_blocked", "coverage_expired",
+            "coverage_partial", "health_consecutive_failures",
         ):
             out.append(f"  {k}: {d[k]}")
         out.append(f"  >>> live_blocker: {r.live_blocker}")

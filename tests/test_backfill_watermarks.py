@@ -110,3 +110,20 @@ def test_uma_era_guard_default_is_behavior_preserving() -> None:
 
     assert _uma_era_end_block() == 0
     assert _uma_era_exhausted is False
+
+
+def test_short_horizon_success_does_not_advance_full_watermark() -> None:
+    """F5: a 06/18 short-horizon success must not advance the live FULL-horizon watermark."""
+    from src.data.source_watermarks import compute_watermark
+
+    c = _conn()
+    _ins(c, source_id="ecmwf_open_data", track="mx2t6_high_full_horizon",
+         release_calendar_key="ecmwf_open_data:mx2t6_high:full",
+         source_issue_time="2026-05-22T00:00:00Z", source_cycle_time="2026-05-22T00:00:00Z",
+         target_local_date=None, status="SUCCESS", observed_members="51")
+    _ins(c, source_id="ecmwf_open_data", track="mx2t6_high_short_horizon",
+         release_calendar_key="ecmwf_open_data:mx2t6_high:short",
+         source_issue_time="2026-05-23T06:00:00Z", source_cycle_time="2026-05-23T06:00:00Z",
+         target_local_date=None, status="SUCCESS", observed_members="51")
+    full = compute_watermark(c, "ecmwf_open_data", "mx2t6_high", horizon_profile="full")
+    assert full.last_successful_partition == "2026-05-22T00:00:00Z"   # NOT advanced by short

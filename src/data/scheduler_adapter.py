@@ -92,13 +92,18 @@ def build_job_specs(owner_daemon: Optional[str] = None) -> list[JobBuildSpec]:
         if owner_daemon is not None and j.owner_daemon != owner_daemon:
             continue
         ec = executor_class_for(j)
+        # Preserve the job's REAL misfire grace where declared (PR review #329 R3 F9): OpenData /
+        # TIGGE daily jobs use 3600s; clobbering them with a 300/60 default changes catch-up
+        # semantics on activation. Fall back to a class default only when the registry is silent.
+        misfire = j.misfire_grace_time if j.misfire_grace_time is not None \
+            else (300 if ec.endswith("_db") else 60)
         specs.append(JobBuildSpec(
             job_id=j.job_id,
             owner_daemon=j.owner_daemon,
             executor_class=ec,
             max_instances=1,                       # serial — preserve current anti-overlap
             coalesce=True,                          # merge missed runs, never stack
-            misfire_grace_time=300 if ec.endswith("_db") else 60,
+            misfire_grace_time=misfire,
         ))
     return specs
 

@@ -110,3 +110,16 @@ def test_calibration_etl_is_derived_lane_not_live() -> None:
     assert by_id["ingest_drift_detector"].executor_class == "derived_db"
     # while a live ingest job is on the live lane:
     assert by_id["ingest_market_scan"].executor_class == "live_db"
+
+
+def test_obs_instant_v2_provenance_distinct_from_daily() -> None:
+    """F11: observation_instant_v2 family requires utc_timestamp/imported_at/authority — daily
+    observation fields (fetched_at) do NOT satisfy it, and vice-versa."""
+    from src.data.temporal_provenance import missing_live_provenance
+
+    daily_cols = {"source", "station_id", "target_date", "fetched_at"}
+    v2_cols = {"source", "station_id", "target_date", "utc_timestamp", "imported_at",
+               "authority", "data_version"}
+    assert missing_live_provenance(v2_cols, "observation_instant_v2") == []
+    assert missing_live_provenance(daily_cols, "observation_instant_v2")   # daily != v2
+    assert missing_live_provenance(daily_cols, "daily_observation") == []

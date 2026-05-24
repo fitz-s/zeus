@@ -33,11 +33,19 @@ FORECAST_LIVE_PROVENANCE: frozenset[str] = frozenset({
     "data_version",          # semantic product identity (e.g. mx2t3 vs mx2t6)
     "captured_at",
 })
-# Settlement-adjacent observation rows (WU/HKO/Ogimet) — REAL `observations` schema column
-# names (PR review #329 E): source/station_id/fetched_at/target_date, NOT source_id/captured_at.
-OBSERVATION_LIVE_PROVENANCE: frozenset[str] = frozenset({
+# Daily settlement observation rows (`observations` table) — REAL columns (PR review #329 E):
+# source/station_id/fetched_at/target_date, NOT source_id/captured_at.
+DAILY_OBSERVATION_PROVENANCE: frozenset[str] = frozenset({
     "source", "station_id", "target_date", "fetched_at",
 })
+# V2 hourly observation-instant rows (`observation_instants_v2`) — distinct schema (R3 F11):
+# utc_timestamp/imported_at/authority/data_version, NOT the daily fetched_at.
+OBSERVATION_INSTANT_V2_PROVENANCE: frozenset[str] = frozenset({
+    "source", "station_id", "target_date", "utc_timestamp", "imported_at",
+    "authority", "data_version",
+})
+# Back-compat alias: bare "observation" = daily observation.
+OBSERVATION_LIVE_PROVENANCE: frozenset[str] = DAILY_OBSERVATION_PROVENANCE
 # Polymarket market-topology rows (Gamma / market_events_v2) — uses created_at, not captured_at.
 MARKET_TOPOLOGY_PROVENANCE: frozenset[str] = frozenset({
     "condition_id", "created_at",
@@ -53,7 +61,9 @@ VENUE_USER_CHANNEL_PROVENANCE: frozenset[str] = frozenset({
 
 FAMILY_REQUIRED_PROVENANCE: dict[str, frozenset[str]] = {
     "forecast": FORECAST_LIVE_PROVENANCE,
-    "observation": OBSERVATION_LIVE_PROVENANCE,
+    "observation": DAILY_OBSERVATION_PROVENANCE,          # alias of daily_observation
+    "daily_observation": DAILY_OBSERVATION_PROVENANCE,
+    "observation_instant_v2": OBSERVATION_INSTANT_V2_PROVENANCE,
     "market": MARKET_TOPOLOGY_PROVENANCE,
     "executable_snapshot": EXECUTABLE_MARKET_SNAPSHOT_PROVENANCE,
     "venue_user": VENUE_USER_CHANNEL_PROVENANCE,

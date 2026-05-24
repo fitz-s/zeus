@@ -102,6 +102,15 @@ class FrontierRow:
     health_last_success_at: Optional[datetime] = None
     health_degraded_since: Optional[datetime] = None
 
+    # Coverage aggregate of the latest USABLE run (PR review #329 R3 F10) — lets --explain show
+    # WHERE the holes are, not just the single blocker label.
+    latest_source_run_id: Optional[str] = None
+    coverage_total: int = 0
+    coverage_ready: int = 0
+    coverage_blocked: int = 0
+    coverage_expired: int = 0
+    coverage_partial: int = 0
+
 
 # ---- blocker reasons (spec §10 distinguishes these) ----
 _BLOCK_OK = "OK"
@@ -133,61 +142,56 @@ def _classify(
     role: str,
     now: datetime,
     safe_fetch_not_before: Optional[datetime],
-    have_run: bool,
-    run_track: Optional[str],
-    source_run_status: Optional[str],
-    completeness_status: Optional[str],
+    have_attempt: bool,
+    usable_fresh: bool,
+    usable_coverage: _CoverageSummary,
+    attempt_status: Optional[str],
+    attempt_completeness: Optional[str],
+    attempt_track: Optional[str],
+    attempt_freshness: str,
     partial_policy: str,
-    readiness_status: Optional[str],
-    readiness_expires_at: Optional[datetime],
-    freshness_state: str,
     health_consecutive_failures: Optional[int],
-    coverage: _CoverageSummary,
 ) -> str:
-    """Single-reason blocker classification, fail-closed ordering.
+    """Blocker classification on the latest-USABLE vs latest-ATTEMPTED model (PR review #329 R3).
 
-    Non-live sources are NOT_LIVE_AUTHORIZED (informational). For live sources the order surfaces
-    the EARLIEST upstream cause. Uses REAL source_run vocabulary (F2). Two #329-R2 gates:
-      * SHORT_HORIZON_ONLY (A): a live entry whose latest cycle is a 06/18 *short_horizon* track
-        is NOT live-authorized (the calendar cycle_profile marks short cycles live_authorization=
-        false) — never OK on a short cycle.
-      * COVERAGE gate (B): OK requires non-empty per-target coverage with zero blocked; a single
-        readiness row cannot prove all targets ready, so absent coverage ⇒ COVERAGE_UNKNOWN.
+    OK is determined by the latest USABLE full-horizon SUCCESS run that is fresh AND has complete,
+    non-expired, all-ready per-target coverage (scoped to THAT run's source_run_id). A newer
+    FAILED / short-horizon / not-released ATTEMPT does NOT hide an older usable cycle. When no
+    usable fresh run exists, the blocker reflects the latest attempt's best diagnosis.
     """
     if role != _LIVE:
         return _BLOCK_NOT_LIVE
-    if safe_fetch_not_before is not None and now < safe_fetch_not_before:
-        return _BLOCK_NOT_RELEASED
-    if not have_run:
+    if not have_attempt:
         return _BLOCK_UNKNOWN
 
-    st = (source_run_status or "").strip().upper()
-    comp = (completeness_status or "").strip().upper()
+    # A usable, fresh full-horizon run exists → OK iff its coverage proves all targets ready.
+    if usable_fresh:
+        cov = usable_coverage
+        if cov.total == 0:
+            return _BLOCK_COVERAGE_UNKNOWN
+        if cov.ready == cov.total:
+            return _BLOCK_OK
+        return _BLOCK_READINESS
 
-    # Past safe-fetch but the source itself reports not-released → abnormal (upstream overdue).
+    # No usable fresh full run — diagnose from the latest attempt.
+    if safe_fetch_not_before is not None and now < safe_fetch_not_before:
+        return _BLOCK_NOT_RELEASED
+    st = (attempt_status or "").strip().upper()
+    comp = (attempt_completeness or "").strip().upper()
     if st in ("NOT_RELEASED", "SKIPPED_NOT_RELEASED") or comp == "NOT_RELEASED":
         return _BLOCK_READINESS
     if health_consecutive_failures is not None and health_consecutive_failures >= 3:
         return _BLOCK_DOWN
-    if freshness_state == "EXPIRED":
+    if attempt_freshness == "EXPIRED":
         return _BLOCK_STALE
-    # A: latest available cycle is a short-horizon (06/18) one — not live-authorized.
-    if (run_track or "").endswith("_short_horizon"):
+    if (attempt_track or "").endswith("_short_horizon"):
         return _BLOCK_SHORT_HORIZON
     if st == "FAILED" or comp in ("MISSING", "HORIZON_OUT_OF_RANGE"):
         return _BLOCK_READINESS
     if comp in ("PARTIAL", "INCOMPLETE") and partial_policy == "BLOCK_LIVE":
         return _BLOCK_PARTIAL
-    if readiness_status and readiness_status.upper() not in ("READY", "LIVE_ELIGIBLE", "OK"):
-        return _BLOCK_READINESS
-    if readiness_expires_at is not None and now >= readiness_expires_at:
-        return _BLOCK_READINESS
-    # B: do not assert OK without per-target coverage proof.
-    if coverage.total == 0:
-        return _BLOCK_COVERAGE_UNKNOWN
-    if coverage.blocked > 0:
-        return _BLOCK_READINESS
-    return _BLOCK_OK
+    # Have an attempt but no usable full run proven — cannot assert OK.
+    return _BLOCK_COVERAGE_UNKNOWN
 
 
 def _load_health() -> dict[str, dict[str, Any]]:
@@ -260,11 +264,34 @@ def _latest_source_run(
     return _safe_fetchone(
         conn,
         f"""
-        SELECT source_id, track, release_calendar_key, source_issue_time, source_release_time,
-               source_available_at, fetch_started_at, captured_at, imported_at, target_local_date,
-               completeness_status, status, recorded_at
+        SELECT source_run_id, source_id, track, release_calendar_key, source_issue_time,
+               source_release_time, source_available_at, fetch_started_at, captured_at,
+               imported_at, target_local_date, completeness_status, status, recorded_at
         FROM source_run
         WHERE source_id = ? AND {_track_match_sql('track', has_release_key=True)}
+        ORDER BY COALESCE(source_issue_time, '') DESC, COALESCE(recorded_at, '') DESC
+        LIMIT 1
+        """,
+        (source_id, *_track_match_params(source_id, track, has_release_key=True)),
+    )
+
+
+def _latest_usable_full_run(
+    conn: sqlite3.Connection, source_id: str, track: str
+) -> Optional[sqlite3.Row]:
+    """Latest SUCCESS, full-horizon source_run for (source_id, calendar track) — the live-usable
+    candidate (PR review #329 R3 F1). Excludes short-horizon (06/18, not live-authorized) and
+    non-success runs, so a newer FAILED/short attempt cannot hide an older fresh usable cycle.
+    """
+    return _safe_fetchone(
+        conn,
+        f"""
+        SELECT source_run_id, track, source_issue_time, source_release_time, source_available_at,
+               captured_at, completeness_status, status
+        FROM source_run
+        WHERE source_id = ? AND {_track_match_sql('track', has_release_key=True)}
+          AND UPPER(status) IN ('SUCCESS', 'OK', 'COMPLETE')
+          AND track NOT LIKE '%\\_short\\_horizon' ESCAPE '\\'
         ORDER BY COALESCE(source_issue_time, '') DESC, COALESCE(recorded_at, '') DESC
         LIMIT 1
         """,
@@ -302,38 +329,57 @@ def _latest_readiness(
 
 @dataclass(frozen=True)
 class _CoverageSummary:
-    """Per-target readiness aggregate from source_run_coverage (PR review #329 B)."""
+    """Per-target readiness aggregate from source_run_coverage for ONE source_run_id."""
 
     total: int
     ready: int
     blocked: int
+    expired: int
+    partial: int
 
 
-def _coverage_summary(conn: sqlite3.Connection, source_id: str, track: str) -> _CoverageSummary:
-    """Aggregate source_run_coverage readiness across ALL targets for (source_id, track).
+def _coverage_summary(
+    conn: sqlite3.Connection, source_run_id: Optional[str], now: datetime
+) -> _CoverageSummary:
+    """Aggregate source_run_coverage readiness for a SPECIFIC source_run_id (PR review #329 R3 B).
 
-    The frontier must NOT assert OK from a single sampled readiness row (a hole in target B is
-    invisible). This counts per-target coverage; OK requires non-empty coverage with zero blocked.
+    Scoped to ONE run id — NOT all historical/short/expired rows for the track (which produced
+    both false-OK from an old all-ready run and false-block from an old BLOCKED row). A target is
+    READY only if readiness=LIVE_ELIGIBLE AND completeness=COMPLETE AND expires_at>now (R3 F3);
+    an expired LIVE_ELIGIBLE counts as expired (blocked), never ready.
     """
-    rows = []
+    if not source_run_id:
+        return _CoverageSummary(0, 0, 0, 0, 0)
     try:
         cur = conn.execute(
-            f"""
-            SELECT readiness_status, completeness_status FROM source_run_coverage
-            WHERE source_id = ? AND {_track_match_sql('track', has_release_key=True)}
+            """
+            SELECT readiness_status, completeness_status, expires_at
+            FROM source_run_coverage WHERE source_run_id = ?
             """,
-            (source_id, *_track_match_params(source_id, track, has_release_key=True)),
+            (source_run_id,),
         )
         rows = list(cur.fetchall())
     except sqlite3.OperationalError as exc:
-        if "no such" in str(exc).lower():   # table or column absent
-            return _CoverageSummary(0, 0, 0)
+        if "no such" in str(exc).lower():
+            return _CoverageSummary(0, 0, 0, 0, 0)
         raise
 
-    ready_states = {"LIVE_ELIGIBLE", "READY", "OK"}
-    ready = sum(1 for r in rows if str(r["readiness_status"]).upper() in ready_states)
-    blocked = len(rows) - ready
-    return _CoverageSummary(total=len(rows), ready=ready, blocked=blocked)
+    ready = expired = partial = blocked = 0
+    for r in rows:
+        rs = str(r["readiness_status"]).upper()
+        comp = str(r["completeness_status"]).upper()
+        exp = _parse_iso(r["expires_at"])
+        if rs == "LIVE_ELIGIBLE" and comp == "COMPLETE":
+            if exp is not None and exp <= now:
+                expired += 1
+            else:
+                ready += 1
+        elif comp in ("PARTIAL", "INCOMPLETE"):
+            partial += 1
+        else:
+            blocked += 1
+    return _CoverageSummary(total=len(rows), ready=ready, blocked=blocked,
+                            expired=expired, partial=partial)
 
 
 def compute_frontier(
@@ -403,18 +449,28 @@ def compute_frontier(
             cf = h.get("consecutive_failures")
             cf = int(cf) if isinstance(cf, (int, float)) else None
 
-            coverage = _coverage_summary(conn, source_id, track) if role == _LIVE \
-                else _CoverageSummary(0, 0, 0)
+            # Latest USABLE full-horizon SUCCESS run (separate from latest ATTEMPT above).
+            usable = _latest_usable_full_run(conn, source_id, track) if role == _LIVE else None
+            usable_issue = _parse_iso(usable["source_issue_time"]) if usable else None
+            usable_fresh = bool(
+                usable_issue is not None
+                and policy.freshness_state((now - usable_issue).total_seconds()) != "EXPIRED"
+            )
+            coverage = (
+                _coverage_summary(conn, usable["source_run_id"], now)
+                if (usable and usable_fresh) else _CoverageSummary(0, 0, 0, 0, 0)
+            )
             blocker = _classify(
                 role=role, now=now, safe_fetch_not_before=safe_fetch,
-                have_run=run is not None,
-                run_track=(run["track"] if run else None),
-                source_run_status=(run["status"] if run else None),
-                completeness_status=completeness,
+                have_attempt=run is not None,
+                usable_fresh=usable_fresh,
+                usable_coverage=coverage,
+                attempt_status=(run["status"] if run else None),
+                attempt_completeness=completeness,
+                attempt_track=(run["track"] if run else None),
+                attempt_freshness=freshness,
                 partial_policy=policy.partial_policy.value,
-                readiness_status=readiness_status, readiness_expires_at=readiness_expires,
-                freshness_state=freshness, health_consecutive_failures=cf,
-                coverage=coverage,
+                health_consecutive_failures=cf,
             )
 
             rows.append(FrontierRow(
@@ -431,6 +487,10 @@ def compute_frontier(
                 health_consecutive_failures=cf,
                 health_last_success_at=_parse_iso(h.get("last_success_at")),
                 health_degraded_since=_parse_iso(h.get("degraded_since")),
+                latest_source_run_id=(usable["source_run_id"] if usable else None),
+                coverage_total=coverage.total, coverage_ready=coverage.ready,
+                coverage_blocked=coverage.blocked, coverage_expired=coverage.expired,
+                coverage_partial=coverage.partial,
             ))
     finally:
         if own_conn:

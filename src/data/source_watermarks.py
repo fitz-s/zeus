@@ -51,7 +51,12 @@ def _like_escape(s: str) -> str:
     return s.replace("\\", "\\\\").replace("_", "\\_").replace("%", "\\%")
 
 
-def compute_watermark(conn: sqlite3.Connection, source_id: str, track: str) -> SourceWatermark:
+def compute_watermark(
+    conn: sqlite3.Connection,
+    source_id: str,
+    track: str,
+    horizon_profile: Optional[str] = None,
+) -> SourceWatermark:
     """Derive the watermark for (source_id, calendar track) from source_run (read-only).
 
     Partition identity is the SOURCE identity, ordered NOT by write time — a late/backfilled
@@ -59,25 +64,37 @@ def compute_watermark(conn: sqlite3.Connection, source_id: str, track: str) -> S
 
     OpenData source-level source_run rows carry NO target_local_date (that lives in
     source_run_coverage); they are keyed by source_issue_time (the cycle). So the partition is
-    COALESCE(target_local_date, source_issue_time, source_cycle_time) — forcing
-    target_local_date IS NOT NULL (the prior version) made the watermark EMPTY for the single
-    most important live forecast producer. The track match is prefix/key aware because real
-    rows write the horizon-expanded track (mx2t6_high_full_horizon), not the bare calendar track.
+    COALESCE(target_local_date, source_issue_time, source_cycle_time).
+
+    ``horizon_profile`` (PR review #329 R3 F5): 'full' or 'short' restricts the match to that
+    horizon's expanded track (mx2t6_high_full_horizon vs _short_horizon), so a 06/18 short cycle
+    cannot advance the live FULL-horizon watermark. None (default) matches any horizon — use it
+    only for diagnostics, never to drive live full-horizon catch-up.
     """
     conn.row_factory = sqlite3.Row
     et = _like_escape(track)
+    if horizon_profile in ("full", "short"):
+        # Restrict to the specific horizon-expanded track + its release_calendar_key suffix.
+        track_clause = "(track = ? OR release_calendar_key = ?)"
+        params: tuple[str, ...] = (
+            source_id,
+            f"{track}_{horizon_profile}_horizon",
+            f"{source_id}:{track}:{horizon_profile}",
+        )
+    else:
+        track_clause = "(track = ? OR track LIKE ? ESCAPE '\\' OR release_calendar_key LIKE ? ESCAPE '\\')"
+        params = (source_id, track, f"{et}\\_%", f"{_like_escape(source_id)}:{et}:%")
     rows = _safe_rows(
         conn,
-        """
+        f"""
         SELECT COALESCE(target_local_date, source_issue_time, source_cycle_time) AS partition_key,
                status, observed_members
         FROM source_run
-        WHERE source_id = ?
-          AND (track = ? OR track LIKE ? ESCAPE '\\' OR release_calendar_key LIKE ? ESCAPE '\\')
+        WHERE source_id = ? AND {track_clause}
           AND COALESCE(target_local_date, source_issue_time, source_cycle_time) IS NOT NULL
         ORDER BY partition_key ASC
         """,
-        (source_id, track, f"{et}\\_%", f"{_like_escape(source_id)}:{et}:%"),
+        params,
     )
 
     attempted = [r["partition_key"] for r in rows]

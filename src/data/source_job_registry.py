@@ -52,7 +52,15 @@ class SourceJobSpec:
     callable_ref: Optional[str] = None      # function name in the owner module
     file_only: bool = False                 # writes only files/JSON (safe for fast/io executor)
     owner_gated: bool = False               # registration is conditional (e.g. OpenData ownership env)
+    misfire_grace_time: Optional[int] = None  # real APScheduler grace (sec); None = adapter default
     notes: str = ""
+
+    @property
+    def all_source_ids(self) -> tuple[str, ...]:
+        """Canonical de-duplicated source set (PR review #329 H/R3): primary source_id plus any
+        secondary source_ids, so a consumer reads ONE field regardless of single/multi-source."""
+        ordered = (*self.source_ids, *(( self.source_id,) if self.source_id else ()))
+        return tuple(dict.fromkeys(ordered))
 
 
 # ---------------------------------------------------------------------------
@@ -85,13 +93,13 @@ _INGEST_MAIN: tuple[SourceJobSpec, ...] = (
     SourceJobSpec("ingest_automation_analysis", "ingest_main", "derived", "default", True,
                   callable_ref="_automation_analysis_cycle"),
     SourceJobSpec("ingest_opendata_daily_mx2t6", "ingest_main", "live", "default", True,
-                  source_id="ecmwf_open_data", callable_ref="_opendata_mx2t6_cycle", owner_gated=True,
+                  source_id="ecmwf_open_data", callable_ref="_opendata_mx2t6_cycle", owner_gated=True, misfire_grace_time=3600,
                   notes="registered only when ingest_main owns OpenData (ZEUS_FORECAST_LIVE_OWNER!=forecast_live)"),
     SourceJobSpec("ingest_opendata_daily_mn2t6", "ingest_main", "live", "default", True,
-                  source_id="ecmwf_open_data", callable_ref="_opendata_mn2t6_cycle", owner_gated=True,
+                  source_id="ecmwf_open_data", callable_ref="_opendata_mn2t6_cycle", owner_gated=True, misfire_grace_time=3600,
                   notes="registered only when ingest_main owns OpenData"),
     SourceJobSpec("ingest_tigge_archive_backfill", "ingest_main", "backfill", "default", True,
-                  source_id="tigge", callable_ref="_tigge_archive_backfill_cycle"),
+                  source_id="tigge", callable_ref="_tigge_archive_backfill_cycle", misfire_grace_time=3600),
     SourceJobSpec("ingest_k2_startup_catch_up", "ingest_main", "backfill", "default", True,
                   callable_ref="_k2_startup_catch_up"),
     SourceJobSpec("ingest_tigge_startup_catch_up", "ingest_main", "backfill", "default", True,

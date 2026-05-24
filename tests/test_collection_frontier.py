@@ -1,13 +1,12 @@
 # Lifecycle: created=2026-05-24; last_reviewed=2026-05-24; last_reused=never
-# Purpose: Frontier tests against REAL source_run/source_run_coverage shapes — PR review #329
-#   F1/F2 (track join, NOT_RELEASED) + R2-A (short-horizon not live) + R2-B (coverage aggregate, no false OK).
+# Purpose: Frontier tests vs REAL source_run/source_run_coverage shapes — #329 F1/F2 + R2-A/B
+#   + R3 SEV-1 (latest-USABLE vs attempted; coverage scoped to source_run_id; expiry/completeness).
 # Reuse: Inspect docs/operations/current/plans/data_temporal_kernel/PLAN.md + collection_frontier before relying on it.
-"""Relationship tests for the in-memory collection frontier (PR2 + #329 R1/R2 fixes).
+"""Relationship tests for the in-memory collection frontier (PR2 + #329 R1/R2/R3 fixes).
 
-Fixtures use REAL write shapes: source_run track='mx2t6_high_full_horizon',
-release_calendar_key='ecmwf_open_data:mx2t6_high:full', target_local_date=NULL; per-target
-readiness in source_run_coverage. OK requires non-empty coverage with zero blocked AND a
-full-horizon (not 06/18 short) latest cycle.
+Fixtures use REAL write shapes and link source_run.source_run_id ↔ source_run_coverage.source_run_id,
+so coverage is scoped to a SPECIFIC run (a newer failed/short attempt cannot hide an older usable
+full cycle; old/expired coverage cannot fake OK).
 """
 from __future__ import annotations
 
@@ -17,12 +16,14 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 _SR_COLS = [
-    "source_id", "track", "release_calendar_key", "source_issue_time", "source_release_time",
-    "source_available_at", "fetch_started_at", "captured_at", "imported_at",
-    "target_local_date", "completeness_status", "status", "recorded_at",
+    "source_run_id", "source_id", "track", "release_calendar_key", "source_issue_time",
+    "source_release_time", "source_available_at", "fetch_started_at", "captured_at",
+    "imported_at", "target_local_date", "completeness_status", "status", "recorded_at",
 ]
-_COV_COLS = ["source_id", "track", "release_calendar_key", "target_local_date",
+_COV_COLS = ["source_run_id", "source_id", "track", "release_calendar_key", "target_local_date",
              "readiness_status", "completeness_status", "expires_at"]
+
+_NOW = datetime(2026, 5, 24, 12, 0, tzinfo=timezone.utc)
 
 
 def _conn() -> sqlite3.Connection:
@@ -36,29 +37,23 @@ def _conn() -> sqlite3.Connection:
     return c
 
 
-def _insert_run(c: sqlite3.Connection, **kw: object) -> None:
+def _run(c, run_id, *, track="mx2t6_high_full_horizon", rck="ecmwf_open_data:mx2t6_high:full",
+         issue_h=9, status="SUCCESS", completeness="COMPLETE") -> None:
+    issue = _NOW - timedelta(hours=issue_h)
     c.execute(
         f"INSERT INTO source_run ({', '.join(_SR_COLS)}) VALUES ({', '.join('?' for _ in _SR_COLS)})",
-        tuple(kw.get(col) for col in _SR_COLS),
+        (run_id, "ecmwf_open_data", track, rck, issue.isoformat(), None, None, None,
+         _NOW.isoformat(), None, None, completeness, status, _NOW.isoformat()),
     )
 
 
-def _insert_cov(c: sqlite3.Connection, target: str, readiness: str) -> None:
+def _cov(c, run_id, target, readiness, *, completeness="COMPLETE", expires_h=12) -> None:
+    exp = (_NOW + timedelta(hours=expires_h)).isoformat() if expires_h is not None else None
     c.execute(
         f"INSERT INTO source_run_coverage ({', '.join(_COV_COLS)}) VALUES ({', '.join('?' for _ in _COV_COLS)})",
-        ("ecmwf_open_data", "mx2t6_high_full_horizon", "ecmwf_open_data:mx2t6_high:full",
-         target, readiness, "COMPLETE", None),
+        (run_id, "ecmwf_open_data", "mx2t6_high_full_horizon", "ecmwf_open_data:mx2t6_high:full",
+         target, readiness, completeness, exp),
     )
-
-
-_REAL_HIGH = dict(
-    source_id="ecmwf_open_data", track="mx2t6_high_full_horizon",
-    release_calendar_key="ecmwf_open_data:mx2t6_high:full",
-)
-_SHORT_HIGH = dict(
-    source_id="ecmwf_open_data", track="mx2t6_high_short_horizon",
-    release_calendar_key="ecmwf_open_data:mx2t6_high:short",
-)
 
 
 @pytest.fixture(autouse=True)
@@ -67,119 +62,130 @@ def _no_health(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(cf, "_load_health", lambda: {})
 
 
-def _frontier(c, now):
+def _f(c):
     from src.data.collection_frontier import compute_frontier
-    return {r.track: r for r in compute_frontier(conn=c, now=now, role_filter="live")}
+    return {r.track: r for r in compute_frontier(conn=c, now=_NOW, role_filter="live")}
 
 
-def test_frontier_finds_real_horizon_expanded_opendata_track() -> None:
-    """F1: real OpenData source_run (horizon-expanded track, NULL target_local_date) is FOUND
-    for calendar track 'mx2t6_high' — not UNKNOWN_BLOCKED."""
-    now = datetime(2026, 5, 24, 12, 0, tzinfo=timezone.utc)
-    issue = now - timedelta(hours=9)
+# ---- F1: latest USABLE vs latest ATTEMPTED ----
+
+def test_latest_failed_attempt_does_not_hide_older_usable_full_run() -> None:
     c = _conn()
-    _insert_run(c, **_REAL_HIGH, source_issue_time=issue.isoformat(), captured_at=now.isoformat(),
-                target_local_date=None, completeness_status="COMPLETE", status="SUCCESS",
-                recorded_at=now.isoformat())
-    high = _frontier(c, now)["mx2t6_high"]
-    assert high.live_blocker != "UNKNOWN_BLOCKED"
-    assert high.source_issue_time == issue
+    _run(c, "R0", issue_h=10, status="SUCCESS")          # older usable full
+    _cov(c, "R0", "2026-05-25", "LIVE_ELIGIBLE")
+    _run(c, "R1", issue_h=2, status="FAILED", completeness="MISSING")  # newer failed (before safe-fetch anyway)
+    # R1 issued 2h ago < 485min safe-fetch, but R0 is usable+fresh+ready → OK
+    assert _f(c)["mx2t6_high"].live_blocker == "OK"
 
 
-def test_skipped_not_released_after_safe_fetch_is_not_ok() -> None:
-    now = datetime(2026, 5, 24, 12, 0, tzinfo=timezone.utc)
+def test_only_short_horizon_run_is_short_horizon_only() -> None:
+    """SHORT_HORIZON_ONLY only when NO usable full run exists — just a short cycle."""
     c = _conn()
-    _insert_run(c, **_REAL_HIGH, source_issue_time=(now - timedelta(hours=9)).isoformat(),
-                captured_at=now.isoformat(), target_local_date=None,
-                completeness_status="NOT_RELEASED", status="SKIPPED_NOT_RELEASED",
-                recorded_at=now.isoformat())
-    assert _frontier(c, now)["mx2t6_high"].live_blocker != "OK"
+    _run(c, "S1", track="mx2t6_high_short_horizon", rck="ecmwf_open_data:mx2t6_high:short",
+         issue_h=9, status="SUCCESS")
+    assert _f(c)["mx2t6_high"].live_blocker == "SHORT_HORIZON_ONLY"
 
 
-def test_06z_short_horizon_latest_is_not_live_ok() -> None:
-    """R2-A: a 06/18 short-horizon cycle (live_authorization=false per calendar cycle_profile),
-    even when it is the LATEST row, must NOT be reported OK."""
-    now = datetime(2026, 5, 24, 12, 0, tzinfo=timezone.utc)
+def test_newer_short_does_not_block_older_fresh_ready_full() -> None:
+    """R2-A/R3-F4: newer short cycle must NOT block an older fresh+ready full cycle."""
     c = _conn()
-    # older full + newer short, BOTH past the 485min safe-fetch so the short is the live latest:
-    _insert_run(c, **_REAL_HIGH, source_issue_time=(now - timedelta(hours=15)).isoformat(),
-                captured_at=now.isoformat(), target_local_date=None,
-                completeness_status="COMPLETE", status="SUCCESS", recorded_at=now.isoformat())
-    _insert_run(c, **_SHORT_HIGH, source_issue_time=(now - timedelta(hours=9)).isoformat(),
-                captured_at=now.isoformat(), target_local_date=None,
-                completeness_status="COMPLETE", status="SUCCESS", recorded_at=now.isoformat())
-    high = _frontier(c, now)["mx2t6_high"]
-    assert high.live_blocker == "SHORT_HORIZON_ONLY"
+    _run(c, "F0", issue_h=12, status="SUCCESS")          # full, fresh
+    _cov(c, "F0", "2026-05-25", "LIVE_ELIGIBLE")
+    _run(c, "S1", track="mx2t6_high_short_horizon", rck="ecmwf_open_data:mx2t6_high:short",
+         issue_h=9, status="SUCCESS")
+    assert _f(c)["mx2t6_high"].live_blocker == "OK"
 
 
-def test_complete_run_without_coverage_is_coverage_unknown_not_ok() -> None:
-    """R2-B: a complete fresh full-horizon run with NO per-target coverage rows must be
-    COVERAGE_UNKNOWN, never OK (a single readiness row cannot prove all targets ready)."""
-    now = datetime(2026, 5, 24, 12, 0, tzinfo=timezone.utc)
-    issue = now - timedelta(hours=9)
+# ---- F2: coverage scoped to source_run_id ----
+
+def test_old_coverage_does_not_make_latest_run_ok() -> None:
+    """Coverage from an OLD run must not satisfy a newer run with no coverage."""
     c = _conn()
-    _insert_run(c, **_REAL_HIGH, source_issue_time=issue.isoformat(), captured_at=now.isoformat(),
-                target_local_date=None, completeness_status="COMPLETE", status="SUCCESS",
-                recorded_at=now.isoformat())
-    assert _frontier(c, now)["mx2t6_high"].live_blocker == "COVERAGE_UNKNOWN"
+    _run(c, "OLD", issue_h=11, status="SUCCESS")
+    _cov(c, "OLD", "2026-05-25", "LIVE_ELIGIBLE")        # coverage belongs to OLD
+    _run(c, "NEW", issue_h=9, status="SUCCESS")          # newer usable, but NO coverage
+    # usable=NEW (latest full success); coverage(NEW)=empty → COVERAGE_UNKNOWN, not OK
+    assert _f(c)["mx2t6_high"].live_blocker == "COVERAGE_UNKNOWN"
 
 
-def test_any_target_blocked_in_coverage_is_not_ok() -> None:
-    """R2-B: if any target's coverage readiness is blocked, the frontier must NOT be OK."""
-    now = datetime(2026, 5, 24, 12, 0, tzinfo=timezone.utc)
-    issue = now - timedelta(hours=9)
+def test_old_blocked_coverage_does_not_block_latest_good_run() -> None:
     c = _conn()
-    _insert_run(c, **_REAL_HIGH, source_issue_time=issue.isoformat(), captured_at=now.isoformat(),
-                target_local_date=None, completeness_status="COMPLETE", status="SUCCESS",
-                recorded_at=now.isoformat())
-    _insert_cov(c, "2026-05-25", "LIVE_ELIGIBLE")
-    _insert_cov(c, "2026-05-26", "BLOCKED")
-    assert _frontier(c, now)["mx2t6_high"].live_blocker != "OK"
+    _run(c, "OLD", issue_h=11, status="SUCCESS")
+    _cov(c, "OLD", "2026-05-25", "BLOCKED")              # old blocked — must NOT block
+    _run(c, "NEW", issue_h=9, status="SUCCESS")
+    _cov(c, "NEW", "2026-05-25", "LIVE_ELIGIBLE")        # latest all-ready
+    assert _f(c)["mx2t6_high"].live_blocker == "OK"
 
 
-def test_full_coverage_all_ready_is_ok() -> None:
-    """OK only when full-horizon + fresh + all coverage targets ready."""
-    now = datetime(2026, 5, 24, 12, 0, tzinfo=timezone.utc)
-    issue = now - timedelta(hours=9)
+# ---- F3: coverage expiry + completeness ----
+
+def test_expired_live_eligible_coverage_is_not_ok() -> None:
     c = _conn()
-    _insert_run(c, **_REAL_HIGH, source_issue_time=issue.isoformat(), captured_at=now.isoformat(),
-                target_local_date=None, completeness_status="COMPLETE", status="SUCCESS",
-                recorded_at=now.isoformat())
-    _insert_cov(c, "2026-05-25", "LIVE_ELIGIBLE")
-    _insert_cov(c, "2026-05-26", "LIVE_ELIGIBLE")
-    high = _frontier(c, now)["mx2t6_high"]
-    assert high.freshness_state == "CURRENT"
-    assert high.live_blocker == "OK"
+    _run(c, "R1", issue_h=9, status="SUCCESS")
+    _cov(c, "R1", "2026-05-25", "LIVE_ELIGIBLE", expires_h=-1)   # expired
+    assert _f(c)["mx2t6_high"].live_blocker != "OK"
 
 
-def test_backfill_write_time_cannot_fake_freshness() -> None:
-    now = datetime(2026, 5, 24, 12, 0, tzinfo=timezone.utc)
+def test_partial_completeness_coverage_is_not_ready() -> None:
     c = _conn()
-    _insert_run(c, **_REAL_HIGH, source_issue_time=(now - timedelta(hours=40)).isoformat(),
-                captured_at=now.isoformat(), target_local_date=None,
-                completeness_status="COMPLETE", status="SUCCESS", recorded_at=now.isoformat())
-    high = _frontier(c, now)["mx2t6_high"]
-    assert high.freshness_state == "EXPIRED" and high.live_blocker == "STALE_SOURCE"
+    _run(c, "R1", issue_h=9, status="SUCCESS")
+    _cov(c, "R1", "2026-05-25", "LIVE_ELIGIBLE", completeness="PARTIAL")
+    assert _f(c)["mx2t6_high"].live_blocker != "OK"
+
+
+def test_any_blocked_target_in_run_coverage_is_not_ok() -> None:
+    c = _conn()
+    _run(c, "R1", issue_h=9, status="SUCCESS")
+    _cov(c, "R1", "2026-05-25", "LIVE_ELIGIBLE")
+    _cov(c, "R1", "2026-05-26", "BLOCKED")
+    assert _f(c)["mx2t6_high"].live_blocker != "OK"
+
+
+def test_full_run_all_targets_ready_is_ok() -> None:
+    c = _conn()
+    _run(c, "R1", issue_h=9, status="SUCCESS")
+    _cov(c, "R1", "2026-05-25", "LIVE_ELIGIBLE")
+    _cov(c, "R1", "2026-05-26", "LIVE_ELIGIBLE")
+    high = _f(c)["mx2t6_high"]
+    assert high.freshness_state == "CURRENT" and high.live_blocker == "OK"
+
+
+# ---- prior-round invariants still hold ----
+
+def test_complete_run_without_coverage_is_coverage_unknown() -> None:
+    c = _conn()
+    _run(c, "R1", issue_h=9, status="SUCCESS")
+    assert _f(c)["mx2t6_high"].live_blocker == "COVERAGE_UNKNOWN"
+
+
+def test_stale_usable_run_is_stale_source() -> None:
+    """A full SUCCESS run 40h old (> ceiling) is not usable → STALE (not OK)."""
+    c = _conn()
+    _run(c, "R1", issue_h=40, status="SUCCESS")
+    _cov(c, "R1", "2026-05-25", "LIVE_ELIGIBLE")
+    assert _f(c)["mx2t6_high"].live_blocker == "STALE_SOURCE"
 
 
 def test_missing_source_run_is_unknown_blocked() -> None:
-    now = datetime(2026, 5, 24, 12, 0, tzinfo=timezone.utc)
-    assert _frontier(_conn(), now)["mn2t6_low"].live_blocker == "UNKNOWN_BLOCKED"
+    assert _f(_conn())["mn2t6_low"].live_blocker == "UNKNOWN_BLOCKED"
 
 
 def test_not_released_before_safe_fetch() -> None:
-    now = datetime(2026, 5, 24, 12, 0, tzinfo=timezone.utc)
     c = _conn()
-    _insert_run(c, **_REAL_HIGH, source_issue_time=(now - timedelta(minutes=10)).isoformat(),
-                captured_at=now.isoformat(), target_local_date=None,
-                completeness_status="COMPLETE", status="SUCCESS", recorded_at=now.isoformat())
-    assert _frontier(c, now)["mx2t6_high"].live_blocker == "NOT_RELEASED"
+    # recent cycle, not yet released/fetched (no usable success), before 485min safe-fetch:
+    _run(c, "R1", issue_h=0, status="SKIPPED_NOT_RELEASED", completeness="NOT_RELEASED")
+    assert _f(c)["mx2t6_high"].live_blocker == "NOT_RELEASED"
+
+
+def test_skipped_not_released_after_safe_fetch_is_not_ok() -> None:
+    c = _conn()
+    _run(c, "R1", issue_h=9, status="SKIPPED_NOT_RELEASED", completeness="NOT_RELEASED")
+    assert _f(c)["mx2t6_high"].live_blocker != "OK"
 
 
 def test_backfill_source_is_not_live_authorized() -> None:
     from src.data.collection_frontier import compute_frontier
 
-    now = datetime(2026, 5, 24, 12, 0, tzinfo=timezone.utc)
-    rows = compute_frontier(conn=_conn(), now=now, role_filter="backfill")
+    rows = compute_frontier(conn=_conn(), now=_NOW, role_filter="backfill")
     assert rows and all(r.live_blocker == "NOT_LIVE_AUTHORIZED" for r in rows)
     assert any(r.source_id == "tigge" for r in rows)
