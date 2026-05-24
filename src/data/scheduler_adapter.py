@@ -32,15 +32,75 @@ from src.data.source_job_registry import JOB_REGISTRY, SourceJobSpec
 
 ExecutorClass = Literal["live_db", "backfill_db", "derived_db", "io", "heartbeat"]
 
-SCHEDULER_REGISTRY_FLAG = "ZEUS_SCHEDULER_REGISTRY_ENABLED"
+SCHEDULER_REGISTRY_FLAG = "ZEUS_SCHEDULER_REGISTRY_ENABLED"  # legacy flag (back-compat, see below)
+
+# PR #329 review A/F: ONE data-collection mode flag, two values. The replacement (registry-built
+# scheduler) is the DEFAULT; legacy (hand-coded add_job) is the rollback escape hatch (F). A
+# single flag makes the two modes structurally mutually exclusive — you cannot be both.
+DATA_COLLECTION_MODE_FLAG = "ZEUS_DATA_COLLECTION_MODE"     # "registry" (default) | "legacy"
+LEGACY_DATA_COLLECTION_FLAG = "ZEUS_USE_LEGACY_DATA_COLLECTION"  # "1" -> force legacy (F rollback)
+REGISTRY_MODE = "registry"
+LEGACY_MODE = "legacy"
+
+
+def _truthy(value: str) -> bool:
+    return value.strip().lower() in ("1", "true", "yes")
+
+
+def assert_single_collection_mode() -> None:
+    """F: registry and legacy modes are mutually exclusive — contradictory env fails fast at boot.
+
+    Forbidden combinations (the operator must pick exactly one mode, not half-set two switches):
+      * ZEUS_DATA_COLLECTION_MODE=registry  AND  ZEUS_USE_LEGACY_DATA_COLLECTION=1
+      * ZEUS_DATA_COLLECTION_MODE=legacy    AND  ZEUS_SCHEDULER_REGISTRY_ENABLED=1
+      * ZEUS_DATA_COLLECTION_MODE set to anything other than registry/legacy
+    """
+    raw_mode = os.environ.get(DATA_COLLECTION_MODE_FLAG)
+    legacy_force = _truthy(os.environ.get(LEGACY_DATA_COLLECTION_FLAG, "0"))
+    registry_legacy_flag = _truthy(os.environ.get(SCHEDULER_REGISTRY_FLAG, "0"))
+
+    explicit_mode = raw_mode.strip().lower() if raw_mode is not None else None
+    if explicit_mode is not None and explicit_mode not in (REGISTRY_MODE, LEGACY_MODE):
+        raise RuntimeError(
+            f"{DATA_COLLECTION_MODE_FLAG}={raw_mode!r} invalid; must be "
+            f"{REGISTRY_MODE!r} or {LEGACY_MODE!r}."
+        )
+    # Contradiction only when the mode is EXPLICITLY set against an opposing flag — the rollback
+    # flag ALONE (mode unset) is a valid way to select legacy, not a conflict.
+    if explicit_mode == REGISTRY_MODE and legacy_force:
+        raise RuntimeError(
+            f"{DATA_COLLECTION_MODE_FLAG}=registry contradicts {LEGACY_DATA_COLLECTION_FLAG}=1 — "
+            "registry and legacy schedulers are mutually exclusive; set exactly one."
+        )
+    if explicit_mode == LEGACY_MODE and registry_legacy_flag:
+        raise RuntimeError(
+            f"{DATA_COLLECTION_MODE_FLAG}=legacy contradicts {SCHEDULER_REGISTRY_FLAG}=1 — "
+            "registry and legacy schedulers are mutually exclusive; set exactly one."
+        )
+
+
+def data_collection_mode() -> str:
+    """The active data-collection mode: 'registry' (default) | 'legacy'.
+
+    Default REGISTRY (PR #329 review A: the replacement is real + active, not deferred). The
+    legacy hand-coded path is reachable only via an explicit opt-out (ZEUS_USE_LEGACY_DATA_
+    COLLECTION=1 or ZEUS_DATA_COLLECTION_MODE=legacy). Raises on a contradictory combination."""
+    assert_single_collection_mode()
+    if _truthy(os.environ.get(LEGACY_DATA_COLLECTION_FLAG, "0")):
+        return LEGACY_MODE
+    return (os.environ.get(DATA_COLLECTION_MODE_FLAG, REGISTRY_MODE)).strip().lower()
+
+
+def registry_scheduler_active() -> bool:
+    """True when the registry-built scheduler is the active path (the new default)."""
+    return data_collection_mode() == REGISTRY_MODE
 
 
 def scheduler_registry_enabled() -> bool:
-    """True only when the operator has explicitly enabled registry-built scheduling.
-
-    Default OFF — the live daemons keep their hand-coded add_job() blocks until activation.
-    """
-    return os.environ.get(SCHEDULER_REGISTRY_FLAG, "0").strip().lower() in ("1", "true", "yes")
+    """DEPRECATED back-compat shim (PR #329 A): the registry scheduler is now the DEFAULT, so this
+    returns True unless the operator opted into legacy mode. The old ZEUS_SCHEDULER_REGISTRY_ENABLED
+    flag is retained only for the mutual-exclusivity guard; it no longer gates activation."""
+    return registry_scheduler_active()
 
 
 def executor_class_for(spec: SourceJobSpec) -> ExecutorClass:
@@ -137,6 +197,89 @@ def validate_executor_assignment(specs: list[JobBuildSpec] | None = None) -> lis
                 f"{s.job_id}: writes_db job assigned file-only executor {s.executor_class!r}"
             )
     return violations
+
+
+def expected_registry_job_ids(owner_daemon: str, forecast_live_owner_env: str) -> set[str]:
+    """The job ids a daemon MUST build from the registry (PR #329 A) — owner-filtered, with the
+    OpenData ownership singleton resolved + long-running (non-add_job) jobs excluded.
+
+    This is the contract the boot assertion checks the daemon's actual job_defs against: build the
+    exact registry set, no more, no less. owner_gated OpenData jobs are included only on the daemon
+    that currently owns OpenData (active_opendata_owner) — so the two ingest daemons never both
+    schedule OpenData."""
+    from src.data.source_job_registry import JOB_REGISTRY, active_opendata_owner
+
+    opendata_owner = active_opendata_owner(forecast_live_owner_env)
+    ids: set[str] = set()
+    for j in JOB_REGISTRY.values():
+        if j.owner_daemon != owner_daemon:
+            continue
+        if j.dispatch_kind == "long_running":   # threads are not add_job'able
+            continue
+        if j.owner_gated and j.owner_daemon != opendata_owner:
+            continue                            # OpenData job on the non-owning daemon
+        ids.add(j.job_id)
+    return ids
+
+
+def registry_executor_pools() -> dict[str, object]:
+    """The APScheduler executor pools for registry mode — one serial pool per lane (PR8 lane
+    separation). live_db is serial (preserve the single-writer invariant) but separated from
+    derived_db/backfill_db so an ETL/calibration job can never starve live ingest behind the lock.
+    """
+    from apscheduler.executors.pool import ThreadPoolExecutor
+
+    return {
+        "live_db": ThreadPoolExecutor(max_workers=1),
+        "backfill_db": ThreadPoolExecutor(max_workers=1),
+        "derived_db": ThreadPoolExecutor(max_workers=1),
+        "io": ThreadPoolExecutor(max_workers=2),
+        "heartbeat": ThreadPoolExecutor(max_workers=1),
+    }
+
+
+def build_registry_scheduler(
+    scheduler: object,
+    owner_daemon: str,
+    job_defs: dict[str, tuple],
+    *,
+    forecast_live_owner_env: str,
+    logger: object = None,
+) -> list[str]:
+    """Build a daemon's APScheduler jobs FROM the registry (PR #329 A). The daemon supplies only
+    the parts a data-registry cannot hold — ``job_defs[job_id] = (callable, trigger, trigger_kwargs)``
+    — and this routes the executor class + concurrency from the registry build spec.
+
+    FAIL-FAST BOOT ASSERT (the safety net that makes registry-default safe): job_defs must cover
+    EXACTLY the registry's expected set for this daemon. A missing or extra id raises, so the
+    daemon refuses to boot a schedule that diverges from the registry rather than silently running
+    the wrong job set. Returns the built job ids (also logged)."""
+    expected = expected_registry_job_ids(owner_daemon, forecast_live_owner_env)
+    have = set(job_defs)
+    missing, extra = expected - have, have - expected
+    if missing or extra:
+        raise RuntimeError(
+            f"registry scheduler job-set mismatch for {owner_daemon!r}: "
+            f"missing_from_daemon={sorted(missing)} not_in_registry={sorted(extra)}. "
+            "The daemon's job_defs must match the registry exactly (PR #329 A boot assert)."
+        )
+    specs = {s.job_id: s for s in build_job_specs(owner_daemon=owner_daemon)}
+    built: list[str] = []
+    for job_id in sorted(expected):
+        spec = specs[job_id]
+        fn, trigger, trigger_kwargs = job_defs[job_id]
+        scheduler.add_job(  # type: ignore[attr-defined]
+            fn, trigger, id=job_id, executor=spec.executor_class,
+            max_instances=spec.max_instances, coalesce=spec.coalesce,
+            misfire_grace_time=spec.misfire_grace_time, **dict(trigger_kwargs),
+        )
+        built.append(job_id)
+    if logger is not None:
+        logger.info(  # type: ignore[attr-defined]
+            "registry scheduler built %d jobs for %s (executors=%s): %s",
+            len(built), owner_daemon, sorted({specs[j].executor_class for j in built}), built,
+        )
+    return built
 
 
 def validate_lane_separation(specs: list[JobBuildSpec] | None = None) -> list[str]:
