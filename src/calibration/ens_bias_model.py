@@ -38,9 +38,17 @@ forecast. The pre-MC application is wired by the caller, not here.
 from __future__ import annotations
 
 import math
+import statistics
 from dataclasses import dataclass
 
 ESTIMATOR_NAME = "empirical_bayes_shrinkage_v1"
+
+# Irreducible transfer-uncertainty floor (degC^2) added to the TIGGE prior
+# variance. TIGGE is a *different product* from the live OpenData ENS, so even
+# with infinite TIGGE history the prior bias for the live product stays
+# uncertain by ~sqrt(V_TRANSFER_DEFAULT). This is what lets abundant live
+# evidence overcome the prior; tune per validated equivalence.
+V_TRANSFER_DEFAULT = 0.25  # (0.5 degC)^2
 
 
 @dataclass(frozen=True)
@@ -150,3 +158,62 @@ def posterior_bias(
         weight_live=w,
         n_live=live.n,
     )
+
+
+def robust_mean(xs: list[float], trim: float = 0.1) -> float:
+    """Symmetric trimmed mean — rejects a few outlier days (heat events, misses).
+
+    Drops floor(trim*n) samples from each tail; falls back to the plain mean for
+    very small samples where trimming would leave nothing.
+    """
+    n = len(xs)
+    if n == 0:
+        raise ValueError("robust_mean of empty sample")
+    if n < 3:
+        return statistics.fmean(xs)
+    k = int(n * trim)
+    core = sorted(xs)[k : n - k] if (n - 2 * k) >= 1 else xs
+    return statistics.fmean(core)
+
+
+def _var_of_mean(xs: list[float], floor: float) -> float:
+    """Variance of the sample mean = sample_variance / n, with a small floor."""
+    n = len(xs)
+    if n < 2:
+        return max(floor, V_TRANSFER_DEFAULT)
+    return max(statistics.variance(xs) / n, floor)
+
+
+def fit_bucket(
+    tigge_residuals: list[float],
+    opendata_residuals: list[float],
+    *,
+    paired_delta_abs: float | None = None,
+    min_live_n: int = 5,
+    v_transfer: float = V_TRANSFER_DEFAULT,
+    trim: float = 0.1,
+    var_floor: float = 1e-6,
+) -> PosteriorBias:
+    """Fit the posterior live-product bias for one (city, season, ...) bucket.
+
+    Builds a TIGGE structural prior (robust mean; variance = var-of-mean +
+    transfer floor) and, when enough live settled pairs exist, an OpenData
+    likelihood (robust mean; variance-of-mean), then combines via
+    ``posterior_bias``. ``tigge_residuals`` and ``opendata_residuals`` are lists
+    of (forecast - actual) in degC for the bucket. Live evidence below
+    ``min_live_n`` is dropped (posterior == prior).
+    """
+    if not tigge_residuals:
+        raise ValueError("fit_bucket requires a non-empty TIGGE prior sample")
+
+    mu_t = robust_mean(tigge_residuals, trim)
+    v0 = _var_of_mean(tigge_residuals, var_floor) + v_transfer
+    prior = BiasPrior(mu_t=mu_t, v0=v0)
+
+    live: LiveResidual | None = None
+    if len(opendata_residuals) >= min_live_n:
+        e_bar = robust_mean(opendata_residuals, trim)
+        var_o = max(statistics.variance(opendata_residuals), var_floor)
+        live = LiveResidual(e_bar=e_bar, n=len(opendata_residuals), sigma2=var_o)
+
+    return posterior_bias(prior, live, paired_delta_abs=paired_delta_abs)
