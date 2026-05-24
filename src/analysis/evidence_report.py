@@ -79,6 +79,16 @@ class EvidenceReport:
     ci_upper: Optional[float]
     breakeven_win_rate: float
     promotion_blockers: tuple[str, ...] = ()
+    # review5.23 P1-2: n_decisions is strategy+source scoped; when experiment_id or
+    # cohort_tag is supplied, only regret analytics are narrowed — the denominator
+    # is NOT.  "REGRET_ONLY_SCOPE" signals the mismatch so promotion logic can block.
+    # "FULL_SCOPE" means no experiment/cohort filter was applied (all three metrics
+    # describe the same population).
+    cohort_scope_status: str = "FULL_SCOPE"
+    # review5.23 P1-3: no_trade_events has no experiment_id / cohort_tag FK, so
+    # n_no_trades can only be scoped by strategy_key + source.  Always
+    # "strategy_source_only"; callers must not treat it as cohort evidence.
+    n_no_trades_scope_status: str = "strategy_source_only"
 
 
 def _bayesian_ci(
@@ -316,6 +326,11 @@ def build_evidence_report(
         except Exception:  # noqa: BLE001
             pass
 
+    # P1-2: n_decisions is NOT narrowed by experiment_id/cohort_tag (no FK on
+    # decision_events). Surface the mismatch so promotion gates can reject.
+    cohort_scope_status = (
+        "REGRET_ONLY_SCOPE" if (experiment_id is not None or cohort_tag is not None) else "FULL_SCOPE"
+    )
     return EvidenceReport(
         strategy_id=strategy_id,
         tier_observed=tier_observed,
@@ -328,4 +343,6 @@ def build_evidence_report(
         ci_upper=ci_upper,
         breakeven_win_rate=breakeven_win_rate,
         promotion_blockers=promotion_blockers,
+        cohort_scope_status=cohort_scope_status,
+        n_no_trades_scope_status="strategy_source_only",
     )

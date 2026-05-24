@@ -101,7 +101,7 @@ invariants:
       - tests/money_path/test_004_schema_live_failclosed.py
 
   MP-LEA-001:
-    description: "Evidence cohort scope is consistent: n_decisions, n_settled, n_wins all scoped to same strategy_key + experiment_id + cohort_tag + source."
+    description: "EvidenceReport.cohort_scope_status is FULL_SCOPE when no experiment/cohort filter applied; REGRET_ONLY_SCOPE when experiment_id or cohort_tag is supplied (n_decisions denominator is strategy+source only — decision_events has no experiment FK). n_no_trades_scope_status is always strategy_source_only. Promotion logic must block on REGRET_ONLY_SCOPE or treat n_decisions as strategy-wide."
     tests:
       - tests/analysis/test_evidence_report_cohort_scope.py
       - tests/analysis/test_promotion_readiness.py
