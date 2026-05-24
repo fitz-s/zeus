@@ -100,3 +100,25 @@ def validate_executor_assignment(specs: list[JobBuildSpec] | None = None) -> lis
         if s.is_db_writer and s.executor_class in ("io", "heartbeat"):
             violations.append(f"{s.job_id}: DB writer on file-only executor {s.executor_class!r}")
     return violations
+
+
+def validate_lane_separation(specs: list[JobBuildSpec] | None = None) -> list[str]:
+    """PR8: derived/diagnostic/backfill DB writers must NOT share the live_db lane — so a
+    calibration/skill/drift ETL can never starve live forecast/observation/market ingest behind
+    the serial writer. Returns violations (empty = clean).
+
+    The live_db lane is reserved for role in {live, settlement(non-UMA)}; everything else gets
+    backfill_db / derived_db. This is enforced by executor_class_for(); this validator proves it.
+    """
+    from src.data.source_job_registry import JOB_REGISTRY
+
+    specs = specs or build_job_specs()
+    by_id = {s.job_id: s for s in specs}
+    violations: list[str] = []
+    for job_id, job in JOB_REGISTRY.items():
+        ec = by_id[job_id].executor_class
+        if ec == "live_db" and job.role in ("derived", "diagnostic", "backfill"):
+            violations.append(
+                f"{job_id}: role={job.role} on live_db lane — would starve live ingest behind ETL"
+            )
+    return violations

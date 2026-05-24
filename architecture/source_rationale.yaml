@@ -887,6 +887,20 @@ files:
     - NOT_DAEMON_WIRED
     downstream:
     - future operator-gated ingest_main scheduler activation
+  src/data/temporal_provenance.py:
+    zone: K2_runtime
+    authority_role: row_provenance_contract_and_live_gate
+    why: >
+      PR7 of data_temporal_kernel program. Declares REQUIRED_LIVE_PROVENANCE (source_id,
+      source_run_id, source_issue_time, target_local_date, data_version, captured_at) + validator;
+      and can_authorize_live_readiness() (reconstructed/archive/shadow/backfill tiers can NEVER
+      authorize live). live_reader_requires_provenance() gated behind ZEUS_FRONTIER_READINESS_GATE
+      (default off). Schema migration adding missing columns is operator-gated (forecast-class
+      SCHEMA_FORECASTS_VERSION bump). NOT_DAEMON_WIRED.
+    hazards:
+    - NOT_DAEMON_WIRED
+    - SOURCE_TRUTH_PLANE_COLLAPSE
+    downstream: []
   src/data/tigge_client.py:
     zone: K2_runtime
     authority_role: dormant_forecast_ingest_stub
