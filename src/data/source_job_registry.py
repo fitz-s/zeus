@@ -245,22 +245,44 @@ def live_producing_jobs() -> list[SourceJobSpec]:
     ]
 
 
-# Known-safe duplicate live producers (PR #329 review E). Each entry is a (family, source_id)
-# pair produced by >1 daemon ON PURPOSE, with the reason it is NOT a singleton violation. The
-# duplicate check below treats these as acknowledged; anything NOT here is a real violation that
-# forces an ownership decision. Keep this list short and every entry justified — a dead entry
-# (no live collision) is itself a lint smell, so only add one when the collision is real + safe.
-_ACKNOWLEDGED_DUPLICATE_LIVE_OWNERS: dict[tuple[str, str], str] = {
-    # (none currently — the market_events_v2 topology overlap is a TABLE-level idempotent
-    # secondary write, not a FAMILY-authority duplicate: market_scan owns market_topology,
-    # market_discovery owns executable_market, so they do not collide at the family grain.)
+# Duplicate-live-owner classification (PR #329 review E). A (family, source_id) produced live by
+# >1 daemon is one of three things. We keep TWO explicit allow-lists so the check stays honest:
+#
+#   _ACKNOWLEDGED_SAFE — verified NOT a violation (idempotent-by-design, no authority conflict).
+#       Empty today: the only family-grain candidates were either a producer/consumer split
+#       (main.harvester reads settlement, does not produce it -> family=None) or distinct primary
+#       families (market_scan=market_topology vs market_discovery=executable_market).
+#
+#   _KNOWN_OPEN — a REAL active duplicate that is NOT yet fixed, tracked here with its verdict so
+#       it is surfaced (not silently passed) while an ownership decision is pending. Putting a dup
+#       here is an admission of a live bug, never an excuse — every entry must name the decision.
+#
+# Anything in NEITHER list is an UNTRACKED violation and fails the E gate fail-closed.
+_ACKNOWLEDGED_SAFE_DUPLICATE_LIVE_OWNERS: dict[tuple[str, str], str] = {}
+
+_KNOWN_OPEN_DUPLICATE_LIVE_OWNERS: dict[tuple[str, str], str] = {
+    # ACTIVE_DUPLICATE verified 2026-05-24 (sonnet forensic). Both live daemons collect WU daily
+    # observations for the same wu_icao city set: ingest_main.ingest_k2_daily_obs (under
+    # acquire_lock('daily_obs')) AND main.wu_daily -> run_wu_daily_dispatch (NO lock). The POSIX
+    # file lock gates ingest_main against itself only; main's path never acquires it -> zero mutual
+    # exclusion. observations upsert (ON CONFLICT DO UPDATE) prevents row duplication but BOTH fire
+    # WU API fetches per city per hour (quota) and the later writer silently overwrites
+    # rebuild_run_id/provenance. Self-acknowledged at src/data/wu_scheduler.py:132-135 as the
+    # "cluster-L duplicate-tick design issue". OPERATOR DECISION PENDING: which daemon owns WU
+    # daily collection — remove main.wu_daily (ingest_main owns collection) vs add the lock to
+    # run_wu_daily_dispatch. main.wu_daily was added 2026-05-18 (Cluster-L), so the fix direction
+    # has live-cadence history that must be confirmed before removal.
+    ("observation", "wu_icao_history"): (
+        "ACTIVE_DUPLICATE: ingest_main.ingest_k2_daily_obs + main.wu_daily both collect WU daily; "
+        "operator ownership decision pending (remove main.wu_daily vs add lock)"
+    ),
 }
 
 
 def duplicate_live_family_owners() -> dict[tuple[str, str], list[str]]:
     """(family, source_id) pairs produced LIVE by >1 distinct owner_daemon (PR #329 review E).
 
-    Returns the FULL map of candidate duplicates (including acknowledged ones) keyed by
+    Returns the FULL map of candidate duplicates (safe + known-open + untracked) keyed by
     (family, source_id) -> sorted distinct owner daemons. Only jobs that declare a ``family``
     are considered (an untyped live job cannot be checked for cross-family ownership)."""
     owners: dict[tuple[str, str], set[str]] = {}
@@ -272,15 +294,24 @@ def duplicate_live_family_owners() -> dict[tuple[str, str], list[str]]:
     return {k: sorted(v) for k, v in owners.items() if len(v) > 1}
 
 
-def unacknowledged_duplicate_live_owners() -> dict[tuple[str, str], list[str]]:
-    """Duplicate live producers NOT in the acknowledged allow-list — real singleton violations.
-
-    This is the fail-closed E gate: after registry activation, no data family+source may have
-    more than one live owner daemon unless it is an explicitly justified idempotent overlap."""
+def open_duplicate_live_owner_violations() -> dict[tuple[str, str], list[str]]:
+    """Detected duplicates that are tracked as KNOWN-OPEN real bugs (pending an ownership fix)."""
     return {
         k: v for k, v in duplicate_live_family_owners().items()
-        if k not in _ACKNOWLEDGED_DUPLICATE_LIVE_OWNERS
+        if k in _KNOWN_OPEN_DUPLICATE_LIVE_OWNERS
     }
+
+
+def unacknowledged_duplicate_live_owners() -> dict[tuple[str, str], list[str]]:
+    """UNTRACKED duplicate live producers — in neither the safe nor the known-open list.
+
+    This is the fail-closed E gate: a NEW (family, source) gaining a second live owner daemon
+    fails immediately, forcing a conscious classification (verify safe, track as open bug, or fix).
+    Known-open bugs are excluded here (they are surfaced via open_duplicate_live_owner_violations)
+    so the gate does not block on an already-triaged issue — but it can never silently pass a NEW
+    duplication."""
+    tracked = set(_ACKNOWLEDGED_SAFE_DUPLICATE_LIVE_OWNERS) | set(_KNOWN_OPEN_DUPLICATE_LIVE_OWNERS)
+    return {k: v for k, v in duplicate_live_family_owners().items() if k not in tracked}
 
 
 def opendata_owners() -> list[SourceJobSpec]:

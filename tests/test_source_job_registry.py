@@ -78,6 +78,40 @@ def test_src_main_partition_requires_every_scheduled_job_classified() -> None:
     assert {"redeem_submitter", "wrap_submitter", "deployment_freshness"} <= _SRC_MAIN_NON_COLLECTION_JOB_IDS
 
 
+def test_no_duplicate_live_source_owners_after_registry_activation() -> None:
+    """PR #329 review E acceptance: no data family+source may have >1 live owner daemon unless it
+    is explicitly triaged. The fail-closed gate is on UNTRACKED duplicates — a new second owner
+    fails immediately. Known-open real duplicates are surfaced separately (not silently passed),
+    verified-safe overlaps are allow-listed."""
+    from src.data.source_job_registry import (
+        open_duplicate_live_owner_violations,
+        unacknowledged_duplicate_live_owners,
+    )
+
+    # No UNTRACKED duplicate live owners — a new second producer for any family+source fails here.
+    assert unacknowledged_duplicate_live_owners() == {}, (
+        f"untracked duplicate live owners (classify each): {unacknowledged_duplicate_live_owners()}"
+    )
+    # The known WU active-duplicate is DETECTED and TRACKED (it must not vanish silently while the
+    # operator ownership decision is pending). When it is fixed (one daemon stops owning WU daily),
+    # this entry disappears from both the detection map and the known-open list.
+    open_v = open_duplicate_live_owner_violations()
+    assert ("observation", "wu_icao_history") in open_v, (
+        "the verified WU daily active-duplicate must remain DETECTED until the ownership fix lands"
+    )
+
+
+def test_settlement_is_producer_consumer_not_duplicate() -> None:
+    """E correctness: main.harvester READS settlement truth (P&L resolver), it does NOT produce it
+    — so it must not be tagged as a settlement-family producer (which would be a false duplicate
+    against ingest_harvester_truth_writer, the real producer)."""
+    from src.data.source_job_registry import JOB_REGISTRY, duplicate_live_family_owners
+
+    assert JOB_REGISTRY["harvester"].family is None        # consumer, not a family producer
+    assert JOB_REGISTRY["ingest_harvester_truth_writer"].family == "settlement"  # the producer
+    assert ("settlement", "polymarket_gamma") not in duplicate_live_family_owners()
+
+
 def test_dict_unpacked_forecast_live_ids_are_extracted() -> None:
     """ANTIBODY (PR #329 review P1): forecast_live_daemon schedules via
     ``add_job(func, trigger, **kwargs)`` where the id lives inside a job-spec DICT
