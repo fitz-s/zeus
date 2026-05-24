@@ -844,10 +844,39 @@ def forecast_live_job_specs(
     )
 
 
+# spec->job_defs derivation is shared across both ingest daemons (one implementation, see
+# src.data.scheduler_adapter) so the trigger-param stripping can never diverge between them.
+from src.data.scheduler_adapter import (  # noqa: E402
+    REGISTRY_OWNED_KWARGS as _REGISTRY_OWNED_KWARGS,
+    job_defs_from_specs as _job_defs_from_specs,
+)
+
+
 def build_scheduler(*, startup_run_date: datetime | None = None):
     from apscheduler.executors.pool import ThreadPoolExecutor as _APSchedulerThreadPoolExecutor
     from apscheduler.schedulers.blocking import BlockingScheduler
 
+    from src.data.scheduler_adapter import (
+        build_registry_scheduler,
+        data_collection_mode,
+        registry_executor_pools,
+    )
+
+    specs = forecast_live_job_specs(startup_run_date=startup_run_date)
+
+    # REGISTRY mode (default, PR #329 A): build jobs FROM the registry with executor-lane routing +
+    # a fail-fast boot assert. The hand-coded loop below is the LEGACY (rollback) path only.
+    if data_collection_mode() == "registry":
+        scheduler = BlockingScheduler(timezone=timezone.utc, executors=registry_executor_pools())
+        build_registry_scheduler(
+            scheduler, "forecast_live_daemon", _job_defs_from_specs(specs),
+            forecast_live_owner_env=os.environ.get("ZEUS_FORECAST_LIVE_OWNER", ""),
+            logger=logger,
+        )
+        return scheduler
+
+    # LEGACY mode (ZEUS_USE_LEGACY_DATA_COLLECTION=1 / ZEUS_DATA_COLLECTION_MODE=legacy): the
+    # original hand-coded 2-pool scheduler, byte-identical to pre-#329 behavior.
     scheduler = BlockingScheduler(
         timezone=timezone.utc,
         executors={
@@ -857,7 +886,7 @@ def build_scheduler(*, startup_run_date: datetime | None = None):
             "source_health": _APSchedulerThreadPoolExecutor(max_workers=1),
         },
     )
-    for func, trigger, kwargs in forecast_live_job_specs(startup_run_date=startup_run_date):
+    for func, trigger, kwargs in specs:
         scheduler.add_job(func, trigger, **kwargs)
     return scheduler
 

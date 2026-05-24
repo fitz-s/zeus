@@ -199,6 +199,27 @@ def validate_executor_assignment(specs: list[JobBuildSpec] | None = None) -> lis
     return violations
 
 
+# Kwargs the registry build spec OWNS (executor lane + concurrency + id); stripped from a daemon
+# job-spec dict so only the TRIGGER params remain for build_registry_scheduler (PR #329 A). Shared
+# by both ingest daemons so the spec->job_defs derivation can never diverge between them.
+REGISTRY_OWNED_KWARGS = frozenset({"id", "executor", "max_instances", "coalesce", "misfire_grace_time"})
+
+
+def job_defs_from_specs(
+    specs: "list[tuple] | tuple[tuple, ...]",
+) -> dict[str, tuple]:
+    """Derive registry job_defs (id -> (callable, trigger, trigger_kwargs)) from a daemon's
+    (callable, trigger, kwargs) spec list — the SAME list its legacy add_job loop consumes, so
+    trigger params can never diverge between the legacy and registry paths (one source, two
+    consumers)."""
+    out: dict[str, tuple] = {}
+    for fn, trigger, kwargs in specs:
+        job_id = str(kwargs["id"])
+        trigger_kwargs = {k: v for k, v in kwargs.items() if k not in REGISTRY_OWNED_KWARGS}
+        out[job_id] = (fn, trigger, trigger_kwargs)
+    return out
+
+
 def expected_registry_job_ids(owner_daemon: str, forecast_live_owner_env: str) -> set[str]:
     """The job ids a daemon MUST build from the registry (PR #329 A) — owner-filtered, with the
     OpenData ownership singleton resolved + long-running (non-add_job) jobs excluded.

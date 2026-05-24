@@ -129,7 +129,7 @@ def _scheduled_ids_in(files: tuple[Path, ...]) -> set[str]:
                         resolved = _resolve_id(kw.value, consts)
                         if resolved is not None:
                             ids.add(resolved)
-            # case 2: job-spec dict literal {"id": ..., <spec key>: ...} unpacked into add_job
+            # case 2: job-spec dict LITERAL {"id": ..., <spec key>: ...} unpacked into add_job
             elif isinstance(n, ast.Dict):
                 keys = {k.value for k in n.keys
                         if isinstance(k, ast.Constant) and isinstance(k.value, str)}
@@ -138,6 +138,18 @@ def _scheduled_ids_in(files: tuple[Path, ...]) -> set[str]:
                 for k, v in zip(n.keys, n.values):
                     if isinstance(k, ast.Constant) and k.value == "id":
                         resolved = _resolve_id(v, consts)
+                        if resolved is not None:
+                            ids.add(resolved)
+            # case 3: job-spec dict CONSTRUCTOR dict(id="...", <spec key>=...) — the spec-list form
+            # used by ingest_main's _ingest_main_job_specs (ast.Dict only matches {} literals, so
+            # the constructor form must be handled separately or the mirror goes blind to it).
+            elif isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "dict":
+                kwarg_names = {kw.arg for kw in n.keywords if kw.arg}
+                if "id" not in kwarg_names or not (kwarg_names & _SCHEDULER_SPEC_KEYS):
+                    continue
+                for kw in n.keywords:
+                    if kw.arg == "id":
+                        resolved = _resolve_id(kw.value, consts)
                         if resolved is not None:
                             ids.add(resolved)
     return ids

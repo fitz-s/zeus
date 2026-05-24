@@ -173,24 +173,52 @@ def test_build_registry_scheduler_builds_exact_set_and_routes_executors() -> Non
 
 
 def test_ingest_main_registry_scheduler_replaces_manual_add_job_when_enabled() -> None:
-    """PR #329 review A acceptance (named): the registry build for ingest_main covers the SAME
-    job ids the hand-coded scheduler registered (no live job dropped, none invented)."""
-    from src.data.scheduler_adapter import build_registry_scheduler, expected_registry_job_ids
-    from scripts.data_collection_inventory import _scheduled_ids_in
-    from pathlib import Path
+    """PR #329 review A acceptance (named, integration): the REAL ingest_main spec list drives the
+    registry build to EXACTLY the registry's expected set — no live job dropped, none invented —
+    and every job lands on its registry executor lane (the manual 2-pool add_job is fully replaced).
+    """
+    import os
 
-    repo = Path(__file__).resolve().parents[1]
-    # ids the hand-coded ingest_main scheduler actually registers today:
-    hand_coded = _scheduled_ids_in((repo / "src" / "ingest_main.py",))
-    expected = expected_registry_job_ids("ingest_main", "ingest_main")
-    # the registry expected set (OpenData owned by ingest_main) must cover the hand-coded ids:
-    missing = hand_coded - expected
-    assert not missing, f"registry would DROP live ingest_main jobs: {sorted(missing)}"
+    import src.ingest_main as im
+    from src.data.scheduler_adapter import (
+        build_registry_scheduler, executor_class_for, expected_registry_job_ids, job_defs_from_specs,
+    )
+    from src.data.source_job_registry import JOB_REGISTRY
+
+    os.environ.pop("ZEUS_FORECAST_LIVE_OWNER", None)   # ingest_main owns OpenData (default)
+    specs = im._ingest_main_job_specs()
+    job_defs = job_defs_from_specs(specs)
+    expected = expected_registry_job_ids("ingest_main", im._forecast_live_owner())
+    assert set(job_defs) == expected, f"spec/registry drift: {set(job_defs) ^ expected}"
 
     sched = _FakeScheduler()
-    job_defs = {jid: ((lambda: None), "interval", {"minutes": 5}) for jid in expected}
-    build_registry_scheduler(sched, "ingest_main", job_defs, forecast_live_owner_env="ingest_main")
-    assert {j["id"] for j in sched.jobs} == expected
+    built = build_registry_scheduler(sched, "ingest_main", job_defs,
+                                     forecast_live_owner_env=im._forecast_live_owner())
+    assert set(built) == expected
+    # every built job routed to its registry lane (manual executor='fast'/'default' replaced):
+    for j in sched.jobs:
+        assert j["executor"] == executor_class_for(JOB_REGISTRY[j["id"]])
+    by_id = {j["id"]: j for j in sched.jobs}
+    assert by_id["ingest_uma_resolution_listener"]["executor"] == "backfill_db"   # PR8 fix landed
+    assert by_id["ingest_heartbeat"]["executor"] == "heartbeat"                   # file-only lane
+
+
+def test_ingest_main_non_owner_excludes_opendata_from_registry_build() -> None:
+    """The OpenData singleton holds through the spec list: when ingest_main does NOT own OpenData,
+    its spec list (and thus the registry build) drops the 3 OpenData jobs — matching the registry's
+    expected set, so the boot assert passes and OpenData is never double-scheduled."""
+    import os
+
+    import src.ingest_main as im
+    from src.data.scheduler_adapter import expected_registry_job_ids, job_defs_from_specs
+
+    os.environ["ZEUS_FORECAST_LIVE_OWNER"] = "forecast_live"
+    try:
+        job_defs = job_defs_from_specs(im._ingest_main_job_specs())
+        assert "ingest_opendata_daily_mx2t6" not in job_defs   # OpenData not owned -> not built
+        assert job_defs.keys() == expected_registry_job_ids("ingest_main", "forecast_live")
+    finally:
+        os.environ.pop("ZEUS_FORECAST_LIVE_OWNER", None)
 
 
 def test_build_registry_scheduler_boot_assert_catches_drift() -> None:
@@ -210,3 +238,27 @@ def test_build_registry_scheduler_boot_assert_catches_drift() -> None:
     extra["not_a_real_job"] = ((lambda: None), "interval", {"minutes": 5})
     with pytest.raises(RuntimeError, match="job-set mismatch"):
         build_registry_scheduler(_FakeScheduler(), "ingest_main", extra, forecast_live_owner_env="ingest_main")
+
+
+def test_forecast_live_legacy_and_registry_triggers_are_equivalent() -> None:
+    """BRIDGE EQUIVALENCE (advisor #1): the registry path and the legacy path are TWO CONSUMERS of
+    ONE spec list, so per job the (id, trigger_type, trigger_params) must be identical. The
+    boot-assert guards the id SET; this guards the trigger PARAMS — catching a future edit where
+    the two paths silently diverge on cadence. Executor/concurrency intentionally differ (lanes)."""
+    import src.ingest.forecast_live_daemon as fld
+    from datetime import datetime, timezone
+
+    specs = fld.forecast_live_job_specs(startup_run_date=datetime(2026, 5, 24, tzinfo=timezone.utc))
+
+    # legacy view: id -> (trigger, sorted trigger-only kwargs)
+    owned = fld._REGISTRY_OWNED_KWARGS
+    legacy = {
+        str(kw["id"]): (trig, sorted((k, str(v)) for k, v in kw.items() if k not in owned))
+        for _fn, trig, kw in specs
+    }
+    # registry view from the SAME derivation used at boot:
+    registry = {
+        jid: (trig, sorted((k, str(v)) for k, v in tkw.items()))
+        for jid, (_fn, trig, tkw) in fld._job_defs_from_specs(specs).items()
+    }
+    assert legacy == registry, "forecast_live legacy vs registry trigger divergence (cadence drift risk)"
