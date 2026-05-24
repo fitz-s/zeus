@@ -403,6 +403,7 @@ def _write_fixture_files(root: Path) -> argparse.Namespace:
     # World DB
     conn = sqlite3.connect(str(world_db))
     init_schema(conn)
+    conn.commit()
     conn.close()
 
     # Forecasts DB — must exist with current schema and a LIVE_ELIGIBLE readiness row
