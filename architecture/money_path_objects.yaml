@@ -348,6 +348,16 @@ state_machines:
       - tests/test_decision_integrity_quarantine.py
       - tests/test_decision_integrity_quarantine_extended.py
 
+  obs_coverage_status:
+    description: >
+      Observation coverage status emitted by ObservationClient and stamped on
+      settlement_day_observation_authority rows. DIAGNOSTIC_FALLBACK indicates
+      the obs pipeline returned a result but via a degraded/fallback path (e.g.
+      stale open-meteo archive). Observability-only — never gates a trade.
+      OBS-AUTHORITY-FOUNDATION 2026-05-23.
+    states:
+      - DIAGNOSTIC_FALLBACK
+
 schema_objects:
   authority_fabricating_defaults:
     - VERIFIED
