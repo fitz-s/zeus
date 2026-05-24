@@ -4,6 +4,11 @@
 # Authority basis: FIX-4 (CORE-P0 spec) — tradeable-edge frontier telemetry;
 #   p_market floor from src/engine/evaluator.py min_entry_price=0.05;
 #   schema from opportunity_fact DDL in state/zeus_trades.db.
+# Lifecycle: created=2026-05-23; last_reviewed=2026-05-23; last_reused=never
+# Purpose: Read-only per-strategy tradeable-edge frontier table from opportunity_fact.
+#          Distinguishes phantom (sub-floor) from real edges. Observability-only, no writes.
+# Reuse: Run manually to audit edge quality. Requires state/zeus_trades.db READ access.
+#        See architecture/script_manifest.yaml for full spec.
 """Tradeable-edge frontier summary: answers 'real edges or only phantoms?'
 
 Reads opportunity_fact (state/zeus_trades.db, READ-ONLY) and prints a

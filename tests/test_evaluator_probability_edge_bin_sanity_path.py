@@ -1,6 +1,11 @@
 # Created: 2026-05-23
 # Last reused or audited: 2026-05-23
-# Authority basis: /Users/leofitz/.claude/jobs/866db2ea/IMPL_SPEC_operator.md §B §E (wiring)
+# Authority basis: docs/operations/task_2026-05-23_probability_phantom_edge/IMPL_SPEC_operator.md §B §E (wiring)
+# Lifecycle: created=2026-05-23; last_reviewed=2026-05-23; last_reused=never
+# Purpose: Evaluator wiring tests — verifies probability_edge_bin_sanity is called per-edge in
+#          the non-day0 path and that hard rejections propagate to SIGNAL_QUALITY with the
+#          correct reason code.
+# Reuse: Run when modifying the evaluator per-edge gate loop or probability_sanity wiring.
 """Evaluator wiring test for probability_edge_bin_sanity (LIVE-PROB-P0 Gate 6 §B).
 
 Verifies:

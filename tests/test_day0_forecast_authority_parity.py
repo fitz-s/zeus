@@ -1,7 +1,11 @@
 # Created: 2026-05-23
-# Last reused/audited: 2026-05-23
+# Last reused or audited: 2026-05-23
 # Authority basis: DAY0-P1 task brief; src/data/ecmwf_open_data_ingest.py _query_metric
 #   fix to prefer FULL_CONTRIBUTOR (contributes_to_target_extrema=1) over MAX(snapshot_id).
+# Lifecycle: created=2026-05-23; last_reviewed=2026-05-23; last_reused=never
+# Purpose: DAY0-P1 antibody tests — FULL_CONTRIBUTOR run selection correctness for
+#          _query_metric (issue_time DESC + central POSITIVE set filters).
+# Reuse: Run when modifying _query_metric, FULL_CONTRIBUTOR selection, or day0 shadow path.
 """
 DAY0-P1 forecast-authority parity antibody.
 

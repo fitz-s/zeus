@@ -1,6 +1,11 @@
 # Created: 2026-05-23
 # Last reused or audited: 2026-05-23
-# Authority basis: /Users/leofitz/.claude/jobs/866db2ea/IMPL_SPEC_operator.md §B §D §D3 §D4
+# Authority basis: docs/operations/task_2026-05-23_probability_phantom_edge/IMPL_SPEC_operator.md §B §D §D3 §D4
+# Lifecycle: created=2026-05-23; last_reviewed=2026-05-23; last_reused=never
+# Purpose: Gate-level tests for probability_edge_bin_sanity (LIVE-PROB-P0 §B) — shadow vs hard
+#          mode, Amsterdam rejection, BIMODAL PROTECTION, FP=0 validation.
+# Reuse: Run when changing probability_edge_bin_sanity logic, gate thresholds, or shadow/hard
+#        mode config. Requires src/signal/probability_sanity.py + config/settings.json gate block.
 """Tests for probability_edge_bin_sanity (LIVE-PROB-P0 §B operator binding spec).
 
 Coverage:

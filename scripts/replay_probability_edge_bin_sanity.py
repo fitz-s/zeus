@@ -1,6 +1,11 @@
 # Created: 2026-05-23
 # Last reused or audited: 2026-05-23
-# Authority basis: /Users/leofitz/.claude/jobs/866db2ea/IMPL_SPEC_operator.md §D.4 (LIVE-PROB-P0)
+# Authority basis: docs/operations/task_2026-05-23_probability_phantom_edge/IMPL_SPEC_operator.md §D.4 (LIVE-PROB-P0)
+# Lifecycle: created=2026-05-23; last_reviewed=2026-05-23; last_reused=never
+# Purpose: Replay probability_edge_bin_sanity against historical probability_trace_fact rows.
+#          Validates FP=0 (no fair-confident edges rejected) and Amsterdam REJECTED.
+# Reuse: Run after any change to probability_edge_bin_sanity thresholds or gate logic.
+#        Requires state/zeus-world.db READ access. Pass --db to override path.
 """Replay probability_edge_bin_sanity (LIVE-PROB-P0 §B) against historical probability_trace_fact rows.
 
 Per §D.4 acceptance criteria:
@@ -22,6 +27,7 @@ Output: docs/reports/live_prob_p0_edge_bin_sanity_20260523.md
 """
 from __future__ import annotations
 
+import argparse
 import json
 import sqlite3
 import sys
@@ -36,9 +42,8 @@ sys.path.insert(0, str(REPO_ROOT))
 from src.signal.probability_sanity import probability_edge_bin_sanity
 from src.types.market import Bin
 
-_MAIN_TREE = Path("/Users/leofitz/.openclaw/workspace-venus/zeus")
-DB_PATH = _MAIN_TREE / "state" / "zeus-world.db"
-OUT_PATH = REPO_ROOT / "docs" / "reports" / "live_prob_p0_edge_bin_sanity_20260523.md"
+_DEFAULT_DB_PATH = REPO_ROOT / "state" / "zeus-world.db"
+_DEFAULT_OUT_PATH = REPO_ROOT / "docs" / "reports" / "live_prob_p0_edge_bin_sanity_20260523.md"
 
 # Amsterdam fixture from EVIDENCE_AMSTERDAM.md
 AMSTERDAM_TRACE_ID = "probtrace:3d2f2373-8c8"
@@ -60,6 +65,13 @@ def _make_dummy_bins(n: int) -> list:
 
 
 def main():
+    parser = argparse.ArgumentParser(description="Replay probability_edge_bin_sanity against probability_trace_fact rows.")
+    parser.add_argument("--db", type=Path, default=_DEFAULT_DB_PATH, help="Path to zeus-world.db (default: state/zeus-world.db relative to repo root)")
+    parser.add_argument("--out", type=Path, default=_DEFAULT_OUT_PATH, help="Path to write the markdown report (default: docs/reports/...)")
+    args = parser.parse_args()
+    DB_PATH = args.db
+    OUT_PATH = args.out
+
     print(f"[replay_edge_bin_sanity] DB: {DB_PATH}")
     print(f"[replay_edge_bin_sanity] Out: {OUT_PATH}")
 
@@ -286,7 +298,7 @@ def main():
         "```",
         "",
         "---",
-        "*Authority: /Users/leofitz/.claude/jobs/866db2ea/IMPL_SPEC_operator.md §A §B §D.4*",
+        "*Authority: docs/operations/task_2026-05-23_probability_phantom_edge/IMPL_SPEC_operator.md §A §B §D.4*",
     ]
 
     out_text = "\n".join(lines)

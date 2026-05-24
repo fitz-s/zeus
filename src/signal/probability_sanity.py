@@ -609,18 +609,22 @@ def probability_edge_bin_sanity(
         return True, None, telemetry  # no market data → pass
 
     mkt_arr = np.asarray(p_market, dtype=np.float64)
-    if not (0.0 < px_edge <= low_price_threshold):
-        return True, None, telemetry  # well-priced or unquoted → pass
 
     # --- Condition 4 (CRITICAL SAFETY): strong member support + market agreement → unconditional PASS ---
     # A genuine BIMODAL edge has BOTH real ensemble members AND a market that also
     # prices the secondary mode above the sub-floor threshold.
+    # Must be evaluated BEFORE the sub-floor guard so the px_edge >= low_price_threshold
+    # branch is reachable (sub-floor guard returns early for px_edge > low_price_threshold,
+    # making the check dead code if placed after it).
     # If p_market[edge] is ALSO sub-floor (< low_price_threshold), the market
     # disagrees with the member count — that is NOT a genuine bimodal edge.
     # Amsterdam case: p_raw[3]=0.220 (members exist) but p_mkt[3]=0.047 (sub-floor,
     # market skeptical) → NOT genuine bimodal → BIMODAL PROTECTION does NOT fire.
     if member_support >= min_member_support and px_edge >= low_price_threshold:
         return True, None, telemetry  # BIMODAL PROTECTION: members + market agree → pass
+
+    if not (0.0 < px_edge <= low_price_threshold):
+        return True, None, telemetry  # well-priced or unquoted → pass
 
     # --- Condition 2: edge gap check ---
     edge_gap = pc_edge - px_edge

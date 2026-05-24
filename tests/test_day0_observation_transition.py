@@ -2,8 +2,10 @@
 # Last reused or audited: 2026-05-23
 # Authority basis: FIX-3 ruling (2026-05-23) — operator physical-law ruling
 #   + docs/operations/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md §Physical law
-# Purpose: Physical-invariant tests for day0_blended_highs (FIX-3).
-#   All tests must be GREEN against np.maximum(obs, remaining) implementation.
+# Lifecycle: created=2026-05-23; last_reviewed=2026-05-23; last_reused=never
+# Purpose: Physical-invariant tests for day0_blended_highs (FIX-3) — np.maximum floor
+#          ensures final_high >= cumulative_observed_max at all times.
+# Reuse: Run when modifying forecast_uncertainty.py day0 blend logic or observation-transition.
 """Tests for day0 physical-floor invariant (FIX-3 — physical law ruling).
 
 Physical law (operator ruling 2026-05-23):
