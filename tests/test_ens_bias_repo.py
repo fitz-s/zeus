@@ -1,13 +1,13 @@
 # Created: 2026-05-24
 # Last reused/audited: 2026-05-24
-# Authority basis: operator hierarchical-bias adjudication 2026-05-24 §9 (model_bias_ens_v2,
-#   ENS-product residuals from ensemble_snapshots_v2 × settlements_v2).
+# Authority basis: operator hierarchical-bias adjudication 2026-05-24 §9 + PR #334 pre-check
+#   blockers (unit->degC, authority/contributor/causality filters, leakage cutoff, read safety).
 """TDD tests for the ENS bias DB I/O layer (residual loader + model_bias_ens_v2 store).
 
-Uses an in-memory fixture with the minimal columns the loader reads, so the test
-is isolated from the full forecasts schema. Residuals are computed in the city's
-NATIVE unit (members and settlement share it), since the downstream correction is
-applied to member extrema in native unit.
+In-memory fixture with the columns the loader reads. Residuals are normalized to
+CANONICAL degC (members + settlement share the city's native unit, read from
+members_unit) so cross-city/cluster hierarchical estimation is unit-consistent
+and degF cities are not mis-scaled by 1.8x.
 """
 
 from __future__ import annotations
@@ -24,6 +24,9 @@ from src.calibration.ens_bias_repo import (
     write_bias_model,
 )
 
+OPD = "ecmwf_opendata_mx2t3_local_calendar_day_max_v1"
+TIG = "tigge_mx2t6_local_calendar_day_max_v1"
+
 
 @pytest.fixture
 def conn():
@@ -33,77 +36,161 @@ def conn():
         """CREATE TABLE ensemble_snapshots_v2(
             city TEXT, target_date TEXT, temperature_metric TEXT, data_version TEXT,
             members_json TEXT, members_unit TEXT, lead_hours REAL, available_at TEXT,
-            contributes_to_target_extrema INTEGER)"""
+            contributes_to_target_extrema INTEGER, boundary_ambiguous INTEGER,
+            training_allowed INTEGER, causality_status TEXT, authority TEXT)"""
     )
     c.execute(
         """CREATE TABLE settlements_v2(
-            city TEXT, target_date TEXT, temperature_metric TEXT, settlement_value REAL)"""
+            city TEXT, target_date TEXT, temperature_metric TEXT, settlement_value REAL,
+            authority TEXT)"""
     )
     return c
 
 
-def _snap(conn, city, date, members, *, unit="C", dv="ecmwf_opendata_mx2t3_local_calendar_day_max_v1",
-          lead=24.0, avail="2026-05-10T00:00:00Z", contributes=1):
+def _snap(conn, city, date, members, *, unit="C", dv=OPD, metric="high", lead=24.0,
+          avail="2026-05-10T00:00:00Z", contributes=1, boundary=0, training=1,
+          causality="OK", authority="VERIFIED"):
     conn.execute(
-        "INSERT INTO ensemble_snapshots_v2 VALUES (?,?,?,?,?,?,?,?,?)",
-        (city, date, "high", dv, json.dumps(members), unit, lead, avail, contributes),
+        "INSERT INTO ensemble_snapshots_v2 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (city, date, metric, dv, json.dumps(members), unit, lead, avail,
+         contributes, boundary, training, causality, authority),
     )
 
 
-def _settle(conn, city, date, value):
-    conn.execute("INSERT INTO settlements_v2 VALUES (?,?,?,?)", (city, date, "high", value))
+def _settle(conn, city, date, value, *, metric="high", authority="VERIFIED"):
+    conn.execute("INSERT INTO settlements_v2 VALUES (?,?,?,?,?)",
+                 (city, date, metric, value, authority))
 
 
-def test_load_bucket_residuals_mean_minus_actual(conn):
-    # ens mean = 19.0, actual = 21.0 -> residual = -2.0 (forecast cold), native unit
-    _snap(conn, "Tokyo", "2026-05-10", [18.0, 19.0, 20.0])
+# ---- Blocker 1: unit normalization to degC ----
+
+def test_residual_degF_city_converted_to_celsius(conn):
+    # 68F mean, 70F actual -> residual (68-70)/1.8 = -1.111 degC (NOT -2)
+    _snap(conn, "San Francisco", "2026-05-10", [66.0, 68.0, 70.0], unit="F")
+    _settle(conn, "San Francisco", "2026-05-10", 70.0)
+    res = load_bucket_residuals(conn, city="San Francisco", data_version=OPD)
+    assert res == pytest.approx([(68.0 - 70.0) / 1.8])
+    assert abs(res[0] - (-1.111)) < 0.01
+
+
+def test_residual_celsius_city_unchanged(conn):
+    _snap(conn, "Tokyo", "2026-05-10", [18.0, 19.0, 20.0], unit="C")
     _settle(conn, "Tokyo", "2026-05-10", 21.0)
-    res = load_bucket_residuals(conn, city="Tokyo",
-                                data_version="ecmwf_opendata_mx2t3_local_calendar_day_max_v1")
-    assert res == pytest.approx([-2.0])
+    assert load_bucket_residuals(conn, city="Tokyo", data_version=OPD) == pytest.approx([-2.0])
 
 
-def test_load_bucket_residuals_freshest_snapshot_wins(conn):
-    # two snapshots same (city,date) — the later available_at must win
-    _snap(conn, "Tokyo", "2026-05-11", [10.0, 10.0, 10.0], avail="2026-05-09T00:00:00Z")
-    _snap(conn, "Tokyo", "2026-05-11", [15.0, 15.0, 15.0], avail="2026-05-11T06:00:00Z")
+def test_freshest_snapshot_wins(conn):
+    _snap(conn, "Tokyo", "2026-05-11", [10.0], avail="2026-05-09T00:00:00Z")
+    _snap(conn, "Tokyo", "2026-05-11", [15.0], avail="2026-05-11T06:00:00Z")
     _settle(conn, "Tokyo", "2026-05-11", 16.0)
-    res = load_bucket_residuals(conn, city="Tokyo",
-                                data_version="ecmwf_opendata_mx2t3_local_calendar_day_max_v1")
-    assert res == pytest.approx([-1.0])  # 15 - 16, freshest used
+    assert load_bucket_residuals(conn, city="Tokyo", data_version=OPD) == pytest.approx([-1.0])
 
 
-def test_load_bucket_residuals_filters_data_version_and_lead(conn):
-    _snap(conn, "Tokyo", "2026-05-12", [10.0], dv="tigge_mx2t6_local_calendar_day_max_v1")
-    _snap(conn, "Tokyo", "2026-05-13", [10.0], lead=200.0)  # beyond lead_max
+def test_filters_data_version_and_lead(conn):
+    _snap(conn, "Tokyo", "2026-05-12", [10.0], dv=TIG)
+    _snap(conn, "Tokyo", "2026-05-13", [10.0], lead=200.0)
     _settle(conn, "Tokyo", "2026-05-12", 12.0)
     _settle(conn, "Tokyo", "2026-05-13", 12.0)
-    res = load_bucket_residuals(conn, city="Tokyo",
-                                data_version="ecmwf_opendata_mx2t3_local_calendar_day_max_v1",
-                                lead_max=48)
-    assert res == []  # wrong dv + over-lead both excluded
+    assert load_bucket_residuals(conn, city="Tokyo", data_version=OPD, lead_max=48) == []
 
 
-def test_load_bucket_residuals_season_month_filter(conn):
-    _snap(conn, "Tokyo", "2026-05-10", [19.0])   # MAM
-    _snap(conn, "Tokyo", "2026-07-10", [19.0])   # JJA
+def test_season_month_filter(conn):
+    _snap(conn, "Tokyo", "2026-05-10", [19.0])
+    _snap(conn, "Tokyo", "2026-07-10", [19.0])
     _settle(conn, "Tokyo", "2026-05-10", 20.0)
     _settle(conn, "Tokyo", "2026-07-10", 25.0)
-    res = load_bucket_residuals(conn, city="Tokyo",
-                                data_version="ecmwf_opendata_mx2t3_local_calendar_day_max_v1",
-                                season_months=(3, 4, 5))
-    assert res == pytest.approx([-1.0])  # only the MAM row
+    assert load_bucket_residuals(conn, city="Tokyo", data_version=OPD,
+                                 season_months=(3, 4, 5)) == pytest.approx([-1.0])
 
 
-def test_model_bias_ens_v2_roundtrip(conn):
+# ---- Blocker 2: authority / contributor / causality / boundary filters ----
+
+def test_full_contributor_only_excludes_noncontributing(conn):
+    _snap(conn, "Tokyo", "2026-05-10", [19.0], contributes=0)            # non-contributor
+    _snap(conn, "Tokyo", "2026-05-11", [19.0], boundary=1)               # boundary ambiguous
+    _snap(conn, "Tokyo", "2026-05-12", [19.0], training=0)               # not training-allowed
+    _snap(conn, "Tokyo", "2026-05-13", [19.0], causality="DEGRADED")     # causality not OK
+    _snap(conn, "Tokyo", "2026-05-14", [19.0])                            # clean
+    for d in ("10", "11", "12", "13", "14"):
+        _settle(conn, "Tokyo", f"2026-05-{d}", 20.0)
+    res = load_bucket_residuals(conn, city="Tokyo", data_version=OPD,
+                                contributor_policy="full_contributor_only")
+    assert res == pytest.approx([-1.0]), "only the clean contributing row survives"
+
+
+def test_unverified_authority_excluded(conn):
+    _snap(conn, "Tokyo", "2026-05-10", [19.0], authority="UNVERIFIED")
+    _settle(conn, "Tokyo", "2026-05-10", 20.0)
+    assert load_bucket_residuals(conn, city="Tokyo", data_version=OPD,
+                                 require_verified=True) == []
+
+
+def test_diagnostic_policy_includes_all(conn):
+    _snap(conn, "Tokyo", "2026-05-10", [19.0], contributes=0)
+    _settle(conn, "Tokyo", "2026-05-10", 20.0)
+    res = load_bucket_residuals(conn, city="Tokyo", data_version=OPD,
+                                contributor_policy="all_for_diagnostic")
+    assert res == pytest.approx([-1.0])
+
+
+# ---- Blocker 7: leakage / training cutoff ----
+
+def test_settled_before_cutoff_excludes_future(conn):
+    _snap(conn, "Tokyo", "2026-05-10", [19.0])
+    _snap(conn, "Tokyo", "2026-05-20", [19.0])
+    _settle(conn, "Tokyo", "2026-05-10", 20.0)
+    _settle(conn, "Tokyo", "2026-05-20", 20.0)
+    res = load_bucket_residuals(conn, city="Tokyo", data_version=OPD,
+                                settled_before="2026-05-15")
+    assert res == pytest.approx([-1.0]), "only pre-cutoff target dates used"
+
+
+# ---- Blocker 6: LOW metric ----
+
+def test_low_metric_residual_sign(conn):
+    # LOW: forecast min 6, actual 5 -> residual = +1 (forecast warm on the low)
+    _snap(conn, "Tokyo", "2026-05-10", [5.0, 6.0, 7.0], metric="low")
+    _settle(conn, "Tokyo", "2026-05-10", 5.0, metric="low")
+    assert load_bucket_residuals(conn, city="Tokyo", data_version=OPD,
+                                 metric="low") == pytest.approx([1.0])
+
+
+# ---- Blocker 3 + 5: store roundtrip with lineage, read safety ----
+
+def test_model_bias_ens_v2_roundtrip_with_lineage(conn):
     init_ens_bias_schema(conn)
-    write_bias_model(conn, city="San Francisco", season="MAM", metric="high",
-                     live_data_version="ecmwf_opendata_mx2t3_local_calendar_day_max_v1",
-                     prior_data_version="tigge_mx2t6_local_calendar_day_max_v1",
-                     posterior_bias_c=-3.2, posterior_sd_c=0.7, n_live=14, n_prior=238,
-                     weight_live=0.6, estimator="empirical_bayes_shrinkage_v1")
-    row = read_bias_model(conn, city="San Francisco", season="MAM", metric="high")
+    write_bias_model(
+        conn, city="San Francisco", season="MAM", month=5, metric="high",
+        live_data_version=OPD, prior_data_version=TIG,
+        live_source_id="ecmwf_opendata", prior_source_id="tigge",
+        bias_unit="C", posterior_bias_c=-3.2, posterior_sd_c=0.7,
+        n_live=14, n_prior=238, n_paired=12, weight_live=0.6,
+        paired_delta_c=-1.28, v0_c2=0.30, vo_c2=0.02,
+        estimator="empirical_bayes_shrinkage_v1", training_cutoff="2026-05-20",
+        contributor_policy="full_contributor_only",
+    )
+    row = read_bias_model(conn, city="San Francisco", season="MAM", month=5,
+                          metric="high", live_data_version=OPD)
     assert row is not None
     assert row["posterior_bias_c"] == pytest.approx(-3.2)
-    assert row["n_live"] == 14
-    assert row["weight_live"] == pytest.approx(0.6)
+    assert row["bias_unit"] == "C"
+    assert row["n_paired"] == 12
+    assert row["training_cutoff"] == "2026-05-20"
+
+
+def test_read_bias_model_requires_exact_live_data_version(conn):
+    init_ens_bias_schema(conn)
+    write_bias_model(conn, city="Tokyo", season="MAM", month=5, metric="high",
+                     live_data_version=OPD, prior_data_version=TIG,
+                     live_source_id="ecmwf_opendata", prior_source_id="tigge",
+                     bias_unit="C", posterior_bias_c=-1.0, posterior_sd_c=0.5,
+                     n_live=20, n_prior=200, n_paired=10, weight_live=0.5,
+                     paired_delta_c=0.0, v0_c2=0.3, vo_c2=0.02,
+                     estimator="empirical_bayes_shrinkage_v1", training_cutoff=None,
+                     contributor_policy="full_contributor_only")
+    # missing live_data_version must NOT silently return an arbitrary row
+    with pytest.raises(ValueError, match="live_data_version"):
+        read_bias_model(conn, city="Tokyo", season="MAM", month=5, metric="high")
+    # exact lookup works
+    assert read_bias_model(conn, city="Tokyo", season="MAM", month=5, metric="high",
+                           live_data_version=OPD) is not None

@@ -5,7 +5,7 @@ Python 3.14.3, pytest 9.0.2.
 
 ## Summary
 
-**21 passed in 0.81s** — all TDD red-first (each test confirmed failing before its
+**28 passed** (after PR pre-check blocker fixes) — all TDD red-first (each test confirmed failing before its
 implementation landed).
 
 | File | Tests | Scope |
@@ -90,3 +90,21 @@ activation order (recompute corrected pairs → refit Platt → enable → invar
   `architecture/source_rationale.yaml`; the 3 test files in `architecture/test_topology.yaml`.
 - Decide `model_bias_ens_v2` table ownership (world vs forecasts) in `db_table_ownership.yaml`.
 - Tune `V_TRANSFER_DEFAULT` (0.25 = (0.5°C)²) against validated equivalence per cohort.
+
+
+## Blocker fixes (PR #334 pre-check, 2026-05-24)
+- B1 unit: `load_bucket_residuals` now normalizes members + settlement to canonical degC via
+  `members_unit` (degF city test added) — fixes the 1.8x mis-scale hazard.
+- B2 filters: authority='VERIFIED' (snapshot+settlement), contributor_policy
+  ('full_contributor_only' = contributes=1 + not boundary-ambiguous + training_allowed +
+  causality OK | 'all_for_diagnostic'). Targets the LIVE contributing residual population
+  (~-1.1degC), not all snapshots (~-1.9degC).
+- B3 read-safety: `read_bias_model` requires exact `live_data_version` (no latest-row fallback).
+- B4 `fit_bucket` min_live_n default 5 -> 20 (city-season live tier).
+- B5 schema lineage: month, live/prior source_id + data_version, bias_unit, n_paired,
+  paired_delta_c, v0_c2, vo_c2, contributor_policy, training_cutoff.
+- B6 LOW metric residual test.
+- B7 leakage: `settled_before` training cutoff (target_date strictly before).
+Still open (documented, not in this PR): wider train/serve guard keyed on bias_model_key/family
+(needs Platt model_key plumbing); residual tail metrics (p90/p95) for Kelly haircut; manifest
+registration + table ownership; calibration_pairs recompute + Platt refit + live wiring.

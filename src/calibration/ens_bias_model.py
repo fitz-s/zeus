@@ -189,7 +189,7 @@ def fit_bucket(
     opendata_residuals: list[float],
     *,
     paired_delta_abs: float | None = None,
-    min_live_n: int = 5,
+    min_live_n: int = 20,
     v_transfer: float = V_TRANSFER_DEFAULT,
     trim: float = 0.1,
     var_floor: float = 1e-6,
