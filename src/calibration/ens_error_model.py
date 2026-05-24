@@ -26,6 +26,7 @@ The SAME parameters handle SF (large confident bias + wide residual) and Chicago
 from __future__ import annotations
 
 import math
+import statistics
 from dataclasses import dataclass
 
 from src.calibration.ens_bias_model import PosteriorBias
@@ -136,3 +137,36 @@ def p_raw_vector_with_error_model(
         corrected, city, settlement_semantics, bins,
         n_mc=n_mc, rng=rng, extra_member_sigma=resid_sd_native,
     )
+
+
+def fit_predictive_error_bucket(
+    tigge_residuals: list[float],
+    opendata_residuals: list[float],
+    *,
+    min_live_n: int = 20,
+    residual_floor_c: float = 0.5,
+    paired_delta_abs: float | None = None,
+) -> PredictiveErrorModel:
+    """Fit location (via #334 fit_bucket) AND scale (residual SD) for one bucket.
+
+    Scale uses the LIVE forecast-error spread when enough live pairs exist, else the
+    TIGGE-prior spread (shrinkage parallel to the bias). The scale intentionally uses
+    the full sample SD (not a trimmed one) so genuine tail regimes keep predictive
+    support; floored at ``residual_floor_c`` (>= sensor-ish level).
+    """
+    from src.calibration.ens_bias_model import fit_bucket
+
+    post = fit_bucket(
+        tigge_residuals, opendata_residuals,
+        paired_delta_abs=paired_delta_abs, min_live_n=min_live_n,
+    )
+
+    def _spread(xs: list[float]) -> float:
+        return statistics.stdev(xs) if len(xs) >= 2 else 0.0
+
+    if len(opendata_residuals) >= min_live_n:
+        residual_sd = _spread(opendata_residuals)
+    else:
+        residual_sd = _spread(tigge_residuals)
+    residual_sd = max(residual_sd, residual_floor_c)
+    return predictive_error_from_posterior(post, residual_sd)

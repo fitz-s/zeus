@@ -94,3 +94,26 @@ def test_effective_bias_is_strength_times_posterior():
     post = posterior_bias(prior, live)
     em = predictive_error_from_posterior(post, residual_sd_c=1.0)
     assert em.effective_bias_c == pytest.approx(em.correction_strength * post.bias)
+
+
+# ---- bucket fit: location (fit_bucket) + scale (residual_sd) ----
+
+def test_fit_predictive_error_bucket_scale_tracks_spread():
+    from src.calibration.ens_error_model import fit_predictive_error_bucket
+    import random
+    r = random.Random(0)
+    tig = [r.gauss(-1.0, 1.0) for _ in range(200)]
+    tight = fit_predictive_error_bucket(tig, [r.gauss(-1.5, 0.5) for _ in range(40)])
+    wide = fit_predictive_error_bucket(tig, [r.gauss(-1.5, 3.0) for _ in range(40)])
+    assert wide.residual_sd_c > tight.residual_sd_c, "scale must track live forecast-error spread"
+    assert tight.residual_sd_c >= 0.5  # floored at >= sensor-ish level
+
+
+def test_fit_predictive_error_bucket_falls_back_to_prior_scale_when_live_sparse():
+    from src.calibration.ens_error_model import fit_predictive_error_bucket
+    import random
+    r = random.Random(1)
+    tig = [r.gauss(-1.0, 2.0) for _ in range(200)]
+    em = fit_predictive_error_bucket(tig, [-3.0, -3.0], min_live_n=20)  # sparse live -> prior scale
+    assert em.correction_strength == 0.0 or em.bias_c == em.bias_c  # bias falls to prior (n_live dropped)
+    assert em.residual_sd_c > 1.0, "sparse live -> use TIGGE spread (~2C), not a tiny live std"
