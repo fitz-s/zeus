@@ -75,6 +75,7 @@ class Day0ExtremeUpdatedPayload:
     metric_match_status: str = "UNKNOWN"
     rounding_status: str = "UNKNOWN"
     source_authorized_status: str = "UNKNOWN"
+    live_authority_status: str = "UNKNOWN"
 
 
 @dataclass(frozen=True)
@@ -88,6 +89,10 @@ class MarketBookEventPayload:
     best_bid: float | None = None
     best_ask: float | None = None
     depth_json: str | None = None
+    tick_size: str | None = None
+    min_order_size: str | None = None
+    neg_risk: bool | None = None
+    executable_snapshot_id: str | None = None
     gap_start: str | None = None
     gap_recovered_at: str | None = None
 

@@ -150,6 +150,25 @@ def test_missing_required_steps_partial_blocked():
     assert result.completeness_status == "PARTIAL_BLOCKED"
 
 
+def test_empty_expected_steps_derives_cycle_steps_and_fails_closed():
+    source_run = _source_run(completeness="COMPLETE")
+    coverage = _coverage(completeness="COMPLETE", readiness="LIVE_ELIGIBLE", members=51)
+    source_run["expected_steps_json"] = "[]"
+    coverage["expected_steps_json"] = "[]"
+    coverage["observed_steps_json"] = "[0,3,6]"
+    source_run["observed_steps_json"] = "[0,3,6]"
+
+    result = classify_forecast_snapshot(
+        source_run=source_run,
+        coverage=coverage,
+        snapshot=_snapshot(),
+        decision_time=_decision_time(),
+    )
+
+    assert result.completeness_status == "PARTIAL_BLOCKED"
+    assert result.required_steps_present is False
+
+
 def test_available_at_is_source_available_not_issue_time():
     event = build_forecast_snapshot_ready_event(
         source_run=_source_run(),

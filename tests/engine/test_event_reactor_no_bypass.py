@@ -14,6 +14,7 @@ from src.engine.discovery_mode import DiscoveryMode
 from src.engine.event_reactor_adapter import (
     discovery_mode_for_event,
     edli_source_truth_gate,
+    edli_trade_score_gate,
     executable_snapshot_gate_from_trade_conn,
     riskguard_allows_new_entries,
     submit_existing_cycle_for_event,
@@ -88,6 +89,29 @@ def test_adapter_source_truth_allows_complete_forecast_only():
     assert edli_source_truth_gate(partial) is False
 
 
+def test_adapter_trade_score_gate_uses_robust_trade_score_inputs():
+    event = _forecast_event()
+    payload = json.loads(event.payload_json)
+    payload.update(
+        {
+            "p_fill_lcb": 0.5,
+            "q_5pct": 0.62,
+            "q_posterior": 0.64,
+            "c_95pct": 0.55,
+            "c_stress": 0.56,
+            "lambda_edge": 0.01,
+            "lambda_stress": 0.01,
+        }
+    )
+    positive = replace(event, payload_json=json.dumps(payload, sort_keys=True, separators=(",", ":")))
+    payload["c_95pct"] = 0.70
+    negative = replace(event, payload_json=json.dumps(payload, sort_keys=True, separators=(",", ":")))
+
+    assert edli_trade_score_gate(positive) is True
+    assert edli_trade_score_gate(negative) is False
+    assert edli_trade_score_gate(event) is False
+
+
 def test_adapter_maps_events_to_existing_discovery_modes():
     forecast = _forecast_event()
 
@@ -103,17 +127,37 @@ def test_submit_existing_cycle_reports_no_submit_when_existing_path_builds_none(
         run_cycle=lambda mode: seen.append(mode) or {"final_intents_built": 0, "entry_orders_submitted": 0},
     )
 
-    assert result is False
+    assert result.submitted is False
+    assert result.reason == "EXISTING_CYCLE_NO_SUBMIT"
     assert seen == [DiscoveryMode.UPDATE_REACTION]
 
 
-def test_submit_existing_cycle_reports_existing_final_intent_or_submit():
+def test_submit_existing_cycle_requires_event_bound_submit_receipt():
     event = _forecast_event()
 
-    assert submit_existing_cycle_for_event(
+    result = submit_existing_cycle_for_event(
         event,
         run_cycle=lambda _mode: {"final_intents_built": 1, "entry_orders_submitted": 0},
-    ) is True
+    )
+    assert result.submitted is False
+    assert result.reason == "UNBOUND_EXISTING_CYCLE_SUMMARY"
+
+
+def test_submit_existing_cycle_accepts_event_bound_summary_only():
+    event = _forecast_event()
+
+    result = submit_existing_cycle_for_event(
+        event,
+        run_cycle=lambda _mode: {
+            "final_intents_built": 1,
+            "entry_orders_submitted": 0,
+            "edli_event_id": event.event_id,
+            "causal_snapshot_id": event.causal_snapshot_id,
+        },
+    )
+
+    assert result.submitted is True
+    assert result.event_id == event.event_id
 
 
 def test_executable_snapshot_gate_requires_fresh_snapshot():
@@ -122,6 +166,7 @@ def test_executable_snapshot_gate_requires_fresh_snapshot():
         """
         CREATE TABLE executable_market_snapshots (
             freshness_deadline TEXT,
+            snapshot_id TEXT,
             yes_token_id TEXT,
             no_token_id TEXT,
             active INTEGER,
@@ -137,8 +182,13 @@ def test_executable_snapshot_gate_requires_fresh_snapshot():
     event = _forecast_event()
     assert gate(event) is False
     conn.execute(
-        "INSERT INTO executable_market_snapshots VALUES (?,?,?,?,?,?)",
-        ("2026-05-24T12:05:00+00:00", "yes-1", "no-1", 1, 0, "chicago-weather"),
+        "INSERT INTO executable_market_snapshots VALUES (?,?,?,?,?,?,?)",
+        ("2026-05-24T12:05:00+00:00", "other-snapshot", "yes-1", "no-1", 1, 0, "chicago-weather"),
+    )
+    assert gate(event) is False
+    conn.execute(
+        "INSERT INTO executable_market_snapshots VALUES (?,?,?,?,?,?,?)",
+        ("2026-05-24T12:05:00+00:00", event.causal_snapshot_id, "yes-1", "no-1", 1, 0, "chicago-weather"),
     )
     assert gate(event) is True
 

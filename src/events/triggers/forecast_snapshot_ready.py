@@ -59,7 +59,11 @@ def classify_forecast_snapshot(
             "PARTIAL_BLOCKED", False, False, False, "AVAILABLE_AT_IN_FUTURE"
         )
 
-    expected_steps = _json_list(coverage.get("expected_steps_json") or source_run.get("expected_steps_json"))
+    expected_steps = _required_expected_steps(source_run=source_run, coverage=coverage)
+    if not expected_steps:
+        return ForecastSnapshotClassification(
+            "PARTIAL_BLOCKED", False, False, False, "EXPECTED_STEPS_UNKNOWN"
+        )
     observed_steps = _json_list(coverage.get("observed_steps_json") or source_run.get("observed_steps_json"))
     required_steps_present = set(expected_steps).issubset(set(observed_steps))
 
@@ -138,7 +142,7 @@ def build_forecast_snapshot_ready_event(
         min_members_floor=min_members_floor,
         live_eligibility_reader=live_eligibility_reader,
     )
-    expected_steps = _json_list(coverage.get("expected_steps_json") or source_run.get("expected_steps_json"))
+    expected_steps = _required_expected_steps(source_run=source_run, coverage=coverage)
     observed_steps = _json_list(coverage.get("observed_steps_json") or source_run.get("observed_steps_json"))
     expected_members = _int_value(coverage.get("expected_members") or source_run.get("expected_members") or 51)
     observed_members = _int_value(
@@ -341,6 +345,21 @@ def _json_list(raw: Any) -> list[Any]:
             raise ValueError("expected JSON list")
         return parsed
     raise ValueError(f"expected list-like value, got {type(raw).__name__}")
+
+
+def _required_expected_steps(*, source_run: dict[str, Any], coverage: dict[str, Any]) -> list[Any]:
+    raw_steps = coverage.get("expected_steps_json") or source_run.get("expected_steps_json")
+    steps = _json_list(raw_steps)
+    if steps:
+        return steps
+    cycle = source_run.get("source_cycle_time") or coverage.get("source_cycle_time")
+    if not cycle:
+        return []
+    cycle_hour = _parse_utc(cycle, "source_cycle_time").hour
+    try:
+        return list(ecmwf_open_data_expected_steps(cycle_hour))
+    except ValueError:
+        return []
 
 
 def _parse_utc(value: Any, field_name: str) -> datetime:

@@ -13,7 +13,9 @@ from src.events.triggers.market_channel_ingestor import (
     MarketChannelAuthorityError,
     MarketChannelIngestor,
     MarketChannelOnlineService,
+    MarketTokenMetadata,
     QuoteCache,
+    active_weather_token_metadata_from_snapshots,
     active_weather_token_ids_from_snapshots,
     assert_market_channel_not_fill_authority,
     assert_user_channel_fill_authority,
@@ -28,6 +30,20 @@ def _conn_writer():
     conn = sqlite3.connect(":memory:")
     init_schema(conn)
     return conn, EventWriter(conn)
+
+
+def _metadata(token_id: str = "token-1", *, outcome_label: str = "YES") -> dict[str, MarketTokenMetadata]:
+    return {
+        token_id: MarketTokenMetadata(
+            condition_id="0xcondition",
+            token_id=token_id,
+            outcome_label=outcome_label,
+            min_tick_size="0.01",
+            min_order_size="5",
+            neg_risk=False,
+            executable_snapshot_id="snap-1",
+        )
+    }
 
 
 def test_book_buy_uses_best_ask():
@@ -56,7 +72,7 @@ def test_book_sell_uses_best_bid():
 
 def test_tick_size_change_forces_snapshot_refresh():
     _conn, writer = _conn_writer()
-    ingestor = MarketChannelIngestor(writer, active_token_ids={"token-1"})
+    ingestor = MarketChannelIngestor(writer, active_token_ids={"token-1"}, token_metadata=_metadata())
     result = ingestor.handle_message(
         {"event_type": "tick_size_change", "asset_id": "token-1", "timestamp": "1766789469958"},
         received_at="2026-05-24T10:00:00+00:00",
@@ -79,7 +95,7 @@ def test_user_channel_is_only_fill_authority():
 
 def test_reconnect_gap_online_ingestor_no_stale_trade():
     conn, writer = _conn_writer()
-    ingestor = MarketChannelIngestor(writer, active_token_ids={"token-1"})
+    ingestor = MarketChannelIngestor(writer, active_token_ids={"token-1"}, token_metadata=_metadata())
     event = ingestor.reconnect_gap_snapshot(
         {
             "event_type": "book",
@@ -100,7 +116,7 @@ def test_reconnect_gap_online_ingestor_no_stale_trade():
 
 def test_market_message_ignores_inactive_token():
     conn, writer = _conn_writer()
-    ingestor = MarketChannelIngestor(writer, active_token_ids={"token-1"})
+    ingestor = MarketChannelIngestor(writer, active_token_ids={"token-1"}, token_metadata=_metadata())
     result = ingestor.handle_message(
         {"event_type": "book", "asset_id": "token-2", "timestamp": "1766789469958"},
         received_at="2026-05-24T10:00:00+00:00",
@@ -146,7 +162,12 @@ def test_insert_execution_feasibility_evidence():
 def test_quote_cache_seeded_from_rest_on_connect():
     conn, writer = _conn_writer()
     cache = QuoteCache()
-    ingestor = MarketChannelIngestor(writer, active_token_ids={"token-1"}, quote_cache=cache)
+    ingestor = MarketChannelIngestor(
+        writer,
+        active_token_ids={"token-1"},
+        token_metadata=_metadata(),
+        quote_cache=cache,
+    )
     service = MarketChannelOnlineService(
         ingestor,
         fetch_orderbook=lambda token_id: {
@@ -167,7 +188,7 @@ def test_quote_cache_seeded_from_rest_on_connect():
 
 def test_market_channel_quote_writes_feasibility_evidence_only():
     conn, writer = _conn_writer()
-    ingestor = MarketChannelIngestor(writer, active_token_ids={"token-1"})
+    ingestor = MarketChannelIngestor(writer, active_token_ids={"token-1"}, token_metadata=_metadata())
 
     ingestor.handle_message(
         {
@@ -189,9 +210,78 @@ def test_market_channel_quote_writes_feasibility_evidence_only():
     assert rows == [("buy_yes", None, None), ("sell_yes", None, None)]
 
 
+def test_market_channel_no_default_yes_for_no_token():
+    conn, writer = _conn_writer()
+    ingestor = MarketChannelIngestor(
+        writer,
+        active_token_ids={"no-token"},
+        token_metadata=_metadata("no-token", outcome_label="NO"),
+    )
+
+    ingestor.handle_message(
+        {
+            "event_type": "book",
+            "asset_id": "no-token",
+            "market": "0xcondition",
+            "bids": [{"price": "0.48", "size": "10"}],
+            "asks": [{"price": "0.52", "size": "10"}],
+            "hash": "hash-no",
+            "timestamp": "1766789469958",
+        },
+        received_at="2026-05-24T10:00:00+00:00",
+    )
+
+    event_payload = conn.execute("SELECT payload_json FROM opportunity_events").fetchone()[0]
+    assert '"outcome_label":"NO"' in event_payload
+    rows = conn.execute(
+        "SELECT direction, outcome_label FROM execution_feasibility_evidence ORDER BY direction"
+    ).fetchall()
+    assert rows == [("buy_no", "NO"), ("sell_no", "NO")]
+
+
+def test_market_channel_rejects_unmapped_token_without_outcome_label():
+    conn, writer = _conn_writer()
+    ingestor = MarketChannelIngestor(writer, active_token_ids={"token-1"})
+
+    result = ingestor.handle_message(
+        {
+            "event_type": "book",
+            "asset_id": "token-1",
+            "market": "0xcondition",
+            "bids": [{"price": "0.48", "size": "10"}],
+            "asks": [{"price": "0.52", "size": "10"}],
+            "hash": "hash-1",
+            "timestamp": "1766789469958",
+        },
+        received_at="2026-05-24T10:00:00+00:00",
+    )
+
+    assert result is None
+    assert conn.execute("SELECT COUNT(*) FROM opportunity_events").fetchone()[0] == 0
+
+
+def test_tick_size_change_invokes_refresh_callback():
+    _conn, writer = _conn_writer()
+    actions = []
+    service = MarketChannelOnlineService(
+        MarketChannelIngestor(writer, active_token_ids={"token-1"}, token_metadata=_metadata()),
+        refresh_snapshot=actions.append,
+    )
+
+    action = service.ingestor.handle_message(
+        {"event_type": "tick_size_change", "asset_id": "token-1", "market": "0xcondition"},
+        received_at="2026-05-24T10:00:00+00:00",
+    )
+    assert isinstance(action, MarketChannelAction)
+    service._handle_action(action)
+
+    assert service.refresh_action_count == 1
+    assert actions == [action]
+
+
 def test_new_market_message_emits_discovery_event_without_shadow_module():
     _conn, writer = _conn_writer()
-    ingestor = MarketChannelIngestor(writer, active_token_ids={"token-1"})
+    ingestor = MarketChannelIngestor(writer, active_token_ids={"token-1"}, token_metadata=_metadata())
 
     event = ingestor.event_from_message(
         {
@@ -210,7 +300,7 @@ def test_new_market_message_emits_discovery_event_without_shadow_module():
 
 def test_feasibility_evidence_from_quote_is_evidence_only():
     conn, writer = _conn_writer()
-    ingestor = MarketChannelIngestor(writer, active_token_ids={"token-1"})
+    ingestor = MarketChannelIngestor(writer, active_token_ids={"token-1"}, token_metadata=_metadata())
     event = ingestor.event_from_message(
         {
             "event_type": "book",
@@ -233,9 +323,13 @@ def test_active_weather_token_ids_from_executable_snapshots():
         """
         CREATE TABLE executable_market_snapshots (
             snapshot_id TEXT,
+            condition_id TEXT,
             event_slug TEXT,
             yes_token_id TEXT,
             no_token_id TEXT,
+            min_tick_size TEXT,
+            min_order_size TEXT,
+            neg_risk INTEGER,
             active INTEGER,
             closed INTEGER,
             captured_at TEXT
@@ -243,12 +337,16 @@ def test_active_weather_token_ids_from_executable_snapshots():
         """
     )
     conn.execute(
-        "INSERT INTO executable_market_snapshots VALUES ('snap-1','chicago-weather','yes-1','no-1',1,0,'2026-05-24T10:00:00+00:00')"
+        "INSERT INTO executable_market_snapshots VALUES ('snap-1','0xcondition','chicago-weather','yes-1','no-1','0.01','5',0,1,0,'2026-05-24T10:00:00+00:00')"
     )
     conn.execute(
-        "INSERT INTO executable_market_snapshots VALUES ('snap-2','politics','yes-2','no-2',1,0,'2026-05-24T10:00:00+00:00')"
+        "INSERT INTO executable_market_snapshots VALUES ('snap-2','0xpolitics','politics','yes-2','no-2','0.01','5',0,1,0,'2026-05-24T10:00:00+00:00')"
     )
     assert active_weather_token_ids_from_snapshots(conn) == {"yes-1", "no-1"}
+    metadata = active_weather_token_metadata_from_snapshots(conn)
+    assert metadata["yes-1"].outcome_label == "YES"
+    assert metadata["no-1"].outcome_label == "NO"
+    assert metadata["no-1"].min_order_size == "5"
 
 
 def test_min_order_size_enforced():

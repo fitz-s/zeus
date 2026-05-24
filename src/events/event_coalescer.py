@@ -42,18 +42,24 @@ class EventCoalescer:
     def flush(self, writer: EventWriter, *, market_budget: int | None = None) -> list[EventWriteResult]:
         """Write queued events. Lossless events are not budgeted or dropped."""
 
-        written: list[EventWriteResult] = []
+        events = self.drain(market_budget=market_budget)
+        return [writer.write(event) for event in events]
+
+    def drain(self, *, market_budget: int | None = None) -> list[OpportunityEvent]:
+        """Return queued events in write order without writing them."""
+
+        events: list[OpportunityEvent] = []
         while self._lossless:
-            written.append(writer.write(self._lossless.popleft()))
+            events.append(self._lossless.popleft())
 
         remaining_budget = len(self._market_latest) if market_budget is None else max(0, market_budget)
         for key in list(self._market_latest.keys()):
             if remaining_budget <= 0:
                 break
             event = self._market_latest.pop(key)
-            written.append(writer.write(event))
+            events.append(event)
             remaining_budget -= 1
-        return written
+        return events
 
     def pending_counts(self) -> dict[str, int]:
         return {"lossless": len(self._lossless), "market": len(self._market_latest)}

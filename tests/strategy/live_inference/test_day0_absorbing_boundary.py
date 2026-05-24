@@ -26,6 +26,7 @@ def _gate(**overrides) -> Day0HardFactGate:
         "metric_match_status": "MATCH",
         "rounding_status": "MATCH",
         "source_authorized_status": "AUTHORIZED",
+        "live_authority_status": "LIVE_AUTHORITY",
     }
     values.update(overrides)
     return Day0HardFactGate(**values)

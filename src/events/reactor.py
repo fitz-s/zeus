@@ -19,7 +19,22 @@ UTC = timezone.utc
 
 Gate = Callable[[OpportunityEvent], bool]
 Reject = Callable[[OpportunityEvent, str, str], None]
-Submit = Callable[[OpportunityEvent], bool | None]
+
+
+@dataclass(frozen=True)
+class EventSubmissionReceipt:
+    """Proof that an executor-facing submit belongs to the current EDLI event."""
+
+    submitted: bool
+    event_id: str
+    causal_snapshot_id: str | None = None
+    condition_id: str | None = None
+    token_id: str | None = None
+    executable_snapshot_id: str | None = None
+    reason: str = ""
+
+
+Submit = Callable[[OpportunityEvent], bool | None | EventSubmissionReceipt]
 
 
 @dataclass
@@ -51,12 +66,14 @@ class OpportunityEventReactor:
         riskguard_gate: Gate,
         final_intent_submit: Submit,
         reject: Reject,
+        trade_score_gate: Gate | None = None,
         config: ReactorConfig | None = None,
         regret_ledger: Any | None = None,
     ) -> None:
         self._store = store
         self._source_truth_gate = source_truth_gate
         self._executable_snapshot_gate = executable_snapshot_gate
+        self._trade_score_gate = trade_score_gate or (lambda _event: True)
         self._fdr_gate = fdr_gate
         self._kelly_gate = kelly_gate
         self._riskguard_gate = riskguard_gate
@@ -109,6 +126,9 @@ class OpportunityEventReactor:
         if not self._executable_snapshot_gate(event):
             self._reject_event(event, "EXECUTABLE_QUOTE", "EXECUTABLE_SNAPSHOT_BLOCKED", result)
             return
+        if not self._trade_score_gate(event):
+            self._reject_event(event, "TRADE_SCORE", "TRADE_SCORE_BLOCKED", result)
+            return
         self._log_family_once(event)
         if not self._fdr_gate(event):
             self._reject_event(event, "FDR", "FDR_REJECTED", result)
@@ -125,8 +145,10 @@ class OpportunityEventReactor:
                 self._reject_event(event, "LIVE_CAP", cap_decision.reason, result)
                 return
         submit_result = self._submit(event)
-        if submit_result is False:
-            self._reject_event(event, "EXECUTOR_EXPRESSIBILITY", "EXISTING_CYCLE_NO_SUBMIT", result)
+        receipt = _submission_receipt(event, submit_result)
+        if receipt is None or not _receipt_matches_event(event, receipt):
+            reason = receipt.reason if receipt is not None and receipt.reason else "EVENT_SUBMISSION_RECEIPT_MISSING_OR_UNBOUND"
+            self._reject_event(event, "EXECUTOR_EXPRESSIBILITY", reason, result)
             return
         if event.event_type == "DAY0_EXTREME_UPDATED":
             self._day0_live_orders_today += 1
@@ -195,6 +217,50 @@ def _payload_dict(event: OpportunityEvent) -> dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
+def _submission_receipt(
+    event: OpportunityEvent,
+    submit_result: bool | None | EventSubmissionReceipt,
+) -> EventSubmissionReceipt | None:
+    if isinstance(submit_result, EventSubmissionReceipt):
+        return submit_result
+    if submit_result is False:
+        return EventSubmissionReceipt(
+            submitted=False,
+            event_id=event.event_id,
+            causal_snapshot_id=event.causal_snapshot_id,
+            reason="EXISTING_CYCLE_NO_SUBMIT",
+        )
+    if submit_result is None:
+        return EventSubmissionReceipt(
+            submitted=True,
+            event_id=event.event_id,
+            causal_snapshot_id=event.causal_snapshot_id,
+            reason="legacy_injected_test_submit",
+        )
+    if submit_result is True:
+        return None
+    return None
+
+
+def _receipt_matches_event(event: OpportunityEvent, receipt: EventSubmissionReceipt) -> bool:
+    if not receipt.submitted:
+        return False
+    if receipt.event_id != event.event_id:
+        return False
+    if event.causal_snapshot_id and receipt.causal_snapshot_id != event.causal_snapshot_id:
+        return False
+    payload = _payload_dict(event)
+    for field in ("condition_id", "token_id"):
+        expected = payload.get(field)
+        observed = getattr(receipt, field)
+        if expected and observed != expected:
+            return False
+    executable_snapshot_id = payload.get("executable_snapshot_id")
+    if executable_snapshot_id and receipt.executable_snapshot_id != executable_snapshot_id:
+        return False
+    return True
+
+
 def _day0_hard_fact_payload_live_eligible(event: OpportunityEvent) -> bool:
     payload = _payload_dict(event)
     return (
@@ -205,6 +271,7 @@ def _day0_hard_fact_payload_live_eligible(event: OpportunityEvent) -> bool:
         and payload.get("metric_match_status") == "MATCH"
         and payload.get("rounding_status") == "MATCH"
         and payload.get("source_authorized_status", "AUTHORIZED") == "AUTHORIZED"
+        and payload.get("live_authority_status") == "LIVE_AUTHORITY"
     )
 
 

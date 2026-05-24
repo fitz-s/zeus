@@ -375,6 +375,7 @@ state_machines:
       - UNKNOWN_REVIEW_REQUIRED
       - FDR_REJECTED
       - EXISTING_CYCLE_NO_SUBMIT
+      - EXPECTED_STEPS_UNKNOWN
     invariant_tests:
       - tests/events/test_forecast_snapshot_ready.py
       - tests/events/test_reactor.py

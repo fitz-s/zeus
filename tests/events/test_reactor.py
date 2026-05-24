@@ -36,6 +36,7 @@ def _day0_event(key_suffix: str = "a"):
         metric_match_status="MATCH",
         rounding_status="MATCH",
         source_authorized_status="AUTHORIZED",
+        live_authority_status="LIVE_AUTHORITY",
     )
     return make_day0_extreme_updated_event(
         entity_key=f"Chicago|2026-05-24|high|{key_suffix}",

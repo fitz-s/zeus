@@ -2387,9 +2387,11 @@ def _edli_event_reactor_cycle() -> None:
     if not edli_cfg.get("enabled") or not edli_cfg.get("event_writer_enabled"):
         return
     from src.engine.event_reactor_adapter import (
+        edli_payload_fdr_gate,
+        edli_payload_kelly_gate,
+        edli_trade_score_gate,
         edli_source_truth_gate,
         executable_snapshot_gate_from_trade_conn,
-        existing_cycle_downstream_gate,
         riskguard_allows_new_entries,
         submit_existing_cycle_for_event,
     )
@@ -2437,8 +2439,9 @@ def _edli_event_reactor_cycle() -> None:
             store,
             source_truth_gate=edli_source_truth_gate,
             executable_snapshot_gate=executable_snapshot_gate_from_trade_conn(trade_conn),
-            fdr_gate=existing_cycle_downstream_gate,
-            kelly_gate=existing_cycle_downstream_gate,
+            trade_score_gate=edli_trade_score_gate,
+            fdr_gate=edli_payload_fdr_gate,
+            kelly_gate=edli_payload_kelly_gate,
             riskguard_gate=riskguard_allows_new_entries(get_current_level=get_current_level),
             final_intent_submit=_submit_via_existing_cycle,
             reject=lambda _event, _stage, _reason: None,
@@ -2567,12 +2570,13 @@ def _edli_market_channel_ingestor_cycle() -> None:
         )
         return
 
-    from src.events.triggers.market_channel_ingestor import active_weather_token_ids_from_snapshots
+    from src.events.triggers.market_channel_ingestor import active_weather_token_metadata_from_snapshots
     from src.state.db import get_trade_connection
 
     trade_conn = get_trade_connection(write_class=None)
     try:
-        token_ids = active_weather_token_ids_from_snapshots(trade_conn)
+        token_metadata = active_weather_token_metadata_from_snapshots(trade_conn)
+        token_ids = set(token_metadata)
     finally:
         trade_conn.close()
 
@@ -2591,8 +2595,10 @@ def _edli_market_channel_ingestor_cycle() -> None:
 
     def _runner() -> None:
         from src.data.polymarket_client import PolymarketClient
+        from src.events.event_coalescer import EventCoalescer
         from src.events.event_writer import EventWriter
         from src.events.triggers.market_channel_ingestor import (
+            MarketChannelAction,
             MarketChannelIngestor,
             MarketChannelOnlineService,
             run_market_channel_service_forever,
@@ -2601,10 +2607,24 @@ def _edli_market_channel_ingestor_cycle() -> None:
 
         world_conn = get_world_connection(write_class="live")
         try:
+            def _refresh_snapshot_action(action: MarketChannelAction) -> None:
+                logger.info(
+                    "EDLI market-channel requested executable snapshot refresh: reason=%s token_id=%s condition_id=%s",
+                    action.reason,
+                    action.token_id,
+                    action.condition_id,
+                )
+
             with PolymarketClient() as clob:
                 service = MarketChannelOnlineService(
-                    MarketChannelIngestor(EventWriter(world_conn), active_token_ids=token_ids),
+                    MarketChannelIngestor(
+                        EventWriter(world_conn),
+                        active_token_ids=token_ids,
+                        token_metadata=token_metadata,
+                        coalescer=EventCoalescer(max_market_keys=1000),
+                    ),
                     fetch_orderbook=clob.get_orderbook_snapshot,
+                    refresh_snapshot=_refresh_snapshot_action,
                 )
                 run_market_channel_service_forever(
                     service,

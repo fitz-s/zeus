@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable
 
+from src.events.event_coalescer import EventCoalescer
 from src.events.event_writer import EventWriter, EventWriteResult
 from src.events.opportunity_event import MarketBookEventPayload, OpportunityEvent, make_opportunity_event
 from src.events.idempotency import stable_event_id
@@ -25,6 +26,19 @@ class MarketChannelAuthorityError(ValueError):
 class MarketChannelAction:
     refresh_snapshot: bool = False
     reason: str = ""
+    token_id: str | None = None
+    condition_id: str | None = None
+
+
+@dataclass(frozen=True)
+class MarketTokenMetadata:
+    condition_id: str
+    token_id: str
+    outcome_label: str
+    min_tick_size: str
+    min_order_size: str
+    neg_risk: bool
+    executable_snapshot_id: str
 
 
 @dataclass
@@ -52,25 +66,49 @@ class MarketChannelIngestor:
         writer: EventWriter,
         *,
         active_token_ids: set[str],
+        token_metadata: dict[str, MarketTokenMetadata] | None = None,
         quote_cache: QuoteCache | None = None,
+        coalescer: EventCoalescer | None = None,
     ) -> None:
         self._writer = writer
         self._active_token_ids = active_token_ids
+        self._token_metadata = token_metadata or {}
         self.quote_cache = quote_cache or QuoteCache()
+        self._coalescer = coalescer
 
     def handle_message(self, message: dict[str, Any], *, received_at: str) -> EventWriteResult | MarketChannelAction | None:
         event_type = str(message.get("event_type") or message.get("type") or "")
         if event_type == "tick_size_change":
-            return MarketChannelAction(refresh_snapshot=True, reason="tick_size_change")
+            return MarketChannelAction(
+                refresh_snapshot=True,
+                reason="tick_size_change",
+                token_id=_message_token_id(message),
+                condition_id=str(message.get("market") or message.get("condition_id") or "") or None,
+            )
         if event_type == "market_resolved":
-            return MarketChannelAction(refresh_snapshot=True, reason="market_resolved")
+            return MarketChannelAction(
+                refresh_snapshot=True,
+                reason="market_resolved",
+                token_id=_message_token_id(message),
+                condition_id=str(message.get("market") or message.get("condition_id") or "") or None,
+            )
         event = self.event_from_message(message, received_at=received_at)
         if event is None:
             return None
         self._cache_event_payload(event)
-        result = self._writer.write(event)
-        self._write_feasibility_evidence(event)
-        return result
+        return self._write_market_event(event)
+
+    def flush_coalesced(self, *, market_budget: int | None = None) -> list[EventWriteResult]:
+        if self._coalescer is None:
+            return []
+        events = self._coalescer.drain(market_budget=market_budget)
+        results = []
+        for event in events:
+            result = self._writer.write(event)
+            if result.inserted:
+                self._write_feasibility_evidence(event)
+            results.append(result)
+        return results
 
     def event_from_message(self, message: dict[str, Any], *, received_at: str) -> OpportunityEvent | None:
         event_type = str(message.get("event_type") or message.get("type") or "")
@@ -115,41 +153,55 @@ class MarketChannelIngestor:
         gap_marked: bool,
         gap_start: str | None = None,
     ) -> OpportunityEvent | None:
-        token_id = str(message.get("asset_id") or "")
+        token_id = _message_token_id(message)
         if token_id not in self._active_token_ids:
             return None
+        metadata = self._metadata_for_message(message, token_id=token_id)
+        if metadata is None:
+            return None
         payload = MarketBookEventPayload(
-            condition_id=str(message.get("market") or message.get("condition_id") or ""),
+            condition_id=metadata.condition_id,
             token_id=token_id,
-            outcome_label=str(message.get("outcome_label") or "YES"),  # type: ignore[arg-type]
+            outcome_label=metadata.outcome_label,  # type: ignore[arg-type]
             event_type="BOOK_SNAPSHOT",
             quote_seen_at=_timestamp_ms_to_iso(message.get("timestamp")) or received_at,
             book_hash=str(message.get("hash") or ""),
             best_bid=_best_price(message.get("bids"), best="bid"),
             best_ask=_best_price(message.get("asks"), best="ask"),
             depth_json=json.dumps({"bids": message.get("bids", []), "asks": message.get("asks", [])}, sort_keys=True),
+            tick_size=metadata.min_tick_size,
+            min_order_size=metadata.min_order_size,
+            neg_risk=metadata.neg_risk,
+            executable_snapshot_id=metadata.executable_snapshot_id,
             gap_start=gap_start if gap_marked else None,
             gap_recovered_at=received_at if gap_marked else None,
         )
         return _event_from_payload(payload, source="polymarket_market_channel", received_at=received_at)
 
     def _bba_event(self, message: dict[str, Any], *, received_at: str) -> OpportunityEvent | None:
-        token_id = str(message.get("asset_id") or "")
+        token_id = _message_token_id(message)
         if not token_id and message.get("price_changes"):
             token_id = str(message["price_changes"][0].get("asset_id") or "")
         if token_id not in self._active_token_ids:
             return None
         change = message.get("price_changes", [{}])[0] if message.get("price_changes") else message
+        metadata = self._metadata_for_message({**message, **change}, token_id=token_id)
+        if metadata is None:
+            return None
         payload = MarketBookEventPayload(
-            condition_id=str(message.get("market") or ""),
+            condition_id=metadata.condition_id,
             token_id=token_id,
-            outcome_label=str(message.get("outcome_label") or "YES"),  # type: ignore[arg-type]
+            outcome_label=metadata.outcome_label,  # type: ignore[arg-type]
             event_type="BEST_BID_ASK_CHANGED",
             quote_seen_at=_timestamp_ms_to_iso(message.get("timestamp")) or received_at,
             book_hash=str(change.get("hash") or ""),
             best_bid=_float_or_none(change.get("best_bid")),
             best_ask=_float_or_none(change.get("best_ask")),
             depth_json=None,
+            tick_size=metadata.min_tick_size,
+            min_order_size=metadata.min_order_size,
+            neg_risk=metadata.neg_risk,
+            executable_snapshot_id=metadata.executable_snapshot_id,
         )
         return _event_from_payload(payload, source="polymarket_market_channel", received_at=received_at)
 
@@ -166,13 +218,17 @@ class MarketChannelIngestor:
             MarketBookEventPayload(
                 condition_id=str(payload.get("condition_id") or ""),
                 token_id=str(payload.get("token_id") or ""),
-                outcome_label=str(payload.get("outcome_label") or "YES"),  # type: ignore[arg-type]
+                outcome_label=str(payload.get("outcome_label") or ""),  # type: ignore[arg-type]
                 event_type=event.event_type,  # type: ignore[arg-type]
                 quote_seen_at=str(payload.get("quote_seen_at") or event.available_at),
                 book_hash=payload.get("book_hash"),
                 best_bid=_float_or_none(payload.get("best_bid")),
                 best_ask=_float_or_none(payload.get("best_ask")),
                 depth_json=payload.get("depth_json"),
+                tick_size=payload.get("tick_size"),
+                min_order_size=payload.get("min_order_size"),
+                neg_risk=payload.get("neg_risk"),
+                executable_snapshot_id=payload.get("executable_snapshot_id"),
                 gap_start=payload.get("gap_start"),
                 gap_recovered_at=payload.get("gap_recovered_at"),
             )
@@ -185,8 +241,10 @@ class MarketChannelIngestor:
         outcome_label = str(payload.get("outcome_label") or "").upper()
         if outcome_label == "NO":
             directions = ("buy_no", "sell_no")
-        else:
+        elif outcome_label == "YES":
             directions = ("buy_yes", "sell_yes")
+        else:
+            raise MarketChannelAuthorityError("market-channel token lacks canonical YES/NO outcome metadata")
         for direction in directions:
             insert_execution_feasibility_evidence(
                 self._writer.conn,
@@ -208,15 +266,54 @@ class MarketChannelIngestor:
         )
         return _event_from_payload(payload, source="polymarket_market_channel", received_at=received_at)
 
+    def _metadata_for_message(self, message: dict[str, Any], *, token_id: str) -> MarketTokenMetadata | None:
+        metadata = self._token_metadata.get(token_id)
+        condition_id = str(message.get("market") or message.get("condition_id") or "")
+        if metadata is not None:
+            if condition_id and condition_id != metadata.condition_id:
+                return None
+            return metadata
+        outcome_label = str(message.get("outcome_label") or message.get("outcome") or "").upper()
+        if outcome_label not in {"YES", "NO"}:
+            return None
+        return MarketTokenMetadata(
+            condition_id=condition_id,
+            token_id=token_id,
+            outcome_label=outcome_label,
+            min_tick_size=str(message.get("tick_size") or message.get("min_tick_size") or ""),
+            min_order_size=str(message.get("min_order_size") or message.get("min_order") or ""),
+            neg_risk=bool(message.get("neg_risk") or message.get("negRisk") or False),
+            executable_snapshot_id=str(message.get("executable_snapshot_id") or message.get("snapshot_id") or ""),
+        )
+
+    def _write_market_event(self, event: OpportunityEvent) -> EventWriteResult | None:
+        if self._coalescer is not None:
+            self._coalescer.enqueue(event)
+            return None
+        result = self._writer.write(event)
+        self._write_feasibility_evidence(event)
+        return result
+
 
 def active_weather_token_ids_from_snapshots(conn: sqlite3.Connection, *, limit: int = 500) -> set[str]:
     """Read active YES/NO token ids from executable snapshot truth."""
 
+    return set(active_weather_token_metadata_from_snapshots(conn, limit=limit))
+
+
+def active_weather_token_metadata_from_snapshots(
+    conn: sqlite3.Connection,
+    *,
+    limit: int = 500,
+) -> dict[str, MarketTokenMetadata]:
+    """Read active weather token metadata from executable snapshot truth."""
+
     if not _table_exists(conn, "executable_market_snapshots"):
-        return set()
+        return {}
     columns = _table_columns(conn, "executable_market_snapshots")
-    if not {"yes_token_id", "no_token_id"} <= columns:
-        return set()
+    required = {"snapshot_id", "condition_id", "yes_token_id", "no_token_id", "min_tick_size", "min_order_size", "neg_risk"}
+    if not required <= columns:
+        return {}
     predicates = []
     if "active" in columns:
         predicates.append("COALESCE(active, 0) = 1")
@@ -227,7 +324,7 @@ def active_weather_token_ids_from_snapshots(conn: sqlite3.Connection, *, limit: 
     where_clause = "WHERE " + " AND ".join(predicates) if predicates else ""
     rows = conn.execute(
         f"""
-        SELECT yes_token_id, no_token_id
+        SELECT snapshot_id, condition_id, yes_token_id, no_token_id, min_tick_size, min_order_size, neg_risk
         FROM executable_market_snapshots
         {where_clause}
         ORDER BY captured_at DESC
@@ -235,13 +332,35 @@ def active_weather_token_ids_from_snapshots(conn: sqlite3.Connection, *, limit: 
         """,
         (limit,),
     ).fetchall()
-    token_ids: set[str] = set()
-    for yes_token_id, no_token_id in rows:
+    metadata: dict[str, MarketTokenMetadata] = {}
+    for snapshot_id, condition_id, yes_token_id, no_token_id, min_tick_size, min_order_size, neg_risk in rows:
         if yes_token_id:
-            token_ids.add(str(yes_token_id))
+            metadata.setdefault(
+                str(yes_token_id),
+                MarketTokenMetadata(
+                    condition_id=str(condition_id),
+                    token_id=str(yes_token_id),
+                    outcome_label="YES",
+                    min_tick_size=str(min_tick_size),
+                    min_order_size=str(min_order_size),
+                    neg_risk=bool(neg_risk),
+                    executable_snapshot_id=str(snapshot_id),
+                ),
+            )
         if no_token_id:
-            token_ids.add(str(no_token_id))
-    return token_ids
+            metadata.setdefault(
+                str(no_token_id),
+                MarketTokenMetadata(
+                    condition_id=str(condition_id),
+                    token_id=str(no_token_id),
+                    outcome_label="NO",
+                    min_tick_size=str(min_tick_size),
+                    min_order_size=str(min_order_size),
+                    neg_risk=bool(neg_risk),
+                    executable_snapshot_id=str(snapshot_id),
+                ),
+            )
+    return metadata
 
 
 @dataclass
@@ -250,8 +369,10 @@ class MarketChannelOnlineService:
 
     ingestor: MarketChannelIngestor
     fetch_orderbook: RestOrderbookFetch | None = None
+    refresh_snapshot: Callable[[MarketChannelAction], None] | None = None
     connected: bool = False
     gap_start: str | None = None
+    refresh_action_count: int = 0
 
     def on_connect(self, *, received_at: str) -> list[EventWriteResult]:
         self.connected = True
@@ -327,10 +448,13 @@ class MarketChannelOnlineService:
                         )
                     async for raw_message in ws:
                         for message in _parse_channel_messages(raw_message):
-                            self.ingestor.handle_message(
+                            action_or_result = self.ingestor.handle_message(
                                 message,
                                 received_at=datetime.now(UTC).isoformat(),
                             )
+                            if isinstance(action_or_result, MarketChannelAction):
+                                self._handle_action(action_or_result)
+                        self.ingestor.flush_coalesced(market_budget=100)
                         if commit is not None:
                             commit()
             except Exception as exc:  # noqa: BLE001 - network loop must retry
@@ -350,6 +474,13 @@ class MarketChannelOnlineService:
                             seed_exc,
                             exc_info=True,
                         )
+
+    def _handle_action(self, action: MarketChannelAction) -> None:
+        if not action.refresh_snapshot:
+            return
+        self.refresh_action_count += 1
+        if self.refresh_snapshot is not None:
+            self.refresh_snapshot(action)
 
 
 def run_market_channel_service_forever(
@@ -489,6 +620,10 @@ def _timestamp_ms_to_iso(value: object) -> str | None:
     if raw > 10_000_000_000:
         raw = raw // 1000
     return datetime.fromtimestamp(raw, tz=UTC).isoformat()
+
+
+def _message_token_id(message: dict[str, Any]) -> str:
+    return str(message.get("asset_id") or message.get("token_id") or "")
 
 
 def _parse_channel_messages(raw_message: object) -> list[dict[str, Any]]:

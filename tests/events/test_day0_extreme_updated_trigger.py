@@ -45,6 +45,7 @@ def _observation(**overrides):
         "metric_match_status": "MATCH",
         "rounding_status": "MATCH",
         "source_authorized_status": "AUTHORIZED",
+        "live_authority_status": "LIVE_AUTHORITY",
         "observation_context_id": "obsctx-1",
     }
     base.update(overrides)
@@ -278,3 +279,29 @@ def test_authority_row_missing_temperature_is_not_observation():
                 "current_temp": None,
             }
         )
+
+
+def test_authority_row_scanner_is_observability_only_not_live_authority():
+    observation = authority_row_to_observation(
+        {
+            "payload_json": '{"dst_status":"UNAMBIGUOUS","rounding_status":"MATCH"}',
+            "city": "Chicago",
+            "target_date": "2026-05-24",
+            "temperature_metric": "high",
+            "source": "WU",
+            "station_id": "KMDW",
+            "observation_time_utc": "2026-05-24T18:00:00+00:00",
+            "high_so_far": 74.2,
+            "low_so_far": None,
+            "current_temp": 74.2,
+            "local_date_matches_target": 1,
+            "source_authorized_for_settlement": 1,
+            "recorded_at": "2026-05-24T18:07:00+00:00",
+            "authority_id": "auth-obs-only",
+        }
+    )
+
+    assert observation["live_authority_status"] == "OBSERVABILITY_ONLY"
+    assert observation["source_match_status"] == "UNKNOWN"
+    assert observation["station_match_status"] == "UNKNOWN"
+    assert observation["metric_match_status"] == "UNKNOWN"

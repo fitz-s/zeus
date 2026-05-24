@@ -23,6 +23,7 @@ class Day0HardFactGate:
     metric_match_status: str
     rounding_status: str
     source_authorized_status: str
+    live_authority_status: str
 
     def live_eligible(self) -> bool:
         return (
@@ -33,6 +34,7 @@ class Day0HardFactGate:
             and self.metric_match_status == "MATCH"
             and self.rounding_status == "MATCH"
             and self.source_authorized_status == "AUTHORIZED"
+            and self.live_authority_status == "LIVE_AUTHORITY"
         )
 
 
@@ -68,6 +70,7 @@ def build_day0_extreme_updated_event(
         metric_match_status=str(observation.get("metric_match_status", "UNKNOWN")),
         rounding_status=str(observation.get("rounding_status", "UNKNOWN")),
         source_authorized_status=str(observation.get("source_authorized_status", "UNKNOWN")),
+        live_authority_status=str(observation.get("live_authority_status", "UNKNOWN")),
     )
     entity_key = "|".join((payload.city, payload.target_date, payload.metric, payload.station_id))
     return make_day0_extreme_updated_event(
@@ -179,15 +182,16 @@ def authority_row_to_observation(row: dict[str, Any]) -> dict[str, Any]:
         "raw_value": float(raw_value),
         "high_so_far": row.get("high_so_far"),
         "low_so_far": row.get("low_so_far"),
-        "source_match_status": payload.get("source_match_status", "MATCH" if row.get("source") else "UNKNOWN"),
+        "source_match_status": payload.get("source_match_status", "UNKNOWN"),
         "local_date_status": "MATCH" if row.get("local_date_matches_target") == 1 else "UNKNOWN",
-        "station_match_status": payload.get("station_match_status", "MATCH" if row.get("station_id") else "UNKNOWN"),
+        "station_match_status": payload.get("station_match_status", "UNKNOWN"),
         "dst_status": payload.get("dst_status", "UNKNOWN"),
-        "metric_match_status": payload.get("metric_match_status", "MATCH" if metric in {"high", "low"} else "UNKNOWN"),
+        "metric_match_status": payload.get("metric_match_status", "UNKNOWN"),
         "rounding_status": payload.get("rounding_status", "UNKNOWN"),
         "source_authorized_status": (
             "AUTHORIZED" if row.get("source_authorized_for_settlement") == 1 else "UNKNOWN"
         ),
+        "live_authority_status": payload.get("live_authority_status", "OBSERVABILITY_ONLY"),
         "settlement_unit": payload.get("settlement_unit") or payload.get("measurement_unit"),
         "settlement_precision": payload.get("settlement_precision") or payload.get("precision"),
         "rounding_rule": payload.get("rounding_rule"),

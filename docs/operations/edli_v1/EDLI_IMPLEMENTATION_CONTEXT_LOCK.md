@@ -86,21 +86,23 @@ Acceptance IDs A01-A40:
 ## Current Unknowns
 
 - `docs/operations/edli_v1/PR328_DEEP_SEMANTIC_WIRING_REVIEW.md` is the current NO-GO semantic wiring audit for PR328. It says DO NOT MERGE and DO NOT REBOOT DAEMON on this PR until the EDLI chain is event-specific from source truth through p_live, native executable cost, TradeScore, full-family FDR, typed Kelly, RiskGuard, final intent, and executor.
+- Repair pass `2026-05-24` removed the most dangerous unsafe wire (`event -> run old cycle(mode) -> infer success from unrelated summary`) and replaced it with event-bound submit receipts plus fail-closed TradeScore/FDR/Kelly payload gates. This is safer, but still not a complete live alpha because forecast/Day0 triggers do not yet hydrate event-specific candidate families and final intents from existing evaluator/cycle_runtime.
 - Current daemon restart command must be operator-verified before live service restart.
-- The isolated worktree does not contain `state/zeus_trades.db`; replay gate was run with `--db /Users/leofitz/.openclaw/workspace-venus/zeus/state/zeus_trades.db` after bootstrapping a worktree-local baseline.
+- The isolated worktree does not contain `state/zeus_trades.db`; `python3 scripts/replay_correctness_gate.py` currently fails in the worktree with `DB not found`.
 - Whether topology admission needs a new EDLI-specific profile to authorize all new EDLI files cleanly.
 - Live market-channel websocket connectivity has not been smoke-tested from this Codex run.
 
 ## Current Phase
 
-Phase: PR328 draft is open but not merge/reboot ready. Cuts 1-10 scaffolding and online service wiring exist, but the PR328 deep semantic wiring audit classifies the current implementation as an EDLI shell plus old-cycle trigger, not a complete event-specific money path. Current package status is NO-GO until the audit blockers are resolved.
+Phase: PR328 draft is open but not merge/reboot ready. The first repair pass converts the audited unsafe wiring into fail-closed event-bound gates: executable snapshots must bind to the event, TradeScore is evaluated from event inputs, FDR/Kelly no longer use no-op placeholders in `src/main.py`, public market-channel token/outcome metadata comes from executable snapshot truth, Day0 authority-table scans are evidence-only, and schema/user_version is now 40. Current package status remains REVIEW_REQUIRED/NO-GO for daemon reboot until a real event-specific candidate-family hydrator and final-intent builder is connected.
 
 Current blocking audit reference:
 
 - `docs/operations/edli_v1/PR328_DEEP_SEMANTIC_WIRING_REVIEW.md`
 - Verdict: DO NOT MERGE / DO NOT REBOOT DAEMON ON THIS PR.
-- Core blocker: `event -> run old cycle(mode) -> infer success from summary` must be replaced with `event -> hydrate exact causal family -> compute p_live -> native executable cost -> robust TradeScore -> full-family FDR -> typed Kelly -> RiskGuard -> final intent for the same event -> executor`.
-- P0 blockers: reactor no-op FDR/Kelly and unrelated old-cycle submit summary; executable snapshot gate not event-bound; live inference/TradeScore helpers not wired; Day0 trigger source uses observability-only table; market-channel token/outcome/tick semantics incomplete; schema version CHECK ranges were incomplete at the audited head; final online config is premature while semantic chain is incomplete.
+- Core blocker status: the unsafe old-cycle summary success path is blocked by `EventSubmissionReceipt`, but the positive path still needs `event -> hydrate exact causal family -> compute p_live -> native executable cost -> robust TradeScore -> full-family FDR -> typed Kelly -> RiskGuard -> final intent for the same event -> executor`.
+- Repaired P0 subset: no-op FDR/Kelly are no longer used by `src/main.py`; executable snapshot gate is event-bound; TradeScore gate is wired; Day0 authority scanner emits observability-only evidence; market-channel no longer defaults unmapped tokens to YES and carries tick/min-order/negRisk from snapshot metadata; schema version CHECK ranges now accept `SCHEMA_VERSION=40`.
+- Remaining live-money blocker: forecast/Day0 online events currently lack generated event-specific candidate family, FDR family rows, typed Kelly evidence, and same-event final intent receipts, so live submission remains fail-closed rather than fully implemented.
 
 Completed files:
 
