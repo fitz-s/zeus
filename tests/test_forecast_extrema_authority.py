@@ -157,15 +157,19 @@ class TestClassifyForecastExtremaAuthority:
             auth = classify_forecast_extrema_authority(row)
             assert auth.eligibility == ForecastExtremaEligibility.FULL_CONTRIBUTOR, status
 
-    def test_partial_contributor_boundary_ambiguous(self):
+    def test_boundary_ambiguous_is_non_contributor_fail_closed(self):
+        # review5.23 P1-4: boundary_ambiguous=1 is fail-closed NON_CONTRIBUTOR,
+        # not PARTIAL_CONTRIBUTOR.  The snapshot reader independently blocks these
+        # rows with EXECUTABLE_FORECAST_CAUSALITY_NOT_OK; both policies now agree.
         row = {
             "contributes_to_target_extrema": 1,
             "forecast_window_attribution_status": "EXPLICIT",
             "boundary_ambiguous": 1,
         }
         auth = classify_forecast_extrema_authority(row)
-        assert auth.eligibility == ForecastExtremaEligibility.PARTIAL_CONTRIBUTOR
+        assert auth.eligibility == ForecastExtremaEligibility.NON_CONTRIBUTOR
         assert auth.boundary_ambiguous is True
+        assert auth.contributes_to_target_extrema is False
 
     def test_non_contributor_explicit_zero(self):
         row = {

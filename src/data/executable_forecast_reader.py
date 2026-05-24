@@ -1129,9 +1129,12 @@ def read_executable_forecast(
     )
     if producer is None:
         return ExecutableForecastBundleResult("BLOCKED", "PRODUCER_READINESS_MISSING")
+    # review5.23 P1-1: do NOT hard-gate on scope-level producer readiness before
+    # enumeration.  readiness_state uses ON CONFLICT(scope_key) DO UPDATE so newer
+    # cycles overwrite older ones; a blocked 12Z row must not prevent a valid 00Z
+    # coverage from being returned.  producer_reason is used as a diagnostic
+    # fallback ONLY when enumeration yields no passing candidates.
     producer_reason = _is_live_readiness(producer, now_utc=now)
-    if producer_reason is not None:
-        return ExecutableForecastBundleResult("BLOCKED", producer_reason)
 
     entry = None
     if require_entry_readiness:
@@ -1181,10 +1184,14 @@ def read_executable_forecast(
         require_entry_readiness=require_entry_readiness,
     )
     if not candidates:
-        # No candidate passed every gate.  Fall back to the producer's own
-        # coverage ONCE to surface its specific single-path BLOCKED reason code
-        # (diagnosability is preserved — §1.3).  If the producer carries no
-        # coverage at all, that is SOURCE_RUN_COVERAGE_MISSING as before.
+        # No candidate passed every gate.
+        # If the latest scope-level producer readiness was already blocked, surface
+        # that reason directly — it is the authoritative explanation for why no
+        # bundle could be elected (review5.23 P1-1 diagnostic fallback).
+        if producer_reason is not None:
+            return ExecutableForecastBundleResult("BLOCKED", producer_reason)
+        # Otherwise fall back to the producer's own coverage ONCE to surface its
+        # specific per-coverage BLOCKED reason code (diagnosability — §1.3).
         coverage = _coverage_for_producer(conn, producer=producer)
         if coverage is None:
             return ExecutableForecastBundleResult("BLOCKED", "SOURCE_RUN_COVERAGE_MISSING")
@@ -1211,10 +1218,12 @@ def read_executable_forecast(
 
     best = min(candidates, key=_bundle_rank)
     # Block semantics on the SELECTED (highest-ranked) candidate — §1.3.
-    # NON_CONTRIBUTOR / UNKNOWN are typed fail-closed; PARTIAL/boundary cases
-    # keep PR #309's handling (a PARTIAL_CONTRIBUTOR bundle is allowed through,
-    # exactly as the single-path snapshot reader did, since classify only
-    # blocks NON_CONTRIBUTOR/UNKNOWN inside read_executable_forecast_snapshot).
+    # NON_CONTRIBUTOR / UNKNOWN are typed fail-closed.
+    # PARTIAL_CONTRIBUTOR is retired from the live path (review5.23 P1-4):
+    # boundary_ambiguous=1 rows are now classified as NON_CONTRIBUTOR by
+    # classify_forecast_extrema_authority AND blocked as EXECUTABLE_FORECAST_CAUSALITY_NOT_OK
+    # by read_executable_forecast_snapshot, so they are dropped by _evaluate_candidate
+    # and never reach this point as a selected candidate.
     #
     # DEFENSIVE / defense-in-depth: in the normal flow these two branches are
     # unreachable, because read_executable_forecast_snapshot already BLOCKS
