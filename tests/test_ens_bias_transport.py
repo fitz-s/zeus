@@ -1,8 +1,6 @@
-# Created: 2026-05-24
-# Last reused/audited: 2026-05-24
-# Authority basis: operator grid-transport adjudication 2026-05-24
-#   (0.25 OpenData live signal kept; 0.5 TIGGE prior transported, not naked-applied;
-#    b25 = b50 + E[Δ], σ25² = σ50² + Var(Δ) + κ·σ50·σ_Δ; Δ = F25 - F50; universal).
+# Lifecycle: created=2026-05-24; last_reviewed=2026-05-24; last_reused=never
+# Purpose: Unit tests for transport_bias_prior (0.5->0.25 grid/product bias bridge + variance inflation).
+# Reuse: Inspect ens_bias_model.transport_bias_prior before reuse.
 """TDD for the universal grid/product transport of a TIGGE (0.5/F50) prior to the
 live OpenData (0.25/F25) lineage.
 
@@ -60,3 +58,11 @@ def test_transport_robust_to_outlier_delta():
     prior = transport_bias_prior(b50=-2.0, sd50=0.5, delta_samples=delta)
     # robust mean keeps the shift near +1.0, not dragged toward the outlier
     assert prior.mu_t == pytest.approx(-1.0, abs=0.3)
+
+
+def test_transport_rejects_negative_inputs():
+    import pytest as _p
+    with _p.raises(ValueError):
+        transport_bias_prior(b50=-2.0, sd50=-0.5, delta_samples=[1.0, 1.0])
+    with _p.raises(ValueError):
+        transport_bias_prior(b50=-2.0, sd50=0.5, delta_samples=[1.0, 1.0], kappa=-1.0)

@@ -214,6 +214,8 @@ def p_raw_vector_from_maxes(
     """
     if n_mc is None:
         n_mc = ensemble_n_mc()
+    if extra_member_sigma < 0 or not np.isfinite(extra_member_sigma):
+        raise ValueError("extra_member_sigma must be a finite, non-negative standard deviation")
 
     member_maxes = np.asarray(member_maxes, dtype=float)
     if member_maxes.ndim != 1 or len(member_maxes) == 0:

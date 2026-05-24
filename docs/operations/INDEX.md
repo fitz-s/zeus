@@ -223,3 +223,5 @@ operator decision in the next housekeeping pass:
 
 ## Registered model-layer artifacts (2026-05-24)
 - `ENS_BIAS_HIERARCHICAL_TEST_RESULTS_2026-05-24.md` — PR #334 hierarchical ENS bias foundation test results (model layer; not live-wired).
+- `ENS_PREDICTIVE_ERROR_MINIVAL_2026-05-24.md` — PR #336 predictive-error 3-city proper-score minival (model layer; not live-wired).
+- `ENS_PREDICTIVE_ERROR_GLOBAL_OOS_2026-05-24.md` — PR #336 predictive-error global blocked-OOS proof (48 cities) (model layer; not live-wired).

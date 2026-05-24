@@ -282,6 +282,10 @@ def transport_bias_prior(
     not move it; the variance uses the full spread (conservative). With no paired Δ the
     0.5 prior is returned unchanged — the safe fallback to the historical lineage.
     """
+    if sd50 < 0:
+        raise ValueError("sd50 must be non-negative")
+    if kappa < 0:
+        raise ValueError("kappa (covariance allowance) must be non-negative")
     if not delta_samples:
         return BiasPrior(mu_t=b50, v0=max(sd50 * sd50, 1e-12))
     d_mean = robust_mean(delta_samples)

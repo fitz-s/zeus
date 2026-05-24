@@ -102,6 +102,7 @@ _DYNAMIC_SQL_PATTERN = re.compile(
 _BASELINE_PER_FILE: dict[str, int] = {
     "src/backtest/economics.py": 1,
     "src/calibration/effective_sample_size.py": 2,
+    "src/calibration/ens_bias_repo.py": 2,
     "src/calibration/store.py": 15,
     # src/contracts/world_schema_validator.py: RETIRED P2 (2026-05-14) — file deleted
     "src/data/daily_obs_append.py": 4,

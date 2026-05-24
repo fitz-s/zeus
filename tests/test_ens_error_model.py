@@ -1,7 +1,6 @@
-# Created: 2026-05-24
-# Last reused/audited: 2026-05-24
-# Authority basis: operator universal predictive-error adjudication 2026-05-24
-#   (location + scale + SNR confidence gate; Occam-minimal; no per-city rules).
+# Lifecycle: created=2026-05-24; last_reviewed=2026-05-24; last_reused=never
+# Purpose: Unit tests for the predictive-error layer: SNR correction-strength gate, residual scale, bucket fit.
+# Reuse: Inspect ens_error_model before reuse.
 """TDD tests for the universal predictive-error layer.
 
 Extends the #334 mean-bias (location) estimator with a UNIVERSAL scale + confidence
@@ -115,5 +114,6 @@ def test_fit_predictive_error_bucket_falls_back_to_prior_scale_when_live_sparse(
     r = random.Random(1)
     tig = [r.gauss(-1.0, 2.0) for _ in range(200)]
     em = fit_predictive_error_bucket(tig, [-3.0, -3.0], min_live_n=20)  # sparse live -> prior scale
-    assert em.correction_strength == 0.0 or em.bias_c == em.bias_c  # bias falls to prior (n_live dropped)
+    from src.calibration.ens_bias_model import robust_mean
+    assert em.bias_c == pytest.approx(robust_mean(tig), abs=0.5)  # bias falls to TIGGE prior (live dropped)
     assert em.residual_sd_c > 1.0, "sparse live -> use TIGGE spread (~2C), not a tiny live std"

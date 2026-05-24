@@ -1,7 +1,6 @@
-# Created: 2026-05-24
-# Last reused/audited: 2026-05-24
-# Authority basis: operator universal predictive-error adjudication 2026-05-24 §5.1/§8
-#   (MC must sample forecast/station residual error, shared path, train==serve).
+# Lifecycle: created=2026-05-24; last_reviewed=2026-05-24; last_reused=never
+# Purpose: Tests for residual-aware MC (extra_member_sigma byte-identical at 0, widening) + p_raw_vector_with_error_model.
+# Reuse: Inspect ens_error_model.p_raw_vector_with_error_model + ensemble_signal before reuse.
 """TDD: residual-aware Monte Carlo.
 
 The shared p_raw_vector_from_maxes gains an optional ``extra_member_sigma`` (forecast/
@@ -82,3 +81,10 @@ def test_wrapper_zero_strength_only_widens_no_shift():
                                   else (b.low or b.high)) * pp for b, pp in zip(bins, p)))
     assert abs(exp(corr) - exp(base)) < 1.0, "lambda=0 must not shift the mean materially"
     assert corr.max() <= base.max() + 1e-9, "but uncertainty must not shrink"
+
+
+def test_negative_extra_member_sigma_rejected():
+    city, ss, bins = _setup()
+    import pytest as _p
+    with _p.raises(ValueError):
+        p_raw_vector_from_maxes(np.array([60.0, 61.0]), city, ss, bins, n_mc=100, extra_member_sigma=-1.0)

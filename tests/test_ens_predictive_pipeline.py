@@ -1,6 +1,6 @@
-# Created: 2026-05-24
-# Last reused/audited: 2026-05-24
-# Authority basis: operator grid-transport + predictive-error adjudication 2026-05-24.
+# Lifecycle: created=2026-05-24; last_reviewed=2026-05-24; last_reused=never
+# Purpose: Tests for the capstone DB-wired pipeline: load_paired_delta + fit_city_predictive_error.
+# Reuse: Inspect ens_error_model.fit_city_predictive_error + ens_bias_repo before reuse.
 """TDD for the capstone DB-wired pipeline: paired-Δ loader + fit_city_predictive_error.
 
 Ties together (all already unit-tested): load_bucket_residuals (F50 prior + F25 live),
