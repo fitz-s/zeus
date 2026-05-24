@@ -123,11 +123,17 @@ def classify_forecast_extrema_authority(
 
     Priority logic (fail-closed):
     - FULL_CONTRIBUTOR      : contributes==1 AND attribution in positive set AND not boundary_ambiguous
-    - PARTIAL_CONTRIBUTOR   : contributes==1 AND boundary_ambiguous
-    - NON_CONTRIBUTOR       : contributes present and ==0
+    - NON_CONTRIBUTOR       : contributes present and ==0, OR contributes==1 AND boundary_ambiguous
     - UNKNOWN               : contributes==1 with unknown attribution, OR contributes is None
                               on a CURRENT data_version (P0 follow-up §2 fail-closed)
     - LEGACY_NULL_PASSTHROUGH: contributes is None on a legacy/pre-cutover data_version
+
+    Note: PARTIAL_CONTRIBUTOR (boundary_ambiguous=1) is retired from live-eligible
+    semantics (review5.23 P1-4 fail-closed policy).  The snapshot reader already
+    blocks boundary_ambiguous!=0 rows with EXECUTABLE_FORECAST_CAUSALITY_NOT_OK
+    before this classifier runs in the bundle-selection path; unifying both paths
+    to NON_CONTRIBUTOR removes the contradiction.  The PARTIAL_CONTRIBUTOR enum
+    value is kept for backward compatibility but is never returned on the live path.
 
     ``data_version`` defaults to ``row.get("data_version")`` so existing callers
     that pass only *row* still get the data-version-aware NULL handling (the
@@ -180,14 +186,18 @@ def classify_forecast_extrema_authority(
 
     if contributes_int == 1:
         if boundary_ambiguous:
+            # Fail-closed: boundary-ambiguous rows are NON_CONTRIBUTOR on the live
+            # path (review5.23 P1-4).  The snapshot reader independently blocks them
+            # with EXECUTABLE_FORECAST_CAUSALITY_NOT_OK; unifying here removes the
+            # classifier↔reader contradiction.
             return ForecastExtremaAuthority(
-                eligibility=ForecastExtremaEligibility.PARTIAL_CONTRIBUTOR,
-                contributes_to_target_extrema=True,
+                eligibility=ForecastExtremaEligibility.NON_CONTRIBUTOR,
+                contributes_to_target_extrema=False,
                 attribution_status=attribution_status,
                 forecast_window_start_utc=forecast_window_start_utc,
                 forecast_window_end_utc=forecast_window_end_utc,
                 boundary_ambiguous=True,
-                reason="contributes=1 but boundary_ambiguous",
+                reason="contributes=1 but boundary_ambiguous — fail-closed NON_CONTRIBUTOR",
             )
         if attribution_status in _POSITIVE_ATTRIBUTION_STATUSES:
             return ForecastExtremaAuthority(

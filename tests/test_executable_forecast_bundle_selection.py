@@ -673,3 +673,108 @@ def test_sanity_gate_uses_settled_samples_for_point_support() -> None:
         strategy_key="day0_high:Amsterdam:test-settled",
     )
     assert ok_settled is True, f"settled samples should pass, got {reason_settled!r}"
+
+
+# ---------------------------------------------------------------------------
+# P1-1 antibody: BLOCKED latest producer_readiness must not suppress valid 00Z
+# ---------------------------------------------------------------------------
+
+def _insert_blocked_producer_readiness(
+    conn: sqlite3.Connection,
+    *,
+    coverage_id: str,
+    source_run_id: str,
+    computed_at: datetime,
+) -> None:
+    """Write a BLOCKED producer_readiness row (simulates 12Z cycle that didn't pass readiness).
+
+    With the pre-P1-1 code, _is_live_readiness(producer) returned a reason and the
+    reader returned BLOCKED immediately before enumeration.  The fix stores the reason
+    and continues to enumerate source_run_coverage rows — so the valid 00Z coverage
+    (which is in source_run_coverage with readiness_status=LIVE_ELIGIBLE) is still found.
+    """
+    scope = _scope()
+    write_readiness_state(
+        conn,
+        readiness_id=f"producer_readiness:blocked:{coverage_id}",
+        scope_type="city_metric",
+        status="BLOCKED",
+        computed_at=computed_at,
+        expires_at=_utc(2026, 5, 8, 23),
+        city_id=scope.city_id,
+        city=scope.city_name,
+        city_timezone=scope.city_timezone,
+        target_local_date=scope.target_local_date,
+        temperature_metric=scope.temperature_metric,
+        physical_quantity=_PHYSQ,
+        observation_field=_OBS_FIELD,
+        data_version=scope.data_version,
+        source_id=_SOURCE_ID,
+        track=_TRACK,
+        source_run_id=source_run_id,
+        strategy_key=PRODUCER_READINESS_STRATEGY_KEY,
+        reason_codes_json=["PRODUCER_COVERAGE_NOT_READY"],
+        dependency_json={"coverage_id": coverage_id, "source_run_id": source_run_id},
+        provenance_json={"contract": "LiveEntryForecastTargetContract.v1"},
+    )
+
+
+# 6.9 -----------------------------------------------------------------------
+def test_blocked_producer_readiness_does_not_suppress_valid_00z_coverage() -> None:
+    """6.9 (P1-1): when the latest producer_readiness is BLOCKED (e.g. 12Z incomplete)
+    but a valid 00Z LIVE_ELIGIBLE coverage exists in source_run_coverage, the 00Z
+    bundle must still be elected.
+
+    Pre-fix: _is_live_readiness(producer) returned "PRODUCER_COVERAGE_NOT_READY" and
+    the reader returned BLOCKED before enumeration — the 00Z coverage was never seen.
+    Post-fix: producer_reason is stored but the reader enumerates ALL source_run_coverage
+    rows independently; the 00Z coverage passes every gate and is elected.
+    """
+    conn = _conn()
+    _build_00z_contributor(conn)
+    # BLOCKED readiness pointing at the 00Z coverage (simulates 12Z blocking but 00Z data intact).
+    _insert_blocked_producer_readiness(
+        conn,
+        coverage_id="cov-00z",
+        source_run_id="run-00z",
+        computed_at=_utc(2026, 5, 8, 5, 31),  # slightly after coverage computed_at
+    )
+
+    result = _read_full(conn)
+
+    assert result.ok, (
+        f"Expected LIVE_ELIGIBLE despite BLOCKED readiness, got {result.status}/{result.reason_code}"
+    )
+    assert result.bundle is not None
+    assert result.bundle.snapshot.snapshot_id == 100
+    assert result.bundle.evidence.coverage_id == "cov-00z"
+    assert result.bundle.evidence.source_run_id == "run-00z"
+
+
+# 6.10 -----------------------------------------------------------------------
+def test_blocked_producer_readiness_surfaces_reason_when_no_valid_coverage() -> None:
+    """6.10 (P1-1 diagnostic): when the latest producer_readiness is BLOCKED and
+    there are NO valid coverage candidates, the BLOCKED reason from the readiness
+    row is surfaced as the result reason (not the generic SOURCE_RUN_COVERAGE_MISSING).
+
+    This exercises the post-enumeration fallback: if candidates is empty and
+    producer_reason is not None, return producer_reason directly (diagnosability).
+    """
+    conn = _conn()
+    # No source_run / coverage / snapshot inserted — the 00Z coverage does NOT exist.
+    # The BLOCKED readiness row exists but there is nothing to enumerate.
+    _insert_blocked_producer_readiness(
+        conn,
+        coverage_id="cov-nonexistent",
+        source_run_id="run-nonexistent",
+        computed_at=_utc(2026, 5, 8, 5, 31),
+    )
+
+    result = _read_full(conn)
+
+    assert not result.ok
+    # The producer_reason fallback must surface "PRODUCER_COVERAGE_NOT_READY" because
+    # producer_reason is not None and the candidates list is empty.
+    assert result.reason_code == "PRODUCER_COVERAGE_NOT_READY", (
+        f"Expected PRODUCER_COVERAGE_NOT_READY (producer_reason fallback), got {result.reason_code!r}"
+    )

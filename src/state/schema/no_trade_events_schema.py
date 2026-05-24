@@ -1,6 +1,6 @@
 # Created: 2026-05-20
-# Last reused or audited: 2026-05-21
-# Authority basis: PHASE_2_ULTRAPLAN.md v3.1 §5.2 (sha 00c2399742) + Phase 3 T2 (2026-05-21): schema_version CHECK extended to 18 + 6 SHOULDER_* NoTradeReason members + live release proof P0-3 schema compatibility marker + Phase 3 T3 (2026-05-21): CHECK extended to 23 + live authority follow-up (2026-05-21): CHECK extended to 25 + evidence governance follow-up (2026-05-21): strategy provenance columns, v26 + P1/P2 architecture review (2026-05-22): evidence lifecycle + day0_nowcast_entry, v27 + opportunity_fact strategy-key widening, v28
+# Last reused or audited: 2026-05-23
+# Authority basis: PHASE_2_ULTRAPLAN.md v3.1 §5.2 (sha 00c2399742) + Phase 3 T2 (2026-05-21): schema_version CHECK extended to 18 + 6 SHOULDER_* NoTradeReason members + live release proof P0-3 schema compatibility marker + Phase 3 T3 (2026-05-21): CHECK extended to 23 + live authority follow-up (2026-05-21): CHECK extended to 25 + evidence governance follow-up (2026-05-21): strategy provenance columns, v26 + P1/P2 architecture review (2026-05-22): evidence lifecycle + day0_nowcast_entry, v27 + opportunity_fact strategy-key widening, v28 + 2026-05-23 review5.23 P0-2: unified schema version authority (import from src.state.db)
 
 """T2 — CREATE TABLE DDL for no_trade_events (world DB).
 
@@ -48,12 +48,11 @@ no hardcoded value list needed here.
 
 from __future__ import annotations
 
+import re
 import sqlite3
 
 from src.contracts.no_trade_reason import NoTradeReason
-
-# Schema version stamped into each row; stays in sync with db.py SCHEMA_VERSION.
-SCHEMA_VERSION = 34
+from src.state.db import SCHEMA_VERSION  # single canonical authority
 
 # Enum CHECK: every valid NoTradeReason value, joined for SQL IN clause.
 _REASON_VALUES_SQL = ", ".join(f"'{r.value}'" for r in NoTradeReason)
@@ -143,6 +142,14 @@ def _table_columns(conn: sqlite3.Connection) -> set[str]:
     return {str(row[1]) for row in conn.execute("PRAGMA table_info(no_trade_events)").fetchall()}
 
 
+def _schema_version_in_list(table_sql: str) -> set[int]:
+    """Parse the schema_version IN (...) values from the CREATE TABLE SQL."""
+    m = re.search(r"schema_version\s+INTEGER[^C]*CHECK\s*\(schema_version\s+IN\s*\(([^)]+)\)", table_sql)
+    if not m:
+        return set()
+    return {int(v.strip()) for v in m.group(1).split(",") if v.strip().lstrip("-").isdigit()}
+
+
 def _rebuild_stale_no_trade_events_table(conn: sqlite3.Connection) -> None:
     """Upgrade stale CHECK constraints on existing no_trade_events tables.
 
@@ -168,7 +175,7 @@ def _rebuild_stale_no_trade_events_table(conn: sqlite3.Connection) -> None:
     # the reason CHECK and causing IntegrityError on every shadow no_trade write.
     if (
         not any(r.value not in table_sql for r in NoTradeReason)
-        and str(SCHEMA_VERSION) in table_sql
+        and SCHEMA_VERSION in _schema_version_in_list(table_sql)
         and "schema_compatibility" in table_sql
         and "strategy_key" in table_sql
         and "event_source" in table_sql
