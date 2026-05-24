@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-05-24; last_reviewed=2026-05-24; last_reused=never
+# Lifecycle: created=2026-05-24; last_reviewed=2026-05-24; last_reused=2026-05-24
 # Purpose: Relationship test — fresh-at-submit re-capture invariant across discovery→execution boundary.
 # Reuse: Inspect capture_executable_market_snapshot + _ensure_fresh_executable_snapshot before reuse.
 """Relationship test (cross-module invariant) for fresh-at-submit re-capture.
@@ -39,7 +39,13 @@ HASH = "a" * 64
 class _FakeClob:
     """Minimal CLOB client exposing the surface capture_executable_market_snapshot needs."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        accepting_orders: bool | None = True,
+        archived: bool | None = False,
+        enable_order_book: bool | None = True,
+    ) -> None:
         self.orderbook = {
             "asset_id": "yes-token",
             "tick_size": "0.01",
@@ -53,6 +59,12 @@ class _FakeClob:
             "tokens": [{"token_id": "yes-token"}, {"token_id": "no-token"}],
             "feesEnabled": True,
         }
+        if accepting_orders is not None:
+            self.market_info["accepting_orders"] = accepting_orders
+        if archived is not None:
+            self.market_info["archived"] = archived
+        if enable_order_book is not None:
+            self.market_info["enable_order_book"] = enable_order_book
 
     def get_clob_market_info(self, condition_id: str) -> dict:
         return self.market_info
@@ -233,6 +245,80 @@ def test_reprice_recapture_wiring_opens_client_and_returns_fresh(conn, monkeypat
     assert fresh is not None
     assert is_fresh(fresh, NOW)
     assert fresh.snapshot_id != "snap-stale", "re-capture mints a new id reprice must propagate"
+
+
+def test_reprice_recapture_reconstructed_snapshot_requires_explicit_clob_accepting_orders(
+    conn, monkeypatch
+):
+    """Integration: reconstructed submit-time recapture must fail without current CLOB accepting-orders."""
+    import src.data.polymarket_client as pmc
+    from src.engine.cycle_runtime import _reprice_recapture_fresh_snapshot
+
+    monkeypatch.setattr(pmc, "PolymarketClient", lambda: _FakeClob(accepting_orders=None))
+    monkeypatch.delenv("ZEUS_REPRICE_RECAPTURE_DISABLED", raising=False)
+
+    stale_at = NOW - (FRESHNESS_WINDOW_DEFAULT + timedelta(seconds=30))
+    insert_snapshot(conn, _stale_snapshot(captured_at=stale_at))
+    stale = get_snapshot(conn, "snap-stale")
+
+    with pytest.raises(ValueError, match="executable_snapshot_stale"):
+        _reprice_recapture_fresh_snapshot(
+            conn, "snap-stale", decision=_decision(), stale_snapshot=stale, now=NOW
+        )
+
+
+def test_reprice_recapture_rejects_current_clob_accepting_orders_false(conn, monkeypatch):
+    """Integration: current CLOB accepting_orders=False keeps the stale safety gate closed."""
+    import src.data.polymarket_client as pmc
+    from src.engine.cycle_runtime import _reprice_recapture_fresh_snapshot
+
+    monkeypatch.setattr(pmc, "PolymarketClient", lambda: _FakeClob(accepting_orders=False))
+    monkeypatch.delenv("ZEUS_REPRICE_RECAPTURE_DISABLED", raising=False)
+
+    stale_at = NOW - (FRESHNESS_WINDOW_DEFAULT + timedelta(seconds=30))
+    insert_snapshot(conn, _stale_snapshot(captured_at=stale_at))
+    stale = get_snapshot(conn, "snap-stale")
+
+    with pytest.raises(ValueError, match="executable_snapshot_stale"):
+        _reprice_recapture_fresh_snapshot(
+            conn, "snap-stale", decision=_decision(), stale_snapshot=stale, now=NOW
+        )
+
+
+def test_reprice_recapture_rejects_missing_clob_archived_status(conn, monkeypatch):
+    """Integration: reconstructed recapture requires explicit CLOB archived status."""
+    import src.data.polymarket_client as pmc
+    from src.engine.cycle_runtime import _reprice_recapture_fresh_snapshot
+
+    monkeypatch.setattr(pmc, "PolymarketClient", lambda: _FakeClob(archived=None))
+    monkeypatch.delenv("ZEUS_REPRICE_RECAPTURE_DISABLED", raising=False)
+
+    stale_at = NOW - (FRESHNESS_WINDOW_DEFAULT + timedelta(seconds=30))
+    insert_snapshot(conn, _stale_snapshot(captured_at=stale_at))
+    stale = get_snapshot(conn, "snap-stale")
+
+    with pytest.raises(ValueError, match="executable_snapshot_stale"):
+        _reprice_recapture_fresh_snapshot(
+            conn, "snap-stale", decision=_decision(), stale_snapshot=stale, now=NOW
+        )
+
+
+def test_reprice_recapture_rejects_missing_clob_orderbook_status(conn, monkeypatch):
+    """Integration: reconstructed recapture requires explicit CLOB orderbook status."""
+    import src.data.polymarket_client as pmc
+    from src.engine.cycle_runtime import _reprice_recapture_fresh_snapshot
+
+    monkeypatch.setattr(pmc, "PolymarketClient", lambda: _FakeClob(enable_order_book=None))
+    monkeypatch.delenv("ZEUS_REPRICE_RECAPTURE_DISABLED", raising=False)
+
+    stale_at = NOW - (FRESHNESS_WINDOW_DEFAULT + timedelta(seconds=30))
+    insert_snapshot(conn, _stale_snapshot(captured_at=stale_at))
+    stale = get_snapshot(conn, "snap-stale")
+
+    with pytest.raises(ValueError, match="executable_snapshot_stale"):
+        _reprice_recapture_fresh_snapshot(
+            conn, "snap-stale", decision=_decision(), stale_snapshot=stale, now=NOW
+        )
 
 
 def test_propagate_recaptured_snapshot_fields_updates_id_and_siblings():

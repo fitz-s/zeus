@@ -1,7 +1,7 @@
 # Created: 2026-04-17
-# Last reused or audited: 2026-05-20
+# Last reused or audited: 2026-05-24
 # Authority basis: AGENTS.md money path; S1 market source-proof persistence via market_topology_state.
-# Lifecycle: created=2026-04-17; last_reviewed=2026-05-18; last_reused=2026-05-20
+# Lifecycle: created=2026-04-17; last_reviewed=2026-05-24; last_reused=2026-05-24
 # Purpose: Lock market_scanner provenance, source-contract drift behavior, and Venus diagnostic authority labels.
 # Reuse: Inspect src/data/market_scanner.py and scripts/watch_source_contract.py before relying on these assertions.
 # Authority basis: audit bug B017 (STILL_OPEN P1 SD-H), Fitz methodology constraint #4 "Data Provenance > Code Correctness"; Wave16 object-meaning diagnostic authority repair.
@@ -441,6 +441,172 @@ def test_snapshot_refresh_stops_when_budget_is_exhausted(monkeypatch):
     assert summary["skipped"] == 5
     assert summary["truncated"] == 1
     assert summary["budget_exhausted"] == 1
+    assert summary["discovered_event_count"] == 1
+    assert summary["executable_snapshot_candidate_count"] == 6
+    assert summary["selected_executable_snapshot_count"] == 3
+    assert summary["executable_candidate_city_count"] == 1
+    assert summary["fresh_executable_city_count"] == 1
+    assert summary["budget_truncated_city_count"] == 1
+    assert summary["uncaptured_candidate_city_count"] == 0
+    assert summary["executable_substrate_coverage_status"] == "PARTIAL"
+
+
+def test_reconstructed_snapshot_recapture_requires_explicit_current_clob_tradability():
+    """Submit-time recapture must not reuse persisted snapshot tradability flags."""
+    from types import SimpleNamespace
+
+    conn = _make_market_topology_conn()
+    market = {
+        "event_id": "stale-event",
+        "slug": "highest-temperature-in-stale-on-may-21-2026",
+        "outcomes": [
+            {
+                "title": "stale bin",
+                "token_id": "yes-stale",
+                "no_token_id": "no-stale",
+                "market_id": "cond-stale",
+                "condition_id": "cond-stale",
+                "question_id": "question-stale",
+                "gamma_market_id": "gamma-stale",
+                "active": True,
+                "closed": False,
+                "accepting_orders": True,
+                "enable_orderbook": True,
+                "raw_gamma_payload_hash": "d" * 64,
+                "token_map_raw": {
+                    "clobTokenIds": ["yes-stale", "no-stale"],
+                    "outcomes": ["Yes", "No"],
+                },
+                "gamma_market_raw": {
+                    "id": "gamma-stale",
+                    "conditionId": "cond-stale",
+                    "questionID": "question-stale",
+                    "active": True,
+                    "closed": False,
+                    "acceptingOrders": True,
+                    "enableOrderBook": True,
+                    "clobTokenIds": ["yes-stale", "no-stale"],
+                    "tradability_authority": "persisted_snapshot_reconstruction",
+                },
+            }
+        ],
+    }
+    decision = SimpleNamespace(
+        tokens={"token_id": "yes-stale", "no_token_id": "no-stale", "market_id": "cond-stale"},
+        edge=SimpleNamespace(direction="buy_yes"),
+    )
+
+    class MissingTradeabilityClob:
+        def get_clob_market_info(self, condition_id: str) -> dict:
+            return {
+                "condition_id": condition_id,
+                "tokens": [{"token_id": "yes-stale"}, {"token_id": "no-stale"}],
+                "feesEnabled": True,
+            }
+
+        def get_orderbook_snapshot(self, token_id: str) -> dict:
+            return {
+                "asset_id": token_id,
+                "tick_size": "0.01",
+                "min_order_size": "5",
+                "neg_risk": True,
+                "bids": [{"price": "0.40", "size": "10"}],
+                "asks": [{"price": "0.42", "size": "10"}],
+            }
+
+        def get_fee_rate(self, token_id: str) -> float:
+            return 0
+
+    with pytest.raises(ms.ExecutableSnapshotCaptureError, match="accepting_orders_not_true"):
+        ms.capture_executable_market_snapshot(
+            conn,
+            market=market,
+            decision=decision,
+            clob=MissingTradeabilityClob(),
+            captured_at=datetime(2026, 5, 20, 12, 0, tzinfo=timezone.utc),
+            scan_authority="VERIFIED",
+        )
+
+
+def test_reconstructed_snapshot_recapture_succeeds_with_explicit_current_clob_tradability():
+    from types import SimpleNamespace
+
+    conn = _make_market_topology_conn()
+    market = {
+        "event_id": "fresh-event",
+        "slug": "highest-temperature-in-fresh-on-may-21-2026",
+        "outcomes": [
+            {
+                "title": "fresh bin",
+                "token_id": "yes-fresh",
+                "no_token_id": "no-fresh",
+                "market_id": "cond-fresh",
+                "condition_id": "cond-fresh",
+                "question_id": "question-fresh",
+                "gamma_market_id": "gamma-fresh",
+                "active": True,
+                "closed": False,
+                "accepting_orders": True,
+                "enable_orderbook": True,
+                "raw_gamma_payload_hash": "e" * 64,
+                "token_map_raw": {
+                    "clobTokenIds": ["yes-fresh", "no-fresh"],
+                    "outcomes": ["Yes", "No"],
+                },
+                "gamma_market_raw": {
+                    "id": "gamma-fresh",
+                    "conditionId": "cond-fresh",
+                    "questionID": "question-fresh",
+                    "active": True,
+                    "closed": False,
+                    "acceptingOrders": True,
+                    "enableOrderBook": True,
+                    "clobTokenIds": ["yes-fresh", "no-fresh"],
+                    "tradability_authority": "persisted_snapshot_reconstruction",
+                },
+            }
+        ],
+    }
+    decision = SimpleNamespace(
+        tokens={"token_id": "yes-fresh", "no_token_id": "no-fresh", "market_id": "cond-fresh"},
+        edge=SimpleNamespace(direction="buy_yes"),
+    )
+
+    class ExplicitTradeabilityClob:
+        def get_clob_market_info(self, condition_id: str) -> dict:
+            return {
+                "condition_id": condition_id,
+                "tokens": [{"token_id": "yes-fresh"}, {"token_id": "no-fresh"}],
+                "archived": False,
+                "enable_order_book": True,
+                "accepting_orders": True,
+                "feesEnabled": True,
+            }
+
+        def get_orderbook_snapshot(self, token_id: str) -> dict:
+            return {
+                "asset_id": token_id,
+                "tick_size": "0.01",
+                "min_order_size": "5",
+                "neg_risk": True,
+                "bids": [{"price": "0.40", "size": "10"}],
+                "asks": [{"price": "0.42", "size": "10"}],
+            }
+
+        def get_fee_rate(self, token_id: str) -> float:
+            return 0
+
+    result = ms.capture_executable_market_snapshot(
+        conn,
+        market=market,
+        decision=decision,
+        clob=ExplicitTradeabilityClob(),
+        captured_at=datetime(2026, 5, 20, 12, 0, tzinfo=timezone.utc),
+        scan_authority="VERIFIED",
+    )
+
+    assert result["condition_id"] == "cond-fresh"
+    assert result["executable_snapshot_id"]
 
 
 def test_snapshot_refresh_persists_yes_and_no_substrate_sides():
@@ -515,6 +681,10 @@ def test_snapshot_refresh_persists_yes_and_no_substrate_sides():
 
     assert summary["attempted"] == 2
     assert summary["inserted"] == 2
+    assert summary["executable_snapshot_candidate_count"] == 2
+    assert summary["fresh_executable_city_count"] == 1
+    assert summary["budget_truncated_city_count"] == 0
+    assert summary["executable_substrate_coverage_status"] == "FULL"
     rows = conn.execute(
         """
         SELECT outcome_label, selected_outcome_token_id
@@ -3162,7 +3332,8 @@ class TestForwardMarketSubstrateProducer:
                 return 0
 
         # Shared city object so both markets hash to the same city_key bucket.
-        # city_key = city.name; without "city" field both fall to "_unknown" (same bucket).
+        # Without this field the fallback key would be slug/event_slug, which is
+        # exactly the per-slug behavior this cap test must reject.
         # Using explicit SimpleNamespace ensures .name attribute is present.
         from types import SimpleNamespace as _SNS
         _shared_city = _SNS(name="Chicago")

@@ -1,5 +1,8 @@
 # Created: 2026-05-03
-# Last reused/audited: 2026-05-22
+# Last reused/audited: 2026-05-24
+# Lifecycle: created=2026-05-03; last_reviewed=2026-05-24; last_reused=2026-05-24
+# Purpose: Lock executable forecast bundle source-run, coverage, readiness, and snapshot coherence.
+# Reuse: Run for live-entry forecast reader, producer-readiness, source-cycle, or coverage-window changes.
 # Authority basis: docs/archive/2026-Q2/task_2026-05-14_data_daemon_live_efficiency/DATA_DAEMON_LIVE_EFFICIENCY_REFACTOR_PLAN.md
 #   Phase 3 producer-readiness-only data daemon cutover path.
 """Executable forecast reader relationship tests."""
@@ -652,6 +655,45 @@ def test_full_reader_blocks_source_available_after_capture() -> None:
 
     assert not result.ok
     assert result.reason_code == "SOURCE_AVAILABLE_AFTER_CAPTURE"
+
+
+def test_full_reader_blocks_unparseable_source_cycle_time_before_snapshot_read() -> None:
+    conn = _conn()
+    _insert_snapshot(conn)
+    _insert_source_run(conn)
+    conn.execute(
+        "UPDATE source_run SET source_cycle_time = '' WHERE source_run_id = 'source-run-1'"
+    )
+    _insert_coverage(conn)
+    _insert_readiness(
+        conn,
+        strategy_key=PRODUCER_READINESS_STRATEGY_KEY,
+        readiness_id="producer-readiness-1",
+        dependency_json={"coverage_id": "coverage-1"},
+    )
+    _insert_readiness(
+        conn,
+        strategy_key="entry_forecast",
+        readiness_id="entry-readiness-1",
+        market_family="family-1",
+        condition_id="condition-123",
+    )
+
+    result = _read_full(conn)
+
+    assert not result.ok
+    assert result.reason_code == "SOURCE_CYCLE_TIME_UNPARSEABLE"
+
+
+def test_full_reader_preserves_source_cycle_time_distinct_from_decision_time() -> None:
+    conn = _conn()
+    _insert_full_reader_fixture(conn)
+
+    result = _read_full(conn)
+
+    assert result.ok
+    assert result.bundle is not None
+    assert result.bundle.evidence.source_cycle_time == "2026-05-03T00:00:00+00:00"
 
 
 def test_full_reader_blocks_snapshot_local_day_window_mismatch() -> None:

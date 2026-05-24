@@ -206,9 +206,15 @@ state_machines:
       rechecked or must remain operator-reviewed.
     states:
       - REDEEM_NEGRISK_AMOUNT_MISMATCH
+      - REDEEM_STANDARD_CTF_AMOUNT_MISMATCH
+      - REDEEM_STANDARD_CTF_AMOUNT_MISSING
+      - REDEEM_STANDARD_CTF_REVIEW_REQUIRED
+      - REDEEM_STANDARD_CTF_WRONG_CONDITION
+      - REDEEM_STANDARD_CTF_ZERO_PAYOUT
     invariant_tests:
       - tests/test_negrisk_redeem_payout_proof.py
       - tests/test_redeem_cascade_liveness.py
+      - tests/test_settlement_commands.py
   live_runtime_config:
     owner: src/strategy/family_exclusive_dedup.py
     description: >
