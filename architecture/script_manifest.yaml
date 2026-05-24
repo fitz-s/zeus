@@ -1427,3 +1427,29 @@ scripts:
     unguarded_write_rationale: "Read-only SELECT; writes only to stdout."
     required_helpers: []
     required_tests: [tests/test_executable_forecast_bundle_selection.py]
+
+  scripts/obs_coverage_report.py:
+    class: diagnostic_report_writer
+    status: active
+    lifecycle: obs_authority_foundation_2026_05_23
+    packet: docs/operations/task_2026-05-23_probability_phantom_edge/
+    authority_scope: read_only
+    dangerous_if_run: false
+    dry_run_default: true
+    apply_flag: null
+    target_db: state/zeus-world.db
+    read_targets: [state/zeus-world.db]
+    write_targets: [stdout]
+    canonical_command: "python scripts/obs_coverage_report.py [--state-dir PATH] [--db-path PATH] [--hours N]"
+    external_inputs: []
+    delete_policy: retain_until_superseded
+    reuse_when: >
+      Operational monitoring: for each settlement city, reports obs freshness
+      (age vs budget) across all source families (wu_pws, open_meteo, hko).
+      Used to verify obs pipeline health and diagnose coverage gaps before
+      or after a trade cycle. Read-only — never writes to any DB.
+    do_not_use_when: "zeus-world.db absent."
+    promotion_barrier: "Informational only — no gate. Run to verify obs coverage is meeting freshness budgets."
+    unguarded_write_rationale: "Read-only SELECT; writes only to stdout."
+    required_helpers: []
+    required_tests: []
