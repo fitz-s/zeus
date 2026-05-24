@@ -85,6 +85,7 @@ Acceptance IDs A01-A40:
 
 ## Current Unknowns
 
+- `docs/operations/edli_v1/PR328_DEEP_SEMANTIC_WIRING_REVIEW.md` is the current NO-GO semantic wiring audit for PR328. It says DO NOT MERGE and DO NOT REBOOT DAEMON on this PR until the EDLI chain is event-specific from source truth through p_live, native executable cost, TradeScore, full-family FDR, typed Kelly, RiskGuard, final intent, and executor.
 - Current daemon restart command must be operator-verified before live service restart.
 - The isolated worktree does not contain `state/zeus_trades.db`; replay gate was run with `--db /Users/leofitz/.openclaw/workspace-venus/zeus/state/zeus_trades.db` after bootstrapping a worktree-local baseline.
 - Whether topology admission needs a new EDLI-specific profile to authorize all new EDLI files cleanly.
@@ -92,7 +93,14 @@ Acceptance IDs A01-A40:
 
 ## Current Phase
 
-Phase: Cuts 1-10 implemented in branch; final daemon wiring is connected to existing forecast/Day0 catch-up, public market-channel service, RiskGuard, executable-snapshot gate, and existing cycle/final-intent/executor path.
+Phase: PR328 draft is open but not merge/reboot ready. Cuts 1-10 scaffolding and online service wiring exist, but the PR328 deep semantic wiring audit classifies the current implementation as an EDLI shell plus old-cycle trigger, not a complete event-specific money path. Current package status is NO-GO until the audit blockers are resolved.
+
+Current blocking audit reference:
+
+- `docs/operations/edli_v1/PR328_DEEP_SEMANTIC_WIRING_REVIEW.md`
+- Verdict: DO NOT MERGE / DO NOT REBOOT DAEMON ON THIS PR.
+- Core blocker: `event -> run old cycle(mode) -> infer success from summary` must be replaced with `event -> hydrate exact causal family -> compute p_live -> native executable cost -> robust TradeScore -> full-family FDR -> typed Kelly -> RiskGuard -> final intent for the same event -> executor`.
+- P0 blockers: reactor no-op FDR/Kelly and unrelated old-cycle submit summary; executable snapshot gate not event-bound; live inference/TradeScore helpers not wired; Day0 trigger source uses observability-only table; market-channel token/outcome/tick semantics incomplete; schema version CHECK ranges were incomplete at the audited head; final online config is premature while semantic chain is incomplete.
 
 Completed files:
 

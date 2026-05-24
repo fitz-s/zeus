@@ -23,6 +23,7 @@ import pytest
 from src.contracts.evidence_tier import EvidenceTier
 from src.contracts.no_trade_reason import NoTradeReason
 from src.state.db import (
+    SCHEMA_VERSION,
     _migrate_trade_strategy_key_checks,
     _migrate_world_strategy_key_checks,
     _strip_strategy_key_check,
@@ -323,7 +324,7 @@ class TestF4EvidenceTierLifecycle:
             ).fetchall()
         ]
 
-        assert schema_versions == [27, 35]  # old row stays at 27; new row at current SCHEMA_VERSION=35
+        assert schema_versions == [27, SCHEMA_VERSION]  # old row stays at 27; new row at current schema.
 
     def test_revoked_row_excluded_from_current_assignment(self) -> None:
         conn = _make_tier_db()
@@ -769,7 +770,7 @@ class TestF6StrategyKeyCheckMigration:
         )
 
         old_versions = "14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27"
-        current_versions = f"{old_versions}, 28, 29, 30, 31, 32, 33, 34, 35"
+        current_versions = ", ".join(str(v) for v in range(14, SCHEMA_VERSION + 1))
         conn = sqlite3.connect(":memory:")
         # Build a v27-only table by replacing the full current version list.
         conn.executescript(CREATE_TABLE_SQL.replace(current_versions, old_versions))
@@ -797,7 +798,7 @@ class TestF6StrategyKeyCheckMigration:
                 NoTradeReason.MUTUALLY_EXCLUSIVE_FAMILY_DEDUP.value,
                 "test",
                 "2026-05-22T17:40:00Z",
-                35,  # current SCHEMA_VERSION (LIVE-PROB-P0 v35)
+                SCHEMA_VERSION,
                 "current",
             ),
         )
