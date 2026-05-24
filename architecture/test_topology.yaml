@@ -506,6 +506,8 @@ test_trust_policy:
     tests/test_cross_market_portfolio_relationships.py: {created: "2026-05-22", last_used: "2026-05-22"}
     # C-EPIC combination candidates wave (2026-05-23)
     tests/test_cepic_combination_candidates.py: {created: "2026-05-23", last_used: "2026-05-23"}
+    # LIVE-PROB-P0 apply-metrics enforcement antibodies (2026-05-24, PR #323)
+    tests/test_prob_gate_apply_list.py: {created: "2026-05-24", last_used: "2026-05-24"}
 
 categories:
   core_law_antibody:
