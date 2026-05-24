@@ -156,7 +156,7 @@ TRACKS: dict[str, dict] = {
 }
 
 SOURCE_ID = "ecmwf_open_data"
-FORECAST_SOURCE_ROLE = "diagnostic"
+FORECAST_SOURCE_ROLE = "entry_primary"
 MODEL_VERSION = "ecmwf_open_data"
 
 # ECMWF Open Data is replicated across multiple mirrors. AWS is fastest but
@@ -399,10 +399,17 @@ def _retrieve_step_with_controlled_ranges(client: Any, *, target: Path, **kwargs
 
 
 def _conda_python() -> str:
-    """Path to the conda interpreter that has ``ecmwf.opendata`` + eccodes installed.
+    """Path to the Python interpreter with ecmwf.opendata + eccodes installed.
 
-    Falls back to ``sys.executable``; tests that mock the runner never invoke this.
+    Resolution order:
+      1. ZEUS_ECMWF_PYTHON env var (explicit deployment config)
+      2. /Users/leofitz/miniconda3/bin/python (dev-machine fallback if it exists)
+      3. sys.executable (test environments that already carry ecmwf deps)
     """
+    import os as _os
+    from_env = _os.environ.get("ZEUS_ECMWF_PYTHON")
+    if from_env:
+        return from_env
     candidate = Path("/Users/leofitz/miniconda3/bin/python")
     if candidate.exists():
         return str(candidate)
