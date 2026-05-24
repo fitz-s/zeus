@@ -110,12 +110,25 @@ def build_job_specs(owner_daemon: Optional[str] = None) -> list[JobBuildSpec]:
 
 def validate_executor_assignment(specs: list[JobBuildSpec] | None = None) -> list[str]:
     """Fail-closed structural check: no DB writer may land on io/heartbeat (the lock-starvation
-    fault). Returns a list of violation messages (empty = clean)."""
+    fault). Returns a list of violation messages (empty = clean).
+
+    PR #329 review (P2): compare the REGISTRY ``writes_db`` truth against the assigned executor
+    class — NOT ``s.is_db_writer`` (which is ``executor_class.endswith('_db')``, so the prior
+    ``is_db_writer and class in (io,heartbeat)`` was unreachable: a tautology that could never
+    flag a mis-assignment). Now a registry job with ``writes_db=True`` that executor_class_for()
+    wrongly routes to io/heartbeat is caught. Falls back to the class-derived flag only for an
+    unknown job_id (no registry row to consult)."""
+    from src.data.source_job_registry import JOB_REGISTRY
+
     specs = specs or build_job_specs()
     violations: list[str] = []
     for s in specs:
-        if s.is_db_writer and s.executor_class in ("io", "heartbeat"):
-            violations.append(f"{s.job_id}: DB writer on file-only executor {s.executor_class!r}")
+        job = JOB_REGISTRY.get(s.job_id)
+        writes_db = job.writes_db if job is not None else s.is_db_writer
+        if writes_db and s.executor_class in ("io", "heartbeat"):
+            violations.append(
+                f"{s.job_id}: writes_db job assigned file-only executor {s.executor_class!r}"
+            )
     return violations
 
 

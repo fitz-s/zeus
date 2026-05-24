@@ -32,6 +32,23 @@ def test_inventory_check_passes() -> None:
     assert cmd_check() == 0
 
 
+def test_dict_unpacked_forecast_live_ids_are_extracted() -> None:
+    """ANTIBODY (PR #329 review P1): forecast_live_daemon schedules via
+    ``add_job(func, trigger, **kwargs)`` where the id lives inside a job-spec DICT
+    (``{"id": CONST, "max_instances": 1, ...}``), not as an add_job keyword. The id extractor
+    must harvest those — otherwise --check is blind to all forecast-live drift and reports a
+    false-clean mirror. Lock that the eight forecast_live ids are detected as SCHEDULED."""
+    from scripts.data_collection_inventory import _scheduled_job_ids
+    from src.ingest.forecast_live_daemon import FORECAST_LIVE_JOB_IDS
+
+    scheduled = _scheduled_job_ids()
+    missing = set(FORECAST_LIVE_JOB_IDS) - scheduled
+    assert not missing, (
+        f"dict-unpacked forecast_live ids NOT extracted (regex/keyword-only blind spot): "
+        f"{sorted(missing)}"
+    )
+
+
 def test_audit_flags_fast_executor_db_writer() -> None:
     """The efficiency audit must surface the UMA listener (DB write on the file-only fast
     executor) — the audit-confirmed structural fault."""

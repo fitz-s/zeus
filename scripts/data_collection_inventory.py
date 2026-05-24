@@ -40,14 +40,40 @@ _DAEMON_FILES = (
 )
 
 
-def _scheduled_job_ids() -> set[str]:
-    """Every id=... passed to .add_job(...) in the daemon modules, via AST (PR review #329 I).
+# APScheduler keyword args that mark a dict as a job-spec (used to tell a real job-spec dict
+# apart from any unrelated dict that happens to carry an "id" key). A dict with an "id" key plus
+# at least one of these is an add_job(**kwargs) spec.
+_SCHEDULER_SPEC_KEYS = frozenset({
+    "trigger", "max_instances", "coalesce", "misfire_grace_time", "executor",
+    "seconds", "minutes", "hours", "hour", "minute", "run_date", "next_run_time",
+})
 
-    Regex stopped at the first ')', so an id= after a nested call — e.g.
-    ``add_job(..., run_date=_dt_now.now(), id="ingest_k2_startup_catch_up")`` — was missed,
-    blinding the registry-mirror antibody to startup/date-trigger jobs. AST resolves the id
-    keyword whether it is a string literal or a module-level constant (forecast_live uses
-    ``id=FORECAST_LIVE_*_JOB_ID`` constants).
+
+def _resolve_id(value: ast.expr, consts: dict[str, str]) -> str | None:
+    """Resolve an id expression to a string: literal or module-level NAME constant."""
+    if isinstance(value, ast.Constant) and isinstance(value.value, str):
+        return value.value
+    if isinstance(value, ast.Name) and value.id in consts:
+        return consts[value.id]
+    return None
+
+
+def _scheduled_job_ids() -> set[str]:
+    """Every scheduled job id in the daemon modules, via AST (PR review #329 I + P1).
+
+    Two real call shapes exist and BOTH must be harvested:
+
+      1. Direct keyword: ``scheduler.add_job(func, trigger, id="...")`` (ingest_main). AST resolves
+         the ``id`` keyword whether it is a string literal or a module-level constant; this also
+         survives an id= placed after a nested call (the old regex stopped at the first ')').
+
+      2. Unpacked job-spec dict: ``forecast_live_daemon`` builds ``(func, trigger, {"id": CONST,
+         "max_instances": 1, ...})`` tuples and schedules them via ``add_job(func, trigger,
+         **kwargs)`` (forecast_live_daemon.py:861). Here the id is a *dict key*, never an add_job
+         keyword — so case (1) alone was BLIND to all eight forecast-live jobs, letting --check
+         report clean coverage even if those ids drifted from JOB_REGISTRY (PR #329 review P1).
+         We harvest the id from any dict literal carrying an ``"id"`` key plus ≥1 APScheduler
+         spec key (so unrelated dicts with an "id" key are not mistaken for job specs).
     """
     ids: set[str] = set()
     for f in _DAEMON_FILES:
@@ -60,17 +86,26 @@ def _scheduled_job_ids() -> set[str]:
                 for tgt in node.targets:
                     if isinstance(tgt, ast.Name):
                         consts[tgt.id] = node.value.value
-        for call in ast.walk(tree):
-            if not (isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute)
-                    and call.func.attr == "add_job"):
-                continue
-            for kw in call.keywords:
-                if kw.arg != "id":
+        for n in ast.walk(tree):
+            # case 1: direct add_job(..., id=...)
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) \
+                    and n.func.attr == "add_job":
+                for kw in n.keywords:
+                    if kw.arg == "id":
+                        resolved = _resolve_id(kw.value, consts)
+                        if resolved is not None:
+                            ids.add(resolved)
+            # case 2: job-spec dict literal {"id": ..., <spec key>: ...} unpacked into add_job
+            elif isinstance(n, ast.Dict):
+                keys = {k.value for k in n.keys
+                        if isinstance(k, ast.Constant) and isinstance(k.value, str)}
+                if "id" not in keys or not (keys & _SCHEDULER_SPEC_KEYS):
                     continue
-                if isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, str):
-                    ids.add(kw.value.value)
-                elif isinstance(kw.value, ast.Name) and kw.value.id in consts:
-                    ids.add(consts[kw.value.id])
+                for k, v in zip(n.keys, n.values):
+                    if isinstance(k, ast.Constant) and k.value == "id":
+                        resolved = _resolve_id(v, consts)
+                        if resolved is not None:
+                            ids.add(resolved)
     return ids
 
 

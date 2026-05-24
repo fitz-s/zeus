@@ -30,6 +30,22 @@ def test_no_db_writer_on_file_only_executor() -> None:
             assert s.executor_class not in ("io", "heartbeat")
 
 
+def test_validator_catches_writes_db_on_file_only_lane() -> None:
+    """ANTIBODY (PR #329 review P2): the validator must compare the REGISTRY writes_db truth
+    against the assigned executor class. The prior check used ``is_db_writer`` (==
+    executor_class.endswith('_db')), making ``is_db_writer and class in (io,heartbeat)``
+    unreachable — a tautology that could never fire. Plant a writes_db job on the heartbeat lane
+    and require a violation, so a future executor_class_for() regression is caught."""
+    from src.data.scheduler_adapter import JobBuildSpec, validate_executor_assignment
+
+    # ingest_market_scan is writes_db=True in the registry; route it to a file-only lane:
+    planted = [JobBuildSpec("ingest_market_scan", "ingest_main", "heartbeat", 1, True, 60)]
+    violations = validate_executor_assignment(planted)
+    assert violations and "ingest_market_scan" in violations[0], (
+        "validator failed to flag a writes_db job on a file-only executor (tautology regression)"
+    )
+
+
 def test_uma_listener_assigned_backfill_db_not_fast() -> None:
     """The audited fault — UMA writes DB on the file-only 'fast' executor — is structurally
     fixed by the adapter: UMA (historical settlement) is assigned backfill_db."""
