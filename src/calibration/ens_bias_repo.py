@@ -235,3 +235,69 @@ def read_bias_model(
         "AND live_data_version=? AND month=?",
         (city, season, metric, live_data_version, (0 if month is None else int(month))),
     ).fetchone()
+
+
+_LEGACY_NULL_CONTRIBUTOR_SQL = (
+    "(e.contributes_to_target_extrema IS NULL OR e.contributes_to_target_extrema = 1) "
+    "AND COALESCE(e.boundary_ambiguous, 0) = 0"
+)
+
+
+def _forecast_means(
+    conn, city, data_version, metric, lead_max, season_months, settled_before,
+    contributor_sql, require_verified,
+):
+    """Freshest-per-date ensemble-mean forecast (degC), no settlement join."""
+    where = ["e.city = ?", "e.data_version = ?", "e.temperature_metric = ?", "e.lead_hours <= ?"]
+    params: list[object] = [city, data_version, metric, lead_max]
+    if require_verified:
+        where.append("e.authority = 'VERIFIED'")
+    if contributor_sql:
+        where.append(contributor_sql)
+    if settled_before is not None:
+        where.append("e.target_date < ?")
+        params.append(settled_before)
+    rows = conn.execute(
+        f"SELECT e.target_date AS td, e.members_json AS mj, e.members_unit AS mu, "
+        f"e.available_at AS av FROM ensemble_snapshots_v2 e WHERE {' AND '.join(where)} "
+        f"ORDER BY e.available_at",
+        params,
+    ).fetchall()
+    fresh: dict[str, tuple[str, str, object]] = {}
+    for r in rows:
+        td = r["td"]
+        if season_months is not None and int(str(td)[5:7]) not in season_months:
+            continue
+        if r["mj"] is None or r["mu"] is None:
+            continue
+        if td not in fresh or str(r["av"]) > fresh[td][0]:
+            fresh[td] = (str(r["av"]), r["mj"], r["mu"])
+    out: dict[str, float] = {}
+    for td, (_av, mj, mu) in fresh.items():
+        parsed = json.loads(mj)
+        vals = [_to_c(float(x), mu) for x in (parsed.values() if isinstance(parsed, dict) else parsed) if x is not None]
+        if vals:
+            out[td] = statistics.fmean(vals)
+    return out
+
+
+def load_paired_delta(
+    conn,
+    *,
+    city: str,
+    live_data_version: str,
+    prior_data_version: str,
+    metric: str = "high",
+    lead_max: float = 48.0,
+    season_months: tuple[int, ...] | None = None,
+    settled_before: str | None = None,
+) -> list[float]:
+    """Δ = F25_mean - F50_mean (degC) for dates where BOTH products have a freshest
+    snapshot. Live (F25) uses the full-contributor population; prior (F50/legacy TIGGE)
+    uses the NULL-passthrough population. No settlement needed — Δ is a paired-lineage
+    product difference, transported into the bias prior."""
+    f25 = _forecast_means(conn, city, live_data_version, metric, lead_max, season_months,
+                          settled_before, _POSITIVE_CONTRIBUTOR_SQL, require_verified=True)
+    f50 = _forecast_means(conn, city, prior_data_version, metric, lead_max, season_months,
+                          settled_before, _LEGACY_NULL_CONTRIBUTOR_SQL, require_verified=False)
+    return [f25[d] - f50[d] for d in (set(f25) & set(f50))]

@@ -170,3 +170,60 @@ def fit_predictive_error_bucket(
         residual_sd = _spread(tigge_residuals)
     residual_sd = max(residual_sd, residual_floor_c)
     return predictive_error_from_posterior(post, residual_sd)
+
+
+def fit_city_predictive_error(
+    conn,
+    *,
+    city: str,
+    live_data_version: str,
+    prior_data_version: str,
+    season_months: tuple[int, ...] | None = None,
+    metric: str = "high",
+    lead_max: float = 48.0,
+    min_live_n: int = 20,
+    settled_before: str | None = None,
+    kappa: float = 1.0,
+    residual_floor_c: float = 0.5,
+) -> PredictiveErrorModel:
+    """Capstone DB-wired pipeline (location+scale+gate+transport) for one city/season.
+
+    F50/TIGGE prior -> transported to the F25/OpenData lineage via Δ=F25-F50 ->
+    updated by the OpenData live residual likelihood -> predictive-error model.
+    All sub-steps are individually unit-tested; this only wires them.
+    """
+    import statistics
+    from src.calibration.ens_bias_model import (
+        LiveResidual, fit_bucket, posterior_bias, robust_mean, transport_bias_prior,
+    )
+    from src.calibration.ens_bias_repo import load_bucket_residuals, load_paired_delta
+
+    common = dict(metric=metric, lead_max=lead_max, season_months=season_months,
+                  settled_before=settled_before)
+    tig = load_bucket_residuals(conn, city=city, data_version=prior_data_version,
+                                require_verified=False,
+                                contributor_policy="legacy_tigge_null_passthrough", **common)
+    if not tig:
+        raise ValueError(f"no TIGGE prior residuals for {city!r}")
+    opd = load_bucket_residuals(conn, city=city, data_version=live_data_version,
+                                contributor_policy="full_contributor_only", **common)
+    delta = load_paired_delta(conn, city=city, live_data_version=live_data_version,
+                              prior_data_version=prior_data_version, **common)
+
+    f50 = fit_bucket(tig, [], min_live_n=min_live_n)          # prior-only: b50, sd50
+    transported = transport_bias_prior(b50=f50.bias, sd50=f50.sd, delta_samples=delta, kappa=kappa)
+
+    live = None
+    if len(opd) >= min_live_n:
+        var_o = statistics.variance(opd) if len(opd) >= 2 else 0.0
+        live = LiveResidual(e_bar=robust_mean(opd), n=len(opd), sigma2=max(var_o, 1e-6))
+    post = posterior_bias(transported, live)
+
+    if len(opd) >= 2:
+        residual_sd = statistics.stdev(opd)
+    elif len(tig) >= 2:
+        residual_sd = statistics.stdev(tig)
+    else:
+        residual_sd = residual_floor_c
+    residual_sd = max(residual_sd, residual_floor_c)
+    return predictive_error_from_posterior(post, residual_sd)
