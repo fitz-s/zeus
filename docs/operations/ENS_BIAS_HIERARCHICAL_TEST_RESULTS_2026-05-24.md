@@ -5,7 +5,7 @@ Python 3.14.3, pytest 9.0.2.
 
 ## Summary
 
-**28 passed** (after PR pre-check blocker fixes) — all TDD red-first (each test confirmed failing before its
+**31 passed** (after PR pre-check blocker fixes + degF/legacy-TIGGE/disagreement-gating round) — all TDD red-first (each test confirmed failing before its
 implementation landed).
 
 | File | Tests | Scope |
@@ -45,7 +45,7 @@ implementation landed).
 - `test_load_bucket_residuals_season_month_filter` — `season_months` restricts by month(target_date).
 - `test_model_bias_ens_v2_roundtrip` — write/read of the new `model_bias_ens_v2` table.
 
-## Raw pytest output
+## Raw pytest output (HISTORICAL 21-count snapshot — superseded; current count 31)
 
 ```
 collected 21 items
@@ -108,3 +108,30 @@ activation order (recompute corrected pairs → refit Platt → enable → invar
 Still open (documented, not in this PR): wider train/serve guard keyed on bias_model_key/family
 (needs Platt model_key plumbing); residual tail metrics (p90/p95) for Kelly haircut; manifest
 registration + table ownership; calibration_pairs recompute + Platt refit + live wiring.
+
+
+## Round 2 additions (2026-05-24, second pre-check)
+- `_to_c` now parses degF/degC/fahrenheit/celsius (real members_unit is 'degF'/'degC', not
+  'F'/'C') and RAISES on unknown units; fixture uses 'degF'. (Earlier first-char check silently
+  failed on 'degF' — a 1.8x correctness bug; an MC "bullseye" earlier was that bug's artifact.)
+- `contributor_policy='legacy_tigge_null_passthrough'` so the TIGGE prior (legacy NULL
+  contributes) loads; `full_contributor_only` still excludes NULL (live OpenData).
+- `model_bias_ens_v2` PK month NOT NULL DEFAULT 0 (season-level=0); read coerces month None->0.
+- Estimator now flags prior<->live conflict: `disagreement_high` (|live-prior|>2*sqrt(V0+V_O))
+  + `heterogeneity_var` (excess between-source variance) — the Chicago case (prior cold, live
+  neutral) must become LOW-confidence, not a confident point shift. `sd` stays the strict
+  precision-combine; downstream adds heterogeneity_var for Kelly haircut / gating.
+- Loader skips rows with NULL members_unit when normalizing to degC.
+Total: 31 tests (model 10, fit 7, repo 14).
+
+## Honest MC diff (unit-fixed) — SF 2026-05-22, actual 68F (bin 68-69)
+prior-only correction: members 57.8 -> 63.7F; argmax bin 57-58 -> 63-64F; P(actual)=0.000.
+The +6F warm shift is directionally correct but SF's ~+10F extreme gap exceeds a seasonal-mean
+correction -> P(actual bin) stays 0 (PARTIAL correction; matches OOS ~4C residual + tail caveat).
+The mechanism (pre-MC temperature correction shifts p_raw warmer) is validated; SF extreme tails
+need the disagreement/tail-variance gating + (separately) Platt p_cal refit.
+
+## Still open before MERGE (not in this PR)
+manifest registration (source_rationale/test_topology); table ownership (db_table_ownership);
+settlement-known-time leakage cutoff; downstream gate that scales correction by confidence /
+applies Kelly haircut when disagreement_high; calibration_pairs recompute + Platt refit + live wiring.

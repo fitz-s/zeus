@@ -28,7 +28,7 @@ MODEL_BIAS_ENS_V2_SCHEMA = """
 CREATE TABLE IF NOT EXISTS model_bias_ens_v2(
     city TEXT NOT NULL,
     season TEXT NOT NULL,
-    month INTEGER,
+    month INTEGER NOT NULL DEFAULT 0,
     metric TEXT NOT NULL,
     live_source_id TEXT,
     live_data_version TEXT NOT NULL,
@@ -61,9 +61,12 @@ _POSITIVE_CONTRIBUTOR_SQL = (
 
 
 def _to_c(value: float, unit: str | None) -> float:
-    if unit is not None and str(unit)[:1].upper() == "F":
+    u = (unit or "").strip().lower()
+    if u in {"f", "degf", "fahrenheit"} or (u and u.endswith("f")):
         return (value - 32.0) / 1.8
-    return value
+    if u in {"c", "degc", "celsius"} or (u and u.endswith("c")):
+        return value
+    raise ValueError(f"unknown temperature unit: {unit!r}")
 
 
 def init_ens_bias_schema(conn: sqlite3.Connection) -> None:
@@ -92,7 +95,12 @@ def load_bucket_residuals(
     (authority='VERIFIED' on snapshot + settlement), and ``contributor_policy``:
       - "full_contributor_only" (default): contributes=1, not boundary-ambiguous,
         training_allowed, causality OK;
+      - "legacy_tigge_null_passthrough": contributes NULL-or-1, not boundary-ambiguous —
+        use ONLY for enumerated legacy TIGGE data_versions (pre-extractor NULL rows);
       - "all_for_diagnostic": no contributor filter.
+    NOTE: ``settled_before`` is a TARGET-DATE cutoff (target_date < cutoff), a first
+    anti-leakage seam — NOT a settlement-known-time cutoff. For rigorous historical
+    rebuilds, prefer a settled_at/fact-known-time cutoff once that column is available.
     """
     where = ["e.city = ?", "e.data_version = ?", "e.temperature_metric = ?", "e.lead_hours <= ?"]
     params: list[object] = [city, data_version, metric, lead_max]
@@ -101,6 +109,14 @@ def load_bucket_residuals(
         where.append("s.authority = 'VERIFIED'")
     if contributor_policy == "full_contributor_only":
         where.append(_POSITIVE_CONTRIBUTOR_SQL)
+    elif contributor_policy == "legacy_tigge_null_passthrough":
+        # Legacy TIGGE rows predate the extrema extractor and carry
+        # contributes_to_target_extrema=NULL. Allow NULL-or-1, still reject
+        # boundary-ambiguous. Use ONLY for enumerated legacy TIGGE data_versions.
+        where.append(
+            "(e.contributes_to_target_extrema IS NULL OR e.contributes_to_target_extrema = 1) "
+            "AND COALESCE(e.boundary_ambiguous, 0) = 0"
+        )
     elif contributor_policy != "all_for_diagnostic":
         raise ValueError(f"unknown contributor_policy: {contributor_policy!r}")
     if settled_before is not None:
@@ -128,6 +144,8 @@ def load_bucket_residuals(
             continue
         if r["sv"] is None or r["mj"] is None:
             continue
+        if to_celsius and r["mu"] is None:
+            continue  # cannot safely unit-normalize without members_unit
         prev = freshest.get(td)
         if prev is None or str(r["av"]) > prev[0]:
             freshest[td] = (str(r["av"]), r["mj"], r["mu"], float(r["sv"]))
@@ -182,7 +200,7 @@ def write_bias_model(
         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """,
         (
-            city, season, month, metric, live_source_id, live_data_version,
+            city, season, (0 if month is None else int(month)), metric, live_source_id, live_data_version,
             prior_source_id, prior_data_version, contributor_policy, bias_unit,
             float(posterior_bias_c), float(posterior_sd_c), int(n_live), int(n_prior),
             (int(n_paired) if n_paired is not None else None), float(weight_live),
@@ -214,6 +232,6 @@ def read_bias_model(
         )
     return conn.execute(
         "SELECT * FROM model_bias_ens_v2 WHERE city=? AND season=? AND metric=? "
-        "AND live_data_version=? AND (month IS ? OR month = ?)",
-        (city, season, metric, live_data_version, month, month),
+        "AND live_data_version=? AND month=?",
+        (city, season, metric, live_data_version, (0 if month is None else int(month))),
     ).fetchone()

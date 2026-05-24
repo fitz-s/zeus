@@ -130,3 +130,20 @@ def test_train_serve_guard_allows_consistent_states():
     assert_bias_state_consistent(live_bias_enabled=False, platt_bias_corrected=False) is None
     # correction off but corrected Platt present is benign (does not raise)
     assert_bias_state_consistent(live_bias_enabled=False, platt_bias_corrected=True) is None
+
+
+def test_posterior_flags_disagreement_and_widens_sd():
+    # Chicago-like: tight prior cold, tight live neutral -> they disagree far more than
+    # their combined SD explains -> posterior must flag disagreement + widen reported sd.
+    from src.calibration.ens_bias_model import BiasPrior, LiveResidual, posterior_bias
+    prior = BiasPrior(mu_t=-1.91, v0=0.02)
+    live = LiveResidual(e_bar=+0.25, n=40, sigma2=0.8)   # V_O = 0.02
+    post = posterior_bias(prior, live)
+    assert post.disagreement_high is True
+    # agreement case: prior and live close -> not flagged, tighter sd
+    prior2 = BiasPrior(mu_t=-1.0, v0=0.02)
+    live2 = LiveResidual(e_bar=-1.1, n=40, sigma2=0.8)
+    post2 = posterior_bias(prior2, live2)
+    assert post2.disagreement_high is False
+    assert post.heterogeneity_var > post2.heterogeneity_var, "disagreement must add heterogeneity variance"
+    assert post2.heterogeneity_var == 0.0

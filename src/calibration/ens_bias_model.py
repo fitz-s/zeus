@@ -49,6 +49,7 @@ ESTIMATOR_NAME = "empirical_bayes_shrinkage_v1"
 # uncertain by ~sqrt(V_TRANSFER_DEFAULT). This is what lets abundant live
 # evidence overcome the prior; tune per validated equivalence.
 V_TRANSFER_DEFAULT = 0.25  # (0.5 degC)^2
+DISAGREEMENT_K = 2.0  # |live-prior| > K*sqrt(V0+V_O) => flag prior<->live conflict
 
 
 @dataclass(frozen=True)
@@ -94,6 +95,8 @@ class PosteriorBias:
     sd: float            # posterior standard deviation, degC (for Kelly haircut)
     weight_live: float   # w = V0/(V0+V_O), in [0, 1]
     n_live: int
+    disagreement_high: bool = False   # prior<->live conflict beyond combined SD (gate live use)
+    heterogeneity_var: float = 0.0    # excess between-source variance (degC^2); add to sd for haircut
     estimator: str = ESTIMATOR_NAME
 
 
@@ -152,11 +155,17 @@ def posterior_bias(
     w = v0 / (v0 + v_o)
     bias = w * live.e_bar + (1.0 - w) * prior_mean
     v_post = 1.0 / (1.0 / v0 + 1.0 / v_o)
+    combined = v0 + v_o
+    gap = live.e_bar - prior_mean
+    het_var = max(0.0, gap * gap - combined)           # between-source excess variance
+    disagreement = abs(gap) > DISAGREEMENT_K * math.sqrt(combined)
     return PosteriorBias(
         bias=bias,
-        sd=math.sqrt(v_post),
+        sd=math.sqrt(v_post),                            # strict precision-combine SD
         weight_live=w,
         n_live=live.n,
+        disagreement_high=disagreement,
+        heterogeneity_var=het_var,
     )
 
 

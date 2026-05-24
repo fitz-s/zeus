@@ -66,7 +66,7 @@ def _settle(conn, city, date, value, *, metric="high", authority="VERIFIED"):
 
 def test_residual_degF_city_converted_to_celsius(conn):
     # 68F mean, 70F actual -> residual (68-70)/1.8 = -1.111 degC (NOT -2)
-    _snap(conn, "San Francisco", "2026-05-10", [66.0, 68.0, 70.0], unit="F")
+    _snap(conn, "San Francisco", "2026-05-10", [66.0, 68.0, 70.0], unit="degF")
     _settle(conn, "San Francisco", "2026-05-10", 70.0)
     res = load_bucket_residuals(conn, city="San Francisco", data_version=OPD)
     assert res == pytest.approx([(68.0 - 70.0) / 1.8])
@@ -194,3 +194,28 @@ def test_read_bias_model_requires_exact_live_data_version(conn):
     # exact lookup works
     assert read_bias_model(conn, city="Tokyo", season="MAM", month=5, metric="high",
                            live_data_version=OPD) is not None
+
+
+def test_to_c_handles_degf_degc_strings():
+    from src.calibration.ens_bias_repo import _to_c
+    assert _to_c(68.0, "degF") == 20.0
+    assert _to_c(68.0, "F") == 20.0
+    assert _to_c(20.0, "degC") == 20.0
+    assert _to_c(20.0, "C") == 20.0
+    import pytest as _pt
+    with _pt.raises(ValueError):
+        _to_c(20.0, "kelvin?")
+
+
+def test_legacy_tigge_null_passthrough_includes_null_contributes(conn):
+    # legacy TIGGE rows carry contributes_to_target_extrema=NULL; the prior loader
+    # must include them under the legacy policy but NOT under full_contributor_only.
+    TIGV = "tigge_mx2t6_local_calendar_day_max_v1"
+    conn.execute("INSERT INTO ensemble_snapshots_v2 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                 ("Tokyo","2026-05-10","high",TIGV, json.dumps([19.0]),"C",24.0,
+                  "2026-05-10T00:00:00Z", None, 0, 1, "OK", "VERIFIED"))
+    _settle(conn,"Tokyo","2026-05-10",20.0)
+    assert load_bucket_residuals(conn, city="Tokyo", data_version=TIGV,
+                                 contributor_policy="full_contributor_only") == []
+    assert load_bucket_residuals(conn, city="Tokyo", data_version=TIGV,
+                                 contributor_policy="legacy_tigge_null_passthrough") == pytest.approx([-1.0])
