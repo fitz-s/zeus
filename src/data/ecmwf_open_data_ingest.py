@@ -1,6 +1,10 @@
 # Created: 2026-05-19
-# Last reused/audited: 2026-05-19
+# Last reused/audited: 2026-05-23
 # Authority basis: docs/operations/task_2026-05-04_tigge_ingest_resilience/DESIGN_PHASE3_LIVE_ROUTING_FIX.md + PIPELINE_REVIEW.md §7
+#   DAY0-P1 (2026-05-23): _query_metric changed from MAX(snapshot_id) to FULL_CONTRIBUTOR-first
+#   selection (contributes_to_target_extrema=1, POSITIVE attribution, boundary_ambiguous=0).
+#   Mirrors _EXTREMA_RANK_ORDER_BY from executable_forecast_reader. Fail-closed: no
+#   FULL_CONTRIBUTOR → no rows returned (caller treats as missing forecast).
 """ECMWFOpenDataIngest — DB-backed adapter for the ecmwf_open_data forecast source.
 
 LIVE TRADE BLOCKER FIX (2026-05-19)
@@ -41,6 +45,7 @@ from typing import TYPE_CHECKING, Optional
 
 import numpy as np
 
+from src.data.forecast_extrema_authority import POSITIVE_ATTRIBUTION_STATUS_SQL_IN_LIST
 from src.data.forecast_ingest_protocol import (
     ForecastBundle,
     ForecastSourceHealth,
@@ -362,11 +367,30 @@ def _query_metric(
     temperature_metric: str,
     cutoff: str,
 ) -> list:
-    """Return VERIFIED rows from ensemble_snapshots_v2 for one temperature metric."""
+    """Return VERIFIED rows from ensemble_snapshots_v2 for one temperature metric.
+
+    DAY0-P1 run-selection rule (2026-05-23): selects the FULL_CONTRIBUTOR snapshot
+    per (city, target_date, temperature_metric), not the latest-inserted one.
+
+    Priority order (mirrors executable_forecast_reader._EXTREMA_RANK_ORDER_BY):
+      1. FULL_CONTRIBUTOR first:
+           contributes_to_target_extrema = 1
+           AND forecast_window_attribution_status IN POSITIVE_SET
+           AND boundary_ambiguous = 0
+      2. Latest issue_time (DESC) — freshest FULL_CONTRIBUTOR run preferred
+      3. snapshot_id DESC as tiebreaker (latest ingested within same cycle)
+
+    Fail-closed: if no FULL_CONTRIBUTOR exists for a (city, target_date, metric),
+    no row is returned for that date. _fetch_db_payload returns None and the caller
+    (ECMWFOpenDataIngest.fetch) raises ValueError, causing ENS_FETCH_FAILED rejection.
+    """
+    # Use the central POSITIVE set from forecast_extrema_authority so any future
+    # status additions propagate automatically to this query.
+    _pos = POSITIVE_ATTRIBUTION_STATUS_SQL_IN_LIST  # e.g. ('CONTRIBUTES','EXPLICIT',...)
     conn = get_forecasts_connection()
     try:
         rows = conn.execute(
-            """
+            f"""
             SELECT
                 target_date,
                 issue_time,
@@ -382,8 +406,11 @@ def _query_metric(
               AND causality_status = 'OK'
               AND data_version LIKE ?
               AND datetime(recorded_at) > datetime(?)
+              AND contributes_to_target_extrema = 1
+              AND COALESCE(forecast_window_attribution_status, '') IN {_pos}
+              AND COALESCE(boundary_ambiguous, 0) = 0
               AND snapshot_id = (
-                  SELECT MAX(s2.snapshot_id)
+                  SELECT s2.snapshot_id
                   FROM ensemble_snapshots_v2 s2
                   WHERE s2.city = ensemble_snapshots_v2.city
                     AND s2.target_date = ensemble_snapshots_v2.target_date
@@ -393,6 +420,13 @@ def _query_metric(
                     AND s2.causality_status = 'OK'
                     AND s2.data_version LIKE ?
                     AND datetime(s2.recorded_at) > datetime(?)
+                    AND s2.contributes_to_target_extrema = 1
+                    AND COALESCE(s2.forecast_window_attribution_status, '') IN {_pos}
+                    AND COALESCE(s2.boundary_ambiguous, 0) = 0
+                  ORDER BY
+                    s2.issue_time DESC,
+                    s2.snapshot_id DESC
+                  LIMIT 1
               )
             ORDER BY target_date ASC
             """,
