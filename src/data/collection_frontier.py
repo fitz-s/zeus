@@ -77,6 +77,7 @@ class FrontierRow:
     track: str
     calendar_id: str
     role: str                                   # live / backfill / shadow
+    family: str                                 # forecast / observation / market_topology / ... (PR #329 C)
     target_local_date: Optional[str]
 
     source_issue_time: Optional[datetime]
@@ -382,6 +383,99 @@ def _coverage_summary(
                             expired=expired, partial=partial)
 
 
+# ---------------------------------------------------------------------------
+# Non-forecast family federation (PR #329 review C). The forecast frontier above is calendar /
+# source_run driven. Other live data families have their OWN truth tables and semantics — the
+# frontier FEDERATES over them rather than forcing the source_run model onto everything.
+#
+# Per-family event-time probe: (table, event_time_column). Event time is the family's SOURCE/EVENT
+# plane (target_date / settled_at / created_at), NEVER a write-time column — same load-bearing rule
+# as the forecast frontier (a row written now for an old event must not read as fresh). Families
+# whose truth lives outside the forecasts connection (executable_market snapshots in the trade DB,
+# venue_user_ws state, solar, diagnostics) have NO probe here: they degrade to an honest
+# COVERAGE_UNKNOWN row (the family is COVERED — it appears — but its freshness is unproven from
+# this connection) rather than fabricating a freshness number. Non-forecast rows report PRESENCE +
+# event age, not calendar-grade staleness; a per-family freshness policy is future work.
+_FAMILY_EVENT_PROBE: dict[str, tuple[str, str]] = {
+    "observation": ("observations", "target_date"),
+    "market_topology": ("market_events_v2", "created_at"),
+    "settlement": ("settlements", "settled_at"),
+}
+
+
+def _family_latest_event(conn: sqlite3.Connection, table: str, col: str) -> Optional[datetime]:
+    """MAX(event_time) for a family table; None if table/col missing or empty (fail-closed)."""
+    row = _safe_fetchone(conn, f"SELECT MAX({col}) FROM {table}", ())  # noqa: S608 (fixed identifiers)
+    # index access (not row["..."]) so it works whether or not the caller set row_factory=Row.
+    return _parse_iso(row[0]) if row else None
+
+
+def _registry_family_role(job_role: str) -> str:
+    """Map a registry job.role onto a frontier role bucket (live/backfill/shadow/derived/diagnostic)."""
+    if job_role in ("live", "settlement"):
+        return _LIVE
+    if job_role == "backfill":
+        return _BACKFILL
+    if job_role == "shadow":
+        return _SHADOW
+    if job_role == "derived":
+        return "derived"
+    return "diagnostic"
+
+
+def _family_frontier_rows(
+    conn: sqlite3.Connection, now: datetime, role_filter: Optional[str]
+) -> list[FrontierRow]:
+    """One FrontierRow per (family, source_id) for every NON-forecast family in the registry.
+
+    Coverage federation (PR #329 C): the report can no longer call itself a control plane while
+    excluding observation/market/venue/settlement truth. Each row reports the latest event-time
+    present for that family (where probeable) + a presence-based blocker; families without a probe
+    degrade to COVERAGE_UNKNOWN, never a fabricated freshness.
+    """
+    from src.data.source_job_registry import JOB_REGISTRY
+
+    seen: set[tuple[str, str]] = set()
+    rows: list[FrontierRow] = []
+    for job in JOB_REGISTRY.values():
+        fam = job.family
+        if fam is None or fam == "forecast":
+            continue
+        role = _registry_family_role(job.role)
+        if role_filter and role != role_filter:
+            continue
+        for source_id in (job.all_source_ids or ((job.source_id,) if job.source_id else (job.job_id,))):
+            key = (fam, source_id)
+            if key in seen:
+                continue
+            seen.add(key)
+
+            probe = _FAMILY_EVENT_PROBE.get(fam)
+            latest_event = _family_latest_event(conn, *probe) if probe else None
+            age = (now - latest_event).total_seconds() if latest_event else None
+
+            if role != _LIVE:
+                blocker = _BLOCK_NOT_LIVE
+            elif latest_event is not None:
+                blocker = _BLOCK_OK              # family IS producing data (presence); age reported
+            else:
+                blocker = _BLOCK_COVERAGE_UNKNOWN  # no probe / no rows — freshness unproven here
+
+            rows.append(FrontierRow(
+                source_id=source_id, track=fam, calendar_id=f"{fam}:{source_id}", role=role,
+                family=fam, target_local_date=None,
+                source_issue_time=latest_event,   # event-time plane (NOT write time)
+                source_release_time=None, safe_fetch_not_before=None,
+                latest_attempt_at=None, latest_success_at=latest_event,
+                captured_at=None, imported_at=None,
+                completeness_status=None, readiness_status=None, readiness_expires_at=None,
+                freshness_state=("UNKNOWN" if latest_event is None else "CURRENT"),
+                freshness_age_seconds=age,
+                live_blocker=blocker, operator_action=_ACTION[blocker],
+            ))
+    return rows
+
+
 def compute_frontier(
     *,
     role_filter: Optional[str] = None,
@@ -475,6 +569,7 @@ def compute_frontier(
 
             rows.append(FrontierRow(
                 source_id=source_id, track=track, calendar_id=calendar_id, role=role,
+                family="forecast",
                 target_local_date=target_date,
                 source_issue_time=issue, source_release_time=release,
                 safe_fetch_not_before=safe_fetch,
@@ -492,6 +587,11 @@ def compute_frontier(
                 coverage_blocked=coverage.blocked, coverage_expired=coverage.expired,
                 coverage_partial=coverage.partial,
             ))
+
+        # Non-forecast family federation (PR #329 C): observation / market_topology / settlement /
+        # executable_market / venue_user_ws / solar / diagnostic. Appended so the frontier spans
+        # ALL live data families, not just the forecast release calendar.
+        rows.extend(_family_frontier_rows(conn, now, role_filter))
     finally:
         if own_conn:
             conn.close()

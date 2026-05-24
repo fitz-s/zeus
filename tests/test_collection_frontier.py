@@ -189,3 +189,53 @@ def test_backfill_source_is_not_live_authorized() -> None:
     rows = compute_frontier(conn=_conn(), now=_NOW, role_filter="backfill")
     assert rows and all(r.live_blocker == "NOT_LIVE_AUTHORIZED" for r in rows)
     assert any(r.source_id == "tigge" for r in rows)
+
+
+def test_frontier_contains_weather_market_venue_and_observation_sources() -> None:
+    """PR #329 review C acceptance: the frontier federates over ALL live data families, not just
+    the forecast release calendar. It must contain rows for forecast + observation + solar +
+    market_topology + executable_market + venue_user_ws + settlement + diagnostic — otherwise it
+    cannot claim to be a data-collection control plane while excluding market/observation truth.
+
+    RED before this PR: compute_frontier emitted forecast-calendar rows only."""
+    c = _conn()
+    # add the probeable family tables (empty is fine — families still appear; probed ones can
+    # report event presence when populated):
+    c.execute("CREATE TABLE observations (city TEXT, target_date TEXT, source TEXT, fetched_at TEXT)")
+    c.execute("CREATE TABLE market_events_v2 (condition_id TEXT, created_at TEXT)")
+    c.execute("CREATE TABLE settlements (city TEXT, target_date TEXT, settled_at TEXT, settlement_source TEXT)")
+    c.execute("INSERT INTO observations VALUES ('chicago','2026-05-24','wu_icao_history','2026-05-24T11:00:00Z')")
+    c.execute("INSERT INTO market_events_v2 VALUES ('0xabc','2026-05-24T10:00:00Z')")
+
+    from src.data.collection_frontier import compute_frontier
+
+    rows = compute_frontier(conn=c, now=_NOW)
+    families = {r.family for r in rows}
+    expected = {
+        "forecast", "observation", "solar", "market_topology",
+        "executable_market", "venue_user_ws", "settlement", "diagnostic",
+    }
+    missing = expected - families
+    assert not missing, f"frontier missing data families (forecast-only regression?): {sorted(missing)}"
+
+    # the observation family probes the EVENT-time column (target_date), and reports presence:
+    obs = [r for r in rows if r.family == "observation"]
+    assert obs and any(r.source_issue_time is not None for r in obs), "observation event-time not probed"
+    # a family with no probe (executable_market truth lives in the trade DB) degrades honestly to
+    # COVERAGE_UNKNOWN, never a fabricated freshness:
+    exe = [r for r in rows if r.family == "executable_market"]
+    assert exe and all(r.live_blocker in ("COVERAGE_UNKNOWN", "OK", "NOT_LIVE_AUTHORIZED") for r in exe)
+
+
+def test_family_freshness_uses_event_time_not_write_time() -> None:
+    """C correctness + the load-bearing rule: a non-forecast family's freshness age is measured on
+    its EVENT-time column (observations.target_date), never a write-time column. An old target_date
+    backfilled now must report a large age, not ~0."""
+    from src.data.collection_frontier import _family_latest_event
+
+    c = _conn()
+    c.execute("CREATE TABLE observations (city TEXT, target_date TEXT, source TEXT, fetched_at TEXT)")
+    # event (target_date) is a week old, write (fetched_at) is now:
+    c.execute("INSERT INTO observations VALUES ('chicago','2026-05-17','wu_icao_history','2026-05-24T11:00:00Z')")
+    latest = _family_latest_event(c, "observations", "target_date")
+    assert latest is not None and latest.date().isoformat() == "2026-05-17"  # event time, not the write time

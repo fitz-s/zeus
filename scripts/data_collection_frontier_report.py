@@ -6,14 +6,15 @@
 # Last reused or audited: 2026-05-24
 # Authority basis: operator "Zeus Data Ingest + Collection Efficiency Refactor" spec §10;
 #   docs/operations/current/plans/data_temporal_kernel/PLAN.md; src/data/collection_frontier.py.
-"""Operator-facing FORECAST collection frontier report — PR2 of the Data Temporal Kernel program.
+"""Operator-facing collection frontier report — Data Temporal Kernel program.
 
-SCOPE (PR review #329 F4): this report covers ONLY forecast sources declared in
-config/source_release_calendar.yaml (ECMWF Open Data, Open-Meteo previous-runs, TIGGE archive).
-It does NOT yet cover WU/HKO/Ogimet observations, Polymarket Gamma topology, CLOB executable
-snapshots, the user WebSocket, or settlement-event lag. Do not read a clean forecast frontier
-as "all live data collection is healthy" — the non-forecast surfaces are out of scope until a
-later PR adds them.
+SCOPE (PR #329 review C): this report now FEDERATES over all live data families, not just the
+forecast release calendar. Forecast sources (ECMWF Open Data / Open-Meteo / TIGGE) get the rich
+calendar/source_run frontier; observation / market_topology / settlement families are probed on
+their own event-time tables; executable_market / venue_user_ws / solar / diagnostic families
+appear as honest COVERAGE_UNKNOWN rows where their truth lives outside the forecasts connection
+(trade DB, state files) — the family is COVERED (it appears) but its freshness is not yet
+calendar-graded. Non-forecast rows report presence + event age, not calendar-grade staleness.
 
 READ-ONLY. Renders the in-memory frontier (src/data/collection_frontier.compute_frontier)
 as a table or JSON, or explains a single source's live blocker. Writes nothing.
@@ -46,6 +47,7 @@ def _row_to_dict(r: FrontierRow) -> dict[str, Any]:
         "track": r.track,
         "calendar_id": r.calendar_id,
         "role": r.role,
+        "family": r.family,
         "target_local_date": r.target_local_date,
         "source_issue_time": _iso(r.source_issue_time),
         "source_release_time": _iso(r.source_release_time),
@@ -81,11 +83,12 @@ def _fmt_age(seconds: Optional[float]) -> str:
 
 
 def _render_table(rows: list[FrontierRow]) -> str:
-    header = f"{'source':28} {'track':14} {'role':9} {'fresh':9} {'age':>7} {'blocker':20} action"
+    header = (f"{'family':16} {'source':24} {'track':14} {'role':9} {'fresh':9} "
+              f"{'age':>7} {'blocker':20} action")
     lines = [header, "-" * len(header)]
-    for r in rows:
+    for r in sorted(rows, key=lambda x: (x.family, x.source_id, x.track)):
         lines.append(
-            f"{r.source_id:28.28} {r.track:14.14} {r.role:9} {r.freshness_state:9} "
+            f"{r.family:16.16} {r.source_id:24.24} {r.track:14.14} {r.role:9} {r.freshness_state:9} "
             f"{_fmt_age(r.freshness_age_seconds):>7} {r.live_blocker:20} {r.operator_action}"
         )
     return "\n".join(lines)
@@ -98,7 +101,7 @@ def _render_explain(rows: list[FrontierRow], source: str) -> str:
     out = []
     for r in matches:
         d = _row_to_dict(r)
-        out.append(f"source: {r.source_id}  track: {r.track}  ({r.calendar_id})")
+        out.append(f"source: {r.source_id}  family: {r.family}  track: {r.track}  ({r.calendar_id})")
         for k in (
             "role", "target_local_date", "source_issue_time", "source_release_time",
             "safe_fetch_not_before", "latest_success_at", "captured_at", "imported_at",
@@ -135,15 +138,18 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     if args.json:
         print(json.dumps({
-            "scope": "forecast_release_calendar_only",
-            "scope_note": "ECMWF/Open-Meteo/TIGGE only; excludes WU/HKO/Ogimet obs, "
-                          "Polymarket Gamma/CLOB, user WS, settlement lag",
+            "scope": "all_live_data_families_federated",
+            "scope_note": "forecast (rich calendar/source_run) + observation/market_topology/"
+                          "settlement (event-time probed) + executable_market/venue_user_ws/solar/"
+                          "diagnostic (COVERAGE_UNKNOWN where truth is in trade DB / state files); "
+                          "non-forecast rows report presence + event age, not calendar-grade staleness",
             "rows": [_row_to_dict(r) for r in rows],
         }, indent=2))
         return 0
 
-    print("SCOPE: forecast release-calendar sources only (ECMWF/Open-Meteo/TIGGE) — "
-          "NOT WU/HKO/Ogimet obs, Polymarket Gamma/CLOB, user WS, or settlement lag.")
+    print("SCOPE: all live data families (forecast = rich calendar frontier; observation/market/"
+          "settlement = event-time probed; executable_market/venue/solar/diagnostic = presence-only "
+          "COVERAGE_UNKNOWN where truth is outside the forecasts DB).")
     print(_render_table(rows))
     return 0
 

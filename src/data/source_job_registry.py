@@ -127,7 +127,7 @@ _INGEST_MAIN: tuple[SourceJobSpec, ...] = (
     SourceJobSpec("ingest_opendata_startup_catch_up", "ingest_main", "backfill", "default", True,
                   source_id="ecmwf_open_data", callable_ref="_opendata_startup_catch_up", owner_gated=True),
     SourceJobSpec("ingest_source_health_probe", "ingest_main", "diagnostic", "fast", False,
-                  callable_ref="_source_health_probe_tick", file_only=True,
+                  callable_ref="_source_health_probe_tick", file_only=True, family="diagnostic",
                   notes="writes state/source_health.json only"),
     SourceJobSpec("ingest_station_migration_probe", "ingest_main", "backfill", "default", True,
                   callable_ref="_station_migration_probe_tick"),
