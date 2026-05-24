@@ -812,7 +812,25 @@ files:
     - SOURCE_TRUTH_PLANE_COLLAPSE
     downstream:
     - future PR3 src/data/source_job_registry.py
-    - future PR2 src/data/collection_frontier.py
+    - src/data/collection_frontier.py
+  src/data/collection_frontier.py:
+    zone: K2_runtime
+    authority_role: collection_frontier_reader
+    why: >
+      PR2 of data_temporal_kernel program. READ-ONLY in-memory temporal frontier: per
+      (source_id, track) computes source_issue/release, safe_fetch (via TemporalPolicy),
+      freshness (on SOURCE/EVENT time — backfill write-time cannot fake freshness), readiness,
+      and a single live_blocker reason (NOT_RELEASED/STALE_SOURCE/SOURCE_DOWN/PARTIAL_RUN/
+      READINESS_BLOCKED/NOT_LIVE_AUTHORIZED/UNKNOWN_BLOCKED). Reads forecasts DB (source_run,
+      readiness_state) + source_health/heartbeat JSON best-effort. Persists NOTHING — a
+      source_time_frontier table would be forecast-class + bump SCHEMA_FORECASTS_VERSION
+      (daemon SystemExit gate); deferred to operator-gated PR2b. NOT_DAEMON_WIRED.
+    hazards:
+    - NOT_DAEMON_WIRED
+    - SOURCE_TRUTH_PLANE_COLLAPSE
+    downstream:
+    - scripts/data_collection_frontier_report.py
+    - future PR2b persisted source_time_frontier
   src/data/tigge_client.py:
     zone: K2_runtime
     authority_role: dormant_forecast_ingest_stub

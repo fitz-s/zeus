@@ -77,7 +77,14 @@ New files only. No scheduler / schema / ingestion-function / calendar edits.
 
 ## Downstream PR map (program; not this branch)
 
-- PR2: source_time_frontier + source_time_variance_sample tables + collection_frontier.py + report (advisory/read-only).
+- PR2 (RESHAPED, as-built): collection_frontier.py + data_collection_frontier_report.py — IN-MEMORY
+  frontier from existing surfaces (source_run/readiness_state/job_run/coverage + health/heartbeat JSON),
+  read-only, NO new table. Freshness on SOURCE/EVENT time (backfill write-time cannot fake freshness);
+  missing data fails closed to UNKNOWN_BLOCKED. Reason: a persisted source_time_frontier is forecast-class
+  → SCHEMA_FORECASTS_VERSION bump → live daemon schema-gate (SystemExit) → operator-gated, NOT zero-change.
+- PR2b (OPERATOR-GATED, deferred): persist source_time_frontier + source_time_variance_sample (forecast-class
+  for INV-37 same-DB write locality; deviates from spec world-class rec — documented for critic/operator) +
+  SCHEMA_FORECASTS_VERSION bump + db_table_ownership + table_registry + live forecasts-DB migration (dry-run+rollback).
 - PR3: source_job_registry inventory of existing scheduled jobs (advisory lint, no scheduler replacement).
 - PR4: OpenData singleton ownership enforced by registry + runtime assertion.
 - PR5: source_watermarks + bounded backfill; UMA era_end_block guard (cursor/cap already exist).

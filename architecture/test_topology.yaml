@@ -107,6 +107,7 @@ test_trust_policy:
     tests/test_source_temporal_policy.py: {created: "2026-05-24", last_used: "2026-05-24"}
     tests/test_source_contract_lint.py: {created: "2026-05-24", last_used: "2026-05-24"}
     tests/test_source_contracts_view.py: {created: "2026-05-24", last_used: "2026-05-24"}
+    tests/test_collection_frontier.py: {created: "2026-05-24", last_used: "2026-05-24"}
     # P5-1 + P5-3 (PR #19 closeout completion, 2026-04-26):
     tests/test_realized_fill_at_receipt.py: {created: "2026-04-26", last_used: "2026-04-26"}
     tests/test_evaluate_candidate_metric_integration.py: {created: "2026-04-26", last_used: "2026-04-26"}
