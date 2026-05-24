@@ -113,6 +113,8 @@ test_trust_policy:
     tests/test_backfill_watermarks.py: {created: "2026-05-24", last_used: "2026-05-24"}
     tests/test_scheduler_adapter.py: {created: "2026-05-24", last_used: "2026-05-24"}
     tests/test_temporal_provenance_and_lanes.py: {created: "2026-05-24", last_used: "2026-05-24"}
+    # PR #329 D: persisted source_time_frontier (schema 7 + idempotent + backfill-safe writer).
+    tests/test_frontier_store.py: {created: "2026-05-24", last_used: "2026-05-24"}
     # P5-1 + P5-3 (PR #19 closeout completion, 2026-04-26):
     tests/test_realized_fill_at_receipt.py: {created: "2026-04-26", last_used: "2026-04-26"}
     tests/test_evaluate_candidate_metric_integration.py: {created: "2026-04-26", last_used: "2026-04-26"}

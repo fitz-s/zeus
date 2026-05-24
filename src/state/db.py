@@ -2769,7 +2769,11 @@ def assert_schema_current(conn: sqlite3.Connection) -> None:
 # SCHEMA_FORECASTS_VERSION: bumped whenever forecast-authority DDL changes.
 # Owned tables include the 7 K1 forecast-class tables, the live source
 # authority chain tables, producer readiness_state, and forecast-live job_run.
-SCHEMA_FORECASTS_VERSION: int = 6  # Phase 7 T1+T3: settlements_v2.outcome_type + settlement_capture_verifications (2026-05-21)
+SCHEMA_FORECASTS_VERSION: int = 7  # Data Temporal Kernel PR #329 D: source_time_frontier persisted authority (2026-05-24)
+# DEPLOY LANDMINE (PR #329 D): bumping this halts the live ingest/forecast daemon on restart
+# (assert_schema_current_forecasts raises until the forecasts DB is migrated). Runbook:
+#   stop daemons -> init_schema_forecasts(get_forecasts_connection()) + commit -> restart.
+# Pull+restart WITHOUT the migration step = SystemExit, all forecast collection halts.
 
 
 def _create_settlements(conn: sqlite3.Connection) -> None:
@@ -3489,6 +3493,40 @@ def _migrate_trade_strategy_key_checks(conn: sqlite3.Connection) -> None:
 
 
 
+def _create_source_time_frontier(conn: sqlite3.Connection) -> None:
+    """Create the persisted source-time frontier table (PR #329 D). Idempotent.
+
+    Forecasts-class. The online authority for "latest USABLE data per source/family right now":
+    live health reads THIS instead of recomputing from scratch in ad-hoc scripts. The writer
+    (src.data.frontier_store.persist_frontier) UPSERTs keyed by (source_id, family,
+    partition_key) so a re-tick for the same partition is idempotent, and refuses to let a
+    backfill/reconstructed authority overwrite a live (DERIVED_FROM_DISSEMINATION) row.
+
+    latest_event_time is the SOURCE/EVENT-time plane (issue/target/settled), NEVER a write-time
+    column — the load-bearing freshness rule. computed_at is the write time (provenance only).
+    """
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS source_time_frontier (
+            source_id TEXT NOT NULL,
+            family TEXT NOT NULL,
+            partition_key TEXT NOT NULL,
+            track TEXT,
+            role TEXT,
+            latest_event_time TEXT,
+            freshness_state TEXT,
+            live_blocker TEXT,
+            authority_tier TEXT NOT NULL DEFAULT 'UNVERIFIED',
+            computed_at TEXT NOT NULL,
+            data_version INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (source_id, family, partition_key)
+        )
+    """)
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_source_time_frontier_family "
+        "ON source_time_frontier (family, source_id)"
+    )
+
+
 def init_schema_forecasts(conn: sqlite3.Connection) -> None:
     """Create all forecast-authority tables on zeus-forecasts.db. Idempotent.
 
@@ -3674,6 +3712,10 @@ def init_schema_forecasts(conn: sqlite3.Connection) -> None:
     # Follow _create_market_microstructure_snapshots precedent: static helper, no registry add.
     from src.state.schema.v2_schema import _create_settlement_capture_verifications as _create_scv
     _create_scv(conn)
+
+    # Data Temporal Kernel — SCHEMA_FORECASTS_VERSION 7 (2026-05-24, PR #329 D).
+    # Persisted source-time frontier authority; forecasts-only static helper (not in world_src).
+    _create_source_time_frontier(conn)
 
     # Mark schema current — MUST be last (partial failure must not mark ready).
     conn.execute(f"PRAGMA user_version = {SCHEMA_FORECASTS_VERSION}")
