@@ -109,6 +109,63 @@ Acceptance IDs A01-A40:
   `385d5c4af940ae82b52bd39197df13d463242bfb` and returned NO-GO with P1/P2
   findings. The review and applied repair are saved at
   `docs/operations/edli_v1/CRITIC_PR332_TRIGGER_REPAIR_REVIEW.md`.
+- Latest PR332 re-review returned NO-GO for head
+  `cec977fd0a82dda1339d150e1952d528df5f8318` because the no-submit adapter
+  no longer required payload proof fields but still treated old
+  `probability_trace_fact` / `selection_hypothesis_fact` / `selection_family_fact`
+  rows as runtime proof preconditions. The saved review is
+  `docs/operations/edli_v1/PR332_EVENT_BOUND_GENERATION_REVIEW.md`.
+- Current repair status after that review: the runtime no-submit adapter no
+  longer queries those old decision fact tables. Forecast events hydrate the
+  exact `ensemble_snapshots_v2` row matching `causal_snapshot_id`, city,
+  target date, and metric through an explicit forecasts authority connection;
+  Day0 events hydrate the latest available matching forecast snapshot and
+  apply the Day0 absorbing boundary to the event-bound distribution. Both
+  paths build a `MarketAnalysis`, scan the full sibling hypothesis family
+  with canonical bootstrap semantics, compute native executable costs through
+  the `executable_cost` book-walk kernel, run robust TradeScore, FDR, typed
+  Kelly, RiskGuard, and emit only typed `NO_SUBMIT` receipts. Native quote
+  binding is keyed by `(condition_id, token_id)` unless a snapshot row proves
+  full two-sided native depth. Real order submit remains disabled.
+- Latest deploy-ready review for head
+  `8bf87df499a321f438f6a1419baf170fa5f74c9d` is saved at
+  `docs/operations/edli_v1/PR332_DEPLOY_READY_REVIEW.md`. Repairs applied
+  after that review: topology authority now uses forecasts connection while
+  executable snapshots stay on trade connection; receipt-time forecast proof
+  revalidates source-run/source-run-coverage/readiness evidence; forecast
+  inference consumes calibrated probability authority or Platt calibration and
+  fails closed on missing calibration; native quote construction no longer
+  fabricates liquidity from top ask/min-order size; Day0 live trigger/hard-fact
+  flags are disabled until an online observation-context hook is wired.
+  Remaining deploy gates: full sweep pass or signed baseline waiver, daemon
+  restart smoke, live Polymarket market-channel websocket smoke, user-channel
+  fill-authority smoke, DB concurrency smoke, and deeper RiskGuard/Day0 receipt
+  reporting follow-ups.
+- Codex-only critic review of commit `80aa85e` found two remaining authority
+  proof gaps: coverage revalidation did not require `snapshot_ids_json` to
+  contain the hydrated causal snapshot, and exported receipt/gate helpers still
+  allowed implicit trade-connection fallback when forecast/topology connections
+  were omitted. Both are repaired in the current worktree: coverage must bind
+  to the hydrated snapshot and forecast causal snapshot, and missing explicit
+  forecast/topology authority connections fail closed.
+
+## Current Phase
+
+Phase: PR332 draft is open as the replacement no-submit implementation for
+PR328/PR331. The EDLI runtime path must remain proof-only: no broad cycle
+runner, no venue adapter, no executor submit, and no stale-book alpha path.
+Current runtime proof generation is event-bound through source snapshot
+hydration, `MarketAnalysis` full-family hypothesis scan, native executable
+cost, robust TradeScore, FDR, typed Kelly, RiskGuard, and typed `NO_SUBMIT`
+final-intent receipts. The branch remains draft until latest CI and follow-up
+review return; daemon restart and live websocket/user-channel smoke remain
+operator-gated.
+
+Current blocking audit reference:
+
+- `docs/operations/edli_v1/PR328_DEEP_SEMANTIC_WIRING_REVIEW.md`
+- `docs/operations/edli_v1/PR332_REAL_TRIGGER_HYDRATION_REVIEW.md`
+- `docs/operations/edli_v1/CRITIC_PR332_TRIGGER_REPAIR_REVIEW.md`
 - `docs/operations/edli_v1/PR332_EVENT_BOUND_GENERATION_REVIEW.md`
 - `docs/operations/edli_v1/PR332_DEPLOY_READY_REVIEW.md`
 - Original verdict: DO NOT MERGE / DO NOT REBOOT DAEMON ON PR328 as reviewed.

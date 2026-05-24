@@ -51,6 +51,8 @@ Implemented after this review:
 - `_native_quote_book_from_snapshot_row()` no longer creates synthetic liquidity from `orderbook_top_ask`; it requires native depth or explicit best-depth size columns.
 - `day0_extreme_trigger_enabled` and `day0_hard_fact_live_enabled` are disabled in config until the online Day0 observation hook is wired.
 - Production-shaped regression tests now cover separate trade/forecast connections, calibration authority, source-run revalidation, and top-ask-without-depth rejection.
+- Follow-up Codex-only critic review on commit `80aa85e` found two remaining proof gaps: source-run coverage did not require `snapshot_ids_json` to contain the causal snapshot, and the public adapter/gate still allowed implicit trade-connection fallback when forecast/topology connections were omitted.
+- Those follow-up gaps are repaired in the current worktree: receipt-time coverage revalidation now requires `snapshot_ids_json` to contain the hydrated snapshot and, for forecast events, the event `causal_snapshot_id`; the no-submit receipt builder and executable snapshot gate fail closed when explicit forecast/topology authority connections are absent. Regression tests cover both.
 
 Still not deploy-ready:
 

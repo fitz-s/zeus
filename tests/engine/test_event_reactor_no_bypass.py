@@ -206,6 +206,433 @@ def _trade_conn_with_snapshot(
     )
     conn.execute(
         """
+        CREATE TABLE ensemble_snapshots_v2 (
+            snapshot_id TEXT PRIMARY KEY,
+            city TEXT NOT NULL,
+            target_date TEXT NOT NULL,
+            temperature_metric TEXT NOT NULL,
+            members_json TEXT NOT NULL,
+            p_raw_json TEXT,
+            p_cal_json TEXT,
+            members_unit TEXT,
+            settlement_unit TEXT,
+            source_id TEXT,
+            source_transport TEXT,
+            source_run_id TEXT,
+            source_cycle_time TEXT,
+            issue_time TEXT,
+            lead_hours REAL,
+            data_version TEXT,
+            available_at TEXT NOT NULL,
+            authority TEXT,
+            causality_status TEXT,
+            boundary_ambiguous INTEGER
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO ensemble_snapshots_v2 VALUES (
+            'snapshot-1',
+            'Chicago',
+            '2026-05-25',
+            'high',
+            ?,
+            ?,
+            ?,
+            'degF',
+            'F',
+            'ecmwf_open_data',
+            'ensemble_snapshots_v2_db_reader',
+            'run-1',
+            '2026-05-24T00:00:00+00:00',
+            '2026-05-24T00:00:00+00:00',
+            32.0,
+            'ecmwf_open_data_local_calendar_day_max_v1',
+            '2026-05-24T08:10:00+00:00',
+            'VERIFIED',
+            'OK',
+            0
+        )
+        """,
+        (
+            json.dumps([70.5] * 41 + [71.5] * 10, separators=(",", ":")),
+            json.dumps([0.80, 0.20], separators=(",", ":")),
+            json.dumps([0.88, 0.12], separators=(",", ":")),
+        ),
+    )
+    _insert_forecast_reader_authority(conn)
+    conn.execute(
+        """
+        CREATE TABLE probability_trace_fact (
+            trace_id TEXT PRIMARY KEY,
+            decision_id TEXT,
+            decision_snapshot_id TEXT,
+            city TEXT,
+            target_date TEXT,
+            range_label TEXT,
+            direction TEXT,
+            p_posterior REAL,
+            recorded_at TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE selection_family_fact (
+            family_id TEXT PRIMARY KEY,
+            decision_snapshot_id TEXT,
+            city TEXT,
+            target_date TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE selection_hypothesis_fact (
+            hypothesis_id TEXT PRIMARY KEY,
+            family_id TEXT,
+            city TEXT,
+            target_date TEXT,
+            range_label TEXT,
+            direction TEXT,
+            p_value REAL,
+            ci_lower REAL,
+            passed_prefilter INTEGER,
+            recorded_at TEXT
+        )
+        """
+    )
+    conn.execute(
+        "INSERT INTO selection_family_fact VALUES ('canonical-family-1', 'snapshot-1', 'Chicago', '2026-05-25')"
+    )
+    probability_rows = []
+    hypothesis_rows = []
+    for index in range(1, condition_count + 1):
+        label = f"{70 + index - 1}-{71 + index - 1}°F"
+        yes_q = 0.80 if index == 1 else 0.20
+        no_q = 1.0 - yes_q
+        probability_rows.extend(
+            [
+                (f"trace-yes-{index}", f"decision-yes-{index}", "snapshot-1", "Chicago", "2026-05-25", label, "buy_yes", yes_q, "2026-05-24T08:12:00+00:00"),
+                (f"trace-no-{index}", f"decision-no-{index}", "snapshot-1", "Chicago", "2026-05-25", label, "buy_no", no_q, "2026-05-24T08:12:00+00:00"),
+            ]
+        )
+        hypothesis_rows.extend(
+            [
+                (f"hyp-yes-{index}", "canonical-family-1", "Chicago", "2026-05-25", label, "buy_yes", 0.001 if index == 1 else 0.80, 0.72 if index == 1 else 0.12, 1, "2026-05-24T08:12:00+00:00"),
+                (f"hyp-no-{index}", "canonical-family-1", "Chicago", "2026-05-25", label, "buy_no", 0.90 if index == 1 else 0.85, 0.12 if index == 1 else 0.72, 1, "2026-05-24T08:12:00+00:00"),
+            ]
+        )
+    conn.executemany(
+        "INSERT INTO probability_trace_fact VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        probability_rows,
+    )
+    conn.executemany(
+        "INSERT INTO selection_hypothesis_fact VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        hypothesis_rows,
+    )
+    return conn
+
+
+def _insert_forecast_reader_authority(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS source_run (
+            source_run_id TEXT PRIMARY KEY,
+            source_id TEXT NOT NULL,
+            track TEXT NOT NULL,
+            release_calendar_key TEXT NOT NULL,
+            ingest_mode TEXT NOT NULL,
+            origin_mode TEXT NOT NULL,
+            source_cycle_time TEXT NOT NULL,
+            source_issue_time TEXT,
+            source_release_time TEXT,
+            source_available_at TEXT,
+            fetch_started_at TEXT,
+            fetch_finished_at TEXT,
+            captured_at TEXT,
+            imported_at TEXT,
+            valid_time_start TEXT,
+            valid_time_end TEXT,
+            target_local_date TEXT,
+            city_id TEXT,
+            city_timezone TEXT,
+            temperature_metric TEXT,
+            physical_quantity TEXT,
+            observation_field TEXT,
+            data_version TEXT,
+            expected_members INTEGER,
+            observed_members INTEGER,
+            expected_steps_json TEXT NOT NULL DEFAULT '[]',
+            observed_steps_json TEXT NOT NULL DEFAULT '[]',
+            expected_count INTEGER,
+            observed_count INTEGER,
+            completeness_status TEXT NOT NULL,
+            partial_run INTEGER NOT NULL DEFAULT 0,
+            raw_payload_hash TEXT,
+            manifest_hash TEXT,
+            status TEXT NOT NULL,
+            reason_code TEXT,
+            recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS source_run_coverage (
+            coverage_id TEXT PRIMARY KEY,
+            source_run_id TEXT NOT NULL,
+            source_id TEXT NOT NULL,
+            source_transport TEXT NOT NULL,
+            release_calendar_key TEXT NOT NULL,
+            track TEXT NOT NULL,
+            city_id TEXT NOT NULL,
+            city TEXT NOT NULL,
+            city_timezone TEXT NOT NULL,
+            target_local_date TEXT NOT NULL,
+            temperature_metric TEXT NOT NULL,
+            physical_quantity TEXT NOT NULL,
+            observation_field TEXT NOT NULL,
+            data_version TEXT NOT NULL,
+            expected_members INTEGER NOT NULL,
+            observed_members INTEGER NOT NULL,
+            expected_steps_json TEXT NOT NULL,
+            observed_steps_json TEXT NOT NULL,
+            snapshot_ids_json TEXT NOT NULL DEFAULT '[]',
+            target_window_start_utc TEXT NOT NULL,
+            target_window_end_utc TEXT NOT NULL,
+            completeness_status TEXT NOT NULL,
+            readiness_status TEXT NOT NULL,
+            reason_code TEXT,
+            computed_at TEXT NOT NULL,
+            expires_at TEXT,
+            recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    conn.execute("DELETE FROM source_run WHERE source_run_id = 'run-1'")
+    conn.execute("DELETE FROM source_run_coverage WHERE coverage_id = 'coverage-1'")
+    conn.execute(
+        """
+        INSERT INTO source_run (
+            source_run_id, source_id, track, release_calendar_key, ingest_mode, origin_mode,
+            source_cycle_time, source_issue_time, source_release_time, source_available_at,
+            fetch_started_at, fetch_finished_at, captured_at, imported_at,
+            valid_time_start, valid_time_end, target_local_date, city_id, city_timezone,
+            temperature_metric, physical_quantity, observation_field, data_version,
+            expected_members, observed_members, expected_steps_json, observed_steps_json,
+            expected_count, observed_count, completeness_status, partial_run,
+            raw_payload_hash, manifest_hash, status, reason_code
+        ) VALUES (
+            'run-1', 'ecmwf_open_data', 'operational', 'ecmwf_open_data',
+            'SCHEDULED_LIVE', 'SCHEDULED_LIVE',
+            '2026-05-24T00:00:00+00:00', '2026-05-24T00:00:00+00:00',
+            '2026-05-24T07:00:00+00:00', '2026-05-24T08:10:00+00:00',
+            '2026-05-24T07:10:00+00:00', '2026-05-24T08:05:00+00:00',
+            '2026-05-24T08:10:00+00:00', '2026-05-24T08:10:00+00:00',
+            '2026-05-25T05:00:00+00:00', '2026-05-26T05:00:00+00:00',
+            '2026-05-25', 'Chicago', 'America/Chicago', 'high',
+            'temperature', 'high_temp', 'ecmwf_open_data_local_calendar_day_max_v1',
+            51, 51, '[0,3,6]', '[0,3,6]', 3, 3,
+            'COMPLETE', 0, 'hash-raw', 'hash-manifest', 'SUCCESS', NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO source_run_coverage (
+            coverage_id, source_run_id, source_id, source_transport, release_calendar_key, track,
+            city_id, city, city_timezone, target_local_date, temperature_metric,
+            physical_quantity, observation_field, data_version, expected_members, observed_members,
+            expected_steps_json, observed_steps_json, snapshot_ids_json, target_window_start_utc,
+            target_window_end_utc, completeness_status, readiness_status, reason_code,
+            computed_at, expires_at
+        ) VALUES (
+            'coverage-1', 'run-1', 'ecmwf_open_data', 'ensemble_snapshots_v2_db_reader',
+            'ecmwf_open_data', 'operational', 'Chicago', 'Chicago', 'America/Chicago',
+            '2026-05-25', 'high', 'temperature', 'high_temp',
+            'ecmwf_open_data_local_calendar_day_max_v1', 51, 51, '[0,3,6]', '[0,3,6]',
+            '["snapshot-1"]', '2026-05-25T05:00:00+00:00', '2026-05-26T05:00:00+00:00',
+            'COMPLETE', 'LIVE_ELIGIBLE', NULL, '2026-05-24T08:10:00+00:00',
+            '2026-05-25T00:00:00+00:00'
+        )
+        """
+    )
+
+
+def _receipt(event, conn: sqlite3.Connection, **kwargs):
+    forecast_conn = kwargs.pop("forecast_conn", conn)
+    topology_conn = kwargs.pop("topology_conn", forecast_conn)
+    return build_event_bound_no_submit_receipt(
+        event,
+        trade_conn=conn,
+        forecast_conn=forecast_conn,
+        topology_conn=topology_conn,
+        get_current_level=kwargs.pop("get_current_level", lambda: RiskLevel.GREEN),
+        **kwargs,
+    )
+
+
+def test_reactor_never_imports_venue_adapter():
+    tree = ast.parse(Path("src/events/reactor.py").read_text())
+    imports = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imports.extend(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            imports.append(node.module or "")
+    assert all("venue_adapter" not in imported for imported in imports)
+
+
+def test_engine_adapter_has_no_cycle_or_executor_boundary():
+    source = Path("src/engine/event_reactor_adapter.py").read_text()
+    assert "venue_adapter" not in source
+    assert "execute_final_intent" not in source
+    assert "run_cycle" not in source
+    assert "submit_existing_cycle_for_event" not in source
+    assert "edli_submit_accepted" not in source
+    assert "final_intents_built" not in source
+
+
+def test_adapter_source_truth_allows_complete_forecast_only():
+    complete = _forecast_event("COMPLETE")
+    partial_payload = json.loads(complete.payload_json)
+    partial_payload["completeness_status"] = "PARTIAL_ALLOWED"
+    partial = replace(complete, payload_json=json.dumps(partial_payload, sort_keys=True, separators=(",", ":")))
+
+    assert edli_source_truth_gate(complete) is True
+    assert edli_source_truth_gate(partial) is False
+
+
+def test_adapter_trade_score_gate_treats_trigger_events_as_hydration_inputs():
+    event = _forecast_event()
+    payload = json.loads(event.payload_json)
+    payload.update(
+        {
+            "p_fill_lcb": 0.5,
+            "q_5pct": 0.62,
+            "q_posterior": 0.64,
+            "c_95pct": 0.55,
+            "c_stress": 0.56,
+            "lambda_edge": 0.01,
+            "lambda_stress": 0.01,
+        }
+    )
+    positive = replace(event, payload_json=json.dumps(payload, sort_keys=True, separators=(",", ":")))
+    payload["c_95pct"] = 0.70
+    negative = replace(event, payload_json=json.dumps(payload, sort_keys=True, separators=(",", ":")))
+
+    assert edli_trade_score_gate(positive) is True
+    assert edli_trade_score_gate(negative) is True
+    assert edli_trade_score_gate(event) is True
+
+
+def test_runtime_receipt_uses_event_bound_final_intent_contract():
+    event = _bound_forecast_event()
+    receipt = _receipt(event, _trade_conn_with_snapshot())
+
+    assert receipt.submitted is True
+    assert receipt.event_id == event.event_id
+    assert receipt.causal_snapshot_id == event.causal_snapshot_id
+    assert receipt.trade_score_positive is True
+    assert receipt.trade_score is not None
+    assert receipt.trade_score > 0
+    assert receipt.q_live is not None
+    assert receipt.q_live > 0.85
+    assert receipt.c_fee_adjusted is not None
+    assert receipt.family_complete is True
+    assert receipt.fdr_pass is True
+    assert receipt.fdr_hypothesis_count == 4
+    assert receipt.kelly_execution_price_type == "ExecutionPrice"
+    assert receipt.kelly_price_fee_deducted is True
+    assert receipt.kelly_size_usd > 0
+    assert receipt.side_effect_status == "NO_SUBMIT"
+
+
+def test_forecast_trigger_event_without_q_or_token_fields_builds_no_submit_receipt():
+    event = _forecast_event()
+    receipt = _receipt(event, _trade_conn_with_snapshot())
+
+    assert receipt.submitted is True
+    assert receipt.token_id == "yes-1"
+    assert receipt.q_live is not None
+    assert receipt.q_live > 0.85
+    assert receipt.trade_score is not None
+    assert receipt.fdr_hypothesis_count == 4
+    assert receipt.kelly_execution_price_type == "ExecutionPrice"
+    assert receipt.side_effect_status == "NO_SUBMIT"
+
+
+def test_family_candidates_use_market_event_range_bounds_not_payload_default():
+    event = _forecast_event()
+    receipt = _receipt(event, _trade_conn_with_snapshot())
+
+    assert receipt.bin_label == "70-71°F"
+    assert receipt.bin_label != "0-1°F"
+
+
+def test_selected_snapshot_row_not_first_still_binds_matching_candidate():
+    event = _bound_forecast_event(token_id="yes-2")
+    receipt = _receipt(event, _trade_conn_with_snapshot())
+
+    assert receipt.condition_id == "condition-2"
+    assert receipt.token_id == "yes-2"
+    assert receipt.bin_label == "71-72°F"
+
+
+def test_runtime_receipt_uses_selected_no_snapshot_not_yes_side_ask():
+    event = _bound_forecast_event(token_id="no-1")
+    receipt = _receipt(event, _trade_conn_with_snapshot(selected_ask="0.10", no_selected_ask="0.80"))
+
+    assert receipt.submitted is False
+    assert receipt.token_id == "no-1"
+    assert receipt.executable_snapshot_id == "snapshot-exec-1-no"
+    assert receipt.c_fee_adjusted is not None
+    assert receipt.c_fee_adjusted >= 0.80
+    assert receipt.reason == "TRADE_SCORE_NON_POSITIVE"
+
+
+def test_runtime_receipt_rejects_selected_no_when_only_yes_side_snapshot_exists():
+    event = _bound_forecast_event(token_id="no-1")
+    conn = _trade_conn_with_snapshot()
+    conn.execute("DELETE FROM executable_market_snapshots WHERE selected_outcome_token_id = 'no-1'")
+    conn.execute(
+        """
+        UPDATE executable_market_snapshots
+        SET orderbook_depth_json = ?
+        WHERE selected_outcome_token_id = 'yes-1'
+        """,
+        (json.dumps({"YES": {"asks": [{"price": "0.40", "size": "100"}], "bids": []}}, separators=(",", ":")),),
+    )
+
+    receipt = _receipt(event, conn)
+
+    assert receipt.submitted is False
+    assert receipt.reason.startswith("EXECUTABLE_NATIVE_ASK_MISSING")
+
+
+def test_runtime_receipt_rejects_when_family_topology_has_missing_sibling_snapshot():
+    event = _bound_forecast_event(fdr_condition_count=3)
+    receipt = _receipt(event, _trade_conn_with_snapshot(condition_count=3, snapshot_condition_count=2))
+
+    assert receipt.submitted is False
+    assert receipt.reason.startswith("FDR_FULL_FAMILY_PROOF_MISSING")
+    assert receipt.family_complete is False
+
+
+def test_runtime_receipt_generates_fdr_from_family_not_event_payload():
+    event = _bound_forecast_event()
+    payload = json.loads(event.payload_json)
+    payload.pop("fdr_hypotheses", None)
+    event = replace(event, payload_json=json.dumps(payload, sort_keys=True, separators=(",", ":")))
+
+    receipt = _receipt(event, _trade_conn_with_snapshot())
+
+    assert receipt.fdr_hypothesis_count == 4
+    assert receipt.reason != "FDR_FULL_FAMILY_PROOF_MISSING"
+
+
 def test_forecast_receipt_does_not_require_old_probability_or_selection_facts():
     event = _bound_forecast_event()
     conn = _trade_conn_with_snapshot()
@@ -213,11 +640,7 @@ def test_forecast_receipt_does_not_require_old_probability_or_selection_facts():
     conn.execute("DROP TABLE selection_hypothesis_fact")
     conn.execute("DROP TABLE selection_family_fact")
 
-    receipt = build_event_bound_no_submit_receipt(
-        event,
-        trade_conn=conn,
-        get_current_level=lambda: RiskLevel.GREEN,
-    )
+    receipt = _receipt(event, conn)
 
     assert receipt.submitted is True
     assert receipt.q_live is not None
@@ -236,13 +659,7 @@ def test_forecast_receipt_uses_separate_forecast_authority_connection():
     trade_conn.execute("DROP TABLE source_run")
     trade_conn.execute("DROP TABLE source_run_coverage")
 
-    receipt = build_event_bound_no_submit_receipt(
-        event,
-        trade_conn=trade_conn,
-        forecast_conn=forecast_conn,
-        topology_conn=forecast_conn,
-        get_current_level=lambda: RiskLevel.GREEN,
-    )
+    receipt = _receipt(event, trade_conn, forecast_conn=forecast_conn, topology_conn=forecast_conn)
 
     assert receipt.submitted is True
     assert receipt.q_live is not None
@@ -261,16 +678,42 @@ def test_executable_snapshot_gate_uses_forecast_topology_authority_connection():
     assert gate(event) is True
 
 
+def test_executable_snapshot_gate_requires_topology_authority_connection():
+    event = _bound_forecast_event()
+    gate = executable_snapshot_gate_from_trade_conn(_trade_conn_with_snapshot())
+
+    assert gate(event) is False
+
+
+def test_receipt_requires_explicit_forecast_and_topology_authority_connections():
+    event = _bound_forecast_event()
+    conn = _trade_conn_with_snapshot()
+
+    missing_forecast = build_event_bound_no_submit_receipt(
+        event,
+        trade_conn=conn,
+        topology_conn=conn,
+        get_current_level=lambda: RiskLevel.GREEN,
+    )
+    missing_topology = build_event_bound_no_submit_receipt(
+        event,
+        trade_conn=conn,
+        forecast_conn=conn,
+        get_current_level=lambda: RiskLevel.GREEN,
+    )
+
+    assert missing_forecast.submitted is False
+    assert missing_forecast.reason == "FORECAST_AUTHORITY_CONNECTION_MISSING"
+    assert missing_topology.submitted is False
+    assert missing_topology.reason == "TOPOLOGY_AUTHORITY_CONNECTION_MISSING"
+
+
 def test_missing_calibration_authority_blocks_receipt():
     event = _bound_forecast_event()
     conn = _trade_conn_with_snapshot()
     conn.execute("UPDATE ensemble_snapshots_v2 SET p_cal_json = NULL")
 
-    receipt = build_event_bound_no_submit_receipt(
-        event,
-        trade_conn=conn,
-        get_current_level=lambda: RiskLevel.GREEN,
-    )
+    receipt = _receipt(event, conn)
 
     assert receipt.submitted is False
     assert receipt.reason.startswith("LIVE_INFERENCE_INPUTS_MISSING:CALIBRATION_AUTHORITY_MISSING")
@@ -281,14 +724,21 @@ def test_receipt_revalidates_source_run_coverage_after_event_emit():
     conn = _trade_conn_with_snapshot()
     conn.execute("UPDATE source_run_coverage SET readiness_status = 'BLOCKED'")
 
-    receipt = build_event_bound_no_submit_receipt(
-        event,
-        trade_conn=conn,
-        get_current_level=lambda: RiskLevel.GREEN,
-    )
+    receipt = _receipt(event, conn)
 
     assert receipt.submitted is False
     assert "FORECAST_READER_REVALIDATION_FAILED:readiness_BLOCKED" in receipt.reason
+
+
+def test_receipt_revalidates_source_run_coverage_snapshot_ids():
+    event = _bound_forecast_event()
+    conn = _trade_conn_with_snapshot()
+    conn.execute("UPDATE source_run_coverage SET snapshot_ids_json = '[\"other-snapshot\"]'")
+
+    receipt = _receipt(event, conn)
+
+    assert receipt.submitted is False
+    assert "FORECAST_READER_REVALIDATION_FAILED:coverage_snapshot_mismatch" in receipt.reason
 
 
 def test_top_ask_without_depth_does_not_create_fillable_quote():
@@ -302,11 +752,7 @@ def test_top_ask_without_depth_does_not_create_fillable_quote():
         """
     )
 
-    receipt = build_event_bound_no_submit_receipt(
-        event,
-        trade_conn=conn,
-        get_current_level=lambda: RiskLevel.GREEN,
-    )
+    receipt = _receipt(event, conn)
 
     assert receipt.submitted is False
     assert receipt.reason.startswith("EXECUTABLE_NATIVE_ASK_MISSING")
@@ -346,11 +792,7 @@ def test_forecast_receipt_uses_attached_forecasts_market_topology():
         ],
     )
 
-    receipt = build_event_bound_no_submit_receipt(
-        event,
-        trade_conn=conn,
-        get_current_level=lambda: RiskLevel.GREEN,
-    )
+    receipt = _receipt(event, conn, forecast_conn=conn, topology_conn=conn)
 
     assert receipt.submitted is True
     assert receipt.fdr_hypothesis_count == 4
@@ -361,11 +803,7 @@ def test_forecast_receipt_rejects_source_snapshot_available_after_event_availabl
     conn = _trade_conn_with_snapshot()
     conn.execute("UPDATE ensemble_snapshots_v2 SET available_at = '2026-05-24T08:11:00+00:00'")
 
-    receipt = build_event_bound_no_submit_receipt(
-        event,
-        trade_conn=conn,
-        get_current_level=lambda: RiskLevel.GREEN,
-    )
+    receipt = _receipt(event, conn)
 
     assert receipt.submitted is False
     assert receipt.reason.startswith("LIVE_INFERENCE_INPUTS_MISSING:causal forecast snapshot missing")
@@ -376,11 +814,7 @@ def test_forecast_receipt_requires_exact_causal_snapshot_from_source_data():
     conn = _trade_conn_with_snapshot()
     conn.execute("UPDATE ensemble_snapshots_v2 SET snapshot_id = 'other-snapshot'")
 
-    receipt = build_event_bound_no_submit_receipt(
-        event,
-        trade_conn=conn,
-        get_current_level=lambda: RiskLevel.GREEN,
-    )
+    receipt = _receipt(event, conn)
 
     assert receipt.submitted is False
     assert receipt.reason.startswith("LIVE_INFERENCE_INPUTS_MISSING:causal forecast snapshot missing")
@@ -391,11 +825,7 @@ def test_forecast_receipt_requires_metric_match_in_source_snapshot():
     conn = _trade_conn_with_snapshot()
     conn.execute("UPDATE ensemble_snapshots_v2 SET temperature_metric = 'low'")
 
-    receipt = build_event_bound_no_submit_receipt(
-        event,
-        trade_conn=conn,
-        get_current_level=lambda: RiskLevel.GREEN,
-    )
+    receipt = _receipt(event, conn)
 
     assert receipt.submitted is False
     assert receipt.reason.startswith("LIVE_INFERENCE_INPUTS_MISSING:causal forecast snapshot missing")
@@ -408,11 +838,7 @@ def test_day0_receipt_uses_latest_forecast_source_and_absorbing_boundary_not_old
     conn.execute("DROP TABLE selection_hypothesis_fact")
     conn.execute("DROP TABLE selection_family_fact")
 
-    receipt = build_event_bound_no_submit_receipt(
-        event,
-        trade_conn=conn,
-        get_current_level=lambda: RiskLevel.GREEN,
-    )
+    receipt = _receipt(event, conn)
 
     assert receipt.submitted is True
     assert receipt.condition_id == "condition-2"
@@ -425,11 +851,7 @@ def test_day0_receipt_uses_latest_forecast_source_and_absorbing_boundary_not_old
 
 def test_runtime_receipt_rejects_missing_native_ask_instead_of_defaulting_midpoint():
     event = _bound_forecast_event()
-    receipt = build_event_bound_no_submit_receipt(
-        event,
-        trade_conn=_trade_conn_with_snapshot(selected_ask=""),
-        get_current_level=lambda: RiskLevel.GREEN,
-    )
+    receipt = _receipt(event, _trade_conn_with_snapshot(selected_ask=""))
 
     assert receipt.submitted is False
     assert receipt.reason.startswith("EXECUTABLE_NATIVE_ASK_MISSING")
@@ -442,11 +864,7 @@ def test_runtime_receipt_uses_runtime_kelly_authority_not_event_payload():
     payload["kelly_multiplier"] = 0
     event = replace(event, payload_json=json.dumps(payload, sort_keys=True, separators=(",", ":")))
 
-    receipt = build_event_bound_no_submit_receipt(
-        event,
-        trade_conn=_trade_conn_with_snapshot(),
-        get_current_level=lambda: RiskLevel.GREEN,
-    )
+    receipt = _receipt(event, _trade_conn_with_snapshot())
 
     assert receipt.kelly_pass is True
     assert receipt.kelly_size_usd > 0

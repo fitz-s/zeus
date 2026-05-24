@@ -111,6 +111,8 @@ def executable_snapshot_gate_from_trade_conn(
     checked_at = (now or datetime.now(UTC)).astimezone(UTC)
 
     def _gate(event: OpportunityEvent) -> bool:
+        if topology_conn is None:
+            return False
         if not _table_exists(trade_conn, "executable_market_snapshots"):
             return False
         columns = _table_columns(trade_conn, "executable_market_snapshots")
@@ -118,7 +120,7 @@ def executable_snapshot_gate_from_trade_conn(
         if not required <= columns:
             return False
         payload = _payload(event)
-        family_topology_rows = _event_family_market_topology_rows(topology_conn or trade_conn, payload)
+        family_topology_rows = _event_family_market_topology_rows(topology_conn, payload)
         if not family_topology_rows:
             return False
         condition_ids = tuple(str(row.get("condition_id") or "") for row in family_topology_rows)
@@ -173,6 +175,66 @@ def build_event_bound_no_submit_receipt(
     *,
     trade_conn: sqlite3.Connection,
     get_current_level: Callable[[], RiskLevel],
+    forecast_conn: sqlite3.Connection | None = None,
+    topology_conn: sqlite3.Connection | None = None,
+) -> EventSubmissionReceipt:
+    """Produce a typed no-submit EDLI proof without running the cycle runner."""
+
+    payload = _payload(event)
+    if forecast_conn is None:
+        return EventSubmissionReceipt(False, event.event_id, event.causal_snapshot_id, reason="FORECAST_AUTHORITY_CONNECTION_MISSING")
+    if topology_conn is None:
+        return EventSubmissionReceipt(False, event.event_id, event.causal_snapshot_id, reason="TOPOLOGY_AUTHORITY_CONNECTION_MISSING")
+    source_conn = forecast_conn
+    topology_authority_conn = topology_conn
+    family_topology_rows = _event_family_market_topology_rows(topology_authority_conn, payload)
+    if not family_topology_rows:
+        return EventSubmissionReceipt(False, event.event_id, event.causal_snapshot_id, reason="EVENT_BOUND_MARKET_TOPOLOGY_MISSING")
+    family_condition_ids = tuple(str(row.get("condition_id") or "") for row in family_topology_rows)
+    family_rows = _latest_snapshot_rows_for_event_family(trade_conn, event, condition_ids=family_condition_ids)
+    if not family_rows:
+        return EventSubmissionReceipt(False, event.event_id, event.causal_snapshot_id, reason="EVENT_BOUND_EXECUTABLE_SNAPSHOT_MISSING")
+    snapshot_token_maps = _snapshot_token_maps_by_condition(family_rows)
+    missing_snapshot_conditions = sorted(set(family_condition_ids) - set(snapshot_token_maps))
+    if missing_snapshot_conditions:
+        return EventSubmissionReceipt(
+            False,
+            event.event_id,
+            event.causal_snapshot_id,
+            reason="FDR_FULL_FAMILY_PROOF_MISSING:missing executable snapshots for sibling conditions "
+            + ",".join(missing_snapshot_conditions),
+            family_complete=False,
+        )
+    topology = tuple(
+        _topology_candidate_from_market_event(row, snapshot_token_maps[str(row.get("condition_id") or "")], payload)
+        for row in family_topology_rows
+    )
+    row = _selected_snapshot_row_for_event(family_rows, payload)
+    if row is None:
+        return EventSubmissionReceipt(False, event.event_id, event.causal_snapshot_id, reason="EVENT_BOUND_SELECTED_SNAPSHOT_MISSING")
+    decision = EventBoundDecisionEngine().evaluate(
+        EventBoundDecisionRequest(
+            event=event,
+            market_topology=topology,
+            decision_time=datetime.now(UTC),
+            market_topology_source="executable_market_snapshots",
+        )
+    )
+    if decision.status != "CANDIDATE_FAMILY_READY" or decision.candidate_family is None:
+        return EventSubmissionReceipt(
+            False,
+            event.event_id,
+            event.causal_snapshot_id,
+            reason=decision.rejection_reason or "EVENT_BOUND_CANDIDATE_BINDING_FAILED",
+        )
+    family = decision.candidate_family
+    try:
+        proofs = _generate_candidate_proofs(
+            event=event,
+            payload=payload,
+            family=family,
+            snapshot_rows=family_rows,
+            trade_conn=trade_conn,
             forecast_conn=source_conn,
         )
     except ValueError as exc:
@@ -1449,6 +1511,14 @@ def _forecast_snapshot_reader_block_reason(
         return f"FORECAST_READER_REVALIDATION_FAILED:coverage_{coverage.get('completeness_status')}"
     if coverage.get("readiness_status") != "LIVE_ELIGIBLE":
         return f"FORECAST_READER_REVALIDATION_FAILED:readiness_{coverage.get('readiness_status')}"
+    snapshot_id = _nonnull(snapshot.get("snapshot_id"))
+    coverage_snapshot_ids = {str(item) for item in _json_list(coverage.get("snapshot_ids_json")) if str(item)}
+    if not coverage_snapshot_ids:
+        return "FORECAST_READER_REVALIDATION_FAILED:coverage_snapshot_ids_missing"
+    if snapshot_id not in coverage_snapshot_ids:
+        return "FORECAST_READER_REVALIDATION_FAILED:coverage_snapshot_mismatch"
+    if not allow_latest and _nonnull(event.causal_snapshot_id) not in coverage_snapshot_ids:
+        return "FORECAST_READER_REVALIDATION_FAILED:causal_snapshot_coverage_mismatch"
     expires_at = _parse_utc(coverage.get("expires_at"))
     if expires_at is None:
         return "FORECAST_READER_REVALIDATION_FAILED:coverage_expiry_missing"
