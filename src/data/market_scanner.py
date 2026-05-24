@@ -3025,7 +3025,7 @@ def _snapshot_max_outcomes_from_env(max_outcomes: int | None) -> int:
 def _snapshot_budget_seconds_from_env(budget_seconds: float | None = None) -> float:
     if budget_seconds is not None:
         return max(0.1, float(budget_seconds))
-    return _positive_float_env("ZEUS_MARKET_DISCOVERY_SNAPSHOT_BUDGET_SECONDS", 90.0)
+    return _positive_float_env("ZEUS_MARKET_DISCOVERY_SNAPSHOT_BUDGET_SECONDS", 130.0)
 
 
 def _outcome_market_end_at(market: dict[str, Any], outcome: dict[str, Any]) -> datetime | None:

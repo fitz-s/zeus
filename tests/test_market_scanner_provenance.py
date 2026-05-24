@@ -372,7 +372,7 @@ def test_slug_pattern_discovery_rotates_under_request_budget(monkeypatch):
     monkeypatch.setattr(ms, "SLUG_DISCOVERY_PREFIXES", ["highest-temperature-in-{city}-on-{date}"])
     monkeypatch.setattr(ms, "_SLUG_DISCOVERY_CURSOR", 0)
     monkeypatch.setattr(ms, "_gamma_get", fake_gamma_get)
-    monkeypatch.setattr(ms, "_event_has_active_children", lambda _event, _now: True)
+    monkeypatch.setattr(ms, "_event_has_active_children", lambda _event, _now, **_kwargs: True)
 
     now = datetime(2026, 5, 20, 10, 0, tzinfo=timezone.utc)
     first = ms._fetch_events_by_slug_pattern(
