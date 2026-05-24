@@ -427,6 +427,12 @@ class MarketChannelOnlineService:
     connected: bool = False
     gap_start: str | None = None
     refresh_action_count: int = 0
+    refresh_action_dropped_count: int = 0
+    refresh_window_action_count: int = 0
+    max_refresh_actions_per_window: int = 5
+    refresh_window_seconds: float = 60.0
+    _refresh_window_start: datetime | None = None
+    _refresh_action_keys: set[tuple[str, str, str]] = field(default_factory=set)
 
     def on_connect(self, *, received_at: str) -> list[EventWriteResult]:
         self.connected = True
@@ -532,6 +538,23 @@ class MarketChannelOnlineService:
     def _handle_action(self, action: MarketChannelAction) -> None:
         if not action.refresh_snapshot:
             return
+        now = datetime.now(UTC)
+        if (
+            self._refresh_window_start is None
+            or (now - self._refresh_window_start) >= timedelta(seconds=max(1.0, self.refresh_window_seconds))
+        ):
+            self._refresh_window_start = now
+            self.refresh_window_action_count = 0
+            self._refresh_action_keys.clear()
+        key = (str(action.reason or ""), str(action.condition_id or ""), str(action.token_id or ""))
+        if key in self._refresh_action_keys:
+            self.refresh_action_dropped_count += 1
+            return
+        if self.refresh_window_action_count >= max(1, self.max_refresh_actions_per_window):
+            self.refresh_action_dropped_count += 1
+            return
+        self._refresh_action_keys.add(key)
+        self.refresh_window_action_count += 1
         self.refresh_action_count += 1
         if self.refresh_snapshot is not None:
             self.refresh_snapshot(action)

@@ -281,6 +281,57 @@ def test_tick_size_change_invokes_refresh_callback():
     assert actions == [action]
 
 
+def test_market_channel_refresh_action_dedupes_within_window():
+    _conn, writer = _conn_writer()
+    actions = []
+    service = MarketChannelOnlineService(
+        MarketChannelIngestor(writer, active_token_ids={"token-1"}, token_metadata=_metadata()),
+        refresh_snapshot=actions.append,
+    )
+    action = MarketChannelAction(
+        refresh_snapshot=True,
+        reason="tick_size_change",
+        token_id="token-1",
+        condition_id="0xcondition",
+    )
+
+    service._handle_action(action)
+    service._handle_action(action)
+
+    assert service.refresh_action_count == 1
+    assert service.refresh_action_dropped_count == 1
+    assert actions == [action]
+
+
+def test_market_channel_refresh_action_budget_limits_work():
+    _conn, writer = _conn_writer()
+    actions = []
+    service = MarketChannelOnlineService(
+        MarketChannelIngestor(writer, active_token_ids={"token-1"}, token_metadata=_metadata()),
+        refresh_snapshot=actions.append,
+        max_refresh_actions_per_window=1,
+    )
+    first = MarketChannelAction(
+        refresh_snapshot=True,
+        reason="tick_size_change",
+        token_id="token-1",
+        condition_id="0xcondition-1",
+    )
+    second = MarketChannelAction(
+        refresh_snapshot=True,
+        reason="market_resolved",
+        token_id="token-2",
+        condition_id="0xcondition-2",
+    )
+
+    service._handle_action(first)
+    service._handle_action(second)
+
+    assert service.refresh_action_count == 1
+    assert service.refresh_action_dropped_count == 1
+    assert actions == [first]
+
+
 def test_market_channel_condition_refresh_does_not_fallback_to_unrelated_markets():
     from src.main import _edli_filter_markets_for_condition
 

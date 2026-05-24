@@ -176,6 +176,12 @@ Acceptance IDs A01-A40:
   `EVENT_BOUND_MARKET_TOPOLOGY_INVALID`. `p_cal_json` provenance also requires
   non-empty snapshot `source_id` and `source_run_id` before matching
   `p_cal_source_id` / `p_cal_source_run_id`.
+- Latest Codex-only deep review repair: market-channel refresh callbacks now
+  have local backpressure. `MarketChannelOnlineService` dedupes refresh actions
+  within a window and caps accepted refreshes with
+  `edli_v1.market_channel_refresh_max_actions_per_window=5` /
+  `market_channel_refresh_window_seconds=60`, reducing tick/resolve storm risk
+  before the required live DB-concurrency smoke.
 
 ## Current Phase
 
@@ -223,7 +229,7 @@ Fresh verification after latest calibration/fill/backpressure repair:
 - `python -m pytest -q tests/events tests/engine/test_event_reactor_no_bypass.py
   tests/strategy/live_inference tests/money_path
   tests/state/test_edli_table_ownership.py --maxfail=10` -> PASS,
-  220 passed.
+  222 passed.
 - `python scripts/check_schema_version.py && python
   scripts/check_table_registry_coherence.py && python
   scripts/ci/assert_test_quality.py` -> PASS.

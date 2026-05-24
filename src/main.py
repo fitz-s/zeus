@@ -2700,6 +2700,13 @@ def _edli_market_channel_ingestor_cycle() -> None:
                     ),
                     fetch_orderbook=clob.get_orderbook_snapshot,
                     refresh_snapshot=_refresh_snapshot_action,
+                    max_refresh_actions_per_window=_edli_bounded_positive_int(
+                        edli_cfg,
+                        "market_channel_refresh_max_actions_per_window",
+                        default=5,
+                        maximum=20,
+                    ),
+                    refresh_window_seconds=float(edli_cfg.get("market_channel_refresh_window_seconds", 60.0) or 60.0),
                 )
                 run_market_channel_service_forever(
                     service,

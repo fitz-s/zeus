@@ -83,6 +83,12 @@ Implemented after this review:
   closed with `EVENT_BOUND_MARKET_TOPOLOGY_INVALID` instead of falling back to
   payload/default `0-1°F` bins. `p_cal_json` provenance also requires non-empty
   snapshot `source_id` and `source_run_id` before source matching can pass.
+- Codex-only deep review then found a P1 market-channel runtime pressure gap:
+  public tick/resolve actions could synchronously trigger unlimited refresh
+  callbacks. `MarketChannelOnlineService` now dedupes refresh actions within a
+  window and caps accepted refresh actions with
+  `edli_v1.market_channel_refresh_max_actions_per_window=5` /
+  `market_channel_refresh_window_seconds=60`.
 - Day0 remains explicitly out of deploy scope for this PR: the config keeps
   `day0_extreme_trigger_enabled=false` and `day0_hard_fact_live_enabled=false`
   until an online `Day0ObservationContext` hook is implemented and smoked.
@@ -98,7 +104,7 @@ Fresh verification after this repair:
 - `python -m pytest -q tests/events tests/engine/test_event_reactor_no_bypass.py
   tests/strategy/live_inference tests/money_path
   tests/state/test_edli_table_ownership.py --maxfail=10` -> PASS,
-  220 passed.
+  222 passed.
 - `python scripts/check_schema_version.py && python
   scripts/check_table_registry_coherence.py && python
   scripts/ci/assert_test_quality.py` -> PASS.
@@ -120,4 +126,4 @@ Still not deploy-ready:
   baseline waiver before deploy-ready.
 - Daemon restart / live market-channel websocket / user-channel smoke remain unrun.
 - RiskGuard proof depth, Day0 online hook/boundary receipt reporting, and
-  market-channel concurrency smoke remain follow-up deploy gates.
+  live market-channel/DB concurrency smoke remain follow-up deploy gates.
