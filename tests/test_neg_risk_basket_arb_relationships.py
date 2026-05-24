@@ -635,3 +635,138 @@ class TestR7EarlyOptimumRegression:
         assert float(dec.vector_profit) == pytest.approx(float(expected_profit), rel=1e-6), (
             f"vector_profit at q*={dec.q_star}: expected {expected_profit}, got {dec.vector_profit}"
         )
+
+
+# ---------------------------------------------------------------------------
+# R8 — proof_inputs_hash distinguishes order-book depth (P1-8)
+# ---------------------------------------------------------------------------
+
+class TestR8ProofHashDepthSensitivity:
+    """proof_inputs_hash must encode full order-book depth, not just best-ask + q_star.
+
+    Two families with identical best-ask and q_star but different second-level
+    prices must produce distinct hashes (economic identity requires full depth).
+    """
+
+    def _make_two_level_family(self, second_level_price: Decimal) -> FamilyOrderBookSnapshot:
+        """2-leg family with 2 YES levels per leg; only second level price varies."""
+        leg0 = LegBook(
+            condition_id="0xcond00",
+            yes_levels=(
+                PriceLevel(Decimal("0.10"), Decimal("5")),
+                PriceLevel(second_level_price, Decimal("5")),
+            ),
+            no_levels=(PriceLevel(Decimal("0.85"), Decimal("10")),),
+        )
+        leg1 = LegBook(
+            condition_id="0xcond01",
+            yes_levels=(
+                PriceLevel(Decimal("0.10"), Decimal("5")),
+                PriceLevel(second_level_price, Decimal("5")),
+            ),
+            no_levels=(PriceLevel(Decimal("0.85"), Decimal("10")),),
+        )
+        return FamilyOrderBookSnapshot(
+            legs=(leg0, leg1),
+            neg_risk_market_id="nrm-r8",
+            captured_at_iso="2026-06-15T09:00:00+00:00",
+        )
+
+    def test_different_depth_levels_produce_different_hashes(self):
+        """Same best-ask + q_star, different second-level price → distinct hashes."""
+        # Both families: best ask = 0.10 per leg, q* limited to 5 shares (first level)
+        # Family A: second level at 0.20; Family B: second level at 0.30
+        # Different depth → different economic book → different hash required.
+        family_a = self._make_two_level_family(Decimal("0.20"))
+        family_b = self._make_two_level_family(Decimal("0.30"))
+
+        conn_a = _conn()
+        conn_b = _conn()
+        analysis_a = _make_analysis(family_a)
+        analysis_b = _make_analysis(family_b)
+        ctx_a = _ctx(conn_a, analysis_a)
+        ctx_b = _ctx(conn_b, analysis_b)
+
+        dec_a = NegRiskBasket().evaluate(context=ctx_a, conn=conn_a, decision_time=_DT)
+        dec_b = NegRiskBasket().evaluate(context=ctx_b, conn=conn_b, decision_time=_DT)
+
+        assert dec_a.outcome == "enter", f"Expected enter for family_a; got {dec_a!r}"
+        assert dec_b.outcome == "enter", f"Expected enter for family_b; got {dec_b!r}"
+        assert isinstance(dec_a, VectorEdgeDecision)
+        assert isinstance(dec_b, VectorEdgeDecision)
+
+        # q_star and best_ask are identical; only second level differs
+        assert dec_a.q_star == dec_b.q_star, (
+            f"q_star should be equal: {dec_a.q_star} vs {dec_b.q_star}"
+        )
+        assert dec_a.proof_inputs_hash != dec_b.proof_inputs_hash, (
+            "proof_inputs_hash must differ when order-book depth differs "
+            "(same best-ask/q_star is insufficient for economic identity)"
+        )
+
+
+# ---------------------------------------------------------------------------
+# R9 — price_limit is last consumed level price, not best ask (P1-9)
+# ---------------------------------------------------------------------------
+
+class TestR9PriceLimitLastConsumed:
+    """price_limit on each LegIntent must be last consumed level's price at q_star.
+
+    If q_star sweeps multiple levels, the limit price must reflect the deepest
+    (highest-priced) level consumed — not the best ask.
+
+    Regression: pre-fix code used min(lv.price) = best ask for price_limit.
+    With levels (0.10, 5) and (0.20, 5) and q_star=8, best ask = 0.10 but
+    fills 5@0.10 + 3@0.20 — price_limit must be 0.20 (last consumed), not 0.10.
+    """
+
+    def test_price_limit_is_last_consumed_level_not_best_ask(self):
+        """2-level leg: (0.10, 5 shares) + (0.20, 5 shares); q_star=8 → price_limit=0.20."""
+        # YES basket: each leg cheap enough to be profitable at q=8.
+        # Levels: first 5 shares at 0.10, next 5 shares at 0.20.
+        # q_star=8 requires consuming both levels: 5@0.10 + 3@0.20.
+        # price_limit must be 0.20 (last consumed), NOT 0.10 (best ask).
+        leg0 = LegBook(
+            condition_id="0xcond00",
+            yes_levels=(
+                PriceLevel(Decimal("0.10"), Decimal("5")),
+                PriceLevel(Decimal("0.20"), Decimal("5")),
+            ),
+            no_levels=(PriceLevel(Decimal("0.85"), Decimal("10")),),
+        )
+        leg1 = LegBook(
+            condition_id="0xcond01",
+            yes_levels=(
+                PriceLevel(Decimal("0.10"), Decimal("5")),
+                PriceLevel(Decimal("0.20"), Decimal("5")),
+            ),
+            no_levels=(PriceLevel(Decimal("0.85"), Decimal("10")),),
+        )
+        family = FamilyOrderBookSnapshot(
+            legs=(leg0, leg1),
+            neg_risk_market_id="nrm-r9",
+            captured_at_iso="2026-06-15T09:00:00+00:00",
+        )
+        conn = _conn()
+        analysis = _make_analysis(family)
+        ctx = _ctx(conn, analysis)
+        dec = NegRiskBasket().evaluate(context=ctx, conn=conn, decision_time=_DT)
+
+        assert dec.outcome == "enter", f"Expected enter; got {dec!r}"
+        assert isinstance(dec, VectorEdgeDecision)
+
+        # Force check: if q_star consumed both levels, price_limit must be 0.20
+        if dec.q_star > Decimal("5"):
+            for leg_intent in dec.legs:
+                assert leg_intent.price_limit == Decimal("0.20"), (
+                    f"q_star={dec.q_star} consumed second level (0.20); "
+                    f"price_limit must be 0.20 (last consumed), "
+                    f"got {leg_intent.price_limit!r} — pre-fix bug returns best ask 0.10"
+                )
+        else:
+            # q_star=5 — only first level consumed; best_ask == last_consumed
+            for leg_intent in dec.legs:
+                assert leg_intent.price_limit == Decimal("0.10"), (
+                    f"q_star=5 consumed only first level; price_limit must be 0.10, "
+                    f"got {leg_intent.price_limit!r}"
+                )

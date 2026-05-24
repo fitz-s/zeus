@@ -224,19 +224,40 @@ def _opt_no(
     return best
 
 
+def _last_consumed_price(levels: tuple[PriceLevel, ...], q_star: Decimal) -> Decimal:
+    """Return price of last level consumed sweeping q_star shares ascending.
+
+    Mirrors _sweep_yes/_sweep_no logic. price_limit must be the last consumed
+    level's price (highest price required to fill q_star), not best ask.
+    Returns Decimal(0) when q_star <= 0 or levels empty.
+    """
+    if q_star <= Decimal(0):
+        return Decimal(0)
+    remaining = q_star
+    last_price = Decimal(0)
+    for lv in sorted(levels, key=lambda x: x.price):
+        fill = min(remaining, lv.quantity)
+        if fill > 0:
+            last_price = lv.price
+            remaining -= fill
+        if remaining <= 0:
+            break
+    return last_price
+
+
 def _build_yes_legs(
     family: FamilyOrderBookSnapshot, q_star: Decimal
 ) -> tuple[LegIntent, ...]:
-    """Build YES LegIntents at q_star (best YES ask for each leg)."""
+    """Build YES LegIntents at q_star (last consumed YES ask for each leg)."""
     intents = []
     for leg in family.legs:
-        best_ask = min((lv.price for lv in leg.yes_levels), default=Decimal(0))
+        price_limit = _last_consumed_price(leg.yes_levels, q_star)
         intents.append(
             LegIntent(
                 side="buy_yes",
                 condition_id=leg.condition_id,
                 quantity=q_star,
-                price_limit=best_ask,
+                price_limit=price_limit,
             )
         )
     return tuple(intents)
@@ -245,16 +266,16 @@ def _build_yes_legs(
 def _build_no_legs(
     family: FamilyOrderBookSnapshot, q_star: Decimal
 ) -> tuple[LegIntent, ...]:
-    """Build NO LegIntents at q_star (best NO ask for each leg)."""
+    """Build NO LegIntents at q_star (last consumed NO ask for each leg)."""
     intents = []
     for leg in family.legs:
-        best_ask = min((lv.price for lv in leg.no_levels), default=Decimal(0))
+        price_limit = _last_consumed_price(leg.no_levels, q_star)
         intents.append(
             LegIntent(
                 side="buy_no",
                 condition_id=leg.condition_id,
                 quantity=q_star,
-                price_limit=best_ask,
+                price_limit=price_limit,
             )
         )
     return tuple(intents)
@@ -396,18 +417,32 @@ class NegRiskBasket(BaseStrategyCandidate):
             payoff = Decimal(family.K - 1) * q_star  # NO basket: (K-1) pay $1 each
             profit = pi_no
 
-        # --- Compute proof_inputs_hash (§19.3): SHA-256 of legs + q_star + fee_rate ---
+        # --- Compute proof_inputs_hash (§19.3): SHA-256 of full canonical proof inputs ---
+        # P1-8: include full order-book depth (yes_levels/no_levels per leg), algorithm
+        # version, neg_risk_market_id, and selected_side.  Two order books with identical
+        # q*/best-ask but different depth at consumed levels produce distinct hashes.
         _proof_blob = json.dumps(
             {
-                "legs": [
-                    {
-                        "condition_id": lg.condition_id,
-                        "side": lg.side,
-                        "quantity": str(lg.quantity),
-                        "price_limit": str(lg.price_limit),
-                    }
-                    for lg in legs
-                ],
+                "algorithm": "neg_risk_basket_v1",
+                "family": {
+                    "neg_risk_market_id": family.neg_risk_market_id,
+                    "captured_at_iso": family.captured_at_iso,
+                    "legs": [
+                        {
+                            "condition_id": leg.condition_id,
+                            "yes_levels": [
+                                [str(lv.price), str(lv.quantity)]
+                                for lv in sorted(leg.yes_levels, key=lambda x: x.price)
+                            ],
+                            "no_levels": [
+                                [str(lv.price), str(lv.quantity)]
+                                for lv in sorted(leg.no_levels, key=lambda x: x.price)
+                            ],
+                        }
+                        for leg in family.legs
+                    ],
+                },
+                "selected_side": basket_side,
                 "q_star": str(q_star),
                 "fee_rate": str(fee_rate),
             },
