@@ -296,7 +296,6 @@ def _check_redeem_state(
         if not _table_exists(conn, "settlement_commands"):
             return GateResult("redeem_state", FAIL, "missing_table:settlement_commands")
         allow = set(allow_redeem_command)
-        now_iso = now.isoformat()
 
         # Hard-block states: always fail unless explicitly whitelisted.
         placeholders = ",".join("?" for _ in BLOCKING_REDEEM_STATES)

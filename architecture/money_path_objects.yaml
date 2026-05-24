@@ -288,9 +288,9 @@ state_machines:
       NULL contribution now fails closed for CURRENT data_versions (UNKNOWN) and
       passes through only for legacy versions (LEGACY_NULL_PASSTHROUGH, recorded
       in applied_validations).
-      Authority: docs/operations/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md;
-      bundle-layer selection design: docs/operations/task_2026-05-22_forecast_bundle_layer_fix/SPEC.md
-      (historical session scratchpad .claude/jobs/866db2ea was non-verifiable; replaced).
+      Authority: docs/operations/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md
+      (bundle-layer selection design archived in that doc; prior .claude/jobs scratchpad
+      path was non-repo-verifiable and has been removed).
     states:
       - FULL_CONTRIBUTOR
       - PARTIAL_CONTRIBUTOR

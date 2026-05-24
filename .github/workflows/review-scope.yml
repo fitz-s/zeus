@@ -59,9 +59,11 @@ jobs:
             || { echo "::warning title=Tier-0 without tests::Tier-0 runtime files changed without paired tests — see review-scope summary"; exit 1; }
 
       - name: Collect review scope (JSON summary)
+        if: always()
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
+          set -o pipefail
           python scripts/review_scope_collect.py \
             --base "$BASE_SHA" \
             --json \
