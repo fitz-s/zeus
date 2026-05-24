@@ -1,9 +1,10 @@
 # Created: 2026-05-24
-# Last reused or audited: 2026-05-24
+# Lifecycle: created=2026-05-24; last_reviewed=2026-05-24; last_reused=2026-05-24
 # Authority basis: fix(discovery): restore full-city market substrate coverage (50→7 regression)
 # Purpose: Relationship antibody — refresh_executable_market_substrate_snapshots must
 #   capture snapshots for ≥ all-but-one city when fed a full 51-city market list.
 #   Regressed in #203 (slug-only wiring) + global top-8 cap.
+# Reuse: import refresh_executable_market_substrate_snapshots + ms.cities_by_name
 """Relationship antibody: full-city coverage through substrate refresh.
 
 Two tests:
