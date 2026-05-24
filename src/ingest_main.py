@@ -925,6 +925,30 @@ def _uma_optional_settings() -> tuple[str, str, int, int]:
     )
 
 
+def _uma_era_end_block() -> int:
+    """Optional UMA-era end block (PR5 data_temporal_kernel).
+
+    UMA OO V2 weather settlement is HISTORICAL: post-2026-02-21 Polymarket uses the internal
+    automatic resolver (Gamma is canonical). Scanning Polygon past the UMA era wastes RPC
+    budget on blocks that can hold no relevant UMA settle event. When the operator configures
+    ``settings["uma"]["era_end_block"]`` (> 0), the listener will not scan past it.
+
+    Returns 0 when unconfigured — the listener then behaves EXACTLY as before (no era cap).
+    """
+    from src.config import settings
+
+    try:
+        uma_cfg = settings["uma"]
+    except KeyError:
+        return 0
+    if not isinstance(uma_cfg, dict):
+        return 0
+    try:
+        return max(0, int(uma_cfg.get("era_end_block", 0) or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
 @_scheduler_job("ingest_uma_resolution_listener")
 def _uma_resolution_listener_tick():
     """Poll Polygon RPC for UMA OO Settle events — 5-min interval.
@@ -1026,6 +1050,20 @@ def _uma_resolution_listener_tick():
             else:
                 from_block = cursor + 1
             to_block = min(from_block + max_per_tick - 1, head_block)
+
+            # PR5 era guard: UMA OO V2 is historical (pre-2026-02-21 cutover to Gamma).
+            # When era_end_block is configured, never scan past it. era_end_block=0 disables
+            # the guard (behavior-identical to pre-PR5).
+            era_end_block = _uma_era_end_block()
+            if era_end_block > 0:
+                if from_block > era_end_block:
+                    logger.debug(
+                        "ingest_uma_resolution_listener: from_block=%s past era_end_block=%s; "
+                        "UMA era ended — skipping scan",
+                        from_block, era_end_block,
+                    )
+                    return
+                to_block = min(to_block, era_end_block)
 
             if to_block < from_block:
                 logger.debug(
