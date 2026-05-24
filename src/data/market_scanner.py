@@ -2977,7 +2977,10 @@ def read_persisted_weather_markets(
 def _snapshot_max_outcomes_from_env(max_outcomes: int | None) -> int:
     if max_outcomes is not None:
         return max(1, int(max_outcomes))
-    return _positive_int_env("ZEUS_MARKET_DISCOVERY_SNAPSHOT_MAX_OUTCOMES", 8)
+    # Per-city cap: how many (condition_id, direction) pairs to capture per city.
+    # Default 4 = 2 priority bins × 2 directions.  Previously this was a global
+    # cap of 8 which limited coverage to ~4 cities regardless of input size.
+    return _positive_int_env("ZEUS_MARKET_DISCOVERY_SNAPSHOT_MAX_OUTCOMES", 4)
 
 
 def _snapshot_budget_seconds_from_env(budget_seconds: float | None = None) -> float:
@@ -3072,19 +3075,34 @@ def refresh_executable_market_substrate_snapshots(
     max_outcomes: int | None = None,
     budget_seconds: float | None = None,
 ) -> dict[str, Any]:
-    """Capture fresh executable snapshots for the live reader substrate."""
+    """Capture fresh executable snapshots for the live reader substrate.
+
+    Selection is BREADTH-FIRST per city: each city contributes up to
+    ``max_outcomes`` (default 4 = 2 bins × 2 directions) candidates before any
+    city exceeds that cap.  The old design applied a global top-K which let the
+    highest-priority ~4 cities monopolise all 8 slots (regression from #203/#221).
+
+    CLOB-rate envelope (ZEUS_MARKET_DISCOVERY_SNAPSHOT_MAX_OUTCOMES=4 default):
+      51 cities × 4 outcomes × 3 HTTP calls each = 612 CLOB calls per cycle.
+      At ~1 s/call this would take ~10 min — well above the 90 s budget gate
+      (ZEUS_MARKET_DISCOVERY_SNAPSHOT_BUDGET_SECONDS).  In practice the budget
+      limits the wall-clock cost; ~90 outcomes are captured per cycle (~30 cities).
+      Operators can raise the budget or tighten per-city cap via env var.
+    """
 
     captured = captured_at or datetime.now(timezone.utc)
-    limit = _snapshot_max_outcomes_from_env(max_outcomes)
+    per_city_limit = _snapshot_max_outcomes_from_env(max_outcomes)
     attempted = inserted = skipped = failed = 0
     failures: list[dict[str, str]] = []
     seen_snapshot_sides: set[tuple[str, str]] = set()
-    candidates: list[
-        tuple[tuple[int, float, float], int, dict[str, Any], dict[str, Any], str, str]
-    ] = []
+
+    # Group candidates by city slug for breadth-first interleaving.
+    # city_candidates: city_key → sorted list of (priority, ordinal, market, outcome, cid, dir)
+    city_candidates: dict[str, list[tuple]] = {}
     ordinal = 0
 
     for market in markets or []:
+        city_key = str(market.get("slug") or market.get("event_id") or "unknown")
         for outcome in market.get("outcomes", []) or []:
             ordinal += 1
             condition_id = str(outcome.get("condition_id") or outcome.get("market_id") or "").strip()
@@ -3107,7 +3125,7 @@ def refresh_executable_market_substrate_snapshots(
                     skipped += 1
                     continue
                 seen_snapshot_sides.add(snapshot_side)
-                candidates.append(
+                city_candidates.setdefault(city_key, []).append(
                     (
                         _snapshot_refresh_priority(market, outcome, captured=captured),
                         ordinal,
@@ -3118,11 +3136,23 @@ def refresh_executable_market_substrate_snapshots(
                     )
                 )
 
-    candidates.sort(key=lambda item: (item[0], item[1]))
-    if len(candidates) > limit:
-        skipped += len(candidates) - limit
+    # Sort within each city by priority, apply per-city cap, then interleave
+    # breadth-first: take slot 0 from each city, then slot 1, etc.
+    per_city_sorted: list[list[tuple]] = []
+    for city_key in sorted(city_candidates):
+        city_list = sorted(city_candidates[city_key], key=lambda item: (item[0], item[1]))
+        if len(city_list) > per_city_limit:
+            skipped += len(city_list) - per_city_limit
+            city_list = city_list[:per_city_limit]
+        per_city_sorted.append(city_list)
 
-    selected_candidates = candidates[:limit]
+    # Interleave: slot 0 from each city, then slot 1, etc.
+    selected_candidates: list[tuple] = []
+    max_slots = max((len(c) for c in per_city_sorted), default=0)
+    for slot in range(max_slots):
+        for city_list in per_city_sorted:
+            if slot < len(city_list):
+                selected_candidates.append(city_list[slot])
     deadline = time.monotonic() + _snapshot_budget_seconds_from_env(budget_seconds)
     budget_exhausted = False
     for index, (_priority, _ordinal, market, outcome, condition_id, direction) in enumerate(
@@ -3162,7 +3192,7 @@ def refresh_executable_market_substrate_snapshots(
         "inserted": inserted,
         "skipped": skipped,
         "failed": failed,
-        "truncated": int(len(candidates) > limit or budget_exhausted),
+        "truncated": int(skipped > 0 or budget_exhausted),
         "budget_exhausted": int(budget_exhausted),
     }
     if failures:

@@ -1614,13 +1614,16 @@ def _market_discovery_cycle() -> None:
         return
     try:
         from src.data.market_scanner import (
-            find_slug_pattern_weather_markets,
+            find_weather_markets,
             refresh_executable_market_substrate_snapshots,
         )
         from src.data.polymarket_client import PolymarketClient
         from src.state.db import get_trade_connection
 
-        events = find_slug_pattern_weather_markets(
+        # Full tag-query (all ~51 cities) is the primary scan; slug-pattern
+        # fallback is already included via find_weather_markets(include_slug_pattern=True).
+        # Regressed to slug-only (14 cities) by #203/#221; restored here.
+        events = find_weather_markets(
             min_hours_to_resolution=0.0,
         )
         conn = get_trade_connection(write_class="live")
