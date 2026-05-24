@@ -16,17 +16,17 @@ PR #321 claimed to fix "all P0/P1/P2 findings" but used a DIFFERENT internal num
 |---------|-------------|--------|
 | P0-1 | Release gate SQL proxy; accepts NULL expires_at + NULL strategy_key | **PARTIALLY FIXED** — NULL expiry + NULL strategy_key now rejected; source_run/coverage chain not yet validated |
 | P0-2 | Bundle selection pre-blocked by latest scope-level readiness before 00Z contributor | **OPEN** — prior PR moved producer_reason to diagnostic fallback but did NOT fix pre-enumeration hard-block by latest scope row |
-| P1-1 | Day0 WU hours=23 cannot prove full local-day coverage interval | **OPEN** |
+| P1-1 | Day0 WU hours=23 cannot prove full local-day coverage interval | **DONE (Phase A)** — 2026-05-24: `_fetch_wu_observation()` computes `WINDOW_INCOMPLETE` when first sample >2h after midnight; evaluator `_day0_observation_quality_rejection_reason()` fail-closes on WINDOW_INCOMPLETE. P2-1 DB reader wiring still deferred. |
 | P1-2 | Day0 lock uses raw float, not settlement-rounded value | **DONE** — evaluator.py `_day0_high_truth_classification_for_edge()` now applies `SettlementSemantics.round_single()` |
-| P1-3 | MC P_raw nondeterministic; no replay seed | **OPEN** |
-| P1-4 | PromotionReadinessValidator ignores REGRET_ONLY_SCOPE from EvidenceReport | **OPEN** |
-| P1-5 | PARTIAL_CONTRIBUTOR / boundary_ambiguous policy inconsistency | **OPEN** — prior PR set NON_CONTRIBUTOR for boundary_ambiguous but read_executable_forecast_snapshot() still has conflicting pass-through comments |
+| P1-3 | MC P_raw nondeterministic; no replay seed | **DONE (Phase A)** — 2026-05-24: `ensemble_signal.py` derives deterministic sha256 seed from member_maxes + n_mc + sigma + bins. Phase B (persist mc_seed + p_raw_vector_hash) deferred (schema change). |
+| P1-4 | PromotionReadinessValidator ignores REGRET_ONLY_SCOPE from EvidenceReport | **DONE** — 2026-05-24: `promotion_readiness.py` hard-gates on `cohort_scope_status != "FULL_SCOPE"` before evaluating any signals; returns NOT_READY immediately. |
+| P1-5 | PARTIAL_CONTRIBUTOR / boundary_ambiguous policy inconsistency | **DONE** — prior PR (pre-2026-05-24) fixed NON_CONTRIBUTOR for boundary_ambiguous; confirmed by code inspection 2026-05-24. |
 | P1-6 | Release-gate fixture inserts non-canonical LIVE_ELIGIBLE row | **PARTIALLY FIXED** — expires_at + strategy_key now present; still using direct SQL not canonical write_readiness_state() |
-| P1-7 | NegRisk proof hash omits full orderbook depth | **OPEN** (shadow-only severity) |
-| P1-8 | NegRisk price_limit = best ask, not last consumed level at q_star | **OPEN** (shadow-only severity) |
-| P2-1 | Correct Day0 DB extrema reader not production-wired | **OPEN** (same as P1-1) |
+| P1-7 | NegRisk proof hash omits full orderbook depth | **DONE** — prior PR fixed; confirmed by code inspection 2026-05-24. Shadow-only. |
+| P1-8 | NegRisk price_limit = best ask, not last consumed level at q_star | **DONE** — prior PR fixed; confirmed by code inspection 2026-05-24. Shadow-only. |
+| P2-1 | Correct Day0 DB extrema reader not production-wired | **DEFERRED** — window-completeness gate (P1-1 Phase A) provides partial protection; full DB reader wiring is a separate multi-file task. |
 | P2-2 | Local /Users/leofitz/.claude/jobs/ paths in source files | **DONE** — all 6 files replaced 2026-05-24 |
-| P2-3 | ECMWF source role "diagnostic" vs entry-path auditability | **OPEN** — "scheduled_collector" is not a valid ForecastSourceRole Literal; needs new role value or documented separation |
+| P2-3 | ECMWF source role "diagnostic" vs entry-path auditability | **DONE** — prior PR set `FORECAST_SOURCE_ROLE = "entry_primary"`; confirmed by code inspection 2026-05-24. |
 
 ---
 
@@ -73,15 +73,12 @@ Note: `source_run_id IS NOT NULL` NOT added to gate — `entry_readiness_writer.
 
 ## Deferred Open Work (larger scope)
 
-| Task | Findings | Scope |
-|------|----------|-------|
-| TASK-D | P1-1/P2-1 | Wire `read_day0_observed_extrema_v2()` into production; add interval coverage proof to observation_client.py. Multi-file, needs planning. |
-| TASK-E | P1-3 | Deterministic MC seed via sha256(snapshot_id, source_run_id, city_id, ...); persist seed + p_raw_vector_hash. Schema change required. |
-| TASK-F | P1-4 | `experiment_decisions` table; PromotionReadinessValidator blocks REGRET_ONLY_SCOPE. Schema change. |
-| TASK-G | P0-2 | Producer readiness bundle-granular (scope_key include coverage_id; or move pre-gate into per-candidate evaluation). Large refactor. |
-| TASK-H | P1-5 | Pick one PARTIAL_CONTRIBUTOR live policy (strict: always block; or haircut: allow with strategy profile flag). |
-| TASK-I | P1-7/P1-8 | NegRisk basket: hash full orderbook depth; price_limit = last consumed level at q_star. Shadow-only, lower urgency. |
-| TASK-J | P0-1 best | Replace SQL proxy with actual `read_executable_forecast()` call. Requires scope enumeration context. Large redesign. |
+| Task | Findings | Status | Scope |
+|------|----------|--------|-------|
+| TASK-D | P2-1 | DEFERRED | Wire `read_day0_observed_extrema_v2()` into production. P1-1 Phase A gate provides fail-close on missing window proof; full DB reader is a separate multi-file PR. |
+| TASK-E | P1-3 Phase B | DEFERRED | Persist mc_seed + p_raw_vector_hash; requires schema bump + migration. Phase A (deterministic seed) DONE. |
+| TASK-G | P0-2 | OPEN | Producer readiness bundle-granular — scope_key must include coverage_id, OR move pre-gate to per-candidate evaluation. Large refactor. |
+| TASK-J | P0-1 best | OPEN | Replace SQL proxy with actual `read_executable_forecast()` call. Requires scope enumeration context. Large redesign. |
 
 ---
 

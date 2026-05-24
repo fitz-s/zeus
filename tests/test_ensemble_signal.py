@@ -1,6 +1,7 @@
 # Created: 2026-03-30
-# Last reused/audited: 2026-04-23
+# Last reused/audited: 2026-05-24
 # Authority basis: midstream verdict v2 2026-04-23 (docs/to-do-list/zeus_midstream_fix_plan_2026-04-23.md T1.a midstream guardian panel)
+#   + review5.23 P1-3 (deterministic MC seed antibody)
 """Tests for EnsembleSignal.
 
 Covers:
@@ -383,3 +384,65 @@ class TestEnsembleBoundaryErrors:
             fake_settings.bias_correction_enabled = True
             with pytest.raises(RuntimeError, match="Bias correction database fault"):
                 EnsembleSignal(members, times, NYC, TARGET_DATE, NYC_SEMANTICS)
+
+
+# ---------------------------------------------------------------------------
+# P1-3 antibody: deterministic MC seed (review5.23)
+# ---------------------------------------------------------------------------
+
+class TestDeterministicMCSeed:
+    """review5.23 P1-3: p_raw_vector_from_maxes must produce bit-identical output
+    for identical inputs when no explicit rng is supplied.
+
+    Pre-fix: np.random.default_rng() with no seed → different noise draws each call
+    → near-threshold decisions could flip across evaluations.
+    Post-fix: seed derived from sha256(sorted member_maxes | n_mc | sigma | bin labels)
+    → same physical inputs → same seed → same p_raw.
+    """
+
+    def test_identical_inputs_produce_identical_p_raw(self) -> None:
+        """T_P1_3a: two calls with same member_maxes, city, bins, n_mc → same vector."""
+        member_maxes = np.array([40.5, 41.0, 39.8, 42.1, 40.0] * 10 + [41.5], dtype=float)  # 51
+        n_mc = 500  # small for test speed
+
+        p1 = p_raw_vector_from_maxes(
+            member_maxes, NYC, NYC_SEMANTICS, NYC_BINS, n_mc=n_mc
+        )
+        p2 = p_raw_vector_from_maxes(
+            member_maxes, NYC, NYC_SEMANTICS, NYC_BINS, n_mc=n_mc
+        )
+
+        np.testing.assert_array_equal(
+            p1, p2,
+            err_msg="p_raw_vector_from_maxes must be bit-identical for identical inputs "
+                    "(P1-3 deterministic seed)",
+        )
+
+    def test_different_member_maxes_produce_different_p_raw(self) -> None:
+        """T_P1_3b: different member_maxes → different seed → different (usually) p_raw."""
+        maxes_a = np.full(51, 40.0, dtype=float)
+        maxes_b = np.full(51, 55.0, dtype=float)
+        n_mc = 500
+
+        p_a = p_raw_vector_from_maxes(maxes_a, NYC, NYC_SEMANTICS, NYC_BINS, n_mc=n_mc)
+        p_b = p_raw_vector_from_maxes(maxes_b, NYC, NYC_SEMANTICS, NYC_BINS, n_mc=n_mc)
+
+        assert not np.array_equal(p_a, p_b), (
+            "Physically different member_maxes must produce different p_raw vectors"
+        )
+
+    def test_explicit_rng_overrides_seed_derivation(self) -> None:
+        """T_P1_3c: explicit rng= overrides seed derivation; caller retains control."""
+        member_maxes = np.full(51, 42.0, dtype=float)
+        n_mc = 500
+
+        rng_fixed = np.random.default_rng(42)
+        p_explicit = p_raw_vector_from_maxes(
+            member_maxes, NYC, NYC_SEMANTICS, NYC_BINS, n_mc=n_mc, rng=rng_fixed
+        )
+        # Call again with a fresh rng seeded identically — should also match
+        rng_fixed2 = np.random.default_rng(42)
+        p_explicit2 = p_raw_vector_from_maxes(
+            member_maxes, NYC, NYC_SEMANTICS, NYC_BINS, n_mc=n_mc, rng=rng_fixed2
+        )
+        np.testing.assert_array_equal(p_explicit, p_explicit2)

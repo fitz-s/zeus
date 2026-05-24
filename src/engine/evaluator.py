@@ -1081,6 +1081,21 @@ def _day0_observation_quality_rejection_reason(
     *,
     decision_time: datetime | None,
 ) -> str | None:
+    # review5.23 P1-1: fail-closed on incomplete coverage window.
+    # WINDOW_INCOMPLETE means the WU data doesn't start at/near local-day midnight;
+    # high_so_far / low_so_far cannot be claimed as local-day extrema.
+    obs_coverage = str(
+        getattr(observation, "coverage_status", None)
+        or (observation.get("coverage_status") if isinstance(observation, dict) else None)
+        or ""
+    ).strip().upper()
+    if obs_coverage == "WINDOW_INCOMPLETE":
+        return (
+            f"Day0 observation coverage window is incomplete: city={city.name} "
+            "first_sample_time is outside the local-day-start grace window; "
+            "high_so_far/low_so_far cannot be trusted as local-day extrema"
+        )
+
     required_fields = ["current_temp"]
     if temperature_metric.is_low():
         required_fields.append("low_so_far")

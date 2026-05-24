@@ -1,7 +1,8 @@
 # Created: 2026-04-21
-# Last reused/audited: 2026-05-18
+# Last reused/audited: 2026-05-24
 # Authority basis: Day0 real-time observation; F3 PR 2/3 typed temperature
 #                  boundary per Path A (src/types/temperature.py).
+#   + review5.23 P1-1: coverage window-completeness proof.
 """Real-time observation client for Day0 signal.
 
 Executable Day0 observations are settlement-source-bound. Diagnostic fallbacks
@@ -131,6 +132,15 @@ _WU_PUBLIC_WEB_KEY = "e1f10a1e78da46f5b10a1e78da96f525"  # [REVIEW-SAFE: WU_PUBL
 WU_API_KEY = os.environ.get("WU_API_KEY") or _WU_PUBLIC_WEB_KEY
 WU_OBS_URL = "https://api.weather.com/v1/geocode/{lat}/{lon}/observations/timeseries.json"
 IEM_BASE = "https://mesonet.agron.iastate.edu/json"
+
+# review5.23 P1-1: coverage window-completeness thresholds.
+# First sample must arrive within this many hours of local midnight for the
+# window to be considered full-day.  DST fall-back days have 25 local hours;
+# hours=23 WU request cannot capture the final 2h — callers that need the
+# full local day must use the DB reader (read_day0_observed_extrema_v2) when
+# observation_instants_v2 has current rows (P2-1, deferred).
+_DAY0_COVERAGE_WINDOW_GRACE_HOURS = 2
+_DAY0_MIN_SAMPLE_COUNT = 4  # below this, coverage is LOW even if window is intact
 
 
 def _coerce_reference_time(value: datetime | str | None) -> datetime:
@@ -349,6 +359,18 @@ def _fetch_wu_observation(
         low_so_far = min(temp for temp, _, _, _ in selected)
         first_local = selected[0][1]
         last_local = selected[-1][1]
+        n_samples = len(selected)
+        # review5.23 P1-1: prove coverage interval starts at/near local-day start.
+        # "OK" requires the first sample within _DAY0_COVERAGE_WINDOW_GRACE_HOURS of
+        # midnight AND sufficient samples.  A window that starts mid-morning cannot
+        # claim the day-so-far extrema are truly the local-day extrema.
+        first_hour = first_local.hour + first_local.minute / 60.0
+        if first_hour > _DAY0_COVERAGE_WINDOW_GRACE_HOURS:
+            coverage_status = "WINDOW_INCOMPLETE"
+        elif n_samples < _DAY0_MIN_SAMPLE_COUNT:
+            coverage_status = "LOW_COVERAGE"
+        else:
+            coverage_status = "OK"
         return Day0ObservationContext(
             high_so_far=float(high_so_far),
             low_so_far=float(low_so_far),
@@ -357,10 +379,10 @@ def _fetch_wu_observation(
             observation_time=_observation_time_utc_iso(observed_local),
             unit=city.settlement_unit,
             station_id=station_id,
-            sample_count=len(selected),
+            sample_count=n_samples,
             first_sample_time=_observation_time_utc_iso(first_local),
             last_sample_time=_observation_time_utc_iso(last_local),
-            coverage_status="OK",
+            coverage_status=coverage_status,
             observation_available_at=datetime.now(timezone.utc).isoformat(),
             provider_reported_time=None,  # WU API has no separate reported-at field
         )

@@ -174,6 +174,29 @@ class PromotionReadinessValidator:
         ValueError
             If tier_target would be >= LIVE_PILOT_TINY and operator_ref is missing.
         """
+        # ── Hard gate: cohort scope (review5.23 P1-4) ─────────────────────────
+        # EvidenceReport sets cohort_scope_status="REGRET_ONLY_SCOPE" when the
+        # report was built with experiment_id or cohort_tag filters.  In that
+        # case only regret analytics are narrowed, not the win-rate denominator;
+        # the CI/tribunal signals would describe a mixed population and must not
+        # drive a promotion decision.
+        if report.cohort_scope_status != "FULL_SCOPE":
+            scope_signal = SignalResult(
+                "cohort_scope",
+                False,
+                f"cohort_scope_incomplete:{report.cohort_scope_status!r} — "
+                "promotion requires FULL_SCOPE evidence",
+            )
+            return PromotionReadinessReport(
+                strategy_id=report.strategy_id,
+                verdict=ReadinessVerdict.NOT_READY,
+                tier_current=report.tier_observed,
+                tier_target=report.tier_observed,
+                signals=(scope_signal,),
+                operator_ref_required=False,
+                summary=f"NOT_READY: failing signals: cohort_scope",
+            )
+
         tier_current = report.tier_observed
         breakeven = report.breakeven_win_rate
         ci_lower = report.ci_lower
