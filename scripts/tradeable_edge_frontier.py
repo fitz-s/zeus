@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import argparse
 import math
+import sqlite3
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -104,7 +105,6 @@ def run(
     # DB connection
     # ------------------------------------------------------------------ #
     if db_path is not None:
-        import sqlite3
 
         path = Path(db_path).expanduser().resolve()
         conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)

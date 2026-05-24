@@ -1510,7 +1510,7 @@ def main() -> None:
     # never wired into the daemon scheduler (FIX-5 HKO gap).
     _scheduler.add_job(
         _k2_hko_tick, "cron",
-        minute=30, id="ingest_k2_hko",
+        minute=30, id="ingest_k2_hko_tick",
         max_instances=1, coalesce=True, misfire_grace_time=3600,
     )
     _scheduler.add_job(
