@@ -78,6 +78,11 @@ Implemented after this review:
   emission / proof processing. This is not a substitute for DB concurrency
   smoke, but it removes the previous default of running up to 50 full-family
   no-submit proofs per scheduler tick.
+- Follow-up local review found and repaired another topology authority gap:
+  if `market_events_v2` lacks bin range bounds, receipt generation now fails
+  closed with `EVENT_BOUND_MARKET_TOPOLOGY_INVALID` instead of falling back to
+  payload/default `0-1°F` bins. `p_cal_json` provenance also requires non-empty
+  snapshot `source_id` and `source_run_id` before source matching can pass.
 - Day0 remains explicitly out of deploy scope for this PR: the config keeps
   `day0_extreme_trigger_enabled=false` and `day0_hard_fact_live_enabled=false`
   until an online `Day0ObservationContext` hook is implemented and smoked.
@@ -89,11 +94,11 @@ Fresh verification after this repair:
   tests/money_path/test_edli_online_invariants.py` -> PASS.
 - `python -m pytest -q tests/engine/test_event_reactor_no_bypass.py
   tests/money_path/test_edli_online_invariants.py --maxfail=5` -> PASS,
-  40 passed.
+  42 passed.
 - `python -m pytest -q tests/events tests/engine/test_event_reactor_no_bypass.py
   tests/strategy/live_inference tests/money_path
   tests/state/test_edli_table_ownership.py --maxfail=10` -> PASS,
-  218 passed.
+  220 passed.
 - `python scripts/check_schema_version.py && python
   scripts/check_table_registry_coherence.py && python
   scripts/ci/assert_test_quality.py` -> PASS.

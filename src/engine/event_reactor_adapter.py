@@ -222,10 +222,18 @@ def build_event_bound_no_submit_receipt(
             + ",".join(missing_snapshot_conditions),
             family_complete=False,
         )
-    topology = tuple(
-        _topology_candidate_from_market_event(row, snapshot_token_maps[str(row.get("condition_id") or "")], payload)
-        for row in family_topology_rows
-    )
+    try:
+        topology = tuple(
+            _topology_candidate_from_market_event(row, snapshot_token_maps[str(row.get("condition_id") or "")], payload)
+            for row in family_topology_rows
+        )
+    except ValueError as exc:
+        return EventSubmissionReceipt(
+            False,
+            event.event_id,
+            event.causal_snapshot_id,
+            reason=f"EVENT_BOUND_MARKET_TOPOLOGY_INVALID:{exc}",
+        )
     row = _selected_snapshot_row_for_event(family_rows, payload)
     if row is None:
         return EventSubmissionReceipt(False, event.event_id, event.causal_snapshot_id, reason="EVENT_BOUND_SELECTED_SNAPSHOT_MISSING")
@@ -1034,6 +1042,8 @@ def _p_cal_json_authority_block_reason(
         return "CALIBRATION_AUTHORITY_MISSING:p_cal_json model provenance missing"
     source_id = _nonnull(snapshot.get("source_id"))
     source_run_id = _nonnull(snapshot.get("source_run_id"))
+    if not source_id or not source_run_id:
+        return "CALIBRATION_AUTHORITY_MISSING:p_cal_json source provenance missing"
     if _nonnull(snapshot.get("p_cal_source_id")) != source_id:
         return "CALIBRATION_AUTHORITY_MISSING:p_cal_json source mismatch"
     if _nonnull(snapshot.get("p_cal_source_run_id")) != source_run_id:
@@ -1283,7 +1293,7 @@ def _bin_from_market_event(row: dict[str, Any], payload: dict[str, object]) -> B
             unit=unit,
             label=label,
         )
-    return _bin_from_payload(payload)
+    raise ValueError("market topology bin range missing")
 
 
 def _bin_from_payload(payload: dict[str, object]) -> Bin:

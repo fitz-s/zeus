@@ -7,6 +7,7 @@ import ast
 import json
 import sqlite3
 from dataclasses import replace
+from datetime import datetime, timezone
 from pathlib import Path
 
 from src.engine.event_reactor_adapter import (
@@ -14,6 +15,7 @@ from src.engine.event_reactor_adapter import (
     edli_source_truth_gate,
     edli_trade_score_gate,
     executable_snapshot_gate_from_trade_conn,
+    _p_cal_json_authority_block_reason,
 )
 from src.events.opportunity_event import ForecastSnapshotReadyPayload, make_opportunity_event
 from src.riskguard.risk_level import RiskLevel
@@ -670,6 +672,17 @@ def test_family_candidates_use_market_event_range_bounds_not_payload_default():
     assert receipt.bin_label != "0-1°F"
 
 
+def test_missing_market_topology_range_blocks_no_submit_receipt():
+    event = _forecast_event()
+    conn = _trade_conn_with_snapshot()
+    conn.execute("UPDATE market_events_v2 SET range_low = NULL, range_high = NULL")
+
+    receipt = _receipt(event, conn)
+
+    assert receipt.submitted is False
+    assert receipt.reason == "EVENT_BOUND_MARKET_TOPOLOGY_INVALID:market topology bin range missing"
+
+
 def test_selected_snapshot_row_not_first_still_binds_matching_candidate():
     event = _bound_forecast_event(token_id="yes-2")
     receipt = _receipt(event, _trade_conn_with_snapshot())
@@ -884,6 +897,24 @@ def test_p_cal_json_without_authority_fields_blocks():
 
     assert receipt.submitted is False
     assert "CALIBRATION_AUTHORITY_MISSING:p_cal_json authority missing" in receipt.reason
+
+
+def test_p_cal_json_without_snapshot_source_provenance_blocks():
+    reason = _p_cal_json_authority_block_reason(
+        {
+            "p_cal_authority": "VERIFIED",
+            "p_cal_model_key": "pcal-model-1",
+            "p_cal_model_version": "platt-v2",
+            "p_cal_source_id": "",
+            "p_cal_source_run_id": "run-1",
+            "source_id": "",
+            "source_run_id": "run-1",
+            "p_cal_available_at": "2026-05-24T08:09:00+00:00",
+        },
+        decision_time=datetime(2026, 5, 24, 8, 10, tzinfo=timezone.utc),
+    )
+
+    assert reason == "CALIBRATION_AUTHORITY_MISSING:p_cal_json source provenance missing"
 
 
 def test_p_cal_json_available_after_event_blocks():

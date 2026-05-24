@@ -170,6 +170,12 @@ Acceptance IDs A01-A40:
   `no_submit_proof_limit=10`, with `src/main.py` clamping values before emit /
   proof processing. This reduces cold-start proof pressure but does not replace
   the required daemon/DB concurrency smoke.
+- Latest local review repair: market topology no longer falls back to event
+  payload/default `0-1°F` bins when forecast-owned `market_events_v2` lacks
+  range bounds; receipt generation fails closed with
+  `EVENT_BOUND_MARKET_TOPOLOGY_INVALID`. `p_cal_json` provenance also requires
+  non-empty snapshot `source_id` and `source_run_id` before matching
+  `p_cal_source_id` / `p_cal_source_run_id`.
 
 ## Current Phase
 
@@ -213,11 +219,11 @@ Fresh verification after latest calibration/fill/backpressure repair:
   tests/money_path/test_edli_online_invariants.py` -> PASS.
 - `python -m pytest -q tests/engine/test_event_reactor_no_bypass.py
   tests/money_path/test_edli_online_invariants.py --maxfail=5` -> PASS,
-  40 passed.
+  42 passed.
 - `python -m pytest -q tests/events tests/engine/test_event_reactor_no_bypass.py
   tests/strategy/live_inference tests/money_path
   tests/state/test_edli_table_ownership.py --maxfail=10` -> PASS,
-  218 passed.
+  220 passed.
 - `python scripts/check_schema_version.py && python
   scripts/check_table_registry_coherence.py && python
   scripts/ci/assert_test_quality.py` -> PASS.
