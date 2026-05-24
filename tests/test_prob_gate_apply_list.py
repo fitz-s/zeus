@@ -1,25 +1,24 @@
 # Created: 2026-05-24
 # Last reused or audited: 2026-05-24
-# Authority basis: LIVE-PROB-P0 Gate 6 apply-list enforcement (post-merge correctness gap #1)
-# Purpose: RED→GREEN antibody tests for apply_to_strategies + apply_to_metrics enforcement.
-#   RED on origin/main: gate hard-rejects LOW metric and unlisted strategies (unvalidated).
-#   GREEN on branch: gate downgrades to SHADOW for unvalidated (metric, strategy) pairs.
-"""Apply-list enforcement tests for probability_edge_bin_sanity (LIVE-PROB-P0 Gate 6).
+# Authority basis: LIVE-PROB-P0 Gate 6 apply-metrics enforcement (post-merge correctness gap #1)
+# Purpose: RED→GREEN antibody tests for apply_to_metrics enforcement (metric-only scope).
+#   apply_to_strategies is advisory metadata, NOT a hard filter.
+#   RED on origin/main: gate hard-rejects LOW metric (unvalidated; no apply-metrics check).
+#   GREEN on branch: LOW → SHADOW; all HIGH strategies (incl. opening_inertia) → HARD.
+"""Apply-metrics enforcement tests for probability_edge_bin_sanity (LIVE-PROB-P0 Gate 6).
 
 Covers:
-  (a) HIGH + opening_hunt (Amsterdam) → HARD reject (apply-list satisfied, unchanged behavior)
-  (b) LOW + opening_hunt_low phantom → SHADOW only (LOW not in apply_to_metrics)
-  (c) HIGH + unlisted strategy + phantom fixture → SHADOW only (strategy not in apply_to_strategies)
-  (d) Both apply_to lists empty (back-compat) → mode from thresholds["mode"] (hard = hard reject)
+  (a) HIGH + opening_hunt Amsterdam → HARD reject (apply-list satisfied, unchanged)
+  (b) HIGH + opening_inertia Amsterdam phantom → HARD reject (CRITICAL: must not be shadowed)
+  (c) HIGH + imminent_open_capture phantom → HARD reject (any strategy, HIGH = hard)
+  (d) HIGH + center_buy phantom → HARD (not in advisory list, still hard)
+  (e) LOW + opening_hunt phantom → SHADOW (LOW unvalidated per critic M1)
+  (f) LOW + opening_hunt_low phantom → SHADOW (strategy in advisory list; metric=LOW = shadow)
+  (g) empty/absent apply_to_metrics → back-compat: hard for all metrics
 
-RED proof: on origin/main, cases (b) and (c) return ok=False with mode=hard — hard blocking
-  unvalidated combinations. GREEN after patch: mode is "shadow", function still returns ok=False
-  (the "reject" signal) but the evaluator caller sees mode="shadow" and does NOT set
-  should_trade=False.
-
-Note: probability_edge_bin_sanity returns (ok=False, reason, telemetry) even in shadow mode —
-  the shadow/hard distinction is in telemetry["probability_sanity_mode"].  The evaluator
-  only hard-blocks when _eb_gate_mode == "hard".  These tests verify the mode field.
+RED proof: origin/main has zero apply_to_metrics enforcement. Tests (e) and (f) fail on
+  origin/main (mode="hard" for LOW). The prior branch's AND-filter would have failed test
+  (b) (opening_inertia not in apply_to_strategies → shadow = phantom hole on dominant strategy).
 """
 from __future__ import annotations
 
@@ -27,7 +26,6 @@ import sys
 from pathlib import Path
 
 import numpy as np
-import pytest
 
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -45,8 +43,8 @@ _AMS_P_RAW = np.array([0.0, 0.0, 0.0123, 0.2203, 0.5358, 0.2094, 0.02, 0.0022, 0
 _AMS_P_CAL = np.array([0.008, 0.008, 0.0098, 0.1856, 0.5656, 0.1754, 0.0158, 0.008, 0.008, 0.008, 0.008])
 _AMS_P_MKT = np.array([0.002, 0.0034, 0.0066, 0.0465, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
 
-# Config with apply-lists (mirrors production config/settings.json apply_to_metrics/apply_to_strategies)
-_CONFIG_WITH_APPLY_LISTS = {
+# Config with apply_to_metrics only (strategy list is advisory — not used as gate filter)
+_CONFIG_WITH_METRICS = {
     "mode": "hard",
     "low_price_threshold": 0.05,
     "min_edge_gap": 0.03,
@@ -60,205 +58,136 @@ _CONFIG_WITH_APPLY_LISTS = {
         "update_reaction_low",
         "settlement_capture",
         "imminent_open_capture",
+        # opening_inertia intentionally absent to prove strategy list is NOT a gate filter
     ],
     "apply_to_metrics": ["high"],
 }
 
-# Config WITHOUT apply-lists (back-compat: empty lists mean "apply to all")
-_CONFIG_NO_APPLY_LISTS = {
+# Config WITHOUT apply-lists (back-compat)
+_CONFIG_NO_APPLY = {
     "mode": "hard",
     "low_price_threshold": 0.05,
     "min_edge_gap": 0.03,
     "odds_ratio_threshold": 3.0,
     "min_edge_bin_member_support": 0.05,
     "min_neighbor_support": 0.05,
-    # apply_to_strategies and apply_to_metrics intentionally absent
 }
 
-# Phantom fixture for LOW metric: left-tail phantom, 5 bins, mode at idx 3.
-# p_raw=0 in left tail bins, p_cal high, p_mkt sub-floor, run_length=2.
+# LOW phantom fixture: left-tail, mode at idx 3, run_length>=2, ratio>>3
 _LOW_P_RAW = np.array([0.0, 0.0, 0.05, 0.70, 0.25])
 _LOW_P_CAL = np.array([0.15, 0.14, 0.05, 0.50, 0.16])
-_LOW_P_MKT = np.array([0.018, 0.025, 0.05, 0.55, 0.30])  # bins 0,1 sub-floor
-# edge_bin_idx=0: p_raw=0, p_cal=0.15, p_mkt=0.018, ratio=8.3, gap=0.132, run_length>=2 → would reject
+_LOW_P_MKT = np.array([0.018, 0.025, 0.05, 0.55, 0.30])
 
 
-def test_high_opening_hunt_amsterdam_still_hard_rejected():
-    """HIGH + opening_hunt (Amsterdam) → HARD reject even with apply-lists.
+def test_high_opening_hunt_amsterdam_hard_rejected():
+    """HIGH + opening_hunt → HARD (baseline, unchanged)."""
+    bins = _make_bins(len(_AMS_P_RAW))
+    ok, reason, t = probability_edge_bin_sanity(
+        selected_bin_idx=3, bins=bins, p_raw=_AMS_P_RAW, p_cal=_AMS_P_CAL, p_market=_AMS_P_MKT,
+        metric="high", strategy_key="opening_hunt", config=_CONFIG_WITH_METRICS,
+    )
+    assert ok is False
+    assert t["probability_sanity_mode"] == "hard", f"Expected hard, got {t['probability_sanity_mode']!r}"
+    assert "PROBABILITY_TAIL_SHAPE_ANOMALY_HARD" in (reason or ""), reason
 
-    Both conditions met: metric="high" IN apply_to_metrics, strategy_key="opening_hunt" IN
-    apply_to_strategies. Mode stays "hard". Rejection must be HARD, not shadow.
 
-    RED on origin/main if apply-list logic is added wrong and breaks Amsterdam.
-    GREEN: ok=False AND telemetry["probability_sanity_mode"] == "hard".
+def test_high_opening_inertia_amsterdam_hard_rejected():
+    """CRITICAL: HIGH + opening_inertia → HARD reject.
+
+    opening_inertia is absent from apply_to_strategies (advisory list). With the old
+    AND-filter, this would have been shadowed — a phantom hole on the dominant live
+    strategy (~547 candidates in 2 days). Metrics-only enforcement means strategy_key
+    is irrelevant: any HIGH phantom is hard-rejected regardless of strategy.
+
+    RED on prior branch (AND-filter): mode="shadow".
+    RED on origin/main: no enforcement at all, but LOW tests fail.
+    GREEN on this branch: mode="hard".
     """
     bins = _make_bins(len(_AMS_P_RAW))
-    ok, reason, telemetry = probability_edge_bin_sanity(
-        selected_bin_idx=3,
-        bins=bins,
-        p_raw=_AMS_P_RAW,
-        p_cal=_AMS_P_CAL,
-        p_market=_AMS_P_MKT,
-        direction="buy_yes",
+    ok, reason, t = probability_edge_bin_sanity(
+        selected_bin_idx=3, bins=bins, p_raw=_AMS_P_RAW, p_cal=_AMS_P_CAL, p_market=_AMS_P_MKT,
         metric="high",
-        strategy_key="opening_hunt",
-        config=_CONFIG_WITH_APPLY_LISTS,
+        strategy_key="opening_inertia",  # NOT in apply_to_strategies advisory list
+        config=_CONFIG_WITH_METRICS,
     )
-    assert ok is False, (
-        f"Amsterdam (HIGH+opening_hunt) must be HARD rejected. got ok=True, reason={reason!r}"
+    assert ok is False, f"opening_inertia+HIGH Amsterdam must be HARD rejected; got ok=True"
+    assert t["probability_sanity_mode"] == "hard", (
+        f"opening_inertia+HIGH must be HARD (strategy list is advisory only). "
+        f"got mode={t['probability_sanity_mode']!r}. "
+        f"Prior AND-filter silently created a phantom hole on the dominant live strategy."
     )
-    assert telemetry["probability_sanity_mode"] == "hard", (
-        f"Mode must be 'hard' for HIGH+opening_hunt; got {telemetry['probability_sanity_mode']!r}"
+    assert "PROBABILITY_TAIL_SHAPE_ANOMALY_HARD" in (reason or ""), reason
+
+
+def test_high_imminent_open_capture_hard_rejected():
+    """HIGH + imminent_open_capture → HARD."""
+    bins = _make_bins(len(_AMS_P_RAW))
+    ok, reason, t = probability_edge_bin_sanity(
+        selected_bin_idx=3, bins=bins, p_raw=_AMS_P_RAW, p_cal=_AMS_P_CAL, p_market=_AMS_P_MKT,
+        metric="high", strategy_key="imminent_open_capture", config=_CONFIG_WITH_METRICS,
     )
-    assert "PROBABILITY_TAIL_SHAPE_ANOMALY_HARD" in (reason or ""), (
-        f"Reason must indicate hard rejection: {reason!r}"
+    assert ok is False
+    assert t["probability_sanity_mode"] == "hard", f"got {t['probability_sanity_mode']!r}"
+
+
+def test_high_center_buy_hard_rejected():
+    """HIGH + center_buy (not in advisory list) → HARD."""
+    bins = _make_bins(len(_AMS_P_RAW))
+    ok, reason, t = probability_edge_bin_sanity(
+        selected_bin_idx=3, bins=bins, p_raw=_AMS_P_RAW, p_cal=_AMS_P_CAL, p_market=_AMS_P_MKT,
+        metric="high", strategy_key="center_buy", config=_CONFIG_WITH_METRICS,
     )
+    assert ok is False
+    assert t["probability_sanity_mode"] == "hard", f"got {t['probability_sanity_mode']!r}"
 
 
 def test_low_metric_phantom_shadow_only():
     """LOW metric phantom → SHADOW (log-only, NOT hard block).
 
-    LOW is not in apply_to_metrics=["high"]. Even though the phantom is real,
-    mode is downgraded to shadow. The function signals rejection (ok=False) but
-    telemetry["probability_sanity_mode"] == "shadow" so the evaluator does NOT
-    set should_trade=False.
-
-    RED on origin/main: mode="hard" (unvalidated LOW hard-blocked).
+    RED on origin/main: mode="hard" (no apply_to_metrics check).
     GREEN on branch: mode="shadow".
     """
     bins = _make_bins(len(_LOW_P_RAW))
-    ok, reason, telemetry = probability_edge_bin_sanity(
-        selected_bin_idx=0,
-        bins=bins,
-        p_raw=_LOW_P_RAW,
-        p_cal=_LOW_P_CAL,
-        p_market=_LOW_P_MKT,
-        direction="buy_yes",
-        metric="low",  # NOT in apply_to_metrics
-        strategy_key="opening_hunt",
-        config=_CONFIG_WITH_APPLY_LISTS,
+    ok, reason, t = probability_edge_bin_sanity(
+        selected_bin_idx=0, bins=bins, p_raw=_LOW_P_RAW, p_cal=_LOW_P_CAL, p_market=_LOW_P_MKT,
+        metric="low", strategy_key="opening_hunt", config=_CONFIG_WITH_METRICS,
     )
-    # Gate still fires the phantom detection (ok=False) but mode must be shadow
-    # (evaluator only hard-blocks when mode=="hard")
-    assert ok is False, (
-        f"LOW metric phantom is still a phantom (ok should be False). got ok=True"
+    assert ok is False, f"LOW phantom still fires (ok=False); got ok=True"
+    assert t["probability_sanity_mode"] == "shadow", (
+        f"LOW metric must be SHADOW (unvalidated). got {t['probability_sanity_mode']!r}. "
+        f"RED: origin/main has no apply_to_metrics enforcement."
     )
-    assert telemetry["probability_sanity_mode"] == "shadow", (
-        f"LOW metric must run in SHADOW mode (unvalidated). "
-        f"got mode={telemetry['probability_sanity_mode']!r}. "
-        f"RED: origin/main runs all non-day0 edges as hard regardless of metric."
-    )
-    assert "PROBABILITY_TAIL_SHAPE_ANOMALY_SHADOW" in (reason or ""), (
-        f"Shadow reason code expected; got {reason!r}"
-    )
+    assert "PROBABILITY_TAIL_SHAPE_ANOMALY_SHADOW" in (reason or ""), reason
 
 
-def test_unlisted_strategy_phantom_shadow_only():
-    """Strategy not in apply_to_strategies → SHADOW.
-
-    "opening_inertia" is a real strategy but NOT in apply_to_strategies.
-    Same phantom fixture as Amsterdam but metric=high, strategy=opening_inertia.
-    Mode must be shadow regardless of metric.
-
-    RED on origin/main: mode="hard" (strategy enforcement absent).
-    GREEN on branch: mode="shadow".
-    """
-    bins = _make_bins(len(_AMS_P_RAW))
-    ok, reason, telemetry = probability_edge_bin_sanity(
-        selected_bin_idx=3,
-        bins=bins,
-        p_raw=_AMS_P_RAW,
-        p_cal=_AMS_P_CAL,
-        p_market=_AMS_P_MKT,
-        direction="buy_yes",
-        metric="high",
-        strategy_key="opening_inertia",  # NOT in apply_to_strategies
-        config=_CONFIG_WITH_APPLY_LISTS,
-    )
-    assert ok is False, (
-        f"Phantom with unlisted strategy is still a phantom (ok should be False). got ok=True"
-    )
-    assert telemetry["probability_sanity_mode"] == "shadow", (
-        f"Unlisted strategy must run in SHADOW mode. "
-        f"got mode={telemetry['probability_sanity_mode']!r}. "
-        f"RED: origin/main runs all non-day0 as hard regardless of strategy_key."
-    )
-
-
-def test_no_apply_lists_back_compat_hard_rejects():
-    """Empty apply-lists → back-compat: mode from thresholds["mode"] (hard=hard reject).
-
-    When apply_to_strategies and apply_to_metrics are absent from config,
-    the gate applies to ALL strategy+metric combinations — same as pre-apply-list behavior.
-
-    Verifies no regression for configs without apply-list keys.
-    """
-    bins = _make_bins(len(_AMS_P_RAW))
-    ok, reason, telemetry = probability_edge_bin_sanity(
-        selected_bin_idx=3,
-        bins=bins,
-        p_raw=_AMS_P_RAW,
-        p_cal=_AMS_P_CAL,
-        p_market=_AMS_P_MKT,
-        direction="buy_yes",
-        metric="high",
-        strategy_key="opening_hunt",
-        config=_CONFIG_NO_APPLY_LISTS,  # no apply-lists → no filtering
-    )
-    assert ok is False, (
-        f"Without apply-lists, Amsterdam must still be HARD rejected. got ok=True"
-    )
-    assert telemetry["probability_sanity_mode"] == "hard", (
-        f"Without apply-lists, mode stays 'hard' from thresholds. "
-        f"got {telemetry['probability_sanity_mode']!r}"
-    )
-
-
-def test_opening_hunt_low_high_metric_hard_rejects():
-    """opening_hunt_low + HIGH metric → HARD reject (both in apply-lists).
-
-    opening_hunt_low IS in apply_to_strategies; high IS in apply_to_metrics.
-    Must not be silently shadowed.
-    """
-    bins = _make_bins(len(_AMS_P_RAW))
-    ok, reason, telemetry = probability_edge_bin_sanity(
-        selected_bin_idx=3,
-        bins=bins,
-        p_raw=_AMS_P_RAW,
-        p_cal=_AMS_P_CAL,
-        p_market=_AMS_P_MKT,
-        direction="buy_yes",
-        metric="high",
-        strategy_key="opening_hunt_low",  # IN apply_to_strategies
-        config=_CONFIG_WITH_APPLY_LISTS,
-    )
-    assert ok is False, f"opening_hunt_low+HIGH phantom must be HARD rejected. reason={reason!r}"
-    assert telemetry["probability_sanity_mode"] == "hard", (
-        f"Mode must be 'hard' for listed strategy + listed metric. "
-        f"got {telemetry['probability_sanity_mode']!r}"
-    )
-
-
-def test_opening_hunt_low_low_metric_shadow_only():
-    """opening_hunt_low + LOW metric → SHADOW.
-
-    Strategy IS in apply_to_strategies but metric (low) is NOT in apply_to_metrics.
-    AND-logic: BOTH must match for hard. LOW → shadow.
-    """
+def test_low_metric_opening_hunt_low_shadow_only():
+    """LOW + opening_hunt_low → SHADOW (strategy in advisory list; metric=LOW overrides to shadow)."""
     bins = _make_bins(len(_LOW_P_RAW))
-    ok, reason, telemetry = probability_edge_bin_sanity(
-        selected_bin_idx=0,
-        bins=bins,
-        p_raw=_LOW_P_RAW,
-        p_cal=_LOW_P_CAL,
-        p_market=_LOW_P_MKT,
-        direction="buy_yes",
-        metric="low",
-        strategy_key="opening_hunt_low",  # IN apply_to_strategies but metric=low NOT in apply_to_metrics
-        config=_CONFIG_WITH_APPLY_LISTS,
+    ok, reason, t = probability_edge_bin_sanity(
+        selected_bin_idx=0, bins=bins, p_raw=_LOW_P_RAW, p_cal=_LOW_P_CAL, p_market=_LOW_P_MKT,
+        metric="low", strategy_key="opening_hunt_low", config=_CONFIG_WITH_METRICS,
     )
-    assert ok is False, f"Phantom with LOW metric still fires (ok should be False). got ok=True"
-    assert telemetry["probability_sanity_mode"] == "shadow", (
-        f"opening_hunt_low + LOW metric → SHADOW (metric not validated). "
-        f"got mode={telemetry['probability_sanity_mode']!r}"
+    assert ok is False
+    assert t["probability_sanity_mode"] == "shadow", f"got {t['probability_sanity_mode']!r}"
+
+
+def test_no_apply_metrics_back_compat_hard_high():
+    """Absent apply_to_metrics → back-compat: mode from thresholds (hard for HIGH)."""
+    bins = _make_bins(len(_AMS_P_RAW))
+    ok, reason, t = probability_edge_bin_sanity(
+        selected_bin_idx=3, bins=bins, p_raw=_AMS_P_RAW, p_cal=_AMS_P_CAL, p_market=_AMS_P_MKT,
+        metric="high", strategy_key="opening_hunt", config=_CONFIG_NO_APPLY,
     )
+    assert ok is False
+    assert t["probability_sanity_mode"] == "hard", f"got {t['probability_sanity_mode']!r}"
+
+
+def test_no_apply_metrics_back_compat_hard_low():
+    """Absent apply_to_metrics → back-compat: mode from thresholds (hard for LOW too)."""
+    bins = _make_bins(len(_LOW_P_RAW))
+    ok, reason, t = probability_edge_bin_sanity(
+        selected_bin_idx=0, bins=bins, p_raw=_LOW_P_RAW, p_cal=_LOW_P_CAL, p_market=_LOW_P_MKT,
+        metric="low", strategy_key="opening_hunt", config=_CONFIG_NO_APPLY,
+    )
+    assert ok is False
+    assert t["probability_sanity_mode"] == "hard", f"got {t['probability_sanity_mode']!r}"

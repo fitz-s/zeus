@@ -533,13 +533,15 @@ def probability_edge_bin_sanity(
     returned PASS at the sub-floor guard (line after Condition 4). Member support is retained
     for telemetry context only.
 
-    APPLY-LIST ENFORCEMENT (2026-05-24):
-    The gate runs in HARD mode only when metric ∈ apply_to_metrics AND strategy_key ∈
-    apply_to_strategies (both from the probability_edge_bin_sanity config block).
-    If either condition fails, effective mode is downgraded to SHADOW (log-only; does NOT
-    set should_trade=False). This ensures only validated (metric, strategy) combinations
-    hard-block. The economic floor still backstops unvalidated combinations.
-    Empty apply-list (default when key absent in config) means "apply to all" — full back-compat.
+    APPLY-METRICS ENFORCEMENT (2026-05-24):
+    The gate runs in HARD mode only when metric ∈ apply_to_metrics (from the
+    probability_edge_bin_sanity config block). If metric is not in the list, effective
+    mode is downgraded to SHADOW (log-only; does NOT set should_trade=False).
+    apply_to_strategies is advisory metadata only — it is NOT used as a hard filter.
+    Excluding any active live strategy (e.g. opening_inertia) from hard-gating would
+    create a phantom hole on that strategy. The hard gate applies to ALL non-day0
+    strategies for the listed metric(s).
+    Empty apply_to_metrics (default when key absent) means "apply to all" — full back-compat.
 
     Reject ONLY when ALL of the following hold:
       1. 0 < p_market[edge] <= low_price_threshold (sub-floor quoted bin)
@@ -582,16 +584,15 @@ def probability_edge_bin_sanity(
     # tail_min_bins = 2: reuse same contiguity guard as legacy predicate
     tail_min_bins = 2
 
-    # APPLY-LIST ENFORCEMENT (2026-05-24): downgrade mode to shadow when
-    # metric or strategy_key is outside the validated hard-mode scope.
-    # FP=0 was proven for HIGH + {opening_hunt, update_reaction, ...} only.
-    # LOW combinations are unvalidated → shadow-only (economic floor still backstops).
+    # APPLY-METRICS ENFORCEMENT (2026-05-24): downgrade mode to shadow when
+    # metric is outside the validated hard-mode scope.
+    # FP=0 was proven for HIGH only (critic M1); LOW is unvalidated → shadow-only.
+    # apply_to_strategies is NOT used as a hard filter — excluding any active live
+    # strategy (e.g. opening_inertia) would create a phantom hole. The hard gate
+    # applies to ALL non-day0 strategies for the listed metric(s).
     # Empty list in config means "apply to all" (back-compat when key absent).
     apply_to_metrics: list[str] = thresholds.get("apply_to_metrics", [])
-    apply_to_strategies: list[str] = thresholds.get("apply_to_strategies", [])
     if apply_to_metrics and metric not in apply_to_metrics:
-        mode = "shadow"
-    elif apply_to_strategies and strategy_key not in apply_to_strategies:
         mode = "shadow"
 
     p_cal_arr = np.asarray(p_cal, dtype=np.float64)
