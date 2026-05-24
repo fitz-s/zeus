@@ -164,6 +164,7 @@ def event_bound_no_submit_adapter_from_trade_conn(
     get_current_level: Callable[[], RiskLevel],
     forecast_conn: sqlite3.Connection | None = None,
     topology_conn: sqlite3.Connection | None = None,
+    calibration_conn: sqlite3.Connection | None = None,
     bankroll_usd_provider: Callable[[], float | None] | None = None,
 ) -> Callable[[OpportunityEvent], EventSubmissionReceipt]:
     """Build a proof-only final-intent receipt adapter for EDLI events."""
@@ -174,6 +175,7 @@ def event_bound_no_submit_adapter_from_trade_conn(
             trade_conn=trade_conn,
             forecast_conn=forecast_conn,
             topology_conn=topology_conn,
+            calibration_conn=calibration_conn,
             get_current_level=get_current_level,
             bankroll_usd_provider=bankroll_usd_provider,
         )
@@ -188,6 +190,7 @@ def build_event_bound_no_submit_receipt(
     get_current_level: Callable[[], RiskLevel],
     forecast_conn: sqlite3.Connection | None = None,
     topology_conn: sqlite3.Connection | None = None,
+    calibration_conn: sqlite3.Connection | None = None,
     bankroll_usd_provider: Callable[[], float | None] | None = None,
 ) -> EventSubmissionReceipt:
     """Produce a typed no-submit EDLI proof without running the cycle runner."""
@@ -197,6 +200,8 @@ def build_event_bound_no_submit_receipt(
         return EventSubmissionReceipt(False, event.event_id, event.causal_snapshot_id, reason="FORECAST_AUTHORITY_CONNECTION_MISSING")
     if topology_conn is None:
         return EventSubmissionReceipt(False, event.event_id, event.causal_snapshot_id, reason="TOPOLOGY_AUTHORITY_CONNECTION_MISSING")
+    if calibration_conn is None:
+        return EventSubmissionReceipt(False, event.event_id, event.causal_snapshot_id, reason="CALIBRATION_AUTHORITY_CONNECTION_MISSING")
     source_conn = forecast_conn
     topology_authority_conn = topology_conn
     family_topology_rows = _event_family_market_topology_rows(topology_authority_conn, payload)
@@ -248,6 +253,7 @@ def build_event_bound_no_submit_receipt(
             snapshot_rows=family_rows,
             trade_conn=trade_conn,
             forecast_conn=source_conn,
+            calibration_conn=calibration_conn,
         )
     except ValueError as exc:
         return EventSubmissionReceipt(
@@ -590,12 +596,16 @@ def _generate_candidate_proofs(
     family,
     snapshot_rows: list[dict[str, Any]],
     trade_conn: sqlite3.Connection,
+    forecast_conn: sqlite3.Connection,
+    calibration_conn: sqlite3.Connection,
 ) -> tuple[_CandidateProof, ...]:
     q_by_condition, q_lcb_by_direction, canonical_p_values, canonical_prefilter = _live_yes_probabilities(
         event=event,
         payload=payload,
         family=family,
-        conn=trade_conn,
+        conn=forecast_conn,
+        calibration_conn=calibration_conn,
+        native_costs=native_costs,
     )
     proofs: list[_CandidateProof] = []
     rows_by_condition = _snapshot_rows_by_condition(snapshot_rows)
@@ -682,13 +692,29 @@ def _live_yes_probabilities(
     payload: dict[str, object],
     family,
     conn: sqlite3.Connection,
+    calibration_conn: sqlite3.Connection,
+    native_costs: dict[tuple[str, str], tuple[dict[str, Any] | None, ExecutionPrice | None, float, float | None, str | None]],
 ) -> tuple[dict[str, float], dict[tuple[str, str], float], dict[tuple[str, str], float], dict[tuple[str, str], bool]]:
     canonical = _canonical_probability_and_fdr_proof(event=event, family=family, conn=conn)
     if event.event_type == "FORECAST_SNAPSHOT_READY":
-        return canonical
+        return _forecast_snapshot_probability_and_fdr_proof(
+            event=event,
+            family=family,
+            conn=conn,
+            calibration_conn=calibration_conn,
+            native_costs=native_costs,
+        )
     if event.event_type == "DAY0_EXTREME_UPDATED":
-        q_by_condition, lcb_by_condition, p_values, prefilter = canonical
-        masked_q, masked_lcb = _apply_day0_mask_to_canonical_probabilities(
+        generated = _forecast_snapshot_probability_and_fdr_proof(
+            event=event,
+            family=family,
+            conn=conn,
+            calibration_conn=calibration_conn,
+            native_costs=native_costs,
+            allow_latest_snapshot=True,
+        )
+        q_by_condition, lcb_by_condition, p_values, prefilter = generated
+        masked_q, masked_lcb, masked_p_values, masked_prefilter = _apply_day0_mask_to_generated_probabilities(
             payload=payload,
             family=family,
             q_by_condition=q_by_condition,
@@ -703,6 +729,9 @@ def _canonical_probability_and_fdr_proof(
     event: OpportunityEvent,
     family,
     conn: sqlite3.Connection,
+    calibration_conn: sqlite3.Connection,
+    native_costs: dict[tuple[str, str], tuple[dict[str, Any] | None, ExecutionPrice | None, float, float | None, str | None]],
+    allow_latest_snapshot: bool = False,
 ) -> tuple[dict[str, float], dict[tuple[str, str], float], dict[tuple[str, str], float], dict[tuple[str, str], bool]]:
     snapshot = _forecast_snapshot_row_for_event(conn, event=event, family=family, allow_latest=allow_latest_snapshot)
     if snapshot is None:
@@ -710,11 +739,12 @@ def _canonical_probability_and_fdr_proof(
             raise ValueError("Day0 base forecast snapshot missing for event-bound inference")
         raise ValueError("causal forecast snapshot missing for event-bound inference")
     analysis = _market_analysis_from_event_snapshot(
-        conn=conn,
+        calibration_conn=calibration_conn,
         snapshot=snapshot,
         family=family,
         native_costs=native_costs,
         payload=_payload(event),
+        decision_time=_parse_utc(event.received_at if allow_latest_snapshot else event.available_at),
     )
     hypotheses = scan_full_hypothesis_family(analysis, n_bootstrap=edge_n_bootstrap())
     hypothesis_by_label_direction = {
@@ -810,22 +840,24 @@ def _canonical_probability_rows(
 def _canonical_hypothesis_rows(
     conn: sqlite3.Connection,
     *,
-    conn: sqlite3.Connection,
+    calibration_conn: sqlite3.Connection,
     snapshot: dict[str, Any],
     family,
     native_costs: dict[tuple[str, str], tuple[dict[str, Any] | None, ExecutionPrice | None, float, float | None, str | None]],
     payload: dict[str, object],
+    decision_time: datetime | None,
 ) -> MarketAnalysis:
     bins = list(family.bins)
     members = _snapshot_members(snapshot)
     p_raw = _snapshot_p_raw(snapshot, family=family, bins=bins, members=members, payload=payload)
     p_cal = _snapshot_p_cal(
-        conn,
+        calibration_conn,
         snapshot=snapshot,
         family=family,
         bins=bins,
         p_raw=p_raw,
         payload=payload,
+        decision_time=decision_time,
     )
     if family.event_type == "DAY0_EXTREME_UPDATED":
         p_raw = _apply_day0_mask_to_probability_vector(payload=payload, family=family, vector=p_raw)
@@ -919,16 +951,23 @@ def _snapshot_p_raw(
 
 
 def _snapshot_p_cal(
-    conn: sqlite3.Connection,
+    calibration_conn: sqlite3.Connection,
     *,
     snapshot: dict[str, Any],
     family,
     bins: list[Bin],
     p_raw: np.ndarray,
     payload: dict[str, object],
+    decision_time: datetime | None,
 ) -> np.ndarray:
     cal_json = snapshot.get("p_cal_json")
     if cal_json not in {None, ""}:
+        authority_reason = _p_cal_json_authority_block_reason(
+            snapshot,
+            decision_time=decision_time,
+        )
+        if authority_reason is not None:
+            raise ValueError(authority_reason)
         arr = np.asarray(_json_list(cal_json), dtype=float)
         if _valid_probability_vector(arr, len(bins)):
             return arr / float(arr.sum())
@@ -961,7 +1000,7 @@ def _snapshot_p_cal(
         raise ValueError("CALIBRATION_AUTHORITY_MISSING:unsupported forecast source")
     try:
         cal, _level = get_calibrator(
-            conn,
+            calibration_conn,
             city,
             str(family.target_date),
             temperature_metric=family.metric,
@@ -969,7 +1008,7 @@ def _snapshot_p_cal(
             source_id=calibration_source_id,
             horizon_profile=horizon_profile,
         )
-    except sqlite3.Error as exc:
+    except (sqlite3.Error, ValueError) as exc:
         raise ValueError("CALIBRATION_AUTHORITY_MISSING:calibration store unavailable") from exc
     if cal is None:
         raise ValueError("CALIBRATION_AUTHORITY_MISSING:no Platt calibrator")
@@ -982,6 +1021,29 @@ def _snapshot_p_cal(
     if not _valid_probability_vector(p_cal, len(bins)):
         raise ValueError("CALIBRATION_AUTHORITY_MISSING:p_cal invalid")
     return p_cal
+
+
+def _p_cal_json_authority_block_reason(
+    snapshot: dict[str, Any],
+    *,
+    decision_time: datetime | None,
+) -> str | None:
+    if _nonnull(snapshot.get("p_cal_authority")) != "VERIFIED":
+        return "CALIBRATION_AUTHORITY_MISSING:p_cal_json authority missing"
+    if not _nonnull(snapshot.get("p_cal_model_key")) or not _nonnull(snapshot.get("p_cal_model_version")):
+        return "CALIBRATION_AUTHORITY_MISSING:p_cal_json model provenance missing"
+    source_id = _nonnull(snapshot.get("source_id"))
+    source_run_id = _nonnull(snapshot.get("source_run_id"))
+    if _nonnull(snapshot.get("p_cal_source_id")) != source_id:
+        return "CALIBRATION_AUTHORITY_MISSING:p_cal_json source mismatch"
+    if _nonnull(snapshot.get("p_cal_source_run_id")) != source_run_id:
+        return "CALIBRATION_AUTHORITY_MISSING:p_cal_json source_run mismatch"
+    available_at = _parse_utc(snapshot.get("p_cal_available_at"))
+    if available_at is None or decision_time is None:
+        return "CALIBRATION_AUTHORITY_MISSING:p_cal_json availability missing"
+    if available_at > decision_time.astimezone(UTC):
+        return "CALIBRATION_AUTHORITY_MISSING:p_cal_json not available"
+    return None
 
 
 def _snapshot_lead_days(*, snapshot: dict[str, Any], family, payload: dict[str, object]) -> float:
@@ -1392,7 +1454,12 @@ def _p_fill_lcb_for_direction(book, *, direction: str, shares: Decimal) -> float
         "sell_no": book.no_bids,
     }[direction]
     available = sum((level.size for level in levels), Decimal("0"))
-    return 1.0 if available >= shares else 0.0
+    if available < shares:
+        return 0.0
+    # Public visible depth is quote feasibility evidence, not fill truth. In
+    # no-submit mode there is no FOK/FAK acceptance or user-channel fill proof,
+    # so cap the fill lower bound at a conservative configured floor.
+    return max(0.0, min(1.0, float(settings["edli_v1"].get("no_submit_visible_depth_fill_lcb", 0.05))))
 
 
 def _robust_trade_score_from_generated_inputs(

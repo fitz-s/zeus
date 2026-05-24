@@ -23,6 +23,10 @@ def test_edli_online_config_enabled_with_stale_book_and_fok_off():
     assert edli["market_channel_quote_cache_enabled"] is True
     assert edli["no_trade_regret_enabled"] is True
     assert edli["reports_enabled"] is True
+    assert edli["forecast_snapshot_emit_limit"] <= 20
+    assert edli["day0_catchup_emit_limit"] <= 20
+    assert edli["no_submit_proof_limit"] <= 10
+    assert edli["no_submit_visible_depth_fill_lcb"] < 1.0
     assert edli["stale_book_directional_trading_enabled"] is False
     assert edli["real_order_submit_enabled"] is False
     assert edli["taker_fok_fak_live_enabled"] is False
@@ -41,6 +45,9 @@ def test_edli_reactor_job_wired_without_removing_scheduler_jobs():
     assert "submit_existing_cycle_for_event" not in source
     assert 'edli_cfg.get("real_order_submit_enabled"' not in source
     assert "real_order_submit_enabled=False" in source
+    assert "forecast_snapshot_emit_limit" in source
+    assert "no_submit_proof_limit" in source
+    assert "reactor.process_pending(decision_time=now, limit=proof_limit)" in source
     assert "user_channel_or_reconcile_only" in source
     edli_start = source.index("def _edli_event_reactor_cycle")
     edli_end = source.index("@_scheduler_job", edli_start + 1)

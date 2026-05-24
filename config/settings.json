@@ -81,9 +81,13 @@
     "market_channel_quote_cache_enabled": true,
     "no_trade_regret_enabled": true,
     "reports_enabled": true,
+    "forecast_snapshot_emit_limit": 20,
+    "day0_catchup_emit_limit": 20,
+    "no_submit_proof_limit": 10,
     "stale_book_directional_trading_enabled": false,
     "real_order_submit_enabled": false,
     "taker_fok_fak_live_enabled": false,
+    "no_submit_visible_depth_fill_lcb": 0.05,
     "tiny_live_max_notional_usd": 5.0,
     "tiny_live_max_orders_per_day": 1
   },

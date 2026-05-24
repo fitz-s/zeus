@@ -2404,12 +2404,15 @@ def _edli_event_reactor_cycle() -> None:
     try:
         now = datetime.now(timezone.utc)
         received_at = now.isoformat()
+        forecast_emit_limit = _edli_bounded_positive_int(edli_cfg, "forecast_snapshot_emit_limit", default=20, maximum=50)
+        day0_emit_limit = _edli_bounded_positive_int(edli_cfg, "day0_catchup_emit_limit", default=20, maximum=100)
+        proof_limit = _edli_bounded_positive_int(edli_cfg, "no_submit_proof_limit", default=10, maximum=50)
         if edli_cfg.get("forecast_snapshot_trigger_enabled"):
             _edli_emit_forecast_snapshot_events(
                 conn,
                 decision_time=now,
                 received_at=received_at,
-                limit=50,
+                limit=forecast_emit_limit,
             )
         if (
             edli_cfg.get("day0_extreme_trigger_enabled")
@@ -2420,7 +2423,7 @@ def _edli_event_reactor_cycle() -> None:
                 trade_conn,
                 decision_time=now,
                 received_at=received_at,
-                limit=100,
+                limit=day0_emit_limit,
             )
         conn.commit()
         store = EventStore(conn)
@@ -2438,6 +2441,7 @@ def _edli_event_reactor_cycle() -> None:
                 trade_conn,
                 forecast_conn=forecasts_conn,
                 topology_conn=forecasts_conn,
+                calibration_conn=conn,
                 get_current_level=get_current_level,
             ),
             reject=lambda _event, _stage, _reason: None,
@@ -2450,11 +2454,19 @@ def _edli_event_reactor_cycle() -> None:
                 tiny_live_max_orders_per_day=int(edli_cfg.get("tiny_live_max_orders_per_day", 1)),
             ),
         )
-        reactor.process_pending(decision_time=now, limit=50)
+        reactor.process_pending(decision_time=now, limit=proof_limit)
         conn.commit()
     finally:
         trade_conn.close()
         conn.close()
+
+
+def _edli_bounded_positive_int(config: dict, key: str, *, default: int, maximum: int) -> int:
+    try:
+        value = int(config.get(key, default))
+    except (TypeError, ValueError):
+        value = default
+    return max(1, min(maximum, value))
 
 
 def _edli_emit_forecast_snapshot_events(

@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-05-24T21:24:16.438889+00:00",
+  "generated_at": "2026-05-24T21:50:37.499547+00:00",
   "non_deterministic_excluded": [
     "external_position_sync",
     "http_fetch",
@@ -9,15 +9,15 @@
     "web_fetch"
   ],
   "projection": {
-    "content_hash": "8207db254572bec54be2deff9dd79438b24948bf13365312c30e2a07a182352e",
+    "content_hash": "448ae82fbe91376f25f4a5d45ccc3c00dfff3098f7fdd4861d1ae383410eb4f5",
     "counts_by_type": {
       "chronicle::SETTLEMENT": 9,
-      "decision_log::decision_cycle_completed": 1824,
-      "opportunity_fact::opportunity_evaluated": 7345,
-      "shadow_signals::shadow_signal_emitted": 1033
+      "decision_log::decision_cycle_completed": 1829,
+      "opportunity_fact::opportunity_evaluated": 7261,
+      "shadow_signals::shadow_signal_emitted": 964
     },
-    "event_count": 10211,
-    "seed_cutoff_utc": "2026-05-17T21:24:16.438550+00:00",
+    "event_count": 10063,
+    "seed_cutoff_utc": "2026-05-17T21:50:37.499195+00:00",
     "seed_window_days": 7
   },
   "schema_version": "0.1.0"

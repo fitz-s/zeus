@@ -215,6 +215,12 @@ def _trade_conn_with_snapshot(
             members_json TEXT NOT NULL,
             p_raw_json TEXT,
             p_cal_json TEXT,
+            p_cal_model_key TEXT,
+            p_cal_model_version TEXT,
+            p_cal_authority TEXT,
+            p_cal_available_at TEXT,
+            p_cal_source_id TEXT,
+            p_cal_source_run_id TEXT,
             members_unit TEXT,
             settlement_unit TEXT,
             source_id TEXT,
@@ -256,6 +262,12 @@ def _trade_conn_with_snapshot(
             ?,
             ?,
             ?,
+            'pcal-model-1',
+            'platt-v2',
+            'VERIFIED',
+            '2026-05-24T08:09:00+00:00',
+            'ecmwf_open_data',
+            'run-1',
             'degF',
             'F',
             'ecmwf_open_data',
@@ -492,14 +504,66 @@ def _insert_forecast_reader_authority(conn: sqlite3.Connection) -> None:
     )
 
 
+def _calibration_conn_with_platt_model() -> sqlite3.Connection:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    _insert_platt_model(conn)
+    return conn
+
+
+def _insert_platt_model(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS platt_models_v2 (
+            model_key TEXT PRIMARY KEY,
+            temperature_metric TEXT NOT NULL,
+            cluster TEXT NOT NULL,
+            season TEXT NOT NULL,
+            data_version TEXT NOT NULL,
+            input_space TEXT NOT NULL,
+            param_A REAL NOT NULL,
+            param_B REAL NOT NULL,
+            param_C REAL NOT NULL,
+            bootstrap_params_json TEXT NOT NULL,
+            n_samples INTEGER NOT NULL,
+            brier_insample REAL,
+            fitted_at TEXT NOT NULL,
+            is_active INTEGER NOT NULL,
+            authority TEXT NOT NULL,
+            cycle TEXT NOT NULL,
+            source_id TEXT NOT NULL,
+            horizon_profile TEXT NOT NULL,
+            recorded_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute("DELETE FROM platt_models_v2 WHERE model_key = 'platt-world-1'")
+    conn.execute(
+        """
+        INSERT INTO platt_models_v2 VALUES (
+            'platt-world-1', 'high', 'Chicago', 'MAM',
+            'tigge_mx2t6_local_calendar_day_max_v1',
+            'width_normalized_density',
+            1.15, 0.01, 0.02, ?,
+            60, 0.12, '2026-05-01T00:00:00+00:00',
+            1, 'VERIFIED', '00', 'tigge_mars', 'full',
+            '2026-05-01T00:00:00+00:00'
+        )
+        """,
+        (json.dumps([[1.15, 0.01, 0.02]], separators=(",", ":")),),
+    )
+
+
 def _receipt(event, conn: sqlite3.Connection, **kwargs):
     forecast_conn = kwargs.pop("forecast_conn", conn)
     topology_conn = kwargs.pop("topology_conn", forecast_conn)
+    calibration_conn = kwargs.pop("calibration_conn", kwargs.pop("world_conn", conn))
     return build_event_bound_no_submit_receipt(
         event,
         trade_conn=conn,
         forecast_conn=forecast_conn,
         topology_conn=topology_conn,
+        calibration_conn=calibration_conn,
         get_current_level=kwargs.pop("get_current_level", lambda: RiskLevel.GREEN),
         bankroll_usd_provider=kwargs.pop("bankroll_usd_provider", lambda: 100.0),
         **kwargs,
@@ -573,6 +637,8 @@ def test_runtime_receipt_uses_event_bound_final_intent_contract():
     assert receipt.q_live is not None
     assert receipt.q_live > 0.85
     assert receipt.c_fee_adjusted is not None
+    assert receipt.p_fill_lcb is not None
+    assert 0.0 < receipt.p_fill_lcb < 1.0
     assert receipt.family_complete is True
     assert receipt.fdr_pass is True
     assert receipt.fdr_hypothesis_count == 4
@@ -733,11 +799,20 @@ def test_receipt_requires_explicit_forecast_and_topology_authority_connections()
         forecast_conn=conn,
         get_current_level=lambda: RiskLevel.GREEN,
     )
+    missing_calibration = build_event_bound_no_submit_receipt(
+        event,
+        trade_conn=conn,
+        forecast_conn=conn,
+        topology_conn=conn,
+        get_current_level=lambda: RiskLevel.GREEN,
+    )
 
     assert missing_forecast.submitted is False
     assert missing_forecast.reason == "FORECAST_AUTHORITY_CONNECTION_MISSING"
     assert missing_topology.submitted is False
     assert missing_topology.reason == "TOPOLOGY_AUTHORITY_CONNECTION_MISSING"
+    assert missing_calibration.submitted is False
+    assert missing_calibration.reason == "CALIBRATION_AUTHORITY_CONNECTION_MISSING"
 
 
 def test_missing_calibration_authority_blocks_receipt():
@@ -749,6 +824,77 @@ def test_missing_calibration_authority_blocks_receipt():
 
     assert receipt.submitted is False
     assert receipt.reason.startswith("LIVE_INFERENCE_INPUTS_MISSING:CALIBRATION_AUTHORITY_MISSING")
+
+
+def test_receipt_uses_world_calibration_authority_not_forecast_conn():
+    event = _bound_forecast_event()
+    trade_conn = _trade_conn_with_snapshot()
+    forecast_conn = _trade_conn_with_snapshot()
+    calibration_conn = _calibration_conn_with_platt_model()
+    forecast_conn.execute("DROP TABLE executable_market_snapshots")
+    trade_conn.execute("DROP TABLE ensemble_snapshots_v2")
+    trade_conn.execute("DROP TABLE market_events_v2")
+    trade_conn.execute("DROP TABLE source_run")
+    trade_conn.execute("DROP TABLE source_run_coverage")
+    forecast_conn.execute("UPDATE ensemble_snapshots_v2 SET p_cal_json = NULL")
+
+    receipt = _receipt(
+        event,
+        trade_conn,
+        forecast_conn=forecast_conn,
+        topology_conn=forecast_conn,
+        calibration_conn=calibration_conn,
+    )
+
+    assert receipt.submitted is True
+    assert receipt.q_live is not None
+    assert receipt.side_effect_status == "NO_SUBMIT"
+
+
+def test_forecast_conn_fake_platt_model_is_not_calibration_authority():
+    event = _bound_forecast_event()
+    trade_conn = _trade_conn_with_snapshot()
+    forecast_conn = _trade_conn_with_snapshot()
+    forecast_conn.execute("DROP TABLE executable_market_snapshots")
+    trade_conn.execute("DROP TABLE ensemble_snapshots_v2")
+    trade_conn.execute("DROP TABLE market_events_v2")
+    trade_conn.execute("DROP TABLE source_run")
+    trade_conn.execute("DROP TABLE source_run_coverage")
+    forecast_conn.execute("UPDATE ensemble_snapshots_v2 SET p_cal_json = NULL")
+    _insert_platt_model(forecast_conn)
+
+    receipt = _receipt(
+        event,
+        trade_conn,
+        forecast_conn=forecast_conn,
+        topology_conn=forecast_conn,
+        calibration_conn=sqlite3.connect(":memory:"),
+    )
+
+    assert receipt.submitted is False
+    assert receipt.reason.startswith("LIVE_INFERENCE_INPUTS_MISSING:CALIBRATION_AUTHORITY_MISSING")
+
+
+def test_p_cal_json_without_authority_fields_blocks():
+    event = _bound_forecast_event()
+    conn = _trade_conn_with_snapshot()
+    conn.execute("UPDATE ensemble_snapshots_v2 SET p_cal_authority = NULL")
+
+    receipt = _receipt(event, conn)
+
+    assert receipt.submitted is False
+    assert "CALIBRATION_AUTHORITY_MISSING:p_cal_json authority missing" in receipt.reason
+
+
+def test_p_cal_json_available_after_event_blocks():
+    event = _bound_forecast_event()
+    conn = _trade_conn_with_snapshot()
+    conn.execute("UPDATE ensemble_snapshots_v2 SET p_cal_available_at = '2026-05-24T08:11:00+00:00'")
+
+    receipt = _receipt(event, conn)
+
+    assert receipt.submitted is False
+    assert "CALIBRATION_AUTHORITY_MISSING:p_cal_json not available" in receipt.reason
 
 
 def test_receipt_revalidates_source_run_coverage_after_event_emit():
@@ -828,6 +974,7 @@ def test_real_snapshot_depth_at_best_ask_authorizes_selected_token_cost():
     assert receipt.submitted is True
     assert receipt.c_fee_adjusted == 0.40
     assert receipt.native_quote_available is True
+    assert receipt.p_fill_lcb == 0.05
 
 
 def test_no_submit_default_bankroll_path_does_not_live_fetch_wallet(monkeypatch):
@@ -847,6 +994,7 @@ def test_no_submit_default_bankroll_path_does_not_live_fetch_wallet(monkeypatch)
         trade_conn=conn,
         forecast_conn=conn,
         topology_conn=conn,
+        calibration_conn=conn,
         get_current_level=lambda: RiskLevel.GREEN,
     )
 

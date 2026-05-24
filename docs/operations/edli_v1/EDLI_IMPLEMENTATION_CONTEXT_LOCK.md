@@ -156,6 +156,20 @@ Acceptance IDs A01-A40:
   bankroll only and fails closed when unavailable. Tests now cover canonical
   reader blocking, production-shaped `depth_at_best_ask` quote proof, and
   no-submit wallet-fetch avoidance.
+- Latest calibration/fill repair: the no-submit adapter now requires an
+  explicit `calibration_conn` and `src/main.py` passes the world connection for
+  Platt authority. Forecast snapshots/topology remain on the forecasts
+  connection; executable snapshots remain on trade. `p_cal_json` requires
+  VERIFIED model/source/run/available-at provenance before it can bypass
+  Platt loading. Visible public book depth is quote-feasibility evidence only:
+  no-submit `p_fill_lcb` is capped by
+  `edli_v1.no_submit_visible_depth_fill_lcb=0.05`, not promoted to `1.0`.
+- Latest backpressure repair: EDLI scheduler proof work is no longer hardcoded
+  to 50 pending events per tick. Config defaults are
+  `forecast_snapshot_emit_limit=20`, `day0_catchup_emit_limit=20`, and
+  `no_submit_proof_limit=10`, with `src/main.py` clamping values before emit /
+  proof processing. This reduces cold-start proof pressure but does not replace
+  the required daemon/DB concurrency smoke.
 
 ## Current Phase
 
@@ -185,11 +199,35 @@ Current blocking audit reference:
   no longer queries them as receipt authority.
 - Repaired P0/P1 subset: no-op FDR/Kelly removed from main wiring; executable snapshot gate and submit receipt are event-bound; forecast p_live no longer double-applies LLR; durable FDR proof is committed before executor entry; Kelly receipt requires matching cost-basis id; Day0 live flags are fail-closed until an online `Day0ObservationContext` hook is wired; authority-table scanning is evidence/catch-up; market-channel token metadata comes from executable snapshots and carries tick/min-order/negRisk; schema version CHECK ranges now accept `SCHEMA_VERSION=41`; market topology reads forecasts authority; calibrated probability authority is mandatory for EDLI proof; top-ask-only quotes cannot create liquidity.
 - Latest remaining deploy blockers: full sweep still needs pass or waiver
-  (latest local run stopped at `1207 passed / 9 failed / 1 error / 10 skipped /
+  (latest local run stopped at `1211 passed / 9 failed / 1 error / 10 skipped /
   19 deselected`); daemon restart, market-channel websocket, user-channel
   authority, and DB concurrency smokes remain unrun; RiskGuard proof is still
-  top-level `RiskLevel.GREEN` only and Day0 boundary receipts still lack
-  explicit fact-true/killed-bin reporting.
+  top-level `RiskLevel.GREEN` only. Day0 is disabled/out-of-scope for deploy
+  until an online observation hook and explicit boundary receipt reporting
+  exist.
+
+Fresh verification after latest calibration/fill/backpressure repair:
+
+- `python -m py_compile src/main.py src/engine/event_reactor_adapter.py
+  tests/engine/test_event_reactor_no_bypass.py
+  tests/money_path/test_edli_online_invariants.py` -> PASS.
+- `python -m pytest -q tests/engine/test_event_reactor_no_bypass.py
+  tests/money_path/test_edli_online_invariants.py --maxfail=5` -> PASS,
+  40 passed.
+- `python -m pytest -q tests/events tests/engine/test_event_reactor_no_bypass.py
+  tests/strategy/live_inference tests/money_path
+  tests/state/test_edli_table_ownership.py --maxfail=10` -> PASS,
+  218 passed.
+- `python scripts/check_schema_version.py && python
+  scripts/check_table_registry_coherence.py && python
+  scripts/ci/assert_test_quality.py` -> PASS.
+- `python3 scripts/replay_correctness_gate.py --db
+  /Users/leofitz/.openclaw/workspace-venus/zeus/state/zeus_trades.db
+  --bootstrap && python3 scripts/replay_correctness_gate.py --db
+  /Users/leofitz/.openclaw/workspace-venus/zeus/state/zeus_trades.db`
+  -> PASS after rolling same-day baseline refresh, 10,063 deterministic
+  events, projection hash
+  `448ae82fbe91376f25f4a5d45ccc3c00dfff3098f7fdd4861d1ae383410eb4f5`.
 
 Completed files:
 

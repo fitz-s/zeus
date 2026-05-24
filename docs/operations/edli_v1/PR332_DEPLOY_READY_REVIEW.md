@@ -63,14 +63,56 @@ Implemented after this review:
 - Regression coverage now includes canonical reader blocking, production-shaped
   `depth_at_best_ask` quote authorization, top-ask-without-depth rejection, and
   no-submit default bankroll path not calling `bankroll_provider.current()`.
+- Latest calibration/fill repair splits calibration authority from forecast
+  authority: `src/main.py` passes the world connection as `calibration_conn`,
+  while forecast snapshots/topology stay on the forecasts connection and
+  executable snapshots stay on the trade connection. `p_cal_json` is accepted
+  only when the row carries VERIFIED model/source/run/available-at provenance;
+  otherwise the adapter loads Platt calibration from `calibration_conn`.
+- Visible public book depth no longer sets `p_fill_lcb=1.0`; no-submit proof
+  caps visible-depth feasibility at `edli_v1.no_submit_visible_depth_fill_lcb`
+  (`0.05`) unless future execution evidence explicitly proves more.
+- EDLI event processing now has explicit local backpressure knobs:
+  `forecast_snapshot_emit_limit=20`, `day0_catchup_emit_limit=20`, and
+  `no_submit_proof_limit=10`; `src/main.py` clamps those values before event
+  emission / proof processing. This is not a substitute for DB concurrency
+  smoke, but it removes the previous default of running up to 50 full-family
+  no-submit proofs per scheduler tick.
+- Day0 remains explicitly out of deploy scope for this PR: the config keeps
+  `day0_extreme_trigger_enabled=false` and `day0_hard_fact_live_enabled=false`
+  until an online `Day0ObservationContext` hook is implemented and smoked.
+
+Fresh verification after this repair:
+
+- `python -m py_compile src/main.py src/engine/event_reactor_adapter.py
+  tests/engine/test_event_reactor_no_bypass.py
+  tests/money_path/test_edli_online_invariants.py` -> PASS.
+- `python -m pytest -q tests/engine/test_event_reactor_no_bypass.py
+  tests/money_path/test_edli_online_invariants.py --maxfail=5` -> PASS,
+  40 passed.
+- `python -m pytest -q tests/events tests/engine/test_event_reactor_no_bypass.py
+  tests/strategy/live_inference tests/money_path
+  tests/state/test_edli_table_ownership.py --maxfail=10` -> PASS,
+  218 passed.
+- `python scripts/check_schema_version.py && python
+  scripts/check_table_registry_coherence.py && python
+  scripts/ci/assert_test_quality.py` -> PASS.
+- `python3 scripts/replay_correctness_gate.py --db
+  /Users/leofitz/.openclaw/workspace-venus/zeus/state/zeus_trades.db
+  --bootstrap && python3 scripts/replay_correctness_gate.py --db
+  /Users/leofitz/.openclaw/workspace-venus/zeus/state/zeus_trades.db`
+  -> PASS after rolling same-day baseline refresh, 10,063 deterministic
+  events, projection hash
+  `448ae82fbe91376f25f4a5d45ccc3c00dfff3098f7fdd4861d1ae383410eb4f5`.
 
 Still not deploy-ready:
 
 - Full pytest sweep remains non-passing in this patch set: latest local run
-  stopped at `1207 passed / 9 failed / 1 error / 10 skipped / 19 deselected`.
+  stopped at `1211 passed / 9 failed / 1 error / 10 skipped / 19 deselected`.
   Failures are the existing missing `mypy`, missing maintenance-worker
   `TASK_CATALOG.yaml`, crossing-decision passive-fill fixture, and maintenance
   untracked-quarantine expectation lanes; they still require pass or explicit
   baseline waiver before deploy-ready.
 - Daemon restart / live market-channel websocket / user-channel smoke remain unrun.
-- RiskGuard proof depth, Day0 boundary receipt reporting, and market-channel concurrency smoke remain follow-up deploy gates.
+- RiskGuard proof depth, Day0 online hook/boundary receipt reporting, and
+  market-channel concurrency smoke remain follow-up deploy gates.
