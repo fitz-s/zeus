@@ -28,6 +28,8 @@ test_trust_policy:
   # Machine-readable registry: 122 tests with valid lifecycle headers.
   # Tests not in this list require audit before running.
   trusted_tests:
+    tests/events/test_event_candidate_binding.py: {created: "2026-05-24", last_used: "2026-05-24"}
+    tests/events/test_event_bound_decision_engine_no_runtime.py: {created: "2026-05-24", last_used: "2026-05-24"}
     tests/test_alpha_target_coherence.py: {created: "2026-04-07", last_used: "2026-04-23"}
     # task_2026-05-04_oracle_kelly_evidence_rebuild antibodies (A1-A7).
     # All packet-specific test files registered here so topology_doctor

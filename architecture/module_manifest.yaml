@@ -125,6 +125,34 @@ modules:
       - tests/test_evaluator_strategy_key_failclosed.py
     graph_appendix_status: LOCAL_GRAPH_QUERY_REQUIRED
     archive_extraction_status: partial
+  events:
+    path: src/events
+    scoped_agents: src/events/AGENTS.md
+    module_book: null
+    priority: edli_redemption_r1
+    maturity: initial
+    zone: source
+    authority_role: event_bound_opportunity_proof_kernel
+    high_risk_files:
+      - src/events/opportunity_event.py
+      - src/events/candidate_binding.py
+      - src/events/decision_engine.py
+    public_entry_files:
+      - src/events/opportunity_event.py
+      - src/events/candidate_binding.py
+      - src/events/decision_engine.py
+    law_dependencies:
+      - AGENTS.md
+      - docs/operations/edli_v1/PR328_REDEMPTION_PACKAGE.md
+      - docs/operations/edli_v1/REDEMPTION_ROOT_CAUSE.md
+    current_fact_dependencies:
+      - docs/operations/edli_v1/PR328_REDEMPTION_PACKAGE.md
+      - docs/operations/edli_v1/REDEMPTION_ROOT_CAUSE.md
+    required_tests:
+      - tests/events/test_event_candidate_binding.py
+      - tests/events/test_event_bound_decision_engine_no_runtime.py
+    graph_appendix_status: LOCAL_GRAPH_QUERY_REQUIRED
+    archive_extraction_status: not_started
   data:
     path: src/data
     scoped_agents: src/data/AGENTS.md

@@ -73,12 +73,31 @@ parent_coverage_allowed_patterns:
 - docs/operations/ws_poll_reaction/
 - docs/operations/attribution_drift/
 - docs/operations/current/
+- docs/operations/edli_v1/
 - docs/reports/
 - docs/artifacts/
 - docs/to-do-list/
 - docs/runbooks/
 - docs/reference/legacy/
 entries:
+- path: docs/operations/edli_v1/
+  doc_class: operations
+  default_read: true
+  direct_reference_allowed: true
+  current_role: EDLI v1 redemption package and proof-kernel operation context
+  canonical_replaced_by: []
+  next_action: keep
+  lifecycle_state: active
+  coverage_scope: descendants
+  parent_coverage_allowed: true
+  truth_profile: active_operations_packet
+  freshness_class: active
+  supersedes: []
+  superseded_by: []
+  may_live_in_reference: false
+  contains_volatile_metrics: true
+  current_tense_allowed: true
+  refresh_source: package closeout
 - path: docs/AGENTS.md
   doc_class: router
   default_read: true

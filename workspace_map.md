@@ -31,6 +31,7 @@ Use it after `AGENTS.md` to answer two questions quickly:
 | Path | Role | Next read |
 |------|------|-----------|
 | `src/` | Runtime source code | `src/AGENTS.md`, then package `AGENTS.md` |
+| `src/events/` | EDLI redemption R1 event facts and event-bound candidate-family proof kernel | `src/events/AGENTS.md` |
 | `src/venue/` | Live venue adapter boundary | `src/venue/AGENTS.md`, `docs/reference/modules/venue.md` |
 | `src/strategy/` | Strategy, benchmark, FDR/Kelly, and candidate-stub boundary | `src/strategy/AGENTS.md`, `docs/reference/modules/strategy.md` |
 | `src/risk_allocator/` | R3 A2 capital allocation, cap policy, governor state, and kill-switch enforcement | `src/risk_allocator/AGENTS.md`, `docs/reference/modules/riskguard.md` |
@@ -42,6 +43,7 @@ Use it after `AGENTS.md` to answer two questions quickly:
 | `docs/reference/modules/` | Dense module books; reference only, never constitutional law | `docs/reference/modules/AGENTS.md` (`state`, `engine`, and `data` landed first) |
 | `docs/reference/legacy/` | Demoted historical reference snapshots (`legacy_reference_*.md`); doc_class `legacy_reference` per 2026-05-17 W6 | `docs/reference/legacy/AGENTS.md` |
 | `docs/operations/` | Live control pointer, active packets (.archived stubs dropped 2026-05-17 — git is backup, docs/archives/packets/ holds canonical) | `docs/operations/AGENTS.md` |
+| `docs/operations/edli_v1/` | EDLI v1 redemption package, root-cause record, and implementation packet | `docs/operations/AGENTS.md` |
 | `docs/runbooks/` | Operator runbooks | `docs/runbooks/AGENTS.md` |
 | `docs/reports/authority_history/` | Durable authority history ADRs and delivery boundary (kept tracked; rest of docs/reports/ is untracked archive) | `docs/reports/authority_history/` |
 | `docs/to-do-list/` | Active checklist workbooks | `docs/to-do-list/AGENTS.md` |

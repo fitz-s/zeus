@@ -136,6 +136,11 @@ package_defaults:
     authority_role: orchestration
     gates:
     - pytest -q tests/test_architecture_contracts.py tests/test_run_replay_cli.py
+  src/events:
+    zone: K2_runtime
+    authority_role: edli_redemption_proof_kernel
+    gates:
+    - pytest -q tests/events
   src/data:
     zone: K2_runtime
     authority_role: external_data_boundary
@@ -211,6 +216,38 @@ files:
     zone: package_marker
     authority_role: package_marker
     why: Marks src as importable package.
+  src/events/AGENTS.md:
+    zone: docs
+    authority_role: event_package_router
+    why: Scoped guidance for EDLI redemption R1 event-bound proof-kernel modules.
+  src/events/__init__.py:
+    zone: package_marker
+    authority_role: package_marker
+    why: Marks EDLI event package as importable.
+  src/events/idempotency.py:
+    zone: K2_runtime
+    authority_role: edli_event_hashing
+    why: Deterministic canonical JSON hashing and idempotency key construction for immutable EDLI event facts.
+    downstream:
+    - src/events/opportunity_event.py
+  src/events/opportunity_event.py:
+    zone: K2_runtime
+    authority_role: edli_event_contract
+    why: Typed EDLI event and payload contract for the R1 proof kernel; preserves observed_at/available_at/received_at separation and deterministic event identity.
+    downstream:
+    - src/events/candidate_binding.py
+  src/events/candidate_binding.py:
+    zone: K2_runtime
+    authority_role: edli_event_bound_candidate_family
+    why: Pure R1 proof kernel that binds forecast/Day0 events to exact city/date/metric market topology before any money-path runtime or side effect may run.
+    downstream:
+    - src/events/decision_engine.py
+  src/events/decision_engine.py:
+    zone: K2_runtime
+    authority_role: edli_event_bound_decision_kernel
+    why: R1 no-runtime decision skeleton that produces an event-bound candidate family or no-trade rejection without scheduler, run_cycle, executor, venue, websocket, or submit paths.
+    downstream:
+    - src/events/candidate_binding.py
   src/main.py:
     zone: K2_runtime
     authority_role: live_daemon_entry
