@@ -956,6 +956,24 @@ def _market_dict_from_snapshot(snapshot) -> dict:
     }
 
 
+def _propagate_recaptured_snapshot_fields(snapshot_fields, fresh_snapshot) -> None:
+    """Propagate a re-captured snapshot's id AND derived facts into snapshot_fields.
+
+    After fresh-at-submit re-capture, the recorded provenance must reference the fresh
+    snapshot in full — not the fresh id paired with the stale snapshot's tick/min_order/
+    neg_risk (read at live validation and on the paper path). Otherwise the recorded
+    intent carries a fresh id against stale derived facts.
+    """
+    if not isinstance(snapshot_fields, dict):
+        return
+    snapshot_fields["executable_snapshot_id"] = str(fresh_snapshot.snapshot_id)
+    if getattr(fresh_snapshot, "min_tick_size", None) is not None:
+        snapshot_fields["executable_snapshot_min_tick_size"] = str(fresh_snapshot.min_tick_size)
+    if getattr(fresh_snapshot, "min_order_size", None) is not None:
+        snapshot_fields["executable_snapshot_min_order_size"] = str(fresh_snapshot.min_order_size)
+    snapshot_fields["executable_snapshot_neg_risk"] = bool(getattr(fresh_snapshot, "neg_risk", False))
+
+
 def _reprice_recapture_fresh_snapshot(conn, snapshot_id, *, decision, stale_snapshot, now):
     """Open a short-lived public CLOB client and re-capture a fresh snapshot for ONE market.
 
@@ -1029,13 +1047,13 @@ def _reprice_decision_from_executable_snapshot(
             stale_snapshot=snapshot,
             now=_now_reprice,
         )
-        # _snapshot_id is content+time-based: re-capture mints a NEW id. Propagate it so
-        # downstream trade provenance (final intent / recorded executable_snapshot_id)
-        # references the fresh snapshot the order was actually priced against.
+        # _snapshot_id is content+time-based: re-capture mints a NEW id. Propagate the
+        # id AND its sibling derived facts (tick/min_order/neg_risk read at live + paper
+        # validation) so downstream trade provenance references the fresh snapshot the
+        # order was actually priced against — never a fresh id against stale derived facts.
         if str(getattr(snapshot, "snapshot_id", "") or "") != snapshot_id:
             snapshot_id = str(snapshot.snapshot_id)
-            if isinstance(snapshot_fields, dict):
-                snapshot_fields["executable_snapshot_id"] = snapshot_id
+            _propagate_recaptured_snapshot_fields(snapshot_fields, snapshot)
     from src.config import settings
     from src.contracts import (
         Direction,

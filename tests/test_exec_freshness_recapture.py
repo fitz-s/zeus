@@ -235,6 +235,25 @@ def test_reprice_recapture_wiring_opens_client_and_returns_fresh(conn, monkeypat
     assert fresh.snapshot_id != "snap-stale", "re-capture mints a new id reprice must propagate"
 
 
+def test_propagate_recaptured_snapshot_fields_updates_id_and_siblings():
+    """SEV-2: propagation must carry the fresh id AND derived facts (tick/min_order/neg_risk),
+    never a fresh id against stale derived facts."""
+    from src.engine.cycle_runtime import _propagate_recaptured_snapshot_fields
+
+    fresh = _stale_snapshot("snap-fresh-xyz", captured_at=NOW)  # builder; identity is what matters
+    fields = {
+        "executable_snapshot_id": "snap-OLD",
+        "executable_snapshot_min_tick_size": "9.99",
+        "executable_snapshot_min_order_size": "9.99",
+        "executable_snapshot_neg_risk": True,
+    }
+    _propagate_recaptured_snapshot_fields(fields, fresh)
+    assert fields["executable_snapshot_id"] == "snap-fresh-xyz"
+    assert fields["executable_snapshot_min_tick_size"] == str(fresh.min_tick_size)
+    assert fields["executable_snapshot_min_order_size"] == str(fresh.min_order_size)
+    assert fields["executable_snapshot_neg_risk"] == bool(fresh.neg_risk)
+
+
 def test_reprice_recapture_disabled_preserves_stale_gate(conn, monkeypatch):
     """Kill-switch ZEUS_REPRICE_RECAPTURE_DISABLED → no re-capture, 30s gate preserved."""
     from src.engine.cycle_runtime import _reprice_recapture_fresh_snapshot
