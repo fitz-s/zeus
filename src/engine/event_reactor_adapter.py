@@ -918,7 +918,7 @@ def _canonical_hypothesis_rows(
         buy_no_available.append(no_price is not None)
         executable_mask.append(yes_price is not None or no_price is not None)
     sampler = None
-    if snapshot.get("p_raw_json") not in {None, ""} or family.event_type == "DAY0_EXTREME_UPDATED":
+    if family.event_type == "DAY0_EXTREME_UPDATED":
         static_p_cal = np.asarray(p_cal, dtype=float)
 
         def _static_sampler(_analysis, _n_members):
@@ -973,15 +973,11 @@ def _snapshot_p_raw(
     members: np.ndarray,
     payload: dict[str, object],
 ) -> np.ndarray:
-    raw_json = snapshot.get("p_raw_json")
-    if raw_json not in {None, ""}:
-        arr = np.asarray(_json_list(raw_json), dtype=float)
-    else:
-        city = runtime_cities_by_name().get(family.city)
-        if city is None:
-            raise ValueError(f"city config missing for event-bound forecast inference: {family.city}")
-        semantics = SettlementSemantics.for_city(city)
-        arr = p_raw_vector_from_maxes(members, city, semantics, bins)
+    city = runtime_cities_by_name().get(family.city)
+    if city is None:
+        raise ValueError(f"city config missing for event-bound forecast inference: {family.city}")
+    semantics = SettlementSemantics.for_city(city)
+    arr = p_raw_vector_from_maxes(members, city, semantics, bins)
     if arr.shape != (len(bins),) or not np.isfinite(arr).all() or np.any(arr < 0.0):
         raise ValueError("event-bound p_raw vector invalid")
     total = float(arr.sum())
@@ -1638,7 +1634,7 @@ def _executable_forecast_reader_authority_block_reason(
     """Revalidate forecast eligibility through the canonical executable reader."""
 
     try:
-        from src.data.executable_forecast_reader import SOURCE_TRANSPORT, read_executable_forecast_snapshot
+        from src.data.executable_forecast_reader import SOURCE_TRANSPORT, read_executable_forecast
         from src.data.forecast_target_contract import ForecastTargetScope
 
         target_date = date.fromisoformat(str(coverage.get("target_local_date") or family.target_date))
@@ -1649,6 +1645,8 @@ def _executable_forecast_reader_authority_block_reason(
         source_transport = _nonnull(coverage.get("source_transport") or snapshot.get("source_transport") or SOURCE_TRANSPORT)
         data_version = _nonnull(coverage.get("data_version") or snapshot.get("data_version"))
         source_run_id = _nonnull(source_run.get("source_run_id") or snapshot.get("source_run_id"))
+        track = _nonnull(coverage.get("track") or source_run.get("track") or snapshot.get("track") or _payload(event).get("track"))
+        condition_id = _nonnull(_payload(event).get("condition_id") or (family.condition_ids[0] if family.condition_ids else ""))
         if (
             source_cycle_time is None
             or target_window_start is None
@@ -1658,6 +1656,8 @@ def _executable_forecast_reader_authority_block_reason(
             or not source_transport
             or not data_version
             or not source_run_id
+            or not track
+            or not condition_id
             or not required_steps
         ):
             return "FORECAST_READER_LIVE_ELIGIBILITY_BLOCKED:scope_incomplete"
@@ -1674,20 +1674,29 @@ def _executable_forecast_reader_authority_block_reason(
             required_step_hours=required_steps,
             market_refs=tuple(str(candidate.condition_id or "") for candidate in family.candidates),
         )
-        result = read_executable_forecast_snapshot(
+        result = read_executable_forecast(
             conn,
-            scope=scope,
+            city_id=scope.city_id,
+            city_name=scope.city_name,
+            city_timezone=scope.city_timezone,
+            target_local_date=scope.target_local_date,
+            temperature_metric=scope.temperature_metric,
             source_id=source_id,
             source_transport=source_transport,
-            source_run_id=source_run_id,
-            now_utc=decision_time,
+            data_version=data_version,
+            track=track,
+            strategy_key="entry_forecast",
+            market_family=family.family_id,
+            condition_id=condition_id,
+            decision_time=decision_time,
+            require_entry_readiness=False,
         )
     except (sqlite3.Error, ValueError, TypeError, KeyError) as exc:
         return f"FORECAST_READER_LIVE_ELIGIBILITY_BLOCKED:{exc}"
-    if not result.ok or result.snapshot is None:
+    if not result.ok or result.bundle is None:
         return f"FORECAST_READER_LIVE_ELIGIBILITY_BLOCKED:{result.reason_code}"
     selected_snapshot_id = _nonnull(snapshot.get("snapshot_id"))
-    if _nonnull(result.snapshot.snapshot_id) != selected_snapshot_id:
+    if _nonnull(result.bundle.snapshot.snapshot_id) != selected_snapshot_id:
         return "FORECAST_READER_SNAPSHOT_MISMATCH"
     if not allow_latest and _nonnull(event.causal_snapshot_id) != selected_snapshot_id:
         return "FORECAST_READER_CAUSAL_SNAPSHOT_MISMATCH"

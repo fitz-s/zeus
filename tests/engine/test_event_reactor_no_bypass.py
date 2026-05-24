@@ -9,15 +9,20 @@ import sqlite3
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
+
+import numpy as np
 
 from src.engine.event_reactor_adapter import (
     build_event_bound_no_submit_receipt,
     edli_source_truth_gate,
     edli_trade_score_gate,
     executable_snapshot_gate_from_trade_conn,
+    _snapshot_p_raw,
 )
 from src.events.opportunity_event import ForecastSnapshotReadyPayload, make_opportunity_event
 from src.riskguard.risk_level import RiskLevel
+from src.types.market import Bin
 
 DECISION_TIME = datetime(2026, 5, 24, 8, 12, tzinfo=timezone.utc)
 
@@ -458,8 +463,42 @@ def _insert_forecast_reader_authority(conn: sqlite3.Connection) -> None:
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS readiness_state (
+            readiness_id TEXT PRIMARY KEY,
+            scope_key TEXT NOT NULL UNIQUE,
+            scope_type TEXT NOT NULL,
+            city_id TEXT,
+            city TEXT,
+            city_timezone TEXT,
+            target_local_date TEXT,
+            metric TEXT,
+            temperature_metric TEXT,
+            physical_quantity TEXT,
+            observation_field TEXT,
+            data_version TEXT,
+            source_id TEXT,
+            track TEXT,
+            source_run_id TEXT,
+            market_family TEXT,
+            event_id TEXT,
+            condition_id TEXT,
+            token_ids_json TEXT NOT NULL DEFAULT '[]',
+            strategy_key TEXT,
+            status TEXT NOT NULL,
+            reason_codes_json TEXT NOT NULL DEFAULT '[]',
+            computed_at TEXT NOT NULL,
+            expires_at TEXT,
+            dependency_json TEXT NOT NULL DEFAULT '{}',
+            provenance_json TEXT NOT NULL DEFAULT '{}',
+            recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
     conn.execute("DELETE FROM source_run WHERE source_run_id = 'run-1'")
     conn.execute("DELETE FROM source_run_coverage WHERE coverage_id = 'coverage-1'")
+    conn.execute("DELETE FROM readiness_state WHERE readiness_id = 'producer-readiness-1'")
     conn.execute(
         """
         INSERT INTO source_run (
@@ -483,6 +522,30 @@ def _insert_forecast_reader_authority(conn: sqlite3.Connection) -> None:
             'temperature', 'high_temp', 'ecmwf_opendata_mx2t3_local_calendar_day_max_v1',
             51, 51, '[0,3,6]', '[0,3,6]', 3, 3,
             'COMPLETE', 0, 'hash-raw', 'hash-manifest', 'SUCCESS', NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO readiness_state (
+            readiness_id, scope_key, scope_type, city_id, city, city_timezone,
+            target_local_date, metric, temperature_metric, physical_quantity,
+            observation_field, data_version, source_id, track, source_run_id,
+            market_family, event_id, condition_id, token_ids_json,
+            strategy_key, status, reason_codes_json, computed_at, expires_at,
+            dependency_json, provenance_json
+        ) VALUES (
+            'producer-readiness-1',
+            'city_metric|Chicago|America/Chicago|2026-05-25|high|temperature|high_temp|ecmwf_opendata_mx2t3_local_calendar_day_max_v1|producer_readiness||ecmwf_open_data|operational|',
+            'city_metric',
+            'Chicago', 'Chicago', 'America/Chicago',
+            '2026-05-25', NULL, 'high', 'temperature',
+            'high_temp', 'ecmwf_opendata_mx2t3_local_calendar_day_max_v1',
+            'ecmwf_open_data', 'operational', 'run-1',
+            NULL, NULL, NULL, '[]',
+            'producer_readiness', 'LIVE_ELIGIBLE', '["READY"]',
+            '2026-05-24T08:10:00+00:00', '2026-05-25T00:00:00+00:00',
+            '{"coverage_id":"coverage-1"}', '{"contract":"edli-test-fixture"}'
         )
         """
     )
@@ -642,7 +705,7 @@ def test_runtime_receipt_uses_event_bound_final_intent_contract():
     assert receipt.trade_score is not None
     assert receipt.trade_score > 0
     assert receipt.q_live is not None
-    assert receipt.q_live > 0.83
+    assert receipt.q_live > 0.60
     assert receipt.c_fee_adjusted is not None
     assert receipt.p_fill_lcb is not None
     assert 0.0 < receipt.p_fill_lcb < 1.0
@@ -662,11 +725,28 @@ def test_forecast_trigger_event_without_q_or_token_fields_builds_no_submit_recei
     assert receipt.proof_accepted is True
     assert receipt.token_id == "yes-1"
     assert receipt.q_live is not None
-    assert receipt.q_live > 0.83
+    assert receipt.q_live > 0.60
     assert receipt.trade_score is not None
     assert receipt.fdr_hypothesis_count == 4
     assert receipt.kelly_execution_price_type == "ExecutionPrice"
     assert receipt.side_effect_status == "NO_SUBMIT"
+
+
+def test_edli_runtime_recomputes_p_raw_from_members_not_unproven_snapshot_json():
+    family = SimpleNamespace(city="Chicago")
+    bins = [Bin(70, 71, "F", "70-71°F"), Bin(72, 73, "F", "72-73°F")]
+    members = np.asarray([70.5] * 41 + [72.5] * 10, dtype=float)
+
+    p_raw = _snapshot_p_raw(
+        {"p_raw_json": json.dumps([0.0, 1.0], separators=(",", ":"))},
+        family=family,
+        bins=bins,
+        members=members,
+        payload={},
+    )
+
+    assert p_raw[0] > 0.7
+    assert p_raw[1] < 0.3
 
 
 def test_family_candidates_use_market_event_range_bounds_not_payload_default():
@@ -760,7 +840,7 @@ def test_forecast_receipt_does_not_require_old_probability_or_selection_facts():
 
     assert receipt.proof_accepted is True
     assert receipt.q_live is not None
-    assert receipt.q_live > 0.83
+    assert receipt.q_live > 0.60
     assert receipt.fdr_pass is True
     assert receipt.fdr_hypothesis_count == 4
 
@@ -779,7 +859,7 @@ def test_forecast_receipt_uses_separate_forecast_authority_connection():
 
     assert receipt.proof_accepted is True
     assert receipt.q_live is not None
-    assert receipt.q_live > 0.83
+    assert receipt.q_live > 0.60
     assert receipt.side_effect_status == "NO_SUBMIT"
 
 
@@ -928,8 +1008,8 @@ def test_adapter_surfaces_reader_block_after_event_emit(monkeypatch):
     conn.execute("UPDATE source_run_coverage SET readiness_status = 'BLOCKED'")
     monkeypatch.setattr(
         executable_forecast_reader,
-        "read_executable_forecast_snapshot",
-        lambda *_args, **_kwargs: SimpleNamespace(ok=False, snapshot=None, reason_code="READINESS_BLOCKED"),
+        "read_executable_forecast",
+        lambda *_args, **_kwargs: SimpleNamespace(ok=False, bundle=None, reason_code="READINESS_BLOCKED"),
     )
 
     receipt = _receipt(event, conn)
@@ -948,8 +1028,12 @@ def test_adapter_uses_reader_snapshot_id_as_authority(monkeypatch):
     conn.execute("UPDATE source_run_coverage SET snapshot_ids_json = '[\"other-snapshot\"]'")
     monkeypatch.setattr(
         executable_forecast_reader,
-        "read_executable_forecast_snapshot",
-        lambda *_args, **_kwargs: SimpleNamespace(ok=True, snapshot=SimpleNamespace(snapshot_id="other-snapshot"), reason_code="OK"),
+        "read_executable_forecast",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            ok=True,
+            bundle=SimpleNamespace(snapshot=SimpleNamespace(snapshot_id="other-snapshot")),
+            reason_code="OK",
+        ),
     )
 
     receipt = _receipt(event, conn)
@@ -968,8 +1052,8 @@ def test_receipt_revalidates_executable_forecast_reader_authority(monkeypatch):
 
     monkeypatch.setattr(
         executable_forecast_reader,
-        "read_executable_forecast_snapshot",
-        lambda *_args, **_kwargs: SimpleNamespace(ok=False, snapshot=None, reason_code="READER_TEST_BLOCK"),
+        "read_executable_forecast",
+        lambda *_args, **_kwargs: SimpleNamespace(ok=False, bundle=None, reason_code="READER_TEST_BLOCK"),
     )
 
     receipt = _receipt(event, conn)
@@ -990,9 +1074,9 @@ def test_forecast_reader_revalidation_uses_reactor_decision_time(monkeypatch):
 
     monkeypatch.setattr(
         executable_forecast_reader,
-        "read_executable_forecast_snapshot",
-        lambda *_args, **kwargs: captured.append(kwargs["now_utc"])
-        or SimpleNamespace(ok=True, snapshot=SimpleNamespace(snapshot_id="1"), reason_code="OK"),
+        "read_executable_forecast",
+        lambda *_args, **kwargs: captured.append(kwargs["decision_time"])
+        or SimpleNamespace(ok=True, bundle=SimpleNamespace(snapshot=SimpleNamespace(snapshot_id="1")), reason_code="OK"),
     )
 
     receipt = _receipt(event, conn, decision_time=decision_time)
@@ -1034,10 +1118,10 @@ def test_coverage_expired_between_event_available_and_decision_blocks_receipt(mo
     seen = []
 
     def _reader(*_args, **kwargs):
-        seen.append(kwargs["now_utc"])
-        return SimpleNamespace(ok=False, snapshot=None, reason_code="COVERAGE_EXPIRED")
+        seen.append(kwargs["decision_time"])
+        return SimpleNamespace(ok=False, bundle=None, reason_code="COVERAGE_EXPIRED")
 
-    monkeypatch.setattr(executable_forecast_reader, "read_executable_forecast_snapshot", _reader)
+    monkeypatch.setattr(executable_forecast_reader, "read_executable_forecast", _reader)
 
     receipt = _receipt(event, conn, decision_time=datetime(2026, 5, 24, 8, 12, tzinfo=timezone.utc))
 
@@ -1118,6 +1202,7 @@ def test_forecast_receipt_uses_attached_forecasts_market_topology():
     conn.execute("CREATE TABLE forecasts.ensemble_snapshots_v2 AS SELECT * FROM ensemble_snapshots_v2")
     conn.execute("CREATE TABLE forecasts.source_run AS SELECT * FROM source_run")
     conn.execute("CREATE TABLE forecasts.source_run_coverage AS SELECT * FROM source_run_coverage")
+    conn.execute("CREATE TABLE forecasts.readiness_state AS SELECT * FROM readiness_state")
     conn.execute(
         """
         CREATE TABLE forecasts.market_events_v2 (

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import sqlite3
 import json
+from dataclasses import replace
 from datetime import datetime, timezone
 
 from src.events.event_store import EventStore
@@ -217,6 +218,95 @@ def test_no_submit_receipt_ledger_is_idempotent_for_duplicate_event():
     ledger.insert_idempotent(receipt, decision_time=datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc))
 
     assert conn.execute("SELECT COUNT(*) FROM edli_no_submit_receipts").fetchone()[0] == 1
+
+
+def test_no_submit_receipt_ledger_rejects_duplicate_hash_drift():
+    conn, _event_store = _store()
+    from src.events.no_submit_receipts import EdliNoSubmitReceiptLedger, EdliReceiptHashDriftError
+
+    receipt = EventSubmissionReceipt(
+        submitted=False,
+        proof_accepted=True,
+        event_id="event-1",
+        causal_snapshot_id="snapshot-1",
+        city="Chicago",
+        target_date="2026-05-24",
+        metric="high",
+        trade_score_positive=True,
+        fdr_pass=True,
+        fdr_family_id="fdr-family-1",
+        fdr_hypothesis_count=2,
+        kelly_pass=True,
+        kelly_execution_price_type="ExecutionPrice",
+        kelly_price_fee_deducted=True,
+        kelly_size_usd=1.0,
+        kelly_cost_basis_id="kelly-cost-1",
+        final_intent_id="intent-1",
+        side_effect_status="NO_SUBMIT",
+    )
+    ledger = EdliNoSubmitReceiptLedger(conn)
+    decision_time = datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc)
+
+    ledger.insert_idempotent(receipt, decision_time=decision_time)
+    drifted = replace(receipt, kelly_size_usd=2.0)
+
+    try:
+        ledger.insert_idempotent(drifted, decision_time=decision_time)
+    except EdliReceiptHashDriftError as exc:
+        assert "EDLI_RECEIPT_HASH_DRIFT" in str(exc)
+    else:
+        raise AssertionError("receipt hash drift must not be silently ignored")
+    assert conn.execute("SELECT COUNT(*) FROM edli_no_submit_receipts").fetchone()[0] == 1
+
+
+def test_receipt_hash_drift_dead_letters_event_before_processed():
+    conn, store = _store()
+    event = _day0_event()
+    store.insert_or_ignore(event)
+    from src.events.no_submit_receipts import EdliNoSubmitReceiptLedger
+
+    decision_time = datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc)
+    payload = json.loads(event.payload_json)
+    existing = EventSubmissionReceipt(
+        submitted=False,
+        proof_accepted=True,
+        event_id=event.event_id,
+        causal_snapshot_id=event.causal_snapshot_id,
+        city=payload.get("city"),
+        target_date=payload.get("target_date"),
+        metric=payload.get("metric"),
+        trade_score_positive=True,
+        fdr_pass=True,
+        fdr_family_id="family-1",
+        fdr_hypothesis_count=2,
+        kelly_pass=True,
+        kelly_execution_price_type="ExecutionPrice",
+        kelly_price_fee_deducted=True,
+        kelly_size_usd=2.0,
+        kelly_cost_basis_id="cost-1",
+        final_intent_id="intent-1",
+        side_effect_status="NO_SUBMIT",
+    )
+    EdliNoSubmitReceiptLedger(conn).insert_idempotent(existing, decision_time=decision_time)
+    reactor, rejected, _submitted = _reactor(store)
+
+    result = reactor.process_pending(decision_time=decision_time)
+
+    assert result.dead_lettered == 1
+    assert conn.execute("SELECT COUNT(*) FROM edli_no_submit_receipts").fetchone()[0] == 1
+    dead = conn.execute(
+        "SELECT failure_stage, error_message FROM event_dead_letters WHERE event_id = ?",
+        (event.event_id,),
+    ).fetchone()
+    assert dead is not None
+    assert dead[0] == "UNKNOWN_REVIEW_REQUIRED"
+    assert "EDLI_RECEIPT_HASH_DRIFT" in dead[1]
+    status = conn.execute(
+        "SELECT processing_status FROM opportunity_event_processing WHERE event_id = ?",
+        (event.event_id,),
+    ).fetchone()[0]
+    assert status == "dead_letter"
+    assert rejected[0][1] == "UNKNOWN_REVIEW_REQUIRED"
 
 
 def test_reactor_passes_decision_time_to_submit():

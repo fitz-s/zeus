@@ -14,6 +14,10 @@ from src.events.reactor import EventSubmissionReceipt
 SCHEMA_VERSION = 1
 
 
+class EdliReceiptHashDriftError(RuntimeError):
+    """Raised when a duplicate receipt key recomputes to different proof bytes."""
+
+
 class EdliNoSubmitReceiptLedger:
     def __init__(self, conn: sqlite3.Connection) -> None:
         self.conn = conn
@@ -33,9 +37,29 @@ class EdliNoSubmitReceiptLedger:
         receipt_hash = hashlib.sha256(receipt_json.encode("utf-8")).hexdigest()
         receipt_id = _receipt_id(receipt)
         created = (created_at or decision_time).astimezone(timezone.utc).isoformat()
+        existing = self.conn.execute(
+            """
+            SELECT receipt_id, receipt_hash
+            FROM edli_no_submit_receipts
+            WHERE receipt_id = ?
+               OR (event_id = ? AND final_intent_id = ?)
+            LIMIT 1
+            """,
+            (receipt_id, receipt.event_id, receipt.final_intent_id),
+        ).fetchone()
+        if existing is not None:
+            existing_receipt_id = str(existing["receipt_id"] if isinstance(existing, sqlite3.Row) else existing[0])
+            existing_hash = str(existing["receipt_hash"] if isinstance(existing, sqlite3.Row) else existing[1])
+            if existing_hash == receipt_hash:
+                return existing_receipt_id
+            raise EdliReceiptHashDriftError(
+                "EDLI_RECEIPT_HASH_DRIFT:"
+                f"event_id={receipt.event_id}:final_intent_id={receipt.final_intent_id}:"
+                f"existing_hash={existing_hash}:new_hash={receipt_hash}"
+            )
         self.conn.execute(
             """
-            INSERT OR IGNORE INTO edli_no_submit_receipts (
+            INSERT INTO edli_no_submit_receipts (
                 receipt_id, event_id, causal_snapshot_id, decision_time,
                 family_id, candidate_id, condition_id, token_id, direction,
                 executable_snapshot_id, final_intent_id, side_effect_status,
