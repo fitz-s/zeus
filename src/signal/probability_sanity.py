@@ -463,6 +463,11 @@ def _edge_bin_sanity_thresholds() -> dict[str, Any]:
 
     Returns dict with all required threshold keys.  Absent block or absent key
     falls back to defaults — behavior is unchanged if block is missing.
+
+    Also returns ``apply_to_strategies`` and ``apply_to_metrics`` lists.
+    When a call's metric or strategy_key is not in these lists, the gate
+    runs in shadow/log-only mode regardless of the top-level ``mode`` setting.
+    Empty lists (default when key absent) mean "apply to all" — full back-compat.
     """
     block: dict[str, Any] = {}
     from src.config import settings
@@ -473,6 +478,13 @@ def _edge_bin_sanity_thresholds() -> dict[str, Any]:
         raw = None
     if isinstance(raw, dict):
         block = raw
+
+    raw_strategies = block.get("apply_to_strategies")
+    apply_to_strategies: list[str] = list(raw_strategies) if isinstance(raw_strategies, list) else []
+
+    raw_metrics = block.get("apply_to_metrics")
+    apply_to_metrics: list[str] = list(raw_metrics) if isinstance(raw_metrics, list) else []
+
     return {
         "mode": str(block.get("mode", _DEFAULT_EDGE_BIN_MODE)),
         "low_price_threshold": float(
@@ -488,6 +500,8 @@ def _edge_bin_sanity_thresholds() -> dict[str, Any]:
         "min_neighbor_support": float(
             block.get("min_neighbor_support", _DEFAULT_EDGE_BIN_MIN_NEIGHBOR_SUPPORT)
         ),
+        "apply_to_strategies": apply_to_strategies,
+        "apply_to_metrics": apply_to_metrics,
     }
 
 
@@ -506,20 +520,33 @@ def probability_edge_bin_sanity(
 ) -> tuple[bool, str | None, dict]:
     """Gate 6 / LIVE-PROB-P0: per-edge-bin phantom predicate (operator binding spec §B).
 
-    CRITICAL SAFETY OVERRIDE: if settled_member_support >= min_edge_bin_member_support,
-    the gate passes unconditionally — even if ratio is high. This protects genuine
-    BIMODAL edges where real ensemble members land in a low-priced secondary mode.
-    A ratio-alone check would falsely block these under hard mode.
+    GATE SEMANTICS — MARKET-DEFERENCE:
+    The gate rejects any sub-floor (0 < p_market[edge] <= low_price_threshold) edge bin
+    where the calibrated model disagrees sharply (ratio >= odds_ratio_threshold) and the
+    bin sits in a contiguous sub-floor tail run (>= 2 bins).  This is pure market-deference:
+    the market's sub-floor price is treated as authoritative evidence of a phantom signal.
+    Member support (p_raw) does not override the market — even genuine ensemble members
+    landing in a sub-floor bin are accepted foregone-alpha under the no-phantom mandate.
+    The BIMODAL PROTECTION branch (Condition 4, which fires when p_raw >= min_member_support
+    AND p_market >= low_price_threshold) is structurally INERT for sub-floor bins: by the
+    time Condition 4 is evaluated, any bin with p_market >= low_price_threshold has already
+    returned PASS at the sub-floor guard (line after Condition 4). Member support is retained
+    for telemetry context only.
 
-    settled_member_support = p_raw[selected_bin_idx]
-      (fraction of MC-rounded members landing in the edge bin, pre-aggregated into p_raw)
+    APPLY-LIST ENFORCEMENT (2026-05-24):
+    The gate runs in HARD mode only when metric ∈ apply_to_metrics AND strategy_key ∈
+    apply_to_strategies (both from the probability_edge_bin_sanity config block).
+    If either condition fails, effective mode is downgraded to SHADOW (log-only; does NOT
+    set should_trade=False). This ensures only validated (metric, strategy) combinations
+    hard-block. The economic floor still backstops unvalidated combinations.
+    Empty apply-list (default when key absent in config) means "apply to all" — full back-compat.
 
     Reject ONLY when ALL of the following hold:
       1. 0 < p_market[edge] <= low_price_threshold (sub-floor quoted bin)
       2. p_cal[edge] - p_market[edge] >= min_edge_gap
       3. p_cal[edge] / max(p_market[edge], eps) >= odds_ratio_threshold (3.0)
-      4. settled_member_support < min_edge_bin_member_support (0.05)
-         [SAFETY: if support >= 0.05, return PASS immediately]
+      4. p_raw[edge] < min_edge_bin_member_support (0.05) OR p_market[edge] < low_price_threshold
+         [Note: always True for sub-floor bins after Condition 1; retained for structural clarity]
       5. edge bin sits in a contiguous sub-floor run >= tail_min_bins=2 on its side of mode
 
     Args:
@@ -529,8 +556,8 @@ def probability_edge_bin_sanity(
         p_cal: calibrated probability array.
         p_market: per-bin market prices; None → always PASS.
         direction: "buy_yes" | "buy_no" | "" (for telemetry).
-        metric: "high" | "low" | "" (for telemetry).
-        strategy_key: opaque label (for telemetry).
+        metric: "high" | "low" | "" (gate enforcement: must be in apply_to_metrics for HARD).
+        strategy_key: strategy label (gate enforcement: must be in apply_to_strategies for HARD).
         market_phase: opaque label (for telemetry).
         config: optional pre-loaded threshold dict (overrides settings.json; for testing).
 
@@ -554,6 +581,18 @@ def probability_edge_bin_sanity(
     min_member_support = thresholds["min_edge_bin_member_support"]
     # tail_min_bins = 2: reuse same contiguity guard as legacy predicate
     tail_min_bins = 2
+
+    # APPLY-LIST ENFORCEMENT (2026-05-24): downgrade mode to shadow when
+    # metric or strategy_key is outside the validated hard-mode scope.
+    # FP=0 was proven for HIGH + {opening_hunt, update_reaction, ...} only.
+    # LOW combinations are unvalidated → shadow-only (economic floor still backstops).
+    # Empty list in config means "apply to all" (back-compat when key absent).
+    apply_to_metrics: list[str] = thresholds.get("apply_to_metrics", [])
+    apply_to_strategies: list[str] = thresholds.get("apply_to_strategies", [])
+    if apply_to_metrics and metric not in apply_to_metrics:
+        mode = "shadow"
+    elif apply_to_strategies and strategy_key not in apply_to_strategies:
+        mode = "shadow"
 
     p_cal_arr = np.asarray(p_cal, dtype=np.float64)
     p_raw_arr = np.asarray(p_raw, dtype=np.float64)
@@ -672,15 +711,16 @@ def probability_edge_bin_sanity(
 
     if mode == "hard":
         reason_code = "PROBABILITY_TAIL_SHAPE_ANOMALY_HARD"
+        # Enrich hard-mode rejections with specific codes based on support/price pattern.
+        # Shadow-mode rejections retain PROBABILITY_TAIL_SHAPE_ANOMALY_SHADOW so callers
+        # can distinguish apply-list-downgraded from genuine hard blocks.
+        if member_support < min_member_support and 0.0 < px_edge <= low_price_threshold:
+            # Low price + no member support = strongest phantom signal
+            reason_code = "PROBABILITY_LOW_PRICE_EDGE_BIN_DISAGREEMENT"
+        elif member_support < min_member_support:
+            reason_code = "PROBABILITY_EDGE_BIN_UNSUPPORTED"
     else:
         reason_code = "PROBABILITY_TAIL_SHAPE_ANOMALY_SHADOW"
-
-    # Enrich with specific code based on support/price pattern
-    if member_support < min_member_support and 0.0 < px_edge <= low_price_threshold:
-        # Low price + no member support = strongest phantom signal
-        reason_code = "PROBABILITY_LOW_PRICE_EDGE_BIN_DISAGREEMENT"
-    elif member_support < min_member_support:
-        reason_code = "PROBABILITY_EDGE_BIN_UNSUPPORTED"
 
     full_reason = f"{reason_code}:{detail}"
     telemetry["probability_sanity_reason"] = full_reason

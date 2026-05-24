@@ -64,7 +64,7 @@
     ],
     "apply_to_metrics": ["high"],
     "log_only_until_replay_fp_zero": true,
-    "_note_2026_05_23": "LIVE-PROB-P0 §F operator binding spec (2026-05-23). probability_edge_bin_sanity is the per-edge phantom discriminator (Gate 6 replacement). Separate key from probability_sanity (which governs validate_high_distribution / check_edge_bin_tail_discrepancy). BIMODAL PROTECTION: if p_raw[edge_bin] >= min_edge_bin_member_support (0.05), PASS unconditionally — genuine bimodal edges with real ensemble members must not be blocked. odds_ratio_threshold=3.0 + min_edge_gap=0.03 prevent spurious rejection of near-par edges. Mode 'hard' = hard reject; 'shadow' = log only. Re-replay FP=0/1303 rows with member-support condition; Amsterdam still rejected (ratio 3.99-8.75, support=0). Authority: /Users/leofitz/.claude/jobs/866db2ea/IMPL_SPEC_operator.md §F."
+    "_note_2026_05_24": "LIVE-PROB-P0 §F operator binding spec (2026-05-23); apply-list enforcement added 2026-05-24. GATE SEMANTICS: pure market-deference — any sub-floor (p_mkt<=0.05) edge bin with cal/mkt ratio>=3.0 in a contiguous tail run>=2 is REJECTED regardless of member support. Genuine sub-floor bimodal edges ARE rejected (accepted foregone-alpha under no-phantom mandate). Member support (p_raw) appears in telemetry only. APPLY-LIST: hard mode fires ONLY when metric IN apply_to_metrics AND strategy_key IN apply_to_strategies; otherwise shadow/log-only. FP=0 proven for HIGH + listed strategies; LOW unvalidated. Mode 'hard'='hard reject for listed combinations'; 'shadow'=log-only. Authority: /Users/leofitz/.claude/jobs/866db2ea/IMPL_SPEC_operator.md §F."
   },
   "entry_forecast": {
     "source_id": "ecmwf_open_data",
