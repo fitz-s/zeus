@@ -260,3 +260,36 @@ def assert_bias_state_consistent(*, live_bias_enabled: bool, platt_bias_correcte
             "(bias_corrected=0). Recompute corrected pairs and refit Platt before "
             "enabling bias_correction."
         )
+
+
+def transport_bias_prior(
+    *,
+    b50: float,
+    sd50: float,
+    delta_samples: list[float],
+    kappa: float = 1.0,
+) -> BiasPrior:
+    """Transport a 0.5/TIGGE (F50) bias prior to the live 0.25/OpenData (F25) lineage.
+
+    The 0.5 calibration cannot be applied losslessly to the 0.25 product. The exact
+    bias bridge is b25 = b50 + E[Δ] with Δ = F25 - F50 measured on PAIRED snapshots
+    (no settlement needed). Prior variance inflates for transport uncertainty:
+
+        v0_25 = sd50^2 + Var(Δ) + kappa · sd50 · sd_Δ
+
+    kappa is the covariance allowance (0 = independent quadrature; 2 = worst-case fully
+    correlated). The mean shift uses a robust (trimmed) mean so a few paired outliers do
+    not move it; the variance uses the full spread (conservative). With no paired Δ the
+    0.5 prior is returned unchanged — the safe fallback to the historical lineage.
+    """
+    if sd50 < 0:
+        raise ValueError("sd50 must be non-negative")
+    if kappa < 0:
+        raise ValueError("kappa (covariance allowance) must be non-negative")
+    if not delta_samples:
+        return BiasPrior(mu_t=b50, v0=max(sd50 * sd50, 1e-12))
+    d_mean = robust_mean(delta_samples)
+    var_d = statistics.variance(delta_samples) if len(delta_samples) >= 2 else 0.0
+    sd_d = math.sqrt(var_d)
+    v0 = sd50 * sd50 + var_d + kappa * sd50 * sd_d
+    return BiasPrior(mu_t=b50 + d_mean, v0=max(v0, 1e-12))
