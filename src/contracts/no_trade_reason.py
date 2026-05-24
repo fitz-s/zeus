@@ -204,7 +204,7 @@ class NoTradeReason(StrEnum):
     PROBABILITY_SANITY_GATE = auto()            # validate_high_distribution failed before Kelly sizing
 
     # ── LIVE-PROB-P0 edge-bin phantom gate (2026-05-23) ───────────────────────
-    # Authority: /Users/leofitz/.claude/jobs/866db2ea/IMPL_SPEC_operator.md §B + §32
+    # Authority: docs/operations/task_2026-05-23_probability_phantom_edge/FIX_PLAN.md §B + §32
     # Four reason codes for probability_edge_bin_sanity predicate:
     PROBABILITY_EDGE_BIN_UNSUPPORTED = auto()          # edge bin has no settled-member support (p_raw[edge] < min_edge_bin_member_support) — phantom unsupported by ensemble
     PROBABILITY_LOW_PRICE_EDGE_BIN_DISAGREEMENT = auto()  # low-price edge bin: market disagrees AND member support absent — hard reject

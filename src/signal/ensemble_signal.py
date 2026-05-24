@@ -8,6 +8,8 @@ Settlement = round(member_max + instrument_noise) → integer.
 Simple member counting ignores measurement uncertainty at bin boundaries.
 """
 
+import hashlib
+import struct
 from datetime import date, datetime, timezone
 from zoneinfo import ZoneInfo
 
@@ -200,8 +202,10 @@ def p_raw_vector_from_maxes(
             partition (cover the real line including shoulders) for the result
             to sum to 1.0; the caller is responsible for grid completeness.
         n_mc: Monte Carlo iterations. Defaults to ``ensemble_n_mc()`` (10,000).
-        rng: numpy Generator. Callers should seed externally for reproducible
-            tests; defaults to ``np.random.default_rng()``.
+        rng: numpy Generator. When ``None`` (default), a deterministic seed is
+            derived from ``member_maxes``, ``city``, ``n_mc``, and ``bins``
+            via SHA-256 so results are reproducible across calls with the same
+            inputs (review5.23 P1-3). Pass an explicit Generator to override.
 
     Returns:
         np.ndarray shape (n_bins,). If the grid is complete the vector sums to
@@ -209,14 +213,28 @@ def p_raw_vector_from_maxes(
     """
     if n_mc is None:
         n_mc = ensemble_n_mc()
-    if rng is None:
-        rng = np.random.default_rng()
 
     member_maxes = np.asarray(member_maxes, dtype=float)
     if member_maxes.ndim != 1 or len(member_maxes) == 0:
         raise ValueError("member_maxes must be a non-empty one-dimensional array")
     if not np.isfinite(member_maxes).all():
         raise ValueError("member_maxes must contain only finite values")
+
+    if rng is None:
+        # review5.23 P1-3 Phase A: derive a deterministic seed from the physical
+        # inputs so that two evaluations of the same snapshot yield bit-identical
+        # p_raw.  Seed = sha256(sorted member_maxes | n_mc | sigma | bin labels).
+        # Callers that need non-determinism must supply an explicit rng.
+        # Seed is derived AFTER finiteness validation so NaN cannot affect sort order.
+        _sig_for_seed = sigma_instrument_for_city(city)
+        _h = hashlib.sha256()
+        _h.update(struct.pack(">q", n_mc))
+        _h.update(struct.pack(">d", _sig_for_seed.value))
+        for _v in sorted(member_maxes.tolist()):
+            _h.update(struct.pack(">d", _v))
+        for _b in bins:
+            _h.update(str(_b).encode())
+        rng = np.random.default_rng(int(_h.hexdigest()[:16], 16))
 
     n_bins = len(bins)
     n_members = len(member_maxes)

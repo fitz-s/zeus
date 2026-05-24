@@ -1081,6 +1081,21 @@ def _day0_observation_quality_rejection_reason(
     *,
     decision_time: datetime | None,
 ) -> str | None:
+    # review5.23 P1-1: fail-closed on incomplete coverage window.
+    # WINDOW_INCOMPLETE means the WU data doesn't start at/near local-day midnight;
+    # high_so_far / low_so_far cannot be claimed as local-day extrema.
+    obs_coverage = str(
+        getattr(observation, "coverage_status", None)
+        or (observation.get("coverage_status") if isinstance(observation, dict) else None)
+        or ""
+    ).strip().upper()
+    if obs_coverage == "WINDOW_INCOMPLETE":
+        return (
+            f"Day0 observation coverage window is incomplete: city={city.name} "
+            "first_sample_time is outside the local-day-start grace window; "
+            "high_so_far/low_so_far cannot be trusted as local-day extrema"
+        )
+
     required_fields = ["current_temp"]
     if temperature_metric.is_low():
         required_fields.append("low_so_far")
@@ -2368,17 +2383,31 @@ def _day0_high_truth_classification_for_edge(
     intraday observation. A buy_yes bin above the observed high is still a
     nowcast/forecast-upside edge and must not inherit settlement_capture live
     policy.
+
+    Bin boundaries are integer settlement values; comparison must use the
+    settled (rounded) value, not the raw sensor float.  Raw WU °F is already
+    integer, but provider decimal or HKO floor-truncation paths require
+    explicit rounding before the bin test (review5.23 P1-2).
     """
     if str(candidate.temperature_metric).lower() != "high":
         return None
     if edge.direction != "buy_yes":
         return None
-    observed_high = _finite_day0_observation_float(
+    observed_high_raw = _finite_day0_observation_float(
         candidate.observation,
         "high_so_far",
     )
-    if observed_high is None:
+    if observed_high_raw is None:
         return "observation_unknown"
+    try:
+        sem = SettlementSemantics.for_city(candidate.city)
+        observed_high = sem.round_single(observed_high_raw)
+    except Exception as exc:
+        logger.warning(
+            "settlement_semantics_rounding_failed city=%s: %s — candidate rejected",
+            candidate.city, exc,
+        )
+        return "settlement_semantics_unavailable"
     edge_bin = edge.bin
     if edge_bin.is_open_high:
         try:

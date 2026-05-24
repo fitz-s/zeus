@@ -2,7 +2,7 @@
 # Last reused/audited: 2026-05-23
 # Authority basis: docs/operations/task_2026-05-14_data_daemon_live_efficiency/DATA_DAEMON_LIVE_EFFICIENCY_REFACTOR_PLAN.md
 #   Phase 3 evaluator consumes producer readiness without hot-path entry-readiness writes.
-#   P0 follow-up (2026-05-23): /Users/leofitz/.claude/jobs/866db2ea/P0_FOLLOWUP_BUNDLE_LAYER_SPEC.md
+#   P0 follow-up (2026-05-23): docs/operations/task_2026-05-22_forecast_bundle_layer_fix/SPEC.md
 #   §1 full-bundle-layer selection + §2 NULL fail-closed.
 """Executable forecast reader for V4 source-linked ensemble snapshots."""
 

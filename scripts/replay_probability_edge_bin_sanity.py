@@ -191,7 +191,7 @@ def main():
         "# Report: LIVE-PROB-P0 Gate 6 — probability_edge_bin_sanity",
         "",
         f"**Generated:** {datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}",
-        f"**Authority:** /Users/leofitz/.claude/jobs/866db2ea/IMPL_SPEC_operator.md §A + §B + §D.4",
+        f"**Authority:** docs/operations/task_2026-05-23_probability_phantom_edge/FIX_PLAN.md §A + §B + §D.4",
         f"**DB:** {DB_PATH}",
         "",
         "---",

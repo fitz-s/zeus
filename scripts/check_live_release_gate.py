@@ -25,7 +25,7 @@ import subprocess
 import sys
 import tempfile
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -255,7 +255,9 @@ def _check_forecast_executable_bundle(forecasts_db: Path, now: datetime) -> Gate
             """
             SELECT COUNT(*) FROM readiness_state
             WHERE status = 'LIVE_ELIGIBLE'
-              AND (expires_at IS NULL OR expires_at > ?)
+              AND expires_at IS NOT NULL
+              AND expires_at > ?
+              AND strategy_key IS NOT NULL
             """,
             (now_iso,),
         ).fetchone()
@@ -404,6 +406,7 @@ def _write_fixture_files(root: Path) -> argparse.Namespace:
     conn.close()
 
     # Forecasts DB — must exist with current schema and a LIVE_ELIGIBLE readiness row
+    expires_iso = (now + timedelta(hours=24)).isoformat()
     fconn = sqlite3.connect(str(forecasts_db))
     init_schema_forecasts(fconn)
     fconn.execute(
@@ -411,14 +414,14 @@ def _write_fixture_files(root: Path) -> argparse.Namespace:
         INSERT OR IGNORE INTO readiness_state
             (readiness_id, scope_key, scope_type,
              city_id, city_timezone, target_local_date, temperature_metric,
-             status, computed_at, token_ids_json, reason_codes_json,
+             strategy_key, status, computed_at, expires_at, token_ids_json, reason_codes_json,
              dependency_json, provenance_json)
         VALUES
             ('fixture-readiness-1', 'fixture:city_metric:test-city:UTC:2026-06-01:high:v1',
              'city_metric', 'test-city', 'UTC', '2026-06-01', 'high',
-             'LIVE_ELIGIBLE', ?, '[]', '[]', '{}', '{}')
+             'producer_readiness_v1', 'LIVE_ELIGIBLE', ?, ?, '[]', '[]', '{}', '{}')
         """,
-        (now_iso,),
+        (now_iso, expires_iso),
     )
     fconn.commit()
     fconn.close()

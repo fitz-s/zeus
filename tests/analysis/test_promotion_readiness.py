@@ -1,6 +1,7 @@
 # Created: 2026-05-22
-# Last reused or audited: 2026-05-22
+# Last reused or audited: 2026-05-24
 # Authority basis: docs/operations/task_2026-05-21_mainline_completion_authority/SESSION_CLOSURE_VERDICT.md §Part B
+#   + review5.23 P1-4 (REGRET_ONLY_SCOPE cohort gate)
 """Tests for PromotionReadinessValidator.
 
 Key invariants tested:
@@ -519,3 +520,97 @@ class TestCriticMissingInvariants:
         assert result.tier_target == EvidenceTier.LIVE_NORMAL
         assert result.tier_target.value <= 7  # cap invariant
         assert result.verdict == ReadinessVerdict.NOT_READY  # already at required tier
+
+
+# ---------------------------------------------------------------------------
+# P1-4 antibody: REGRET_ONLY_SCOPE blocks promotion regardless of CI signals
+# ---------------------------------------------------------------------------
+
+class TestCohortScopeGate:
+    """review5.23 P1-4: PromotionReadinessValidator must block when
+    EvidenceReport.cohort_scope_status != 'FULL_SCOPE'.
+
+    EvidenceReport sets cohort_scope_status='REGRET_ONLY_SCOPE' when built
+    with experiment_id or cohort_tag filters.  In that case only regret
+    analytics are narrowed — the win-rate denominator is not — so the
+    CI/tribunal signals describe a mixed population and must not drive a
+    promotion decision.
+    """
+
+    def _make_regret_only_report(self, **kwargs) -> EvidenceReport:
+        base = dict(
+            strategy_id="shoulder_sell",
+            tier_observed=EvidenceTier.SHADOW_PASS,
+            n_decisions=10,
+            n_wins=8,
+            n_no_trades=0,
+            n_settled=10,
+            mean_regret_usd=0.5,
+            ci_lower=0.65,
+            ci_upper=0.85,
+            breakeven_win_rate=0.55,
+            cohort_scope_status="REGRET_ONLY_SCOPE",
+        )
+        base.update(kwargs)
+        return EvidenceReport(**base)
+
+    def test_regret_only_scope_blocks_regardless_of_ci(self) -> None:
+        """T8a (P1-4): REGRET_ONLY_SCOPE → NOT_READY even with strong CI."""
+        report = self._make_regret_only_report()
+        validator = PromotionReadinessValidator(
+            tier_required_for_live=EvidenceTier.LIVE_PILOT_TINY,
+            requires_settlement_gate=False,
+        )
+        result = validator.assess(report, operator_ref=None)
+
+        assert result.verdict == ReadinessVerdict.NOT_READY
+        assert len(result.signals) == 1
+        assert result.signals[0].signal_name == "cohort_scope"
+        assert not result.signals[0].passed
+        assert "REGRET_ONLY_SCOPE" in result.signals[0].rationale
+        assert result.tier_target == result.tier_current  # no promotion
+
+    def test_regret_only_scope_blocks_pre_signal_evaluation(self) -> None:
+        """T8b (P1-4): gate fires BEFORE evaluating CI/tribunal/settlement.
+
+        The returned report must have exactly one signal (cohort_scope),
+        NOT three — confirming the early-return path is taken.
+        """
+        report = self._make_regret_only_report()
+        validator = PromotionReadinessValidator(
+            tier_required_for_live=EvidenceTier.LIVE_PILOT_TINY,
+            requires_settlement_gate=True,  # settlement gate would normally run
+        )
+        result = validator.assess(report, operator_ref=None)
+
+        assert result.verdict == ReadinessVerdict.NOT_READY
+        assert len(result.signals) == 1, (
+            f"Expected only cohort_scope signal, got: {[s.signal_name for s in result.signals]}"
+        )
+
+    def test_full_scope_report_proceeds_to_normal_evaluation(self) -> None:
+        """T8c (P1-4): FULL_SCOPE report is not short-circuited; normal evaluation runs."""
+        report = EvidenceReport(
+            strategy_id="shoulder_sell",
+            tier_observed=EvidenceTier.SHADOW_PASS,
+            n_decisions=10,
+            n_wins=8,
+            n_no_trades=0,
+            n_settled=10,
+            mean_regret_usd=0.5,
+            ci_lower=0.65,
+            ci_upper=0.85,
+            breakeven_win_rate=0.55,
+            cohort_scope_status="FULL_SCOPE",
+        )
+        validator = PromotionReadinessValidator(
+            tier_required_for_live=EvidenceTier.LIVE_PILOT_TINY,
+            requires_settlement_gate=False,
+        )
+        result = validator.assess(report, operator_ref=None)
+
+        # Normal path: 3 signals evaluated (ci, tribunal, settlement)
+        assert len(result.signals) == 3
+        assert {s.signal_name for s in result.signals} == {
+            "evidence_ci", "tribunal", "settlement_gate"
+        }
