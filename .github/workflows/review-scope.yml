@@ -56,7 +56,7 @@ jobs:
         run: |
           python scripts/review_scope_collect.py \
             --base "$BASE_SHA" \
-            || echo "ADVISORY: review-scope collector exited non-zero (see above)"
+            || { echo "::warning title=Tier-0 without tests::Tier-0 runtime files changed without paired tests — see review-scope summary"; exit 1; }
 
       - name: Collect review scope (JSON summary)
         env:
@@ -65,8 +65,7 @@ jobs:
           python scripts/review_scope_collect.py \
             --base "$BASE_SHA" \
             --json \
-            | tee /tmp/review_scope.json \
-            || true
+            | tee /tmp/review_scope.json
 
       - name: Emit step summary
         if: always()
