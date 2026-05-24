@@ -110,6 +110,8 @@ _TRUTHFUL_FAIL_STATUSES = frozenset({
     "download_failed",
     "empty_ingest",
     "extract_failed",
+    "market_events_persistence_failed",
+    "market_scan_failed",
     "paused_mars_credentials",
     "bad_target_date",
 })
@@ -176,6 +178,24 @@ def _classify_result(result) -> tuple[bool, str | None]:
         if isinstance(stage, dict) and stage.get("ok") is False:
             return True, f"stage_failed:{stage.get('label', '?')}:{stage.get('error', '?')}"
     return False, None
+
+
+def _assert_forecasts_schema_ready_for_ingest() -> None:
+    """Fail ingest boot before forecast-class writer jobs start on stale schema."""
+
+    from src.state.db import (
+        assert_schema_current_forecasts,
+        get_forecasts_connection,
+        init_schema_forecasts,
+    )
+
+    conn = get_forecasts_connection(write_class="bulk")
+    try:
+        init_schema_forecasts(conn)
+        assert_schema_current_forecasts(conn)
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def _is_source_paused(source_id: str) -> bool:
@@ -1176,11 +1196,34 @@ def _market_scan_tick():
     Runs on default executor (writes to zeus-forecasts.db via _persist_market_events_to_db).
     """
     try:
-        from src.data.market_scanner import find_weather_markets
+        from src.data.market_scanner import (
+            find_weather_markets,
+            get_last_market_events_persistence_result,
+        )
         markets = find_weather_markets()
         logger.info("ingest_market_scan: found %d active weather markets", len(markets))
+        persistence = get_last_market_events_persistence_result()
+        if markets and persistence is not None and persistence.status == "failed":
+            result = {
+                "status": "market_events_persistence_failed",
+                "market_count": len(markets),
+                "persistence": persistence.as_dict(),
+                "error": persistence.error,
+            }
+            logger.warning(
+                "ingest_market_scan: market_events_v2 persistence failed after %d active markets: %s",
+                len(markets),
+                persistence.error,
+            )
+            return result
+        return {
+            "status": "ok",
+            "market_count": len(markets),
+            "persistence": persistence.as_dict() if persistence is not None else None,
+        }
     except Exception as exc:
         logger.warning("ingest_market_scan tick error: %s", exc)
+        return {"status": "market_scan_failed", "error": str(exc)}
 
 
 # ---------------------------------------------------------------------------
@@ -1542,6 +1585,8 @@ def main() -> None:
     init_schema(conn)
     conn.close()
     logger.info("init_schema complete")
+    _assert_forecasts_schema_ready_for_ingest()
+    logger.info("init_schema_forecasts + assert_schema_current_forecasts complete")
 
     # v1.F1 (2026-05-18): assert_db_matches_registry boot wiring — ingest daemon.
     # Fail-closed per INV-05: RegistryAssertionError propagates and aborts daemon start.

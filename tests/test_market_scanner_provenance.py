@@ -3082,12 +3082,23 @@ class TestExecutableConditionIdsForUserChannelWS:
         monkeypatch.setattr(ms, "_get_active_events", lambda **_kwargs: [event])
         # Avoid the SQLite persistence side-effect during the unit assertion;
         # the production path already exercises it elsewhere.
-        monkeypatch.setattr(ms, "_persist_market_events_to_db", lambda *_a, **_k: 0)
+        monkeypatch.setattr(
+            ms,
+            "_persist_market_events_to_db",
+            lambda events, **_k: ms.MarketEventsPersistenceResult(
+                status="written",
+                inserted=3,
+                event_count=len(events),
+            ),
+        )
 
         results = ms.find_weather_markets(min_hours_to_resolution=0.0)
         assert len(results) == 1
         condition_ids = results[0]["condition_ids"]
         assert condition_ids == ["cond-low", "cond-center", "cond1"]
+        persistence = ms.get_last_market_events_persistence_result()
+        assert persistence is not None
+        assert persistence.status == "written"
 
         # And the helper returns the same flat set when fed straight from the scanner.
         assert ms.extract_executable_condition_ids(results) == [
@@ -3095,6 +3106,48 @@ class TestExecutableConditionIdsForUserChannelWS:
             "cond-center",
             "cond1",
         ]
+
+    def test_market_events_persistence_missing_table_reports_failed(self, tmp_path):
+        event = _gamma_temperature_event()
+        parsed = _parse_event(
+            event,
+            datetime(2026, 4, 28, tzinfo=timezone.utc),
+            min_hours=0.0,
+        )
+        assert parsed is not None
+        db_path = tmp_path / "forecasts_without_market_events.db"
+
+        result = ms._persist_market_events_to_db([parsed], db_path=db_path)
+
+        assert result.status == "failed"
+        assert result.inserted == 0
+        assert result.event_count == 1
+        assert "market_events_v2" in (result.error or "")
+
+    def test_market_events_persistence_duplicate_only_is_not_failed(self, tmp_path):
+        event = _gamma_temperature_event()
+        parsed = _parse_event(
+            event,
+            datetime(2026, 4, 28, tzinfo=timezone.utc),
+            min_hours=0.0,
+        )
+        assert parsed is not None
+        db_path = tmp_path / "forecasts.db"
+        conn = sqlite3.connect(db_path)
+        try:
+            state_db.init_schema_forecasts(conn)
+            conn.commit()
+        finally:
+            conn.close()
+
+        first = ms._persist_market_events_to_db([parsed], db_path=db_path)
+        second = ms._persist_market_events_to_db([parsed], db_path=db_path)
+
+        assert first.status == "written"
+        assert first.inserted > 0
+        assert second.status == "duplicate_only"
+        assert second.inserted == 0
+        assert second.error is None
 
 
 class TestForwardMarketSubstrateProducer:

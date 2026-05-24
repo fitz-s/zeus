@@ -19,10 +19,12 @@ the regression shipped. These tests exercise the guard against the real ingest_m
 from __future__ import annotations
 
 import pathlib
+from types import SimpleNamespace
 
 import pytest
 
 import src.ingest_main as _ingest_main
+from src.data.market_scanner import MarketEventsPersistenceResult
 from src.state.table_registry import RegistryAssertionError, assert_writer_jobs_registered
 
 _INGEST_MAIN_SRC = pathlib.Path(_ingest_main.__file__).read_text(encoding="utf-8")
@@ -45,3 +47,116 @@ def test_guard_still_detects_a_genuinely_unwired_writer() -> None:
     assert mutated != _INGEST_MAIN_SRC, "fixture stale: ingest_market_scan spec id not found"
     with pytest.raises(RegistryAssertionError, match="ingest_market_scan"):
         assert_writer_jobs_registered(ingest_main_source=mutated)
+
+
+def test_market_scan_tick_reports_persistence_failure_to_scheduler_health(monkeypatch) -> None:
+    """market_events_v2 write failure must make the scheduler health entry FAILED."""
+
+    written: list[tuple[str, bool, str | None]] = []
+
+    def _fake_health(job_name: str, *, failed: bool, reason: str | None = None) -> None:
+        written.append((job_name, failed, reason))
+
+    monkeypatch.setattr(
+        "src.observability.scheduler_health._write_scheduler_health",
+        _fake_health,
+    )
+    monkeypatch.setattr(
+        "src.data.market_scanner.find_weather_markets",
+        lambda: [{"event_id": "evt-1"}],
+    )
+    monkeypatch.setattr(
+        "src.data.market_scanner.get_last_market_events_persistence_result",
+        lambda: MarketEventsPersistenceResult(
+            status="failed",
+            inserted=0,
+            event_count=1,
+            error="OperationalError: no such table: market_events_v2",
+        ),
+    )
+
+    result = _ingest_main._market_scan_tick()
+
+    assert result["status"] == "market_events_persistence_failed"
+    assert written == [
+        (
+            "ingest_market_scan",
+            True,
+            "market_events_persistence_failed: OperationalError: no such table: market_events_v2",
+        )
+    ]
+
+
+def test_market_scan_tick_duplicate_only_stays_scheduler_healthy(monkeypatch) -> None:
+    """Idempotent duplicate-only scans are a no-op, not a health failure."""
+
+    written: list[tuple[str, bool, str | None]] = []
+    monkeypatch.setattr(
+        "src.observability.scheduler_health._write_scheduler_health",
+        lambda job_name, *, failed, reason=None: written.append((job_name, failed, reason)),
+    )
+    monkeypatch.setattr(
+        "src.data.market_scanner.find_weather_markets",
+        lambda: [{"event_id": "evt-1"}],
+    )
+    monkeypatch.setattr(
+        "src.data.market_scanner.get_last_market_events_persistence_result",
+        lambda: MarketEventsPersistenceResult(
+            status="duplicate_only",
+            inserted=0,
+            event_count=1,
+        ),
+    )
+
+    result = _ingest_main._market_scan_tick()
+
+    assert result["status"] == "ok"
+    assert written == [("ingest_market_scan", False, None)]
+
+
+def test_ingest_boot_asserts_forecasts_schema_current(monkeypatch) -> None:
+    """Boot guard must initialize/assert forecasts DB before scheduler startup."""
+
+    calls: list[str] = []
+
+    class _FakeConn:
+        def commit(self) -> None:
+            calls.append("commit")
+
+        def close(self) -> None:
+            calls.append("close")
+
+    conn = _FakeConn()
+    monkeypatch.setattr("src.state.db.get_forecasts_connection", lambda **_kw: conn)
+    monkeypatch.setattr("src.state.db.init_schema_forecasts", lambda c: calls.append("init"))
+    monkeypatch.setattr(
+        "src.state.db.assert_schema_current_forecasts",
+        lambda c: calls.append("assert_current"),
+    )
+
+    _ingest_main._assert_forecasts_schema_ready_for_ingest()
+
+    assert calls == ["init", "assert_current", "commit", "close"]
+
+
+def test_ingest_boot_schema_assert_failure_closes_conn(monkeypatch) -> None:
+    """Stale forecasts DB must fail boot and still close the connection."""
+
+    calls: list[str] = []
+    conn = SimpleNamespace(
+        commit=lambda: calls.append("commit"),
+        close=lambda: calls.append("close"),
+    )
+
+    def _raise_stale(_conn) -> None:
+        calls.append("assert_current")
+        raise RuntimeError("forecasts user_version stale")
+
+    monkeypatch.setattr("src.state.db.get_forecasts_connection", lambda **_kw: conn)
+    monkeypatch.setattr("src.state.db.init_schema_forecasts", lambda c: calls.append("init"))
+    monkeypatch.setattr("src.state.db.assert_schema_current_forecasts", _raise_stale)
+
+    with pytest.raises(RuntimeError, match="forecasts user_version stale"):
+        _ingest_main._assert_forecasts_schema_ready_for_ingest()
+
+    assert calls == ["init", "assert_current", "close"]

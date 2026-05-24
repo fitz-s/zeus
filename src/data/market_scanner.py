@@ -84,6 +84,26 @@ class MarketSnapshot:
 
 
 @dataclass(frozen=True)
+class MarketEventsPersistenceResult:
+    """Outcome of persisting parsed Gamma market topology to market_events_v2."""
+
+    status: Literal["written", "duplicate_only", "failed"]
+    inserted: int
+    event_count: int
+    error: str | None = None
+
+    def as_dict(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "status": self.status,
+            "inserted": self.inserted,
+            "event_count": self.event_count,
+        }
+        if self.error:
+            payload["error"] = self.error
+        return payload
+
+
+@dataclass(frozen=True)
 class SourceContractCheck:
     """Settlement-source proof extracted from Gamma resolution metadata."""
 
@@ -166,6 +186,7 @@ _ACTIVE_EVENTS_CACHE: list[dict] | None = None
 _ACTIVE_EVENTS_CACHE_AT: float = 0.0  # monotonic timestamp of last fetch
 _ACTIVE_EVENTS_CACHE_AT_UTC: datetime | None = None  # wall-clock of last successful fetch
 _ACTIVE_EVENTS_LAST_STATUS: ScanAuthority = "NEVER_FETCHED"  # B017 provenance flag
+_LAST_MARKET_EVENTS_PERSISTENCE_RESULT: MarketEventsPersistenceResult | None = None
 _ACTIVE_EVENTS_TTL: float = 300.0  # 5-minute TTL
 
 # Per-tick CLOB /markets/{cid} archived cross-check cache.
@@ -629,18 +650,24 @@ def _gamma_get(path: str, *, params: dict | None = None, timeout: float = 15.0, 
 
 
 # Created: 2026-05-01
-def _persist_market_events_to_db(results: list[dict], db_path: str | Path | None = None) -> int:
+def _persist_market_events_to_db(
+    results: list[dict],
+    db_path: str | Path | None = None,
+) -> MarketEventsPersistenceResult:
     """Upsert scanned market events into market_events_v2.
 
     Uses INSERT OR IGNORE so repeated scans are idempotent — existing rows
     keyed on (market_slug, condition_id) are never overwritten.
 
-    Returns the count of newly inserted rows (ignored rows not counted).
-    Fails silently on DB errors: logs a warning and returns 0 so that market
-    scanning is never blocked by persistence failures.
+    Returns a structured result so ingest health can distinguish idempotent
+    duplicate-only scans from schema/permission failures.
     """
     if not results:
-        return 0
+        return MarketEventsPersistenceResult(
+            status="duplicate_only",
+            inserted=0,
+            event_count=0,
+        )
 
     from src.state.db import ZEUS_FORECASTS_DB_PATH  # local import to avoid circular dependency
 
@@ -700,9 +727,24 @@ def _persist_market_events_to_db(results: list[dict], db_path: str | Path | None
         finally:
             conn.close()
     except Exception as exc:
-        logger.warning("market_events_v2 persistence failed (non-fatal): %s", exc)
-        return 0
-    return inserted
+        logger.warning("market_events_v2 persistence failed: %s", exc)
+        return MarketEventsPersistenceResult(
+            status="failed",
+            inserted=inserted,
+            event_count=len(results),
+            error=f"{type(exc).__name__}: {exc}",
+        )
+    return MarketEventsPersistenceResult(
+        status="written" if inserted > 0 else "duplicate_only",
+        inserted=inserted,
+        event_count=len(results),
+    )
+
+
+def get_last_market_events_persistence_result() -> MarketEventsPersistenceResult | None:
+    """Return the last market_events_v2 persistence outcome for scheduler health."""
+
+    return _LAST_MARKET_EVENTS_PERSISTENCE_RESULT
 
 
 def _dedupe_condition_ids(values) -> list[str]:
@@ -823,7 +865,8 @@ def _parse_and_persist_weather_events(
             results.append(parsed)
 
     logger.info("Found %d active weather markets", len(results))
-    _persist_market_events_to_db(results)
+    global _LAST_MARKET_EVENTS_PERSISTENCE_RESULT
+    _LAST_MARKET_EVENTS_PERSISTENCE_RESULT = _persist_market_events_to_db(results)
     return results
 
 
