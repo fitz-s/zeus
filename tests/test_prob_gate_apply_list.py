@@ -1,10 +1,14 @@
 # Created: 2026-05-24
 # Last reused or audited: 2026-05-24
 # Authority basis: LIVE-PROB-P0 Gate 6 apply-metrics enforcement (post-merge correctness gap #1)
+# Lifecycle: created=2026-05-24; last_reviewed=2026-05-24; last_reused=never
 # Purpose: RED→GREEN antibody tests for apply_to_metrics enforcement (metric-only scope).
 #   apply_to_strategies is advisory metadata, NOT a hard filter.
 #   RED on origin/main: gate hard-rejects LOW metric (unvalidated; no apply-metrics check).
 #   GREEN on branch: LOW → SHADOW; all HIGH strategies (incl. opening_inertia) → HARD.
+# Reuse: Run when changing probability_edge_bin_sanity apply_to_metrics enforcement logic,
+#   or when modifying apply_to_strategies advisory semantics. Verify RED/GREEN baseline
+#   before trusting results (see module docstring for RED proof on origin/main).
 """Apply-metrics enforcement tests for probability_edge_bin_sanity (LIVE-PROB-P0 Gate 6).
 
 Covers:

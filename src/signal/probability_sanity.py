@@ -465,9 +465,11 @@ def _edge_bin_sanity_thresholds() -> dict[str, Any]:
     falls back to defaults — behavior is unchanged if block is missing.
 
     Also returns ``apply_to_strategies`` and ``apply_to_metrics`` lists.
-    When a call's metric or strategy_key is not in these lists, the gate
-    runs in shadow/log-only mode regardless of the top-level ``mode`` setting.
-    Empty lists (default when key absent) mean "apply to all" — full back-compat.
+    When a call's metric is not in ``apply_to_metrics``, the gate runs in
+    shadow/log-only mode regardless of the top-level ``mode`` setting.
+    ``apply_to_strategies`` is advisory metadata only — it is NOT used to
+    downgrade mode.  Empty ``apply_to_metrics`` (default when key absent)
+    means "apply to all" — full back-compat.
     """
     block: dict[str, Any] = {}
     from src.config import settings
@@ -527,11 +529,16 @@ def probability_edge_bin_sanity(
     the market's sub-floor price is treated as authoritative evidence of a phantom signal.
     Member support (p_raw) does not override the market — even genuine ensemble members
     landing in a sub-floor bin are accepted foregone-alpha under the no-phantom mandate.
-    The BIMODAL PROTECTION branch (Condition 4, which fires when p_raw >= min_member_support
-    AND p_market >= low_price_threshold) is structurally INERT for sub-floor bins: by the
-    time Condition 4 is evaluated, any bin with p_market >= low_price_threshold has already
-    returned PASS at the sub-floor guard (line after Condition 4). Member support is retained
-    for telemetry context only.
+    The BIMODAL PROTECTION branch fires when p_raw >= min_member_support AND
+    p_market >= low_price_threshold (i.e. the market also prices the secondary mode at or
+    above the floor — genuine bimodal agreement).  This branch is evaluated BEFORE the
+    sub-floor guard and returns PASS for bins where ``px_edge >= low_price_threshold``.
+    For strictly sub-floor bins (``px_edge < low_price_threshold``) BIMODAL PROTECTION
+    does NOT fire — the market disagrees, so member support is not treated as genuine
+    bimodal evidence.  At the exact equality boundary (``px_edge == low_price_threshold``),
+    BIMODAL PROTECTION takes precedence: a bin priced exactly at the floor with real
+    member support is treated as the market's boundary-case approval.  Member support
+    is retained for telemetry context in all sub-floor rejection paths.
 
     APPLY-METRICS ENFORCEMENT (2026-05-24):
     The gate runs in HARD mode only when metric ∈ apply_to_metrics (from the
@@ -544,11 +551,15 @@ def probability_edge_bin_sanity(
     Empty apply_to_metrics (default when key absent) means "apply to all" — full back-compat.
 
     Reject ONLY when ALL of the following hold:
-      1. 0 < p_market[edge] <= low_price_threshold (sub-floor quoted bin)
+      1. 0 < p_market[edge] <= low_price_threshold (sub-floor quoted bin; strictly below OR at the
+         floor — note: bins at exactly ``low_price_threshold`` pass BIMODAL PROTECTION if
+         p_raw[edge] >= min_member_support, so effective rejection requires ``px_edge < threshold``
+         after that guard)
       2. p_cal[edge] - p_market[edge] >= min_edge_gap
       3. p_cal[edge] / max(p_market[edge], eps) >= odds_ratio_threshold (3.0)
-      4. p_raw[edge] < min_edge_bin_member_support (0.05) OR p_market[edge] < low_price_threshold
-         [Note: always True for sub-floor bins after Condition 1; retained for structural clarity]
+      4. BIMODAL PROTECTION did NOT fire: NOT (p_raw[edge] >= min_member_support AND
+         p_market[edge] >= low_price_threshold).  This is always satisfied for strictly
+         sub-floor bins (p_market < low_price_threshold) since the market disagrees.
       5. edge bin sits in a contiguous sub-floor run >= tail_min_bins=2 on its side of mode
 
     Args:
@@ -558,8 +569,11 @@ def probability_edge_bin_sanity(
         p_cal: calibrated probability array.
         p_market: per-bin market prices; None → always PASS.
         direction: "buy_yes" | "buy_no" | "" (for telemetry).
-        metric: "high" | "low" | "" (gate enforcement: must be in apply_to_metrics for HARD).
-        strategy_key: strategy label (gate enforcement: must be in apply_to_strategies for HARD).
+        metric: "high" | "low" | "" (gate enforcement: must be in apply_to_metrics for HARD;
+            if apply_to_metrics is non-empty and metric is absent, mode is downgraded to shadow).
+        strategy_key: strategy label (telemetry only; apply_to_strategies is advisory metadata
+            and is NOT used to downgrade mode — the hard gate applies to ALL non-day0
+            strategies for any metric that is in apply_to_metrics).
         market_phase: opaque label (for telemetry).
         config: optional pre-loaded threshold dict (overrides settings.json; for testing).
 

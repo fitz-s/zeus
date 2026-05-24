@@ -114,6 +114,7 @@ directory should EITHER be moved under `archive/` OR keep a
 | `task_2026-05-22_live_math_frontier/` | PR #285 | **archived** — moved to archive/2026-Q2/ — live math-frontier edge trace, Day0 observation-fused bootstrap, source writer observability, and no-trade attribution repair | 2026-05-22 |
 | `task_2026-05-22_crosscheck_valid_window/` | PR #287 | **archived** — moved to archive/2026-Q2/ — executable forecast valid-window provenance repair for crosscheck comparability | 2026-05-22 |
 | `task_2026-05-21_mainline_completion_authority/` | PR #284 | **active** — Phase 1-7 mainline completion authority package: closure verdict, promotion-validator critic, completion report, and #77 promotion-readiness validator | 2026-05-22 |
+| `task_2026-05-23_probability_phantom_edge/` | PR #323 | **active** — LIVE-PROB-P0 metric-only apply enforcement + market-deference doc + DAY0 parity residual (post PR-2 correctness follow-up) | 2026-05-23 |
 
 ## Active operation (only one allowed unless explicit branching)
 
