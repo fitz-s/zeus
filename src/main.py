@@ -1626,9 +1626,17 @@ def _market_discovery_cycle() -> None:
         events = find_weather_markets(
             min_hours_to_resolution=0.0,
         )
+        # Short per-call timeout for discovery CLOB queries.  Default 5s gives
+        # connect=5s / read=10s per httpx.Timeout split — bounds TLS handshake.
+        # At 3 calls × 15s worst-case × 50 cities = 2250s without this; with it
+        # the budget gate at 90s is the effective bound.
+        _discovery_clob_timeout = max(
+            1.0,
+            float(os.environ.get("ZEUS_DISCOVERY_CLOB_TIMEOUT_SECONDS", "5.0")),
+        )
         conn = get_trade_connection(write_class="live")
         try:
-            with PolymarketClient() as snapshot_clob:
+            with PolymarketClient(public_http_timeout=_discovery_clob_timeout) as snapshot_clob:
                 snapshot_summary = refresh_executable_market_substrate_snapshots(
                     conn,
                     markets=events,

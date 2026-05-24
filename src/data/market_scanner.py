@@ -3102,7 +3102,10 @@ def refresh_executable_market_substrate_snapshots(
     ordinal = 0
 
     for market in markets or []:
-        city_key = str(market.get("slug") or market.get("event_id") or "unknown")
+        _city_obj = market.get("city")
+        city_key = getattr(_city_obj, "name", None) or (
+            _city_obj if isinstance(_city_obj, str) else None
+        ) or "_unknown"
         for outcome in market.get("outcomes", []) or []:
             ordinal += 1
             condition_id = str(outcome.get("condition_id") or outcome.get("market_id") or "").strip()

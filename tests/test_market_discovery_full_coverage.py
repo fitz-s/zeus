@@ -2,30 +2,35 @@
 # Lifecycle: created=2026-05-24; last_reviewed=2026-05-24; last_reused=2026-05-24
 # Authority basis: fix(discovery): restore full-city market substrate coverage (50→7 regression)
 # Purpose: Relationship antibody — refresh_executable_market_substrate_snapshots must
-#   capture snapshots for ≥ all-but-one city when fed a full 51-city market list.
-#   Regressed in #203 (slug-only wiring) + global top-8 cap.
+#   (R1) cap per CITY not per slug — a city with high+low slugs is 1 city, not 2;
+#   (R2) _market_discovery_cycle calls find_weather_markets (tag path), not slug-only;
+#   (HANG) a full 50-city scan with CLOB latency must complete under wall-clock budget.
 # Reuse: import refresh_executable_market_substrate_snapshots + ms.cities_by_name
-"""Relationship antibody: full-city coverage through substrate refresh.
+"""Relationship antibodies: city-scoped per-city cap + hang-proof budget gate.
 
-Two tests:
-  R1 (BREADTH_FIRST_CITY_COVERAGE): substrate refresh fed N cities produces
-     snapshots across ≥ N-1 distinct cities, not capped at 7.
+Three tests:
+  R1 (PER_CITY_CAP_NOT_PER_SLUG): cities with multiple slugs (high+low) are capped
+     per-city, not per-slug.  40 cities x 2 slugs -> >=35 distinct cities captured,
+     each with <= per_city_limit snapshots.
   R2 (MARKET_DISCOVERY_CYCLE_USES_FULL_SCAN): _market_discovery_cycle calls
      find_weather_markets (tag-query path), not slug-only fallback.
+  HANG (CLOB_LATENCY_CANNOT_OVERRUN_BUDGET): even when each CLOB call sleeps 3s,
+     refresh_executable_market_substrate_snapshots completes under budget x 1.5.
 """
 from __future__ import annotations
 
 import re
 import sqlite3
+import time
+from collections import defaultdict
 from datetime import datetime, timezone
 from types import SimpleNamespace
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 import src.data.market_scanner as ms
 from src.data.market_scanner import refresh_executable_market_substrate_snapshots
-
 
 _NOW = datetime(2026, 5, 24, 12, 0, 0, tzinfo=timezone.utc)
 _CITY_SLUG_RE = re.compile(r"in-([a-z-]+)-on-")
@@ -34,30 +39,40 @@ _CITY_SLUG_RE = re.compile(r"in-([a-z-]+)-on-")
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _slug(city_slug: str) -> str:
-    return f"highest-temperature-in-{city_slug}-on-2026-05-25"
+def _slug(city_slug: str, metric: str) -> str:
+    return f"{metric}-temperature-in-{city_slug}-on-2026-05-25"
 
 
-def _make_market(city_name: str, idx: int) -> dict:
-    """Build a minimal enriched event dict matching market_scanner parse output."""
+def _make_market(city_name: str, idx: int, metric: str = "highest") -> dict:
+    """Build an enriched event dict matching market_scanner parse output.
+
+    Each (city_name, metric) pair gets a distinct slug and condition_id, so
+    a single city_name can appear as both 'highest' and 'lowest' slugs.
+    The ``city`` key carries the City object -- production ``_parse_event`` sets
+    this; tests must mirror it for city_key extraction to work correctly.
+    """
     city_slug = city_name.lower().replace(" ", "-")
-    cid = f"0x{idx:04x}" + "0" * 60
+    # idx encodes (city_ordinal * 10 + metric_ordinal) to ensure distinct cids
+    metric_ord = 0 if metric == "highest" else 1
+    cid_int = idx * 10 + metric_ord
+    cid = f"0x{cid_int:04x}" + "0" * 60
     cid = cid[:66]
-    no_token = f"0x{idx:04x}" + "1" * 60
+    no_token = f"0x{cid_int:04x}" + "1" * 60
     no_token = no_token[:66]
     return {
-        "event_id": f"evt-{city_slug}-001",
-        "slug": _slug(city_slug),
-        "title": f"Highest temperature in {city_name} on May 25?",
+        "event_id": f"evt-{city_slug}-{metric}-001",
+        "slug": _slug(city_slug, metric),
+        "title": f"{metric.capitalize()} temperature in {city_name} on May 25?",
+        # City object -- mirrors _parse_event output; city_key extraction uses .name
         "city": ms.cities_by_name.get(city_name, city_name),
         "target_date": "2026-05-25",
-        "temperature_metric": "high",
+        "temperature_metric": metric,
         "hours_to_resolution": 36.0,
         "hours_since_open": 2.0,
         "outcomes": [
             {
                 "condition_id": cid,
-                "token_id": f"0x{idx:04x}" + "a" * 60,
+                "token_id": f"0x{cid_int:04x}" + "a" * 60,
                 "no_token_id": no_token,
                 "executable": True,
                 "accepting_orders": True,
@@ -78,7 +93,7 @@ def _make_market(city_name: str, idx: int) -> dict:
 
 
 def _make_clob_mock() -> MagicMock:
-    """CLOB mock that returns minimal valid responses for every call."""
+    """CLOB mock -- returns minimal valid responses instantly."""
     clob = MagicMock()
 
     def _market_info(condition_id: str) -> dict:
@@ -114,7 +129,6 @@ def _make_in_memory_trade_db() -> sqlite3.Connection:
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
-    # Minimal schema — only columns that capture_executable_market_snapshot writes
     conn.executescript("""
         CREATE TABLE IF NOT EXISTS executable_market_snapshots (
             snapshot_id TEXT PRIMARY KEY,
@@ -139,42 +153,41 @@ def _make_in_memory_trade_db() -> sqlite3.Connection:
     return conn
 
 
-def _cities_in_snapshots(conn: sqlite3.Connection) -> set[str]:
-    """Extract city slugs from event_slug column."""
-    rows = conn.execute("SELECT DISTINCT event_slug FROM executable_market_snapshots").fetchall()
-    cities = set()
-    for row in rows:
-        m = _CITY_SLUG_RE.search(row[0])
-        if m:
-            cities.add(m.group(1))
-    return cities
+def _city_name_from_slug(slug: str) -> str | None:
+    m = _CITY_SLUG_RE.search(slug)
+    return m.group(1) if m else None
 
 
 # ---------------------------------------------------------------------------
-# R1: breadth-first city coverage
+# R1: per-CITY cap (not per-slug)
 # ---------------------------------------------------------------------------
 
-def test_substrate_refresh_covers_all_cities_not_global_cap_of_8(monkeypatch):
-    """R1 (BREADTH_FIRST_CITY_COVERAGE): refresh with 40 distinct cities produces
-    snapshots across ≥ 35 cities, not capped at ~4 (global top-8 / 2 directions).
+def test_per_city_cap_applies_across_slugs_not_per_slug(monkeypatch):
+    """R1 (PER_CITY_CAP_NOT_PER_SLUG): cities with multiple slugs (high+low)
+    are capped per-city.  40 cities x 2 slugs each = 80 input markets.
 
-    Sed-revert on fix: revert refresh_executable_market_substrate_snapshots to
-    global limit=8 → distinct_cities ≤ 4 → RED.
+    Uses max_outcomes=2 (2 candidates per city limit) to make the pre-fix
+    failure concrete:
+    - Each slug produces 2 candidate directions (buy_yes + buy_no).
+    - Pre-fix (city_key=slug): 2 slug-buckets x min(2,2) = 4 per city -> OVER limit of 2.
+    - Post-fix (city_key=city.name): 1 city-bucket capped at 2 -> exactly at limit.
 
-    Pre-fix baseline: with default ZEUS_MARKET_DISCOVERY_SNAPSHOT_MAX_OUTCOMES=8,
-    global sort selects 8 candidates (all tier-2, all same priority for the
-    36h-to-resolution markets above). At most 4 cities (2 per direction pair each).
-    With breadth-first per-city selection, all 40 cities get at least 1 direction.
+    RED on pre-fix code: over_limit dict is non-empty (every multi-slug city exceeds 2).
+    GREEN post-fix: no city exceeds 2, and >=35 distinct cities are covered.
     """
-    all_city_names = list(ms.cities_by_name.keys())[:40]  # 40 distinct cities
-    markets = [_make_market(name, idx) for idx, name in enumerate(all_city_names, start=1)]
+    all_city_names = list(ms.cities_by_name.keys())[:40]
+    # Two slugs per city: highest + lowest temperature
+    markets = []
+    for idx, name in enumerate(all_city_names, start=1):
+        markets.append(_make_market(name, idx, metric="highest"))
+        markets.append(_make_market(name, idx, metric="lowest"))
 
-    # Use patch() not monkeypatch — intra-module call bypasses module-attr setattr
+    per_city_limit = 2  # tight cap: 2 directions max per city; pre-fix gives 4
+
     captured_slugs: list[str] = []
 
     def _mock_capture(conn, *, market, decision, clob, captured_at, scan_authority, execution_side="BUY"):
-        slug = market.get("slug", "")
-        captured_slugs.append(slug)
+        captured_slugs.append(market.get("slug", ""))
 
     clob = _make_clob_mock()
     conn = _make_in_memory_trade_db()
@@ -186,19 +199,33 @@ def test_substrate_refresh_covers_all_cities_not_global_cap_of_8(monkeypatch):
             clob=clob,
             captured_at=_NOW,
             scan_authority="VERIFIED",
+            max_outcomes=per_city_limit,
         )
 
-    captured_cities = set()
+    # Group captured slugs by city name (extracted from slug pattern)
+    city_snapshot_counts: dict[str, int] = defaultdict(int)
     for slug in captured_slugs:
-        m = _CITY_SLUG_RE.search(slug)
-        if m:
-            captured_cities.add(m.group(1))
+        city = _city_name_from_slug(slug)
+        if city:
+            city_snapshot_counts[city] += 1
 
-    assert len(captured_cities) >= 35, (
-        f"substrate refresh must cover ≥35 of 40 input cities "
-        f"(breadth-first per-city selection). Got {len(captured_cities)} cities: "
-        f"{sorted(captured_cities)}. Summary: {summary}. "
-        "Pre-fix failure: global top-8 cap produces ≤4 distinct cities."
+    distinct_cities = set(city_snapshot_counts.keys())
+
+    # >=35 of 40 cities must be covered (breadth-first ensures coverage)
+    assert len(distinct_cities) >= 35, (
+        f"substrate refresh must cover >=35 of 40 input cities "
+        f"(per-city breadth-first). Got {len(distinct_cities)} cities: "
+        f"{sorted(distinct_cities)}. Summary: {summary}."
+    )
+
+    # No city may exceed per_city_limit snapshots (per-CITY cap, not per-slug).
+    # Pre-fix: city_key=slug -> 2 slug-buckets x 2 directions = 4 per city -> FAILS here.
+    # Post-fix: city_key=city.name -> 1 bucket capped at 2 -> PASSES.
+    over_limit = {c: n for c, n in city_snapshot_counts.items() if n > per_city_limit}
+    assert not over_limit, (
+        f"Per-city cap must be <={per_city_limit} snapshots per city. "
+        f"Cities over limit: {over_limit}. "
+        "Pre-fix failure: city_key=slug gives 2x snapshots per city when 2 slugs exist."
     )
 
 
@@ -211,7 +238,7 @@ def test_market_discovery_cycle_calls_find_weather_markets_not_slug_only(monkeyp
     find_weather_markets (full tag-query, 51 cities), not slug-only fallback.
 
     Sed-revert on fix: revert _market_discovery_cycle import back to
-    find_slug_pattern_weather_markets → find_weather_markets call never happens → RED.
+    find_slug_pattern_weather_markets -> find_weather_markets call never happens -> RED.
 
     Pre-fix baseline: _market_discovery_cycle imports and calls
     find_slug_pattern_weather_markets only; find_weather_markets never called.
@@ -221,7 +248,6 @@ def test_market_discovery_cycle_calls_find_weather_markets_not_slug_only(monkeyp
     tag_scan_called = []
     slug_only_called = []
 
-    # Patch both discovery functions to track which gets called
     def _mock_find_weather_markets(**kwargs):
         tag_scan_called.append(kwargs)
         return []
@@ -230,16 +256,9 @@ def test_market_discovery_cycle_calls_find_weather_markets_not_slug_only(monkeyp
         slug_only_called.append(kwargs)
         return []
 
-    # Patch at module level that main.py imports from
     import src.data.market_scanner as scanner_mod
     monkeypatch.setattr(scanner_mod, "find_weather_markets", _mock_find_weather_markets)
     monkeypatch.setattr(scanner_mod, "find_slug_pattern_weather_markets", _mock_find_slug_pattern)
-
-    # Patch CLOB and DB so the cycle completes without network/disk
-    mock_clob = MagicMock()
-    mock_conn = MagicMock()
-    mock_conn.__enter__ = lambda s: s
-    mock_conn.__exit__ = MagicMock(return_value=False)
 
     monkeypatch.setattr(
         "src.data.market_scanner.refresh_executable_market_substrate_snapshots",
@@ -249,14 +268,16 @@ def test_market_discovery_cycle_calls_find_weather_markets_not_slug_only(monkeyp
         },
     )
 
-    # Prevent real DB + CLOB instantiation
+    mock_conn = MagicMock()
+    mock_conn.__enter__ = lambda s: s
+    mock_conn.__exit__ = MagicMock(return_value=False)
+
     with (
         patch("src.data.polymarket_client.PolymarketClient") as mock_clob_cls,
         patch("src.state.db.get_trade_connection", return_value=mock_conn),
     ):
         mock_clob_cls.return_value.__enter__ = lambda s: MagicMock()
         mock_clob_cls.return_value.__exit__ = MagicMock(return_value=False)
-        # Patch the lock object itself with a mock that always acquires
         mock_lock = MagicMock()
         mock_lock.acquire.return_value = True
         with patch.object(main_mod, "_market_discovery_lock", mock_lock):
@@ -266,4 +287,77 @@ def test_market_discovery_cycle_calls_find_weather_markets_not_slug_only(monkeyp
         "_market_discovery_cycle must call find_weather_markets (full tag-query "
         "path covering all 51 cities). Pre-fix: only find_slug_pattern_weather_markets "
         "(14-city slug-only) is called."
+    )
+
+
+# ---------------------------------------------------------------------------
+# HANG: CLOB latency cannot overrun wall-clock budget
+# ---------------------------------------------------------------------------
+
+def test_clob_latency_cannot_overrun_budget():
+    """HANG (CLOB_LATENCY_CANNOT_OVERRUN_BUDGET): even when each mock-capture
+    call sleeps 3s, the full refresh must complete under budget.
+
+    Design:
+    - 10 cities x 1 slug each = 10 markets, each with 1 outcome.
+    - per_city_limit=1, budget=10s (tight, forces early abort after ~3 captures).
+    - Each mock_capture sleeps 3s.
+
+    The budget gate (checked between each capture) aborts after ~3 captures
+    regardless of CLOB latency. This proves the gate actually fires.
+
+    Assertions:
+    - elapsed < budget + one_extra_capture + slack (15s total)
+    - budget_exhausted == 1
+    - attempted < 10 (did not exhaust all 10 cities)
+
+    This is RED before budget gate is wired: without budget_seconds, the refresh
+    would attempt all 10 cities (30s of sleep). With budget_seconds=10, it stops
+    after ~3 captures (~9-12s).
+    """
+    SLEEP_PER_CAPTURE = 3.0  # seconds per mock capture call
+    BUDGET_SECONDS = 10.0    # tight budget to force early abort
+    MAX_ELAPSED_SECONDS = BUDGET_SECONDS + SLEEP_PER_CAPTURE + 2.0  # = 15s
+
+    all_city_names = list(ms.cities_by_name.keys())[:10]
+    markets = [_make_market(name, idx, metric="highest") for idx, name in enumerate(all_city_names, start=1)]
+
+    capture_calls = []
+
+    def _slow_capture(conn, *, market, decision, clob, captured_at, scan_authority, execution_side="BUY"):
+        time.sleep(SLEEP_PER_CAPTURE)
+        capture_calls.append(market.get("slug", ""))
+
+    clob = _make_clob_mock()
+    conn = _make_in_memory_trade_db()
+
+    t0 = time.monotonic()
+    with patch("src.data.market_scanner.capture_executable_market_snapshot", side_effect=_slow_capture):
+        summary = refresh_executable_market_substrate_snapshots(
+            conn,
+            markets=markets,
+            clob=clob,
+            captured_at=_NOW,
+            scan_authority="VERIFIED",
+            budget_seconds=BUDGET_SECONDS,
+            max_outcomes=1,
+        )
+    elapsed = time.monotonic() - t0
+
+    assert elapsed < MAX_ELAPSED_SECONDS, (
+        f"refresh must complete in < {MAX_ELAPSED_SECONDS:.1f}s even with "
+        f"{SLEEP_PER_CAPTURE}s/capture and {BUDGET_SECONDS}s budget. "
+        f"Got {elapsed:.1f}s. budget_exhausted={summary.get('budget_exhausted')}. "
+        f"captures={len(capture_calls)}."
+    )
+
+    assert summary.get("budget_exhausted") == 1, (
+        f"budget_exhausted must be 1 when budget={BUDGET_SECONDS}s and each capture "
+        f"takes {SLEEP_PER_CAPTURE}s. Got summary={summary}."
+    )
+
+    # Must have attempted fewer than all 10 cities
+    assert summary.get("attempted", 0) < 10, (
+        f"Must abort before all 10 cities when budget={BUDGET_SECONDS}s. "
+        f"attempted={summary.get('attempted')}, elapsed={elapsed:.1f}s."
     )
