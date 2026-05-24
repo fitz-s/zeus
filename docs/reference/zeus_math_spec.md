@@ -795,6 +795,8 @@ Current code disagrees with this spec at the following points. The data-rebuild 
 
 These concepts come from the prior `02_mathematics_and_statistics_upgrade.md` document and are **not part of current Zeus math**. They are documented here so the current spec cannot be confused with a future upgraded one, and so reviewers know what is intentionally not yet implemented.
 
+> **Now implemented (2026-05-24), do not confuse with §15.1:** an empirical-Bayes *ENS bias correction* applied to forecast member extrema (not Platt-parameter pooling) is live — it shrinks the TIGGE structural prior toward live OpenData settled residuals (SNR-gated), with a predictive-error scale term and a 0.5°→0.25° variance transport, applied pre-Monte-Carlo. Code: `src/calibration/ens_bias_model.py`, `ens_error_model.py` (PRs #334/#336). §15.1 below remains deferred and refers to pooling of *Platt* parameters, a different layer.
+
 ### 15.1 Empirical-Bayes partial pooling
 Replace hard fallback (city → cluster → global → uncalibrated) with shrinkage:
 ```

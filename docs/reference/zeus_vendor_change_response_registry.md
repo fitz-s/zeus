@@ -1,8 +1,8 @@
 # Zeus Vendor Change Response Registry
 
 Created: 2026-05-03
-Last reused/audited: 2026-05-03
-Authority basis: operator directive 2026-05-03 — "我们交易的是概率和polymarket的选择，不是完美的物理"
+Last reused/audited: 2026-05-24
+Authority basis: operator directive 2026-05-03 — "我们交易的是概率和polymarket的选择，不是完美的物理"; audited 2026-05-24 against current law: SCHEMA_VERSION=35, SCHEMA_FORECASTS_VERSION=7, K1 DB split, reality_contracts gate, ens_bias_v2 (model_bias_ens_v2 table), watch_source_contract, onboard_cities.py pipeline
 Status: REFERENCE / canonical surface map
 
 ## §1 The Principle
@@ -337,28 +337,42 @@ Pre-commit invariant baseline at `.claude/hooks/pre-commit-invariant-test.sh` �
 
 ### T4 — New "Shenzhen-class" city onboarded
 
+**Canonical orchestrator**: `scripts/onboard_cities.py` — defines the `NewCity` dataclass and full PIPELINE_STEPS dependency chain. Run `--dry-run` first.
+
+**Hard gate**: A new city MUST NOT enter live trading until all three of the following hold:
+  1. A `config/reality_contracts/data.yaml` (or dedicated file) entry is captured with a `SETTLEMENT_SOURCE_<CITY>` contract
+  2. `python scripts/verify_reality_contracts_2026-05-17.py --apply` exits 0 and `last_verified` is renewed for that contract
+  3. `src/strategy/oracle_penalty.py` BLACKLIST status is cleared (error_rate drops below threshold after shadow period)
+
 1. **Detection**:
    - Operator-driven (PM lists new market)
 2. **Containment**:
-   - City entered `oracle_penalty` BLACKLIST until validation complete (no live trades)
+   - Add city to `oracle_penalty` BLACKLIST in `config/oracle_penalty.json` (or equivalent runtime config) — no live trades until Verification gate passed
+   - Confirm no `SETTLEMENT_SOURCE_<CITY>` entry exists yet in `config/reality_contracts/data.yaml`; note city as uncontracted until Repair step 7
 3. **Investigation**:
    - Determine PM settlement source URL → primary station
    - Check WU page existence + parser compatibility
    - Probe Ogimet & Meteostat for the same station
    - Establish historical archive depth (need ≥1 year for seasonal Platt)
+   - Confirm city unit (F vs C) — relevant for `model_bias_ens_v2` `members_unit` degC normalization in `src/calibration/ens_bias_repo.py`
 4. **Repair**:
-   1. Layer 1: add to `cities.json` (all required fields)
-   2. Layer 5: assign tier in `tier_resolver` (default: WU_ICAO if WU primary; OGIMET_METAR if PM uses NOAA-style settlement)
-   3. Layer 1: generate `city_monthly_bounds.json` row (may be NULL if <30 samples; lat-band fallback in guard)
-   4. Layer 3: ensure clients accept the new ICAO
+   1. Layer 1: add to `config/cities.json` (all required fields, unit, cluster, settlement_source, historical_peak_hour, diurnal_amplitude)
+   2. Layer 5: assign tier in `tier_resolver` (default: WU_ICAO if WU primary; OGIMET_METAR if PM uses NOAA-style settlement); add source-tag to `TIER_ALLOWED_SOURCES`
+   3. Layer 1: generate `config/city_monthly_bounds.json` row (may be NULL if <30 samples; lat-band fallback in guard)
+   4. Layer 3: ensure clients accept the new ICAO (check OGIMET_CITIES dict at `src/data/daily_obs_append.py:1019` if city needs Ogimet)
    5. Layer 12: extend AST guard TARGETS list if new script written
-   6. Layer 6: backfill ≥365 days of `observation_instants_v2` + run Platt training
-   7. Layer 8: keep DDD multiplier-adjusted small-sample floor active until N ≥ 1000 pairs
+   6. Layer 6: run `scripts/onboard_cities.py` pipeline — backfills `observation_instants_v2` (zeus-world.db, SCHEMA_VERSION=35) + `ensemble_snapshots_v2` (zeus-forecasts.db, SCHEMA_FORECASTS_VERSION=7) + triggers `rebuild_calibration_pairs_canonical.py`
+   7. Layer 6b: populate `model_bias_ens_v2` (zeus-forecasts.db, SCHEMA_FORECASTS_VERSION=7) via `src/calibration/ens_bias_repo.py` — defaults are `contributor_policy='full_contributor_only'`, bias normalized to degC (`members_unit`), `prior_data_version` propagated from ensemble source
+   8. Layer 6c: run `scripts/watch_source_contract.py` to validate Gamma settlement-source consistency for new city; address any ALERT before proceeding
+   9. Layer 6d: add `SETTLEMENT_SOURCE_<CITY>` entry to `config/reality_contracts/data.yaml` (blocking criticality, appropriate `unit`, `rounding`, `ttl_seconds`, `on_change_handlers`)
+   10. Layer 8: keep DDD multiplier-adjusted small-sample floor active until N ≥ 1000 calibration pairs
 5. **Verification**:
+   - Run `python scripts/verify_reality_contracts_2026-05-17.py --apply` — must exit 0 with `last_verified` renewed for `SETTLEMENT_SOURCE_<CITY>` (uses `config/reality_contracts/*.yaml` + live Polymarket CLOB + Open-Meteo)
    - Test entry: `tests/test_config.py` city-mapping invariants
+   - Confirm `oracle_penalty` error_rate falls below threshold after shadow period (14+ days); clear BLACKLIST only then
    - Shadow trade for 14+ days; mismatch < 5%
 6. **Backfill**:
-   - N/A — onboarding starts clean
+   - N/A — onboarding starts clean; schema version targets are zeus-world.db (SCHEMA_VERSION=35) and zeus-forecasts.db (SCHEMA_FORECASTS_VERSION=7)
 
 ### T5 — Vendor outage of indeterminate duration
 

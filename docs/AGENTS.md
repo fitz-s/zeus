@@ -63,6 +63,25 @@ body or bundle.
 | `artifacts/` | Active evidence artifacts and inventories; not authority -> `artifacts/AGENTS.md` |
 | `artifacts/tigge_data_training_handoff_2026-04-23.md` | Dated TIGGE asset/training handoff for completed raw, extraction, validation, and next Zeus training steps |
 
+## New city onboarding (canonical pointer)
+
+When a new Polymarket weather city must be added:
+
+- **Add flow**: `docs/reference/zeus_vendor_change_response_registry.md` §T4 is the
+  canonical 6-phase procedure. The pipeline orchestrator is `scripts/onboard_cities.py`.
+- **Settlement validation**: every new city requires a `SETTLEMENT_SOURCE_<CITY>`
+  blocking entry in `config/reality_contracts/data.yaml`. Run
+  `scripts/verify_reality_contracts_2026-05-17.py --apply` and confirm exit 0.
+- **Hard gate — no live trades until**:
+  1. `config/reality_contracts/data.yaml` entry captured for the city
+  2. `verify_reality_contracts_2026-05-17.py` exits 0 with `last_verified` renewed
+  3. `oracle_penalty` BLACKLIST cleared (error_rate below threshold after 14-day shadow)
+- **Source-contract monitor**: run `scripts/watch_source_contract.py` to validate
+  Gamma settlement-source consistency before clearing the BLACKLIST.
+- **ENS bias**: `model_bias_ens_v2` rows land in zeus-forecasts.db
+  (SCHEMA_FORECASTS_VERSION=7) via `src/calibration/ens_bias_repo.py`;
+  observation backfill lands in zeus-world.db (SCHEMA_VERSION=35).
+
 ## Rules
 
 - New active docs belong in declared tracked subroots, not directly under
