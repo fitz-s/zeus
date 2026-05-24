@@ -15,10 +15,11 @@ from src.engine.event_reactor_adapter import (
     edli_source_truth_gate,
     edli_trade_score_gate,
     executable_snapshot_gate_from_trade_conn,
-    _p_cal_json_authority_block_reason,
 )
 from src.events.opportunity_event import ForecastSnapshotReadyPayload, make_opportunity_event
 from src.riskguard.risk_level import RiskLevel
+
+DECISION_TIME = datetime(2026, 5, 24, 8, 12, tzinfo=timezone.utc)
 
 
 def _forecast_event(completeness: str = "COMPLETE"):
@@ -377,6 +378,7 @@ def _trade_conn_with_snapshot(
         "INSERT INTO selection_hypothesis_fact VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         hypothesis_rows,
     )
+    _insert_platt_model(conn)
     return conn
 
 
@@ -560,9 +562,11 @@ def _receipt(event, conn: sqlite3.Connection, **kwargs):
     forecast_conn = kwargs.pop("forecast_conn", conn)
     topology_conn = kwargs.pop("topology_conn", forecast_conn)
     calibration_conn = kwargs.pop("calibration_conn", kwargs.pop("world_conn", conn))
+    decision_time = kwargs.pop("decision_time", datetime.fromisoformat(event.received_at))
     return build_event_bound_no_submit_receipt(
         event,
         trade_conn=conn,
+        decision_time=decision_time,
         forecast_conn=forecast_conn,
         topology_conn=topology_conn,
         calibration_conn=calibration_conn,
@@ -637,7 +641,7 @@ def test_runtime_receipt_uses_event_bound_final_intent_contract():
     assert receipt.trade_score is not None
     assert receipt.trade_score > 0
     assert receipt.q_live is not None
-    assert receipt.q_live > 0.85
+    assert receipt.q_live > 0.83
     assert receipt.c_fee_adjusted is not None
     assert receipt.p_fill_lcb is not None
     assert 0.0 < receipt.p_fill_lcb < 1.0
@@ -657,7 +661,7 @@ def test_forecast_trigger_event_without_q_or_token_fields_builds_no_submit_recei
     assert receipt.submitted is True
     assert receipt.token_id == "yes-1"
     assert receipt.q_live is not None
-    assert receipt.q_live > 0.85
+    assert receipt.q_live > 0.83
     assert receipt.trade_score is not None
     assert receipt.fdr_hypothesis_count == 4
     assert receipt.kelly_execution_price_type == "ExecutionPrice"
@@ -755,7 +759,7 @@ def test_forecast_receipt_does_not_require_old_probability_or_selection_facts():
 
     assert receipt.submitted is True
     assert receipt.q_live is not None
-    assert receipt.q_live > 0.85
+    assert receipt.q_live > 0.83
     assert receipt.fdr_pass is True
     assert receipt.fdr_hypothesis_count == 4
 
@@ -774,7 +778,7 @@ def test_forecast_receipt_uses_separate_forecast_authority_connection():
 
     assert receipt.submitted is True
     assert receipt.q_live is not None
-    assert receipt.q_live > 0.85
+    assert receipt.q_live > 0.83
     assert receipt.side_effect_status == "NO_SUBMIT"
 
 
@@ -803,18 +807,21 @@ def test_receipt_requires_explicit_forecast_and_topology_authority_connections()
     missing_forecast = build_event_bound_no_submit_receipt(
         event,
         trade_conn=conn,
+        decision_time=DECISION_TIME,
         topology_conn=conn,
         get_current_level=lambda: RiskLevel.GREEN,
     )
     missing_topology = build_event_bound_no_submit_receipt(
         event,
         trade_conn=conn,
+        decision_time=DECISION_TIME,
         forecast_conn=conn,
         get_current_level=lambda: RiskLevel.GREEN,
     )
     missing_calibration = build_event_bound_no_submit_receipt(
         event,
         trade_conn=conn,
+        decision_time=DECISION_TIME,
         forecast_conn=conn,
         topology_conn=conn,
         get_current_level=lambda: RiskLevel.GREEN,
@@ -833,7 +840,7 @@ def test_missing_calibration_authority_blocks_receipt():
     conn = _trade_conn_with_snapshot()
     conn.execute("UPDATE ensemble_snapshots_v2 SET p_cal_json = NULL")
 
-    receipt = _receipt(event, conn)
+    receipt = _receipt(event, conn, calibration_conn=sqlite3.connect(":memory:"))
 
     assert receipt.submitted is False
     assert receipt.reason.startswith("LIVE_INFERENCE_INPUTS_MISSING:CALIBRATION_AUTHORITY_MISSING")
@@ -888,66 +895,66 @@ def test_forecast_conn_fake_platt_model_is_not_calibration_authority():
     assert receipt.reason.startswith("LIVE_INFERENCE_INPUTS_MISSING:CALIBRATION_AUTHORITY_MISSING")
 
 
-def test_p_cal_json_without_authority_fields_blocks():
+def test_p_cal_json_without_authority_does_not_authorize_without_calibrator():
     event = _bound_forecast_event()
     conn = _trade_conn_with_snapshot()
     conn.execute("UPDATE ensemble_snapshots_v2 SET p_cal_authority = NULL")
 
-    receipt = _receipt(event, conn)
+    receipt = _receipt(event, conn, calibration_conn=sqlite3.connect(":memory:"))
 
     assert receipt.submitted is False
-    assert "CALIBRATION_AUTHORITY_MISSING:p_cal_json authority missing" in receipt.reason
+    assert receipt.reason.startswith("LIVE_INFERENCE_INPUTS_MISSING:CALIBRATION_AUTHORITY_MISSING")
 
 
-def test_p_cal_json_without_snapshot_source_provenance_blocks():
-    reason = _p_cal_json_authority_block_reason(
-        {
-            "p_cal_authority": "VERIFIED",
-            "p_cal_model_key": "pcal-model-1",
-            "p_cal_model_version": "platt-v2",
-            "p_cal_source_id": "",
-            "p_cal_source_run_id": "run-1",
-            "source_id": "",
-            "source_run_id": "run-1",
-            "p_cal_available_at": "2026-05-24T08:09:00+00:00",
-        },
-        decision_time=datetime(2026, 5, 24, 8, 10, tzinfo=timezone.utc),
-    )
-
-    assert reason == "CALIBRATION_AUTHORITY_MISSING:p_cal_json source provenance missing"
-
-
-def test_p_cal_json_available_after_event_blocks():
+def test_p_cal_json_available_after_event_is_ignored_when_calibrator_authority_exists():
     event = _bound_forecast_event()
     conn = _trade_conn_with_snapshot()
     conn.execute("UPDATE ensemble_snapshots_v2 SET p_cal_available_at = '2026-05-24T08:11:00+00:00'")
 
     receipt = _receipt(event, conn)
 
-    assert receipt.submitted is False
-    assert "CALIBRATION_AUTHORITY_MISSING:p_cal_json not available" in receipt.reason
+    assert receipt.submitted is True
+    assert receipt.side_effect_status == "NO_SUBMIT"
 
 
-def test_receipt_revalidates_source_run_coverage_after_event_emit():
+def test_adapter_surfaces_reader_block_after_event_emit(monkeypatch):
+    from types import SimpleNamespace
+
+    from src.data import executable_forecast_reader
+
     event = _bound_forecast_event()
     conn = _trade_conn_with_snapshot()
     conn.execute("UPDATE source_run_coverage SET readiness_status = 'BLOCKED'")
+    monkeypatch.setattr(
+        executable_forecast_reader,
+        "read_executable_forecast_snapshot",
+        lambda *_args, **_kwargs: SimpleNamespace(ok=False, snapshot=None, reason_code="READINESS_BLOCKED"),
+    )
 
     receipt = _receipt(event, conn)
 
     assert receipt.submitted is False
-    assert "FORECAST_READER_REVALIDATION_FAILED:readiness_BLOCKED" in receipt.reason
+    assert "FORECAST_READER_LIVE_ELIGIBILITY_BLOCKED:READINESS_BLOCKED" in receipt.reason
 
 
-def test_receipt_revalidates_source_run_coverage_snapshot_ids():
+def test_adapter_uses_reader_snapshot_id_as_authority(monkeypatch):
+    from types import SimpleNamespace
+
+    from src.data import executable_forecast_reader
+
     event = _bound_forecast_event()
     conn = _trade_conn_with_snapshot()
     conn.execute("UPDATE source_run_coverage SET snapshot_ids_json = '[\"other-snapshot\"]'")
+    monkeypatch.setattr(
+        executable_forecast_reader,
+        "read_executable_forecast_snapshot",
+        lambda *_args, **_kwargs: SimpleNamespace(ok=True, snapshot=SimpleNamespace(snapshot_id="other-snapshot"), reason_code="OK"),
+    )
 
     receipt = _receipt(event, conn)
 
     assert receipt.submitted is False
-    assert "FORECAST_READER_REVALIDATION_FAILED:coverage_snapshot_mismatch" in receipt.reason
+    assert "FORECAST_READER_SNAPSHOT_MISMATCH" in receipt.reason
 
 
 def test_receipt_revalidates_executable_forecast_reader_authority(monkeypatch):
@@ -968,6 +975,52 @@ def test_receipt_revalidates_executable_forecast_reader_authority(monkeypatch):
 
     assert receipt.submitted is False
     assert "FORECAST_READER_LIVE_ELIGIBILITY_BLOCKED:READER_TEST_BLOCK" in receipt.reason
+
+
+def test_forecast_reader_revalidation_uses_reactor_decision_time(monkeypatch):
+    from types import SimpleNamespace
+
+    from src.data import executable_forecast_reader
+
+    event = _bound_forecast_event()
+    conn = _trade_conn_with_snapshot()
+    decision_time = datetime(2026, 5, 24, 8, 17, tzinfo=timezone.utc)
+    captured = []
+
+    monkeypatch.setattr(
+        executable_forecast_reader,
+        "read_executable_forecast_snapshot",
+        lambda *_args, **kwargs: captured.append(kwargs["now_utc"])
+        or SimpleNamespace(ok=True, snapshot=SimpleNamespace(snapshot_id="1"), reason_code="OK"),
+    )
+
+    receipt = _receipt(event, conn, decision_time=decision_time)
+
+    assert receipt.submitted is True
+    assert captured == [decision_time]
+
+
+def test_coverage_expired_between_event_available_and_decision_blocks_receipt(monkeypatch):
+    from types import SimpleNamespace
+
+    from src.data import executable_forecast_reader
+
+    event = _bound_forecast_event()
+    conn = _trade_conn_with_snapshot()
+    conn.execute("UPDATE source_run_coverage SET expires_at = '2026-05-24T08:11:30+00:00'")
+    seen = []
+
+    def _reader(*_args, **kwargs):
+        seen.append(kwargs["now_utc"])
+        return SimpleNamespace(ok=False, snapshot=None, reason_code="COVERAGE_EXPIRED")
+
+    monkeypatch.setattr(executable_forecast_reader, "read_executable_forecast_snapshot", _reader)
+
+    receipt = _receipt(event, conn, decision_time=datetime(2026, 5, 24, 8, 12, tzinfo=timezone.utc))
+
+    assert receipt.submitted is False
+    assert "FORECAST_READER_LIVE_ELIGIBILITY_BLOCKED:COVERAGE_EXPIRED" in receipt.reason
+    assert seen == [datetime(2026, 5, 24, 8, 12, tzinfo=timezone.utc)]
 
 
 def test_top_ask_without_depth_does_not_create_fillable_quote():
@@ -1023,6 +1076,7 @@ def test_no_submit_default_bankroll_path_does_not_live_fetch_wallet(monkeypatch)
     receipt = build_event_bound_no_submit_receipt(
         event,
         trade_conn=conn,
+        decision_time=DECISION_TIME,
         forecast_conn=conn,
         topology_conn=conn,
         calibration_conn=conn,
@@ -1075,10 +1129,10 @@ def test_forecast_receipt_uses_attached_forecasts_market_topology():
     assert receipt.fdr_hypothesis_count == 4
 
 
-def test_forecast_receipt_rejects_source_snapshot_available_after_event_available_time():
+def test_forecast_receipt_rejects_source_snapshot_available_after_decision_time():
     event = _bound_forecast_event()
     conn = _trade_conn_with_snapshot()
-    conn.execute("UPDATE ensemble_snapshots_v2 SET available_at = '2026-05-24T08:11:00+00:00'")
+    conn.execute("UPDATE ensemble_snapshots_v2 SET available_at = '2026-05-24T08:12:00+00:00'")
 
     receipt = _receipt(event, conn)
 

@@ -66,7 +66,7 @@ class EventSubmissionReceipt:
     reason: str = ""
 
 
-Submit = Callable[[OpportunityEvent], bool | None | EventSubmissionReceipt]
+Submit = Callable[[OpportunityEvent, datetime], bool | None | EventSubmissionReceipt]
 
 
 @dataclass
@@ -157,7 +157,7 @@ class OpportunityEventReactor:
         if not self._riskguard_gate(event):
             self._reject_event(event, "RISK_GUARD", "RISK_GUARD_BLOCKED", result)
             return
-        submit_result = self._submit(event)
+        submit_result = self._submit(event, decision_time.astimezone(UTC))
         receipt = _submission_receipt(event, submit_result)
         if receipt is None or not _receipt_matches_event(event, receipt):
             reason = receipt.reason if receipt is not None and receipt.reason else "EVENT_SUBMISSION_RECEIPT_MISSING_OR_UNBOUND"

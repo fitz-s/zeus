@@ -166,13 +166,14 @@ def event_bound_no_submit_adapter_from_trade_conn(
     topology_conn: sqlite3.Connection | None = None,
     calibration_conn: sqlite3.Connection | None = None,
     bankroll_usd_provider: Callable[[], float | None] | None = None,
-) -> Callable[[OpportunityEvent], EventSubmissionReceipt]:
+) -> Callable[[OpportunityEvent, datetime], EventSubmissionReceipt]:
     """Build a proof-only final-intent receipt adapter for EDLI events."""
 
-    def _submit(event: OpportunityEvent) -> EventSubmissionReceipt:
+    def _submit(event: OpportunityEvent, decision_time: datetime) -> EventSubmissionReceipt:
         return build_event_bound_no_submit_receipt(
             event,
             trade_conn=trade_conn,
+            decision_time=decision_time,
             forecast_conn=forecast_conn,
             topology_conn=topology_conn,
             calibration_conn=calibration_conn,
@@ -187,6 +188,7 @@ def build_event_bound_no_submit_receipt(
     event: OpportunityEvent,
     *,
     trade_conn: sqlite3.Connection,
+    decision_time: datetime,
     get_current_level: Callable[[], RiskLevel],
     forecast_conn: sqlite3.Connection | None = None,
     topology_conn: sqlite3.Connection | None = None,
@@ -195,6 +197,7 @@ def build_event_bound_no_submit_receipt(
 ) -> EventSubmissionReceipt:
     """Produce a typed no-submit EDLI proof without running the cycle runner."""
 
+    decision_time = decision_time.astimezone(UTC)
     payload = _payload(event)
     if forecast_conn is None:
         return EventSubmissionReceipt(False, event.event_id, event.causal_snapshot_id, reason="FORECAST_AUTHORITY_CONNECTION_MISSING")
@@ -241,7 +244,7 @@ def build_event_bound_no_submit_receipt(
         EventBoundDecisionRequest(
             event=event,
             market_topology=topology,
-            decision_time=datetime.now(UTC),
+            decision_time=decision_time,
             market_topology_source="executable_market_snapshots",
         )
     )
@@ -262,6 +265,7 @@ def build_event_bound_no_submit_receipt(
             trade_conn=trade_conn,
             forecast_conn=source_conn,
             calibration_conn=calibration_conn,
+            decision_time=decision_time,
         )
     except ValueError as exc:
         return EventSubmissionReceipt(
@@ -606,6 +610,7 @@ def _generate_candidate_proofs(
     trade_conn: sqlite3.Connection,
     forecast_conn: sqlite3.Connection,
     calibration_conn: sqlite3.Connection,
+    decision_time: datetime,
 ) -> tuple[_CandidateProof, ...]:
     q_by_condition, q_lcb_by_direction, canonical_p_values, canonical_prefilter = _live_yes_probabilities(
         event=event,
@@ -614,6 +619,7 @@ def _generate_candidate_proofs(
         conn=forecast_conn,
         calibration_conn=calibration_conn,
         native_costs=native_costs,
+        decision_time=decision_time,
     )
     proofs: list[_CandidateProof] = []
     rows_by_condition = _snapshot_rows_by_condition(snapshot_rows)
@@ -702,6 +708,7 @@ def _live_yes_probabilities(
     conn: sqlite3.Connection,
     calibration_conn: sqlite3.Connection,
     native_costs: dict[tuple[str, str], tuple[dict[str, Any] | None, ExecutionPrice | None, float, float | None, str | None]],
+    decision_time: datetime,
 ) -> tuple[dict[str, float], dict[tuple[str, str], float], dict[tuple[str, str], float], dict[tuple[str, str], bool]]:
     canonical = _canonical_probability_and_fdr_proof(event=event, family=family, conn=conn)
     if event.event_type == "FORECAST_SNAPSHOT_READY":
@@ -711,6 +718,7 @@ def _live_yes_probabilities(
             conn=conn,
             calibration_conn=calibration_conn,
             native_costs=native_costs,
+            decision_time=decision_time,
         )
     if event.event_type == "DAY0_EXTREME_UPDATED":
         generated = _forecast_snapshot_probability_and_fdr_proof(
@@ -720,6 +728,7 @@ def _live_yes_probabilities(
             calibration_conn=calibration_conn,
             native_costs=native_costs,
             allow_latest_snapshot=True,
+            decision_time=decision_time,
         )
         q_by_condition, lcb_by_condition, p_values, prefilter = generated
         masked_q, masked_lcb, masked_p_values, masked_prefilter = _apply_day0_mask_to_generated_probabilities(
@@ -739,9 +748,16 @@ def _canonical_probability_and_fdr_proof(
     conn: sqlite3.Connection,
     calibration_conn: sqlite3.Connection,
     native_costs: dict[tuple[str, str], tuple[dict[str, Any] | None, ExecutionPrice | None, float, float | None, str | None]],
+    decision_time: datetime,
     allow_latest_snapshot: bool = False,
 ) -> tuple[dict[str, float], dict[tuple[str, str], float], dict[tuple[str, str], float], dict[tuple[str, str], bool]]:
-    snapshot = _forecast_snapshot_row_for_event(conn, event=event, family=family, allow_latest=allow_latest_snapshot)
+    snapshot = _forecast_snapshot_row_for_event(
+        conn,
+        event=event,
+        family=family,
+        allow_latest=allow_latest_snapshot,
+        decision_time=decision_time,
+    )
     if snapshot is None:
         if allow_latest_snapshot:
             raise ValueError("Day0 base forecast snapshot missing for event-bound inference")
@@ -752,7 +768,7 @@ def _canonical_probability_and_fdr_proof(
         family=family,
         native_costs=native_costs,
         payload=_payload(event),
-        decision_time=_parse_utc(event.received_at if allow_latest_snapshot else event.available_at),
+        decision_time=decision_time,
     )
     hypotheses = scan_full_hypothesis_family(analysis, n_bootstrap=edge_n_bootstrap())
     hypothesis_by_label_direction = {
@@ -802,25 +818,34 @@ def _canonical_probability_rows(
     *,
     event: OpportunityEvent,
     family,
-) -> dict[tuple[str, str], dict[str, Any]]:
-    table_ref = _authority_table_ref(conn, "probability_trace_fact")
+    allow_latest: bool,
+    decision_time: datetime,
+) -> dict[str, Any] | None:
+    table_ref = _authority_table_ref(conn, "ensemble_snapshots_v2")
     if table_ref is None:
         raise ValueError("canonical probability_trace_fact table missing")
     columns = _table_ref_columns(conn, table_ref)
     required = {"city", "target_date", "range_label", "direction", "p_posterior"}
     if not required.issubset(columns):
-        raise ValueError("canonical probability_trace_fact schema missing required columns")
-    predicates = ["city = ?", "target_date = ?", "COALESCE(range_label, '') != ''"]
-    params: list[object] = [family.city, family.target_date]
-    if "decision_snapshot_id" in columns and event.causal_snapshot_id:
-        predicates.append("(decision_snapshot_id = ? OR decision_snapshot_id IS NULL OR decision_snapshot_id = '')")
-        params.append(event.causal_snapshot_id)
-    select_fields = [
-        "range_label",
-        "direction",
-        "p_posterior",
-        _optional_column_expr(columns, "recorded_at"),
-    ]
+        return None
+    predicates = ["city = ?", "target_date = ?", "temperature_metric = ?"]
+    params: list[object] = [family.city, family.target_date, family.metric]
+    if not allow_latest:
+        predicates.append("CAST(snapshot_id AS TEXT) = ?")
+        params.append(str(event.causal_snapshot_id or ""))
+        if "available_at" in columns:
+            predicates.append("available_at <= ?")
+            params.append(decision_time.astimezone(UTC).isoformat())
+    elif "available_at" in columns:
+        predicates.append("available_at <= ?")
+        params.append(decision_time.astimezone(UTC).isoformat())
+    if "authority" in columns:
+        predicates.append("COALESCE(authority, 'VERIFIED') = 'VERIFIED'")
+    if "causality_status" in columns:
+        predicates.append("COALESCE(causality_status, 'OK') = 'OK'")
+    if "boundary_ambiguous" in columns:
+        predicates.append("COALESCE(boundary_ambiguous, 0) = 0")
+    order_field = "available_at" if "available_at" in columns else "snapshot_id"
     cur = conn.execute(
         f"""
         SELECT {', '.join(select_fields)}
@@ -839,6 +864,7 @@ def _canonical_probability_rows(
         event=event,
         family=family,
         allow_latest=allow_latest,
+        decision_time=decision_time,
     )
     if reason is not None:
         raise ValueError(reason)
@@ -968,19 +994,6 @@ def _snapshot_p_cal(
     payload: dict[str, object],
     decision_time: datetime | None,
 ) -> np.ndarray:
-    cal_json = snapshot.get("p_cal_json")
-    if cal_json not in {None, ""}:
-        authority_reason = _p_cal_json_authority_block_reason(
-            snapshot,
-            decision_time=decision_time,
-        )
-        if authority_reason is not None:
-            raise ValueError(authority_reason)
-        arr = np.asarray(_json_list(cal_json), dtype=float)
-        if _valid_probability_vector(arr, len(bins)):
-            return arr / float(arr.sum())
-        raise ValueError("CALIBRATION_AUTHORITY_MISSING:p_cal_json invalid")
-
     city = runtime_cities_by_name().get(family.city)
     if city is None:
         raise ValueError(f"CALIBRATION_AUTHORITY_MISSING:city config missing for {family.city}")
@@ -1029,31 +1042,6 @@ def _snapshot_p_cal(
     if not _valid_probability_vector(p_cal, len(bins)):
         raise ValueError("CALIBRATION_AUTHORITY_MISSING:p_cal invalid")
     return p_cal
-
-
-def _p_cal_json_authority_block_reason(
-    snapshot: dict[str, Any],
-    *,
-    decision_time: datetime | None,
-) -> str | None:
-    if _nonnull(snapshot.get("p_cal_authority")) != "VERIFIED":
-        return "CALIBRATION_AUTHORITY_MISSING:p_cal_json authority missing"
-    if not _nonnull(snapshot.get("p_cal_model_key")) or not _nonnull(snapshot.get("p_cal_model_version")):
-        return "CALIBRATION_AUTHORITY_MISSING:p_cal_json model provenance missing"
-    source_id = _nonnull(snapshot.get("source_id"))
-    source_run_id = _nonnull(snapshot.get("source_run_id"))
-    if not source_id or not source_run_id:
-        return "CALIBRATION_AUTHORITY_MISSING:p_cal_json source provenance missing"
-    if _nonnull(snapshot.get("p_cal_source_id")) != source_id:
-        return "CALIBRATION_AUTHORITY_MISSING:p_cal_json source mismatch"
-    if _nonnull(snapshot.get("p_cal_source_run_id")) != source_run_id:
-        return "CALIBRATION_AUTHORITY_MISSING:p_cal_json source_run mismatch"
-    available_at = _parse_utc(snapshot.get("p_cal_available_at"))
-    if available_at is None or decision_time is None:
-        return "CALIBRATION_AUTHORITY_MISSING:p_cal_json availability missing"
-    if available_at > decision_time.astimezone(UTC):
-        return "CALIBRATION_AUTHORITY_MISSING:p_cal_json not available"
-    return None
 
 
 def _snapshot_lead_days(*, snapshot: dict[str, Any], family, payload: dict[str, object]) -> float:
@@ -1588,6 +1576,7 @@ def _forecast_snapshot_reader_block_reason(
     event: OpportunityEvent,
     family,
     allow_latest: bool,
+    decision_time: datetime,
 ) -> str | None:
     if event.event_type not in {"FORECAST_SNAPSHOT_READY", "DAY0_EXTREME_UPDATED"}:
         return None
@@ -1601,10 +1590,6 @@ def _forecast_snapshot_reader_block_reason(
     source_run = _row_by_id(conn, source_run_table, "source_run_id", source_run_id)
     if source_run is None:
         return "FORECAST_READER_REVALIDATION_FAILED:source_run_missing"
-    if source_run.get("status") not in {"SUCCESS", "PARTIAL"}:
-        return f"FORECAST_READER_REVALIDATION_FAILED:source_run_status_{source_run.get('status')}"
-    if source_run.get("completeness_status") not in {"COMPLETE", "PARTIAL"}:
-        return f"FORECAST_READER_REVALIDATION_FAILED:source_run_completeness_{source_run.get('completeness_status')}"
     coverage = _coverage_row_for_snapshot(
         conn,
         coverage_table,
@@ -1614,28 +1599,7 @@ def _forecast_snapshot_reader_block_reason(
     )
     if coverage is None:
         return "FORECAST_READER_REVALIDATION_FAILED:coverage_missing"
-    if coverage.get("completeness_status") != "COMPLETE":
-        return f"FORECAST_READER_REVALIDATION_FAILED:coverage_{coverage.get('completeness_status')}"
-    if coverage.get("readiness_status") != "LIVE_ELIGIBLE":
-        return f"FORECAST_READER_REVALIDATION_FAILED:readiness_{coverage.get('readiness_status')}"
-    snapshot_id = _nonnull(snapshot.get("snapshot_id"))
-    coverage_snapshot_ids = {str(item) for item in _json_list(coverage.get("snapshot_ids_json")) if str(item)}
-    if not coverage_snapshot_ids:
-        return "FORECAST_READER_REVALIDATION_FAILED:coverage_snapshot_ids_missing"
-    if snapshot_id not in coverage_snapshot_ids:
-        return "FORECAST_READER_REVALIDATION_FAILED:coverage_snapshot_mismatch"
-    if not allow_latest and _nonnull(event.causal_snapshot_id) not in coverage_snapshot_ids:
-        return "FORECAST_READER_REVALIDATION_FAILED:causal_snapshot_coverage_mismatch"
-    expires_at = _parse_utc(coverage.get("expires_at"))
-    if expires_at is None:
-        return "FORECAST_READER_REVALIDATION_FAILED:coverage_expiry_missing"
-    decision_time = _parse_utc(event.received_at if allow_latest else event.available_at)
-    if decision_time is not None and expires_at <= decision_time:
-        return "FORECAST_READER_REVALIDATION_FAILED:coverage_expired"
-    expected = set(_json_list(coverage.get("expected_steps_json")))
-    observed = set(_json_list(coverage.get("observed_steps_json")))
-    if not expected or not expected.issubset(observed):
-        return "FORECAST_READER_REVALIDATION_FAILED:required_steps_missing"
+    required_steps = tuple(int(step) for step in _json_list(coverage.get("expected_steps_json")) if str(step) != "")
     reader_reason = _executable_forecast_reader_authority_block_reason(
         conn,
         snapshot=snapshot,
@@ -1644,7 +1608,8 @@ def _forecast_snapshot_reader_block_reason(
         event=event,
         family=family,
         allow_latest=allow_latest,
-        required_steps=tuple(int(step) for step in expected),
+        decision_time=decision_time,
+        required_steps=required_steps,
     )
     if reader_reason is not None:
         return reader_reason
@@ -1660,6 +1625,7 @@ def _executable_forecast_reader_authority_block_reason(
     event: OpportunityEvent,
     family,
     allow_latest: bool,
+    decision_time: datetime,
     required_steps: tuple[int, ...],
 ) -> str | None:
     """Revalidate forecast eligibility through the canonical executable reader."""
@@ -1672,7 +1638,6 @@ def _executable_forecast_reader_authority_block_reason(
         source_cycle_time = _parse_utc(source_run.get("source_cycle_time") or snapshot.get("source_cycle_time"))
         target_window_start = _parse_utc(coverage.get("target_window_start_utc"))
         target_window_end = _parse_utc(coverage.get("target_window_end_utc"))
-        decision_time = _parse_utc(event.received_at if allow_latest else event.available_at)
         source_id = _nonnull(coverage.get("source_id") or source_run.get("source_id") or snapshot.get("source_id"))
         source_transport = _nonnull(coverage.get("source_transport") or snapshot.get("source_transport") or SOURCE_TRANSPORT)
         data_version = _nonnull(coverage.get("data_version") or snapshot.get("data_version"))

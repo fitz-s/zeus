@@ -81,7 +81,7 @@ def test_reactor_blocks_final_intent_when_live_submit_disabled():
     store.insert_or_ignore(event)
     rejected = []
 
-    def _submit(_event):
+    def _submit(_event, _decision_time):
         return EventSubmissionReceipt(
             submitted=True,
             event_id=event.event_id,
@@ -133,7 +133,7 @@ def test_no_submit_fdr_rejection_is_classified_as_fdr_not_executor_expressibilit
     store.insert_or_ignore(event)
     rejected = []
 
-    def _submit(_event):
+    def _submit(_event, _decision_time):
         return EventSubmissionReceipt(
             submitted=False,
             event_id=event.event_id,
@@ -180,7 +180,7 @@ def test_no_submit_kelly_rejection_is_classified_as_kelly_not_executor_expressib
     store.insert_or_ignore(event)
     rejected = []
 
-    def _submit(_event):
+    def _submit(_event, _decision_time):
         return EventSubmissionReceipt(
             submitted=False,
             event_id=event.event_id,
