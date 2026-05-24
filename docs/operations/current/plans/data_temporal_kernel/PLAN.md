@@ -99,3 +99,26 @@ No live order placement. No production DB mutation without operator-go. No delet
 ensemble_snapshots_v2/readiness_state/source_run/market_events_v2/settlements. No auto cities.json
 station remap. No HKO→WU/VHHH fallback. No TIGGE/Open-Meteo as live authority. Each PR has a
 named rollback (env flag or file removal). PR1 rollback = remove new files (zero runtime touch).
+
+## A–F REAL REPLACEMENT closeout (2026-05-24, operator directive)
+
+Operator lifted HOLD + directed the advisory/flag-gated layer to become the REAL default control
+plane (requirements A–F with acceptance tests). Delivered as 3 structural decisions on PR #329
+(commits 07f2731b..d944b26256):
+
+- Decision 2 (B+E): registry covers all 3 daemons incl. src/main collectors (COVER ≠ BUILD — the
+  trading scheduler is never rebuilt); SourceJobSpec.dispatch_kind + family; per-family singleton.
+  Surfaced + verified the WU daily ACTIVE_DUPLICATE (tracked _KNOWN_OPEN, operator ownership
+  decision pending: remove main.wu_daily vs add lock).
+- Decision 3 (C+D): compute_frontier federates over 8 families; persisted source_time_frontier
+  table (SCHEMA_FORECASTS_VERSION 6→7, idempotent UPSERT, backfill-cannot-refresh-live invariant).
+- Decision 1 (A+F): ZEUS_DATA_COLLECTION_MODE=registry (DEFAULT) | legacy (rollback); both ingest
+  daemons build from the registry via a fail-fast boot assert (one spec source, two consumers).
+
+Final opus critic: ACCEPT-WITH-RESERVATIONS, all 9 substance probes pass. Folded SEV-2 #1
+(heartbeat-lane starvation: pool 1→3 workers) + #2 (forecast_live boot fragility: invariant encoded
+in expected_registry_job_ids, not the plist) + #3 (forecast_live boot tests). SEV-3 = briefing only.
+
+DEPLOY (operator-gated, held): stop daemons → init_schema_forecasts(get_forecasts_connection())
++commit (schema 7) → restart → grep "registry scheduler built N jobs" → rollback via
+ZEUS_USE_LEGACY_DATA_COLLECTION=1 if wrong. Plists must keep ZEUS_FORECAST_LIVE_OWNER=forecast_live.
