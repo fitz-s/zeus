@@ -1,6 +1,6 @@
-# Created: 2026-05-24
-# Last reused/audited: 2026-05-24
-# Authority basis: docs/operations/EXEC_FRESHNESS_ROOTCAUSE_2026-05-24.md
+# Lifecycle: created=2026-05-24; last_reviewed=2026-05-24; last_reused=never
+# Purpose: Relationship test — fresh-at-submit re-capture invariant across discovery→execution boundary.
+# Reuse: Inspect capture_executable_market_snapshot + _ensure_fresh_executable_snapshot before reuse.
 """Relationship test (cross-module invariant) for fresh-at-submit re-capture.
 
 Invariant under test (discovery→execution boundary):

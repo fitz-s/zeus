@@ -888,7 +888,8 @@ def _ensure_fresh_executable_snapshot(
             execution_side="BUY",
         )
     except Exception as exc:  # noqa: BLE001 — any capture failure preserves the stale gate
-        raise ValueError(f"executable_snapshot_stale_recapture_failed:{exc}") from exc
+        logger.warning("executable_snapshot_stale: recapture failed — %s", exc)
+        raise ValueError("executable_snapshot_stale") from exc
     new_id = str(fields.get("executable_snapshot_id") or "")
     fresh = get_snapshot(conn, new_id) if new_id else None
     if fresh is None or not is_fresh(fresh, now):
@@ -920,10 +921,10 @@ def _market_dict_from_snapshot(snapshot) -> dict:
         "id": gamma_market_id,
         "conditionId": condition_id,
         "questionID": question_id,
-        "active": True,
-        "closed": False,
-        "acceptingOrders": True,
-        "enableOrderBook": True,
+        "active": True,  # identity-pass only; CLOB re-checks tradeability_status authoritatively
+        "closed": False,  # identity-pass only; CLOB re-checks tradeability_status authoritatively
+        "acceptingOrders": True,  # identity-pass only; CLOB re-checks tradeability_status authoritatively
+        "enableOrderBook": True,  # identity-pass only; CLOB re-checks tradeability_status authoritatively
         "negRisk": neg_risk,
         "clobTokenIds": [yes_token, no_token],
     }
@@ -934,6 +935,9 @@ def _market_dict_from_snapshot(snapshot) -> dict:
         "market_id": condition_id,
         "question_id": question_id,
         "gamma_market_id": gamma_market_id,
+        # Tradability flags hardcoded True for Gamma-identity pass only.
+        # capture_executable_market_snapshot re-checks tradeability_status, crossed-book,
+        # and _assert_clob_identity against live CLOB — those are the authoritative gates.
         "active": True,
         "closed": False,
         "accepting_orders": True,

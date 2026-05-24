@@ -3139,3 +3139,17 @@ test_metadata:
       Shadow log line uses [PROBABILITY_SANITY_SHADOW] prefix for grep-ability.
     created: 2026-05-23
     last_reused_or_audited: 2026-05-23
+
+  tests/test_exec_freshness_recapture.py:
+    cohort: law_antibody
+    trust: trusted
+    authority_docs:
+      - docs/operations/EXEC_FRESHNESS_ROOTCAUSE_2026-05-24.md
+    notes: >
+      Relationship test pinning fresh-at-submit re-capture invariant
+      across discovery→execution boundary. Guards that stale snapshots
+      trigger a single-market re-capture when a CLOB client is available,
+      and raise executable_snapshot_stale (exact string) when no client
+      is available. Root cause of zero live entries 2026-05-24.
+    created: 2026-05-24
+    last_reused_or_audited: 2026-05-24

@@ -36,6 +36,7 @@ expected to close out.  Keep them under their existing names.
 | `P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md` | active | P0 authority doc: PR-A snapshot ORDER BY fix, PR-B Day0 HIGH physical law, PR-C observation reader Root C, PR-D probability sanity gate, PR-E decision_integrity_quarantine. PR #309. |
 | `review5_23_findings.md` | active | review5.23 findings catalogue (P0-1, P1-1 through P1-8, P2-1 through P2-3). Authority for PR #326 fix scope. |
 | `review5_23_triage.md` | active | review5.23 triage status — per-finding fix status, PR anchors, open items. Updated by PR #326. |
+| `EXEC_FRESHNESS_ROOTCAUSE_2026-05-24.md` | active | Root-cause report: stale executable snapshot at submit (discovery→reprice latency > 30s). Authority for exec-freshness re-capture design. PR #330. |
 
 ## Task directories — closeout status
 
