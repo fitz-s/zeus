@@ -1,11 +1,12 @@
-# Lifecycle: created=2026-05-21; last_reviewed=2026-05-21; last_reused=2026-05-22
+# Lifecycle: created=2026-05-21; last_reviewed=2026-05-23; last_reused=2026-05-23
 # Purpose: Relationship tests for the read-only live release gate and its
 #   fail-closed proof requirements.
 # Reuse: Run when changing scripts/check_live_release_gate.py or live release
 #   money-path proof requirements.
 # Created: 2026-05-21
-# Last reused/audited: 2026-05-22
+# Last reused/audited: 2026-05-23
 # Authority basis: docs/operations/task_2026-05-21_live_release_proof_p0p3/task.md P0-1/P1-2/P1-7
+#   + review5.23 P0-1 (forecasts DB gate) + P1-5 (stale redeem age-check)
 
 from __future__ import annotations
 
@@ -15,8 +16,19 @@ import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 
-from scripts.check_live_release_gate import PAPER_PROOF_KEYS, FAIL, PASS, _check_loaded_sha, evaluate_release_gate, parse_args
-from src.state.db import SCHEMA_VERSION, init_schema
+from scripts.check_live_release_gate import (
+    PAPER_PROOF_KEYS, FAIL, PASS,
+    STALE_REDEEM_TX_HASHED_SECONDS,
+    _check_loaded_sha,
+    evaluate_release_gate,
+    parse_args,
+)
+from src.state.db import (
+    SCHEMA_FORECASTS_VERSION,
+    SCHEMA_VERSION,
+    init_schema,
+    init_schema_forecasts,
+)
 
 
 def _write_json(path: Path, payload: dict[str, object]) -> None:
@@ -32,30 +44,78 @@ def _make_world_db(path: Path) -> None:
         conn.close()
 
 
-def _make_trade_db(path: Path, *, command_state: str = "ACKED", redeem_state: str = "REDEEM_CONFIRMED") -> None:
+def _make_forecasts_db(path: Path, *, with_live_eligible: bool = True) -> None:
+    conn = sqlite3.connect(str(path))
+    try:
+        init_schema_forecasts(conn)
+        if with_live_eligible:
+            now_iso = datetime.now(timezone.utc).isoformat()
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO readiness_state
+                    (readiness_id, scope_key, scope_type,
+                     city_id, city_timezone, target_local_date, temperature_metric,
+                     status, computed_at, token_ids_json, reason_codes_json,
+                     dependency_json, provenance_json)
+                VALUES
+                    ('test-r1', 'test:city_metric:test:UTC:2026-06-01:high:v1',
+                     'city_metric', 'test', 'UTC', '2026-06-01', 'high',
+                     'LIVE_ELIGIBLE', ?, '[]', '[]', '{}', '{}')
+                """,
+                (now_iso,),
+            )
+            conn.commit()
+    finally:
+        conn.close()
+
+
+def _make_trade_db(
+    path: Path,
+    *,
+    command_state: str = "ACKED",
+    redeem_state: str = "REDEEM_CONFIRMED",
+    redeem_requested_at: str | None = None,
+) -> None:
     conn = sqlite3.connect(str(path))
     try:
         conn.executescript(
             """
             CREATE TABLE venue_commands (command_id TEXT PRIMARY KEY, state TEXT NOT NULL);
-            CREATE TABLE settlement_commands (command_id TEXT PRIMARY KEY, state TEXT NOT NULL);
+            CREATE TABLE settlement_commands (
+                command_id TEXT PRIMARY KEY,
+                state TEXT NOT NULL,
+                requested_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
             """
         )
         conn.execute(
             "INSERT INTO venue_commands(command_id, state) VALUES (?, ?)",
             ("entry-1", command_state),
         )
-        conn.execute(
-            "INSERT INTO settlement_commands(command_id, state) VALUES (?, ?)",
-            ("redeem-1", redeem_state),
-        )
+        if redeem_requested_at is not None:
+            conn.execute(
+                "INSERT INTO settlement_commands(command_id, state, requested_at) VALUES (?, ?, ?)",
+                ("redeem-1", redeem_state, redeem_requested_at),
+            )
+        else:
+            conn.execute(
+                "INSERT INTO settlement_commands(command_id, state) VALUES (?, ?)",
+                ("redeem-1", redeem_state),
+            )
         conn.commit()
     finally:
         conn.close()
 
 
-def _make_gate_args(tmp_path: Path, *, live_eligibility: str = "UNKNOWN", loaded_sha: str = "sha-a") -> object:
+def _make_gate_args(
+    tmp_path: Path,
+    *,
+    live_eligibility: str = "UNKNOWN",
+    loaded_sha: str = "sha-a",
+    with_forecasts_db: bool = True,
+) -> object:
     world_db = tmp_path / "zeus-world.db"
+    forecasts_db = tmp_path / "zeus-forecasts.db"
     trade_db = tmp_path / "zeus_trades.db"
     loaded = tmp_path / "loaded_sha.json"
     source = tmp_path / "source_health.json"
@@ -63,6 +123,8 @@ def _make_gate_args(tmp_path: Path, *, live_eligibility: str = "UNKNOWN", loaded
     proof = tmp_path / "paper_proof.json"
 
     _make_world_db(world_db)
+    if with_forecasts_db:
+        _make_forecasts_db(forecasts_db)
     _make_trade_db(trade_db)
     _write_json(loaded, {"loaded_sha": loaded_sha})
     generated_at = datetime.now(timezone.utc).isoformat()
@@ -76,28 +138,19 @@ def _make_gate_args(tmp_path: Path, *, live_eligibility: str = "UNKNOWN", loaded
             **{key: True for key in PAPER_PROOF_KEYS},
         },
     )
-    return parse_args(
-        [
-            "--expected-sha",
-            "sha-a",
-            "--loaded-sha-file",
-            str(loaded),
-            "--world-db",
-            str(world_db),
-            "--trade-db",
-            str(trade_db),
-            "--source-health-json",
-            str(source),
-            "--status-json",
-            str(status),
-            "--paper-proof-json",
-            str(proof),
-            "--source-max-age-seconds",
-            str(24 * 60 * 60),
-            "--status-max-age-seconds",
-            str(24 * 60 * 60),
-        ]
-    )
+    argv = [
+        "--expected-sha", "sha-a",
+        "--loaded-sha-file", str(loaded),
+        "--world-db", str(world_db),
+        "--forecasts-db", str(forecasts_db),
+        "--trade-db", str(trade_db),
+        "--source-health-json", str(source),
+        "--status-json", str(status),
+        "--paper-proof-json", str(proof),
+        "--source-max-age-seconds", str(24 * 60 * 60),
+        "--status-max-age-seconds", str(24 * 60 * 60),
+    ]
+    return parse_args(argv)
 
 
 def test_release_gate_passes_only_as_read_only_evidence(tmp_path: Path) -> None:
@@ -172,3 +225,155 @@ def test_loaded_sha_gate_fails_cleanly_when_git_sha_unavailable(monkeypatch) -> 
     assert result.name == "loaded_sha"
     assert result.status == FAIL
     assert "expected_sha_unavailable" in result.detail
+
+
+# ---------------------------------------------------------------------------
+# P0-1 antibody: forecasts DB gates
+# ---------------------------------------------------------------------------
+
+
+def test_release_gate_fails_when_forecasts_db_missing(tmp_path: Path) -> None:
+    """Gate must FAIL if forecasts DB does not exist. (review5.23 P0-1)"""
+    args = _make_gate_args(tmp_path, with_forecasts_db=False)
+    # forecasts_db path points to a non-existent file
+
+    report = evaluate_release_gate(args)
+
+    assert report.status == FAIL
+    assert any(r.name == "forecasts_schema" and r.status == FAIL for r in report.results)
+
+
+def test_release_gate_fails_when_forecasts_schema_stale(tmp_path: Path) -> None:
+    """Gate must FAIL if forecasts DB user_version != SCHEMA_FORECASTS_VERSION. (review5.23 P0-1)"""
+    args = _make_gate_args(tmp_path)
+    conn = sqlite3.connect(str(args.forecasts_db))
+    try:
+        conn.execute(f"PRAGMA user_version = {SCHEMA_FORECASTS_VERSION - 1}")
+        conn.commit()
+    finally:
+        conn.close()
+
+    report = evaluate_release_gate(args)
+
+    assert report.status == FAIL
+    assert any(r.name == "forecasts_schema" and r.status == FAIL for r in report.results)
+
+
+def test_release_gate_fails_when_no_live_eligible_readiness(tmp_path: Path) -> None:
+    """Gate must FAIL if no LIVE_ELIGIBLE readiness_state row exists. (review5.23 P0-1)"""
+    # Build forecasts DB with BLOCKED readiness only
+    forecasts_db = tmp_path / "zeus-forecasts.db"
+    _make_forecasts_db(forecasts_db, with_live_eligible=False)
+    conn = sqlite3.connect(str(forecasts_db))
+    try:
+        now_iso = datetime.now(timezone.utc).isoformat()
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO readiness_state
+                (readiness_id, scope_key, scope_type,
+                 city_id, city_timezone, target_local_date, temperature_metric,
+                 status, computed_at, token_ids_json, reason_codes_json,
+                 dependency_json, provenance_json)
+            VALUES
+                ('blocked-r1', 'test:city_metric:test:UTC:2026-06-01:high:v1',
+                 'city_metric', 'test', 'UTC', '2026-06-01', 'high',
+                 'BLOCKED', ?, '[]', '[]', '{}', '{}')
+            """,
+            (now_iso,),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    args = _make_gate_args(tmp_path)
+
+    report = evaluate_release_gate(args)
+
+    assert report.status == FAIL
+    assert any(r.name == "forecast_executable_bundle" and r.status == FAIL for r in report.results)
+
+
+# ---------------------------------------------------------------------------
+# P1-5 antibody: stale in-flight redeem state age-checks
+# ---------------------------------------------------------------------------
+
+
+def test_release_gate_fails_on_stale_redeem_tx_hashed(tmp_path: Path) -> None:
+    """Gate must FAIL when REDEEM_TX_HASHED is older than the age threshold. (review5.23 P1-5)"""
+    stale_ts = datetime(2026, 1, 1, 0, 0, 0, tzinfo=timezone.utc).isoformat()
+    world_db = tmp_path / "zeus-world.db"
+    forecasts_db = tmp_path / "zeus-forecasts.db"
+    trade_db = tmp_path / "zeus_trades.db"
+    _make_world_db(world_db)
+    _make_forecasts_db(forecasts_db)
+    _make_trade_db(trade_db, redeem_state="REDEEM_TX_HASHED", redeem_requested_at=stale_ts)
+
+    loaded = tmp_path / "loaded_sha.json"
+    source = tmp_path / "source_health.json"
+    status = tmp_path / "status_summary.json"
+    proof = tmp_path / "paper_proof.json"
+    generated_at = datetime.now(timezone.utc).isoformat()
+    _write_json(loaded, {"loaded_sha": "sha-a"})
+    _write_json(source, {"generated_at": generated_at})
+    _write_json(status, {"generated_at": generated_at})
+    _write_json(proof, {"status": PASS, "live_eligibility": "UNKNOWN", **{k: True for k in PAPER_PROOF_KEYS}})
+
+    args = parse_args([
+        "--expected-sha", "sha-a",
+        "--loaded-sha-file", str(loaded),
+        "--world-db", str(world_db),
+        "--forecasts-db", str(forecasts_db),
+        "--trade-db", str(trade_db),
+        "--source-health-json", str(source),
+        "--status-json", str(status),
+        "--paper-proof-json", str(proof),
+        "--source-max-age-seconds", str(24 * 60 * 60),
+        "--status-max-age-seconds", str(24 * 60 * 60),
+    ])
+
+    report = evaluate_release_gate(args)
+
+    assert report.status == FAIL
+    stale_result = next((r for r in report.results if r.name == "redeem_state"), None)
+    assert stale_result is not None
+    assert stale_result.status == FAIL
+    assert "stale_inflight_redeem" in stale_result.detail
+
+
+def test_release_gate_passes_with_recent_redeem_tx_hashed(tmp_path: Path) -> None:
+    """Gate must PASS when REDEEM_TX_HASHED is within the allowed age window. (review5.23 P1-5)"""
+    # Recent timestamp: within STALE_REDEEM_TX_HASHED_SECONDS
+    recent_ts = datetime.now(timezone.utc).isoformat()
+    world_db = tmp_path / "zeus-world.db"
+    forecasts_db = tmp_path / "zeus-forecasts.db"
+    trade_db = tmp_path / "zeus_trades.db"
+    _make_world_db(world_db)
+    _make_forecasts_db(forecasts_db)
+    _make_trade_db(trade_db, redeem_state="REDEEM_TX_HASHED", redeem_requested_at=recent_ts)
+
+    loaded = tmp_path / "loaded_sha.json"
+    source = tmp_path / "source_health.json"
+    status = tmp_path / "status_summary.json"
+    proof = tmp_path / "paper_proof.json"
+    generated_at = recent_ts
+    _write_json(loaded, {"loaded_sha": "sha-a"})
+    _write_json(source, {"generated_at": generated_at})
+    _write_json(status, {"generated_at": generated_at})
+    _write_json(proof, {"status": PASS, "live_eligibility": "UNKNOWN", **{k: True for k in PAPER_PROOF_KEYS}})
+
+    args = parse_args([
+        "--expected-sha", "sha-a",
+        "--loaded-sha-file", str(loaded),
+        "--world-db", str(world_db),
+        "--forecasts-db", str(forecasts_db),
+        "--trade-db", str(trade_db),
+        "--source-health-json", str(source),
+        "--status-json", str(status),
+        "--paper-proof-json", str(proof),
+        "--source-max-age-seconds", str(24 * 60 * 60),
+        "--status-max-age-seconds", str(24 * 60 * 60),
+    ])
+
+    report = evaluate_release_gate(args)
+
+    assert report.status == PASS
+    assert any(r.name == "redeem_state" and r.status == PASS for r in report.results)

@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-# Lifecycle: created=2026-05-21; last_reviewed=2026-05-21; last_reused=never
+# Lifecycle: created=2026-05-21; last_reviewed=2026-05-23; last_reused=never
 # Purpose: Read-only release gate proving loaded SHA, schema, order/redeem state,
-#   freshness, and paper proof before any live-money enablement claim.
+#   freshness, forecasts DB schema, executable forecast bundle, and paper proof
+#   before any live-money enablement claim.
 # Reuse: Run before live-release claims or when touching money-path release gates.
 # Created: 2026-05-21
-# Last reused or audited: 2026-05-21
+# Last reused or audited: 2026-05-23
 # Authority basis: docs/operations/task_2026-05-21_live_release_proof_p0p3/task.md P0-1/P1-2/P1-7
+#   + review5.23 P0-1 (forecasts DB gate) + P1-5 (stale redeem age-check)
 """Read-only live-release gate for the Zeus money path.
 
 This script does not authorize live trading by itself. It fails unless the
@@ -31,7 +33,14 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from src.state.db import SCHEMA_VERSION, init_schema
+from src.state.db import (
+    SCHEMA_FORECASTS_VERSION,
+    SCHEMA_VERSION,
+    SchemaOutOfDateError,
+    assert_schema_current_forecasts,
+    init_schema,
+    init_schema_forecasts,
+)
 from src.state.no_trade_events import (
     NoTradeEventsSchemaCompatibilityError,
     assert_no_trade_events_schema_current_for_live,
@@ -49,6 +58,11 @@ BLOCKING_REDEEM_STATES = (
     "REDEEM_OPERATOR_REQUIRED",
     "REDEEM_REVIEW_REQUIRED",
 )
+# In-flight redeem states that block release if older than these thresholds.
+# Chain confirmation should complete well within these windows; older rows are stuck.
+STALE_REDEEM_SUBMITTED_SECONDS = 30 * 60   # 30 min
+STALE_REDEEM_TX_HASHED_SECONDS = 60 * 60   # 60 min — awaiting receipt
+STALE_REDEEM_RETRYING_SECONDS = 60 * 60    # 60 min — retry loop should self-terminate
 PAPER_PROOF_KEYS = (
     "scanner",
     "forecast",
@@ -189,6 +203,74 @@ def _count_where_in(conn: sqlite3.Connection, table: str, column: str, values: I
     return int(row[0] if row else 0)
 
 
+def _check_forecasts_schema(forecasts_db: Path) -> GateResult:
+    """Gate: forecasts DB exists and schema version matches SCHEMA_FORECASTS_VERSION."""
+    if not forecasts_db.exists():
+        return GateResult(
+            "forecasts_schema",
+            FAIL,
+            f"missing:{forecasts_db} — forecasts DB does not exist; init_schema_forecasts not run",
+        )
+    conn = sqlite3.connect(str(forecasts_db))
+    try:
+        version = int(conn.execute("PRAGMA user_version").fetchone()[0])
+        if version != SCHEMA_FORECASTS_VERSION:
+            return GateResult(
+                "forecasts_schema",
+                FAIL,
+                f"user_version={version} expected={SCHEMA_FORECASTS_VERSION}",
+            )
+        try:
+            assert_schema_current_forecasts(conn)
+        except SchemaOutOfDateError as exc:
+            return GateResult("forecasts_schema", FAIL, str(exc))
+        return GateResult("forecasts_schema", PASS, f"user_version={version}")
+    finally:
+        conn.close()
+
+
+def _check_forecast_executable_bundle(forecasts_db: Path, now: datetime) -> GateResult:
+    """Gate: at least one non-expired LIVE_ELIGIBLE readiness_state row in forecasts DB.
+
+    This is a lightweight proxy for 'read_executable_forecast() can return LIVE_ELIGIBLE
+    for at least one scope'. It does not exercise the full bundle-selection logic but
+    proves the readiness graph has been populated and has not fully expired.
+    """
+    if not forecasts_db.exists():
+        return GateResult(
+            "forecast_executable_bundle",
+            FAIL,
+            f"missing:{forecasts_db}",
+        )
+    conn = sqlite3.connect(str(forecasts_db))
+    try:
+        if not _table_exists(conn, "readiness_state"):
+            return GateResult(
+                "forecast_executable_bundle",
+                FAIL,
+                "missing_table:readiness_state — init_schema_forecasts not run",
+            )
+        now_iso = now.isoformat()
+        row = conn.execute(
+            """
+            SELECT COUNT(*) FROM readiness_state
+            WHERE status = 'LIVE_ELIGIBLE'
+              AND (expires_at IS NULL OR expires_at > ?)
+            """,
+            (now_iso,),
+        ).fetchone()
+        count = int(row[0] if row else 0)
+        if count == 0:
+            return GateResult(
+                "forecast_executable_bundle",
+                FAIL,
+                "no_live_eligible_readiness_state:forecast_live_daemon_not_running_or_all_expired",
+            )
+        return GateResult("forecast_executable_bundle", PASS, f"live_eligible_count={count}")
+    finally:
+        conn.close()
+
+
 def _check_trade_state(trade_db: Path) -> GateResult:
     if not trade_db.exists():
         return GateResult("trade_state", FAIL, f"missing:{trade_db}")
@@ -204,7 +286,9 @@ def _check_trade_state(trade_db: Path) -> GateResult:
         conn.close()
 
 
-def _check_redeem_state(trade_db: Path, allow_redeem_command: tuple[str, ...]) -> GateResult:
+def _check_redeem_state(
+    trade_db: Path, allow_redeem_command: tuple[str, ...], now: datetime
+) -> GateResult:
     if not trade_db.exists():
         return GateResult("redeem_state", FAIL, f"missing:{trade_db}")
     conn = sqlite3.connect(str(trade_db))
@@ -212,8 +296,11 @@ def _check_redeem_state(trade_db: Path, allow_redeem_command: tuple[str, ...]) -
         if not _table_exists(conn, "settlement_commands"):
             return GateResult("redeem_state", FAIL, "missing_table:settlement_commands")
         allow = set(allow_redeem_command)
+        now_iso = now.isoformat()
+
+        # Hard-block states: always fail unless explicitly whitelisted.
         placeholders = ",".join("?" for _ in BLOCKING_REDEEM_STATES)
-        rows = conn.execute(
+        hard_rows = conn.execute(
             f"""
             SELECT command_id, state
             FROM settlement_commands
@@ -221,10 +308,41 @@ def _check_redeem_state(trade_db: Path, allow_redeem_command: tuple[str, ...]) -
             """,
             BLOCKING_REDEEM_STATES,
         ).fetchall()
-        blocking = [(str(row[0]), str(row[1])) for row in rows if str(row[0]) not in allow]
+        blocking = [(str(r[0]), str(r[1])) for r in hard_rows if str(r[0]) not in allow]
         if blocking:
             return GateResult("redeem_state", FAIL, f"blocking_redeem_rows={blocking[:5]}")
-        return GateResult("redeem_state", PASS, "no_unwhitelisted_blocking_redeem_rows")
+
+        # Age-check in-flight states: fail if stuck beyond expected confirmation window.
+        age_states = (
+            ("REDEEM_SUBMITTED", STALE_REDEEM_SUBMITTED_SECONDS),
+            ("REDEEM_TX_HASHED", STALE_REDEEM_TX_HASHED_SECONDS),
+            ("REDEEM_RETRYING", STALE_REDEEM_RETRYING_SECONDS),
+        )
+        stale_findings: list[str] = []
+        for state, max_age in age_states:
+            rows = conn.execute(
+                """
+                SELECT command_id, requested_at
+                FROM settlement_commands
+                WHERE state = ?
+                """,
+                (state,),
+            ).fetchall()
+            for command_id, requested_at in rows:
+                if str(command_id) in allow:
+                    continue
+                parsed = _parse_time(requested_at)
+                if parsed is None:
+                    stale_findings.append(f"{command_id}:{state}:no_timestamp")
+                    continue
+                age = (now - parsed).total_seconds()
+                if age > max_age:
+                    stale_findings.append(f"{command_id}:{state}:age={age:.0f}s>{max_age}s")
+        if stale_findings:
+            return GateResult(
+                "redeem_state", FAIL, f"stale_inflight_redeem={stale_findings[:5]}"
+            )
+        return GateResult("redeem_state", PASS, "no_unwhitelisted_blocking_or_stale_redeem_rows")
     finally:
         conn.close()
 
@@ -255,8 +373,10 @@ def evaluate_release_gate(args: argparse.Namespace) -> ReleaseGateReport:
     results = [
         _check_loaded_sha(args.expected_sha, args.loaded_sha_file),
         _check_world_schema(args.world_db),
+        _check_forecasts_schema(args.forecasts_db),
+        _check_forecast_executable_bundle(args.forecasts_db, now),
         _check_trade_state(args.trade_db),
-        _check_redeem_state(args.trade_db, tuple(args.allow_redeem_command or ())),
+        _check_redeem_state(args.trade_db, tuple(args.allow_redeem_command or ()), now),
         _check_fresh_file("source_health", args.source_health_json, max_age_seconds=args.source_max_age_seconds, now=now),
         _check_fresh_file("status_summary", args.status_json, max_age_seconds=args.status_max_age_seconds, now=now),
         _check_paper_proof(args.paper_proof_json),
@@ -273,29 +393,60 @@ def evaluate_release_gate(args: argparse.Namespace) -> ReleaseGateReport:
 
 
 def _write_fixture_files(root: Path) -> argparse.Namespace:
-    now = _utc_now().isoformat()
+    now = _utc_now()
+    now_iso = now.isoformat()
     world_db = root / "zeus-world.db"
+    forecasts_db = root / "zeus-forecasts.db"
     trade_db = root / "zeus_trades.db"
+
+    # World DB
     conn = sqlite3.connect(str(world_db))
     init_schema(conn)
     conn.close()
+
+    # Forecasts DB — must exist with current schema and a LIVE_ELIGIBLE readiness row
+    fconn = sqlite3.connect(str(forecasts_db))
+    init_schema_forecasts(fconn)
+    fconn.execute(
+        """
+        INSERT OR IGNORE INTO readiness_state
+            (readiness_id, scope_key, scope_type,
+             city_id, city_timezone, target_local_date, temperature_metric,
+             status, computed_at, token_ids_json, reason_codes_json,
+             dependency_json, provenance_json)
+        VALUES
+            ('fixture-readiness-1', 'fixture:city_metric:test-city:UTC:2026-06-01:high:v1',
+             'city_metric', 'test-city', 'UTC', '2026-06-01', 'high',
+             'LIVE_ELIGIBLE', ?, '[]', '[]', '{}', '{}')
+        """,
+        (now_iso,),
+    )
+    fconn.commit()
+    fconn.close()
+
+    # Trade DB
     tconn = sqlite3.connect(str(trade_db))
     tconn.executescript(
         """
         CREATE TABLE venue_commands (command_id TEXT PRIMARY KEY, state TEXT NOT NULL);
-        CREATE TABLE settlement_commands (command_id TEXT PRIMARY KEY, state TEXT NOT NULL);
+        CREATE TABLE settlement_commands (
+            command_id TEXT PRIMARY KEY,
+            state TEXT NOT NULL,
+            requested_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
         """
     )
     tconn.commit()
     tconn.close()
+
     expected = _current_git_sha()
     loaded = root / "loaded_sha.json"
     source = root / "source_health.json"
     status = root / "status_summary.json"
     proof = root / "paper_proof.json"
     loaded.write_text(json.dumps({"loaded_sha": expected}))
-    source.write_text(json.dumps({"generated_at": now}))
-    status.write_text(json.dumps({"generated_at": now}))
+    source.write_text(json.dumps({"generated_at": now_iso}))
+    status.write_text(json.dumps({"generated_at": now_iso}))
     proof.write_text(json.dumps({
         "status": PASS,
         "live_eligibility": "UNKNOWN",
@@ -305,6 +456,7 @@ def _write_fixture_files(root: Path) -> argparse.Namespace:
         "--expected-sha", expected,
         "--loaded-sha-file", str(loaded),
         "--world-db", str(world_db),
+        "--forecasts-db", str(forecasts_db),
         "--trade-db", str(trade_db),
         "--source-health-json", str(source),
         "--status-json", str(status),
@@ -318,6 +470,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--expected-sha", default="")
     parser.add_argument("--loaded-sha-file", type=Path)
     parser.add_argument("--world-db", type=Path, default=ROOT / "state" / "zeus-world.db")
+    parser.add_argument("--forecasts-db", type=Path, default=ROOT / "state" / "zeus-forecasts.db")
     parser.add_argument("--trade-db", type=Path, default=ROOT / "state" / "zeus_trades.db")
     parser.add_argument("--source-health-json", type=Path, default=ROOT / "state" / "source_health.json")
     parser.add_argument("--status-json", type=Path, default=ROOT / "state" / "status_summary.json")
