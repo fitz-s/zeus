@@ -193,6 +193,7 @@ def event_bound_no_submit_adapter_from_trade_conn(
     forecast_conn: sqlite3.Connection | None = None,
     topology_conn: sqlite3.Connection | None = None,
     calibration_conn: sqlite3.Connection | None = None,
+    live_cap_conn: sqlite3.Connection | None = None,
     bankroll_usd_provider: Callable[[], float | None] | None = None,
 ) -> Callable[[OpportunityEvent, datetime], EventSubmissionReceipt]:
     """Build a proof-only final-intent receipt adapter for EDLI events."""
@@ -219,6 +220,7 @@ def event_bound_live_adapter_from_trade_conn(
     forecast_conn: sqlite3.Connection | None = None,
     topology_conn: sqlite3.Connection | None = None,
     calibration_conn: sqlite3.Connection | None = None,
+    live_cap_conn: sqlite3.Connection | None = None,
     bankroll_usd_provider: Callable[[], float | None] | None = None,
     real_order_submit_enabled: bool = False,
     live_canary_enabled: bool = False,
@@ -268,6 +270,7 @@ def event_bound_live_adapter_from_trade_conn(
                     receipt=no_submit_receipt,
                     decision_time=decision_time.astimezone(UTC),
                     tiny_live_max_notional_usd=tiny_live_max_notional_usd,
+                    live_cap_conn=live_cap_conn or trade_conn,
                 )
                 final_intent = _required_cert(command_certificates, claims.FINAL_INTENT)
                 command = _required_cert(command_certificates, claims.EXECUTION_COMMAND)
@@ -295,6 +298,7 @@ def event_bound_live_adapter_from_trade_conn(
                     receipt=no_submit_receipt,
                     decision_time=decision_time.astimezone(UTC),
                     tiny_live_max_notional_usd=tiny_live_max_notional_usd,
+                    live_cap_conn=live_cap_conn or trade_conn,
                 )
                 side_effect_status = "SUBMIT_DISABLED"
                 submitted = False
@@ -809,12 +813,14 @@ def _build_submit_disabled_live_certificates(
     receipt: EventSubmissionReceipt,
     decision_time: datetime,
     tiny_live_max_notional_usd: float,
+    live_cap_conn: sqlite3.Connection | None = None,
 ) -> tuple[DecisionCertificate, ...]:
     command_certificates = _build_live_execution_command_certificates(
         event=event,
         receipt=receipt,
         decision_time=decision_time,
         tiny_live_max_notional_usd=tiny_live_max_notional_usd,
+        live_cap_conn=live_cap_conn,
     )
     command = _required_cert(command_certificates, claims.EXECUTION_COMMAND)
     receipt_cert = build_execution_receipt_certificate(
@@ -832,6 +838,7 @@ def _build_live_execution_command_certificates(
     receipt: EventSubmissionReceipt,
     decision_time: datetime,
     tiny_live_max_notional_usd: float,
+    live_cap_conn: sqlite3.Connection | None = None,
 ) -> tuple[DecisionCertificate, ...]:
     proof_bundle = receipt.decision_proof_bundle
     compile_result = DecisionCompiler().compile_no_submit(
@@ -849,11 +856,12 @@ def _build_live_execution_command_certificates(
         if cert.certificate_type not in {claims.NO_SUBMIT_DECISION, claims.NO_SUBMIT_MODE}
     )
     executable_snapshot = _required_cert(base_certs, claims.EXECUTABLE_SNAPSHOT)
-    live_cap = _build_live_cap_certificate_for_submit_disabled(
+    live_cap = _build_live_cap_certificate_from_ledger(
         event=event,
         receipt=receipt,
         decision_time=decision_time,
         max_notional_usd=tiny_live_max_notional_usd,
+        live_cap_conn=live_cap_conn,
     )
     actionable = build_actionable_trade_certificate(
         payload=_actionable_payload_from_receipt(receipt, live_cap),
@@ -917,31 +925,34 @@ def _actionable_payload_from_receipt(
     }
 
 
-def _build_live_cap_certificate_for_submit_disabled(
+def _build_live_cap_certificate_from_ledger(
     *,
     event: OpportunityEvent,
     receipt: EventSubmissionReceipt,
     decision_time: datetime,
     max_notional_usd: float,
+    live_cap_conn: sqlite3.Connection | None,
 ) -> DecisionCertificate:
+    if live_cap_conn is None:
+        raise ValueError("LIVE_CAP_LEDGER_CONNECTION_REQUIRED")
+    from src.events.live_cap import LiveCapLedger
+
     price = _float_or_default(receipt.c_fee_adjusted, 0.01)
     min_order_notional = min(max_notional_usd, max(price, 0.01))
     requested_notional = max(min(float(receipt.kelly_size_usd or 0.0), max_notional_usd), min_order_notional)
-    usage_id = f"edli_live_cap:{event.event_id}:tiny_live_canary"
-    payload = {
-        "usage_id": usage_id,
-        "event_id": event.event_id,
-        "decision_time": decision_time.isoformat(),
-        "cap_scope": "tiny_live_canary",
-        "max_notional_usd": float(max_notional_usd),
-        "max_orders_per_day": 1,
-        "reserved_notional_usd": float(requested_notional),
-        "order_count": 1,
-        "reservation_status": "RESERVED",
-    }
+    reservation = LiveCapLedger(live_cap_conn).reserve(
+        event_id=event.event_id,
+        decision_time=decision_time,
+        cap_scope="tiny_live_canary",
+        requested_notional_usd=float(requested_notional),
+        max_notional_usd=float(max_notional_usd),
+        max_orders_per_day=1,
+        final_intent_id=receipt.final_intent_id,
+    )
+    payload = reservation.certificate_payload()
     return build_certificate(
         certificate_type=claims.LIVE_CAP,
-        semantic_key=f"live_cap:{event.event_id}:tiny_live_canary",
+        semantic_key=f"live_cap:{reservation.usage_id}",
         claim_type=claims.LIVE_CAP,
         mode="LIVE",
         decision_time=decision_time,

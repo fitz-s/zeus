@@ -209,6 +209,63 @@ def test_live_adapter_rejects_if_actionable_certificate_fails(monkeypatch):
     assert "ACTIONABLE_CERTIFICATE_REJECTED" in receipt.reason
 
 
+def test_live_cap_certificate_is_backed_by_usage_row():
+    from src.engine import event_reactor_adapter as adapter
+    from src.events.reactor import EventSubmissionReceipt
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    event = _forecast_event()
+    cert = adapter._build_live_cap_certificate_from_ledger(
+        event=event,
+        receipt=EventSubmissionReceipt(
+            submitted=False,
+            proof_accepted=True,
+            event_id=event.event_id,
+            causal_snapshot_id=event.causal_snapshot_id,
+            c_fee_adjusted=0.4,
+            kelly_size_usd=3.0,
+            final_intent_id="intent-1",
+        ),
+        decision_time=datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc),
+        max_notional_usd=5.0,
+        live_cap_conn=conn,
+    )
+
+    row = conn.execute(
+        """
+        SELECT event_id, cap_scope, reserved_notional_usd, reservation_status, final_intent_id
+        FROM edli_live_cap_usage
+        WHERE usage_id = ?
+        """,
+        (cert.payload["usage_id"],),
+    ).fetchone()
+
+    assert row is not None
+    assert row["event_id"] == event.event_id
+    assert row["cap_scope"] == "tiny_live_canary"
+    assert row["reservation_status"] == "RESERVED"
+    assert row["reserved_notional_usd"] == cert.payload["reserved_notional_usd"]
+    assert row["final_intent_id"] == "intent-1"
+
+
+def test_edli_live_cap_path_does_not_reference_legacy_cap_columns():
+    from pathlib import Path
+
+    source = "\n".join(
+        Path(path).read_text()
+        for path in (
+            "src/events/reactor.py",
+            "src/engine/event_reactor_adapter.py",
+            "src/strategy/live_inference/promotion_ledger.py",
+        )
+    )
+
+    assert "cap_name" not in source
+    assert "usage_date" not in source
+    assert "SUM(notional_usd)" not in source
+
+
 def test_live_adapter_submit_enabled_canary_disabled_blocks(monkeypatch):
     from src.engine import event_reactor_adapter as adapter
     from src.events.reactor import EventSubmissionReceipt
@@ -340,6 +397,33 @@ def test_live_adapter_records_timeout_unknown_fixture_response(monkeypatch):
     assert _receipt_status(receipt) == "TIMEOUT_UNKNOWN"
     receipt_cert = _receipt_cert(receipt)
     assert receipt_cert.payload["reconciliation_followup_required"] is True
+
+
+def test_production_executor_boundary_blocks_current_unenriched_final_intent():
+    from src.engine.event_bound_final_intent import submit_event_bound_final_intent_via_existing_executor
+
+    _actionable, final_intent, _expressibility, _live_cap, command = _command_cert_bundle()
+    result = submit_event_bound_final_intent_via_existing_executor(
+        final_intent_cert=final_intent,
+        execution_command_cert=command,
+        conn=sqlite3.connect(":memory:"),
+        decision_time=datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc),
+        executor_submit=lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("executor must not be called")),
+    )
+
+    assert result.status == "ERROR_UNKNOWN"
+    assert result.reason_code.startswith("EXECUTOR_FINAL_INTENT_NOT_EXPRESSIBLE:")
+    assert "executable_snapshot_hash missing" in result.reason_code
+
+
+def test_main_live_mode_wires_production_executor_boundary_source():
+    from pathlib import Path
+
+    source = Path("src/main.py").read_text()
+
+    assert "submit_event_bound_final_intent_via_existing_executor" in source
+    assert "executor_submit=lambda final_intent_cert, execution_command_cert" in source
+    assert "reactor_mode == \"live\"" in source
 
 
 def _accepted_receipt(event):

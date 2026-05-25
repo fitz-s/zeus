@@ -128,17 +128,16 @@ class OpportunityEventReactor:
         self._config = config or ReactorConfig()
         self._regret_ledger = regret_ledger
         self._family_logged: set[str] = set()
-        self._day0_live_orders_today = 0
         from src.events.no_submit_receipts import EdliNoSubmitReceiptLedger
         from src.decision_kernel.compiler import DecisionCompiler
         from src.decision_kernel.ledger import DecisionCertificateLedger
-        from src.strategy.live_inference.promotion_ledger import EdliLiveCapLedger
+        from src.events.live_cap import LiveCapLedger
 
         self._no_submit_receipt_ledger = EdliNoSubmitReceiptLedger(store.conn)
         self._decision_compiler = DecisionCompiler()
         self._decision_certificate_ledger = DecisionCertificateLedger(store.conn)
         self._decision_certificate_ledger.ensure_schema()
-        self._live_cap_ledger = EdliLiveCapLedger(store.conn)
+        self._live_cap_ledger = LiveCapLedger(store.conn)
 
     def process_pending(self, *, decision_time: datetime, limit: int = 100) -> ReactorResult:
         result = ReactorResult()
@@ -210,21 +209,6 @@ class OpportunityEventReactor:
         if receipt.side_effect_status not in {"NO_SUBMIT"} | EXECUTION_RECEIPT_TERMINAL_STATUSES and not self._config.real_order_submit_enabled:
             self._reject_event(event, "EXECUTOR_EXPRESSIBILITY", "EDLI_REAL_ORDER_SUBMIT_DISABLED", result, receipt=receipt, decision_time=decision_time)
             return
-        if (
-            event.event_type == "DAY0_EXTREME_UPDATED"
-            and self._config.real_order_submit_enabled
-            and receipt.side_effect_status in {"COMMAND_CREATED", "SUBMITTED"}
-        ):
-            cap_decision = self._day0_tiny_cap_decision(event, decision_time=decision_time)
-            if not cap_decision.allowed:
-                self._reject_event(event, "LIVE_CAP", cap_decision.reason, result, receipt=receipt, decision_time=decision_time)
-                return
-            self._day0_live_orders_today += 1
-            self._live_cap_ledger.reserve_day0(
-                event_id=event.event_id,
-                decision_time=decision_time,
-                notional_usd=self._config.tiny_live_max_notional_usd,
-            )
         if receipt.side_effect_status == "NO_SUBMIT":
             proof_bundle = receipt.decision_proof_bundle
             if proof_bundle is None:
@@ -368,24 +352,6 @@ class OpportunityEventReactor:
 
     def family_log_count(self) -> int:
         return len(self._family_logged)
-
-    def _day0_tiny_cap_decision(self, event: OpportunityEvent, *, decision_time: datetime):
-        if self._day0_live_orders_today >= self._config.tiny_live_max_orders_per_day:
-            from src.strategy.live_inference.promotion_ledger import LiveCapDecision
-
-            return LiveCapDecision(
-                False,
-                "DAY0_TINY_ORDER_CAP_BLOCKED",
-                self._day0_live_orders_today,
-                0.0,
-            )
-        return self._live_cap_ledger.check_day0(
-            event_id=event.event_id,
-            decision_time=decision_time,
-            max_orders_per_day=self._config.tiny_live_max_orders_per_day,
-            max_notional_usd=self._config.tiny_live_max_notional_usd,
-        )
-
 
 def _execution_receipt_certificate_bundle(receipt: EventSubmissionReceipt) -> tuple[Any, ...]:
     bundle = receipt.decision_proof_bundle

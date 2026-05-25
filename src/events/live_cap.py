@@ -58,6 +58,8 @@ class LiveCapLedger:
         requested_notional_usd: float,
         max_notional_usd: float,
         max_orders_per_day: int,
+        final_intent_id: str | None = None,
+        execution_command_id: str | None = None,
     ) -> LiveCapReservation:
         if requested_notional_usd <= 0:
             raise LiveCapError("requested_notional_usd must be positive")
@@ -83,6 +85,8 @@ class LiveCapLedger:
                     reservation.max_notional_usd != float(max_notional_usd)
                     or reservation.max_orders_per_day != int(max_orders_per_day)
                     or reservation.reserved_notional_usd != float(requested_notional_usd)
+                    or (final_intent_id is not None and reservation.final_intent_id != final_intent_id)
+                    or (execution_command_id is not None and reservation.execution_command_id != execution_command_id)
                 ):
                     raise LiveCapError("live cap reservation drift for event/cap_scope")
                 return reservation
@@ -105,7 +109,7 @@ class LiveCapLedger:
                     max_notional_usd, max_orders_per_day, reserved_notional_usd,
                     order_count, reservation_status, final_intent_id,
                     execution_command_id, created_at, schema_version
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'RESERVED', NULL, NULL, ?, 1)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'RESERVED', ?, ?, ?, 1)
                 """,
                 (
                     usage_id,
@@ -116,6 +120,8 @@ class LiveCapLedger:
                     int(max_orders_per_day),
                     float(requested_notional_usd),
                     int(used) + 1,
+                    final_intent_id,
+                    execution_command_id,
                     created_at,
                 ),
             )

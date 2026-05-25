@@ -2394,6 +2394,7 @@ def _edli_event_reactor_cycle() -> None:
         executable_snapshot_gate_from_trade_conn,
         riskguard_allows_new_entries,
     )
+    from src.engine.event_bound_final_intent import submit_event_bound_final_intent_via_existing_executor
     from src.events.event_store import EventStore
     from src.events.reactor import OpportunityEventReactor, ReactorConfig
     from src.riskguard.riskguard import get_current_level
@@ -2441,6 +2442,14 @@ def _edli_event_reactor_cycle() -> None:
                 real_order_submit_enabled=real_order_submit_enabled,
                 live_canary_enabled=bool(edli_cfg.get("live_canary_enabled", False)),
                 tiny_live_max_notional_usd=float(edli_cfg.get("tiny_live_max_notional_usd", 5.0)),
+                live_cap_conn=conn,
+                executor_submit=lambda final_intent_cert, execution_command_cert: submit_event_bound_final_intent_via_existing_executor(
+                    final_intent_cert=final_intent_cert,
+                    execution_command_cert=execution_command_cert,
+                    conn=trade_conn,
+                    snapshot_conn=trade_conn,
+                    decision_time=now,
+                ),
             )
             if reactor_mode == "live"
             else event_bound_no_submit_adapter_from_trade_conn(

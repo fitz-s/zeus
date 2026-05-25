@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
+from decimal import Decimal
+import sqlite3
 from typing import Literal
 
 from src.contracts.execution_price import ExecutionPrice
+from src.decision_kernel.certificate import DecisionCertificate
 
 
 SideEffectStatus = Literal[
@@ -72,6 +76,209 @@ class EventBoundExecutorSubmitResult:
     raw_response: dict[str, object] = field(default_factory=dict)
     raw_response_hash: str | None = None
     reconciliation_followup_required: bool = False
+
+
+class EventBoundExecutorExpressibilityError(ValueError):
+    """Raised when EDLI proof cannot be expressed as the existing executor intent."""
+
+
+def submit_event_bound_final_intent_via_existing_executor(
+    *,
+    final_intent_cert: DecisionCertificate,
+    execution_command_cert: DecisionCertificate,
+    conn: sqlite3.Connection,
+    decision_time: datetime,
+    snapshot_conn: sqlite3.Connection | None = None,
+    executor_submit=None,
+) -> EventBoundExecutorSubmitResult:
+    """Submit EDLI's verified command through the existing executor seam.
+
+    This engine-layer boundary is the only production bridge from EDLI
+    certificates to the live executor. It intentionally accepts certificates,
+    constructs the executor-native final intent, and returns a normalized
+    receipt surface without interpreting fills.
+    """
+
+    started_at = decision_time.astimezone(timezone.utc).isoformat()
+    try:
+        intent = _final_execution_intent_from_cert(final_intent_cert, execution_command_cert)
+        if executor_submit is None:
+            from src.execution.executor import execute_final_intent as _submit
+
+            executor_submit = _submit
+        result = executor_submit(
+            intent,
+            conn=conn,
+            decision_id=str(execution_command_cert.payload["execution_command_id"]),
+            snapshot_conn=snapshot_conn if snapshot_conn is not None else conn,
+        )
+    except EventBoundExecutorExpressibilityError as exc:
+        return EventBoundExecutorSubmitResult(
+            status="ERROR_UNKNOWN",
+            reason_code=f"EXECUTOR_FINAL_INTENT_NOT_EXPRESSIBLE:{exc}",
+            submit_started_at=started_at,
+            submit_finished_at=datetime.now(timezone.utc).isoformat(),
+            raw_response={"error": str(exc), "stage": "final_intent_conversion"},
+        )
+    except Exception as exc:
+        return EventBoundExecutorSubmitResult(
+            status="TIMEOUT_UNKNOWN",
+            reason_code=f"EXECUTOR_SUBMIT_UNKNOWN:{exc}",
+            submit_started_at=started_at,
+            submit_finished_at=datetime.now(timezone.utc).isoformat(),
+            raw_response={"error": str(exc), "stage": "existing_executor_submit"},
+            reconciliation_followup_required=True,
+        )
+    return _executor_order_result_to_submit_result(result, started_at=started_at)
+
+
+def _final_execution_intent_from_cert(
+    final_intent_cert: DecisionCertificate,
+    execution_command_cert: DecisionCertificate,
+):
+    from src.contracts.execution_intent import (
+        DecisionSourceContext,
+        FinalExecutionIntent,
+        PassiveMakerExecutionContext,
+    )
+
+    final_payload = final_intent_cert.payload
+    command_payload = execution_command_cert.payload
+    _require_payload_match(final_payload, command_payload, "event_id")
+    _require_payload_match(final_payload, command_payload, "final_intent_id")
+    _require_payload_match(final_payload, command_payload, "token_id")
+    _require_payload_match(final_payload, command_payload, "direction")
+    snapshot_hash = _required_text(final_payload, "executable_snapshot_hash")
+    cost_basis_hash = _required_text(final_payload, "cost_basis_hash")
+    cost_basis_id = str(final_payload.get("cost_basis_id") or f"cost_basis:{cost_basis_hash[:16]}")
+    if cost_basis_id != f"cost_basis:{cost_basis_hash[:16]}":
+        raise EventBoundExecutorExpressibilityError("cost_basis_id does not match cost_basis_hash")
+    decision_source_payload = final_payload.get("decision_source_context")
+    decision_source_context = DecisionSourceContext.from_forecast_context(decision_source_payload)
+    if decision_source_context is None:
+        raise EventBoundExecutorExpressibilityError("decision_source_context missing")
+    passive_payload = final_payload.get("passive_maker_context")
+    if not isinstance(passive_payload, dict):
+        raise EventBoundExecutorExpressibilityError("passive_maker_context missing")
+    passive_maker_context = PassiveMakerExecutionContext(
+        spread_usd=_decimal(passive_payload.get("spread_usd"), "passive_maker_context.spread_usd"),
+        quote_age_ms=int(passive_payload.get("quote_age_ms", 0)),
+        expected_fill_probability=_decimal(
+            passive_payload.get("expected_fill_probability"),
+            "passive_maker_context.expected_fill_probability",
+        ),
+        queue_depth_ahead=_optional_decimal(passive_payload.get("queue_depth_ahead")),
+        adverse_selection_score=_optional_decimal(passive_payload.get("adverse_selection_score")),
+        orderbook_hash_age_ms=(
+            None
+            if passive_payload.get("orderbook_hash_age_ms") is None
+            else int(passive_payload["orderbook_hash_age_ms"])
+        ),
+    )
+    if final_payload.get("post_only") is not True or final_payload.get("maker_intent") is not True:
+        raise EventBoundExecutorExpressibilityError("current executor law requires post_only maker intent")
+    executor_order_type = str(final_payload.get("executor_order_type") or final_payload.get("time_in_force") or "")
+    if executor_order_type not in {"GTC", "GTD"}:
+        raise EventBoundExecutorExpressibilityError("post_only maker final intent requires GTC/GTD executor_order_type")
+    size = _decimal(final_payload.get("size"), "size")
+    limit_price = _decimal(final_payload.get("limit_price"), "limit_price")
+    return FinalExecutionIntent(
+        hypothesis_id=str(final_payload.get("candidate_id") or final_payload["final_intent_id"]),
+        selected_token_id=str(final_payload["token_id"]),
+        direction=str(final_payload["direction"]),
+        size_kind="shares",
+        size_value=size,
+        submitted_shares=size,
+        final_limit_price=limit_price,
+        expected_fill_price_before_fee=limit_price,
+        fee_adjusted_execution_price=limit_price,
+        order_policy="post_only_passive_limit",
+        order_type=executor_order_type,
+        post_only=True,
+        cancel_after=_cancel_after(final_payload),
+        snapshot_id=str(final_payload["executable_snapshot_id"]),
+        snapshot_hash=snapshot_hash,
+        cost_basis_id=cost_basis_id,
+        cost_basis_hash=cost_basis_hash,
+        max_slippage_bps=Decimal("0"),
+        tick_size=_decimal(final_payload.get("tick_size"), "tick_size"),
+        min_order_size=_decimal(final_payload.get("min_order_size"), "min_order_size"),
+        fee_rate=Decimal("0"),
+        neg_risk=bool(final_payload.get("neg_risk", False)),
+        event_id=str(final_payload["event_id"]),
+        resolution_window=str(final_payload.get("resolution_window") or "default"),
+        correlation_key=str(final_payload["final_intent_id"]),
+        decision_source_context=decision_source_context,
+        passive_maker_context=passive_maker_context,
+    )
+
+
+def _executor_order_result_to_submit_result(result, *, started_at: str) -> EventBoundExecutorSubmitResult:
+    status = str(getattr(result, "status", "") or "").lower()
+    raw_response = {
+        "status": getattr(result, "status", None),
+        "reason": getattr(result, "reason", None),
+        "command_state": getattr(result, "command_state", None),
+        "order_id": getattr(result, "order_id", None),
+        "external_order_id": getattr(result, "external_order_id", None),
+    }
+    if status in {"pending", "filled"}:
+        receipt_status = "SUBMITTED"
+        reason = "OK"
+        reconcile = False
+    elif status in {"rejected", "cancelled"}:
+        receipt_status = "REJECTED"
+        reason = str(getattr(result, "reason", None) or "EXECUTOR_REJECTED")
+        reconcile = False
+    elif status == "unknown_side_effect":
+        receipt_status = "TIMEOUT_UNKNOWN"
+        reason = str(getattr(result, "reason", None) or "EXECUTOR_UNKNOWN_SIDE_EFFECT")
+        reconcile = True
+    else:
+        receipt_status = "ERROR_UNKNOWN"
+        reason = str(getattr(result, "reason", None) or f"EXECUTOR_STATUS_UNSUPPORTED:{status}")
+        reconcile = False
+    return EventBoundExecutorSubmitResult(
+        status=receipt_status,  # type: ignore[arg-type]
+        reason_code=reason,
+        venue_order_id=getattr(result, "order_id", None) or getattr(result, "external_order_id", None),
+        submit_started_at=getattr(result, "zeus_submit_intent_time", None) or started_at,
+        submit_finished_at=getattr(result, "venue_ack_time", None) or datetime.now(timezone.utc).isoformat(),
+        raw_response=raw_response,
+        reconciliation_followup_required=reconcile,
+    )
+
+
+def _require_payload_match(left: dict, right: dict, field: str) -> None:
+    if str(left.get(field) or "") != str(right.get(field) or ""):
+        raise EventBoundExecutorExpressibilityError(f"{field} mismatch")
+
+
+def _required_text(payload: dict, field: str) -> str:
+    value = str(payload.get(field) or "").strip()
+    if not value:
+        raise EventBoundExecutorExpressibilityError(f"{field} missing")
+    return value
+
+
+def _decimal(value, field: str) -> Decimal:
+    if value is None or value == "":
+        raise EventBoundExecutorExpressibilityError(f"{field} missing")
+    return Decimal(str(value))
+
+
+def _optional_decimal(value) -> Decimal | None:
+    if value is None or value == "":
+        return None
+    return Decimal(str(value))
+
+
+def _cancel_after(payload: dict) -> datetime:
+    raw = payload.get("cancel_after")
+    if raw:
+        parsed = datetime.fromisoformat(str(raw))
+        return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
+    return datetime.now(timezone.utc).replace(microsecond=0) + timedelta(minutes=15)
 
 
 def build_event_bound_final_intent_receipt(
