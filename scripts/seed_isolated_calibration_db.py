@@ -1,9 +1,13 @@
 # Created: 2026-05-24
 # Last reused/audited: 2026-05-24
+# Lifecycle: created=2026-05-24; last_reviewed=2026-05-24; last_reused=2026-05-24
 # Authority basis: ENS full_transport_v1 REFIT task 2026-05-24
 #   (docs/operations/ENS_REFIT_PLAN_2026-05-24.md). Builds the isolated staging
 #   DB the rebuild + refit run against, sourcing READ-ONLY from the live
 #   forecasts DB. Never writes a live DB.
+# Purpose: Clone source tables from live zeus-forecasts.db (read-only) into a new
+#   isolated staging DB; apply v2 write-target schema for offline rebuild+refit.
+# Reuse: Run once per refit cycle before run_offline_calibration_rebuild.py.
 """Seed a lean isolated staging DB for an offline calibration rebuild/refit.
 
 The rebuild (`scripts/rebuild_calibration_pairs_v2.py`) and refit

@@ -697,9 +697,10 @@ def _fit_bucket(
         error_model_family=error_model_family,
     )
     n_eff = len({p["decision_group_id"] for p in pairs})
+    _emf_suffix = f":emf={error_model_family}" if error_model_family != "none" else ""
     bucket_key = (
         f"{metric_identity.temperature_metric}:{cluster}:{season}:"
-        f"{data_version}:{cycle}:{source_id}:{horizon_profile}:emf={error_model_family}"
+        f"{data_version}:{cycle}:{source_id}:{horizon_profile}{_emf_suffix}"
     )
 
     if n_eff < MIN_DECISION_GROUPS:
@@ -982,9 +983,10 @@ def refit_v2(
             cycle = bucket["cycle"]
             source_id = bucket["source_id"]
             horizon_profile = bucket["horizon_profile"]
+            _bucket_emf_suffix = f":emf={error_model_family}" if error_model_family != "none" else ""
             bucket_key = (
                 f"{metric_identity.temperature_metric}:{cluster}:{season}:"
-                f"{data_version}:{cycle}:{source_id}:{horizon_profile}:emf={error_model_family}"
+                f"{data_version}:{cycle}:{source_id}:{horizon_profile}{_bucket_emf_suffix}"
             )
             print(
                 f"[{bucket_idx}/{len(buckets)}] starting bucket {bucket_key}",

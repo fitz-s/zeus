@@ -2696,7 +2696,7 @@ def _migrate_decision_events_schema(conn: sqlite3.Connection) -> None:
             CASE
                 WHEN schema_version IN (12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36)
                     THEN schema_version
-                ELSE 35
+                ELSE 36
             END,
             CASE
                 WHEN source IN ('phase0_backfill', 'live_decision', 'shadow_decision')

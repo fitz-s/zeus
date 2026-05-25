@@ -5,8 +5,8 @@
 """Pytest wrapper for scripts/check_dynamic_sql.py.
 
 Locks the per-file count of f-string SQL interpolation sites (`cursor
-.execute(f"...")` and friends) at the current audited baseline of 232 sites
-across 46 files. Any drift triggers a test failure with a per-file
+.execute(f"...")` and friends) at the current audited baseline of 267 sites
+across 53 files. Any drift triggers a test failure with a per-file
 breakdown.
 
 Why

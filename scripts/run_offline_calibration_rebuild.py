@@ -1,7 +1,11 @@
 # Created: 2026-05-24
 # Last reused/audited: 2026-05-24
+# Lifecycle: created=2026-05-24; last_reviewed=2026-05-24; last_reused=2026-05-24
 # Authority basis: ENS full_transport_v1 REFIT task 2026-05-24
 #   (docs/operations/ENS_REFIT_PLAN_2026-05-24.md).
+# Purpose: Drive rebuild_all_v2() against an isolated staging DB (never the shared
+#   world DB); supports --error-model flag for full_transport_v1 corrected rebuild.
+# Reuse: Run after seed_isolated_calibration_db.py; before run_offline_platt_refit.py.
 """Offline driver: run rebuild_all_v2() against an ISOLATED staging DB.
 
 `rebuild_calibration_pairs_v2.py main()` wraps the rebuild in an operator
