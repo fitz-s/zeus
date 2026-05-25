@@ -597,13 +597,14 @@ schema_objects:
     edli_live_cap_usage:
       db: world
       pk: usage_id
-      writer: src/strategy/live_inference/promotion_ledger.py::EdliLiveCapLedger.reserve_day0
+      writer: src/events/live_cap.py::LiveCapLedger.reserve
       meaning: >
-        Durable EDLI pilot live-cap ledger. Prevents Day0 hard-fact live order
-        count/notional caps from resetting when the daemon scheduler constructs
-        a fresh reactor instance.
+        Durable EDLI pilot live-cap ledger. Reserves, releases, and consumes
+        event-bound live canary count/notional quota before live action or
+        execution-command certificates can be accepted.
       required_tests:
-        - tests/events/test_reactor.py
+        - tests/events/test_live_cap.py
+        - tests/money_path/test_edli_live_canary.py
     # OBS-AUTHORITY-FOUNDATION 2026-05-23. Persisted, auditable settlement-day
     # observation authority. Observability only — these objects record runtime
     # observation truth + per-edge day0 classification so the operator can audit

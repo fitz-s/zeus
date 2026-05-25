@@ -965,13 +965,22 @@ tables:
     pk_col: usage_id
     required_columns:
       - {name: usage_id, type: TEXT, nullable: false}
-      - {name: cap_name, type: TEXT, nullable: false}
-      - {name: usage_date, type: TEXT, nullable: false}
       - {name: event_id, type: TEXT, nullable: false}
-      - {name: notional_usd, type: REAL, nullable: false}
+      - {name: decision_time, type: TEXT, nullable: false}
+      - {name: cap_scope, type: TEXT, nullable: false}
+      - {name: max_notional_usd, type: REAL, nullable: false}
+      - {name: max_orders_per_day, type: INTEGER, nullable: false}
+      - {name: reserved_notional_usd, type: REAL, nullable: false}
+      - {name: order_count, type: INTEGER, nullable: false}
+      - {name: reservation_status, type: TEXT, nullable: false}
+      - {name: final_intent_id, type: TEXT, nullable: true}
+      - {name: execution_command_id, type: TEXT, nullable: true}
+      - {name: created_at, type: TEXT, nullable: false}
+      - {name: schema_version, type: INTEGER, nullable: false}
     notes: >
-      EDLI v1 durable pilot live-cap usage ledger. Day0 hard-fact live cap
-      checks are persisted here so daemon scheduler ticks cannot reset caps.
+      EDLI v1 durable pilot live-cap usage ledger. Full-live groundwork uses
+      this table for event-bound live canary reservation, release, and consume
+      state before execution-command persistence.
 
   - name: outcome_fact
     db: world

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
+import math
 from typing import Iterable
 
 from src.decision_kernel import claims
@@ -78,11 +80,25 @@ def verify_actionable_trade(cert: DecisionCertificate, parents: Iterable[Decisio
     verify_certificate(cert, parent_tuple)
     if cert.certificate_type != claims.ACTIONABLE_TRADE:
         raise CertificateVerificationError("expected ActionableTradeCertificate")
+    if cert.header.mode != "LIVE":
+        raise CertificateVerificationError("actionable trade must use LIVE mode")
+    _verify_actionable_payload(cert)
     parent_types = {parent.certificate_type for parent in parent_tuple}
     missing = claims.ACTIONABLE_REQUIRED_TYPES - parent_types
     if missing:
         raise CertificateVerificationError(f"actionable trade missing parents: {sorted(missing)}")
+    event_type = cert.payload.get("event_type")
+    if event_type == "FORECAST_SNAPSHOT_READY":
+        source_required = {claims.FORECAST_AUTHORITY, claims.CALIBRATION}
+    elif event_type == "DAY0_EXTREME_UPDATED":
+        source_required = {claims.DAY0_AUTHORITY, claims.ABSORBING_BOUNDARY}
+    else:
+        raise CertificateVerificationError(f"unsupported actionable event_type: {event_type!r}")
+    missing_source = source_required - parent_types
+    if missing_source:
+        raise CertificateVerificationError(f"actionable trade missing source parents: {sorted(missing_source)}")
     _forbid_public_market_channel_fill(parent_tuple)
+    _verify_actionable_parent_consistency(cert, parent_tuple)
 
 
 def verify_execution_command(cert: DecisionCertificate, parents: Iterable[DecisionCertificate]) -> None:
@@ -90,10 +106,13 @@ def verify_execution_command(cert: DecisionCertificate, parents: Iterable[Decisi
     verify_certificate(cert, parent_tuple)
     if cert.certificate_type != claims.EXECUTION_COMMAND:
         raise CertificateVerificationError("expected ExecutionCommandCertificate")
+    if cert.header.mode != "LIVE":
+        raise CertificateVerificationError("execution command must use LIVE mode")
     parent_types = {parent.certificate_type for parent in parent_tuple}
     missing = claims.EXECUTION_COMMAND_REQUIRED_TYPES - parent_types
     if missing:
         raise CertificateVerificationError(f"execution command missing parents: {sorted(missing)}")
+    _verify_execution_command_payload(cert, parent_tuple)
 
 
 def assert_market_channel_not_fill(cert: DecisionCertificate) -> None:
@@ -160,6 +179,182 @@ def _forbid_no_submit_payload(cert: DecisionCertificate) -> None:
             raise CertificateVerificationError(f"NO_SUBMIT certificate cannot carry positive {key}")
     if cert.payload.get("execution_command_id"):
         raise CertificateVerificationError("NO_SUBMIT certificate cannot carry execution command")
+
+
+def _verify_actionable_payload(cert: DecisionCertificate) -> None:
+    payload = cert.payload
+    if payload.get("submitted") is True:
+        raise CertificateVerificationError("actionable trade cannot be submitted before execution command")
+    if payload.get("execution_command_id") not in (None, ""):
+        raise CertificateVerificationError("actionable trade cannot carry execution_command_id")
+    if payload.get("side_effect_status") != "ACTIONABLE_NOT_SUBMITTED":
+        raise CertificateVerificationError("actionable trade side_effect_status must be ACTIONABLE_NOT_SUBMITTED")
+    for field in ("action_score", "trade_score", "p_fill_lcb"):
+        if _finite_float(payload.get(field), field) <= 0.0:
+            raise CertificateVerificationError(f"actionable {field} must be positive")
+    for field in ("q_live", "q_lcb_5pct"):
+        value = _finite_float(payload.get(field), field)
+        if value < 0.0 or value > 1.0:
+            raise CertificateVerificationError(f"actionable {field} must be in [0, 1]")
+    for field in ("c_fee_adjusted", "c_cost_95pct"):
+        value = _finite_float(payload.get(field), field)
+        if value <= 0.0 or value >= 1.0:
+            raise CertificateVerificationError(f"actionable {field} must be in (0, 1)")
+    if payload.get("native_quote_available") is not True:
+        raise CertificateVerificationError("actionable native_quote_available must be true")
+    required = (
+        "event_id",
+        "causal_snapshot_id",
+        "family_id",
+        "candidate_id",
+        "condition_id",
+        "token_id",
+        "direction",
+        "executable_snapshot_id",
+        "fdr_family_id",
+        "kelly_decision_id",
+        "risk_decision_id",
+        "live_cap_usage_id",
+        "final_intent_id",
+    )
+    for field in required:
+        if payload.get(field) in (None, ""):
+            raise CertificateVerificationError(f"actionable {field} missing")
+
+
+def _verify_actionable_parent_consistency(
+    cert: DecisionCertificate,
+    parents: tuple[DecisionCertificate, ...],
+) -> None:
+    parent = _parents_by_type(parents)
+    payload = cert.payload
+    causal = _required_parent_payload(parent, claims.CAUSAL_EVENT)
+    topology = _required_parent_payload(parent, claims.MARKET_TOPOLOGY)
+    family = _required_parent_payload(parent, claims.FAMILY_CLOSURE)
+    executable = _required_parent_payload(parent, claims.EXECUTABLE_SNAPSHOT)
+    quote = _required_parent_payload(parent, claims.QUOTE_FEASIBILITY)
+    cost = _required_parent_payload(parent, claims.COST_MODEL)
+    candidate = _required_parent_payload(parent, claims.CANDIDATE_EVIDENCE)
+    fdr = _required_parent_payload(parent, claims.FDR)
+    kelly = _required_parent_payload(parent, claims.KELLY_DRY_RUN)
+    risk = _required_parent_payload(parent, claims.RISK_LEVEL)
+    live_cap = _required_parent_payload(parent, claims.LIVE_CAP)
+
+    _require_equal("actionable.event_id", payload.get("event_id"), "causal.event_id", causal.get("event_id"))
+    _require_equal(
+        "actionable.causal_snapshot_id",
+        payload.get("causal_snapshot_id"),
+        "causal.causal_snapshot_id",
+        causal.get("causal_snapshot_id"),
+    )
+    for name, other in (
+        ("topology.family_id", topology.get("family_id")),
+        ("family.family_id", family.get("family_id")),
+        ("fdr.fdr_family_id", fdr.get("fdr_family_id")),
+    ):
+        _require_equal("actionable.family_id", payload.get("family_id"), name, other)
+    _require_equal("actionable.fdr_family_id", payload.get("fdr_family_id"), "fdr.fdr_family_id", fdr.get("fdr_family_id"))
+    _require_equal("candidate.family_id", candidate.get("family_id"), "actionable.family_id", payload.get("family_id"))
+    _require_equal("actionable.condition_id", payload.get("condition_id"), "candidate.condition_id", candidate.get("condition_id"))
+    _require_equal("actionable.condition_id", payload.get("condition_id"), "executable.condition_id", executable.get("condition_id"))
+    _require_equal("actionable.condition_id", payload.get("condition_id"), "quote.condition_id", quote.get("condition_id"))
+    _require_equal("actionable.condition_id", payload.get("condition_id"), "cost.condition_id", cost.get("condition_id"))
+    candidate_token = candidate.get("selected_token_id", candidate.get("token_id"))
+    for name, other in (
+        ("candidate.selected_token_id", candidate_token),
+        ("executable.token_id", executable.get("token_id")),
+        ("quote.token_id", quote.get("token_id")),
+        ("cost.token_id", cost.get("token_id")),
+    ):
+        _require_equal("actionable.token_id", payload.get("token_id"), name, other)
+    for name, other in (
+        ("candidate.direction", candidate.get("direction")),
+        ("quote.direction", quote.get("direction")),
+        ("cost.direction", cost.get("direction")),
+    ):
+        if other not in (None, ""):
+            _require_equal("actionable.direction", payload.get("direction"), name, other)
+    _require_equal("actionable.executable_snapshot_id", payload.get("executable_snapshot_id"), "executable.executable_snapshot_id", executable.get("executable_snapshot_id", executable.get("selected_snapshot_id")))
+    if candidate.get("hypothesis_id") not in tuple(fdr.get("selected_hypotheses") or ()):
+        raise CertificateVerificationError("fdr.selected_hypotheses missing candidate hypothesis_id")
+    _require_equal("kelly.cost_basis_id", kelly.get("cost_basis_id"), "cost.cost_basis_id", cost.get("cost_basis_id"))
+    if kelly.get("passed") is not True:
+        raise CertificateVerificationError("kelly.passed must be true")
+    if risk.get("passed") is not True:
+        raise CertificateVerificationError("risk.passed must be true")
+    _require_equal("actionable.kelly_decision_id", payload.get("kelly_decision_id"), "kelly.kelly_decision_id", kelly.get("kelly_decision_id"))
+    _require_equal("actionable.risk_decision_id", payload.get("risk_decision_id"), "risk.risk_decision_id", risk.get("risk_decision_id"))
+    _require_equal("live_cap.event_id", live_cap.get("event_id"), "actionable.event_id", payload.get("event_id"))
+    _require_equal("live_cap.usage_id", live_cap.get("usage_id"), "actionable.live_cap_usage_id", payload.get("live_cap_usage_id"))
+    if live_cap.get("reservation_status") != "RESERVED":
+        raise CertificateVerificationError("live_cap.reservation_status must be RESERVED")
+    if live_cap.get("stale_book_directional_strategy") is True:
+        raise CertificateVerificationError("stale-book directional strategy parent is forbidden")
+    _validate_cost_sources(quote, cost, {"direction": payload.get("direction")})
+
+
+def _verify_execution_command_payload(
+    cert: DecisionCertificate,
+    parents: tuple[DecisionCertificate, ...],
+) -> None:
+    payload = cert.payload
+    if payload.get("submitted") is not False:
+        raise CertificateVerificationError("execution command must set submitted=false before executor call")
+    if payload.get("venue_order_id") not in (None, ""):
+        raise CertificateVerificationError("execution command cannot carry venue_order_id before submit")
+    parent = _parents_by_type(parents)
+    actionable_cert = parent.get(claims.ACTIONABLE_TRADE)
+    if actionable_cert is None:
+        raise CertificateVerificationError("execution command missing actionable parent")
+    actionable = actionable_cert.payload
+    final_intent = _required_parent_payload(parent, claims.FINAL_INTENT)
+    expressibility = _required_parent_payload(parent, claims.EXECUTOR_EXPRESSIBILITY)
+    live_cap = _required_parent_payload(parent, claims.LIVE_CAP)
+    if expressibility.get("passed") is not True:
+        raise CertificateVerificationError("executor expressibility must pass")
+    if live_cap.get("reservation_status") != "RESERVED":
+        raise CertificateVerificationError("live cap reservation must be RESERVED")
+    for field in ("event_id", "condition_id", "token_id", "direction", "final_intent_id"):
+        _require_equal(f"execution_command.{field}", payload.get(field), f"actionable.{field}", actionable.get(field))
+    _require_equal(
+        "execution_command.actionable_certificate_hash",
+        payload.get("actionable_certificate_hash"),
+        "actionable.certificate_hash",
+        actionable_cert.certificate_hash,
+    )
+    _require_equal("final_intent.final_intent_id", final_intent.get("final_intent_id"), "actionable.final_intent_id", actionable.get("final_intent_id"))
+    _require_equal("final_intent.token_id", final_intent.get("token_id"), "actionable.token_id", actionable.get("token_id"))
+    _require_equal("final_intent.condition_id", final_intent.get("condition_id"), "actionable.condition_id", actionable.get("condition_id"))
+    _require_equal("live_cap.usage_id", live_cap.get("usage_id"), "actionable.live_cap_usage_id", actionable.get("live_cap_usage_id"))
+    size = _finite_float(payload.get("size"), "execution command size")
+    min_order_size = _finite_float(payload.get("min_order_size"), "execution command min_order_size")
+    limit_price = _finite_float(payload.get("limit_price"), "execution command limit_price")
+    tick_size = _finite_float(payload.get("tick_size"), "execution command tick_size")
+    if size <= 0:
+        raise CertificateVerificationError("execution command size must be positive")
+    if size < min_order_size:
+        raise CertificateVerificationError("execution command size below min_order_size")
+    max_notional = _finite_float(live_cap.get("max_notional_usd"), "live cap max_notional_usd")
+    if size * limit_price > max_notional:
+        raise CertificateVerificationError("execution command size exceeds live cap notional")
+    if limit_price <= 0.0 or limit_price >= 1.0:
+        raise CertificateVerificationError("execution command limit_price must be in (0, 1)")
+    if tick_size <= 0.0:
+        raise CertificateVerificationError("execution command tick_size must be positive")
+    if not _is_tick_aligned(limit_price, tick_size):
+        raise CertificateVerificationError("execution command limit_price not tick-aligned")
+    for field in ("executor_name", "execution_command_id", "idempotency_key"):
+        if payload.get(field) in (None, ""):
+            raise CertificateVerificationError(f"execution command {field} missing")
+    if payload.get("order_type") not in {"LIMIT", "GTC_LIMIT", "POST_ONLY_LIMIT"}:
+        raise CertificateVerificationError("execution command order_type unsupported")
+    if payload.get("time_in_force") not in {"GTC", "GTD"}:
+        raise CertificateVerificationError("execution command time_in_force unsupported")
+    maker_flag = payload.get("post_only", payload.get("maker"))
+    if maker_flag is not True:
+        raise CertificateVerificationError("execution command must be post_only maker intent for current executor law")
+    if "neg_risk" in actionable and payload.get("neg_risk") != actionable.get("neg_risk"):
+        raise CertificateVerificationError("execution command neg_risk mismatch")
 
 
 def _verify_generated_certificate_semantics(cert: DecisionCertificate) -> None:
@@ -401,6 +596,27 @@ def _expected_cost_source_for_direction(direction: object) -> str:
     if direction in {"sell_yes", "sell_no"}:
         return "native_orderbook_bid"
     raise CertificateVerificationError("candidate.direction unsupported for cost source")
+
+
+def _finite_float(value: object, field_name: str) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError) as exc:
+        raise CertificateVerificationError(f"{field_name} must be finite") from exc
+    if not math.isfinite(parsed):
+        raise CertificateVerificationError(f"{field_name} must be finite")
+    return parsed
+
+
+def _is_tick_aligned(price: float, tick_size: float) -> bool:
+    try:
+        price_decimal = Decimal(str(price))
+        tick_decimal = Decimal(str(tick_size))
+        if tick_decimal <= 0:
+            return False
+        return price_decimal.remainder_near(tick_decimal) == 0
+    except (InvalidOperation, ValueError):
+        return False
 
 
 def _expected_members_extrema_transform(metric: object) -> str:

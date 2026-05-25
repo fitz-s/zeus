@@ -43,11 +43,14 @@ test_trust_policy:
     tests/strategy/live_inference/test_trade_score.py: {created: "2026-05-24", last_used: "2026-05-24"}
     tests/events/test_market_channel_ingestor.py: {created: "2026-05-24", last_used: "2026-05-24"}
     tests/events/test_reactor.py: {created: "2026-05-24", last_used: "2026-05-24"}
+    tests/events/test_live_cap.py: {created: "2026-05-25", last_used: "2026-05-25"}
     tests/decision_kernel/test_certificate_time_filtration.py: {created: "2026-05-25", last_used: "2026-05-25"}
     tests/decision_kernel/test_certificate_hashing.py: {created: "2026-05-25", last_used: "2026-05-25"}
     tests/decision_kernel/test_no_submit_theorems.py: {created: "2026-05-25", last_used: "2026-05-25"}
     tests/decision_kernel/test_no_bypass.py: {created: "2026-05-25", last_used: "2026-05-25"}
     tests/decision_kernel/test_certificate_ledger.py: {created: "2026-05-25", last_used: "2026-05-25"}
+    tests/decision_kernel/test_actionable_trade_certificate.py: {created: "2026-05-25", last_used: "2026-05-25"}
+    tests/decision_kernel/test_execution_command_certificate.py: {created: "2026-05-25", last_used: "2026-05-25"}
     tests/decision_kernel/test_no_submit_compiler.py: {created: "2026-05-25", last_used: "2026-05-25"}
     tests/decision_kernel/test_forecast_authority_adapter.py: {created: "2026-05-25", last_used: "2026-05-25"}
     tests/decision_kernel/test_quote_adapter.py: {created: "2026-05-25", last_used: "2026-05-25"}
@@ -56,6 +59,8 @@ test_trust_policy:
     tests/strategy/live_inference/test_no_trade_regret.py: {created: "2026-05-24", last_used: "2026-05-24"}
     tests/analysis/test_event_opportunity_report.py: {created: "2026-05-24", last_used: "2026-05-24"}
     tests/money_path/test_edli_online_invariants.py: {created: "2026-05-24", last_used: "2026-05-24"}
+    tests/money_path/test_edli_live_canary.py: {created: "2026-05-25", last_used: "2026-05-25"}
+    tests/money_path/test_edli_order_lifecycle.py: {created: "2026-05-25", last_used: "2026-05-25"}
     tests/state/test_edli_table_ownership.py: {created: "2026-05-24", last_used: "2026-05-24"}
     # task_2026-05-04_oracle_kelly_evidence_rebuild antibodies (A1-A7).
     # All packet-specific test files registered here so topology_doctor

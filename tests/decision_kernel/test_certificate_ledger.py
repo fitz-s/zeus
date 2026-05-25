@@ -465,6 +465,41 @@ def test_buy_no_rejects_native_orderbook_bid_cost_source():
         ledger.persist_all(parents + (no_submit,))
 
 
+def test_ledger_rejects_actionable_with_generic_verifier_only_path():
+    cert = _cert(
+        claims.ACTIONABLE_TRADE,
+        "actionable:forged",
+        {
+            "event_id": "event-1",
+            "event_type": "FORECAST_SNAPSHOT_READY",
+            "side_effect_status": "ACTIONABLE_NOT_SUBMITTED",
+            "action_score": -1.0,
+            "trade_score": -1.0,
+            "native_quote_available": False,
+        },
+    )
+    ledger = DecisionCertificateLedger(_conn())
+
+    with pytest.raises(CertificateVerificationError, match="LIVE mode|action_score|native_quote"):
+        ledger.insert_idempotent(cert)
+
+
+def test_ledger_rejects_execution_command_with_generic_verifier_only_path():
+    cert = _cert(
+        claims.EXECUTION_COMMAND,
+        "execution-command:forged",
+        {
+            "event_id": "event-1",
+            "execution_command_id": "cmd-1",
+            "submitted": True,
+        },
+    )
+    ledger = DecisionCertificateLedger(_conn())
+
+    with pytest.raises(CertificateVerificationError, match="LIVE mode|submitted=false|ActionableTradeCertificate"):
+        ledger.insert_idempotent(cert)
+
+
 def _conn() -> sqlite3.Connection:
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row

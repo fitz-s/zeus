@@ -894,7 +894,7 @@ def get_connection(
 # CI hook scripts/check_schema_version.py diffs the sqlite_master hash of
 # a fresh-init DB against tests/state/_schema_pinned_hash.txt and fails
 # the PR if SCHEMA_VERSION did not change in lockstep.
-SCHEMA_VERSION = 45  # 2026-05-25 EDLI no-submit receipt projection hash binding.
+SCHEMA_VERSION = 46  # 2026-05-25 EDLI live-cap reservation schema.
 
 
 def init_schema(

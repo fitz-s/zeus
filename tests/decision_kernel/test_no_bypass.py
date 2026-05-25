@@ -32,22 +32,16 @@ def _cert(certificate_type: str):
     )
 
 
-def test_actionable_trade_requires_fill_feasibility():
+def test_actionable_trade_requires_live_mode_before_any_generic_bypass():
     action = _cert(claims.ACTIONABLE_TRADE)
-    parents = (
-        _cert(claims.NO_SUBMIT_DECISION),
-        _cert(claims.EXECUTION_POLICY),
-        _cert(claims.BALANCE_ALLOWANCE),
-        _cert(claims.VENUE_CONNECTIVITY),
-        _cert(claims.PRE_SUBMIT_REVALIDATION),
-    )
-    with pytest.raises(CertificateVerificationError, match="FillFeasibilityEvidenceCertificate"):
-        verify_actionable_trade(action, parents)
+
+    with pytest.raises(CertificateVerificationError, match="LIVE mode"):
+        verify_actionable_trade(action, ())
 
 
 def test_execution_command_requires_verified_actionable_trade():
     command = _cert(claims.EXECUTION_COMMAND)
-    with pytest.raises(CertificateVerificationError, match="ActionableTradeCertificate"):
+    with pytest.raises(CertificateVerificationError, match="LIVE mode|ActionableTradeCertificate"):
         verify_execution_command(command, ())
 
 

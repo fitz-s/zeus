@@ -18,6 +18,7 @@ CALIBRATION = "CalibrationCertificate"
 MODEL_CONFIG = "ModelConfigCertificate"
 BELIEF = "BeliefCertificate"
 BOUNDARY = "BoundaryCertificate"
+ABSORBING_BOUNDARY = "AbsorbingBoundaryCertificate"
 QUOTE_FEASIBILITY = "QuoteFeasibilityCertificate"
 COST_MODEL = "CostModelCertificate"
 PRE_TRADE_EVIDENCE = "PreTradeEvidenceCertificate"
@@ -28,6 +29,7 @@ FDR = "FdrCertificate"
 KELLY_DRY_RUN = "KellyDryRunCertificate"
 PORTFOLIO_STATE = "PortfolioStateCertificate"
 RISK_LEVEL = "RiskLevelCertificate"
+LIVE_CAP = "LiveCapCertificate"
 NO_SUBMIT_MODE = "NoSubmitModeCertificate"
 NO_SUBMIT_DECISION = "NoSubmitDecisionCertificate"
 EXECUTION_POLICY = "ExecutionPolicyCertificate"
@@ -35,6 +37,8 @@ BALANCE_ALLOWANCE = "BalanceAllowanceCertificate"
 VENUE_CONNECTIVITY = "VenueConnectivityCertificate"
 PRE_SUBMIT_REVALIDATION = "PreSubmitRevalidationCertificate"
 ACTIONABLE_TRADE = "ActionableTradeCertificate"
+FINAL_INTENT = "FinalIntentCertificate"
+EXECUTOR_EXPRESSIBILITY = "ExecutorExpressibilityCertificate"
 ORDER_EXPRESSION = "OrderExpressionCertificate"
 EXECUTION_COMMAND = "ExecutionCommandCertificate"
 VENUE_SUBMISSION = "VenueSubmissionCertificate"
@@ -86,14 +90,28 @@ NO_SUBMIT_FORBIDDEN_TYPES: frozenset[str] = frozenset({
 })
 
 ACTIONABLE_REQUIRED_TYPES: frozenset[str] = frozenset({
-    NO_SUBMIT_DECISION,
-    FILL_FEASIBILITY,
-    EXECUTION_POLICY,
-    BALANCE_ALLOWANCE,
-    VENUE_CONNECTIVITY,
-    PRE_SUBMIT_REVALIDATION,
+    CLOCK_MODE,
+    CAUSAL_EVENT,
+    SOURCE_TRUTH,
+    MARKET_TOPOLOGY,
+    FAMILY_CLOSURE,
+    MODEL_CONFIG,
+    BELIEF,
+    EXECUTABLE_SNAPSHOT,
+    QUOTE_FEASIBILITY,
+    COST_MODEL,
+    PRE_TRADE_EVIDENCE,
+    CANDIDATE_EVIDENCE,
+    TESTING_PROTOCOL,
+    FDR,
+    KELLY_DRY_RUN,
+    RISK_LEVEL,
+    LIVE_CAP,
 })
 
 EXECUTION_COMMAND_REQUIRED_TYPES: frozenset[str] = frozenset({
     ACTIONABLE_TRADE,
+    FINAL_INTENT,
+    EXECUTOR_EXPRESSIBILITY,
+    LIVE_CAP,
 })

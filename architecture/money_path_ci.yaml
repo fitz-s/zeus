@@ -219,6 +219,10 @@ segments:
       - src/state/schema/execution_feasibility_evidence_schema.py
       - src/state/schema/no_trade_regret_events_schema.py
       - src/state/schema/edli_live_cap_usage_schema.py
+      - src/events/live_cap.py
+      - src/decision_kernel/claims.py
+      - src/decision_kernel/verifier.py
+      - src/decision_kernel/ledger.py
     relationship_tests:
       - tests/events/test_opportunity_event.py
       - tests/events/test_event_store_idempotency.py
@@ -230,10 +234,13 @@ segments:
       - tests/strategy/live_inference/test_trade_score.py
       - tests/events/test_market_channel_ingestor.py
       - tests/events/test_reactor.py
+      - tests/events/test_live_cap.py
       - tests/engine/test_event_reactor_no_bypass.py
       - tests/strategy/live_inference/test_no_trade_regret.py
       - tests/analysis/test_event_opportunity_report.py
       - tests/money_path/test_edli_online_invariants.py
+      - tests/money_path/test_edli_live_canary.py
+      - tests/money_path/test_edli_order_lifecycle.py
     future_object_rules:
       new_event_type: requires_idempotency_and_replay_order_test
       mutable_event_fact: forbidden_without_explicit_policy

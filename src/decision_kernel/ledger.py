@@ -63,11 +63,13 @@ class DecisionCertificateLedger:
                 if edge.certificate_hash in by_hash
             )
             _verify_for_persistence(cert, parents)
-            self.insert_idempotent(cert)
+            self.insert_idempotent(cert, preverified=True)
 
-    def insert_idempotent(self, cert: DecisionCertificate) -> str:
+    def insert_idempotent(self, cert: DecisionCertificate, *, preverified: bool = False) -> str:
         if not self._schema_ready:
             self.ensure_schema()
+        if not preverified:
+            _verify_for_persistence(cert, ())
         existing = self.conn.execute(
             """
             SELECT certificate_id, certificate_hash

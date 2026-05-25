@@ -341,6 +341,13 @@ files:
     downstream:
     - src/decision_kernel/ledger.py
     - src/events/no_submit_receipts.py
+  src/events/live_cap.py:
+    zone: K2_runtime
+    authority_role: edli_live_cap_reservation_ledger
+    why: Durable EDLI live canary cap reservation writer; atomically reserves, releases, and consumes tiny live-order quota before any ActionableTradeCertificate can be accepted.
+    downstream:
+    - src/state/schema/edli_live_cap_usage_schema.py
+    - src/decision_kernel/verifier.py
   src/decision_kernel/certificate.py:
     zone: K2_runtime
     authority_role: edli_certificate_grammar
@@ -390,6 +397,20 @@ files:
     downstream:
     - src/decision_kernel/verifier.py
     - src/decision_kernel/compiler.py
+  src/decision_kernel/certificates/action.py:
+    zone: K2_runtime
+    authority_role: edli_actionable_trade_certificate_surface
+    why: Live-money ActionableTradeCertificate verifier entrypoint; proves an event-bound EDLI candidate is actionable but not submitted before execution-command construction.
+    downstream:
+    - src/decision_kernel/verifier.py
+    - src/decision_kernel/ledger.py
+  src/decision_kernel/certificates/execution.py:
+    zone: K2_runtime
+    authority_role: edli_execution_command_certificate_surface
+    why: Live-money pre-submit ExecutionCommandCertificate verifier entrypoint; binds actionable trade proof to final intent, executor expressibility, and live-cap reservation before executor handoff.
+    downstream:
+    - src/decision_kernel/verifier.py
+    - src/decision_kernel/ledger.py
   src/decision_kernel/compiler.py:
     zone: K2_runtime
     authority_role: edli_no_submit_certificate_compiler

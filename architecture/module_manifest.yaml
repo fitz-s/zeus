@@ -142,6 +142,7 @@ modules:
       - src/events/forecast_completeness.py
       - src/events/day0_authority.py
       - src/events/money_path_adapters.py
+      - src/events/live_cap.py
       - src/events/event_writer.py
       - src/events/event_coalescer.py
       - src/events/dead_letter.py
@@ -179,10 +180,13 @@ modules:
       - tests/strategy/live_inference/test_trade_score.py
       - tests/events/test_market_channel_ingestor.py
       - tests/events/test_reactor.py
+      - tests/events/test_live_cap.py
       - tests/engine/test_event_reactor_no_bypass.py
       - tests/strategy/live_inference/test_no_trade_regret.py
       - tests/analysis/test_event_opportunity_report.py
       - tests/money_path/test_edli_online_invariants.py
+      - tests/money_path/test_edli_live_canary.py
+      - tests/money_path/test_edli_order_lifecycle.py
       - tests/state/test_edli_table_ownership.py
     graph_appendix_status: LOCAL_GRAPH_QUERY_REQUIRED
     archive_extraction_status: not_started
