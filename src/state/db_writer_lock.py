@@ -692,6 +692,7 @@ SQLITE_CONNECT_ALLOWLIST: frozenset[str] = frozenset(
         "scripts/live_health_probe.py",                 # read_only_ro_uri (live health verifier; settlement truth SELECT-only)
         "scripts/check_live_order_e2e.py",              # read_only_ro_uri (live order verifier; mode=ro + query_only)
         "scripts/check_live_release_gate.py",           # read_only_live + temp_fixture (release gate verifier; no canonical DB writes)
+        "scripts/check_full_transport_ship_readiness.py",  # read_only_ro_uri (full_transport ship-readiness gate; SELECT-only, no writes)
         "scripts/produce_activation_evidence.py",       # in_memory_only (":memory:" only)
         "scripts/replay_correctness_gate.py",           # read_only (SELECT-only)
         "scripts/replay_probability_edge_bin_sanity.py", # read_only (SELECT-only; LIVE-PROB-P0 §D.4 replay)
