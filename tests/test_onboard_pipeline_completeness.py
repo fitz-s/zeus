@@ -1,12 +1,12 @@
-# Created: 2026-05-25
-# Last reused or audited: 2026-05-25
-# Authority basis: docs/operations/ENS_NEWCITY_DATA_PARITY_AUDIT_2026-05-24.md
+# Lifecycle: created=2026-05-25; last_reviewed=2026-05-25; last_reused=never
 # Purpose: Structural completeness tests for onboard_cities.py pipeline steps.
 #          Verify PIPELINE_STEPS covers all OBTAINABLE-NOW parity steps, that
 #          calibration_pairs is NOT dry-run / NOT optional, that
 #          _verification_tables() uses V2 table names, that deferred artifacts
 #          are recorded-pending (not hard-failed), and that the precondition
 #          check raises on unregistered cities.
+# Reuse: Inspect onboard_cities.py + naming_conventions.yaml before running;
+#        authority: docs/operations/ENS_NEWCITY_DATA_PARITY_AUDIT_2026-05-24.md
 """Completeness tests for the city onboarding pipeline (scripts/onboard_cities.py).
 
 RED-FIRST TDD: these tests are written against the CURRENT (broken) state of
@@ -193,7 +193,7 @@ def test_precondition_raises_on_unregistered_city(monkeypatch):
     except (ImportError, AttributeError):
         pass  # If TIER_SCHEDULE not importable, proceed with bare call
 
-    with pytest.raises((ValueError, KeyError, RuntimeError)):
+    with pytest.raises(ValueError):
         onboard_cities._check_city_registered("__NOT_A_REAL_CITY_XYZ__")
 
 

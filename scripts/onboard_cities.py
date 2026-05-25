@@ -835,14 +835,29 @@ def run_pipeline(
 
 
 def _print_verification(city_names: list[str]):
-    """Print data coverage summary for newly onboarded cities."""
+    """Print data coverage summary for newly onboarded cities.
+
+    V2 tables (ensemble_snapshots_v2, calibration_pairs_v2, model_bias_ens_v2,
+    settlements_v2, observation_instants_v2) live in zeus-forecasts.db (K1 split).
+    All other tables live in zeus-world.db.  Querying V2 tables via world connection
+    would silently report SKIP for every V2 surface — use the correct connection per table.
+    """
+    _FORECASTS_V2_TABLES = frozenset({
+        "ensemble_snapshots_v2",
+        "calibration_pairs_v2",
+        "model_bias_ens_v2",
+        "settlements_v2",
+        "observation_instants_v2",
+    })
     try:
-        from src.state.db import get_world_connection
-        conn = get_world_connection(write_class="bulk")
+        from src.state.db import get_world_connection, get_forecasts_connection
+        world_conn = get_world_connection(write_class=None)
+        forecasts_conn = get_forecasts_connection(write_class=None)
 
         logger.info("\nDATA COVERAGE VERIFICATION:")
         logger.info("-" * 60)
         for table in _verification_tables():
+            conn = forecasts_conn if table in _FORECASTS_V2_TABLES else world_conn
             try:
                 placeholders = ",".join("?" * len(city_names))
                 row = conn.execute(
@@ -855,7 +870,8 @@ def _print_verification(city_names: list[str]):
             except Exception:
                 logger.info("  %5s %-25s (table missing)", "SKIP", table)
 
-        conn.close()
+        world_conn.close()
+        forecasts_conn.close()
     except Exception as e:
         logger.warning("Verification skipped: %s", e)
 
@@ -992,7 +1008,11 @@ def _run_fit_ens_bias_v2(city_names: list[str], dry_run: bool = False) -> set[st
         init_ens_bias_schema(conn)
         conn.commit()
 
-        fitted = 0
+        # Track fitted bucket count per city to detect zero-coverage cities individually.
+        # A city with no TIGGE/GRIB data will have fitted_per_city[city]==0 across all
+        # season/metric buckets; those cities are returned as deferred-sidecar candidates
+        # even if other cities in the batch did fit successfully.
+        fitted_per_city: dict[str, int] = {city: 0 for city in city_names}
         skipped = 0
         for city in city_names:
             for season, months in _ENS_SEASONS:
@@ -1022,21 +1042,23 @@ def _run_fit_ens_bias_v2(city_names: list[str], dry_run: bool = False) -> set[st
                             training_cutoff=today_str,
                             recorded_at=today_str,
                         )
-                        fitted += 1
+                        fitted_per_city[city] += 1
                     except (ValueError, RuntimeError) as exc:
                         logger.debug("  ENS bias skipped %s/%s/%s: %s", city, season, metric, exc)
                         skipped += 1
 
+        fitted = sum(fitted_per_city.values())
         conn.commit()
         logger.info("  ENS bias v2: fitted=%d skipped=%d", fitted, skipped)
-        if fitted == 0:
+        zero_coverage_cities = {city for city, count in fitted_per_city.items() if count == 0}
+        if zero_coverage_cities:
             logger.warning(
                 "  fit_ens_bias_v2: ZERO buckets fitted for %s — likely no "
                 "TIGGE/GRIB coverage yet.  model_bias_ens_v2 is empty for "
                 "these cities; recording as PENDING in deferred sidecar.",
-                city_names,
+                sorted(zero_coverage_cities),
             )
-            return set(city_names)  # caller adds to deferred sidecar
+            return zero_coverage_cities  # caller adds to deferred sidecar
     except Exception as exc:
         logger.error("  fit_ens_bias_v2 failed: %s", exc)
         conn.rollback()
@@ -1129,13 +1151,11 @@ def _run_compute_ddd_floor(city_names: list[str], dry_run: bool = False) -> None
                 logger.warning("  DDD floor: city %r not in cities.json — skipping", city_name)
                 continue
 
-            # Determine canonical peak-hour window (WINDOW_RADIUS = 6 from ddd_wiring)
+            # Determine canonical peak-hour window using ddd_wiring's directional_window
+            # (WINDOW_RADIUS=3, matches runtime DDD coverage quantile semantics)
+            from src.engine.ddd_wiring import directional_window
             peak_hour = getattr(city_cfg, "historical_peak_hour", 14.5)
-            window_radius = 6
-            target_hours = list(range(
-                max(0, int(peak_hour) - window_radius),
-                min(24, int(peak_hour) + window_radius + 1),
-            ))
+            target_hours = directional_window(peak_hour)
             if not target_hours:
                 target_hours = list(range(8, 21))  # fallback: 8am–8pm
 
