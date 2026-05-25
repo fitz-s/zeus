@@ -419,6 +419,45 @@ def test_no_submit_rejects_source_truth_snapshot_mismatch():
     assert "source_truth.snapshot_id" in (result.failures[0].reason_detail or "")
 
 
+def test_source_truth_certificate_not_hardcoded_match():
+    event = _event()
+    decision_time = datetime(2026, 5, 25, 10, 3, tzinfo=timezone.utc)
+    bundle = build_test_no_submit_proof_bundle(event, _receipt(event.event_id), decision_time=decision_time)
+
+    assert bundle.source_truth.payload["source_status"] == bundle.forecast_authority.payload["reader_status"]
+    assert bundle.source_truth.payload["source_authority_id"] == "test.executable_forecast_reader"
+
+
+def test_no_submit_rejects_source_truth_status_unknown():
+    event = _event()
+    decision_time = datetime(2026, 5, 25, 10, 3, tzinfo=timezone.utc)
+    bundle = build_test_no_submit_proof_bundle(event, _receipt(event.event_id), decision_time=decision_time)
+    bad_source = replace(bundle.source_truth, payload={**bundle.source_truth.payload, "source_status": "UNKNOWN"})
+    result = DecisionCompiler().compile_no_submit(
+        event,
+        decision_time=decision_time,
+        proof_bundle=replace(bundle, source_truth=bad_source),
+    )
+
+    assert result.status == "REJECTED"
+    assert "source_truth.source_status" in (result.failures[0].reason_detail or "")
+
+
+def test_no_submit_rejects_source_truth_reason_code():
+    event = _event()
+    decision_time = datetime(2026, 5, 25, 10, 3, tzinfo=timezone.utc)
+    bundle = build_test_no_submit_proof_bundle(event, _receipt(event.event_id), decision_time=decision_time)
+    bad_source = replace(bundle.source_truth, payload={**bundle.source_truth.payload, "source_reason_code": "BLOCKED"})
+    result = DecisionCompiler().compile_no_submit(
+        event,
+        decision_time=decision_time,
+        proof_bundle=replace(bundle, source_truth=bad_source),
+    )
+
+    assert result.status == "REJECTED"
+    assert "source_truth.source_reason_code" in (result.failures[0].reason_detail or "")
+
+
 def test_no_submit_rejects_forecast_reader_reason_code():
     event = _event()
     decision_time = datetime(2026, 5, 25, 10, 3, tzinfo=timezone.utc)
@@ -428,6 +467,18 @@ def test_no_submit_rejects_forecast_reader_reason_code():
 
     assert result.status == "REJECTED"
     assert "forecast.reader_reason_code" in (result.failures[0].reason_detail or "")
+
+
+def test_no_submit_rejects_forecast_missing_coverage_readiness():
+    event = _event()
+    decision_time = datetime(2026, 5, 25, 10, 3, tzinfo=timezone.utc)
+    bundle = build_test_no_submit_proof_bundle(event, _receipt(event.event_id), decision_time=decision_time)
+    payload = {key: value for key, value in bundle.forecast_authority.payload.items() if key != "coverage_readiness_status"}
+    bad_forecast = replace(bundle.forecast_authority, payload=payload)
+    result = DecisionCompiler().compile_no_submit(event, decision_time=decision_time, proof_bundle=replace(bundle, forecast_authority=bad_forecast))
+
+    assert result.status == "REJECTED"
+    assert "coverage_readiness_status" in (result.failures[0].reason_detail or "")
 
 
 def test_no_submit_rejects_coverage_not_live_eligible():
@@ -441,6 +492,17 @@ def test_no_submit_rejects_coverage_not_live_eligible():
     assert "forecast.coverage_readiness_status" in (result.failures[0].reason_detail or "")
 
 
+def test_no_submit_rejects_forecast_missing_required_steps():
+    event = _event()
+    decision_time = datetime(2026, 5, 25, 10, 3, tzinfo=timezone.utc)
+    bundle = build_test_no_submit_proof_bundle(event, _receipt(event.event_id), decision_time=decision_time)
+    bad_forecast = replace(bundle.forecast_authority, payload={**bundle.forecast_authority.payload, "required_steps": ()})
+    result = DecisionCompiler().compile_no_submit(event, decision_time=decision_time, proof_bundle=replace(bundle, forecast_authority=bad_forecast))
+
+    assert result.status == "REJECTED"
+    assert "required_steps" in (result.failures[0].reason_detail or "")
+
+
 def test_no_submit_rejects_missing_required_steps_in_certificate():
     event = _event()
     decision_time = datetime(2026, 5, 25, 10, 3, tzinfo=timezone.utc)
@@ -450,6 +512,20 @@ def test_no_submit_rejects_missing_required_steps_in_certificate():
 
     assert result.status == "REJECTED"
     assert "observed_steps" in (result.failures[0].reason_detail or "")
+
+
+def test_no_submit_rejects_forecast_missing_member_counts():
+    event = _event()
+    decision_time = datetime(2026, 5, 25, 10, 3, tzinfo=timezone.utc)
+    bundle = build_test_no_submit_proof_bundle(event, _receipt(event.event_id), decision_time=decision_time)
+    bad_forecast = replace(
+        bundle.forecast_authority,
+        payload={**bundle.forecast_authority.payload, "expected_members": None},
+    )
+    result = DecisionCompiler().compile_no_submit(event, decision_time=decision_time, proof_bundle=replace(bundle, forecast_authority=bad_forecast))
+
+    assert result.status == "REJECTED"
+    assert "expected_members" in (result.failures[0].reason_detail or "")
 
 
 def test_no_submit_rejects_observed_members_below_expected():
@@ -463,11 +539,48 @@ def test_no_submit_rejects_observed_members_below_expected():
     assert "observed_members" in (result.failures[0].reason_detail or "")
 
 
+def test_no_submit_rejects_forecast_empty_applied_validations():
+    event = _event()
+    decision_time = datetime(2026, 5, 25, 10, 3, tzinfo=timezone.utc)
+    bundle = build_test_no_submit_proof_bundle(event, _receipt(event.event_id), decision_time=decision_time)
+    bad_forecast = replace(bundle.forecast_authority, payload={**bundle.forecast_authority.payload, "applied_validations": ()})
+    result = DecisionCompiler().compile_no_submit(event, decision_time=decision_time, proof_bundle=replace(bundle, forecast_authority=bad_forecast))
+
+    assert result.status == "REJECTED"
+    assert "applied_validations" in (result.failures[0].reason_detail or "")
+
+
+def test_members_metric_identity_mismatch_blocks():
+    event = _event()
+    decision_time = datetime(2026, 5, 25, 10, 3, tzinfo=timezone.utc)
+    bundle = build_test_no_submit_proof_bundle(event, _receipt(event.event_id), decision_time=decision_time)
+    bad_forecast = replace(
+        bundle.forecast_authority,
+        payload={**bundle.forecast_authority.payload, "members_extrema_metric_identity": "low"},
+    )
+    result = DecisionCompiler().compile_no_submit(event, decision_time=decision_time, proof_bundle=replace(bundle, forecast_authority=bad_forecast))
+
+    assert result.status == "REJECTED"
+    assert "members_extrema_metric_identity" in (result.failures[0].reason_detail or "")
+
+
 def test_no_submit_rejects_unapproved_calibration_authority():
     event = _event()
     decision_time = datetime(2026, 5, 25, 10, 3, tzinfo=timezone.utc)
     bundle = build_test_no_submit_proof_bundle(event, _receipt(event.event_id), decision_time=decision_time)
     bad_calibration = replace(bundle.calibration, payload={**bundle.calibration.payload, "authority": "EXPERIMENTAL"})
+    result = DecisionCompiler().compile_no_submit(event, decision_time=decision_time, proof_bundle=replace(bundle, calibration=bad_calibration))
+
+    assert result.status == "REJECTED"
+    assert "calibration.authority" in (result.failures[0].reason_detail or "")
+
+
+def test_no_submit_rejects_calibration_missing_authority():
+    event = _event()
+    decision_time = datetime(2026, 5, 25, 10, 3, tzinfo=timezone.utc)
+    bundle = build_test_no_submit_proof_bundle(event, _receipt(event.event_id), decision_time=decision_time)
+    payload = {key: value for key, value in bundle.calibration.payload.items() if key != "authority"}
+    bad_calibration = replace(bundle.calibration, payload=payload)
     result = DecisionCompiler().compile_no_submit(event, decision_time=decision_time, proof_bundle=replace(bundle, calibration=bad_calibration))
 
     assert result.status == "REJECTED"
@@ -485,6 +598,18 @@ def test_no_submit_rejects_low_maturity_calibrator():
     assert "maturity_level" in (result.failures[0].reason_detail or "")
 
 
+def test_no_submit_rejects_calibration_missing_maturity():
+    event = _event()
+    decision_time = datetime(2026, 5, 25, 10, 3, tzinfo=timezone.utc)
+    bundle = build_test_no_submit_proof_bundle(event, _receipt(event.event_id), decision_time=decision_time)
+    payload = {key: value for key, value in bundle.calibration.payload.items() if key != "maturity_level"}
+    bad_calibration = replace(bundle.calibration, payload=payload)
+    result = DecisionCompiler().compile_no_submit(event, decision_time=decision_time, proof_bundle=replace(bundle, calibration=bad_calibration))
+
+    assert result.status == "REJECTED"
+    assert "maturity_level" in (result.failures[0].reason_detail or "")
+
+
 def test_no_submit_rejects_calibration_training_cutoff_after_decision():
     event = _event()
     decision_time = datetime(2026, 5, 25, 10, 3, tzinfo=timezone.utc)
@@ -494,6 +619,30 @@ def test_no_submit_rejects_calibration_training_cutoff_after_decision():
 
     assert result.status == "REJECTED"
     assert "training_cutoff" in (result.failures[0].reason_detail or "")
+
+
+def test_no_submit_rejects_calibration_missing_input_space():
+    event = _event()
+    decision_time = datetime(2026, 5, 25, 10, 3, tzinfo=timezone.utc)
+    bundle = build_test_no_submit_proof_bundle(event, _receipt(event.event_id), decision_time=decision_time)
+    payload = {key: value for key, value in bundle.calibration.payload.items() if key != "input_space"}
+    bad_calibration = replace(bundle.calibration, payload=payload)
+    result = DecisionCompiler().compile_no_submit(event, decision_time=decision_time, proof_bundle=replace(bundle, calibration=bad_calibration))
+
+    assert result.status == "REJECTED"
+    assert "calibration.input_space" in (result.failures[0].reason_detail or "")
+
+
+def test_no_submit_rejects_model_config_missing_calibration_input_space():
+    event = _event()
+    decision_time = datetime(2026, 5, 25, 10, 3, tzinfo=timezone.utc)
+    bundle = build_test_no_submit_proof_bundle(event, _receipt(event.event_id), decision_time=decision_time)
+    payload = {key: value for key, value in bundle.model_config.payload.items() if key != "calibration_input_space"}
+    bad_model_config = replace(bundle.model_config, payload=payload)
+    result = DecisionCompiler().compile_no_submit(event, decision_time=decision_time, proof_bundle=replace(bundle, model_config=bad_model_config))
+
+    assert result.status == "REJECTED"
+    assert "model_config.calibration_input_space" in (result.failures[0].reason_detail or "")
 
 
 def test_no_submit_rejects_calibration_input_space_mismatch():

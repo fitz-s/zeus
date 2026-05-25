@@ -336,6 +336,7 @@ def _validate_no_submit_parent_consistency(event: OpportunityEvent, bundle: NoSu
         _require_equal("forecast.snapshot_id", forecast.get("snapshot_id"), "event.causal_snapshot_id", event.causal_snapshot_id)
         _require_equal("source_truth.snapshot_id", source.get("snapshot_id"), "forecast.snapshot_id", forecast.get("snapshot_id"))
     if event.event_type == "FORECAST_SNAPSHOT_READY":
+        _validate_source_truth_payload(source)
         _require_equal("source_truth.completeness_status", source.get("completeness_status"), "COMPLETE", "COMPLETE")
         if source.get("required_fields_present") is not True:
             raise ValueError("source_truth.required_fields_present must be true")
@@ -392,6 +393,18 @@ def _validate_no_submit_parent_consistency(event: OpportunityEvent, bundle: NoSu
         raise ValueError("final_intent_id does not match event and selected token")
 
 
+def _validate_source_truth_payload(source: dict[str, Any]) -> None:
+    status = source.get("source_status")
+    if status not in {"MATCH", "LIVE_ELIGIBLE", "VERIFIED"}:
+        raise ValueError("source_truth.source_status is not verified")
+    reason = source.get("source_reason_code")
+    if reason not in (None, "", "OK"):
+        raise ValueError("source_truth.source_reason_code must be empty for verified no-submit")
+    for field in ("source_authority_id", "snapshot_id", "source_run_id", "payload_hash"):
+        if source.get(field) in (None, ""):
+            raise ValueError(f"source_truth.{field} missing")
+
+
 def _validate_forecast_authority_payload(forecast: dict[str, Any]) -> None:
     status = str(forecast.get("reader_status") or "")
     if status not in {"LIVE_ELIGIBLE", "VERIFIED", "OK"}:
@@ -399,22 +412,38 @@ def _validate_forecast_authority_payload(forecast: dict[str, Any]) -> None:
     reason = forecast.get("reader_reason_code")
     if reason not in (None, "", "OK"):
         raise ValueError("forecast.reader_reason_code must be empty for verified no-submit")
-    if forecast.get("coverage_readiness_status") not in (None, "LIVE_ELIGIBLE"):
+    if forecast.get("coverage_readiness_status") != "LIVE_ELIGIBLE":
         raise ValueError("forecast.coverage_readiness_status must be LIVE_ELIGIBLE")
-    if forecast.get("coverage_completeness_status") not in (None, "COMPLETE"):
+    if forecast.get("coverage_completeness_status") != "COMPLETE":
         raise ValueError("forecast.coverage_completeness_status must be COMPLETE")
-    if forecast.get("source_run_completeness_status") not in (None, "COMPLETE"):
+    if forecast.get("source_run_completeness_status") != "COMPLETE":
         raise ValueError("forecast.source_run_completeness_status must be COMPLETE")
     required_steps = {str(item) for item in (forecast.get("required_steps") or ())}
     observed_steps = {str(item) for item in (forecast.get("observed_steps") or ())}
-    if required_steps and not required_steps.issubset(observed_steps):
+    if not required_steps:
+        raise ValueError("forecast.required_steps missing")
+    if not required_steps.issubset(observed_steps):
         raise ValueError("forecast.observed_steps missing required_steps")
     expected_members = _optional_int(forecast.get("expected_members"))
     observed_members = _optional_int(forecast.get("observed_members"))
-    if expected_members is not None and observed_members is not None and observed_members < expected_members:
+    if expected_members is None:
+        raise ValueError("forecast.expected_members missing")
+    if observed_members is None:
+        raise ValueError("forecast.observed_members missing")
+    if observed_members < expected_members:
         raise ValueError("forecast.observed_members below expected_members")
-    if "applied_validations" not in forecast:
+    if not tuple(forecast.get("applied_validations") or ()):
         raise ValueError("forecast.applied_validations missing")
+    _require_equal(
+        "forecast.members_extrema_metric_identity",
+        forecast.get("members_extrema_metric_identity"),
+        "forecast.temperature_metric",
+        forecast.get("temperature_metric") or forecast.get("metric"),
+    )
+    if forecast.get("members_json_source") in (None, ""):
+        raise ValueError("forecast.members_json_source missing")
+    if forecast.get("local_date_window_hash") in (None, ""):
+        raise ValueError("forecast.local_date_window_hash missing")
 
 
 def _validate_calibration_payload(
@@ -425,15 +454,24 @@ def _validate_calibration_payload(
     decision_time: datetime,
 ) -> None:
     authority = calibration.get("authority")
-    if authority is not None and str(authority) not in {"VERIFIED", "LIVE", "APPROVED", "test"}:
+    if authority in (None, ""):
+        raise ValueError("calibration.authority missing")
+    if str(authority) not in {"VERIFIED", "LIVE", "APPROVED", "test"}:
         raise ValueError("calibration.authority is not approved")
     maturity = _optional_int(calibration.get("maturity_level"))
-    if maturity is not None and maturity > 3:
+    if maturity is None:
+        raise ValueError("calibration.maturity_level missing")
+    if maturity > 3:
         raise ValueError("calibration.maturity_level too low")
     input_space = calibration.get("input_space")
     expected_input_space = model_config.get("calibration_input_space")
-    if input_space is not None and expected_input_space is not None:
-        _require_equal("calibration.input_space", input_space, "model_config.calibration_input_space", expected_input_space)
+    if input_space in (None, ""):
+        raise ValueError("calibration.input_space missing")
+    if expected_input_space in (None, ""):
+        raise ValueError("model_config.calibration_input_space missing")
+    _require_equal("calibration.input_space", input_space, "model_config.calibration_input_space", expected_input_space)
+    if not any(calibration.get(field) not in (None, "") for field in ("model_available_at", "recorded_at", "fitted_at")):
+        raise ValueError("calibration model clock missing")
     for field in ("training_cutoff", "model_available_at", "recorded_at", "fitted_at"):
         when = _optional_dt(calibration.get(field))
         if when is not None and when > decision_time:

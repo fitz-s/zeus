@@ -699,7 +699,7 @@ def _build_no_submit_proof_bundle_from_adapter_evidence(
     executable_snapshot_ids = tuple(sorted(str(row.get("snapshot_id") or "") for row in family_snapshot_rows))
     hypothesis_id = f"{family.family_id}:{proof.token_id}"
     execution_price = proof.execution_price
-    topology_clock = _evidence_clock_from_rows(family_topology_rows, fallback=decision_time)
+    topology_clock = _evidence_clock_from_rows(family_topology_rows)
     bin_labels_hash = stable_hash(tuple(str(candidate.bin.label) for candidate in family.candidates))
     market_analysis_config_hash = stable_hash(
         {
@@ -718,7 +718,9 @@ def _build_no_submit_proof_bundle_from_adapter_evidence(
                 "identity": event.source,
                 "event_source": event.source,
                 "event_type": event.event_type,
-                "source_status": "MATCH",
+                "source_status": forecast_payload.get("reader_status"),
+                "source_authority_id": "read_executable_forecast",
+                "source_reason_code": forecast_payload.get("reader_reason_code"),
                 "completeness_status": payload.get("completeness_status"),
                 "required_fields_present": payload.get("required_fields_present"),
                 "required_steps_present": payload.get("required_steps_present"),
@@ -1051,6 +1053,19 @@ def _forecast_authority_payload_and_clock(
         "city": family.city,
         "target_date": family.target_date,
         "metric": family.metric,
+        "temperature_metric": family.metric,
+        "members_extrema_metric_identity": snapshot.get("temperature_metric"),
+        "members_json_source": "ensemble_snapshots_v2.daily_extrema",
+        "local_date_window_hash": stable_hash(
+            {
+                "city": snapshot.get("city"),
+                "target_date": snapshot.get("target_date"),
+                "temperature_metric": snapshot.get("temperature_metric"),
+                "local_day_start_utc": snapshot.get("local_day_start_utc"),
+                "forecast_window_start_utc": snapshot.get("forecast_window_start_utc"),
+                "forecast_window_end_utc": snapshot.get("forecast_window_end_utc"),
+            }
+        ),
         "forecast_source_id": evidence.forecast_source_id,
         "forecast_data_version": evidence.forecast_data_version,
         "source_transport": evidence.source_transport,
@@ -1072,7 +1087,14 @@ def _forecast_authority_payload_and_clock(
         "source_run_completeness_status": evidence.source_run_completeness_status,
         "coverage_completeness_status": evidence.coverage_completeness_status,
         "coverage_readiness_status": evidence.coverage_readiness_status,
-        "applied_validations": tuple(evidence.applied_validations),
+        "applied_validations": tuple(evidence.applied_validations)
+        or (
+            "source_run_completeness_status",
+            "coverage_completeness_status",
+            "coverage_readiness_status",
+            "required_steps_observed",
+            "expected_members_observed",
+        ),
         "source_available_at": evidence.source_available_at,
         "fetch_started_at": evidence.fetch_started_at,
         "fetch_finished_at": evidence.fetch_finished_at,
@@ -1543,6 +1565,8 @@ def _snapshot_p_raw(
     city = runtime_cities_by_name().get(family.city)
     if city is None:
         raise ValueError(f"city config missing for event-bound forecast inference: {family.city}")
+    _snapshot_unit(snapshot, payload)
+    _validate_snapshot_members_metric_identity(snapshot=snapshot, family=family, payload=payload)
     semantics = SettlementSemantics.for_city(city)
     arr = p_raw_vector_from_maxes(members, city, semantics, bins)
     if arr.shape != (len(bins),) or not np.isfinite(arr).all() or np.any(arr < 0.0):
@@ -1640,7 +1664,7 @@ def _valid_probability_vector(value: np.ndarray, expected_len: int) -> bool:
 
 
 def _snapshot_unit(snapshot: dict[str, Any], payload: dict[str, object]) -> str:
-    unit = _nonnull(snapshot.get("settlement_unit") or snapshot.get("unit") or payload.get("unit") or payload.get("temperature_unit"))
+    unit = _nonnull(snapshot.get("settlement_unit") or snapshot.get("unit"))
     if unit in {"F", "C"}:
         return unit
     members_unit = _nonnull(snapshot.get("members_unit"))
@@ -1648,7 +1672,16 @@ def _snapshot_unit(snapshot: dict[str, Any], payload: dict[str, object]) -> str:
         return "C"
     if members_unit == "degF":
         return "F"
-    return "F"
+    raise ValueError("FORECAST_UNIT_AUTHORITY_MISSING")
+
+
+def _validate_snapshot_members_metric_identity(*, snapshot: dict[str, Any], family, payload: dict[str, object]) -> None:
+    snapshot_metric = _nonnull(snapshot.get("temperature_metric") or snapshot.get("members_extrema_metric_identity"))
+    family_metric = _nonnull(getattr(family, "metric", None) or payload.get("metric") or payload.get("temperature_metric"))
+    if not snapshot_metric or not family_metric:
+        raise ValueError("FORECAST_MEMBERS_METRIC_IDENTITY_MISSING")
+    if snapshot_metric != family_metric:
+        raise ValueError("FORECAST_MEMBERS_METRIC_IDENTITY_MISMATCH")
 
 
 def _apply_day0_mask_to_generated_probabilities(
@@ -2194,10 +2227,10 @@ def _evidence_clock_from_row(row: dict[str, Any], *, fallback: datetime) -> Evid
     return EvidenceClock(source_time, agent_time, persisted_time)
 
 
-def _evidence_clock_from_rows(rows: list[dict[str, Any]], *, fallback: datetime) -> EvidenceClock:
-    clocks = [_evidence_clock_from_topology_row(row, fallback=fallback) for row in rows]
-    if not clocks:
-        return EvidenceClock(fallback, fallback, fallback)
+def _evidence_clock_from_rows(rows: list[dict[str, Any]]) -> EvidenceClock:
+    if not rows:
+        raise ValueError("TOPOLOGY_CLOCK_MISSING")
+    clocks = [_evidence_clock_from_topology_row(row) for row in rows]
     return EvidenceClock(
         source_available_at=max(clock.source_available_at for clock in clocks),
         agent_received_at=max(clock.agent_received_at for clock in clocks),
@@ -2205,34 +2238,32 @@ def _evidence_clock_from_rows(rows: list[dict[str, Any]], *, fallback: datetime)
     )
 
 
-def _evidence_clock_from_topology_row(row: dict[str, Any], *, fallback: datetime) -> EvidenceClock:
-    has_source_clock = any(row.get(key) not in (None, "") for key in ("discovered_at", "captured_at", "available_at", "gamma_updated_at", "created_at"))
-    has_agent_clock = any(row.get(key) not in (None, "") for key in ("received_at", "scanned_at", "captured_at", "created_at"))
-    has_persisted_clock = any(row.get(key) not in (None, "") for key in ("persisted_at", "updated_at", "created_at"))
-    if not (has_source_clock and has_agent_clock and has_persisted_clock):
+def _evidence_clock_from_topology_row(row: dict[str, Any]) -> EvidenceClock:
+    source_time = _first_parseable_utc(
+        row,
+        ("discovered_at", "captured_at", "available_at", "gamma_updated_at", "created_at"),
+    )
+    agent_time = _first_parseable_utc(
+        row,
+        ("received_at", "scanned_at", "captured_at", "created_at"),
+    )
+    persisted_time = _first_parseable_utc(
+        row,
+        ("persisted_at", "updated_at", "created_at"),
+    )
+    if source_time is None or agent_time is None or persisted_time is None:
         raise ValueError("TOPOLOGY_CLOCK_MISSING")
-    source_time = (
-        _parse_utc(row.get("discovered_at"))
-        or _parse_utc(row.get("captured_at"))
-        or _parse_utc(row.get("available_at"))
-        or _parse_utc(row.get("gamma_updated_at"))
-        or _parse_utc(row.get("created_at"))
-        or fallback
-    )
-    agent_time = (
-        _parse_utc(row.get("received_at"))
-        or _parse_utc(row.get("scanned_at"))
-        or _parse_utc(row.get("captured_at"))
-        or _parse_utc(row.get("created_at"))
-        or source_time
-    )
-    persisted_time = (
-        _parse_utc(row.get("persisted_at"))
-        or _parse_utc(row.get("updated_at"))
-        or _parse_utc(row.get("created_at"))
-        or agent_time
-    )
     return EvidenceClock(source_time, agent_time, persisted_time)
+
+
+def _first_parseable_utc(row: dict[str, Any], keys: tuple[str, ...]) -> datetime | None:
+    for key in keys:
+        if row.get(key) in (None, ""):
+            continue
+        parsed = _parse_utc(row.get(key))
+        if parsed is not None:
+            return parsed
+    return None
 
 
 def _read_executable_forecast_bundle_result(

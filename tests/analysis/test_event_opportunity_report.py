@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import sqlite3
 from datetime import datetime, timezone
+import json
 
 from src.decision_kernel.compiler import DecisionCompiler
 from src.decision_kernel.ledger import DecisionCertificateLedger
@@ -27,6 +28,88 @@ def test_event_opportunity_report_counts_regret_and_violations():
     assert report["blocked_by_stage"] == {"FDR": 1}
     assert report["violations"]["midpoint_cost_uses"] == 0
     assert report["violations"]["no_complement_cost_uses"] == 0
+
+
+def test_report_available_at_violation_uses_decision_time_not_received_at():
+    conn = sqlite3.connect(":memory:")
+    init_schema(conn)
+    event = _forecast_event()
+    conn.execute(
+        """
+        INSERT INTO opportunity_events (
+            event_id, event_type, entity_key, source, observed_at, available_at,
+            received_at, causal_snapshot_id, payload_hash, idempotency_key,
+            payload_json, schema_version, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+        """,
+        (
+            event.event_id,
+            event.event_type,
+            event.entity_key,
+            event.source,
+            event.observed_at,
+            "2026-05-25T10:05:00+00:00",
+            "2026-05-25T10:06:00+00:00",
+            event.causal_snapshot_id,
+            event.payload_hash,
+            event.idempotency_key,
+            event.payload_json,
+            event.created_at,
+        ),
+    )
+    NoTradeRegretLedger(conn).insert_idempotent(
+        NoTradeRegretEvent(
+            event.event_id,
+            "FORECAST",
+            "BLOCKED",
+            "BLOCKED",
+            decision_time="2026-05-25T10:04:00+00:00",
+        )
+    )
+
+    report = build_event_opportunity_report(conn)
+
+    assert report["violations"]["event_available_after_decision"] == 1
+    assert report["violations"]["available_at_violations"] == 1
+
+
+def test_report_counts_parent_filtration_violations():
+    conn = sqlite3.connect(":memory:")
+    init_schema(conn)
+    _insert_decision_certificate(
+        conn,
+        certificate_id="cert-1",
+        certificate_type="ForecastAuthorityCertificate",
+        decision_time="2026-05-25T10:04:00+00:00",
+        source_available_at="2026-05-25T10:05:00+00:00",
+        payload={},
+    )
+
+    report = build_event_opportunity_report(conn)
+
+    assert report["violations"]["parent_source_available_after_decision"] == 1
+
+
+def test_report_does_not_hardcode_cost_violation_zero():
+    conn = sqlite3.connect(":memory:")
+    init_schema(conn)
+    _insert_decision_certificate(
+        conn,
+        certificate_id="cost-1",
+        certificate_type="CostModelCertificate",
+        payload={"cost_source": "midpoint"},
+    )
+    _insert_decision_certificate(
+        conn,
+        certificate_id="quote-1",
+        certificate_type="QuoteFeasibilityCertificate",
+        payload={"quote_source_kind": "last_trade"},
+    )
+
+    report = build_event_opportunity_report(conn)
+
+    assert report["violations"]["midpoint_cost_uses"] == 1
+    assert report["violations"]["last_trade_cost_uses"] == 1
 
 
 def test_event_opportunity_report_counts_accepted_no_submit_receipts():
@@ -106,4 +189,41 @@ def _receipt(event_id: str):
         kelly_decision_id="kelly-1",
         risk_decision_id="risk-1",
         final_intent_id="intent-1",
+    )
+
+
+def _insert_decision_certificate(
+    conn: sqlite3.Connection,
+    *,
+    certificate_id: str,
+    certificate_type: str,
+    decision_time: str = "2026-05-25T10:04:00+00:00",
+    source_available_at: str = "2026-05-25T10:03:00+00:00",
+    agent_received_at: str = "2026-05-25T10:03:00+00:00",
+    persisted_at: str = "2026-05-25T10:03:00+00:00",
+    payload: dict[str, object],
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO decision_certificates (
+            certificate_id, certificate_type, schema_version, canonicalization_version,
+            semantic_key, claim_type, mode, decision_time, source_available_at,
+            agent_received_at, persisted_at, authority_id, authority_version,
+            algorithm_id, algorithm_version, payload_json, payload_hash,
+            certificate_hash, verifier_status, created_at
+        ) VALUES (?, ?, 1, 'test', ?, 'test', 'NO_SUBMIT', ?, ?, ?, ?,
+            'test', 'test', 'test', 'test', ?, 'payload-hash', ?, 'VERIFIED',
+            '2026-05-25T10:04:00+00:00')
+        """,
+        (
+            certificate_id,
+            certificate_type,
+            f"test:{certificate_id}",
+            decision_time,
+            source_available_at,
+            agent_received_at,
+            persisted_at,
+            json.dumps(payload, sort_keys=True),
+            f"hash:{certificate_id}",
+        ),
     )

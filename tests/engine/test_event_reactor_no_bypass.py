@@ -23,6 +23,7 @@ from src.engine.event_reactor_adapter import (
     executable_snapshot_gate_from_trade_conn,
     _snapshot_p_cal,
     _snapshot_p_raw,
+    _snapshot_unit,
 )
 from src.config import runtime_cities_by_name
 from src.contracts.settlement_semantics import SettlementSemantics
@@ -829,13 +830,45 @@ def test_topology_clock_missing_blocks_certificate():
         _receipt(event, conn, decision_time=DECISION_TIME)
 
 
+def test_adapter_source_truth_status_comes_from_forecast_authority():
+    event = _forecast_event()
+    conn = _trade_conn_with_snapshot()
+
+    receipt = _receipt(event, conn, decision_time=DECISION_TIME)
+
+    assert receipt.decision_proof_bundle is not None
+    assert receipt.decision_proof_bundle.source_truth.payload["source_status"] == "LIVE_ELIGIBLE"
+    assert receipt.decision_proof_bundle.source_truth.payload["source_status"] == receipt.decision_proof_bundle.forecast_authority.payload["reader_status"]
+    assert receipt.decision_proof_bundle.source_truth.payload["source_authority_id"] == "read_executable_forecast"
+
+
+def test_family_closure_clock_missing_blocks_certificate():
+    event = _forecast_event()
+    conn = _trade_conn_with_snapshot()
+    conn.execute("UPDATE market_events_v2 SET created_at = ''")
+
+    with pytest.raises(ValueError, match="TOPOLOGY_CLOCK_MISSING"):
+        _receipt(event, conn, decision_time=DECISION_TIME)
+
+
+def test_topology_db_read_fallback_requires_db_state_read_certificate():
+    event = _forecast_event()
+    conn = _trade_conn_with_snapshot()
+    conn.execute("DELETE FROM market_events_v2")
+
+    receipt = _receipt(event, conn, decision_time=DECISION_TIME)
+
+    assert receipt.proof_accepted is False
+    assert receipt.reason == "EVENT_BOUND_MARKET_TOPOLOGY_MISSING"
+
+
 def test_edli_runtime_recomputes_p_raw_from_members_not_unproven_snapshot_json():
-    family = SimpleNamespace(city="Chicago")
+    family = SimpleNamespace(city="Chicago", metric="high")
     bins = [Bin(70, 71, "F", "70-71°F"), Bin(72, 73, "F", "72-73°F")]
     members = np.asarray([70.5] * 41 + [72.5] * 10, dtype=float)
 
     p_raw = _snapshot_p_raw(
-        {"p_raw_json": json.dumps([0.0, 1.0], separators=(",", ":"))},
+        {"p_raw_json": json.dumps([0.0, 1.0], separators=(",", ":")), "settlement_unit": "F", "temperature_metric": "high"},
         family=family,
         bins=bins,
         members=members,
@@ -847,16 +880,62 @@ def test_edli_runtime_recomputes_p_raw_from_members_not_unproven_snapshot_json()
 
 
 def test_edli_p_raw_matches_current_entry_forecast_signal_for_fixture():
-    family = SimpleNamespace(city="Chicago")
+    family = SimpleNamespace(city="Chicago", metric="high")
     bins = [Bin(70, 71, "F", "70-71°F"), Bin(72, 73, "F", "72-73°F")]
     members = np.asarray([70.5] * 41 + [72.5] * 10, dtype=float)
     city = runtime_cities_by_name()["Chicago"]
     semantics = SettlementSemantics.for_city(city)
 
-    edli_p_raw = _snapshot_p_raw({}, family=family, bins=bins, members=members, payload={})
+    edli_p_raw = _snapshot_p_raw({"settlement_unit": "F", "temperature_metric": "high"}, family=family, bins=bins, members=members, payload={})
     entry_p_raw = p_raw_vector_from_maxes(members, city, semantics, bins)
 
     np.testing.assert_allclose(edli_p_raw, entry_p_raw, rtol=0.0, atol=0.0)
+
+
+def test_no_submit_rejects_snapshot_missing_unit_metadata():
+    family = SimpleNamespace(city="Chicago", metric="high")
+    bins = [Bin(70, 71, "F", "70-71°F")]
+    members = np.asarray([70.5] * 51, dtype=float)
+
+    with pytest.raises(ValueError, match="FORECAST_UNIT_AUTHORITY_MISSING"):
+        _snapshot_p_raw({"temperature_metric": "high"}, family=family, bins=bins, members=members, payload={})
+
+
+def test_payload_unit_cannot_supply_missing_snapshot_unit_authority():
+    family = SimpleNamespace(city="Chicago", metric="high")
+    bins = [Bin(70, 71, "F", "70-71°F")]
+    members = np.asarray([70.5] * 51, dtype=float)
+
+    with pytest.raises(ValueError, match="FORECAST_UNIT_AUTHORITY_MISSING"):
+        _snapshot_p_raw({"temperature_metric": "high"}, family=family, bins=bins, members=members, payload={"unit": "F"})
+
+
+def test_members_unit_degC_uses_C():
+    assert _snapshot_unit({"members_unit": "degC"}, {}) == "C"
+
+
+def test_members_unit_degF_uses_F():
+    assert _snapshot_unit({"members_unit": "degF"}, {}) == "F"
+
+
+def test_low_metric_requires_low_extrema_members_identity():
+    family = SimpleNamespace(city="Chicago", metric="low")
+    bins = [Bin(30, 31, "F", "30-31°F")]
+    members = np.asarray([30.5] * 51, dtype=float)
+
+    _snapshot_p_raw({"settlement_unit": "F", "temperature_metric": "low"}, family=family, bins=bins, members=members, payload={})
+
+
+def test_high_metric_requires_high_extrema_members_identity():
+    family = SimpleNamespace(city="Chicago", metric="high")
+    bins = [Bin(70, 71, "F", "70-71°F")]
+    members = np.asarray([70.5] * 51, dtype=float)
+
+    _snapshot_p_raw({"settlement_unit": "F", "temperature_metric": "high"}, family=family, bins=bins, members=members, payload={})
+
+
+def test_unit_payload_cannot_override_snapshot_unit_without_authority():
+    assert _snapshot_unit({"settlement_unit": "F", "members_unit": "degC"}, {"unit": "C"}) == "F"
 
 
 def test_edli_p_cal_matches_existing_evaluator_platt_path_for_same_snapshot_and_family():

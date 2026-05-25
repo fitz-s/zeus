@@ -35,14 +35,35 @@ def build_event_opportunity_report(conn: sqlite3.Connection) -> dict[str, object
     feasibility_count = conn.execute(
         "SELECT COUNT(*) FROM execution_feasibility_evidence"
     ).fetchone()[0]
+    event_available_after_decision = _event_time_violation_count(conn, "available_at")
+    event_received_after_decision = _event_time_violation_count(conn, "received_at")
     violations = {
-        "available_at_violations": conn.execute(
-            "SELECT COUNT(*) FROM opportunity_events WHERE available_at > received_at"
-        ).fetchone()[0],
-        "direct_market_channel_stale_trades": 0,
-        "midpoint_cost_uses": 0,
-        "no_complement_cost_uses": 0,
-        "last_trade_cost_uses": 0,
+        "event_available_after_decision": event_available_after_decision,
+        "event_received_after_decision": event_received_after_decision,
+        "available_at_violations": event_available_after_decision,
+        "parent_source_available_after_decision": _certificate_time_violation_count(conn, "source_available_at"),
+        "parent_agent_received_after_decision": _certificate_time_violation_count(conn, "agent_received_at"),
+        "parent_persisted_after_decision": _certificate_time_violation_count(conn, "persisted_at"),
+        "direct_market_channel_stale_trades": _payload_violation_count(
+            conn,
+            "certificate_type IN ('ActionableTradeCertificate','ExecutionCommandCertificate')"
+            " AND COALESCE(json_extract(payload_json, '$.fill_source'), json_extract(payload_json, '$.evidence_source'), '') = 'market_channel'",
+        ),
+        "midpoint_cost_uses": _payload_violation_count(
+            conn,
+            "certificate_type = 'CostModelCertificate'"
+            " AND lower(COALESCE(json_extract(payload_json, '$.cost_source'), json_extract(payload_json, '$.execution_price_type'), '')) LIKE '%midpoint%'",
+        ),
+        "no_complement_cost_uses": _payload_violation_count(
+            conn,
+            "certificate_type IN ('QuoteFeasibilityCertificate','CostModelCertificate')"
+            " AND lower(COALESCE(json_extract(payload_json, '$.cost_source'), json_extract(payload_json, '$.execution_price_type'), '')) LIKE '%complement%'",
+        ),
+        "last_trade_cost_uses": _payload_violation_count(
+            conn,
+            "certificate_type IN ('QuoteFeasibilityCertificate','CostModelCertificate')"
+            " AND lower(COALESCE(json_extract(payload_json, '$.cost_source'), json_extract(payload_json, '$.quote_source_kind'), '')) LIKE '%last_trade%'",
+        ),
     }
     return {
         "events_by_type": event_counts,
@@ -52,3 +73,44 @@ def build_event_opportunity_report(conn: sqlite3.Connection) -> dict[str, object
         "execution_feasibility_rows": feasibility_count,
         "violations": violations,
     }
+
+
+def _event_time_violation_count(conn: sqlite3.Connection, event_time_column: str) -> int:
+    if event_time_column not in {"available_at", "received_at"}:
+        raise ValueError(f"unsupported event time column: {event_time_column}")
+    return conn.execute(
+        f"""
+        SELECT COUNT(*)
+        FROM opportunity_events AS event
+        JOIN (
+            SELECT event_id, decision_time FROM edli_no_submit_receipts
+            UNION ALL
+            SELECT event_id, decision_time FROM no_trade_regret_events WHERE decision_time IS NOT NULL
+        ) AS decision
+          ON decision.event_id = event.event_id
+        WHERE event.{event_time_column} > decision.decision_time
+        """
+    ).fetchone()[0]
+
+
+def _certificate_time_violation_count(conn: sqlite3.Connection, column: str) -> int:
+    if column not in {"source_available_at", "agent_received_at", "persisted_at"}:
+        raise ValueError(f"unsupported certificate time column: {column}")
+    return conn.execute(
+        f"""
+        SELECT COUNT(*)
+        FROM decision_certificates
+        WHERE {column} IS NOT NULL
+          AND {column} > decision_time
+        """
+    ).fetchone()[0]
+
+
+def _payload_violation_count(conn: sqlite3.Connection, predicate: str) -> int:
+    return conn.execute(
+        f"""
+        SELECT COUNT(*)
+        FROM decision_certificates
+        WHERE {predicate}
+        """
+    ).fetchone()[0]
