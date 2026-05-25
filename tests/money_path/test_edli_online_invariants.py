@@ -46,6 +46,37 @@ def test_pr332_scope_marks_day0_and_market_channel_as_disabled_followups():
     assert edli["market_channel_ingestor_enabled"] is False
 
 
+def test_pr_scope_document_matches_settings_flags():
+    settings = json.loads(Path("config/settings.json").read_text())
+    edli = settings["edli_v1"]
+    spec = Path("docs/operations/edli_v1/EDLI_REDEMPTION_FINAL_PACKAGE_SPEC.md").read_text()
+
+    assert edli["enabled"] is True
+    assert edli["forecast_snapshot_trigger_enabled"] is True
+    assert edli["day0_hard_fact_live_enabled"] is False
+    assert edli["market_channel_ingestor_enabled"] is False
+    assert edli["real_order_submit_enabled"] is False
+    assert "market_channel_ingestor_enabled=false" in spec
+    assert "Day0 disabled" in spec or "Day0 online hard-fact eventing is not enabled" in spec
+    assert "real submit disabled" in spec or "real submit disabled" in spec.lower()
+
+
+def test_edli_online_invariants_do_not_claim_day0_online():
+    source = Path("tests/money_path/test_edli_online_invariants.py").read_text()
+    forbidden_claim = "DAY0_ONLINE_ENABLED" + " = true"
+
+    assert "day0_hard_fact_live_enabled\"] is True" not in source
+    assert forbidden_claim not in source
+
+
+def test_edli_online_invariants_do_not_claim_market_channel_deployed_when_disabled():
+    settings = json.loads(Path("config/settings.json").read_text())
+    edli = settings["edli_v1"]
+
+    assert edli["market_channel_ingestor_enabled"] is False
+    assert edli["real_order_submit_enabled"] is False
+
+
 def test_edli_reactor_job_wired_without_removing_scheduler_jobs():
     source = Path("src/main.py").read_text()
     assert "edli_event_reactor" in source

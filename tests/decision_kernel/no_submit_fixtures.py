@@ -40,6 +40,8 @@ def build_test_no_submit_proof_bundle(
     final_intent_id = str(getattr(receipt, "final_intent_id", None) or f"edli_intent:{event.event_id}:{token_id}")
     bin_labels_hash = stable_hash(("70-71F",))
     model_config_hash = stable_hash({"edge_bootstrap_n": 1000})
+    p_cal_vector_hash = stable_hash((0.8, 0.2))
+    p_live_vector_hash = stable_hash((0.78, 0.22))
     projection = {
         "event_id": event.event_id,
         "final_intent_id": final_intent_id,
@@ -165,6 +167,8 @@ def build_test_no_submit_proof_bundle(
                 "edge_bootstrap_n": 1000,
                 "market_analysis_config_hash": model_config_hash,
                 "calibration_input_space": "width_normalized_density",
+                "calibrator_model_key": "model-1",
+                "calibrator_model_hash": "model-hash-1",
             },
             decision_clock,
             "test.model_config",
@@ -177,9 +181,12 @@ def build_test_no_submit_proof_bundle(
                 "identity": hypothesis_id,
                 "forecast_snapshot_id": event.causal_snapshot_id,
                 "calibrator_model_key": "model-1",
+                "calibrator_model_hash": "model-hash-1",
                 "bin_labels_hash": bin_labels_hash,
-                "p_cal_hash": "p-cal-hash-1",
-                "p_live_hash": "p-live-hash-1",
+                "p_cal_vector_hash": p_cal_vector_hash,
+                "p_live_vector_hash": p_live_vector_hash,
+                "p_cal_hash": p_cal_vector_hash,
+                "p_live_hash": p_live_vector_hash,
                 "market_analysis_config_hash": model_config_hash,
                 "bootstrap_n": 1000,
                 "unit": "F",

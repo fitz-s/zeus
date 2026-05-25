@@ -863,6 +863,16 @@ def test_no_submit_receipt_succeeds_with_production_market_events_v2_clock_shape
     assert receipt.decision_proof_bundle.market_topology.clock.persisted_at.isoformat() == "2026-05-24T08:11:00+00:00"
 
 
+def test_adapter_does_not_synthesize_forecast_applied_validations():
+    source = Path("src/engine/event_reactor_adapter.py").read_text()
+    forecast_section = source[
+        source.index("def _forecast_authority_payload_and_clock") : source.index("def _calibration_authority_payload_and_clock")
+    ]
+
+    assert '"applied_validations": tuple(evidence.applied_validations)' in forecast_section
+    assert '"applied_validations": tuple(evidence.applied_validations) or' not in forecast_section
+
+
 def test_family_closure_clock_missing_blocks_certificate():
     event = _forecast_event()
     conn = _trade_conn_with_snapshot()

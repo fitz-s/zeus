@@ -7,7 +7,12 @@ from dataclasses import replace
 from datetime import datetime, timezone
 
 from src.decision_kernel import claims
-from src.decision_kernel.compiler import DecisionCompiler
+from src.decision_kernel.compiler import (
+    FORECAST_LIVE_ELIGIBLE_STATUS,
+    FORECAST_READER_STATUS_ALIASES,
+    DecisionCompiler,
+    normalize_forecast_reader_status,
+)
 from tests.decision_kernel.no_submit_fixtures import build_test_no_submit_proof_bundle
 from src.events.opportunity_event import ForecastSnapshotReadyPayload, make_opportunity_event
 from src.events.reactor import EventSubmissionReceipt
@@ -444,6 +449,20 @@ def test_source_truth_certificate_not_hardcoded_match():
     assert bundle.source_truth.payload["source_authority_id"] == "read_executable_forecast"
 
 
+def test_source_truth_and_forecast_status_vocabularies_identical():
+    normalized = {normalize_forecast_reader_status(status) for status in FORECAST_READER_STATUS_ALIASES}
+
+    assert normalized == {FORECAST_LIVE_ELIGIBLE_STATUS}
+
+
+def test_reader_status_ok_normalizes_to_live_eligible():
+    assert normalize_forecast_reader_status("OK") == FORECAST_LIVE_ELIGIBLE_STATUS
+
+
+def test_reader_status_executable_forecast_ready_normalizes_to_live_eligible():
+    assert normalize_forecast_reader_status("EXECUTABLE_FORECAST_READY") == FORECAST_LIVE_ELIGIBLE_STATUS
+
+
 def test_no_submit_rejects_source_truth_status_unknown():
     event = _event()
     decision_time = datetime(2026, 5, 25, 10, 3, tzinfo=timezone.utc)
@@ -522,7 +541,7 @@ def test_no_submit_rejects_source_truth_status_forecast_status_mismatch():
     event = _event()
     decision_time = datetime(2026, 5, 25, 10, 3, tzinfo=timezone.utc)
     bundle = build_test_no_submit_proof_bundle(event, _receipt(event.event_id), decision_time=decision_time)
-    bad_source = replace(bundle.source_truth, payload={**bundle.source_truth.payload, "source_status": "VERIFIED"})
+    bad_source = replace(bundle.source_truth, payload={**bundle.source_truth.payload, "source_status": "BLOCKED"})
     result = DecisionCompiler().compile_no_submit(event, decision_time=decision_time, proof_bundle=replace(bundle, source_truth=bad_source))
 
     assert result.status == "REJECTED"
@@ -820,3 +839,34 @@ def test_no_submit_rejects_calibration_input_space_mismatch():
 
     assert result.status == "REJECTED"
     assert "calibration.input_space" in (result.failures[0].reason_detail or "")
+
+
+def test_belief_p_cal_hash_is_full_distribution_hash_not_selected_q():
+    event = _event()
+    decision_time = datetime(2026, 5, 25, 10, 3, tzinfo=timezone.utc)
+    bundle = build_test_no_submit_proof_bundle(event, _receipt(event.event_id), decision_time=decision_time)
+
+    assert bundle.belief.payload["p_cal_hash"] == bundle.belief.payload["p_cal_vector_hash"]
+    assert bundle.belief.payload["p_live_hash"] == bundle.belief.payload["p_live_vector_hash"]
+
+
+def test_belief_model_hash_matches_calibration_model_hash():
+    event = _event()
+    decision_time = datetime(2026, 5, 25, 10, 3, tzinfo=timezone.utc)
+    bundle = build_test_no_submit_proof_bundle(event, _receipt(event.event_id), decision_time=decision_time)
+    bad_belief = replace(bundle.belief, payload={**bundle.belief.payload, "calibrator_model_hash": "other-hash"})
+    result = DecisionCompiler().compile_no_submit(event, decision_time=decision_time, proof_bundle=replace(bundle, belief=bad_belief))
+
+    assert result.status == "REJECTED"
+    assert "belief.calibrator_model_hash" in (result.failures[0].reason_detail or "")
+
+
+def test_model_config_model_key_matches_calibration():
+    event = _event()
+    decision_time = datetime(2026, 5, 25, 10, 3, tzinfo=timezone.utc)
+    bundle = build_test_no_submit_proof_bundle(event, _receipt(event.event_id), decision_time=decision_time)
+    bad_model_config = replace(bundle.model_config, payload={**bundle.model_config.payload, "calibrator_model_key": "other-model"})
+    result = DecisionCompiler().compile_no_submit(event, decision_time=decision_time, proof_bundle=replace(bundle, model_config=bad_model_config))
+
+    assert result.status == "REJECTED"
+    assert "model_config.calibrator_model_key" in (result.failures[0].reason_detail or "")

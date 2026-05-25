@@ -17,7 +17,13 @@ from typing import Any, Callable
 from src.contracts.execution_price import ExecutionPrice
 from src.decision_kernel import claims
 from src.decision_kernel.canonicalization import stable_hash
-from src.decision_kernel.compiler import AuthorityEvidence, EvidenceClock, NoSubmitProofBundle
+from src.decision_kernel.compiler import (
+    FORECAST_LIVE_ELIGIBLE_STATUS,
+    AuthorityEvidence,
+    EvidenceClock,
+    NoSubmitProofBundle,
+    normalize_forecast_reader_status,
+)
 from src.engine.event_bound_final_intent import (
     EventBoundFinalIntent,
     build_event_bound_final_intent_receipt,
@@ -52,6 +58,8 @@ class _CandidateProof:
     p_value: float
     passed_prefilter: bool
     native_quote_available: bool
+    p_cal_vector_hash: str
+    p_live_vector_hash: str
     missing_reason: str | None = None
 
 
@@ -552,7 +560,7 @@ def build_event_bound_no_submit_receipt(
             "p_fill_lcb": proof.p_fill_lcb,
             "trade_score": trade_score,
             "native_quote_available": True,
-            "source_status": "MATCH",
+            "source_status": FORECAST_LIVE_ELIGIBLE_STATUS,
             "family_complete": True,
         }
     )
@@ -803,6 +811,8 @@ def _build_no_submit_proof_bundle_from_adapter_evidence(
                 "kelly_multiplier": kelly_multiplier,
                 "market_analysis_config_hash": market_analysis_config_hash,
                 "calibration_input_space": calibration_payload.get("input_space"),
+                "calibrator_model_key": calibration_payload.get("calibrator_model_key"),
+                "calibrator_model_hash": calibration_payload.get("model_hash"),
             },
             decision_clock,
             "zeus.config.settings",
@@ -820,8 +830,11 @@ def _build_no_submit_proof_bundle_from_adapter_evidence(
                 "passed_prefilter": proof.passed_prefilter,
                 "forecast_snapshot_id": forecast_payload.get("snapshot_id"),
                 "calibrator_model_key": calibration_payload.get("calibrator_model_key"),
-                "p_cal_hash": stable_hash({"q_live": proof.q_posterior, "q_lcb_5pct": proof.q_lcb_5pct}),
-                "p_live_hash": stable_hash({"q_live": proof.q_posterior}),
+                "calibrator_model_hash": calibration_payload.get("model_hash"),
+                "p_cal_vector_hash": proof.p_cal_vector_hash,
+                "p_live_vector_hash": proof.p_live_vector_hash,
+                "p_cal_hash": proof.p_cal_vector_hash,
+                "p_live_hash": proof.p_live_vector_hash,
                 "bin_labels_hash": bin_labels_hash,
                 "market_analysis_config_hash": market_analysis_config_hash,
                 "bootstrap_n": edge_n_bootstrap(),
@@ -1053,7 +1066,7 @@ def _forecast_authority_payload_and_clock(
         "identity": str(result.bundle.snapshot.snapshot_id),
         "snapshot_id": str(result.bundle.snapshot.snapshot_id),
         "reader_authority": "read_executable_forecast",
-        "reader_status": result.status,
+        "reader_status": normalize_forecast_reader_status(result.status, result.reason_code) or result.status,
         "reader_reason_code": None if result.reason_code in {None, "", "OK", "LIVE_ELIGIBLE", "EXECUTABLE_FORECAST_READY"} else result.reason_code,
         "city": family.city,
         "target_date": family.target_date,
@@ -1210,7 +1223,14 @@ def _generate_candidate_proofs(
     calibration_conn: sqlite3.Connection,
     decision_time: datetime,
 ) -> tuple[_CandidateProof, ...]:
-    q_by_condition, q_lcb_by_direction, canonical_p_values, canonical_prefilter = _live_yes_probabilities(
+    native_costs = _native_costs_by_candidate_direction(family=family, snapshot_rows=snapshot_rows)
+    (
+        q_by_condition,
+        q_lcb_by_direction,
+        generated_p_values,
+        generated_prefilter,
+        probability_evidence,
+    ) = _live_yes_probabilities(
         event=event,
         payload=payload,
         family=family,
@@ -1275,6 +1295,8 @@ def _generate_candidate_proofs(
                     p_value=p_value,
                     passed_prefilter=passed_prefilter,
                     native_quote_available=execution_price is not None,
+                    p_cal_vector_hash=str(probability_evidence["p_cal_vector_hash"]),
+                    p_live_vector_hash=str(probability_evidence["p_live_vector_hash"]),
                     missing_reason=missing_reason,
                 )
             )
@@ -1307,8 +1329,13 @@ def _live_yes_probabilities(
     calibration_conn: sqlite3.Connection,
     native_costs: dict[tuple[str, str], tuple[dict[str, Any] | None, ExecutionPrice | None, float, float | None, str | None]],
     decision_time: datetime,
-) -> tuple[dict[str, float], dict[tuple[str, str], float], dict[tuple[str, str], float], dict[tuple[str, str], bool]]:
-    canonical = _canonical_probability_and_fdr_proof(event=event, family=family, conn=conn)
+) -> tuple[
+    dict[str, float],
+    dict[tuple[str, str], float],
+    dict[tuple[str, str], float],
+    dict[tuple[str, str], bool],
+    dict[str, str],
+]:
     if event.event_type == "FORECAST_SNAPSHOT_READY":
         return _forecast_snapshot_probability_and_fdr_proof(
             event=event,
@@ -1328,14 +1355,20 @@ def _live_yes_probabilities(
             allow_latest_snapshot=True,
             decision_time=decision_time,
         )
-        q_by_condition, lcb_by_condition, p_values, prefilter = generated
+        q_by_condition, lcb_by_condition, p_values, prefilter, evidence = generated
         masked_q, masked_lcb, masked_p_values, masked_prefilter = _apply_day0_mask_to_generated_probabilities(
             payload=payload,
             family=family,
             q_by_condition=q_by_condition,
             lcb_by_condition=lcb_by_condition,
         )
-        return masked_q, masked_lcb, p_values, prefilter
+        return masked_q, masked_lcb, masked_p_values, masked_prefilter, {
+            **evidence,
+            "p_live_vector_hash": _probability_vector_hash(
+                masked_q[str(candidate.condition_id or "")]
+                for candidate in family.candidates
+            ),
+        }
     raise ValueError(f"unsupported EDLI event type for inference: {event.event_type}")
 
 
@@ -1348,7 +1381,13 @@ def _canonical_probability_and_fdr_proof(
     native_costs: dict[tuple[str, str], tuple[dict[str, Any] | None, ExecutionPrice | None, float, float | None, str | None]],
     decision_time: datetime,
     allow_latest_snapshot: bool = False,
-) -> tuple[dict[str, float], dict[tuple[str, str], float], dict[tuple[str, str], float], dict[tuple[str, str], bool]]:
+) -> tuple[
+    dict[str, float],
+    dict[tuple[str, str], float],
+    dict[tuple[str, str], float],
+    dict[tuple[str, str], bool],
+    dict[str, str],
+]:
     snapshot = _forecast_snapshot_row_for_event(
         conn,
         event=event,
@@ -1408,7 +1447,14 @@ def _canonical_probability_and_fdr_proof(
         condition_id = str(candidate.condition_id or "")
         q_value = float(live_state.probabilities[str(index)])
         q_by_condition[condition_id] = q_value
-    return q_by_condition, lcb_by_direction, p_values, prefilter
+    probability_evidence = {
+        "p_cal_vector_hash": _probability_vector_hash(float(value) for value in analysis.p_cal),
+        "p_live_vector_hash": _probability_vector_hash(
+            q_by_condition[str(candidate.condition_id or "")]
+            for candidate in family.candidates
+        ),
+    }
+    return q_by_condition, lcb_by_direction, p_values, prefilter, probability_evidence
 
 
 def _canonical_probability_rows(
@@ -1663,6 +1709,10 @@ def _valid_probability_vector(value: np.ndarray, expected_len: int) -> bool:
         and bool(np.all(arr >= 0.0))
         and float(arr.sum()) > 0.0
     )
+
+
+def _probability_vector_hash(values) -> str:
+    return stable_hash(tuple(round(float(value), 12) for value in values))
 
 
 def _snapshot_unit(snapshot: dict[str, Any], payload: dict[str, object]) -> str:

@@ -29,18 +29,25 @@ def build_event_opportunity_report(conn: sqlite3.Connection) -> dict[str, object
           ON cert.certificate_type = 'NoSubmitDecisionCertificate'
          AND cert.semantic_key = 'no_submit:' || receipt.event_id || ':' || receipt.final_intent_id
          AND cert.verifier_status = 'VERIFIED'
+         AND NOT EXISTS (
+             SELECT 1
+             FROM decision_certificate_supersessions AS supersession
+             WHERE supersession.old_certificate_hash = cert.certificate_hash
+         )
         WHERE receipt.side_effect_status = 'NO_SUBMIT'
         """
     ).fetchone()[0]
     feasibility_count = conn.execute(
         "SELECT COUNT(*) FROM execution_feasibility_evidence"
     ).fetchone()[0]
-    event_available_after_decision = _event_time_violation_count(conn, "available_at")
-    event_received_after_decision = _event_time_violation_count(conn, "received_at")
+    event_available_after_decision = _event_time_violation_counts(conn, "available_at")
+    event_received_after_decision = _event_time_violation_counts(conn, "received_at")
     violations = {
-        "event_available_after_decision": event_available_after_decision,
-        "event_received_after_decision": event_received_after_decision,
-        "available_at_violations": event_available_after_decision,
+        "event_available_after_decision": event_available_after_decision["events"],
+        "event_available_after_decision_rows": event_available_after_decision["rows"],
+        "event_received_after_decision": event_received_after_decision["events"],
+        "event_received_after_decision_rows": event_received_after_decision["rows"],
+        "available_at_violations": event_available_after_decision["events"],
         "parent_source_available_after_decision": _certificate_time_violation_count(conn, "source_available_at"),
         "parent_agent_received_after_decision": _certificate_time_violation_count(conn, "agent_received_at"),
         "parent_persisted_after_decision": _certificate_time_violation_count(conn, "persisted_at"),
@@ -75,29 +82,70 @@ def build_event_opportunity_report(conn: sqlite3.Connection) -> dict[str, object
     }
 
 
-def _event_time_violation_count(conn: sqlite3.Connection, event_time_column: str) -> int:
+def _event_time_violation_counts(conn: sqlite3.Connection, event_time_column: str) -> dict[str, int]:
     if event_time_column not in {"available_at", "received_at"}:
         raise ValueError(f"unsupported event time column: {event_time_column}")
-    return conn.execute(
+    row = conn.execute(
         f"""
-        SELECT COUNT(*)
-        FROM opportunity_events AS event
-        JOIN (
-            SELECT event_id, decision_time FROM edli_no_submit_receipts
+        WITH decision_surface AS (
+            SELECT receipt.event_id, receipt.decision_time, 'receipt' AS surface
+            FROM edli_no_submit_receipts AS receipt
+            WHERE receipt.side_effect_status = 'NO_SUBMIT'
+              AND EXISTS (
+                  SELECT 1
+                  FROM decision_certificates AS cert
+                  WHERE cert.certificate_type = 'NoSubmitDecisionCertificate'
+                    AND cert.verifier_status = 'VERIFIED'
+                    AND cert.semantic_key = 'no_submit:' || receipt.event_id || ':' || receipt.final_intent_id
+                    AND NOT EXISTS (
+                        SELECT 1
+                        FROM decision_certificate_supersessions AS supersession
+                        WHERE supersession.old_certificate_hash = cert.certificate_hash
+                    )
+              )
             UNION ALL
-            SELECT event_id, decision_time FROM no_trade_regret_events WHERE decision_time IS NOT NULL
+            SELECT event_id, decision_time, 'regret' AS surface
+            FROM no_trade_regret_events
+            WHERE decision_time IS NOT NULL
             UNION ALL
-            SELECT event_id, decision_time FROM decision_compile_failures
+            SELECT event_id, decision_time, 'compile_failure' AS surface
+            FROM decision_compile_failures
             UNION ALL
-            SELECT json_extract(payload_json, '$.event_id') AS event_id, decision_time
-            FROM decision_certificates
-            WHERE certificate_type = 'NoSubmitDecisionCertificate'
-              AND json_extract(payload_json, '$.event_id') IS NOT NULL
-        ) AS decision
-          ON decision.event_id = event.event_id
-        WHERE event.{event_time_column} > decision.decision_time
+            SELECT
+                json_extract(cert.payload_json, '$.event_id') AS event_id,
+                cert.decision_time,
+                'verified_no_submit_certificate' AS surface
+            FROM decision_certificates AS cert
+            WHERE cert.certificate_type = 'NoSubmitDecisionCertificate'
+              AND cert.verifier_status = 'VERIFIED'
+              AND json_extract(cert.payload_json, '$.event_id') IS NOT NULL
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM decision_certificate_supersessions AS supersession
+                  WHERE supersession.old_certificate_hash = cert.certificate_hash
+              )
+              AND EXISTS (
+                  SELECT 1
+                  FROM edli_no_submit_receipts AS receipt
+                  WHERE receipt.event_id = json_extract(cert.payload_json, '$.event_id')
+                    AND receipt.final_intent_id = json_extract(cert.payload_json, '$.final_intent_id')
+                    AND 'no_submit:' || receipt.event_id || ':' || receipt.final_intent_id = cert.semantic_key
+              )
+        ),
+        violations AS (
+            SELECT decision.event_id, decision.decision_time, decision.surface
+            FROM opportunity_events AS event
+            JOIN decision_surface AS decision
+              ON decision.event_id = event.event_id
+            WHERE event.{event_time_column} > decision.decision_time
+        )
+        SELECT
+            COUNT(*) AS rows_count,
+            COUNT(DISTINCT event_id || '|' || decision_time) AS event_decision_count
+        FROM violations
         """
-    ).fetchone()[0]
+    ).fetchone()
+    return {"rows": int(row[0] or 0), "events": int(row[1] or 0)}
 
 
 def _certificate_time_violation_count(conn: sqlite3.Connection, column: str) -> int:

@@ -190,7 +190,7 @@ def test_report_event_time_violation_counts_compile_failure_only_event():
     assert report["violations"]["event_available_after_decision"] == 1
 
 
-def test_report_event_time_violation_counts_certificate_only_event():
+def test_report_event_time_violation_excludes_unfinalized_certificate_only_event():
     conn = sqlite3.connect(":memory:")
     init_schema(conn)
     event = _forecast_event()
@@ -206,6 +206,32 @@ def test_report_event_time_violation_counts_certificate_only_event():
         certificate_type="NoSubmitDecisionCertificate",
         decision_time="2026-05-25T10:04:00+00:00",
         payload={"event_id": event.event_id},
+    )
+
+    report = build_event_opportunity_report(conn)
+
+    assert report["violations"]["event_available_after_decision"] == 0
+
+
+def test_report_event_time_violation_counts_finalized_certificate_event():
+    conn = sqlite3.connect(":memory:")
+    init_schema(conn)
+    event = _forecast_event()
+    _insert_opportunity_event(
+        conn,
+        event,
+        available_at="2026-05-25T10:05:00+00:00",
+        received_at="2026-05-25T10:06:00+00:00",
+    )
+    receipt = _receipt(event.event_id)
+    EdliNoSubmitReceiptLedger(conn).insert_idempotent(receipt, decision_time=datetime(2026, 5, 25, 10, 4, tzinfo=timezone.utc))
+    _insert_decision_certificate(
+        conn,
+        certificate_id="no-submit-1",
+        certificate_type="NoSubmitDecisionCertificate",
+        decision_time="2026-05-25T10:04:00+00:00",
+        semantic_key=f"no_submit:{event.event_id}:{receipt.final_intent_id}",
+        payload={"event_id": event.event_id, "final_intent_id": receipt.final_intent_id},
     )
 
     report = build_event_opportunity_report(conn)
@@ -239,17 +265,54 @@ def test_report_decision_time_union_has_no_surface_gap():
         """,
         (event.event_id,),
     )
+    receipt = _receipt(event.event_id)
+    EdliNoSubmitReceiptLedger(conn).insert_idempotent(receipt, decision_time=datetime(2026, 5, 25, 10, 4, tzinfo=timezone.utc))
     _insert_decision_certificate(
         conn,
         certificate_id="no-submit-1",
         certificate_type="NoSubmitDecisionCertificate",
         decision_time="2026-05-25T10:04:00+00:00",
-        payload={"event_id": event.event_id},
+        semantic_key=f"no_submit:{event.event_id}:{receipt.final_intent_id}",
+        payload={"event_id": event.event_id, "final_intent_id": receipt.final_intent_id},
     )
 
     report = build_event_opportunity_report(conn)
 
-    assert report["violations"]["event_available_after_decision"] == 3
+    assert report["violations"]["event_available_after_decision"] == 1
+    assert report["violations"]["event_available_after_decision_rows"] == 4
+
+
+def test_report_excludes_superseded_certificate_graphs():
+    conn = sqlite3.connect(":memory:")
+    init_schema(conn)
+    event = _forecast_event()
+    _insert_opportunity_event(
+        conn,
+        event,
+        available_at="2026-05-25T10:05:00+00:00",
+        received_at="2026-05-25T10:06:00+00:00",
+    )
+    receipt = _receipt(event.event_id)
+    EdliNoSubmitReceiptLedger(conn).insert_idempotent(receipt, decision_time=datetime(2026, 5, 25, 10, 4, tzinfo=timezone.utc))
+    _insert_decision_certificate(
+        conn,
+        certificate_id="no-submit-old",
+        certificate_type="NoSubmitDecisionCertificate",
+        decision_time="2026-05-25T10:04:00+00:00",
+        semantic_key=f"no_submit:{event.event_id}:{receipt.final_intent_id}",
+        payload={"event_id": event.event_id, "final_intent_id": receipt.final_intent_id},
+    )
+    conn.execute(
+        """
+        INSERT INTO decision_certificate_supersessions (
+            supersession_id, old_certificate_hash, new_certificate_hash, reason, created_at
+        ) VALUES ('sup-1', 'hash:no-submit-old', 'hash:no-submit-new', 'test', '2026-05-25T10:04:00+00:00')
+        """
+    )
+
+    report = build_event_opportunity_report(conn)
+
+    assert report["violations"]["event_available_after_decision"] == 0
 
 
 def _forecast_event():
@@ -352,6 +415,7 @@ def _insert_decision_certificate(
     source_available_at: str = "2026-05-25T10:03:00+00:00",
     agent_received_at: str = "2026-05-25T10:03:00+00:00",
     persisted_at: str = "2026-05-25T10:03:00+00:00",
+    semantic_key: str | None = None,
     payload: dict[str, object],
 ) -> None:
     conn.execute(
@@ -369,7 +433,7 @@ def _insert_decision_certificate(
         (
             certificate_id,
             certificate_type,
-            f"test:{certificate_id}",
+            semantic_key or f"test:{certificate_id}",
             decision_time,
             source_available_at,
             agent_received_at,

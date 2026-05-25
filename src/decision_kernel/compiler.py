@@ -15,6 +15,13 @@ from src.decision_kernel.ledger import CompileFailure
 from src.events.opportunity_event import OpportunityEvent
 
 CompileStatus = Literal["VERIFIED", "REJECTED", "REVIEW_REQUIRED"]
+FORECAST_LIVE_ELIGIBLE_STATUS = "LIVE_ELIGIBLE"
+FORECAST_READER_STATUS_ALIASES = {
+    "LIVE_ELIGIBLE": FORECAST_LIVE_ELIGIBLE_STATUS,
+    "OK": FORECAST_LIVE_ELIGIBLE_STATUS,
+    "EXECUTABLE_FORECAST_READY": FORECAST_LIVE_ELIGIBLE_STATUS,
+    "VERIFIED": FORECAST_LIVE_ELIGIBLE_STATUS,
+}
 REQUIRED_FORECAST_VALIDATIONS = frozenset(
     {
         "source_run_completeness_status",
@@ -361,7 +368,12 @@ def _validate_no_submit_parent_consistency(event: OpportunityEvent, bundle: NoSu
         _require_equal("source_truth.source_id", source.get("source_id"), "forecast.forecast_source_id", forecast.get("forecast_source_id"))
         _require_equal("source_truth.payload_hash", source.get("payload_hash"), "event.payload_hash", event.payload_hash)
         _require_equal("source_truth.event_source", source.get("event_source"), "event.source", event.source)
-        _require_equal("source_truth.source_status", source.get("source_status"), "forecast.reader_status", forecast.get("reader_status"))
+        _require_equal(
+            "source_truth.source_status",
+            normalize_forecast_reader_status(source.get("source_status")),
+            "forecast.reader_status",
+            normalize_forecast_reader_status(forecast.get("reader_status")),
+        )
         _require_equal("source_truth.source_authority_id", source.get("source_authority_id"), "forecast.reader_authority", forecast.get("reader_authority"))
     _validate_forecast_authority_payload(forecast)
     _validate_calibration_payload(calibration, model_config, forecast, decision_time=decision_time)
@@ -393,6 +405,29 @@ def _validate_no_submit_parent_consistency(event: OpportunityEvent, bundle: NoSu
         "calibration.calibrator_model_key",
         calibration.get("calibrator_model_key"),
     )
+    _require_equal(
+        "model_config.calibrator_model_key",
+        model_config.get("calibrator_model_key"),
+        "calibration.calibrator_model_key",
+        calibration.get("calibrator_model_key"),
+    )
+    _require_equal(
+        "belief.calibrator_model_hash",
+        belief.get("calibrator_model_hash"),
+        "calibration.model_hash",
+        calibration.get("model_hash"),
+    )
+    _require_equal(
+        "model_config.calibrator_model_hash",
+        model_config.get("calibrator_model_hash"),
+        "calibration.model_hash",
+        calibration.get("model_hash"),
+    )
+    for field in ("p_cal_vector_hash", "p_live_vector_hash"):
+        if belief.get(field) in (None, ""):
+            raise ValueError(f"belief.{field} missing")
+    _require_equal("belief.p_cal_hash", belief.get("p_cal_hash"), "belief.p_cal_vector_hash", belief.get("p_cal_vector_hash"))
+    _require_equal("belief.p_live_hash", belief.get("p_live_hash"), "belief.p_live_vector_hash", belief.get("p_live_vector_hash"))
     _require_equal("belief.bin_labels_hash", belief.get("bin_labels_hash"), "family.bin_labels_hash", family.get("bin_labels_hash"))
     _validate_unit_authority(forecast, belief, family)
     _require_equal("fdr.edge_bootstrap_n", fdr.get("edge_bootstrap_n"), "model_config.edge_bootstrap_n", model_config.get("edge_bootstrap_n"))
@@ -416,8 +451,8 @@ def _validate_no_submit_parent_consistency(event: OpportunityEvent, bundle: NoSu
 
 
 def _validate_source_truth_payload(source: dict[str, Any]) -> None:
-    status = source.get("source_status")
-    if status not in {"MATCH", "LIVE_ELIGIBLE", "VERIFIED"}:
+    status = normalize_forecast_reader_status(source.get("source_status"))
+    if status != FORECAST_LIVE_ELIGIBLE_STATUS:
         raise ValueError("source_truth.source_status is not verified")
     reason = source.get("source_reason_code")
     if reason not in (None, "", "OK"):
@@ -428,8 +463,8 @@ def _validate_source_truth_payload(source: dict[str, Any]) -> None:
 
 
 def _validate_forecast_authority_payload(forecast: dict[str, Any]) -> None:
-    status = str(forecast.get("reader_status") or "")
-    if status not in {"LIVE_ELIGIBLE", "VERIFIED", "OK"}:
+    status = normalize_forecast_reader_status(forecast.get("reader_status"))
+    if status != FORECAST_LIVE_ELIGIBLE_STATUS:
         raise ValueError("forecast.reader_status is not live eligible")
     reason = forecast.get("reader_reason_code")
     if reason not in (None, "", "OK"):
@@ -524,6 +559,13 @@ def _validate_unit_authority(forecast: dict[str, Any], belief: dict[str, Any], f
         "forecast.unit_authority_source",
         forecast.get("unit_authority_source"),
     )
+
+
+def normalize_forecast_reader_status(status: Any, reason_code: Any = None) -> str | None:
+    if reason_code not in (None, "", "OK", "LIVE_ELIGIBLE", "EXECUTABLE_FORECAST_READY"):
+        return None
+    raw = str(status or "").strip().upper()
+    return FORECAST_READER_STATUS_ALIASES.get(raw)
 
 
 def _optional_int(value: Any) -> int | None:
