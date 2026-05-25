@@ -356,6 +356,13 @@ files:
     downstream:
     - src/decision_kernel/certificate.py
     - src/decision_kernel/ledger.py
+  src/decision_kernel/claims.py:
+    zone: K2_runtime
+    authority_role: edli_certificate_claim_taxonomy
+    why: Canonical EDLI certificate claim and required-parent taxonomy used by the verifier to prevent no-submit/action/fill proof bypasses.
+    downstream:
+    - src/decision_kernel/verifier.py
+    - src/decision_kernel/compiler.py
   src/decision_kernel/verifier.py:
     zone: K2_runtime
     authority_role: edli_certificate_verifier

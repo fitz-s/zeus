@@ -7,6 +7,7 @@ must flow through injected final-intent/executor seams owned by `src.engine` and
 
 from __future__ import annotations
 
+import contextlib
 import json
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -69,6 +70,7 @@ class EventSubmissionReceipt:
     side_effect_status: str = "NO_SUBMIT"
     reason: str = ""
     proof_accepted: bool | None = None
+    decision_proof_bundle: Any | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if self.proof_accepted is None:
@@ -124,13 +126,15 @@ class OpportunityEventReactor:
         self._family_logged: set[str] = set()
         self._day0_live_orders_today = 0
         from src.events.no_submit_receipts import EdliNoSubmitReceiptLedger
-        from src.decision_kernel.compiler import DecisionCompiler
+        from src.decision_kernel.compiler import DecisionCompiler, build_transition_proof_bundle_from_receipt
         from src.decision_kernel.ledger import DecisionCertificateLedger
         from src.strategy.live_inference.promotion_ledger import EdliLiveCapLedger
 
         self._no_submit_receipt_ledger = EdliNoSubmitReceiptLedger(store.conn)
         self._decision_compiler = DecisionCompiler()
+        self._build_transition_proof_bundle = build_transition_proof_bundle_from_receipt
         self._decision_certificate_ledger = DecisionCertificateLedger(store.conn)
+        self._decision_certificate_ledger.ensure_schema()
         self._live_cap_ledger = EdliLiveCapLedger(store.conn)
 
     def process_pending(self, *, decision_time: datetime, limit: int = 100) -> ReactorResult:
@@ -140,11 +144,22 @@ class OpportunityEventReactor:
             if not self._store.claim(event.event_id, claimed_at=decision_time.astimezone(UTC).isoformat()):
                 continue
             try:
+                self._store.conn.execute("SAVEPOINT edli_reactor_event")
                 self._process_one(event, decision_time=decision_time, result=result)
                 self._store.mark_processed(event.event_id, processed_at=decision_time.astimezone(UTC).isoformat())
+                self._store.conn.execute("RELEASE SAVEPOINT edli_reactor_event")
                 result.processed += 1
             except Exception as exc:
+                with contextlib.suppress(Exception):
+                    self._store.conn.execute("ROLLBACK TO SAVEPOINT edli_reactor_event")
+                    self._store.conn.execute("RELEASE SAVEPOINT edli_reactor_event")
                 self._reject(event, "UNKNOWN_REVIEW_REQUIRED", str(exc))
+                self._write_compile_failure(
+                    event,
+                    "UNKNOWN_REVIEW_REQUIRED",
+                    str(exc),
+                    decision_time=decision_time,
+                )
                 self._write_regret(event, "UNKNOWN_REVIEW_REQUIRED", str(exc))
                 self._store.mark_dead_letter(
                     event,
@@ -158,36 +173,36 @@ class OpportunityEventReactor:
     def _process_one(self, event: OpportunityEvent, *, decision_time: datetime, result: ReactorResult) -> None:
         assert_available_for_decision(event, decision_time)
         if event.event_type in {"BOOK_SNAPSHOT", "BEST_BID_ASK_CHANGED", "NEW_MARKET_DISCOVERED"}:
-            self._reject_event(event, "EXECUTABLE_QUOTE", "MARKET_CHANNEL_EVENT_NO_DIRECT_STALE_TRADE", result)
+            self._reject_event(event, "EXECUTABLE_QUOTE", "MARKET_CHANNEL_EVENT_NO_DIRECT_STALE_TRADE", result, decision_time=decision_time)
             return
         if self._config.reactor_mode not in {"live", "live_no_submit"}:
-            self._reject_event(event, "LIVE_CAP", "REACTOR_NOT_LIVE", result)
+            self._reject_event(event, "LIVE_CAP", "REACTOR_NOT_LIVE", result, decision_time=decision_time)
             return
         if event.event_type == "DAY0_EXTREME_UPDATED" and not _day0_hard_fact_payload_live_eligible(event):
-            self._reject_event(event, "SOURCE_TRUTH", "DAY0_HARD_FACT_AUTHORITY_BLOCKED", result)
+            self._reject_event(event, "SOURCE_TRUTH", "DAY0_HARD_FACT_AUTHORITY_BLOCKED", result, decision_time=decision_time)
             return
         if not self._source_truth_gate(event):
-            self._reject_event(event, "SOURCE_TRUTH", "SOURCE_TRUTH_BLOCKED", result)
+            self._reject_event(event, "SOURCE_TRUTH", "SOURCE_TRUTH_BLOCKED", result, decision_time=decision_time)
             return
         if not self._executable_snapshot_gate(event, decision_time.astimezone(UTC)):
-            self._reject_event(event, "EXECUTABLE_QUOTE", "EXECUTABLE_SNAPSHOT_BLOCKED", result)
+            self._reject_event(event, "EXECUTABLE_QUOTE", "EXECUTABLE_SNAPSHOT_BLOCKED", result, decision_time=decision_time)
             return
         self._log_family_once(event)
         if not self._riskguard_gate(event):
-            self._reject_event(event, "RISK_GUARD", "RISK_GUARD_BLOCKED", result)
+            self._reject_event(event, "RISK_GUARD", "RISK_GUARD_BLOCKED", result, decision_time=decision_time)
             return
         submit_result = self._submit(event, decision_time.astimezone(UTC))
         receipt = _submission_receipt(event, submit_result)
         if receipt is None or not _receipt_matches_event(event, receipt):
             reason = receipt.reason if receipt is not None and receipt.reason else "EVENT_SUBMISSION_RECEIPT_MISSING_OR_UNBOUND"
-            self._reject_event(event, "EXECUTOR_EXPRESSIBILITY", reason, result, receipt=receipt)
+            self._reject_event(event, "EXECUTOR_EXPRESSIBILITY", reason, result, receipt=receipt, decision_time=decision_time)
             return
         proof_stage, proof_reason = _receipt_money_path_blocker(receipt)
         if proof_stage is not None:
-            self._reject_event(event, proof_stage, proof_reason, result, receipt=receipt)
+            self._reject_event(event, proof_stage, proof_reason, result, receipt=receipt, decision_time=decision_time)
             return
         if receipt.side_effect_status != "NO_SUBMIT" and not self._config.real_order_submit_enabled:
-            self._reject_event(event, "EXECUTOR_EXPRESSIBILITY", "EDLI_REAL_ORDER_SUBMIT_DISABLED", result, receipt=receipt)
+            self._reject_event(event, "EXECUTOR_EXPRESSIBILITY", "EDLI_REAL_ORDER_SUBMIT_DISABLED", result, receipt=receipt, decision_time=decision_time)
             return
         if (
             event.event_type == "DAY0_EXTREME_UPDATED"
@@ -196,7 +211,7 @@ class OpportunityEventReactor:
         ):
             cap_decision = self._day0_tiny_cap_decision(event, decision_time=decision_time)
             if not cap_decision.allowed:
-                self._reject_event(event, "LIVE_CAP", cap_decision.reason, result, receipt=receipt)
+                self._reject_event(event, "LIVE_CAP", cap_decision.reason, result, receipt=receipt, decision_time=decision_time)
                 return
             self._day0_live_orders_today += 1
             self._live_cap_ledger.reserve_day0(
@@ -205,11 +220,18 @@ class OpportunityEventReactor:
                 notional_usd=self._config.tiny_live_max_notional_usd,
             )
         if receipt.side_effect_status == "NO_SUBMIT":
+            proof_bundle = receipt.decision_proof_bundle
+            if proof_bundle is None:
+                proof_bundle = self._build_transition_proof_bundle(
+                    event,
+                    receipt,
+                    decision_time=decision_time,
+                )
             compile_result = self._decision_compiler.compile_no_submit(
                 event,
                 decision_time=decision_time,
                 mode="NO_SUBMIT",
-                receipt=receipt,
+                proof_bundle=proof_bundle,
             )
             self._decision_certificate_ledger.persist_all(compile_result.certificates)
             self._decision_certificate_ledger.persist_failures(compile_result.failures)
@@ -219,7 +241,7 @@ class OpportunityEventReactor:
                     if compile_result.failures
                     else "NO_SUBMIT_CERTIFICATE_REJECTED"
                 )
-                self._reject_event(event, "DECISION_CERTIFICATE", reason, result, receipt=receipt)
+                self._reject_event(event, "DECISION_CERTIFICATE", reason, result, receipt=receipt, decision_time=decision_time)
                 return
             self._no_submit_receipt_ledger.insert_idempotent(receipt, decision_time=decision_time)
         result.proof_accepted += 1
@@ -232,11 +254,42 @@ class OpportunityEventReactor:
         result: ReactorResult,
         *,
         receipt: EventSubmissionReceipt | None = None,
+        decision_time: datetime | None = None,
     ) -> None:
         self._reject(event, stage, reason)
+        if decision_time is not None:
+            self._write_compile_failure(event, stage, reason, decision_time=decision_time, receipt=receipt)
         self._write_regret(event, stage, reason, receipt=receipt)
         result.rejected += 1
         result.rejection_reasons.append(reason)
+
+    def _write_compile_failure(
+        self,
+        event: OpportunityEvent,
+        stage: str,
+        reason: str,
+        *,
+        decision_time: datetime,
+        receipt: EventSubmissionReceipt | None = None,
+    ) -> None:
+        from src.decision_kernel.ledger import CompileFailure
+
+        parent_hashes = ()
+        if receipt is not None and receipt.final_intent_id:
+            parent_hashes = (receipt.final_intent_id,)
+        self._decision_certificate_ledger.persist_failures(
+            (
+                CompileFailure(
+                    event_id=event.event_id,
+                    decision_time=decision_time.astimezone(UTC),
+                    mode="NO_SUBMIT",
+                    claim_type="no_submit_dry_run_decision",
+                    stage=stage,
+                    reason_code=reason,
+                    parent_hashes=parent_hashes,
+                ),
+            )
+        )
 
     def _write_regret(
         self,

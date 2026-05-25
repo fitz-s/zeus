@@ -15,6 +15,9 @@ from decimal import Decimal
 from typing import Any, Callable
 
 from src.contracts.execution_price import ExecutionPrice
+from src.decision_kernel import claims
+from src.decision_kernel.canonicalization import stable_hash
+from src.decision_kernel.compiler import AuthorityEvidence, EvidenceClock, NoSubmitProofBundle
 from src.engine.event_bound_final_intent import (
     EventBoundFinalIntent,
     build_event_bound_final_intent_receipt,
@@ -553,12 +556,34 @@ def build_event_bound_no_submit_receipt(
             "family_complete": True,
         }
     )
-    return _event_submission_receipt_from_typed_receipt_payload(raw_receipt, event)
+    proof_bundle = _build_no_submit_proof_bundle_from_adapter_evidence(
+        event=event,
+        payload=payload,
+        decision_time=decision_time,
+        family=family,
+        family_topology_rows=family_topology_rows,
+        family_snapshot_rows=family_rows,
+        selected_snapshot_row=row,
+        proof=proof,
+        raw_receipt=raw_receipt,
+        fdr=fdr,
+        kelly=kelly,
+        risk=risk,
+        bankroll_usd=bankroll_usd,
+        kelly_multiplier=kelly_multiplier,
+    )
+    return _event_submission_receipt_from_typed_receipt_payload(
+        raw_receipt,
+        event,
+        decision_proof_bundle=proof_bundle,
+    )
 
 
 def _event_submission_receipt_from_typed_receipt_payload(
     raw_receipt: dict[str, Any],
     event: OpportunityEvent,
+    *,
+    decision_proof_bundle: NoSubmitProofBundle | None = None,
 ) -> EventSubmissionReceipt:
     schema = str(raw_receipt.get("schema") or "")
     if schema != "edli_event_bound_no_submit_v1":
@@ -614,6 +639,307 @@ def _event_submission_receipt_from_typed_receipt_payload(
         side_effect_status="NO_SUBMIT",
         reason=str(raw_receipt.get("reason") or "event_bound_final_intent_no_submit"),
         proof_accepted=bool(raw_receipt.get("proof_accepted")),
+        decision_proof_bundle=decision_proof_bundle,
+    )
+
+
+def _build_no_submit_proof_bundle_from_adapter_evidence(
+    *,
+    event: OpportunityEvent,
+    payload: dict[str, object],
+    decision_time: datetime,
+    family,
+    family_topology_rows: list[dict[str, Any]],
+    family_snapshot_rows: list[dict[str, Any]],
+    selected_snapshot_row: dict[str, Any],
+    proof: _CandidateProof,
+    raw_receipt: dict[str, Any],
+    fdr,
+    kelly,
+    risk,
+    bankroll_usd: float,
+    kelly_multiplier: float,
+) -> NoSubmitProofBundle:
+    event_clock = EvidenceClock(
+        source_available_at=_parse_utc(event.available_at) or decision_time,
+        agent_received_at=_parse_utc(event.received_at) or decision_time,
+        persisted_at=_parse_utc(event.created_at) or decision_time,
+    )
+    decision_clock = EvidenceClock(decision_time, decision_time, decision_time)
+    quote_clock = _evidence_clock_from_row(selected_snapshot_row, fallback=decision_time)
+    forecast_clock = EvidenceClock(
+        source_available_at=_parse_utc(payload.get("available_at")) or event_clock.source_available_at,
+        agent_received_at=_parse_utc(payload.get("received_at")) or event_clock.agent_received_at,
+        persisted_at=event_clock.persisted_at,
+    )
+    projection = {
+        "event_id": raw_receipt.get("event_id"),
+        "final_intent_id": raw_receipt.get("final_intent_id"),
+        "side_effect_status": raw_receipt.get("side_effect_status"),
+        "proof_accepted": raw_receipt.get("proof_accepted"),
+        "submitted": raw_receipt.get("submitted"),
+    }
+    projection["projection_hash"] = stable_hash(projection)
+    condition_ids = tuple(str(row.get("condition_id") or "") for row in family_topology_rows)
+    executable_snapshot_ids = tuple(sorted(str(row.get("snapshot_id") or "") for row in family_snapshot_rows))
+    hypothesis_id = f"{family.family_id}:{proof.token_id}"
+    execution_price = proof.execution_price
+    return NoSubmitProofBundle(
+        final_intent_id=str(raw_receipt.get("final_intent_id") or ""),
+        source_truth=AuthorityEvidence(
+            claims.SOURCE_TRUTH,
+            "source_truth",
+            "source_truth",
+            {
+                "identity": event.source,
+                "event_source": event.source,
+                "event_type": event.event_type,
+                "source_status": "MATCH",
+                "causal_snapshot_id": event.causal_snapshot_id,
+            },
+            event_clock,
+            "zeus.events.source_truth_gate",
+            algorithm_id="decision_kernel.source_truth.event_bound_adapter",
+        ),
+        market_topology=AuthorityEvidence(
+            claims.MARKET_TOPOLOGY,
+            "market_topology",
+            "market_topology",
+            {
+                "identity": family.family_id,
+                "family_id": family.family_id,
+                "condition_ids": condition_ids,
+                "candidate_count": len(tuple(family.candidates)),
+                "source_table": "market_events_v2",
+            },
+            event_clock,
+            "zeus.forecasts.market_events_v2",
+            algorithm_id="decision_kernel.topology.event_bound_adapter",
+        ),
+        family_closure=AuthorityEvidence(
+            claims.FAMILY_CLOSURE,
+            "family_closure",
+            "family_closure",
+            {
+                "identity": family.family_id,
+                "family_id": family.family_id,
+                "condition_ids": condition_ids,
+                "yes_token_ids": tuple(family.yes_token_ids),
+                "no_token_ids": tuple(family.no_token_ids),
+                "sibling_hypothesis_count": len(tuple(family.yes_token_ids)) + len(tuple(family.no_token_ids)),
+                "family_complete": True,
+            },
+            event_clock,
+            "zeus.events.candidate_binding",
+            algorithm_id="decision_kernel.family_closure.event_bound_adapter",
+        ),
+        forecast_authority=AuthorityEvidence(
+            claims.FORECAST_AUTHORITY,
+            "forecast_authority",
+            "forecast_authority",
+            {
+                "identity": event.causal_snapshot_id,
+                "snapshot_id": event.causal_snapshot_id,
+                "reader_authority": "read_executable_forecast",
+                "city": family.city,
+                "target_date": family.target_date,
+                "metric": family.metric,
+                "source_run_id": payload.get("source_run_id"),
+            },
+            forecast_clock,
+            "zeus.data.executable_forecast_reader",
+            algorithm_id="decision_kernel.forecast_authority.event_bound_adapter",
+        ),
+        calibration=AuthorityEvidence(
+            claims.CALIBRATION,
+            "calibration",
+            "calibration",
+            {
+                "identity": f"{family.city}:{family.metric}:{family.target_date}",
+                "city": family.city,
+                "metric": family.metric,
+                "calibration_authority": "calibration.manager.get_calibrator",
+                "p_cal_source": "event_bound_snapshot_calibrator",
+            },
+            decision_clock,
+            "zeus.calibration.manager",
+            algorithm_id="decision_kernel.calibration.event_bound_adapter",
+        ),
+        model_config=AuthorityEvidence(
+            claims.MODEL_CONFIG,
+            "model_config",
+            "model_config",
+            {
+                "identity": "event_bound_no_submit_v1",
+                "posterior_mode": MODEL_ONLY_POSTERIOR_MODE,
+                "edge_bootstrap_n": edge_n_bootstrap(),
+                "kelly_multiplier": kelly_multiplier,
+            },
+            decision_clock,
+            "zeus.config.settings",
+            algorithm_id="decision_kernel.model_config.event_bound_adapter",
+        ),
+        belief=AuthorityEvidence(
+            claims.BELIEF,
+            "belief",
+            "belief",
+            {
+                "identity": hypothesis_id,
+                "q_live": proof.q_posterior,
+                "q_lcb_5pct": proof.q_lcb_5pct,
+                "p_value": proof.p_value,
+                "passed_prefilter": proof.passed_prefilter,
+            },
+            forecast_clock,
+            "zeus.strategy.market_analysis_family_scan",
+            algorithm_id="decision_kernel.belief.event_bound_adapter",
+        ),
+        executable_snapshot=AuthorityEvidence(
+            claims.EXECUTABLE_SNAPSHOT,
+            "executable_snapshot",
+            "executable_snapshot",
+            {
+                "identity": proof.executable_snapshot_id,
+                "selected_snapshot_id": proof.executable_snapshot_id,
+                "family_snapshot_ids": executable_snapshot_ids,
+                "condition_id": raw_receipt.get("condition_id"),
+                "token_id": raw_receipt.get("token_id"),
+                "freshness_deadline": selected_snapshot_row.get("freshness_deadline"),
+            },
+            quote_clock,
+            "zeus.trades.executable_market_snapshots",
+            algorithm_id="decision_kernel.executable_snapshot.event_bound_adapter",
+        ),
+        quote_feasibility=AuthorityEvidence(
+            claims.QUOTE_FEASIBILITY,
+            "quote_feasibility",
+            "quote_feasibility",
+            {
+                "identity": hypothesis_id,
+                "condition_id": raw_receipt.get("condition_id"),
+                "token_id": raw_receipt.get("token_id"),
+                "direction": proof.direction,
+                "native_quote_available": proof.native_quote_available,
+                "execution_price_type": execution_price.__class__.__name__ if execution_price is not None else None,
+                "execution_price_value": execution_price.value if execution_price is not None else None,
+                "fee_deducted": execution_price.fee_deducted if execution_price is not None else None,
+                "p_fill_lcb": proof.p_fill_lcb,
+            },
+            quote_clock,
+            "zeus.strategy.live_inference.executable_cost",
+            algorithm_id="decision_kernel.quote_feasibility.event_bound_adapter",
+        ),
+        cost_model=AuthorityEvidence(
+            claims.COST_MODEL,
+            "cost_model",
+            "cost_model",
+            {
+                "identity": str(raw_receipt.get("kelly_cost_basis_id") or hypothesis_id),
+                "cost_basis_id": raw_receipt.get("kelly_cost_basis_id"),
+                "execution_price_type": execution_price.__class__.__name__ if execution_price is not None else None,
+                "price_fee_deducted": execution_price.fee_deducted if execution_price is not None else None,
+                "c_fee_adjusted": raw_receipt.get("c_fee_adjusted"),
+                "c_cost_95pct": proof.c_cost_95pct,
+            },
+            quote_clock,
+            "zeus.contracts.execution_price",
+            algorithm_id="decision_kernel.cost_model.event_bound_adapter",
+        ),
+        pre_trade_evidence=AuthorityEvidence(
+            claims.PRE_TRADE_EVIDENCE,
+            "pre_trade_evidence",
+            "pre_trade_evidence",
+            {
+                "identity": hypothesis_id,
+                "quote_edge_bound": proof.trade_score,
+                "conditional_edge_given_fill": None,
+                "no_submit_trade_score_evidence": proof.trade_score,
+                "actionable_trade_score": 0.0,
+            },
+            decision_clock,
+            "zeus.strategy.market_analysis_family_scan",
+            algorithm_id="decision_kernel.pre_trade_evidence.event_bound_adapter",
+        ),
+        candidate_evidence=AuthorityEvidence(
+            claims.CANDIDATE_EVIDENCE,
+            "candidate_evidence",
+            "candidate_evidence",
+            {
+                "identity": hypothesis_id,
+                "candidate_id": raw_receipt.get("candidate_id"),
+                "family_id": family.family_id,
+                "bin_label": raw_receipt.get("bin_label"),
+                "selected_token_id": proof.token_id,
+                "direction": proof.direction,
+            },
+            decision_clock,
+            "zeus.events.decision_engine",
+            algorithm_id="decision_kernel.candidate_evidence.event_bound_adapter",
+        ),
+        testing_protocol=AuthorityEvidence(
+            claims.TESTING_PROTOCOL,
+            "testing_protocol",
+            "testing_protocol",
+            {
+                "identity": family.family_id,
+                "testing_protocol_id": f"edli_testing:{family.family_id}",
+                "family_id": family.family_id,
+                "mode": "FIXED_WINDOW_BH",
+                "optional_stopping_valid": True,
+                "sibling_hypothesis_count": fdr.attempted_hypotheses,
+            },
+            decision_clock,
+            "zeus.strategy.fdr_filter",
+            algorithm_id="decision_kernel.testing_protocol.event_bound_adapter",
+        ),
+        fdr=AuthorityEvidence(
+            claims.FDR,
+            "fdr",
+            "fdr",
+            {
+                "identity": fdr.fdr_family_id,
+                "fdr_family_id": fdr.fdr_family_id,
+                "selected_hypotheses": tuple(fdr.selected_hypotheses),
+                "selected_post_fdr": tuple(fdr.selected_post_fdr),
+                "fdr_hypothesis_count": fdr.attempted_hypotheses,
+                "passed": fdr.passed,
+            },
+            decision_clock,
+            "zeus.strategy.fdr_filter",
+            algorithm_id="decision_kernel.fdr.event_bound_adapter",
+        ),
+        kelly_dry_run=AuthorityEvidence(
+            claims.KELLY_DRY_RUN,
+            "kelly_dry_run",
+            "kelly_dry_run",
+            {
+                "identity": kelly.kelly_decision_id,
+                "kelly_decision_id": kelly.kelly_decision_id,
+                "kelly_size_usd": kelly.size_usd,
+                "bankroll_usd": bankroll_usd,
+                "kelly_multiplier": kelly_multiplier,
+                "execution_price_type": execution_price.__class__.__name__ if execution_price is not None else None,
+                "price_fee_deducted": execution_price.fee_deducted if execution_price is not None else None,
+            },
+            decision_clock,
+            "zeus.strategy.kelly",
+            algorithm_id="decision_kernel.kelly.event_bound_adapter",
+        ),
+        risk_level=AuthorityEvidence(
+            claims.RISK_LEVEL,
+            "risk_level",
+            "risk_level",
+            {
+                "identity": risk.risk_decision_id,
+                "risk_decision_id": risk.risk_decision_id,
+                "risk_level": risk.level.name,
+                "passed": risk.passed,
+            },
+            decision_clock,
+            "zeus.riskguard.risk_level",
+            algorithm_id="decision_kernel.risk.event_bound_adapter",
+        ),
+        no_submit_projection=projection,
     )
 
 
@@ -1579,6 +1905,28 @@ def _parse_utc(value: object) -> datetime | None:
     if parsed.tzinfo is None or parsed.utcoffset() is None:
         return None
     return parsed.astimezone(UTC)
+
+
+def _evidence_clock_from_row(row: dict[str, Any], *, fallback: datetime) -> EvidenceClock:
+    source_time = (
+        _parse_utc(row.get("book_timestamp"))
+        or _parse_utc(row.get("captured_at"))
+        or _parse_utc(row.get("source_available_at"))
+        or fallback
+    )
+    agent_time = (
+        _parse_utc(row.get("received_at"))
+        or _parse_utc(row.get("agent_received_at"))
+        or _parse_utc(row.get("captured_at"))
+        or source_time
+    )
+    persisted_time = (
+        _parse_utc(row.get("persisted_at"))
+        or _parse_utc(row.get("created_at"))
+        or _parse_utc(row.get("inserted_at"))
+        or agent_time
+    )
+    return EvidenceClock(source_time, agent_time, persisted_time)
 
 
 def _forecast_snapshot_reader_block_reason(

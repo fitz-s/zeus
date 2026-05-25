@@ -166,6 +166,51 @@ def test_reactor_persists_no_submit_certificate_before_processed():
     assert len(_submitted) == 1
 
 
+def test_source_truth_block_writes_decision_compile_failure():
+    conn, store = _store()
+    event = _day0_event()
+    store.insert_or_ignore(event)
+    reactor, _rejected, _submitted = _reactor(store, gates=False)
+
+    result = reactor.process_pending(decision_time=datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc))
+
+    assert result.rejected == 1
+    failure = conn.execute(
+        """
+        SELECT stage, reason_code
+        FROM decision_compile_failures
+        WHERE event_id = ?
+        """,
+        (event.event_id,),
+    ).fetchone()
+    assert failure is not None
+    assert failure[0] == "SOURCE_TRUTH"
+    assert failure[1] == "SOURCE_TRUTH_BLOCKED"
+
+
+def test_receipt_insert_failure_does_not_leave_verified_orphan_certificate_graph():
+    conn, store = _store()
+    event = _day0_event()
+    store.insert_or_ignore(event)
+    reactor, _rejected, _submitted = _reactor(store)
+
+    def _raise(*_args, **_kwargs):
+        raise RuntimeError("projection insert failed")
+
+    reactor._no_submit_receipt_ledger.insert_idempotent = _raise  # type: ignore[method-assign]
+
+    result = reactor.process_pending(decision_time=datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc))
+
+    assert result.dead_lettered == 1
+    assert conn.execute("SELECT COUNT(*) FROM decision_certificates").fetchone()[0] == 0
+    failure = conn.execute(
+        "SELECT reason_code FROM decision_compile_failures WHERE event_id = ?",
+        (event.event_id,),
+    ).fetchone()
+    assert failure is not None
+    assert "projection insert failed" in failure[0]
+
+
 def test_successful_no_submit_receipt_is_persisted_before_processed():
     conn, store = _store()
     event = _day0_event()

@@ -38,7 +38,10 @@ def verify_no_submit_decision(cert: DecisionCertificate, parents: Iterable[Decis
         raise CertificateVerificationError("no-submit decision must use NO_SUBMIT mode")
     _forbid_no_submit_payload(cert)
     parent_types = {parent.certificate_type for parent in parent_tuple}
-    missing = claims.NO_SUBMIT_REQUIRED_TYPES - parent_types
+    required = claims.NO_SUBMIT_REQUIRED_TYPES
+    if cert.payload.get("decision_source") == "forecast":
+        required = claims.NO_SUBMIT_FORECAST_REQUIRED_TYPES
+    missing = required - parent_types
     if missing:
         raise CertificateVerificationError(f"no-submit decision missing parents: {sorted(missing)}")
     forbidden = claims.NO_SUBMIT_FORBIDDEN_TYPES & parent_types

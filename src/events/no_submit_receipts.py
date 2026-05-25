@@ -125,4 +125,5 @@ def _receipt_id(receipt: EventSubmissionReceipt) -> str:
 
 def _receipt_json(receipt: EventSubmissionReceipt) -> str:
     payload: dict[str, Any] = asdict(receipt)
+    payload.pop("decision_proof_bundle", None)
     return json.dumps(payload, sort_keys=True, separators=(",", ":"))

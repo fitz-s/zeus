@@ -39,11 +39,13 @@ class CompileFailure:
 class DecisionCertificateLedger:
     def __init__(self, conn: sqlite3.Connection) -> None:
         self.conn = conn
+        self._schema_ready = False
 
     def ensure_schema(self) -> None:
         from src.state.schema.decision_certificates_schema import ensure_tables
 
         ensure_tables(self.conn)
+        self._schema_ready = True
 
     def persist_all(self, certificates: tuple[DecisionCertificate, ...]) -> None:
         by_hash = {cert.certificate_hash: cert for cert in certificates}
@@ -57,7 +59,8 @@ class DecisionCertificateLedger:
             self.insert_idempotent(cert)
 
     def insert_idempotent(self, cert: DecisionCertificate) -> str:
-        self.ensure_schema()
+        if not self._schema_ready:
+            self.ensure_schema()
         existing = self.conn.execute(
             """
             SELECT certificate_id, certificate_hash
@@ -141,7 +144,8 @@ class DecisionCertificateLedger:
         return cert.header.certificate_id
 
     def persist_failures(self, failures: tuple[CompileFailure, ...]) -> None:
-        self.ensure_schema()
+        if not self._schema_ready:
+            self.ensure_schema()
         for failure in failures:
             self.conn.execute(
                 """

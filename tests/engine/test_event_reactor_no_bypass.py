@@ -13,6 +13,7 @@ from types import SimpleNamespace
 
 import numpy as np
 
+from src.decision_kernel import claims
 from src.engine.event_reactor_adapter import (
     build_event_bound_no_submit_receipt,
     edli_source_truth_gate,
@@ -720,6 +721,10 @@ def test_runtime_receipt_uses_event_bound_final_intent_contract():
     assert receipt.kelly_price_fee_deducted is True
     assert receipt.kelly_size_usd > 0
     assert receipt.side_effect_status == "NO_SUBMIT"
+    assert receipt.decision_proof_bundle is not None
+    assert receipt.decision_proof_bundle.forecast_authority.certificate_type == claims.FORECAST_AUTHORITY
+    assert "receipt_projection" not in receipt.decision_proof_bundle.fdr.payload
+    assert receipt.decision_proof_bundle.quote_feasibility.payload["execution_price_type"] == "ExecutionPrice"
 
 
 def test_forecast_trigger_event_without_q_or_token_fields_builds_no_submit_receipt():
