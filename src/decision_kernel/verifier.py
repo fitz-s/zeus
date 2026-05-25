@@ -115,6 +115,48 @@ def verify_execution_command(cert: DecisionCertificate, parents: Iterable[Decisi
     _verify_execution_command_payload(cert, parent_tuple)
 
 
+def verify_final_intent(cert: DecisionCertificate, parents: Iterable[DecisionCertificate]) -> None:
+    parent_tuple = tuple(parents)
+    verify_certificate(cert, parent_tuple)
+    if cert.certificate_type != claims.FINAL_INTENT:
+        raise CertificateVerificationError("expected FinalIntentCertificate")
+    if cert.header.mode != "LIVE":
+        raise CertificateVerificationError("final intent must use LIVE mode")
+    parent_types = {parent.certificate_type for parent in parent_tuple}
+    missing = claims.FINAL_INTENT_REQUIRED_TYPES - parent_types
+    if missing:
+        raise CertificateVerificationError(f"final intent missing parents: {sorted(missing)}")
+    _verify_final_intent_payload(cert, parent_tuple)
+
+
+def verify_executor_expressibility(cert: DecisionCertificate, parents: Iterable[DecisionCertificate]) -> None:
+    parent_tuple = tuple(parents)
+    verify_certificate(cert, parent_tuple)
+    if cert.certificate_type != claims.EXECUTOR_EXPRESSIBILITY:
+        raise CertificateVerificationError("expected ExecutorExpressibilityCertificate")
+    if cert.header.mode != "LIVE":
+        raise CertificateVerificationError("executor expressibility must use LIVE mode")
+    parent_types = {parent.certificate_type for parent in parent_tuple}
+    missing = claims.EXECUTOR_EXPRESSIBILITY_REQUIRED_TYPES - parent_types
+    if missing:
+        raise CertificateVerificationError(f"executor expressibility missing parents: {sorted(missing)}")
+    _verify_executor_expressibility_payload(cert, parent_tuple)
+
+
+def verify_execution_receipt(cert: DecisionCertificate, parents: Iterable[DecisionCertificate]) -> None:
+    parent_tuple = tuple(parents)
+    verify_certificate(cert, parent_tuple)
+    if cert.certificate_type != claims.EXECUTION_RECEIPT:
+        raise CertificateVerificationError("expected ExecutionReceiptCertificate")
+    if cert.header.mode != "LIVE":
+        raise CertificateVerificationError("execution receipt must use LIVE mode")
+    parent_types = {parent.certificate_type for parent in parent_tuple}
+    missing = claims.EXECUTION_RECEIPT_REQUIRED_TYPES - parent_types
+    if missing:
+        raise CertificateVerificationError(f"execution receipt missing parents: {sorted(missing)}")
+    _verify_execution_receipt_payload(cert, parent_tuple)
+
+
 def assert_market_channel_not_fill(cert: DecisionCertificate) -> None:
     if (
         cert.certificate_type == claims.FILL
@@ -355,6 +397,137 @@ def _verify_execution_command_payload(
         raise CertificateVerificationError("execution command must be post_only maker intent for current executor law")
     if "neg_risk" in actionable and payload.get("neg_risk") != actionable.get("neg_risk"):
         raise CertificateVerificationError("execution command neg_risk mismatch")
+
+
+def _verify_final_intent_payload(
+    cert: DecisionCertificate,
+    parents: tuple[DecisionCertificate, ...],
+) -> None:
+    payload = cert.payload
+    parent = _parents_by_type(parents)
+    actionable_cert = parent.get(claims.ACTIONABLE_TRADE)
+    if actionable_cert is None:
+        raise CertificateVerificationError("final intent missing actionable parent")
+    actionable = actionable_cert.payload
+    if payload.get("submitted") is True:
+        raise CertificateVerificationError("final intent cannot be submitted before execution command")
+    if payload.get("venue_order_id") not in (None, ""):
+        raise CertificateVerificationError("final intent cannot carry venue_order_id before submit")
+    _require_equal(
+        "final_intent.actionable_certificate_hash",
+        payload.get("actionable_certificate_hash"),
+        "actionable.certificate_hash",
+        actionable_cert.certificate_hash,
+    )
+    for field in (
+        "event_id",
+        "family_id",
+        "candidate_id",
+        "condition_id",
+        "token_id",
+        "direction",
+        "final_intent_id",
+        "executable_snapshot_id",
+    ):
+        _require_equal(f"final_intent.{field}", payload.get(field), f"actionable.{field}", actionable.get(field))
+    limit_price = _finite_float(payload.get("limit_price"), "final intent limit_price")
+    size = _finite_float(payload.get("size"), "final intent size")
+    notional = _finite_float(payload.get("notional_usd"), "final intent notional_usd")
+    if size <= 0:
+        raise CertificateVerificationError("final intent size must be positive")
+    if limit_price <= 0.0 or limit_price >= 1.0:
+        raise CertificateVerificationError("final intent limit_price must be in (0, 1)")
+    if notional <= 0:
+        raise CertificateVerificationError("final intent notional_usd must be positive")
+    reserved_notional = actionable.get("live_cap_reserved_notional_usd")
+    if reserved_notional is not None and notional > _finite_float(reserved_notional, "actionable live_cap_reserved_notional_usd"):
+        raise CertificateVerificationError("final intent notional_usd exceeds live cap reserved notional")
+    if payload.get("order_type") not in {"LIMIT", "GTC_LIMIT", "POST_ONLY_LIMIT"}:
+        raise CertificateVerificationError("final intent order_type unsupported")
+    if payload.get("time_in_force") not in {"GTC", "GTD"}:
+        raise CertificateVerificationError("final intent time_in_force unsupported")
+    if payload.get("post_only") is not True or payload.get("maker_intent") is not True:
+        raise CertificateVerificationError("final intent must preserve passive maker executor law")
+    if payload.get("source") != "existing_final_intent_builder":
+        raise CertificateVerificationError("final intent source must be existing_final_intent_builder")
+
+
+def _verify_executor_expressibility_payload(
+    cert: DecisionCertificate,
+    parents: tuple[DecisionCertificate, ...],
+) -> None:
+    payload = cert.payload
+    parent = _parents_by_type(parents)
+    final_intent = _required_parent_payload(parent, claims.FINAL_INTENT)
+    executable = _required_parent_payload(parent, claims.EXECUTABLE_SNAPSHOT)
+    live_cap = _required_parent_payload(parent, claims.LIVE_CAP)
+    if payload.get("can_express") is not True:
+        raise CertificateVerificationError("executor expressibility can_express must be true")
+    if payload.get("passed") is not True:
+        raise CertificateVerificationError("executor expressibility passed must be true")
+    if payload.get("reason_code") not in (None, "", "OK"):
+        raise CertificateVerificationError("executor expressibility reason_code must be empty or OK")
+    for field in ("final_intent_id", "token_id", "condition_id", "direction", "order_type", "time_in_force"):
+        _require_equal(f"executor_expressibility.{field}", payload.get(field), f"final_intent.{field}", final_intent.get(field))
+    if executable.get("condition_id") not in (None, ""):
+        _require_equal("executor_expressibility.condition_id", payload.get("condition_id"), "executable.condition_id", executable.get("condition_id"))
+    if executable.get("token_id") not in (None, ""):
+        _require_equal("executor_expressibility.token_id", payload.get("token_id"), "executable.token_id", executable.get("token_id"))
+    if "neg_risk" in executable and payload.get("neg_risk") != executable.get("neg_risk"):
+        raise CertificateVerificationError("executor expressibility neg_risk mismatch")
+    _require_equal("live_cap.usage_id", live_cap.get("usage_id"), "final_intent.live_cap_usage_id", final_intent.get("live_cap_usage_id"))
+    if live_cap.get("reservation_status") != "RESERVED":
+        raise CertificateVerificationError("executor expressibility live cap must be RESERVED")
+    tick_size = _finite_float(payload.get("tick_size"), "executor expressibility tick_size")
+    limit_price = _finite_float(payload.get("limit_price"), "executor expressibility limit_price")
+    size = _finite_float(payload.get("size"), "executor expressibility size")
+    min_order_size = _finite_float(payload.get("min_order_size"), "executor expressibility min_order_size")
+    if tick_size <= 0:
+        raise CertificateVerificationError("executor expressibility tick_size must be positive")
+    if not _is_tick_aligned(limit_price, tick_size):
+        raise CertificateVerificationError("executor expressibility limit_price not tick-aligned")
+    if size < min_order_size:
+        raise CertificateVerificationError("executor expressibility size below min_order_size")
+    if payload.get("order_type") not in {"LIMIT", "GTC_LIMIT", "POST_ONLY_LIMIT"}:
+        raise CertificateVerificationError("executor expressibility order_type unsupported")
+    if payload.get("time_in_force") not in {"GTC", "GTD"}:
+        raise CertificateVerificationError("executor expressibility time_in_force unsupported")
+    if payload.get("post_only") is not True or payload.get("maker_intent") is not True:
+        raise CertificateVerificationError("executor expressibility requires passive maker order")
+
+
+def _verify_execution_receipt_payload(
+    cert: DecisionCertificate,
+    parents: tuple[DecisionCertificate, ...],
+) -> None:
+    payload = cert.payload
+    parent = _parents_by_type(parents)
+    command = _required_parent_payload(parent, claims.EXECUTION_COMMAND)
+    for field in ("event_id", "final_intent_id", "execution_command_id", "idempotency_key"):
+        _require_equal(f"execution_receipt.{field}", payload.get(field), f"execution_command.{field}", command.get(field))
+    status = payload.get("status")
+    allowed = {
+        "NOT_SUBMITTED_DRY_RUN",
+        "SUBMIT_DISABLED",
+        "SUBMITTED",
+        "ACCEPTED",
+        "RESTING",
+        "REJECTED",
+        "TIMEOUT_UNKNOWN",
+        "ERROR_UNKNOWN",
+    }
+    if status not in allowed:
+        raise CertificateVerificationError(f"execution receipt status unsupported: {status!r}")
+    if status in {"SUBMIT_DISABLED", "NOT_SUBMITTED_DRY_RUN"}:
+        if payload.get("venue_order_id") not in (None, ""):
+            raise CertificateVerificationError("execution receipt dry status cannot carry venue_order_id")
+        if payload.get("submit_started_at") not in (None, "") or payload.get("submit_finished_at") not in (None, ""):
+            raise CertificateVerificationError("execution receipt dry status cannot carry submit timestamps")
+    if status in {"SUBMITTED", "ACCEPTED", "RESTING"}:
+        if payload.get("submit_started_at") in (None, "") or payload.get("submit_finished_at") in (None, ""):
+            raise CertificateVerificationError("execution receipt submitted status requires submit timestamps")
+    if status == "TIMEOUT_UNKNOWN" and payload.get("reconciliation_followup_required") is not True:
+        raise CertificateVerificationError("execution receipt TIMEOUT_UNKNOWN requires reconciliation follow-up")
 
 
 def _verify_generated_certificate_semantics(cert: DecisionCertificate) -> None:

@@ -41,6 +41,7 @@ FINAL_INTENT = "FinalIntentCertificate"
 EXECUTOR_EXPRESSIBILITY = "ExecutorExpressibilityCertificate"
 ORDER_EXPRESSION = "OrderExpressionCertificate"
 EXECUTION_COMMAND = "ExecutionCommandCertificate"
+EXECUTION_RECEIPT = "ExecutionReceiptCertificate"
 VENUE_SUBMISSION = "VenueSubmissionCertificate"
 USER_CHANNEL_ORDER = "UserChannelOrderCertificate"
 USER_CHANNEL_TRADE = "UserChannelTradeCertificate"
@@ -114,4 +115,18 @@ EXECUTION_COMMAND_REQUIRED_TYPES: frozenset[str] = frozenset({
     FINAL_INTENT,
     EXECUTOR_EXPRESSIBILITY,
     LIVE_CAP,
+})
+
+FINAL_INTENT_REQUIRED_TYPES: frozenset[str] = frozenset({
+    ACTIONABLE_TRADE,
+})
+
+EXECUTOR_EXPRESSIBILITY_REQUIRED_TYPES: frozenset[str] = frozenset({
+    FINAL_INTENT,
+    EXECUTABLE_SNAPSHOT,
+    LIVE_CAP,
+})
+
+EXECUTION_RECEIPT_REQUIRED_TYPES: frozenset[str] = frozenset({
+    EXECUTION_COMMAND,
 })

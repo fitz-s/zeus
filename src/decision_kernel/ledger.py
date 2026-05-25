@@ -15,6 +15,9 @@ from src.decision_kernel.verifier import (
     verify_actionable_trade,
     verify_certificate,
     verify_execution_command,
+    verify_execution_receipt,
+    verify_executor_expressibility,
+    verify_final_intent,
     verify_no_submit_decision,
 )
 
@@ -236,7 +239,16 @@ def _verify_for_persistence(cert: DecisionCertificate, parents: tuple[DecisionCe
     if cert.certificate_type == claims.ACTIONABLE_TRADE:
         verify_actionable_trade(cert, parents)
         return
+    if cert.certificate_type == claims.FINAL_INTENT:
+        verify_final_intent(cert, parents)
+        return
+    if cert.certificate_type == claims.EXECUTOR_EXPRESSIBILITY:
+        verify_executor_expressibility(cert, parents)
+        return
     if cert.certificate_type == claims.EXECUTION_COMMAND:
         verify_execution_command(cert, parents)
+        return
+    if cert.certificate_type == claims.EXECUTION_RECEIPT:
+        verify_execution_receipt(cert, parents)
         return
     verify_certificate(cert, parents)

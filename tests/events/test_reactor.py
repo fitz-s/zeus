@@ -197,8 +197,19 @@ def _terminal_surfaces(conn: sqlite3.Connection, event_id: str) -> dict[str, int
         "SELECT COUNT(*) FROM event_dead_letters WHERE event_id = ?",
         (event_id,),
     ).fetchone()[0]
+    execution_receipt = conn.execute(
+        """
+        SELECT COUNT(*)
+        FROM decision_certificates
+        WHERE certificate_type = 'ExecutionReceiptCertificate'
+          AND verifier_status = 'VERIFIED'
+          AND json_extract(payload_json, '$.event_id') = ?
+        """,
+        (event_id,),
+    ).fetchone()[0]
     return {
         "verified_no_submit": verified_no_submit,
+        "execution_receipt": execution_receipt,
         "compile_failure": compile_failure,
         "regret": regret,
         "dead_letter": dead_letter,
@@ -223,6 +234,150 @@ def test_market_channel_event_no_direct_stale_trade():
     result = reactor.process_pending(decision_time=datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc))
     assert result.rejection_reasons == ["MARKET_CHANNEL_EVENT_NO_DIRECT_STALE_TRADE"]
     assert submitted == []
+
+
+def test_processed_event_terminal_surface_includes_execution_receipt_certificate():
+    from src.decision_kernel.certificates.execution import (
+        build_execution_command_certificate_from_final_intent,
+        build_execution_receipt_certificate,
+        build_executor_expressibility_certificate,
+        build_final_intent_certificate_from_actionable,
+    )
+    from tests.decision_kernel.test_actionable_trade_certificate import actionable_graph
+    from tests.decision_kernel.test_execution_command_certificate import _cert, _live_cap_payload
+    from src.decision_kernel import claims
+
+    conn, store = _store()
+    event = _forecast_event()
+    store.insert_or_ignore(event)
+    decision_time = datetime(2026, 5, 25, 12, 0, tzinfo=timezone.utc)
+    action_parents, action = actionable_graph(
+        action_payload={"event_id": event.event_id, "causal_snapshot_id": event.causal_snapshot_id},
+        parent_overrides={
+            claims.CAUSAL_EVENT: {"event_id": event.event_id, "causal_snapshot_id": event.causal_snapshot_id},
+            claims.SOURCE_TRUTH: {"event_id": event.event_id},
+            claims.LIVE_CAP: {"event_id": event.event_id},
+        },
+    )
+    final_intent = build_final_intent_certificate_from_actionable(
+        actionable_cert=action,
+        decision_time=decision_time,
+    )
+    executable = _cert(
+        claims.EXECUTABLE_SNAPSHOT,
+        "executable:exec-1",
+        {"condition_id": "condition-1", "token_id": "yes-1", "neg_risk": False},
+    )
+    live_cap = _cert(claims.LIVE_CAP, "live-cap:cap-1", {**_live_cap_payload(), "event_id": event.event_id})
+    expressibility = build_executor_expressibility_certificate(
+        final_intent_cert=final_intent,
+        executable_snapshot_cert=executable,
+        live_cap_cert=live_cap,
+        decision_time=decision_time,
+    )
+    command = build_execution_command_certificate_from_final_intent(
+        actionable_cert=action,
+        final_intent_cert=final_intent,
+        executor_expressibility_cert=expressibility,
+        live_cap_cert=live_cap,
+        decision_time=decision_time,
+    )
+    receipt_cert = build_execution_receipt_certificate(execution_command_cert=command, decision_time=decision_time)
+    cert_bundle = action_parents + (action, final_intent, executable, live_cap, expressibility, command, receipt_cert)
+
+    def _submit(_event, _decision_time):
+        return EventSubmissionReceipt(
+            submitted=False,
+            event_id=event.event_id,
+            causal_snapshot_id=event.causal_snapshot_id,
+            city="Chicago",
+            target_date="2026-05-24",
+            metric="high",
+            condition_id="condition-1",
+            token_id="yes-1",
+            executable_snapshot_id="exec-1",
+            family_id="family-1",
+            trade_score_positive=True,
+            fdr_pass=True,
+            fdr_family_id="family-1",
+            fdr_hypothesis_count=1,
+            kelly_pass=True,
+            kelly_execution_price_type="ExecutionPrice",
+            kelly_price_fee_deducted=True,
+            kelly_size_usd=3.0,
+            kelly_cost_basis_id="cost-1",
+            kelly_decision_id="kelly-1",
+            risk_decision_id="risk-1",
+            final_intent_id="intent-1",
+            side_effect_status="SUBMIT_DISABLED",
+            proof_accepted=True,
+            decision_proof_bundle=cert_bundle,
+        )
+
+    reactor = OpportunityEventReactor(
+        store,
+        source_truth_gate=lambda _event: True,
+        executable_snapshot_gate=lambda _event, _decision_time: True,
+        riskguard_gate=lambda _event: True,
+        final_intent_submit=_submit,
+        reject=lambda *_args: None,
+        config=ReactorConfig(real_order_submit_enabled=False),
+        regret_ledger=NoTradeRegretLedger(store.conn),
+    )
+
+    result = reactor.process_pending(decision_time=decision_time)
+
+    assert result.processed == 1
+    assert _terminal_surfaces(conn, event.event_id)["execution_receipt"] == 1
+
+
+def test_processed_event_without_execution_receipt_or_no_submit_or_failure_rejected():
+    conn, store = _store()
+    event = _forecast_event()
+    store.insert_or_ignore(event)
+    rejected = []
+
+    def _submit(_event, _decision_time):
+        return EventSubmissionReceipt(
+            submitted=False,
+            event_id=event.event_id,
+            causal_snapshot_id=event.causal_snapshot_id,
+            city="Chicago",
+            target_date="2026-05-24",
+            metric="high",
+            trade_score_positive=True,
+            fdr_pass=True,
+            fdr_family_id="family-1",
+            fdr_hypothesis_count=1,
+            kelly_pass=True,
+            kelly_execution_price_type="ExecutionPrice",
+            kelly_price_fee_deducted=True,
+            kelly_size_usd=3.0,
+            kelly_cost_basis_id="cost-1",
+            final_intent_id="intent-1",
+            side_effect_status="SUBMIT_DISABLED",
+            proof_accepted=True,
+            decision_proof_bundle=(),
+        )
+
+    reactor = OpportunityEventReactor(
+        store,
+        source_truth_gate=lambda _event: True,
+        executable_snapshot_gate=lambda _event, _decision_time: True,
+        riskguard_gate=lambda _event: True,
+        final_intent_submit=_submit,
+        reject=lambda event, stage, reason: rejected.append((event.event_id, stage, reason)),
+        config=ReactorConfig(real_order_submit_enabled=False),
+        regret_ledger=NoTradeRegretLedger(store.conn),
+    )
+
+    result = reactor.process_pending(decision_time=datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc))
+
+    assert result.rejected == 1
+    assert rejected[0][1] == "EXECUTION_RECEIPT"
+    surfaces = _terminal_surfaces(conn, event.event_id)
+    assert surfaces["execution_receipt"] == 0
+    assert surfaces["compile_failure"] == 1
 
 
 def test_duplicate_event_not_double_counted():
@@ -867,9 +1022,9 @@ def test_processed_event_has_verified_certificate_or_failure_or_regret_or_dead_l
     ).fetchall()
     assert {row[1] for row in rows} == {"processed"}
     expected = {
-        accepted.event_id: {"verified_no_submit": 1, "compile_failure": 0, "regret": 0, "dead_letter": 0},
-        source_rejected.event_id: {"verified_no_submit": 0, "compile_failure": 1, "regret": 1, "dead_letter": 0},
-        market_rejected.event_id: {"verified_no_submit": 0, "compile_failure": 1, "regret": 1, "dead_letter": 0},
+        accepted.event_id: {"verified_no_submit": 1, "execution_receipt": 0, "compile_failure": 0, "regret": 0, "dead_letter": 0},
+        source_rejected.event_id: {"verified_no_submit": 0, "execution_receipt": 0, "compile_failure": 1, "regret": 1, "dead_letter": 0},
+        market_rejected.event_id: {"verified_no_submit": 0, "execution_receipt": 0, "compile_failure": 1, "regret": 1, "dead_letter": 0},
     }
     for event_id, expected_surfaces in expected.items():
         assert _terminal_surfaces(conn, event_id) == expected_surfaces

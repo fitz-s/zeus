@@ -8,7 +8,14 @@ from typing import Literal
 from src.contracts.execution_price import ExecutionPrice
 
 
-SideEffectStatus = Literal["NO_SUBMIT", "INTENT_BUILT", "COMMAND_CREATED", "SUBMITTED"]
+SideEffectStatus = Literal[
+    "NO_SUBMIT",
+    "INTENT_BUILT",
+    "COMMAND_CREATED",
+    "SUBMITTED",
+    "SUBMIT_DISABLED",
+    "NOT_SUBMITTED_DRY_RUN",
+]
 RECEIPT_SCHEMA = "edli_event_bound_no_submit_v1"
 
 

@@ -13,10 +13,12 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable
 
+from src.decision_kernel import claims
 from src.events.event_store import EventStore
 from src.events.opportunity_event import OpportunityEvent, assert_available_for_decision
 
 UTC = timezone.utc
+EXECUTION_RECEIPT_TERMINAL_STATUSES = frozenset({"SUBMIT_DISABLED", "NOT_SUBMITTED_DRY_RUN"})
 
 Gate = Callable[[OpportunityEvent], bool]
 ExecutableSnapshotGate = Callable[[OpportunityEvent, datetime], bool]
@@ -200,7 +202,11 @@ class OpportunityEventReactor:
         if proof_stage is not None:
             self._reject_event(event, proof_stage, proof_reason, result, receipt=receipt, decision_time=decision_time)
             return
-        if receipt.side_effect_status != "NO_SUBMIT" and not self._config.real_order_submit_enabled:
+        if (
+            receipt.side_effect_status != "NO_SUBMIT"
+            and receipt.side_effect_status not in EXECUTION_RECEIPT_TERMINAL_STATUSES
+            and not self._config.real_order_submit_enabled
+        ):
             self._reject_event(event, "EXECUTOR_EXPRESSIBILITY", "EDLI_REAL_ORDER_SUBMIT_DISABLED", result, receipt=receipt, decision_time=decision_time)
             return
         if (
@@ -252,6 +258,12 @@ class OpportunityEventReactor:
                 self._reject_event(event, "DECISION_CERTIFICATE", reason, result, receipt=receipt, decision_time=decision_time)
                 return
             self._no_submit_receipt_ledger.insert_idempotent(receipt, decision_time=decision_time)
+        elif receipt.side_effect_status in EXECUTION_RECEIPT_TERMINAL_STATUSES:
+            certificates = _execution_receipt_certificate_bundle(receipt)
+            if not certificates:
+                self._reject_event(event, "EXECUTION_RECEIPT", "EXECUTION_RECEIPT_CERTIFICATE_REQUIRED", result, receipt=receipt, decision_time=decision_time)
+                return
+            self._decision_certificate_ledger.persist_all(certificates)
         result.proof_accepted += 1
 
     def _reject_event(
@@ -372,6 +384,15 @@ class OpportunityEventReactor:
             max_orders_per_day=self._config.tiny_live_max_orders_per_day,
             max_notional_usd=self._config.tiny_live_max_notional_usd,
         )
+
+
+def _execution_receipt_certificate_bundle(receipt: EventSubmissionReceipt) -> tuple[Any, ...]:
+    bundle = receipt.decision_proof_bundle
+    if not isinstance(bundle, tuple):
+        return ()
+    if not any(getattr(cert, "certificate_type", None) == claims.EXECUTION_RECEIPT for cert in bundle):
+        return ()
+    return bundle
 
 
 def _payload_dict(event: OpportunityEvent) -> dict[str, Any]:

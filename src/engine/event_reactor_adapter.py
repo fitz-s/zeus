@@ -17,7 +17,16 @@ from typing import Any, Callable
 from src.contracts.execution_price import ExecutionPrice
 from src.decision_kernel import claims
 from src.decision_kernel.canonicalization import stable_hash
+from src.decision_kernel.certificate import DecisionCertificate, build_certificate
+from src.decision_kernel.certificates.action import build_actionable_trade_certificate
+from src.decision_kernel.certificates.execution import (
+    build_execution_command_certificate_from_final_intent,
+    build_execution_receipt_certificate,
+    build_executor_expressibility_certificate,
+    build_final_intent_certificate_from_actionable,
+)
 from src.decision_kernel.compiler import (
+    DecisionCompiler,
     FORECAST_LIVE_ELIGIBLE_STATUS,
     AuthorityEvidence,
     EvidenceClock,
@@ -197,6 +206,105 @@ def event_bound_no_submit_adapter_from_trade_conn(
             calibration_conn=calibration_conn,
             get_current_level=get_current_level,
             bankroll_usd_provider=bankroll_usd_provider,
+        )
+
+    return _submit
+
+
+def event_bound_live_adapter_from_trade_conn(
+    trade_conn: sqlite3.Connection,
+    *,
+    get_current_level: Callable[[], RiskLevel],
+    forecast_conn: sqlite3.Connection | None = None,
+    topology_conn: sqlite3.Connection | None = None,
+    calibration_conn: sqlite3.Connection | None = None,
+    bankroll_usd_provider: Callable[[], float | None] | None = None,
+    real_order_submit_enabled: bool = False,
+    tiny_live_max_notional_usd: float = 5.0,
+) -> Callable[[OpportunityEvent, datetime], EventSubmissionReceipt]:
+    """Build the event-bound live certificate chain up to the executor boundary.
+
+    This first full-live increment deliberately stops before executor submit
+    when real submit is disabled. It creates the durable proof shape that a
+    later live-canary cut can submit through the existing executor seam.
+    """
+
+    def _submit(event: OpportunityEvent, decision_time: datetime) -> EventSubmissionReceipt:
+        no_submit_receipt = build_event_bound_no_submit_receipt(
+            event,
+            trade_conn=trade_conn,
+            decision_time=decision_time,
+            forecast_conn=forecast_conn,
+            topology_conn=topology_conn,
+            calibration_conn=calibration_conn,
+            get_current_level=get_current_level,
+            bankroll_usd_provider=bankroll_usd_provider,
+        )
+        if no_submit_receipt.proof_accepted is not True or no_submit_receipt.decision_proof_bundle is None:
+            return no_submit_receipt
+        if real_order_submit_enabled:
+            return EventSubmissionReceipt(
+                False,
+                event.event_id,
+                event.causal_snapshot_id,
+                reason="EDLI_LIVE_SUBMIT_NOT_WIRED_IN_THIS_INCREMENT",
+                proof_accepted=False,
+            )
+        try:
+            certificates = _build_submit_disabled_live_certificates(
+                event=event,
+                receipt=no_submit_receipt,
+                decision_time=decision_time.astimezone(UTC),
+                tiny_live_max_notional_usd=tiny_live_max_notional_usd,
+            )
+        except Exception as exc:
+            return EventSubmissionReceipt(
+                False,
+                event.event_id,
+                event.causal_snapshot_id,
+                reason=f"EDLI_LIVE_CERTIFICATE_BUILD_FAILED:{exc}",
+                proof_accepted=False,
+            )
+        return EventSubmissionReceipt(
+            submitted=False,
+            event_id=no_submit_receipt.event_id,
+            causal_snapshot_id=no_submit_receipt.causal_snapshot_id,
+            city=no_submit_receipt.city,
+            target_date=no_submit_receipt.target_date,
+            metric=no_submit_receipt.metric,
+            condition_id=no_submit_receipt.condition_id,
+            token_id=no_submit_receipt.token_id,
+            outcome_label=no_submit_receipt.outcome_label,
+            candidate_id=no_submit_receipt.candidate_id,
+            executable_snapshot_id=no_submit_receipt.executable_snapshot_id,
+            family_id=no_submit_receipt.family_id,
+            bin_label=no_submit_receipt.bin_label,
+            direction=no_submit_receipt.direction,
+            q_live=no_submit_receipt.q_live,
+            q_lcb_5pct=no_submit_receipt.q_lcb_5pct,
+            c_fee_adjusted=no_submit_receipt.c_fee_adjusted,
+            c_cost_95pct=no_submit_receipt.c_cost_95pct,
+            p_fill_lcb=no_submit_receipt.p_fill_lcb,
+            trade_score=no_submit_receipt.trade_score,
+            native_quote_available=no_submit_receipt.native_quote_available,
+            source_status=no_submit_receipt.source_status,
+            family_complete=no_submit_receipt.family_complete,
+            trade_score_positive=no_submit_receipt.trade_score_positive,
+            fdr_pass=no_submit_receipt.fdr_pass,
+            fdr_family_id=no_submit_receipt.fdr_family_id,
+            fdr_hypothesis_count=no_submit_receipt.fdr_hypothesis_count,
+            kelly_pass=no_submit_receipt.kelly_pass,
+            kelly_execution_price_type=no_submit_receipt.kelly_execution_price_type,
+            kelly_price_fee_deducted=no_submit_receipt.kelly_price_fee_deducted,
+            kelly_size_usd=no_submit_receipt.kelly_size_usd,
+            kelly_cost_basis_id=no_submit_receipt.kelly_cost_basis_id,
+            kelly_decision_id=no_submit_receipt.kelly_decision_id,
+            risk_decision_id=no_submit_receipt.risk_decision_id,
+            final_intent_id=no_submit_receipt.final_intent_id,
+            side_effect_status="SUBMIT_DISABLED",
+            reason="real_order_submit_disabled",
+            proof_accepted=True,
+            decision_proof_bundle=certificates,
         )
 
     return _submit
@@ -653,6 +761,151 @@ def _event_submission_receipt_from_typed_receipt_payload(
     )
 
 
+def _build_submit_disabled_live_certificates(
+    *,
+    event: OpportunityEvent,
+    receipt: EventSubmissionReceipt,
+    decision_time: datetime,
+    tiny_live_max_notional_usd: float,
+) -> tuple[DecisionCertificate, ...]:
+    proof_bundle = receipt.decision_proof_bundle
+    compile_result = DecisionCompiler().compile_no_submit(
+        event,
+        decision_time=decision_time,
+        mode="NO_SUBMIT",
+        proof_bundle=proof_bundle,
+    )
+    if compile_result.status != "VERIFIED":
+        reason = compile_result.failures[0].reason_code if compile_result.failures else "NO_SUBMIT_CERTIFICATE_REJECTED"
+        raise ValueError(reason)
+    base_certs = tuple(
+        cert
+        for cert in compile_result.certificates
+        if cert.certificate_type not in {claims.NO_SUBMIT_DECISION, claims.NO_SUBMIT_MODE}
+    )
+    executable_snapshot = _required_cert(base_certs, claims.EXECUTABLE_SNAPSHOT)
+    live_cap = _build_live_cap_certificate_for_submit_disabled(
+        event=event,
+        receipt=receipt,
+        decision_time=decision_time,
+        max_notional_usd=tiny_live_max_notional_usd,
+    )
+    actionable = build_actionable_trade_certificate(
+        payload=_actionable_payload_from_receipt(receipt, live_cap),
+        parent_certificates=base_certs + (live_cap,),
+        decision_time=decision_time,
+    )
+    final_intent = build_final_intent_certificate_from_actionable(
+        actionable_cert=actionable,
+        decision_time=decision_time,
+        tick_size=_float_or_default(executable_snapshot.payload.get("min_tick_size"), 0.01),
+        min_order_size=_float_or_default(executable_snapshot.payload.get("min_order_size"), 1.0),
+    )
+    expressibility = build_executor_expressibility_certificate(
+        final_intent_cert=final_intent,
+        executable_snapshot_cert=executable_snapshot,
+        live_cap_cert=live_cap,
+        decision_time=decision_time,
+    )
+    command = build_execution_command_certificate_from_final_intent(
+        actionable_cert=actionable,
+        final_intent_cert=final_intent,
+        executor_expressibility_cert=expressibility,
+        live_cap_cert=live_cap,
+        decision_time=decision_time,
+    )
+    receipt_cert = build_execution_receipt_certificate(
+        execution_command_cert=command,
+        decision_time=decision_time,
+        status="SUBMIT_DISABLED",
+        reason_code="REAL_ORDER_SUBMIT_DISABLED",
+    )
+    return base_certs + (live_cap, actionable, final_intent, expressibility, command, receipt_cert)
+
+
+def _actionable_payload_from_receipt(
+    receipt: EventSubmissionReceipt,
+    live_cap_cert: DecisionCertificate,
+) -> dict[str, object]:
+    reserved_notional = float(live_cap_cert.payload["reserved_notional_usd"])
+    return {
+        "event_id": receipt.event_id,
+        "event_type": "FORECAST_SNAPSHOT_READY",
+        "causal_snapshot_id": receipt.causal_snapshot_id,
+        "family_id": receipt.family_id,
+        "candidate_id": receipt.candidate_id,
+        "condition_id": receipt.condition_id,
+        "token_id": receipt.token_id,
+        "direction": receipt.direction,
+        "executable_snapshot_id": receipt.executable_snapshot_id,
+        "q_live": receipt.q_live,
+        "q_lcb_5pct": receipt.q_lcb_5pct,
+        "c_fee_adjusted": receipt.c_fee_adjusted,
+        "c_cost_95pct": receipt.c_cost_95pct,
+        "p_fill_lcb": receipt.p_fill_lcb,
+        "trade_score": receipt.trade_score,
+        "action_score": receipt.trade_score,
+        "fdr_family_id": receipt.fdr_family_id,
+        "kelly_decision_id": receipt.kelly_decision_id,
+        "kelly_size_usd": receipt.kelly_size_usd,
+        "risk_decision_id": receipt.risk_decision_id,
+        "live_cap_usage_id": live_cap_cert.payload["usage_id"],
+        "live_cap_reserved_notional_usd": reserved_notional,
+        "final_intent_id": receipt.final_intent_id,
+        "side_effect_status": "ACTIONABLE_NOT_SUBMITTED",
+        "native_quote_available": receipt.native_quote_available,
+        "submitted": False,
+    }
+
+
+def _build_live_cap_certificate_for_submit_disabled(
+    *,
+    event: OpportunityEvent,
+    receipt: EventSubmissionReceipt,
+    decision_time: datetime,
+    max_notional_usd: float,
+) -> DecisionCertificate:
+    price = _float_or_default(receipt.c_fee_adjusted, 0.01)
+    min_order_notional = min(max_notional_usd, max(price, 0.01))
+    requested_notional = max(min(float(receipt.kelly_size_usd or 0.0), max_notional_usd), min_order_notional)
+    usage_id = f"edli_live_cap:{event.event_id}:tiny_live_canary"
+    payload = {
+        "usage_id": usage_id,
+        "event_id": event.event_id,
+        "decision_time": decision_time.isoformat(),
+        "cap_scope": "tiny_live_canary",
+        "max_notional_usd": float(max_notional_usd),
+        "max_orders_per_day": 1,
+        "reserved_notional_usd": float(requested_notional),
+        "order_count": 1,
+        "reservation_status": "RESERVED",
+    }
+    return build_certificate(
+        certificate_type=claims.LIVE_CAP,
+        semantic_key=f"live_cap:{event.event_id}:tiny_live_canary",
+        claim_type=claims.LIVE_CAP,
+        mode="LIVE",
+        decision_time=decision_time,
+        source_available_at=decision_time,
+        agent_received_at=decision_time,
+        persisted_at=decision_time,
+        payload=payload,
+        parent_edges=(),
+        parent_certificates=(),
+        authority_id="edli.live_cap",
+        authority_version="v1",
+        algorithm_id="edli.submit_disabled_live_cap",
+        algorithm_version="v1",
+    )
+
+
+def _required_cert(certs: tuple[DecisionCertificate, ...], certificate_type: str) -> DecisionCertificate:
+    for cert in certs:
+        if cert.certificate_type == certificate_type:
+            return cert
+    raise ValueError(f"missing required certificate: {certificate_type}")
+
+
 def _build_no_submit_proof_bundle_from_adapter_evidence(
     *,
     event: OpportunityEvent,
@@ -1003,6 +1256,7 @@ def _build_no_submit_proof_bundle_from_adapter_evidence(
                 "cost_basis_id": raw_receipt.get("kelly_cost_basis_id"),
                 "execution_price_type": execution_price.__class__.__name__ if execution_price is not None else None,
                 "price_fee_deducted": execution_price.fee_deducted if execution_price is not None else None,
+                "passed": kelly.passed,
             },
             decision_clock,
             "zeus.strategy.kelly",
@@ -2239,6 +2493,11 @@ def _optional_float(value: object) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _float_or_default(value: object, default: float) -> float:
+    parsed = _optional_float(value)
+    return default if parsed is None else parsed
 
 
 def _optional_bool(value: object) -> bool | None:
