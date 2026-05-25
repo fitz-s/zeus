@@ -541,3 +541,50 @@ def test_verify_fail_when_empty(tmp_path, capsys):
     out = capsys.readouterr().out
     assert rc == 1
     assert "FAIL" in out and "empty" in out
+
+
+# --------------------------------------------------------------------------
+# FIX 1 regression: data_version=all sentinel must yield "complete"
+# (was silently "missing" before the fix because full_complete filter only
+# checked wanted_dvs, not the wildcard "all" value).
+# --------------------------------------------------------------------------
+
+
+def test_wildcard_data_version_complete_sentinel_yields_complete(tmp_path):
+    """A sentinel with scope.data_version='all', start='all', end='all',
+    payload.status='complete' must yield status 'complete' for the metric,
+    not 'missing'.  Regression guard for Zeus #64 Phase 1a FIX 1."""
+    stage = tmp_path / "stage.db"
+    _build_db(stage)
+    conn = sqlite3.connect(str(stage))
+
+    # Build the wildcard sentinel key that a full-scope rebuild emits
+    wildcard_key = (
+        f"{P.REBUILD_COMPLETE_META_PREFIX}:metric=high:bin_source=canonical_v2:"
+        f"city=all:start=all:end=all:data_version=all:cycle=all:source_id=all:"
+        f"horizon=all:n_mc=10000"
+    )
+    conn.execute(
+        "INSERT INTO zeus_meta (key, value) VALUES (?, ?)",
+        (
+            wildcard_key,
+            json.dumps({
+                "status": "complete",
+                "completed": True,
+                "scope": {"data_version": "all", "start": "all", "end": "all"},
+            }),
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    conn = sqlite3.connect(str(stage))
+    conn.row_factory = sqlite3.Row
+    sentinels = P._load_sentinels(conn)
+    conn.close()
+
+    # Must return "complete", not "missing"
+    status = P._sentinel_status_for_metrics(sentinels, ["high"])
+    assert status == {"high": "complete"}, (
+        f"data_version=all complete sentinel must yield 'complete'; got {status}"
+    )

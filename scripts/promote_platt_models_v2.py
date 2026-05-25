@@ -223,7 +223,10 @@ def _sentinel_status_for_metrics(
             for s in relevant
             if s["scope"].get("start") == "all"  # type: ignore[union-attr]
             and s["scope"].get("end") == "all"  # type: ignore[union-attr]
-            and s["scope"].get("data_version") in wanted_dvs  # type: ignore[union-attr]
+            and (  # accept exact data_version match OR wildcard "all" rebuild  # type: ignore[union-attr]
+                s["scope"].get("data_version") in wanted_dvs
+                or s["scope"].get("data_version") == "all"
+            )
             and s["payload"].get("status") == "complete"  # type: ignore[union-attr]
         ]
         if full_complete:
