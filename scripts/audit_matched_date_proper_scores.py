@@ -491,6 +491,31 @@ def main() -> int:
     matched_raw_global, matched_ft_global = _intersect_distributions(raw_dists, ft_dists)
     print(f"  matched pairs (global): {len(matched_raw_global):,}", file=sys.stderr)
 
+    # Diagnostic: (city, target_date)-only match count — helps distinguish post-Fix-A
+    # lead_days granularity mismatch (none=integer, full_transport_v1=finer) from
+    # true domain gap.  If city+date > 0 but strict == 0, the intersection key
+    # needs loosening (or lead_days alignment in Fix-A output).
+    raw_date_keys = {(d["city"], d.get("target_date", "")) for d in raw_dists}
+    ft_date_keys = {(d["city"], d.get("target_date", "")) for d in ft_dists}
+    n_date_only = len(raw_date_keys & ft_date_keys)
+    print(
+        f"  (city, target_date)-only match (ignoring lead_days): {n_date_only:,}",
+        file=sys.stderr,
+    )
+    if len(matched_raw_global) == 0 and n_date_only > 0:
+        print(
+            "  NOTE: city+date pairs overlap but strict (city,target_date,lead_days) is 0.",
+            file=sys.stderr,
+        )
+        print(
+            "  Post-Fix-A: if this persists, check lead_days granularity alignment",
+            file=sys.stderr,
+        )
+        print(
+            "  (none family uses integer lead_days; full_transport_v1 may use finer values).",
+            file=sys.stderr,
+        )
+
     # -----------------------------------------------------------------------
     # Build cohort specs
     # -----------------------------------------------------------------------
@@ -574,6 +599,7 @@ def main() -> int:
         f"ft domain: {n_ft_total:,} dists.\n"
         f"> Intersection key: (city, target_date, lead_days). "
         f"Events absent from either arm are excluded.\n"
+        f"> (city, target_date)-only match (ignoring lead_days): {n_date_only:,}.\n"
     )
     if n_global == 0:
         domain_note += (
@@ -582,6 +608,13 @@ def main() -> int:
             "> This is the §4.1 confound. Run again post-Fix-A (#74) once both families\n"
             "> share a common date range. All cohorts below will show INSUFFICIENT.\n"
         )
+        if n_date_only > 0:
+            domain_note += (
+                f"> NOTE: {n_date_only:,} (city, target_date) pairs overlap, "
+                f"but lead_days granularity mismatch prevents strict matching.\n"
+                "> Post-Fix-A: verify lead_days alignment (none=integer, "
+                "full_transport_v1 may use finer values).\n"
+            )
     elif n_global < 200:
         domain_note += (
             f"> **LOW MATCH WARNING:** only {n_global} matched pairs. "
