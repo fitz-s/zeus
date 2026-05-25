@@ -25,18 +25,30 @@ from __future__ import annotations
 
 import logging
 import sqlite3
-from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Literal, Optional
 from zoneinfo import ZoneInfo
 
 from src.oracle.data_density_discount import (
+    DDDFailClosed,  # defined there; re-exported here for backward-compat imports
     DDDResult,
     evaluate_ddd,
     load_city_floors,
     load_nstar_config,
 )
+
+# Re-export so existing callers (evaluator.py, tests) keep working unchanged.
+__all__ = [
+    "DDDFailClosed",
+    "DDDResult",
+    "evaluate_ddd_for_decision",
+    "reset_caches",
+    "directional_window",
+    "fetch_directional_coverage",
+    "compute_window_elapsed",
+    "fetch_n_platt_samples",
+]
 
 logger = logging.getLogger(__name__)
 
@@ -66,27 +78,6 @@ def reset_caches() -> None:
     global _FLOORS_CACHE, _NSTAR_CACHE
     _FLOORS_CACHE = None
     _NSTAR_CACHE = None
-
-
-# ── exceptions for caller pattern-match ──────────────────────────────────────
-
-
-@dataclass
-class DDDFailClosed(Exception):
-    """Raised when DDD cannot evaluate and policy is fail-CLOSED.
-
-    The caller (evaluator) catches this and rejects the decision with an
-    appropriate rejection_stage. The reason string is suitable as a
-    human-readable rejection reason.
-    """
-
-    code: str          # e.g. "DDD_CONFIG_MISSING", "DDD_NO_TRAIN_DATA"
-    reason: str        # human-readable
-    city: str = ""
-    track: str = ""
-
-    def __str__(self) -> str:
-        return f"{self.code}: {self.reason}"
 
 
 # ── coverage + window helpers ────────────────────────────────────────────────

@@ -745,11 +745,10 @@ def run_pipeline(
 ):
     """Run the full onboarding pipeline for a batch of new cities."""
     # Fail-closed precondition: every city must be registered in TIER_SCHEDULE
-    # before ETL steps can execute.  Check all cities up-front so the operator
-    # gets one clear error rather than a cryptic UnsupportedTierError mid-run.
-    if not dry_run:
-        for c in cities:
-            _check_city_registered(c.name)
+    # before ETL steps can execute.  Runs for BOTH dry-run and live so dry-run
+    # serves as a proper pre-flight that surfaces missing registrations early.
+    for c in cities:
+        _check_city_registered(c.name)
 
     total_steps = len(PIPELINE_STEPS)
     logger.info("=" * 70)
@@ -761,6 +760,7 @@ def run_pipeline(
 
     city_names = [c.name for c in cities]
     started = start_from is None
+    _ens_bias_zero_cities: set[str] = set()  # cities where fit_ens_bias_v2 produced 0 rows
 
     for step_num, step in enumerate(PIPELINE_STEPS, 1):
         step_id = step["id"]
@@ -801,10 +801,11 @@ def run_pipeline(
             continue
 
         if step_id == "fit_ens_bias_v2":
-            _run_fit_ens_bias_v2(city_names, dry_run=dry_run)
+            _ens_bias_zero_cities = _run_fit_ens_bias_v2(city_names, dry_run=dry_run)
             continue
 
         if step_id == "compute_ddd_floor":
+            _write_nstar_stubs(city_names, dry_run=dry_run)
             _run_compute_ddd_floor(city_names, dry_run=dry_run)
             continue
 
@@ -828,7 +829,7 @@ def run_pipeline(
     # Verification summary
     if not dry_run:
         _print_verification(city_names)
-        _record_deferred_artifacts(city_names)
+        _record_deferred_artifacts(city_names, ens_bias_no_coverage=_ens_bias_zero_cities)
 
     return True
 
@@ -961,7 +962,7 @@ _ENS_SEASONS: tuple[tuple[str, tuple[int, ...]], ...] = (
 )
 
 
-def _run_fit_ens_bias_v2(city_names: list[str], dry_run: bool = False) -> None:
+def _run_fit_ens_bias_v2(city_names: list[str], dry_run: bool = False) -> set[str]:
     """Fit model_bias_ens_v2 for each city/season/metric using ens_bias_repo.
 
     Calls fit_city_predictive_error() (from ens_error_model) per (city, season,
@@ -971,7 +972,7 @@ def _run_fit_ens_bias_v2(city_names: list[str], dry_run: bool = False) -> None:
     """
     if dry_run:
         logger.info("  [DRY RUN] Would fit model_bias_ens_v2 for: %s", city_names)
-        return
+        return set()
 
     try:
         from src.calibration.ens_bias_repo import (
@@ -982,7 +983,7 @@ def _run_fit_ens_bias_v2(city_names: list[str], dry_run: bool = False) -> None:
         from src.state.db import get_forecasts_connection
     except ImportError as exc:
         logger.error("  Cannot import ens_bias modules: %s", exc)
-        return
+        return set()
 
     today_str = date.today().isoformat()
 
@@ -1028,12 +1029,68 @@ def _run_fit_ens_bias_v2(city_names: list[str], dry_run: bool = False) -> None:
 
         conn.commit()
         logger.info("  ENS bias v2: fitted=%d skipped=%d", fitted, skipped)
+        if fitted == 0:
+            logger.warning(
+                "  fit_ens_bias_v2: ZERO buckets fitted for %s — likely no "
+                "TIGGE/GRIB coverage yet.  model_bias_ens_v2 is empty for "
+                "these cities; recording as PENDING in deferred sidecar.",
+                city_names,
+            )
+            return set(city_names)  # caller adds to deferred sidecar
     except Exception as exc:
         logger.error("  fit_ens_bias_v2 failed: %s", exc)
         conn.rollback()
         raise
     finally:
         conn.close()
+    return set()
+
+
+def _write_nstar_stubs(city_names: list[str], dry_run: bool = False) -> None:
+    """Write N_STAR_NOT_FOUND stubs for new cities into v2_nstar.json.
+
+    Writes ``{city}_high`` and ``{city}_low`` stub entries ONLY if absent
+    (never clobbers calibrated entries). Atomic write — same pattern as
+    _run_compute_ddd_floor.
+
+    Without these stubs get_n_star() raises DDDFailClosed(DDD_NSTAR_UNCONFIGURED)
+    for any trade decision on the new city.
+    """
+    nstar_path = PROJECT_ROOT / "src" / "oracle" / "ddd_artifacts" / "v2_nstar.json"
+
+    if dry_run:
+        logger.info("  [DRY RUN] Would write N_star stubs for: %s", city_names)
+        return
+
+    if not nstar_path.exists():
+        logger.error("  v2_nstar.json not found at %s — cannot write stubs", nstar_path)
+        return
+
+    with nstar_path.open() as f:
+        nstar_data = json.load(f)
+
+    per_city_metric: dict = nstar_data.setdefault("per_city_metric", {})
+    added: list[str] = []
+    for city_name in city_names:
+        for track in ("high", "low"):
+            key = f"{city_name}_{track}"
+            if key not in per_city_metric:
+                per_city_metric[key] = {"status": "N_STAR_NOT_FOUND", "N_star": None}
+                added.append(key)
+                logger.info("  N_star stub written: %s", key)
+            else:
+                logger.debug("  N_star key already exists (no-op): %s", key)
+
+    if not added:
+        logger.info("  N_star stubs: all keys already present, no writes needed")
+        return
+
+    tmp_path = nstar_path.with_suffix(".json.tmp")
+    with tmp_path.open("w") as f:
+        json.dump(nstar_data, f, indent=2, ensure_ascii=False)
+        f.write("\n")
+    tmp_path.replace(nstar_path)
+    logger.info("  v2_nstar.json updated — added stubs: %s", added)
 
 
 def _run_compute_ddd_floor(city_names: list[str], dry_run: bool = False) -> None:
@@ -1141,30 +1198,46 @@ def _run_compute_ddd_floor(city_names: list[str], dry_run: bool = False) -> None
     logger.info("  v2_city_floors.json updated for: %s", city_names)
 
 
-def _record_deferred_artifacts(city_names: list[str]) -> None:
+def _record_deferred_artifacts(
+    city_names: list[str],
+    *,
+    ens_bias_no_coverage: set[str] | None = None,
+) -> None:
     """Write per-city PENDING sidecar files for deferred artifacts.
 
     These files signal to operators (and bridge scripts) that the city
     is onboarded but certain calibration artifacts require accumulated
     live history before they become available.
 
+    ``ens_bias_no_coverage``: set of city names where fit_ens_bias_v2
+    produced zero fitted buckets (no TIGGE/GRIB coverage).  These cities
+    get an additional model_bias_ens_v2=PENDING entry in their sidecar.
+
     Written to: data/onboarding_pending/<city_slug>.json
     """
     pending_dir = PROJECT_ROOT / "data" / "onboarding_pending"
     pending_dir.mkdir(parents=True, exist_ok=True)
+    ens_bias_no_coverage = ens_bias_no_coverage or set()
 
     for city_name in city_names:
         slug = city_name.lower().replace(" ", "_")
+        deferred: dict = {
+            artifact: {"status": "PENDING", "reason": reason}
+            for artifact, reason in DEFERRED_ARTIFACTS.items()
+        }
+        if city_name in ens_bias_no_coverage:
+            deferred["model_bias_ens_v2"] = {
+                "status": "PENDING",
+                "reason": (
+                    "fit_ens_bias_v2 produced 0 fitted buckets — "
+                    "city has no TIGGE/GRIB ensemble_snapshots coverage yet; "
+                    "re-run after ingest_grib_to_snapshots backfill completes."
+                ),
+            }
         pending: dict = {
             "city": city_name,
             "onboarded_at": date.today().isoformat(),
-            "deferred_artifacts": {
-                artifact: {
-                    "status": "PENDING",
-                    "reason": reason,
-                }
-                for artifact, reason in DEFERRED_ARTIFACTS.items()
-            },
+            "deferred_artifacts": deferred,
             "oracle_status": "MISSING",
             "oracle_effective_multiplier": 0.5,
             "note": (

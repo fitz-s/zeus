@@ -341,17 +341,55 @@ class TestFailClosed:
                 city_floors_config=floors, n_star_config=nstar,
             )
 
-    def test_missing_nstar_key_raises_keyerror(self):
-        """Track not in N_star config raises KeyError (fail-CLOSED)."""
+    def test_missing_nstar_key_raises_ddd_fail_closed(self):
+        """Track not in N_star config raises DDDFailClosed (not bare KeyError).
+
+        Category fix: evaluator catches DDDFailClosed; a bare KeyError would
+        propagate uncaught and crash the decision loop.
+        """
+        from src.engine.ddd_wiring import DDDFailClosed
         floors = make_floors_config("TestCity", 1.0)
         nstar = {"per_city_metric": {}}  # TestCity_high missing
-        with pytest.raises(KeyError, match="not found in DDD N_star config"):
+        with pytest.raises(DDDFailClosed) as exc_info:
             evaluate_ddd(
                 city="TestCity", track="high",
                 current_cov=0.80, window_elapsed=0.50,
                 N_platt_samples=100, mismatch_rate=0.0,
                 city_floors_config=floors, n_star_config=nstar,
             )
+        assert exc_info.value.code == "DDD_NSTAR_UNCONFIGURED"
+        assert "TestCity_high" in exc_info.value.reason
+
+    def test_nstar_not_found_stub_returns_none(self):
+        """N_STAR_NOT_FOUND stub returns None (not an exception).
+
+        Antibody: onboarded cities carry this stub so get_n_star returns None
+        (conservative small-sample path) rather than crashing the loop.
+        """
+        from src.oracle.data_density_discount import get_n_star
+        nstar_cfg = {
+            "per_city_metric": {
+                "Jinan_high": {"status": "N_STAR_NOT_FOUND", "N_star": None},
+                "Jinan_low":  {"status": "N_STAR_NOT_FOUND", "N_star": None},
+            }
+        }
+        assert get_n_star("Jinan", "high", nstar_cfg) is None
+        assert get_n_star("Jinan", "low",  nstar_cfg) is None
+
+    def test_fully_unconfigured_city_raises_ddd_fail_closed_not_keyerror(self):
+        """A city with no nstar entry raises DDDFailClosed, never bare KeyError.
+
+        Antibody: any future unconfigured city fails-closed to no-trade rather
+        than crashing the event loop with an unhandled KeyError.
+        """
+        from src.engine.ddd_wiring import DDDFailClosed
+        from src.oracle.data_density_discount import get_n_star
+        nstar_cfg = {"per_city_metric": {}}
+        with pytest.raises(DDDFailClosed) as exc_info:
+            get_n_star("FutureCity", "high", nstar_cfg)
+        assert exc_info.value.code == "DDD_NSTAR_UNCONFIGURED"
+        # Must NOT be a bare KeyError
+        assert not isinstance(exc_info.value, KeyError)
 
     def test_missing_floors_file_raises(self, tmp_path):
         """Missing floors JSON file raises FileNotFoundError."""

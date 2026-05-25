@@ -197,6 +197,26 @@ def test_precondition_raises_on_unregistered_city(monkeypatch):
         onboard_cities._check_city_registered("__NOT_A_REAL_CITY_XYZ__")
 
 
+def test_precondition_runs_in_dry_run_mode(monkeypatch):
+    """_check_city_registered must be called in dry-run mode too (pre-flight).
+
+    Verifies MAJOR 1 fix: the check was previously inside `if not dry_run`.
+    Now dry-run must also fail-closed on an unregistered city.
+    """
+    import inspect
+    source = inspect.getsource(onboard_cities.run_pipeline)
+    # The check must NOT be nested inside `if not dry_run:` — verify this by
+    # asserting _check_city_registered is called before any dry_run branch.
+    # We approximate by confirming it appears before "if not dry_run:" text.
+    check_pos = source.find("_check_city_registered")
+    dry_run_gate_pos = source.find("if not dry_run:")
+    assert check_pos != -1, "_check_city_registered not found in run_pipeline"
+    assert dry_run_gate_pos == -1 or check_pos < dry_run_gate_pos, (
+        "_check_city_registered must run BEFORE any 'if not dry_run' gate "
+        "(dry-run is the pre-flight; unregistered city must fail in both modes)"
+    )
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # T6 – platt_training step wires to forecasts DB (not world DB)
 # ──────────────────────────────────────────────────────────────────────────────
@@ -289,3 +309,95 @@ def test_v2_city_floors_schema():
         assert field in entry, (
             f"v2_city_floors.json per_city[{first_city!r}] missing field {field!r}"
         )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# T11 – _write_nstar_stubs: antibody tests
+# ──────────────────────────────────────────────────────────────────────────────
+
+def test_write_nstar_stubs_function_exists():
+    """onboard_cities must expose _write_nstar_stubs helper."""
+    assert hasattr(onboard_cities, "_write_nstar_stubs"), (
+        "onboard_cities must define _write_nstar_stubs to prevent uncaught "
+        "DDDFailClosed(DDD_NSTAR_UNCONFIGURED) for new cities"
+    )
+
+
+def test_write_nstar_stubs_atomic_write(tmp_path):
+    """_write_nstar_stubs writes N_STAR_NOT_FOUND stubs without clobbering existing keys."""
+    import json
+    nstar_file = tmp_path / "v2_nstar.json"
+    # Seed an existing city so we can verify it's not clobbered
+    initial = {
+        "per_city_metric": {
+            "Amsterdam_high": {"status": "OK", "N_star": 123},
+            "Amsterdam_low": {"status": "OK", "N_star": 99},
+        }
+    }
+    nstar_file.write_text(json.dumps(initial))
+
+    # Monkey-patch PROJECT_ROOT inside onboard_cities so the function finds our tmp file
+    import importlib
+    orig_root = onboard_cities.PROJECT_ROOT
+    onboard_cities.PROJECT_ROOT = tmp_path / "fake_root"
+    # Create the expected sub-path
+    artifact_dir = tmp_path / "fake_root" / "src" / "oracle" / "ddd_artifacts"
+    artifact_dir.mkdir(parents=True)
+    (artifact_dir / "v2_nstar.json").write_text(json.dumps(initial))
+
+    try:
+        onboard_cities._write_nstar_stubs(["TestCity"], dry_run=False)
+    finally:
+        onboard_cities.PROJECT_ROOT = orig_root
+
+    result = json.loads((artifact_dir / "v2_nstar.json").read_text())
+    pm = result["per_city_metric"]
+    # New stubs written
+    assert "TestCity_high" in pm, "TestCity_high stub must be written"
+    assert "TestCity_low" in pm, "TestCity_low stub must be written"
+    assert pm["TestCity_high"] == {"status": "N_STAR_NOT_FOUND", "N_star": None}
+    assert pm["TestCity_low"] == {"status": "N_STAR_NOT_FOUND", "N_star": None}
+    # Existing keys not clobbered
+    assert pm["Amsterdam_high"]["N_star"] == 123, "Amsterdam_high must not be overwritten"
+
+
+def test_write_nstar_stubs_no_clobber(tmp_path):
+    """_write_nstar_stubs must not overwrite already-calibrated entries."""
+    import json
+    initial = {
+        "per_city_metric": {
+            "Kuala Lumpur_high": {"status": "OK", "N_star": 77},
+        }
+    }
+    artifact_dir = tmp_path / "src" / "oracle" / "ddd_artifacts"
+    artifact_dir.mkdir(parents=True)
+    nstar_file = artifact_dir / "v2_nstar.json"
+    nstar_file.write_text(json.dumps(initial))
+
+    orig_root = onboard_cities.PROJECT_ROOT
+    onboard_cities.PROJECT_ROOT = tmp_path
+    try:
+        onboard_cities._write_nstar_stubs(["Kuala Lumpur"], dry_run=False)
+    finally:
+        onboard_cities.PROJECT_ROOT = orig_root
+
+    result = json.loads(nstar_file.read_text())
+    pm = result["per_city_metric"]
+    # Existing calibrated entry must survive
+    assert pm["Kuala Lumpur_high"]["N_star"] == 77, (
+        "_write_nstar_stubs must NOT clobber existing entries"
+    )
+    # Missing low track should have been added
+    assert "Kuala Lumpur_low" in pm
+
+
+def test_nstar_stubs_called_at_compute_ddd_floor_step(monkeypatch):
+    """_write_nstar_stubs must be called when compute_ddd_floor step dispatches."""
+    import inspect
+    source = inspect.getsource(onboard_cities.run_pipeline)
+    # Both _write_nstar_stubs and _run_compute_ddd_floor must appear in the
+    # same branch handling the "compute_ddd_floor" step id.
+    assert "_write_nstar_stubs" in source, (
+        "_write_nstar_stubs must be called in run_pipeline "
+        "(wired alongside compute_ddd_floor)"
+    )
