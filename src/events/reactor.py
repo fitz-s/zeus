@@ -159,7 +159,7 @@ class OpportunityEventReactor:
                     str(exc),
                     decision_time=decision_time,
                 )
-                self._write_regret(event, "UNKNOWN_REVIEW_REQUIRED", str(exc))
+                self._write_regret(event, "UNKNOWN_REVIEW_REQUIRED", str(exc), decision_time=decision_time)
                 self._store.mark_dead_letter(
                     event,
                     failure_stage="UNKNOWN_REVIEW_REQUIRED",
@@ -267,7 +267,7 @@ class OpportunityEventReactor:
         self._reject(event, stage, reason)
         if decision_time is not None:
             self._write_compile_failure(event, stage, reason, decision_time=decision_time, receipt=receipt)
-        self._write_regret(event, stage, reason, receipt=receipt)
+        self._write_regret(event, stage, reason, receipt=receipt, decision_time=decision_time)
         result.rejected += 1
         result.rejection_reasons.append(reason)
 
@@ -306,6 +306,7 @@ class OpportunityEventReactor:
         reason: str,
         *,
         receipt: EventSubmissionReceipt | None = None,
+        decision_time: datetime | None = None,
     ) -> None:
         if self._regret_ledger is None:
             return
@@ -322,7 +323,7 @@ class OpportunityEventReactor:
                 condition_id=_receipt_or_payload(receipt, payload, "condition_id"),
                 token_id=_receipt_or_payload(receipt, payload, "token_id"),
                 outcome_label=_receipt_or_payload(receipt, payload, "outcome_label"),
-                decision_time=payload.get("decision_time"),
+                decision_time=decision_time.astimezone(UTC).isoformat() if decision_time is not None else None,
                 city=_receipt_or_payload(receipt, payload, "city"),
                 target_date=_receipt_or_payload(receipt, payload, "target_date"),
                 metric=_receipt_or_payload(receipt, payload, "metric"),

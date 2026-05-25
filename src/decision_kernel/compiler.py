@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Literal
@@ -194,6 +193,7 @@ class DecisionCompiler:
             no_submit_mode,
         )
         try:
+            _validate_no_submit_parent_consistency(event, proof_bundle)
             no_submit = build_no_submit_decision_certificate(
                 semantic_key=f"no_submit:{event.event_id}:{proof_bundle.final_intent_id}",
                 decision_time=decision_time,
@@ -305,264 +305,93 @@ class DecisionCompiler:
         )
 
 
-def build_transition_proof_bundle_from_receipt(
-    event: OpportunityEvent,
-    receipt: Any,
-    *,
-    decision_time: datetime,
-) -> NoSubmitProofBundle:
-    """Build typed authority evidence from the current PR332 receipt projection.
+def _validate_no_submit_parent_consistency(event: OpportunityEvent, bundle: NoSubmitProofBundle) -> None:
+    projection = bundle.no_submit_projection
+    source = bundle.source_truth.payload
+    topology = bundle.market_topology.payload
+    family = bundle.family_closure.payload
+    forecast = bundle.forecast_authority.payload
+    calibration = bundle.calibration.payload
+    model_config = bundle.model_config.payload
+    belief = bundle.belief.payload
+    executable = bundle.executable_snapshot.payload
+    quote = bundle.quote_feasibility.payload
+    cost = bundle.cost_model.payload
+    candidate = bundle.candidate_evidence.payload
+    protocol = bundle.testing_protocol.payload
+    fdr = bundle.fdr.payload
+    kelly = bundle.kelly_dry_run.payload
+    risk = bundle.risk_level.payload
 
-    This keeps the compiler API proof-bundle-first while the surrounding
-    adapter is migrated to emit bundle evidence directly.
-    """
-    decision_time = _utc(decision_time)
-    payload = _payload_dict(event)
-    event_clock = EvidenceClock(
-        source_available_at=_parse_dt(event.available_at),
-        agent_received_at=_parse_dt(event.received_at),
-        persisted_at=_parse_dt(event.created_at),
+    if event.causal_snapshot_id:
+        _require_equal("source_truth.causal_snapshot_id", source.get("causal_snapshot_id"), "event.causal_snapshot_id", event.causal_snapshot_id)
+        _require_equal("forecast.snapshot_id", forecast.get("snapshot_id"), "event.causal_snapshot_id", event.causal_snapshot_id)
+    _require_equal("market_topology.family_id", topology.get("family_id"), "family_closure.family_id", family.get("family_id"))
+    _require_equal("market_topology.family_id", topology.get("family_id"), "candidate.family_id", candidate.get("family_id"))
+    _require_equal("market_topology.family_id", topology.get("family_id"), "testing_protocol.family_id", protocol.get("family_id"))
+    _require_equal("market_topology.family_id", topology.get("family_id"), "fdr.fdr_family_id", fdr.get("fdr_family_id"))
+    _require_equal("candidate.selected_token_id", candidate.get("selected_token_id"), "quote.token_id", quote.get("token_id"))
+    _require_equal("candidate.selected_token_id", candidate.get("selected_token_id"), "quote.selected_token_id", quote.get("selected_token_id"))
+    _require_equal("candidate.selected_token_id", candidate.get("selected_token_id"), "cost.token_id", cost.get("token_id"))
+    _require_equal("candidate.condition_id", candidate.get("condition_id"), "executable.condition_id", executable.get("condition_id"))
+    _require_equal("candidate.condition_id", candidate.get("condition_id"), "quote.condition_id", quote.get("condition_id"))
+    _require_equal("candidate.condition_id", candidate.get("condition_id"), "cost.condition_id", cost.get("condition_id"))
+    _require_equal(
+        "executable.selected_snapshot_id",
+        executable.get("selected_snapshot_id"),
+        "projection.executable_snapshot_id",
+        projection.get("executable_snapshot_id"),
     )
-    decision_clock = EvidenceClock(decision_time, decision_time, decision_time)
-    quote_seen_at = _dt_from_payload(payload, "quote_seen_at") or decision_time
-    quote_clock = EvidenceClock(
-        source_available_at=quote_seen_at,
-        agent_received_at=_dt_from_payload(payload, "quote_received_at") or decision_time,
-        persisted_at=_dt_from_payload(payload, "quote_persisted_at") or decision_time,
+    _require_equal("quote.native_side", quote.get("native_side"), "direction native side", _native_side_for_direction(candidate.get("direction")))
+    _require_equal("quote.direction", quote.get("direction"), "candidate.direction", candidate.get("direction"))
+    _require_equal("kelly.cost_basis_id", kelly.get("cost_basis_id"), "cost_model.cost_basis_id", cost.get("cost_basis_id"))
+    _require_equal("kelly.execution_price_type", kelly.get("execution_price_type"), "cost_model.execution_price_type", cost.get("execution_price_type"))
+    if forecast.get("snapshot_id") is not None:
+        _require_equal("belief.forecast_snapshot_id", belief.get("forecast_snapshot_id"), "forecast.snapshot_id", forecast.get("snapshot_id"))
+    _require_equal(
+        "belief.calibrator_model_key",
+        belief.get("calibrator_model_key"),
+        "calibration.calibrator_model_key",
+        calibration.get("calibrator_model_key"),
     )
-    calibration_clock = EvidenceClock(
-        source_available_at=_dt_from_payload(payload, "calibration_available_at") or decision_time,
-        agent_received_at=_dt_from_payload(payload, "calibration_received_at") or decision_time,
-        persisted_at=_dt_from_payload(payload, "calibration_persisted_at") or decision_time,
-    )
-    projection = _receipt_projection(receipt)
-    projection["projection_hash"] = _stable_projection_hash(projection)
-    final_intent_id = str(getattr(receipt, "final_intent_id", "") or "")
-    family_id = getattr(receipt, "family_id", None) or payload.get("family_id") or event.entity_key
-    return NoSubmitProofBundle(
-        final_intent_id=final_intent_id,
-        source_truth=AuthorityEvidence(
-            claims.SOURCE_TRUTH,
-            "source_truth",
-            "source_truth",
-            {
-                "identity": event.source,
-                "event_source": event.source,
-                "source_status": getattr(receipt, "source_status", None),
-                "event_available_at": event.available_at,
-                "event_received_at": event.received_at,
-            },
-            event_clock,
-            "zeus.events.source_truth_gate",
-            algorithm_id="decision_kernel.source_truth.from_event_gate",
-        ),
-        market_topology=AuthorityEvidence(
-            claims.MARKET_TOPOLOGY,
-            "market_topology",
-            "market_topology",
-            {
-                "identity": family_id,
-                "family_id": family_id,
-                "condition_id": getattr(receipt, "condition_id", None),
-                "token_id": getattr(receipt, "token_id", None),
-                "city": getattr(receipt, "city", None),
-                "target_date": getattr(receipt, "target_date", None),
-                "metric": getattr(receipt, "metric", None),
-            },
-            event_clock,
-            "zeus.forecasts.market_events_v2",
-        ),
-        family_closure=AuthorityEvidence(
-            claims.FAMILY_CLOSURE,
-            "family_closure",
-            "family_closure",
-            {
-                "identity": family_id,
-                "family_id": family_id,
-                "family_complete": getattr(receipt, "family_complete", None),
-                "fdr_hypothesis_count": getattr(receipt, "fdr_hypothesis_count", 0),
-            },
-            event_clock,
-            "zeus.events.candidate_binding",
-        ),
-        forecast_authority=AuthorityEvidence(
-            claims.FORECAST_AUTHORITY,
-            "forecast_authority",
-            "forecast_authority",
-            {
-                "identity": event.causal_snapshot_id,
-                "snapshot_id": event.causal_snapshot_id,
-                "reader": "canonical_executable_forecast_reader",
-                "reader_status": "VERIFIED",
-                "reader_reason_code": None,
-                "applied_validations": tuple(payload.get("applied_validations", ())),
-            },
-            event_clock,
-            "zeus.data.executable_forecast_reader",
-        ),
-        calibration=AuthorityEvidence(
-            claims.CALIBRATION,
-            "calibration",
-            "calibration",
-            {
-                "identity": f"{getattr(receipt, 'city', None)}:{getattr(receipt, 'target_date', None)}:{getattr(receipt, 'metric', None)}",
-                "calibration_authority": "world_platt_models_v2",
-                "model_version_hash": payload.get("calibration_model_version_hash"),
-            },
-            calibration_clock,
-            "zeus.calibration.platt",
-        ),
-        model_config=AuthorityEvidence(
-            claims.MODEL_CONFIG,
-            "model_config",
-            "model_config",
-            {"identity": "edli_v1", "config_scope": "edli_v1", "model_config_hash": payload.get("model_config_hash")},
-            decision_clock,
-            "zeus.config.settings",
-        ),
-        belief=AuthorityEvidence(
-            claims.BELIEF,
-            "belief",
-            "belief",
-            {
-                "identity": getattr(receipt, "candidate_id", None),
-                "q_live": getattr(receipt, "q_live", None),
-                "q_lcb_5pct": getattr(receipt, "q_lcb_5pct", None),
-                "belief_source": "forecast_authority_plus_calibration",
-            },
-            decision_clock,
-            "zeus.strategy.live_inference",
-        ),
-        executable_snapshot=AuthorityEvidence(
-            claims.EXECUTABLE_SNAPSHOT,
-            "executable_snapshot",
-            "executable_snapshot",
-            {
-                "identity": getattr(receipt, "executable_snapshot_id", None),
-                "executable_snapshot_id": getattr(receipt, "executable_snapshot_id", None),
-                "condition_id": getattr(receipt, "condition_id", None),
-                "token_id": getattr(receipt, "token_id", None),
-            },
-            quote_clock,
-            "zeus.trade.executable_market_snapshots",
-        ),
-        quote_feasibility=AuthorityEvidence(
-            claims.QUOTE_FEASIBILITY,
-            "quote_feasibility",
-            "quote_feasibility",
-            {
-                "identity": getattr(receipt, "token_id", None),
-                "condition_id": getattr(receipt, "condition_id", None),
-                "token_id": getattr(receipt, "token_id", None),
-                "direction": getattr(receipt, "direction", None),
-                "native_quote_available": getattr(receipt, "native_quote_available", None),
-                "c_fee_adjusted": getattr(receipt, "c_fee_adjusted", None),
-                "c_cost_95pct": getattr(receipt, "c_cost_95pct", None),
-                "p_fill_lcb": getattr(receipt, "p_fill_lcb", None),
-                "fill_claim": False,
-            },
-            quote_clock,
-            "zeus.strategy.live_inference.executable_cost",
-        ),
-        cost_model=AuthorityEvidence(
-            claims.COST_MODEL,
-            "cost_model",
-            "cost_model",
-            {
-                "identity": getattr(receipt, "kelly_cost_basis_id", None),
-                "execution_price_type": getattr(receipt, "kelly_execution_price_type", None),
-                "price_fee_deducted": getattr(receipt, "kelly_price_fee_deducted", None),
-                "cost_basis_id": getattr(receipt, "kelly_cost_basis_id", None),
-            },
-            quote_clock,
-            "zeus.strategy.live_inference.executable_cost",
-        ),
-        pre_trade_evidence=AuthorityEvidence(
-            claims.PRE_TRADE_EVIDENCE,
-            "pre_trade_evidence",
-            "pre_trade_evidence",
-            {
-                "identity": getattr(receipt, "candidate_id", None),
-                "quote_edge_bound": getattr(receipt, "trade_score", None),
-                "conditional_edge_given_fill": getattr(receipt, "trade_score", None),
-                "actionable_trade_score": 0.0,
-            },
-            decision_clock,
-            "zeus.strategy.live_inference.trade_score",
-        ),
-        candidate_evidence=AuthorityEvidence(
-            claims.CANDIDATE_EVIDENCE,
-            "candidate_evidence",
-            "candidate_evidence",
-            {
-                "identity": getattr(receipt, "candidate_id", None),
-                "candidate_id": getattr(receipt, "candidate_id", None),
-                "bin_label": getattr(receipt, "bin_label", None),
-                "outcome_label": getattr(receipt, "outcome_label", None),
-            },
-            decision_clock,
-            "zeus.events.decision_engine",
-        ),
-        testing_protocol=AuthorityEvidence(
-            claims.TESTING_PROTOCOL,
-            "testing_protocol",
-            "testing_protocol",
-            {
-                "identity": getattr(receipt, "fdr_family_id", None),
-                "testing_protocol_id": getattr(receipt, "fdr_family_id", None) or f"event:{event.event_id}",
-                "family_id": getattr(receipt, "fdr_family_id", None),
-                "event_trigger_type": event.event_type,
-                "look_index": 1,
-                "max_looks": 1,
-                "alpha_spending_rule": "FIXED_WINDOW_BH",
-                "optional_stopping_valid": True,
-                "sibling_hypothesis_count": getattr(receipt, "fdr_hypothesis_count", 0),
-            },
-            decision_clock,
-            "zeus.events.fdr_protocol",
-        ),
-        fdr=AuthorityEvidence(
-            claims.FDR,
-            "fdr",
-            "fdr",
-            {
-                "identity": getattr(receipt, "fdr_family_id", None),
-                "fdr_pass": getattr(receipt, "fdr_pass", None),
-                "fdr_family_id": getattr(receipt, "fdr_family_id", None),
-                "fdr_hypothesis_count": getattr(receipt, "fdr_hypothesis_count", 0),
-            },
-            decision_clock,
-            "zeus.events.money_path_adapters.fdr",
-        ),
-        kelly_dry_run=AuthorityEvidence(
-            claims.KELLY_DRY_RUN,
-            "kelly_dry_run",
-            "kelly_dry_run",
-            {
-                "identity": getattr(receipt, "kelly_decision_id", None),
-                "kelly_decision_id": getattr(receipt, "kelly_decision_id", None),
-                "kelly_pass": getattr(receipt, "kelly_pass", None),
-                "kelly_size_usd": getattr(receipt, "kelly_size_usd", None),
-                "execution_price_type": getattr(receipt, "kelly_execution_price_type", None),
-                "price_fee_deducted": getattr(receipt, "kelly_price_fee_deducted", None),
-            },
-            decision_clock,
-            "zeus.events.money_path_adapters.kelly",
-        ),
-        risk_level=AuthorityEvidence(
-            claims.RISK_LEVEL,
-            "risk_level",
-            "risk_level",
-            {
-                "identity": getattr(receipt, "risk_decision_id", None),
-                "risk_decision_id": getattr(receipt, "risk_decision_id", None),
-                "risk_level": "GREEN",
-            },
-            decision_clock,
-            "zeus.riskguard",
-        ),
-        no_submit_projection=projection,
-    )
+    _require_equal("belief.bin_labels_hash", belief.get("bin_labels_hash"), "family.bin_labels_hash", family.get("bin_labels_hash"))
+    _require_equal("fdr.edge_bootstrap_n", fdr.get("edge_bootstrap_n"), "model_config.edge_bootstrap_n", model_config.get("edge_bootstrap_n"))
+    if calibration.get("raw_source_id") is not None and forecast.get("forecast_source_id") is not None:
+        _require_equal("calibration.raw_source_id", calibration.get("raw_source_id"), "forecast.forecast_source_id", forecast.get("forecast_source_id"))
+    if calibration.get("source_cycle") is not None and forecast.get("source_cycle_time") is not None:
+        if str(calibration.get("source_cycle")) not in str(forecast.get("source_cycle_time")):
+            raise ValueError("calibration.source_cycle does not match forecast.source_cycle_time")
+    if calibration.get("horizon_profile") is not None and forecast.get("horizon_profile") is not None:
+        _require_equal("calibration.horizon_profile", calibration.get("horizon_profile"), "forecast.horizon_profile", forecast.get("horizon_profile"))
+    hypothesis_id = candidate.get("hypothesis_id") or candidate.get("identity")
+    if hypothesis_id not in tuple(fdr.get("selected_hypotheses") or ()):
+        raise ValueError("fdr.selected_hypotheses missing candidate hypothesis")
+    risk_intent_id = risk.get("final_intent_id")
+    if risk_intent_id is not None:
+        _require_equal("risk.final_intent_id", risk_intent_id, "bundle.final_intent_id", bundle.final_intent_id)
+    selected_token = candidate.get("selected_token_id")
+    expected_intent = f"edli_intent:{event.event_id}:{selected_token}"
+    if bundle.final_intent_id.startswith("edli_intent:") and bundle.final_intent_id != expected_intent:
+        raise ValueError("final_intent_id does not match event and selected token")
+
+
+def _require_equal(left_name: str, left: Any, right_name: str, right: Any) -> None:
+    if left in (None, "") or right in (None, ""):
+        raise ValueError(f"missing consistency field: {left_name if left in (None, '') else right_name}")
+    if str(left) != str(right):
+        raise ValueError(f"{left_name} != {right_name}: {left!r} != {right!r}")
+
+
+def _native_side_for_direction(direction: Any) -> str | None:
+    if direction == "buy_yes":
+        return "YES_ASK"
+    if direction == "buy_no":
+        return "NO_ASK"
+    if direction == "sell_yes":
+        return "YES_BID"
+    if direction == "sell_no":
+        return "NO_BID"
+    return None
 
 
 def edge(role: str, cert: DecisionCertificate) -> ParentEdge:
@@ -579,55 +408,6 @@ def _role_for(certificate_type: str) -> str:
             out.append("_")
         out.append(char.lower())
     return "".join(out)
-
-
-def _receipt_projection(receipt: Any) -> dict[str, Any]:
-    fields = (
-        "event_id",
-        "causal_snapshot_id",
-        "family_id",
-        "candidate_id",
-        "condition_id",
-        "token_id",
-        "direction",
-        "q_live",
-        "q_lcb_5pct",
-        "c_fee_adjusted",
-        "c_cost_95pct",
-        "p_fill_lcb",
-        "trade_score",
-        "fdr_pass",
-        "fdr_family_id",
-        "fdr_hypothesis_count",
-        "kelly_pass",
-        "kelly_decision_id",
-        "risk_decision_id",
-        "final_intent_id",
-        "side_effect_status",
-        "proof_accepted",
-    )
-    return {field: getattr(receipt, field, None) for field in fields}
-
-
-def _payload_dict(event: OpportunityEvent) -> dict[str, Any]:
-    try:
-        parsed = json.loads(event.payload_json)
-    except json.JSONDecodeError:
-        return {}
-    return parsed if isinstance(parsed, dict) else {}
-
-
-def _stable_projection_hash(projection: dict[str, Any]) -> str:
-    from src.decision_kernel.canonicalization import stable_hash
-
-    return stable_hash(projection)
-
-
-def _dt_from_payload(payload: dict[str, Any], key: str) -> datetime | None:
-    value = payload.get(key)
-    if value in {None, ""}:
-        return None
-    return _parse_dt(str(value))
 
 
 def _parse_dt(value: str) -> datetime:

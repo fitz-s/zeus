@@ -734,6 +734,10 @@ def test_runtime_receipt_uses_event_bound_final_intent_contract():
     assert receipt.decision_proof_bundle.calibration.payload["calibration_source_id"] == "tigge_mars"
     assert receipt.decision_proof_bundle.calibration.payload["training_cutoff"] == "2026-05-01T00:00:00+00:00"
     assert receipt.decision_proof_bundle.calibration.clock.source_available_at.isoformat() == "2026-05-01T00:00:00+00:00"
+    assert receipt.decision_proof_bundle.belief.payload["calibrator_model_key"] == "platt-world-1"
+    assert receipt.decision_proof_bundle.belief.payload["forecast_snapshot_id"] == "1"
+    assert receipt.decision_proof_bundle.belief.payload["bin_labels_hash"] == receipt.decision_proof_bundle.family_closure.payload["bin_labels_hash"]
+    assert receipt.decision_proof_bundle.fdr.payload["edge_bootstrap_n"] == receipt.decision_proof_bundle.model_config.payload["edge_bootstrap_n"]
     assert receipt.decision_proof_bundle.executable_snapshot.payload["orderbook_hash"]
     assert receipt.decision_proof_bundle.executable_snapshot.payload["fee_details_hash"]
     assert receipt.decision_proof_bundle.executable_snapshot.payload["min_tick_size"] == "0.01"
@@ -770,6 +774,38 @@ def test_certificate_rejects_calibration_artifact_available_after_decision():
         WHERE model_key = 'platt-world-1'
         """
     )
+
+    receipt = _receipt(event, conn, decision_time=DECISION_TIME)
+    result = DecisionCompiler().compile_no_submit(
+        event,
+        decision_time=DECISION_TIME,
+        proof_bundle=receipt.decision_proof_bundle,
+    )
+
+    assert result.status == "REJECTED"
+    assert result.failures[0].reason_code == "NO_SUBMIT_CERTIFICATE_REJECTED"
+    assert "source_available_at after decision_time" in (result.failures[0].reason_detail or "")
+
+
+def test_market_topology_certificate_uses_topology_row_clock_not_event_clock():
+    event = _forecast_event()
+    conn = _trade_conn_with_snapshot()
+    conn.execute("ALTER TABLE market_events_v2 ADD COLUMN created_at TEXT")
+    conn.execute("UPDATE market_events_v2 SET created_at = '2026-05-24T08:11:00+00:00'")
+
+    receipt = _receipt(event, conn, decision_time=DECISION_TIME)
+
+    assert receipt.decision_proof_bundle is not None
+    assert receipt.decision_proof_bundle.market_topology.clock.source_available_at.isoformat() == "2026-05-24T08:11:00+00:00"
+    assert receipt.decision_proof_bundle.family_closure.clock.source_available_at.isoformat() == "2026-05-24T08:11:00+00:00"
+    assert receipt.decision_proof_bundle.market_topology.clock.source_available_at.isoformat() != event.available_at
+
+
+def test_topology_persisted_after_decision_blocks_certificate():
+    event = _forecast_event()
+    conn = _trade_conn_with_snapshot()
+    conn.execute("ALTER TABLE market_events_v2 ADD COLUMN created_at TEXT")
+    conn.execute("UPDATE market_events_v2 SET created_at = '2026-05-24T08:13:00+00:00'")
 
     receipt = _receipt(event, conn, decision_time=DECISION_TIME)
     result = DecisionCompiler().compile_no_submit(

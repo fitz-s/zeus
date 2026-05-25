@@ -692,12 +692,22 @@ def _build_no_submit_proof_bundle_from_adapter_evidence(
         "side_effect_status": raw_receipt.get("side_effect_status"),
         "proof_accepted": raw_receipt.get("proof_accepted"),
         "submitted": raw_receipt.get("submitted"),
+        "executable_snapshot_id": raw_receipt.get("executable_snapshot_id"),
     }
     projection["projection_hash"] = stable_hash(projection)
     condition_ids = tuple(str(row.get("condition_id") or "") for row in family_topology_rows)
     executable_snapshot_ids = tuple(sorted(str(row.get("snapshot_id") or "") for row in family_snapshot_rows))
     hypothesis_id = f"{family.family_id}:{proof.token_id}"
     execution_price = proof.execution_price
+    topology_clock = _evidence_clock_from_rows(family_topology_rows, fallback=decision_time)
+    bin_labels_hash = stable_hash(tuple(str(candidate.bin.label) for candidate in family.candidates))
+    market_analysis_config_hash = stable_hash(
+        {
+            "posterior_mode": MODEL_ONLY_POSTERIOR_MODE,
+            "edge_bootstrap_n": edge_n_bootstrap(),
+            "family_id": family.family_id,
+        }
+    )
     return NoSubmitProofBundle(
         final_intent_id=str(raw_receipt.get("final_intent_id") or ""),
         source_truth=AuthorityEvidence(
@@ -710,6 +720,7 @@ def _build_no_submit_proof_bundle_from_adapter_evidence(
                 "event_type": event.event_type,
                 "source_status": "MATCH",
                 "causal_snapshot_id": event.causal_snapshot_id,
+                "event_id": event.event_id,
             },
             event_clock,
             "zeus.events.source_truth_gate",
@@ -725,8 +736,9 @@ def _build_no_submit_proof_bundle_from_adapter_evidence(
                 "condition_ids": condition_ids,
                 "candidate_count": len(tuple(family.candidates)),
                 "source_table": "market_events_v2",
+                "event_id": event.event_id,
             },
-            event_clock,
+            topology_clock,
             "zeus.forecasts.market_events_v2",
             algorithm_id="decision_kernel.topology.event_bound_adapter",
         ),
@@ -742,8 +754,10 @@ def _build_no_submit_proof_bundle_from_adapter_evidence(
                 "no_token_ids": tuple(family.no_token_ids),
                 "sibling_hypothesis_count": len(tuple(family.yes_token_ids)) + len(tuple(family.no_token_ids)),
                 "family_complete": True,
+                "bin_labels_hash": bin_labels_hash,
+                "event_id": event.event_id,
             },
-            event_clock,
+            topology_clock,
             "zeus.events.candidate_binding",
             algorithm_id="decision_kernel.family_closure.event_bound_adapter",
         ),
@@ -774,6 +788,7 @@ def _build_no_submit_proof_bundle_from_adapter_evidence(
                 "posterior_mode": MODEL_ONLY_POSTERIOR_MODE,
                 "edge_bootstrap_n": edge_n_bootstrap(),
                 "kelly_multiplier": kelly_multiplier,
+                "market_analysis_config_hash": market_analysis_config_hash,
             },
             decision_clock,
             "zeus.config.settings",
@@ -789,6 +804,13 @@ def _build_no_submit_proof_bundle_from_adapter_evidence(
                 "q_lcb_5pct": proof.q_lcb_5pct,
                 "p_value": proof.p_value,
                 "passed_prefilter": proof.passed_prefilter,
+                "forecast_snapshot_id": forecast_payload.get("snapshot_id"),
+                "calibrator_model_key": calibration_payload.get("calibrator_model_key"),
+                "p_cal_hash": stable_hash({"q_live": proof.q_posterior, "q_lcb_5pct": proof.q_lcb_5pct}),
+                "p_live_hash": stable_hash({"q_live": proof.q_posterior}),
+                "bin_labels_hash": bin_labels_hash,
+                "market_analysis_config_hash": market_analysis_config_hash,
+                "bootstrap_n": edge_n_bootstrap(),
             },
             forecast_clock,
             "zeus.strategy.market_analysis_family_scan",
@@ -804,6 +826,7 @@ def _build_no_submit_proof_bundle_from_adapter_evidence(
                 "family_snapshot_ids": executable_snapshot_ids,
                 "condition_id": raw_receipt.get("condition_id"),
                 "token_id": raw_receipt.get("token_id"),
+                "cost_basis_id": raw_receipt.get("kelly_cost_basis_id"),
                 "orderbook_hash": _hash_jsonish(selected_snapshot_row.get("orderbook_depth_json") or selected_snapshot_row.get("orderbook_depth_jsonb")),
                 "fee_details_hash": _hash_jsonish(selected_snapshot_row.get("fee_details_json") or selected_snapshot_row.get("fee_details")),
                 "min_tick_size": selected_snapshot_row.get("min_tick_size"),
@@ -848,6 +871,8 @@ def _build_no_submit_proof_bundle_from_adapter_evidence(
             {
                 "identity": str(raw_receipt.get("kelly_cost_basis_id") or hypothesis_id),
                 "cost_basis_id": raw_receipt.get("kelly_cost_basis_id"),
+                "condition_id": raw_receipt.get("condition_id"),
+                "token_id": raw_receipt.get("token_id"),
                 "execution_price_type": execution_price.__class__.__name__ if execution_price is not None else None,
                 "price_fee_deducted": execution_price.fee_deducted if execution_price is not None else None,
                 "c_fee_adjusted": raw_receipt.get("c_fee_adjusted"),
@@ -880,9 +905,11 @@ def _build_no_submit_proof_bundle_from_adapter_evidence(
                 "identity": hypothesis_id,
                 "candidate_id": raw_receipt.get("candidate_id"),
                 "family_id": family.family_id,
+                "condition_id": raw_receipt.get("condition_id"),
                 "bin_label": raw_receipt.get("bin_label"),
                 "selected_token_id": proof.token_id,
                 "direction": proof.direction,
+                "hypothesis_id": hypothesis_id,
             },
             decision_clock,
             "zeus.events.decision_engine",
@@ -914,6 +941,7 @@ def _build_no_submit_proof_bundle_from_adapter_evidence(
                 "selected_hypotheses": tuple(fdr.selected_hypotheses),
                 "selected_post_fdr": tuple(fdr.selected_post_fdr),
                 "fdr_hypothesis_count": fdr.attempted_hypotheses,
+                "edge_bootstrap_n": edge_n_bootstrap(),
                 "passed": fdr.passed,
             },
             decision_clock,
@@ -930,6 +958,7 @@ def _build_no_submit_proof_bundle_from_adapter_evidence(
                 "kelly_size_usd": kelly.size_usd,
                 "bankroll_usd": bankroll_usd,
                 "kelly_multiplier": kelly_multiplier,
+                "cost_basis_id": raw_receipt.get("kelly_cost_basis_id"),
                 "execution_price_type": execution_price.__class__.__name__ if execution_price is not None else None,
                 "price_fee_deducted": execution_price.fee_deducted if execution_price is not None else None,
             },
@@ -946,6 +975,7 @@ def _build_no_submit_proof_bundle_from_adapter_evidence(
                 "risk_decision_id": risk.risk_decision_id,
                 "risk_level": risk.level.name,
                 "passed": risk.passed,
+                "final_intent_id": raw_receipt.get("final_intent_id"),
             },
             decision_clock,
             "zeus.riskguard.risk_level",
@@ -2154,6 +2184,42 @@ def _evidence_clock_from_row(row: dict[str, Any], *, fallback: datetime) -> Evid
     return EvidenceClock(source_time, agent_time, persisted_time)
 
 
+def _evidence_clock_from_rows(rows: list[dict[str, Any]], *, fallback: datetime) -> EvidenceClock:
+    clocks = [_evidence_clock_from_topology_row(row, fallback=fallback) for row in rows]
+    if not clocks:
+        return EvidenceClock(fallback, fallback, fallback)
+    return EvidenceClock(
+        source_available_at=max(clock.source_available_at for clock in clocks),
+        agent_received_at=max(clock.agent_received_at for clock in clocks),
+        persisted_at=max(clock.persisted_at for clock in clocks),
+    )
+
+
+def _evidence_clock_from_topology_row(row: dict[str, Any], *, fallback: datetime) -> EvidenceClock:
+    source_time = (
+        _parse_utc(row.get("discovered_at"))
+        or _parse_utc(row.get("captured_at"))
+        or _parse_utc(row.get("available_at"))
+        or _parse_utc(row.get("gamma_updated_at"))
+        or _parse_utc(row.get("created_at"))
+        or fallback
+    )
+    agent_time = (
+        _parse_utc(row.get("received_at"))
+        or _parse_utc(row.get("scanned_at"))
+        or _parse_utc(row.get("captured_at"))
+        or _parse_utc(row.get("created_at"))
+        or source_time
+    )
+    persisted_time = (
+        _parse_utc(row.get("persisted_at"))
+        or _parse_utc(row.get("updated_at"))
+        or _parse_utc(row.get("created_at"))
+        or agent_time
+    )
+    return EvidenceClock(source_time, agent_time, persisted_time)
+
+
 def _read_executable_forecast_bundle_result(
     conn: sqlite3.Connection,
     *,
@@ -2415,6 +2481,15 @@ def _event_family_market_topology_rows(
         _optional_column_expr(columns, "range_high"),
         _optional_column_expr(columns, "outcome"),
         _optional_column_expr(columns, "token_id"),
+        _optional_column_expr(columns, "discovered_at"),
+        _optional_column_expr(columns, "captured_at"),
+        _optional_column_expr(columns, "available_at"),
+        _optional_column_expr(columns, "gamma_updated_at"),
+        _optional_column_expr(columns, "created_at"),
+        _optional_column_expr(columns, "received_at"),
+        _optional_column_expr(columns, "scanned_at"),
+        _optional_column_expr(columns, "persisted_at"),
+        _optional_column_expr(columns, "updated_at"),
     ]
     label_order = "COALESCE(range_label, outcome, '')" if {"range_label", "outcome"}.issubset(columns) else (
         "COALESCE(range_label, '')" if "range_label" in columns else ("COALESCE(outcome, '')" if "outcome" in columns else "''")

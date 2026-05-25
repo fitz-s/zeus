@@ -8,11 +8,12 @@ import json
 from dataclasses import replace
 from datetime import datetime, timezone
 
-from src.decision_kernel.compiler import build_transition_proof_bundle_from_receipt
+from tests.decision_kernel.no_submit_fixtures import build_test_no_submit_proof_bundle
 from src.events.event_store import EventStore
 from src.events.opportunity_event import Day0ExtremeUpdatedPayload, MarketBookEventPayload, make_day0_extreme_updated_event, make_opportunity_event
 from src.events.reactor import EventSubmissionReceipt, OpportunityEventReactor, ReactorConfig
 from src.state.db import init_schema
+from src.strategy.live_inference.no_trade_regret import NoTradeRegretLedger
 
 
 def _store() -> tuple[sqlite3.Connection, EventStore]:
@@ -100,7 +101,7 @@ def _reactor(store, *, gates=True, config=None):
         )
         return replace(
             receipt,
-            decision_proof_bundle=build_transition_proof_bundle_from_receipt(
+            decision_proof_bundle=build_test_no_submit_proof_bundle(
                 event,
                 receipt,
                 decision_time=_decision_time,
@@ -115,6 +116,7 @@ def _reactor(store, *, gates=True, config=None):
         final_intent_submit=_submit,
         reject=lambda event, stage, reason: rejected.append((event.event_id, stage, reason)),
         config=config or ReactorConfig(),
+        regret_ledger=NoTradeRegretLedger(store.conn),
     )
     return reactor, rejected, submitted
 
@@ -195,6 +197,44 @@ def test_source_truth_block_writes_decision_compile_failure():
     assert failure is not None
     assert failure[0] == "SOURCE_TRUTH"
     assert failure[1] == "SOURCE_TRUTH_BLOCKED"
+
+
+def test_rejection_regret_uses_reactor_decision_time():
+    conn, store = _store()
+    event = _day0_event()
+    store.insert_or_ignore(event)
+    reactor, _rejected, _submitted = _reactor(store, gates=False)
+    decision_time = datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc)
+
+    reactor.process_pending(decision_time=decision_time)
+
+    row = conn.execute(
+        "SELECT decision_time FROM no_trade_regret_events WHERE event_id = ?",
+        (event.event_id,),
+    ).fetchone()
+    assert row is not None
+    assert row[0] == decision_time.isoformat()
+
+
+def test_payload_decision_time_cannot_override_reactor_decision_time():
+    conn, store = _store()
+    event = _day0_event()
+    payload = json.loads(event.payload_json)
+    payload["decision_time"] = "2099-01-01T00:00:00+00:00"
+    event = replace(event, payload_json=json.dumps(payload, sort_keys=True, separators=(",", ":")))
+    store.insert_or_ignore(event)
+    reactor, _rejected, _submitted = _reactor(store, gates=False)
+    decision_time = datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc)
+
+    reactor.process_pending(decision_time=decision_time)
+
+    row = conn.execute(
+        "SELECT decision_time FROM no_trade_regret_events WHERE event_id = ?",
+        (event.event_id,),
+    ).fetchone()
+    assert row is not None
+    assert row[0] == decision_time.isoformat()
+    assert row[0] != payload["decision_time"]
 
 
 def test_reactor_rejects_no_submit_receipt_without_decision_proof_bundle():
