@@ -24,6 +24,7 @@ from src.decision_kernel.certificates.execution import (
     build_execution_receipt_certificate,
     build_executor_expressibility_certificate,
     build_final_intent_certificate_from_actionable,
+    build_live_cap_transition_certificate,
 )
 from src.decision_kernel.compiler import (
     DecisionCompiler,
@@ -277,12 +278,6 @@ def event_bound_live_adapter_from_trade_conn(
                 command = _required_cert(command_certificates, claims.EXECUTION_COMMAND)
                 assert executor_submit is not None
                 submit_result = executor_submit(final_intent, command)
-                _transition_live_cap_after_submit(
-                    command_certificates,
-                    live_cap_conn or trade_conn,
-                    command,
-                    submit_result,
-                )
                 receipt_cert = build_execution_receipt_certificate(
                     execution_command_cert=command,
                     decision_time=decision_time.astimezone(UTC),
@@ -295,7 +290,15 @@ def event_bound_live_adapter_from_trade_conn(
                     raw_response_hash=submit_result.raw_response_hash,
                     reconciliation_followup_required=submit_result.reconciliation_followup_required,
                 )
-                certificates = command_certificates + (receipt_cert,)
+                transition_cert = _transition_live_cap_after_submit(
+                    command_certificates,
+                    live_cap_conn or trade_conn,
+                    command,
+                    receipt_cert,
+                    submit_result,
+                    decision_time=decision_time.astimezone(UTC),
+                )
+                certificates = command_certificates + (receipt_cert, transition_cert)
                 side_effect_status = submit_result.status
                 submitted = submit_result.status in {"SUBMITTED"}
                 reason = submit_result.reason_code
@@ -836,8 +839,13 @@ def _build_submit_disabled_live_certificates(
         status="SUBMIT_DISABLED",
         reason_code="REAL_ORDER_SUBMIT_DISABLED",
     )
-    _release_live_cap_for_submit_disabled(command_certificates, live_cap_conn)
-    return command_certificates + (receipt_cert,)
+    transition_cert = _release_live_cap_for_submit_disabled(
+        command_certificates,
+        receipt_cert,
+        live_cap_conn,
+        decision_time=decision_time,
+    )
+    return command_certificates + (receipt_cert, transition_cert)
 
 
 def _build_live_execution_command_certificates(
@@ -986,18 +994,31 @@ def _build_live_cap_certificate_from_ledger(
 
 def _release_live_cap_for_submit_disabled(
     certificates: tuple[DecisionCertificate, ...],
+    receipt_cert: DecisionCertificate,
     live_cap_conn: sqlite3.Connection | None,
-) -> None:
+    *,
+    decision_time: datetime,
+) -> DecisionCertificate:
     live_cap = _required_cert(certificates, claims.LIVE_CAP)
     _release_live_cap_certificate(live_cap, live_cap_conn, reason="SUBMIT_DISABLED")
+    return build_live_cap_transition_certificate(
+        live_cap_cert=live_cap,
+        execution_receipt_cert=receipt_cert,
+        decision_time=decision_time,
+        to_status="RELEASED",
+        reason_code="SUBMIT_DISABLED",
+    )
 
 
 def _transition_live_cap_after_submit(
     certificates: tuple[DecisionCertificate, ...],
     live_cap_conn: sqlite3.Connection,
     command: DecisionCertificate,
+    receipt_cert: DecisionCertificate,
     submit_result: EventBoundExecutorSubmitResult,
-) -> None:
+    *,
+    decision_time: datetime,
+) -> DecisionCertificate:
     live_cap = _required_cert(certificates, claims.LIVE_CAP)
     usage_id = str(live_cap.payload["usage_id"])
     from src.events.live_cap import LiveCapLedger
@@ -1009,10 +1030,32 @@ def _transition_live_cap_after_submit(
             final_intent_id=str(command.payload["final_intent_id"]),
             execution_command_id=str(command.payload["execution_command_id"]),
         )
+        return build_live_cap_transition_certificate(
+            live_cap_cert=live_cap,
+            execution_receipt_cert=receipt_cert,
+            decision_time=decision_time,
+            to_status="CONSUMED",
+            reason_code=submit_result.reason_code,
+        )
     elif submit_result.status in {"REJECTED", "ERROR_UNKNOWN"}:
         ledger.release(usage_id, submit_result.reason_code)
+        return build_live_cap_transition_certificate(
+            live_cap_cert=live_cap,
+            execution_receipt_cert=receipt_cert,
+            decision_time=decision_time,
+            to_status="RELEASED",
+            reason_code=submit_result.reason_code,
+        )
     elif submit_result.status == "TIMEOUT_UNKNOWN":
-        return
+        return build_live_cap_transition_certificate(
+            live_cap_cert=live_cap,
+            execution_receipt_cert=receipt_cert,
+            decision_time=decision_time,
+            to_status="PENDING_RECONCILE",
+            projection_status="RESERVED",
+            reason_code=submit_result.reason_code,
+        )
+    raise ValueError(f"unsupported submit result status for live cap transition: {submit_result.status!r}")
 
 
 def _release_live_cap_certificate(

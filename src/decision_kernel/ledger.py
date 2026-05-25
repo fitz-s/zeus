@@ -18,6 +18,7 @@ from src.decision_kernel.verifier import (
     verify_execution_receipt,
     verify_executor_expressibility,
     verify_final_intent,
+    verify_live_cap_transition,
     verify_no_submit_decision,
 )
 
@@ -250,5 +251,8 @@ def _verify_for_persistence(cert: DecisionCertificate, parents: tuple[DecisionCe
         return
     if cert.certificate_type == claims.EXECUTION_RECEIPT:
         verify_execution_receipt(cert, parents)
+        return
+    if cert.certificate_type == claims.LIVE_CAP_TRANSITION:
+        verify_live_cap_transition(cert, parents)
         return
     verify_certificate(cert, parents)

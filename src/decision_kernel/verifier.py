@@ -157,6 +157,16 @@ def verify_execution_receipt(cert: DecisionCertificate, parents: Iterable[Decisi
     _verify_execution_receipt_payload(cert, parent_tuple)
 
 
+def verify_live_cap_transition(cert: DecisionCertificate, parents: Iterable[DecisionCertificate]) -> None:
+    parent_tuple = tuple(parents)
+    verify_certificate(cert, parent_tuple)
+    if cert.certificate_type != claims.LIVE_CAP_TRANSITION:
+        raise CertificateVerificationError("expected LiveCapTransitionCertificate")
+    if cert.header.mode != "LIVE":
+        raise CertificateVerificationError("live cap transition must use LIVE mode")
+    _verify_live_cap_transition_payload(cert, parent_tuple)
+
+
 def assert_market_channel_not_fill(cert: DecisionCertificate) -> None:
     if (
         cert.certificate_type == claims.FILL
@@ -544,6 +554,56 @@ def _verify_execution_receipt_payload(
             raise CertificateVerificationError("execution receipt submitted status requires submit timestamps")
     if status == "TIMEOUT_UNKNOWN" and payload.get("reconciliation_followup_required") is not True:
         raise CertificateVerificationError("execution receipt TIMEOUT_UNKNOWN requires reconciliation follow-up")
+
+
+def _verify_live_cap_transition_payload(
+    cert: DecisionCertificate,
+    parents: tuple[DecisionCertificate, ...],
+) -> None:
+    payload = cert.payload
+    parent = _parents_by_type(parents)
+    live_cap = _required_parent_payload(parent, claims.LIVE_CAP)
+    receipt_cert = parent.get(claims.EXECUTION_RECEIPT)
+    if receipt_cert is None:
+        raise CertificateVerificationError("live cap transition missing ExecutionReceiptCertificate parent")
+    receipt = receipt_cert.payload
+    for field in ("event_id", "final_intent_id", "execution_command_id"):
+        expected = live_cap.get(field) if field == "event_id" else receipt.get(field)
+        _require_equal(f"live_cap_transition.{field}", payload.get(field), f"parent.{field}", expected)
+    _require_equal("live_cap_transition.usage_id", payload.get("usage_id"), "live_cap.usage_id", live_cap.get("usage_id"))
+    _require_equal(
+        "live_cap_transition.execution_receipt_hash",
+        payload.get("execution_receipt_hash"),
+        "execution_receipt.certificate_hash",
+        receipt_cert.certificate_hash,
+    )
+    if payload.get("from_status") != "RESERVED":
+        raise CertificateVerificationError("live cap transition from_status must be RESERVED")
+    to_status = payload.get("to_status")
+    if to_status not in {"RELEASED", "CONSUMED", "PENDING_RECONCILE"}:
+        raise CertificateVerificationError(f"live cap transition status unsupported: {to_status!r}")
+    receipt_status = receipt.get("status")
+    expected_by_receipt = {
+        "SUBMIT_DISABLED": "RELEASED",
+        "NOT_SUBMITTED_DRY_RUN": "RELEASED",
+        "REJECTED": "RELEASED",
+        "ERROR_UNKNOWN": "RELEASED",
+        "SUBMITTED": "CONSUMED",
+        "TIMEOUT_UNKNOWN": "PENDING_RECONCILE",
+    }
+    expected_to_status = expected_by_receipt.get(str(receipt_status))
+    if expected_to_status is None:
+        raise CertificateVerificationError(f"live cap transition receipt status unsupported: {receipt_status!r}")
+    if to_status != expected_to_status:
+        raise CertificateVerificationError("live cap transition status does not match execution receipt")
+    projection_status = payload.get("projection_status")
+    if to_status == "PENDING_RECONCILE":
+        if projection_status != "RESERVED":
+            raise CertificateVerificationError("pending reconcile keeps live cap projection RESERVED")
+    elif projection_status != to_status:
+        raise CertificateVerificationError("live cap transition projection_status mismatch")
+    if not payload.get("transition_reason"):
+        raise CertificateVerificationError("live cap transition requires transition_reason")
 
 
 def _verify_generated_certificate_semantics(cert: DecisionCertificate) -> None:

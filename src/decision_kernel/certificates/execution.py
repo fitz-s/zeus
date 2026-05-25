@@ -14,6 +14,7 @@ from src.decision_kernel.verifier import (
     verify_execution_receipt,
     verify_executor_expressibility,
     verify_final_intent,
+    verify_live_cap_transition,
 )
 
 
@@ -256,6 +257,37 @@ def build_execution_receipt_certificate(
     )
 
 
+def build_live_cap_transition_certificate(
+    *,
+    live_cap_cert: DecisionCertificate,
+    execution_receipt_cert: DecisionCertificate,
+    decision_time: datetime,
+    to_status: str,
+    reason_code: str,
+    projection_status: str | None = None,
+) -> DecisionCertificate:
+    live_cap = live_cap_cert.payload
+    receipt = execution_receipt_cert.payload
+    payload = {
+        "event_id": live_cap["event_id"],
+        "usage_id": live_cap["usage_id"],
+        "from_status": live_cap["reservation_status"],
+        "to_status": to_status,
+        "projection_status": projection_status or to_status,
+        "transition_reason": reason_code,
+        "final_intent_id": receipt["final_intent_id"],
+        "execution_command_id": receipt["execution_command_id"],
+        "execution_receipt_hash": execution_receipt_cert.certificate_hash,
+    }
+    return _build_cert(
+        claims.LIVE_CAP_TRANSITION,
+        f"live_cap_transition:{payload['usage_id']}:{payload['to_status']}:{payload['execution_command_id']}",
+        payload,
+        decision_time,
+        (live_cap_cert, execution_receipt_cert),
+    )
+
+
 def _build_cert(
     certificate_type: str,
     semantic_key: str,
@@ -347,8 +379,10 @@ __all__ = [
     "build_execution_receipt_certificate",
     "build_executor_expressibility_certificate",
     "build_final_intent_certificate_from_actionable",
+    "build_live_cap_transition_certificate",
     "verify_execution_command",
     "verify_execution_receipt",
     "verify_executor_expressibility",
     "verify_final_intent",
+    "verify_live_cap_transition",
 ]

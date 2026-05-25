@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 
 import pytest
 
+
 def test_live_canary_runtime_remains_disabled_until_executor_cut():
     settings = json.loads(Path("config/settings.json").read_text())
     edli = settings["edli_v1"]
@@ -285,6 +286,8 @@ def test_submit_disabled_live_bridge_releases_live_cap_row(monkeypatch):
     assert receipt.side_effect_status == "SUBMIT_DISABLED"
     assert rows
     assert {row["reservation_status"] for row in rows} == {"RELEASED"}
+    assert _cap_transition_status(receipt) == "RELEASED"
+    assert _cap_transition_projection_status(receipt) == "RELEASED"
 
 
 def test_edli_live_cap_path_does_not_reference_legacy_cap_columns():
@@ -375,6 +378,8 @@ def test_live_adapter_submit_enabled_canary_enabled_calls_executor_mock(monkeypa
     assert receipt.side_effect_status == "SUBMITTED"
     assert _receipt_status(receipt) == "SUBMITTED"
     assert conn.execute("SELECT reservation_status FROM edli_live_cap_usage").fetchone()["reservation_status"] == "CONSUMED"
+    assert _cap_transition_status(receipt) == "CONSUMED"
+    assert _cap_transition_projection_status(receipt) == "CONSUMED"
 
 
 def test_live_adapter_records_rejected_fixture_response(monkeypatch):
@@ -410,6 +415,8 @@ def test_live_adapter_records_rejected_fixture_response(monkeypatch):
     assert receipt.reason == "VENUE_REJECTED"
     assert _receipt_status(receipt) == "REJECTED"
     assert conn.execute("SELECT reservation_status FROM edli_live_cap_usage").fetchone()["reservation_status"] == "RELEASED"
+    assert _cap_transition_status(receipt) == "RELEASED"
+    assert _cap_transition_projection_status(receipt) == "RELEASED"
 
 
 def test_live_adapter_records_timeout_unknown_fixture_response(monkeypatch):
@@ -447,6 +454,8 @@ def test_live_adapter_records_timeout_unknown_fixture_response(monkeypatch):
     receipt_cert = _receipt_cert(receipt)
     assert receipt_cert.payload["reconciliation_followup_required"] is True
     assert conn.execute("SELECT reservation_status FROM edli_live_cap_usage").fetchone()["reservation_status"] == "RESERVED"
+    assert _cap_transition_status(receipt) == "PENDING_RECONCILE"
+    assert _cap_transition_projection_status(receipt) == "RESERVED"
 
 
 def test_production_executor_boundary_rejects_unenriched_final_intent_before_executor():
@@ -597,6 +606,23 @@ def _receipt_cert(receipt):
 
 def _receipt_status(receipt):
     return _receipt_cert(receipt).payload["status"]
+
+
+def _cap_transition_cert(receipt):
+    from src.decision_kernel import claims
+
+    for cert in receipt.decision_proof_bundle:
+        if getattr(cert, "certificate_type", None) == claims.LIVE_CAP_TRANSITION:
+            return cert
+    raise AssertionError("LiveCapTransitionCertificate missing")
+
+
+def _cap_transition_status(receipt):
+    return _cap_transition_cert(receipt).payload["to_status"]
+
+
+def _cap_transition_projection_status(receipt):
+    return _cap_transition_cert(receipt).payload["projection_status"]
 
 
 def _forecast_event():
