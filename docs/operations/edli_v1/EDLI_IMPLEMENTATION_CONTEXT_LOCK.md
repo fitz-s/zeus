@@ -6,6 +6,14 @@ Branch: `codex/edli-v1-implementation`
 
 ## Context Anchor
 
+- Latest authoritative spec for all future EDLI implementation work:
+  `docs/operations/edli_v1/EDLI_REDEMPTION_FINAL_PACKAGE_SPEC.md`.
+  SHA-256:
+  `e898c3a1f1e6e5e6b3bf0dc272a75ea55fb4e27627a0169099401d290d967e91`.
+  Agents must read that file directly and treat its original text as the
+  current authority. Do not rely on compaction summaries, prior review
+  fragments, or compressed handoff notes when implementing certificate-kernel
+  EDLI work.
 - Reference spec: `docs/operations/edli_v1/REFERENCE_event_sourced_opportunity.md`
 - Original source: `/Users/leofitz/Downloads/event-sourced opportunity.md`
 - SHA-256: `1b21f43708666a4e1714ea97128ffeeed05cde43a9a624a6c0f763ec270c8d11`
@@ -16,8 +24,10 @@ Branch: `codex/edli-v1-implementation`
 2. Real repo code that runs live money path.
 3. Repo schema / DB ownership / tests / CI.
 4. Repo docs / AGENTS / architecture specs.
-5. `docs/operations/edli_v1/REFERENCE_event_sourced_opportunity.md`.
-6. Inferred intent.
+5. `docs/operations/edli_v1/EDLI_REDEMPTION_FINAL_PACKAGE_SPEC.md` for
+   certificate-kernel EDLI design and implementation sequencing.
+6. `docs/operations/edli_v1/REFERENCE_event_sourced_opportunity.md`.
+7. Inferred intent.
 
 ## Prompt Acceptance Contract
 
