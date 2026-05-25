@@ -37,6 +37,8 @@ expected to close out.  Keep them under their existing names.
 | `review5_23_findings.md` | active | review5.23 findings catalogue (P0-1, P1-1 through P1-8, P2-1 through P2-3). Authority for PR #326 fix scope. |
 | `review5_23_triage.md` | active | review5.23 triage status — per-finding fix status, PR anchors, open items. Updated by PR #326. |
 | `EXEC_FRESHNESS_ROOTCAUSE_2026-05-24.md` | active | Root-cause report: stale executable snapshot at submit (discovery→reprice latency > 30s). Authority for exec-freshness re-capture design. PR #330. |
+| `ZEUS_DOC_GAP_INVENTORY_2026-05-24.md` | active | Codebase doc-gap audit (2026-05-24): README, AGENTS.md, reference docs surveyed for stale/missing citations. Basis for PR #338 fixes. |
+| `ENS_NEWCITY_DATA_PARITY_AUDIT_2026-05-24.md` | active | ENS new-city data parity audit (Jinan/Zhengzhou vs. 52 established cities): per-city artifact coverage on live trade-decision path. |
 
 ## Task directories — closeout status
 

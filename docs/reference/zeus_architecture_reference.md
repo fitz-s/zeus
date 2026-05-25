@@ -15,7 +15,9 @@ Zeus is a **live weather settlement-contract trading runtime** for Polymarket.
 `contract semantics -> source truth -> forecast signal -> calibration -> edge -> execution -> monitoring -> settlement -> learning`
 
 **The Probability Chain:**
-`51 ENS members -> per-member daily max -> Monte Carlo (sensor noise + ASOS rounding) -> P_raw -> Extended Platt (A·logit + B·lead_days + C) -> P_cal -> α-weighted Market Fusion -> P_posterior -> Edge & Double-Bootstrap CI -> Fractional Kelly -> Position Size`
+`51 ENS members -> ENS bias correction (empirical-Bayes, pre-MC; flag-gated, default off) -> per-member daily max -> Monte Carlo (sensor noise + ASOS rounding) -> P_raw -> Extended Platt (A·logit + B·lead_days + C) -> P_cal -> α-weighted Market Fusion -> P_posterior -> Edge & Double-Bootstrap CI -> Fractional Kelly (× DDD oracle-coverage discount) -> Position Size`
+
+ENS bias correction is empirical-Bayes shrinkage of the TIGGE structural prior toward live OpenData residuals, SNR-gated and applied to member extrema before Monte Carlo (`src/calibration/ens_bias_model.py`, `src/calibration/ens_error_model.py`; PRs #334/#336). This step is flag-gated (`settings.bias_correction_enabled`, default `false`) and not yet active in production — activation pending. The final Kelly size is scaled by the Data Density Discount (DDD) when observation coverage is thin (see Subsystem Map).
 
 ### Platform Configuration & Change Control
 
@@ -55,6 +57,8 @@ Important surfaces:
 
 - `state/zeus_trades.db`: live trade/event/projection truth.
 - `state/zeus-world.db`: weather, calibration, forecast, and settlement-world data.
+- `state/zeus-forecasts.db`: ensemble snapshots, settlements, calibration pairs, Platt + ENS-bias models (3rd DB of the K1 split; cross-DB writes use ATTACH+SAVEPOINT per INV-37, never independent connections).
+- `data/oracle_error_rates.json`: per-city oracle mismatch rate (beta-binomial 95% bound), written daily by an `ingest_main.py` cron job; feeds the strategy oracle penalty and DDD.
 - `position_events` and `position_current`: append-first event/projection model.
 - `docs/operations/current_state.md`: repo-facing active work pointer, not runtime truth.
 - `docs/operations/current_data_state.md`: current audited data posture, not law.
@@ -71,7 +75,11 @@ states are not safety mechanisms.
 - Probability/signal: `src/signal/**`, ensemble signals, Day0 high/low paths,
   and settlement semantics.
 - Calibration/math: `src/calibration/**`, Platt models, effective sample size,
-  market fusion, FDR, and Kelly sizing.
+  market fusion, FDR, Kelly sizing, and the hierarchical ENS bias / predictive-error
+  layer (`ens_bias_model.py`, `ens_bias_repo.py`, `ens_error_model.py`).
+- Oracle/DDD: `src/oracle/**`, Data Density Discount v2 (two-rail coverage trigger
+  + continuous Kelly discount) and oracle-error-rate consumption; spec
+  `docs/reference/zeus_oracle_density_discount_reference.md`.
 - Execution: `src/execution/**`, limit-order placement, fill tracking, exits,
   collateral, and settlement harvest.
 - State/control: `src/state/**`, lifecycle manager, chronicler/ledger,
@@ -119,9 +127,19 @@ observability (src/observability/**) → derived operator summaries (read-only)
 supervisor_api (src/supervisor_api/**) → typed boundary for Venus/OpenClaw
 ```
 
+Two cross-cutting facts the stage list hides:
+- **Grid resolution asymmetry:** TIGGE (training prior) is O640 (≈0.5°) while ECMWF
+  OpenData (live) is 0.25°; the live path reconciles them and the ENS-bias layer
+  transports the 0.5°→0.25° variance. Binding law:
+  `architecture/zeus_grid_resolution_authority_2026_05_07.yaml`;
+  ingest detail `src/data/ecmwf_open_data.py`.
+- **ENS bias correction** runs inside signal generation, before the Monte Carlo,
+  on member extrema (see Probability Chain above).
+
 Risk policy flows laterally: RiskGuard emits policy consumed by engine,
 evaluator, and executor. Control plane (`src/control/**`) bridges operator
-intent into typed runtime behavior changes.
+intent into typed runtime behavior changes. DDD (`src/oracle/**`) likewise
+applies laterally as a Kelly-size discount when oracle coverage is thin.
 
 ## Dual-Track Architecture
 

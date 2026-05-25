@@ -14,12 +14,13 @@ Zeus trades **discrete settlement contracts** on daily high/low temperatures. Th
 contract semantics
   → source truth (settlement provider, station, observation field)
   → ensemble forecast signal (51 ENS members)
+  → ENS bias correction (empirical-Bayes, pre-Monte-Carlo; flag-gated, default off / activation pending)
   → Monte Carlo sensor-noise + rounding simulation → P_raw
   → Extended Platt calibration (temporal-decay aware) → P_cal
   → α-weighted model-market fusion → P_posterior
   → double-bootstrap confidence intervals → edge + p-value
   → BH FDR filtering (per tested-family)
-  → fractional Kelly sizing (dynamic cascade multiplier)
+  → fractional Kelly sizing (dynamic cascade multiplier × DDD coverage discount)
   → execution via Polymarket CLOB
   → monitoring / exit
   → settlement reconciliation
@@ -50,12 +51,15 @@ P_cal = sigmoid(A·logit(P_raw) + B·lead_days + C)
 
 The `B·lead_days` term triples effective training data per bucket vs. simple lead-time bucketing and prevents overtrade of stale forecasts.
 
+Before calibration, raw ensemble member extrema are bias-corrected: an **empirical-Bayes ENS bias model** shrinks the TIGGE structural prior toward live OpenData settled residuals (SNR-gated, so a noisy/uncertain bias is not applied), with a predictive-error layer that also widens the Monte-Carlo draw and transports the 0.5°→0.25° grid-resolution variance. See `src/calibration/ens_bias_model.py`, `src/calibration/ens_error_model.py` (PRs #334/#336). **This step is flag-gated (`settings.bias_correction_enabled`, default `false`) and not yet active in production — activation pending.**
+
 ### Edge detection and sizing
 
 - **Model-market fusion**: `P_posterior = α × P_cal + (1 - α) × P_market`, where α is dynamically computed from calibration maturity, ensemble spread, and lead time (clamped to [0.20, 0.85])
 - **Uncertainty**: double-bootstrap propagates ensemble sampling noise, instrument noise (σ ≈ 0.2–0.5°F), and calibration parameter uncertainty
 - **Selection**: Benjamini-Hochberg FDR controls false discovery within each tested family
 - **Sizing**: fractional Kelly reduced multiplicatively through CI width, lead time, win rate, portfolio heat, and drawdown cascades (fail-closed on NaN)
+- **Data Density Discount (DDD)**: when a city's observation coverage is thin or its oracle mismatch rate is high, a two-rail trigger applies a continuous Kelly discount (and hard-halts below an absolute coverage floor); spec `docs/reference/zeus_oracle_density_discount_reference.md`, code `src/oracle/data_density_discount.py`
 
 ---
 

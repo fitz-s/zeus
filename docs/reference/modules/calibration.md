@@ -55,6 +55,8 @@ Calibration is mathematically flexible but semantically brittle. It cannot rescu
 | `metric_specs.py` | Metric identity and feature-contract anchor. |
 | `drift.py / blocked_oos.py / effective_sample_size.py` | Health/robustness layer. |
 | `retrain_trigger.py` | R3 F2 operator-gated retrain/promotion wiring; CONFIRMED-only corpus and frozen-replay PASS before promotion. |
+| `ens_bias_model.py / ens_bias_repo.py` | Hierarchical ENS bias estimator: empirical-Bayes shrinkage of TIGGE structural prior toward live OpenData residuals (SNR-gated), `model_bias_ens_v2` persistence (PR #334). |
+| `ens_error_model.py` | Universal predictive-error layer: location + scale + SNR correction-strength gate, residual-aware MC, 0.5°→0.25° variance transport (PR #336). |
 
 ## 10. Relevant tests
 - tests/test_calibration_manager.py

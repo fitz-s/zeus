@@ -314,10 +314,11 @@ that package.
 Do not default-read all references. The digest profile tells you which laws
 apply; read the reference that explains those laws:
 - `docs/reference/zeus_domain_model.md` — domain model, worked examples, strategy taxonomy
-- `docs/reference/zeus_math_spec.md` — probability chain formulas, calibration math
+- `docs/reference/zeus_math_spec.md` — probability chain formulas, calibration math (incl. empirical-Bayes ENS bias correction + predictive-error layer: `src/calibration/ens_bias_model.py`, `src/calibration/ens_error_model.py`)
 - `docs/reference/zeus_market_settlement_reference.md` — bin topology, settlement semantics, sensor physics
 - `docs/reference/zeus_execution_lifecycle_reference.md` — lifecycle state machine, chain reconciliation, executor
 - `docs/reference/zeus_risk_strategy_reference.md` — risk levels, Kelly sizing, edge decay
+- `docs/reference/zeus_oracle_density_discount_reference.md` — DDD v2: two-rail coverage trigger, oracle error-rate, Kelly discount integration
 - `docs/reference/zeus_data_and_replay_reference.md` — database topology, data ingestion, dual-track identity
 - `docs/reference/zeus_failure_modes_reference.md` — code-grounded failure modes with invariant anchors
 
