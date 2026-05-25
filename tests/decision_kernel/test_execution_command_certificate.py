@@ -24,6 +24,7 @@ from src.decision_kernel.certificates.execution import (
     build_executor_expressibility_certificate,
     build_final_intent_certificate_from_actionable,
 )
+from src.engine.event_bound_final_intent import validate_final_intent_cert_for_existing_executor
 
 
 NOW = datetime(2026, 5, 25, 12, tzinfo=timezone.utc)
@@ -467,6 +468,7 @@ def builder_chain(final_payload: dict | None = None):
         executable_snapshot_cert=executable,
         live_cap_cert=live_cap,
         decision_time=NOW,
+        executor_native_intent_hash=validate_final_intent_cert_for_existing_executor(final_intent),
     )
     return actionable, final_intent, expressibility, live_cap
 
@@ -564,6 +566,37 @@ def _final_intent_payload(actionable) -> dict:
         "tick_size": 0.01,
         "min_order_size": 1.0,
         "fee_rate": 0.0,
+        "executable_snapshot_hash": "a" * 64,
+        "cost_basis_hash": "b" * 64,
+        "cost_basis_id": "cost_basis:" + ("b" * 16),
+        "executor_order_type": "GTC",
+        "decision_source_context": {
+            "source_id": "edli_event_bound",
+            "model_family": "edli_v1",
+            "forecast_issue_time": NOW.isoformat(),
+            "forecast_valid_time": NOW.isoformat(),
+            "forecast_fetch_time": NOW.isoformat(),
+            "forecast_available_at": NOW.isoformat(),
+            "raw_payload_hash": "c" * 64,
+            "degradation_level": "OK",
+            "forecast_source_role": "entry_primary",
+            "authority_tier": "FORECAST",
+            "decision_time": NOW.isoformat(),
+            "decision_time_status": "OK",
+            "observation_time": NOW.isoformat(),
+            "observation_available_at": NOW.isoformat(),
+            "polymarket_end_anchor_source": "gamma_explicit",
+            "first_member_observed_time": NOW.isoformat(),
+            "run_complete_time": NOW.isoformat(),
+            "zeus_submit_intent_time": NOW.isoformat(),
+            "venue_ack_time": NOW.isoformat(),
+        },
+        "passive_maker_context": {
+            "spread_usd": "0.01",
+            "quote_age_ms": 0,
+            "expected_fill_probability": "0.1",
+            "orderbook_hash_age_ms": 0,
+        },
         "live_cap_usage_id": payload["live_cap_usage_id"],
         "source": "existing_final_intent_builder",
         "submitted": False,
@@ -581,6 +614,7 @@ def _expressibility_payload(final_intent) -> dict:
         "can_express": True,
         "passed": True,
         "reason_code": "OK",
+        "executor_native_intent_hash": "d" * 64,
         "order_type": payload["order_type"],
         "side": payload["side"],
         "direction": payload["direction"],

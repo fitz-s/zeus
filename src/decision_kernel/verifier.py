@@ -446,10 +446,24 @@ def _verify_final_intent_payload(
         raise CertificateVerificationError("final intent order_type unsupported")
     if payload.get("time_in_force") not in {"GTC", "GTD"}:
         raise CertificateVerificationError("final intent time_in_force unsupported")
+    if payload.get("executor_order_type") not in {"GTC", "GTD"}:
+        raise CertificateVerificationError("final intent executor_order_type unsupported")
     if payload.get("post_only") is not True or payload.get("maker_intent") is not True:
         raise CertificateVerificationError("final intent must preserve passive maker executor law")
     if payload.get("source") != "existing_final_intent_builder":
         raise CertificateVerificationError("final intent source must be existing_final_intent_builder")
+    for field in (
+        "executable_snapshot_hash",
+        "cost_basis_hash",
+        "cost_basis_id",
+        "decision_source_context",
+        "passive_maker_context",
+    ):
+        if payload.get(field) in (None, "", {}):
+            raise CertificateVerificationError(f"final intent missing executor-native field: {field}")
+    expected_cost_basis_id = "cost_basis:" + str(payload["cost_basis_hash"])[:16]
+    if payload["cost_basis_id"] != expected_cost_basis_id:
+        raise CertificateVerificationError("final intent cost_basis_id mismatch")
 
 
 def _verify_executor_expressibility_payload(
@@ -467,6 +481,8 @@ def _verify_executor_expressibility_payload(
         raise CertificateVerificationError("executor expressibility passed must be true")
     if payload.get("reason_code") not in (None, "", "OK"):
         raise CertificateVerificationError("executor expressibility reason_code must be empty or OK")
+    if payload.get("executor_native_intent_hash") in (None, ""):
+        raise CertificateVerificationError("executor expressibility requires executor_native_intent_hash")
     for field in ("final_intent_id", "token_id", "condition_id", "direction", "order_type", "time_in_force"):
         _require_equal(f"executor_expressibility.{field}", payload.get(field), f"final_intent.{field}", final_intent.get(field))
     if executable.get("condition_id") not in (None, ""):

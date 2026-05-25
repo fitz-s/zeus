@@ -9,6 +9,7 @@ import sqlite3
 from typing import Literal
 
 from src.contracts.execution_price import ExecutionPrice
+from src.decision_kernel.canonicalization import stable_hash
 from src.decision_kernel.certificate import DecisionCertificate
 
 
@@ -112,14 +113,8 @@ def submit_event_bound_final_intent_via_existing_executor(
             decision_id=str(execution_command_cert.payload["execution_command_id"]),
             snapshot_conn=snapshot_conn if snapshot_conn is not None else conn,
         )
-    except EventBoundExecutorExpressibilityError as exc:
-        return EventBoundExecutorSubmitResult(
-            status="ERROR_UNKNOWN",
-            reason_code=f"EXECUTOR_FINAL_INTENT_NOT_EXPRESSIBLE:{exc}",
-            submit_started_at=started_at,
-            submit_finished_at=datetime.now(timezone.utc).isoformat(),
-            raw_response={"error": str(exc), "stage": "final_intent_conversion"},
-        )
+    except EventBoundExecutorExpressibilityError:
+        raise
     except Exception as exc:
         return EventBoundExecutorSubmitResult(
             status="TIMEOUT_UNKNOWN",
@@ -132,22 +127,32 @@ def submit_event_bound_final_intent_via_existing_executor(
     return _executor_order_result_to_submit_result(result, started_at=started_at)
 
 
+def validate_final_intent_cert_for_existing_executor(final_intent_cert: DecisionCertificate) -> str:
+    """Return the executor-native intent hash only if the final intent is expressible."""
+
+    return stable_hash(_final_execution_intent_from_payload(final_intent_cert.payload))
+
+
 def _final_execution_intent_from_cert(
     final_intent_cert: DecisionCertificate,
     execution_command_cert: DecisionCertificate,
 ):
-    from src.contracts.execution_intent import (
-        DecisionSourceContext,
-        FinalExecutionIntent,
-        PassiveMakerExecutionContext,
-    )
-
     final_payload = final_intent_cert.payload
     command_payload = execution_command_cert.payload
     _require_payload_match(final_payload, command_payload, "event_id")
     _require_payload_match(final_payload, command_payload, "final_intent_id")
     _require_payload_match(final_payload, command_payload, "token_id")
     _require_payload_match(final_payload, command_payload, "direction")
+    return _final_execution_intent_from_payload(final_payload)
+
+
+def _final_execution_intent_from_payload(final_payload: dict):
+    from src.contracts.execution_intent import (
+        DecisionSourceContext,
+        FinalExecutionIntent,
+        PassiveMakerExecutionContext,
+    )
+
     snapshot_hash = _required_text(final_payload, "executable_snapshot_hash")
     cost_basis_hash = _required_text(final_payload, "cost_basis_hash")
     cost_basis_id = str(final_payload.get("cost_basis_id") or f"cost_basis:{cost_basis_hash[:16]}")

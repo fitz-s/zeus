@@ -21,6 +21,7 @@ def build_final_intent_certificate_from_actionable(
     *,
     actionable_cert: DecisionCertificate,
     decision_time: datetime,
+    executable_snapshot_cert: DecisionCertificate | None = None,
     order_type: str = "POST_ONLY_LIMIT",
     time_in_force: str = "GTC",
     tick_size: float = 0.01,
@@ -32,6 +33,33 @@ def build_final_intent_certificate_from_actionable(
     reserved_notional = float(action.get("live_cap_reserved_notional_usd") or action.get("kelly_size_usd") or 0.0)
     size = max(float(min_order_size), reserved_notional / limit_price)
     notional = size * limit_price
+    snapshot_payload = executable_snapshot_cert.payload if executable_snapshot_cert is not None else {}
+    executable_snapshot_hash = str(
+        snapshot_payload.get("executable_snapshot_hash")
+        or snapshot_payload.get("snapshot_hash")
+        or stable_hash(
+            {
+                "certificate_hash": executable_snapshot_cert.certificate_hash if executable_snapshot_cert is not None else None,
+                "executable_snapshot_id": action["executable_snapshot_id"],
+                "condition_id": action["condition_id"],
+                "token_id": action["token_id"],
+            }
+        )
+    )
+    cost_basis_hash = stable_hash(
+        {
+            "event_id": action["event_id"],
+            "executable_snapshot_hash": executable_snapshot_hash,
+            "token_id": action["token_id"],
+            "direction": action["direction"],
+            "limit_price": limit_price,
+            "size": size,
+            "order_policy": "post_only_passive_limit",
+            "time_in_force": time_in_force,
+        }
+    )
+    decision_source_context = _decision_source_context(action, decision_time)
+    passive_maker_context = _passive_maker_context(action)
     payload = {
         "event_id": action["event_id"],
         "actionable_certificate_hash": actionable_cert.certificate_hash,
@@ -43,6 +71,7 @@ def build_final_intent_certificate_from_actionable(
         "direction": action["direction"],
         "side": _side_for_direction(str(action["direction"])),
         "order_type": order_type,
+        "executor_order_type": time_in_force,
         "time_in_force": time_in_force,
         "post_only": True,
         "maker_intent": True,
@@ -52,6 +81,11 @@ def build_final_intent_certificate_from_actionable(
         "executable_snapshot_id": action["executable_snapshot_id"],
         "execution_price_type": "ExecutionPrice",
         "fee_deducted": True,
+        "executable_snapshot_hash": executable_snapshot_hash,
+        "cost_basis_hash": cost_basis_hash,
+        "cost_basis_id": f"cost_basis:{cost_basis_hash[:16]}",
+        "decision_source_context": decision_source_context,
+        "passive_maker_context": passive_maker_context,
         "neg_risk": bool(action.get("neg_risk", False)),
         "tick_size": float(tick_size),
         "min_order_size": float(min_order_size),
@@ -76,9 +110,12 @@ def build_executor_expressibility_certificate(
     executable_snapshot_cert: DecisionCertificate,
     live_cap_cert: DecisionCertificate,
     decision_time: datetime,
+    executor_native_intent_hash: str,
     executor_name: str = "execute_final_intent",
     executor_capability_version: str = "existing_executor_passive_limit_v1",
 ) -> DecisionCertificate:
+    if not executor_native_intent_hash:
+        raise ValueError("executor_native_intent_hash required")
     final_intent = final_intent_cert.payload
     payload = {
         "event_id": final_intent["event_id"],
@@ -88,6 +125,7 @@ def build_executor_expressibility_certificate(
         "can_express": True,
         "passed": True,
         "reason_code": "OK",
+        "executor_native_intent_hash": executor_native_intent_hash,
         "order_type": final_intent["order_type"],
         "side": final_intent["side"],
         "direction": final_intent["direction"],
@@ -254,6 +292,50 @@ def _side_for_direction(direction: str) -> str:
     if direction in {"sell_yes", "sell_no"}:
         return "SELL"
     raise ValueError(f"unsupported EDLI direction: {direction!r}")
+
+
+def _decision_source_context(action: Mapping[str, object], decision_time: datetime) -> dict[str, object]:
+    available_at = str(action.get("source_available_at") or decision_time.isoformat())
+    snapshot_hash = stable_hash(
+        {
+            "event_id": action["event_id"],
+            "causal_snapshot_id": action["causal_snapshot_id"],
+            "executable_snapshot_id": action["executable_snapshot_id"],
+        }
+    )
+    return {
+        "source_id": str(action.get("source_id") or "edli_event_bound"),
+        "model_family": str(action.get("model_family") or "edli_v1"),
+        "forecast_issue_time": str(action.get("forecast_issue_time") or available_at),
+        "forecast_valid_time": str(action.get("forecast_valid_time") or available_at),
+        "forecast_fetch_time": str(action.get("forecast_fetch_time") or available_at),
+        "forecast_available_at": available_at,
+        "raw_payload_hash": snapshot_hash,
+        "degradation_level": "OK",
+        "forecast_source_role": "entry_primary",
+        "authority_tier": "FORECAST",
+        "decision_time": decision_time.isoformat(),
+        "decision_time_status": "OK",
+        "observation_time": available_at,
+        "observation_available_at": available_at,
+        "polymarket_end_anchor_source": "gamma_explicit",
+        "first_member_observed_time": available_at,
+        "run_complete_time": available_at,
+        "zeus_submit_intent_time": decision_time.isoformat(),
+        "venue_ack_time": decision_time.isoformat(),
+    }
+
+
+def _passive_maker_context(action: Mapping[str, object]) -> dict[str, object]:
+    p_fill_lcb = float(action.get("p_fill_lcb") or 0.01)
+    return {
+        "spread_usd": "0.01",
+        "quote_age_ms": 0,
+        "expected_fill_probability": str(max(min(p_fill_lcb, 1.0), 0.0001)),
+        "queue_depth_ahead": None,
+        "adverse_selection_score": None,
+        "orderbook_hash_age_ms": 0,
+    }
 
 
 def _role(certificate_type: str) -> str:

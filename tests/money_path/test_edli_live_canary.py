@@ -8,6 +8,7 @@ import sqlite3
 from pathlib import Path
 from datetime import datetime, timezone
 
+import pytest
 
 def test_live_canary_runtime_remains_disabled_until_executor_cut():
     settings = json.loads(Path("config/settings.json").read_text())
@@ -249,6 +250,43 @@ def test_live_cap_certificate_is_backed_by_usage_row():
     assert row["final_intent_id"] == "intent-1"
 
 
+def test_submit_disabled_live_bridge_releases_live_cap_row(monkeypatch):
+    from src.engine import event_reactor_adapter as adapter
+    from src.riskguard.risk_level import RiskLevel
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    event = _forecast_event()
+    monkeypatch.setattr(adapter, "build_event_bound_no_submit_receipt", lambda *_args, **_kwargs: _accepted_receipt(event))
+
+    def _command_bundle_with_real_cap(**kwargs):
+        live_cap = adapter._build_live_cap_certificate_from_ledger(
+            event=kwargs["event"],
+            receipt=kwargs["receipt"],
+            decision_time=kwargs["decision_time"],
+            max_notional_usd=kwargs["tiny_live_max_notional_usd"],
+            live_cap_conn=kwargs["live_cap_conn"],
+        )
+        actionable, final_intent, expressibility, _old_live_cap, command = _command_cert_bundle()
+        return (actionable, live_cap, final_intent, expressibility, command)
+
+    monkeypatch.setattr(adapter, "_build_live_execution_command_certificates", _command_bundle_with_real_cap)
+
+    submit = adapter.event_bound_live_adapter_from_trade_conn(
+        conn,
+        live_cap_conn=conn,
+        get_current_level=lambda: RiskLevel.GREEN,
+        real_order_submit_enabled=False,
+    )
+
+    receipt = submit(event, datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc))
+    rows = conn.execute("SELECT reservation_status FROM edli_live_cap_usage").fetchall()
+
+    assert receipt.side_effect_status == "SUBMIT_DISABLED"
+    assert rows
+    assert {row["reservation_status"] for row in rows} == {"RELEASED"}
+
+
 def test_edli_live_cap_path_does_not_reference_legacy_cap_columns():
     from pathlib import Path
 
@@ -304,9 +342,11 @@ def test_live_adapter_submit_enabled_canary_enabled_calls_executor_mock(monkeypa
     from src.riskguard.risk_level import RiskLevel
 
     event = _forecast_event()
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
     called = {"count": 0}
     monkeypatch.setattr(adapter, "build_event_bound_no_submit_receipt", lambda *_args, **_kwargs: _accepted_receipt(event))
-    monkeypatch.setattr(adapter, "_build_live_execution_command_certificates", lambda **_kwargs: _command_cert_bundle())
+    monkeypatch.setattr(adapter, "_build_live_execution_command_certificates", _command_bundle_with_real_cap)
 
     def _submit(_final_intent, _command):
         called["count"] += 1
@@ -320,7 +360,8 @@ def test_live_adapter_submit_enabled_canary_enabled_calls_executor_mock(monkeypa
         )
 
     submit = adapter.event_bound_live_adapter_from_trade_conn(
-        sqlite3.connect(":memory:"),
+        conn,
+        live_cap_conn=conn,
         get_current_level=lambda: RiskLevel.GREEN,
         real_order_submit_enabled=True,
         live_canary_enabled=True,
@@ -333,6 +374,7 @@ def test_live_adapter_submit_enabled_canary_enabled_calls_executor_mock(monkeypa
     assert receipt.submitted is True
     assert receipt.side_effect_status == "SUBMITTED"
     assert _receipt_status(receipt) == "SUBMITTED"
+    assert conn.execute("SELECT reservation_status FROM edli_live_cap_usage").fetchone()["reservation_status"] == "CONSUMED"
 
 
 def test_live_adapter_records_rejected_fixture_response(monkeypatch):
@@ -342,10 +384,13 @@ def test_live_adapter_records_rejected_fixture_response(monkeypatch):
     from src.riskguard.risk_level import RiskLevel
 
     event = _forecast_event()
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
     monkeypatch.setattr(adapter, "build_event_bound_no_submit_receipt", lambda *_args, **_kwargs: _accepted_receipt(event))
-    monkeypatch.setattr(adapter, "_build_live_execution_command_certificates", lambda **_kwargs: _command_cert_bundle())
+    monkeypatch.setattr(adapter, "_build_live_execution_command_certificates", _command_bundle_with_real_cap)
     submit = adapter.event_bound_live_adapter_from_trade_conn(
-        sqlite3.connect(":memory:"),
+        conn,
+        live_cap_conn=conn,
         get_current_level=lambda: RiskLevel.GREEN,
         real_order_submit_enabled=True,
         live_canary_enabled=True,
@@ -364,6 +409,7 @@ def test_live_adapter_records_rejected_fixture_response(monkeypatch):
     assert receipt.side_effect_status == "REJECTED"
     assert receipt.reason == "VENUE_REJECTED"
     assert _receipt_status(receipt) == "REJECTED"
+    assert conn.execute("SELECT reservation_status FROM edli_live_cap_usage").fetchone()["reservation_status"] == "RELEASED"
 
 
 def test_live_adapter_records_timeout_unknown_fixture_response(monkeypatch):
@@ -373,10 +419,13 @@ def test_live_adapter_records_timeout_unknown_fixture_response(monkeypatch):
     from src.riskguard.risk_level import RiskLevel
 
     event = _forecast_event()
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
     monkeypatch.setattr(adapter, "build_event_bound_no_submit_receipt", lambda *_args, **_kwargs: _accepted_receipt(event))
-    monkeypatch.setattr(adapter, "_build_live_execution_command_certificates", lambda **_kwargs: _command_cert_bundle())
+    monkeypatch.setattr(adapter, "_build_live_execution_command_certificates", _command_bundle_with_real_cap)
     submit = adapter.event_bound_live_adapter_from_trade_conn(
-        sqlite3.connect(":memory:"),
+        conn,
+        live_cap_conn=conn,
         get_current_level=lambda: RiskLevel.GREEN,
         real_order_submit_enabled=True,
         live_canary_enabled=True,
@@ -397,23 +446,51 @@ def test_live_adapter_records_timeout_unknown_fixture_response(monkeypatch):
     assert _receipt_status(receipt) == "TIMEOUT_UNKNOWN"
     receipt_cert = _receipt_cert(receipt)
     assert receipt_cert.payload["reconciliation_followup_required"] is True
+    assert conn.execute("SELECT reservation_status FROM edli_live_cap_usage").fetchone()["reservation_status"] == "RESERVED"
 
 
-def test_production_executor_boundary_blocks_current_unenriched_final_intent():
+def test_production_executor_boundary_rejects_unenriched_final_intent_before_executor():
+    from src.engine.event_bound_final_intent import (
+        EventBoundExecutorExpressibilityError,
+        submit_event_bound_final_intent_via_existing_executor,
+    )
+
+    _actionable, final_intent, _expressibility, _live_cap, command = _command_cert_bundle()
+    stripped = _replace_payload(final_intent, {"executable_snapshot_hash": ""})
+
+    with pytest.raises(EventBoundExecutorExpressibilityError, match="executable_snapshot_hash missing"):
+        submit_event_bound_final_intent_via_existing_executor(
+            final_intent_cert=stripped,
+            execution_command_cert=command,
+            conn=sqlite3.connect(":memory:"),
+            decision_time=datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc),
+            executor_submit=lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("executor must not be called")),
+        )
+
+
+def test_production_executor_boundary_calls_spy_after_native_validation():
+    from types import SimpleNamespace
     from src.engine.event_bound_final_intent import submit_event_bound_final_intent_via_existing_executor
 
     _actionable, final_intent, _expressibility, _live_cap, command = _command_cert_bundle()
+    called = {"count": 0}
+
+    def _spy(intent, **kwargs):
+        called["count"] += 1
+        assert intent.selected_token_id == final_intent.payload["token_id"]
+        assert kwargs["decision_id"] == command.payload["execution_command_id"]
+        return SimpleNamespace(status="pending", reason=None, order_id="venue-1", external_order_id=None)
+
     result = submit_event_bound_final_intent_via_existing_executor(
         final_intent_cert=final_intent,
         execution_command_cert=command,
         conn=sqlite3.connect(":memory:"),
         decision_time=datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc),
-        executor_submit=lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("executor must not be called")),
+        executor_submit=_spy,
     )
 
-    assert result.status == "ERROR_UNKNOWN"
-    assert result.reason_code.startswith("EXECUTOR_FINAL_INTENT_NOT_EXPRESSIBLE:")
-    assert "executable_snapshot_hash missing" in result.reason_code
+    assert called["count"] == 1
+    assert result.status == "SUBMITTED"
 
 
 def test_main_live_mode_wires_production_executor_boundary_source():
@@ -472,6 +549,41 @@ def _command_cert_bundle():
     assert final_intent.certificate_type == claims.FINAL_INTENT
     assert command.certificate_type == claims.EXECUTION_COMMAND
     return (actionable, final_intent, expressibility, live_cap, command)
+
+
+def _command_bundle_with_real_cap(**kwargs):
+    from src.engine import event_reactor_adapter as adapter
+
+    live_cap = adapter._build_live_cap_certificate_from_ledger(
+        event=kwargs["event"],
+        receipt=kwargs["receipt"],
+        decision_time=kwargs["decision_time"],
+        max_notional_usd=kwargs["tiny_live_max_notional_usd"],
+        live_cap_conn=kwargs["live_cap_conn"],
+    )
+    actionable, final_intent, expressibility, _old_live_cap, command = _command_cert_bundle()
+    return (actionable, live_cap, final_intent, expressibility, command)
+
+
+def _replace_payload(cert, updates):
+    from src.decision_kernel.certificate import build_certificate
+
+    return build_certificate(
+        certificate_type=cert.certificate_type,
+        semantic_key=cert.semantic_key + ":modified",
+        claim_type=cert.header.claim_type,
+        mode=cert.header.mode,
+        decision_time=cert.header.decision_time,
+        source_available_at=cert.header.source_available_at,
+        agent_received_at=cert.header.agent_received_at,
+        persisted_at=cert.header.persisted_at,
+        payload={**cert.payload, **updates},
+        parent_edges=cert.header.parent_edges,
+        authority_id=cert.header.authority_id,
+        authority_version=cert.header.authority_version,
+        algorithm_id=cert.header.algorithm_id,
+        algorithm_version=cert.header.algorithm_version,
+    )
 
 
 def _receipt_cert(receipt):

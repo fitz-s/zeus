@@ -70,105 +70,102 @@ class LiveCapLedger:
         usage_id = self._usage_id(event_id, cap_scope)
         created_at = _dt(datetime.now(timezone.utc))
         decision_text = _dt(decision_time)
-        with self.conn:
-            existing = self.conn.execute(
-                """
-                SELECT *
-                FROM edli_live_cap_usage
-                WHERE event_id = ? AND cap_scope = ?
-                """,
-                (event_id, cap_scope),
-            ).fetchone()
-            if existing is not None:
-                reservation = _reservation_from_row(existing)
-                if (
-                    reservation.max_notional_usd != float(max_notional_usd)
-                    or reservation.max_orders_per_day != int(max_orders_per_day)
-                    or reservation.reserved_notional_usd != float(requested_notional_usd)
-                    or (final_intent_id is not None and reservation.final_intent_id != final_intent_id)
-                    or (execution_command_id is not None and reservation.execution_command_id != execution_command_id)
-                ):
-                    raise LiveCapError("live cap reservation drift for event/cap_scope")
-                return reservation
-            used = self.conn.execute(
-                """
-                SELECT COUNT(*)
-                FROM edli_live_cap_usage
-                WHERE cap_scope = ?
-                  AND substr(decision_time, 1, 10) = substr(?, 1, 10)
-                  AND reservation_status IN ('RESERVED','CONSUMED')
-                """,
-                (cap_scope, decision_text),
-            ).fetchone()[0]
-            if int(used) >= max_orders_per_day:
-                raise LiveCapError("live cap max_orders_per_day exhausted")
-            self.conn.execute(
-                """
-                INSERT INTO edli_live_cap_usage (
-                    usage_id, event_id, decision_time, cap_scope,
-                    max_notional_usd, max_orders_per_day, reserved_notional_usd,
-                    order_count, reservation_status, final_intent_id,
-                    execution_command_id, created_at, schema_version
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'RESERVED', ?, ?, ?, 1)
-                """,
-                (
-                    usage_id,
-                    event_id,
-                    decision_text,
-                    cap_scope,
-                    float(max_notional_usd),
-                    int(max_orders_per_day),
-                    float(requested_notional_usd),
-                    int(used) + 1,
-                    final_intent_id,
-                    execution_command_id,
-                    created_at,
-                ),
-            )
+        existing = self.conn.execute(
+            """
+            SELECT *
+            FROM edli_live_cap_usage
+            WHERE event_id = ? AND cap_scope = ?
+            """,
+            (event_id, cap_scope),
+        ).fetchone()
+        if existing is not None:
+            reservation = _reservation_from_row(existing)
+            if (
+                reservation.max_notional_usd != float(max_notional_usd)
+                or reservation.max_orders_per_day != int(max_orders_per_day)
+                or reservation.reserved_notional_usd != float(requested_notional_usd)
+                or (final_intent_id is not None and reservation.final_intent_id != final_intent_id)
+                or (execution_command_id is not None and reservation.execution_command_id != execution_command_id)
+            ):
+                raise LiveCapError("live cap reservation drift for event/cap_scope")
+            return reservation
+        used = self.conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM edli_live_cap_usage
+            WHERE cap_scope = ?
+              AND substr(decision_time, 1, 10) = substr(?, 1, 10)
+              AND reservation_status IN ('RESERVED','CONSUMED')
+            """,
+            (cap_scope, decision_text),
+        ).fetchone()[0]
+        if int(used) >= max_orders_per_day:
+            raise LiveCapError("live cap max_orders_per_day exhausted")
+        self.conn.execute(
+            """
+            INSERT INTO edli_live_cap_usage (
+                usage_id, event_id, decision_time, cap_scope,
+                max_notional_usd, max_orders_per_day, reserved_notional_usd,
+                order_count, reservation_status, final_intent_id,
+                execution_command_id, created_at, schema_version
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'RESERVED', ?, ?, ?, 1)
+            """,
+            (
+                usage_id,
+                event_id,
+                decision_text,
+                cap_scope,
+                float(max_notional_usd),
+                int(max_orders_per_day),
+                float(requested_notional_usd),
+                int(used) + 1,
+                final_intent_id,
+                execution_command_id,
+                created_at,
+            ),
+        )
         return self.get(usage_id)
 
     def release(self, usage_id: str, reason: str | None = None) -> None:
         del reason
-        with self.conn:
-            row = self.conn.execute(
-                "SELECT reservation_status FROM edli_live_cap_usage WHERE usage_id = ?",
-                (usage_id,),
-            ).fetchone()
-            if row is None:
-                raise LiveCapError("live cap reservation not found")
-            if row[0] == "CONSUMED":
-                raise LiveCapError("consumed live cap reservation cannot be released")
-            self.conn.execute(
-                """
-                UPDATE edli_live_cap_usage
-                SET reservation_status = 'RELEASED'
-                WHERE usage_id = ?
-                """,
-                (usage_id,),
-            )
+        row = self.conn.execute(
+            "SELECT reservation_status FROM edli_live_cap_usage WHERE usage_id = ?",
+            (usage_id,),
+        ).fetchone()
+        if row is None:
+            raise LiveCapError("live cap reservation not found")
+        if row[0] == "CONSUMED":
+            raise LiveCapError("consumed live cap reservation cannot be released")
+        self.conn.execute(
+            """
+            UPDATE edli_live_cap_usage
+            SET reservation_status = 'RELEASED'
+            WHERE usage_id = ?
+            """,
+            (usage_id,),
+        )
 
     def consume(self, usage_id: str, *, final_intent_id: str, execution_command_id: str) -> None:
         if not final_intent_id or not execution_command_id:
             raise LiveCapError("consume requires final_intent_id and execution_command_id")
-        with self.conn:
-            row = self.conn.execute(
-                "SELECT reservation_status FROM edli_live_cap_usage WHERE usage_id = ?",
-                (usage_id,),
-            ).fetchone()
-            if row is None:
-                raise LiveCapError("live cap reservation not found")
-            if row[0] != "RESERVED":
-                raise LiveCapError("only RESERVED live cap reservations can be consumed")
-            self.conn.execute(
-                """
-                UPDATE edli_live_cap_usage
-                SET reservation_status = 'CONSUMED',
-                    final_intent_id = ?,
-                    execution_command_id = ?
-                WHERE usage_id = ?
-                """,
-                (final_intent_id, execution_command_id, usage_id),
-            )
+        row = self.conn.execute(
+            "SELECT reservation_status FROM edli_live_cap_usage WHERE usage_id = ?",
+            (usage_id,),
+        ).fetchone()
+        if row is None:
+            raise LiveCapError("live cap reservation not found")
+        if row[0] != "RESERVED":
+            raise LiveCapError("only RESERVED live cap reservations can be consumed")
+        self.conn.execute(
+            """
+            UPDATE edli_live_cap_usage
+            SET reservation_status = 'CONSUMED',
+                final_intent_id = ?,
+                execution_command_id = ?
+            WHERE usage_id = ?
+            """,
+            (final_intent_id, execution_command_id, usage_id),
+        )
 
     def get(self, usage_id: str) -> LiveCapReservation:
         row = self.conn.execute(

@@ -243,6 +243,7 @@ def test_processed_event_terminal_surface_includes_execution_receipt_certificate
         build_executor_expressibility_certificate,
         build_final_intent_certificate_from_actionable,
     )
+    from src.engine.event_bound_final_intent import validate_final_intent_cert_for_existing_executor
     from tests.decision_kernel.test_actionable_trade_certificate import actionable_graph
     from tests.decision_kernel.test_execution_command_certificate import _cert, _live_cap_payload
     from src.decision_kernel import claims
@@ -274,6 +275,7 @@ def test_processed_event_terminal_surface_includes_execution_receipt_certificate
         executable_snapshot_cert=executable,
         live_cap_cert=live_cap,
         decision_time=decision_time,
+        executor_native_intent_hash=validate_final_intent_cert_for_existing_executor(final_intent),
     )
     command = build_execution_command_certificate_from_final_intent(
         actionable_cert=action,
@@ -338,6 +340,7 @@ def test_live_submitted_execution_receipt_certificate_is_terminal_when_submit_en
         build_executor_expressibility_certificate,
         build_final_intent_certificate_from_actionable,
     )
+    from src.engine.event_bound_final_intent import validate_final_intent_cert_for_existing_executor
     from tests.decision_kernel.test_actionable_trade_certificate import actionable_graph
     from tests.decision_kernel.test_execution_command_certificate import _cert, _live_cap_payload
     from src.decision_kernel import claims
@@ -369,6 +372,7 @@ def test_live_submitted_execution_receipt_certificate_is_terminal_when_submit_en
         executable_snapshot_cert=executable,
         live_cap_cert=live_cap,
         decision_time=decision_time,
+        executor_native_intent_hash=validate_final_intent_cert_for_existing_executor(final_intent),
     )
     command = build_execution_command_certificate_from_final_intent(
         actionable_cert=action,

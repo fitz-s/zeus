@@ -38,6 +38,7 @@ from src.engine.event_bound_final_intent import (
     EventBoundFinalIntent,
     build_event_bound_final_intent_receipt,
     serialize_event_bound_final_intent_receipt,
+    validate_final_intent_cert_for_existing_executor,
 )
 from src.events.candidate_binding import MarketTopologyCandidate
 from src.events.decision_engine import EventBoundDecisionEngine, EventBoundDecisionRequest
@@ -276,6 +277,12 @@ def event_bound_live_adapter_from_trade_conn(
                 command = _required_cert(command_certificates, claims.EXECUTION_COMMAND)
                 assert executor_submit is not None
                 submit_result = executor_submit(final_intent, command)
+                _transition_live_cap_after_submit(
+                    command_certificates,
+                    live_cap_conn or trade_conn,
+                    command,
+                    submit_result,
+                )
                 receipt_cert = build_execution_receipt_certificate(
                     execution_command_cert=command,
                     decision_time=decision_time.astimezone(UTC),
@@ -829,6 +836,7 @@ def _build_submit_disabled_live_certificates(
         status="SUBMIT_DISABLED",
         reason_code="REAL_ORDER_SUBMIT_DISABLED",
     )
+    _release_live_cap_for_submit_disabled(command_certificates, live_cap_conn)
     return command_certificates + (receipt_cert,)
 
 
@@ -863,30 +871,37 @@ def _build_live_execution_command_certificates(
         max_notional_usd=tiny_live_max_notional_usd,
         live_cap_conn=live_cap_conn,
     )
-    actionable = build_actionable_trade_certificate(
-        payload=_actionable_payload_from_receipt(receipt, live_cap),
-        parent_certificates=base_certs + (live_cap,),
-        decision_time=decision_time,
-    )
-    final_intent = build_final_intent_certificate_from_actionable(
-        actionable_cert=actionable,
-        decision_time=decision_time,
-        tick_size=_float_or_default(executable_snapshot.payload.get("min_tick_size"), 0.01),
-        min_order_size=_float_or_default(executable_snapshot.payload.get("min_order_size"), 1.0),
-    )
-    expressibility = build_executor_expressibility_certificate(
-        final_intent_cert=final_intent,
-        executable_snapshot_cert=executable_snapshot,
-        live_cap_cert=live_cap,
-        decision_time=decision_time,
-    )
-    command = build_execution_command_certificate_from_final_intent(
-        actionable_cert=actionable,
-        final_intent_cert=final_intent,
-        executor_expressibility_cert=expressibility,
-        live_cap_cert=live_cap,
-        decision_time=decision_time,
-    )
+    try:
+        actionable = build_actionable_trade_certificate(
+            payload=_actionable_payload_from_receipt(receipt, live_cap),
+            parent_certificates=base_certs + (live_cap,),
+            decision_time=decision_time,
+        )
+        final_intent = build_final_intent_certificate_from_actionable(
+            actionable_cert=actionable,
+            executable_snapshot_cert=executable_snapshot,
+            decision_time=decision_time,
+            tick_size=_float_or_default(executable_snapshot.payload.get("min_tick_size"), 0.01),
+            min_order_size=_float_or_default(executable_snapshot.payload.get("min_order_size"), 1.0),
+        )
+        executor_native_intent_hash = validate_final_intent_cert_for_existing_executor(final_intent)
+        expressibility = build_executor_expressibility_certificate(
+            final_intent_cert=final_intent,
+            executable_snapshot_cert=executable_snapshot,
+            live_cap_cert=live_cap,
+            decision_time=decision_time,
+            executor_native_intent_hash=executor_native_intent_hash,
+        )
+        command = build_execution_command_certificate_from_final_intent(
+            actionable_cert=actionable,
+            final_intent_cert=final_intent,
+            executor_expressibility_cert=expressibility,
+            live_cap_cert=live_cap,
+            decision_time=decision_time,
+        )
+    except Exception:
+        _release_live_cap_certificate(live_cap, live_cap_conn, reason="PRE_COMMAND_FAILURE")
+        raise
     return base_certs + (live_cap, actionable, final_intent, expressibility, command)
 
 
@@ -967,6 +982,53 @@ def _build_live_cap_certificate_from_ledger(
         algorithm_id="edli.submit_disabled_live_cap",
         algorithm_version="v1",
     )
+
+
+def _release_live_cap_for_submit_disabled(
+    certificates: tuple[DecisionCertificate, ...],
+    live_cap_conn: sqlite3.Connection | None,
+) -> None:
+    live_cap = _required_cert(certificates, claims.LIVE_CAP)
+    _release_live_cap_certificate(live_cap, live_cap_conn, reason="SUBMIT_DISABLED")
+
+
+def _transition_live_cap_after_submit(
+    certificates: tuple[DecisionCertificate, ...],
+    live_cap_conn: sqlite3.Connection,
+    command: DecisionCertificate,
+    submit_result: EventBoundExecutorSubmitResult,
+) -> None:
+    live_cap = _required_cert(certificates, claims.LIVE_CAP)
+    usage_id = str(live_cap.payload["usage_id"])
+    from src.events.live_cap import LiveCapLedger
+
+    ledger = LiveCapLedger(live_cap_conn)
+    if submit_result.status == "SUBMITTED":
+        ledger.consume(
+            usage_id,
+            final_intent_id=str(command.payload["final_intent_id"]),
+            execution_command_id=str(command.payload["execution_command_id"]),
+        )
+    elif submit_result.status in {"REJECTED", "ERROR_UNKNOWN"}:
+        ledger.release(usage_id, submit_result.reason_code)
+    elif submit_result.status == "TIMEOUT_UNKNOWN":
+        return
+
+
+def _release_live_cap_certificate(
+    live_cap: DecisionCertificate,
+    live_cap_conn: sqlite3.Connection | None,
+    *,
+    reason: str,
+) -> None:
+    if live_cap_conn is None:
+        return
+    from src.events.live_cap import LiveCapError, LiveCapLedger
+
+    try:
+        LiveCapLedger(live_cap_conn).release(str(live_cap.payload["usage_id"]), reason)
+    except LiveCapError:
+        return
 
 
 def _required_cert(certs: tuple[DecisionCertificate, ...], certificate_type: str) -> DecisionCertificate:
