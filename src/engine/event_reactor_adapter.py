@@ -564,6 +564,8 @@ def build_event_bound_no_submit_receipt(
         family_topology_rows=family_topology_rows,
         family_snapshot_rows=family_rows,
         selected_snapshot_row=row,
+        forecast_conn=source_conn,
+        calibration_conn=calibration_conn,
         proof=proof,
         raw_receipt=raw_receipt,
         fdr=fdr,
@@ -652,6 +654,8 @@ def _build_no_submit_proof_bundle_from_adapter_evidence(
     family_topology_rows: list[dict[str, Any]],
     family_snapshot_rows: list[dict[str, Any]],
     selected_snapshot_row: dict[str, Any],
+    forecast_conn: sqlite3.Connection,
+    calibration_conn: sqlite3.Connection,
     proof: _CandidateProof,
     raw_receipt: dict[str, Any],
     fdr,
@@ -667,10 +671,20 @@ def _build_no_submit_proof_bundle_from_adapter_evidence(
     )
     decision_clock = EvidenceClock(decision_time, decision_time, decision_time)
     quote_clock = _evidence_clock_from_row(selected_snapshot_row, fallback=decision_time)
-    forecast_clock = EvidenceClock(
-        source_available_at=_parse_utc(payload.get("available_at")) or event_clock.source_available_at,
-        agent_received_at=_parse_utc(payload.get("received_at")) or event_clock.agent_received_at,
-        persisted_at=event_clock.persisted_at,
+    forecast_payload, forecast_clock = _forecast_authority_payload_and_clock(
+        forecast_conn,
+        event=event,
+        family=family,
+        payload=payload,
+        decision_time=decision_time,
+    )
+    calibration_payload, calibration_clock = _calibration_authority_payload_and_clock(
+        calibration_conn,
+        event=event,
+        family=family,
+        payload=payload,
+        forecast_payload=forecast_payload,
+        decision_time=decision_time,
     )
     projection = {
         "event_id": raw_receipt.get("event_id"),
@@ -737,15 +751,7 @@ def _build_no_submit_proof_bundle_from_adapter_evidence(
             claims.FORECAST_AUTHORITY,
             "forecast_authority",
             "forecast_authority",
-            {
-                "identity": event.causal_snapshot_id,
-                "snapshot_id": event.causal_snapshot_id,
-                "reader_authority": "read_executable_forecast",
-                "city": family.city,
-                "target_date": family.target_date,
-                "metric": family.metric,
-                "source_run_id": payload.get("source_run_id"),
-            },
+            forecast_payload,
             forecast_clock,
             "zeus.data.executable_forecast_reader",
             algorithm_id="decision_kernel.forecast_authority.event_bound_adapter",
@@ -754,14 +760,8 @@ def _build_no_submit_proof_bundle_from_adapter_evidence(
             claims.CALIBRATION,
             "calibration",
             "calibration",
-            {
-                "identity": f"{family.city}:{family.metric}:{family.target_date}",
-                "city": family.city,
-                "metric": family.metric,
-                "calibration_authority": "calibration.manager.get_calibrator",
-                "p_cal_source": "event_bound_snapshot_calibrator",
-            },
-            decision_clock,
+            calibration_payload,
+            calibration_clock,
             "zeus.calibration.manager",
             algorithm_id="decision_kernel.calibration.event_bound_adapter",
         ),
@@ -804,7 +804,15 @@ def _build_no_submit_proof_bundle_from_adapter_evidence(
                 "family_snapshot_ids": executable_snapshot_ids,
                 "condition_id": raw_receipt.get("condition_id"),
                 "token_id": raw_receipt.get("token_id"),
+                "orderbook_hash": _hash_jsonish(selected_snapshot_row.get("orderbook_depth_json") or selected_snapshot_row.get("orderbook_depth_jsonb")),
+                "fee_details_hash": _hash_jsonish(selected_snapshot_row.get("fee_details_json") or selected_snapshot_row.get("fee_details")),
+                "min_tick_size": selected_snapshot_row.get("min_tick_size"),
+                "min_order_size": selected_snapshot_row.get("min_order_size"),
+                "neg_risk": selected_snapshot_row.get("neg_risk"),
+                "captured_at": selected_snapshot_row.get("captured_at"),
                 "freshness_deadline": selected_snapshot_row.get("freshness_deadline"),
+                "active": selected_snapshot_row.get("active"),
+                "closed": selected_snapshot_row.get("closed"),
             },
             quote_clock,
             "zeus.trades.executable_market_snapshots",
@@ -819,6 +827,10 @@ def _build_no_submit_proof_bundle_from_adapter_evidence(
                 "condition_id": raw_receipt.get("condition_id"),
                 "token_id": raw_receipt.get("token_id"),
                 "direction": proof.direction,
+                "native_side": _native_side_for_direction(proof.direction),
+                "selected_token_id": proof.token_id,
+                "quote_depth_hash": _hash_jsonish(selected_snapshot_row.get("orderbook_depth_json") or selected_snapshot_row.get("orderbook_depth_jsonb")),
+                "p_fill_lcb_policy_id": "edli_v1.no_submit_visible_depth_fill_lcb",
                 "native_quote_available": proof.native_quote_available,
                 "execution_price_type": execution_price.__class__.__name__ if execution_price is not None else None,
                 "execution_price_value": execution_price.value if execution_price is not None else None,
@@ -941,6 +953,186 @@ def _build_no_submit_proof_bundle_from_adapter_evidence(
         ),
         no_submit_projection=projection,
     )
+
+
+def _forecast_authority_payload_and_clock(
+    conn: sqlite3.Connection,
+    *,
+    event: OpportunityEvent,
+    family,
+    payload: dict[str, object],
+    decision_time: datetime,
+) -> tuple[dict[str, Any], EvidenceClock]:
+    allow_latest = event.event_type == "DAY0_EXTREME_UPDATED"
+    snapshot = _forecast_snapshot_row_for_event(
+        conn,
+        event=event,
+        family=family,
+        allow_latest=allow_latest,
+        decision_time=decision_time,
+    )
+    if snapshot is None:
+        raise ValueError("FORECAST_AUTHORITY_EVIDENCE_MISSING:snapshot")
+    source_run_id = _nonnull(snapshot.get("source_run_id") or payload.get("source_run_id"))
+    source_run_table = _authority_table_ref(conn, "source_run")
+    coverage_table = _authority_table_ref(conn, "source_run_coverage")
+    if not source_run_id or source_run_table is None or coverage_table is None:
+        raise ValueError("FORECAST_AUTHORITY_EVIDENCE_MISSING:scope")
+    source_run = _row_by_id(conn, source_run_table, "source_run_id", source_run_id)
+    if source_run is None:
+        raise ValueError("FORECAST_AUTHORITY_EVIDENCE_MISSING:source_run")
+    coverage = _coverage_row_for_snapshot(
+        conn,
+        coverage_table,
+        source_run_id=source_run_id,
+        family=family,
+        snapshot=snapshot,
+    )
+    if coverage is None:
+        raise ValueError("FORECAST_AUTHORITY_EVIDENCE_MISSING:coverage")
+    result = _read_executable_forecast_bundle_result(
+        conn,
+        snapshot=snapshot,
+        source_run=source_run,
+        coverage=coverage,
+        event=event,
+        family=family,
+        decision_time=decision_time,
+    )
+    if not result.ok or result.bundle is None:
+        raise ValueError(f"FORECAST_AUTHORITY_EVIDENCE_MISSING:{result.reason_code}")
+    evidence = result.bundle.evidence
+    payload_out = {
+        "identity": str(result.bundle.snapshot.snapshot_id),
+        "snapshot_id": str(result.bundle.snapshot.snapshot_id),
+        "reader_authority": "read_executable_forecast",
+        "reader_status": result.status,
+        "reader_reason_code": result.reason_code,
+        "city": family.city,
+        "target_date": family.target_date,
+        "metric": family.metric,
+        "forecast_source_id": evidence.forecast_source_id,
+        "forecast_data_version": evidence.forecast_data_version,
+        "source_transport": evidence.source_transport,
+        "source_cycle_time": evidence.source_cycle_time,
+        "source_issue_time": evidence.source_issue_time,
+        "horizon_profile": snapshot.get("horizon_profile"),
+        "source_run_id": evidence.source_run_id,
+        "coverage_id": evidence.coverage_id,
+        "producer_readiness_id": evidence.producer_readiness_id,
+        "entry_readiness_id": evidence.entry_readiness_id,
+        "input_snapshot_ids": tuple(str(item) for item in evidence.input_snapshot_ids),
+        "raw_payload_hash": evidence.raw_payload_hash,
+        "manifest_hash": evidence.manifest_hash,
+        "required_steps": tuple(evidence.required_steps),
+        "observed_steps": tuple(evidence.observed_steps),
+        "expected_members": evidence.expected_members,
+        "observed_members": evidence.observed_members,
+        "source_run_status": evidence.source_run_status,
+        "source_run_completeness_status": evidence.source_run_completeness_status,
+        "coverage_completeness_status": evidence.coverage_completeness_status,
+        "coverage_readiness_status": evidence.coverage_readiness_status,
+        "applied_validations": tuple(evidence.applied_validations),
+        "source_available_at": evidence.source_available_at,
+        "fetch_started_at": evidence.fetch_started_at,
+        "fetch_finished_at": evidence.fetch_finished_at,
+        "captured_at": evidence.captured_at,
+    }
+    source_time = _parse_utc(evidence.source_available_at)
+    agent_time = _parse_utc(evidence.fetch_finished_at) or _parse_utc(evidence.captured_at)
+    persisted_time = (
+        _parse_utc(source_run.get("imported_at"))
+        or _parse_utc(coverage.get("computed_at"))
+        or _parse_utc(evidence.captured_at)
+    )
+    if source_time is None or agent_time is None or persisted_time is None:
+        raise ValueError("FORECAST_AUTHORITY_EVIDENCE_MISSING:clock")
+    return payload_out, EvidenceClock(source_time, agent_time, persisted_time)
+
+
+def _calibration_authority_payload_and_clock(
+    calibration_conn: sqlite3.Connection,
+    *,
+    event: OpportunityEvent,
+    family,
+    payload: dict[str, object],
+    forecast_payload: dict[str, Any],
+    decision_time: datetime,
+) -> tuple[dict[str, Any], EvidenceClock]:
+    city = runtime_cities_by_name().get(family.city)
+    if city is None:
+        raise ValueError("CALIBRATION_AUTHORITY_EVIDENCE_MISSING:city")
+    source_id = _nonnull(payload.get("source_id") or forecast_payload.get("forecast_source_id"))
+    issue_time = _nonnull(
+        payload.get("issue_time")
+        or payload.get("source_cycle_time")
+        or payload.get("cycle")
+        or forecast_payload.get("source_issue_time")
+        or forecast_payload.get("source_cycle_time")
+    )
+    if not source_id or not issue_time:
+        raise ValueError("CALIBRATION_AUTHORITY_EVIDENCE_MISSING:forecast_provenance")
+    from src.calibration.forecast_calibration_domain import derive_phase2_keys_from_ens_result
+    from src.calibration.manager import get_calibrator
+    from src.data.forecast_source_registry import calibration_source_id_for_lookup
+
+    cycle, raw_source_id, horizon_profile = derive_phase2_keys_from_ens_result(
+        {
+            "issue_time": issue_time,
+            "source_id": source_id,
+            "horizon_profile": payload.get("horizon_profile") or forecast_payload.get("horizon_profile"),
+        }
+    )
+    calibration_source_id = calibration_source_id_for_lookup(raw_source_id)
+    if calibration_source_id is None:
+        raise ValueError("CALIBRATION_AUTHORITY_EVIDENCE_MISSING:source_id")
+    cal, level = get_calibrator(
+        calibration_conn,
+        city,
+        str(family.target_date),
+        temperature_metric=family.metric,
+        cycle=cycle,
+        source_id=calibration_source_id,
+        horizon_profile=horizon_profile,
+    )
+    if cal is None:
+        raise ValueError("CALIBRATION_AUTHORITY_EVIDENCE_MISSING:model")
+    model_key = getattr(cal, "_bucket_model_key", None)
+    row = _calibration_model_row(calibration_conn, model_key=model_key)
+    if row is None:
+        raise ValueError("CALIBRATION_AUTHORITY_EVIDENCE_MISSING:model_row")
+    recorded_at = _parse_utc(row.get("recorded_at"))
+    fitted_at = _parse_utc(row.get("fitted_at"))
+    if recorded_at is None and fitted_at is None:
+        raise ValueError("CALIBRATION_AUTHORITY_EVIDENCE_MISSING:clock")
+    source_time = recorded_at or fitted_at
+    persisted_time = recorded_at or fitted_at
+    assert source_time is not None and persisted_time is not None
+    payload_out = {
+        "identity": str(model_key or ""),
+        "calibrator_model_key": model_key,
+        "calibrator_version": row.get("model_key"),
+        "calibration_source_id": calibration_source_id,
+        "raw_source_id": raw_source_id,
+        "source_cycle": cycle,
+        "horizon_profile": horizon_profile,
+        "training_cutoff": row.get("training_cutoff") or row.get("fitted_at"),
+        "model_available_at": row.get("recorded_at") or row.get("fitted_at"),
+        "model_hash": _hash_jsonish({
+            "model_key": row.get("model_key"),
+            "param_A": row.get("param_A"),
+            "param_B": row.get("param_B"),
+            "param_C": row.get("param_C"),
+            "bootstrap_params_json": row.get("bootstrap_params_json"),
+        }),
+        "maturity_level": level,
+        "n_samples": row.get("n_samples"),
+        "input_space": row.get("input_space"),
+        "authority": row.get("authority"),
+        "recorded_at": row.get("recorded_at"),
+        "fitted_at": row.get("fitted_at"),
+    }
+    return payload_out, EvidenceClock(source_time, persisted_time, persisted_time)
 
 
 def _generate_candidate_proofs(
@@ -1907,6 +2099,39 @@ def _parse_utc(value: object) -> datetime | None:
     return parsed.astimezone(UTC)
 
 
+def _hash_jsonish(value: object) -> str | None:
+    if value is None or value == "":
+        return None
+    try:
+        parsed = json.loads(value) if isinstance(value, str) else value
+    except (TypeError, ValueError, json.JSONDecodeError):
+        parsed = value
+    return stable_hash(parsed)
+
+
+def _native_side_for_direction(direction: str | None) -> str | None:
+    if direction == "buy_yes":
+        return "YES_ASK"
+    if direction == "buy_no":
+        return "NO_ASK"
+    if direction == "sell_yes":
+        return "YES_BID"
+    if direction == "sell_no":
+        return "NO_BID"
+    return None
+
+
+def _calibration_model_row(conn: sqlite3.Connection, *, model_key: object) -> dict[str, Any] | None:
+    if not model_key or not _table_exists(conn, "platt_models_v2"):
+        return None
+    cur = conn.execute("SELECT * FROM platt_models_v2 WHERE model_key = ? LIMIT 1", (str(model_key),))
+    row = cur.fetchone()
+    if row is None:
+        return None
+    names = [description[0] for description in cur.description]
+    return {name: row[name] for name in names} if isinstance(row, sqlite3.Row) else dict(zip(names, row))
+
+
 def _evidence_clock_from_row(row: dict[str, Any], *, fallback: datetime) -> EvidenceClock:
     source_time = (
         _parse_utc(row.get("book_timestamp"))
@@ -1927,6 +2152,53 @@ def _evidence_clock_from_row(row: dict[str, Any], *, fallback: datetime) -> Evid
         or agent_time
     )
     return EvidenceClock(source_time, agent_time, persisted_time)
+
+
+def _read_executable_forecast_bundle_result(
+    conn: sqlite3.Connection,
+    *,
+    snapshot: dict[str, Any],
+    source_run: dict[str, Any],
+    coverage: dict[str, Any],
+    event: OpportunityEvent,
+    family,
+    decision_time: datetime,
+):
+    from src.data.executable_forecast_reader import SOURCE_TRANSPORT, read_executable_forecast
+
+    target_date = date.fromisoformat(str(coverage.get("target_local_date") or family.target_date))
+    source_id = _nonnull(coverage.get("source_id") or source_run.get("source_id") or snapshot.get("source_id"))
+    source_transport = _nonnull(coverage.get("source_transport") or snapshot.get("source_transport") or SOURCE_TRANSPORT)
+    data_version = _nonnull(coverage.get("data_version") or snapshot.get("data_version"))
+    source_run_id = _nonnull(source_run.get("source_run_id") or snapshot.get("source_run_id"))
+    track = _nonnull(coverage.get("track") or source_run.get("track") or snapshot.get("track") or _payload(event).get("track"))
+    condition_id = _nonnull(_payload(event).get("condition_id") or (family.condition_ids[0] if family.condition_ids else ""))
+    if (
+        not source_id
+        or not source_transport
+        or not data_version
+        or not source_run_id
+        or not track
+        or not condition_id
+    ):
+        raise ValueError("FORECAST_READER_SCOPE_CONSTRUCTION_MISSING:scope_incomplete")
+    return read_executable_forecast(
+        conn,
+        city_id=str(coverage.get("city_id") or family.city),
+        city_name=str(coverage.get("city") or family.city),
+        city_timezone=str(coverage.get("city_timezone") or "UTC"),
+        target_local_date=target_date,
+        temperature_metric=family.metric,
+        source_id=source_id,
+        source_transport=source_transport,
+        data_version=data_version,
+        track=track,
+        strategy_key="entry_forecast",
+        market_family=family.family_id,
+        condition_id=condition_id,
+        decision_time=decision_time,
+        require_entry_readiness=False,
+    )
 
 
 def _forecast_snapshot_reader_block_reason(

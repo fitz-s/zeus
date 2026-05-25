@@ -14,6 +14,7 @@ from types import SimpleNamespace
 import numpy as np
 
 from src.decision_kernel import claims
+from src.decision_kernel.compiler import DecisionCompiler
 from src.engine.event_reactor_adapter import (
     build_event_bound_no_submit_receipt,
     edli_source_truth_gate,
@@ -723,6 +724,23 @@ def test_runtime_receipt_uses_event_bound_final_intent_contract():
     assert receipt.side_effect_status == "NO_SUBMIT"
     assert receipt.decision_proof_bundle is not None
     assert receipt.decision_proof_bundle.forecast_authority.certificate_type == claims.FORECAST_AUTHORITY
+    assert receipt.decision_proof_bundle.forecast_authority.payload["reader_status"] == "LIVE_ELIGIBLE"
+    assert receipt.decision_proof_bundle.forecast_authority.payload["coverage_id"] == "coverage-1"
+    assert receipt.decision_proof_bundle.forecast_authority.payload["producer_readiness_id"] == "producer_readiness:coverage-1"
+    assert receipt.decision_proof_bundle.forecast_authority.payload["required_steps"] == (0, 3, 6)
+    assert receipt.decision_proof_bundle.forecast_authority.payload["observed_steps"] == (0, 3, 6)
+    assert receipt.decision_proof_bundle.forecast_authority.payload["source_run_status"] == "SUCCESS"
+    assert receipt.decision_proof_bundle.calibration.payload["calibrator_model_key"] == "platt-world-1"
+    assert receipt.decision_proof_bundle.calibration.payload["calibration_source_id"] == "tigge_mars"
+    assert receipt.decision_proof_bundle.calibration.payload["training_cutoff"] == "2026-05-01T00:00:00+00:00"
+    assert receipt.decision_proof_bundle.calibration.clock.source_available_at.isoformat() == "2026-05-01T00:00:00+00:00"
+    assert receipt.decision_proof_bundle.executable_snapshot.payload["orderbook_hash"]
+    assert receipt.decision_proof_bundle.executable_snapshot.payload["fee_details_hash"]
+    assert receipt.decision_proof_bundle.executable_snapshot.payload["min_tick_size"] == "0.01"
+    assert receipt.decision_proof_bundle.executable_snapshot.payload["min_order_size"] == "5"
+    assert receipt.decision_proof_bundle.executable_snapshot.payload["neg_risk"] == 0
+    assert receipt.decision_proof_bundle.quote_feasibility.payload["native_side"] == "YES_ASK"
+    assert receipt.decision_proof_bundle.quote_feasibility.payload["quote_depth_hash"]
     assert "receipt_projection" not in receipt.decision_proof_bundle.fdr.payload
     assert receipt.decision_proof_bundle.quote_feasibility.payload["execution_price_type"] == "ExecutionPrice"
 
@@ -739,6 +757,30 @@ def test_forecast_trigger_event_without_q_or_token_fields_builds_no_submit_recei
     assert receipt.fdr_hypothesis_count == 4
     assert receipt.kelly_execution_price_type == "ExecutionPrice"
     assert receipt.side_effect_status == "NO_SUBMIT"
+
+
+def test_certificate_rejects_calibration_artifact_available_after_decision():
+    event = _forecast_event()
+    conn = _trade_conn_with_snapshot()
+    conn.execute(
+        """
+        UPDATE platt_models_v2
+        SET recorded_at = '2026-05-24T08:13:00+00:00',
+            fitted_at = '2026-05-24T08:13:00+00:00'
+        WHERE model_key = 'platt-world-1'
+        """
+    )
+
+    receipt = _receipt(event, conn, decision_time=DECISION_TIME)
+    result = DecisionCompiler().compile_no_submit(
+        event,
+        decision_time=DECISION_TIME,
+        proof_bundle=receipt.decision_proof_bundle,
+    )
+
+    assert result.status == "REJECTED"
+    assert result.failures[0].reason_code == "NO_SUBMIT_CERTIFICATE_REJECTED"
+    assert "source_available_at after decision_time" in (result.failures[0].reason_detail or "")
 
 
 def test_edli_runtime_recomputes_p_raw_from_members_not_unproven_snapshot_json():
@@ -1155,18 +1197,51 @@ def test_forecast_reader_revalidation_uses_reactor_decision_time(monkeypatch):
     conn = _trade_conn_with_snapshot()
     decision_time = datetime(2026, 5, 24, 8, 17, tzinfo=timezone.utc)
     captured = []
+    evidence = SimpleNamespace(
+        forecast_source_id="ecmwf_open_data",
+        forecast_data_version="ecmwf_opendata_mx2t3_local_calendar_day_max_v1",
+        source_transport="ensemble_snapshots_v2_db_reader",
+        source_cycle_time="2026-05-24T00:00:00+00:00",
+        source_issue_time="2026-05-24T00:00:00+00:00",
+        source_run_id="run-1",
+        coverage_id="coverage-1",
+        producer_readiness_id="producer_readiness:coverage-1",
+        entry_readiness_id=None,
+        input_snapshot_ids=(1,),
+        raw_payload_hash="hash-raw",
+        manifest_hash="hash-manifest",
+        required_steps=(0, 3, 6),
+        observed_steps=(0, 3, 6),
+        expected_members=51,
+        observed_members=51,
+        source_run_status="SUCCESS",
+        source_run_completeness_status="COMPLETE",
+        coverage_completeness_status="COMPLETE",
+        coverage_readiness_status="LIVE_ELIGIBLE",
+        applied_validations=(),
+        source_available_at="2026-05-24T08:10:00+00:00",
+        fetch_started_at="2026-05-24T07:10:00+00:00",
+        fetch_finished_at="2026-05-24T08:05:00+00:00",
+        captured_at="2026-05-24T08:10:00+00:00",
+    )
 
     monkeypatch.setattr(
         executable_forecast_reader,
         "read_executable_forecast",
         lambda *_args, **kwargs: captured.append(kwargs["decision_time"])
-        or SimpleNamespace(ok=True, bundle=SimpleNamespace(snapshot=SimpleNamespace(snapshot_id="1")), reason_code="OK"),
+        or SimpleNamespace(
+            ok=True,
+            status="LIVE_ELIGIBLE",
+            bundle=SimpleNamespace(snapshot=SimpleNamespace(snapshot_id="1"), evidence=evidence),
+            reason_code="OK",
+        ),
     )
 
     receipt = _receipt(event, conn, decision_time=decision_time)
 
     assert receipt.proof_accepted is True
-    assert captured == [decision_time]
+    assert captured
+    assert set(captured) == {decision_time}
 
 
 def test_executable_snapshot_freshness_uses_reactor_decision_time():

@@ -8,6 +8,7 @@ import json
 from dataclasses import replace
 from datetime import datetime, timezone
 
+from src.decision_kernel.compiler import build_transition_proof_bundle_from_receipt
 from src.events.event_store import EventStore
 from src.events.opportunity_event import Day0ExtremeUpdatedPayload, MarketBookEventPayload, make_day0_extreme_updated_event, make_opportunity_event
 from src.events.reactor import EventSubmissionReceipt, OpportunityEventReactor, ReactorConfig
@@ -76,7 +77,7 @@ def _reactor(store, *, gates=True, config=None):
     def _submit(event, _decision_time):
         payload = json.loads(event.payload_json)
         submitted.append(event.event_id)
-        return EventSubmissionReceipt(
+        receipt = EventSubmissionReceipt(
             submitted=False,
             proof_accepted=True,
             event_id=event.event_id,
@@ -96,6 +97,14 @@ def _reactor(store, *, gates=True, config=None):
             kelly_decision_id="kelly-1",
             risk_decision_id="risk-1",
             final_intent_id="intent-1",
+        )
+        return replace(
+            receipt,
+            decision_proof_bundle=build_transition_proof_bundle_from_receipt(
+                event,
+                receipt,
+                decision_time=_decision_time,
+            ),
         )
 
     reactor = OpportunityEventReactor(
@@ -188,6 +197,65 @@ def test_source_truth_block_writes_decision_compile_failure():
     assert failure[1] == "SOURCE_TRUTH_BLOCKED"
 
 
+def test_reactor_rejects_no_submit_receipt_without_decision_proof_bundle():
+    conn, store = _store()
+    event = _day0_event()
+    store.insert_or_ignore(event)
+    rejected = []
+
+    def _submit(submitted_event, _decision_time):
+        payload = json.loads(submitted_event.payload_json)
+        return EventSubmissionReceipt(
+            submitted=False,
+            proof_accepted=True,
+            event_id=submitted_event.event_id,
+            causal_snapshot_id=submitted_event.causal_snapshot_id,
+            city=payload.get("city"),
+            target_date=payload.get("target_date"),
+            metric=payload.get("metric"),
+            trade_score_positive=True,
+            fdr_pass=True,
+            fdr_family_id="family-1",
+            fdr_hypothesis_count=2,
+            kelly_pass=True,
+            kelly_execution_price_type="ExecutionPrice",
+            kelly_price_fee_deducted=True,
+            kelly_size_usd=1.0,
+            kelly_cost_basis_id="cost-1",
+            kelly_decision_id="kelly-1",
+            risk_decision_id="risk-1",
+            final_intent_id="intent-1",
+        )
+
+    reactor = OpportunityEventReactor(
+        store,
+        source_truth_gate=lambda _event: True,
+        executable_snapshot_gate=lambda _event, _decision_time: True,
+        riskguard_gate=lambda _event: True,
+        final_intent_submit=_submit,
+        reject=lambda event, stage, reason: rejected.append((event.event_id, stage, reason)),
+    )
+
+    result = reactor.process_pending(decision_time=datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc))
+
+    assert result.rejected == 1
+    assert rejected[0][1] == "DECISION_CERTIFICATE"
+    assert rejected[0][2] == "NO_SUBMIT_PROOF_BUNDLE_REQUIRED"
+    assert conn.execute("SELECT COUNT(*) FROM decision_certificates").fetchone()[0] == 0
+    failure = conn.execute(
+        "SELECT stage, reason_code FROM decision_compile_failures WHERE event_id = ?",
+        (event.event_id,),
+    ).fetchall()
+    assert ("NO_SUBMIT_COMPILER", "NO_SUBMIT_PROOF_BUNDLE_REQUIRED") in failure
+
+
+def test_transition_proof_bundle_builder_not_used_in_runtime_reactor():
+    _conn, store = _store()
+    reactor, _rejected, _submitted = _reactor(store)
+
+    assert not hasattr(reactor, "_build_transition_proof_bundle")
+
+
 def test_receipt_insert_failure_does_not_leave_verified_orphan_certificate_graph():
     conn, store = _store()
     event = _day0_event()
@@ -245,6 +313,21 @@ def test_successful_no_submit_receipt_is_persisted_before_processed():
         (event.event_id,),
     ).fetchone()[0]
     assert status == "processed"
+
+
+def test_no_submit_projection_rows_require_verified_decision_certificate():
+    conn, store = _store()
+    event = _day0_event()
+    store.insert_or_ignore(event)
+    reactor, _rejected, _submitted = _reactor(store)
+    decision_time = datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc)
+    from src.events.no_submit_projection import no_submit_projection_rows
+
+    reactor.process_pending(decision_time=decision_time)
+
+    assert len(no_submit_projection_rows(conn)) == 1
+    conn.execute("DELETE FROM decision_certificates WHERE certificate_type = 'NoSubmitDecisionCertificate'")
+    assert no_submit_projection_rows(conn) == []
 
 
 def test_no_submit_receipt_ledger_is_idempotent_for_duplicate_event():

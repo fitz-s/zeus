@@ -126,13 +126,12 @@ class OpportunityEventReactor:
         self._family_logged: set[str] = set()
         self._day0_live_orders_today = 0
         from src.events.no_submit_receipts import EdliNoSubmitReceiptLedger
-        from src.decision_kernel.compiler import DecisionCompiler, build_transition_proof_bundle_from_receipt
+        from src.decision_kernel.compiler import DecisionCompiler
         from src.decision_kernel.ledger import DecisionCertificateLedger
         from src.strategy.live_inference.promotion_ledger import EdliLiveCapLedger
 
         self._no_submit_receipt_ledger = EdliNoSubmitReceiptLedger(store.conn)
         self._decision_compiler = DecisionCompiler()
-        self._build_transition_proof_bundle = build_transition_proof_bundle_from_receipt
         self._decision_certificate_ledger = DecisionCertificateLedger(store.conn)
         self._decision_certificate_ledger.ensure_schema()
         self._live_cap_ledger = EdliLiveCapLedger(store.conn)
@@ -222,11 +221,20 @@ class OpportunityEventReactor:
         if receipt.side_effect_status == "NO_SUBMIT":
             proof_bundle = receipt.decision_proof_bundle
             if proof_bundle is None:
-                proof_bundle = self._build_transition_proof_bundle(
+                compile_result = self._decision_compiler.compile_no_submit(
                     event,
-                    receipt,
                     decision_time=decision_time,
+                    mode="NO_SUBMIT",
+                    proof_bundle=None,
                 )
+                self._decision_certificate_ledger.persist_failures(compile_result.failures)
+                reason = (
+                    compile_result.failures[0].reason_code
+                    if compile_result.failures
+                    else "NO_SUBMIT_PROOF_BUNDLE_REQUIRED"
+                )
+                self._reject_event(event, "DECISION_CERTIFICATE", reason, result, receipt=receipt, decision_time=decision_time)
+                return
             compile_result = self._decision_compiler.compile_no_submit(
                 event,
                 decision_time=decision_time,

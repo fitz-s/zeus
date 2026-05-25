@@ -377,6 +377,12 @@ files:
     downstream:
     - src/events/reactor.py
     - src/state/schema/decision_certificates_schema.py
+  src/decision_kernel/reports/no_submit_decision_report.py:
+    zone: K2_runtime
+    authority_role: edli_no_submit_certificate_report
+    why: Report-only projection surface for verified no-submit decision certificates; must not count raw certificate rows without accepted projection finalization.
+    downstream:
+    - src/events/no_submit_projection.py
   src/decision_kernel/compiler.py:
     zone: K2_runtime
     authority_role: edli_no_submit_certificate_compiler
