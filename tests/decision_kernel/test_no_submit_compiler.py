@@ -447,6 +447,23 @@ def test_source_truth_certificate_not_hardcoded_match():
 
     assert bundle.source_truth.payload["source_status"] == bundle.forecast_authority.payload["reader_status"]
     assert bundle.source_truth.payload["source_authority_id"] == "read_executable_forecast"
+    assert bundle.source_truth.payload["derived_from_certificate_type"] == claims.FORECAST_AUTHORITY
+    assert bundle.source_truth.payload["derived_from_snapshot_id"] == bundle.forecast_authority.payload["snapshot_id"]
+    assert bundle.source_truth.payload["derived_from_reader_status"] == bundle.forecast_authority.payload["reader_status"]
+
+
+def test_no_submit_rejects_source_truth_not_derived_from_forecast_parent():
+    event = _event()
+    decision_time = datetime(2026, 5, 25, 10, 3, tzinfo=timezone.utc)
+    bundle = build_test_no_submit_proof_bundle(event, _receipt(event.event_id), decision_time=decision_time)
+    bad_source = replace(
+        bundle.source_truth,
+        payload={**bundle.source_truth.payload, "derived_from_snapshot_id": "other-snapshot"},
+    )
+    result = DecisionCompiler().compile_no_submit(event, decision_time=decision_time, proof_bundle=replace(bundle, source_truth=bad_source))
+
+    assert result.status == "REJECTED"
+    assert "source_truth.derived_from_snapshot_id" in (result.failures[0].reason_detail or "")
 
 
 def test_source_truth_and_forecast_status_vocabularies_identical():

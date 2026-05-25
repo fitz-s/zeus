@@ -730,6 +730,9 @@ def _build_no_submit_proof_bundle_from_adapter_evidence(
                 "source_status": forecast_payload.get("reader_status"),
                 "source_authority_id": "read_executable_forecast",
                 "source_reason_code": forecast_payload.get("reader_reason_code"),
+                "derived_from_certificate_type": claims.FORECAST_AUTHORITY,
+                "derived_from_snapshot_id": forecast_payload.get("snapshot_id"),
+                "derived_from_reader_status": forecast_payload.get("reader_status"),
                 "completeness_status": payload.get("completeness_status"),
                 "required_fields_present": payload.get("required_fields_present"),
                 "required_steps_present": payload.get("required_steps_present"),
@@ -880,6 +883,9 @@ def _build_no_submit_proof_bundle_from_adapter_evidence(
                 "token_id": raw_receipt.get("token_id"),
                 "direction": proof.direction,
                 "native_side": _native_side_for_direction(proof.direction),
+                "cost_source": _native_cost_source_for_direction(proof.direction),
+                "quote_source_kind": "executable_market_snapshot_native_book",
+                "forbidden_cost_source": False,
                 "selected_token_id": proof.token_id,
                 "quote_depth_hash": _hash_jsonish(selected_snapshot_row.get("orderbook_depth_json") or selected_snapshot_row.get("orderbook_depth_jsonb")),
                 "p_fill_lcb_policy_id": "edli_v1.no_submit_visible_depth_fill_lcb",
@@ -902,6 +908,9 @@ def _build_no_submit_proof_bundle_from_adapter_evidence(
                 "cost_basis_id": raw_receipt.get("kelly_cost_basis_id"),
                 "condition_id": raw_receipt.get("condition_id"),
                 "token_id": raw_receipt.get("token_id"),
+                "cost_source": _native_cost_source_for_direction(proof.direction),
+                "quote_source_kind": "executable_market_snapshot_native_book",
+                "forbidden_cost_source": False,
                 "execution_price_type": execution_price.__class__.__name__ if execution_price is not None else None,
                 "price_fee_deducted": execution_price.fee_deducted if execution_price is not None else None,
                 "c_fee_adjusted": raw_receipt.get("c_fee_adjusted"),
@@ -2251,6 +2260,14 @@ def _native_side_for_direction(direction: str | None) -> str | None:
         return "YES_BID"
     if direction == "sell_no":
         return "NO_BID"
+    return None
+
+
+def _native_cost_source_for_direction(direction: str | None) -> str | None:
+    if direction in {"buy_yes", "buy_no"}:
+        return "native_orderbook_ask"
+    if direction in {"sell_yes", "sell_no"}:
+        return "native_orderbook_bid"
     return None
 
 

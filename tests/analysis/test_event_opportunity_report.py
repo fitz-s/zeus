@@ -112,6 +112,46 @@ def test_report_does_not_hardcode_cost_violation_zero():
     assert report["violations"]["last_trade_cost_uses"] == 1
 
 
+def test_report_detects_midpoint_cost_source():
+    conn = sqlite3.connect(":memory:")
+    init_schema(conn)
+    _insert_decision_certificate(conn, certificate_id="cost-1", certificate_type="CostModelCertificate", payload={"cost_source": "midpoint"})
+
+    report = build_event_opportunity_report(conn)
+
+    assert report["violations"]["midpoint_cost_uses"] == 1
+
+
+def test_report_detects_complement_cost_source():
+    conn = sqlite3.connect(":memory:")
+    init_schema(conn)
+    _insert_decision_certificate(conn, certificate_id="cost-1", certificate_type="CostModelCertificate", payload={"cost_source": "complement_price"})
+
+    report = build_event_opportunity_report(conn)
+
+    assert report["violations"]["no_complement_cost_uses"] == 1
+
+
+def test_report_detects_last_trade_cost_source():
+    conn = sqlite3.connect(":memory:")
+    init_schema(conn)
+    _insert_decision_certificate(conn, certificate_id="quote-1", certificate_type="QuoteFeasibilityCertificate", payload={"quote_source_kind": "last_trade"})
+
+    report = build_event_opportunity_report(conn)
+
+    assert report["violations"]["last_trade_cost_uses"] == 1
+
+
+def test_report_flags_missing_cost_source_for_cost_model_certificate():
+    conn = sqlite3.connect(":memory:")
+    init_schema(conn)
+    _insert_decision_certificate(conn, certificate_id="cost-1", certificate_type="CostModelCertificate", payload={"execution_price_type": "ExecutionPrice"})
+
+    report = build_event_opportunity_report(conn)
+
+    assert report["violations"]["cost_source_missing"] == 1
+
+
 def test_event_opportunity_report_counts_accepted_no_submit_receipts():
     conn = sqlite3.connect(":memory:")
     init_schema(conn)
@@ -159,6 +199,26 @@ def test_certificate_created_at_can_be_after_header_persisted_at_for_generated_c
     assert row[1]
     assert payload["generated_at_decision_time"] is True
     assert payload["db_created_at_may_follow_header_persisted_at"] is True
+
+
+def test_report_distinguishes_header_persisted_at_from_db_created_at():
+    conn = sqlite3.connect(":memory:")
+    init_schema(conn)
+    event = _forecast_event()
+    decision_time = datetime(2026, 5, 25, 10, 3, tzinfo=timezone.utc)
+    receipt = _receipt(event.event_id)
+    compile_result = DecisionCompiler().compile_no_submit(
+        event,
+        decision_time=decision_time,
+        proof_bundle=build_test_no_submit_proof_bundle(event, receipt, decision_time=decision_time),
+    )
+    assert compile_result.status == "VERIFIED"
+    DecisionCertificateLedger(conn).persist_all(compile_result.certificates)
+
+    report = build_event_opportunity_report(conn)
+
+    assert report["certificate_time_semantics"]["generated_no_submit_decisions"] == 1
+    assert report["certificate_time_semantics"]["db_created_after_header_persisted_at"] == 1
 
 
 def test_report_event_time_violation_counts_compile_failure_only_event():

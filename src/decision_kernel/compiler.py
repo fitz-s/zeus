@@ -368,6 +368,14 @@ def _validate_no_submit_parent_consistency(event: OpportunityEvent, bundle: NoSu
         _require_equal("source_truth.source_id", source.get("source_id"), "forecast.forecast_source_id", forecast.get("forecast_source_id"))
         _require_equal("source_truth.payload_hash", source.get("payload_hash"), "event.payload_hash", event.payload_hash)
         _require_equal("source_truth.event_source", source.get("event_source"), "event.source", event.source)
+        _require_equal("source_truth.derived_from_certificate_type", source.get("derived_from_certificate_type"), "ForecastAuthorityCertificate", claims.FORECAST_AUTHORITY)
+        _require_equal("source_truth.derived_from_snapshot_id", source.get("derived_from_snapshot_id"), "forecast.snapshot_id", forecast.get("snapshot_id"))
+        _require_equal(
+            "source_truth.derived_from_reader_status",
+            normalize_forecast_reader_status(source.get("derived_from_reader_status")),
+            "forecast.reader_status",
+            normalize_forecast_reader_status(forecast.get("reader_status")),
+        )
         _require_equal(
             "source_truth.source_status",
             normalize_forecast_reader_status(source.get("source_status")),

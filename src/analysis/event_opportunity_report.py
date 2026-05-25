@@ -71,6 +71,11 @@ def build_event_opportunity_report(conn: sqlite3.Connection) -> dict[str, object
             "certificate_type IN ('QuoteFeasibilityCertificate','CostModelCertificate')"
             " AND lower(COALESCE(json_extract(payload_json, '$.cost_source'), json_extract(payload_json, '$.quote_source_kind'), '')) LIKE '%last_trade%'",
         ),
+        "cost_source_missing": _payload_violation_count(
+            conn,
+            "certificate_type = 'CostModelCertificate'"
+            " AND COALESCE(json_extract(payload_json, '$.cost_source'), '') = ''",
+        ),
     }
     return {
         "events_by_type": event_counts,
@@ -78,6 +83,7 @@ def build_event_opportunity_report(conn: sqlite3.Connection) -> dict[str, object
         "blocked_by_stage": regret_by_stage,
         "accepted_no_submit_receipts": accepted_no_submit_count,
         "execution_feasibility_rows": feasibility_count,
+        "certificate_time_semantics": _generated_decision_time_semantics(conn),
         "violations": violations,
     }
 
@@ -159,6 +165,24 @@ def _certificate_time_violation_count(conn: sqlite3.Connection, column: str) -> 
           AND {column} > decision_time
         """
     ).fetchone()[0]
+
+
+def _generated_decision_time_semantics(conn: sqlite3.Connection) -> dict[str, int]:
+    row = conn.execute(
+        """
+        SELECT
+            COUNT(*) AS generated_no_submit_decisions,
+            SUM(CASE WHEN created_at > persisted_at THEN 1 ELSE 0 END) AS db_created_after_header_persisted_at
+        FROM decision_certificates
+        WHERE certificate_type = 'NoSubmitDecisionCertificate'
+          AND json_extract(payload_json, '$.generated_at_decision_time') = 1
+          AND json_extract(payload_json, '$.header_persisted_at_semantics') = 'decision_kernel_generated_at_decision_time'
+        """
+    ).fetchone()
+    return {
+        "generated_no_submit_decisions": int(row[0] or 0),
+        "db_created_after_header_persisted_at": int(row[1] or 0),
+    }
 
 
 def _payload_violation_count(conn: sqlite3.Connection, predicate: str) -> int:

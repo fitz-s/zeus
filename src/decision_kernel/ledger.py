@@ -9,7 +9,13 @@ from datetime import datetime, timezone
 from src.decision_kernel.canonicalization import canonical_json, stable_hash
 from src.decision_kernel.certificate import DecisionCertificate, certificate_payload_json
 from src.decision_kernel.errors import CertificateSemanticDriftError
-from src.decision_kernel.verifier import verify_certificate
+from src.decision_kernel import claims
+from src.decision_kernel.verifier import (
+    verify_actionable_trade,
+    verify_certificate,
+    verify_execution_command,
+    verify_no_submit_decision,
+)
 
 
 @dataclass(frozen=True)
@@ -55,7 +61,7 @@ class DecisionCertificateLedger:
                 for edge in cert.header.parent_edges
                 if edge.certificate_hash in by_hash
             )
-            verify_certificate(cert, parents)
+            _verify_for_persistence(cert, parents)
             self.insert_idempotent(cert)
 
     def insert_idempotent(self, cert: DecisionCertificate) -> str:
@@ -197,3 +203,16 @@ def _dt(value: datetime) -> str:
 
 def _dt_or_none(value: datetime | None) -> str | None:
     return None if value is None else _dt(value)
+
+
+def _verify_for_persistence(cert: DecisionCertificate, parents: tuple[DecisionCertificate, ...]) -> None:
+    if cert.certificate_type == claims.NO_SUBMIT_DECISION:
+        verify_no_submit_decision(cert, parents)
+        return
+    if cert.certificate_type == claims.ACTIONABLE_TRADE:
+        verify_actionable_trade(cert, parents)
+        return
+    if cert.certificate_type == claims.EXECUTION_COMMAND:
+        verify_execution_command(cert, parents)
+        return
+    verify_certificate(cert, parents)

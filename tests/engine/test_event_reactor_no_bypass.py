@@ -24,6 +24,7 @@ from src.engine.event_reactor_adapter import (
     _snapshot_p_cal,
     _snapshot_p_raw,
     _snapshot_unit,
+    _probability_vector_hash,
 )
 from src.config import runtime_cities_by_name
 from src.contracts.settlement_semantics import SettlementSemantics
@@ -841,6 +842,9 @@ def test_adapter_source_truth_status_comes_from_forecast_authority():
     assert receipt.decision_proof_bundle.source_truth.payload["source_status"] == "LIVE_ELIGIBLE"
     assert receipt.decision_proof_bundle.source_truth.payload["source_status"] == receipt.decision_proof_bundle.forecast_authority.payload["reader_status"]
     assert receipt.decision_proof_bundle.source_truth.payload["source_authority_id"] == "read_executable_forecast"
+    assert receipt.decision_proof_bundle.source_truth.payload["derived_from_certificate_type"] == claims.FORECAST_AUTHORITY
+    assert receipt.decision_proof_bundle.source_truth.payload["derived_from_snapshot_id"] == receipt.decision_proof_bundle.forecast_authority.payload["snapshot_id"]
+    assert receipt.decision_proof_bundle.source_truth.payload["derived_from_reader_status"] == receipt.decision_proof_bundle.forecast_authority.payload["reader_status"]
 
 
 def test_market_events_v2_authority_rows_have_topology_clock_fields():
@@ -861,6 +865,39 @@ def test_no_submit_receipt_succeeds_with_production_market_events_v2_clock_shape
     assert receipt.proof_accepted is True
     assert receipt.decision_proof_bundle is not None
     assert receipt.decision_proof_bundle.market_topology.clock.persisted_at.isoformat() == "2026-05-24T08:11:00+00:00"
+
+
+def test_topology_clock_missing_blocks_with_topology_clock_missing_reason():
+    event = _forecast_event()
+    conn = _trade_conn_with_snapshot()
+    conn.execute("UPDATE market_events_v2 SET created_at = NULL")
+
+    with pytest.raises(ValueError, match="TOPOLOGY_CLOCK_MISSING"):
+        _receipt(event, conn, decision_time=DECISION_TIME)
+
+
+def test_cost_model_certificate_records_native_cost_source():
+    event = _forecast_event()
+    conn = _trade_conn_with_snapshot()
+
+    receipt = _receipt(event, conn, decision_time=DECISION_TIME)
+
+    assert receipt.decision_proof_bundle is not None
+    assert receipt.decision_proof_bundle.cost_model.payload["cost_source"] == "native_orderbook_ask"
+    assert receipt.decision_proof_bundle.cost_model.payload["quote_source_kind"] == "executable_market_snapshot_native_book"
+    assert receipt.decision_proof_bundle.quote_feasibility.payload["cost_source"] == "native_orderbook_ask"
+
+
+def test_belief_p_cal_vector_hash_changes_when_unselected_bin_probability_changes():
+    assert _probability_vector_hash((0.8, 0.2)) != _probability_vector_hash((0.8, 0.19))
+
+
+def test_belief_p_live_vector_hash_changes_when_unselected_bin_probability_changes():
+    assert _probability_vector_hash((0.78, 0.22)) != _probability_vector_hash((0.78, 0.21))
+
+
+def test_belief_vector_hash_uses_family_bin_order():
+    assert _probability_vector_hash((0.8, 0.2)) != _probability_vector_hash((0.2, 0.8))
 
 
 def test_adapter_does_not_synthesize_forecast_applied_validations():
