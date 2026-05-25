@@ -719,7 +719,16 @@ def _build_no_submit_proof_bundle_from_adapter_evidence(
                 "event_source": event.source,
                 "event_type": event.event_type,
                 "source_status": "MATCH",
+                "completeness_status": payload.get("completeness_status"),
+                "required_fields_present": payload.get("required_fields_present"),
+                "required_steps_present": payload.get("required_steps_present"),
+                "source_id": payload.get("source_id"),
+                "source_run_id": payload.get("source_run_id"),
+                "snapshot_id": payload.get("snapshot_id") or event.causal_snapshot_id,
+                "payload_hash": event.payload_hash,
                 "causal_snapshot_id": event.causal_snapshot_id,
+                "available_at": event.available_at,
+                "received_at": event.received_at,
                 "event_id": event.event_id,
             },
             event_clock,
@@ -789,6 +798,7 @@ def _build_no_submit_proof_bundle_from_adapter_evidence(
                 "edge_bootstrap_n": edge_n_bootstrap(),
                 "kelly_multiplier": kelly_multiplier,
                 "market_analysis_config_hash": market_analysis_config_hash,
+                "calibration_input_space": calibration_payload.get("input_space"),
             },
             decision_clock,
             "zeus.config.settings",
@@ -1037,7 +1047,7 @@ def _forecast_authority_payload_and_clock(
         "snapshot_id": str(result.bundle.snapshot.snapshot_id),
         "reader_authority": "read_executable_forecast",
         "reader_status": result.status,
-        "reader_reason_code": result.reason_code,
+        "reader_reason_code": None if result.reason_code in {None, "", "OK", "LIVE_ELIGIBLE", "EXECUTABLE_FORECAST_READY"} else result.reason_code,
         "city": family.city,
         "target_date": family.target_date,
         "metric": family.metric,
@@ -2196,6 +2206,11 @@ def _evidence_clock_from_rows(rows: list[dict[str, Any]], *, fallback: datetime)
 
 
 def _evidence_clock_from_topology_row(row: dict[str, Any], *, fallback: datetime) -> EvidenceClock:
+    has_source_clock = any(row.get(key) not in (None, "") for key in ("discovered_at", "captured_at", "available_at", "gamma_updated_at", "created_at"))
+    has_agent_clock = any(row.get(key) not in (None, "") for key in ("received_at", "scanned_at", "captured_at", "created_at"))
+    has_persisted_clock = any(row.get(key) not in (None, "") for key in ("persisted_at", "updated_at", "created_at"))
+    if not (has_source_clock and has_agent_clock and has_persisted_clock):
+        raise ValueError("TOPOLOGY_CLOCK_MISSING")
     source_time = (
         _parse_utc(row.get("discovered_at"))
         or _parse_utc(row.get("captured_at"))

@@ -12,6 +12,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 from src.decision_kernel import claims
 from src.decision_kernel.compiler import DecisionCompiler
@@ -194,7 +195,8 @@ def _trade_conn_with_snapshot(
             market_slug TEXT,
             range_label TEXT,
             range_low REAL,
-            range_high REAL
+            range_high REAL,
+            created_at TEXT
         )
         """
     )
@@ -209,12 +211,13 @@ def _trade_conn_with_snapshot(
                 f"{70 + index - 1}-{71 + index - 1}°F",
                 float(70 + index - 1),
                 float(71 + index - 1),
+                "2026-05-24T08:11:00+00:00",
             )
         )
     conn.executemany(
         """
         INSERT INTO market_events_v2 VALUES (
-            'Chicago', '2026-05-25', 'high', ?, ?, ?, ?, ?, ?, ?
+            'Chicago', '2026-05-25', 'high', ?, ?, ?, ?, ?, ?, ?, ?
         )
         """,
         rows,
@@ -784,13 +787,12 @@ def test_certificate_rejects_calibration_artifact_available_after_decision():
 
     assert result.status == "REJECTED"
     assert result.failures[0].reason_code == "NO_SUBMIT_CERTIFICATE_REJECTED"
-    assert "source_available_at after decision_time" in (result.failures[0].reason_detail or "")
+    assert "calibration.training_cutoff after decision_time" in (result.failures[0].reason_detail or "")
 
 
 def test_market_topology_certificate_uses_topology_row_clock_not_event_clock():
     event = _forecast_event()
     conn = _trade_conn_with_snapshot()
-    conn.execute("ALTER TABLE market_events_v2 ADD COLUMN created_at TEXT")
     conn.execute("UPDATE market_events_v2 SET created_at = '2026-05-24T08:11:00+00:00'")
 
     receipt = _receipt(event, conn, decision_time=DECISION_TIME)
@@ -804,7 +806,6 @@ def test_market_topology_certificate_uses_topology_row_clock_not_event_clock():
 def test_topology_persisted_after_decision_blocks_certificate():
     event = _forecast_event()
     conn = _trade_conn_with_snapshot()
-    conn.execute("ALTER TABLE market_events_v2 ADD COLUMN created_at TEXT")
     conn.execute("UPDATE market_events_v2 SET created_at = '2026-05-24T08:13:00+00:00'")
 
     receipt = _receipt(event, conn, decision_time=DECISION_TIME)
@@ -817,6 +818,15 @@ def test_topology_persisted_after_decision_blocks_certificate():
     assert result.status == "REJECTED"
     assert result.failures[0].reason_code == "NO_SUBMIT_CERTIFICATE_REJECTED"
     assert "source_available_at after decision_time" in (result.failures[0].reason_detail or "")
+
+
+def test_topology_clock_missing_blocks_certificate():
+    event = _forecast_event()
+    conn = _trade_conn_with_snapshot()
+    conn.execute("UPDATE market_events_v2 SET created_at = NULL")
+
+    with pytest.raises(ValueError, match="TOPOLOGY_CLOCK_MISSING"):
+        _receipt(event, conn, decision_time=DECISION_TIME)
 
 
 def test_edli_runtime_recomputes_p_raw_from_members_not_unproven_snapshot_json():
@@ -1410,19 +1420,20 @@ def test_forecast_receipt_uses_attached_forecasts_market_topology():
             market_slug TEXT,
             range_label TEXT,
             range_low REAL,
-            range_high REAL
+            range_high REAL,
+            created_at TEXT
         )
         """
     )
     conn.executemany(
         """
         INSERT INTO forecasts.market_events_v2 VALUES (
-            'Chicago', '2026-05-25', 'high', ?, ?, ?, ?, ?, ?, ?
+            'Chicago', '2026-05-25', 'high', ?, ?, ?, ?, ?, ?, ?, ?
         )
         """,
         [
-            ("70-71°F", "condition-1", "yes-1", "chicago-high-1", "70-71°F", 70.0, 71.0),
-            ("71-72°F", "condition-2", "yes-2", "chicago-high-2", "71-72°F", 71.0, 72.0),
+            ("70-71°F", "condition-1", "yes-1", "chicago-high-1", "70-71°F", 70.0, 71.0, "2026-05-24T08:11:00+00:00"),
+            ("71-72°F", "condition-2", "yes-2", "chicago-high-2", "71-72°F", 71.0, 72.0, "2026-05-24T08:11:00+00:00"),
         ],
     )
 

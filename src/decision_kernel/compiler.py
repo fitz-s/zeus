@@ -193,7 +193,7 @@ class DecisionCompiler:
             no_submit_mode,
         )
         try:
-            _validate_no_submit_parent_consistency(event, proof_bundle)
+            _validate_no_submit_parent_consistency(event, proof_bundle, decision_time=decision_time)
             no_submit = build_no_submit_decision_certificate(
                 semantic_key=f"no_submit:{event.event_id}:{proof_bundle.final_intent_id}",
                 decision_time=decision_time,
@@ -305,7 +305,7 @@ class DecisionCompiler:
         )
 
 
-def _validate_no_submit_parent_consistency(event: OpportunityEvent, bundle: NoSubmitProofBundle) -> None:
+def _validate_no_submit_parent_consistency(event: OpportunityEvent, bundle: NoSubmitProofBundle, *, decision_time: datetime) -> None:
     projection = bundle.no_submit_projection
     source = bundle.source_truth.payload
     topology = bundle.market_topology.payload
@@ -323,9 +323,26 @@ def _validate_no_submit_parent_consistency(event: OpportunityEvent, bundle: NoSu
     kelly = bundle.kelly_dry_run.payload
     risk = bundle.risk_level.payload
 
+    _require_equal("projection.event_id", projection.get("event_id"), "event.event_id", event.event_id)
+    _require_equal("projection.final_intent_id", projection.get("final_intent_id"), "bundle.final_intent_id", bundle.final_intent_id)
+    if projection.get("side_effect_status") != "NO_SUBMIT":
+        raise ValueError("projection.side_effect_status must be NO_SUBMIT")
+    if projection.get("submitted") is not False:
+        raise ValueError("projection.submitted must be false")
+    if projection.get("proof_accepted") is not True:
+        raise ValueError("projection.proof_accepted must be true")
     if event.causal_snapshot_id:
         _require_equal("source_truth.causal_snapshot_id", source.get("causal_snapshot_id"), "event.causal_snapshot_id", event.causal_snapshot_id)
         _require_equal("forecast.snapshot_id", forecast.get("snapshot_id"), "event.causal_snapshot_id", event.causal_snapshot_id)
+        _require_equal("source_truth.snapshot_id", source.get("snapshot_id"), "forecast.snapshot_id", forecast.get("snapshot_id"))
+    if event.event_type == "FORECAST_SNAPSHOT_READY":
+        _require_equal("source_truth.completeness_status", source.get("completeness_status"), "COMPLETE", "COMPLETE")
+        if source.get("required_fields_present") is not True:
+            raise ValueError("source_truth.required_fields_present must be true")
+        if source.get("required_steps_present") is not True:
+            raise ValueError("source_truth.required_steps_present must be true")
+    _validate_forecast_authority_payload(forecast)
+    _validate_calibration_payload(calibration, model_config, forecast, decision_time=decision_time)
     _require_equal("market_topology.family_id", topology.get("family_id"), "family_closure.family_id", family.get("family_id"))
     _require_equal("market_topology.family_id", topology.get("family_id"), "candidate.family_id", candidate.get("family_id"))
     _require_equal("market_topology.family_id", topology.get("family_id"), "testing_protocol.family_id", protocol.get("family_id"))
@@ -373,6 +390,70 @@ def _validate_no_submit_parent_consistency(event: OpportunityEvent, bundle: NoSu
     expected_intent = f"edli_intent:{event.event_id}:{selected_token}"
     if bundle.final_intent_id.startswith("edli_intent:") and bundle.final_intent_id != expected_intent:
         raise ValueError("final_intent_id does not match event and selected token")
+
+
+def _validate_forecast_authority_payload(forecast: dict[str, Any]) -> None:
+    status = str(forecast.get("reader_status") or "")
+    if status not in {"LIVE_ELIGIBLE", "VERIFIED", "OK"}:
+        raise ValueError("forecast.reader_status is not live eligible")
+    reason = forecast.get("reader_reason_code")
+    if reason not in (None, "", "OK"):
+        raise ValueError("forecast.reader_reason_code must be empty for verified no-submit")
+    if forecast.get("coverage_readiness_status") not in (None, "LIVE_ELIGIBLE"):
+        raise ValueError("forecast.coverage_readiness_status must be LIVE_ELIGIBLE")
+    if forecast.get("coverage_completeness_status") not in (None, "COMPLETE"):
+        raise ValueError("forecast.coverage_completeness_status must be COMPLETE")
+    if forecast.get("source_run_completeness_status") not in (None, "COMPLETE"):
+        raise ValueError("forecast.source_run_completeness_status must be COMPLETE")
+    required_steps = {str(item) for item in (forecast.get("required_steps") or ())}
+    observed_steps = {str(item) for item in (forecast.get("observed_steps") or ())}
+    if required_steps and not required_steps.issubset(observed_steps):
+        raise ValueError("forecast.observed_steps missing required_steps")
+    expected_members = _optional_int(forecast.get("expected_members"))
+    observed_members = _optional_int(forecast.get("observed_members"))
+    if expected_members is not None and observed_members is not None and observed_members < expected_members:
+        raise ValueError("forecast.observed_members below expected_members")
+    if "applied_validations" not in forecast:
+        raise ValueError("forecast.applied_validations missing")
+
+
+def _validate_calibration_payload(
+    calibration: dict[str, Any],
+    model_config: dict[str, Any],
+    forecast: dict[str, Any],
+    *,
+    decision_time: datetime,
+) -> None:
+    authority = calibration.get("authority")
+    if authority is not None and str(authority) not in {"VERIFIED", "LIVE", "APPROVED", "test"}:
+        raise ValueError("calibration.authority is not approved")
+    maturity = _optional_int(calibration.get("maturity_level"))
+    if maturity is not None and maturity > 3:
+        raise ValueError("calibration.maturity_level too low")
+    input_space = calibration.get("input_space")
+    expected_input_space = model_config.get("calibration_input_space")
+    if input_space is not None and expected_input_space is not None:
+        _require_equal("calibration.input_space", input_space, "model_config.calibration_input_space", expected_input_space)
+    for field in ("training_cutoff", "model_available_at", "recorded_at", "fitted_at"):
+        when = _optional_dt(calibration.get(field))
+        if when is not None and when > decision_time:
+            raise ValueError(f"calibration.{field} after decision_time")
+    if calibration.get("horizon_profile") is not None and forecast.get("horizon_profile") is not None:
+        _require_equal("calibration.horizon_profile", calibration.get("horizon_profile"), "forecast.horizon_profile", forecast.get("horizon_profile"))
+
+
+def _optional_int(value: Any) -> int | None:
+    if value in (None, ""):
+        return None
+    return int(value)
+
+
+def _optional_dt(value: Any) -> datetime | None:
+    if value in (None, ""):
+        return None
+    if isinstance(value, datetime):
+        return _utc(value)
+    return _parse_dt(str(value))
 
 
 def _require_equal(left_name: str, left: Any, right_name: str, right: Any) -> None:

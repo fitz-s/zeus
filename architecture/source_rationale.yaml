@@ -383,6 +383,13 @@ files:
     why: Report-only projection surface for verified no-submit decision certificates; must not count raw certificate rows without accepted projection finalization.
     downstream:
     - src/events/no_submit_projection.py
+  src/decision_kernel/certificates/no_submit.py:
+    zone: K2_runtime
+    authority_role: edli_no_submit_decision_certificate_builder
+    why: Constructs the terminal NoSubmitDecisionCertificate and enforces the no-submit theorem boundary before durable certificate persistence.
+    downstream:
+    - src/decision_kernel/verifier.py
+    - src/decision_kernel/compiler.py
   src/decision_kernel/compiler.py:
     zone: K2_runtime
     authority_role: edli_no_submit_certificate_compiler

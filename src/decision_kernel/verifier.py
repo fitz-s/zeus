@@ -128,6 +128,8 @@ def _verify_time_filtration(cert: DecisionCertificate) -> None:
 def _forbid_no_submit_payload(cert: DecisionCertificate) -> None:
     if cert.payload.get("submitted") is True:
         raise CertificateVerificationError("NO_SUBMIT certificate cannot set submitted=true")
+    if cert.payload.get("proof_accepted") is not True:
+        raise CertificateVerificationError("NO_SUBMIT decision requires proof_accepted=true")
     for key in ("action_score", "actionable_trade_score", "actionable_executable_trade_score"):
         value = cert.payload.get(key)
         if value is not None and float(value) > 0.0:

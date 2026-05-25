@@ -24,6 +24,8 @@ def build_no_submit_decision_certificate(
 ) -> DecisionCertificate:
     if payload.get("submitted") is True:
         raise ValueError("NO_SUBMIT decision cannot set submitted=true")
+    if payload.get("proof_accepted") is not True:
+        raise ValueError("NO_SUBMIT decision requires proof_accepted=true")
     for key in ("action_score", "actionable_trade_score", "actionable_executable_trade_score"):
         if payload.get(key) is not None and float(payload[key]) > 0.0:
             raise ValueError(f"NO_SUBMIT decision cannot carry positive {key}")

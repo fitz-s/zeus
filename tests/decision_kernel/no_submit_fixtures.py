@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import json
 from typing import Any
 
 from src.decision_kernel import claims
@@ -28,6 +29,7 @@ def build_test_no_submit_proof_bundle(
     )
     decision_clock = EvidenceClock(decision_time, decision_time, decision_time)
     quote_clock = EvidenceClock(decision_time, decision_time, decision_time)
+    event_payload = _payload_dict(event)
     family_id = str(getattr(receipt, "family_id", None) or "family-1")
     condition_id = str(getattr(receipt, "condition_id", None) or "condition-1")
     token_id = str(getattr(receipt, "token_id", None) or "yes-1")
@@ -53,7 +55,22 @@ def build_test_no_submit_proof_bundle(
             claims.SOURCE_TRUTH,
             "source_truth",
             "source_truth",
-            {"identity": event.source, "event_id": event.event_id, "causal_snapshot_id": event.causal_snapshot_id},
+            {
+                "identity": event.source,
+                "event_id": event.event_id,
+                "event_type": event.event_type,
+                "source_status": "MATCH",
+                "causal_snapshot_id": event.causal_snapshot_id,
+                "snapshot_id": event.causal_snapshot_id,
+                "completeness_status": event_payload.get("completeness_status"),
+                "required_fields_present": event_payload.get("required_fields_present"),
+                "required_steps_present": event_payload.get("required_steps_present"),
+                "source_id": event_payload.get("source_id"),
+                "source_run_id": event_payload.get("source_run_id"),
+                "payload_hash": event.payload_hash,
+                "available_at": event.available_at,
+                "received_at": event.received_at,
+            },
             event_clock,
             "test.source_truth",
         ),
@@ -83,6 +100,16 @@ def build_test_no_submit_proof_bundle(
                 "forecast_source_id": "opendata",
                 "source_cycle_time": "2026-05-25T00:00:00+00:00",
                 "horizon_profile": "default",
+                "reader_status": "LIVE_ELIGIBLE",
+                "reader_reason_code": None,
+                "coverage_readiness_status": "LIVE_ELIGIBLE",
+                "coverage_completeness_status": "COMPLETE",
+                "source_run_completeness_status": "COMPLETE",
+                "required_steps": (0,),
+                "observed_steps": (0,),
+                "expected_members": 51,
+                "observed_members": 51,
+                "applied_validations": ("test_authority_validation",),
             },
             event_clock,
             "test.forecast_authority",
@@ -98,6 +125,11 @@ def build_test_no_submit_proof_bundle(
                 "source_cycle": "00",
                 "horizon_profile": "default",
                 "model_hash": "model-hash-1",
+                "authority": "VERIFIED",
+                "maturity_level": 1,
+                "input_space": "width_normalized_density",
+                "training_cutoff": "2026-05-01T00:00:00+00:00",
+                "model_available_at": "2026-05-01T00:00:00+00:00",
             },
             decision_clock,
             "test.calibration",
@@ -110,6 +142,7 @@ def build_test_no_submit_proof_bundle(
                 "identity": "edli_v1",
                 "edge_bootstrap_n": 1000,
                 "market_analysis_config_hash": model_config_hash,
+                "calibration_input_space": "width_normalized_density",
             },
             decision_clock,
             "test.model_config",
@@ -247,6 +280,14 @@ def build_test_no_submit_proof_bundle(
 
 def _parse_dt(value: str) -> datetime:
     return _utc(datetime.fromisoformat(value.replace("Z", "+00:00")))
+
+
+def _payload_dict(event: OpportunityEvent) -> dict[str, Any]:
+    try:
+        parsed = json.loads(event.payload_json)
+    except json.JSONDecodeError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
 
 
 def _utc(value: datetime) -> datetime:
