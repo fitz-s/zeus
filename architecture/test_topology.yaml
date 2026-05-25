@@ -169,6 +169,7 @@ test_trust_policy:
     tests/test_market_phase_d_a_unification.py: {created: "2026-05-04", last_used: "2026-05-04"}
     tests/test_main_scheduler_timezone.py: {created: "2026-05-04", last_used: "2026-05-04"}
     tests/test_no_deprecated_make_family_id_calls.py: {created: "2026-04-23", last_used: "2026-04-23"}
+    tests/test_onboard_pipeline_completeness.py: {created: "2026-05-25", last_used: "2026-05-25"}
     tests/test_ingest_isolation.py: {created: "2026-04-26", last_used: "2026-04-26"}
     tests/test_ingest_status_v2_rollup.py: {created: "2026-05-18", last_used: "2026-05-19"}
     tests/test_obs_v2_dst_missing_hour_flag.py: {created: "2026-04-26", last_used: "2026-04-26"}
@@ -1063,6 +1064,7 @@ law_gate:
     tests:
       - tests/test_instrument_invariants.py
       - tests/test_assumptions_validation.py
+      - tests/test_onboard_pipeline_completeness.py
     protects:
       - src/contracts/settlement_semantics.py
       - src/signal/ensemble_signal.py

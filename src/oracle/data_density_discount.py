@@ -26,10 +26,30 @@ from __future__ import annotations
 
 import json
 import logging
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, NamedTuple
 
 logger = logging.getLogger(__name__)
+
+
+# ── fail-closed exception ─────────────────────────────────────────────────────
+
+@dataclass
+class DDDFailClosed(Exception):
+    """Raised when DDD cannot evaluate and policy is fail-CLOSED.
+
+    Defined here so data_density_discount (pure, no engine deps) can raise it.
+    ddd_wiring re-exports it for backward-compatible imports.
+    """
+
+    code: str          # e.g. "DDD_CONFIG_MISSING", "DDD_NSTAR_UNCONFIGURED"
+    reason: str        # human-readable
+    city: str = ""
+    track: str = ""
+
+    def __str__(self) -> str:
+        return f"{self.code}: {self.reason}"
 
 # ── config paths ──────────────────────────────────────────────────────────────
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -134,14 +154,21 @@ def get_n_star(city: str, track: str, nstar_config: dict) -> int | None:
     """Extract N_star for a (city, metric/track) pair.
 
     Returns None if status is N_STAR_NOT_FOUND (conservative: treat as N < N_star).
-    Raises KeyError if the key is completely absent.
+    Raises DDDFailClosed (not bare KeyError) if the key is completely absent,
+    so the evaluator's except DDDFailClosed handler catches it cleanly instead
+    of propagating an unexpected KeyError through the decision loop.
     """
     key = f"{city}_{track}"
     per_city_metric = nstar_config.get("per_city_metric", nstar_config)
     if key not in per_city_metric:
-        raise KeyError(
-            f"N_star key '{key}' not found in DDD N_star config (fail-CLOSED). "
-            "Add the city/track pair before enabling DDD."
+        raise DDDFailClosed(
+            code="DDD_NSTAR_UNCONFIGURED",
+            reason=(
+                f"N_star key '{key}' not found in DDD N_star config (fail-CLOSED). "
+                "Add the city/track pair before enabling DDD."
+            ),
+            city=city,
+            track=track,
         )
     entry = per_city_metric[key]
     if entry.get("status") == "N_STAR_NOT_FOUND":

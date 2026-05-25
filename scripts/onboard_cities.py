@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Lifecycle: created=2026-04-02; last_reviewed=2026-04-24; last_reused=2026-04-24
+# Lifecycle: created=2026-04-02; last_reviewed=2026-04-24; last_reused=2026-05-25
 # Purpose: Operator city-onboarding workflow that scaffolds config, data, and
 # market/settlement rows.
 # Reuse: Inspect architecture/script_manifest.yaml plus
@@ -47,6 +47,54 @@ PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.state.db_writer_lock import WriteClass, subprocess_run_with_write_class  # noqa: E402
+
+# Lazy-import at module level (available for tests + precondition check):
+try:
+    from src.data.tier_resolver import TIER_SCHEDULE as _TIER_SCHEDULE_IMPORT  # noqa: E402
+    TIER_SCHEDULE: dict = _TIER_SCHEDULE_IMPORT
+except ImportError:
+    TIER_SCHEDULE = {}
+
+# ─────────────────────────────────────────────────────────────
+# Deferred artifacts: require live shadow history or ≥110
+# settled calibration_pairs dates — cannot be derived from
+# public archives during initial onboarding.  The pipeline
+# records them as PENDING and keeps the city at oracle
+# MISSING-status (mult=0.5) until the bridge scripts accrue
+# sufficient evidence.
+# ─────────────────────────────────────────────────────────────
+DEFERRED_ARTIFACTS: dict[str, str] = {
+    "oracle_error_rates": (
+        "requires real-time oracle shadow snapshots "
+        "(bridge_oracle_to_calibration.py accrues ≥14d live)"
+    ),
+    "v2_nstar": (
+        "requires ≥110 settled calibration_pairs_v2 target_dates "
+        "for ECE analysis"
+    ),
+    "settlements_v2": (
+        "market-facing settlements; populated as Polymarket markets "
+        "open and settle over time"
+    ),
+}
+
+
+def _check_city_registered(city_name: str) -> None:
+    """Raise ValueError if city_name is not in TIER_SCHEDULE.
+
+    This is a fail-closed precondition check at pipeline entry.  A city
+    absent from TIER_SCHEDULE will crash ``tier_for_city`` (raising
+    UnsupportedTierError) during every live ETL step, so we surface it
+    early with a clear message.
+    """
+    if city_name not in TIER_SCHEDULE:
+        registered = sorted(TIER_SCHEDULE.keys())
+        raise ValueError(
+            f"City {city_name!r} is not in TIER_SCHEDULE "
+            f"(src/data/tier_resolver.py).  Add it there before "
+            f"onboarding.  Registered cities: {registered}"
+        )
+
 
 logging.basicConfig(
     level=logging.INFO,
@@ -283,16 +331,58 @@ PIPELINE_STEPS = [
         "optional": True,
     },
     {
+        "id": "obs_instants_v2",
+        "name": "Backfill observation_instants_v2 (≥365d, data_version=v1.wu-native)",
+        "script": "backfill_obs_v2.py",
+        "city_flag": "--cities",
+        # --start / --end / --data-version injected dynamically via extra_args_factory
+        "extra_args_factory": "_obs_instants_v2_extra_args",
+    },
+    {
         "id": "ens_backfill",
-        "name": "Backfill ENS snapshots from OpenMeteo",
+        "name": "Backfill ENS snapshots v1 from OpenMeteo (legacy p_raw lane)",
         "script": "backfill_ens.py",
+    },
+    {
+        "id": "ens_backfill_v2",
+        "name": "Backfill ensemble_snapshots_v2 from GRIB/TIGGE archive",
+        "script": "ingest_grib_to_snapshots.py",
+        "city_flag": "--cities",
+        # --date-from injected via extra_args_factory
+        "extra_args_factory": "_ens_backfill_v2_extra_args",
     },
     {
         "id": "calibration_pairs",
         "name": "Canonical calibration-pair rebuild from verified ENS + observations",
         "script": "rebuild_calibration_pairs_canonical.py",
-        "extra_args": ["--dry-run"],
-        "optional": True,
+        # SEV-1 fix: removed --dry-run and optional=True so the rebuild is
+        # mandatory and actually writes calibration_pairs_v2 rows.
+    },
+    {
+        "id": "platt_training",
+        "name": "Refit Platt v2 models (refit_platt_v2 → promote to world.db)",
+        "type": "python",
+        # Inline Python step: calls refit_platt_v2 + promote_platt_models_v2.
+        # Uses zeus-forecasts.db (refuses zeus-world.db per refit_platt_v2 safety gate).
+        "uses_forecasts_db": True,
+        "db_source": "zeus-forecasts.db",
+    },
+    {
+        "id": "fit_ens_bias_v2",
+        "name": "Fit model_bias_ens_v2 per city (inline ens_bias_repo)",
+        "type": "python",
+    },
+    {
+        "id": "monthly_bounds",
+        "name": "Regenerate city_monthly_bounds.json (global recompute)",
+        "script": "generate_monthly_bounds.py",
+        # No city flag — global recompute; new city rows appear automatically
+        # once ensemble_snapshots have been backfilled.
+    },
+    {
+        "id": "compute_ddd_floor",
+        "name": "Compute v2_city_floors.json entry from observation_instants_v2 p05",
+        "type": "python",
     },
 ]
 
@@ -551,6 +641,38 @@ def compute_solar_daily(cities: list[NewCity], days: int = 440, dry_run: bool = 
     logger.info("  Computed %d solar_daily entries for %d cities", inserted, len(cities))
 
 
+# ─────────────────────────────────────────────────────────────
+# Extra-args factories for steps that need dynamic date/path args
+# ─────────────────────────────────────────────────────────────
+
+# Number of lookback days for observation_instants_v2 backfill.
+_OBS_V2_BACKFILL_DAYS = 400
+
+
+def _obs_instants_v2_extra_args() -> list[str]:
+    """Dynamic args for backfill_obs_v2.py: --start, --end, --data-version."""
+    end_date = date.today()
+    start_date = end_date - timedelta(days=_OBS_V2_BACKFILL_DAYS)
+    return [
+        "--start", start_date.isoformat(),
+        "--end", end_date.isoformat(),
+        "--data-version", "v1.wu-native",
+    ]
+
+
+def _ens_backfill_v2_extra_args() -> list[str]:
+    """Dynamic args for ingest_grib_to_snapshots.py: --date-from."""
+    start_date = date.today() - timedelta(days=_OBS_V2_BACKFILL_DAYS)
+    return ["--date-from", start_date.isoformat()]
+
+
+# Registry so run_script can resolve factory names to callables.
+_EXTRA_ARGS_FACTORIES: dict[str, object] = {
+    "_obs_instants_v2_extra_args": _obs_instants_v2_extra_args,
+    "_ens_backfill_v2_extra_args": _ens_backfill_v2_extra_args,
+}
+
+
 def run_script(step: dict, city_names: list[str], dry_run: bool = False) -> bool:
     """Run a single pipeline script. Returns True on success."""
     script = step.get("script")
@@ -569,8 +691,17 @@ def run_script(step: dict, city_names: list[str], dry_run: bool = False) -> bool
         cmd.append(step["city_flag"])
         cmd.extend(city_names)
 
-    # Add extra args
+    # Add extra args (static list)
     cmd.extend(step.get("extra_args", []))
+
+    # Add dynamic extra args from factory (for steps needing runtime-computed dates)
+    factory_name = step.get("extra_args_factory")
+    if factory_name:
+        factory = _EXTRA_ARGS_FACTORIES.get(factory_name)
+        if factory is None:
+            logger.error("  Unknown extra_args_factory: %s", factory_name)
+            return False
+        cmd.extend(factory())
 
     if dry_run:
         logger.info("  [DRY RUN] Would run: %s", " ".join(cmd))
@@ -613,6 +744,12 @@ def run_pipeline(
     start_from: str | None = None,
 ):
     """Run the full onboarding pipeline for a batch of new cities."""
+    # Fail-closed precondition: every city must be registered in TIER_SCHEDULE
+    # before ETL steps can execute.  Runs for BOTH dry-run and live so dry-run
+    # serves as a proper pre-flight that surfaces missing registrations early.
+    for c in cities:
+        _check_city_registered(c.name)
+
     total_steps = len(PIPELINE_STEPS)
     logger.info("=" * 70)
     logger.info("ZEUS CITY ONBOARDING PIPELINE")
@@ -623,6 +760,7 @@ def run_pipeline(
 
     city_names = [c.name for c in cities]
     started = start_from is None
+    _ens_bias_zero_cities: set[str] = set()  # cities where fit_ens_bias_v2 produced 0 rows
 
     for step_num, step in enumerate(PIPELINE_STEPS, 1):
         step_id = step["id"]
@@ -639,7 +777,7 @@ def run_pipeline(
 
         logger.info("\n[%d/%d] %s...", step_num, total_steps, step["name"])
 
-        # Custom Python steps
+        # Custom Python steps — dispatched by step_id
         if step_id == "config":
             added = add_cities_to_config(cities, dry_run=dry_run)
             if not added and not dry_run:
@@ -658,11 +796,24 @@ def run_pipeline(
             compute_solar_daily(cities, days=900, dry_run=dry_run)
             continue
 
+        if step_id == "platt_training":
+            _run_platt_training(city_names, dry_run=dry_run)
+            continue
+
+        if step_id == "fit_ens_bias_v2":
+            _ens_bias_zero_cities = _run_fit_ens_bias_v2(city_names, dry_run=dry_run)
+            continue
+
+        if step_id == "compute_ddd_floor":
+            _write_nstar_stubs(city_names, dry_run=dry_run)
+            _run_compute_ddd_floor(city_names, dry_run=dry_run)
+            continue
+
         # Script-based steps
         if step.get("optional"):
             success = run_script(step, city_names, dry_run=dry_run)
             if not success and not dry_run:
-                logger.warning("  ⚠️  Optional step %s failed — continuing", step["name"])
+                logger.warning("  Optional step %s failed — continuing", step["name"])
             continue
 
         success = run_script(step, city_names, dry_run=dry_run)
@@ -678,19 +829,35 @@ def run_pipeline(
     # Verification summary
     if not dry_run:
         _print_verification(city_names)
+        _record_deferred_artifacts(city_names, ens_bias_no_coverage=_ens_bias_zero_cities)
 
     return True
 
 
 def _print_verification(city_names: list[str]):
-    """Print data coverage summary for newly onboarded cities."""
+    """Print data coverage summary for newly onboarded cities.
+
+    V2 tables (ensemble_snapshots_v2, calibration_pairs_v2, model_bias_ens_v2,
+    settlements_v2, observation_instants_v2) live in zeus-forecasts.db (K1 split).
+    All other tables live in zeus-world.db.  Querying V2 tables via world connection
+    would silently report SKIP for every V2 surface — use the correct connection per table.
+    """
+    _FORECASTS_V2_TABLES = frozenset({
+        "ensemble_snapshots_v2",
+        "calibration_pairs_v2",
+        "model_bias_ens_v2",
+        "settlements_v2",
+        "observation_instants_v2",
+    })
     try:
-        from src.state.db import get_world_connection
-        conn = get_world_connection(write_class="bulk")
+        from src.state.db import get_world_connection, get_forecasts_connection
+        world_conn = get_world_connection(write_class=None)
+        forecasts_conn = get_forecasts_connection(write_class=None)
 
         logger.info("\nDATA COVERAGE VERIFICATION:")
         logger.info("-" * 60)
         for table in _verification_tables():
+            conn = forecasts_conn if table in _FORECASTS_V2_TABLES else world_conn
             try:
                 placeholders = ",".join("?" * len(city_names))
                 row = conn.execute(
@@ -703,29 +870,408 @@ def _print_verification(city_names: list[str]):
             except Exception:
                 logger.info("  %5s %-25s (table missing)", "SKIP", table)
 
-        conn.close()
+        world_conn.close()
+        forecasts_conn.close()
     except Exception as e:
         logger.warning("Verification skipped: %s", e)
 
 
 def _verification_tables() -> list[str]:
     return [
+        # V2 canonical tables (K1 split: zeus-forecasts.db)
+        "observation_instants_v2",
+        "ensemble_snapshots_v2",
+        "calibration_pairs_v2",
+        "model_bias_ens_v2",
+        "settlements_v2",
+        # V1 legacy tables still checked for completeness (zeus-world.db)
         "settlements",
         "observations",
-        "observation_instants",
         "market_events",
         "solar_daily",
         "temp_persistence",
         "diurnal_curves",
         "forecasts",
         "forecast_skill",
-        "model_bias",
-        "ensemble_snapshots",
-        "calibration_pairs",
         "historical_forecasts",
         "model_skill",
         "asos_wu_offsets",
     ]
+
+
+# ─────────────────────────────────────────────────────────────
+# Inline Python pipeline step implementations
+# ─────────────────────────────────────────────────────────────
+
+def _run_platt_training(city_names: list[str], dry_run: bool = False) -> None:
+    """Run refit_platt_v2.py (write to forecasts.db) then promote to world.db.
+
+    Two-stage:
+      1. refit_platt_v2.py --db <forecasts.db> --no-dry-run --force
+         Reads calibration_pairs_v2 from zeus-forecasts.db.
+         Refuses zeus-world.db (safety gate in the script).
+      2. promote_platt_models_v2.py promote
+           --stage-db <forecasts.db> --prod-db <world.db> --commit
+    """
+    from src.state.db import ZEUS_FORECASTS_DB_PATH, ZEUS_WORLD_DB_PATH
+
+    refit_script = PROJECT_ROOT / "scripts" / "refit_platt_v2.py"
+    promote_script = PROJECT_ROOT / "scripts" / "promote_platt_models_v2.py"
+
+    for script in (refit_script, promote_script):
+        if not script.exists():
+            logger.error("  Script not found: %s", script)
+            return
+
+    refit_cmd = [
+        sys.executable, str(refit_script),
+        "--db", str(ZEUS_FORECASTS_DB_PATH),
+        "--no-dry-run",
+        "--force",
+    ]
+    promote_cmd = [
+        sys.executable, str(promote_script),
+        "promote",
+        "--stage-db", str(ZEUS_FORECASTS_DB_PATH),
+        "--prod-db", str(ZEUS_WORLD_DB_PATH),
+        "--commit",
+    ]
+
+    if dry_run:
+        logger.info("  [DRY RUN] Would run: %s", " ".join(refit_cmd[-4:]))
+        logger.info("  [DRY RUN] Would run: %s", " ".join(promote_cmd[-4:]))
+        return
+
+    for cmd, label in [(refit_cmd, "refit_platt_v2"), (promote_cmd, "promote_platt_models_v2")]:
+        logger.info("  Running: %s", label)
+        try:
+            result = subprocess_run_with_write_class(
+                cmd,
+                WriteClass.BULK,
+                cwd=str(PROJECT_ROOT),
+                capture_output=True,
+                text=True,
+                timeout=3600,
+            )
+            if result.returncode != 0:
+                logger.error("  %s failed (exit %d)", label, result.returncode)
+                for line in (result.stderr or result.stdout).strip().split("\n")[-5:]:
+                    logger.error("    %s", line)
+                raise RuntimeError(f"Platt training step failed at {label}")
+            lines = result.stdout.strip().split("\n")
+            for line in lines[-3:]:
+                logger.info("    %s", line)
+        except subprocess.TimeoutExpired:
+            raise RuntimeError(f"Platt training step timed out at {label}")
+
+
+# Canonical data versions for ENS bias fitting (see test_ens_bias_repo.py)
+_ENS_LIVE_DATA_VERSION = "ecmwf_opendata_mx2t3_local_calendar_day_max_v1"
+_ENS_PRIOR_DATA_VERSION = "tigge_mx2t6_local_calendar_day_max_v1"
+
+# Seasons used for per-season bias estimation
+_ENS_SEASONS: tuple[tuple[str, tuple[int, ...]], ...] = (
+    ("DJF", (12, 1, 2)),
+    ("MAM", (3, 4, 5)),
+    ("JJA", (6, 7, 8)),
+    ("SON", (9, 10, 11)),
+)
+
+
+def _run_fit_ens_bias_v2(city_names: list[str], dry_run: bool = False) -> set[str]:
+    """Fit model_bias_ens_v2 for each city/season/metric using ens_bias_repo.
+
+    Calls fit_city_predictive_error() (from ens_error_model) per (city, season,
+    metric) bucket, then writes the posterior to model_bias_ens_v2 via
+    write_bias_model().  init_ens_bias_schema() is called defensively so the
+    table is created even if it did not exist yet in zeus-forecasts.db.
+    """
+    if dry_run:
+        logger.info("  [DRY RUN] Would fit model_bias_ens_v2 for: %s", city_names)
+        return set()
+
+    try:
+        from src.calibration.ens_bias_repo import (
+            init_ens_bias_schema,
+            write_bias_model,
+        )
+        from src.calibration.ens_error_model import fit_city_predictive_error
+        from src.state.db import get_forecasts_connection
+    except ImportError as exc:
+        logger.error("  Cannot import ens_bias modules: %s", exc)
+        return set()
+
+    today_str = date.today().isoformat()
+
+    conn = get_forecasts_connection(write_class="bulk")
+    try:
+        init_ens_bias_schema(conn)
+        conn.commit()
+
+        # Track fitted bucket count per city to detect zero-coverage cities individually.
+        # A city with no TIGGE/GRIB data will have fitted_per_city[city]==0 across all
+        # season/metric buckets; those cities are returned as deferred-sidecar candidates
+        # even if other cities in the batch did fit successfully.
+        fitted_per_city: dict[str, int] = {city: 0 for city in city_names}
+        skipped = 0
+        for city in city_names:
+            for season, months in _ENS_SEASONS:
+                for metric in ("high", "low"):
+                    try:
+                        model = fit_city_predictive_error(
+                            conn,
+                            city=city,
+                            live_data_version=_ENS_LIVE_DATA_VERSION,
+                            prior_data_version=_ENS_PRIOR_DATA_VERSION,
+                            season_months=tuple(months),
+                            metric=metric,
+                        )
+                        write_bias_model(
+                            conn,
+                            city=city,
+                            season=season,
+                            metric=metric,
+                            live_data_version=_ENS_LIVE_DATA_VERSION,
+                            prior_data_version=_ENS_PRIOR_DATA_VERSION,
+                            posterior_bias_c=model.posterior.bias,
+                            posterior_sd_c=model.posterior.sd,
+                            n_live=model.posterior.n_live if hasattr(model.posterior, "n_live") else 0,
+                            n_prior=model.posterior.n_prior if hasattr(model.posterior, "n_prior") else 0,
+                            weight_live=model.posterior.weight_live if hasattr(model.posterior, "weight_live") else 0.0,
+                            estimator="ens_error_model.fit_city_predictive_error",
+                            training_cutoff=today_str,
+                            recorded_at=today_str,
+                        )
+                        fitted_per_city[city] += 1
+                    except (ValueError, RuntimeError) as exc:
+                        logger.debug("  ENS bias skipped %s/%s/%s: %s", city, season, metric, exc)
+                        skipped += 1
+
+        fitted = sum(fitted_per_city.values())
+        conn.commit()
+        logger.info("  ENS bias v2: fitted=%d skipped=%d", fitted, skipped)
+        zero_coverage_cities = {city for city, count in fitted_per_city.items() if count == 0}
+        if zero_coverage_cities:
+            logger.warning(
+                "  fit_ens_bias_v2: ZERO buckets fitted for %s — likely no "
+                "TIGGE/GRIB coverage yet.  model_bias_ens_v2 is empty for "
+                "these cities; recording as PENDING in deferred sidecar.",
+                sorted(zero_coverage_cities),
+            )
+            return zero_coverage_cities  # caller adds to deferred sidecar
+    except Exception as exc:
+        logger.error("  fit_ens_bias_v2 failed: %s", exc)
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+    return set()
+
+
+def _write_nstar_stubs(city_names: list[str], dry_run: bool = False) -> None:
+    """Write N_STAR_NOT_FOUND stubs for new cities into v2_nstar.json.
+
+    Writes ``{city}_high`` and ``{city}_low`` stub entries ONLY if absent
+    (never clobbers calibrated entries). Atomic write — same pattern as
+    _run_compute_ddd_floor.
+
+    Without these stubs get_n_star() raises DDDFailClosed(DDD_NSTAR_UNCONFIGURED)
+    for any trade decision on the new city.
+    """
+    nstar_path = PROJECT_ROOT / "src" / "oracle" / "ddd_artifacts" / "v2_nstar.json"
+
+    if dry_run:
+        logger.info("  [DRY RUN] Would write N_star stubs for: %s", city_names)
+        return
+
+    if not nstar_path.exists():
+        logger.error("  v2_nstar.json not found at %s — cannot write stubs", nstar_path)
+        return
+
+    with nstar_path.open() as f:
+        nstar_data = json.load(f)
+
+    per_city_metric: dict = nstar_data.setdefault("per_city_metric", {})
+    added: list[str] = []
+    for city_name in city_names:
+        for track in ("high", "low"):
+            key = f"{city_name}_{track}"
+            if key not in per_city_metric:
+                per_city_metric[key] = {"status": "N_STAR_NOT_FOUND", "N_star": None}
+                added.append(key)
+                logger.info("  N_star stub written: %s", key)
+            else:
+                logger.debug("  N_star key already exists (no-op): %s", key)
+
+    if not added:
+        logger.info("  N_star stubs: all keys already present, no writes needed")
+        return
+
+    tmp_path = nstar_path.with_suffix(".json.tmp")
+    with tmp_path.open("w") as f:
+        json.dump(nstar_data, f, indent=2, ensure_ascii=False)
+        f.write("\n")
+    tmp_path.replace(nstar_path)
+    logger.info("  v2_nstar.json updated — added stubs: %s", added)
+
+
+def _run_compute_ddd_floor(city_names: list[str], dry_run: bool = False) -> None:
+    """Compute and write v2_city_floors.json entries for each new city.
+
+    Algorithm (matches existing floor_method in _metadata):
+      final_floor = max(p05_directional_coverage, SAFETY_MINIMUM_FLOOR)
+
+    Coverage is sampled from observation_instants_v2 over ≥365 recent dates
+    per city, using the canonical settlement source and data_version.
+    """
+    floors_path = PROJECT_ROOT / "src" / "oracle" / "ddd_artifacts" / "v2_city_floors.json"
+
+    if dry_run:
+        logger.info("  [DRY RUN] Would compute DDD floors for: %s", city_names)
+        return
+
+    try:
+        from src.oracle.data_density_discount import SAFETY_MINIMUM_FLOOR
+        from src.state.db import get_world_connection
+        from src.config import cities_by_name
+    except ImportError as exc:
+        logger.error("  Cannot import DDD modules: %s", exc)
+        return
+
+    # Load current floors config
+    with floors_path.open() as f:
+        floors_data: dict = json.load(f)
+    per_city: dict = floors_data.setdefault("per_city", {})
+
+    conn = get_world_connection(write_class=None)
+    try:
+        for city_name in city_names:
+            city_cfg = cities_by_name.get(city_name)
+            if city_cfg is None:
+                logger.warning("  DDD floor: city %r not in cities.json — skipping", city_name)
+                continue
+
+            # Determine canonical peak-hour window using ddd_wiring's directional_window
+            # (WINDOW_RADIUS=3, matches runtime DDD coverage quantile semantics)
+            from src.engine.ddd_wiring import directional_window
+            peak_hour = getattr(city_cfg, "historical_peak_hour", 14.5)
+            target_hours = directional_window(peak_hour)
+            if not target_hours:
+                target_hours = list(range(8, 21))  # fallback: 8am–8pm
+
+            # Collect per-date directional coverage over the lookback window
+            lookback_days = 400
+            coverages: list[float] = []
+            for delta in range(lookback_days):
+                target_date = (date.today() - timedelta(days=delta)).isoformat()
+                in_clause = ",".join(str(h) for h in target_hours)
+                row = conn.execute(
+                    f"""
+                    SELECT COUNT(DISTINCT CAST(local_hour AS INTEGER)) AS hrs
+                    FROM observation_instants_v2
+                    WHERE city = ?
+                      AND source = 'wu_icao_history'
+                      AND data_version = 'v1.wu-native'
+                      AND target_date = ?
+                      AND CAST(local_hour AS INTEGER) IN ({in_clause})
+                    """,
+                    (city_name, target_date),
+                ).fetchone()
+                hrs = (row[0] or 0) if row else 0
+                coverages.append(hrs / len(target_hours) if target_hours else 0.0)
+
+            if not coverages:
+                logger.warning("  DDD floor: no coverage data for %r — using SAFETY_MINIMUM_FLOOR", city_name)
+                p05 = 0.0
+            else:
+                sorted_covs = sorted(coverages)
+                p05_idx = max(0, int(len(sorted_covs) * 0.05) - 1)
+                p05 = sorted_covs[p05_idx]
+
+            final_floor = max(p05, SAFETY_MINIMUM_FLOOR)
+
+            sorted_covs_local = sorted(coverages)
+            entry = {
+                "p05": round(p05, 4),
+                "p10": round(sorted_covs_local[max(0, int(len(sorted_covs_local) * 0.10) - 1)], 4),
+                "p25": round(sorted_covs_local[max(0, int(len(sorted_covs_local) * 0.25) - 1)], 4),
+                "recommended_floor_empirical": round(final_floor, 4),
+                "policy_override": None,
+                "final_floor": round(final_floor, 4),
+                "train_FP_rate": 0.0,
+                "n_zero_train": sum(1 for c in coverages if c == 0.0),
+                "sigma_diagnostic": 0.0,
+                "floor_source": "empirical_p05",
+                "computed_date": date.today().isoformat(),
+            }
+            per_city[city_name] = entry
+            logger.info("  DDD floor %s: p05=%.3f final_floor=%.3f", city_name, p05, final_floor)
+    finally:
+        conn.close()
+
+    # Atomic write back to floors file
+    tmp_path = floors_path.with_suffix(".json.tmp")
+    with tmp_path.open("w") as f:
+        json.dump(floors_data, f, indent=2, ensure_ascii=False)
+        f.write("\n")
+    tmp_path.replace(floors_path)
+    logger.info("  v2_city_floors.json updated for: %s", city_names)
+
+
+def _record_deferred_artifacts(
+    city_names: list[str],
+    *,
+    ens_bias_no_coverage: set[str] | None = None,
+) -> None:
+    """Write per-city PENDING sidecar files for deferred artifacts.
+
+    These files signal to operators (and bridge scripts) that the city
+    is onboarded but certain calibration artifacts require accumulated
+    live history before they become available.
+
+    ``ens_bias_no_coverage``: set of city names where fit_ens_bias_v2
+    produced zero fitted buckets (no TIGGE/GRIB coverage).  These cities
+    get an additional model_bias_ens_v2=PENDING entry in their sidecar.
+
+    Written to: data/onboarding_pending/<city_slug>.json
+    """
+    pending_dir = PROJECT_ROOT / "data" / "onboarding_pending"
+    pending_dir.mkdir(parents=True, exist_ok=True)
+    ens_bias_no_coverage = ens_bias_no_coverage or set()
+
+    for city_name in city_names:
+        slug = city_name.lower().replace(" ", "_")
+        deferred: dict = {
+            artifact: {"status": "PENDING", "reason": reason}
+            for artifact, reason in DEFERRED_ARTIFACTS.items()
+        }
+        if city_name in ens_bias_no_coverage:
+            deferred["model_bias_ens_v2"] = {
+                "status": "PENDING",
+                "reason": (
+                    "fit_ens_bias_v2 produced 0 fitted buckets — "
+                    "city has no TIGGE/GRIB ensemble_snapshots coverage yet; "
+                    "re-run after ingest_grib_to_snapshots backfill completes."
+                ),
+            }
+        pending: dict = {
+            "city": city_name,
+            "onboarded_at": date.today().isoformat(),
+            "deferred_artifacts": deferred,
+            "oracle_status": "MISSING",
+            "oracle_effective_multiplier": 0.5,
+            "note": (
+                "City is onboarded and will receive ARCHIVE-derivable data. "
+                "Deferred artifacts require live shadow history. "
+                "oracle_error_rates is MISSING (mult=0.5) until "
+                "bridge_oracle_to_calibration.py accrues ≥14d live data."
+            ),
+        }
+        sidecar = pending_dir / f"{slug}.json"
+        with sidecar.open("w") as f:
+            json.dump(pending, f, indent=2, ensure_ascii=False)
+            f.write("\n")
+        logger.info("  Deferred-artifacts sidecar: %s", sidecar.relative_to(PROJECT_ROOT))
 
 
 CLUSTER_RULES = [
