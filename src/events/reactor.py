@@ -18,7 +18,9 @@ from src.events.event_store import EventStore
 from src.events.opportunity_event import OpportunityEvent, assert_available_for_decision
 
 UTC = timezone.utc
-EXECUTION_RECEIPT_TERMINAL_STATUSES = frozenset({"SUBMIT_DISABLED", "NOT_SUBMITTED_DRY_RUN"})
+DRY_EXECUTION_RECEIPT_TERMINAL_STATUSES = frozenset({"SUBMIT_DISABLED", "NOT_SUBMITTED_DRY_RUN"})
+LIVE_EXECUTION_RECEIPT_TERMINAL_STATUSES = frozenset({"SUBMITTED", "REJECTED", "TIMEOUT_UNKNOWN", "ERROR_UNKNOWN"})
+EXECUTION_RECEIPT_TERMINAL_STATUSES = DRY_EXECUTION_RECEIPT_TERMINAL_STATUSES | LIVE_EXECUTION_RECEIPT_TERMINAL_STATUSES
 
 Gate = Callable[[OpportunityEvent], bool]
 ExecutableSnapshotGate = Callable[[OpportunityEvent, datetime], bool]
@@ -202,11 +204,10 @@ class OpportunityEventReactor:
         if proof_stage is not None:
             self._reject_event(event, proof_stage, proof_reason, result, receipt=receipt, decision_time=decision_time)
             return
-        if (
-            receipt.side_effect_status != "NO_SUBMIT"
-            and receipt.side_effect_status not in EXECUTION_RECEIPT_TERMINAL_STATUSES
-            and not self._config.real_order_submit_enabled
-        ):
+        if receipt.side_effect_status in LIVE_EXECUTION_RECEIPT_TERMINAL_STATUSES and not self._config.real_order_submit_enabled:
+            self._reject_event(event, "EXECUTOR_EXPRESSIBILITY", "EDLI_REAL_ORDER_SUBMIT_DISABLED", result, receipt=receipt, decision_time=decision_time)
+            return
+        if receipt.side_effect_status not in {"NO_SUBMIT"} | EXECUTION_RECEIPT_TERMINAL_STATUSES and not self._config.real_order_submit_enabled:
             self._reject_event(event, "EXECUTOR_EXPRESSIBILITY", "EDLI_REAL_ORDER_SUBMIT_DISABLED", result, receipt=receipt, decision_time=decision_time)
             return
         if (
@@ -492,7 +493,7 @@ def _receipt_matches_event(event: OpportunityEvent, receipt: EventSubmissionRece
 
 
 def _receipt_money_path_blocker(receipt: EventSubmissionReceipt) -> tuple[str | None, str]:
-    if receipt.side_effect_status in {"COMMAND_CREATED", "SUBMITTED"}:
+    if receipt.side_effect_status == "COMMAND_CREATED":
         return "EXECUTOR_EXPRESSIBILITY", receipt.reason or "EDLI_REAL_ORDER_SIDE_EFFECT_FORBIDDEN"
     if not receipt.trade_score_positive:
         return "TRADE_SCORE", receipt.reason or "TRADE_SCORE_BLOCKED"

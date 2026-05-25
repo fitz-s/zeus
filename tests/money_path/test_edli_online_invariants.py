@@ -88,9 +88,11 @@ def test_edli_reactor_job_wired_without_removing_scheduler_jobs():
     assert "_edli_emit_day0_extreme_events" in source
     assert "day0_authority_catchup_scanner_enabled" in source
     assert "event_bound_no_submit_adapter_from_trade_conn" in source
+    assert "event_bound_live_adapter_from_trade_conn" in source
     assert "submit_existing_cycle_for_event" not in source
-    assert 'edli_cfg.get("real_order_submit_enabled"' not in source
-    assert "real_order_submit_enabled=False" in source
+    assert 'edli_cfg.get("real_order_submit_enabled", False)' in source
+    assert "real_order_submit_enabled=real_order_submit_enabled" in source
+    assert 'edli_cfg.get("live_canary_enabled", False)' in source
     assert "forecast_snapshot_emit_limit" in source
     assert "no_submit_proof_limit" in source
     assert "reactor.process_pending(decision_time=now, limit=proof_limit)" in source

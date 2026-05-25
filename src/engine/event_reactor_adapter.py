@@ -34,6 +34,7 @@ from src.decision_kernel.compiler import (
     normalize_forecast_reader_status,
 )
 from src.engine.event_bound_final_intent import (
+    EventBoundExecutorSubmitResult,
     EventBoundFinalIntent,
     build_event_bound_final_intent_receipt,
     serialize_event_bound_final_intent_receipt,
@@ -220,7 +221,9 @@ def event_bound_live_adapter_from_trade_conn(
     calibration_conn: sqlite3.Connection | None = None,
     bankroll_usd_provider: Callable[[], float | None] | None = None,
     real_order_submit_enabled: bool = False,
+    live_canary_enabled: bool = False,
     tiny_live_max_notional_usd: float = 5.0,
+    executor_submit: Callable[[DecisionCertificate, DecisionCertificate], EventBoundExecutorSubmitResult] | None = None,
 ) -> Callable[[OpportunityEvent, datetime], EventSubmissionReceipt]:
     """Build the event-bound live certificate chain up to the executor boundary.
 
@@ -242,21 +245,60 @@ def event_bound_live_adapter_from_trade_conn(
         )
         if no_submit_receipt.proof_accepted is not True or no_submit_receipt.decision_proof_bundle is None:
             return no_submit_receipt
-        if real_order_submit_enabled:
+        if real_order_submit_enabled and not live_canary_enabled:
             return EventSubmissionReceipt(
                 False,
                 event.event_id,
                 event.causal_snapshot_id,
-                reason="EDLI_LIVE_SUBMIT_NOT_WIRED_IN_THIS_INCREMENT",
+                reason="LIVE_CANARY_DISABLED",
+                proof_accepted=False,
+            )
+        if real_order_submit_enabled and executor_submit is None:
+            return EventSubmissionReceipt(
+                False,
+                event.event_id,
+                event.causal_snapshot_id,
+                reason="EXECUTOR_BOUNDARY_MISSING",
                 proof_accepted=False,
             )
         try:
-            certificates = _build_submit_disabled_live_certificates(
-                event=event,
-                receipt=no_submit_receipt,
-                decision_time=decision_time.astimezone(UTC),
-                tiny_live_max_notional_usd=tiny_live_max_notional_usd,
-            )
+            if real_order_submit_enabled:
+                command_certificates = _build_live_execution_command_certificates(
+                    event=event,
+                    receipt=no_submit_receipt,
+                    decision_time=decision_time.astimezone(UTC),
+                    tiny_live_max_notional_usd=tiny_live_max_notional_usd,
+                )
+                final_intent = _required_cert(command_certificates, claims.FINAL_INTENT)
+                command = _required_cert(command_certificates, claims.EXECUTION_COMMAND)
+                assert executor_submit is not None
+                submit_result = executor_submit(final_intent, command)
+                receipt_cert = build_execution_receipt_certificate(
+                    execution_command_cert=command,
+                    decision_time=decision_time.astimezone(UTC),
+                    status=submit_result.status,
+                    reason_code=submit_result.reason_code,
+                    submit_started_at=submit_result.submit_started_at,
+                    submit_finished_at=submit_result.submit_finished_at,
+                    venue_order_id=submit_result.venue_order_id,
+                    raw_response=submit_result.raw_response,
+                    raw_response_hash=submit_result.raw_response_hash,
+                    reconciliation_followup_required=submit_result.reconciliation_followup_required,
+                )
+                certificates = command_certificates + (receipt_cert,)
+                side_effect_status = submit_result.status
+                submitted = submit_result.status in {"SUBMITTED"}
+                reason = submit_result.reason_code
+            else:
+                certificates = _build_submit_disabled_live_certificates(
+                    event=event,
+                    receipt=no_submit_receipt,
+                    decision_time=decision_time.astimezone(UTC),
+                    tiny_live_max_notional_usd=tiny_live_max_notional_usd,
+                )
+                side_effect_status = "SUBMIT_DISABLED"
+                submitted = False
+                reason = "real_order_submit_disabled"
         except Exception as exc:
             return EventSubmissionReceipt(
                 False,
@@ -266,7 +308,7 @@ def event_bound_live_adapter_from_trade_conn(
                 proof_accepted=False,
             )
         return EventSubmissionReceipt(
-            submitted=False,
+            submitted=submitted,
             event_id=no_submit_receipt.event_id,
             causal_snapshot_id=no_submit_receipt.causal_snapshot_id,
             city=no_submit_receipt.city,
@@ -301,8 +343,8 @@ def event_bound_live_adapter_from_trade_conn(
             kelly_decision_id=no_submit_receipt.kelly_decision_id,
             risk_decision_id=no_submit_receipt.risk_decision_id,
             final_intent_id=no_submit_receipt.final_intent_id,
-            side_effect_status="SUBMIT_DISABLED",
-            reason="real_order_submit_disabled",
+            side_effect_status=side_effect_status,
+            reason=reason,
             proof_accepted=True,
             decision_proof_bundle=certificates,
         )
@@ -768,6 +810,29 @@ def _build_submit_disabled_live_certificates(
     decision_time: datetime,
     tiny_live_max_notional_usd: float,
 ) -> tuple[DecisionCertificate, ...]:
+    command_certificates = _build_live_execution_command_certificates(
+        event=event,
+        receipt=receipt,
+        decision_time=decision_time,
+        tiny_live_max_notional_usd=tiny_live_max_notional_usd,
+    )
+    command = _required_cert(command_certificates, claims.EXECUTION_COMMAND)
+    receipt_cert = build_execution_receipt_certificate(
+        execution_command_cert=command,
+        decision_time=decision_time,
+        status="SUBMIT_DISABLED",
+        reason_code="REAL_ORDER_SUBMIT_DISABLED",
+    )
+    return command_certificates + (receipt_cert,)
+
+
+def _build_live_execution_command_certificates(
+    *,
+    event: OpportunityEvent,
+    receipt: EventSubmissionReceipt,
+    decision_time: datetime,
+    tiny_live_max_notional_usd: float,
+) -> tuple[DecisionCertificate, ...]:
     proof_bundle = receipt.decision_proof_bundle
     compile_result = DecisionCompiler().compile_no_submit(
         event,
@@ -814,13 +879,7 @@ def _build_submit_disabled_live_certificates(
         live_cap_cert=live_cap,
         decision_time=decision_time,
     )
-    receipt_cert = build_execution_receipt_certificate(
-        execution_command_cert=command,
-        decision_time=decision_time,
-        status="SUBMIT_DISABLED",
-        reason_code="REAL_ORDER_SUBMIT_DISABLED",
-    )
-    return base_certs + (live_cap, actionable, final_intent, expressibility, command, receipt_cert)
+    return base_certs + (live_cap, actionable, final_intent, expressibility, command)
 
 
 def _actionable_payload_from_receipt(

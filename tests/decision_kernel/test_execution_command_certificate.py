@@ -298,6 +298,39 @@ def test_execution_receipt_matches_execution_command():
     verify_execution_receipt(receipt, (command,))
 
 
+def test_execution_receipt_submitted_fixture_response_verifies():
+    command = receipt_command()
+    receipt = build_execution_receipt_certificate(
+        execution_command_cert=command,
+        decision_time=NOW,
+        status="SUBMITTED",
+        reason_code="OK",
+        submit_started_at=NOW.isoformat(),
+        submit_finished_at=NOW.isoformat(),
+        venue_order_id="venue-1",
+        raw_response={"status": "submitted"},
+    )
+
+    assert receipt.payload["venue_order_id"] == "venue-1"
+    verify_execution_receipt(receipt, (command,))
+
+
+def test_execution_receipt_rejected_fixture_response_verifies():
+    command = receipt_command()
+    receipt = build_execution_receipt_certificate(
+        execution_command_cert=command,
+        decision_time=NOW,
+        status="REJECTED",
+        reason_code="VENUE_REJECTED",
+        submit_started_at=NOW.isoformat(),
+        submit_finished_at=NOW.isoformat(),
+        raw_response={"status": "rejected"},
+    )
+
+    assert receipt.payload["status"] == "REJECTED"
+    verify_execution_receipt(receipt, (command,))
+
+
 def test_execution_receipt_timeout_requires_reconcile_followup():
     command = receipt_command()
     receipt = build_execution_receipt_certificate(
@@ -309,6 +342,22 @@ def test_execution_receipt_timeout_requires_reconcile_followup():
 
     with pytest.raises(CertificateVerificationError, match="reconciliation"):
         verify_execution_receipt(receipt, (command,))
+
+
+def test_execution_receipt_timeout_fixture_response_verifies_with_reconcile_followup():
+    command = receipt_command()
+    receipt = build_execution_receipt_certificate(
+        execution_command_cert=command,
+        decision_time=NOW,
+        status="TIMEOUT_UNKNOWN",
+        reason_code="SUBMIT_TIMEOUT",
+        submit_started_at=NOW.isoformat(),
+        submit_finished_at=NOW.isoformat(),
+        raw_response={"status": "timeout"},
+        reconciliation_followup_required=True,
+    )
+
+    verify_execution_receipt(receipt, (command,))
 
 
 def test_execution_receipt_accepted_not_equal_filled():

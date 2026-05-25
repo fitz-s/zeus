@@ -2389,6 +2389,7 @@ def _edli_event_reactor_cycle() -> None:
         return
     from src.engine.event_reactor_adapter import (
         edli_source_truth_gate,
+        event_bound_live_adapter_from_trade_conn,
         event_bound_no_submit_adapter_from_trade_conn,
         executable_snapshot_gate_from_trade_conn,
         riskguard_allows_new_entries,
@@ -2428,6 +2429,28 @@ def _edli_event_reactor_cycle() -> None:
         conn.commit()
         store = EventStore(conn)
         regret_ledger = NoTradeRegretLedger(conn)
+        reactor_mode = str(edli_cfg.get("reactor_mode", "live_no_submit"))
+        real_order_submit_enabled = bool(edli_cfg.get("real_order_submit_enabled", False))
+        submit_adapter = (
+            event_bound_live_adapter_from_trade_conn(
+                trade_conn,
+                forecast_conn=forecasts_conn,
+                topology_conn=forecasts_conn,
+                calibration_conn=conn,
+                get_current_level=get_current_level,
+                real_order_submit_enabled=real_order_submit_enabled,
+                live_canary_enabled=bool(edli_cfg.get("live_canary_enabled", False)),
+                tiny_live_max_notional_usd=float(edli_cfg.get("tiny_live_max_notional_usd", 5.0)),
+            )
+            if reactor_mode == "live"
+            else event_bound_no_submit_adapter_from_trade_conn(
+                trade_conn,
+                forecast_conn=forecasts_conn,
+                topology_conn=forecasts_conn,
+                calibration_conn=conn,
+                get_current_level=get_current_level,
+            )
+        )
 
         reactor = OpportunityEventReactor(
             store,
@@ -2437,18 +2460,12 @@ def _edli_event_reactor_cycle() -> None:
                 topology_conn=forecasts_conn,
             ),
             riskguard_gate=riskguard_allows_new_entries(get_current_level=get_current_level),
-            final_intent_submit=event_bound_no_submit_adapter_from_trade_conn(
-                trade_conn,
-                forecast_conn=forecasts_conn,
-                topology_conn=forecasts_conn,
-                calibration_conn=conn,
-                get_current_level=get_current_level,
-            ),
+            final_intent_submit=submit_adapter,
             reject=lambda _event, _stage, _reason: None,
             regret_ledger=regret_ledger,
             config=ReactorConfig(
-                reactor_mode=str(edli_cfg.get("reactor_mode", "live")),
-                real_order_submit_enabled=False,
+                reactor_mode=reactor_mode,
+                real_order_submit_enabled=real_order_submit_enabled,
                 taker_fok_fak_live_enabled=bool(edli_cfg.get("taker_fok_fak_live_enabled", False)),
                 tiny_live_max_notional_usd=float(edli_cfg.get("tiny_live_max_notional_usd", 5.0)),
                 tiny_live_max_orders_per_day=int(edli_cfg.get("tiny_live_max_orders_per_day", 1)),

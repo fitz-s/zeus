@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal
 
 from src.contracts.execution_price import ExecutionPrice
@@ -13,6 +13,9 @@ SideEffectStatus = Literal[
     "INTENT_BUILT",
     "COMMAND_CREATED",
     "SUBMITTED",
+    "REJECTED",
+    "TIMEOUT_UNKNOWN",
+    "ERROR_UNKNOWN",
     "SUBMIT_DISABLED",
     "NOT_SUBMITTED_DRY_RUN",
 ]
@@ -50,6 +53,25 @@ class EventBoundFinalIntentReceipt:
     final_intent_id: str
     command_id: str | None
     side_effect_status: SideEffectStatus
+
+
+@dataclass(frozen=True)
+class EventBoundExecutorSubmitResult:
+    """Normalized result from the sanctioned executor boundary.
+
+    The EDLI adapter consumes this small value object so tests can inject the
+    existing executor boundary without importing venue or executor code into the
+    reactor path.
+    """
+
+    status: Literal["SUBMITTED", "REJECTED", "TIMEOUT_UNKNOWN", "ERROR_UNKNOWN"]
+    reason_code: str = "OK"
+    venue_order_id: str | None = None
+    submit_started_at: str | None = None
+    submit_finished_at: str | None = None
+    raw_response: dict[str, object] = field(default_factory=dict)
+    raw_response_hash: str | None = None
+    reconciliation_followup_required: bool = False
 
 
 def build_event_bound_final_intent_receipt(

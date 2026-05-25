@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from collections.abc import Mapping
 from typing import Iterable
 
 from src.decision_kernel import claims
@@ -177,19 +178,32 @@ def build_execution_receipt_certificate(
     decision_time: datetime,
     status: str = "SUBMIT_DISABLED",
     reason_code: str = "REAL_ORDER_SUBMIT_DISABLED",
+    submit_started_at: str | None = None,
+    submit_finished_at: str | None = None,
+    venue_order_id: str | None = None,
+    raw_response: Mapping[str, object] | None = None,
+    raw_response_hash: str | None = None,
     reconciliation_followup_required: bool | None = None,
 ) -> DecisionCertificate:
     command = execution_command_cert.payload
+    response_hash = raw_response_hash or stable_hash(
+        {
+            "status": status,
+            "reason_code": reason_code,
+            "venue_order_id": venue_order_id,
+            "raw_response": dict(raw_response or {}),
+        }
+    )
     payload = {
         "event_id": command["event_id"],
         "execution_command_id": command["execution_command_id"],
         "final_intent_id": command["final_intent_id"],
         "executor_name": command["executor_name"],
         "status": status,
-        "submit_started_at": None,
-        "submit_finished_at": None,
-        "venue_order_id": None,
-        "raw_response_hash": stable_hash({"status": status, "reason_code": reason_code}),
+        "submit_started_at": submit_started_at,
+        "submit_finished_at": submit_finished_at,
+        "venue_order_id": venue_order_id,
+        "raw_response_hash": response_hash,
         "idempotency_key": command["idempotency_key"],
         "reason_code": reason_code,
     }

@@ -84,4 +84,5 @@ def test_final_intent_receipt_module_has_no_venue_adapter_import():
     source = inspect.getsource(event_bound_final_intent)
 
     assert "venue_adapter" not in source
-    assert "executor" not in source
+    assert "polymarket" not in source.lower()
+    assert "run_cycle" not in source
