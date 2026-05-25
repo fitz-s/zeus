@@ -138,7 +138,32 @@ def test_duplicate_event_not_double_counted():
     reactor, _rejected, submitted = _reactor(store)
     result = reactor.process_pending(decision_time=datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc))
     assert result.processed == 1
-    assert len(submitted) == 1
+
+
+def test_reactor_persists_no_submit_certificate_before_processed():
+    conn, store = _store()
+    event = _day0_event()
+    store.insert_or_ignore(event)
+    reactor, _rejected, _submitted = _reactor(store)
+
+    result = reactor.process_pending(decision_time=datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc))
+
+    assert result.processed == 1
+    cert_row = conn.execute(
+        """
+        SELECT certificate_hash, verifier_status
+        FROM decision_certificates
+        WHERE certificate_type = 'NoSubmitDecisionCertificate'
+        """
+    ).fetchone()
+    assert cert_row is not None
+    assert cert_row[1] == "VERIFIED"
+    processing = conn.execute(
+        "SELECT processing_status FROM opportunity_event_processing WHERE event_id = ?",
+        (event.event_id,),
+    ).fetchone()
+    assert processing[0] == "processed"
+    assert len(_submitted) == 1
 
 
 def test_successful_no_submit_receipt_is_persisted_before_processed():

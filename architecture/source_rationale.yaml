@@ -334,6 +334,66 @@ files:
     downstream:
     - src/events/reactor.py
     - src/state/schema/edli_no_submit_receipts_schema.py
+  src/events/no_submit_projection.py:
+    zone: K2_runtime
+    authority_role: edli_no_submit_projection
+    why: Report projection over no-submit receipts that references decision certificate authority instead of treating receipt rows as proof source of truth.
+    downstream:
+    - src/decision_kernel/ledger.py
+    - src/events/no_submit_receipts.py
+  src/decision_kernel/certificate.py:
+    zone: K2_runtime
+    authority_role: edli_certificate_grammar
+    why: Core proof-carrying decision certificate grammar with role-labeled parent edges and stable certificate hashes per EDLI redemption spec.
+    downstream:
+    - src/decision_kernel/verifier.py
+    - src/decision_kernel/ledger.py
+    - src/decision_kernel/compiler.py
+  src/decision_kernel/canonicalization.py:
+    zone: K2_runtime
+    authority_role: edli_certificate_canonicalization
+    why: Stable JSON/hash canonicalization for certificate payloads and certificate hashes.
+    downstream:
+    - src/decision_kernel/certificate.py
+    - src/decision_kernel/ledger.py
+  src/decision_kernel/verifier.py:
+    zone: K2_runtime
+    authority_role: edli_certificate_verifier
+    why: Enforces agent-filtration time invariants, no-submit theorem constraints, and action/fill bypass rules for certificate DAGs.
+    downstream:
+    - src/decision_kernel/compiler.py
+    - src/decision_kernel/ledger.py
+  src/decision_kernel/ledger.py:
+    zone: K2_runtime
+    authority_role: edli_certificate_ledger
+    why: Durable world-DB writer for verified decision certificates, role-labeled edges, supersession/drift errors, and compile failure denominators.
+    downstream:
+    - src/events/reactor.py
+    - src/state/schema/decision_certificates_schema.py
+  src/decision_kernel/compiler.py:
+    zone: K2_runtime
+    authority_role: edli_no_submit_certificate_compiler
+    why: Compiles EDLI opportunity events and no-submit projection evidence into a claim-indexed certificate DAG before reactor processing is marked complete.
+    downstream:
+    - src/events/reactor.py
+  src/decision_kernel/adapters/forecast_authority_adapter.py:
+    zone: K2_runtime
+    authority_role: edli_forecast_authority_certificate_adapter
+    why: Adapter boundary that calls the canonical executable forecast reader and preserves reader status/reason/applied validations as certificate payload, without local SQL live-eligibility policy.
+    downstream:
+    - src/decision_kernel/compiler.py
+  src/decision_kernel/adapters/quote_adapter.py:
+    zone: K2_runtime
+    authority_role: edli_native_quote_certificate_adapter
+    why: Native bid/ask quote adapter that forbids midpoint/display/last-trade/complement executable costs and keeps visible depth separate from fill evidence.
+    downstream:
+    - src/decision_kernel/compiler.py
+  src/decision_kernel/adapters/market_channel_adapter.py:
+    zone: K2_runtime
+    authority_role: edli_market_channel_certificate_adapter
+    why: Public market-channel adapter that creates MarketData/Quote certificates only and cannot assert fill evidence.
+    downstream:
+    - src/decision_kernel/compiler.py
   src/events/event_writer.py:
     zone: K2_runtime
     authority_role: edli_single_event_writer
@@ -2464,6 +2524,13 @@ files:
     - src/state/db.py
     - src/events/no_submit_receipts.py
     - src/events/reactor.py
+  src/state/schema/decision_certificates_schema.py:
+    zone: K2_runtime
+    authority_role: edli_decision_certificates_schema_owner
+    why: EDLI redemption certificate-ledger DDL owner for decision_certificates, role-labeled edges, supersessions, and compile failure denominator tables.
+    downstream:
+    - src/state/db.py
+    - src/decision_kernel/ledger.py
   src/state/schema/edli_live_cap_usage_schema.py:
     zone: K2_runtime
     authority_role: edli_live_cap_usage_schema_owner

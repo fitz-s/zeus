@@ -124,9 +124,13 @@ class OpportunityEventReactor:
         self._family_logged: set[str] = set()
         self._day0_live_orders_today = 0
         from src.events.no_submit_receipts import EdliNoSubmitReceiptLedger
+        from src.decision_kernel.compiler import DecisionCompiler
+        from src.decision_kernel.ledger import DecisionCertificateLedger
         from src.strategy.live_inference.promotion_ledger import EdliLiveCapLedger
 
         self._no_submit_receipt_ledger = EdliNoSubmitReceiptLedger(store.conn)
+        self._decision_compiler = DecisionCompiler()
+        self._decision_certificate_ledger = DecisionCertificateLedger(store.conn)
         self._live_cap_ledger = EdliLiveCapLedger(store.conn)
 
     def process_pending(self, *, decision_time: datetime, limit: int = 100) -> ReactorResult:
@@ -201,6 +205,22 @@ class OpportunityEventReactor:
                 notional_usd=self._config.tiny_live_max_notional_usd,
             )
         if receipt.side_effect_status == "NO_SUBMIT":
+            compile_result = self._decision_compiler.compile_no_submit(
+                event,
+                decision_time=decision_time,
+                mode="NO_SUBMIT",
+                receipt=receipt,
+            )
+            self._decision_certificate_ledger.persist_all(compile_result.certificates)
+            self._decision_certificate_ledger.persist_failures(compile_result.failures)
+            if compile_result.status != "VERIFIED":
+                reason = (
+                    compile_result.failures[0].reason_code
+                    if compile_result.failures
+                    else "NO_SUBMIT_CERTIFICATE_REJECTED"
+                )
+                self._reject_event(event, "DECISION_CERTIFICATE", reason, result, receipt=receipt)
+                return
             self._no_submit_receipt_ledger.insert_idempotent(receipt, decision_time=decision_time)
         result.proof_accepted += 1
 

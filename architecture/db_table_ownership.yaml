@@ -883,7 +883,79 @@ tables:
       - {name: receipt_hash, type: TEXT, nullable: false}
     notes: >
       EDLI v1 durable accepted no-submit receipt ledger. Rows preserve the
-      event-bound proof output without asserting executor or venue submission.
+      event-bound proof projection without asserting executor or venue submission.
+      Decision certificate rows are the authority for proof-carrying decisions.
+
+  - name: decision_certificates
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: certificate_id
+    required_columns:
+      - {name: certificate_id, type: TEXT, nullable: false}
+      - {name: certificate_type, type: TEXT, nullable: false}
+      - {name: semantic_key, type: TEXT, nullable: false}
+      - {name: claim_type, type: TEXT, nullable: false}
+      - {name: mode, type: TEXT, nullable: false}
+      - {name: decision_time, type: TEXT, nullable: false}
+      - {name: payload_json, type: TEXT, nullable: false}
+      - {name: payload_hash, type: TEXT, nullable: false}
+      - {name: certificate_hash, type: TEXT, nullable: false}
+      - {name: verifier_status, type: TEXT, nullable: false}
+    notes: >
+      EDLI redemption certificate ledger. This is the authority table for
+      proof-carrying decision certificates; projections such as
+      edli_no_submit_receipts are report conveniences.
+
+  - name: decision_certificate_edges
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: "[child_certificate_id, parent_role, parent_certificate_hash]"
+    required_columns:
+      - {name: child_certificate_id, type: TEXT, nullable: false}
+      - {name: parent_role, type: TEXT, nullable: false}
+      - {name: parent_certificate_hash, type: TEXT, nullable: false}
+      - {name: parent_certificate_type, type: TEXT, nullable: false}
+      - {name: required, type: INTEGER, nullable: false}
+    notes: >
+      Role-labeled certificate parent edges. Parent role participates in the
+      certificate hash and prevents semantic parent confusion.
+
+  - name: decision_certificate_supersessions
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: supersession_id
+    required_columns:
+      - {name: supersession_id, type: TEXT, nullable: false}
+      - {name: old_certificate_hash, type: TEXT, nullable: false}
+      - {name: new_certificate_hash, type: TEXT, nullable: false}
+      - {name: reason, type: TEXT, nullable: false}
+    notes: >
+      Explicit supersession trail for same semantic certificate claims when a
+      replacement proof is intentionally authorized.
+
+  - name: decision_compile_failures
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: failure_id
+    required_columns:
+      - {name: failure_id, type: TEXT, nullable: false}
+      - {name: event_id, type: TEXT, nullable: false}
+      - {name: decision_time, type: TEXT, nullable: false}
+      - {name: mode, type: TEXT, nullable: false}
+      - {name: claim_type, type: TEXT, nullable: false}
+      - {name: stage, type: TEXT, nullable: false}
+      - {name: reason_code, type: TEXT, nullable: false}
+    notes: >
+      Durable compiler failure denominator. Failed certificate construction is
+      persisted so no-submit reports cannot hide rejected looks.
 
   - name: edli_live_cap_usage
     db: world
