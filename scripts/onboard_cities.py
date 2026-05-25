@@ -1033,14 +1033,24 @@ def _run_fit_ens_bias_v2(city_names: list[str], dry_run: bool = False) -> set[st
                             metric=metric,
                             live_data_version=_ENS_LIVE_DATA_VERSION,
                             prior_data_version=_ENS_PRIOR_DATA_VERSION,
-                            posterior_bias_c=model.posterior.bias,
-                            posterior_sd_c=model.posterior.sd,
-                            n_live=model.posterior.n_live if hasattr(model.posterior, "n_live") else 0,
-                            n_prior=model.posterior.n_prior if hasattr(model.posterior, "n_prior") else 0,
-                            weight_live=model.posterior.weight_live if hasattr(model.posterior, "weight_live") else 0.0,
+                            posterior_bias_c=model.bias_c,
+                            posterior_sd_c=model.bias_sd_c,
+                            n_live=0,   # PredictiveErrorModel does not expose n_live; use producer for full lineage
+                            n_prior=0,  # PredictiveErrorModel does not expose n_prior; use producer for full lineage
+                            weight_live=0.0,
                             estimator="ens_error_model.fit_city_predictive_error",
                             training_cutoff=today_str,
                             recorded_at=today_str,
+                            # canonical extension fields (requires migration on target DB)
+                            error_model_family="none",
+                            bias_c=model.bias_c,
+                            bias_sd_c=model.bias_sd_c,
+                            residual_sd_c=model.residual_sd_c,
+                            heterogeneity_var_c2=model.heterogeneity_var_c2,
+                            correction_strength=model.correction_strength,
+                            effective_bias_c=model.effective_bias_c,
+                            total_residual_sd_c=model.total_residual_sd_c,
+                            authority="STAGING",
                         )
                         fitted_per_city[city] += 1
                     except (ValueError, RuntimeError) as exc:

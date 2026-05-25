@@ -268,3 +268,121 @@ def test_low_metric_prefers_12Z_over_0Z(conn):
     assert res == pytest.approx([2.0]), (
         f"LOW must use the 12Z nighttime snapshot (residual=+2.0), got {res}"
     )
+
+
+# ---- Canonical extension fields (Zeus #64 / #68 / #69) ----
+
+def test_write_bias_model_persists_canonical_extension_fields(conn):
+    """write_bias_model writes all 13 canonical extension fields when the columns exist."""
+    import sys, os
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+    from scripts.migrate_model_bias_ens_v2_canonical_fields import migrate
+    init_ens_bias_schema(conn)
+    migrate(conn, dry_run=False)
+    conn.commit()
+
+    write_bias_model(
+        conn,
+        city="Tokyo", season="JJA", month=7, metric="high",
+        live_data_version=OPD, prior_data_version=TIG,
+        posterior_bias_c=0.5, posterior_sd_c=0.3,
+        n_live=30, n_prior=120, weight_live=0.6,
+        estimator="test",
+        error_model_family="full_transport_v1",
+        error_model_key="Tokyo|high|JJA|full_transport_v1|opd",
+        transport_delta_policy="kappa=1.0;delta=paired_load_bucket_residuals",
+        bias_c=0.5,
+        bias_sd_c=0.3,
+        residual_sd_c=1.2,
+        heterogeneity_var_c2=0.0,
+        correction_strength=0.8,
+        effective_bias_c=0.4,
+        total_residual_sd_c=1.2,
+        code_commit="abc123",
+        fit_signature_hash="deadbeef01234567",
+        authority="STAGING",
+    )
+    conn.commit()
+
+    row = read_bias_model(conn, city="Tokyo", season="JJA", month=7,
+                          metric="high", live_data_version=OPD)
+    assert row is not None
+    assert row["error_model_family"] == "full_transport_v1"
+    assert row["bias_c"] == pytest.approx(0.5)
+    assert row["bias_sd_c"] == pytest.approx(0.3)
+    assert row["residual_sd_c"] == pytest.approx(1.2)
+    assert row["correction_strength"] == pytest.approx(0.8)
+    assert row["effective_bias_c"] == pytest.approx(0.4)
+    assert row["authority"] == "STAGING"
+    assert row["fit_signature_hash"] == "deadbeef01234567"
+
+
+def test_relationship_unbiased_high_cohort_effective_bias_near_zero(conn):
+    """Relationship test (Zeus #64): a bucket with near-zero true bias yields
+    effective_bias_c close to 0 after the SNR gate — round-tripped through the DB.
+
+    This verifies both the producer logic AND persistence-layer integrity: a row
+    written by write_bias_model then read_bias_model must expose effective_bias_c < 1C.
+    """
+    import random, sys, os
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+    from scripts.migrate_model_bias_ens_v2_canonical_fields import migrate
+    from src.calibration.ens_error_model import fit_predictive_error_bucket
+    init_ens_bias_schema(conn)
+    migrate(conn, dry_run=False)
+    conn.commit()
+
+    rng = random.Random(42)
+    zero_tig = [rng.gauss(0.0, 1.5) for _ in range(100)]
+    zero_opd = [rng.gauss(0.0, 1.5) for _ in range(40)]
+    model = fit_predictive_error_bucket(zero_tig, zero_opd)
+
+    write_bias_model(
+        conn,
+        city="Synthetic", season="DJF", month=1, metric="high",
+        live_data_version=OPD, prior_data_version=TIG,
+        posterior_bias_c=model.bias_c, posterior_sd_c=model.bias_sd_c,
+        n_live=len(zero_opd), n_prior=len(zero_tig), weight_live=0.5,
+        estimator="fit_predictive_error_bucket",
+        bias_c=model.bias_c,
+        bias_sd_c=model.bias_sd_c,
+        residual_sd_c=model.residual_sd_c,
+        heterogeneity_var_c2=model.heterogeneity_var_c2,
+        correction_strength=model.correction_strength,
+        effective_bias_c=model.effective_bias_c,
+        total_residual_sd_c=model.total_residual_sd_c,
+        error_model_family="full_transport_v1",
+        authority="STAGING",
+    )
+    conn.commit()
+
+    row = read_bias_model(conn, city="Synthetic", season="DJF", month=1,
+                          metric="high", live_data_version=OPD)
+    assert row is not None
+    assert abs(row["effective_bias_c"]) < 1.0, (
+        f"Unbiased cohort: expected |effective_bias_c| < 1.0C, got {row['effective_bias_c']:.4f}"
+    )
+
+
+def test_write_bias_model_legacy_db_without_canonical_columns(conn):
+    """write_bias_model succeeds on a pre-migration DB (no canonical columns).
+    The INSERT uses only the base columns — no OperationalError."""
+    init_ens_bias_schema(conn)
+    conn.commit()
+
+    write_bias_model(
+        conn,
+        city="Oslo", season="DJF", month=1, metric="low",
+        live_data_version=OPD, prior_data_version=TIG,
+        posterior_bias_c=-0.8, posterior_sd_c=0.4,
+        n_live=20, n_prior=100, weight_live=0.3,
+        estimator="test",
+        bias_c=-0.8,
+        effective_bias_c=-0.5,
+        authority="STAGING",
+    )
+    conn.commit()
+    row = read_bias_model(conn, city="Oslo", season="DJF", month=1,
+                          metric="low", live_data_version=OPD)
+    assert row is not None
+    assert row["posterior_bias_c"] == pytest.approx(-0.8)
