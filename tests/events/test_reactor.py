@@ -6,6 +6,7 @@ from __future__ import annotations
 import sqlite3
 import json
 import hashlib
+import threading
 from dataclasses import replace
 from datetime import datetime, timezone
 
@@ -683,6 +684,100 @@ def test_receipt_hash_drift_dead_letters_event_before_processed():
     ).fetchone()[0]
     assert status == "dead_letter"
     assert rejected[0][1] == "UNKNOWN_REVIEW_REQUIRED"
+
+
+def test_pr332_db_concurrency_smoke_reactor_world_writes(tmp_path):
+    db_path = tmp_path / "pr332-world.db"
+    conn = sqlite3.connect(db_path, timeout=5.0)
+    conn.row_factory = sqlite3.Row
+    init_schema(conn)
+    store = EventStore(conn)
+    decision_time = datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc)
+    forecast_events = [_forecast_event(str(index)) for index in range(6)]
+    book_event = _market_event()
+    for event in [*forecast_events, book_event]:
+        store.insert_or_ignore(event)
+    conn.commit()
+    reactor, _rejected, _submitted = _reactor(store)
+    writer_ready = threading.Event()
+    writer_done = threading.Event()
+    writer_errors = []
+
+    def _concurrent_world_writer() -> None:
+        try:
+            writer_ready.set()
+            writer_conn = sqlite3.connect(db_path, timeout=5.0)
+            writer_conn.row_factory = sqlite3.Row
+            try:
+                writer_store = EventStore(writer_conn)
+                future_event = _forecast_event("concurrent-future")
+                future_payload = json.loads(future_event.payload_json)
+                future_payload["available_at"] = "2026-05-24T18:15:00+00:00"
+                future_event = replace(
+                    future_event,
+                    available_at="2026-05-24T18:15:00+00:00",
+                    received_at="2026-05-24T18:15:01+00:00",
+                    payload_json=json.dumps(future_payload, sort_keys=True, separators=(",", ":")),
+                )
+                writer_store.insert_or_ignore(future_event)
+                writer_conn.commit()
+            finally:
+                writer_conn.close()
+        except Exception as exc:  # pragma: no cover - assertion below reports exact failure.
+            writer_errors.append(exc)
+        finally:
+            writer_done.set()
+
+    thread = threading.Thread(target=_concurrent_world_writer)
+    thread.start()
+    assert writer_ready.wait(timeout=2.0)
+
+    result = reactor.process_pending(decision_time=decision_time, limit=10)
+    conn.commit()
+    assert writer_done.wait(timeout=5.0)
+    thread.join(timeout=5.0)
+
+    assert writer_errors == []
+    assert result.processed == len(forecast_events) + 1
+    assert result.rejected == 1
+    rows = conn.execute(
+        """
+        SELECT event_id, processing_status
+        FROM opportunity_event_processing
+        WHERE event_id IN ({})
+        """.format(",".join("?" for _ in [*forecast_events, book_event])),
+        tuple(event.event_id for event in [*forecast_events, book_event]),
+    ).fetchall()
+    assert {row["processing_status"] for row in rows} == {"processed"}
+    for event in forecast_events:
+        cert_count = conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM decision_certificates
+            WHERE certificate_type = 'NoSubmitDecisionCertificate'
+              AND json_extract(payload_json, '$.event_id') = ?
+            """,
+            (event.event_id,),
+        ).fetchone()[0]
+        receipt_count = conn.execute(
+            "SELECT COUNT(*) FROM edli_no_submit_receipts WHERE event_id = ?",
+            (event.event_id,),
+        ).fetchone()[0]
+        assert cert_count == 1
+        assert receipt_count == 1
+    regret_count = conn.execute(
+        "SELECT COUNT(*) FROM no_trade_regret_events WHERE event_id = ?",
+        (book_event.event_id,),
+    ).fetchone()[0]
+    assert regret_count == 1
+    future_pending = conn.execute(
+        """
+        SELECT COUNT(*)
+        FROM opportunity_event_processing
+        WHERE processing_status = 'pending'
+        """
+    ).fetchone()[0]
+    assert future_pending == 1
 
 
 def test_reactor_passes_decision_time_to_submit():

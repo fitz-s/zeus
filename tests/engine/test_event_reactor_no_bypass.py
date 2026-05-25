@@ -90,6 +90,126 @@ def _bound_forecast_event(*, token_id: str = "yes-1", fdr_condition_count: int =
     return replace(event, payload_json=json.dumps(payload, sort_keys=True, separators=(",", ":")))
 
 
+def _low_bound_forecast_event():
+    event = _bound_forecast_event()
+    payload = json.loads(event.payload_json)
+    payload["metric"] = "low"
+    return replace(
+        event,
+        entity_key="Chicago|2026-05-25|low|run-1",
+        payload_json=json.dumps(payload, sort_keys=True, separators=(",", ":")),
+    )
+
+
+def _convert_fixture_to_low_extrema(conn: sqlite3.Connection) -> None:
+    low_data_version = "ecmwf_opendata_mn2t3_local_calendar_day_min_contract_window_v2"
+    low_platt_data_version = "tigge_mn2t6_local_calendar_day_min_contract_window_v2"
+    low_members = [50.5] * 41 + [49.5] * 10
+    conn.execute(
+        """
+        UPDATE market_events_v2
+        SET temperature_metric = 'low',
+            market_slug = replace(market_slug, 'high', 'low'),
+            range_label = replace(range_label, '70', '50'),
+            range_low = range_low - 20,
+            range_high = range_high - 20
+        """
+    )
+    conn.execute(
+        """
+        UPDATE source_run
+        SET temperature_metric = 'low',
+            observation_field = 'low_temp',
+            data_version = ?,
+            physical_quantity = 'temperature'
+        WHERE source_run_id = 'run-1'
+        """,
+        (low_data_version,),
+    )
+    conn.execute(
+        """
+        UPDATE source_run_coverage
+        SET temperature_metric = 'low',
+            observation_field = 'low_temp',
+            data_version = ?,
+            physical_quantity = 'temperature'
+        WHERE coverage_id = 'coverage-1'
+        """,
+        (low_data_version,),
+    )
+    conn.execute(
+        """
+        UPDATE readiness_state
+        SET temperature_metric = 'low',
+            observation_field = 'low_temp',
+            data_version = ?
+        WHERE readiness_id = 'producer-readiness-1'
+        """,
+        (low_data_version,),
+    )
+    conn.execute(
+        """
+        UPDATE ensemble_snapshots_v2
+        SET temperature_metric = 'low',
+            members_json = ?,
+            p_raw_json = ?,
+            p_cal_json = ?,
+            data_version = ?
+        WHERE snapshot_id = '1'
+        """,
+        (
+            json.dumps(low_members, separators=(",", ":")),
+            json.dumps([0.80, 0.20], separators=(",", ":")),
+            json.dumps([0.88, 0.12], separators=(",", ":")),
+            low_data_version,
+        ),
+    )
+    conn.execute(
+        """
+        UPDATE platt_models_v2
+        SET temperature_metric = 'low',
+            data_version = ?,
+            source_id = 'tigge_mars'
+        WHERE model_key = 'platt-world-1'
+        """,
+        (low_platt_data_version,),
+    )
+
+
+def _day0_event(*, token_id: str = "yes-2"):
+    payload = Day0ExtremeUpdatedPayload(
+        city="Chicago",
+        target_date="2026-05-25",
+        metric="high",
+        settlement_source="wu_icao",
+        station_id="KMDW",
+        observation_time="2026-05-24T14:00:00+00:00",
+        observation_available_at="2026-05-24T14:05:00+00:00",
+        raw_value=72.1,
+        rounded_value=72,
+        high_so_far=72.1,
+        source_match_status="MATCH",
+        local_date_status="MATCH",
+        station_match_status="MATCH",
+        dst_status="UNAMBIGUOUS",
+        metric_match_status="MATCH",
+        rounding_status="MATCH",
+        source_authorized_status="AUTHORIZED",
+        live_authority_status="LIVE_AUTHORITY",
+    )
+    event = make_day0_extreme_updated_event(
+        entity_key="Chicago|2026-05-25|high",
+        source="day0_extreme_updated_trigger",
+        observed_at=payload.observation_time,
+        received_at="2026-05-24T14:06:00+00:00",
+        payload=payload,
+        causal_snapshot_id="day0-observation-1",
+    )
+    event_payload = json.loads(event.payload_json)
+    event_payload.update({"condition_id": "condition-2", "token_id": token_id, "unit": "F"})
+    return replace(event, payload_json=json.dumps(event_payload, sort_keys=True, separators=(",", ":")))
+
+
 def _trade_conn_with_snapshot(
     *,
     selected_ask: str = "0.40",
@@ -905,6 +1025,57 @@ def test_forecast_certificate_records_members_json_hash_and_window_authority():
     assert forecast["target_local_date"] == "2026-05-25"
     assert forecast["city_timezone"] == "America/Chicago"
     assert forecast["bin_labels_hash"] == receipt.decision_proof_bundle.family_closure.payload["bin_labels_hash"]
+
+
+def test_high_forecast_snapshot_members_json_is_daily_max_extrema():
+    event = _forecast_event()
+    conn = _trade_conn_with_snapshot()
+
+    receipt = _receipt(event, conn, decision_time=DECISION_TIME)
+
+    assert receipt.decision_proof_bundle is not None
+    forecast = receipt.decision_proof_bundle.forecast_authority.payload
+    assert forecast["temperature_metric"] == "high"
+    assert forecast["members_extrema_metric_identity"] == "high"
+    assert forecast["members_extrema_transform"] == "daily_max"
+    assert forecast["members_json_source"] == "ensemble_snapshots_v2.daily_extrema"
+    assert forecast["members_json_hash"] == _snapshot_members_json_hash(
+        dict(conn.execute("SELECT * FROM ensemble_snapshots_v2 WHERE snapshot_id = '1'").fetchone())
+    )
+
+
+def test_low_forecast_snapshot_members_json_is_daily_min_extrema():
+    event = _low_bound_forecast_event()
+    conn = _trade_conn_with_snapshot()
+    _convert_fixture_to_low_extrema(conn)
+
+    receipt = _receipt(event, conn, decision_time=DECISION_TIME)
+
+    assert receipt.decision_proof_bundle is not None
+    forecast = receipt.decision_proof_bundle.forecast_authority.payload
+    assert forecast["temperature_metric"] == "low"
+    assert forecast["members_extrema_metric_identity"] == "low"
+    assert forecast["members_extrema_transform"] == "daily_min"
+    assert forecast["members_json_source"] == "ensemble_snapshots_v2.daily_extrema"
+    assert forecast["members_json_hash"] == _snapshot_members_json_hash(
+        dict(conn.execute("SELECT * FROM ensemble_snapshots_v2 WHERE snapshot_id = '1'").fetchone())
+    )
+
+
+def test_event_bound_low_uses_low_extrema_members_not_raw_hourly_or_max_members():
+    event = _low_bound_forecast_event()
+    conn = _trade_conn_with_snapshot()
+    _convert_fixture_to_low_extrema(conn)
+
+    receipt = _receipt(event, conn, decision_time=DECISION_TIME)
+
+    assert receipt.decision_proof_bundle is not None
+    forecast = receipt.decision_proof_bundle.forecast_authority.payload
+    low_snapshot = dict(conn.execute("SELECT * FROM ensemble_snapshots_v2 WHERE snapshot_id = '1'").fetchone())
+    high_like_snapshot = {**low_snapshot, "members_json": json.dumps([70.5] * 41 + [71.5] * 10, separators=(",", ":"))}
+    assert forecast["members_extrema_transform"] == "daily_min"
+    assert forecast["members_json_hash"] == _snapshot_members_json_hash(low_snapshot)
+    assert forecast["members_json_hash"] != _snapshot_members_json_hash(high_like_snapshot)
 
 
 def test_members_json_hash_changes_when_member_extrema_change():

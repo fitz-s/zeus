@@ -5,6 +5,9 @@
 from __future__ import annotations
 
 import json
+import sqlite3
+from copy import deepcopy
+from types import SimpleNamespace
 from pathlib import Path
 
 
@@ -98,6 +101,91 @@ def test_edli_reactor_job_wired_without_removing_scheduler_jobs():
     assert "run_cycle" not in edli_source
     for existing_job in ("opening_hunt", "day0_capture", "imminent_open_capture", "market_discovery", "harvester"):
         assert existing_job in source
+
+
+def test_pr332_scoped_daemon_restart_smoke_registers_forecast_no_submit_only(monkeypatch):
+    import src.main as main
+
+    settings_copy = deepcopy(main.settings._data)
+    settings_copy["edli_v1"].update(
+        {
+            "enabled": True,
+            "reactor_mode": "live_no_submit",
+            "forecast_snapshot_trigger_enabled": True,
+            "day0_extreme_trigger_enabled": False,
+            "day0_hard_fact_live_enabled": False,
+            "market_channel_ingestor_enabled": False,
+            "real_order_submit_enabled": False,
+            "taker_fok_fak_live_enabled": False,
+        }
+    )
+    monkeypatch.setattr(main, "settings", settings_copy)
+    monkeypatch.setattr(main, "get_mode", lambda: "live")
+    monkeypatch.setattr(main.sys, "argv", ["src/main.py"])
+    monkeypatch.setattr(main, "_capture_boot_state", lambda: {"sha": "abc123", "ts": None})
+    monkeypatch.setattr(main, "_start_venue_heartbeat_loop_if_needed", lambda: None)
+    monkeypatch.setattr(main, "_startup_world_schema_ready_check", lambda: None)
+    monkeypatch.setattr(main, "_run_f109_consolidator", lambda: None)
+    monkeypatch.setattr(main, "_startup_data_health_check", lambda _conn: None)
+    monkeypatch.setattr(main, "_startup_freshness_check", lambda: None)
+    monkeypatch.setattr(main, "_assert_live_safe_strategies_or_exit", lambda: None)
+    monkeypatch.setattr(main, "_boot_deployment_freshness_auto_resume", lambda: None)
+    monkeypatch.setattr(main, "_startup_wallet_check", lambda: None)
+    monkeypatch.setattr(main, "_start_user_channel_ingestor_if_enabled", lambda: None)
+    monkeypatch.setattr(main, "_check_s1_without_s2_sla", lambda: None)
+    monkeypatch.setattr(main, "_assert_cascade_liveness_contract", lambda _scheduler: None)
+    monkeypatch.setattr(main, "init_schema_trade_only", lambda _conn: None)
+    monkeypatch.setenv("ZEUS_BOOT_REGISTRY_ASSERT_ENABLED", "0")
+
+    opened = []
+
+    def _conn():
+        conn = sqlite3.connect(":memory:")
+        opened.append(conn)
+        return conn
+
+    monkeypatch.setattr(main, "get_world_connection", lambda *args, **kwargs: _conn())
+    monkeypatch.setattr(main, "get_trade_connection", lambda *args, **kwargs: _conn())
+
+    class FakeScheduler:
+        instances = []
+
+        def __init__(self, *args, **kwargs):
+            self.timezone = kwargs.get("timezone")
+            self.jobs = []
+            self.started = False
+            self.shutdown_called = False
+            FakeScheduler.instances.append(self)
+
+        def add_job(self, func, trigger, *args, id=None, **kwargs):
+            self.jobs.append(SimpleNamespace(id=id, func=func, trigger=trigger, kwargs=kwargs))
+
+        def get_jobs(self):
+            return self.jobs
+
+        def start(self):
+            self.started = True
+            raise KeyboardInterrupt()
+
+        def shutdown(self, wait=True):
+            self.shutdown_called = wait
+
+    monkeypatch.setattr(main, "BlockingScheduler", FakeScheduler)
+
+    main.main()
+
+    scheduler = FakeScheduler.instances[-1]
+    job_ids = {job.id for job in scheduler.jobs}
+    assert scheduler.started is True
+    assert scheduler.shutdown_called is True
+    assert "edli_event_reactor" in job_ids
+    assert "edli_market_channel_ingestor" not in job_ids
+    assert "heartbeat" in job_ids
+    assert "harvester" in job_ids
+    assert settings_copy["edli_v1"]["forecast_snapshot_trigger_enabled"] is True
+    assert settings_copy["edli_v1"]["day0_extreme_trigger_enabled"] is False
+    assert settings_copy["edli_v1"]["market_channel_ingestor_enabled"] is False
+    assert settings_copy["edli_v1"]["real_order_submit_enabled"] is False
 
 
 def test_market_discovery_uses_full_weather_discovery_with_slug_fallback():
