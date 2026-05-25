@@ -86,6 +86,13 @@ def _event_time_violation_count(conn: sqlite3.Connection, event_time_column: str
             SELECT event_id, decision_time FROM edli_no_submit_receipts
             UNION ALL
             SELECT event_id, decision_time FROM no_trade_regret_events WHERE decision_time IS NOT NULL
+            UNION ALL
+            SELECT event_id, decision_time FROM decision_compile_failures
+            UNION ALL
+            SELECT json_extract(payload_json, '$.event_id') AS event_id, decision_time
+            FROM decision_certificates
+            WHERE certificate_type = 'NoSubmitDecisionCertificate'
+              AND json_extract(payload_json, '$.event_id') IS NOT NULL
         ) AS decision
           ON decision.event_id = event.event_id
         WHERE event.{event_time_column} > decision.decision_time

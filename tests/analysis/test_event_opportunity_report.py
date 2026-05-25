@@ -133,6 +133,125 @@ def test_event_opportunity_report_counts_accepted_no_submit_receipts():
     assert report["blocked_by_stage"] == {}
 
 
+def test_certificate_created_at_can_be_after_header_persisted_at_for_generated_certificates_only():
+    conn = sqlite3.connect(":memory:")
+    init_schema(conn)
+    event = _forecast_event()
+    decision_time = datetime(2026, 5, 25, 10, 3, tzinfo=timezone.utc)
+    receipt = _receipt(event.event_id)
+    compile_result = DecisionCompiler().compile_no_submit(
+        event,
+        decision_time=decision_time,
+        proof_bundle=build_test_no_submit_proof_bundle(event, receipt, decision_time=decision_time),
+    )
+    assert compile_result.status == "VERIFIED"
+    DecisionCertificateLedger(conn).persist_all(compile_result.certificates)
+
+    row = conn.execute(
+        """
+        SELECT persisted_at, created_at, payload_json
+        FROM decision_certificates
+        WHERE certificate_type = 'NoSubmitDecisionCertificate'
+        """
+    ).fetchone()
+    payload = json.loads(row[2])
+    assert row[0] == "2026-05-25T10:03:00+00:00"
+    assert row[1]
+    assert payload["generated_at_decision_time"] is True
+    assert payload["db_created_at_may_follow_header_persisted_at"] is True
+
+
+def test_report_event_time_violation_counts_compile_failure_only_event():
+    conn = sqlite3.connect(":memory:")
+    init_schema(conn)
+    event = _forecast_event()
+    _insert_opportunity_event(
+        conn,
+        event,
+        available_at="2026-05-25T10:05:00+00:00",
+        received_at="2026-05-25T10:06:00+00:00",
+    )
+    conn.execute(
+        """
+        INSERT INTO decision_compile_failures (
+            failure_id, event_id, decision_time, mode, claim_type, stage,
+            reason_code, created_at
+        ) VALUES (
+            'failure-1', ?, '2026-05-25T10:04:00+00:00', 'NO_SUBMIT',
+            'NoSubmitDecision', 'FORECAST', 'BLOCKED',
+            '2026-05-25T10:04:00+00:00'
+        )
+        """,
+        (event.event_id,),
+    )
+
+    report = build_event_opportunity_report(conn)
+
+    assert report["violations"]["event_available_after_decision"] == 1
+
+
+def test_report_event_time_violation_counts_certificate_only_event():
+    conn = sqlite3.connect(":memory:")
+    init_schema(conn)
+    event = _forecast_event()
+    _insert_opportunity_event(
+        conn,
+        event,
+        available_at="2026-05-25T10:05:00+00:00",
+        received_at="2026-05-25T10:06:00+00:00",
+    )
+    _insert_decision_certificate(
+        conn,
+        certificate_id="no-submit-1",
+        certificate_type="NoSubmitDecisionCertificate",
+        decision_time="2026-05-25T10:04:00+00:00",
+        payload={"event_id": event.event_id},
+    )
+
+    report = build_event_opportunity_report(conn)
+
+    assert report["violations"]["event_available_after_decision"] == 1
+
+
+def test_report_decision_time_union_has_no_surface_gap():
+    conn = sqlite3.connect(":memory:")
+    init_schema(conn)
+    event = _forecast_event()
+    _insert_opportunity_event(
+        conn,
+        event,
+        available_at="2026-05-25T10:05:00+00:00",
+        received_at="2026-05-25T10:06:00+00:00",
+    )
+    NoTradeRegretLedger(conn).insert_idempotent(
+        NoTradeRegretEvent(event.event_id, "FORECAST", "BLOCKED", "BLOCKED", decision_time="2026-05-25T10:04:00+00:00")
+    )
+    conn.execute(
+        """
+        INSERT INTO decision_compile_failures (
+            failure_id, event_id, decision_time, mode, claim_type, stage,
+            reason_code, created_at
+        ) VALUES (
+            'failure-1', ?, '2026-05-25T10:04:00+00:00', 'NO_SUBMIT',
+            'NoSubmitDecision', 'FORECAST', 'BLOCKED',
+            '2026-05-25T10:04:00+00:00'
+        )
+        """,
+        (event.event_id,),
+    )
+    _insert_decision_certificate(
+        conn,
+        certificate_id="no-submit-1",
+        certificate_type="NoSubmitDecisionCertificate",
+        decision_time="2026-05-25T10:04:00+00:00",
+        payload={"event_id": event.event_id},
+    )
+
+    report = build_event_opportunity_report(conn)
+
+    assert report["violations"]["event_available_after_decision"] == 3
+
+
 def _forecast_event():
     payload = ForecastSnapshotReadyPayload(
         city="Chicago",
@@ -168,6 +287,38 @@ def _forecast_event():
         received_at="2026-05-25T10:02:00+00:00",
         causal_snapshot_id="snap-1",
         payload=payload,
+    )
+
+
+def _insert_opportunity_event(
+    conn: sqlite3.Connection,
+    event,
+    *,
+    available_at: str,
+    received_at: str,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO opportunity_events (
+            event_id, event_type, entity_key, source, observed_at, available_at,
+            received_at, causal_snapshot_id, payload_hash, idempotency_key,
+            payload_json, schema_version, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+        """,
+        (
+            event.event_id,
+            event.event_type,
+            event.entity_key,
+            event.source,
+            event.observed_at,
+            available_at,
+            received_at,
+            event.causal_snapshot_id,
+            event.payload_hash,
+            event.idempotency_key,
+            event.payload_json,
+            event.created_at,
+        ),
     )
 
 

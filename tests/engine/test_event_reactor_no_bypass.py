@@ -30,6 +30,7 @@ from src.contracts.settlement_semantics import SettlementSemantics
 from src.events.opportunity_event import Day0ExtremeUpdatedPayload, ForecastSnapshotReadyPayload, make_day0_extreme_updated_event, make_opportunity_event
 from src.riskguard.risk_level import RiskLevel
 from src.signal.ensemble_signal import p_raw_vector_from_maxes
+from src.state.db import init_schema_forecasts
 from src.types.market import Bin
 
 DECISION_TIME = datetime(2026, 5, 24, 8, 12, tzinfo=timezone.utc)
@@ -840,6 +841,26 @@ def test_adapter_source_truth_status_comes_from_forecast_authority():
     assert receipt.decision_proof_bundle.source_truth.payload["source_status"] == "LIVE_ELIGIBLE"
     assert receipt.decision_proof_bundle.source_truth.payload["source_status"] == receipt.decision_proof_bundle.forecast_authority.payload["reader_status"]
     assert receipt.decision_proof_bundle.source_truth.payload["source_authority_id"] == "read_executable_forecast"
+
+
+def test_market_events_v2_authority_rows_have_topology_clock_fields():
+    conn = sqlite3.connect(":memory:")
+    init_schema_forecasts(conn)
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(market_events_v2)").fetchall()}
+
+    assert "created_at" in columns
+
+
+def test_no_submit_receipt_succeeds_with_production_market_events_v2_clock_shape():
+    event = _forecast_event()
+    conn = _trade_conn_with_snapshot()
+    conn.execute("UPDATE market_events_v2 SET created_at = '2026-05-24T08:11:00+00:00'")
+
+    receipt = _receipt(event, conn, decision_time=DECISION_TIME)
+
+    assert receipt.proof_accepted is True
+    assert receipt.decision_proof_bundle is not None
+    assert receipt.decision_proof_bundle.market_topology.clock.persisted_at.isoformat() == "2026-05-24T08:11:00+00:00"
 
 
 def test_family_closure_clock_missing_blocks_certificate():

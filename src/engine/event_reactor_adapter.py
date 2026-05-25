@@ -701,6 +701,7 @@ def _build_no_submit_proof_bundle_from_adapter_evidence(
     execution_price = proof.execution_price
     topology_clock = _evidence_clock_from_rows(family_topology_rows)
     bin_labels_hash = stable_hash(tuple(str(candidate.bin.label) for candidate in family.candidates))
+    bin_units = tuple(sorted({str(candidate.bin.unit) for candidate in family.candidates if candidate.bin.unit}))
     market_analysis_config_hash = stable_hash(
         {
             "posterior_mode": MODEL_ONLY_POSTERIOR_MODE,
@@ -766,6 +767,7 @@ def _build_no_submit_proof_bundle_from_adapter_evidence(
                 "sibling_hypothesis_count": len(tuple(family.yes_token_ids)) + len(tuple(family.no_token_ids)),
                 "family_complete": True,
                 "bin_labels_hash": bin_labels_hash,
+                "bin_units": bin_units,
                 "event_id": event.event_id,
             },
             topology_clock,
@@ -823,6 +825,8 @@ def _build_no_submit_proof_bundle_from_adapter_evidence(
                 "bin_labels_hash": bin_labels_hash,
                 "market_analysis_config_hash": market_analysis_config_hash,
                 "bootstrap_n": edge_n_bootstrap(),
+                "unit": forecast_payload.get("unit"),
+                "unit_authority_source": forecast_payload.get("unit_authority_source"),
             },
             forecast_clock,
             "zeus.strategy.market_analysis_family_scan",
@@ -1044,6 +1048,7 @@ def _forecast_authority_payload_and_clock(
     if not result.ok or result.bundle is None:
         raise ValueError(f"FORECAST_AUTHORITY_EVIDENCE_MISSING:{result.reason_code}")
     evidence = result.bundle.evidence
+    unit = _snapshot_unit(snapshot, payload)
     payload_out = {
         "identity": str(result.bundle.snapshot.snapshot_id),
         "snapshot_id": str(result.bundle.snapshot.snapshot_id),
@@ -1056,6 +1061,10 @@ def _forecast_authority_payload_and_clock(
         "temperature_metric": family.metric,
         "members_extrema_metric_identity": snapshot.get("temperature_metric"),
         "members_json_source": "ensemble_snapshots_v2.daily_extrema",
+        "settlement_unit": snapshot.get("settlement_unit"),
+        "members_unit": snapshot.get("members_unit"),
+        "unit": unit,
+        "unit_authority_source": _snapshot_unit_authority_source(snapshot),
         "local_date_window_hash": stable_hash(
             {
                 "city": snapshot.get("city"),
@@ -1087,14 +1096,7 @@ def _forecast_authority_payload_and_clock(
         "source_run_completeness_status": evidence.source_run_completeness_status,
         "coverage_completeness_status": evidence.coverage_completeness_status,
         "coverage_readiness_status": evidence.coverage_readiness_status,
-        "applied_validations": tuple(evidence.applied_validations)
-        or (
-            "source_run_completeness_status",
-            "coverage_completeness_status",
-            "coverage_readiness_status",
-            "required_steps_observed",
-            "expected_members_observed",
-        ),
+        "applied_validations": tuple(evidence.applied_validations),
         "source_available_at": evidence.source_available_at,
         "fetch_started_at": evidence.fetch_started_at,
         "fetch_finished_at": evidence.fetch_finished_at,
@@ -1672,6 +1674,14 @@ def _snapshot_unit(snapshot: dict[str, Any], payload: dict[str, object]) -> str:
         return "C"
     if members_unit == "degF":
         return "F"
+    raise ValueError("FORECAST_UNIT_AUTHORITY_MISSING")
+
+
+def _snapshot_unit_authority_source(snapshot: dict[str, Any]) -> str:
+    if _nonnull(snapshot.get("settlement_unit") or snapshot.get("unit")):
+        return "ensemble_snapshots_v2.settlement_unit"
+    if _nonnull(snapshot.get("members_unit")):
+        return "ensemble_snapshots_v2.members_unit"
     raise ValueError("FORECAST_UNIT_AUTHORITY_MISSING")
 
 

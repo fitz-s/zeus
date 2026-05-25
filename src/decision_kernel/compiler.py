@@ -15,6 +15,18 @@ from src.decision_kernel.ledger import CompileFailure
 from src.events.opportunity_event import OpportunityEvent
 
 CompileStatus = Literal["VERIFIED", "REJECTED", "REVIEW_REQUIRED"]
+REQUIRED_FORECAST_VALIDATIONS = frozenset(
+    {
+        "source_run_completeness_status",
+        "coverage_completeness_status",
+        "coverage_readiness_status",
+        "required_steps_observed",
+        "expected_members_observed",
+        "causality_status_ok",
+        "authority_verified",
+        "available_at_not_future",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -212,6 +224,9 @@ class DecisionCompiler:
                     "actionable_trade_score": 0.0,
                     "no_submit_verified": True,
                     "projection_hash": proof_bundle.no_submit_projection.get("projection_hash"),
+                    "generated_at_decision_time": True,
+                    "header_persisted_at_semantics": "decision_kernel_generated_at_decision_time",
+                    "db_created_at_may_follow_header_persisted_at": True,
                 },
                 source_available_at=decision_time,
                 agent_received_at=decision_time,
@@ -342,6 +357,12 @@ def _validate_no_submit_parent_consistency(event: OpportunityEvent, bundle: NoSu
             raise ValueError("source_truth.required_fields_present must be true")
         if source.get("required_steps_present") is not True:
             raise ValueError("source_truth.required_steps_present must be true")
+        _require_equal("source_truth.source_run_id", source.get("source_run_id"), "forecast.source_run_id", forecast.get("source_run_id"))
+        _require_equal("source_truth.source_id", source.get("source_id"), "forecast.forecast_source_id", forecast.get("forecast_source_id"))
+        _require_equal("source_truth.payload_hash", source.get("payload_hash"), "event.payload_hash", event.payload_hash)
+        _require_equal("source_truth.event_source", source.get("event_source"), "event.source", event.source)
+        _require_equal("source_truth.source_status", source.get("source_status"), "forecast.reader_status", forecast.get("reader_status"))
+        _require_equal("source_truth.source_authority_id", source.get("source_authority_id"), "forecast.reader_authority", forecast.get("reader_authority"))
     _validate_forecast_authority_payload(forecast)
     _validate_calibration_payload(calibration, model_config, forecast, decision_time=decision_time)
     _require_equal("market_topology.family_id", topology.get("family_id"), "family_closure.family_id", family.get("family_id"))
@@ -373,6 +394,7 @@ def _validate_no_submit_parent_consistency(event: OpportunityEvent, bundle: NoSu
         calibration.get("calibrator_model_key"),
     )
     _require_equal("belief.bin_labels_hash", belief.get("bin_labels_hash"), "family.bin_labels_hash", family.get("bin_labels_hash"))
+    _validate_unit_authority(forecast, belief, family)
     _require_equal("fdr.edge_bootstrap_n", fdr.get("edge_bootstrap_n"), "model_config.edge_bootstrap_n", model_config.get("edge_bootstrap_n"))
     if calibration.get("raw_source_id") is not None and forecast.get("forecast_source_id") is not None:
         _require_equal("calibration.raw_source_id", calibration.get("raw_source_id"), "forecast.forecast_source_id", forecast.get("forecast_source_id"))
@@ -432,8 +454,12 @@ def _validate_forecast_authority_payload(forecast: dict[str, Any]) -> None:
         raise ValueError("forecast.observed_members missing")
     if observed_members < expected_members:
         raise ValueError("forecast.observed_members below expected_members")
-    if not tuple(forecast.get("applied_validations") or ()):
+    applied_validations = {str(item) for item in tuple(forecast.get("applied_validations") or ())}
+    if not applied_validations:
         raise ValueError("forecast.applied_validations missing")
+    missing_validations = REQUIRED_FORECAST_VALIDATIONS - applied_validations
+    if missing_validations:
+        raise ValueError(f"forecast.applied_validations missing required validations: {sorted(missing_validations)}")
     _require_equal(
         "forecast.members_extrema_metric_identity",
         forecast.get("members_extrema_metric_identity"),
@@ -456,7 +482,7 @@ def _validate_calibration_payload(
     authority = calibration.get("authority")
     if authority in (None, ""):
         raise ValueError("calibration.authority missing")
-    if str(authority) not in {"VERIFIED", "LIVE", "APPROVED", "test"}:
+    if str(authority) not in {"VERIFIED", "LIVE", "APPROVED"}:
         raise ValueError("calibration.authority is not approved")
     maturity = _optional_int(calibration.get("maturity_level"))
     if maturity is None:
@@ -478,6 +504,26 @@ def _validate_calibration_payload(
             raise ValueError(f"calibration.{field} after decision_time")
     if calibration.get("horizon_profile") is not None and forecast.get("horizon_profile") is not None:
         _require_equal("calibration.horizon_profile", calibration.get("horizon_profile"), "forecast.horizon_profile", forecast.get("horizon_profile"))
+
+
+def _validate_unit_authority(forecast: dict[str, Any], belief: dict[str, Any], family: dict[str, Any]) -> None:
+    unit = forecast.get("unit")
+    if unit not in {"F", "C"}:
+        raise ValueError("forecast.unit missing or unsupported")
+    if forecast.get("unit_authority_source") not in {"ensemble_snapshots_v2.settlement_unit", "ensemble_snapshots_v2.members_unit"}:
+        raise ValueError("forecast.unit_authority_source missing")
+    bin_units = tuple(str(item) for item in (family.get("bin_units") or ()))
+    if not bin_units:
+        raise ValueError("family.bin_units missing")
+    for bin_unit in bin_units:
+        _require_equal("family.bin_unit", bin_unit, "forecast.unit", unit)
+    _require_equal("belief.unit", belief.get("unit"), "forecast.unit", unit)
+    _require_equal(
+        "belief.unit_authority_source",
+        belief.get("unit_authority_source"),
+        "forecast.unit_authority_source",
+        forecast.get("unit_authority_source"),
+    )
 
 
 def _optional_int(value: Any) -> int | None:
