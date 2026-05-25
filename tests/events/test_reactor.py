@@ -1,5 +1,5 @@
 # Created: 2026-05-24
-# Last reused/audited: 2026-05-24
+# Last reused/audited: 2026-05-25
 # Authority basis: EDLI v1 implementation prompt §13 event reactor no-bypass contract.
 from __future__ import annotations
 
@@ -169,6 +169,40 @@ def _reactor(store, *, gates=True, config=None):
         regret_ledger=NoTradeRegretLedger(store.conn),
     )
     return reactor, rejected, submitted
+
+
+def _terminal_surfaces(conn: sqlite3.Connection, event_id: str) -> dict[str, int]:
+    verified_no_submit = conn.execute(
+        """
+        SELECT COUNT(*)
+        FROM edli_no_submit_receipts AS receipt
+        JOIN decision_certificates AS cert
+          ON cert.certificate_type = 'NoSubmitDecisionCertificate'
+         AND cert.verifier_status = 'VERIFIED'
+         AND json_extract(cert.payload_json, '$.event_id') = receipt.event_id
+         AND json_extract(cert.payload_json, '$.projection_hash') = receipt.projection_hash
+        WHERE receipt.event_id = ?
+        """,
+        (event_id,),
+    ).fetchone()[0]
+    compile_failure = conn.execute(
+        "SELECT COUNT(*) FROM decision_compile_failures WHERE event_id = ?",
+        (event_id,),
+    ).fetchone()[0]
+    regret = conn.execute(
+        "SELECT COUNT(*) FROM no_trade_regret_events WHERE event_id = ?",
+        (event_id,),
+    ).fetchone()[0]
+    dead_letter = conn.execute(
+        "SELECT COUNT(*) FROM event_dead_letters WHERE event_id = ?",
+        (event_id,),
+    ).fetchone()[0]
+    return {
+        "verified_no_submit": verified_no_submit,
+        "compile_failure": compile_failure,
+        "regret": regret,
+        "dead_letter": dead_letter,
+    }
 
 
 def test_event_cannot_bypass_source_truth():
@@ -367,6 +401,34 @@ def test_receipt_insert_failure_does_not_leave_verified_orphan_certificate_graph
     ).fetchone()
     assert failure is not None
     assert "projection insert failed" in failure[0]
+
+
+def test_certificate_insert_failure_rolls_back_event_processing():
+    conn, store = _store()
+    event = _forecast_event()
+    store.insert_or_ignore(event)
+    reactor, _rejected, _submitted = _reactor(store)
+
+    def _raise(*_args, **_kwargs):
+        raise RuntimeError("certificate graph insert failed")
+
+    reactor._decision_certificate_ledger.persist_all = _raise  # type: ignore[method-assign]
+
+    result = reactor.process_pending(decision_time=datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc))
+
+    assert result.dead_lettered == 1
+    assert conn.execute("SELECT COUNT(*) FROM decision_certificates").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM edli_no_submit_receipts").fetchone()[0] == 0
+    status = conn.execute(
+        "SELECT processing_status FROM opportunity_event_processing WHERE event_id = ?",
+        (event.event_id,),
+    ).fetchone()[0]
+    assert status == "dead_letter"
+    surfaces = _terminal_surfaces(conn, event.event_id)
+    assert surfaces["verified_no_submit"] == 0
+    assert surfaces["compile_failure"] == 1
+    assert surfaces["regret"] == 1
+    assert surfaces["dead_letter"] == 1
 
 
 def test_successful_no_submit_receipt_is_persisted_before_processed():
@@ -778,6 +840,39 @@ def test_pr332_db_concurrency_smoke_reactor_world_writes(tmp_path):
         """
     ).fetchone()[0]
     assert future_pending == 1
+
+
+def test_processed_event_has_verified_certificate_or_failure_or_regret_or_dead_letter():
+    conn, store = _store()
+    accepted = _forecast_event("accepted")
+    source_rejected = _forecast_event("source-rejected")
+    market_rejected = _market_event()
+    for event in (accepted, source_rejected, market_rejected):
+        store.insert_or_ignore(event)
+    reactor, _rejected, _submitted = _reactor(store)
+    reactor._source_truth_gate = lambda event: event.event_id != source_rejected.event_id  # type: ignore[method-assign]
+
+    result = reactor.process_pending(decision_time=datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc), limit=10)
+
+    assert result.processed == 3
+    assert result.proof_accepted == 1
+    assert result.rejected == 2
+    rows = conn.execute(
+        """
+        SELECT event_id, processing_status
+        FROM opportunity_event_processing
+        WHERE event_id IN (?, ?, ?)
+        """,
+        (accepted.event_id, source_rejected.event_id, market_rejected.event_id),
+    ).fetchall()
+    assert {row[1] for row in rows} == {"processed"}
+    expected = {
+        accepted.event_id: {"verified_no_submit": 1, "compile_failure": 0, "regret": 0, "dead_letter": 0},
+        source_rejected.event_id: {"verified_no_submit": 0, "compile_failure": 1, "regret": 1, "dead_letter": 0},
+        market_rejected.event_id: {"verified_no_submit": 0, "compile_failure": 1, "regret": 1, "dead_letter": 0},
+    }
+    for event_id, expected_surfaces in expected.items():
+        assert _terminal_surfaces(conn, event_id) == expected_surfaces
 
 
 def test_reactor_passes_decision_time_to_submit():
