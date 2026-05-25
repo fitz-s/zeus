@@ -9,8 +9,9 @@ from datetime import datetime, timezone
 import pytest
 
 from src.decision_kernel import claims
+from src.decision_kernel.canonicalization import stable_hash
 from src.decision_kernel.certificate import ParentEdge, build_certificate
-from src.decision_kernel.errors import CertificateVerificationError
+from src.decision_kernel.errors import CertificateSemanticDriftError, CertificateVerificationError
 from src.decision_kernel.ledger import CompileFailure, DecisionCertificateLedger
 
 
@@ -179,6 +180,212 @@ def test_non_generated_authority_certificate_cannot_use_generated_at_decision_ti
         ledger.persist_all((cert,))
 
 
+def test_no_submit_rejects_missing_decision_source():
+    parents, no_submit = _minimal_no_submit_graph(no_submit_payload={"decision_source": None})
+    ledger = DecisionCertificateLedger(_conn())
+
+    with pytest.raises(CertificateVerificationError, match="unsupported no-submit decision_source"):
+        ledger.persist_all(parents + (no_submit,))
+
+
+def test_no_submit_rejects_unknown_decision_source():
+    parents, no_submit = _minimal_no_submit_graph(no_submit_payload={"decision_source": "forcast"})
+    ledger = DecisionCertificateLedger(_conn())
+
+    with pytest.raises(CertificateVerificationError, match="unsupported no-submit decision_source"):
+        ledger.persist_all(parents + (no_submit,))
+
+
+def test_no_submit_rejects_day0_or_other_while_day0_disabled():
+    parents, no_submit = _minimal_no_submit_graph(no_submit_payload={"decision_source": "day0_or_other"})
+    ledger = DecisionCertificateLedger(_conn())
+
+    with pytest.raises(CertificateVerificationError, match="unsupported no-submit decision_source"):
+        ledger.persist_all(parents + (no_submit,))
+
+
+def test_no_submit_forecast_always_requires_forecast_parent_set():
+    parents, no_submit = _minimal_no_submit_graph()
+    weak_parents = tuple(parent for parent in parents if parent.certificate_type != claims.FORECAST_AUTHORITY)
+    no_submit = build_certificate(
+        certificate_type=claims.NO_SUBMIT_DECISION,
+        semantic_key="no_submit:event-1:intent-1",
+        claim_type="no_submit_dry_run_decision",
+        mode="NO_SUBMIT",
+        decision_time=no_submit.header.decision_time,
+        source_available_at=no_submit.header.source_available_at,
+        agent_received_at=no_submit.header.agent_received_at,
+        persisted_at=no_submit.header.persisted_at,
+        payload=no_submit.payload,
+        parent_edges=tuple(ParentEdge(_role(parent.certificate_type), parent.certificate_hash, parent.certificate_type) for parent in weak_parents),
+        parent_certificates=weak_parents,
+        authority_id="test",
+        authority_version="v1",
+        algorithm_id="test",
+        algorithm_version="v1",
+    )
+    ledger = DecisionCertificateLedger(_conn())
+
+    with pytest.raises(CertificateVerificationError, match="ForecastAuthorityCertificate"):
+        ledger.persist_all(weak_parents + (no_submit,))
+
+
+def test_ledger_rejects_no_submit_forecast_missing_required_steps():
+    parents, no_submit = _minimal_no_submit_graph(parent_payload_overrides={claims.FORECAST_AUTHORITY: {"required_steps": ()}})
+    ledger = DecisionCertificateLedger(_conn())
+
+    with pytest.raises(CertificateVerificationError, match="required_steps"):
+        ledger.persist_all(parents + (no_submit,))
+
+
+def test_ledger_rejects_no_submit_forecast_missing_applied_validations():
+    parents, no_submit = _minimal_no_submit_graph(parent_payload_overrides={claims.FORECAST_AUTHORITY: {"applied_validations": ()}})
+    ledger = DecisionCertificateLedger(_conn())
+
+    with pytest.raises(CertificateVerificationError, match="applied_validations"):
+        ledger.persist_all(parents + (no_submit,))
+
+
+def test_ledger_rejects_no_submit_forecast_observed_members_below_expected_members():
+    parents, no_submit = _minimal_no_submit_graph(parent_payload_overrides={claims.FORECAST_AUTHORITY: {"observed_members": 50}})
+    ledger = DecisionCertificateLedger(_conn())
+
+    with pytest.raises(CertificateVerificationError, match="observed_members"):
+        ledger.persist_all(parents + (no_submit,))
+
+
+def test_ledger_rejects_no_submit_calibration_missing_authority():
+    parents, no_submit = _minimal_no_submit_graph(parent_payload_overrides={claims.CALIBRATION: {"authority": None}})
+    ledger = DecisionCertificateLedger(_conn())
+
+    with pytest.raises(CertificateVerificationError, match="calibration.authority"):
+        ledger.persist_all(parents + (no_submit,))
+
+
+def test_ledger_rejects_no_submit_calibration_missing_input_space():
+    parents, no_submit = _minimal_no_submit_graph(parent_payload_overrides={claims.CALIBRATION: {"input_space": None}})
+    ledger = DecisionCertificateLedger(_conn())
+
+    with pytest.raises(CertificateVerificationError, match="calibration.input_space"):
+        ledger.persist_all(parents + (no_submit,))
+
+
+def test_ledger_rejects_no_submit_unit_mismatch():
+    parents, no_submit = _minimal_no_submit_graph(parent_payload_overrides={claims.BELIEF: {"unit": "C"}})
+    ledger = DecisionCertificateLedger(_conn())
+
+    with pytest.raises(CertificateVerificationError, match="belief.unit"):
+        ledger.persist_all(parents + (no_submit,))
+
+
+def test_persist_all_rejects_forecast_parent_missing_coverage_readiness():
+    parents, no_submit = _minimal_no_submit_graph(parent_payload_overrides={claims.FORECAST_AUTHORITY: {"coverage_readiness_status": None}})
+    ledger = DecisionCertificateLedger(_conn())
+
+    with pytest.raises(CertificateVerificationError, match="coverage_readiness_status"):
+        ledger.persist_all(parents + (no_submit,))
+
+
+def test_persist_all_rejects_forecast_parent_missing_required_validation():
+    validations = tuple(item for item in _required_forecast_validations() if item != "authority_verified")
+    parents, no_submit = _minimal_no_submit_graph(parent_payload_overrides={claims.FORECAST_AUTHORITY: {"applied_validations": validations}})
+    ledger = DecisionCertificateLedger(_conn())
+
+    with pytest.raises(CertificateVerificationError, match="authority_verified"):
+        ledger.persist_all(parents + (no_submit,))
+
+
+def test_persist_all_rejects_forecast_parent_metric_identity_mismatch():
+    parents, no_submit = _minimal_no_submit_graph(parent_payload_overrides={claims.FORECAST_AUTHORITY: {"members_extrema_metric_identity": "low"}})
+    ledger = DecisionCertificateLedger(_conn())
+
+    with pytest.raises(CertificateVerificationError, match="members_extrema_metric_identity"):
+        ledger.persist_all(parents + (no_submit,))
+
+
+def test_no_submit_rejects_projection_hash_mismatch():
+    parents, no_submit = _minimal_no_submit_graph(no_submit_payload={"projection_hash": "bad-hash"})
+    ledger = DecisionCertificateLedger(_conn())
+
+    with pytest.raises(CertificateVerificationError, match="projection_hash mismatch"):
+        ledger.persist_all(parents + (no_submit,))
+
+
+def test_projection_payload_matches_no_submit_payload():
+    parents, no_submit = _minimal_no_submit_graph()
+    expected_projection = {
+        "event_id": no_submit.payload["event_id"],
+        "final_intent_id": no_submit.payload["final_intent_id"],
+        "side_effect_status": no_submit.payload["side_effect_status"],
+        "proof_accepted": no_submit.payload["proof_accepted"],
+        "submitted": no_submit.payload["submitted"],
+        "executable_snapshot_id": no_submit.payload["executable_snapshot_id"],
+    }
+
+    assert no_submit.payload["projection_hash"] == stable_hash(expected_projection)
+    DecisionCertificateLedger(_conn()).persist_all(parents + (no_submit,))
+
+
+def test_insert_idempotent_detects_existing_payload_hash_corruption():
+    conn = _conn()
+    ledger = DecisionCertificateLedger(conn)
+    cert = _cert("ClockModeCertificate", "clock:event", {"mode": "NO_SUBMIT"})
+    ledger.persist_all((cert,))
+    conn.execute(
+        "UPDATE decision_certificates SET payload_json = ? WHERE certificate_id = ?",
+        ('{"mode":"CORRUPT"}', cert.certificate_id),
+    )
+
+    with pytest.raises(CertificateSemanticDriftError, match="PAYLOAD_HASH_CORRUPT"):
+        ledger.persist_all((cert,))
+
+
+def test_certificate_ledger_audit_detects_payload_hash_mismatch():
+    conn = _conn()
+    ledger = DecisionCertificateLedger(conn)
+    cert = _cert("ClockModeCertificate", "clock:event", {"mode": "NO_SUBMIT"})
+    ledger.persist_all((cert,))
+    conn.execute(
+        "UPDATE decision_certificates SET payload_json = ? WHERE certificate_id = ?",
+        ('{"mode":"CORRUPT"}', cert.certificate_id),
+    )
+
+    with pytest.raises(CertificateSemanticDriftError):
+        ledger.insert_idempotent(cert)
+
+
+def test_no_submit_rejects_quote_cost_source_midpoint():
+    parents, no_submit = _minimal_no_submit_graph(parent_payload_overrides={claims.QUOTE_FEASIBILITY: {"cost_source": "midpoint"}})
+    ledger = DecisionCertificateLedger(_conn())
+
+    with pytest.raises(CertificateVerificationError, match="quote.cost_source"):
+        ledger.persist_all(parents + (no_submit,))
+
+
+def test_no_submit_rejects_cost_model_cost_source_complement():
+    parents, no_submit = _minimal_no_submit_graph(parent_payload_overrides={claims.COST_MODEL: {"cost_source": "complement_price"}})
+    ledger = DecisionCertificateLedger(_conn())
+
+    with pytest.raises(CertificateVerificationError, match="cost.cost_source"):
+        ledger.persist_all(parents + (no_submit,))
+
+
+def test_no_submit_rejects_quote_source_kind_last_trade():
+    parents, no_submit = _minimal_no_submit_graph(parent_payload_overrides={claims.QUOTE_FEASIBILITY: {"quote_source_kind": "last_trade"}})
+    ledger = DecisionCertificateLedger(_conn())
+
+    with pytest.raises(CertificateVerificationError, match="quote.quote_source_kind"):
+        ledger.persist_all(parents + (no_submit,))
+
+
+def test_no_submit_requires_forbidden_cost_source_false():
+    parents, no_submit = _minimal_no_submit_graph(parent_payload_overrides={claims.COST_MODEL: {"forbidden_cost_source": True}})
+    ledger = DecisionCertificateLedger(_conn())
+
+    with pytest.raises(CertificateVerificationError, match="cost.forbidden_cost_source"):
+        ledger.persist_all(parents + (no_submit,))
+
+
 def _conn() -> sqlite3.Connection:
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
@@ -211,16 +418,44 @@ def _minimal_no_submit_graph(
             "derived_from_reader_status": "LIVE_ELIGIBLE",
         },
         claims.MARKET_TOPOLOGY: {"family_id": "family-1"},
-        claims.FAMILY_CLOSURE: {"family_id": "family-1", "bin_labels_hash": "bins-hash-1"},
+        claims.FAMILY_CLOSURE: {"family_id": "family-1", "bin_labels_hash": "bins-hash-1", "bin_units": ("F",)},
         claims.FORECAST_AUTHORITY: {
             "snapshot_id": "snap-1",
             "reader_authority": "read_executable_forecast",
             "reader_status": "LIVE_ELIGIBLE",
             "forecast_source_id": "opendata",
             "source_run_id": "run-1",
+            "temperature_metric": "high",
+            "horizon_profile": "default",
+            "coverage_readiness_status": "LIVE_ELIGIBLE",
+            "coverage_completeness_status": "COMPLETE",
+            "source_run_completeness_status": "COMPLETE",
+            "required_steps": (0,),
+            "observed_steps": (0,),
+            "expected_members": 51,
+            "observed_members": 51,
+            "applied_validations": _required_forecast_validations(),
+            "members_extrema_metric_identity": "high",
+            "members_json_source": "ensemble_snapshots_v2.daily_extrema",
+            "local_date_window_hash": "window-hash-1",
+            "unit": "F",
+            "unit_authority_source": "ensemble_snapshots_v2.settlement_unit",
         },
-        claims.CALIBRATION: {"calibrator_model_key": "model-1", "model_hash": "model-hash-1"},
-        claims.MODEL_CONFIG: {"calibrator_model_key": "model-1", "calibrator_model_hash": "model-hash-1"},
+        claims.CALIBRATION: {
+            "calibrator_model_key": "model-1",
+            "model_hash": "model-hash-1",
+            "authority": "VERIFIED",
+            "maturity_level": 1,
+            "input_space": "width_normalized_density",
+            "horizon_profile": "default",
+            "training_cutoff": "2026-05-01T00:00:00+00:00",
+            "model_available_at": "2026-05-01T00:00:00+00:00",
+        },
+        claims.MODEL_CONFIG: {
+            "calibrator_model_key": "model-1",
+            "calibrator_model_hash": "model-hash-1",
+            "calibration_input_space": "width_normalized_density",
+        },
         claims.BELIEF: {
             "forecast_snapshot_id": "snap-1",
             "calibrator_model_key": "model-1",
@@ -230,10 +465,26 @@ def _minimal_no_submit_graph(
             "p_cal_hash": "pcal-vector-hash",
             "p_live_hash": "plive-vector-hash",
             "bin_labels_hash": "bins-hash-1",
+            "unit": "F",
+            "unit_authority_source": "ensemble_snapshots_v2.settlement_unit",
         },
         claims.EXECUTABLE_SNAPSHOT: {"selected_snapshot_id": "exec-snap-1", "condition_id": "condition-1", "token_id": "yes-1"},
-        claims.QUOTE_FEASIBILITY: {"condition_id": "condition-1", "token_id": "yes-1", "selected_token_id": "yes-1", "cost_source": "native_orderbook_ask"},
-        claims.COST_MODEL: {"condition_id": "condition-1", "token_id": "yes-1", "cost_basis_id": "cost-1", "cost_source": "native_orderbook_ask"},
+        claims.QUOTE_FEASIBILITY: {
+            "condition_id": "condition-1",
+            "token_id": "yes-1",
+            "selected_token_id": "yes-1",
+            "cost_source": "native_orderbook_ask",
+            "quote_source_kind": "executable_market_snapshot_native_book",
+            "forbidden_cost_source": False,
+        },
+        claims.COST_MODEL: {
+            "condition_id": "condition-1",
+            "token_id": "yes-1",
+            "cost_basis_id": "cost-1",
+            "cost_source": "native_orderbook_ask",
+            "quote_source_kind": "executable_market_snapshot_native_book",
+            "forbidden_cost_source": False,
+        },
         claims.PRE_TRADE_EVIDENCE: {"actionable_trade_score": 0.0},
         claims.CANDIDATE_EVIDENCE: {"family_id": "family-1", "condition_id": "condition-1", "selected_token_id": "yes-1", "hypothesis_id": "family-1:yes-1"},
         claims.TESTING_PROTOCOL: {"family_id": "family-1"},
@@ -269,19 +520,44 @@ def _minimal_no_submit_graph(
 
 
 def _no_submit_payload() -> dict:
-    return {
+    payload = {
         "event_id": "event-1",
         "decision_source": "forecast",
         "final_intent_id": "intent-1",
         "side_effect_status": "NO_SUBMIT",
         "proof_accepted": True,
         "submitted": False,
+        "executable_snapshot_id": "exec-snap-1",
         "actionable_trade_score": 0.0,
         "generated_at_decision_time": True,
         "header_persisted_at_semantics": "decision_kernel_generated_at_decision_time",
         "db_created_at_may_follow_header_persisted_at": True,
     }
+    payload["projection_hash"] = stable_hash(
+        {
+            "event_id": payload["event_id"],
+            "final_intent_id": payload["final_intent_id"],
+            "side_effect_status": payload["side_effect_status"],
+            "proof_accepted": payload["proof_accepted"],
+            "submitted": payload["submitted"],
+            "executable_snapshot_id": payload["executable_snapshot_id"],
+        }
+    )
+    return payload
 
 
 def _role(certificate_type: str) -> str:
     return certificate_type.removesuffix("Certificate").replace("Evidence", "").lower()
+
+
+def _required_forecast_validations() -> tuple[str, ...]:
+    return (
+        "source_run_completeness_status",
+        "coverage_completeness_status",
+        "coverage_readiness_status",
+        "required_steps_observed",
+        "expected_members_observed",
+        "causality_status_ok",
+        "authority_verified",
+        "available_at_not_future",
+    )

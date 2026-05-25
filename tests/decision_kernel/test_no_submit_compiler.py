@@ -62,6 +62,7 @@ def _receipt(event_id: str):
         proof_accepted=True,
         event_id=event_id,
         causal_snapshot_id="snap-1",
+        executable_snapshot_id="snapshot-exec-1",
         trade_score_positive=True,
         fdr_pass=True,
         fdr_family_id="family-1",

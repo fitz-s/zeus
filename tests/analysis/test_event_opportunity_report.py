@@ -173,6 +173,93 @@ def test_event_opportunity_report_counts_accepted_no_submit_receipts():
     assert report["blocked_by_stage"] == {}
 
 
+def test_report_does_not_count_receipt_certificate_final_intent_mismatch():
+    conn = sqlite3.connect(":memory:")
+    init_schema(conn)
+    event = _forecast_event()
+    receipt = _receipt(event.event_id)
+    EdliNoSubmitReceiptLedger(conn).insert_idempotent(
+        receipt,
+        decision_time=datetime(2026, 5, 25, 10, 3, tzinfo=timezone.utc),
+    )
+    _insert_decision_certificate(
+        conn,
+        certificate_id="no-submit-1",
+        certificate_type="NoSubmitDecisionCertificate",
+        semantic_key=f"no_submit:{event.event_id}:{receipt.final_intent_id}",
+        payload={
+            "event_id": event.event_id,
+            "final_intent_id": "different-intent",
+            "side_effect_status": "NO_SUBMIT",
+            "executable_snapshot_id": receipt.executable_snapshot_id,
+            "proof_accepted": True,
+            "submitted": False,
+        },
+    )
+
+    report = build_event_opportunity_report(conn)
+
+    assert report["accepted_no_submit_receipts"] == 0
+
+
+def test_report_does_not_count_receipt_certificate_executable_snapshot_mismatch():
+    conn = sqlite3.connect(":memory:")
+    init_schema(conn)
+    event = _forecast_event()
+    receipt = _receipt(event.event_id)
+    EdliNoSubmitReceiptLedger(conn).insert_idempotent(
+        receipt,
+        decision_time=datetime(2026, 5, 25, 10, 3, tzinfo=timezone.utc),
+    )
+    _insert_decision_certificate(
+        conn,
+        certificate_id="no-submit-1",
+        certificate_type="NoSubmitDecisionCertificate",
+        semantic_key=f"no_submit:{event.event_id}:{receipt.final_intent_id}",
+        payload={
+            "event_id": event.event_id,
+            "final_intent_id": receipt.final_intent_id,
+            "side_effect_status": "NO_SUBMIT",
+            "executable_snapshot_id": "different-snapshot",
+            "proof_accepted": True,
+            "submitted": False,
+        },
+    )
+
+    report = build_event_opportunity_report(conn)
+
+    assert report["accepted_no_submit_receipts"] == 0
+
+
+def test_report_does_not_count_receipt_when_certificate_payload_is_not_proof_accepted():
+    conn = sqlite3.connect(":memory:")
+    init_schema(conn)
+    event = _forecast_event()
+    receipt = _receipt(event.event_id)
+    EdliNoSubmitReceiptLedger(conn).insert_idempotent(
+        receipt,
+        decision_time=datetime(2026, 5, 25, 10, 3, tzinfo=timezone.utc),
+    )
+    _insert_decision_certificate(
+        conn,
+        certificate_id="no-submit-1",
+        certificate_type="NoSubmitDecisionCertificate",
+        semantic_key=f"no_submit:{event.event_id}:{receipt.final_intent_id}",
+        payload={
+            "event_id": event.event_id,
+            "final_intent_id": receipt.final_intent_id,
+            "side_effect_status": "NO_SUBMIT",
+            "executable_snapshot_id": receipt.executable_snapshot_id,
+            "proof_accepted": False,
+            "submitted": False,
+        },
+    )
+
+    report = build_event_opportunity_report(conn)
+
+    assert report["accepted_no_submit_receipts"] == 0
+
+
 def test_certificate_created_at_can_be_after_header_persisted_at_for_generated_certificates_only():
     conn = sqlite3.connect(":memory:")
     init_schema(conn)
@@ -451,6 +538,7 @@ def _receipt(event_id: str):
         proof_accepted=True,
         event_id=event_id,
         causal_snapshot_id="snap-1",
+        executable_snapshot_id="snapshot-exec-1",
         trade_score_positive=True,
         fdr_pass=True,
         fdr_family_id="family-1",

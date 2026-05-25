@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -88,6 +89,7 @@ class DecisionCertificateLedger:
             existing_id = str(existing["certificate_id"] if isinstance(existing, sqlite3.Row) else existing[0])
             existing_hash = str(existing["certificate_hash"] if isinstance(existing, sqlite3.Row) else existing[1])
             if existing_hash == cert.certificate_hash:
+                self._audit_existing_payload_hash(existing_id)
                 self._persist_edges(cert)
                 return existing_id
             raise CertificateSemanticDriftError(
@@ -193,6 +195,26 @@ class DecisionCertificateLedger:
                     created_at,
                 ),
             )
+
+    def _audit_existing_payload_hash(self, certificate_id: str) -> None:
+        row = self.conn.execute(
+            """
+            SELECT payload_json, payload_hash
+            FROM decision_certificates
+            WHERE certificate_id = ?
+            """,
+            (certificate_id,),
+        ).fetchone()
+        if row is None:
+            raise CertificateSemanticDriftError(f"DECISION_CERTIFICATE_MISSING_AFTER_MATCH:{certificate_id}")
+        payload_json = str(row["payload_json"] if isinstance(row, sqlite3.Row) else row[0])
+        payload_hash = str(row["payload_hash"] if isinstance(row, sqlite3.Row) else row[1])
+        try:
+            payload = json.loads(payload_json)
+        except json.JSONDecodeError as exc:
+            raise CertificateSemanticDriftError(f"DECISION_CERTIFICATE_PAYLOAD_CORRUPT:{certificate_id}") from exc
+        if stable_hash(payload) != payload_hash:
+            raise CertificateSemanticDriftError(f"DECISION_CERTIFICATE_PAYLOAD_HASH_CORRUPT:{certificate_id}")
 
 
 def _dt(value: datetime) -> str:

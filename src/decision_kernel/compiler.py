@@ -231,6 +231,7 @@ class DecisionCompiler:
                     "actionable_trade_score": 0.0,
                     "no_submit_verified": True,
                     "projection_hash": proof_bundle.no_submit_projection.get("projection_hash"),
+                    "executable_snapshot_id": proof_bundle.no_submit_projection.get("executable_snapshot_id"),
                     "generated_at_decision_time": True,
                     "header_persisted_at_semantics": "decision_kernel_generated_at_decision_time",
                     "db_created_at_may_follow_header_persisted_at": True,

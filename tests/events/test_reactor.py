@@ -10,7 +10,13 @@ from datetime import datetime, timezone
 
 from tests.decision_kernel.no_submit_fixtures import build_test_no_submit_proof_bundle
 from src.events.event_store import EventStore
-from src.events.opportunity_event import Day0ExtremeUpdatedPayload, MarketBookEventPayload, make_day0_extreme_updated_event, make_opportunity_event
+from src.events.opportunity_event import (
+    Day0ExtremeUpdatedPayload,
+    ForecastSnapshotReadyPayload,
+    MarketBookEventPayload,
+    make_day0_extreme_updated_event,
+    make_opportunity_event,
+)
 from src.events.reactor import EventSubmissionReceipt, OpportunityEventReactor, ReactorConfig
 from src.state.db import init_schema
 from src.strategy.live_inference.no_trade_regret import NoTradeRegretLedger
@@ -51,6 +57,44 @@ def _day0_event(key_suffix: str = "a"):
     )
 
 
+def _forecast_event(key_suffix: str = "a"):
+    payload = ForecastSnapshotReadyPayload(
+        city="Chicago",
+        target_date="2026-05-24",
+        metric="high",
+        source_id="opendata",
+        source_run_id="run-1",
+        cycle="00",
+        track="live",
+        snapshot_id="snap-1",
+        snapshot_hash="hash-1",
+        captured_at="2026-05-24T18:00:00+00:00",
+        available_at="2026-05-24T18:01:00+00:00",
+        required_fields_present=True,
+        required_steps_present=True,
+        member_count=51,
+        min_members_floor=40,
+        completeness_status="COMPLETE",
+        required_steps=[0],
+        observed_steps=[0],
+        expected_members=51,
+        source_run_status="SUCCESS",
+        source_run_completeness_status="COMPLETE",
+        coverage_completeness_status="COMPLETE",
+        coverage_readiness_status="LIVE_ELIGIBLE",
+    )
+    return make_opportunity_event(
+        event_type="FORECAST_SNAPSHOT_READY",
+        entity_key=f"Chicago|2026-05-24|high|{key_suffix}",
+        source="forecast_live",
+        observed_at="2026-05-24T18:00:00+00:00",
+        available_at="2026-05-24T18:01:00+00:00",
+        received_at="2026-05-24T18:02:00+00:00",
+        payload=payload,
+        causal_snapshot_id="snap-1",
+    )
+
+
 def _market_event():
     payload = MarketBookEventPayload(
         condition_id="0xcondition",
@@ -86,6 +130,10 @@ def _reactor(store, *, gates=True, config=None):
             city=payload.get("city"),
             target_date=payload.get("target_date"),
             metric=payload.get("metric"),
+            condition_id="condition-1",
+            token_id="yes-1",
+            executable_snapshot_id="snapshot-exec-1",
+            family_id="family-1",
             trade_score_positive=True,
             fdr_pass=True,
             fdr_family_id="family-1",
@@ -153,7 +201,7 @@ def test_duplicate_event_not_double_counted():
 
 def test_reactor_persists_no_submit_certificate_before_processed():
     conn, store = _store()
-    event = _day0_event()
+    event = _forecast_event()
     store.insert_or_ignore(event)
     reactor, _rejected, _submitted = _reactor(store)
 
@@ -298,7 +346,7 @@ def test_transition_proof_bundle_builder_not_used_in_runtime_reactor():
 
 def test_receipt_insert_failure_does_not_leave_verified_orphan_certificate_graph():
     conn, store = _store()
-    event = _day0_event()
+    event = _forecast_event()
     store.insert_or_ignore(event)
     reactor, _rejected, _submitted = _reactor(store)
 
@@ -321,7 +369,7 @@ def test_receipt_insert_failure_does_not_leave_verified_orphan_certificate_graph
 
 def test_successful_no_submit_receipt_is_persisted_before_processed():
     conn, store = _store()
-    event = _day0_event()
+    event = _forecast_event()
     store.insert_or_ignore(event)
     reactor, _rejected, _submitted = _reactor(store)
 
@@ -357,7 +405,7 @@ def test_successful_no_submit_receipt_is_persisted_before_processed():
 
 def test_no_submit_projection_rows_require_verified_decision_certificate():
     conn, store = _store()
-    event = _day0_event()
+    event = _forecast_event()
     store.insert_or_ignore(event)
     reactor, _rejected, _submitted = _reactor(store)
     decision_time = datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc)
@@ -467,7 +515,7 @@ def test_no_submit_receipt_ledger_rejects_duplicate_hash_drift():
 
 def test_receipt_hash_drift_dead_letters_event_before_processed():
     conn, store = _store()
-    event = _day0_event()
+    event = _forecast_event()
     store.insert_or_ignore(event)
     from src.events.no_submit_receipts import EdliNoSubmitReceiptLedger
 
@@ -586,6 +634,10 @@ def test_receipt_without_money_path_proof_is_rejected():
             city=payload.get("city"),
             target_date=payload.get("target_date"),
             metric=payload.get("metric"),
+            condition_id="condition-1",
+            token_id="yes-1",
+            executable_snapshot_id="snapshot-exec-1",
+            family_id="family-1",
             trade_score_positive=True,
             fdr_pass=True,
             fdr_family_id="family-1",
@@ -662,8 +714,8 @@ def test_reactor_blocks_real_order_side_effect_when_no_submit_mode():
 
 def test_no_submit_day0_does_not_consume_tiny_cap():
     conn, store = _store()
-    store.insert_or_ignore(_day0_event("bin-a"))
-    store.insert_or_ignore(_day0_event("bin-b"))
+    store.insert_or_ignore(_forecast_event("bin-a"))
+    store.insert_or_ignore(_forecast_event("bin-b"))
     reactor, rejected, submitted = _reactor(
         store,
         config=ReactorConfig(tiny_live_max_orders_per_day=1),
@@ -677,8 +729,8 @@ def test_no_submit_day0_does_not_consume_tiny_cap():
 
 def test_no_submit_day0_tiny_cap_does_not_persist_across_reactor_instances():
     conn, store = _store()
-    first = _day0_event("bin-a")
-    second = _day0_event("bin-b")
+    first = _forecast_event("bin-a")
+    second = _forecast_event("bin-b")
     store.insert_or_ignore(first)
     reactor, _rejected, submitted = _reactor(
         store,
@@ -702,8 +754,8 @@ def test_no_submit_day0_tiny_cap_does_not_persist_across_reactor_instances():
 
 def test_no_submit_day0_tiny_notional_cap_does_not_persist_across_reactor_instances():
     conn, store = _store()
-    first = _day0_event("bin-a")
-    second = _day0_event("bin-b")
+    first = _forecast_event("bin-a")
+    second = _forecast_event("bin-b")
     store.insert_or_ignore(first)
     reactor, _rejected, submitted = _reactor(
         store,

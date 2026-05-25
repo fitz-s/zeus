@@ -6,9 +6,27 @@ from datetime import datetime, timezone
 from typing import Iterable
 
 from src.decision_kernel import claims
+from src.decision_kernel.canonicalization import stable_hash
 from src.decision_kernel.certificate import DecisionCertificate, certificate_hash_for
 from src.decision_kernel.errors import CertificateVerificationError
 from src.decision_kernel.modes import ALLOWED_MODES, is_live_like
+
+FORECAST_LIVE_ELIGIBLE_STATUS = "LIVE_ELIGIBLE"
+REQUIRED_FORECAST_VALIDATIONS = frozenset(
+    {
+        "source_run_completeness_status",
+        "coverage_completeness_status",
+        "coverage_readiness_status",
+        "required_steps_observed",
+        "expected_members_observed",
+        "causality_status_ok",
+        "authority_verified",
+        "available_at_not_future",
+    }
+)
+APPROVED_CALIBRATION_AUTHORITIES = frozenset({"VERIFIED", "LIVE", "APPROVED"})
+ALLOWED_COST_SOURCES = frozenset({"native_orderbook_ask", "native_orderbook_bid"})
+ALLOWED_QUOTE_SOURCE_KINDS = frozenset({"executable_market_snapshot_native_book"})
 
 
 def verify_certificate(
@@ -38,10 +56,13 @@ def verify_no_submit_decision(cert: DecisionCertificate, parents: Iterable[Decis
     if cert.header.mode != "NO_SUBMIT":
         raise CertificateVerificationError("no-submit decision must use NO_SUBMIT mode")
     _forbid_no_submit_payload(cert)
+    decision_source = cert.payload.get("decision_source")
+    if decision_source != "forecast":
+        raise CertificateVerificationError(
+            f"unsupported no-submit decision_source for forecast no-submit scope: {decision_source!r}"
+        )
     parent_types = {parent.certificate_type for parent in parent_tuple}
-    required = claims.NO_SUBMIT_REQUIRED_TYPES
-    if cert.payload.get("decision_source") == "forecast":
-        required = claims.NO_SUBMIT_FORECAST_REQUIRED_TYPES
+    required = claims.NO_SUBMIT_FORECAST_REQUIRED_TYPES
     missing = required - parent_types
     if missing:
         raise CertificateVerificationError(f"no-submit decision missing parents: {sorted(missing)}")
@@ -49,8 +70,7 @@ def verify_no_submit_decision(cert: DecisionCertificate, parents: Iterable[Decis
     if forbidden:
         raise CertificateVerificationError(f"no-submit decision has forbidden parents: {sorted(forbidden)}")
     _verify_no_submit_generated_time_semantics(cert)
-    if cert.payload.get("decision_source") == "forecast":
-        _verify_forecast_no_submit_semantic_consistency(cert, parent_tuple)
+    _verify_forecast_no_submit_semantic_consistency(cert, parent_tuple)
 
 
 def verify_actionable_trade(cert: DecisionCertificate, parents: Iterable[DecisionCertificate]) -> None:
@@ -230,6 +250,134 @@ def _verify_forecast_no_submit_semantic_consistency(
             raise CertificateVerificationError(f"belief.{field} missing")
     _require_equal("belief.bin_labels_hash", belief.get("bin_labels_hash"), "family.bin_labels_hash", family.get("bin_labels_hash"))
     _require_equal("risk.final_intent_id", risk.get("final_intent_id"), "no_submit.final_intent_id", cert.payload.get("final_intent_id"))
+    _verify_no_submit_projection_hash(cert)
+    _validate_forecast_authority_payload(forecast)
+    _validate_calibration_payload(calibration, model_config, forecast, decision_time=cert.header.decision_time)
+    _validate_unit_authority(forecast, belief, family)
+    _validate_cost_sources(quote, cost)
+
+
+def _verify_no_submit_projection_hash(cert: DecisionCertificate) -> None:
+    projection = {
+        "event_id": cert.payload.get("event_id"),
+        "final_intent_id": cert.payload.get("final_intent_id"),
+        "side_effect_status": cert.payload.get("side_effect_status"),
+        "proof_accepted": cert.payload.get("proof_accepted"),
+        "submitted": cert.payload.get("submitted"),
+        "executable_snapshot_id": cert.payload.get("executable_snapshot_id"),
+    }
+    expected_hash = stable_hash(projection)
+    if cert.payload.get("projection_hash") != expected_hash:
+        raise CertificateVerificationError("no-submit projection_hash mismatch")
+
+
+def _validate_forecast_authority_payload(forecast: dict) -> None:
+    status = _normalize_forecast_status(forecast.get("reader_status"))
+    if status != FORECAST_LIVE_ELIGIBLE_STATUS:
+        raise CertificateVerificationError("forecast.reader_status is not live eligible")
+    reason = forecast.get("reader_reason_code")
+    if reason not in (None, "", "OK"):
+        raise CertificateVerificationError("forecast.reader_reason_code must be empty for verified forecast")
+    required_scalars = (
+        "coverage_readiness_status",
+        "coverage_completeness_status",
+        "source_run_completeness_status",
+        "expected_members",
+        "observed_members",
+        "members_extrema_metric_identity",
+        "temperature_metric",
+        "members_json_source",
+        "local_date_window_hash",
+    )
+    for field in required_scalars:
+        if forecast.get(field) in (None, ""):
+            raise CertificateVerificationError(f"forecast.{field} missing")
+    if forecast.get("coverage_readiness_status") != "LIVE_ELIGIBLE":
+        raise CertificateVerificationError("forecast.coverage_readiness_status is not LIVE_ELIGIBLE")
+    if forecast.get("coverage_completeness_status") != "COMPLETE":
+        raise CertificateVerificationError("forecast.coverage_completeness_status is not COMPLETE")
+    if forecast.get("source_run_completeness_status") != "COMPLETE":
+        raise CertificateVerificationError("forecast.source_run_completeness_status is not COMPLETE")
+    required_steps = tuple(forecast.get("required_steps") or ())
+    observed_steps = tuple(forecast.get("observed_steps") or ())
+    if not required_steps:
+        raise CertificateVerificationError("forecast.required_steps missing")
+    if not set(required_steps).issubset(set(observed_steps)):
+        raise CertificateVerificationError("forecast.observed_steps missing required steps")
+    if int(forecast.get("observed_members")) < int(forecast.get("expected_members")):
+        raise CertificateVerificationError("forecast.observed_members below expected_members")
+    validations = {str(item) for item in tuple(forecast.get("applied_validations") or ())}
+    if not validations:
+        raise CertificateVerificationError("forecast.applied_validations missing")
+    missing = REQUIRED_FORECAST_VALIDATIONS - validations
+    if missing:
+        raise CertificateVerificationError(f"forecast.applied_validations missing required validations: {sorted(missing)}")
+    if forecast.get("members_extrema_metric_identity") != forecast.get("temperature_metric"):
+        raise CertificateVerificationError("forecast.members_extrema_metric_identity mismatch")
+    if forecast.get("members_json_source") != "ensemble_snapshots_v2.daily_extrema":
+        raise CertificateVerificationError("forecast.members_json_source is not authoritative daily extrema")
+
+
+def _validate_calibration_payload(
+    calibration: dict,
+    model_config: dict,
+    forecast: dict,
+    *,
+    decision_time: datetime,
+) -> None:
+    authority = calibration.get("authority")
+    if authority not in APPROVED_CALIBRATION_AUTHORITIES:
+        raise CertificateVerificationError("calibration.authority is not approved")
+    maturity = calibration.get("maturity_level")
+    if maturity in (None, ""):
+        raise CertificateVerificationError("calibration.maturity_level missing")
+    if int(maturity) > 3:
+        raise CertificateVerificationError("calibration.maturity_level too low for live/no-submit")
+    input_space = calibration.get("input_space")
+    expected_input_space = model_config.get("calibration_input_space")
+    if input_space in (None, ""):
+        raise CertificateVerificationError("calibration.input_space missing")
+    if expected_input_space in (None, ""):
+        raise CertificateVerificationError("model_config.calibration_input_space missing")
+    if input_space != expected_input_space:
+        raise CertificateVerificationError("calibration.input_space != model_config.calibration_input_space")
+    _require_equal(
+        "calibration.horizon_profile",
+        calibration.get("horizon_profile"),
+        "forecast.horizon_profile",
+        forecast.get("horizon_profile"),
+    )
+    for field in ("training_cutoff", "model_available_at"):
+        parsed = _parse_dt(calibration.get(field))
+        if parsed is None:
+            raise CertificateVerificationError(f"calibration.{field} missing")
+        if parsed > decision_time:
+            raise CertificateVerificationError(f"calibration.{field} after decision_time")
+
+
+def _validate_unit_authority(forecast: dict, belief: dict, family: dict) -> None:
+    unit = forecast.get("unit")
+    if unit not in {"F", "C"}:
+        raise CertificateVerificationError("forecast.unit missing or unsupported")
+    if belief.get("unit") != unit:
+        raise CertificateVerificationError("belief.unit != forecast.unit")
+    units = tuple(family.get("bin_units") or ())
+    if unit not in units:
+        raise CertificateVerificationError("forecast.unit not present in family.bin_units")
+    if forecast.get("unit_authority_source") in (None, ""):
+        raise CertificateVerificationError("forecast.unit_authority_source missing")
+    if belief.get("unit_authority_source") != forecast.get("unit_authority_source"):
+        raise CertificateVerificationError("belief.unit_authority_source != forecast.unit_authority_source")
+
+
+def _validate_cost_sources(quote: dict, cost: dict) -> None:
+    for label, payload in (("quote", quote), ("cost", cost)):
+        if payload.get("forbidden_cost_source") is not False:
+            raise CertificateVerificationError(f"{label}.forbidden_cost_source must be false")
+        if payload.get("cost_source") not in ALLOWED_COST_SOURCES:
+            raise CertificateVerificationError(f"{label}.cost_source is not native orderbook")
+        if payload.get("quote_source_kind") not in ALLOWED_QUOTE_SOURCE_KINDS:
+            raise CertificateVerificationError(f"{label}.quote_source_kind is not executable native book")
 
 
 def _parents_by_type(parents: tuple[DecisionCertificate, ...]) -> dict[str, DecisionCertificate]:
@@ -256,6 +404,17 @@ def _normalize_forecast_status(status: object) -> str | None:
     if raw in {"LIVE_ELIGIBLE", "OK", "EXECUTABLE_FORECAST_READY", "VERIFIED"}:
         return "LIVE_ELIGIBLE"
     return None
+
+
+def _parse_dt(value: object) -> datetime | None:
+    if value in (None, ""):
+        return None
+    if isinstance(value, datetime):
+        return _utc(value)
+    try:
+        return _utc(datetime.fromisoformat(str(value).replace("Z", "+00:00")))
+    except ValueError:
+        return None
 
 
 def _forbid_public_market_channel_fill(parents: tuple[DecisionCertificate, ...]) -> None:

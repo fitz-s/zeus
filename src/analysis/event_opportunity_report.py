@@ -29,6 +29,11 @@ def build_event_opportunity_report(conn: sqlite3.Connection) -> dict[str, object
           ON cert.certificate_type = 'NoSubmitDecisionCertificate'
          AND cert.semantic_key = 'no_submit:' || receipt.event_id || ':' || receipt.final_intent_id
          AND cert.verifier_status = 'VERIFIED'
+         AND receipt.final_intent_id = json_extract(cert.payload_json, '$.final_intent_id')
+         AND receipt.side_effect_status = json_extract(cert.payload_json, '$.side_effect_status')
+         AND receipt.executable_snapshot_id = json_extract(cert.payload_json, '$.executable_snapshot_id')
+         AND json_extract(cert.payload_json, '$.proof_accepted') = 1
+         AND json_extract(cert.payload_json, '$.submitted') = 0
          AND NOT EXISTS (
              SELECT 1
              FROM decision_certificate_supersessions AS supersession
