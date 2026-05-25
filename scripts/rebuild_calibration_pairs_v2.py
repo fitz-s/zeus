@@ -144,6 +144,111 @@ REBUILD_COMPLETE_META_PREFIX = "calibration_pairs_v2_rebuild_complete"
 
 MIN_TRAINING_DATE = "2024-01-01"
 
+# ---------------------------------------------------------------------------
+# Predictive-error model (universal location+scale+gate+transport) — opt-in.
+# ---------------------------------------------------------------------------
+# Flag value accepted by --error-model. When OFF (None) the rebuild is
+# byte-identical to current main. The universal model is fit per
+# (city, season, metric) bucket using the OpenData live residual likelihood
+# transported from the TIGGE prior, and applied PRE-MC: corrected members =
+# members - effective_bias, with the MC draw widened by total_residual_sd.
+ERROR_MODEL_FULL_TRANSPORT_V1 = "full_transport_v1"
+SUPPORTED_ERROR_MODELS = (ERROR_MODEL_FULL_TRANSPORT_V1,)
+
+# Residual-likelihood source (live) and prior, keyed by metric track. The error
+# model fit reads OpenData live residuals + TIGGE prior + paired Δ to build the
+# location+scale; this is independent of which data_version the snapshot being
+# corrected carries (snapshots rebuilt are the TIGGE-prior archive).
+_ERROR_MODEL_DATA_VERSIONS = {
+    "high": {
+        "live": "ecmwf_opendata_mx2t3_local_calendar_day_max_v1",
+        "prior": "tigge_mx2t6_local_calendar_day_max_v1",
+    },
+    "low": {
+        "live": "ecmwf_opendata_mn2t3_local_calendar_day_min_v1",
+        "prior": "tigge_mn2t6_local_calendar_day_min_v1",
+    },
+}
+
+# Minimum OpenData live pairs before the live likelihood updates the prior. Set
+# below the #334 default (20) per the task brief (min_live_n=5): the OpenData
+# lineage is young, so a lower floor lets confident buckets correct while the
+# SNR gate (λ) still suppresses unstable shifts.
+_ERROR_MODEL_MIN_LIVE_N = 5
+
+
+def _calendar_season_months(target_date: str) -> tuple[int, ...]:
+    """Return the 3-month CALENDAR group containing target_date's month.
+
+    Hemisphere-INDEPENDENT on purpose: ``load_bucket_residuals`` filters
+    residuals by ``int(target_date[5:7]) in season_months`` (raw calendar
+    month), so the correct grouping is the calendar trimester, not the
+    hemisphere-flipped season label. A southern-hemisphere city in January
+    still draws its residual bucket from {12,1,2} rows of the SAME city, which
+    is the physically-matched set.
+    """
+    month = int(str(target_date)[5:7])
+    if month in (12, 1, 2):
+        return (12, 1, 2)
+    if month in (3, 4, 5):
+        return (3, 4, 5)
+    if month in (6, 7, 8):
+        return (6, 7, 8)
+    return (9, 10, 11)
+
+
+def _native_error_params_for_snapshot(
+    conn: sqlite3.Connection,
+    *,
+    city: City,
+    target_date: str,
+    spec: CalibrationMetricSpec,
+    error_model_family: str,
+    cache: dict,
+) -> tuple[float, float] | None:
+    """Fit (or cache) the bucket PredictiveErrorModel and convert it to the
+    members' NATIVE unit. Returns (error_bias_native, error_extra_sigma_native)
+    or None when no usable error model exists for the bucket (fail-open: the
+    snapshot is then rebuilt uncorrected).
+
+    Caches the °C model per (city, season_label, metric) for the lifetime of one
+    rebuild_v2 call. The °C→native conversion is a pure scalar (×1.8 for degF)
+    applied per snapshot so a single cached fit serves every snapshot in the
+    bucket.
+    """
+    from src.calibration.ens_error_model import (
+        _c_to_native_scale,
+        fit_city_predictive_error,
+    )
+
+    metric = spec.identity.temperature_metric
+    season_label = season_from_date(target_date, lat=city.lat)
+    season_months = _calendar_season_months(target_date)
+    cache_key = (city.name, season_label, metric)
+    if cache_key not in cache:
+        versions = _ERROR_MODEL_DATA_VERSIONS.get(metric)
+        model = None
+        if versions is not None:
+            try:
+                model = fit_city_predictive_error(
+                    conn,
+                    city=city.name,
+                    live_data_version=versions["live"],
+                    prior_data_version=versions["prior"],
+                    season_months=season_months,
+                    metric=metric,
+                    min_live_n=_ERROR_MODEL_MIN_LIVE_N,
+                )
+            except ValueError:
+                # No TIGGE prior residuals for this city/season — fail open.
+                model = None
+        cache[cache_key] = model
+    model = cache[cache_key]
+    if model is None:
+        return None
+    scale = _c_to_native_scale(city.settlement_unit)
+    return (model.effective_bias_c * scale, model.total_residual_sd_c * scale)
+
 
 @dataclass
 class RebuildStatsV2:
@@ -1017,6 +1122,8 @@ def _pre_compute_snapshot_v2(
     *,
     spec: CalibrationMetricSpec,
     stats: RebuildStatsV2,
+    error_model_family: Optional[str] = None,
+    error_cache: Optional[dict] = None,
 ) -> Optional[dict]:
     """Run all pre-MC validation gates for one snapshot in main process.
 
@@ -1025,6 +1132,12 @@ def _pre_compute_snapshot_v2(
     appropriate ``stats`` counter and returns None. Gate ORDER mirrors
     ``_process_snapshot_v2`` exactly so RebuildStatsV2 counters match the
     sequential path under both --workers=1 and --workers>1.
+
+    When ``error_model_family`` is set (e.g. 'full_transport_v1') the survivor
+    additionally carries ``error_bias_native`` / ``error_extra_sigma_native``
+    (members' native unit) so the MC step subtracts the gated bias pre-draw and
+    widens the predictive distribution. When None, no error fields are added and
+    the downstream MC path is byte-identical to the legacy rebuild.
     """
     target_date = snapshot["target_date"]
     data_version = snapshot["data_version"] or ""
@@ -1087,10 +1200,28 @@ def _pre_compute_snapshot_v2(
         print(f"  UNIT-VS-OBS-REJECT {city.name}/{target_date}: {e}")
         return None
 
-    return {
+    survivor = {
         "member_maxes": [float(x) for x in member_maxes],
         "settlement_value": float(settlement_value),
     }
+
+    # Predictive-error model (opt-in). Fit/cached per (city, season, metric) and
+    # converted to the members' native unit. Fail-open: a bucket with no usable
+    # model leaves the survivor unannotated and is rebuilt uncorrected.
+    if error_model_family:
+        params = _native_error_params_for_snapshot(
+            conn,
+            city=city,
+            target_date=target_date,
+            spec=spec,
+            error_model_family=error_model_family,
+            cache=error_cache if error_cache is not None else {},
+        )
+        if params is not None:
+            survivor["error_bias_native"] = float(params[0])
+            survivor["error_extra_sigma_native"] = float(params[1])
+
+    return survivor
 
 
 def _write_snapshot_pairs_v2(
@@ -1104,8 +1235,14 @@ def _write_snapshot_pairs_v2(
     bin_labels: Optional[list[str]] = None,
     winning_bin_label: Optional[str] = None,
     stats: RebuildStatsV2,
+    bias_corrected: bool = False,
+    error_model_family: str = "none",
 ) -> None:
     """Write calibration_pairs_v2 rows for one MC-computed snapshot in main.
+
+    When the snapshot's p_raw was computed under a predictive-error correction,
+    ``bias_corrected=True`` and ``error_model_family`` stamp the provenance so
+    the Platt refit + serving guard can key on the exact correction family.
 
     ``p_raw_vec`` is the MC output (list[float] or np.ndarray).
     ``settlement_value`` is the validated obs value already produced by
@@ -1204,6 +1341,8 @@ def _write_snapshot_pairs_v2(
             cycle=_rb_cycle,
             source_id=_rb_source_id,
             horizon_profile=_rb_horizon_profile,
+            bias_corrected=bias_corrected,
+            error_model_family=error_model_family,
         )
         pairs_this_snapshot += 1
 
@@ -1221,14 +1360,23 @@ def _process_snapshot_v2(
     n_mc: Optional[int],
     rng: np.random.Generator,
     stats: RebuildStatsV2,
+    error_model_family: Optional[str] = None,
+    error_cache: Optional[dict] = None,
 ) -> None:
     """Sequential path: pre-compute gates → MC → write, byte-identical to legacy.
 
     This is the workers=1 path. It composes the same primitives that the
     parallel path uses (``_pre_compute_snapshot_v2`` and
     ``_write_snapshot_pairs_v2``) so behavior cannot drift between the two.
+
+    When ``error_model_family`` is set and the survivor carries error params, the
+    members are corrected (members - effective_bias) pre-MC and the MC draw is
+    widened by the extra residual sigma. When unset, the path is byte-identical.
     """
-    survivor = _pre_compute_snapshot_v2(conn, snapshot, city, spec=spec, stats=stats)
+    survivor = _pre_compute_snapshot_v2(
+        conn, snapshot, city, spec=spec, stats=stats,
+        error_model_family=error_model_family, error_cache=error_cache,
+    )
     if survivor is None:
         return
 
@@ -1236,14 +1384,21 @@ def _process_snapshot_v2(
     grid = grid_for_city(city)
     bins = grid.as_bins()
     sem = SettlementSemantics.for_city(city)
-    p_raw_vec = p_raw_vector_from_maxes(
-        member_maxes,
-        city,
-        sem,
-        bins,
-        n_mc=n_mc,
-        rng=rng,
-    )
+
+    error_bias = survivor.get("error_bias_native")
+    extra_sigma = survivor.get("error_extra_sigma_native")
+    applied_family = "none"
+    if error_model_family and error_bias is not None:
+        corrected = member_maxes - float(error_bias)
+        p_raw_vec = p_raw_vector_from_maxes(
+            corrected, city, sem, bins, n_mc=n_mc, rng=rng,
+            extra_member_sigma=float(extra_sigma),
+        )
+        applied_family = error_model_family
+    else:
+        p_raw_vec = p_raw_vector_from_maxes(
+            member_maxes, city, sem, bins, n_mc=n_mc, rng=rng,
+        )
     _write_snapshot_pairs_v2(
         conn,
         snapshot,
@@ -1254,6 +1409,8 @@ def _process_snapshot_v2(
         bin_labels=None,
         winning_bin_label=None,
         stats=stats,
+        bias_corrected=(applied_family != "none"),
+        error_model_family=applied_family,
     )
 
 
@@ -1329,6 +1486,7 @@ def rebuild_v2(
     workers: int = 1,
     mc_seed_base: Optional[int] = None,
     chunker: Optional[BulkChunker] = None,
+    error_model_family: Optional[str] = None,
 ) -> RebuildStatsV2:
     """Run the v2 rebuild end-to-end, sharded per (city, metric) bucket.
 
@@ -1341,6 +1499,15 @@ def rebuild_v2(
     )
     if rng is None:
         rng = np.random.default_rng()
+
+    if error_model_family and error_model_family not in SUPPORTED_ERROR_MODELS:
+        raise ValueError(
+            f"unsupported --error-model {error_model_family!r}; "
+            f"supported: {SUPPORTED_ERROR_MODELS!r}"
+        )
+    # Per-(city, season, metric) PredictiveErrorModel cache, lifetime = one
+    # rebuild_v2 call. Shared by the sequential and parallel pre-compute paths.
+    error_cache: dict = {}
 
     stats = RebuildStatsV2()
 
@@ -1363,6 +1530,7 @@ def rebuild_v2(
     print(f"Bin source tag:    {CANONICAL_BIN_SOURCE_V2!r}")
     print(f"MetricIdentity:    {spec.identity}")
     print(f"n_mc per snapshot: {effective_n_mc}")
+    print(f"Error model:       {error_model_family or 'none (byte-identical to main)'}")
 
     snapshots = _fetch_eligible_snapshots_v2(
         conn,
@@ -1501,6 +1669,8 @@ def rebuild_v2(
             n_mc=effective_n_mc,
             seed_base=mc_seed_base,
             stats=stats,
+            error_model_family=error_model_family,
+            error_cache=error_cache,
         )
     else:
         start = time.monotonic()
@@ -1532,6 +1702,8 @@ def rebuild_v2(
                         n_mc=effective_n_mc,
                         rng=rng,
                         stats=stats,
+                        error_model_family=error_model_family,
+                        error_cache=error_cache,
                     )
                     if stats.snapshots_processed % 500 == 0 and stats.snapshots_processed > 0:
                         elapsed = time.monotonic() - start
@@ -1661,6 +1833,7 @@ def rebuild_all_v2(
     workers: int = 1,
     mc_seed_base: Optional[int] = None,
     chunker: Optional[BulkChunker] = None,
+    error_model_family: Optional[str] = None,
 ) -> dict[str, RebuildStatsV2]:
     """Rebuild calibration_pairs_v2 for all METRIC_SPECS.
 
@@ -1695,6 +1868,7 @@ def rebuild_all_v2(
             workers=workers,
             mc_seed_base=mc_seed_base,
             chunker=chunker,
+            error_model_family=error_model_family,
         )
         per_metric[spec.identity.temperature_metric] = stats
 
@@ -1809,6 +1983,15 @@ def main() -> int:
             "their seed as (seed_base + worker_index) for reproducibility."
         ),
     )
+    parser.add_argument(
+        "--error-model", dest="error_model", default=None,
+        choices=SUPPORTED_ERROR_MODELS,
+        help=(
+            "Opt-in predictive-error correction applied PRE-MC (location + "
+            "scale + SNR-gate + 0.5->0.25 transport). OFF (default) is "
+            "byte-identical to main. Currently: 'full_transport_v1'."
+        ),
+    )
     args = parser.parse_args()
 
     write_db_path: Path | None = None
@@ -1854,6 +2037,7 @@ def main() -> int:
                 source_id_filter=args.source_id,
                 horizon_profile_filter=args.horizon_profile,
                 n_mc=args.n_mc,
+                error_model_family=args.error_model,
             )
         except Exception as e:
             print(f"ERROR: {type(e).__name__}: {e}", file=sys.stderr)
@@ -1916,6 +2100,7 @@ def main() -> int:
                     workers=args.workers,
                     mc_seed_base=args.mc_seed_base,
                     chunker=chunker,
+                    error_model_family=args.error_model,
                 )
             except Exception as e:
                 print(f"ERROR: {type(e).__name__}: {e}", file=sys.stderr)

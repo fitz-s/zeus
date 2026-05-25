@@ -123,6 +123,16 @@ def _v2_pairs_table_has_stratification(conn: sqlite3.Connection) -> bool:
     )
 
 
+def _v2_pairs_table_has_error_model_family(conn: sqlite3.Connection) -> bool:
+    """True iff calibration_pairs_v2 has the error_model_family column.
+
+    Used by add_calibration_pair_v2 to choose whether to write the predictive-
+    error provenance tag. Pre-migration fixtures lack the column so callers
+    silently fall back to the unstamped INSERT (family is implicitly 'none').
+    """
+    return has_columns(conn, "calibration_pairs_v2", "error_model_family")
+
+
 def infer_bin_width_from_label(range_label: str) -> float | None:
     """Infer finite bin width from a stored range label.
 
@@ -253,6 +263,7 @@ def add_calibration_pair_v2(
     cycle: Optional[str] = None,
     source_id: Optional[str] = None,
     horizon_profile: Optional[str] = None,
+    error_model_family: str = "none",
 ) -> None:
     """Insert a calibration pair into calibration_pairs_v2.
 
@@ -288,14 +299,22 @@ def add_calibration_pair_v2(
     # schema raised OperationalError; now we route to the legacy INSERT
     # form so legacy callers and partial-schema fixtures keep working.
     _has_strat_pairs = _v2_pairs_table_has_stratification(conn)
+    # error_model_family (2026-05-24): predictive-error provenance tag. The
+    # column is additive (ADD COLUMN DEFAULT 'none'); pre-migration fixtures lack
+    # it, so we only append the column + value when present. 'none' is the
+    # byte-identical-to-legacy default so unflagged rebuilds are unaffected.
+    _has_emf = _v2_pairs_table_has_error_model_family(conn)
+    _emf_col = ", error_model_family" if _has_emf else ""
+    _emf_ph = ", ?" if _has_emf else ""
+    _emf_val = (error_model_family,) if _has_emf else ()
     if cycle is None and source_id is None and horizon_profile is None or not _has_strat_pairs:
-        conn.execute("""
+        conn.execute(f"""
             INSERT INTO calibration_pairs_v2
             (city, target_date, temperature_metric, observation_field, range_label,
              p_raw, outcome, lead_days, season, cluster, forecast_available_at,
              settlement_value, decision_group_id, bias_corrected, authority,
-             bin_source, data_version, training_allowed, causality_status, snapshot_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             bin_source, data_version, training_allowed, causality_status, snapshot_id{_emf_col})
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?{_emf_ph})
         """, (
             city, target_date,
             metric_identity.temperature_metric,
@@ -304,16 +323,16 @@ def add_calibration_pair_v2(
             forecast_available_at, settlement_value, decision_group_id,
             int(bool(bias_corrected)), authority, bin_source, data_version,
             int(effective_training_allowed), causality_status, snapshot_id,
-        ))
+        ) + _emf_val)
     else:
-        conn.execute("""
+        conn.execute(f"""
             INSERT INTO calibration_pairs_v2
             (city, target_date, temperature_metric, observation_field, range_label,
              p_raw, outcome, lead_days, season, cluster, forecast_available_at,
              settlement_value, decision_group_id, bias_corrected, authority,
              bin_source, data_version, training_allowed, causality_status, snapshot_id,
-             cycle, source_id, horizon_profile)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             cycle, source_id, horizon_profile{_emf_col})
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?{_emf_ph})
         """, (
             city, target_date,
             metric_identity.temperature_metric,
@@ -325,7 +344,7 @@ def add_calibration_pair_v2(
             cycle if cycle is not None else "00",
             source_id if source_id is not None else "tigge_mars",
             horizon_profile if horizon_profile is not None else "full",
-        ))
+        ) + _emf_val)
 
 
 def _has_authority_column(conn: sqlite3.Connection) -> bool:
@@ -572,6 +591,7 @@ def save_platt_model_v2(
     cycle: str = "00",
     source_id: str = "tigge_mars",
     horizon_profile: str = "full",
+    error_model_family: str = "none",
 ) -> None:
     """Save a fitted Platt model to platt_models_v2.
 
@@ -582,19 +602,31 @@ def save_platt_model_v2(
     Defaults match legacy 00z TIGGE archive for backward compat with un-migrated
     callers; production callers MUST pass explicit values from the calibration
     pair source.
+
+    error_model_family (2026-05-24): the predictive-error correction family the
+    source calibration_pairs_v2 rows were built under ('none' = uncorrected).
+    Appended to model_key ONLY when != 'none' so legacy/uncorrected model_keys
+    stay byte-identical to pre-error-model refits; a corrected model lives under
+    a distinct key and never collides with the uncorrected one.
     """
     model_key = (
         f"{metric_identity.temperature_metric}:{cluster}:{season}"
         f":{data_version}:{cycle}:{source_id}:{horizon_profile}:{input_space}"
     )
+    if error_model_family and error_model_family != "none":
+        model_key = f"{model_key}:emf={error_model_family}"
     now = datetime.now(timezone.utc).isoformat()
-    conn.execute("""
+    _has_emf = has_columns(conn, "platt_models_v2", "error_model_family")
+    _emf_col = ", error_model_family" if _has_emf else ""
+    _emf_ph = ", ?" if _has_emf else ""
+    _emf_val = (error_model_family,) if _has_emf else ()
+    conn.execute(f"""
         INSERT INTO platt_models_v2
         (model_key, temperature_metric, cluster, season, data_version,
          input_space, param_A, param_B, param_C, bootstrap_params_json,
          n_samples, brier_insample, fitted_at, is_active, authority,
-         cycle, source_id, horizon_profile)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)
+         cycle, source_id, horizon_profile{_emf_col})
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?{_emf_ph})
     """, (
         model_key,
         metric_identity.temperature_metric,
@@ -603,7 +635,7 @@ def save_platt_model_v2(
         json.dumps(bootstrap_params),
         n_samples, brier_insample, now, authority,
         cycle, source_id, horizon_profile,
-    ))
+    ) + _emf_val)
 
 
 def deactivate_model_v2(
@@ -617,6 +649,7 @@ def deactivate_model_v2(
     cycle: str = "00",
     source_id: str = "tigge_mars",
     horizon_profile: str = "full",
+    error_model_family: str = "none",
 ) -> int:
     """Delete the existing platt_models_v2 row for a bucket before refit.
 
@@ -630,25 +663,35 @@ def deactivate_model_v2(
     Phase 2 fix (2026-05-06): use 9-tuple column WHERE instead of reconstructed
     model_key string — matches both legacy-format-keyed and new-format-keyed rows
     by column values, not by key string reconstruction.
+
+    error_model_family (2026-05-24): scope the delete to the SAME family so a
+    corrected refit ('full_transport_v1') does NOT evict the uncorrected ('none')
+    model for the same bucket (they are distinct model_keys serving distinct
+    input spaces). When the column is absent (pre-migration), the family scope is
+    skipped and behavior is unchanged.
     """
+    where = [
+        "temperature_metric = ?",
+        "cluster = ?",
+        "season = ?",
+        "data_version = ?",
+        "input_space = ?",
+        "cycle = ?",
+        "source_id = ?",
+        "horizon_profile = ?",
+        "is_active = 1",
+    ]
+    params: list = [
+        metric_identity.temperature_metric,
+        cluster, season, data_version, input_space,
+        cycle, source_id, horizon_profile,
+    ]
+    if has_columns(conn, "platt_models_v2", "error_model_family"):
+        where.append("error_model_family = ?")
+        params.append(error_model_family)
     result = conn.execute(
-        """
-        DELETE FROM platt_models_v2
-        WHERE temperature_metric = ?
-          AND cluster = ?
-          AND season = ?
-          AND data_version = ?
-          AND input_space = ?
-          AND cycle = ?
-          AND source_id = ?
-          AND horizon_profile = ?
-          AND is_active = 1
-        """,
-        (
-            metric_identity.temperature_metric,
-            cluster, season, data_version, input_space,
-            cycle, source_id, horizon_profile,
-        ),
+        f"DELETE FROM platt_models_v2 WHERE {' AND '.join(where)}",
+        tuple(params),
     )
     return result.rowcount
 

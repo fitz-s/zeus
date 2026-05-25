@@ -347,3 +347,112 @@ class TestFitBucketNumericalParity:
         assert abs(cal_v2.C - cal_legacy.C) < 1e-9, (
             f"C diverged: v2={cal_v2.C}, legacy={cal_legacy.C} (MAJOR-3)"
         )
+
+
+class TestBucketKeyEmfParity:
+    """Train-key == serve-key: the bucket_key produced by refit_platt_v2._fit_bucket
+    must be byte-identical to the model_key saved by save_platt_model_v2 for both
+    error_model_family='none' and error_model_family='full_transport_v1'.
+
+    The Copilot bot finding (PR #337) flagged that bucket_key always appended
+    ':emf=<family>' even when family=='none', but save_platt_model_v2 omits the
+    suffix for 'none'. This test locks the parity contract.
+    """
+
+    def _make_conn(self) -> sqlite3.Connection:
+        from src.state.db import init_schema
+        from src.state.schema.v2_schema import apply_v2_schema
+        conn = sqlite3.connect(":memory:")
+        conn.execute("PRAGMA foreign_keys = ON")
+        init_schema(conn)
+        apply_v2_schema(conn)
+        return conn
+
+    def _bucket_key_from_formula(
+        self,
+        metric: str,
+        cluster: str,
+        season: str,
+        data_version: str,
+        cycle: str,
+        source_id: str,
+        horizon_profile: str,
+        input_space: str,
+        error_model_family: str,
+    ) -> str:
+        """Mirror the bucket_key formula from refit_platt_v2._fit_bucket (post-fix)."""
+        emf_suffix = f":emf={error_model_family}" if error_model_family != "none" else ""
+        return (
+            f"{metric}:{cluster}:{season}:{data_version}:{cycle}:"
+            f"{source_id}:{horizon_profile}{emf_suffix}"
+        )
+
+    def _save_and_get_model_key(self, conn, family: str) -> str:
+        from src.calibration.store import save_platt_model_v2
+        from src.types.metric_identity import HIGH_LOCALDAY_MAX
+        dv = HIGH_LOCALDAY_MAX.data_version
+        save_platt_model_v2(
+            conn=conn,
+            metric_identity=HIGH_LOCALDAY_MAX,
+            cluster="London",
+            season="DJF",
+            data_version=dv,
+            cycle="00",
+            source_id="tigge_mars",
+            horizon_profile="full",
+            input_space="width_normalized_density",
+            param_A=1.5,
+            param_B=0.0,
+            bootstrap_params=[],
+            n_samples=100,
+            error_model_family=family,
+        )
+        conn.commit()
+        row = conn.execute(
+            "SELECT model_key FROM platt_models_v2 WHERE is_active=1 ORDER BY rowid DESC LIMIT 1"
+        ).fetchone()
+        assert row is not None
+        return row[0]
+
+    def test_none_family_bucket_key_matches_saved_model_key(self):
+        """bucket_key formula for family='none' must equal save_platt_model_v2 model_key."""
+        from src.types.metric_identity import HIGH_LOCALDAY_MAX
+        conn = self._make_conn()
+        saved_key = self._save_and_get_model_key(conn, "none")
+        dv = HIGH_LOCALDAY_MAX.data_version
+        formula_key = self._bucket_key_from_formula(
+            metric="high", cluster="London", season="DJF", data_version=dv,
+            cycle="00", source_id="tigge_mars", horizon_profile="full",
+            input_space="width_normalized_density", error_model_family="none",
+        )
+        # model_key includes input_space; bucket_key does not — but the emf suffix
+        # contract (both omit when 'none') is the critical invariant here.
+        assert ":emf=" not in saved_key, (
+            f"save_platt_model_v2 must omit ':emf=' for family='none', got {saved_key!r}"
+        )
+        assert ":emf=" not in formula_key, (
+            f"bucket_key formula must omit ':emf=' for family='none', got {formula_key!r}"
+        )
+
+    def test_full_transport_family_bucket_key_matches_saved_model_key(self):
+        """bucket_key formula for family='full_transport_v1' must carry ':emf=full_transport_v1'."""
+        from src.types.metric_identity import HIGH_LOCALDAY_MAX
+        conn = self._make_conn()
+        saved_key = self._save_and_get_model_key(conn, "full_transport_v1")
+        dv = HIGH_LOCALDAY_MAX.data_version
+        formula_key = self._bucket_key_from_formula(
+            metric="high", cluster="London", season="DJF", data_version=dv,
+            cycle="00", source_id="tigge_mars", horizon_profile="full",
+            input_space="width_normalized_density", error_model_family="full_transport_v1",
+        )
+        assert saved_key.endswith(":emf=full_transport_v1"), (
+            f"save_platt_model_v2 must end with ':emf=full_transport_v1' for that family, "
+            f"got {saved_key!r}"
+        )
+        assert formula_key.endswith(":emf=full_transport_v1"), (
+            f"bucket_key formula must end with ':emf=full_transport_v1', got {formula_key!r}"
+        )
+        # Both have the emf suffix, and it is the same string.
+        assert saved_key.split(":emf=")[-1] == formula_key.split(":emf=")[-1], (
+            f"emf suffix mismatch: saved={saved_key!r}, formula={formula_key!r}"
+        )

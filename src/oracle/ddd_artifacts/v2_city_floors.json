@@ -425,6 +425,19 @@
       "sigma_diagnostic": 0.040811,
       "floor_source": "empirical_p05"
     },
+    "Qingdao": {
+      "p05": 1.0,
+      "p10": 1.0,
+      "p25": 1.0,
+      "recommended_floor_empirical": 1.0,
+      "policy_override": null,
+      "final_floor": 1.0,
+      "train_FP_rate": null,
+      "n_zero_train": 0,
+      "sigma_diagnostic": null,
+      "floor_source": "empirical_p05_from_current_obs_v2_2026-05-24",
+      "_onboard_note": "Qingdao added 2026-05-24 (fix/ddd-config-qingdao-nstar) to close SEV-1 silent DDD_CITY_UNCONFIGURED lockout. City has training data + oracle evidence (23 obs, 0 mismatch) but was absent from DDD configs. Floor computed from current observation_instants_v2 (source=wu_icao_history, data_version=v1.wu-native, 22 distinct target_dates): HIGH window [11-17] and LOW window [23,0-5] both mean cov 0.994, min 0.857, p05=1.0 -> final_floor=max(1.0,0.35)=1.0 (joins healthy cluster). Provenance differs from the 2026-05-03 batch (computed on current obs_v2, not the original frozen training snapshot); see branch report. train_FP_rate/sigma_diagnostic null: not recomputed under original methodology."
+    },
     "Paris": {
       "p05": 1.0,
       "p10": 1.0,

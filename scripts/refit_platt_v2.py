@@ -414,6 +414,7 @@ def _fetch_buckets(
     cycle_filter: str | None = None,
     source_id_filter: str | None = None,
     horizon_profile_filter: str | None = None,
+    error_model_family: str = "none",
 ) -> list[sqlite3.Row]:
     """Fetch metric-scoped buckets with sufficient maturity from calibration_pairs_v2."""
     columns = _table_columns(conn, "calibration_pairs_v2")
@@ -459,6 +460,14 @@ def _fetch_buckets(
         where, params, column="horizon_profile", value=horizon_profile_filter,
         default="full", columns=columns,
     )
+    # error_model_family scoping (mirror of _fetch_pairs_for_bucket): the
+    # maturity count must be computed on family-scoped pairs so a corrected
+    # refit only sees corrected pairs.
+    if "error_model_family" in columns:
+        where.append("error_model_family = ?")
+        params.append(error_model_family)
+    elif error_model_family != "none":
+        where.append("1 = 0")
     _append_bucket_key_filter(where, params, affected_keys, columns)
     params.append(MIN_DECISION_GROUPS)
     cycle_expr = _dimension_expr(columns, "cycle", "00")
@@ -486,6 +495,7 @@ def _fetch_pairs_for_bucket(
     source_id: str,
     horizon_profile: str,
     metric_identity: MetricIdentity,
+    error_model_family: str = "none",
 ) -> list[sqlite3.Row]:
     columns = _table_columns(conn, "calibration_pairs_v2")
     where = [
@@ -505,6 +515,15 @@ def _fetch_pairs_for_bucket(
         season,
         data_version,
     ]
+    # error_model_family scoping: only train on pairs built under the requested
+    # correction family. When the column is absent (pre-migration), only 'none'
+    # is meaningful — any other family selects nothing (1=0). This keeps a
+    # corrected refit from silently mixing uncorrected pairs.
+    if "error_model_family" in columns:
+        where.append("error_model_family = ?")
+        params.append(error_model_family)
+    elif error_model_family != "none":
+        where.append("1 = 0")
     _append_optional_dimension_filter(
         where, params, column="cycle", value=cycle, default="00", columns=columns,
     )
@@ -670,15 +689,18 @@ def _fit_bucket(
     metric_identity: MetricIdentity,
     dry_run: bool,
     stats: RefitStatsV2,
+    error_model_family: str = "none",
 ) -> None:
     pairs = _fetch_pairs_for_bucket(
         conn, cluster, season, data_version,
         cycle, source_id, horizon_profile, metric_identity,
+        error_model_family=error_model_family,
     )
     n_eff = len({p["decision_group_id"] for p in pairs})
+    _emf_suffix = f":emf={error_model_family}" if error_model_family != "none" else ""
     bucket_key = (
         f"{metric_identity.temperature_metric}:{cluster}:{season}:"
-        f"{data_version}:{cycle}:{source_id}:{horizon_profile}"
+        f"{data_version}:{cycle}:{source_id}:{horizon_profile}{_emf_suffix}"
     )
 
     if n_eff < MIN_DECISION_GROUPS:
@@ -784,6 +806,7 @@ def _fit_bucket(
             source_id=source_id,
             horizon_profile=horizon_profile,
             input_space=cal.input_space,
+            error_model_family=error_model_family,
         )
         stats.deactivated_rows += deactivated
     else:
@@ -837,6 +860,7 @@ def _fit_bucket(
         brier_insample=brier_insample,
         input_space=cal.input_space,
         authority=authority,
+        error_model_family=error_model_family,
     )
 
     print(f"{label} {bucket_key:50s} {summary} authority={authority}")
@@ -863,6 +887,7 @@ def refit_v2(
     source_id_filter: str | None = None,
     horizon_profile_filter: str | None = None,
     rebuild_n_mc: int | None = None,
+    error_model_family: str = "none",
 ) -> RefitStatsV2:
     stats = RefitStatsV2()
 
@@ -871,6 +896,7 @@ def refit_v2(
     print("=" * 70)
     print(f"Mode:           {'DRY-RUN' if dry_run else 'LIVE WRITE'}")
     print(f"MetricIdentity: {metric_identity}")
+    print(f"Error model:    {error_model_family}")
     seasons_display = ",".join(_normalize_multi_filter(season_filter)) or "*"
     if (
         city_filter or start_date or end_date or cluster_filter
@@ -907,6 +933,7 @@ def refit_v2(
         cycle_filter=cycle_filter,
         source_id_filter=source_id_filter,
         horizon_profile_filter=horizon_profile_filter,
+        error_model_family=error_model_family,
     )
     stats.buckets_scanned = len(buckets)
     print(f"Buckets eligible (n_eff >= {MIN_DECISION_GROUPS}): {stats.buckets_scanned}")
@@ -956,9 +983,10 @@ def refit_v2(
             cycle = bucket["cycle"]
             source_id = bucket["source_id"]
             horizon_profile = bucket["horizon_profile"]
+            _bucket_emf_suffix = f":emf={error_model_family}" if error_model_family != "none" else ""
             bucket_key = (
                 f"{metric_identity.temperature_metric}:{cluster}:{season}:"
-                f"{data_version}:{cycle}:{source_id}:{horizon_profile}"
+                f"{data_version}:{cycle}:{source_id}:{horizon_profile}{_bucket_emf_suffix}"
             )
             print(
                 f"[{bucket_idx}/{len(buckets)}] starting bucket {bucket_key}",
@@ -972,6 +1000,7 @@ def refit_v2(
                     conn, cluster, season, data_version,
                     cycle, source_id, horizon_profile,
                     metric_identity=metric_identity, dry_run=dry_run, stats=stats,
+                    error_model_family=error_model_family,
                 )
                 conn.execute(f"RELEASE SAVEPOINT {sp_name}")
                 elapsed = time.monotonic() - t0
@@ -1113,6 +1142,7 @@ def refit_all_v2(
     source_id_filter: str | None = None,
     horizon_profile_filter: str | None = None,
     rebuild_n_mc: int | None = None,
+    error_model_family: str = "none",
 ) -> dict[str, RefitStatsV2]:
     """Refit Platt v2 models for ALL METRIC_SPECS in one invocation.
 
@@ -1141,6 +1171,7 @@ def refit_all_v2(
             source_id_filter=source_id_filter,
             horizon_profile_filter=horizon_profile_filter,
             rebuild_n_mc=rebuild_n_mc,
+            error_model_family=error_model_family,
         )
         per_metric[spec.identity.temperature_metric] = stats
     return per_metric
@@ -1201,6 +1232,18 @@ def main() -> int:
         help="Monte Carlo scope used by the source rebuild sentinel; omit for rebuild default.",
     )
     parser.add_argument(
+        "--error-model",
+        dest="error_model",
+        default="none",
+        help=(
+            "Predictive-error correction family the source calibration_pairs_v2 "
+            "rows were built under. 'none' (default) trains on uncorrected pairs "
+            "and keeps legacy model_keys byte-identical; 'full_transport_v1' "
+            "trains on full_transport_v1-corrected pairs and tags the model_key + "
+            "error_model_family column so the serving guard can enforce match."
+        ),
+    )
+    parser.add_argument(
         "--strict", dest="strict", action="store_true", default=False,
         help=(
             "Fix D: fail-fast mode — if ANY bucket fails, roll back ALL buckets "
@@ -1257,6 +1300,7 @@ def main() -> int:
                 source_id_filter=args.source_id,
                 horizon_profile_filter=args.horizon_profile,
                 rebuild_n_mc=args.rebuild_n_mc,
+                error_model_family=args.error_model,
             )
         except Exception as e:
             print(f"ERROR: {type(e).__name__}: {e}", file=sys.stderr)
@@ -1292,6 +1336,7 @@ def main() -> int:
                 source_id_filter=args.source_id,
                 horizon_profile_filter=args.horizon_profile,
                 rebuild_n_mc=args.rebuild_n_mc,
+                error_model_family=args.error_model,
             )
         except Exception as e:
             print(f"ERROR: {type(e).__name__}: {e}", file=sys.stderr)

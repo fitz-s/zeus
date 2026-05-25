@@ -416,10 +416,11 @@
       "city": "Kuala Lumpur",
       "metric": "low",
       "total_N_dates": 95,
-      "N_star": null,
+      "N_star": 113,
       "final_brier": 0.065335,
       "final_ece": 0.125797,
-      "status": "N_STAR_NOT_FOUND"
+      "status": "POST_ONBOARD_DEFAULT",
+      "_nstar_placeholder_note": "N_star placeholder set 2026-05-24 (fix/ddd-config-qingdao-nstar) to stop the unconditional 1.25x small-sample amplifier (data_density_discount.py:265 treats N_star=None as small_sample=True forever). total_N_dates=95 is below the calibration-stability threshold so a city-specific N_star was not computable, but these are NOT small-sample-forever — N_star set to the healthy low-track median (113) per the Paris/POST_WORKSTREAM_A_DEFAULT precedent. Amplifier now fires only when live N_platt < 113, as intended."
     },
     "Lagos_high": {
       "city": "Lagos",
@@ -668,10 +669,11 @@
       "city": "San Francisco",
       "metric": "low",
       "total_N_dates": 116,
-      "N_star": null,
+      "N_star": 113,
       "final_brier": 0.190236,
       "final_ece": 0.327082,
-      "status": "N_STAR_NOT_FOUND"
+      "status": "POST_ONBOARD_DEFAULT",
+      "_nstar_placeholder_note": "N_star placeholder set 2026-05-24 (fix/ddd-config-qingdao-nstar) to stop the unconditional 1.25x small-sample amplifier (data_density_discount.py:265 treats N_star=None as small_sample=True forever). total_N_dates=116 is below the calibration-stability threshold so a city-specific N_star was not computable, but these are NOT small-sample-forever — N_star set to the healthy low-track median (113) per the Paris/POST_WORKSTREAM_A_DEFAULT precedent. Amplifier now fires only when live N_platt < 113, as intended."
     },
     "Sao Paulo_high": {
       "city": "Sao Paulo",
@@ -704,10 +706,11 @@
       "city": "Seattle",
       "metric": "low",
       "total_N_dates": 97,
-      "N_star": null,
+      "N_star": 113,
       "final_brier": 0.144268,
       "final_ece": 0.265678,
-      "status": "N_STAR_NOT_FOUND"
+      "status": "POST_ONBOARD_DEFAULT",
+      "_nstar_placeholder_note": "N_star placeholder set 2026-05-24 (fix/ddd-config-qingdao-nstar) to stop the unconditional 1.25x small-sample amplifier (data_density_discount.py:265 treats N_star=None as small_sample=True forever). total_N_dates=97 is below the calibration-stability threshold so a city-specific N_star was not computable, but these are NOT small-sample-forever — N_star set to the healthy low-track median (113) per the Paris/POST_WORKSTREAM_A_DEFAULT precedent. Amplifier now fires only when live N_platt < 113, as intended."
     },
     "Seoul_high": {
       "city": "Seoul",
@@ -776,10 +779,11 @@
       "city": "Singapore",
       "metric": "low",
       "total_N_dates": 123,
-      "N_star": null,
+      "N_star": 113,
       "final_brier": 0.075199,
       "final_ece": 0.171973,
-      "status": "N_STAR_NOT_FOUND"
+      "status": "POST_ONBOARD_DEFAULT",
+      "_nstar_placeholder_note": "N_star placeholder set 2026-05-24 (fix/ddd-config-qingdao-nstar) to stop the unconditional 1.25x small-sample amplifier (data_density_discount.py:265 treats N_star=None as small_sample=True forever). total_N_dates=123 is below the calibration-stability threshold so a city-specific N_star was not computable, but these are NOT small-sample-forever — N_star set to the healthy low-track median (113) per the Paris/POST_WORKSTREAM_A_DEFAULT precedent. Amplifier now fires only when live N_platt < 113, as intended."
     },
     "Taipei_high": {
       "city": "Taipei",
@@ -906,6 +910,26 @@
       "final_brier": 0.088243,
       "final_ece": 0.219427,
       "status": "OK"
+    },
+    "Qingdao_high": {
+      "city": "Qingdao",
+      "metric": "high",
+      "total_N_dates": 22,
+      "N_star": 110,
+      "final_brier": null,
+      "final_ece": null,
+      "status": "POST_ONBOARD_DEFAULT",
+      "_note": "Qingdao added 2026-05-24 (fix/ddd-config-qingdao-nstar) to close SEV-1 silent DDD lockout. Only 22 distinct training target_dates in observation_instants_v2 — far below the calibration-stability threshold, so a city-specific N_star is not computable. N_star set to the healthy high-track median (110) per the Paris/POST_WORKSTREAM_A_DEFAULT precedent. Recompute when Qingdao accumulates >~200 training dates."
+    },
+    "Qingdao_low": {
+      "city": "Qingdao",
+      "metric": "low",
+      "total_N_dates": 22,
+      "N_star": 113,
+      "final_brier": null,
+      "final_ece": null,
+      "status": "POST_ONBOARD_DEFAULT",
+      "_note": "Qingdao added 2026-05-24 (fix/ddd-config-qingdao-nstar) to close SEV-1 silent DDD lockout. Only 22 distinct training target_dates in observation_instants_v2 — far below the calibration-stability threshold, so a city-specific N_star is not computable. N_star set to the healthy low-track median (113) per the Paris/POST_WORKSTREAM_A_DEFAULT precedent. Recompute when Qingdao accumulates >~200 training dates."
     },
     "Paris_high": {
       "city": "Paris",

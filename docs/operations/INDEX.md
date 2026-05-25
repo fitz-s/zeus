@@ -227,3 +227,5 @@ operator decision in the next housekeeping pass:
 - `ENS_BIAS_HIERARCHICAL_TEST_RESULTS_2026-05-24.md` — PR #334 hierarchical ENS bias foundation test results (model layer; not live-wired).
 - `ENS_PREDICTIVE_ERROR_MINIVAL_2026-05-24.md` — PR #336 predictive-error 3-city proper-score minival (model layer; not live-wired).
 - `ENS_PREDICTIVE_ERROR_GLOBAL_OOS_2026-05-24.md` — PR #336 predictive-error global blocked-OOS proof (48 cities) (model layer; not live-wired).
+- `ENS_REFIT_PLAN_2026-05-24.md` — PR #337 full_transport_v1 calibration REFIT architecture plan: isolated staging DB design, correctness proof, flag-gated rebuild+refit pipeline (model layer; not live-wired).
+- `ENS_REFIT_VALIDATION_2026-05-24.md` — PR #337 full_transport_v1 calibration REFIT validation evidence: Platt refit summary (49/50 VERIFIED), group-blocked OOS table (HIGH 14-city subset; raw LogLoss −50%, OOS LogLoss −9% coastal) (model layer; not live-wired).

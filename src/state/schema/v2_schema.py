@@ -293,10 +293,19 @@ def _create_calibration_pairs_v2(conn: sqlite3.Connection) -> None:
     # idempotent ALTER so legacy DBs migrated via
     # scripts/migrate_phase2_cycle_stratification.py converge with fresh DBs
     # built from this canonical schema. Defaults match the migration script.
+    # error_model_family (2026-05-24): predictive-error provenance tag. 'none'
+    # means raw uncorrected pairs (byte-identical to pre-error-model rebuilds);
+    # e.g. 'full_transport_v1' means the universal location+scale+gate+transport
+    # correction was applied pre-MC. Stamped per-row so the Platt refit can key
+    # its bucket model_key on the exact correction family the pairs were built
+    # under (train/serve consistency, INV-bias-state). Not in UNIQUE — SQLite
+    # cannot ALTER an existing UNIQUE, and a single rebuild scope only ever
+    # writes ONE family; the destructive delete is keyed on bin_source.
     for alter_sql in [
         "ALTER TABLE calibration_pairs_v2 ADD COLUMN cycle TEXT NOT NULL DEFAULT '00'",
         "ALTER TABLE calibration_pairs_v2 ADD COLUMN source_id TEXT NOT NULL DEFAULT 'tigge_mars'",
         "ALTER TABLE calibration_pairs_v2 ADD COLUMN horizon_profile TEXT NOT NULL DEFAULT 'full'",
+        "ALTER TABLE calibration_pairs_v2 ADD COLUMN error_model_family TEXT NOT NULL DEFAULT 'none'",
     ]:
         try:
             conn.execute(alter_sql)
@@ -548,10 +557,18 @@ def apply_v2_schema(conn: sqlite3.Connection, *, forecast_tables: bool = True) -
         # Phase 2 (2026-05-04): cycle/source_id/horizon_profile stratification —
         # idempotent ALTER for legacy DBs. Mirror of the calibration_pairs_v2
         # block above; defaults match scripts/migrate_phase2_cycle_stratification.py.
+        # error_model_family (2026-05-24): mirror of the calibration_pairs_v2
+        # column. A Platt model fit on pairs built under family F MUST advertise
+        # F so the live serving guard (assert_bias_state_consistent) can refuse a
+        # train/serve mismatch (live bias-correction enabled while the active
+        # Platt was fit on a different family's input space). Concatenated into
+        # model_key in save_platt_model_v2. Not in UNIQUE (same rationale as
+        # calibration_pairs_v2): SQLite cannot ALTER an existing UNIQUE.
         for alter_sql in [
             "ALTER TABLE platt_models_v2 ADD COLUMN cycle TEXT NOT NULL DEFAULT '00'",
             "ALTER TABLE platt_models_v2 ADD COLUMN source_id TEXT NOT NULL DEFAULT 'tigge_mars'",
             "ALTER TABLE platt_models_v2 ADD COLUMN horizon_profile TEXT NOT NULL DEFAULT 'full'",
+            "ALTER TABLE platt_models_v2 ADD COLUMN error_model_family TEXT NOT NULL DEFAULT 'none'",
         ]:
             try:
                 conn.execute(alter_sql)

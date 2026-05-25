@@ -614,7 +614,8 @@ def test_rebuild_marks_scope_in_progress_then_complete(rebuild_mod):
         FakeRow({"city": city_a, "data_version": high_spec.allowed_data_version, "snapshot_id": "s-ok"}),
     ]
 
-    def successful_process(_conn, _snap, city, *, spec, n_mc, rng, stats):
+    def successful_process(_conn, _snap, city, *, spec, n_mc, rng, stats,
+                           error_model_family=None, error_cache=None):
         stats.snapshots_processed += 1
         stats.pairs_written += 3
         stats.per_city[city.name] = 3
