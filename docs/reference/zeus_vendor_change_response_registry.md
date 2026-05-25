@@ -347,7 +347,7 @@ Pre-commit invariant baseline at `.claude/hooks/pre-commit-invariant-test.sh` �
 1. **Detection**:
    - Operator-driven (PM lists new market)
 2. **Containment**:
-   - Add city to `oracle_penalty` BLACKLIST in `config/oracle_penalty.json` (or equivalent runtime config) — no live trades until Verification gate passed
+   - Add city to `oracle_penalty` BLACKLIST in `data/oracle_error_rates.json` (loaded by `src/strategy/oracle_penalty.py` via `src.state.paths.oracle_error_rates_path`) — no live trades until Verification gate passed
    - Confirm no `SETTLEMENT_SOURCE_<CITY>` entry exists yet in `config/reality_contracts/data.yaml`; note city as uncontracted until Repair step 7
 3. **Investigation**:
    - Determine PM settlement source URL → primary station
@@ -362,7 +362,7 @@ Pre-commit invariant baseline at `.claude/hooks/pre-commit-invariant-test.sh` �
    4. Layer 3: ensure clients accept the new ICAO (check OGIMET_CITIES dict at `src/data/daily_obs_append.py:1019` if city needs Ogimet)
    5. Layer 12: extend AST guard TARGETS list if new script written
    6. Layer 6: run `scripts/onboard_cities.py` pipeline — backfills `observation_instants_v2` (zeus-world.db, SCHEMA_VERSION=35) + `ensemble_snapshots_v2` (zeus-forecasts.db, SCHEMA_FORECASTS_VERSION=7) + triggers `rebuild_calibration_pairs_canonical.py`
-   7. Layer 6b: populate `model_bias_ens_v2` (zeus-forecasts.db, SCHEMA_FORECASTS_VERSION=7) via `src/calibration/ens_bias_repo.py` — defaults are `contributor_policy='full_contributor_only'`, bias normalized to degC (`members_unit`), `prior_data_version` propagated from ensemble source
+   7. Layer 6b: populate `model_bias_ens_v2` (zeus-forecasts.db, SCHEMA_FORECASTS_VERSION=7, **pending ENS-refit forecasts-schema migration PR #337 — table not yet in production schema**) via `src/calibration/ens_bias_repo.py` — defaults are `contributor_policy='full_contributor_only'`, bias normalized to degC (`members_unit`), `prior_data_version` propagated from ensemble source
    8. Layer 6c: run `scripts/watch_source_contract.py` to validate Gamma settlement-source consistency for new city; address any ALERT before proceeding
    9. Layer 6d: add `SETTLEMENT_SOURCE_<CITY>` entry to `config/reality_contracts/data.yaml` (blocking criticality, appropriate `unit`, `rounding`, `ttl_seconds`, `on_change_handlers`)
    10. Layer 8: keep DDD multiplier-adjusted small-sample floor active until N ≥ 1000 calibration pairs

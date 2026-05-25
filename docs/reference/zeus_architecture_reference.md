@@ -15,9 +15,9 @@ Zeus is a **live weather settlement-contract trading runtime** for Polymarket.
 `contract semantics -> source truth -> forecast signal -> calibration -> edge -> execution -> monitoring -> settlement -> learning`
 
 **The Probability Chain:**
-`51 ENS members -> ENS bias correction (empirical-Bayes, pre-MC) -> per-member daily max -> Monte Carlo (sensor noise + ASOS rounding) -> P_raw -> Extended Platt (A·logit + B·lead_days + C) -> P_cal -> α-weighted Market Fusion -> P_posterior -> Edge & Double-Bootstrap CI -> Fractional Kelly (× DDD oracle-coverage discount) -> Position Size`
+`51 ENS members -> ENS bias correction (empirical-Bayes, pre-MC; flag-gated, default off) -> per-member daily max -> Monte Carlo (sensor noise + ASOS rounding) -> P_raw -> Extended Platt (A·logit + B·lead_days + C) -> P_cal -> α-weighted Market Fusion -> P_posterior -> Edge & Double-Bootstrap CI -> Fractional Kelly (× DDD oracle-coverage discount) -> Position Size`
 
-ENS bias correction is empirical-Bayes shrinkage of the TIGGE structural prior toward live OpenData residuals, SNR-gated and applied to member extrema before Monte Carlo (`src/calibration/ens_bias_model.py`, `ens_error_model.py`; PRs #334/#336). The final Kelly size is scaled by the Data Density Discount (DDD) when observation coverage is thin (see Subsystem Map).
+ENS bias correction is empirical-Bayes shrinkage of the TIGGE structural prior toward live OpenData residuals, SNR-gated and applied to member extrema before Monte Carlo (`src/calibration/ens_bias_model.py`, `src/calibration/ens_error_model.py`; PRs #334/#336). This step is flag-gated (`settings.bias_correction_enabled`, default `false`) and not yet active in production — activation pending. The final Kelly size is scaled by the Data Density Discount (DDD) when observation coverage is thin (see Subsystem Map).
 
 ### Platform Configuration & Change Control
 

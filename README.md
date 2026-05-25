@@ -14,7 +14,7 @@ Zeus trades **discrete settlement contracts** on daily high/low temperatures. Th
 contract semantics
   → source truth (settlement provider, station, observation field)
   → ensemble forecast signal (51 ENS members)
-  → ENS bias correction (empirical-Bayes, pre-Monte-Carlo)
+  → ENS bias correction (empirical-Bayes, pre-Monte-Carlo; flag-gated, default off / activation pending)
   → Monte Carlo sensor-noise + rounding simulation → P_raw
   → Extended Platt calibration (temporal-decay aware) → P_cal
   → α-weighted model-market fusion → P_posterior
@@ -51,7 +51,7 @@ P_cal = sigmoid(A·logit(P_raw) + B·lead_days + C)
 
 The `B·lead_days` term triples effective training data per bucket vs. simple lead-time bucketing and prevents overtrade of stale forecasts.
 
-Before calibration, raw ensemble member extrema are bias-corrected: an **empirical-Bayes ENS bias model** shrinks the TIGGE structural prior toward live OpenData settled residuals (SNR-gated, so a noisy/uncertain bias is not applied), with a predictive-error layer that also widens the Monte-Carlo draw and transports the 0.5°→0.25° grid-resolution variance. See `src/calibration/ens_bias_model.py`, `ens_error_model.py` (PRs #334/#336).
+Before calibration, raw ensemble member extrema are bias-corrected: an **empirical-Bayes ENS bias model** shrinks the TIGGE structural prior toward live OpenData settled residuals (SNR-gated, so a noisy/uncertain bias is not applied), with a predictive-error layer that also widens the Monte-Carlo draw and transports the 0.5°→0.25° grid-resolution variance. See `src/calibration/ens_bias_model.py`, `src/calibration/ens_error_model.py` (PRs #334/#336). **This step is flag-gated (`settings.bias_correction_enabled`, default `false`) and not yet active in production — activation pending.**
 
 ### Edge detection and sizing
 

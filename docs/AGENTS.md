@@ -79,7 +79,7 @@ When a new Polymarket weather city must be added:
 - **Source-contract monitor**: run `scripts/watch_source_contract.py` to validate
   Gamma settlement-source consistency before clearing the BLACKLIST.
 - **ENS bias**: `model_bias_ens_v2` rows land in zeus-forecasts.db
-  (SCHEMA_FORECASTS_VERSION=7) via `src/calibration/ens_bias_repo.py`;
+  (SCHEMA_FORECASTS_VERSION=7, **pending ENS-refit forecasts-schema migration PR #337 — table not yet in production schema**) via `src/calibration/ens_bias_repo.py`;
   observation backfill lands in zeus-world.db (SCHEMA_VERSION=35).
 
 ## Rules
