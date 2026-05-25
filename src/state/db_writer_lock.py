@@ -802,6 +802,14 @@ SQLITE_CONNECT_ALLOWLIST: frozenset[str] = frozenset(
         "scripts/verify_forecast_bundle_selection.py",  # read_only_ro_uri: opens forecasts+world DBs via file:...?mode=ro uri; SELECT-only; never writes
         # --- Zeus #64 matched-date eval tool (2026-05-25) ---
         "scripts/audit_matched_date_proper_scores.py",  # read_only_ro_uri: opens isolated staging DB via file:...?mode=ro uri; SELECT-only; never writes
+        # --- Zeus #64 Phase 1a: model_bias_ens_v2 residual-cols migration (2026-05-25) ---
+        "scripts/migrate_model_bias_ens_v2_add_residual_cols.py",  # operator_invoked: idempotent ALTER TABLE ADD COLUMN; --commit gated; targets zeus-forecasts.db; never daemon path
+        # --- Zeus #64 pre-existing analysis scripts (read-only, mode=ro) ---
+        "scripts/audit_refit_proper_scores.py",         # read_only_ro_uri: mode=ro SELECT-only; operator diagnostic; never daemon path
+        "scripts/experiment_route6_transport_beta.py",  # read_only_ro_uri: mode=ro SELECT-only; operator experiment; never daemon path
+        "scripts/experiment_route5_spread_scale.py",    # read_only_ro_uri: mode=ro SELECT-only; operator experiment; never daemon path
+        # --- Zeus #64 Phase-2 replay-equivalence harness (2026-05-25) ---
+        "scripts/replay_equivalence_full_transport.py",  # read_only_ro_uri: all connects use file:...?mode=ro uri; SELECT-only; never writes; operator diagnostic tool
     }
 )
 
