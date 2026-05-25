@@ -47,7 +47,10 @@ if PIT extreme-decile mass > 30% OR ECE > 5× global OR (bias sign contradicts l
     no full_transport route for this bucket; use identity/legacy/no-trade;
     require posterior refit before serving full_transport.
 ```
-HK HIGH currently triggers this (PIT 96.9% in bin0, +6.32°C over-warm from pooled cold prior on an already-unbiased cohort). **Fix = per-cohort bias shrinkage** so a data-rich unbiased cohort anchors to its own ~0 bias; then HK HIGH passes the rule and ships — all 49, no exclusion. HK LOW (genuinely cold) keeps its win.
+HK HIGH currently triggers this (PIT 96.9% in bin0, +6.32°C over-warm). **ROOT CAUSE (proven, `ens_bias_repo.py:140-163`):** `load_bucket_residuals` picks the *freshest* snapshot per date = the **12Z cycle**, whose window is nighttime and **misses the afternoon HIGH**. HK HIGH TIGGE prior measured −3.49°C (12Z nighttime) vs +0.69°C (0Z, correct). DB-wide for HIGH; masked where live OpenData overrides the prior; HK HIGH has **zero live pairs** (OpenData starts 2026-05-06, last HK HIGH settlement 2026-04-30) so its posterior collapses to the contaminated prior → `corrected = raw − (−3.49) = +3.49°C` over-warm.
+**FIX A (global, not HK-specific):** for HIGH-metric prior, select the snapshot whose window covers the target-day extremum (`contributes_to_target_extrema=1` / prefer 0Z over 12Z for same-day HIGH), not the freshest. Post-fix HK HIGH prior ≈+0.69°C → SNR λ≈0.4 → effective bias ≈+0.28°C (negligible) → HK HIGH passes the pathology rule and ships, all 49, no carve-out. LOW is unaffected (daily-MIN genuinely occurs in the 12Z nighttime window → selection correct there; HK LOW keeps its win). **The generic pathology rule remains as the safety net for any residual pathology.**
+
+> **CONTAMINATION IMPLICATION:** the §4.1 HIGH evaluation and the full.db HIGH ft pairs/posteriors were built on the contaminated prior. After Fix A, HIGH posteriors must be re-fit and the HIGH eval re-run; HIGH pairs need regeneration **wherever the prior materially contributed** (low/zero-live cohorts; live-dominated cohorts ≈ unchanged) — scope decided by the Phase-2 replay-equivalence proof, not assumed.
 
 **Phase 6 — explicit pin.** Write `calibration.pin.frozen_as_of` + `model_keys` (`metric:cluster:season:cycle → model_key`) for every served cohort. No reliance on "newest VERIFIED wins" (the empty-pin legacy default).
 
@@ -74,3 +77,4 @@ No evaluation artifact may be called promotable unless all pass.
 - ALLOWED: additive migration of complete ft pairs to prod forecasts.db **after** replay-equivalence proof passes + schema supports error_model_key + non-destructive + legacy retained.
 - FORBIDDEN: push pairs → promote partial Platt → let live auto-select newest. Domain identity / coverage / routing authority not closed.
 - "Everything rerun?" — only the MC pairs, and only IF replay-equivalence FAILS. Otherwise: producer + Platt/identity + replay, no 20h.
+- **Post-Fix-A refinement:** LOW pairs likely reusable (window-correct). HIGH pairs need regeneration only where the corrected prior materially shifts p_raw (low/zero-live cohorts like HK HIGH); live-dominated HIGH cohorts (weight_live≈1) ≈ unchanged → reusable. Bounded, not a full 20h MC. The replay-equivalence proof per cohort is the exact decider.

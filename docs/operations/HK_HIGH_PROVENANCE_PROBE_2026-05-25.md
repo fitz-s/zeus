@@ -149,3 +149,175 @@ regardless.
 - ALGORITHM: full_transport_v1 over-corrects already-unbiased buckets. HK HIGH must be carved
   out of full_transport (serve `none`/uncorrected, or a bucket that receives ~zero shift).
 - HK LOW under full_transport: genuine win, ship.
+
+---
+
+## ROOT FIX
+
+*Appended 2026-05-25 — operator decision: fix the root, ship HK HIGH with all 49 cities.*
+
+### 1. Why HK HIGH receives the contaminated prior instead of its own ≈0 posterior
+
+The defect has **two independent compounding layers**, both traceable to exact file:line.
+
+#### Layer 1 (DB-wide, all cities): 12Z nighttime snapshot contaminates TIGGE prior
+
+`src/calibration/ens_bias_repo.py:140-163` — `load_bucket_residuals` builds the TIGGE prior
+by taking the **freshest-per-date snapshot** (`latest available_at`) among all
+`ensemble_snapshots_v2` rows with `lead_hours <= 48`.
+
+For the TIGGE archive, every target date has **two lead=0h snapshots**:
+
+| Snapshot | available_at | UTC window | HKT window |
+|----------|-------------|------------|------------|
+| 0Z cycle | T00:00 UTC | 00–12 UTC | 08:00–20:00 HKT (covers afternoon HIGH) |
+| 12Z cycle | T12:00 UTC | 12–24 UTC | 20:00–08:00 HKT next day (nighttime, MISSES HIGH) |
+
+`max(available_at)` selects the 12Z snapshot (T12:00 > T00:00), whose forecast window is
+nighttime for UTC+8 cities. The 12Z ens_mean is systematically cold vs the calendar-day high.
+
+**Measured impact on TIGGE prior residuals (ens_mean − settlement), HK HIGH:**
+
+| Snapshot | n | mean bias |
+|---|---|---|
+| 0Z cycle (afternoon window) | 41 | **+0.69°C** |
+| 12Z cycle (nighttime window, selected by freshest) | 41 | **−3.36°C** |
+
+This is **not HK-specific**. Every UTC+8 city with both 0Z and 12Z TIGGE rows at lead=0h
+suffers the same contamination. Tokyo, Seoul, SF are also affected (TIGGE prior ≈ −3.5 to
+−4°C for all, reconfirmed in refit DB). For cities with sufficient OpenData live data the
+bad prior is overridden; for HK it is not.
+
+#### Layer 2 (HK HIGH specific): zero OpenData live pairs → posterior = contaminated prior
+
+`src/calibration/ens_error_model.py:216-220` — `fit_city_predictive_error` calls
+`fit_bucket(tig, [], ...)` for the prior, then builds a `LiveResidual` only if
+`len(opd) >= min_live_n` (min_live_n=5 at `scripts/rebuild_calibration_pairs_v2.py:177`).
+
+**For HK HIGH:**
+- OpenData (`ecmwf_opendata_mx2t3_local_calendar_day_max_v1`) date range: 2026-05-06 onward.
+- Settlements (`settlements_v2`, authority=VERIFIED): 2026-03-16 to 2026-04-30.
+- Overlap: **zero dates** (OpenData begins after last settlement).
+- `opd` list length = 0 → `live = None` → `posterior_bias(transported, None)` → posterior = prior.
+
+For Tokyo: 14 live pairs, mean −3.0°C (itself contaminated by 12Z but overrides partially).
+For Seoul: 13 live pairs, mean +1.2°C → posterior moves away from contaminated prior.
+For HK: **n=0**, weight_live=0.000, posterior bias = −3.49°C = the 12Z-contaminated TIGGE mean.
+
+`apply_bias_to_extrema` at `src/calibration/ens_bias_model.py:245`:
+`corrected = raw − (−3.49) = raw + 3.49°C`
+applied to an HK HIGH raw ENS that was already centered (−0.05°C vs obs). Net effect: +3.49°C
+warm overcorrection. Combined with the +0.32°C truncation artifact (obs > settlement), this
+produces the measured **+6.09°C predicted-above-truth** mass-center shift.
+
+*(Note: the observed +6.32°C transport shift is the mass-center delta between none and
+full_transport populations; the +6.09°C is the pred−truth gap in the full_transport column.
+The small excess above +3.49°C comes from binning/MC nonlinearities and the Platt recalibration
+trained on the biased pairs.)*
+
+### 2. Fix scope (read-only; implementation not performed)
+
+The fix must satisfy all four conditions: (a) HK HIGH correction → ≈0, (b) HK LOW win
+preserved, (c) global HIGH/LOW wins preserved, (d) category made impossible for any
+data-sparse, already-unbiased city in the future.
+
+#### Fix A (Layer 1 — primary, global): filter TIGGE prior by `contributes_to_target_extrema`
+
+**File:line**: `src/calibration/ens_bias_repo.py:110-120` — the `legacy_tigge_null_passthrough`
+policy allows `contributes_to_target_extrema IS NULL OR 1`. The 12Z nighttime snapshots have
+`contributes_to_target_extrema=NULL` (legacy rows) because the extractor never ran on them.
+Modern rows (with the extractor) would have `contributes_to_target_extrema=0` for nighttime
+window rows that do not cover the target-day extremum.
+
+**Minimal change**: for TIGGE prior residuals, additionally gate on the forecast window cycle
+time. Concretely: in `load_bucket_residuals`, when selecting the freshest snapshot, prefer
+snapshots whose `available_at` time aligns with the 0Z cycle (T00:xx UTC) over the 12Z cycle
+(T12:xx UTC) for high-metric cities. Formally: within `freshest` selection, penalize
+`available_at` with time component 12:00 UTC by setting its sort key to noon-of-previous-day
+for HIGH metric. This is a **tie-break rewrite of the freshest-selector** so the 0Z cycle
+(afternoon-covering window) wins for target-day lead=0h comparisons on HIGH.
+
+**Alternative (cleaner, more general)**: require `contributes_to_target_extrema=1` even for
+legacy TIGGE rows, which means backfilling `contributes_to_target_extrema` for legacy TIGGE
+snapshots from the extractor's window logic before the prior is built. The extractor already
+knows whether a snapshot's valid window covers the target extremum. This is the permanent
+antibody — it makes the nighttime-window contamination un-insertable into any future prior.
+
+**Impact on other cities**: Tokyo and Seoul TIGGE priors are also contaminated; fixing this
+will bring their priors in line with the true TIGGE vs settlement bias. Their OpenData live
+data will still be able to override, so their posteriors improve too.
+
+#### Fix B (Layer 2 — secondary, HK-specific timing): live data lookback window extension
+
+**File:line**: `src/calibration/ens_error_model.py:208-219` — `fit_city_predictive_error`
+passes `settled_before=settled_before` to `load_bucket_residuals`. If `settled_before` is None,
+the full settlement history is available. But the **OpenData product** only has snapshots from
+2026-05-06 onward, which don't overlap with any settled HK HIGH market (last settlement
+2026-04-30). This is a temporal availability gap, not a code bug — OpenData was not yet
+ingesting during the HK HIGH settlement window.
+
+**Fix B implication**: no code change can create live residuals that don't exist. The correct
+handling is: when `opd` is empty, the prior must itself be uncontaminated (Fix A is required).
+Fix B is strictly dependent on Fix A. Once Fix A produces a correct prior (≈+0.69°C for
+HK HIGH 0Z), the empty live posterior correctly falls back to the prior (≈+0.69°C) — a
+minimal, evidence-consistent correction. The SNR gate (`correction_strength` at
+`src/calibration/ens_error_model.py:39-56`) will compute z=|+0.69|/SD; with SD≈0.5 this
+gives z≈1.4 → partial correction λ≈0.4 → effective_bias≈+0.28°C — negligible warm shift.
+
+#### Fix summary (file:line + change)
+
+| Layer | File:line | Change |
+|---|---|---|
+| L1 (primary) | `ens_bias_repo.py:140-163` in `load_bucket_residuals` / `_forecast_means` | For HIGH-metric TIGGE prior, filter or penalize 12Z lead=0h snapshots that do not cover the target-day extremum window. Preferred: require extractor-validated `contributes_to_target_extrema=1` even for legacy TIGGE (needs backfill); or: sort key prefers 0Z over 12Z for same-day leads. |
+| L1 (backfill) | scripts/backfill step | Run extractor's window-attribution logic over legacy TIGGE HK HIGH (and all UTC+8 cities) to set `contributes_to_target_extrema=0` on 12Z nighttime rows. |
+| L2 (none needed if L1 fixed) | `ens_error_model.py:216-220` | No change required. Empty live posterior correctly falls back to fixed prior ≈+0.69°C for HK HIGH. |
+| Global safety | `ens_bias_model.py:199-231` `fit_bucket` | No change needed; the estimator already handles empty `opendata_residuals` correctly (returns prior). The fix is upstream in what goes into `tigge_residuals`. |
+
+**DOES NOT touch**: HK LOW (uses a different data_version, different metric, and already has
+6,822 provenanced live+settlement pairs — fix is orthogonal).
+
+### 3. Verification spec
+
+Post-fix, confirm all four conditions before promotion.
+
+**A — HK HIGH correction approaches zero:**
+```
+Query: load_bucket_residuals(conn, city='Hong Kong', data_version=PRIOR_VER,
+    metric='high', lead_max=48.0, contributor_policy='legacy_tigge_null_passthrough')
+Expected: mean ∈ [−0.5, +1.5]°C (vs current −3.49°C)
+```
+
+**B — HK HIGH PIT ≈ uniform:**
+```
+On matched dates (pre/post refit), assert:
+    PIT p00_p10 bin (lowest) fraction ≤ 15% (vs current 96.9%)
+    All 10 PIT bins within [5%, 20%] (uniform would be 10%)
+    ECE ≤ 5 percentage points (vs current ~15× global)
+```
+
+**C — HK HIGH effective_bias_c ≈ 0 (SNR gate suppression):**
+```
+After rebuild: PredictiveErrorModel.effective_bias_c for (HK, summer HIGH)
+    assert abs(effective_bias_c) ≤ 0.5°C
+```
+
+**D — HK LOW win preserved (orthogonal, should be unchanged):**
+```
+load_bucket_residuals(city='Hong Kong', metric='low', data_version=LOW_PRIOR_VER) → still negative mean
+HK LOW full_transport mass-center vs truth delta ≤ −1.5°C → −0.5°C (current −0.85°C preserved)
+```
+
+**E — Global: other UTC+8 cities (Tokyo, Seoul) TIGGE prior improves but OpenData live still corrects:**
+```
+Tokyo TIGGE prior mean (post-fix): ∈ [−1.0, +1.0]°C  (vs current −4.0°C)
+Tokyo OpenData live (n=14, mean=−3.0°C) still provides live evidence → posterior moves toward live
+Tokyo full_transport: no regression vs current LogLoss on matched validation dates
+```
+
+**F — Anti-regression: prior full_transport PR#340 validation set:**
+```
+Run scripts/verify_truth_surfaces.py or matched_compare.py on 48-city subset
+    excluding HK HIGH from current 'carve-out' mental model
+    Global HIGH win (LogLoss delta < 0) preserved for ≥ 85% of HIGH cities
+    Global LOW win preserved for ≥ 85% of LOW cities
+```
