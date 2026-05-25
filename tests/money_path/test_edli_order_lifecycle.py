@@ -1,5 +1,5 @@
 # Created: 2026-05-25
-# Last reused or audited: 2026-05-25
+# Last reused/audited: 2026-05-25
 # Authority basis: docs/operations/edli_v1/EDLI_REDEMPTION_FINAL_PACKAGE_SPEC.md §14 full-live increment.
 from __future__ import annotations
 
