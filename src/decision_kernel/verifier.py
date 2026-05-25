@@ -249,12 +249,16 @@ def _verify_forecast_no_submit_semantic_consistency(
         if belief.get(field) in (None, ""):
             raise CertificateVerificationError(f"belief.{field} missing")
     _require_equal("belief.bin_labels_hash", belief.get("bin_labels_hash"), "family.bin_labels_hash", family.get("bin_labels_hash"))
+    _require_equal("belief.members_json_hash", belief.get("members_json_hash"), "forecast.members_json_hash", forecast.get("members_json_hash"))
+    _require_equal("forecast.bin_labels_hash", forecast.get("bin_labels_hash"), "family.bin_labels_hash", family.get("bin_labels_hash"))
+    _require_equal("forecast.members_extrema_metric_identity", forecast.get("members_extrema_metric_identity"), "family.metric", family.get("metric"))
+    _require_equal("forecast.target_local_date", forecast.get("target_local_date"), "family.target_date", family.get("target_date"))
     _require_equal("risk.final_intent_id", risk.get("final_intent_id"), "no_submit.final_intent_id", cert.payload.get("final_intent_id"))
     _verify_no_submit_projection_hash(cert)
     _validate_forecast_authority_payload(forecast)
     _validate_calibration_payload(calibration, model_config, forecast, decision_time=cert.header.decision_time)
     _validate_unit_authority(forecast, belief, family)
-    _validate_cost_sources(quote, cost)
+    _validate_cost_sources(quote, cost, candidate)
 
 
 def _verify_no_submit_projection_hash(cert: DecisionCertificate) -> None:
@@ -287,7 +291,12 @@ def _validate_forecast_authority_payload(forecast: dict) -> None:
         "members_extrema_metric_identity",
         "temperature_metric",
         "members_json_source",
+        "members_json_hash",
+        "members_extrema_transform",
+        "target_local_date",
+        "city_timezone",
         "local_date_window_hash",
+        "bin_labels_hash",
     )
     for field in required_scalars:
         if forecast.get(field) in (None, ""):
@@ -316,6 +325,9 @@ def _validate_forecast_authority_payload(forecast: dict) -> None:
         raise CertificateVerificationError("forecast.members_extrema_metric_identity mismatch")
     if forecast.get("members_json_source") != "ensemble_snapshots_v2.daily_extrema":
         raise CertificateVerificationError("forecast.members_json_source is not authoritative daily extrema")
+    expected_transform = _expected_members_extrema_transform(forecast.get("temperature_metric"))
+    if forecast.get("members_extrema_transform") != expected_transform:
+        raise CertificateVerificationError("forecast.members_extrema_transform mismatch")
 
 
 def _validate_calibration_payload(
@@ -370,14 +382,33 @@ def _validate_unit_authority(forecast: dict, belief: dict, family: dict) -> None
         raise CertificateVerificationError("belief.unit_authority_source != forecast.unit_authority_source")
 
 
-def _validate_cost_sources(quote: dict, cost: dict) -> None:
+def _validate_cost_sources(quote: dict, cost: dict, candidate: dict) -> None:
+    expected_cost_source = _expected_cost_source_for_direction(candidate.get("direction"))
     for label, payload in (("quote", quote), ("cost", cost)):
         if payload.get("forbidden_cost_source") is not False:
             raise CertificateVerificationError(f"{label}.forbidden_cost_source must be false")
         if payload.get("cost_source") not in ALLOWED_COST_SOURCES:
             raise CertificateVerificationError(f"{label}.cost_source is not native orderbook")
+        if payload.get("cost_source") != expected_cost_source:
+            raise CertificateVerificationError(f"{label}.cost_source does not match direction")
         if payload.get("quote_source_kind") not in ALLOWED_QUOTE_SOURCE_KINDS:
             raise CertificateVerificationError(f"{label}.quote_source_kind is not executable native book")
+
+
+def _expected_cost_source_for_direction(direction: object) -> str:
+    if direction in {"buy_yes", "buy_no"}:
+        return "native_orderbook_ask"
+    if direction in {"sell_yes", "sell_no"}:
+        return "native_orderbook_bid"
+    raise CertificateVerificationError("candidate.direction unsupported for cost source")
+
+
+def _expected_members_extrema_transform(metric: object) -> str:
+    if metric == "high":
+        return "daily_max"
+    if metric == "low":
+        return "daily_min"
+    raise CertificateVerificationError("forecast.temperature_metric unsupported for members extrema transform")
 
 
 def _parents_by_type(parents: tuple[DecisionCertificate, ...]) -> dict[str, DecisionCertificate]:

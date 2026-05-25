@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
+
+from src.decision_kernel.canonicalization import stable_hash
 
 
 CREATE_TABLE_SQL = """
@@ -31,6 +34,7 @@ CREATE TABLE IF NOT EXISTS edli_no_submit_receipts (
     kelly_decision_id TEXT,
     risk_decision_id TEXT,
     kelly_size_usd REAL NOT NULL DEFAULT 0.0,
+    projection_hash TEXT NOT NULL,
     receipt_json TEXT NOT NULL,
     receipt_hash TEXT NOT NULL,
     created_at TEXT NOT NULL,
@@ -54,6 +58,8 @@ def ensure_table(conn: sqlite3.Connection) -> None:
     conn.execute(CREATE_TABLE_SQL)
     _ensure_column(conn, "kelly_decision_id", "TEXT")
     _ensure_column(conn, "risk_decision_id", "TEXT")
+    _ensure_column(conn, "projection_hash", "TEXT")
+    _backfill_projection_hash(conn)
     conn.execute(CREATE_EVENT_INDEX_SQL)
     conn.execute(CREATE_DECISION_TIME_INDEX_SQL)
 
@@ -62,3 +68,32 @@ def _ensure_column(conn: sqlite3.Connection, column_name: str, column_sql: str) 
     columns = {row[1] for row in conn.execute("PRAGMA table_info(edli_no_submit_receipts)").fetchall()}
     if column_name not in columns:
         conn.execute(f"ALTER TABLE edli_no_submit_receipts ADD COLUMN {column_name} {column_sql}")
+
+
+def _backfill_projection_hash(conn: sqlite3.Connection) -> None:
+    rows = conn.execute(
+        """
+        SELECT receipt_id, event_id, final_intent_id, side_effect_status,
+               executable_snapshot_id, receipt_json
+        FROM edli_no_submit_receipts
+        WHERE projection_hash IS NULL OR projection_hash = ''
+        """
+    ).fetchall()
+    for row in rows:
+        receipt_json = row["receipt_json"] if isinstance(row, sqlite3.Row) else row[5]
+        payload = json.loads(receipt_json)
+        projection = {
+            "event_id": row["event_id"] if isinstance(row, sqlite3.Row) else row[1],
+            "final_intent_id": row["final_intent_id"] if isinstance(row, sqlite3.Row) else row[2],
+            "side_effect_status": row["side_effect_status"] if isinstance(row, sqlite3.Row) else row[3],
+            "proof_accepted": payload.get("proof_accepted"),
+            "submitted": payload.get("submitted"),
+            "executable_snapshot_id": row["executable_snapshot_id"] if isinstance(row, sqlite3.Row) else row[4],
+        }
+        conn.execute(
+            "UPDATE edli_no_submit_receipts SET projection_hash = ? WHERE receipt_id = ?",
+            (
+                stable_hash(projection),
+                row["receipt_id"] if isinstance(row, sqlite3.Row) else row[0],
+            ),
+        )

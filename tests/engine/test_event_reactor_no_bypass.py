@@ -22,6 +22,7 @@ from src.engine.event_reactor_adapter import (
     edli_trade_score_gate,
     executable_snapshot_gate_from_trade_conn,
     _snapshot_p_cal,
+    _snapshot_members_json_hash,
     _snapshot_p_raw,
     _snapshot_unit,
     _probability_vector_hash,
@@ -888,6 +889,31 @@ def test_cost_model_certificate_records_native_cost_source():
     assert receipt.decision_proof_bundle.quote_feasibility.payload["cost_source"] == "native_orderbook_ask"
 
 
+def test_forecast_certificate_records_members_json_hash_and_window_authority():
+    event = _forecast_event()
+    conn = _trade_conn_with_snapshot()
+
+    receipt = _receipt(event, conn, decision_time=DECISION_TIME)
+
+    assert receipt.decision_proof_bundle is not None
+    forecast = receipt.decision_proof_bundle.forecast_authority.payload
+    belief = receipt.decision_proof_bundle.belief.payload
+    snapshot = dict(conn.execute("SELECT * FROM ensemble_snapshots_v2 WHERE snapshot_id = '1'").fetchone())
+    assert forecast["members_json_hash"] == _snapshot_members_json_hash(snapshot)
+    assert belief["members_json_hash"] == forecast["members_json_hash"]
+    assert forecast["members_extrema_transform"] == "daily_max"
+    assert forecast["target_local_date"] == "2026-05-25"
+    assert forecast["city_timezone"] == "America/Chicago"
+    assert forecast["bin_labels_hash"] == receipt.decision_proof_bundle.family_closure.payload["bin_labels_hash"]
+
+
+def test_members_json_hash_changes_when_member_extrema_change():
+    base = {"members_json": json.dumps([70.5, 71.5], separators=(",", ":"))}
+    changed = {"members_json": json.dumps([70.5, 72.5], separators=(",", ":"))}
+
+    assert _snapshot_members_json_hash(base) != _snapshot_members_json_hash(changed)
+
+
 def test_belief_p_cal_vector_hash_changes_when_unselected_bin_probability_changes():
     assert _probability_vector_hash((0.8, 0.2)) != _probability_vector_hash((0.8, 0.19))
 
@@ -908,6 +934,54 @@ def test_adapter_does_not_synthesize_forecast_applied_validations():
 
     assert '"applied_validations": tuple(evidence.applied_validations)' in forecast_section
     assert '"applied_validations": tuple(evidence.applied_validations) or' not in forecast_section
+    assert "FORECAST_AUTHORITY_VALIDATIONS_MISSING" in forecast_section
+
+
+def test_adapter_rejects_empty_reader_applied_validations(monkeypatch):
+    from src.data import executable_forecast_reader
+
+    event = _bound_forecast_event()
+    conn = _trade_conn_with_snapshot()
+    evidence = SimpleNamespace(
+        forecast_source_id="ecmwf_open_data",
+        forecast_data_version="ecmwf_opendata_mx2t3_local_calendar_day_max_v1",
+        source_transport="ensemble_snapshots_v2_db_reader",
+        source_cycle_time="2026-05-24T00:00:00+00:00",
+        source_issue_time="2026-05-24T00:00:00+00:00",
+        source_run_id="run-1",
+        coverage_id="coverage-1",
+        producer_readiness_id="producer_readiness:coverage-1",
+        entry_readiness_id=None,
+        input_snapshot_ids=(1,),
+        raw_payload_hash="hash-raw",
+        manifest_hash="hash-manifest",
+        required_steps=(0, 3, 6),
+        observed_steps=(0, 3, 6),
+        expected_members=51,
+        observed_members=51,
+        source_run_status="SUCCESS",
+        source_run_completeness_status="COMPLETE",
+        coverage_completeness_status="COMPLETE",
+        coverage_readiness_status="LIVE_ELIGIBLE",
+        applied_validations=(),
+        source_available_at="2026-05-24T08:10:00+00:00",
+        fetch_started_at="2026-05-24T07:10:00+00:00",
+        fetch_finished_at="2026-05-24T08:05:00+00:00",
+        captured_at="2026-05-24T08:10:00+00:00",
+    )
+    monkeypatch.setattr(
+        executable_forecast_reader,
+        "read_executable_forecast",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            ok=True,
+            status="LIVE_ELIGIBLE",
+            bundle=SimpleNamespace(snapshot=SimpleNamespace(snapshot_id="1"), evidence=evidence),
+            reason_code="OK",
+        ),
+    )
+
+    with pytest.raises(ValueError, match="FORECAST_AUTHORITY_VALIDATIONS_MISSING"):
+        _receipt(event, conn, decision_time=DECISION_TIME)
 
 
 def test_family_closure_clock_missing_blocks_certificate():
@@ -1411,7 +1485,16 @@ def test_forecast_reader_revalidation_uses_reactor_decision_time(monkeypatch):
         source_run_completeness_status="COMPLETE",
         coverage_completeness_status="COMPLETE",
         coverage_readiness_status="LIVE_ELIGIBLE",
-        applied_validations=(),
+        applied_validations=(
+            "source_run_completeness_status",
+            "coverage_completeness_status",
+            "coverage_readiness_status",
+            "required_steps_observed",
+            "expected_members_observed",
+            "causality_status_ok",
+            "authority_verified",
+            "available_at_not_future",
+        ),
         source_available_at="2026-05-24T08:10:00+00:00",
         fetch_started_at="2026-05-24T07:10:00+00:00",
         fetch_finished_at="2026-05-24T08:05:00+00:00",

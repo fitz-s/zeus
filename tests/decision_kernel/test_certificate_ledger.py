@@ -303,6 +303,39 @@ def test_persist_all_rejects_forecast_parent_metric_identity_mismatch():
         ledger.persist_all(parents + (no_submit,))
 
 
+def test_forecast_certificate_members_json_hash_required():
+    parents, no_submit = _minimal_no_submit_graph(parent_payload_overrides={claims.FORECAST_AUTHORITY: {"members_json_hash": None}})
+    ledger = DecisionCertificateLedger(_conn())
+
+    with pytest.raises(CertificateVerificationError, match="members_json_hash"):
+        ledger.persist_all(parents + (no_submit,))
+
+
+def test_belief_members_json_hash_matches_forecast():
+    parents, no_submit = _minimal_no_submit_graph(parent_payload_overrides={claims.BELIEF: {"members_json_hash": "different-members"}})
+    ledger = DecisionCertificateLedger(_conn())
+
+    with pytest.raises(CertificateVerificationError, match="belief.members_json_hash"):
+        ledger.persist_all(parents + (no_submit,))
+
+
+def test_low_metric_requires_daily_min_transform():
+    parents, no_submit = _minimal_no_submit_graph(
+        parent_payload_overrides={
+            claims.FAMILY_CLOSURE: {"metric": "low"},
+            claims.FORECAST_AUTHORITY: {
+                "temperature_metric": "low",
+                "members_extrema_metric_identity": "low",
+                "members_extrema_transform": "daily_max",
+            },
+        }
+    )
+    ledger = DecisionCertificateLedger(_conn())
+
+    with pytest.raises(CertificateVerificationError, match="members_extrema_transform"):
+        ledger.persist_all(parents + (no_submit,))
+
+
 def test_no_submit_rejects_projection_hash_mismatch():
     parents, no_submit = _minimal_no_submit_graph(no_submit_payload={"projection_hash": "bad-hash"})
     ledger = DecisionCertificateLedger(_conn())
@@ -386,6 +419,52 @@ def test_no_submit_requires_forbidden_cost_source_false():
         ledger.persist_all(parents + (no_submit,))
 
 
+def test_buy_yes_requires_native_orderbook_ask_cost_source():
+    parents, no_submit = _minimal_no_submit_graph(parent_payload_overrides={claims.COST_MODEL: {"cost_source": "native_orderbook_bid"}})
+    ledger = DecisionCertificateLedger(_conn())
+
+    with pytest.raises(CertificateVerificationError, match="cost.cost_source"):
+        ledger.persist_all(parents + (no_submit,))
+
+
+def test_buy_no_requires_native_orderbook_ask_cost_source():
+    parents, no_submit = _minimal_no_submit_graph(
+        parent_payload_overrides={
+            claims.CANDIDATE_EVIDENCE: {"direction": "buy_no"},
+            claims.QUOTE_FEASIBILITY: {"cost_source": "native_orderbook_ask"},
+            claims.COST_MODEL: {"cost_source": "native_orderbook_ask"},
+        }
+    )
+
+    DecisionCertificateLedger(_conn()).persist_all(parents + (no_submit,))
+
+
+def test_sell_yes_requires_native_orderbook_bid_cost_source():
+    parents, no_submit = _minimal_no_submit_graph(
+        parent_payload_overrides={
+            claims.CANDIDATE_EVIDENCE: {"direction": "sell_yes"},
+            claims.QUOTE_FEASIBILITY: {"cost_source": "native_orderbook_bid"},
+            claims.COST_MODEL: {"cost_source": "native_orderbook_bid"},
+        }
+    )
+
+    DecisionCertificateLedger(_conn()).persist_all(parents + (no_submit,))
+
+
+def test_buy_no_rejects_native_orderbook_bid_cost_source():
+    parents, no_submit = _minimal_no_submit_graph(
+        parent_payload_overrides={
+            claims.CANDIDATE_EVIDENCE: {"direction": "buy_no"},
+            claims.QUOTE_FEASIBILITY: {"cost_source": "native_orderbook_bid"},
+            claims.COST_MODEL: {"cost_source": "native_orderbook_bid"},
+        }
+    )
+    ledger = DecisionCertificateLedger(_conn())
+
+    with pytest.raises(CertificateVerificationError, match="quote.cost_source"):
+        ledger.persist_all(parents + (no_submit,))
+
+
 def _conn() -> sqlite3.Connection:
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
@@ -418,7 +497,13 @@ def _minimal_no_submit_graph(
             "derived_from_reader_status": "LIVE_ELIGIBLE",
         },
         claims.MARKET_TOPOLOGY: {"family_id": "family-1"},
-        claims.FAMILY_CLOSURE: {"family_id": "family-1", "bin_labels_hash": "bins-hash-1", "bin_units": ("F",)},
+        claims.FAMILY_CLOSURE: {
+            "family_id": "family-1",
+            "bin_labels_hash": "bins-hash-1",
+            "bin_units": ("F",),
+            "metric": "high",
+            "target_date": "2026-05-25",
+        },
         claims.FORECAST_AUTHORITY: {
             "snapshot_id": "snap-1",
             "reader_authority": "read_executable_forecast",
@@ -436,8 +521,13 @@ def _minimal_no_submit_graph(
             "observed_members": 51,
             "applied_validations": _required_forecast_validations(),
             "members_extrema_metric_identity": "high",
+            "members_extrema_transform": "daily_max",
             "members_json_source": "ensemble_snapshots_v2.daily_extrema",
+            "members_json_hash": "members-hash-1",
+            "target_local_date": "2026-05-25",
+            "city_timezone": "America/Chicago",
             "local_date_window_hash": "window-hash-1",
+            "bin_labels_hash": "bins-hash-1",
             "unit": "F",
             "unit_authority_source": "ensemble_snapshots_v2.settlement_unit",
         },
@@ -465,6 +555,7 @@ def _minimal_no_submit_graph(
             "p_cal_hash": "pcal-vector-hash",
             "p_live_hash": "plive-vector-hash",
             "bin_labels_hash": "bins-hash-1",
+            "members_json_hash": "members-hash-1",
             "unit": "F",
             "unit_authority_source": "ensemble_snapshots_v2.settlement_unit",
         },
@@ -486,7 +577,13 @@ def _minimal_no_submit_graph(
             "forbidden_cost_source": False,
         },
         claims.PRE_TRADE_EVIDENCE: {"actionable_trade_score": 0.0},
-        claims.CANDIDATE_EVIDENCE: {"family_id": "family-1", "condition_id": "condition-1", "selected_token_id": "yes-1", "hypothesis_id": "family-1:yes-1"},
+        claims.CANDIDATE_EVIDENCE: {
+            "family_id": "family-1",
+            "condition_id": "condition-1",
+            "selected_token_id": "yes-1",
+            "hypothesis_id": "family-1:yes-1",
+            "direction": "buy_yes",
+        },
         claims.TESTING_PROTOCOL: {"family_id": "family-1"},
         claims.FDR: {"fdr_family_id": "family-1", "selected_hypotheses": ("family-1:yes-1",)},
         claims.KELLY_DRY_RUN: {"cost_basis_id": "cost-1"},

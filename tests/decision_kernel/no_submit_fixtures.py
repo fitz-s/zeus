@@ -39,6 +39,7 @@ def build_test_no_submit_proof_bundle(
     hypothesis_id = f"{family_id}:{token_id}"
     final_intent_id = str(getattr(receipt, "final_intent_id", None) or f"edli_intent:{event.event_id}:{token_id}")
     bin_labels_hash = stable_hash(("70-71F",))
+    members_json_hash = stable_hash(tuple(round(float(value), 12) for value in ([70.5] * 41 + [71.5] * 10)))
     model_config_hash = stable_hash({"edge_bootstrap_n": 1000})
     p_cal_vector_hash = stable_hash((0.8, 0.2))
     p_live_vector_hash = stable_hash((0.78, 0.22))
@@ -94,7 +95,15 @@ def build_test_no_submit_proof_bundle(
             claims.FAMILY_CLOSURE,
             "family_closure",
             "family_closure",
-            {"identity": family_id, "family_id": family_id, "condition_ids": (condition_id,), "bin_labels_hash": bin_labels_hash, "bin_units": ("F",)},
+            {
+                "identity": family_id,
+                "family_id": family_id,
+                "condition_ids": (condition_id,),
+                "bin_labels_hash": bin_labels_hash,
+                "bin_units": ("F",),
+                "metric": event_payload.get("metric"),
+                "target_date": event_payload.get("target_date"),
+            },
             decision_clock,
             "test.family_closure",
         ),
@@ -108,7 +117,12 @@ def build_test_no_submit_proof_bundle(
                 "reader_authority": "read_executable_forecast",
                 "temperature_metric": "high",
                 "members_extrema_metric_identity": "high",
+                "members_extrema_transform": "daily_max",
                 "members_json_source": "ensemble_snapshots_v2.daily_extrema",
+                "members_json_hash": members_json_hash,
+                "target_local_date": event_payload.get("target_date"),
+                "city_timezone": "America/Chicago",
+                "bin_labels_hash": bin_labels_hash,
                 "unit": "F",
                 "settlement_unit": "F",
                 "members_unit": "degF",
@@ -192,6 +206,7 @@ def build_test_no_submit_proof_bundle(
                 "p_live_hash": p_live_vector_hash,
                 "market_analysis_config_hash": model_config_hash,
                 "bootstrap_n": 1000,
+                "members_json_hash": members_json_hash,
                 "unit": "F",
                 "unit_authority_source": "ensemble_snapshots_v2.settlement_unit",
             },

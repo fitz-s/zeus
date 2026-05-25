@@ -21,27 +21,33 @@ def build_event_opportunity_report(conn: sqlite3.Connection) -> dict[str, object
             "SELECT rejection_stage, COUNT(*) FROM no_trade_regret_events GROUP BY rejection_stage"
         ).fetchall()
     )
-    accepted_no_submit_count = conn.execute(
+    accepted_no_submit = conn.execute(
         """
-        SELECT COUNT(*)
-        FROM edli_no_submit_receipts AS receipt
-        JOIN decision_certificates AS cert
-          ON cert.certificate_type = 'NoSubmitDecisionCertificate'
-         AND cert.semantic_key = 'no_submit:' || receipt.event_id || ':' || receipt.final_intent_id
-         AND cert.verifier_status = 'VERIFIED'
-         AND receipt.final_intent_id = json_extract(cert.payload_json, '$.final_intent_id')
-         AND receipt.side_effect_status = json_extract(cert.payload_json, '$.side_effect_status')
-         AND receipt.executable_snapshot_id = json_extract(cert.payload_json, '$.executable_snapshot_id')
-         AND json_extract(cert.payload_json, '$.proof_accepted') = 1
-         AND json_extract(cert.payload_json, '$.submitted') = 0
-         AND NOT EXISTS (
-             SELECT 1
-             FROM decision_certificate_supersessions AS supersession
-             WHERE supersession.old_certificate_hash = cert.certificate_hash
-         )
-        WHERE receipt.side_effect_status = 'NO_SUBMIT'
+        WITH accepted AS (
+            SELECT receipt.event_id, receipt.final_intent_id
+            FROM edli_no_submit_receipts AS receipt
+            JOIN decision_certificates AS cert
+              ON cert.certificate_type = 'NoSubmitDecisionCertificate'
+             AND cert.semantic_key = 'no_submit:' || receipt.event_id || ':' || receipt.final_intent_id
+             AND cert.verifier_status = 'VERIFIED'
+             AND receipt.final_intent_id = json_extract(cert.payload_json, '$.final_intent_id')
+             AND receipt.side_effect_status = json_extract(cert.payload_json, '$.side_effect_status')
+             AND receipt.executable_snapshot_id = json_extract(cert.payload_json, '$.executable_snapshot_id')
+             AND receipt.projection_hash = json_extract(cert.payload_json, '$.projection_hash')
+             AND json_extract(cert.payload_json, '$.proof_accepted') = 1
+             AND json_extract(cert.payload_json, '$.submitted') = 0
+             AND NOT EXISTS (
+                 SELECT 1
+                 FROM decision_certificate_supersessions AS supersession
+                 WHERE supersession.old_certificate_hash = cert.certificate_hash
+             )
+            WHERE receipt.side_effect_status = 'NO_SUBMIT'
+        )
+        SELECT COUNT(*) AS rows,
+               COUNT(DISTINCT event_id || '|' || final_intent_id) AS decisions
+        FROM accepted
         """
-    ).fetchone()[0]
+    ).fetchone()
     feasibility_count = conn.execute(
         "SELECT COUNT(*) FROM execution_feasibility_evidence"
     ).fetchone()[0]
@@ -86,7 +92,9 @@ def build_event_opportunity_report(conn: sqlite3.Connection) -> dict[str, object
         "events_by_type": event_counts,
         "processing_by_status": processing_counts,
         "blocked_by_stage": regret_by_stage,
-        "accepted_no_submit_receipts": accepted_no_submit_count,
+        "accepted_no_submit_receipts": int(accepted_no_submit[1] or 0),
+        "accepted_no_submit_receipt_rows": int(accepted_no_submit[0] or 0),
+        "accepted_no_submit_distinct_decisions": int(accepted_no_submit[1] or 0),
         "execution_feasibility_rows": feasibility_count,
         "certificate_time_semantics": _generated_decision_time_semantics(conn),
         "violations": violations,

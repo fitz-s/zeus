@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import sqlite3
 import json
+import hashlib
 from dataclasses import replace
 from datetime import datetime, timezone
 
@@ -470,6 +471,125 @@ def test_no_submit_receipt_ledger_is_idempotent_for_duplicate_event():
         "SELECT kelly_decision_id, risk_decision_id FROM edli_no_submit_receipts WHERE event_id = 'event-1'"
     ).fetchone()
     assert row == ("kelly-decision-1", "risk-decision-1")
+
+
+def test_no_submit_receipt_ledger_backfills_missing_projection_hash_on_idempotent_insert():
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    from src.events.no_submit_receipts import EdliNoSubmitReceiptLedger, _receipt_json
+
+    receipt = EventSubmissionReceipt(
+        submitted=False,
+        proof_accepted=True,
+        event_id="event-1",
+        causal_snapshot_id="snapshot-1",
+        city="Chicago",
+        target_date="2026-05-24",
+        metric="high",
+        executable_snapshot_id="exec-1",
+        trade_score_positive=True,
+        fdr_pass=True,
+        fdr_family_id="fdr-family-1",
+        fdr_hypothesis_count=2,
+        kelly_pass=True,
+        kelly_execution_price_type="ExecutionPrice",
+        kelly_price_fee_deducted=True,
+        kelly_size_usd=1.0,
+        kelly_cost_basis_id="kelly-cost-1",
+        kelly_decision_id="kelly-decision-1",
+        risk_decision_id="risk-decision-1",
+        final_intent_id="intent-1",
+        side_effect_status="NO_SUBMIT",
+    )
+    receipt_json = _receipt_json(receipt)
+    conn.execute(
+        """
+        CREATE TABLE edli_no_submit_receipts (
+            receipt_id TEXT NOT NULL PRIMARY KEY,
+            event_id TEXT NOT NULL,
+            final_intent_id TEXT,
+            receipt_hash TEXT NOT NULL,
+            projection_hash TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO edli_no_submit_receipts (
+            receipt_id, event_id, final_intent_id, receipt_hash, projection_hash
+        ) VALUES (?, ?, ?, ?, NULL)
+        """,
+        (
+            "legacy-receipt-1",
+            receipt.event_id,
+            receipt.final_intent_id,
+            hashlib.sha256(receipt_json.encode("utf-8")).hexdigest(),
+        ),
+    )
+    ledger = EdliNoSubmitReceiptLedger(conn)
+    decision_time = datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc)
+
+    ledger.insert_idempotent(receipt, decision_time=decision_time)
+
+    projection_hash = conn.execute(
+        "SELECT projection_hash FROM edli_no_submit_receipts WHERE event_id = 'event-1'"
+    ).fetchone()[0]
+    assert projection_hash
+
+
+def test_no_submit_receipt_schema_backfills_projection_hash_for_existing_rows():
+    from src.events.no_submit_receipts import _receipt_json
+    from src.state.schema.edli_no_submit_receipts_schema import ensure_table
+
+    conn = sqlite3.connect(":memory:")
+    receipt = EventSubmissionReceipt(
+        submitted=False,
+        proof_accepted=True,
+        event_id="event-1",
+        causal_snapshot_id="snapshot-1",
+        executable_snapshot_id="exec-1",
+        final_intent_id="intent-1",
+        side_effect_status="NO_SUBMIT",
+    )
+    conn.execute(
+        """
+        CREATE TABLE edli_no_submit_receipts (
+            receipt_id TEXT NOT NULL PRIMARY KEY,
+            event_id TEXT NOT NULL,
+            decision_time TEXT NOT NULL,
+            final_intent_id TEXT,
+            side_effect_status TEXT NOT NULL,
+            executable_snapshot_id TEXT,
+            receipt_json TEXT NOT NULL,
+            receipt_hash TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO edli_no_submit_receipts (
+            receipt_id, event_id, decision_time, final_intent_id, side_effect_status,
+            executable_snapshot_id, receipt_json, receipt_hash
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "receipt-1",
+            receipt.event_id,
+            "2026-05-24T18:10:00+00:00",
+            receipt.final_intent_id,
+            receipt.side_effect_status,
+            receipt.executable_snapshot_id,
+            _receipt_json(receipt),
+            "receipt-hash",
+        ),
+    )
+
+    ensure_table(conn)
+
+    projection_hash = conn.execute(
+        "SELECT projection_hash FROM edli_no_submit_receipts WHERE receipt_id = 'receipt-1'"
+    ).fetchone()[0]
+    assert projection_hash
 
 
 def test_no_submit_receipt_ledger_rejects_duplicate_hash_drift():

@@ -9,6 +9,7 @@ from dataclasses import asdict
 from datetime import datetime, timezone
 from typing import Any
 
+from src.decision_kernel.canonicalization import stable_hash
 from src.events.reactor import EventSubmissionReceipt
 
 SCHEMA_VERSION = 1
@@ -35,11 +36,12 @@ class EdliNoSubmitReceiptLedger:
             raise ValueError("edli_no_submit_receipts only accepts proof-accepted receipts")
         receipt_json = _receipt_json(receipt)
         receipt_hash = hashlib.sha256(receipt_json.encode("utf-8")).hexdigest()
+        projection_hash = _projection_hash(receipt)
         receipt_id = _receipt_id(receipt)
         created = (created_at or decision_time).astimezone(timezone.utc).isoformat()
         existing = self.conn.execute(
             """
-            SELECT receipt_id, receipt_hash
+            SELECT receipt_id, receipt_hash, projection_hash
             FROM edli_no_submit_receipts
             WHERE receipt_id = ?
                OR (event_id = ? AND final_intent_id = ?)
@@ -51,6 +53,18 @@ class EdliNoSubmitReceiptLedger:
             existing_receipt_id = str(existing["receipt_id"] if isinstance(existing, sqlite3.Row) else existing[0])
             existing_hash = str(existing["receipt_hash"] if isinstance(existing, sqlite3.Row) else existing[1])
             if existing_hash == receipt_hash:
+                existing_projection_hash = existing["projection_hash"] if isinstance(existing, sqlite3.Row) else existing[2]
+                if existing_projection_hash in (None, ""):
+                    self.conn.execute(
+                        "UPDATE edli_no_submit_receipts SET projection_hash = ? WHERE receipt_id = ?",
+                        (projection_hash, existing_receipt_id),
+                    )
+                elif str(existing_projection_hash) != projection_hash:
+                    raise EdliReceiptHashDriftError(
+                        "EDLI_RECEIPT_PROJECTION_HASH_DRIFT:"
+                        f"event_id={receipt.event_id}:final_intent_id={receipt.final_intent_id}:"
+                        f"existing_projection_hash={existing_projection_hash}:new_projection_hash={projection_hash}"
+                    )
                 return existing_receipt_id
             raise EdliReceiptHashDriftError(
                 "EDLI_RECEIPT_HASH_DRIFT:"
@@ -66,7 +80,7 @@ class EdliNoSubmitReceiptLedger:
                 q_live, q_lcb_5pct, c_fee_adjusted, c_cost_95pct, p_fill_lcb,
                 trade_score, fdr_family_id, fdr_hypothesis_count,
                 kelly_cost_basis_id, kelly_decision_id, risk_decision_id, kelly_size_usd,
-                receipt_json, receipt_hash, created_at, schema_version
+                projection_hash, receipt_json, receipt_hash, created_at, schema_version
             ) VALUES (
                 :receipt_id, :event_id, :causal_snapshot_id, :decision_time,
                 :family_id, :candidate_id, :condition_id, :token_id, :direction,
@@ -74,7 +88,7 @@ class EdliNoSubmitReceiptLedger:
                 :q_live, :q_lcb_5pct, :c_fee_adjusted, :c_cost_95pct, :p_fill_lcb,
                 :trade_score, :fdr_family_id, :fdr_hypothesis_count,
                 :kelly_cost_basis_id, :kelly_decision_id, :risk_decision_id, :kelly_size_usd,
-                :receipt_json, :receipt_hash, :created_at, :schema_version
+                :projection_hash, :receipt_json, :receipt_hash, :created_at, :schema_version
             )
             """,
             {
@@ -102,6 +116,7 @@ class EdliNoSubmitReceiptLedger:
                 "kelly_decision_id": receipt.kelly_decision_id,
                 "risk_decision_id": receipt.risk_decision_id,
                 "kelly_size_usd": receipt.kelly_size_usd,
+                "projection_hash": projection_hash,
                 "receipt_json": receipt_json,
                 "receipt_hash": receipt_hash,
                 "created_at": created,
@@ -127,3 +142,16 @@ def _receipt_json(receipt: EventSubmissionReceipt) -> str:
     payload: dict[str, Any] = asdict(receipt)
     payload.pop("decision_proof_bundle", None)
     return json.dumps(payload, sort_keys=True, separators=(",", ":"))
+
+
+def _projection_hash(receipt: EventSubmissionReceipt) -> str:
+    return stable_hash(
+        {
+            "event_id": receipt.event_id,
+            "final_intent_id": receipt.final_intent_id,
+            "side_effect_status": receipt.side_effect_status,
+            "proof_accepted": receipt.proof_accepted,
+            "submitted": receipt.submitted,
+            "executable_snapshot_id": receipt.executable_snapshot_id,
+        }
+    )

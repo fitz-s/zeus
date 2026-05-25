@@ -7,6 +7,7 @@ import sqlite3
 from datetime import datetime, timezone
 import json
 
+from src.decision_kernel.canonicalization import stable_hash
 from src.decision_kernel.compiler import DecisionCompiler
 from src.decision_kernel.ledger import DecisionCertificateLedger
 from src.analysis.event_opportunity_report import build_event_opportunity_report
@@ -170,7 +171,89 @@ def test_event_opportunity_report_counts_accepted_no_submit_receipts():
     report = build_event_opportunity_report(conn)
 
     assert report["accepted_no_submit_receipts"] == 1
+    assert report["accepted_no_submit_receipt_rows"] == 1
+    assert report["accepted_no_submit_distinct_decisions"] == 1
     assert report["blocked_by_stage"] == {}
+
+
+def test_report_does_not_count_receipt_certificate_projection_hash_mismatch():
+    conn = sqlite3.connect(":memory:")
+    init_schema(conn)
+    event = _forecast_event()
+    receipt = _receipt(event.event_id)
+    EdliNoSubmitReceiptLedger(conn).insert_idempotent(
+        receipt,
+        decision_time=datetime(2026, 5, 25, 10, 3, tzinfo=timezone.utc),
+    )
+    payload = _accepted_no_submit_payload(event.event_id, receipt)
+    payload["projection_hash"] = "different-projection-hash"
+    _insert_decision_certificate(
+        conn,
+        certificate_id="no-submit-1",
+        certificate_type="NoSubmitDecisionCertificate",
+        semantic_key=f"no_submit:{event.event_id}:{receipt.final_intent_id}",
+        payload=payload,
+    )
+
+    report = build_event_opportunity_report(conn)
+
+    assert report["accepted_no_submit_receipts"] == 0
+
+
+def test_report_requires_receipt_projection_hash_match():
+    conn = sqlite3.connect(":memory:")
+    init_schema(conn)
+    event = _forecast_event()
+    receipt = _receipt(event.event_id)
+    EdliNoSubmitReceiptLedger(conn).insert_idempotent(
+        receipt,
+        decision_time=datetime(2026, 5, 25, 10, 3, tzinfo=timezone.utc),
+    )
+    _insert_decision_certificate(
+        conn,
+        certificate_id="no-submit-1",
+        certificate_type="NoSubmitDecisionCertificate",
+        semantic_key=f"no_submit:{event.event_id}:{receipt.final_intent_id}",
+        payload=_accepted_no_submit_payload(event.event_id, receipt),
+    )
+
+    report = build_event_opportunity_report(conn)
+
+    assert report["accepted_no_submit_receipts"] == 1
+
+
+def test_report_counts_distinct_accepted_no_submit_decisions():
+    conn = sqlite3.connect(":memory:")
+    init_schema(conn)
+    event = _forecast_event()
+    receipt = _receipt(event.event_id)
+    EdliNoSubmitReceiptLedger(conn).insert_idempotent(
+        receipt,
+        decision_time=datetime(2026, 5, 25, 10, 3, tzinfo=timezone.utc),
+    )
+    semantic_key = f"no_submit:{event.event_id}:{receipt.final_intent_id}"
+    payload = _accepted_no_submit_payload(event.event_id, receipt)
+    _insert_decision_certificate(
+        conn,
+        certificate_id="no-submit-1",
+        certificate_type="NoSubmitDecisionCertificate",
+        semantic_key=semantic_key,
+        payload=payload,
+    )
+    _insert_decision_certificate(
+        conn,
+        certificate_id="no-submit-2",
+        certificate_type="NoSubmitDecisionCertificate",
+        decision_time="2026-05-25T10:05:00+00:00",
+        semantic_key=semantic_key,
+        payload=payload,
+    )
+
+    report = build_event_opportunity_report(conn)
+
+    assert report["accepted_no_submit_receipt_rows"] == 2
+    assert report["accepted_no_submit_distinct_decisions"] == 1
+    assert report["accepted_no_submit_receipts"] == 1
 
 
 def test_report_does_not_count_receipt_certificate_final_intent_mismatch():
@@ -552,6 +635,19 @@ def _receipt(event_id: str):
         risk_decision_id="risk-1",
         final_intent_id="intent-1",
     )
+
+
+def _accepted_no_submit_payload(event_id: str, receipt) -> dict[str, object]:
+    payload = {
+        "event_id": event_id,
+        "final_intent_id": receipt.final_intent_id,
+        "side_effect_status": receipt.side_effect_status,
+        "proof_accepted": True,
+        "submitted": False,
+        "executable_snapshot_id": receipt.executable_snapshot_id,
+    }
+    payload["projection_hash"] = stable_hash(payload)
+    return payload
 
 
 def _insert_decision_certificate(

@@ -438,7 +438,12 @@ def _validate_no_submit_parent_consistency(event: OpportunityEvent, bundle: NoSu
     _require_equal("belief.p_cal_hash", belief.get("p_cal_hash"), "belief.p_cal_vector_hash", belief.get("p_cal_vector_hash"))
     _require_equal("belief.p_live_hash", belief.get("p_live_hash"), "belief.p_live_vector_hash", belief.get("p_live_vector_hash"))
     _require_equal("belief.bin_labels_hash", belief.get("bin_labels_hash"), "family.bin_labels_hash", family.get("bin_labels_hash"))
+    _require_equal("belief.members_json_hash", belief.get("members_json_hash"), "forecast.members_json_hash", forecast.get("members_json_hash"))
+    _require_equal("forecast.bin_labels_hash", forecast.get("bin_labels_hash"), "family.bin_labels_hash", family.get("bin_labels_hash"))
+    _require_equal("forecast.members_extrema_metric_identity", forecast.get("members_extrema_metric_identity"), "family.metric", family.get("metric"))
+    _require_equal("forecast.target_local_date", forecast.get("target_local_date"), "family.target_date", family.get("target_date"))
     _validate_unit_authority(forecast, belief, family)
+    _validate_cost_sources(quote, cost, candidate)
     _require_equal("fdr.edge_bootstrap_n", fdr.get("edge_bootstrap_n"), "model_config.edge_bootstrap_n", model_config.get("edge_bootstrap_n"))
     if calibration.get("raw_source_id") is not None and forecast.get("forecast_source_id") is not None:
         _require_equal("calibration.raw_source_id", calibration.get("raw_source_id"), "forecast.forecast_source_id", forecast.get("forecast_source_id"))
@@ -512,6 +517,13 @@ def _validate_forecast_authority_payload(forecast: dict[str, Any]) -> None:
     )
     if forecast.get("members_json_source") in (None, ""):
         raise ValueError("forecast.members_json_source missing")
+    if forecast.get("members_json_hash") in (None, ""):
+        raise ValueError("forecast.members_json_hash missing")
+    if forecast.get("members_extrema_transform") != _expected_members_extrema_transform(forecast.get("temperature_metric")):
+        raise ValueError("forecast.members_extrema_transform mismatch")
+    for field in ("target_local_date", "city_timezone", "bin_labels_hash"):
+        if forecast.get(field) in (None, ""):
+            raise ValueError(f"forecast.{field} missing")
     if forecast.get("local_date_window_hash") in (None, ""):
         raise ValueError("forecast.local_date_window_hash missing")
 
@@ -568,6 +580,36 @@ def _validate_unit_authority(forecast: dict[str, Any], belief: dict[str, Any], f
         "forecast.unit_authority_source",
         forecast.get("unit_authority_source"),
     )
+
+
+def _validate_cost_sources(quote: dict[str, Any], cost: dict[str, Any], candidate: dict[str, Any]) -> None:
+    expected_cost_source = _expected_cost_source_for_direction(candidate.get("direction"))
+    for label, payload in (("quote", quote), ("cost", cost)):
+        if payload.get("forbidden_cost_source") is not False:
+            raise ValueError(f"{label}.forbidden_cost_source must be false")
+        _require_equal(f"{label}.cost_source", payload.get("cost_source"), "direction cost_source", expected_cost_source)
+        _require_equal(
+            f"{label}.quote_source_kind",
+            payload.get("quote_source_kind"),
+            "executable native book",
+            "executable_market_snapshot_native_book",
+        )
+
+
+def _expected_cost_source_for_direction(direction: Any) -> str:
+    if direction in {"buy_yes", "buy_no"}:
+        return "native_orderbook_ask"
+    if direction in {"sell_yes", "sell_no"}:
+        return "native_orderbook_bid"
+    raise ValueError("candidate.direction unsupported for cost source")
+
+
+def _expected_members_extrema_transform(metric: Any) -> str:
+    if metric == "high":
+        return "daily_max"
+    if metric == "low":
+        return "daily_min"
+    raise ValueError("forecast.temperature_metric unsupported for members extrema transform")
 
 
 def normalize_forecast_reader_status(status: Any, reason_code: Any = None) -> str | None:

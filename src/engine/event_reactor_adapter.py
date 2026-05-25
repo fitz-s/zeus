@@ -710,6 +710,7 @@ def _build_no_submit_proof_bundle_from_adapter_evidence(
     topology_clock = _evidence_clock_from_rows(family_topology_rows)
     bin_labels_hash = stable_hash(tuple(str(candidate.bin.label) for candidate in family.candidates))
     bin_units = tuple(sorted({str(candidate.bin.unit) for candidate in family.candidates if candidate.bin.unit}))
+    forecast_payload = {**forecast_payload, "bin_labels_hash": bin_labels_hash}
     market_analysis_config_hash = stable_hash(
         {
             "posterior_mode": MODEL_ONLY_POSTERIOR_MODE,
@@ -779,6 +780,8 @@ def _build_no_submit_proof_bundle_from_adapter_evidence(
                 "family_complete": True,
                 "bin_labels_hash": bin_labels_hash,
                 "bin_units": bin_units,
+                "metric": family.metric,
+                "target_date": family.target_date,
                 "event_id": event.event_id,
             },
             topology_clock,
@@ -839,6 +842,7 @@ def _build_no_submit_proof_bundle_from_adapter_evidence(
                 "p_cal_hash": proof.p_cal_vector_hash,
                 "p_live_hash": proof.p_live_vector_hash,
                 "bin_labels_hash": bin_labels_hash,
+                "members_json_hash": forecast_payload.get("members_json_hash"),
                 "market_analysis_config_hash": market_analysis_config_hash,
                 "bootstrap_n": edge_n_bootstrap(),
                 "unit": forecast_payload.get("unit"),
@@ -1070,7 +1074,13 @@ def _forecast_authority_payload_and_clock(
     if not result.ok or result.bundle is None:
         raise ValueError(f"FORECAST_AUTHORITY_EVIDENCE_MISSING:{result.reason_code}")
     evidence = result.bundle.evidence
+    if not tuple(evidence.applied_validations):
+        raise ValueError("FORECAST_AUTHORITY_VALIDATIONS_MISSING")
     unit = _snapshot_unit(snapshot, payload)
+    city_config = runtime_cities_by_name().get(family.city)
+    if city_config is None:
+        raise ValueError(f"FORECAST_AUTHORITY_EVIDENCE_MISSING:city:{family.city}")
+    members_json_hash = _snapshot_members_json_hash(snapshot)
     payload_out = {
         "identity": str(result.bundle.snapshot.snapshot_id),
         "snapshot_id": str(result.bundle.snapshot.snapshot_id),
@@ -1082,7 +1092,11 @@ def _forecast_authority_payload_and_clock(
         "metric": family.metric,
         "temperature_metric": family.metric,
         "members_extrema_metric_identity": snapshot.get("temperature_metric"),
+        "members_extrema_transform": _members_extrema_transform(family.metric),
         "members_json_source": "ensemble_snapshots_v2.daily_extrema",
+        "members_json_hash": members_json_hash,
+        "target_local_date": family.target_date,
+        "city_timezone": city_config.timezone,
         "settlement_unit": snapshot.get("settlement_unit"),
         "members_unit": snapshot.get("members_unit"),
         "unit": unit,
@@ -1092,6 +1106,7 @@ def _forecast_authority_payload_and_clock(
                 "city": snapshot.get("city"),
                 "target_date": snapshot.get("target_date"),
                 "temperature_metric": snapshot.get("temperature_metric"),
+                "members_json_hash": members_json_hash,
                 "local_day_start_utc": snapshot.get("local_day_start_utc"),
                 "forecast_window_start_utc": snapshot.get("forecast_window_start_utc"),
                 "forecast_window_end_utc": snapshot.get("forecast_window_end_utc"),
@@ -1611,6 +1626,10 @@ def _snapshot_members(snapshot: dict[str, Any]) -> np.ndarray:
     return values
 
 
+def _snapshot_members_json_hash(snapshot: dict[str, Any]) -> str:
+    return _probability_vector_hash(_snapshot_members(snapshot))
+
+
 def _snapshot_p_raw(
     snapshot: dict[str, Any],
     *,
@@ -1751,6 +1770,14 @@ def _validate_snapshot_members_metric_identity(*, snapshot: dict[str, Any], fami
         raise ValueError("FORECAST_MEMBERS_METRIC_IDENTITY_MISSING")
     if snapshot_metric != family_metric:
         raise ValueError("FORECAST_MEMBERS_METRIC_IDENTITY_MISMATCH")
+
+
+def _members_extrema_transform(metric: object) -> str:
+    if metric == "high":
+        return "daily_max"
+    if metric == "low":
+        return "daily_min"
+    raise ValueError("FORECAST_MEMBERS_METRIC_IDENTITY_MISSING")
 
 
 def _apply_day0_mask_to_generated_probabilities(
