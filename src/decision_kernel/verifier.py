@@ -458,6 +458,20 @@ def _verify_pre_submit_revalidation_for_command(
     for status_field in ("heartbeat_status", "user_ws_status", "venue_connectivity_status", "balance_allowance_status"):
         if pre_submit.get(status_field) != "OK":
             raise CertificateVerificationError(f"pre-submit revalidation {status_field} must be OK")
+    for provenance_field in (
+        "book_authority_id",
+        "book_captured_at",
+        "heartbeat_authority_id",
+        "heartbeat_checked_at",
+        "user_ws_authority_id",
+        "user_ws_checked_at",
+        "venue_connectivity_authority_id",
+        "venue_connectivity_checked_at",
+        "balance_allowance_authority_id",
+        "balance_allowance_checked_at",
+    ):
+        if not str(pre_submit.get(provenance_field) or "").strip():
+            raise CertificateVerificationError(f"pre-submit revalidation {provenance_field} missing")
     quote_age_ms = _finite_float(pre_submit.get("quote_age_ms"), "pre-submit quote_age_ms")
     max_quote_age_ms = _finite_float(pre_submit.get("max_quote_age_ms", quote_age_ms), "pre-submit max_quote_age_ms")
     if quote_age_ms > max_quote_age_ms:

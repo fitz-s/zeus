@@ -499,6 +499,13 @@ files:
     downstream:
     - src/events/event_writer.py
     - src/state/schema/execution_feasibility_evidence_schema.py
+  src/events/triggers/user_channel_ingestor.py:
+    zone: K2_runtime
+    authority_role: edli_authenticated_user_channel_ingest
+    why: Disabled-by-config authenticated user-channel adapter that maps user order/trade messages into live-order aggregate lifecycle facts while rejecting public market-channel fill truth.
+    downstream:
+    - src/events/live_order_aggregate.py
+    - src/events/live_order_reconcile.py
   src/events/reactor.py:
     zone: K2_runtime
     authority_role: edli_event_reactor

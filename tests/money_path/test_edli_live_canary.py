@@ -8,6 +8,7 @@ import sqlite3
 from pathlib import Path
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import pytest
 
@@ -651,7 +652,77 @@ def test_main_live_mode_wires_production_executor_boundary_source():
 
     assert "submit_event_bound_final_intent_via_existing_executor" in source
     assert "executor_submit=lambda final_intent_cert, execution_command_cert" in source
-    assert "reactor_mode == \"live\"" in source
+    assert "live_bridge_mode" in source
+    assert "submit_disabled_live_bridge" in source
+    assert "pre_submit_authority_provider=_edli_pre_submit_authority_provider_from_world_conn" in source
+
+
+def test_main_pre_submit_authority_provider_hydrates_typed_provenance(monkeypatch):
+    import src.main as main
+    import src.control.heartbeat_supervisor as heartbeat_supervisor
+    import src.control.ws_gap_guard as ws_gap_guard
+    import src.data.polymarket_client as polymarket_client
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """
+        CREATE TABLE execution_feasibility_evidence (
+            token_id TEXT,
+            quote_seen_at TEXT,
+            book_hash_before TEXT,
+            best_bid_before REAL,
+            best_ask_before REAL
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO execution_feasibility_evidence
+            (token_id, quote_seen_at, book_hash_before, best_bid_before, best_ask_before)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        ("yes-1", "2026-05-25T11:59:59.950000+00:00", "book-hash-1", 0.39, 0.41),
+    )
+    monkeypatch.setattr(heartbeat_supervisor, "summary", lambda: {"entry": {"allow_submit": True}})
+    monkeypatch.setattr(ws_gap_guard, "summary", lambda *, now=None: {"entry": {"allow_submit": True}})
+
+    class FakePolymarketClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def get_wallet_balance(self):
+            return 25.0
+
+    monkeypatch.setattr(polymarket_client, "PolymarketClient", FakePolymarketClient)
+    provider = main._edli_pre_submit_authority_provider_from_world_conn(
+        conn,
+        {
+            "pre_submit_max_quote_age_ms": 1000,
+            "pre_submit_balance_allowance_check_enabled": True,
+        },
+    )
+    final_intent = SimpleNamespace(
+        payload={
+            "token_id": "yes-1",
+            "tick_size": 0.01,
+            "min_order_size": 1.0,
+            "neg_risk": False,
+            "notional_usd": 5.0,
+        }
+    )
+
+    witness = provider(final_intent, object(), datetime(2026, 5, 25, 12, tzinfo=timezone.utc))
+
+    assert witness.book_hash == "book-hash-1"
+    assert witness.book_authority_id == "execution_feasibility_evidence"
+    assert witness.heartbeat_authority_id == "heartbeat_supervisor"
+    assert witness.user_ws_authority_id == "ws_gap_guard"
+    assert witness.balance_allowance_authority_id == "polymarket_wallet_readonly"
+    assert witness.balance_allowance_status == "OK"
 
 
 def _accepted_receipt(event):
@@ -916,6 +987,16 @@ def _pre_submit_authority_witness(
         user_ws_status=user_ws_status,
         venue_connectivity_status=venue_connectivity_status,
         balance_allowance_status=balance_allowance_status,
+        book_authority_id="execution_feasibility_evidence",
+        book_captured_at=quote_seen_at.isoformat(),
+        heartbeat_authority_id="heartbeat_supervisor",
+        heartbeat_checked_at=checked_at.isoformat(),
+        user_ws_authority_id="ws_gap_guard",
+        user_ws_checked_at=checked_at.isoformat(),
+        venue_connectivity_authority_id="polymarket_public_orderbook",
+        venue_connectivity_checked_at=checked_at.isoformat(),
+        balance_allowance_authority_id="polymarket_wallet_readonly",
+        balance_allowance_checked_at=checked_at.isoformat(),
         checked_at=checked_at.isoformat(),
         max_quote_age_ms=1000,
     )

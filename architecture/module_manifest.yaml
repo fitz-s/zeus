@@ -152,6 +152,7 @@ modules:
       - src/events/triggers/forecast_snapshot_ready.py
       - src/events/triggers/day0_extreme_updated.py
       - src/events/triggers/market_channel_ingestor.py
+      - src/events/triggers/user_channel_ingestor.py
       - src/events/reactor.py
     public_entry_files:
       - src/events/event_store.py

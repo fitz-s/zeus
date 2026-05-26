@@ -90,6 +90,16 @@ class PreSubmitAuthorityWitness:
     user_ws_status: str
     venue_connectivity_status: str
     balance_allowance_status: str
+    book_authority_id: str
+    book_captured_at: str
+    heartbeat_authority_id: str
+    heartbeat_checked_at: str
+    user_ws_authority_id: str
+    user_ws_checked_at: str
+    venue_connectivity_authority_id: str
+    venue_connectivity_checked_at: str
+    balance_allowance_authority_id: str
+    balance_allowance_checked_at: str
     checked_at: str | None = None
     max_quote_age_ms: int = 1000
 
@@ -1133,6 +1143,16 @@ def _pre_submit_revalidation_payload_from_final_intent(
         "user_ws_status": authority_witness.user_ws_status,
         "venue_connectivity_status": authority_witness.venue_connectivity_status,
         "balance_allowance_status": authority_witness.balance_allowance_status,
+        "book_authority_id": authority_witness.book_authority_id,
+        "book_captured_at": authority_witness.book_captured_at,
+        "heartbeat_authority_id": authority_witness.heartbeat_authority_id,
+        "heartbeat_checked_at": authority_witness.heartbeat_checked_at,
+        "user_ws_authority_id": authority_witness.user_ws_authority_id,
+        "user_ws_checked_at": authority_witness.user_ws_checked_at,
+        "venue_connectivity_authority_id": authority_witness.venue_connectivity_authority_id,
+        "venue_connectivity_checked_at": authority_witness.venue_connectivity_checked_at,
+        "balance_allowance_authority_id": authority_witness.balance_allowance_authority_id,
+        "balance_allowance_checked_at": authority_witness.balance_allowance_checked_at,
     }
 
 
@@ -1147,8 +1167,22 @@ def _require_pre_submit_authority_witness(
     witness = provider(final_intent, executable_snapshot, decision_time)
     if not isinstance(witness, PreSubmitAuthorityWitness):
         raise ValueError("PRE_SUBMIT_AUTHORITY_WITNESS_REQUIRED")
-    if not witness.book_hash:
-        raise ValueError("PRE_SUBMIT_BOOK_HASH_REQUIRED")
+    required_text_fields = {
+        "book_hash": witness.book_hash,
+        "book_authority_id": witness.book_authority_id,
+        "book_captured_at": witness.book_captured_at,
+        "heartbeat_authority_id": witness.heartbeat_authority_id,
+        "heartbeat_checked_at": witness.heartbeat_checked_at,
+        "user_ws_authority_id": witness.user_ws_authority_id,
+        "user_ws_checked_at": witness.user_ws_checked_at,
+        "venue_connectivity_authority_id": witness.venue_connectivity_authority_id,
+        "venue_connectivity_checked_at": witness.venue_connectivity_checked_at,
+        "balance_allowance_authority_id": witness.balance_allowance_authority_id,
+        "balance_allowance_checked_at": witness.balance_allowance_checked_at,
+    }
+    missing = [field for field, value in required_text_fields.items() if not str(value or "").strip()]
+    if missing:
+        raise ValueError("PRE_SUBMIT_AUTHORITY_PROVENANCE_REQUIRED:" + ",".join(missing))
     return witness
 
 

@@ -2432,6 +2432,7 @@ def _edli_event_reactor_cycle() -> None:
         regret_ledger = NoTradeRegretLedger(conn)
         reactor_mode = str(edli_cfg.get("reactor_mode", "live_no_submit"))
         real_order_submit_enabled = bool(edli_cfg.get("real_order_submit_enabled", False))
+        live_bridge_mode = reactor_mode in {"live", "submit_disabled_live_bridge"}
         submit_adapter = (
             event_bound_live_adapter_from_trade_conn(
                 trade_conn,
@@ -2439,10 +2440,11 @@ def _edli_event_reactor_cycle() -> None:
                 topology_conn=forecasts_conn,
                 calibration_conn=conn,
                 get_current_level=get_current_level,
-                real_order_submit_enabled=real_order_submit_enabled,
+                real_order_submit_enabled=real_order_submit_enabled if reactor_mode == "live" else False,
                 live_canary_enabled=bool(edli_cfg.get("live_canary_enabled", False)),
                 tiny_live_max_notional_usd=float(edli_cfg.get("tiny_live_max_notional_usd", 5.0)),
                 live_cap_conn=conn,
+                pre_submit_authority_provider=_edli_pre_submit_authority_provider_from_world_conn(conn, edli_cfg),
                 executor_submit=lambda final_intent_cert, execution_command_cert: submit_event_bound_final_intent_via_existing_executor(
                     final_intent_cert=final_intent_cert,
                     execution_command_cert=execution_command_cert,
@@ -2451,7 +2453,7 @@ def _edli_event_reactor_cycle() -> None:
                     decision_time=now,
                 ),
             )
-            if reactor_mode == "live"
+            if live_bridge_mode
             else event_bound_no_submit_adapter_from_trade_conn(
                 trade_conn,
                 forecast_conn=forecasts_conn,
@@ -2603,6 +2605,169 @@ def _edli_filter_markets_for_condition(markets: list[dict], condition_id: str | 
         ):
             filtered.append(market)
     return filtered
+
+
+def _edli_pre_submit_authority_provider_from_world_conn(world_conn, edli_cfg):
+    """Build EDLI's production read-only pre-submit authority provider.
+
+    The provider is intentionally read-only: it consumes quote evidence,
+    heartbeat/user-channel guards, and wallet allowance truth. Missing
+    authority remains fail-closed before command creation.
+    """
+
+    from src.engine.event_reactor_adapter import PreSubmitAuthorityWitness
+
+    max_quote_age_ms = int(edli_cfg.get("pre_submit_max_quote_age_ms", 1000) or 1000)
+    balance_check_enabled = bool(edli_cfg.get("pre_submit_balance_allowance_check_enabled", True))
+
+    def _provider(final_intent, _executable_snapshot, decision_time):
+        checked_at = decision_time.astimezone(timezone.utc)
+        intent = final_intent.payload
+        row = _edli_latest_pre_submit_book_row(
+            world_conn,
+            token_id=str(intent["token_id"]),
+            decision_time=checked_at,
+        )
+        if row is None:
+            raise ValueError("PRE_SUBMIT_BOOK_AUTHORITY_MISSING")
+        quote_seen_at = str(_row_get(row, "quote_seen_at") or "")
+        book_hash = str(_row_get(row, "book_hash_before") or "")
+        best_bid = _row_float(row, "best_bid_before")
+        best_ask = _row_float(row, "best_ask_before")
+        if not quote_seen_at or not book_hash or best_bid is None or best_ask is None:
+            raise ValueError("PRE_SUBMIT_BOOK_AUTHORITY_INCOMPLETE")
+
+        heartbeat_summary = _edli_heartbeat_authority_summary()
+        user_ws_summary = _edli_user_ws_authority_summary(checked_at)
+        balance_status, balance_authority_id = _edli_balance_allowance_status(
+            final_intent,
+            checked_at,
+            enabled=balance_check_enabled,
+        )
+
+        return PreSubmitAuthorityWitness(
+            quote_seen_at=quote_seen_at,
+            book_hash=book_hash,
+            current_best_bid=best_bid,
+            current_best_ask=best_ask,
+            tick_size=float(intent["tick_size"]),
+            min_order_size=float(intent["min_order_size"]),
+            neg_risk=bool(intent.get("neg_risk", False)),
+            heartbeat_status="OK" if heartbeat_summary["allow_submit"] else "BLOCKED",
+            user_ws_status="OK" if user_ws_summary["allow_submit"] else "BLOCKED",
+            venue_connectivity_status="OK",
+            balance_allowance_status=balance_status,
+            book_authority_id="execution_feasibility_evidence",
+            book_captured_at=quote_seen_at,
+            heartbeat_authority_id=str(heartbeat_summary["authority_id"]),
+            heartbeat_checked_at=checked_at.isoformat(),
+            user_ws_authority_id=str(user_ws_summary["authority_id"]),
+            user_ws_checked_at=checked_at.isoformat(),
+            venue_connectivity_authority_id="execution_feasibility_evidence",
+            venue_connectivity_checked_at=checked_at.isoformat(),
+            balance_allowance_authority_id=balance_authority_id,
+            balance_allowance_checked_at=checked_at.isoformat(),
+            checked_at=checked_at.isoformat(),
+            max_quote_age_ms=max_quote_age_ms,
+        )
+
+    return _provider
+
+
+def _edli_latest_pre_submit_book_row(world_conn, *, token_id: str, decision_time: datetime):
+    return world_conn.execute(
+        """
+        SELECT quote_seen_at, book_hash_before, best_bid_before, best_ask_before
+        FROM execution_feasibility_evidence
+        WHERE token_id = ?
+          AND quote_seen_at <= ?
+          AND best_bid_before IS NOT NULL
+          AND best_ask_before IS NOT NULL
+          AND COALESCE(book_hash_before, '') != ''
+        ORDER BY quote_seen_at DESC
+        LIMIT 1
+        """,
+        (token_id, decision_time.isoformat()),
+    ).fetchone()
+
+
+def _edli_heartbeat_authority_summary() -> dict[str, object]:
+    from src.control.heartbeat_supervisor import summary as heartbeat_summary
+
+    summary = heartbeat_summary()
+    return {
+        "authority_id": "heartbeat_supervisor",
+        "allow_submit": bool(summary.get("entry", {}).get("allow_submit", False)),
+    }
+
+
+def _edli_user_ws_authority_summary(checked_at: datetime) -> dict[str, object]:
+    from src.control.ws_gap_guard import summary as ws_summary
+
+    summary = ws_summary(now=checked_at)
+    return {
+        "authority_id": "ws_gap_guard",
+        "allow_submit": bool(summary.get("entry", {}).get("allow_submit", False)),
+    }
+
+
+def _edli_balance_allowance_status(final_intent, checked_at: datetime, *, enabled: bool) -> tuple[str, str]:
+    if not enabled:
+        return "BLOCKED", "polymarket_wallet_readonly_disabled"
+    from src.data.polymarket_client import PolymarketClient
+
+    required_notional = float(final_intent.payload.get("notional_usd") or 0.0)
+    with PolymarketClient() as clob:
+        balance = float(clob.get_wallet_balance())
+    if balance < required_notional:
+        logger.warning(
+            "EDLI pre-submit balance/allowance blocked: balance=%.4f required=%.4f checked_at=%s",
+            balance,
+            required_notional,
+            checked_at.isoformat(),
+        )
+        return "INSUFFICIENT", "polymarket_wallet_readonly"
+    return "OK", "polymarket_wallet_readonly"
+
+
+def _row_get(row, key: str):
+    try:
+        return row[key]
+    except Exception:
+        try:
+            return getattr(row, key)
+        except Exception:
+            return None
+
+
+def _row_float(row, key: str) -> float | None:
+    value = _row_get(row, key)
+    if value in (None, ""):
+        return None
+    return float(value)
+
+
+@_scheduler_job("edli_user_channel_reconcile")
+def _edli_user_channel_reconcile_cycle() -> None:
+    """EDLI user-channel/reconcile service boundary.
+
+    Disabled by default. The live-order aggregate may only accept fill/lifecycle
+    facts from authenticated user channel or explicit reconcile writers; public
+    market-channel data remains quote evidence only.
+    """
+
+    edli_cfg = settings.get("edli_v1", {})
+    if not edli_cfg.get("enabled") or not edli_cfg.get("edli_user_channel_reconcile_enabled", False):
+        return
+    _write_scheduler_health(
+        "edli_user_channel_reconcile",
+        failed=False,
+        extra={
+            "status": "enabled_no_socket_side_effect_in_this_cycle",
+            "fill_authority": "user_channel_or_reconcile_only",
+            "public_market_channel_fill_truth": "forbidden",
+        },
+    )
 
 
 @_scheduler_job("edli_market_channel_ingestor")
@@ -2998,6 +3163,16 @@ def main():
             minutes=1,
             id="edli_market_channel_ingestor",
             next_run_time=_utc_run_time_after(OPENING_HUNT_FIRST_DELAY_SECONDS + 20.0),
+            max_instances=1,
+            coalesce=True,
+        )
+    if settings.get("edli_v1", {}).get("edli_user_channel_reconcile_enabled"):
+        scheduler.add_job(
+            _edli_user_channel_reconcile_cycle,
+            "interval",
+            minutes=1,
+            id="edli_user_channel_reconcile",
+            next_run_time=_utc_run_time_after(OPENING_HUNT_FIRST_DELAY_SECONDS + 25.0),
             max_instances=1,
             coalesce=True,
         )

@@ -214,6 +214,7 @@ def test_execution_command_requires_pre_submit_revalidation():
         ({"user_ws_status": "GAP"}, "user_ws_status=OK"),
         ({"venue_connectivity_status": "DOWN"}, "venue_connectivity_status=OK"),
         ({"balance_allowance_status": "INSUFFICIENT"}, "balance_allowance_status=OK"),
+        ({"book_authority_id": ""}, "book_authority_id"),
         ({"time_in_force": "FOK"}, "GTC/GTD"),
     ],
 )
@@ -360,6 +361,16 @@ def _pre_submit_payload(**overrides):
         "user_ws_status": "OK",
         "venue_connectivity_status": "OK",
         "balance_allowance_status": "OK",
+        "book_authority_id": "execution_feasibility_evidence",
+        "book_captured_at": "2026-05-25T17:59:59.950000+00:00",
+        "heartbeat_authority_id": "heartbeat_supervisor",
+        "heartbeat_checked_at": "2026-05-25T18:00:00+00:00",
+        "user_ws_authority_id": "ws_gap_guard",
+        "user_ws_checked_at": "2026-05-25T18:00:00+00:00",
+        "venue_connectivity_authority_id": "polymarket_public_orderbook",
+        "venue_connectivity_checked_at": "2026-05-25T18:00:00+00:00",
+        "balance_allowance_authority_id": "polymarket_wallet_readonly",
+        "balance_allowance_checked_at": "2026-05-25T18:00:00+00:00",
     }
     payload.update(overrides)
     return payload

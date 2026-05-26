@@ -23,6 +23,9 @@ def test_edli_online_config_enabled_with_stale_book_and_fok_off():
     assert edli["day0_authority_catchup_scanner_enabled"] is False
     assert edli["day0_hard_fact_live_enabled"] is False
     assert edli["market_channel_ingestor_enabled"] is False
+    assert edli["edli_user_channel_reconcile_enabled"] is False
+    assert edli["pre_submit_max_quote_age_ms"] <= 1000
+    assert edli["pre_submit_balance_allowance_check_enabled"] is True
     assert edli["market_channel_quote_cache_enabled"] is True
     assert edli["no_trade_regret_enabled"] is True
     assert edli["reports_enabled"] is True
@@ -84,6 +87,7 @@ def test_edli_reactor_job_wired_without_removing_scheduler_jobs():
     source = Path("src/main.py").read_text()
     assert "edli_event_reactor" in source
     assert "edli_market_channel_ingestor" in source
+    assert "edli_user_channel_reconcile" in source
     assert "_edli_emit_forecast_snapshot_events" in source
     assert "_edli_emit_day0_extreme_events" in source
     assert "day0_authority_catchup_scanner_enabled" in source
@@ -117,6 +121,7 @@ def test_pr332_scoped_daemon_restart_smoke_registers_forecast_no_submit_only(mon
             "day0_extreme_trigger_enabled": False,
             "day0_hard_fact_live_enabled": False,
             "market_channel_ingestor_enabled": False,
+            "edli_user_channel_reconcile_enabled": False,
             "real_order_submit_enabled": False,
             "taker_fok_fak_live_enabled": False,
         }
@@ -182,11 +187,13 @@ def test_pr332_scoped_daemon_restart_smoke_registers_forecast_no_submit_only(mon
     assert scheduler.shutdown_called is True
     assert "edli_event_reactor" in job_ids
     assert "edli_market_channel_ingestor" not in job_ids
+    assert "edli_user_channel_reconcile" not in job_ids
     assert "heartbeat" in job_ids
     assert "harvester" in job_ids
     assert settings_copy["edli_v1"]["forecast_snapshot_trigger_enabled"] is True
     assert settings_copy["edli_v1"]["day0_extreme_trigger_enabled"] is False
     assert settings_copy["edli_v1"]["market_channel_ingestor_enabled"] is False
+    assert settings_copy["edli_v1"]["edli_user_channel_reconcile_enabled"] is False
     assert settings_copy["edli_v1"]["real_order_submit_enabled"] is False
 
 
