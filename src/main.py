@@ -45,6 +45,14 @@ logger = logging.getLogger("zeus")
 _cycle_lock = threading.Lock()
 _market_discovery_lock = threading.Lock()
 OPENING_HUNT_FIRST_DELAY_SECONDS = 30.0
+LIVE_EXECUTION_MODES = {"legacy_cron", "edli_event_driven", "disabled"}
+EDLI_RUNTIME_FLAGS = (
+    "enabled",
+    "event_writer_enabled",
+    "forecast_snapshot_trigger_enabled",
+    "market_channel_ingestor_enabled",
+    "edli_user_channel_reconcile_enabled",
+)
 
 # PR-S6 deployment freshness gate — mutable container populated in main() at boot.
 # Tests monkeypatch this dict directly; scheduler job reads it each tick.
@@ -62,6 +70,28 @@ def _day0_first_delay_seconds(discovery: dict) -> float:
 
     interval_seconds = float(discovery["day0_interval_min"]) * 60.0
     return OPENING_HUNT_FIRST_DELAY_SECONDS + (interval_seconds / 2.0)
+
+
+def _live_execution_mode(edli_cfg: dict) -> str:
+    mode = str(edli_cfg.get("live_execution_mode") or "legacy_cron")
+    if mode not in LIVE_EXECUTION_MODES:
+        raise ValueError(f"UNSUPPORTED_LIVE_EXECUTION_MODE:{mode}")
+    return mode
+
+
+def _edli_runtime_requested(edli_cfg: dict) -> bool:
+    return any(bool(edli_cfg.get(flag, False)) for flag in EDLI_RUNTIME_FLAGS)
+
+
+def _assert_live_execution_mode_contract(edli_cfg: dict) -> str:
+    mode = _live_execution_mode(edli_cfg)
+    if mode == "legacy_cron" and _edli_runtime_requested(edli_cfg):
+        raise RuntimeError("EDLI_RUNTIME_CONFLICTS_WITH_LEGACY_CRON")
+    if mode == "edli_event_driven" and not bool(edli_cfg.get("enabled", False)):
+        raise RuntimeError("EDLI_EVENT_DRIVEN_REQUIRES_EDLI_ENABLED")
+    if mode == "disabled" and _edli_runtime_requested(edli_cfg):
+        raise RuntimeError("EDLI_RUNTIME_CONFLICTS_WITH_DISABLED_MODE")
+    return mode
 
 
 def _scheduler_job(job_name: str):
@@ -3145,45 +3175,48 @@ def main():
 
     # All modes use the SAME CycleRunner with different DiscoveryMode values
     # max_instances=1: prevent concurrent execution if previous cycle still running
-    scheduler.add_job(
-        lambda: _run_mode(DiscoveryMode.OPENING_HUNT), "interval",
-        minutes=discovery["opening_hunt_interval_min"], id="opening_hunt",
-        next_run_time=_utc_run_time_after(OPENING_HUNT_FIRST_DELAY_SECONDS),
-        max_instances=1, coalesce=True,
-    )
-    for time_str in discovery["update_reaction_times_utc"]:
-        h, m = time_str.split(":")
+    edli_cfg = settings.get("edli_v1", {})
+    live_execution_mode = _assert_live_execution_mode_contract(edli_cfg)
+    if live_execution_mode == "legacy_cron":
         scheduler.add_job(
-            lambda: _run_mode(DiscoveryMode.UPDATE_REACTION), "cron",
-            hour=int(h), minute=int(m), id=f"update_reaction_{time_str}",
+            lambda: _run_mode(DiscoveryMode.OPENING_HUNT), "interval",
+            minutes=discovery["opening_hunt_interval_min"], id="opening_hunt",
+            next_run_time=_utc_run_time_after(OPENING_HUNT_FIRST_DELAY_SECONDS),
             max_instances=1, coalesce=True,
         )
-    scheduler.add_job(
-        lambda: _run_mode(DiscoveryMode.DAY0_CAPTURE), "interval",
-        minutes=discovery["day0_interval_min"], id="day0_capture",
-        next_run_time=_utc_run_time_after(_day0_first_delay_seconds(discovery)),
-        max_instances=1, coalesce=True,
-    )
-    # imminent_open_capture: fires every 5 min to catch re-opened or D+1 markets
-    # in the 0-24h window that fall below opening_hunt's min_hours_to_resolution:24
-    # threshold. Fail-closed on stale data (same freshness gate as day0_capture).
-    scheduler.add_job(
-        lambda: _run_mode(DiscoveryMode.IMMINENT_OPEN_CAPTURE), "interval",
-        minutes=discovery.get("imminent_open_capture_interval_min", 5),
-        id="imminent_open_capture",
-        next_run_time=_utc_run_time_after(OPENING_HUNT_FIRST_DELAY_SECONDS + 15.0),
-        max_instances=1, coalesce=True,
-    )
-    scheduler.add_job(
-        _market_discovery_cycle,
-        "interval",
-        minutes=5,
-        id="market_discovery",
-        next_run_time=_utc_run_time_after(OPENING_HUNT_FIRST_DELAY_SECONDS + 90.0),
-        max_instances=1,
-        coalesce=True,
-    )
-    if settings.get("edli_v1", {}).get("enabled"):
+        for time_str in discovery["update_reaction_times_utc"]:
+            h, m = time_str.split(":")
+            scheduler.add_job(
+                lambda: _run_mode(DiscoveryMode.UPDATE_REACTION), "cron",
+                hour=int(h), minute=int(m), id=f"update_reaction_{time_str}",
+                max_instances=1, coalesce=True,
+            )
+        scheduler.add_job(
+            lambda: _run_mode(DiscoveryMode.DAY0_CAPTURE), "interval",
+            minutes=discovery["day0_interval_min"], id="day0_capture",
+            next_run_time=_utc_run_time_after(_day0_first_delay_seconds(discovery)),
+            max_instances=1, coalesce=True,
+        )
+        # imminent_open_capture: fires every 5 min to catch re-opened or D+1 markets
+        # in the 0-24h window that fall below opening_hunt's min_hours_to_resolution:24
+        # threshold. Fail-closed on stale data (same freshness gate as day0_capture).
+        scheduler.add_job(
+            lambda: _run_mode(DiscoveryMode.IMMINENT_OPEN_CAPTURE), "interval",
+            minutes=discovery.get("imminent_open_capture_interval_min", 5),
+            id="imminent_open_capture",
+            next_run_time=_utc_run_time_after(OPENING_HUNT_FIRST_DELAY_SECONDS + 15.0),
+            max_instances=1, coalesce=True,
+        )
+        scheduler.add_job(
+            _market_discovery_cycle,
+            "interval",
+            minutes=5,
+            id="market_discovery",
+            next_run_time=_utc_run_time_after(OPENING_HUNT_FIRST_DELAY_SECONDS + 90.0),
+            max_instances=1,
+            coalesce=True,
+        )
+    if live_execution_mode == "edli_event_driven" and edli_cfg.get("enabled"):
         scheduler.add_job(
             _edli_event_reactor_cycle,
             "interval",
@@ -3193,7 +3226,7 @@ def main():
             max_instances=1,
             coalesce=True,
         )
-    if settings.get("edli_v1", {}).get("market_channel_ingestor_enabled"):
+    if live_execution_mode == "edli_event_driven" and edli_cfg.get("market_channel_ingestor_enabled"):
         scheduler.add_job(
             _edli_market_channel_ingestor_cycle,
             "interval",
@@ -3203,7 +3236,7 @@ def main():
             max_instances=1,
             coalesce=True,
         )
-    if settings.get("edli_v1", {}).get("edli_user_channel_reconcile_enabled"):
+    if live_execution_mode == "edli_event_driven" and edli_cfg.get("edli_user_channel_reconcile_enabled"):
         scheduler.add_job(
             _edli_user_channel_reconcile_cycle,
             "interval",
@@ -3213,7 +3246,8 @@ def main():
             max_instances=1,
             coalesce=True,
         )
-    scheduler.add_job(_harvester_cycle, "interval", hours=1, id="harvester")
+    if live_execution_mode == "legacy_cron":
+        scheduler.add_job(_harvester_cycle, "interval", hours=1, id="harvester")
     scheduler.add_job(_write_heartbeat, "interval", seconds=60, id="heartbeat",
                       max_instances=1, coalesce=True)
     from src.control.heartbeat_supervisor import heartbeat_cadence_seconds_from_env

@@ -17,7 +17,11 @@ def test_live_canary_runtime_remains_disabled_until_executor_cut():
     settings = json.loads(Path("config/settings.json").read_text())
     edli = settings["edli_v1"]
 
-    assert edli["reactor_mode"] == "live_no_submit"
+    assert edli["enabled"] is False
+    assert edli["live_execution_mode"] == "legacy_cron"
+    assert edli["reactor_mode"] == "disabled"
+    assert edli["event_writer_enabled"] is False
+    assert edli["forecast_snapshot_trigger_enabled"] is False
     assert edli["real_order_submit_enabled"] is False
     assert edli["day0_extreme_trigger_enabled"] is False
     assert edli["market_channel_ingestor_enabled"] is False
