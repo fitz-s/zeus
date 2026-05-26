@@ -18,6 +18,7 @@ def test_edli_online_config_defaults_inert_under_legacy_cron():
     edli = settings["edli_v1"]
     assert edli["enabled"] is False
     assert edli["live_execution_mode"] == "legacy_cron"
+    assert edli["edli_live_scope"] == "forecast_only"
     assert edli["reactor_mode"] == "disabled"
     assert edli["event_writer_enabled"] is False
     assert edli["forecast_snapshot_trigger_enabled"] is False
@@ -27,6 +28,10 @@ def test_edli_online_config_defaults_inert_under_legacy_cron():
     assert edli["day0_hard_fact_live_enabled"] is False
     assert edli["market_channel_ingestor_enabled"] is False
     assert edli["edli_user_channel_reconcile_enabled"] is False
+    assert edli["edli_user_channel_message_queue_path"] == ""
+    assert edli["edli_venue_reconcile_facts_path"] == ""
+    assert edli["edli_user_channel_reconcile_max_messages"] <= 50
+    assert edli["edli_user_channel_reconcile_pending_limit"] <= 50
     assert edli["pre_submit_max_quote_age_ms"] <= 1000
     assert edli["pre_submit_balance_allowance_check_enabled"] is True
     assert edli["market_channel_quote_cache_enabled"] is True
@@ -233,6 +238,23 @@ def test_live_execution_mode_rejects_disabled_with_edli_runtime_enabled(monkeypa
                 "reactor_mode": "disabled",
                 "event_writer_enabled": True,
                 "forecast_snapshot_trigger_enabled": False,
+                "real_order_submit_enabled": False,
+            },
+        )
+
+
+def test_forecast_only_live_scope_rejects_day0_runtime(monkeypatch):
+    with pytest.raises(RuntimeError, match="DAY0_OUT_OF_SCOPE_FOR_PR332"):
+        _run_main_with_fake_scheduler(
+            monkeypatch,
+            {
+                "enabled": False,
+                "live_execution_mode": "legacy_cron",
+                "edli_live_scope": "forecast_only",
+                "reactor_mode": "disabled",
+                "event_writer_enabled": False,
+                "forecast_snapshot_trigger_enabled": False,
+                "day0_extreme_trigger_enabled": True,
                 "real_order_submit_enabled": False,
             },
         )

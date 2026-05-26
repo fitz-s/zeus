@@ -490,6 +490,21 @@ state_machines:
       - PRE_SUBMIT_PUSD_ALLOWANCE_INSUFFICIENT
       - PRE_SUBMIT_CTF_BALANCE_INSUFFICIENT
       - PRE_SUBMIT_CTF_ALLOWANCE_INSUFFICIENT
+      - DAY0_OUT_OF_SCOPE_FOR_PR332
+      - CANARY_PROOF_PASS
+      - WAITING_FOR_QUALIFYING_EVENT
+      - FAIL
+      - CANARY_ARTIFACT_MISSING
+      - CANARY_REQUIRED_FIELDS_MISSING
+      - CANARY_REQUIRES_VENUE_ORDER_OR_SUBMIT_UNKNOWN
+      - CANARY_REQUIRES_USER_CHANNEL_OR_RECONCILE
+      - CANARY_SUBMIT_UNKNOWN_UNRESOLVED
+      - CANARY_PENDING_RECONCILE
+      - CANARY_QUOTE_STALE
+      - CANARY_EXPECTED_EDGE_INSUFFICIENT
+      - CANARY_EXPECTED_EDGE_INVALID
+      - CANARY_CAP_TRANSITION_INVALID
+      - CANARY_REALIZED_STATE_INVALID
       - EDLI_LIVE_REQUIRES_EDLI_LIVE_SCALEOUT_ENABLED
       - EDLI_LIVE_REQUIRES_PROMOTION_ARTIFACT_REQUIRED
       - EDLI_LIVE_REQUIRES_PROMOTION_ARTIFACT
@@ -667,6 +682,17 @@ schema_objects:
         aggregate event log after crashes or partial writes.
       required_tests:
         - tests/events/test_live_order_aggregate.py
+    edli_live_profit_audit:
+      db: world
+      pk: audit_id
+      writer: src/events/live_profit_audit.py::LiveProfitAuditLedger.insert_record
+      meaning: >
+        Event-bound EDLI live realized-edge audit projection. Promotion gates
+        consume it to require clean canary lifecycle evidence, zero unresolved
+        unknown side effects, and positive realized-edge telemetry before
+        scaleout.
+      required_tests:
+        - tests/events/test_live_profit_audit.py
     # OBS-AUTHORITY-FOUNDATION 2026-05-23. Persisted, auditable settlement-day
     # observation authority. Observability only — these objects record runtime
     # observation truth + per-edge day0 classification so the operator can audit

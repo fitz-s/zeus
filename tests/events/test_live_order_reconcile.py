@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+import json
 from datetime import datetime, timezone
 
 import pytest
@@ -195,6 +196,132 @@ def test_user_channel_ingestor_appends_order_and_confirmed_trade_events():
     assert trade_event.payload["fill_authority_state"] == "FILL_CONFIRMED"
 
 
+def test_user_channel_reconcile_cycle_processes_authenticated_queue(monkeypatch, tmp_path):
+    import src.main as main
+
+    db_path = tmp_path / "world.db"
+    conn = _conn(db_path)
+    ledger = LiveOrderAggregateLedger(conn)
+    _seed(ledger)
+    conn.commit()
+    queue_path = tmp_path / "user_channel.jsonl"
+    queue_path.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "source": "polymarket_user_channel",
+                        "type": "order",
+                        "aggregate_id": "event-1:intent-1",
+                        "event_id": "event-1",
+                        "final_intent_id": "intent-1",
+                        "venue_order_id": "venue-1",
+                        "order_update_type": "UPDATE",
+                        "occurred_at": NOW.isoformat(),
+                    }
+                ),
+                json.dumps(
+                    {
+                        "source": "polymarket_user_channel",
+                        "type": "trade",
+                        "aggregate_id": "event-1:intent-1",
+                        "event_id": "event-1",
+                        "final_intent_id": "intent-1",
+                        "venue_order_id": "venue-1",
+                        "trade_status": "CONFIRMED",
+                        "occurred_at": NOW.isoformat(),
+                    }
+                ),
+            ]
+        )
+    )
+
+    monkeypatch.setattr(
+        main,
+        "settings",
+        {
+            "edli_v1": {
+                "enabled": True,
+                "edli_user_channel_reconcile_enabled": True,
+                "edli_user_channel_message_queue_path": str(queue_path),
+                "edli_venue_reconcile_facts_path": "",
+            }
+        },
+    )
+    monkeypatch.setattr(main, "get_world_connection", lambda *args, **kwargs: conn)
+    monkeypatch.setattr(main, "_write_scheduler_health", lambda *args, **kwargs: None)
+
+    main._edli_user_channel_reconcile_cycle.__wrapped__()
+
+    check_ledger = LiveOrderAggregateLedger(_conn(db_path))
+    projection = check_ledger.get_projection("event-1:intent-1")
+    assert projection.current_state == "USER_TRADE_OBSERVED"
+    row = check_ledger.conn.execute(
+        """
+        SELECT payload_json
+        FROM edli_live_order_events
+        WHERE event_type = 'UserTradeObserved'
+        """
+    ).fetchone()
+    payload = json.loads(row["payload_json"])
+    assert payload["fill_authority_state"] == "FILL_CONFIRMED"
+
+
+def test_user_channel_reconcile_cycle_clears_submit_unknown_from_venue_fact(monkeypatch, tmp_path):
+    import src.main as main
+
+    db_path = tmp_path / "world.db"
+    conn = _conn(db_path)
+    ledger = LiveOrderAggregateLedger(conn)
+    _seed(ledger)
+    ledger.append_event(
+        aggregate_id="event-1:intent-1",
+        event_type="SubmitUnknown",
+        payload={"event_id": "event-1", "final_intent_id": "intent-1", "venue_order_id": "venue-1"},
+        occurred_at=NOW,
+        source_authority="existing_executor",
+    )
+    assert ledger.get_projection("event-1:intent-1").pending_reconcile is True
+    conn.commit()
+    reconcile_path = tmp_path / "venue_reconcile.jsonl"
+    reconcile_path.write_text(
+        json.dumps(
+            {
+                "aggregate_id": "event-1:intent-1",
+                "event_id": "event-1",
+                "final_intent_id": "intent-1",
+                "source": "venue_reconcile",
+                "pending_reconcile": False,
+                "observed_at": NOW.isoformat(),
+                "payload": {"venue_order_exists": False, "cap_transition_recommendation": "RELEASED"},
+            }
+        )
+        + "\n"
+    )
+
+    monkeypatch.setattr(
+        main,
+        "settings",
+        {
+            "edli_v1": {
+                "enabled": True,
+                "edli_user_channel_reconcile_enabled": True,
+                "edli_user_channel_message_queue_path": "",
+                "edli_venue_reconcile_facts_path": str(reconcile_path),
+            }
+        },
+    )
+    monkeypatch.setattr(main, "get_world_connection", lambda *args, **kwargs: conn)
+    monkeypatch.setattr(main, "_write_scheduler_health", lambda *args, **kwargs: None)
+
+    main._edli_user_channel_reconcile_cycle.__wrapped__()
+
+    check_ledger = LiveOrderAggregateLedger(_conn(db_path))
+    projection = check_ledger.get_projection("event-1:intent-1")
+    assert projection.current_state == "RECONCILED"
+    assert projection.pending_reconcile is False
+
+
 def _seed(ledger: LiveOrderAggregateLedger) -> None:
     ledger.append_event(
         aggregate_id="event-1:intent-1",
@@ -205,7 +332,7 @@ def _seed(ledger: LiveOrderAggregateLedger) -> None:
     )
 
 
-def _conn() -> sqlite3.Connection:
-    conn = sqlite3.connect(":memory:")
+def _conn(path=":memory:") -> sqlite3.Connection:
+    conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row
     return conn

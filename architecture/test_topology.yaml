@@ -46,6 +46,8 @@ test_trust_policy:
     tests/events/test_live_cap.py: {created: "2026-05-25", last_used: "2026-05-25"}
     tests/events/test_live_order_aggregate.py: {created: "2026-05-25", last_used: "2026-05-25"}
     tests/events/test_live_order_reconcile.py: {created: "2026-05-26", last_used: "2026-05-26"}
+    tests/events/test_live_profit_audit.py: {created: "2026-05-26", last_used: "2026-05-26"}
+    tests/scripts/test_check_edli_live_canary_gate.py: {created: "2026-05-26", last_used: "2026-05-26"}
     tests/decision_kernel/test_certificate_time_filtration.py: {created: "2026-05-25", last_used: "2026-05-25"}
     tests/decision_kernel/test_certificate_hashing.py: {created: "2026-05-25", last_used: "2026-05-25"}
     tests/decision_kernel/test_no_submit_theorems.py: {created: "2026-05-25", last_used: "2026-05-25"}

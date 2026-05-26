@@ -139,8 +139,19 @@ def _assert_edli_live_promotion_artifact(edli_cfg: dict) -> None:
         raise RuntimeError("EDLI_LIVE_PROMOTION_REALIZED_EDGE_INSUFFICIENT")
 
 
+def _assert_edli_live_scope(edli_cfg: dict) -> None:
+    scope = str(edli_cfg.get("edli_live_scope") or "forecast_only")
+    if scope != "forecast_only":
+        raise RuntimeError(f"UNSUPPORTED_EDLI_LIVE_SCOPE:{scope}")
+    if bool(edli_cfg.get("day0_extreme_trigger_enabled", False)) or bool(
+        edli_cfg.get("day0_hard_fact_live_enabled", False)
+    ):
+        raise RuntimeError("DAY0_OUT_OF_SCOPE_FOR_PR332")
+
+
 def _assert_live_execution_mode_contract(edli_cfg: dict) -> str:
     mode = _live_execution_mode(edli_cfg)
+    _assert_edli_live_scope(edli_cfg)
     expected_reactor_mode = REACTOR_MODE_BY_LIVE_STAGE[mode]
     reactor_mode = str(edli_cfg.get("reactor_mode") or "disabled")
     if reactor_mode != expected_reactor_mode:
@@ -2892,6 +2903,134 @@ def _row_float(row, key: str) -> float | None:
     return float(value)
 
 
+def _edli_jsonl_records(path_value: str | os.PathLike[str] | None) -> list[dict]:
+    path_text = str(path_value or "").strip()
+    if not path_text:
+        return []
+    path = Path(path_text)
+    if not path.exists():
+        return []
+    records: list[dict] = []
+    for line_number, raw_line in enumerate(path.read_text().splitlines(), start=1):
+        line = raw_line.strip()
+        if not line:
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"EDLI_USER_CHANNEL_RECONCILE_QUEUE_INVALID_JSON:{path}:{line_number}") from exc
+        if not isinstance(record, dict):
+            raise RuntimeError(f"EDLI_USER_CHANNEL_RECONCILE_QUEUE_RECORD_NOT_OBJECT:{path}:{line_number}")
+        records.append(record)
+    return records
+
+
+class _EdliJsonlUserChannelReader:
+    def __init__(self, path_value: str | os.PathLike[str] | None):
+        self._path_value = path_value
+
+    def poll(self, *, max_messages: int) -> list[dict]:
+        return _edli_jsonl_records(self._path_value)[:max(0, max_messages)]
+
+
+class _EdliJsonlVenueReconcileReader:
+    def __init__(self, path_value: str | os.PathLike[str] | None):
+        self._facts = _edli_jsonl_records(path_value)
+
+    def reconcile(self, pending) -> dict | None:
+        aggregate_id = _row_get(pending, "aggregate_id")
+        event_id = _row_get(pending, "event_id")
+        final_intent_id = _row_get(pending, "final_intent_id")
+        venue_order_id = _row_get(pending, "venue_order_id")
+        for fact in self._facts:
+            if fact.get("aggregate_id") and fact.get("aggregate_id") == aggregate_id:
+                return fact
+            if fact.get("venue_order_id") and fact.get("venue_order_id") == venue_order_id:
+                return fact
+            if fact.get("event_id") == event_id and fact.get("final_intent_id") == final_intent_id:
+                return fact
+        return None
+
+
+def _edli_user_channel_reader(edli_cfg: dict) -> _EdliJsonlUserChannelReader:
+    return _EdliJsonlUserChannelReader(edli_cfg.get("edli_user_channel_message_queue_path"))
+
+
+def _edli_venue_reconcile_reader(edli_cfg: dict) -> _EdliJsonlVenueReconcileReader:
+    return _EdliJsonlVenueReconcileReader(edli_cfg.get("edli_venue_reconcile_facts_path"))
+
+
+def _parse_edli_runtime_time(payload: dict, *, default: datetime) -> datetime:
+    for key in ("occurred_at", "observed_at", "timestamp", "created_at"):
+        value = payload.get(key)
+        if not value:
+            continue
+        if isinstance(value, datetime):
+            return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+        if isinstance(value, (int, float)):
+            return datetime.fromtimestamp(float(value), tz=timezone.utc)
+        if isinstance(value, str):
+            text = value.replace("Z", "+00:00")
+            try:
+                parsed = datetime.fromisoformat(text)
+            except ValueError as exc:
+                raise RuntimeError(f"EDLI_RUNTIME_TIMESTAMP_INVALID:{key}") from exc
+            return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+    return default
+
+
+def _parse_edli_runtime_bool(value, *, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "y"}
+    return bool(value)
+
+
+def _resolve_edli_user_channel_aggregate_id(conn, message: dict) -> str:
+    aggregate_id = str(message.get("aggregate_id") or "").strip()
+    if aggregate_id:
+        return aggregate_id
+    venue_order_id = str(message.get("venue_order_id") or message.get("order_id") or "").strip()
+    if venue_order_id:
+        row = conn.execute(
+            """
+            SELECT aggregate_id
+            FROM edli_live_order_projection
+            WHERE venue_order_id = ?
+            ORDER BY updated_at DESC
+            LIMIT 1
+            """,
+            (venue_order_id,),
+        ).fetchone()
+        if row is not None:
+            return str(_row_get(row, "aggregate_id"))
+    event_id = str(message.get("event_id") or "").strip()
+    final_intent_id = str(message.get("final_intent_id") or "").strip()
+    if event_id and final_intent_id:
+        return f"{event_id}:{final_intent_id}"
+    raise RuntimeError("EDLI_USER_CHANNEL_MESSAGE_AGGREGATE_UNRESOLVED")
+
+
+def _edli_pending_reconcile_aggregates(conn, *, limit: int) -> list:
+    return list(
+        conn.execute(
+            """
+            SELECT aggregate_id, event_id, final_intent_id, venue_order_id
+            FROM edli_live_order_projection
+            WHERE pending_reconcile = 1
+            ORDER BY updated_at ASC
+            LIMIT ?
+            """,
+            (max(0, limit),),
+        ).fetchall()
+    )
+
+
 @_scheduler_job("edli_user_channel_reconcile")
 def _edli_user_channel_reconcile_cycle() -> None:
     """EDLI user-channel/reconcile service boundary.
@@ -2904,13 +3043,57 @@ def _edli_user_channel_reconcile_cycle() -> None:
     edli_cfg = settings.get("edli_v1", {})
     if not edli_cfg.get("enabled") or not edli_cfg.get("edli_user_channel_reconcile_enabled", False):
         return
+    max_messages = int(edli_cfg.get("edli_user_channel_reconcile_max_messages", 50))
+    pending_limit = int(edli_cfg.get("edli_user_channel_reconcile_pending_limit", 50))
+    now = datetime.now(timezone.utc)
+    message_count = 0
+    reconcile_count = 0
+    from src.events.live_order_aggregate import LiveOrderAggregateLedger
+    from src.events.live_order_reconcile import append_reconciled
+    from src.events.triggers.user_channel_ingestor import append_user_channel_message
+
+    conn = get_world_connection(write_class="live")
+    try:
+        ledger = LiveOrderAggregateLedger(conn)
+        user_channel_reader = _edli_user_channel_reader(edli_cfg)
+        for message in user_channel_reader.poll(max_messages=max_messages):
+            aggregate_id = _resolve_edli_user_channel_aggregate_id(conn, message)
+            append_user_channel_message(
+                ledger,
+                aggregate_id=aggregate_id,
+                message=message,
+                occurred_at=_parse_edli_runtime_time(message, default=now),
+            )
+            message_count += 1
+
+        venue_reconcile_reader = _edli_venue_reconcile_reader(edli_cfg)
+        for pending in _edli_pending_reconcile_aggregates(conn, limit=pending_limit):
+            fact = venue_reconcile_reader.reconcile(pending)
+            if not fact:
+                continue
+            append_reconciled(
+                ledger,
+                aggregate_id=str(_row_get(pending, "aggregate_id")),
+                event_id=str(fact.get("event_id") or _row_get(pending, "event_id")),
+                final_intent_id=str(fact.get("final_intent_id") or _row_get(pending, "final_intent_id")),
+                source=str(fact.get("source") or "venue_reconcile"),
+                pending_reconcile=_parse_edli_runtime_bool(fact.get("pending_reconcile"), default=False),
+                occurred_at=_parse_edli_runtime_time(fact, default=now),
+                payload=fact.get("payload") if isinstance(fact.get("payload"), dict) else None,
+            )
+            reconcile_count += 1
+        conn.commit()
+    finally:
+        conn.close()
     _write_scheduler_health(
         "edli_user_channel_reconcile",
         failed=False,
         extra={
-            "status": "enabled_no_socket_side_effect_in_this_cycle",
+            "status": "processed_user_channel_reconcile_cycle",
             "fill_authority": "user_channel_or_reconcile_only",
             "public_market_channel_fill_truth": "forbidden",
+            "user_channel_messages": message_count,
+            "venue_reconciliations": reconcile_count,
         },
     )
 

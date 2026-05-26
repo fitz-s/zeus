@@ -71,6 +71,7 @@
   "edli_v1": {
     "enabled": false,
     "live_execution_mode": "legacy_cron",
+    "edli_live_scope": "forecast_only",
     "reactor_mode": "disabled",
     "event_writer_enabled": false,
     "forecast_snapshot_trigger_enabled": false,
@@ -81,6 +82,10 @@
     "market_channel_ingestor_enabled": false,
     "market_channel_quote_cache_enabled": true,
     "edli_user_channel_reconcile_enabled": false,
+    "edli_user_channel_message_queue_path": "",
+    "edli_venue_reconcile_facts_path": "",
+    "edli_user_channel_reconcile_max_messages": 50,
+    "edli_user_channel_reconcile_pending_limit": 50,
     "no_trade_regret_enabled": true,
     "reports_enabled": true,
     "forecast_snapshot_emit_limit": 20,

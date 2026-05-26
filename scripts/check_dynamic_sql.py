@@ -20,7 +20,7 @@ f-string is enough for SQL injection.
 
 This scanner doesn't prove every existing site is safe (taint-tracking is out
 of scope for a 1-file scanner). It locks the per-file count of dynamic SQL
-sites at the current audited baseline (267 sites total across 53 files) so:
+sites at the current audited baseline (292 sites total across 60 files) so:
 
 - Any NEW file gaining its first dynamic SQL site fails the gate.
 - Any existing file with MORE dynamic SQL sites than baseline fails the gate.
@@ -81,7 +81,7 @@ _DYNAMIC_SQL_PATTERN = re.compile(
 )
 
 
-# Per-file baseline as of 2026-05-24 (236 sites across 46 files).
+# Per-file baseline as of 2026-05-26 (292 sites across 60 files).
 # Update both this dict AND the `total` field below when a site is added or
 # removed. The test wrapper enforces both directions.
 #
@@ -102,7 +102,10 @@ _DYNAMIC_SQL_PATTERN = re.compile(
 _BASELINE_PER_FILE: dict[str, int] = {
     "src/backtest/economics.py": 1,
     "src/calibration/effective_sample_size.py": 2,
-    "src/calibration/ens_bias_repo.py": 2,
+    # 2026-05-26 PR #332 promotion-gate pass: ens_bias_repo grew from 2 → 4.
+    # Both additional sites build WHERE fragments from closed internal
+    # contributor-policy branches; values remain bound parameters.
+    "src/calibration/ens_bias_repo.py": 4,
     # 2026-05-24 (PR #337 full_transport_v1 refit): store.py grew from 15 → 19.
     # Four new f-string SQL sites added in add_calibration_pair_v2 (2 branches, each
     # conditionally inserts error_model_family column from an internal whitelist
@@ -168,7 +171,12 @@ _BASELINE_PER_FILE: dict[str, int] = {
     # 3 new sites: PRAGMA mmap_size/cache_size with numeric literals from
     # os.environ (integer-coerced, not string-interpolated) + table-rename
     # migration helpers (tname from hardcoded tuple literals). No user input.
-    "src/state/db.py": 46,
+    # 2026-05-25 PR #332 EDLI/schema merge: db.py grew from 46 → 49. New sites
+    # are schema/table migration DDL over hardcoded internal table/column names.
+    # 2026-05-26 PR #332 promotion gate: db.py grew from 49 → 50 via an
+    # existing decision_events rebuild f-string whose interpolations are
+    # SCHEMA_VERSION and hardcoded schema SQL only; no user-controlled input.
+    "src/state/db.py": 50,
     # 2026-05-24 (post-PR #337 merge-base): decision_integrity_quarantine.py is
     # a new file with 6 f-string SQL sites. All sites interpolate {q_ref} which
     # is a module-local qualified table-name built from ATTACH alias + literal
@@ -181,6 +189,10 @@ _BASELINE_PER_FILE: dict[str, int] = {
     # Names are generated from secrets.token_hex() within the module; phase
     # filters were refactored to bound placeholders before registration.
     "src/state/position_duplicate_consolidator.py": 9,
+    # 2026-05-26 PR #332 promotion-gate pass: phase6 evidence schema has 2
+    # sites that interpolate module-local schema-version constants into
+    # migration INSERT/SELECT SQL; all identifiers are hardcoded.
+    "src/state/schema/phase6_evidence_schema.py": 2,
     "src/state/schema/v2_schema.py": 2,  # +1 PRAGMA busy_timeout in P1
     # 2 PRAGMA table_info() interpolations (with optional attached-DB name).
     # Both `table` and `attached` are internal identifiers passed by callers

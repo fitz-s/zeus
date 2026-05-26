@@ -1029,6 +1029,51 @@ tables:
       Deterministic projection of edli_live_order_events. The append-only event
       log remains source of truth; this table is rebuildable current state.
 
+  - name: edli_live_profit_audit
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: audit_id
+    required_columns:
+      - {name: audit_id, type: TEXT, nullable: false}
+      - {name: event_id, type: TEXT, nullable: false}
+      - {name: aggregate_id, type: TEXT, nullable: false}
+      - {name: final_intent_id, type: TEXT, nullable: true}
+      - {name: execution_command_id, type: TEXT, nullable: true}
+      - {name: condition_id, type: TEXT, nullable: false}
+      - {name: token_id, type: TEXT, nullable: false}
+      - {name: direction, type: TEXT, nullable: true}
+      - {name: side, type: TEXT, nullable: true}
+      - {name: q_live, type: REAL, nullable: true}
+      - {name: q_lcb_5pct, type: REAL, nullable: true}
+      - {name: expected_cost_basis, type: REAL, nullable: true}
+      - {name: expected_edge, type: REAL, nullable: true}
+      - {name: kelly_size_usd, type: REAL, nullable: true}
+      - {name: live_cap_notional, type: REAL, nullable: true}
+      - {name: quote_seen_at, type: TEXT, nullable: true}
+      - {name: quote_age_ms, type: INTEGER, nullable: true}
+      - {name: best_bid, type: REAL, nullable: true}
+      - {name: best_ask, type: REAL, nullable: true}
+      - {name: limit_price, type: REAL, nullable: true}
+      - {name: order_type, type: TEXT, nullable: true}
+      - {name: time_in_force, type: TEXT, nullable: true}
+      - {name: venue_order_id, type: TEXT, nullable: true}
+      - {name: order_lifecycle_state, type: TEXT, nullable: false}
+      - {name: avg_fill_price, type: REAL, nullable: true}
+      - {name: filled_size, type: REAL, nullable: true}
+      - {name: fees, type: REAL, nullable: true}
+      - {name: post_fill_mark, type: REAL, nullable: true}
+      - {name: settlement_outcome, type: TEXT, nullable: true}
+      - {name: realized_edge, type: REAL, nullable: true}
+      - {name: pnl_usd, type: REAL, nullable: true}
+      - {name: reject_reason, type: TEXT, nullable: true}
+      - {name: created_at, type: TEXT, nullable: false}
+      - {name: schema_version, type: INTEGER, nullable: false}
+    notes: >
+      Event-bound EDLI live realized-edge audit projection. Used by promotion
+      gates to block scaleout when canary lifecycle or economics are not proven.
+
   - name: outcome_fact
     db: world
     schema_class: world_class

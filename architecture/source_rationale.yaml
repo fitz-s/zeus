@@ -362,6 +362,13 @@ files:
     downstream:
     - src/events/live_order_aggregate.py
     - src/decision_kernel/verifier.py
+  src/events/live_profit_audit.py:
+    zone: K2_runtime
+    authority_role: edli_live_profit_audit_projection
+    why: Event-bound EDLI live realized-edge audit projection and promotion-artifact summarizer; measures canary lifecycle economics without submitting orders.
+    downstream:
+    - src/state/schema/edli_live_profit_audit_schema.py
+    - src/main.py
   src/decision_kernel/certificate.py:
     zone: K2_runtime
     authority_role: edli_certificate_grammar
@@ -2607,6 +2614,13 @@ files:
     downstream:
     - src/state/db.py
     - src/events/live_order_aggregate.py
+  src/state/schema/edli_live_profit_audit_schema.py:
+    zone: K2_runtime
+    authority_role: edli_live_profit_audit_schema_owner
+    why: EDLI live promotion DDL owner for event-bound realized-edge audit rows used by scaleout gates.
+    downstream:
+    - src/state/db.py
+    - src/events/live_profit_audit.py
   src/state/schema/tail_stress_scenarios_schema.py:
     zone: K2_runtime
     authority_role: tail_stress_scenarios_schema_owner
