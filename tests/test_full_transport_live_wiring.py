@@ -9,7 +9,8 @@ Three invariants (per Zeus #64 task spec):
       a direct p_raw_vector_with_error_model call
   (c) flag ON + no model row → plain fallback + WARNING logged
 
-Test (b) is proven RED on current HEAD (no flag + no helper) then GREEN after wiring.
+Test (b) exercises the new wiring branch; it would be an ImportError (not an
+assertion RED) on pre-wiring HEAD since _load_ft_error_model did not exist.
 """
 
 from __future__ import annotations

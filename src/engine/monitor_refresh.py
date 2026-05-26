@@ -350,7 +350,16 @@ def _resolve_ft_error_model(
 
     Handles entry_forecast_config() failure gracefully — if the config surface
     is unavailable, returns None (plain p_raw path used; no silent ft pretence).
+
+    Note on season convention: ``season_from_date`` uses lat=city.lat (hemisphere-aware).
+    The writer (fit_full_transport_error_models.py) uses calendar labels (NH convention).
+    This matches because Zeus has no Southern-Hemisphere cities (all lat > 0); the call
+    signatures agree for every active city. Add an assertion or override if SH cities
+    are added.
     """
+    # Flag-check first: avoid config/season resolution work on every cycle when OFF (default).
+    if not bool(settings["feature_flags"].get("full_transport_live_enabled", False)):
+        return None
     try:
         cfg = entry_forecast_config()
         track = track_for_metric(cfg, metric_str)
