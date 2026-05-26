@@ -168,8 +168,9 @@ def fit_all(
     from src.calibration.ens_error_model import fit_city_predictive_error  # noqa: PLC0415
     from src.calibration.ens_bias_repo import load_bucket_residuals  # noqa: PLC0415
 
-    init_ens_bias_schema(conn)
     if not dry_run:
+        # Both schema helpers write to DB — must not run on the read-only dry-run connection.
+        init_ens_bias_schema(conn)
         _apply_canonical_migration(conn)
         conn.commit()
 
