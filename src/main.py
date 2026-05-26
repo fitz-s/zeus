@@ -59,6 +59,14 @@ EDLI_EVENT_DRIVEN_MODES = {
     "edli_live_canary",
     "edli_live",
 }
+REACTOR_MODE_BY_LIVE_STAGE = {
+    "legacy_cron": "disabled",
+    "disabled": "disabled",
+    "edli_shadow_no_submit": "live_no_submit",
+    "edli_submit_disabled_bridge": "submit_disabled_live_bridge",
+    "edli_live_canary": "live",
+    "edli_live": "live",
+}
 EDLI_RUNTIME_FLAGS = (
     "enabled",
     "event_writer_enabled",
@@ -104,6 +112,10 @@ def _require_edli_flags(edli_cfg: dict, mode: str, flags: tuple[str, ...]) -> No
 
 def _assert_live_execution_mode_contract(edli_cfg: dict) -> str:
     mode = _live_execution_mode(edli_cfg)
+    expected_reactor_mode = REACTOR_MODE_BY_LIVE_STAGE[mode]
+    reactor_mode = str(edli_cfg.get("reactor_mode") or "disabled")
+    if reactor_mode != expected_reactor_mode:
+        raise RuntimeError(f"{mode.upper()}_REQUIRES_REACTOR_MODE_{expected_reactor_mode.upper()}")
     if mode == "legacy_cron" and _edli_runtime_requested(edli_cfg):
         raise RuntimeError("EDLI_RUNTIME_CONFLICTS_WITH_LEGACY_CRON")
     if mode == "disabled" and _edli_runtime_requested(edli_cfg):

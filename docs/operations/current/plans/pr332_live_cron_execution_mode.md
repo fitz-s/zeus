@@ -21,6 +21,11 @@ can be scheduled.
 - Fail boot when EDLI runtime flags conflict with `legacy_cron` mode or when
   an EDLI event-driven stage is requested without its required runtime
   authorities.
+- Bind each live execution stage to exactly one reactor mode:
+  `legacy_cron`/`disabled` require `reactor_mode=disabled`,
+  `edli_shadow_no_submit` requires `live_no_submit`,
+  `edli_submit_disabled_bridge` requires `submit_disabled_live_bridge`, and
+  canary/live stages require `live`.
 - Add focused daemon-smoke tests for inert default, legacy-vs-EDLI exclusion,
   and conflict fail-closed behavior.
 

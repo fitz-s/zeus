@@ -191,15 +191,28 @@ def test_pr332_scoped_daemon_restart_smoke_registers_event_driven_no_legacy_cron
 
 
 def test_live_execution_mode_rejects_legacy_cron_with_edli_runtime_enabled(monkeypatch):
-    with pytest.raises(RuntimeError, match="EDLI_RUNTIME_CONFLICTS_WITH_LEGACY_CRON"):
+    with pytest.raises(RuntimeError, match="LEGACY_CRON_REQUIRES_REACTOR_MODE_DISABLED"):
         _run_main_with_fake_scheduler(
             monkeypatch,
             {
-                "enabled": True,
+                "enabled": False,
                 "live_execution_mode": "legacy_cron",
                 "reactor_mode": "live_no_submit",
-                "event_writer_enabled": True,
-                "forecast_snapshot_trigger_enabled": True,
+                "event_writer_enabled": False,
+                "forecast_snapshot_trigger_enabled": False,
+                "real_order_submit_enabled": False,
+            },
+        )
+
+    with pytest.raises(RuntimeError, match="EDLI_RUNTIME_CONFLICTS_WITH_LEGACY_CRON"):
+        _run_main_with_fake_scheduler(
+            monkeypatch,
+                {
+                    "enabled": True,
+                    "live_execution_mode": "legacy_cron",
+                    "reactor_mode": "disabled",
+                    "event_writer_enabled": True,
+                    "forecast_snapshot_trigger_enabled": True,
                 "real_order_submit_enabled": False,
             },
         )
@@ -215,6 +228,52 @@ def test_live_execution_mode_rejects_disabled_with_edli_runtime_enabled(monkeypa
                 "reactor_mode": "disabled",
                 "event_writer_enabled": True,
                 "forecast_snapshot_trigger_enabled": False,
+                "real_order_submit_enabled": False,
+            },
+        )
+
+
+def test_live_execution_mode_stage_requires_matching_reactor_mode(monkeypatch):
+    with pytest.raises(RuntimeError, match="EDLI_LIVE_CANARY_REQUIRES_REACTOR_MODE_LIVE"):
+        _run_main_with_fake_scheduler(
+            monkeypatch,
+            {
+                "enabled": True,
+                "live_execution_mode": "edli_live_canary",
+                "reactor_mode": "live_no_submit",
+                "event_writer_enabled": True,
+                "forecast_snapshot_trigger_enabled": True,
+                "market_channel_ingestor_enabled": True,
+                "edli_user_channel_reconcile_enabled": True,
+                "real_order_submit_enabled": True,
+                "live_canary_enabled": True,
+            },
+        )
+
+    with pytest.raises(RuntimeError, match="EDLI_SUBMIT_DISABLED_BRIDGE_REQUIRES_REACTOR_MODE_SUBMIT_DISABLED_LIVE_BRIDGE"):
+        _run_main_with_fake_scheduler(
+            monkeypatch,
+            {
+                "enabled": True,
+                "live_execution_mode": "edli_submit_disabled_bridge",
+                "reactor_mode": "live",
+                "event_writer_enabled": True,
+                "forecast_snapshot_trigger_enabled": True,
+                "market_channel_ingestor_enabled": True,
+                "edli_user_channel_reconcile_enabled": True,
+                "real_order_submit_enabled": False,
+            },
+        )
+
+    with pytest.raises(RuntimeError, match="EDLI_SHADOW_NO_SUBMIT_REQUIRES_REACTOR_MODE_LIVE_NO_SUBMIT"):
+        _run_main_with_fake_scheduler(
+            monkeypatch,
+            {
+                "enabled": True,
+                "live_execution_mode": "edli_shadow_no_submit",
+                "reactor_mode": "submit_disabled_live_bridge",
+                "event_writer_enabled": True,
+                "forecast_snapshot_trigger_enabled": True,
                 "real_order_submit_enabled": False,
             },
         )
@@ -351,7 +410,8 @@ def test_no_shadow_named_edli_modules():
 def _run_main_with_fake_scheduler(monkeypatch, edli_updates):
     import src.main as main
 
-    settings_copy = deepcopy(main.settings._data)
+    settings_source = main.settings._data if hasattr(main.settings, "_data") else main.settings
+    settings_copy = deepcopy(settings_source)
     settings_copy["edli_v1"].update(edli_updates)
     monkeypatch.setattr(main, "settings", settings_copy)
     monkeypatch.setattr(main, "get_mode", lambda: "live")
