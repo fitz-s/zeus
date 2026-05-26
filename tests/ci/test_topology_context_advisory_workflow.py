@@ -122,3 +122,29 @@ def test_workflow_uploads_pack_artifact(workflow: dict) -> None:
                 assert "context-packs" in path
                 break
     assert found, "workflow must upload context-packs artifact"
+
+
+def test_workflow_in_agents_md_file_registry() -> None:
+    """Phase C.1 fix: every workflow in .github/workflows/ must be listed in
+    .github/workflows/AGENTS.md File Registry (Copilot finding on PR #344)."""
+    agents_md = (REPO_ROOT / ".github" / "workflows" / "AGENTS.md").read_text()
+    assert "`topology-context-advisory.yml`" in agents_md, (
+        "topology-context-advisory.yml missing from .github/workflows/AGENTS.md File Registry"
+    )
+
+
+def test_workflow_artifact_upload_uses_if_always(workflow: dict) -> None:
+    """Phase C.1 fix: artifact upload + comment post must use `if: always()` so
+    they attempt even if a prior cascade step failed. Without if:always(), the
+    job-level continue-on-error claim was misleading (Copilot finding on PR #344)."""
+    jobs = workflow["jobs"]
+    for job in jobs.values():
+        for step in job.get("steps", []):
+            uses = step.get("uses", "")
+            name = step.get("name", "")
+            if uses.startswith("actions/upload-artifact") or "sticky PR comment" in name:
+                if_expr = step.get("if", "")
+                assert "always()" in if_expr, (
+                    f"step {name or uses!r} must use `if: always()` "
+                    f"to honor the advisory contract; got if={if_expr!r}"
+                )

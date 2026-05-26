@@ -5,9 +5,16 @@ name: topology-context-advisory
 #
 # Advisory job: assembles Context Pack(s) for the PR's changed files using
 # scripts/topology_doctor_context_pack.py and posts a sticky summary
-# comment on the PR. Never blocks the build. continue-on-error is true on
-# every step so any failure here (e.g. gh API down, missing surface) does
-# not break the PR.
+# comment on the PR.
+#
+# Advisory contract: the JOB declares `continue-on-error: true`, so the
+# PR's overall build status is never failed by this workflow's outcome.
+# Steps within the job cascade normally (a failing step short-circuits
+# later cascade steps), EXCEPT for the upload-artifact and post-comment
+# steps which use `if: always()` so we still upload partial artifacts and
+# attempt comment upsert even when an earlier step failed.
+# This matches Copilot finding on PR #344 (step-level vs job-level
+# continue-on-error semantics).
 #
 # Gate owner: ci-infra (per architecture/topology_enforcement.yaml)
 # Review condition: promote continue-on-error to false only if false-
@@ -107,6 +114,7 @@ jobs:
           head -40 /tmp/context-packs.md || true
 
       - name: Upload artifacts
+        if: always()    # upload partial artifacts even if assembly partially failed
         uses: actions/upload-artifact@v4
         with:
           name: topology-context-pack-${{ github.event.pull_request.number }}
@@ -118,6 +126,7 @@ jobs:
           if-no-files-found: warn
 
       - name: Post or update sticky PR comment
+        if: always() && hashFiles('/tmp/context-packs.md') != ''
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |

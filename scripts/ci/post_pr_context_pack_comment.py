@@ -64,33 +64,54 @@ def _gh_default_repo() -> str | None:
 
 
 def list_pr_comments(pr: int, repo: str) -> list[dict[str, Any]]:
-    """Return list of comments on the PR via REST issue comments endpoint."""
+    """
+    Return list of comments on the PR via REST issue comments endpoint.
+
+    Uses `gh api --paginate --slurp` which wraps all pages of JSON arrays
+    into a single outer JSON array, then flattens. This is the documented
+    correct way to paginate JSON arrays through gh CLI (per `gh api --help`
+    `--slurp` description). The earlier implementation parsed concatenated
+    JSON arrays via `][` boundary splitting — fragile, and on parse failure
+    silently returned an empty list, which could trigger duplicate sticky
+    comments (Copilot finding on PR #344).
+    """
     out = subprocess.run(
         [
             "gh", "api",
             "--paginate",
+            "--slurp",
             f"repos/{repo}/issues/{pr}/comments",
         ],
         capture_output=True, text=True, timeout=30, check=False,
     )
     if out.returncode != 0:
         raise RuntimeError(f"gh api list comments failed: {out.stderr.strip()}")
-    # gh --paginate concatenates JSON arrays; split + parse defensively
     txt = out.stdout.strip()
     if not txt:
         return []
     try:
-        return json.loads(txt)
-    except json.JSONDecodeError:
-        # Multiple arrays back-to-back; split on `][` boundary.
-        parts = txt.replace("][", "]\x00[").split("\x00")
-        merged: list[dict[str, Any]] = []
-        for p in parts:
-            try:
-                merged.extend(json.loads(p))
-            except json.JSONDecodeError:
-                continue
-        return merged
+        pages = json.loads(txt)
+    except json.JSONDecodeError as e:
+        # With --slurp we expect a single JSON value; refuse to silently
+        # treat parse failure as "no comments exist" — that's the bug
+        # path that caused duplicate sticky comments before.
+        raise RuntimeError(
+            f"gh api --paginate --slurp returned unparseable JSON: {e}; "
+            f"output head: {txt[:200]!r}"
+        ) from e
+    if not isinstance(pages, list):
+        raise RuntimeError(
+            f"gh api --paginate --slurp returned non-array: {type(pages).__name__}"
+        )
+    # --slurp wraps pages into an array; each element is itself a list of comments.
+    merged: list[dict[str, Any]] = []
+    for page in pages:
+        if isinstance(page, list):
+            merged.extend(page)
+        elif isinstance(page, dict):
+            # Single-page response (no pagination needed) → dict not array
+            merged.append(page)
+    return merged
 
 
 def find_sticky_comment(comments: list[dict[str, Any]], marker: str) -> dict[str, Any] | None:

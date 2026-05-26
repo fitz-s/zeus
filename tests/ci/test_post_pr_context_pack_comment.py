@@ -199,3 +199,88 @@ def test_marker_html_is_html_comment():
     from scripts.ci.post_pr_context_pack_comment import _marker_html
     s = _marker_html("foo")
     assert s.startswith("<!--") and s.endswith("-->")
+
+
+# ---------------------------------------------------------------------------
+# Phase C.1 — gh api --paginate --slurp pagination contract
+# Anchor: Copilot finding on PR #344 — silent parse-failure fallback could
+# return empty list → script POST a duplicate sticky comment.
+# ---------------------------------------------------------------------------
+
+
+class _FakeRun:
+    """Stand-in for subprocess.CompletedProcess in monkeypatched subprocess.run."""
+    def __init__(self, stdout: str = "", stderr: str = "", returncode: int = 0):
+        self.stdout = stdout
+        self.stderr = stderr
+        self.returncode = returncode
+
+
+def test_list_pr_comments_parses_slurp_array(monkeypatch):
+    """Two-page response: --slurp wraps as [[...page1...], [...page2...]]."""
+    from scripts.ci import post_pr_context_pack_comment as ppc
+
+    payload = json.dumps([
+        [{"id": 1, "body": "page1-a"}, {"id": 2, "body": "page1-b"}],
+        [{"id": 3, "body": "page2-a"}],
+    ])
+
+    def fake_run(cmd, **kwargs):
+        # Verify we're actually requesting --paginate --slurp
+        assert "--paginate" in cmd
+        assert "--slurp" in cmd
+        return _FakeRun(stdout=payload)
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+    out = ppc.list_pr_comments(344, "fitz-s/zeus")
+    assert [c["id"] for c in out] == [1, 2, 3]
+
+
+def test_list_pr_comments_handles_empty_response(monkeypatch):
+    from scripts.ci import post_pr_context_pack_comment as ppc
+    monkeypatch.setattr("subprocess.run", lambda cmd, **k: _FakeRun(stdout=""))
+    assert ppc.list_pr_comments(344, "fitz-s/zeus") == []
+
+
+def test_list_pr_comments_raises_on_parse_failure_not_returns_empty(monkeypatch):
+    """
+    Phase C.1 fix: parse failure must NOT silently return [] (the prior
+    behavior could cause duplicate sticky comments because find_sticky
+    returned None on every poll). It now raises.
+    """
+    from scripts.ci import post_pr_context_pack_comment as ppc
+    monkeypatch.setattr(
+        "subprocess.run",
+        lambda cmd, **k: _FakeRun(stdout="not json at all"),
+    )
+    with pytest.raises(RuntimeError, match="unparseable"):
+        ppc.list_pr_comments(344, "fitz-s/zeus")
+
+
+def test_list_pr_comments_raises_on_non_array_response(monkeypatch):
+    from scripts.ci import post_pr_context_pack_comment as ppc
+    monkeypatch.setattr(
+        "subprocess.run",
+        lambda cmd, **k: _FakeRun(stdout=json.dumps("just-a-string")),
+    )
+    with pytest.raises(RuntimeError, match="non-array"):
+        ppc.list_pr_comments(344, "fitz-s/zeus")
+
+
+def test_list_pr_comments_raises_on_gh_error(monkeypatch):
+    from scripts.ci import post_pr_context_pack_comment as ppc
+    monkeypatch.setattr(
+        "subprocess.run",
+        lambda cmd, **k: _FakeRun(stderr="gh: 401 unauthorized", returncode=1),
+    )
+    with pytest.raises(RuntimeError, match="401 unauthorized"):
+        ppc.list_pr_comments(344, "fitz-s/zeus")
+
+
+def test_list_pr_comments_handles_single_dict_page(monkeypatch):
+    """If response is a single-page dict (no array wrap), accept it."""
+    from scripts.ci import post_pr_context_pack_comment as ppc
+    payload = json.dumps([{"id": 1, "body": "single"}])
+    monkeypatch.setattr("subprocess.run", lambda cmd, **k: _FakeRun(stdout=payload))
+    out = ppc.list_pr_comments(344, "fitz-s/zeus")
+    assert [c["id"] for c in out] == [1]
