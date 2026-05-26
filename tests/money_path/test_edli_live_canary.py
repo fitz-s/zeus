@@ -342,6 +342,45 @@ def test_submit_disabled_live_bridge_writes_live_order_aggregate_without_command
     assert projection["current_state"] == "CAP_TRANSITIONED"
 
 
+def test_live_build_failure_rolls_back_partial_live_order_aggregate(monkeypatch):
+    from src.engine import event_reactor_adapter as adapter
+    from src.events.live_cap import LiveCapLedger
+    from src.riskguard.risk_level import RiskLevel
+    from tests.decision_kernel.no_submit_fixtures import build_test_no_submit_proof_bundle
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    event = _forecast_event()
+    decision_time = datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc)
+    accepted = _accepted_receipt(event)
+    accepted = replace(
+        accepted,
+        decision_proof_bundle=build_test_no_submit_proof_bundle(event, accepted, decision_time=decision_time),
+    )
+    monkeypatch.setattr(adapter, "build_event_bound_no_submit_receipt", lambda *_args, **_kwargs: accepted)
+    monkeypatch.setattr(
+        LiveCapLedger,
+        "reserve",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("forced reserve failure")),
+    )
+
+    submit = adapter.event_bound_live_adapter_from_trade_conn(
+        conn,
+        live_cap_conn=conn,
+        get_current_level=lambda: RiskLevel.GREEN,
+        real_order_submit_enabled=False,
+        pre_submit_authority_provider=_pre_submit_authority_provider,
+    )
+
+    receipt = submit(event, decision_time)
+
+    assert receipt.proof_accepted is False
+    assert "forced reserve failure" in receipt.reason
+    assert _table_count(conn, "edli_live_order_events") == 0
+    assert _table_count(conn, "edli_live_order_projection") == 0
+    assert _table_count(conn, "edli_live_cap_usage") == 0
+
+
 def test_live_execution_command_build_fails_without_pre_submit_authority_witness():
     from src.engine import event_reactor_adapter as adapter
     from tests.decision_kernel.no_submit_fixtures import build_test_no_submit_proof_bundle
@@ -1127,6 +1166,16 @@ def _required_cert(certs, certificate_type):
         if getattr(cert, "certificate_type", None) == certificate_type:
             return cert
     raise AssertionError(f"{certificate_type} missing")
+
+
+def _table_count(conn, table_name):
+    row = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+        (table_name,),
+    ).fetchone()
+    if row is None:
+        return 0
+    return conn.execute(f"SELECT COUNT(*) FROM {table_name}").fetchone()[0]
 
 
 def _receipt_status(receipt):

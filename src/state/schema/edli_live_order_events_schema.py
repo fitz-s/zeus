@@ -67,13 +67,19 @@ CREATE TABLE IF NOT EXISTS edli_live_order_projection (
 )
 """
 
-CREATE_INDEXES_SQL = """
+CREATE_INDEX_SQL = """
 CREATE INDEX IF NOT EXISTS idx_edli_live_order_events_aggregate
-    ON edli_live_order_events(aggregate_id, event_sequence);
+    ON edli_live_order_events(aggregate_id, event_sequence)
+"""
+
+CREATE_TYPE_INDEX_SQL = """
 CREATE INDEX IF NOT EXISTS idx_edli_live_order_events_type
-    ON edli_live_order_events(event_type, occurred_at);
+    ON edli_live_order_events(event_type, occurred_at)
+"""
+
+CREATE_PROJECTION_STATE_INDEX_SQL = """
 CREATE INDEX IF NOT EXISTS idx_edli_live_order_projection_state
-    ON edli_live_order_projection(current_state, updated_at);
+    ON edli_live_order_projection(current_state, updated_at)
 """
 
 CREATE_NO_UPDATE_TRIGGER_SQL = """
@@ -96,6 +102,8 @@ END
 def ensure_tables(conn: sqlite3.Connection) -> None:
     conn.execute(CREATE_EVENTS_SQL)
     conn.execute(CREATE_PROJECTION_SQL)
-    conn.executescript(CREATE_INDEXES_SQL)
+    conn.execute(CREATE_INDEX_SQL)
+    conn.execute(CREATE_TYPE_INDEX_SQL)
+    conn.execute(CREATE_PROJECTION_STATE_INDEX_SQL)
     conn.execute(CREATE_NO_UPDATE_TRIGGER_SQL)
     conn.execute(CREATE_NO_DELETE_TRIGGER_SQL)

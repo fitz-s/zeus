@@ -247,6 +247,24 @@ segments:
     future_object_rules:
       new_event_type: requires_idempotency_and_replay_order_test
       mutable_event_fact: forbidden_without_explicit_policy
+  edli_live_bridge_authority:
+    invariant_ids: [MP-ORD-003, MP-SIDE-001, MP-SIDE-002, MP-EXT-002]
+    files:
+      - src/main.py
+      - src/engine/event_reactor_adapter.py
+      - src/events/live_order_aggregate.py
+      - src/events/live_cap.py
+      - src/events/triggers/user_channel_ingestor.py
+      - tests/money_path/test_edli_live_canary.py
+      - tests/events/test_live_order_aggregate.py
+      - tests/events/test_reactor.py
+    relationship_tests:
+      - tests/money_path/test_edli_live_canary.py
+      - tests/events/test_live_order_aggregate.py
+      - tests/events/test_reactor.py
+    future_object_rules:
+      new_pre_submit_state: requires_authority_and_fail_closed_test
+      live_order_aggregate_mutation: requires_replay_projection_test
   economic_semantics:
     invariant_ids: [MP-ECO-001, MP-ECO-002]
     files:

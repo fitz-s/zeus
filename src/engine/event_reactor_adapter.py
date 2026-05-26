@@ -299,13 +299,17 @@ def event_bound_live_adapter_from_trade_conn(
             )
         try:
             if real_order_submit_enabled:
-                command_certificates = _build_live_execution_command_certificates(
-                    event=event,
-                    receipt=no_submit_receipt,
-                    decision_time=decision_time.astimezone(UTC),
-                    tiny_live_max_notional_usd=tiny_live_max_notional_usd,
-                    live_cap_conn=live_cap_conn or trade_conn,
-                    pre_submit_authority_provider=pre_submit_authority_provider,
+                build_conn = live_cap_conn or trade_conn
+                command_certificates = _run_live_order_build_savepoint(
+                    build_conn,
+                    lambda: _build_live_execution_command_certificates(
+                        event=event,
+                        receipt=no_submit_receipt,
+                        decision_time=decision_time.astimezone(UTC),
+                        tiny_live_max_notional_usd=tiny_live_max_notional_usd,
+                        live_cap_conn=build_conn,
+                        pre_submit_authority_provider=pre_submit_authority_provider,
+                    ),
                 )
                 final_intent = _required_cert(command_certificates, claims.FINAL_INTENT)
                 command = _required_cert(command_certificates, claims.EXECUTION_COMMAND)
@@ -339,13 +343,17 @@ def event_bound_live_adapter_from_trade_conn(
                 submitted = submit_result.status in {"SUBMITTED"}
                 reason = submit_result.reason_code
             else:
-                certificates = _build_submit_disabled_live_certificates(
-                    event=event,
-                    receipt=no_submit_receipt,
-                    decision_time=decision_time.astimezone(UTC),
-                    tiny_live_max_notional_usd=tiny_live_max_notional_usd,
-                    live_cap_conn=live_cap_conn or trade_conn,
-                    pre_submit_authority_provider=pre_submit_authority_provider,
+                build_conn = live_cap_conn or trade_conn
+                certificates = _run_live_order_build_savepoint(
+                    build_conn,
+                    lambda: _build_submit_disabled_live_certificates(
+                        event=event,
+                        receipt=no_submit_receipt,
+                        decision_time=decision_time.astimezone(UTC),
+                        tiny_live_max_notional_usd=tiny_live_max_notional_usd,
+                        live_cap_conn=build_conn,
+                        pre_submit_authority_provider=pre_submit_authority_provider,
+                    ),
                 )
                 side_effect_status = "SUBMIT_DISABLED"
                 submitted = False
@@ -401,6 +409,21 @@ def event_bound_live_adapter_from_trade_conn(
         )
 
     return _submit
+
+
+def _run_live_order_build_savepoint(
+    conn: sqlite3.Connection,
+    build: Callable[[], tuple[DecisionCertificate, ...]],
+) -> tuple[DecisionCertificate, ...]:
+    conn.execute("SAVEPOINT edli_live_order_build")
+    try:
+        result = build()
+    except Exception:
+        conn.execute("ROLLBACK TO SAVEPOINT edli_live_order_build")
+        conn.execute("RELEASE SAVEPOINT edli_live_order_build")
+        raise
+    conn.execute("RELEASE SAVEPOINT edli_live_order_build")
+    return result
 
 
 def build_event_bound_no_submit_receipt(
