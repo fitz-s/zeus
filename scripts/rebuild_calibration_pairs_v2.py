@@ -1,4 +1,10 @@
-# Lifecycle: created=2026-04-16; last_reviewed=2026-05-08; last_reused=2026-05-08
+# Lifecycle: created=2026-04-16; last_reviewed=2026-05-08; last_reused=2026-05-25
+# Last reused or audited: 2026-05-25
+# Authority basis: FT_SHIP_MASTER_SPEC_2026-05-25 Phase 3 (additive, non-destructive)
+# P1 (2026-05-25): _scoped_pair_predicate scoped by error_model_family — delete is now
+#   family-scoped, making ft_v1 additive alongside existing 'none' rows.
+# P2 (2026-05-25): DataVersionQuarantinedError caught per-snapshot in dry-run and
+#   sequential live paths — spec-quarantined snapshots skip+count, do not abort run.
 # Purpose: Rebuild metric-aware calibration_pairs_v2 behind dry-run and preflight gates.
 # Reuse: Inspect architecture/script_manifest.yaml and active packet receipt before live writes.
 
@@ -985,10 +991,19 @@ def _scoped_pair_predicate(
     cycle_filter: Optional[str] = None,
     source_id_filter: Optional[str] = None,
     horizon_profile_filter: Optional[str] = None,
+    error_model_family_filter: Optional[str] = None,
 ) -> tuple[str, list]:
     columns = _table_columns(conn, "calibration_pairs_v2")
     where_parts = ["bin_source = ?", "temperature_metric = ?"]
     params: list = [CANONICAL_BIN_SOURCE_V2, spec.identity.temperature_metric]
+    # P1 (2026-05-25): scope delete/count to the specific error_model_family being
+    # written, making re-runs idempotent within the family and preventing deletion
+    # of existing none/legacy rows when a new family (e.g. full_transport_v1) is
+    # being added. Without this, the delete predicate would wipe ALL canonical_v2
+    # rows for the (city, metric) regardless of their error_model_family.
+    if error_model_family_filter is not None:
+        where_parts.append("error_model_family = ?")
+        params.append(error_model_family_filter)
     if city_filter:
         where_parts.append("city = ?")
         params.append(city_filter)
@@ -1027,6 +1042,7 @@ def _collect_pre_delete_count(
     cycle_filter: Optional[str] = None,
     source_id_filter: Optional[str] = None,
     horizon_profile_filter: Optional[str] = None,
+    error_model_family_filter: Optional[str] = None,
 ) -> int:
     where, params = _scoped_pair_predicate(
         conn=conn,
@@ -1038,6 +1054,7 @@ def _collect_pre_delete_count(
         cycle_filter=cycle_filter,
         source_id_filter=source_id_filter,
         horizon_profile_filter=horizon_profile_filter,
+        error_model_family_filter=error_model_family_filter,
     )
     return conn.execute(
         f"SELECT COUNT(*) FROM calibration_pairs_v2 WHERE {where}",
@@ -1056,6 +1073,7 @@ def _delete_canonical_v2_slice(
     cycle_filter: Optional[str] = None,
     source_id_filter: Optional[str] = None,
     horizon_profile_filter: Optional[str] = None,
+    error_model_family_filter: Optional[str] = None,
 ) -> None:
     where, params = _scoped_pair_predicate(
         conn=conn,
@@ -1067,6 +1085,7 @@ def _delete_canonical_v2_slice(
         cycle_filter=cycle_filter,
         source_id_filter=source_id_filter,
         horizon_profile_filter=horizon_profile_filter,
+        error_model_family_filter=error_model_family_filter,
     )
     conn.execute(
         f"DELETE FROM calibration_pairs_v2 WHERE {where}",
@@ -1570,6 +1589,7 @@ def rebuild_v2(
         cycle_filter=cycle_filter,
         source_id_filter=source_id_filter,
         horizon_profile_filter=horizon_profile_filter,
+        error_model_family_filter=error_model_family,
     )
     print(f"Existing canonical_v2 pairs (will delete): {stats.pre_delete_v2_pairs}")
 
@@ -1578,13 +1598,26 @@ def rebuild_v2(
             city = cities_by_name.get(snap["city"])
             if city is None:
                 continue
-            _dry_run_evaluate_snapshot_v2(
-                conn,
-                snap,
-                city,
-                spec=spec,
-                stats=stats,
-            )
+            try:
+                _dry_run_evaluate_snapshot_v2(
+                    conn,
+                    snap,
+                    city,
+                    spec=spec,
+                    stats=stats,
+                )
+            except DataVersionQuarantinedError as _dve:
+                # P2 (2026-05-25): spec.allows_data_version() raises for versions
+                # not in the spec's allowed list (e.g. ecmwf_opendata_mx2t6 which
+                # passed is_quarantined() but is outside the HIGH spec's positively-
+                # allowed set). Catch per-snapshot so the dry-run traverses all
+                # cities×metrics rather than aborting on the first such snapshot.
+                stats.snapshots_quarantined += 1
+                print(
+                    f"  SPEC-QUARANTINED (dry-run skip) "
+                    f"snapshot_id={snap['snapshot_id']} "
+                    f"data_version={snap['data_version']!r}: {_dve}"
+                )
         print()
         print("[dry-run] no DB changes made.")
         _print_rebuild_estimate_v2(eligible)
@@ -1684,6 +1717,8 @@ def rebuild_v2(
             conn.execute("SAVEPOINT v2_rebuild_bucket")
             try:
                 # Delete the slice for this city+metric only.
+                # P1: scoped by error_model_family so only prior runs of the same
+                # family are removed; legacy 'none' rows survive untouched.
                 _delete_canonical_v2_slice(
                     conn,
                     spec=spec,
@@ -1694,17 +1729,29 @@ def rebuild_v2(
                     cycle_filter=cycle_filter,
                     source_id_filter=source_id_filter,
                     horizon_profile_filter=horizon_profile_filter,
+                    error_model_family_filter=error_model_family,
                 )
                 for snap in city_snaps:
-                    _process_snapshot_v2(
-                        conn, snap, city,
-                        spec=spec,
-                        n_mc=effective_n_mc,
-                        rng=rng,
-                        stats=stats,
-                        error_model_family=error_model_family,
-                        error_cache=error_cache,
-                    )
+                    try:
+                        _process_snapshot_v2(
+                            conn, snap, city,
+                            spec=spec,
+                            n_mc=effective_n_mc,
+                            rng=rng,
+                            stats=stats,
+                            error_model_family=error_model_family,
+                            error_cache=error_cache,
+                        )
+                    except DataVersionQuarantinedError as _dve:
+                        # P2: spec-quarantined snapshot (passes is_quarantined() but
+                        # outside this spec's positively-allowed data_version set).
+                        # Skip + count; do not abort the city bucket.
+                        stats.snapshots_quarantined += 1
+                        print(
+                            f"  SPEC-QUARANTINED (live skip) "
+                            f"snapshot_id={snap['snapshot_id']} "
+                            f"data_version={snap['data_version']!r}: {_dve}"
+                        )
                     if stats.snapshots_processed % 500 == 0 and stats.snapshots_processed > 0:
                         elapsed = time.monotonic() - start
                         rate = stats.snapshots_processed / max(elapsed, 1e-6)
