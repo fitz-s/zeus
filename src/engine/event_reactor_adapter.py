@@ -77,6 +77,23 @@ class _CandidateProof:
     missing_reason: str | None = None
 
 
+@dataclass(frozen=True)
+class PreSubmitAuthorityWitness:
+    quote_seen_at: str
+    book_hash: str
+    current_best_bid: float
+    current_best_ask: float
+    tick_size: float
+    min_order_size: float
+    neg_risk: bool
+    heartbeat_status: str
+    user_ws_status: str
+    venue_connectivity_status: str
+    balance_allowance_status: str
+    checked_at: str | None = None
+    max_quote_age_ms: int = 1000
+
+
 def build_event_reactor(
     store: EventStore,
     *,
@@ -230,6 +247,7 @@ def event_bound_live_adapter_from_trade_conn(
     live_canary_enabled: bool = False,
     tiny_live_max_notional_usd: float = 5.0,
     executor_submit: Callable[[DecisionCertificate, DecisionCertificate], EventBoundExecutorSubmitResult] | None = None,
+    pre_submit_authority_provider: Callable[[DecisionCertificate, DecisionCertificate, datetime], PreSubmitAuthorityWitness] | None = None,
 ) -> Callable[[OpportunityEvent, datetime], EventSubmissionReceipt]:
     """Build the event-bound live certificate chain up to the executor boundary.
 
@@ -275,6 +293,7 @@ def event_bound_live_adapter_from_trade_conn(
                     decision_time=decision_time.astimezone(UTC),
                     tiny_live_max_notional_usd=tiny_live_max_notional_usd,
                     live_cap_conn=live_cap_conn or trade_conn,
+                    pre_submit_authority_provider=pre_submit_authority_provider,
                 )
                 final_intent = _required_cert(command_certificates, claims.FINAL_INTENT)
                 command = _required_cert(command_certificates, claims.EXECUTION_COMMAND)
@@ -291,6 +310,9 @@ def event_bound_live_adapter_from_trade_conn(
                     raw_response=submit_result.raw_response,
                     raw_response_hash=submit_result.raw_response_hash,
                     reconciliation_followup_required=submit_result.reconciliation_followup_required,
+                    venue_call_started=submit_result.venue_call_started,
+                    venue_ack_received=submit_result.venue_ack_received,
+                    side_effect_known=submit_result.side_effect_known,
                 )
                 transition_cert = _transition_live_cap_after_submit(
                     command_certificates,
@@ -311,6 +333,7 @@ def event_bound_live_adapter_from_trade_conn(
                     decision_time=decision_time.astimezone(UTC),
                     tiny_live_max_notional_usd=tiny_live_max_notional_usd,
                     live_cap_conn=live_cap_conn or trade_conn,
+                    pre_submit_authority_provider=pre_submit_authority_provider,
                 )
                 side_effect_status = "SUBMIT_DISABLED"
                 submitted = False
@@ -826,6 +849,7 @@ def _build_submit_disabled_live_certificates(
     decision_time: datetime,
     tiny_live_max_notional_usd: float,
     live_cap_conn: sqlite3.Connection | None = None,
+    pre_submit_authority_provider: Callable[[DecisionCertificate, DecisionCertificate, datetime], PreSubmitAuthorityWitness] | None = None,
 ) -> tuple[DecisionCertificate, ...]:
     command_certificates = _build_live_execution_command_certificates(
         event=event,
@@ -833,6 +857,7 @@ def _build_submit_disabled_live_certificates(
         decision_time=decision_time,
         tiny_live_max_notional_usd=tiny_live_max_notional_usd,
         live_cap_conn=live_cap_conn,
+        pre_submit_authority_provider=pre_submit_authority_provider,
     )
     command = _required_cert(command_certificates, claims.EXECUTION_COMMAND)
     receipt_cert = build_execution_receipt_certificate(
@@ -857,6 +882,7 @@ def _build_live_execution_command_certificates(
     decision_time: datetime,
     tiny_live_max_notional_usd: float,
     live_cap_conn: sqlite3.Connection | None = None,
+    pre_submit_authority_provider: Callable[[DecisionCertificate, DecisionCertificate, datetime], PreSubmitAuthorityWitness] | None = None,
 ) -> tuple[DecisionCertificate, ...]:
     proof_bundle = receipt.decision_proof_bundle
     compile_result = DecisionCompiler().compile_no_submit(
@@ -942,6 +968,12 @@ def _build_live_execution_command_certificates(
                 final_intent=final_intent,
                 executable_snapshot=executable_snapshot,
                 decision_time=decision_time,
+                authority_witness=_require_pre_submit_authority_witness(
+                    pre_submit_authority_provider,
+                    final_intent,
+                    executable_snapshot,
+                    decision_time,
+                ),
             ),
             occurred_at=decision_time,
             source_authority="engine_adapter",
@@ -969,6 +1001,9 @@ def _build_live_execution_command_certificates(
                 "event_id": event.event_id,
                 "final_intent_id": final_intent.payload["final_intent_id"],
                 "execution_command_id": execution_command_id,
+                "pre_submit_event_hash": pre_submit_event.event_hash,
+                "live_cap_reserved_event_hash": live_cap_event.event_hash,
+                "usage_id": live_cap.payload["usage_id"],
             },
             occurred_at=decision_time,
             source_authority="engine_adapter",
@@ -1051,26 +1086,24 @@ def _pre_submit_revalidation_payload_from_final_intent(
     final_intent: DecisionCertificate,
     executable_snapshot: DecisionCertificate,
     decision_time: datetime,
+    authority_witness: PreSubmitAuthorityWitness,
 ) -> dict[str, object]:
     payload = final_intent.payload
-    snapshot = executable_snapshot.payload
-    passive = payload.get("passive_maker_context") if isinstance(payload.get("passive_maker_context"), dict) else {}
-    quote_age_ms = int(_float_or_default(passive.get("quote_age_ms"), 0.0))
-    spread_usd = _float_or_default(passive.get("spread_usd"), 0.01)
     limit_price = _float_or_default(payload.get("limit_price"), 0.01)
-    current_best_bid = _float_or_default(snapshot.get("best_bid"), max(0.0, limit_price - spread_usd))
-    current_best_ask = _float_or_default(snapshot.get("best_ask"), min(0.99, limit_price + spread_usd))
-    book_hash = (
-        snapshot.get("orderbook_hash")
-        or snapshot.get("orderbook_depth_hash")
-        or snapshot.get("snapshot_hash")
-        or payload.get("executable_snapshot_hash")
-    )
-    quote_seen_at = (
-        snapshot.get("quote_seen_at")
-        or snapshot.get("captured_at")
-        or snapshot.get("source_available_at")
-        or decision_time.isoformat()
+    quote_seen_at = _parse_utc(authority_witness.quote_seen_at)
+    if quote_seen_at is None:
+        raise ValueError("PRE_SUBMIT_QUOTE_SEEN_AT_REQUIRED")
+    quote_age_ms = int(max(0.0, (decision_time.astimezone(UTC) - quote_seen_at).total_seconds() * 1000.0))
+    current_best_bid = float(authority_witness.current_best_bid)
+    current_best_ask = float(authority_witness.current_best_ask)
+    tick_size = float(authority_witness.tick_size)
+    min_order_size = float(authority_witness.min_order_size)
+    side = str(payload["side"])
+    would_cross = _would_cross_post_only_book(
+        side=side,
+        limit_price=limit_price,
+        current_best_bid=current_best_bid,
+        current_best_ask=current_best_ask,
     )
     return {
         "event_id": payload["event_id"],
@@ -1082,25 +1115,55 @@ def _pre_submit_revalidation_payload_from_final_intent(
         "order_type": payload["order_type"],
         "time_in_force": payload["time_in_force"],
         "post_only": payload["post_only"],
-        "checked_at": decision_time.isoformat(),
-        "quote_seen_at": str(quote_seen_at),
+        "checked_at": authority_witness.checked_at or decision_time.isoformat(),
+        "quote_seen_at": authority_witness.quote_seen_at,
         "quote_age_ms": quote_age_ms,
-        "max_quote_age_ms": int(_float_or_default(snapshot.get("max_quote_age_ms"), max(quote_age_ms, 1000))),
-        "book_hash": str(book_hash),
+        "max_quote_age_ms": int(authority_witness.max_quote_age_ms),
+        "book_hash": authority_witness.book_hash,
         "current_best_bid": current_best_bid,
         "current_best_ask": current_best_ask,
         "limit_price": limit_price,
-        "would_cross_book": False,
-        "tick_size": payload["tick_size"],
-        "tick_aligned": _is_price_tick_aligned(limit_price, _float_or_default(payload.get("tick_size"), 0.01)),
-        "min_order_size": payload["min_order_size"],
-        "size_ok": _float_or_default(payload.get("size"), 0.0) >= _float_or_default(payload.get("min_order_size"), 0.0),
-        "neg_risk": payload["neg_risk"],
-        "heartbeat_status": "OK",
-        "user_ws_status": "OK",
-        "venue_connectivity_status": "OK",
-        "balance_allowance_status": "OK",
+        "would_cross_book": would_cross,
+        "tick_size": tick_size,
+        "tick_aligned": _is_price_tick_aligned(limit_price, tick_size),
+        "min_order_size": min_order_size,
+        "size_ok": _float_or_default(payload.get("size"), 0.0) >= min_order_size,
+        "neg_risk": authority_witness.neg_risk,
+        "heartbeat_status": authority_witness.heartbeat_status,
+        "user_ws_status": authority_witness.user_ws_status,
+        "venue_connectivity_status": authority_witness.venue_connectivity_status,
+        "balance_allowance_status": authority_witness.balance_allowance_status,
     }
+
+
+def _require_pre_submit_authority_witness(
+    provider: Callable[[DecisionCertificate, DecisionCertificate, datetime], PreSubmitAuthorityWitness] | None,
+    final_intent: DecisionCertificate,
+    executable_snapshot: DecisionCertificate,
+    decision_time: datetime,
+) -> PreSubmitAuthorityWitness:
+    if provider is None:
+        raise ValueError("PRE_SUBMIT_AUTHORITY_WITNESS_REQUIRED")
+    witness = provider(final_intent, executable_snapshot, decision_time)
+    if not isinstance(witness, PreSubmitAuthorityWitness):
+        raise ValueError("PRE_SUBMIT_AUTHORITY_WITNESS_REQUIRED")
+    if not witness.book_hash:
+        raise ValueError("PRE_SUBMIT_BOOK_HASH_REQUIRED")
+    return witness
+
+
+def _would_cross_post_only_book(
+    *,
+    side: str,
+    limit_price: float,
+    current_best_bid: float,
+    current_best_ask: float,
+) -> bool:
+    if side == "BUY":
+        return limit_price >= current_best_ask
+    if side == "SELL":
+        return limit_price <= current_best_bid
+    raise ValueError(f"unsupported pre-submit side: {side!r}")
 
 
 def _is_price_tick_aligned(price: float, tick_size: float) -> bool:
@@ -1219,7 +1282,7 @@ def _transition_live_cap_after_submit(
                 decision_time=decision_time,
             ),
         )
-    elif submit_result.status in {"REJECTED", "ERROR_UNKNOWN"}:
+    elif submit_result.status in {"REJECTED", "PRE_SUBMIT_ERROR"}:
         ledger.release(usage_id, submit_result.reason_code)
         return build_live_cap_transition_certificate(
             live_cap_cert=live_cap,
@@ -1237,7 +1300,7 @@ def _transition_live_cap_after_submit(
                 decision_time=decision_time,
             ),
         )
-    elif submit_result.status == "TIMEOUT_UNKNOWN":
+    elif submit_result.status in {"TIMEOUT_UNKNOWN", "POST_SUBMIT_UNKNOWN"}:
         return build_live_cap_transition_certificate(
             live_cap_cert=live_cap,
             execution_receipt_cert=receipt_cert,

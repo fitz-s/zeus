@@ -355,6 +355,13 @@ files:
     downstream:
     - src/state/schema/edli_live_order_events_schema.py
     - src/engine/event_reactor_adapter.py
+  src/events/live_order_reconcile.py:
+    zone: K2_runtime
+    authority_role: edli_live_order_reconcile_boundary
+    why: EDLI user-channel and explicit-reconcile authority boundary for live-order aggregate lifecycle facts; public market-channel data is rejected as fill truth.
+    downstream:
+    - src/events/live_order_aggregate.py
+    - src/decision_kernel/verifier.py
   src/decision_kernel/certificate.py:
     zone: K2_runtime
     authority_role: edli_certificate_grammar

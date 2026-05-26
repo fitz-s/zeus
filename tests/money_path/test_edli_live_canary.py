@@ -7,7 +7,7 @@ import json
 import sqlite3
 from pathlib import Path
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -312,6 +312,7 @@ def test_submit_disabled_live_bridge_writes_live_order_aggregate_without_command
         decision_time=decision_time,
         tiny_live_max_notional_usd=5.0,
         live_cap_conn=conn,
+        pre_submit_authority_provider=_pre_submit_authority_provider,
     )
 
     events = conn.execute(
@@ -338,6 +339,55 @@ def test_submit_disabled_live_bridge_writes_live_order_aggregate_without_command
     assert command.payload["aggregate_execution_command_event_hash"] == events[4]["event_hash"]
     assert transition.payload["aggregate_cap_transition_event_hash"] == events[5]["event_hash"]
     assert projection["current_state"] == "CAP_TRANSITIONED"
+
+
+def test_live_execution_command_build_fails_without_pre_submit_authority_witness():
+    from src.engine import event_reactor_adapter as adapter
+    from tests.decision_kernel.no_submit_fixtures import build_test_no_submit_proof_bundle
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    event = _forecast_event()
+    decision_time = datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc)
+    accepted = _accepted_receipt(event)
+    accepted = replace(
+        accepted,
+        decision_proof_bundle=build_test_no_submit_proof_bundle(event, accepted, decision_time=decision_time),
+    )
+
+    with pytest.raises(ValueError, match="PRE_SUBMIT_AUTHORITY_WITNESS_REQUIRED"):
+        adapter._build_live_execution_command_certificates(
+            event=event,
+            receipt=accepted,
+            decision_time=decision_time,
+            tiny_live_max_notional_usd=5.0,
+            live_cap_conn=conn,
+        )
+
+
+def test_crossing_post_only_pre_submit_witness_blocks_command():
+    from src.engine import event_reactor_adapter as adapter
+    from tests.decision_kernel.no_submit_fixtures import build_test_no_submit_proof_bundle
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    event = _forecast_event()
+    decision_time = datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc)
+    accepted = _accepted_receipt(event)
+    accepted = replace(
+        accepted,
+        decision_proof_bundle=build_test_no_submit_proof_bundle(event, accepted, decision_time=decision_time),
+    )
+
+    with pytest.raises(Exception, match="would_cross_book=false"):
+        adapter._build_live_execution_command_certificates(
+            event=event,
+            receipt=accepted,
+            decision_time=decision_time,
+            tiny_live_max_notional_usd=5.0,
+            live_cap_conn=conn,
+            pre_submit_authority_provider=lambda *_args: _pre_submit_authority_witness(current_best_ask=0.39),
+        )
 
 
 def test_edli_live_cap_path_does_not_reference_legacy_cap_columns():
@@ -503,6 +553,48 @@ def test_live_adapter_records_timeout_unknown_fixture_response(monkeypatch):
     assert _receipt_status(receipt) == "TIMEOUT_UNKNOWN"
     receipt_cert = _receipt_cert(receipt)
     assert receipt_cert.payload["reconciliation_followup_required"] is True
+    assert conn.execute("SELECT reservation_status FROM edli_live_cap_usage").fetchone()["reservation_status"] == "RESERVED"
+    assert _cap_transition_status(receipt) == "PENDING_RECONCILE"
+    assert _cap_transition_projection_status(receipt) == "RESERVED"
+
+
+def test_live_adapter_records_post_submit_unknown_as_pending_reconcile(monkeypatch):
+    from src.engine import event_reactor_adapter as adapter
+    from src.engine.event_bound_final_intent import EventBoundExecutorSubmitResult
+    from src.riskguard.risk_level import RiskLevel
+
+    event = _forecast_event()
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    monkeypatch.setattr(adapter, "build_event_bound_no_submit_receipt", lambda *_args, **_kwargs: _accepted_receipt(event))
+    monkeypatch.setattr(adapter, "_build_live_execution_command_certificates", _command_bundle_with_real_cap)
+    submit = adapter.event_bound_live_adapter_from_trade_conn(
+        conn,
+        live_cap_conn=conn,
+        get_current_level=lambda: RiskLevel.GREEN,
+        real_order_submit_enabled=True,
+        live_canary_enabled=True,
+        executor_submit=lambda _final_intent, _command: EventBoundExecutorSubmitResult(
+            status="POST_SUBMIT_UNKNOWN",
+            reason_code="SDK_EXCEPTION_AFTER_SEND",
+            submit_started_at="2026-05-24T18:10:00+00:00",
+            submit_finished_at="2026-05-24T18:10:01+00:00",
+            raw_response={"status": "exception_after_send"},
+            reconciliation_followup_required=True,
+            venue_call_started=True,
+            venue_ack_received=False,
+            side_effect_known=False,
+        ),
+    )
+
+    receipt = submit(event, datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc))
+
+    assert receipt.submitted is False
+    assert receipt.side_effect_status == "POST_SUBMIT_UNKNOWN"
+    assert _receipt_status(receipt) == "POST_SUBMIT_UNKNOWN"
+    receipt_cert = _receipt_cert(receipt)
+    assert receipt_cert.payload["venue_call_started"] is True
+    assert receipt_cert.payload["side_effect_known"] is False
     assert conn.execute("SELECT reservation_status FROM edli_live_cap_usage").fetchone()["reservation_status"] == "RESERVED"
     assert _cap_transition_status(receipt) == "PENDING_RECONCILE"
     assert _cap_transition_projection_status(receipt) == "RESERVED"
@@ -789,4 +881,41 @@ def _forecast_event():
         received_at="2026-05-24T18:02:00+00:00",
         payload=payload,
         causal_snapshot_id="snap-1",
+    )
+
+
+def _pre_submit_authority_provider(_final_intent, _executable_snapshot, decision_time):
+    return _pre_submit_authority_witness(decision_time=decision_time)
+
+
+def _pre_submit_authority_witness(
+    *,
+    decision_time: datetime | None = None,
+    current_best_bid: float = 0.39,
+    current_best_ask: float = 0.41,
+    tick_size: float = 0.01,
+    min_order_size: float = 1.0,
+    heartbeat_status: str = "OK",
+    user_ws_status: str = "OK",
+    venue_connectivity_status: str = "OK",
+    balance_allowance_status: str = "OK",
+):
+    from src.engine.event_reactor_adapter import PreSubmitAuthorityWitness
+
+    checked_at = decision_time or datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc)
+    quote_seen_at = checked_at - timedelta(milliseconds=50)
+    return PreSubmitAuthorityWitness(
+        quote_seen_at=quote_seen_at.isoformat(),
+        book_hash="book-hash-1",
+        current_best_bid=current_best_bid,
+        current_best_ask=current_best_ask,
+        tick_size=tick_size,
+        min_order_size=min_order_size,
+        neg_risk=False,
+        heartbeat_status=heartbeat_status,
+        user_ws_status=user_ws_status,
+        venue_connectivity_status=venue_connectivity_status,
+        balance_allowance_status=balance_allowance_status,
+        checked_at=checked_at.isoformat(),
+        max_quote_age_ms=1000,
     )

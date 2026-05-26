@@ -595,7 +595,8 @@ def _verify_execution_receipt_payload(
         "RESTING",
         "REJECTED",
         "TIMEOUT_UNKNOWN",
-        "ERROR_UNKNOWN",
+        "PRE_SUBMIT_ERROR",
+        "POST_SUBMIT_UNKNOWN",
     }
     if status not in allowed:
         raise CertificateVerificationError(f"execution receipt status unsupported: {status!r}")
@@ -607,8 +608,13 @@ def _verify_execution_receipt_payload(
     if status in {"SUBMITTED", "ACCEPTED", "RESTING"}:
         if payload.get("submit_started_at") in (None, "") or payload.get("submit_finished_at") in (None, ""):
             raise CertificateVerificationError("execution receipt submitted status requires submit timestamps")
-    if status == "TIMEOUT_UNKNOWN" and payload.get("reconciliation_followup_required") is not True:
-        raise CertificateVerificationError("execution receipt TIMEOUT_UNKNOWN requires reconciliation follow-up")
+    if status in {"TIMEOUT_UNKNOWN", "POST_SUBMIT_UNKNOWN"} and payload.get("reconciliation_followup_required") is not True:
+        raise CertificateVerificationError(f"execution receipt {status} requires reconciliation follow-up")
+    if status == "POST_SUBMIT_UNKNOWN":
+        if payload.get("venue_call_started") is not True:
+            raise CertificateVerificationError("execution receipt POST_SUBMIT_UNKNOWN requires venue_call_started=true")
+        if payload.get("side_effect_known") is not False:
+            raise CertificateVerificationError("execution receipt POST_SUBMIT_UNKNOWN requires side_effect_known=false")
 
 
 def _verify_live_cap_transition_payload(
@@ -642,7 +648,8 @@ def _verify_live_cap_transition_payload(
         "SUBMIT_DISABLED": "RELEASED",
         "NOT_SUBMITTED_DRY_RUN": "RELEASED",
         "REJECTED": "RELEASED",
-        "ERROR_UNKNOWN": "RELEASED",
+        "PRE_SUBMIT_ERROR": "RELEASED",
+        "POST_SUBMIT_UNKNOWN": "PENDING_RECONCILE",
         "SUBMITTED": "CONSUMED",
         "TIMEOUT_UNKNOWN": "PENDING_RECONCILE",
     }

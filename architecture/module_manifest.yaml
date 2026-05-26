@@ -144,6 +144,7 @@ modules:
       - src/events/money_path_adapters.py
       - src/events/live_cap.py
       - src/events/live_order_aggregate.py
+      - src/events/live_order_reconcile.py
       - src/events/event_writer.py
       - src/events/event_coalescer.py
       - src/events/dead_letter.py
@@ -183,6 +184,7 @@ modules:
       - tests/events/test_reactor.py
       - tests/events/test_live_cap.py
       - tests/events/test_live_order_aggregate.py
+      - tests/events/test_live_order_reconcile.py
       - tests/engine/test_event_reactor_no_bypass.py
       - tests/strategy/live_inference/test_no_trade_regret.py
       - tests/analysis/test_event_opportunity_report.py

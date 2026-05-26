@@ -230,6 +230,9 @@ def build_execution_receipt_certificate(
     raw_response: Mapping[str, object] | None = None,
     raw_response_hash: str | None = None,
     reconciliation_followup_required: bool | None = None,
+    venue_call_started: bool | None = None,
+    venue_ack_received: bool | None = None,
+    side_effect_known: bool | None = None,
 ) -> DecisionCertificate:
     command = execution_command_cert.payload
     response_hash = raw_response_hash or stable_hash(
@@ -255,6 +258,12 @@ def build_execution_receipt_certificate(
     }
     if reconciliation_followup_required is not None:
         payload["reconciliation_followup_required"] = reconciliation_followup_required
+    if venue_call_started is not None:
+        payload["venue_call_started"] = venue_call_started
+    if venue_ack_received is not None:
+        payload["venue_ack_received"] = venue_ack_received
+    if side_effect_known is not None:
+        payload["side_effect_known"] = side_effect_known
     return _build_cert(
         claims.EXECUTION_RECEIPT,
         f"execution_receipt:{payload['event_id']}:{payload['execution_command_id']}:{status}",

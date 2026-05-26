@@ -316,6 +316,20 @@ class LiveOrderAggregateLedger:
             _validate_pre_submit_revalidation_payload(revalidation)
             if payload.get("final_intent_id") != revalidation.get("final_intent_id"):
                 raise LiveOrderAggregateError("ExecutionCommandCreated final_intent_id must match pre-submit revalidation")
+            if payload.get("event_id") != revalidation.get("event_id"):
+                raise LiveOrderAggregateError("ExecutionCommandCreated event_id must match pre-submit revalidation")
+            if payload.get("pre_submit_event_hash") != revalidation_row["event_hash"]:
+                raise LiveOrderAggregateError("ExecutionCommandCreated pre_submit_event_hash must match PreSubmitRevalidated event")
+            live_cap_row = self._latest_row_of_type(str(latest["aggregate_id"]), "LiveCapReserved")
+            if live_cap_row is None:
+                raise LiveOrderAggregateError("ExecutionCommandCreated requires preceding LiveCapReserved event")
+            live_cap = _payload(live_cap_row)
+            if payload.get("final_intent_id") != live_cap.get("final_intent_id"):
+                raise LiveOrderAggregateError("ExecutionCommandCreated final_intent_id must match live cap reservation")
+            if payload.get("event_id") != live_cap.get("event_id"):
+                raise LiveOrderAggregateError("ExecutionCommandCreated event_id must match live cap reservation")
+            if payload.get("live_cap_reserved_event_hash") != live_cap_row["event_hash"]:
+                raise LiveOrderAggregateError("ExecutionCommandCreated live_cap_reserved_event_hash must match LiveCapReserved event")
             return
 
     def _latest_row_of_type(self, aggregate_id: str, event_type: str) -> sqlite3.Row | None:

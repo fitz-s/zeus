@@ -377,6 +377,34 @@ def test_execution_receipt_timeout_fixture_response_verifies_with_reconcile_foll
     verify_execution_receipt(receipt, (command,))
 
 
+def test_execution_receipt_post_submit_unknown_requires_unknown_side_effect_fields():
+    command = receipt_command()
+    missing = build_execution_receipt_certificate(
+        execution_command_cert=command,
+        decision_time=NOW,
+        status="POST_SUBMIT_UNKNOWN",
+        reason_code="SDK_EXCEPTION_AFTER_SEND",
+        reconciliation_followup_required=True,
+    )
+    with pytest.raises(CertificateVerificationError, match="venue_call_started"):
+        verify_execution_receipt(missing, (command,))
+
+    receipt = build_execution_receipt_certificate(
+        execution_command_cert=command,
+        decision_time=NOW,
+        status="POST_SUBMIT_UNKNOWN",
+        reason_code="SDK_EXCEPTION_AFTER_SEND",
+        submit_started_at=NOW.isoformat(),
+        submit_finished_at=NOW.isoformat(),
+        raw_response={"status": "exception_after_send"},
+        reconciliation_followup_required=True,
+        venue_call_started=True,
+        venue_ack_received=False,
+        side_effect_known=False,
+    )
+    verify_execution_receipt(receipt, (command,))
+
+
 def test_execution_receipt_accepted_not_equal_filled():
     command = receipt_command()
     receipt = _cert(

@@ -14,13 +14,15 @@ def test_order_lifecycle_certificate_status_vocabulary_declared_for_future_live_
         "PARTIAL_FILL",
         "CANCEL_REMAINDER",
         "TIMEOUT_UNKNOWN",
-        "ERROR_UNKNOWN",
+        "PRE_SUBMIT_ERROR",
+        "POST_SUBMIT_UNKNOWN",
     }
 
     assert "ACCEPTED" in statuses
     assert "FILLED" in statuses
     assert "ACCEPTED" != "FILLED"
     assert "TIMEOUT_UNKNOWN" in statuses
+    assert "POST_SUBMIT_UNKNOWN" in statuses
     assert "REJECTED" in statuses
     assert "PARTIAL_FILL" in statuses
     assert "CANCEL_REMAINDER" in statuses

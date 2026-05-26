@@ -20,7 +20,8 @@ SideEffectStatus = Literal[
     "SUBMITTED",
     "REJECTED",
     "TIMEOUT_UNKNOWN",
-    "ERROR_UNKNOWN",
+    "PRE_SUBMIT_ERROR",
+    "POST_SUBMIT_UNKNOWN",
     "SUBMIT_DISABLED",
     "NOT_SUBMITTED_DRY_RUN",
 ]
@@ -69,7 +70,7 @@ class EventBoundExecutorSubmitResult:
     reactor path.
     """
 
-    status: Literal["SUBMITTED", "REJECTED", "TIMEOUT_UNKNOWN", "ERROR_UNKNOWN"]
+    status: Literal["SUBMITTED", "REJECTED", "TIMEOUT_UNKNOWN", "PRE_SUBMIT_ERROR", "POST_SUBMIT_UNKNOWN"]
     reason_code: str = "OK"
     venue_order_id: str | None = None
     submit_started_at: str | None = None
@@ -77,6 +78,9 @@ class EventBoundExecutorSubmitResult:
     raw_response: dict[str, object] = field(default_factory=dict)
     raw_response_hash: str | None = None
     reconciliation_followup_required: bool = False
+    venue_call_started: bool = False
+    venue_ack_received: bool = False
+    side_effect_known: bool = True
 
 
 class EventBoundExecutorExpressibilityError(ValueError):
@@ -117,12 +121,15 @@ def submit_event_bound_final_intent_via_existing_executor(
         raise
     except Exception as exc:
         return EventBoundExecutorSubmitResult(
-            status="TIMEOUT_UNKNOWN",
+            status="POST_SUBMIT_UNKNOWN",
             reason_code=f"EXECUTOR_SUBMIT_UNKNOWN:{exc}",
             submit_started_at=started_at,
             submit_finished_at=datetime.now(timezone.utc).isoformat(),
             raw_response={"error": str(exc), "stage": "existing_executor_submit"},
             reconciliation_followup_required=True,
+            venue_call_started=True,
+            venue_ack_received=False,
+            side_effect_known=False,
         )
     return _executor_order_result_to_submit_result(result, started_at=started_at)
 
@@ -236,11 +243,11 @@ def _executor_order_result_to_submit_result(result, *, started_at: str) -> Event
         reason = str(getattr(result, "reason", None) or "EXECUTOR_REJECTED")
         reconcile = False
     elif status == "unknown_side_effect":
-        receipt_status = "TIMEOUT_UNKNOWN"
+        receipt_status = "POST_SUBMIT_UNKNOWN"
         reason = str(getattr(result, "reason", None) or "EXECUTOR_UNKNOWN_SIDE_EFFECT")
         reconcile = True
     else:
-        receipt_status = "ERROR_UNKNOWN"
+        receipt_status = "PRE_SUBMIT_ERROR"
         reason = str(getattr(result, "reason", None) or f"EXECUTOR_STATUS_UNSUPPORTED:{status}")
         reconcile = False
     return EventBoundExecutorSubmitResult(
@@ -251,6 +258,9 @@ def _executor_order_result_to_submit_result(result, *, started_at: str) -> Event
         submit_finished_at=getattr(result, "venue_ack_time", None) or datetime.now(timezone.utc).isoformat(),
         raw_response=raw_response,
         reconciliation_followup_required=reconcile,
+        venue_call_started=receipt_status in {"SUBMITTED", "REJECTED", "TIMEOUT_UNKNOWN", "POST_SUBMIT_UNKNOWN"},
+        venue_ack_received=receipt_status in {"SUBMITTED", "REJECTED"},
+        side_effect_known=receipt_status in {"SUBMITTED", "REJECTED", "PRE_SUBMIT_ERROR"},
     )
 
 

@@ -59,10 +59,25 @@ def test_live_order_projection_rebuilds_from_append_only_events():
         occurred_at=NOW,
         source_authority="engine_adapter",
     )
+    live_cap = ledger.append_event(
+        aggregate_id="event-1:intent-1",
+        event_type="LiveCapReserved",
+        payload={"event_id": "event-1", "final_intent_id": "intent-1", "usage_id": "usage-1"},
+        occurred_at=NOW,
+        source_authority="live_cap_ledger",
+    )
+    pre_submit = ledger.latest_event_of_type("event-1:intent-1", "PreSubmitRevalidated")
+    assert pre_submit is not None
     ledger.append_event(
         aggregate_id="event-1:intent-1",
         event_type="ExecutionCommandCreated",
-        payload={"event_id": "event-1", "final_intent_id": "intent-1", "execution_command_id": "cmd-1"},
+        payload={
+            "event_id": "event-1",
+            "final_intent_id": "intent-1",
+            "execution_command_id": "cmd-1",
+            "pre_submit_event_hash": pre_submit.event_hash,
+            "live_cap_reserved_event_hash": live_cap.event_hash,
+        },
         occurred_at=NOW,
         source_authority="engine_adapter",
     )
@@ -71,7 +86,7 @@ def test_live_order_projection_rebuilds_from_append_only_events():
     rebuilt = ledger.rebuild_projection("event-1:intent-1")
 
     assert rebuilt.current_state == "EXECUTION_COMMAND_CREATED"
-    assert rebuilt.last_sequence == 3
+    assert rebuilt.last_sequence == 4
 
 
 def test_live_order_aggregate_rejects_parent_hash_mismatch():
@@ -238,12 +253,67 @@ def test_execution_command_final_intent_must_match_pre_submit_revalidation():
         occurred_at=NOW,
         source_authority="engine_adapter",
     )
+    live_cap = ledger.append_event(
+        aggregate_id="event-1:intent-1",
+        event_type="LiveCapReserved",
+        payload={"event_id": "event-1", "final_intent_id": "intent-1", "usage_id": "usage-1"},
+        occurred_at=NOW,
+        source_authority="live_cap_ledger",
+    )
+    pre_submit = ledger.latest_event_of_type("event-1:intent-1", "PreSubmitRevalidated")
+    assert pre_submit is not None
 
     with pytest.raises(LiveOrderAggregateError, match="final_intent_id must match"):
         ledger.append_event(
             aggregate_id="event-1:intent-1",
             event_type="ExecutionCommandCreated",
-            payload={"event_id": "event-1", "final_intent_id": "intent-2", "execution_command_id": "cmd-1"},
+            payload={
+                "event_id": "event-1",
+                "final_intent_id": "intent-2",
+                "execution_command_id": "cmd-1",
+                "pre_submit_event_hash": pre_submit.event_hash,
+                "live_cap_reserved_event_hash": live_cap.event_hash,
+            },
+            occurred_at=NOW,
+            source_authority="engine_adapter",
+        )
+
+
+def test_execution_command_binds_pre_submit_and_live_cap_event_hashes():
+    ledger = LiveOrderAggregateLedger(_conn())
+    ledger.append_event(
+        aggregate_id="event-1:intent-1",
+        event_type="DecisionProofAccepted",
+        payload={"event_id": "event-1", "final_intent_id": "intent-1"},
+        occurred_at=NOW,
+        source_authority="decision_kernel",
+    )
+    pre_submit = ledger.append_event(
+        aggregate_id="event-1:intent-1",
+        event_type="PreSubmitRevalidated",
+        payload=_pre_submit_payload(),
+        occurred_at=NOW,
+        source_authority="engine_adapter",
+    )
+    live_cap = ledger.append_event(
+        aggregate_id="event-1:intent-1",
+        event_type="LiveCapReserved",
+        payload={"event_id": "event-1", "final_intent_id": "intent-2", "usage_id": "usage-1"},
+        occurred_at=NOW,
+        source_authority="live_cap_ledger",
+    )
+
+    with pytest.raises(LiveOrderAggregateError, match="live cap reservation"):
+        ledger.append_event(
+            aggregate_id="event-1:intent-1",
+            event_type="ExecutionCommandCreated",
+            payload={
+                "event_id": "event-1",
+                "final_intent_id": "intent-1",
+                "execution_command_id": "cmd-1",
+                "pre_submit_event_hash": pre_submit.event_hash,
+                "live_cap_reserved_event_hash": live_cap.event_hash,
+            },
             occurred_at=NOW,
             source_authority="engine_adapter",
         )
