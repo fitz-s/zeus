@@ -100,6 +100,9 @@ test_trust_policy:
     tests/topology/test_context_pack_schema.py: {created: "2026-05-26", last_used: "2026-05-26"}
     tests/topology/test_topology_surfaces_schema.py: {created: "2026-05-26", last_used: "2026-05-26"}
     tests/topology/test_failure_chains_schema.py: {created: "2026-05-26", last_used: "2026-05-26"}
+    # CI Topology Context Pack Phase B integration (2026-05-26). Historical PR
+    # fixtures: PR325/PR330/PR335/PR312/PR306 + multi-file UNION semantics.
+    tests/topology/test_context_pack_integration.py: {created: "2026-05-26", last_used: "2026-05-26"}
     # P1/P2 architecture review antibodies (2026-05-22): strategy routing, evidence
     # report scoping, migration clamp, evidence tier provenance.
     tests/test_p1_findings_evidence_risk.py: {created: "2026-05-22", last_used: "2026-05-22"}
