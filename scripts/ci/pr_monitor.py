@@ -65,6 +65,12 @@ DEFAULT_POLL_SECONDS = 90
 # Default total timeout — 1 hour. Use --timeout 0 for no limit (loops forever).
 DEFAULT_TIMEOUT_SECONDS = 3600
 
+# Default stale-silence threshold — 900s (15 min). Operator first principle
+# 2026-05-26: if monitor has been silent for ≥15 min after PR open, something
+# is wrong (e.g. PR ref drift, gh CLI broken, bot reviews delayed beyond SLA,
+# CI never started). Emit STALE_SILENCE to prompt direct PR check.
+DEFAULT_STALE_AFTER_SECONDS = 900
+
 
 # ---------------------------------------------------------------------------
 # State persistence
@@ -84,24 +90,41 @@ def state_path(repo: str, pr: int) -> Path:
     return state_dir() / f"pr_{safe_repo}_{pr}.json"
 
 
-def load_state(path: Path) -> dict[str, set[str]]:
+def _empty_state() -> dict[str, Any]:
+    return {
+        "reported_threads": set(),
+        "reported_failures": set(),
+        # Float Unix timestamps. None until the first event/tick.
+        "last_event_at": None,
+        "last_stale_emit_at": None,
+        "monitor_started_at": None,
+    }
+
+
+def load_state(path: Path) -> dict[str, Any]:
     if not path.exists():
-        return {"reported_threads": set(), "reported_failures": set()}
+        return _empty_state()
     try:
         with path.open() as f:
             raw = json.load(f)
         return {
             "reported_threads": set(raw.get("reported_threads", [])),
             "reported_failures": set(raw.get("reported_failures", [])),
+            "last_event_at": raw.get("last_event_at"),
+            "last_stale_emit_at": raw.get("last_stale_emit_at"),
+            "monitor_started_at": raw.get("monitor_started_at"),
         }
     except (json.JSONDecodeError, OSError):
-        return {"reported_threads": set(), "reported_failures": set()}
+        return _empty_state()
 
 
-def save_state(path: Path, state: dict[str, set[str]]) -> None:
+def save_state(path: Path, state: dict[str, Any]) -> None:
     serialized = {
         "reported_threads": sorted(state["reported_threads"]),
         "reported_failures": sorted(state["reported_failures"]),
+        "last_event_at": state.get("last_event_at"),
+        "last_stale_emit_at": state.get("last_stale_emit_at"),
+        "monitor_started_at": state.get("monitor_started_at"),
     }
     tmp = path.with_suffix(".json.tmp")
     with tmp.open("w") as f:
@@ -222,6 +245,63 @@ def format_terminal_line(pr: int, state: str) -> str:
     return f"PR#{pr} TERMINAL state={state}"
 
 
+def format_stale_silence_line(pr: int, elapsed_seconds: int, last_event_at: float | None) -> str:
+    """
+    Emitted when no meaningful event has fired for >= stale_after_seconds.
+    Prompts a direct PR check (something may be wrong: gh CLI down,
+    PR-ref drift, CI never started, bot review SLA exceeded).
+    """
+    if last_event_at is None:
+        last = "never"
+    else:
+        last = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(last_event_at))
+    return (
+        f"PR#{pr} STALE_SILENCE elapsed={elapsed_seconds}s last_event_at={last} "
+        f"hint=check PR directly (gh pr view {pr})"
+    )
+
+
+def check_stale_silence(
+    state: dict[str, Any],
+    *,
+    threshold_seconds: int,
+    now: float | None = None,
+) -> int | None:
+    """
+    Returns elapsed_seconds if STALE_SILENCE should be emitted now, else None.
+
+    Rules (first-principle per operator 2026-05-26):
+      - Anchor = max(last_event_at, monitor_started_at). The clock starts on
+        whichever is most recent.
+      - Fires when (now - anchor) >= threshold_seconds.
+      - Dedup: after firing, set last_stale_emit_at = now; do not re-fire
+        unless threshold_seconds passes again since last_stale_emit_at OR a
+        real event resets last_event_at.
+      - threshold_seconds <= 0 disables the check entirely.
+    """
+    if threshold_seconds <= 0:
+        return None
+    if now is None:
+        now = time.time()
+
+    anchors = [a for a in (state.get("last_event_at"), state.get("monitor_started_at")) if a is not None]
+    if not anchors:
+        # No anchor yet — caller has not initialized monitor_started_at;
+        # cannot judge staleness.
+        return None
+    anchor = max(anchors)
+    elapsed = int(now - anchor)
+    if elapsed < threshold_seconds:
+        return None
+
+    last_stale = state.get("last_stale_emit_at")
+    if last_stale is not None and (now - last_stale) < threshold_seconds:
+        # Already emitted recently within this stale window — wait it out.
+        return None
+
+    return elapsed
+
+
 def emit(line: str, *, as_json: bool = False, kind: str = "event") -> None:
     if as_json:
         print(json.dumps({"kind": kind, "line": line}))
@@ -239,38 +319,67 @@ def tick_once(
     pr: int,
     *,
     repo: str | None,
-    state: dict[str, set[str]],
+    state: dict[str, Any],
     as_json: bool,
+    stale_after_seconds: int = 0,
+    now: float | None = None,
 ) -> str | None:
     """
     Pull current PR state, emit any new events, update dedup state in place.
     Returns the PR terminal state (MERGED/CLOSED) if reached, else None.
+
+    When `stale_after_seconds > 0`, also emit STALE_SILENCE if the monitor
+    has been silent for >= that many seconds (per operator first principle
+    2026-05-26: ≥15 min silence = something wrong, check PR directly).
     """
+    if now is None:
+        now = time.time()
+
     pr_data = gh_pr_view(pr, repo=repo)
-    if pr_data is None:
-        return None
+    emitted_any = False
 
-    # 1. Findings — only emit if thread id not previously reported
-    for finding in extract_unresolved_findings(pr_data):
-        tid = finding["tid"]
-        if not tid or tid in state["reported_threads"]:
-            continue
-        emit(format_finding_line(pr, finding), as_json=as_json, kind="finding")
-        state["reported_threads"].add(tid)
+    if pr_data is not None:
+        # 1. Findings — only emit if thread id not previously reported
+        for finding in extract_unresolved_findings(pr_data):
+            tid = finding["tid"]
+            if not tid or tid in state["reported_threads"]:
+                continue
+            emit(format_finding_line(pr, finding), as_json=as_json, kind="finding")
+            state["reported_threads"].add(tid)
+            emitted_any = True
 
-    # 2. CI failures — dedup by name:conclusion (re-emits if check re-runs and fails again differently)
-    for failure in extract_ci_failures(pr_data):
-        key = f"{failure['name']}:{failure['conclusion']}"
-        if key in state["reported_failures"]:
-            continue
-        emit(format_ci_fail_line(pr, failure), as_json=as_json, kind="ci_fail")
-        state["reported_failures"].add(key)
+        # 2. CI failures — dedup by name:conclusion (re-emits if check re-runs differently)
+        for failure in extract_ci_failures(pr_data):
+            key = f"{failure['name']}:{failure['conclusion']}"
+            if key in state["reported_failures"]:
+                continue
+            emit(format_ci_fail_line(pr, failure), as_json=as_json, kind="ci_fail")
+            state["reported_failures"].add(key)
+            emitted_any = True
 
-    # 3. Terminal
-    term = is_terminal(pr_data)
-    if term:
-        emit(format_terminal_line(pr, term), as_json=as_json, kind="terminal")
-        return term
+        # 3. Terminal
+        term = is_terminal(pr_data)
+        if term:
+            emit(format_terminal_line(pr, term), as_json=as_json, kind="terminal")
+            state["last_event_at"] = now
+            state["last_stale_emit_at"] = None
+            return term
+
+    if emitted_any:
+        state["last_event_at"] = now
+        # A real event resets the stale window.
+        state["last_stale_emit_at"] = None
+
+    # 4. Stale silence — must run even when gh returned None (signal that
+    # the polling itself may be failing).
+    elapsed = check_stale_silence(state, threshold_seconds=stale_after_seconds, now=now)
+    if elapsed is not None:
+        emit(
+            format_stale_silence_line(pr, elapsed, state.get("last_event_at")),
+            as_json=as_json,
+            kind="stale_silence",
+        )
+        state["last_stale_emit_at"] = now
 
     return None
 
@@ -289,6 +398,7 @@ def run(
     once: bool,
     reset_state: bool,
     as_json: bool,
+    stale_after_seconds: int = DEFAULT_STALE_AFTER_SECONDS,
 ) -> int:
     repo_key = repo or _gh_default_repo() or "default"
     spath = state_path(repo_key, pr)
@@ -296,14 +406,32 @@ def run(
         spath.unlink()
     state = load_state(spath)
 
+    # Anchor the stale-silence clock at first invocation (per run).
+    # Without this, --reset-state + immediate stale-check would never fire,
+    # and a long-idle state file would fire instantly on the first tick.
+    if state.get("monitor_started_at") is None or reset_state:
+        state["monitor_started_at"] = time.time()
+
     if once:
-        term = tick_once(pr, repo=repo, state=state, as_json=as_json)
+        tick_once(
+            pr,
+            repo=repo,
+            state=state,
+            as_json=as_json,
+            stale_after_seconds=stale_after_seconds,
+        )
         save_state(spath, state)
         return 0
 
     deadline = time.monotonic() + timeout_seconds if timeout_seconds > 0 else None
     while True:
-        term = tick_once(pr, repo=repo, state=state, as_json=as_json)
+        term = tick_once(
+            pr,
+            repo=repo,
+            state=state,
+            as_json=as_json,
+            stale_after_seconds=stale_after_seconds,
+        )
         save_state(spath, state)
         if term is not None:
             return 0
@@ -377,6 +505,17 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Emit JSON {kind, line} per event instead of plain text.",
     )
+    p.add_argument(
+        "--stale-after",
+        type=int,
+        default=DEFAULT_STALE_AFTER_SECONDS,
+        help=(
+            f"Emit STALE_SILENCE if no meaningful event fires for this many "
+            f"seconds (default: {DEFAULT_STALE_AFTER_SECONDS}; 0 = disable). "
+            f"Operator first principle: silence ≥15 min after PR open = "
+            f"something wrong, check PR directly."
+        ),
+    )
     return p
 
 
@@ -391,6 +530,7 @@ def main(argv: list[str] | None = None) -> int:
             once=args.once,
             reset_state=args.reset_state,
             as_json=args.json,
+            stale_after_seconds=max(0, args.stale_after),
         )
     except KeyboardInterrupt:
         return 130

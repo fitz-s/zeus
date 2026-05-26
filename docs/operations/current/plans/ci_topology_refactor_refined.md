@@ -129,6 +129,21 @@ scripts/ci/tier0_pairing_gate.py         → fold into structural_blockers (one 
   invokes `python scripts/ci/pr_monitor.py <pr>` and gets the same
   first-principle filtering.
 
+**Phase B.6 — Stale-silence detector (added to PR #2, ~370 LOC).**
+- Operator fifth first-principle directive 2026-05-26: if monitor has been
+  silent for ≥15 min, something is wrong — check PR directly.
+- `--stale-after SECONDS` flag (default 900 = 15 min; 0 disables).
+- Anchors silence clock on `max(last_event_at, monitor_started_at)`. The
+  real-event reset semantics mean the timer always measures "time since
+  monitor saw anything actionable".
+- Emits one-shot `PR#NN STALE_SILENCE elapsed=Ns last_event_at=<ts|never>
+  hint=check PR directly (gh pr view <pr>)`.
+- Dedup: after a stale emit, suppress until threshold passes again OR a
+  real event resets the clock. Persisted via `last_stale_emit_at` in state.
+- Fires even when `gh pr view` returns None (network/auth/PR-ref drift
+  = exactly the failure mode the directive is meant to catch).
+- `tests/ci/test_pr_monitor.py` adds 17 stale-silence tests for a total of 49.
+
 **Phase C — Advisory CI workflow (PR #3, ~300 LOC).**
 - `.github/workflows/topology-context-advisory.yml`
 - PR summary artifact rendering

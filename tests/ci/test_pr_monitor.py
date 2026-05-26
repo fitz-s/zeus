@@ -21,16 +21,32 @@ import pytest
 
 from scripts.ci.pr_monitor import (
     CI_FAILURE_CONCLUSIONS,
+    DEFAULT_STALE_AFTER_SECONDS,
+    check_stale_silence,
     extract_ci_failures,
     extract_unresolved_findings,
     format_ci_fail_line,
     format_finding_line,
+    format_stale_silence_line,
     format_terminal_line,
     is_terminal,
     load_state,
     save_state,
     tick_once,
 )
+
+
+def _state(**overrides):
+    """Build a state dict with the new fields, suitable for tick_once tests."""
+    base = {
+        "reported_threads": set(),
+        "reported_failures": set(),
+        "last_event_at": None,
+        "last_stale_emit_at": None,
+        "monitor_started_at": None,
+    }
+    base.update(overrides)
+    return base
 
 
 # ---------------------------------------------------------------------------
@@ -348,3 +364,181 @@ def test_json_mode_emits_kind_per_event(monkeypatch, capsys):
     parsed = [json.loads(line) for line in out]
     kinds = {p["kind"] for p in parsed}
     assert kinds == {"finding", "ci_fail"}
+
+
+# ---------------------------------------------------------------------------
+# Phase B.6: stale-silence detector
+# ---------------------------------------------------------------------------
+
+
+def test_stale_silence_disabled_when_threshold_zero():
+    state = _state(monitor_started_at=0.0)
+    assert check_stale_silence(state, threshold_seconds=0, now=10000.0) is None
+
+
+def test_stale_silence_disabled_when_threshold_negative():
+    state = _state(monitor_started_at=0.0)
+    assert check_stale_silence(state, threshold_seconds=-1, now=10000.0) is None
+
+
+def test_stale_silence_silent_when_no_anchor():
+    """Without monitor_started_at or last_event_at, cannot judge staleness."""
+    state = _state()  # all None
+    assert check_stale_silence(state, threshold_seconds=900, now=10000.0) is None
+
+
+def test_stale_silence_silent_within_threshold():
+    state = _state(monitor_started_at=1000.0)
+    # only 500s elapsed, threshold 900s → silent
+    assert check_stale_silence(state, threshold_seconds=900, now=1500.0) is None
+
+
+def test_stale_silence_fires_at_threshold():
+    state = _state(monitor_started_at=1000.0)
+    # exactly threshold reached
+    elapsed = check_stale_silence(state, threshold_seconds=900, now=1900.0)
+    assert elapsed == 900
+
+
+def test_stale_silence_fires_past_threshold():
+    state = _state(monitor_started_at=1000.0)
+    elapsed = check_stale_silence(state, threshold_seconds=900, now=3000.0)
+    assert elapsed == 2000
+
+
+def test_stale_silence_uses_last_event_at_as_anchor_when_more_recent():
+    """If a real event fired AFTER monitor_started_at, that becomes the anchor."""
+    state = _state(monitor_started_at=1000.0, last_event_at=2000.0)
+    # 500s after last_event_at → silent (even though >900s after start)
+    assert check_stale_silence(state, threshold_seconds=900, now=2500.0) is None
+    # 1000s after last_event_at → fires
+    elapsed = check_stale_silence(state, threshold_seconds=900, now=3000.0)
+    assert elapsed == 1000
+
+
+def test_stale_silence_dedup_within_window():
+    """Once fired, do not re-fire until threshold passes again or new event resets."""
+    state = _state(monitor_started_at=1000.0, last_stale_emit_at=2000.0)
+    # 500s after last stale emit → suppress
+    assert check_stale_silence(state, threshold_seconds=900, now=2500.0) is None
+
+
+def test_stale_silence_refires_after_threshold_since_last_stale_emit():
+    """If still silent and threshold has passed AGAIN since last stale emit, re-fire."""
+    state = _state(monitor_started_at=0.0, last_stale_emit_at=1000.0)
+    # 1100s after last stale emit + total elapsed from anchor still >threshold → re-fire
+    elapsed = check_stale_silence(state, threshold_seconds=900, now=2100.0)
+    assert elapsed == 2100
+
+
+def test_tick_emits_stale_when_threshold_passed(monkeypatch, capsys):
+    """tick_once with empty PR + stale-after set emits STALE_SILENCE."""
+    monkeypatch.setattr(
+        "scripts.ci.pr_monitor.gh_pr_view",
+        lambda pr_num, repo=None: _pr_data(),  # nothing happening
+    )
+    state = _state(monitor_started_at=1000.0)
+    tick_once(
+        343,
+        repo="x/y",
+        state=state,
+        as_json=False,
+        stale_after_seconds=900,
+        now=2000.0,
+    )
+    out = capsys.readouterr().out
+    assert "PR#343 STALE_SILENCE elapsed=1000s" in out
+    assert "gh pr view 343" in out
+    # last_stale_emit_at recorded for dedup
+    assert state["last_stale_emit_at"] == 2000.0
+
+
+def test_tick_does_not_emit_stale_when_threshold_zero(monkeypatch, capsys):
+    monkeypatch.setattr(
+        "scripts.ci.pr_monitor.gh_pr_view",
+        lambda pr_num, repo=None: _pr_data(),
+    )
+    state = _state(monitor_started_at=0.0)
+    tick_once(
+        343,
+        repo="x/y",
+        state=state,
+        as_json=False,
+        stale_after_seconds=0,
+        now=999999.0,
+    )
+    out = capsys.readouterr().out
+    assert "STALE_SILENCE" not in out
+
+
+def test_real_event_resets_stale_clock(monkeypatch, capsys):
+    """A real finding emit must reset last_stale_emit_at so next stale window starts fresh."""
+    monkeypatch.setattr(
+        "scripts.ci.pr_monitor.gh_pr_view",
+        lambda pr_num, repo=None: _pr_data(threads=[_thread("T1", "real finding")]),
+    )
+    state = _state(monitor_started_at=1000.0, last_stale_emit_at=1500.0)
+    tick_once(
+        343,
+        repo="x/y",
+        state=state,
+        as_json=False,
+        stale_after_seconds=900,
+        now=2000.0,
+    )
+    out = capsys.readouterr().out
+    assert "PR#343 FINDING" in out
+    # Stale window resets
+    assert state["last_stale_emit_at"] is None
+    assert state["last_event_at"] == 2000.0
+
+
+def test_stale_silence_fires_when_gh_unreachable(monkeypatch, capsys):
+    """If gh keeps returning None and we've been silent, that itself is a problem."""
+    monkeypatch.setattr("scripts.ci.pr_monitor.gh_pr_view", lambda pr_num, repo=None: None)
+    state = _state(monitor_started_at=1000.0)
+    tick_once(
+        343,
+        repo="x/y",
+        state=state,
+        as_json=False,
+        stale_after_seconds=900,
+        now=2000.0,
+    )
+    out = capsys.readouterr().out
+    assert "PR#343 STALE_SILENCE" in out
+
+
+def test_stale_silence_line_includes_actionable_hint():
+    line = format_stale_silence_line(343, 1234, None)
+    assert "PR#343 STALE_SILENCE" in line
+    assert "elapsed=1234s" in line
+    assert "last_event_at=never" in line
+    assert "gh pr view 343" in line
+
+
+def test_stale_silence_line_renders_last_event_timestamp():
+    # 2026-05-26 18:00:00 UTC
+    last = 1779831600.0
+    line = format_stale_silence_line(343, 900, last)
+    assert "last_event_at=2026-05" in line
+
+
+def test_default_stale_threshold_is_15_minutes():
+    assert DEFAULT_STALE_AFTER_SECONDS == 900
+
+
+def test_state_roundtrip_preserves_stale_fields(tmp_path):
+    spath = tmp_path / "state.json"
+    state = _state(
+        reported_threads={"T1"},
+        last_event_at=2000.0,
+        last_stale_emit_at=2100.0,
+        monitor_started_at=1000.0,
+    )
+    save_state(spath, state)
+    loaded = load_state(spath)
+    assert loaded["last_event_at"] == 2000.0
+    assert loaded["last_stale_emit_at"] == 2100.0
+    assert loaded["monitor_started_at"] == 1000.0
+    assert loaded["reported_threads"] == {"T1"}
