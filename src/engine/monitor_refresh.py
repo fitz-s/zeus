@@ -59,6 +59,13 @@ from src.types import Bin
 from src.types.market import BinTopologyError, validate_bin_topology
 from src.types.metric_identity import MetricIdentity
 from src.types.temperature import TemperatureDelta
+from src.calibration.ens_bias_repo import read_bias_model
+from src.calibration.ens_error_model import (
+    PredictiveErrorModel,
+    predictive_error_from_posterior,
+    p_raw_vector_with_error_model,
+)
+from src.calibration.ens_bias_model import PosteriorBias
 
 logger = logging.getLogger(__name__)
 _MONITOR_PROBABILITY_FRESH_ATTR = "_monitor_probability_is_fresh"
@@ -333,6 +340,82 @@ def _build_all_bins(position: Position, city) -> tuple[list, int]:
     return all_bins, held_idx
 
 
+def _resolve_ft_error_model(
+    conn: sqlite3.Connection,
+    city,
+    target_d: date,
+    metric_str: str,
+) -> "PredictiveErrorModel | None":
+    """Resolve bucket keys and delegate to _load_ft_error_model.
+
+    Handles entry_forecast_config() failure gracefully — if the config surface
+    is unavailable, returns None (plain p_raw path used; no silent ft pretence).
+    """
+    try:
+        cfg = entry_forecast_config()
+        track = track_for_metric(cfg, metric_str)
+        live_data_version = data_version_for_track(track)
+    except Exception:
+        return None
+    season = season_from_date(target_d.isoformat(), lat=city.lat)
+    return _load_ft_error_model(
+        conn,
+        city_name=city.name,
+        season=season,
+        metric=metric_str,
+        live_data_version=live_data_version,
+    )
+
+
+def _load_ft_error_model(
+    conn: sqlite3.Connection,
+    *,
+    city_name: str,
+    season: str,
+    metric: str,
+    live_data_version: str,
+) -> "PredictiveErrorModel | None":
+    """Load a persisted PredictiveErrorModel for full_transport_live if the flag is ON.
+
+    Zeus #64: flag-gated loader.
+    - Flag OFF → returns None immediately (caller uses plain p_raw path, byte-identical).
+    - Flag ON + row found → reconstructs PredictiveErrorModel from canonical schema fields.
+    - Flag ON + no row → logs WARNING + returns None (fail-closed; caller uses plain p_raw).
+    """
+    ft_enabled = bool(settings["feature_flags"].get("full_transport_live_enabled", False))
+    if not ft_enabled:
+        return None
+
+    row = read_bias_model(
+        conn,
+        city=city_name,
+        season=season,
+        metric=metric,
+        live_data_version=live_data_version,
+        month=None,  # season-level pool (month=0 in schema)
+    )
+    if row is None:
+        logger.warning(
+            "full_transport_live: flag ON but no model_bias_ens_v2 row for "
+            "city=%r season=%r metric=%r live_data_version=%r — falling back to plain p_raw",
+            city_name, season, metric, live_data_version,
+        )
+        return None
+
+    # Reconstruct via the canonical path: PosteriorBias → predictive_error_from_posterior.
+    # bias_c, bias_sd_c, heterogeneity_var_c2 stored directly; disagreement_high not stored
+    # (derived from correction_strength gate at fit time) — default False for reconstruction.
+    posterior = PosteriorBias(
+        bias=float(row["bias_c"]),
+        sd=float(row["bias_sd_c"]),
+        weight_live=0.0,  # not used by predictive_error_from_posterior
+        n_live=0,         # not used by predictive_error_from_posterior
+        disagreement_high=False,
+        heterogeneity_var=float(row["heterogeneity_var_c2"]),
+    )
+    return predictive_error_from_posterior(posterior, float(row["residual_sd_c"]))
+
+
 def _refresh_ens_member_counting(
     *,
     position: Position,
@@ -450,32 +533,73 @@ def _refresh_ens_member_counting(
                 "entry_forecast_reader",
                 "period_extrema_members_invalid",
             ]
-        p_raw_vector = p_raw_vector_from_maxes(
-            member_extrema,
-            city,
-            semantics,
-            all_bins,
-            n_mc=ensemble_n_mc(),
-        )
+        _member_unit = expected_members_unit  # already validated above
+        _ft_model = _resolve_ft_error_model(conn, city, target_d, _position_metric_str)
+        if _ft_model is not None:
+            p_raw_vector = p_raw_vector_with_error_model(
+                member_extrema,
+                _ft_model,
+                city,
+                semantics,
+                all_bins,
+                member_unit=_member_unit,
+                n_mc=ensemble_n_mc(),
+            )
+            base_applied = [
+                "fresh_ens_fetch",
+                *forecast_source_validations,
+                "entry_forecast_reader",
+                "period_extrema_members_adapter",
+                "mc_instrument_noise",
+                "full_transport_live",
+            ]
+        else:
+            p_raw_vector = p_raw_vector_from_maxes(
+                member_extrema,
+                city,
+                semantics,
+                all_bins,
+                n_mc=ensemble_n_mc(),
+            )
+            base_applied = [
+                "fresh_ens_fetch",
+                *forecast_source_validations,
+                "entry_forecast_reader",
+                "period_extrema_members_adapter",
+                "mc_instrument_noise",
+            ]
         ensemble_spread = TemperatureDelta(float(np.std(member_extrema)), city.settlement_unit)
         analysis_member_extrema = member_extrema
-        base_applied = [
-            "fresh_ens_fetch",
-            *forecast_source_validations,
-            "entry_forecast_reader",
-            "period_extrema_members_adapter",
-            "mc_instrument_noise",
-        ]
     else:
         assert ens is not None
-        p_raw_vector = ens.p_raw_vector(all_bins, n_mc=ensemble_n_mc())
+        _ens_member_extrema = getattr(ens, "member_extrema", getattr(ens, "member_maxes"))
+        _member_unit = "degC" if city.settlement_unit == "C" else "degF"
+        _ft_model = _resolve_ft_error_model(conn, city, target_d, _position_metric_str)
+        if _ft_model is not None:
+            p_raw_vector = p_raw_vector_with_error_model(
+                _ens_member_extrema,
+                _ft_model,
+                city,
+                ens.settlement_semantics,
+                all_bins,
+                member_unit=_member_unit,
+                n_mc=ensemble_n_mc(),
+            )
+            base_applied = [
+                "fresh_ens_fetch",
+                *forecast_source_validations,
+                "mc_instrument_noise",
+                "full_transport_live",
+            ]
+        else:
+            p_raw_vector = ens.p_raw_vector(all_bins, n_mc=ensemble_n_mc())
+            base_applied = [
+                "fresh_ens_fetch",
+                *forecast_source_validations,
+                "mc_instrument_noise",
+            ]
         ensemble_spread = ens.spread()
-        analysis_member_extrema = getattr(ens, "member_extrema", getattr(ens, "member_maxes"))
-        base_applied = [
-            "fresh_ens_fetch",
-            *forecast_source_validations,
-            "mc_instrument_noise",
-        ]
+        analysis_member_extrema = _ens_member_extrema
 
     # DT#5 / L3 Phase 9C: thread temperature_metric so LOW position reads
     # its own Platt model (pre-P9C this was metric-blind and LOW silently
