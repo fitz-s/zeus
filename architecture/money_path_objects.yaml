@@ -337,6 +337,18 @@ state_machines:
       as a string literal in scripts/check_advisory_gates.py.
     states:
       - GATE_REVIEW_CONDITION
+  schema_migration_sql_ops:
+    owner: scripts/migrate_model_bias_ens_v2_canonical_fields.py
+    description: >
+      Raw SQL transaction operations used in schema migration scripts for
+      race-safe ALTER TABLE patterns. NOT a money-path state machine — these are
+      SQLite transaction control statements used in idempotent migration helpers.
+      Registered here because the "ACK" substring in ROLLBACK fires the semantic
+      classifier's ACK-prefix state check when the string literal "ROLLBACK"
+      appears in conn.execute() calls. (Zeus #64 PR #342)
+    states:
+      - ROLLBACK
+    invariant_tests: []
   decision_integrity_quarantine_reason_codes:
     owner: src/state/decision_integrity_quarantine.py
     description: >

@@ -28,7 +28,7 @@ full_transport → live trading: autonomous execution ledger. Read top-to-bottom
 - Prod DBs (live checkout, ABSOLUTE): `/Users/leofitz/.openclaw/workspace-venus/zeus/state/zeus-world.db` (39GB) + `zeus-forecasts.db` (49GB). Live daemon: `src.main` + riskguard.
 - Backup full.db (38M pairs): `state/backups/ens_refit_full_2026-05-25.db` (33.5GB).
 - Corrected posteriors (71 rows): `state/backups/ens_error_models_2026-05-25.db`.
-- Master spec: `docs/operations/FT_SHIP_MASTER_SPEC_2026-05-25.md` (PR #340).
+- Master spec: FT_SHIP_MASTER_SPEC_2026-05-25.md (on PR #340 — not on this branch).
 
 ## FINISHED
 - Fix A — metric-aware 0Z/12Z window selection in ens_bias_repo (HK HIGH prior −3.49→+0.67). `5260dd2809` on ft-ship-64.

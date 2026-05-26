@@ -1,10 +1,21 @@
 # Created: 2026-05-25
 # Last reused or audited: 2026-05-25
+# Lifecycle: created=2026-05-25; last_reviewed=2026-05-25; last_reused=never
+# Purpose: Schema migration — add canonical error-model columns to model_bias_ens_v2 (idempotent, guarded by PRAGMA table_info).
+# Reuse: Safe to re-run; ALTERs are no-ops if columns already exist. Verify schema_version before reuse.
 # Authority basis: Zeus #64 / #68 / #69 — canonical error-model schema.
 #   Extends model_bias_ens_v2 to the full domain-identity field set per task spec
 #   (FT_SHIP_MASTER_SPEC_2026-05-25 enumerated field list).  Each ALTER is guarded
 #   by PRAGMA table_info so re-runs are no-ops.
 """Schema migration: add canonical error-model columns to ``model_bias_ens_v2``.
+
+Migration semantic policy: additive-only / idempotent.
+  - Only ADD COLUMN operations; no DROP, no RENAME, no data backfill.
+  - Each ALTER is guarded by PRAGMA table_info — re-runs are no-ops.
+  - Columns added with no DEFAULT; legacy rows remain NULL.
+  - Safe to run against shared production DBs (schema-only, no row writes).
+  - Rollback: columns are nullable and ignored by readers that don't use them;
+    no migration rollback script required for additive-only schema changes.
 
 Columns added (all nullable, no DEFAULT — legacy rows remain NULL):
   error_model_family   TEXT   — e.g. 'full_transport_v1', 'none'

@@ -1,5 +1,8 @@
 # Created: 2026-05-25
 # Last reused or audited: 2026-05-25
+# Lifecycle: created=2026-05-25; last_reviewed=2026-05-25; last_reused=never
+# Purpose: Relationship tests for identity_full_transport_v1 calibration route (Zeus #64).
+# Reuse: Inspect calibration route + IdentityCalibrator before reuse; covers 3 invariants.
 # Authority basis: Zeus #64 FT_SHIP_MASTER_SPEC §total-function-rule + gap 3.3
 """Relationship tests for identity_full_transport_v1 calibration route (Zeus #64).
 

@@ -1,5 +1,8 @@
 # Created: 2026-05-25
 # Last reused or audited: 2026-05-25
+# Lifecycle: created=2026-05-25; last_reviewed=2026-05-25; last_reused=never
+# Purpose: Replay-equivalence harness proving backup calibration_pairs_v2 p_raw values can be reused or must be regenerated.
+# Reuse: Requires backup full.db and stage_db; inspect replay tolerance before accepting PASS verdict.
 # Authority basis: FT_SHIP_MASTER_SPEC_2026-05-25 §Phase 2 + FT_POSTERIOR_SOURCE_PROBE_2026-05-25
 """Replay-equivalence harness for full_transport calibration_pairs_v2.
 
@@ -779,7 +782,7 @@ def _make_synthetic_fixture():
             observation_field TEXT, range_label TEXT,
             p_raw REAL, outcome INTEGER, lead_days REAL, season TEXT,
             cluster TEXT, forecast_available_at TEXT, decision_group_id TEXT,
-            bias_corrected INTEGER DEFAULT 0, authority TEXT DEFAULT 'VERIFIED',
+            bias_corrected INTEGER DEFAULT 0, authority TEXT,
             bin_source TEXT DEFAULT 'canonical_v2', snapshot_id INTEGER,
             data_version TEXT, training_allowed INTEGER DEFAULT 1,
             causality_status TEXT DEFAULT 'OK', cycle TEXT DEFAULT '00',
