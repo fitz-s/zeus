@@ -31,3 +31,4 @@ Workflow files control gate severity and maintenance cost.
 | `replay-correctness.yml` | Required merge gate (Gate 4); replay-correctness DB-fixture validation |
 | `secrets-scan.yml` | Required cross-agent secrets-scan gate covering Codex, Copilot, human, and raw pushes |
 | `threads-resolved.yml` | Required merge gate: blocks merge when any review thread is unresolved or a requested reviewer has not yet submitted; re-triggers on resolve/unresolve events |
+| `topology-context-advisory.yml` | Advisory Context Pack provisioning: runs `scripts/topology_doctor_context_pack.py` on PR diff, uploads pack JSON+markdown as artifact, upserts sticky PR comment via `scripts/ci/post_pr_context_pack_comment.py`. Never blocks the build (job-level `continue-on-error: true`). Authority: `docs/operations/current/plans/ci_topology_refactor_refined.md` Phase C. |

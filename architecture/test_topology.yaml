@@ -107,6 +107,9 @@ test_trust_policy:
     # Verifies 4 invariants: meaningful findings only, CI failure emits / success silent,
     # dedup persistence across runs, terminal state emit-and-exit.
     tests/ci/test_pr_monitor.py: {created: "2026-05-26", last_used: "2026-05-26"}
+    # CI Topology Phase C: advisory workflow + sticky PR comment poster (2026-05-26).
+    tests/ci/test_post_pr_context_pack_comment.py: {created: "2026-05-26", last_used: "2026-05-26"}
+    tests/ci/test_topology_context_advisory_workflow.py: {created: "2026-05-26", last_used: "2026-05-26"}
     # P1/P2 architecture review antibodies (2026-05-22): strategy routing, evidence
     # report scoping, migration clamp, evidence tier provenance.
     tests/test_p1_findings_evidence_risk.py: {created: "2026-05-22", last_used: "2026-05-22"}
