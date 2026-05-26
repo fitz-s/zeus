@@ -827,17 +827,19 @@ def load_platt_model_v2(
     # interprets a missing bucket_source_id as "fell back to legacy" and
     # still rejects cross-domain.
     _strat_cols = _v2_table_has_stratification(conn, table)
+    _has_cal_method = has_columns(conn, "platt_models_v2", "calibration_method")
+    _cal_method_col = ", calibration_method" if _has_cal_method else ""
     if _strat_cols:
         _v2_select_cols = (
             "param_A, param_B, param_C, bootstrap_params_json, "
             "n_samples, brier_insample, fitted_at, input_space, "
-            "cycle, source_id, horizon_profile, data_version, model_key"
+            f"cycle, source_id, horizon_profile, data_version, model_key{_cal_method_col}"
         )
     else:
         _v2_select_cols = (
             "param_A, param_B, param_C, bootstrap_params_json, "
-            "n_samples, brier_insample, fitted_at, input_space, "
-            "data_version, model_key"
+            f"n_samples, brier_insample, fitted_at, input_space, "
+            f"data_version, model_key{_cal_method_col}"
         )
 
     # Explicit model_key pin — bypasses match filters, still gated by auth/active
@@ -971,6 +973,10 @@ def load_platt_model_v2(
         "bucket_horizon_profile": _row_field("horizon_profile") if _strat_cols else None,
         "bucket_data_version": _row_field("data_version"),
         "model_key": _row_field("model_key"),
+        # Zeus #64 (2026-05-25): identity_full_transport_v1 route. None when
+        # calibration_method column is absent (pre-migration DB) — manager
+        # treats None as 'platt' (backward-compatible).
+        "calibration_method": _row_field("calibration_method") if _has_cal_method else None,
     }
 
 

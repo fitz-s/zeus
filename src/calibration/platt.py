@@ -269,9 +269,65 @@ class ExtendedPlattCalibrator:
         return lr
 
 
+IDENTITY_CALIBRATION_METHOD = "identity_full_transport_v1"
+
+
+class IdentityCalibrator:
+    """Identity calibrator: p_cal = p_raw (no Platt transform).
+
+    Zeus #64 (2026-05-25): explicit certified route for full_transport buckets
+    where ECE is already low — persisted as a platt_models_v2 row with
+    calibration_method='identity_full_transport_v1'.  The identity transform is
+    the mathematically correct calibration when the ensemble is already well-
+    calibrated; a missing-Platt fallback is NOT the same thing (missing = blocked,
+    identity = intentionally certified).
+
+    Duck-type compatible with ExtendedPlattCalibrator at the calibrate_and_normalize
+    call site: predict_for_bin(p_raw, lead_days, bin_width=...) returns p_raw
+    unchanged, so calibrate_and_normalize produces a vector that is element-wise
+    identical to p_raw (up to the renormalization step — already-normalized
+    p_raw vectors are unaffected).
+
+    Attributes:
+        n_samples: always 0 for the identity row (no training pairs consumed).
+        fitted: always True (no fit step required).
+        input_space: always WIDTH_NORMALIZED_SPACE so the evaluator does NOT
+            attempt a stale-Platt refit from pairs.
+        calibration_method: the stable string constant identifying this route.
+    """
+
+    def __init__(self) -> None:
+        self.n_samples: int = 0
+        self.fitted: bool = True
+        self.bootstrap_params: list = []
+        self.input_space: str = WIDTH_NORMALIZED_SPACE
+        self.calibration_method: str = IDENTITY_CALIBRATION_METHOD
+        # Bucket identity attrs — populated by _model_data_to_calibrator so the
+        # evaluator transfer gate can read them via getattr(cal, '_bucket_*', None).
+        self._bucket_cycle: str | None = None
+        self._bucket_source_id: str | None = None
+        self._bucket_horizon_profile: str | None = None
+        self._bucket_data_version: str | None = None
+        self._bucket_model_key: str | None = None
+
+    def predict(self, p_raw: float, lead_days: float) -> float:  # noqa: ARG002
+        """Return p_raw unchanged (identity transform)."""
+        return float(p_raw)
+
+    def predict_for_bin(
+        self,
+        p_raw: float,
+        lead_days: float,  # noqa: ARG002
+        *,
+        bin_width: float | None = None,  # noqa: ARG002
+    ) -> float:
+        """Return p_raw unchanged — no width-normalization, no Platt transform."""
+        return float(p_raw)
+
+
 def calibrate_and_normalize(
     p_raw_vector: np.ndarray,
-    calibrator: ExtendedPlattCalibrator,
+    calibrator: "ExtendedPlattCalibrator | IdentityCalibrator",
     lead_days: float,
     bin_widths: np.ndarray | list[float | None] | None = None,
 ) -> np.ndarray:
