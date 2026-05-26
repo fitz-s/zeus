@@ -203,6 +203,68 @@ def test_live_execution_mode_rejects_legacy_cron_with_edli_runtime_enabled(monke
         )
 
 
+def test_live_execution_mode_rejects_disabled_with_edli_runtime_enabled(monkeypatch):
+    with pytest.raises(RuntimeError, match="EDLI_RUNTIME_CONFLICTS_WITH_DISABLED_MODE"):
+        _run_main_with_fake_scheduler(
+            monkeypatch,
+            {
+                "enabled": True,
+                "live_execution_mode": "disabled",
+                "reactor_mode": "disabled",
+                "event_writer_enabled": True,
+                "forecast_snapshot_trigger_enabled": False,
+                "real_order_submit_enabled": False,
+            },
+        )
+
+
+def test_market_discovery_constructs_public_clob_with_bounded_timeout(monkeypatch):
+    import src.main as main
+    import src.data.market_scanner as market_scanner
+    import src.data.polymarket_client as polymarket_client
+    import src.state.db as db
+
+    captured = {}
+
+    class FakePolymarketClient:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class FakeConn:
+        def __init__(self):
+            self.committed = False
+            self.closed = False
+
+        def commit(self):
+            self.committed = True
+
+        def close(self):
+            self.closed = True
+
+    fake_conn = FakeConn()
+    monkeypatch.setenv("ZEUS_DISCOVERY_CLOB_TIMEOUT_SECONDS", "7.5")
+    monkeypatch.setattr(polymarket_client, "PolymarketClient", FakePolymarketClient)
+    monkeypatch.setattr(market_scanner, "find_weather_markets", lambda **_kwargs: [])
+    monkeypatch.setattr(
+        market_scanner,
+        "refresh_executable_market_substrate_snapshots",
+        lambda conn, **_kwargs: {"attempted": 0, "inserted": 0},
+    )
+    monkeypatch.setattr(db, "get_trade_connection", lambda *args, **kwargs: fake_conn)
+
+    main._market_discovery_cycle()
+
+    assert captured["public_http_timeout"] == 7.5
+    assert fake_conn.committed is True
+    assert fake_conn.closed is True
+
+
 def test_market_discovery_uses_full_weather_discovery_with_slug_fallback():
     source = Path("src/main.py").read_text()
     start = source.index("def _market_discovery_cycle")
@@ -210,6 +272,7 @@ def test_market_discovery_uses_full_weather_discovery_with_slug_fallback():
     discovery_source = source[start:end]
     assert "find_weather_markets" in discovery_source
     assert "include_slug_pattern=True" in discovery_source
+    assert "public_http_timeout=_discovery_clob_timeout" in discovery_source
     assert "find_slug_pattern_weather_markets" not in discovery_source
 
 

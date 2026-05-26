@@ -1661,7 +1661,11 @@ def _market_discovery_cycle() -> None:
         )
         conn = get_trade_connection(write_class="live")
         try:
-            with PolymarketClient() as snapshot_clob:
+            _discovery_clob_timeout = max(
+                1.0,
+                float(os.environ.get("ZEUS_DISCOVERY_CLOB_TIMEOUT_SECONDS", "5.0")),
+            )
+            with PolymarketClient(public_http_timeout=_discovery_clob_timeout) as snapshot_clob:
                 snapshot_summary = refresh_executable_market_substrate_snapshots(
                     conn,
                     markets=events,
