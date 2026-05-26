@@ -192,6 +192,8 @@
   },
   "bias_correction_enabled": false,
   "feature_flags": {
+    "full_transport_live_enabled": false,
+    "_full_transport_live_enabled_note": "Zeus #64: when ON, monitor_refresh uses p_raw_vector_with_error_model (bias-corrected + residual-widened MC) instead of the plain p_raw path. Requires persisted model_bias_ens_v2 rows for the (city, season, metric) bucket. Fail-closed: flag ON but no row → falls back to plain p_raw + WARNING. Default OFF — operator must explicitly promote after shadow validation.",
     "CANONICAL_EXIT_PATH": false,
     "HOLD_VALUE_EXIT_COSTS": false,
     "_HOLD_VALUE_EXIT_COSTS_note": "T6.4 flag-gates HoldValue.compute_with_exit_costs at _buy_yes_exit + _buy_no_exit seams in src/state/portfolio.py. Default OFF to preserve pre-T6.4 zero-cost behavior during shadow validation; flip ON after operator reviews should_exit rate delta against pre-T6.4 baseline (T6.3-followup-1 replay harness is a pre-requisite). When ON, exit decisions include fee + time opportunity cost (not yet correlation — that lives in T6.4-phase2 requiring portfolio context in ExitContext).",

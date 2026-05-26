@@ -174,6 +174,33 @@ def source_family_from_data_version(data_version: str) -> str | None:
     return None
 
 
+def physical_quantity_for_data_version(
+    temperature_metric: str, data_version: str
+) -> str | None:
+    """Return the expected physical_quantity for a given data_version.
+
+    Used by preflight checks that must validate physical_quantity per
+    data_version rather than assuming a single spec-level physical_quantity
+    (which is the TIGGE canonical form and stale for ecmwf_opendata rows).
+
+    Returns None if the data_version doesn't map to a known source family.
+    Preflight callers treat None as a non-fatal unknown (skip or warn).
+
+    Added 2026-05-25: rename-propagation fix — mx2t3/mn2t3 OpenData rows
+    were introduced 2026-05-07 when ecmwf_opendata switched from 6h to 3h
+    accumulation params; callers that pinned physical_quantity to
+    spec.identity (TIGGE-canonical) silently rejected all OpenData rows.
+    """
+    sf = source_family_from_data_version(data_version)
+    if sf is None:
+        return None
+    if temperature_metric == "high":
+        return _HIGH_PHYSICAL_QUANTITY_BY_SOURCE_FAMILY.get(sf)
+    if temperature_metric == "low":
+        return _LOW_PHYSICAL_QUANTITY_BY_SOURCE_FAMILY.get(sf)
+    return None
+
+
 # Phase 2.6 hardening (2026-05-04, critic-opus BLOCKER 1): map runtime
 # source_id strings to source_family keys so live-fetch paths (where the
 # data_version isn't yet known at parse time) can populate a typed

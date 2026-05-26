@@ -41,7 +41,9 @@ from src.contracts.ensemble_snapshot_provenance import (
     TIGGE_LOW_CONTRACT_WINDOW_DATA_VERSION,
 )
 from src.config import STATE_DIR, calibration_maturity_thresholds
+from src.data.forecast_extrema_authority import POSITIVE_ATTRIBUTION_STATUSES
 from src.state.db import ZEUS_FORECASTS_DB_PATH
+from src.types.metric_identity import physical_quantity_for_data_version
 
 DEFAULT_TRADE_DB = STATE_DIR / "zeus_trades.db"
 # K1 split 2026-05-11: forecast-class tables (ensemble_snapshots_v2, observations,
@@ -1265,17 +1267,39 @@ def _add_low_contract_evidence_preflight_check(
     table: str,
     allowed_required_versions: tuple[str, ...],
 ) -> None:
-    """Block LOW rebuild promotion when evidence-required rows lack contract proof."""
+    """Block LOW rebuild promotion when evidence-required rows lack contract proof.
+
+    2026-05-25: scope to processable rows only (attribution_status IS NULL or
+    FULLY_INSIDE_TARGET_LOCAL_DAY or another positive status).  Rows with
+    AMBIGUOUS_CROSSES_LOCAL_DAY_BOUNDARY / UNKNOWN are excluded by the rebuild
+    processor at runtime and must not block the preflight gate.
+    """
     if not allowed_required_versions:
         return
     columns = _columns(cur, table)
     placeholders = _sql_placeholders(allowed_required_versions)
+    # Scope to processable rows: exclude AMBIGUOUS/UNKNOWN attribution rows that
+    # the rebuild processor would skip at runtime.  NULL attribution (TIGGE) is
+    # processable.  Only applied when the column is present — older/test DBs
+    # without it have no AMBIGUOUS rows and the bare WHERE is correct.
+    if "forecast_window_attribution_status" in columns:
+        _pos_attr_in_list = (
+            "(" + ", ".join(f"'{s}'" for s in sorted(POSITIVE_ATTRIBUTION_STATUSES)) + ")"
+        )
+        _processable_attr_clause = (
+            f" AND (forecast_window_attribution_status IS NULL"
+            f" OR UPPER(TRIM(CAST(forecast_window_attribution_status AS TEXT)))"
+            f" IN {_pos_attr_in_list})"
+        )
+    else:
+        _processable_attr_clause = ""
     required_training_where = f"""
         temperature_metric = 'low'
         AND data_version IN ({placeholders})
         AND COALESCE(training_allowed, 0) = 1
         AND UPPER(TRIM(CAST(authority AS TEXT))) = 'VERIFIED'
         AND UPPER(TRIM(CAST(causality_status AS TEXT))) = 'OK'
+        {_processable_attr_clause}
     """
     missing_columns = [
         field for field in _LOW_CONTRACT_EVIDENCE_PREFLIGHT_FIELDS
@@ -1457,6 +1481,12 @@ def _add_rebuild_snapshot_preflight_checks(report: dict, cur: sqlite3.Cursor) ->
     ):
         return
 
+    # 2026-05-25: check for forecast_window_attribution_status presence to
+    # conditionally enable the processable-row filter.  This column was added
+    # after the initial schema; older or test DBs may not have it.
+    _snap_columns = _columns(cur, table)
+    _has_attribution_col = "forecast_window_attribution_status" in _snap_columns
+
     allowed_versions = _metric_allowed_versions()
     metric_names = tuple(allowed_versions)
     quoted_metrics = ", ".join(f"'{metric}'" for metric in metric_names)
@@ -1498,14 +1528,57 @@ def _add_rebuild_snapshot_preflight_checks(report: dict, cur: sqlite3.Cursor) ->
         metric = identity.temperature_metric
         allowed_data_versions = tuple(spec.allowed_data_versions)
         data_version_placeholders = _sql_placeholders(allowed_data_versions)
+
+        # 2026-05-25 rename-propagation fix: derive the set of permitted
+        # physical_quantity values from allowed_data_versions, not from the
+        # single spec.identity.physical_quantity (which is the TIGGE canonical
+        # form — mx2t6/mn2t6 — and became stale when ecmwf_opendata switched
+        # to mx2t3/mn2t3 on 2026-05-07).  Each data_version maps to exactly
+        # one physical_quantity via the source-family registry in metric_identity.
+        allowed_physical_quantities: tuple[str, ...] = tuple(
+            sorted(
+                {
+                    pq
+                    for dv in allowed_data_versions
+                    if (pq := physical_quantity_for_data_version(metric, dv)) is not None
+                }
+            )
+        )
+        # Fallback: if mapping returns nothing (unknown data_versions), preserve
+        # the legacy identity.physical_quantity so the gate doesn't silently open.
+        if not allowed_physical_quantities:
+            allowed_physical_quantities = (identity.physical_quantity,)
+        pq_placeholders = _sql_placeholders(allowed_physical_quantities)
+
+        # Processable-row filter: exclude rows that the rebuild processor would
+        # skip at runtime (non-positive attribution_status like AMBIGUOUS/UNKNOWN).
+        # NULL attribution (TIGGE archive) is treated as processable — TIGGE does
+        # not populate forecast_window_attribution_status.
+        # Only applied when the column is present; older/test DBs without it skip
+        # the attribution scoping and fall back to the bare WHERE (safe because
+        # rows without the column can't have AMBIGUOUS attribution).
+        if _has_attribution_col:
+            _pos_in_list = (
+                "(" + ", ".join(f"'{s}'" for s in sorted(POSITIVE_ATTRIBUTION_STATUSES)) + ")"
+            )
+            processable_attr_sql = (
+                f"(forecast_window_attribution_status IS NULL"
+                f" OR UPPER(TRIM(CAST(forecast_window_attribution_status AS TEXT)))"
+                f" IN {_pos_in_list})"
+            )
+        else:
+            # No attribution column → all rows are treated as processable.
+            processable_attr_sql = "1"
+
         eligible_where = """
             temperature_metric = ?
-            AND physical_quantity = ?
+            AND physical_quantity IN ({pq_placeholders})
             AND observation_field = ?
             AND data_version IN ({data_version_placeholders})
             AND COALESCE(training_allowed, 0) = 1
             AND UPPER(TRIM(CAST(authority AS TEXT))) = 'VERIFIED'
             AND UPPER(TRIM(CAST(causality_status AS TEXT))) = 'OK'
+            AND {processable_attr_sql}
             AND city IS NOT NULL AND TRIM(CAST(city AS TEXT)) != ''
             AND target_date IS NOT NULL AND TRIM(CAST(target_date AS TEXT)) != ''
             AND issue_time IS NOT NULL AND TRIM(CAST(issue_time AS TEXT)) != ''
@@ -1517,7 +1590,9 @@ def _add_rebuild_snapshot_preflight_checks(report: dict, cur: sqlite3.Cursor) ->
             AND members_json IS NOT NULL AND TRIM(CAST(members_json AS TEXT)) != ''
         """
         eligible_where = eligible_where.format(
-            data_version_placeholders=data_version_placeholders
+            pq_placeholders=pq_placeholders,
+            data_version_placeholders=data_version_placeholders,
+            processable_attr_sql=processable_attr_sql,
         )
         eligible_count = _count_params(
             cur,
@@ -1525,7 +1600,7 @@ def _add_rebuild_snapshot_preflight_checks(report: dict, cur: sqlite3.Cursor) ->
             eligible_where,
             (
                 metric,
-                identity.physical_quantity,
+                *allowed_physical_quantities,
                 identity.observation_field,
                 *allowed_data_versions,
             ),
@@ -1550,16 +1625,22 @@ def _add_rebuild_snapshot_preflight_checks(report: dict, cur: sqlite3.Cursor) ->
                 }
             )
 
+        # unsafe_where: counts processable training-allowed rows (data_version in
+        # allowed list + processable attribution: NULL or positive) that have
+        # corrupt structural field values which would cause the rebuild to fail or
+        # produce wrong output.  Rows excluded at runtime (AMBIGUOUS/UNKNOWN
+        # attribution) are out of scope — they're skipped by the rebuild processor
+        # and already checked by _add_low_contract_evidence_preflight_check.
         unsafe_where = """
             temperature_metric = ?
             AND COALESCE(training_allowed, 0) = 1
+            AND data_version IN ({data_version_placeholders})
+            AND {processable_attr_sql}
             AND (
                 physical_quantity IS NULL
-                OR physical_quantity != ?
+                OR physical_quantity NOT IN ({pq_placeholders})
                 OR observation_field IS NULL
                 OR observation_field != ?
-                OR data_version IS NULL
-                OR data_version NOT IN ({data_version_placeholders})
                 OR UPPER(TRIM(CAST(authority AS TEXT))) != 'VERIFIED'
                 OR UPPER(TRIM(CAST(causality_status AS TEXT))) != 'OK'
                 OR city IS NULL OR TRIM(CAST(city AS TEXT)) = ''
@@ -1574,7 +1655,9 @@ def _add_rebuild_snapshot_preflight_checks(report: dict, cur: sqlite3.Cursor) ->
             )
         """
         unsafe_where = unsafe_where.format(
-            data_version_placeholders=data_version_placeholders
+            data_version_placeholders=data_version_placeholders,
+            processable_attr_sql=processable_attr_sql,
+            pq_placeholders=pq_placeholders,
         )
         unsafe_count = _count_params(
             cur,
@@ -1582,9 +1665,9 @@ def _add_rebuild_snapshot_preflight_checks(report: dict, cur: sqlite3.Cursor) ->
             unsafe_where,
             (
                 metric,
-                identity.physical_quantity,
-                identity.observation_field,
                 *allowed_data_versions,
+                *allowed_physical_quantities,
+                identity.observation_field,
             ),
         )
         unsafe_met = unsafe_count == 0
@@ -1899,20 +1982,25 @@ def _add_platt_pair_preflight_checks(report: dict, cur: sqlite3.Cursor) -> None:
     for spec in METRIC_SPECS:
         identity = spec.identity
         metric = identity.temperature_metric
+        # PR #341 fix: use plural allowed_data_versions (spec may declare multiple valid versions
+        # e.g. contract_window_v2 LOW has two versions; singular spec.allowed_data_version
+        # falsely flagged legitimate rows as identity_mismatch).
+        allowed_versions = tuple(spec.allowed_data_versions)
+        dv_placeholders = _sql_placeholders(allowed_versions)
         mismatch_count = _count_params(
             cur,
             table,
-            """
+            f"""
             temperature_metric = ?
             AND COALESCE(training_allowed, 0) = 1
             AND (
                 observation_field IS NULL
                 OR observation_field != ?
                 OR data_version IS NULL
-                OR data_version != ?
+                OR data_version NOT IN ({dv_placeholders})
             )
             """,
-            (metric, identity.observation_field, spec.allowed_data_version),
+            (metric, identity.observation_field, *allowed_versions),
         )
         mismatch_met = mismatch_count == 0
         mismatch_check_id = f"calibration_pairs_v2.{metric}.identity_safe"
@@ -1935,7 +2023,7 @@ def _add_platt_pair_preflight_checks(report: dict, cur: sqlite3.Cursor) -> None:
             )
 
         cur.execute(
-            """
+            f"""
             SELECT COUNT(*)
             FROM (
                 SELECT cluster, season, data_version,
@@ -1943,7 +2031,7 @@ def _add_platt_pair_preflight_checks(report: dict, cur: sqlite3.Cursor) -> None:
                 FROM calibration_pairs_v2
                 WHERE temperature_metric = ?
                   AND observation_field = ?
-                  AND data_version = ?
+                  AND data_version IN ({dv_placeholders})
                   AND COALESCE(training_allowed, 0) = 1
                   AND authority = 'VERIFIED'
                   AND UPPER(TRIM(CAST(causality_status AS TEXT))) = 'OK'
@@ -1967,7 +2055,7 @@ def _add_platt_pair_preflight_checks(report: dict, cur: sqlite3.Cursor) -> None:
             (
                 metric,
                 identity.observation_field,
-                spec.allowed_data_version,
+                *allowed_versions,
                 MIN_PLATT_DECISION_GROUPS,
             ),
         )

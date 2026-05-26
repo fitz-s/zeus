@@ -15,7 +15,12 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 from src.architecture.decorators import capability, protects
-from src.calibration.platt import ExtendedPlattCalibrator, calibrate_and_normalize
+from src.calibration.platt import (
+    ExtendedPlattCalibrator,
+    IdentityCalibrator,
+    IDENTITY_CALIBRATION_METHOD,
+    calibrate_and_normalize,
+)
 from src.calibration.store import (
     get_pairs_for_bucket,
     get_decision_group_count,
@@ -903,6 +908,15 @@ def get_calibrator(
             )
         else:
             cal = _model_data_to_calibrator(model_data)
+            # Zeus #64 (2026-05-25): identity_full_transport_v1 is a CERTIFIED
+            # route — it intentionally has n_samples=0 (no Platt training pairs)
+            # and must return level=1 (calibrated) so the evaluator gate at
+            # ``if cal is None or cal_level >= 4`` passes.  maturity_level(0)
+            # would return 4 and block the bucket.  The LOW n_eff floor is also
+            # bypassed: the floor guards against under-trained Platt models;
+            # an identity route has no Platt model and therefore no n_eff floor.
+            if model_data.get("calibration_method") == IDENTITY_CALIBRATION_METHOD:
+                return cal, 1
             level = maturity_level(model_data["n_samples"])
             if (
                 temperature_metric == "low"
@@ -1025,7 +1039,9 @@ def get_calibrator(
     return None, 4
 
 
-def _model_data_to_calibrator(model_data: dict) -> ExtendedPlattCalibrator:
+def _model_data_to_calibrator(
+    model_data: dict,
+) -> "ExtendedPlattCalibrator | IdentityCalibrator":
     """Reconstruct calibrator from stored model data.
 
     Codex P1 #6 (2026-05-04): also attach the bucket identity attrs from
@@ -1035,17 +1051,27 @@ def _model_data_to_calibrator(model_data: dict) -> ExtendedPlattCalibrator:
     load_platt_model populates them as None (no Phase 2 stratification on
     the legacy table) so the gate falls back correctly to the
     cross-domain rejection path.
+
+    Zeus #64 (2026-05-25): when calibration_method is 'identity_full_transport_v1',
+    return an IdentityCalibrator whose predict_for_bin returns p_raw unchanged.
+    Bucket identity attrs are still populated so the transfer gate works correctly.
     """
-    cal = ExtendedPlattCalibrator()
-    cal.A = model_data["A"]
-    cal.B = model_data["B"]
-    cal.C = model_data["C"]
-    cal.n_samples = model_data["n_samples"]
-    cal.fitted = True
-    cal.bootstrap_params = [
-        tuple(p) for p in model_data["bootstrap_params"]
-    ]
-    cal.input_space = model_data.get("input_space", "raw_probability")
+    cal_method = model_data.get("calibration_method") or "platt"
+    if cal_method == IDENTITY_CALIBRATION_METHOD:
+        cal: ExtendedPlattCalibrator | IdentityCalibrator = IdentityCalibrator()
+    else:
+        platt_cal = ExtendedPlattCalibrator()
+        platt_cal.A = model_data["A"]
+        platt_cal.B = model_data["B"]
+        platt_cal.C = model_data["C"]
+        platt_cal.n_samples = model_data["n_samples"]
+        platt_cal.fitted = True
+        platt_cal.bootstrap_params = [
+            tuple(p) for p in model_data["bootstrap_params"]
+        ]
+        platt_cal.input_space = model_data.get("input_space", "raw_probability")
+        cal = platt_cal
+    # Bucket identity attrs (both paths)
     cal._bucket_cycle = model_data.get("bucket_cycle")
     cal._bucket_source_id = model_data.get("bucket_source_id")
     cal._bucket_horizon_profile = model_data.get("bucket_horizon_profile")

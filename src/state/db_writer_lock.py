@@ -692,6 +692,7 @@ SQLITE_CONNECT_ALLOWLIST: frozenset[str] = frozenset(
         "scripts/live_health_probe.py",                 # read_only_ro_uri (live health verifier; settlement truth SELECT-only)
         "scripts/check_live_order_e2e.py",              # read_only_ro_uri (live order verifier; mode=ro + query_only)
         "scripts/check_live_release_gate.py",           # read_only_live + temp_fixture (release gate verifier; no canonical DB writes)
+        "scripts/check_full_transport_ship_readiness.py",  # read_only_ro_uri (full_transport ship-readiness gate; SELECT-only, no writes)
         "scripts/produce_activation_evidence.py",       # in_memory_only (":memory:" only)
         "scripts/replay_correctness_gate.py",           # read_only (SELECT-only)
         "scripts/replay_probability_edge_bin_sanity.py", # read_only (SELECT-only; LIVE-PROB-P0 §D.4 replay)
@@ -799,6 +800,18 @@ SQLITE_CONNECT_ALLOWLIST: frozenset[str] = frozenset(
         "scripts/verify_forecast_offset_fix.py",   # read_only_ro_uri: opens forecasts+world DBs via file:...?mode=ro uri; SELECT-only; never writes
         # --- P0 follow-up bundle-layer selection diagnostic (2026-05-23) ---
         "scripts/verify_forecast_bundle_selection.py",  # read_only_ro_uri: opens forecasts+world DBs via file:...?mode=ro uri; SELECT-only; never writes
+        # --- Zeus #64 matched-date eval tool (2026-05-25) ---
+        "scripts/audit_matched_date_proper_scores.py",  # read_only_ro_uri: opens isolated staging DB via file:...?mode=ro uri; SELECT-only; never writes
+        # --- Zeus #64 Phase 1a: model_bias_ens_v2 residual-cols migration (2026-05-25) ---
+        "scripts/migrate_model_bias_ens_v2_add_residual_cols.py",  # operator_invoked: idempotent ALTER TABLE ADD COLUMN; --commit gated; targets zeus-forecasts.db; never daemon path
+        "scripts/migrate_model_bias_ens_v2_canonical_fields.py",  # operator_invoked: idempotent ALTER TABLE ADD COLUMN per-column; --commit gated dry-run default; targets staging/copy only; Zeus #64/#68/#69
+        "scripts/fit_full_transport_error_models.py",  # operator_invoked: INSERT OR REPLACE into model_bias_ens_v2; --commit gated dry-run default; --db must be staging/copy; Zeus #64/#69
+        # --- Zeus #64 pre-existing analysis scripts (read-only, mode=ro) ---
+        "scripts/audit_refit_proper_scores.py",         # read_only_ro_uri: mode=ro SELECT-only; operator diagnostic; never daemon path
+        "scripts/experiment_route6_transport_beta.py",  # read_only_ro_uri: mode=ro SELECT-only; operator experiment; never daemon path
+        "scripts/experiment_route5_spread_scale.py",    # read_only_ro_uri: mode=ro SELECT-only; operator experiment; never daemon path
+        # --- Zeus #64 Phase-2 replay-equivalence harness (2026-05-25) ---
+        "scripts/replay_equivalence_full_transport.py",  # read_only_ro_uri: all connects use file:...?mode=ro uri; SELECT-only; never writes; operator diagnostic tool
     }
 )
 

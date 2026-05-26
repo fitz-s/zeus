@@ -913,6 +913,106 @@ class TestTrainingReadinessP0:
         assert "observation_instants_v2.training_role_unsafe" in blockers
         assert "observation_instants_v2.causality_unsafe" in blockers
 
+    def test_rebuild_preflight_accepts_opendata_mx2t3_data_version(self, tmp_path):
+        """2026-05-25 rename-propagation antibody: ecmwf_opendata_mx2t3_... (in
+        allowed_data_versions, physical_quantity=mx2t3_local_calendar_day_max) must
+        PASS the preflight gate after the physical_quantity multi-version fix.
+        Pre-fix, the gate rejected ALL mx2t3 rows because physical_quantity != mx2t6.
+        """
+        db_path = _fresh_training_readiness_world_db(tmp_path)
+        conn = sqlite3.connect(db_path)
+        _seed_rebuild_preflight_inputs(conn)
+        # Insert a HIGH mx2t3 OpenData snapshot with FULLY_INSIDE attribution.
+        conn.execute(
+            """
+            INSERT INTO ensemble_snapshots_v2 (
+                city, target_date, temperature_metric, physical_quantity,
+                observation_field, issue_time, valid_time, available_at,
+                fetch_time, lead_hours, members_json, model_version,
+                data_version, training_allowed, causality_status, authority,
+                provenance_json,
+                forecast_window_start_utc, forecast_window_end_utc,
+                forecast_window_start_local, forecast_window_end_local,
+                forecast_window_attribution_status,
+                contributes_to_target_extrema, forecast_window_block_reasons_json
+            ) VALUES (
+                'NYC', '2026-04-23', 'high',
+                'mx2t3_local_calendar_day_max', 'high_temp',
+                '2026-04-22T12:00:00Z', '2026-04-23T12:00:00Z',
+                '2026-04-22T12:10:00Z', '2026-04-22T12:15:00Z',
+                24.0, '[80.0, 81.0, 82.0]', 'ecmwf_opendata',
+                'ecmwf_opendata_mx2t3_local_calendar_day_max_v1',
+                1, 'OK', 'VERIFIED', '{"source":"ecmwf_opendata"}',
+                '2026-04-23T00:00:00Z', '2026-04-23T23:59:59Z',
+                '2026-04-22T20:00:00-04:00', '2026-04-23T19:59:59-04:00',
+                'FULLY_INSIDE_TARGET_LOCAL_DAY', 1, '[]'
+            )
+            """
+        )
+        conn.commit()
+        conn.close()
+
+        report = build_calibration_pair_rebuild_preflight_report(db_path)
+
+        blockers = _blocker_codes(report)
+        assert "ensemble_snapshots_v2.rebuild_input_unsafe" not in blockers, (
+            f"mx2t3 OpenData row wrongly rejected: blockers={blockers}"
+        )
+        assert report["checks"]["ensemble_snapshots_v2.high.rebuild_eligible_present"][
+            "status"
+        ] == "PASS"
+
+    def test_rebuild_preflight_rejects_legacy_mx2t6_data_version_not_in_allowed(
+        self, tmp_path
+    ):
+        """2026-05-25 rename-propagation antibody (rejection-preserving): the legacy
+        ecmwf_opendata_mx2t6_local_calendar_day_max_v1 data_version is NOT in
+        allowed_data_versions and must still be rejected by the preflight.
+        Proves the gate does its rejection job after the physical_quantity fix.
+        """
+        db_path = _fresh_training_readiness_world_db(tmp_path)
+        conn = sqlite3.connect(db_path)
+        _seed_rebuild_preflight_inputs(conn)
+        # Remove the TIGGE HIGH seed row so the only HIGH row is the legacy mx2t6.
+        conn.execute(
+            "DELETE FROM ensemble_snapshots_v2 WHERE temperature_metric = 'high'"
+        )
+        # Insert legacy ecmwf_opendata_mx2t6 snapshot (not in allowed_data_versions).
+        conn.execute(
+            """
+            INSERT INTO ensemble_snapshots_v2 (
+                city, target_date, temperature_metric, physical_quantity,
+                observation_field, issue_time, valid_time, available_at,
+                fetch_time, lead_hours, members_json, model_version,
+                data_version, training_allowed, causality_status, authority,
+                provenance_json,
+                forecast_window_attribution_status,
+                contributes_to_target_extrema, forecast_window_block_reasons_json
+            ) VALUES (
+                'NYC', '2026-04-23', 'high',
+                'mx2t6_local_calendar_day_max', 'high_temp',
+                '2026-04-22T12:00:00Z', '2026-04-23T12:00:00Z',
+                '2026-04-22T12:10:00Z', '2026-04-22T12:15:00Z',
+                24.0, '[78.0, 79.0, 80.0]', 'ecmwf_opendata',
+                'ecmwf_opendata_mx2t6_local_calendar_day_max_v1',
+                1, 'OK', 'VERIFIED', '{"source":"ecmwf_opendata"}',
+                'FULLY_INSIDE_TARGET_LOCAL_DAY', 1, '[]'
+            )
+            """
+        )
+        conn.commit()
+        conn.close()
+
+        report = build_calibration_pair_rebuild_preflight_report(db_path)
+
+        blockers = _blocker_codes(report)
+        # Legacy mx2t6 data_version is not in allowed_data_versions.
+        # The unsafe_where scopes to data_version IN allowed — so this row is NOT
+        # in the unsafe_where scope.  The real failure mode is no eligible rows.
+        assert "empty_rebuild_eligible_snapshots" in blockers, (
+            f"Legacy mx2t6 data_version should have no eligible rows: blockers={blockers}"
+        )
+
     def test_platt_refit_preflight_does_not_require_existing_platt_models(self, tmp_path):
         db_path = _fresh_training_readiness_world_db(tmp_path)
         conn = sqlite3.connect(db_path)

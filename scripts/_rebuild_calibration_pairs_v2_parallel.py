@@ -1,4 +1,8 @@
-# Lifecycle: created=2026-05-11; last_reviewed=2026-05-11; last_reused=never
+# Lifecycle: created=2026-05-11; last_reviewed=2026-05-11; last_reused=2026-05-25
+# Last reused or audited: 2026-05-25
+# Authority basis: FT_SHIP_MASTER_SPEC_2026-05-25 Phase 3 (additive, non-destructive)
+# P1 (2026-05-25): _delete_canonical_v2_slice call passes error_model_family_filter.
+# P2 (2026-05-25): DataVersionQuarantinedError caught per-snapshot in parallel path.
 # Purpose: Compute-in-workers + write-in-main parallel orchestrator for rebuild_calibration_pairs_v2.
 # Authority basis: redesign after city-level multiprocessing failed under SQLite WAL writer-lock contention (2026-05-11).
 # Reuse: imported lazily from scripts/rebuild_calibration_pairs_v2.py rebuild_v2() when --workers>1.
@@ -52,6 +56,8 @@ import traceback
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Optional
+
+from src.contracts.ensemble_snapshot_provenance import DataVersionQuarantinedError
 
 
 # ---------------------------------------------------------------------------
@@ -213,6 +219,8 @@ def run_parallel_rebuild(
 
             conn.execute("SAVEPOINT v2_rebuild_bucket")
             try:
+                # P1: scoped by error_model_family so only prior runs of the same
+                # family are removed; legacy 'none' rows survive untouched.
                 _delete_canonical_v2_slice(
                     conn,
                     spec=spec,
@@ -223,6 +231,7 @@ def run_parallel_rebuild(
                     cycle_filter=cycle_filter,
                     source_id_filter=source_id_filter,
                     horizon_profile_filter=horizon_profile_filter,
+                    error_model_family_filter=error_model_family,
                 )
 
                 # ---- Step A: pre-process in main; build payloads for survivors.
@@ -234,11 +243,23 @@ def run_parallel_rebuild(
                 # correction provenance (fail-open buckets => 'none').
                 snap_index: dict[int, tuple[sqlite3.Row, float, str]] = {}
                 for snap in city_snaps:
-                    survivor = _pre_compute_snapshot_v2(
-                        conn, snap, city, spec=spec, stats=stats,
-                        error_model_family=error_model_family,
-                        error_cache=error_cache,
-                    )
+                    try:
+                        survivor = _pre_compute_snapshot_v2(
+                            conn, snap, city, spec=spec, stats=stats,
+                            error_model_family=error_model_family,
+                            error_cache=error_cache,
+                        )
+                    except DataVersionQuarantinedError as _dve:
+                        # P2: spec-quarantined snapshot (passes is_quarantined() but
+                        # outside this spec's positively-allowed data_version set).
+                        # Skip + count; do not abort the city bucket.
+                        stats.snapshots_quarantined += 1
+                        print(
+                            f"  SPEC-QUARANTINED (parallel skip) "
+                            f"snapshot_id={snap['snapshot_id']} "
+                            f"data_version={snap['data_version']!r}: {_dve}"
+                        )
+                        continue
                     if survivor is None:
                         continue
                     sid = int(snap["snapshot_id"])

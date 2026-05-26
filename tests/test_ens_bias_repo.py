@@ -36,7 +36,8 @@ def conn():
             city TEXT, target_date TEXT, temperature_metric TEXT, data_version TEXT,
             members_json TEXT, members_unit TEXT, lead_hours REAL, available_at TEXT,
             contributes_to_target_extrema INTEGER, boundary_ambiguous INTEGER,
-            training_allowed INTEGER, causality_status TEXT, authority TEXT)"""
+            training_allowed INTEGER, causality_status TEXT, authority TEXT,
+            issue_time TEXT)"""
     )
     c.execute(
         """CREATE TABLE settlements_v2(
@@ -48,11 +49,11 @@ def conn():
 
 def _snap(conn, city, date, members, *, unit="C", dv=OPD, metric="high", lead=24.0,
           avail="2026-05-10T00:00:00Z", contributes=1, boundary=0, training=1,
-          causality="OK", authority="VERIFIED"):
+          causality="OK", authority="VERIFIED", issue_time=None):
     conn.execute(
-        "INSERT INTO ensemble_snapshots_v2 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO ensemble_snapshots_v2 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (city, date, metric, dv, json.dumps(members), unit, lead, avail,
-         contributes, boundary, training, causality, authority),
+         contributes, boundary, training, causality, authority, issue_time),
     )
 
 
@@ -210,11 +211,178 @@ def test_legacy_tigge_null_passthrough_includes_null_contributes(conn):
     # legacy TIGGE rows carry contributes_to_target_extrema=NULL; the prior loader
     # must include them under the legacy policy but NOT under full_contributor_only.
     TIGV = "tigge_mx2t6_local_calendar_day_max_v1"
-    conn.execute("INSERT INTO ensemble_snapshots_v2 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                 ("Tokyo","2026-05-10","high",TIGV, json.dumps([19.0]),"C",24.0,
-                  "2026-05-10T00:00:00Z", None, 0, 1, "OK", "VERIFIED"))
-    _settle(conn,"Tokyo","2026-05-10",20.0)
+    _snap(conn, "Tokyo", "2026-05-10", [19.0], dv=TIGV, contributes=None, boundary=0,
+          avail="2026-05-10T00:00:00Z", issue_time="2026-05-10T00:00:00Z")
+    _settle(conn, "Tokyo", "2026-05-10", 20.0)
     assert load_bucket_residuals(conn, city="Tokyo", data_version=TIGV,
                                  contributor_policy="full_contributor_only") == []
     assert load_bucket_residuals(conn, city="Tokyo", data_version=TIGV,
                                  contributor_policy="legacy_tigge_null_passthrough") == pytest.approx([-1.0])
+
+
+# ---- Relationship test: metric-aware cycle selection ----
+# Cross-module invariant: the prior-residual selection must return the snapshot whose
+# forecast window COVERS the target-day extremum for the metric.
+# HIGH → daytime (0Z cycle); LOW → nighttime (12Z cycle).
+# Proven RED against current code (freshest-always picks 12Z for HIGH when both exist).
+
+def test_high_metric_prefers_0Z_over_12Z(conn):
+    """HIGH prior uses the 0Z snapshot (daytime coverage), not the fresher 12Z (nighttime)."""
+    TIGV = "tigge_mx2t6_local_calendar_day_max_v1"
+    # 0Z snapshot: daytime coverage → mean=20 (correct for HIGH)
+    _snap(conn, "HK", "2026-02-01", [19.0, 20.0, 21.0], dv=TIGV, metric="high", lead=0.0,
+          avail="2026-02-01T00:00:00Z", issue_time="2026-02-01T00:00:00Z",
+          contributes=None, boundary=0)
+    # 12Z snapshot: nighttime coverage → mean=16 (wrong for HIGH — colder nighttime window)
+    # available_at is later, so "freshest" logic currently picks this one incorrectly.
+    _snap(conn, "HK", "2026-02-01", [15.0, 16.0, 17.0], dv=TIGV, metric="high", lead=0.0,
+          avail="2026-02-01T12:00:00Z", issue_time="2026-02-01T12:00:00Z",
+          contributes=None, boundary=0)
+    _settle(conn, "HK", "2026-02-01", 22.0, metric="high")
+    res = load_bucket_residuals(conn, city="HK", data_version=TIGV, metric="high",
+                                contributor_policy="legacy_tigge_null_passthrough",
+                                require_verified=False)
+    # 0Z mean=20, settlement=22 → residual = -2.0
+    # 12Z mean=16, settlement=22 → residual = -6.0  (wrong — current behavior)
+    assert res == pytest.approx([-2.0]), (
+        f"HIGH must use the 0Z daytime snapshot (residual=-2.0), got {res}"
+    )
+
+
+def test_low_metric_prefers_12Z_over_0Z(conn):
+    """LOW prior uses the 12Z snapshot (nighttime coverage) — current behavior preserved."""
+    TIGV = "tigge_mn2t6_local_calendar_day_min_v1"
+    # 0Z snapshot first (earlier)
+    _snap(conn, "HK", "2026-02-01", [8.0, 9.0, 10.0], dv=TIGV, metric="low", lead=0.0,
+          avail="2026-02-01T00:00:00Z", issue_time="2026-02-01T00:00:00Z",
+          contributes=None, boundary=0)
+    # 12Z snapshot later (fresher) — nighttime coverage, correct for LOW
+    _snap(conn, "HK", "2026-02-01", [5.0, 6.0, 7.0], dv=TIGV, metric="low", lead=0.0,
+          avail="2026-02-01T12:00:00Z", issue_time="2026-02-01T12:00:00Z",
+          contributes=None, boundary=0)
+    _settle(conn, "HK", "2026-02-01", 4.0, metric="low")
+    res = load_bucket_residuals(conn, city="HK", data_version=TIGV, metric="low",
+                                contributor_policy="legacy_tigge_null_passthrough",
+                                require_verified=False)
+    # 12Z mean=6, settlement=4 → residual = +2.0 (LOW behavior unchanged)
+    assert res == pytest.approx([2.0]), (
+        f"LOW must use the 12Z nighttime snapshot (residual=+2.0), got {res}"
+    )
+
+
+# ---- Canonical extension fields (Zeus #64 / #68 / #69) ----
+
+def test_write_bias_model_persists_canonical_extension_fields(conn):
+    """write_bias_model writes all 13 canonical extension fields when the columns exist."""
+    import sys, os
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+    from scripts.migrate_model_bias_ens_v2_canonical_fields import migrate
+    init_ens_bias_schema(conn)
+    migrate(conn, dry_run=False)
+    conn.commit()
+
+    write_bias_model(
+        conn,
+        city="Tokyo", season="JJA", month=7, metric="high",
+        live_data_version=OPD, prior_data_version=TIG,
+        posterior_bias_c=0.5, posterior_sd_c=0.3,
+        n_live=30, n_prior=120, weight_live=0.6,
+        estimator="test",
+        error_model_family="full_transport_v1",
+        error_model_key="Tokyo|high|JJA|full_transport_v1|opd",
+        transport_delta_policy="kappa=1.0;delta=paired_load_bucket_residuals",
+        bias_c=0.5,
+        bias_sd_c=0.3,
+        residual_sd_c=1.2,
+        heterogeneity_var_c2=0.0,
+        correction_strength=0.8,
+        effective_bias_c=0.4,
+        total_residual_sd_c=1.2,
+        code_commit="abc123",
+        fit_signature_hash="deadbeef01234567",
+        authority="STAGING",
+    )
+    conn.commit()
+
+    row = read_bias_model(conn, city="Tokyo", season="JJA", month=7,
+                          metric="high", live_data_version=OPD)
+    assert row is not None
+    assert row["error_model_family"] == "full_transport_v1"
+    assert row["bias_c"] == pytest.approx(0.5)
+    assert row["bias_sd_c"] == pytest.approx(0.3)
+    assert row["residual_sd_c"] == pytest.approx(1.2)
+    assert row["correction_strength"] == pytest.approx(0.8)
+    assert row["effective_bias_c"] == pytest.approx(0.4)
+    assert row["authority"] == "STAGING"
+    assert row["fit_signature_hash"] == "deadbeef01234567"
+
+
+def test_relationship_unbiased_high_cohort_effective_bias_near_zero(conn):
+    """Relationship test (Zeus #64): a bucket with near-zero true bias yields
+    effective_bias_c close to 0 after the SNR gate — round-tripped through the DB.
+
+    This verifies both the producer logic AND persistence-layer integrity: a row
+    written by write_bias_model then read_bias_model must expose effective_bias_c < 1C.
+    """
+    import random, sys, os
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+    from scripts.migrate_model_bias_ens_v2_canonical_fields import migrate
+    from src.calibration.ens_error_model import fit_predictive_error_bucket
+    init_ens_bias_schema(conn)
+    migrate(conn, dry_run=False)
+    conn.commit()
+
+    rng = random.Random(42)
+    zero_tig = [rng.gauss(0.0, 1.5) for _ in range(100)]
+    zero_opd = [rng.gauss(0.0, 1.5) for _ in range(40)]
+    model = fit_predictive_error_bucket(zero_tig, zero_opd)
+
+    write_bias_model(
+        conn,
+        city="Synthetic", season="DJF", month=1, metric="high",
+        live_data_version=OPD, prior_data_version=TIG,
+        posterior_bias_c=model.bias_c, posterior_sd_c=model.bias_sd_c,
+        n_live=len(zero_opd), n_prior=len(zero_tig), weight_live=0.5,
+        estimator="fit_predictive_error_bucket",
+        bias_c=model.bias_c,
+        bias_sd_c=model.bias_sd_c,
+        residual_sd_c=model.residual_sd_c,
+        heterogeneity_var_c2=model.heterogeneity_var_c2,
+        correction_strength=model.correction_strength,
+        effective_bias_c=model.effective_bias_c,
+        total_residual_sd_c=model.total_residual_sd_c,
+        error_model_family="full_transport_v1",
+        authority="STAGING",
+    )
+    conn.commit()
+
+    row = read_bias_model(conn, city="Synthetic", season="DJF", month=1,
+                          metric="high", live_data_version=OPD)
+    assert row is not None
+    assert abs(row["effective_bias_c"]) < 1.0, (
+        f"Unbiased cohort: expected |effective_bias_c| < 1.0C, got {row['effective_bias_c']:.4f}"
+    )
+
+
+def test_write_bias_model_legacy_db_without_canonical_columns(conn):
+    """write_bias_model succeeds on a pre-migration DB (no canonical columns).
+    The INSERT uses only the base columns — no OperationalError."""
+    init_ens_bias_schema(conn)
+    conn.commit()
+
+    write_bias_model(
+        conn,
+        city="Oslo", season="DJF", month=1, metric="low",
+        live_data_version=OPD, prior_data_version=TIG,
+        posterior_bias_c=-0.8, posterior_sd_c=0.4,
+        n_live=20, n_prior=100, weight_live=0.3,
+        estimator="test",
+        bias_c=-0.8,
+        effective_bias_c=-0.5,
+        authority="STAGING",
+    )
+    conn.commit()
+    row = read_bias_model(conn, city="Oslo", season="DJF", month=1,
+                          metric="low", live_data_version=OPD)
+    assert row is not None
+    assert row["posterior_bias_c"] == pytest.approx(-0.8)
