@@ -34,6 +34,12 @@ from src.calibration.ens_bias_model import PosteriorBias
 # SNR gate breakpoints: below SNR_LO no shift; full shift at/above SNR_HI; linear between.
 SNR_LO = 1.0
 SNR_HI = 2.0
+# Minimum paired-Δ samples required to trust the transport step.  Below this
+# statistics.variance is undefined (n=1) so var_d=0.0, the prior keeps its raw
+# variance but its mean is shifted by the entire single-date delta, and the SNR
+# gate cannot suppress the resulting (possibly spurious) correction.
+# Matches _ERROR_MODEL_MIN_LIVE_N in ens_bias_model.py (both are 5).
+MIN_PAIRED_N = 5
 
 
 def correction_strength(*, bias: float, bias_sd: float, heterogeneity_var: float) -> float:
@@ -209,9 +215,15 @@ def fit_city_predictive_error(
                                 contributor_policy="full_contributor_only", **common)
     delta = load_paired_delta(conn, city=city, live_data_version=live_data_version,
                               prior_data_version=prior_data_version, **common)
+    # Fix B: gate transport on sufficient paired-Δ sample count.
+    # n=1 makes statistics.variance undefined → var_d=0 → prior mean shifted by the
+    # entire single-date delta with no variance inflation → SNR gate cannot suppress
+    # it → spurious large corrections (e.g. Dallas -9.87C, Busan +5.03C).
+    # When fewer than MIN_PAIRED_N samples exist, treat as no-delta (prior-only).
+    delta_gated = delta if len(delta) >= MIN_PAIRED_N else []
 
     f50 = fit_bucket(tig, [], min_live_n=min_live_n)          # prior-only: b50, sd50
-    transported = transport_bias_prior(b50=f50.bias, sd50=f50.sd, delta_samples=delta, kappa=kappa)
+    transported = transport_bias_prior(b50=f50.bias, sd50=f50.sd, delta_samples=delta_gated, kappa=kappa)
 
     live = None
     if len(opd) >= min_live_n:
