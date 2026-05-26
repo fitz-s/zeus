@@ -113,6 +113,22 @@ scripts/ci/tier0_pairing_gate.py         → fold into structural_blockers (one 
 - Output: doctor route_card now includes surface_ids + FC IDs + injected fatal misreads + required relationship tests
 - Run alongside existing doctor output; no behavior change to admission.
 
+**Phase B.5 — Universal first-principle PR monitor (added to PR #2, ~600 LOC).**
+- Operator first-principle directive 2026-05-26: meaningful findings only,
+  no self-reflection, CI failure immediate, no CI success run.
+- `scripts/ci/pr_monitor.py` — reusable CLI tool with persistent dedup state
+  in `~/.cache/zeus/pr_monitor/`. Stdlib only, no PyYAML.
+- Four invariants enforced:
+  1. Unresolved review threads with non-empty body emit; resolved or empty silent
+  2. CI checks with FAILURE/TIMED_OUT/CANCELLED/STARTUP_FAILURE emit immediately;
+     SUCCESS/pending/SKIPPED/NEUTRAL silent
+  3. Dedup across invocations via state file (thread_id + name:conclusion keys)
+  4. Terminal MERGED/CLOSED emits exactly once and exits 0
+- `tests/ci/test_pr_monitor.py` — 32 tests verifying all 4 invariants + format + JSON mode
+- Replaces ad-hoc in-session Bash Monitors. Any agent on any future PR
+  invokes `python scripts/ci/pr_monitor.py <pr>` and gets the same
+  first-principle filtering.
+
 **Phase C — Advisory CI workflow (PR #3, ~300 LOC).**
 - `.github/workflows/topology-context-advisory.yml`
 - PR summary artifact rendering

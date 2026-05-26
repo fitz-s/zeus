@@ -103,6 +103,10 @@ test_trust_policy:
     # CI Topology Context Pack Phase B integration (2026-05-26). Historical PR
     # fixtures: PR325/PR330/PR335/PR312/PR306 + multi-file UNION semantics.
     tests/topology/test_context_pack_integration.py: {created: "2026-05-26", last_used: "2026-05-26"}
+    # CI Topology Phase B.5: universal first-principle PR monitor (2026-05-26).
+    # Verifies 4 invariants: meaningful findings only, CI failure emits / success silent,
+    # dedup persistence across runs, terminal state emit-and-exit.
+    tests/ci/test_pr_monitor.py: {created: "2026-05-26", last_used: "2026-05-26"}
     # P1/P2 architecture review antibodies (2026-05-22): strategy routing, evidence
     # report scoping, migration clamp, evidence tier provenance.
     tests/test_p1_findings_evidence_risk.py: {created: "2026-05-22", last_used: "2026-05-22"}
