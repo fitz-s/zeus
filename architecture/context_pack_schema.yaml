@@ -1,0 +1,267 @@
+# Created: 2026-05-26
+# Last reused or audited: 2026-05-26
+# Authority basis: docs/operations/current/plans/ci_topology_refactor_refined.md §4 Phase A
+#                  External spec: ci topology refactor.md §4 Context Pack Schema
+#
+# Formal contract for the Context Pack atomic output emitted by
+# scripts/topology_doctor_context_pack.py (added in Phase B).
+#
+# A Context Pack answers: "this PR/diff/task touched what money-path surface,
+# what must the agent read, what tests/gates apply, what historical failure
+# chains and fatal misreads must be injected?"
+#
+# It does NOT answer runtime-truth questions (forecast freshness, CLOB book
+# state, calibration validity). Those are runtime/test/static/replay gates.
+#
+# Status: advisory only in Phase A. CI integrity gate added in Phase D.
+
+schema_version: 1
+
+metadata:
+  created: "2026-05-26"
+  owner: "ci-infra / topology"
+  status: provisional
+  refines:
+    - architecture/context_pack_profiles.yaml  # existing 2026-04-15 profile contracts; not retired
+  inputs:
+    # Context Pack assembler reads these manifests; never duplicates them.
+    - architecture/topology_surfaces.yaml
+    - architecture/failure_chains.yaml
+    - architecture/money_path_ci.yaml
+    - architecture/money_path_objects.yaml
+    - architecture/fatal_misreads.yaml
+    - architecture/db_table_ownership.yaml
+    - architecture/source_rationale.yaml
+    - architecture/test_topology.yaml
+    - architecture/task_boot_profiles.yaml
+
+required_fields:
+  - id
+  - title
+  - status
+  - owner
+  - risk_tier
+  - money_path_segments
+  - matched_surfaces
+  - required_reads
+  - active_invariants
+  - failure_chains
+  - fatal_misreads
+  - required_relationship_tests
+  - required_static_gates
+  - ci_classification
+  - renderer
+  - evidence_sources
+  - not_topology_responsibility
+
+allowed_status:
+  - active
+  - provisional
+  - retired
+
+allowed_risk_tier:
+  - T0    # live money-path, structural cannot-fail
+  - T1    # source truth / forecast signal
+  - T2    # source or cross-module behavior
+  - T3    # internal refactor with cross-module impact
+  - T4    # docs / arrangement / advisory only
+
+allowed_ci_classification:
+  - blocking_static
+  - blocking_relationship
+  - advisory
+  - nightly
+  - manual
+
+allowed_money_path_segments:
+  - contract_semantics
+  - source_truth
+  - forecast_signal
+  - calibration
+  - market_prior
+  - executable_edge
+  - sizing
+  - execution
+  - monitoring
+  - settlement
+  - learning
+
+# ---------------------------------------------------------------------------
+# Multi-file UNION semantics (operator caveat 2026-05-26)
+# ---------------------------------------------------------------------------
+# When a PR diff touches N files matching M distinct surface_ids:
+#   - assembler emits M Context Packs (one per matched surface) OR
+#   - assembler emits 1 merged Context Pack with `matched_surfaces` listing all M
+# Both modes are allowed; renderer picks one based on --mode.
+# This eliminates the doctor's "high_fanout_file_only" generic-fallback
+# behavior, which degrades on multi-file PRs.
+multi_file_union_policy:
+  default_mode: emit_per_surface
+  alternate_mode: emit_merged
+  forbidden:
+    - "selecting one surface and discarding others"
+    - "falling back to generic profile when ≥2 surfaces matched"
+
+# ---------------------------------------------------------------------------
+# Context Pack object shape
+# ---------------------------------------------------------------------------
+context_pack:
+  id: string                    # kebab-case stable id, e.g. execution_fresh_submit
+  title: string
+  status: active|provisional|retired
+  owner: string
+  sunset_condition: string|null
+
+  task_change_label: string     # short human-readable change label
+  matched_surfaces:
+    - surface_id: string
+      match_type: path|symbol|db_table|source|workflow|test|manifest|operation|pr_body|failure_chain
+      matched_value: string
+      confidence: high|medium|weak
+
+  money_path_segments:
+    - one of allowed_money_path_segments
+
+  risk_tier: T0|T1|T2|T3|T4
+
+  scoped_agents:
+    - path: string             # path to AGENTS.md (root or scoped)
+      reason: string
+
+  required_reads:
+    repo_files:
+      - path: string
+        reason: string
+        mode: must_read|read_if_touching|reference_only
+    architecture_manifests:
+      - path: string
+        keys: [string]
+        reason: string
+    scoped_agents:
+      - path: string
+        reason: string
+
+  ownership_checks:
+    db_table_ownership:
+      required: boolean
+      reason: string|null
+    source_rationale:
+      required: boolean
+      reason: string|null
+    test_topology:
+      required: boolean
+      reason: string|null
+    workflow_refs:
+      required: boolean
+      reason: string|null
+
+  failure_chains:
+    - id: string                  # FC-01..FC-10 from architecture/failure_chains.yaml
+      relevance: root|repair|similar|weak
+      reason: string
+
+  fatal_misreads:
+    - id: string                  # references architecture/fatal_misreads.yaml entry id
+      inject_into_prompt: boolean
+      reason: string
+
+  active_invariants:
+    - id: string                  # MP-ECO-001, MP-SIDE-001 (money-path); INV-NN (structural law)
+      source: architecture/money_path_ci.yaml|architecture/money_path_objects.yaml|architecture/invariants.yaml|custom
+      reason: string
+      # NOTE: Both architecture/money_path_ci.yaml#invariants (MP-NN money-path
+      # invariants) and architecture/invariants.yaml (INV-NN structural-law
+      # invariants) are valid sources. The external spec proposed an enum that
+      # listed only architecture/invariants.yaml; the refined schema permits
+      # all three plus `custom` so Context Packs can reference either or both.
+
+  required_relationship_tests:
+    - path: string
+      selector_id: string|null
+      historical_chain: string|null      # FC-id
+      runtime_path_hit: direct|indirect|mock_only|review_required
+      blocking: boolean
+
+  required_static_gates:
+    - id: string
+      script: string                     # scripts/ci/check_*.py
+      blocking: boolean
+      reason: string
+
+  optional_nightly_gates:
+    - id: string
+      workflow: string                   # nightly workflow path
+      reason: string
+
+  pr_template_questions:
+    - id: string
+      question: string
+      required: boolean
+
+  reviewer_checklist:
+    - id: string
+      question: string
+      severity_if_unanswered: blocking|important|advisory
+
+  ci_classification:
+    blocking_static: [string]
+    blocking_relationship: [string]
+    advisory: [string]
+    nightly: [string]
+    manual: [string]
+
+  override:
+    allowed: boolean
+    no_override_rules: [string]
+    override_file: architecture/ci_overrides.yaml
+
+  renderer:
+    compact_budget_lines: integer        # default 40
+    expanded_budget_lines: integer       # default 200
+    include_evidence_links: boolean
+
+  evidence_sources:
+    - type: pr|manifest|workflow|test|docs|source
+      ref: string
+      note: string
+
+  not_topology_responsibility:
+    - string                             # what topology CANNOT prove
+
+  review_required:
+    - string                             # weak matches the human reviewer must resolve
+
+# ---------------------------------------------------------------------------
+# Integrity rules (enforced by scripts/ci/check_context_pack_integrity.py in Phase D)
+# ---------------------------------------------------------------------------
+integrity_rules:
+  - id: schema_required_fields_present
+    description: "every Context Pack must declare all required_fields"
+    severity: blocking
+  - id: failure_chain_id_exists
+    description: "every failure_chains[].id must resolve in architecture/failure_chains.yaml"
+    severity: blocking
+  - id: surface_id_exists
+    description: "every matched_surfaces[].surface_id must resolve in architecture/topology_surfaces.yaml"
+    severity: blocking
+  - id: relationship_test_path_exists
+    description: "every required_relationship_tests[].path must be a real file"
+    severity: blocking
+  - id: fatal_misread_id_exists
+    description: "every fatal_misreads[].id must resolve in architecture/fatal_misreads.yaml"
+    severity: blocking
+  - id: invariant_id_exists
+    description: "every active_invariants[].id must resolve in money_path_ci.yaml or money_path_objects.yaml"
+    severity: blocking
+  - id: scoped_agents_path_exists
+    description: "scoped_agents path must be a real AGENTS.md file"
+    severity: blocking
+  - id: gate_script_exists
+    description: "every required_static_gates[].script must be a real .py file"
+    severity: blocking
+  - id: no_override_rule_in_enforcement
+    description: "every override.no_override_rules entry must exist in architecture/topology_enforcement.yaml"
+    severity: blocking
+  - id: blocking_rule_has_enforcer
+    description: "every ci_classification.blocking_static or blocking_relationship entry must name a real script/test"
+    severity: blocking
