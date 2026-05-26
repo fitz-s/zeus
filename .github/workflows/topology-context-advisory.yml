@@ -1,0 +1,129 @@
+name: topology-context-advisory
+
+# Created: 2026-05-26
+# Authority basis: docs/operations/current/plans/ci_topology_refactor_refined.md Phase C
+#
+# Advisory job: assembles Context Pack(s) for the PR's changed files using
+# scripts/topology_doctor_context_pack.py and posts a sticky summary
+# comment on the PR. Never blocks the build. continue-on-error is true on
+# every step so any failure here (e.g. gh API down, missing surface) does
+# not break the PR.
+#
+# Gate owner: ci-infra (per architecture/topology_enforcement.yaml)
+# Review condition: promote continue-on-error to false only if false-
+#   positive rate on advisory pack emission is empirically near zero.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths:
+      - 'src/**'
+      - 'tests/**'
+      - 'scripts/**'
+      - 'architecture/**'
+      - 'config/**'
+      - '.github/workflows/**'
+      - 'docs/operations/**'
+
+concurrency:
+  group: topology-context-advisory-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: write    # required by post_pr_context_pack_comment.py
+
+jobs:
+  context-pack-summary:
+    name: topology-context (advisory)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 5
+    env:
+      GATE_OWNER: "ci-infra (per architecture/topology_enforcement.yaml)"
+      GATE_RATIONALE: >
+        Advisory Context Pack assembly. Emits surface-matched failure-chain
+        and fatal-misread context for the PR's changed files. Posts as a
+        sticky PR comment for agent + human reviewers. Never blocking.
+    steps:
+      - name: Checkout (full history for diff)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install PyYAML
+        run: pip install --quiet pyyaml
+
+      - name: Compute changed files vs base
+        id: diff
+        run: |
+          set -euo pipefail
+          BASE_SHA="${{ github.event.pull_request.base.sha }}"
+          HEAD_SHA="${{ github.event.pull_request.head.sha }}"
+          echo "BASE_SHA=$BASE_SHA"
+          echo "HEAD_SHA=$HEAD_SHA"
+          # 3-dot diff: changed files since merge-base
+          git diff --name-only "$BASE_SHA"..."$HEAD_SHA" > /tmp/changed-files.txt || true
+          echo "Changed file count: $(wc -l < /tmp/changed-files.txt)"
+          head -50 /tmp/changed-files.txt
+          # Expose head sha for the comment header
+          echo "head_sha=$HEAD_SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Assemble Context Pack(s) — JSON
+        run: |
+          set -euo pipefail
+          if [ ! -s /tmp/changed-files.txt ]; then
+            echo "No changed files — skipping pack assembly."
+            echo '{"schema_version":1,"matched_files":[],"packs":[],"missing_surfaces_for_files":[],"review_required":[]}' > /tmp/context-packs.json
+            exit 0
+          fi
+          # shellcheck disable=SC2046
+          python scripts/topology_doctor_context_pack.py \
+            --changed-files $(cat /tmp/changed-files.txt) \
+            --format json \
+            --output /tmp/context-packs.json
+          echo "--- pack summary ---"
+          python -c "import json; d=json.load(open('/tmp/context-packs.json')); print('packs:', len(d.get('packs') or [])); print('matched_files:', len(d.get('matched_files') or [])); print('missing:', len(d.get('missing_surfaces_for_files') or []))"
+
+      - name: Assemble Context Pack(s) — markdown
+        run: |
+          set -euo pipefail
+          if [ ! -s /tmp/changed-files.txt ]; then
+            echo "No surface-matched changed files." > /tmp/context-packs.md
+            exit 0
+          fi
+          # shellcheck disable=SC2046
+          python scripts/topology_doctor_context_pack.py \
+            --changed-files $(cat /tmp/changed-files.txt) \
+            --format markdown \
+            --render-mode compact \
+            --output /tmp/context-packs.md
+          echo "--- markdown head ---"
+          head -40 /tmp/context-packs.md || true
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: topology-context-pack-${{ github.event.pull_request.number }}
+          path: |
+            /tmp/context-packs.json
+            /tmp/context-packs.md
+            /tmp/changed-files.txt
+          retention-days: 14
+          if-no-files-found: warn
+
+      - name: Post or update sticky PR comment
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          python scripts/ci/post_pr_context_pack_comment.py \
+            --pr "${{ github.event.pull_request.number }}" \
+            --body /tmp/context-packs.md \
+            --json-summary /tmp/context-packs.json \
+            --sha "${{ steps.diff.outputs.head_sha }}"

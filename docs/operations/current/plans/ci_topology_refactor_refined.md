@@ -144,10 +144,23 @@ scripts/ci/tier0_pairing_gate.py         → fold into structural_blockers (one 
   = exactly the failure mode the directive is meant to catch).
 - `tests/ci/test_pr_monitor.py` adds 17 stale-silence tests for a total of 49.
 
-**Phase C — Advisory CI workflow (PR #3, ~300 LOC).**
-- `.github/workflows/topology-context-advisory.yml`
-- PR summary artifact rendering
-- Never blocking.
+**Phase C — Advisory CI workflow (PR #3, ~580 LOC).**
+- `.github/workflows/topology-context-advisory.yml` — pull_request trigger,
+  continue-on-error: true, timeout 5 min, pull-requests:write permission.
+  Concurrency group per PR with cancel-in-progress. Actions pinned to
+  major versions. Uploads `/tmp/context-packs.{json,md}` as artifact
+  `topology-context-pack-<PR>`.
+- `scripts/ci/post_pr_context_pack_comment.py` — sticky PR comment poster.
+  Hidden marker `<!-- zeus-context-pack-summary -->` for upsert detection.
+  Builds body with summary count + per-pack table + collapsible full
+  pack(s) + topology boundary disclaimer. `--dry-run` mode.
+- `tests/ci/test_post_pr_context_pack_comment.py` — 13 tests (sticky
+  marker, body construction, table truncation, dry-run, error paths).
+- `tests/ci/test_topology_context_advisory_workflow.py` — 9 structural
+  validation tests (YAML parses, pull_request trigger, paths filter,
+  continue-on-error, permissions, timeout, workflow_refs_exist
+  enforcement, concurrency, action pinning, artifact upload).
+- Never blocks the build — every step has `continue-on-error: true`.
 
 **Phase D — Structural blockers + override system (PR #4, ~500 LOC).**
 - `scripts/ci/check_context_pack_integrity.py`
