@@ -137,33 +137,161 @@ def save_state(path: Path, state: dict[str, Any]) -> None:
 # ---------------------------------------------------------------------------
 
 
+# GraphQL query — `reviewThreads` is NOT in gh's `--json` whitelist for
+# `gh pr view`, so we go through `gh api graphql` directly. This was a real
+# bug in the first Phase B.5 cut (Copilot PR #343 review caught silently
+# broken monitor — `--json reviewThreads` returned exit 1 with stderr
+# "Unknown JSON field: reviewThreads").
+_GH_GRAPHQL_QUERY = """
+query($owner:String!,$repo:String!,$pr:Int!){
+  repository(owner:$owner,name:$repo){
+    pullRequest(number:$pr){
+      state
+      reviewThreads(first:100){
+        nodes{
+          id
+          isResolved
+          comments(first:1){
+            nodes{
+              author{login}
+              path
+              line
+              body
+            }
+          }
+        }
+      }
+      commits(last:1){
+        nodes{
+          commit{
+            statusCheckRollup{
+              contexts(first:100){
+                nodes{
+                  ... on CheckRun  { name conclusion status }
+                  ... on StatusContext { context state }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+"""
+
+
+def _parse_owner_repo(repo: str) -> tuple[str, str] | None:
+    """Returns (owner, repo) or None if format invalid."""
+    if "/" not in repo:
+        return None
+    parts = repo.split("/", 1)
+    if not parts[0] or not parts[1]:
+        return None
+    return parts[0], parts[1]
+
+
 def gh_pr_view(pr: int, *, repo: str | None = None) -> dict[str, Any] | None:
     """
-    Returns parsed JSON from `gh pr view <pr> --json ...` or None on failure.
-    Caller decides whether to retry.
+    Returns a normalized dict
+        {state, reviewThreads, statusCheckRollup}
+    from `gh api graphql`, or None on failure.
+
+    The shape matches what the rest of pr_monitor.py expects (originally
+    `gh pr view --json reviewThreads,statusCheckRollup,state`). gh_error
+    state — caller can inspect by passing return_error=True via gh_pr_view_v2.
+    For back-compat, this function returns None on any error.
     """
+    pr_data, _err = gh_pr_view_v2(pr, repo=repo)
+    return pr_data
+
+
+def gh_pr_view_v2(
+    pr: int, *, repo: str | None = None
+) -> tuple[dict[str, Any] | None, str | None]:
+    """
+    Same as gh_pr_view but also returns an error message string when gh fails.
+    Used by tick_once to emit GH_ERROR events.
+
+    Returns (data, error). Exactly one is non-None:
+        (dict, None) — success
+        (None, str)  — failure with human-readable reason
+    """
+    owner_repo = repo or _gh_default_repo()
+    if not owner_repo:
+        return None, "could not determine owner/repo (set --repo)"
+    parts = _parse_owner_repo(owner_repo)
+    if not parts:
+        return None, f"invalid --repo {owner_repo!r}; expected owner/name"
+    owner, repo_name = parts
+
     cmd = [
-        "gh",
-        "pr",
-        "view",
-        str(pr),
-        "--json",
-        "reviewThreads,statusCheckRollup,state",
+        "gh", "api", "graphql",
+        "-f", f"query={_GH_GRAPHQL_QUERY}",
+        "-f", f"owner={owner}",
+        "-f", f"repo={repo_name}",
+        "-F", f"pr={pr}",
     ]
-    if repo:
-        cmd.extend(["--repo", repo])
     try:
         result = subprocess.run(
             cmd, capture_output=True, text=True, timeout=30, check=False
         )
-    except (subprocess.TimeoutExpired, FileNotFoundError):
-        return None
+    except subprocess.TimeoutExpired:
+        return None, "gh api graphql timed out after 30s"
+    except FileNotFoundError:
+        return None, "gh CLI not installed (`gh` not on PATH)"
+
     if result.returncode != 0:
-        return None
+        stderr = (result.stderr or "").strip().splitlines()
+        msg = stderr[0] if stderr else f"gh exit {result.returncode}"
+        return None, f"gh api graphql failed: {msg}"
     try:
-        return json.loads(result.stdout)
-    except json.JSONDecodeError:
-        return None
+        raw = json.loads(result.stdout)
+    except json.JSONDecodeError as e:
+        return None, f"gh returned non-JSON: {e}"
+
+    if "errors" in raw and raw["errors"]:
+        first = raw["errors"][0]
+        return None, f"graphql error: {first.get('message', 'unknown')}"
+
+    try:
+        pr_node = raw["data"]["repository"]["pullRequest"]
+    except (KeyError, TypeError):
+        return None, "graphql response missing pullRequest"
+    if pr_node is None:
+        return None, f"PR #{pr} not found in {owner}/{repo_name}"
+
+    # Flatten statusCheckRollup to a list of {name, conclusion, status}
+    rollup_list: list[dict[str, Any]] = []
+    commits_nodes = (pr_node.get("commits") or {}).get("nodes") or []
+    if commits_nodes:
+        commit = commits_nodes[0].get("commit") or {}
+        rollup = commit.get("statusCheckRollup") or {}
+        contexts = (rollup.get("contexts") or {}).get("nodes") or []
+        for c in contexts:
+            if "name" in c:  # CheckRun
+                rollup_list.append(
+                    {"name": c["name"], "conclusion": c.get("conclusion"), "status": c.get("status")}
+                )
+            elif "context" in c:  # StatusContext (commit status)
+                state = c.get("state")
+                # Map status states to check conclusions vocabulary
+                conclusion = {
+                    "SUCCESS": "SUCCESS",
+                    "FAILURE": "FAILURE",
+                    "ERROR": "FAILURE",
+                    "PENDING": None,
+                    "EXPECTED": None,
+                }.get(state)
+                rollup_list.append(
+                    {"name": c["context"], "conclusion": conclusion, "status": "COMPLETED" if conclusion else "IN_PROGRESS"}
+                )
+
+    return {
+        "state": pr_node.get("state"),
+        "reviewThreads": (pr_node.get("reviewThreads") or {}).get("nodes") or [],
+        "statusCheckRollup": rollup_list,
+    }, None
 
 
 # ---------------------------------------------------------------------------
@@ -243,6 +371,15 @@ def format_ci_fail_line(pr: int, failure: dict[str, str]) -> str:
 
 def format_terminal_line(pr: int, state: str) -> str:
     return f"PR#{pr} TERMINAL state={state}"
+
+
+def format_gh_error_line(pr: int, error: str) -> str:
+    """
+    Emitted when the underlying gh CLI fails (auth, network, PR-ref drift,
+    invalid GraphQL field, etc). This is meaningful — silent broken-API is
+    exactly the failure mode this script is supposed to surface.
+    """
+    return f"PR#{pr} GH_ERROR {error}"
 
 
 def format_stale_silence_line(pr: int, elapsed_seconds: int, last_event_at: float | None) -> str:
@@ -335,8 +472,29 @@ def tick_once(
     if now is None:
         now = time.time()
 
-    pr_data = gh_pr_view(pr, repo=repo)
+    pr_data, gh_error = gh_pr_view_v2(pr, repo=repo)
     emitted_any = False
+
+    if gh_error is not None:
+        # Dedup GH_ERROR by error message so repeated same-failure ticks
+        # don't spam. Same dedup bucket as failures (gh:<msg>).
+        key = f"gh:{gh_error}"
+        if key not in state["reported_failures"]:
+            emit(format_gh_error_line(pr, gh_error), as_json=as_json, kind="gh_error")
+            state["reported_failures"].add(key)
+            emitted_any = True
+            state["last_event_at"] = now
+            state["last_stale_emit_at"] = None
+        # Stale check still runs below in case gh keeps failing
+        elapsed = check_stale_silence(state, threshold_seconds=stale_after_seconds, now=now)
+        if elapsed is not None:
+            emit(
+                format_stale_silence_line(pr, elapsed, state.get("last_event_at")),
+                as_json=as_json,
+                kind="stale_silence",
+            )
+            state["last_stale_emit_at"] = now
+        return None
 
     if pr_data is not None:
         # 1. Findings — only emit if thread id not previously reported

@@ -166,11 +166,14 @@ context_pack:
       reason: string
 
   active_invariants:
-    - id: string                  # MP-ECO-001, MP-SIDE-001, etc
-      source: architecture/money_path_ci.yaml|architecture/money_path_objects.yaml|custom
+    - id: string                  # MP-ECO-001, MP-SIDE-001 (money-path); INV-NN (structural law)
+      source: architecture/money_path_ci.yaml|architecture/money_path_objects.yaml|architecture/invariants.yaml|custom
       reason: string
-      # NOTE: spec referenced architecture/invariants.yaml which does NOT exist.
-      # Invariants live in money_path_ci.yaml#invariants: and money_path_objects.yaml.
+      # NOTE: Both architecture/money_path_ci.yaml#invariants (MP-NN money-path
+      # invariants) and architecture/invariants.yaml (INV-NN structural-law
+      # invariants) are valid sources. The external spec proposed an enum that
+      # listed only architecture/invariants.yaml; the refined schema permits
+      # all three plus `custom` so Context Packs can reference either or both.
 
   required_relationship_tests:
     - path: string

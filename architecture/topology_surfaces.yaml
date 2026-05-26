@@ -450,8 +450,8 @@ surfaces:
 # Integrity rules
 # ---------------------------------------------------------------------------
 integrity_rules:
-  - id: surface_id_kebab_case
-    description: "surface id must be lower_snake_case"
+  - id: surface_id_snake_case
+    description: "surface id must be lower_snake_case (letters, digits, underscores; no hyphens)"
     severity: blocking
   - id: surface_context_pack_resolvable
     description: "every context_packs[] entry must resolve in a Context Pack template (defined inline or in architecture/context_pack_profiles.yaml extension)"

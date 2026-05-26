@@ -353,3 +353,90 @@ def test_file_order_independent():
     b = assemble_context_packs(list(reversed(PR330_FILES)))
     assert _surface_ids(a) == _surface_ids(b)
     assert _fc_ids(a) == _fc_ids(b)
+
+
+# ---------------------------------------------------------------------------
+# Phase B.7 fixes: fatal_misreads populated, merged anchor stable
+# ---------------------------------------------------------------------------
+
+
+def test_fatal_misreads_populated_for_chains_with_refs():
+    """Phase B.7 fix: fatal_misreads_for_chains() must resolve refs from
+    failure_chains.yaml#chains[].fatal_misread_refs into actual misread
+    entries from architecture/fatal_misreads.yaml. (Copilot finding on PR
+    #343: previous lookup keyed on non-existent fields.)"""
+    # FC-01 has fatal_misread_refs added in B.7
+    bundle = assemble_context_packs(PR312_FILES)
+    fatal_lists = [pack["fatal_misreads"] for pack in bundle["packs"]]
+    flat = [fm for fl in fatal_lists for fm in fl]
+    assert len(flat) >= 1, "FC-01 surfaces must produce ≥1 fatal_misread"
+    # Each entry must carry a real misread id from architecture/fatal_misreads.yaml
+    ids = {fm["id"] for fm in flat}
+    assert any(i in ids for i in (
+        "hourly_downsample_preserves_extrema",
+        "daily_day0_hourly_forecast_sources_are_not_interchangeable",
+    ))
+    # Each must have inject_into_prompt + reason fields populated
+    for fm in flat:
+        assert "inject_into_prompt" in fm
+        assert fm.get("reason"), f"empty reason on {fm['id']}"
+
+
+def test_fatal_misreads_resolve_actual_misread_text():
+    """Verify the lookup uses real fatal_misreads.yaml fields
+    (false_equivalence + correction), not the old non-existent keys."""
+    bundle = assemble_context_packs(
+        ["src/data/day0_observation_reader.py", "src/engine/evaluator_day0.py"]
+    )
+    flat = [fm for pack in bundle["packs"] for fm in pack["fatal_misreads"]]
+    # FC-07 maps to airport_station_not_city_settlement_station etc.
+    # Reason should contain the false_equivalence string, not be empty.
+    assert flat, "FC-07 surfaces must produce fatal_misreads"
+    for fm in flat:
+        # Real misreads have severity prefix [critical|high|medium]
+        assert fm["reason"].startswith("[") or "REVIEW_REQUIRED" in fm["reason"]
+
+
+def test_emit_merged_anchor_is_stable_under_file_reordering():
+    """Phase B.7 fix: merged anchor must not depend on input file order."""
+    a = assemble_context_packs(
+        ["src/engine/cycle_runtime.py", "src/data/market_scanner.py"],
+        mode="emit_merged",
+    )
+    b = assemble_context_packs(
+        ["src/data/market_scanner.py", "src/engine/cycle_runtime.py"],
+        mode="emit_merged",
+    )
+    assert a["packs"][0]["id"] == b["packs"][0]["id"], (
+        "merged pack id must be stable across input file orderings"
+    )
+    # Matched surfaces should also be in a stable order
+    a_surface_order = [s["surface_id"] for s in a["packs"][0]["matched_surfaces"]]
+    b_surface_order = [s["surface_id"] for s in b["packs"][0]["matched_surfaces"]]
+    assert a_surface_order == b_surface_order
+
+
+def test_render_markdown_dedups_surface_ids_in_why_line():
+    """Phase B.7 fix: when multiple files match the same surface, the
+    'Why you are seeing this' line should list each surface_id once."""
+    bundle = assemble_context_packs(
+        # 3 files all matching execution_venue_boundary
+        ["src/execution/a.py", "src/execution/b.py", "src/venue/c.py"],
+        mode="emit_merged",
+    )
+    md = render_markdown(bundle, mode="compact")
+    # surface should appear once in the "Why you are seeing this" surfaces line
+    why_section = md.split("## Why you are seeing this")[1].split("##")[0]
+    # Count occurrences in the inline list (not in other sections of the doc)
+    count = why_section.count("execution_venue_boundary")
+    assert count == 1, f"execution_venue_boundary should appear once in why line; got {count}"
+
+
+def test_render_markdown_renders_fatal_misreads_section():
+    """Phase B.7 fix: fatal_misreads section must be rendered separately
+    from runtime warnings (was completely dropped before)."""
+    bundle = assemble_context_packs(PR312_FILES)
+    md = render_markdown(bundle)
+    assert "## Fatal misreads (injected)" in md
+    # And runtime warnings section is now distinct
+    assert "## Runtime warnings (from failure chains)" in md

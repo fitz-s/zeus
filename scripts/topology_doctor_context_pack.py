@@ -204,36 +204,67 @@ def fatal_misreads_for_chains(
     chain_ids: list[str], manifests: TopologyManifests
 ) -> list[dict[str, Any]]:
     """
-    Returns fatal_misreads entries relevant to the given chain ids. The
-    fatal_misreads.yaml manifest has a free-form shape; we look up entries
-    by `failure_chain_refs` or `chain_id` keys if present, falling back to
-    surfacing the entries that name FCs in their content.
-    """
-    misreads_doc = manifests.fatal_misreads or {}
-    # Try common shapes
-    misread_list = misreads_doc.get("fatal_misreads") or misreads_doc.get("misreads") or []
-    if isinstance(misread_list, dict):
-        # dict-of-misreads shape: id → entry
-        items = [{"id": k, **(v if isinstance(v, dict) else {"text": v})} for k, v in misread_list.items()]
-    elif isinstance(misread_list, list):
-        items = misread_list
-    else:
-        items = []
+    Returns fatal_misread entries injected into the Context Pack for the
+    given failure chains.
 
-    chain_set = set(chain_ids)
+    Mapping direction: failure_chains.yaml#chains[<FC-id>].fatal_misread_refs
+    lists ids that resolve in architecture/fatal_misreads.yaml#misreads[].id.
+    fatal_misreads.yaml itself uses domain task_classes (source_routing,
+    settlement_semantics, ...) rather than FC refs, so the join goes
+    through our new failure_chains.yaml field (added 2026-05-26 per
+    Copilot finding on PR #343).
+
+    Misread fields used (per actual fatal_misreads.yaml shape):
+      id, false_equivalence, correction, severity
+    """
+    chains = (manifests.failure_chains or {}).get("chains", {}) or {}
+    misreads_doc = manifests.fatal_misreads or {}
+    misread_list = misreads_doc.get("misreads") or []
+    # Index misreads by id for O(1) lookup
+    misread_by_id: dict[str, dict[str, Any]] = {}
+    if isinstance(misread_list, list):
+        for entry in misread_list:
+            if isinstance(entry, dict) and entry.get("id"):
+                misread_by_id[entry["id"]] = entry
+    elif isinstance(misread_list, dict):
+        for k, v in misread_list.items():
+            if isinstance(v, dict):
+                misread_by_id[k] = {"id": k, **v}
+
+    seen: set[str] = set()
     out: list[dict[str, Any]] = []
-    for entry in items:
-        refs = entry.get("failure_chain_refs") or entry.get("chains") or []
+    for cid in chain_ids:
+        chain = chains.get(cid, {})
+        refs = chain.get("fatal_misread_refs") or []
         if isinstance(refs, str):
             refs = [refs]
-        if any(r in chain_set for r in refs):
+        for ref in refs:
+            if ref in seen:
+                continue
+            misread = misread_by_id.get(ref)
+            if not misread:
+                # Unresolvable ref: still surface so reviewers notice the drift.
+                out.append(
+                    {
+                        "id": ref,
+                        "inject_into_prompt": False,
+                        "reason": "REVIEW_REQUIRED: misread id not found in architecture/fatal_misreads.yaml",
+                    }
+                )
+                seen.add(ref)
+                continue
+            false_eq = (misread.get("false_equivalence") or "").strip()
+            correction = (misread.get("correction") or "").strip().split("\n")[0]
+            severity = misread.get("severity") or "unknown"
+            reason = f"[{severity}] {false_eq} — {correction}" if false_eq else correction
             out.append(
                 {
-                    "id": entry.get("id") or entry.get("name") or "unknown",
+                    "id": ref,
                     "inject_into_prompt": True,
-                    "reason": (entry.get("summary") or entry.get("text") or "").strip().split("\n")[0],
+                    "reason": reason.strip(),
                 }
             )
+            seen.add(ref)
     return out
 
 
@@ -553,15 +584,27 @@ def assemble_context_packs(
         for sid, matches in by_surface.items():
             packs.append(build_context_pack(sid, matches, manifests, task_label=task_label))
     elif mode == "emit_merged":
-        # Single merged pack: pick the highest-risk surface as anchor, UNION fields
-        anchor_sid = max(by_surface, key=lambda s: _tier_rank(manifests.surfaces["surfaces"][s].get("risk_tier", "T4")))
+        # Stable anchor selection: highest tier rank first, then alphabetical
+        # surface_id. Without the secondary sort, equivalent inputs in
+        # different file order could pick different anchors (per Copilot
+        # finding on PR #343).
+        anchor_sid = sorted(
+            by_surface.keys(),
+            key=lambda s: (
+                -_tier_rank(manifests.surfaces["surfaces"][s].get("risk_tier", "T4")),
+                s,
+            ),
+        )[0]
         anchor_pack = build_context_pack(
             anchor_sid, by_surface[anchor_sid], manifests, task_label=task_label
         )
-        # Union matched_surfaces across all hits
+        # Union matched_surfaces across all hits — deterministic order
+        # (by surface_id then matched_value) for downstream stability.
         all_matches: list[dict[str, Any]] = []
-        for matches in by_surface.values():
-            all_matches.extend(matches)
+        for sid in sorted(by_surface.keys()):
+            all_matches.extend(
+                sorted(by_surface[sid], key=lambda m: m["matched_value"])
+            )
         anchor_pack["matched_surfaces"] = all_matches
         anchor_pack["id"] = f"merged_{anchor_pack['id']}"
         packs.append(anchor_pack)
@@ -611,7 +654,13 @@ def render_markdown(
         lines.append(f"# Zeus Context Pack: {pack['id']}")
         lines.append("")
         lines.append("## Why you are seeing this")
-        surfaces_str = ", ".join(s["surface_id"] for s in pack.get("matched_surfaces", []))
+        # Dedup surface_ids while preserving first-appearance order — same
+        # surface can match multiple files in multi-file diffs (per-file
+        # match detail still available in pack["matched_surfaces"]).
+        seen_sid: dict[str, None] = {}
+        for s in pack.get("matched_surfaces", []):
+            seen_sid.setdefault(s["surface_id"], None)
+        surfaces_str = ", ".join(seen_sid.keys())
         segs = " → ".join(pack.get("money_path_segments", []))
         lines.append(
             f"Changed files matched surface(s): **{surfaces_str}**. Money path segments: {segs}."
@@ -647,8 +696,15 @@ def render_markdown(
                 lines.append(f"- {fc['id']}: {fc.get('reason', '')}")
             lines.append("")
 
+        if pack.get("fatal_misreads"):
+            lines.append("## Fatal misreads (injected)")
+            for fm in pack["fatal_misreads"]:
+                inject_mark = "" if fm.get("inject_into_prompt") else " (NOT injected — review_required)"
+                lines.append(f"- {fm['id']}{inject_mark}: {fm.get('reason', '')}")
+            lines.append("")
+
         if pack.get("agent_runtime_warnings"):
-            lines.append("## Fatal misreads / runtime warnings")
+            lines.append("## Runtime warnings (from failure chains)")
             for w in pack["agent_runtime_warnings"]:
                 lines.append(f"- {w}")
             lines.append("")

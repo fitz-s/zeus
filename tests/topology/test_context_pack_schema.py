@@ -128,18 +128,20 @@ def test_integrity_rules_unique_ids(schema: dict) -> None:
     assert len(ids) == len(set(ids)), f"duplicate integrity rule ids: {ids}"
 
 
-def test_no_invariants_yaml_reference(schema: dict) -> None:
+def test_active_invariants_source_enum_lists_canonical_sources(schema: dict) -> None:
     """
-    Spec §4 referenced `architecture/invariants.yaml` which does NOT exist.
-    Refined schema must reference money_path_ci.yaml + money_path_objects.yaml only
-    in active enum/value positions. Comments documenting the redirect are allowed.
+    architecture/invariants.yaml DOES exist (INV-NN structural-law invariants)
+    alongside architecture/money_path_ci.yaml (MP-NN money-path invariants)
+    and architecture/money_path_objects.yaml. The active_invariants.source
+    enum must permit all three plus `custom`.
+
+    (Earlier version of this test was based on a false-negative existence
+    check; corrected per Copilot finding on PR #343.)
     """
     schema_text = SCHEMA_PATH.read_text()
-    # Strip comments (everything from `#` to end-of-line) before scanning.
+    # Strip line-comments before scanning to avoid matching documentation.
     code_lines = []
     for line in schema_text.splitlines():
-        # Preserve quoted strings; for YAML our 'source:' values are unquoted,
-        # so a simple split on '#' suffices.
         if "#" in line:
             line = line.split("#", 1)[0]
         code_lines.append(line)
@@ -148,10 +150,15 @@ def test_no_invariants_yaml_reference(schema: dict) -> None:
     active_section = code_text.split("active_invariants:")[1].split(
         "required_relationship_tests:"
     )[0]
-    assert "architecture/invariants.yaml" not in active_section, (
-        "active_invariants.source must NOT include architecture/invariants.yaml "
-        "as an active value (comments documenting the redirect are OK)"
-    )
+    for required_source in (
+        "architecture/money_path_ci.yaml",
+        "architecture/money_path_objects.yaml",
+        "architecture/invariants.yaml",
+        "custom",
+    ):
+        assert required_source in active_section, (
+            f"active_invariants.source enum must include {required_source!r}"
+        )
 
 
 def test_context_pack_shape_has_required_fields(schema: dict) -> None:

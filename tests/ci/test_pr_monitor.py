@@ -15,6 +15,7 @@ Covers the four first-principle invariants:
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 
 import pytest
@@ -198,7 +199,7 @@ def test_dedup_state_corrupt_returns_empty(tmp_path: Path):
 def test_tick_does_not_reemit_known_finding(monkeypatch, capsys):
     """tick_once with a thread id already in state must stay silent."""
     pr = _pr_data(threads=[_thread("T1", "duplicate")])
-    monkeypatch.setattr("scripts.ci.pr_monitor.gh_pr_view", lambda pr_num, repo=None: pr)
+    monkeypatch.setattr("scripts.ci.pr_monitor.gh_pr_view_v2", lambda pr_num, repo=None: (pr, None))
     state = {"reported_threads": {"T1"}, "reported_failures": set()}
     result = tick_once(343, repo="x/y", state=state, as_json=False)
     out = capsys.readouterr().out
@@ -208,7 +209,7 @@ def test_tick_does_not_reemit_known_finding(monkeypatch, capsys):
 
 def test_tick_reemits_new_finding_then_dedups(monkeypatch, capsys):
     pr = _pr_data(threads=[_thread("T1", "novel finding"), _thread("T2", "second novel")])
-    monkeypatch.setattr("scripts.ci.pr_monitor.gh_pr_view", lambda pr_num, repo=None: pr)
+    monkeypatch.setattr("scripts.ci.pr_monitor.gh_pr_view_v2", lambda pr_num, repo=None: (pr, None))
     state = {"reported_threads": set(), "reported_failures": set()}
     # First tick emits both
     tick_once(343, repo="x/y", state=state, as_json=False)
@@ -224,7 +225,7 @@ def test_tick_reemits_new_finding_then_dedups(monkeypatch, capsys):
 
 def test_tick_dedup_ci_failure(monkeypatch, capsys):
     pr = _pr_data(checks=[_check("pytest", "FAILURE")])
-    monkeypatch.setattr("scripts.ci.pr_monitor.gh_pr_view", lambda pr_num, repo=None: pr)
+    monkeypatch.setattr("scripts.ci.pr_monitor.gh_pr_view_v2", lambda pr_num, repo=None: (pr, None))
     state = {"reported_threads": set(), "reported_failures": set()}
     tick_once(343, repo="x/y", state=state, as_json=False)
     out1 = capsys.readouterr().out
@@ -240,14 +241,14 @@ def test_tick_reemits_new_failure_after_rerun_with_different_conclusion(
     """If a check was FAILURE then becomes TIMED_OUT, that's a NEW failure."""
     state = {"reported_threads": set(), "reported_failures": set()}
     monkeypatch.setattr(
-        "scripts.ci.pr_monitor.gh_pr_view",
-        lambda pr_num, repo=None: _pr_data(checks=[_check("pytest", "FAILURE")]),
+        "scripts.ci.pr_monitor.gh_pr_view_v2",
+        lambda pr_num, repo=None: (_pr_data(checks=[_check("pytest", "FAILURE")]), None),
     )
     tick_once(343, repo="x/y", state=state, as_json=False)
     capsys.readouterr()
     monkeypatch.setattr(
-        "scripts.ci.pr_monitor.gh_pr_view",
-        lambda pr_num, repo=None: _pr_data(checks=[_check("pytest", "TIMED_OUT")]),
+        "scripts.ci.pr_monitor.gh_pr_view_v2",
+        lambda pr_num, repo=None: (_pr_data(checks=[_check("pytest", "TIMED_OUT")]), None),
     )
     tick_once(343, repo="x/y", state=state, as_json=False)
     out = capsys.readouterr().out
@@ -277,8 +278,8 @@ def test_terminal_draft_returns_none():
 
 def test_tick_emits_terminal_when_merged(monkeypatch, capsys):
     monkeypatch.setattr(
-        "scripts.ci.pr_monitor.gh_pr_view",
-        lambda pr_num, repo=None: _pr_data(state="MERGED"),
+        "scripts.ci.pr_monitor.gh_pr_view_v2",
+        lambda pr_num, repo=None: (_pr_data(state="MERGED"), None),
     )
     state = {"reported_threads": set(), "reported_failures": set()}
     result = tick_once(343, repo="x/y", state=state, as_json=False)
@@ -331,17 +332,60 @@ def test_terminal_line_format():
 
 
 # ---------------------------------------------------------------------------
-# Robustness: gh failure returns None, tick is no-op
+# GH_ERROR — broken gh CLI is meaningful, not silent (Phase B.7 first principle)
 # ---------------------------------------------------------------------------
 
 
-def test_tick_silent_when_gh_returns_none(monkeypatch, capsys):
-    monkeypatch.setattr("scripts.ci.pr_monitor.gh_pr_view", lambda pr_num, repo=None: None)
-    state = {"reported_threads": set(), "reported_failures": set()}
+def test_tick_emits_gh_error_when_gh_fails(monkeypatch, capsys):
+    """A gh CLI failure must surface as PR#NN GH_ERROR rather than silence
+    (Phase B.7 fix to PR #343 Copilot finding root cause: silent broken-gh
+    masks all other events). Renamed from test_tick_silent_when_gh_returns_none."""
+    monkeypatch.setattr(
+        "scripts.ci.pr_monitor.gh_pr_view_v2",
+        lambda pr_num, repo=None: (None, "graphql 401 unauthorized"),
+    )
+    state = _state()
     result = tick_once(343, repo="x/y", state=state, as_json=False)
     assert result is None
     out = capsys.readouterr().out
-    assert out == ""
+    assert "PR#343 GH_ERROR graphql 401 unauthorized" in out
+
+
+def test_tick_dedups_repeated_gh_error(monkeypatch, capsys):
+    """Same gh error message twice → only one emit, not two (signal-only)."""
+    monkeypatch.setattr(
+        "scripts.ci.pr_monitor.gh_pr_view_v2",
+        lambda pr_num, repo=None: (None, "same persistent failure"),
+    )
+    state = _state()
+    tick_once(343, repo="x/y", state=state, as_json=False)
+    capsys.readouterr()
+    tick_once(343, repo="x/y", state=state, as_json=False, now=time.time() + 1)
+    out = capsys.readouterr().out
+    assert "GH_ERROR" not in out
+
+
+def test_tick_emits_different_gh_errors_separately(monkeypatch, capsys):
+    state = _state()
+    monkeypatch.setattr(
+        "scripts.ci.pr_monitor.gh_pr_view_v2",
+        lambda pr_num, repo=None: (None, "error A"),
+    )
+    tick_once(343, repo="x/y", state=state, as_json=False)
+    capsys.readouterr()
+    monkeypatch.setattr(
+        "scripts.ci.pr_monitor.gh_pr_view_v2",
+        lambda pr_num, repo=None: (None, "error B"),
+    )
+    tick_once(343, repo="x/y", state=state, as_json=False)
+    out = capsys.readouterr().out
+    assert "PR#343 GH_ERROR error B" in out
+
+
+def test_format_gh_error_line():
+    from scripts.ci.pr_monitor import format_gh_error_line
+    line = format_gh_error_line(343, "graphql error: not found")
+    assert line == "PR#343 GH_ERROR graphql error: not found"
 
 
 # ---------------------------------------------------------------------------
@@ -351,10 +395,13 @@ def test_tick_silent_when_gh_returns_none(monkeypatch, capsys):
 
 def test_json_mode_emits_kind_per_event(monkeypatch, capsys):
     monkeypatch.setattr(
-        "scripts.ci.pr_monitor.gh_pr_view",
-        lambda pr_num, repo=None: _pr_data(
-            threads=[_thread("T1", "json mode finding")],
-            checks=[_check("pytest", "FAILURE")],
+        "scripts.ci.pr_monitor.gh_pr_view_v2",
+        lambda pr_num, repo=None: (
+            _pr_data(
+                threads=[_thread("T1", "json mode finding")],
+                checks=[_check("pytest", "FAILURE")],
+            ),
+            None,
         ),
     )
     state = {"reported_threads": set(), "reported_failures": set()}
@@ -434,8 +481,8 @@ def test_stale_silence_refires_after_threshold_since_last_stale_emit():
 def test_tick_emits_stale_when_threshold_passed(monkeypatch, capsys):
     """tick_once with empty PR + stale-after set emits STALE_SILENCE."""
     monkeypatch.setattr(
-        "scripts.ci.pr_monitor.gh_pr_view",
-        lambda pr_num, repo=None: _pr_data(),  # nothing happening
+        "scripts.ci.pr_monitor.gh_pr_view_v2",
+        lambda pr_num, repo=None: (_pr_data(), None),  # gh OK but PR has nothing
     )
     state = _state(monitor_started_at=1000.0)
     tick_once(
@@ -455,8 +502,8 @@ def test_tick_emits_stale_when_threshold_passed(monkeypatch, capsys):
 
 def test_tick_does_not_emit_stale_when_threshold_zero(monkeypatch, capsys):
     monkeypatch.setattr(
-        "scripts.ci.pr_monitor.gh_pr_view",
-        lambda pr_num, repo=None: _pr_data(),
+        "scripts.ci.pr_monitor.gh_pr_view_v2",
+        lambda pr_num, repo=None: (_pr_data(), None),
     )
     state = _state(monitor_started_at=0.0)
     tick_once(
@@ -474,8 +521,8 @@ def test_tick_does_not_emit_stale_when_threshold_zero(monkeypatch, capsys):
 def test_real_event_resets_stale_clock(monkeypatch, capsys):
     """A real finding emit must reset last_stale_emit_at so next stale window starts fresh."""
     monkeypatch.setattr(
-        "scripts.ci.pr_monitor.gh_pr_view",
-        lambda pr_num, repo=None: _pr_data(threads=[_thread("T1", "real finding")]),
+        "scripts.ci.pr_monitor.gh_pr_view_v2",
+        lambda pr_num, repo=None: (_pr_data(threads=[_thread("T1", "real finding")]), None),
     )
     state = _state(monitor_started_at=1000.0, last_stale_emit_at=1500.0)
     tick_once(
@@ -493,17 +540,27 @@ def test_real_event_resets_stale_clock(monkeypatch, capsys):
     assert state["last_event_at"] == 2000.0
 
 
-def test_stale_silence_fires_when_gh_unreachable(monkeypatch, capsys):
-    """If gh keeps returning None and we've been silent, that itself is a problem."""
-    monkeypatch.setattr("scripts.ci.pr_monitor.gh_pr_view", lambda pr_num, repo=None: None)
+def test_stale_silence_fires_when_gh_repeatedly_unreachable(monkeypatch, capsys):
+    """Phase B.7 design: first GH_ERROR fires immediately; subsequent same-message
+    failures dedup (silent); after threshold passes since the first GH_ERROR,
+    STALE_SILENCE fires as a secondary signal. (The first GH_ERROR is the
+    primary signal — stale is the backup if it's missed.)"""
+    monkeypatch.setattr(
+        "scripts.ci.pr_monitor.gh_pr_view_v2",
+        lambda pr_num, repo=None: (None, "gh: persistent connection refused"),
+    )
     state = _state(monitor_started_at=1000.0)
+    # First tick emits GH_ERROR
     tick_once(
-        343,
-        repo="x/y",
-        state=state,
-        as_json=False,
-        stale_after_seconds=900,
-        now=2000.0,
+        343, repo="x/y", state=state, as_json=False,
+        stale_after_seconds=900, now=2000.0,
+    )
+    out = capsys.readouterr().out
+    assert "PR#343 GH_ERROR" in out
+    # Second tick well past threshold from the first event → STALE_SILENCE fires
+    tick_once(
+        343, repo="x/y", state=state, as_json=False,
+        stale_after_seconds=900, now=3500.0,
     )
     out = capsys.readouterr().out
     assert "PR#343 STALE_SILENCE" in out

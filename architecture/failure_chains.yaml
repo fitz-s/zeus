@@ -68,6 +68,7 @@ failure_chain_schema:
     escalates_to: string
   agent_runtime_warnings: [string]
   not_topology_responsibility: [string]
+  fatal_misread_refs: [string]    # optional: ids from architecture/fatal_misreads.yaml#misreads[]
   owner: string
   sunset_condition: string|null
 
@@ -115,6 +116,9 @@ chains:
     not_topology_responsibility:
       - "Topology does not decide which forecast cycle is actually fresh."
       - "Tests must prove bundle ranking and readiness/source_run coherence."
+    fatal_misread_refs:
+      - hourly_downsample_preserves_extrema
+      - daily_day0_hourly_forecast_sources_are_not_interchangeable
     owner: forecast-reader-owner
     sunset_condition: "retire only after bundle-layer gate is superseded by stronger replay fixture"
 
@@ -153,6 +157,8 @@ chains:
     not_topology_responsibility:
       - "Topology does not prove live Gamma/CLOB availability."
       - "Runtime tests must prove full tag path and breadth-first substrate coverage."
+    fatal_misread_refs:
+      - polymarket_low_market_history_starts_2026_04_15
     owner: market-data-owner
     sunset_condition: null
 
@@ -263,6 +269,8 @@ chains:
       - "Job id, decorator id, and table registry id must stay aligned."
     not_topology_responsibility:
       - "Topology does not prove HKO data correctness."
+    fatal_misread_refs:
+      - hong_kong_hko_explicit_caution_path
     owner: ingest-owner
     sunset_condition: null
 
@@ -300,6 +308,8 @@ chains:
     not_topology_responsibility:
       - "Topology does not prove ECMWF external dissemination freshness."
       - "Release-calendar tests and runtime source_run evidence must prove timing."
+    fatal_misread_refs:
+      - api_returns_data_not_settlement_correct_source
     owner: data-source-owner
     sunset_condition: null
 
@@ -341,6 +351,13 @@ chains:
     not_topology_responsibility:
       - "Topology does not decide current source validity."
       - "Source contract/runtime tests must prove the specific source role."
+    fatal_misread_refs:
+      - airport_station_not_city_settlement_station
+      - daily_day0_hourly_forecast_sources_are_not_interchangeable
+      - wu_website_daily_summary_not_wu_api_hourly_max
+      - source_family_false_equivalence
+      - hourly_downsample_preserves_extrema
+      - api_returns_data_not_settlement_correct_source
     owner: source-truth-owner
     sunset_condition: null
 

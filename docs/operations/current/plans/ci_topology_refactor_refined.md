@@ -1,7 +1,7 @@
 # CI Topology Refactor — Refined Plan (post live-run)
 
 > Created: 2026-05-26
-> Authority basis: `/Users/leofitz/Downloads/ci topology refactor.md` (external spec) + live-run reconciliation against `scripts/topology_doctor.py` (active authority) and `scripts/topology_v_next/` (P3 shadow mode).
+> Authority basis: external CI topology refactor spec supplied by operator on 2026-05-26 (out-of-repo authoring artifact) + live-run reconciliation against `scripts/topology_doctor.py` (active authority) and `scripts/topology_v_next/` (P3 shadow mode).
 > Status: PROPOSED, awaiting operator sign-off.
 
 ## 1. Why this is a refinement, not a rewrite
@@ -12,7 +12,7 @@ External spec proposed ~50 new files + 4 new workflows + new `scripts/topology/`
 2. **Doctor falls back to `generic` profile on path-only input** — exactly the failure mode spec §1 names ("agent 仍依赖用户 prompt 写得足够准"). For PR330-like files (`src/engine/cycle_runtime.py` + `src/execution/**` + `src/venue/**`), doctor returns `selected_by: high_fanout_file_only`, ties 10 candidates at 0.75, `admission_status: advisory_only`. Path-only routing is exactly what spec §2.2 Surface Registry would fix.
 3. **`topology_v_next/`** (P3 shadow mode, 14 profiles, hard_stop_paths) already runs alongside doctor via `--v-next-shadow`. It's the in-flight successor admission engine; spec's proposed admission would be a third parallel system.
 4. **`architecture/context_pack_profiles.yaml`** exists (2026-04-15, "Topology Context Efficiency" packet) and would name-collide with spec's `architecture/topology_context_packs.yaml`.
-5. **`architecture/invariants.yaml`** referenced by spec §4 — does not exist. Invariants live in `architecture/money_path_ci.yaml#invariants:` (MP-ECO-001, MP-SIDE-001, etc).
+5. **`architecture/invariants.yaml`** referenced by spec §4 — DOES exist (INV-NN structural-law invariants, 44KB). Money-path invariants (MP-ECO-001, MP-SIDE-001, etc.) are separately defined in `architecture/money_path_ci.yaml#invariants:`. The refined `active_invariants.source` enum permits all three (`money_path_ci.yaml`, `money_path_objects.yaml`, `invariants.yaml`) plus `custom`. (Corrected per Copilot finding on PR #343 — earlier draft incorrectly claimed the file did not exist.)
 
 ## 2. Delta (what is genuinely missing)
 
