@@ -16,6 +16,8 @@ EDLI_WORLD_TABLES = {
     "no_trade_regret_events",
     "edli_no_submit_receipts",
     "edli_live_cap_usage",
+    "edli_live_order_events",
+    "edli_live_order_projection",
 }
 
 

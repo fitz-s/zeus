@@ -465,7 +465,14 @@ state_machines:
       - NO_SUBMIT_CERTIFICATE_REJECTED
       - ACTIONABLE_NOT_SUBMITTED
       - INTENT_BUILT
+      - SUBMIT_PLAN_BUILT
+      - PRE_SUBMIT_REVALIDATED
+      - LIVE_CAP_RESERVED
+      - EXECUTION_COMMAND_CREATED
+      - VENUE_SUBMIT_ATTEMPTED
+      - VENUE_SUBMIT_ACKED
       - SUBMIT_DISABLED
+      - SUBMIT_REJECTED
       - NOT_SUBMITTED_DRY_RUN
       - SUBMITTED
       - TIMEOUT_UNKNOWN
@@ -617,6 +624,27 @@ schema_objects:
       required_tests:
         - tests/events/test_live_cap.py
         - tests/money_path/test_edli_live_canary.py
+    edli_live_order_events:
+      db: world
+      pk: aggregate_event_id
+      writer: src/events/live_order_aggregate.py::LiveOrderAggregateLedger.append_event
+      meaning: >
+        Append-only EDLI live-order aggregate event log. It is the replayable
+        source of truth for decision proof, pre-submit revalidation, cap,
+        venue submission, user-channel, reconcile, and lifecycle facts in the
+        full-live split. It does not perform venue submit.
+      required_tests:
+        - tests/events/test_live_order_aggregate.py
+    edli_live_order_projection:
+      db: world
+      pk: aggregate_id
+      writer: src/events/live_order_aggregate.py::LiveOrderAggregateLedger.rebuild_projection
+      meaning: >
+        Rebuildable current-state projection of edli_live_order_events. It is
+        not source of truth and can be reconstructed from the append-only
+        aggregate event log after crashes or partial writes.
+      required_tests:
+        - tests/events/test_live_order_aggregate.py
     # OBS-AUTHORITY-FOUNDATION 2026-05-23. Persisted, auditable settlement-day
     # observation authority. Observability only — these objects record runtime
     # observation truth + per-edge day0 classification so the operator can audit

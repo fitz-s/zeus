@@ -348,6 +348,13 @@ files:
     downstream:
     - src/state/schema/edli_live_cap_usage_schema.py
     - src/decision_kernel/verifier.py
+  src/events/live_order_aggregate.py:
+    zone: K2_runtime
+    authority_role: edli_live_order_aggregate_ledger
+    why: Append-only EDLI live-order aggregate ledger and rebuildable projection substrate for full-live split work; no venue submit or user-channel side effects.
+    downstream:
+    - src/state/schema/edli_live_order_events_schema.py
+    - src/engine/event_reactor_adapter.py
   src/decision_kernel/certificate.py:
     zone: K2_runtime
     authority_role: edli_certificate_grammar
@@ -2579,6 +2586,13 @@ files:
     downstream:
     - src/state/db.py
     - src/strategy/live_inference/promotion_ledger.py
+  src/state/schema/edli_live_order_events_schema.py:
+    zone: K2_runtime
+    authority_role: edli_live_order_aggregate_schema_owner
+    why: EDLI full-live split DDL owner for append-only live-order aggregate events and deterministic projection; event log is source of truth.
+    downstream:
+    - src/state/db.py
+    - src/events/live_order_aggregate.py
   src/state/schema/tail_stress_scenarios_schema.py:
     zone: K2_runtime
     authority_role: tail_stress_scenarios_schema_owner

@@ -982,6 +982,53 @@ tables:
       this table for event-bound live canary reservation, release, and consume
       state before execution-command persistence.
 
+  - name: edli_live_order_events
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: aggregate_event_id
+    required_columns:
+      - {name: aggregate_event_id, type: TEXT, nullable: false}
+      - {name: aggregate_id, type: TEXT, nullable: false}
+      - {name: event_sequence, type: INTEGER, nullable: false}
+      - {name: event_type, type: TEXT, nullable: false}
+      - {name: parent_event_hash, type: TEXT, nullable: true}
+      - {name: event_hash, type: TEXT, nullable: false}
+      - {name: payload_json, type: TEXT, nullable: false}
+      - {name: payload_hash, type: TEXT, nullable: false}
+      - {name: source_authority, type: TEXT, nullable: false}
+      - {name: occurred_at, type: TEXT, nullable: false}
+      - {name: created_at, type: TEXT, nullable: false}
+      - {name: schema_version, type: INTEGER, nullable: false}
+    notes: >
+      EDLI full-live split append-only live-order aggregate event log. Rows
+      bind decision proof, pre-submit revalidation, cap, venue submit,
+      user-channel, reconcile, and lifecycle facts without performing live
+      submission.
+
+  - name: edli_live_order_projection
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: aggregate_id
+    required_columns:
+      - {name: aggregate_id, type: TEXT, nullable: false}
+      - {name: event_id, type: TEXT, nullable: false}
+      - {name: final_intent_id, type: TEXT, nullable: true}
+      - {name: current_state, type: TEXT, nullable: false}
+      - {name: last_sequence, type: INTEGER, nullable: false}
+      - {name: last_event_type, type: TEXT, nullable: true}
+      - {name: last_event_hash, type: TEXT, nullable: true}
+      - {name: pending_reconcile, type: INTEGER, nullable: false}
+      - {name: venue_order_id, type: TEXT, nullable: true}
+      - {name: updated_at, type: TEXT, nullable: false}
+      - {name: schema_version, type: INTEGER, nullable: false}
+    notes: >
+      Deterministic projection of edli_live_order_events. The append-only event
+      log remains source of truth; this table is rebuildable current state.
+
   - name: outcome_fact
     db: world
     schema_class: world_class

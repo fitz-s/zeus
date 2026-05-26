@@ -894,7 +894,7 @@ def get_connection(
 # CI hook scripts/check_schema_version.py diffs the sqlite_master hash of
 # a fresh-init DB against tests/state/_schema_pinned_hash.txt and fails
 # the PR if SCHEMA_VERSION did not change in lockstep.
-SCHEMA_VERSION = 46  # 2026-05-25 EDLI live-cap reservation schema.
+SCHEMA_VERSION = 47  # 2026-05-25 EDLI live-order aggregate substrate schema.
 
 
 def init_schema(
@@ -2581,6 +2581,10 @@ def init_schema(
     # EDLI v1 (2026-05-24): durable tiny live-cap usage ledger.
     from src.state.schema.edli_live_cap_usage_schema import ensure_table as _ensure_edli_live_cap_usage_table
     _ensure_edli_live_cap_usage_table(conn)
+
+    # EDLI full-live split (2026-05-25): live-order aggregate event log + projection.
+    from src.state.schema.edli_live_order_events_schema import ensure_tables as _ensure_edli_live_order_events_tables
+    _ensure_edli_live_order_events_tables(conn)
 
     # EDLI redemption (2026-05-25): proof-carrying decision certificate ledger.
     from src.state.schema.decision_certificates_schema import ensure_tables as _ensure_decision_certificate_tables
