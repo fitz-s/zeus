@@ -41,6 +41,11 @@ def test_edli_online_config_defaults_inert_under_legacy_cron():
     assert edli["stale_book_directional_trading_enabled"] is False
     assert edli["real_order_submit_enabled"] is False
     assert edli["taker_fok_fak_live_enabled"] is False
+    assert edli["edli_live_scaleout_enabled"] is False
+    assert edli["edli_live_promotion_artifact_required"] is True
+    assert edli["edli_live_min_canary_count"] == 1
+    assert edli["edli_live_max_unresolved_unknowns"] == 0
+    assert edli["edli_live_min_realized_edge_bps"] == 0
     assert edli["tiny_live_max_notional_usd"] == 5.0
     assert edli["tiny_live_max_orders_per_day"] == 1
 
@@ -327,6 +332,107 @@ def test_live_canary_requires_submit_and_canary_flags(monkeypatch):
                 "live_canary_enabled": False,
             },
         )
+
+
+def _edli_live_updates(**overrides):
+    values = {
+        "enabled": True,
+        "live_execution_mode": "edli_live",
+        "reactor_mode": "live",
+        "event_writer_enabled": True,
+        "forecast_snapshot_trigger_enabled": True,
+        "market_channel_ingestor_enabled": True,
+        "edli_user_channel_reconcile_enabled": True,
+        "real_order_submit_enabled": True,
+        "live_canary_enabled": True,
+        "edli_live_scaleout_enabled": True,
+        "edli_live_promotion_artifact_required": True,
+        "edli_live_min_canary_count": 1,
+        "edli_live_max_unresolved_unknowns": 0,
+        "edli_live_min_realized_edge_bps": 0,
+    }
+    values.update(overrides)
+    return values
+
+
+def test_edli_live_requires_scaleout_flag(monkeypatch):
+    with pytest.raises(RuntimeError, match="EDLI_LIVE_REQUIRES_EDLI_LIVE_SCALEOUT_ENABLED"):
+        _run_main_with_fake_scheduler(
+            monkeypatch,
+            _edli_live_updates(edli_live_scaleout_enabled=False),
+        )
+
+
+def test_edli_live_requires_promotion_artifact(monkeypatch):
+    with pytest.raises(RuntimeError, match="EDLI_LIVE_REQUIRES_PROMOTION_ARTIFACT"):
+        _run_main_with_fake_scheduler(
+            monkeypatch,
+            _edli_live_updates(edli_live_promotion_artifact_path=""),
+        )
+
+
+def test_edli_live_blocks_unresolved_unknowns(monkeypatch, tmp_path):
+    artifact = tmp_path / "promotion.json"
+    artifact.write_text(
+        json.dumps(
+            {
+                "canary_count": 1,
+                "unresolved_unknowns": 1,
+                "realized_edge_bps": 10,
+            }
+        )
+    )
+
+    with pytest.raises(RuntimeError, match="EDLI_LIVE_PROMOTION_UNRESOLVED_UNKNOWN"):
+        _run_main_with_fake_scheduler(
+            monkeypatch,
+            _edli_live_updates(edli_live_promotion_artifact_path=str(artifact)),
+        )
+
+
+def test_edli_live_blocks_non_positive_realized_edge(monkeypatch, tmp_path):
+    artifact = tmp_path / "promotion.json"
+    artifact.write_text(
+        json.dumps(
+            {
+                "canary_count": 1,
+                "unresolved_unknowns": 0,
+                "realized_edge_bps": -1,
+            }
+        )
+    )
+
+    with pytest.raises(RuntimeError, match="EDLI_LIVE_PROMOTION_REALIZED_EDGE_INSUFFICIENT"):
+        _run_main_with_fake_scheduler(
+            monkeypatch,
+            _edli_live_updates(edli_live_promotion_artifact_path=str(artifact)),
+        )
+
+
+def test_edli_live_accepts_positive_promotion_artifact(monkeypatch, tmp_path):
+    artifact = tmp_path / "promotion.json"
+    artifact.write_text(
+        json.dumps(
+            {
+                "canary_count": 1,
+                "unresolved_unknowns": 0,
+                "realized_edge_bps": 1,
+            }
+        )
+    )
+
+    scheduler, settings_copy = _run_main_with_fake_scheduler(
+        monkeypatch,
+        _edli_live_updates(edli_live_promotion_artifact_path=str(artifact)),
+    )
+
+    job_ids = {job.id for job in scheduler.jobs}
+    assert scheduler.started is True
+    assert "edli_event_reactor" in job_ids
+    assert "edli_market_channel_ingestor" in job_ids
+    assert "edli_user_channel_reconcile" in job_ids
+    assert settings_copy["edli_v1"]["live_execution_mode"] == "edli_live"
+    assert settings_copy["edli_v1"]["edli_live_scaleout_enabled"] is True
 
 
 def test_market_discovery_constructs_public_clob_with_bounded_timeout(monkeypatch):

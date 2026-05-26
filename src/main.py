@@ -19,6 +19,7 @@ Advisory file lock infrastructure (src.data.dual_run_lock) is retained in code
 #                  + 2026-05-17 CLOB venue-heartbeat critical-path split
 
 import functools
+import json
 import logging
 import os
 import signal
@@ -110,6 +111,34 @@ def _require_edli_flags(edli_cfg: dict, mode: str, flags: tuple[str, ...]) -> No
         raise RuntimeError(f"{mode.upper()}_REQUIRES_{'_AND_'.join(missing).upper()}")
 
 
+def _assert_edli_live_promotion_artifact(edli_cfg: dict) -> None:
+    if not bool(edli_cfg.get("edli_live_scaleout_enabled", False)):
+        raise RuntimeError("EDLI_LIVE_REQUIRES_EDLI_LIVE_SCALEOUT_ENABLED")
+    if not bool(edli_cfg.get("edli_live_promotion_artifact_required", True)):
+        raise RuntimeError("EDLI_LIVE_REQUIRES_PROMOTION_ARTIFACT_REQUIRED")
+
+    artifact_path = str(edli_cfg.get("edli_live_promotion_artifact_path") or "").strip()
+    if not artifact_path:
+        raise RuntimeError("EDLI_LIVE_REQUIRES_PROMOTION_ARTIFACT")
+    try:
+        artifact = json.loads(Path(artifact_path).read_text())
+    except FileNotFoundError as exc:
+        raise RuntimeError("EDLI_LIVE_REQUIRES_PROMOTION_ARTIFACT") from exc
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("EDLI_LIVE_PROMOTION_ARTIFACT_INVALID_JSON") from exc
+
+    min_canary_count = int(edli_cfg.get("edli_live_min_canary_count", 1))
+    max_unresolved_unknowns = int(edli_cfg.get("edli_live_max_unresolved_unknowns", 0))
+    min_realized_edge_bps = float(edli_cfg.get("edli_live_min_realized_edge_bps", 0.0))
+
+    if int(artifact.get("canary_count", 0)) < min_canary_count:
+        raise RuntimeError("EDLI_LIVE_PROMOTION_CANARY_COUNT_INSUFFICIENT")
+    if int(artifact.get("unresolved_unknowns", 0)) > max_unresolved_unknowns:
+        raise RuntimeError("EDLI_LIVE_PROMOTION_UNRESOLVED_UNKNOWN")
+    if float(artifact.get("realized_edge_bps", 0.0)) <= min_realized_edge_bps:
+        raise RuntimeError("EDLI_LIVE_PROMOTION_REALIZED_EDGE_INSUFFICIENT")
+
+
 def _assert_live_execution_mode_contract(edli_cfg: dict) -> str:
     mode = _live_execution_mode(edli_cfg)
     expected_reactor_mode = REACTOR_MODE_BY_LIVE_STAGE[mode]
@@ -139,6 +168,8 @@ def _assert_live_execution_mode_contract(edli_cfg: dict) -> str:
                 "live_canary_enabled",
             ),
         )
+    if mode == "edli_live":
+        _assert_edli_live_promotion_artifact(edli_cfg)
     return mode
 
 

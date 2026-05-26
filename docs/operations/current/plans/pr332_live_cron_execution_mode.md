@@ -26,6 +26,10 @@ can be scheduled.
   `edli_shadow_no_submit` requires `live_no_submit`,
   `edli_submit_disabled_bridge` requires `submit_disabled_live_bridge`, and
   canary/live stages require `live`.
+- Require `edli_live` scaleout to present an explicit promotion artifact with
+  enough canary count, zero unresolved unknowns by default, and realized edge
+  above the configured threshold. `edli_live_canary` remains the one-order/day
+  proving stage and does not satisfy scaleout by itself.
 - Add focused daemon-smoke tests for inert default, legacy-vs-EDLI exclusion,
   and conflict fail-closed behavior.
 

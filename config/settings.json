@@ -93,6 +93,12 @@
     "stale_book_directional_trading_enabled": false,
     "real_order_submit_enabled": false,
     "taker_fok_fak_live_enabled": false,
+    "edli_live_scaleout_enabled": false,
+    "edli_live_promotion_artifact_required": true,
+    "edli_live_promotion_artifact_path": "state/edli_live_promotion_artifact.json",
+    "edli_live_min_canary_count": 1,
+    "edli_live_max_unresolved_unknowns": 0,
+    "edli_live_min_realized_edge_bps": 0,
     "no_submit_visible_depth_fill_lcb": 0.05,
     "tiny_live_max_notional_usd": 5.0,
     "tiny_live_max_orders_per_day": 1
