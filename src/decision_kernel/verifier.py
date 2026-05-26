@@ -362,6 +362,7 @@ def _verify_execution_command_payload(
     final_intent = _required_parent_payload(parent, claims.FINAL_INTENT)
     expressibility = _required_parent_payload(parent, claims.EXECUTOR_EXPRESSIBILITY)
     live_cap = _required_parent_payload(parent, claims.LIVE_CAP)
+    pre_submit = _required_parent_payload(parent, claims.PRE_SUBMIT_REVALIDATION)
     if expressibility.get("passed") is not True:
         raise CertificateVerificationError("executor expressibility must pass")
     if live_cap.get("reservation_status") != "RESERVED":
@@ -378,6 +379,7 @@ def _verify_execution_command_payload(
     _require_equal("final_intent.token_id", final_intent.get("token_id"), "actionable.token_id", actionable.get("token_id"))
     _require_equal("final_intent.condition_id", final_intent.get("condition_id"), "actionable.condition_id", actionable.get("condition_id"))
     _require_equal("live_cap.usage_id", live_cap.get("usage_id"), "actionable.live_cap_usage_id", actionable.get("live_cap_usage_id"))
+    _verify_pre_submit_revalidation_for_command(payload, pre_submit, final_intent, live_cap)
     size = _finite_float(payload.get("size"), "execution command size")
     min_order_size = _finite_float(payload.get("min_order_size"), "execution command min_order_size")
     limit_price = _finite_float(payload.get("limit_price"), "execution command limit_price")
@@ -407,6 +409,59 @@ def _verify_execution_command_payload(
         raise CertificateVerificationError("execution command must be post_only maker intent for current executor law")
     if "neg_risk" in actionable and payload.get("neg_risk") != actionable.get("neg_risk"):
         raise CertificateVerificationError("execution command neg_risk mismatch")
+
+
+def _verify_pre_submit_revalidation_for_command(
+    command: dict,
+    pre_submit: dict,
+    final_intent: dict,
+    live_cap: dict,
+) -> None:
+    for field in (
+        "event_id",
+        "final_intent_id",
+        "condition_id",
+        "token_id",
+        "side",
+        "direction",
+        "order_type",
+        "time_in_force",
+        "post_only",
+        "limit_price",
+        "tick_size",
+        "min_order_size",
+        "neg_risk",
+    ):
+        _require_equal(f"pre_submit.{field}", pre_submit.get(field), f"execution_command.{field}", command.get(field))
+    _require_equal(
+        "pre_submit.live_cap_usage_id",
+        pre_submit.get("live_cap_usage_id"),
+        "live_cap.usage_id",
+        live_cap.get("usage_id"),
+    )
+    _require_equal(
+        "execution_command.aggregate_pre_submit_event_hash",
+        command.get("aggregate_pre_submit_event_hash"),
+        "pre_submit.aggregate_event_hash",
+        pre_submit.get("aggregate_event_hash"),
+    )
+    if not pre_submit.get("aggregate_event_hash"):
+        raise CertificateVerificationError("pre-submit revalidation aggregate_event_hash missing")
+    if not command.get("aggregate_execution_command_event_hash"):
+        raise CertificateVerificationError("execution command aggregate_execution_command_event_hash missing")
+    if pre_submit.get("would_cross_book") is not False:
+        raise CertificateVerificationError("pre-submit revalidation would_cross_book must be false")
+    if pre_submit.get("tick_aligned") is not True:
+        raise CertificateVerificationError("pre-submit revalidation tick_aligned must be true")
+    if pre_submit.get("size_ok") is not True:
+        raise CertificateVerificationError("pre-submit revalidation size_ok must be true")
+    for status_field in ("heartbeat_status", "user_ws_status", "venue_connectivity_status", "balance_allowance_status"):
+        if pre_submit.get(status_field) != "OK":
+            raise CertificateVerificationError(f"pre-submit revalidation {status_field} must be OK")
+    quote_age_ms = _finite_float(pre_submit.get("quote_age_ms"), "pre-submit quote_age_ms")
+    max_quote_age_ms = _finite_float(pre_submit.get("max_quote_age_ms", quote_age_ms), "pre-submit max_quote_age_ms")
+    if quote_age_ms > max_quote_age_ms:
+        raise CertificateVerificationError("pre-submit revalidation quote_age_ms exceeds max_quote_age_ms")
 
 
 def _verify_final_intent_payload(
@@ -604,6 +659,8 @@ def _verify_live_cap_transition_payload(
         raise CertificateVerificationError("live cap transition projection_status mismatch")
     if not payload.get("transition_reason"):
         raise CertificateVerificationError("live cap transition requires transition_reason")
+    if not payload.get("aggregate_cap_transition_event_hash"):
+        raise CertificateVerificationError("live cap transition aggregate_cap_transition_event_hash missing")
 
 
 def _verify_generated_certificate_semantics(cert: DecisionCertificate) -> None:

@@ -263,6 +263,23 @@ class LiveOrderAggregateLedger:
             venue_order_id=row["venue_order_id"],
         )
 
+    def latest_event_of_type(
+        self,
+        aggregate_id: str,
+        event_type: str,
+    ) -> LiveOrderAggregateEvent | None:
+        row = self.conn.execute(
+            """
+            SELECT *
+            FROM edli_live_order_events
+            WHERE aggregate_id = ? AND event_type = ?
+            ORDER BY event_sequence DESC
+            LIMIT 1
+            """,
+            (aggregate_id, event_type),
+        ).fetchone()
+        return _event_from_row(row) if row is not None else None
+
     def _latest_row(self, aggregate_id: str) -> sqlite3.Row | None:
         return self.conn.execute(
             """
@@ -286,15 +303,32 @@ class LiveOrderAggregateLedger:
             _validate_pre_submit_revalidation_payload(payload)
             return
         if event_type == "ExecutionCommandCreated":
-            if latest is None or latest["event_type"] != "PreSubmitRevalidated":
+            if latest is None or latest["event_type"] not in {"PreSubmitRevalidated", "LiveCapReserved"}:
                 raise LiveOrderAggregateError(
-                    "ExecutionCommandCreated requires immediately preceding PreSubmitRevalidated event"
+                    "ExecutionCommandCreated requires preceding PreSubmitRevalidated or LiveCapReserved event"
                 )
-            revalidation = _payload(latest)
+            revalidation_row = latest
+            if latest["event_type"] == "LiveCapReserved":
+                revalidation_row = self._latest_row_of_type(str(latest["aggregate_id"]), "PreSubmitRevalidated")
+                if revalidation_row is None:
+                    raise LiveOrderAggregateError("ExecutionCommandCreated requires preceding PreSubmitRevalidated event")
+            revalidation = _payload(revalidation_row)
             _validate_pre_submit_revalidation_payload(revalidation)
             if payload.get("final_intent_id") != revalidation.get("final_intent_id"):
                 raise LiveOrderAggregateError("ExecutionCommandCreated final_intent_id must match pre-submit revalidation")
             return
+
+    def _latest_row_of_type(self, aggregate_id: str, event_type: str) -> sqlite3.Row | None:
+        return self.conn.execute(
+            """
+            SELECT *
+            FROM edli_live_order_events
+            WHERE aggregate_id = ? AND event_type = ?
+            ORDER BY event_sequence DESC
+            LIMIT 1
+            """,
+            (aggregate_id, event_type),
+        ).fetchone()
 
 
 def _event_from_row(row: sqlite3.Row) -> LiveOrderAggregateEvent:

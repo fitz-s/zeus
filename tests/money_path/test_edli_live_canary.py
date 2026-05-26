@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from pathlib import Path
+from dataclasses import replace
 from datetime import datetime, timezone
 
 import pytest
@@ -290,6 +291,55 @@ def test_submit_disabled_live_bridge_releases_live_cap_row(monkeypatch):
     assert _cap_transition_projection_status(receipt) == "RELEASED"
 
 
+def test_submit_disabled_live_bridge_writes_live_order_aggregate_without_command_builder_monkeypatch():
+    from src.decision_kernel import claims
+    from src.engine import event_reactor_adapter as adapter
+    from tests.decision_kernel.no_submit_fixtures import build_test_no_submit_proof_bundle
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    event = _forecast_event()
+    decision_time = datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc)
+    accepted = _accepted_receipt(event)
+    accepted = replace(
+        accepted,
+        decision_proof_bundle=build_test_no_submit_proof_bundle(event, accepted, decision_time=decision_time),
+    )
+
+    certificates = adapter._build_submit_disabled_live_certificates(
+        event=event,
+        receipt=accepted,
+        decision_time=decision_time,
+        tiny_live_max_notional_usd=5.0,
+        live_cap_conn=conn,
+    )
+
+    events = conn.execute(
+        """
+        SELECT event_type, event_hash
+        FROM edli_live_order_events
+        ORDER BY event_sequence
+        """
+    ).fetchall()
+    event_types = [row["event_type"] for row in events]
+    command = _required_cert(certificates, claims.EXECUTION_COMMAND)
+    transition = _required_cert(certificates, claims.LIVE_CAP_TRANSITION)
+    projection = conn.execute("SELECT * FROM edli_live_order_projection").fetchone()
+
+    assert event_types == [
+        "DecisionProofAccepted",
+        "SubmitPlanBuilt",
+        "PreSubmitRevalidated",
+        "LiveCapReserved",
+        "ExecutionCommandCreated",
+        "CapTransitioned",
+    ]
+    assert command.payload["aggregate_pre_submit_event_hash"] == events[2]["event_hash"]
+    assert command.payload["aggregate_execution_command_event_hash"] == events[4]["event_hash"]
+    assert transition.payload["aggregate_cap_transition_event_hash"] == events[5]["event_hash"]
+    assert projection["current_state"] == "CAP_TRANSITIONED"
+
+
 def test_edli_live_cap_path_does_not_reference_legacy_cap_columns():
     from pathlib import Path
 
@@ -526,6 +576,12 @@ def _accepted_receipt(event):
         family_id="family-1",
         candidate_id="candidate-1",
         direction="buy_yes",
+        q_live=0.7,
+        q_lcb_5pct=0.6,
+        c_fee_adjusted=0.4,
+        c_cost_95pct=0.45,
+        p_fill_lcb=0.1,
+        trade_score=0.2,
         trade_score_positive=True,
         fdr_pass=True,
         fdr_family_id="family-1",
@@ -548,16 +604,80 @@ def _command_cert_bundle():
     from tests.decision_kernel.test_execution_command_certificate import builder_chain
 
     actionable, final_intent, expressibility, live_cap = builder_chain()
+    pre_submit = _pre_submit_cert(final_intent, live_cap)
     command = build_execution_command_certificate_from_final_intent(
         actionable_cert=actionable,
         final_intent_cert=final_intent,
         executor_expressibility_cert=expressibility,
         live_cap_cert=live_cap,
+        pre_submit_revalidation_cert=pre_submit,
         decision_time=datetime(2026, 5, 25, 12, tzinfo=timezone.utc),
     )
     assert final_intent.certificate_type == claims.FINAL_INTENT
     assert command.certificate_type == claims.EXECUTION_COMMAND
     return (actionable, final_intent, expressibility, live_cap, command)
+
+
+def _pre_submit_cert(final_intent, live_cap):
+    from src.decision_kernel import claims
+    from src.decision_kernel.certificate import ParentEdge, build_certificate
+
+    now = datetime(2026, 5, 25, 12, tzinfo=timezone.utc)
+    payload = {
+        "event_id": "event-1",
+        "final_intent_id": "intent-1",
+        "condition_id": "condition-1",
+        "token_id": "yes-1",
+        "side": "BUY",
+        "direction": "buy_yes",
+        "order_type": "POST_ONLY_LIMIT",
+        "time_in_force": "GTC",
+        "post_only": True,
+        "checked_at": now.isoformat(),
+        "quote_seen_at": now.isoformat(),
+        "quote_age_ms": 0,
+        "max_quote_age_ms": 1000,
+        "book_hash": "book-hash",
+        "current_best_bid": 0.39,
+        "current_best_ask": 0.41,
+        "limit_price": 0.4,
+        "would_cross_book": False,
+        "tick_size": 0.01,
+        "tick_aligned": True,
+        "min_order_size": 1.0,
+        "size_ok": True,
+        "neg_risk": False,
+        "heartbeat_status": "OK",
+        "user_ws_status": "OK",
+        "venue_connectivity_status": "OK",
+        "balance_allowance_status": "OK",
+        "aggregate_id": "event-1:intent-1",
+        "aggregate_event_hash": "pre-submit-hash",
+        "aggregate_execution_command_event_hash": "command-hash",
+        "final_intent_certificate_hash": final_intent.certificate_hash,
+        "live_cap_usage_id": live_cap.payload["usage_id"],
+    }
+    parents = (final_intent, live_cap)
+    return build_certificate(
+        certificate_type=claims.PRE_SUBMIT_REVALIDATION,
+        semantic_key="pre-submit:event-1:intent-1",
+        claim_type=claims.PRE_SUBMIT_REVALIDATION,
+        mode="LIVE",
+        decision_time=now,
+        source_available_at=now,
+        agent_received_at=now,
+        persisted_at=now,
+        payload=payload,
+        parent_edges=tuple(
+            ParentEdge(parent.certificate_type.removesuffix("Certificate").lower(), parent.certificate_hash, parent.certificate_type)
+            for parent in parents
+        ),
+        parent_certificates=parents,
+        authority_id="test",
+        authority_version="v1",
+        algorithm_id="test",
+        algorithm_version="v1",
+    )
 
 
 def _command_bundle_with_real_cap(**kwargs):
@@ -602,6 +722,13 @@ def _receipt_cert(receipt):
         if getattr(cert, "certificate_type", None) == claims.EXECUTION_RECEIPT:
             return cert
     raise AssertionError("ExecutionReceiptCertificate missing")
+
+
+def _required_cert(certs, certificate_type):
+    for cert in certs:
+        if getattr(cert, "certificate_type", None) == certificate_type:
+            return cert
+    raise AssertionError(f"{certificate_type} missing")
 
 
 def _receipt_status(receipt):

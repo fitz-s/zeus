@@ -65,6 +65,13 @@ def test_execution_command_requires_live_cap_parent():
         verify_execution_command(command, parents)
 
 
+def test_execution_command_requires_pre_submit_revalidation_parent():
+    parents, command = execution_graph(drop_parent=claims.PRE_SUBMIT_REVALIDATION)
+
+    with pytest.raises(CertificateVerificationError, match="PreSubmitRevalidationCertificate"):
+        verify_execution_command(command, parents)
+
+
 def test_execution_command_rejects_submitted_true_before_executor():
     parents, command = execution_graph(command_payload={"submitted": True})
 
@@ -216,12 +223,14 @@ def test_executor_expressibility_rejects_taker_order_when_executor_law_requires_
 
 def test_execution_command_builder_preserves_event_token_condition_direction():
     actionable, final_intent, expressibility, live_cap = builder_chain()
+    pre_submit = _pre_submit_cert(final_intent, live_cap)
 
     command = build_execution_command_certificate_from_final_intent(
         actionable_cert=actionable,
         final_intent_cert=final_intent,
         executor_expressibility_cert=expressibility,
         live_cap_cert=live_cap,
+        pre_submit_revalidation_cert=pre_submit,
         decision_time=NOW,
     )
 
@@ -229,17 +238,19 @@ def test_execution_command_builder_preserves_event_token_condition_direction():
     assert command.payload["token_id"] == actionable.payload["token_id"]
     assert command.payload["condition_id"] == actionable.payload["condition_id"]
     assert command.payload["direction"] == actionable.payload["direction"]
-    verify_execution_command(command, (actionable, final_intent, expressibility, live_cap))
+    verify_execution_command(command, (actionable, final_intent, expressibility, live_cap, pre_submit))
 
 
 def test_execution_command_builder_deterministic_idempotency_key():
     actionable, final_intent, expressibility, live_cap = builder_chain()
+    pre_submit = _pre_submit_cert(final_intent, live_cap)
 
     first = build_execution_command_certificate_from_final_intent(
         actionable_cert=actionable,
         final_intent_cert=final_intent,
         executor_expressibility_cert=expressibility,
         live_cap_cert=live_cap,
+        pre_submit_revalidation_cert=pre_submit,
         decision_time=NOW,
     )
     second = build_execution_command_certificate_from_final_intent(
@@ -247,6 +258,7 @@ def test_execution_command_builder_deterministic_idempotency_key():
         final_intent_cert=final_intent,
         executor_expressibility_cert=expressibility,
         live_cap_cert=live_cap,
+        pre_submit_revalidation_cert=pre_submit,
         decision_time=NOW,
     )
 
@@ -255,12 +267,14 @@ def test_execution_command_builder_deterministic_idempotency_key():
 
 def test_execution_command_builder_no_venue_order_id_before_submit():
     actionable, final_intent, expressibility, live_cap = builder_chain()
+    pre_submit = _pre_submit_cert(final_intent, live_cap)
 
     command = build_execution_command_certificate_from_final_intent(
         actionable_cert=actionable,
         final_intent_cert=final_intent,
         executor_expressibility_cert=expressibility,
         live_cap_cert=live_cap,
+        pre_submit_revalidation_cert=pre_submit,
         decision_time=NOW,
     )
 
@@ -270,17 +284,19 @@ def test_execution_command_builder_no_venue_order_id_before_submit():
 
 def test_execution_command_builder_rejects_invalid_final_intent_parent():
     actionable, final_intent, expressibility, live_cap = builder_chain(final_payload={"token_id": "other-token"})
+    pre_submit = _pre_submit_cert(final_intent, live_cap)
 
     command = build_execution_command_certificate_from_final_intent(
         actionable_cert=actionable,
         final_intent_cert=final_intent,
         executor_expressibility_cert=expressibility,
         live_cap_cert=live_cap,
+        pre_submit_revalidation_cert=pre_submit,
         decision_time=NOW,
     )
 
     with pytest.raises(CertificateVerificationError, match="token_id"):
-        verify_execution_command(command, (actionable, final_intent, expressibility, live_cap))
+        verify_execution_command(command, (actionable, final_intent, expressibility, live_cap, pre_submit))
 
 
 def test_execution_receipt_submit_disabled_has_no_venue_order_id():
@@ -413,8 +429,13 @@ def execution_graph(*, mode: str = "LIVE", command_payload: dict | None = None, 
         "live-cap:cap-1",
         {"usage_id": "cap-1", "event_id": "event-1", "reservation_status": "RESERVED", "max_notional_usd": 5.0},
     )
-    parents = tuple(parent for parent in (actionable, final_intent, expressibility, live_cap) if parent.certificate_type != drop_parent)
     payload = {**_command_payload(actionable), **(command_payload or {})}
+    pre_submit = _pre_submit_cert(final_intent, live_cap, payload)
+    parents = tuple(
+        parent
+        for parent in (actionable, final_intent, expressibility, live_cap, pre_submit)
+        if parent.certificate_type != drop_parent
+    )
     command = _cert(claims.EXECUTION_COMMAND, "execution-command:cmd-1", payload, mode=mode, parents=parents)
     return parents, command
 
@@ -475,11 +496,13 @@ def builder_chain(final_payload: dict | None = None):
 
 def receipt_command():
     actionable, final_intent, expressibility, live_cap = builder_chain()
+    pre_submit = _pre_submit_cert(final_intent, live_cap)
     return build_execution_command_certificate_from_final_intent(
         actionable_cert=actionable,
         final_intent_cert=final_intent,
         executor_expressibility_cert=expressibility,
         live_cap_cert=live_cap,
+        pre_submit_revalidation_cert=pre_submit,
         decision_time=NOW,
     )
 
@@ -536,8 +559,55 @@ def _command_payload(actionable) -> dict:
         "min_order_size": 1.0,
         "fee_rate": 0.0,
         "idempotency_key": "edli:event-1:cmd-1",
+        "aggregate_id": "event-1:intent-1",
+        "aggregate_pre_submit_event_hash": "pre-submit-hash",
+        "aggregate_execution_command_event_hash": "command-hash",
         "submitted": False,
     }
+
+
+def _pre_submit_cert(final_intent, live_cap, command_payload: dict | None = None):
+    command_payload = command_payload or {}
+    payload = {
+        "event_id": command_payload.get("event_id", final_intent.payload.get("event_id", "event-1")),
+        "final_intent_id": command_payload.get("final_intent_id", final_intent.payload.get("final_intent_id", "intent-1")),
+        "condition_id": command_payload.get("condition_id", final_intent.payload.get("condition_id", "condition-1")),
+        "token_id": command_payload.get("token_id", final_intent.payload.get("token_id", "yes-1")),
+        "side": command_payload.get("side", final_intent.payload.get("side", "BUY")),
+        "direction": command_payload.get("direction", final_intent.payload.get("direction", "buy_yes")),
+        "order_type": command_payload.get("order_type", final_intent.payload.get("order_type", "POST_ONLY_LIMIT")),
+        "time_in_force": command_payload.get("time_in_force", final_intent.payload.get("time_in_force", "GTC")),
+        "post_only": command_payload.get("post_only", final_intent.payload.get("post_only", True)),
+        "checked_at": NOW.isoformat(),
+        "quote_seen_at": NOW.isoformat(),
+        "quote_age_ms": 0,
+        "max_quote_age_ms": 1000,
+        "book_hash": "book-hash",
+        "current_best_bid": 0.39,
+        "current_best_ask": 0.41,
+        "limit_price": command_payload.get("limit_price", 0.4),
+        "would_cross_book": False,
+        "tick_size": command_payload.get("tick_size", 0.01),
+        "tick_aligned": command_payload.get("tick_aligned", True),
+        "min_order_size": command_payload.get("min_order_size", 1.0),
+        "size_ok": command_payload.get("size_ok", True),
+        "neg_risk": command_payload.get("neg_risk", False),
+        "heartbeat_status": "OK",
+        "user_ws_status": "OK",
+        "venue_connectivity_status": "OK",
+        "balance_allowance_status": "OK",
+        "aggregate_id": f"{command_payload.get('event_id', final_intent.payload.get('event_id', 'event-1'))}:{command_payload.get('final_intent_id', final_intent.payload.get('final_intent_id', 'intent-1'))}",
+        "aggregate_event_hash": "pre-submit-hash",
+        "aggregate_execution_command_event_hash": "command-hash",
+        "final_intent_certificate_hash": final_intent.certificate_hash,
+        "live_cap_usage_id": live_cap.payload["usage_id"],
+    }
+    return _cert(
+        claims.PRE_SUBMIT_REVALIDATION,
+        "pre-submit:event-1:intent-1",
+        payload,
+        parents=(final_intent, live_cap),
+    )
 
 
 def _final_intent_payload(actionable) -> dict:

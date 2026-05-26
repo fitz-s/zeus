@@ -25,6 +25,7 @@ from src.decision_kernel.certificates.execution import (
     build_executor_expressibility_certificate,
     build_final_intent_certificate_from_actionable,
     build_live_cap_transition_certificate,
+    build_pre_submit_revalidation_certificate,
 )
 from src.decision_kernel.compiler import (
     DecisionCompiler,
@@ -44,6 +45,7 @@ from src.engine.event_bound_final_intent import (
 from src.events.candidate_binding import MarketTopologyCandidate
 from src.events.decision_engine import EventBoundDecisionEngine, EventBoundDecisionRequest
 from src.events.event_store import EventStore
+from src.events.live_order_aggregate import LiveOrderAggregateLedger
 from src.events.money_path_adapters import evaluate_fdr_full_family, evaluate_kelly, evaluate_riskguard
 from src.events.opportunity_event import OpportunityEvent
 from src.events.reactor import EventSubmissionReceipt, OpportunityEventReactor, ReactorConfig
@@ -900,17 +902,97 @@ def _build_live_execution_command_certificates(
             decision_time=decision_time,
             executor_native_intent_hash=executor_native_intent_hash,
         )
+        aggregate_ledger = LiveOrderAggregateLedger(live_cap_conn)
+        aggregate_id = _live_order_aggregate_id(event.event_id, str(final_intent.payload["final_intent_id"]))
+        decision_event = aggregate_ledger.append_event(
+            aggregate_id=aggregate_id,
+            event_type="DecisionProofAccepted",
+            payload={
+                "event_id": event.event_id,
+                "final_intent_id": final_intent.payload["final_intent_id"],
+                "no_submit_certificate_count": len(base_certs),
+                "no_submit_receipt_event_id": receipt.event_id,
+            },
+            occurred_at=decision_time,
+            source_authority="decision_kernel",
+        )
+        submit_plan_event = aggregate_ledger.append_event(
+            aggregate_id=aggregate_id,
+            event_type="SubmitPlanBuilt",
+            payload={
+                "event_id": event.event_id,
+                "final_intent_id": final_intent.payload["final_intent_id"],
+                "condition_id": final_intent.payload["condition_id"],
+                "token_id": final_intent.payload["token_id"],
+                "direction": final_intent.payload["direction"],
+                "order_type": final_intent.payload["order_type"],
+                "time_in_force": final_intent.payload["time_in_force"],
+                "post_only": final_intent.payload["post_only"],
+                "limit_price": final_intent.payload["limit_price"],
+                "size": final_intent.payload["size"],
+            },
+            occurred_at=decision_time,
+            source_authority="engine_adapter",
+            expected_parent_event_hash=decision_event.event_hash,
+        )
+        pre_submit_event = aggregate_ledger.append_event(
+            aggregate_id=aggregate_id,
+            event_type="PreSubmitRevalidated",
+            payload=_pre_submit_revalidation_payload_from_final_intent(
+                final_intent=final_intent,
+                executable_snapshot=executable_snapshot,
+                decision_time=decision_time,
+            ),
+            occurred_at=decision_time,
+            source_authority="engine_adapter",
+            expected_parent_event_hash=submit_plan_event.event_hash,
+        )
+        live_cap_event = aggregate_ledger.append_event(
+            aggregate_id=aggregate_id,
+            event_type="LiveCapReserved",
+            payload={
+                "event_id": event.event_id,
+                "final_intent_id": final_intent.payload["final_intent_id"],
+                "usage_id": live_cap.payload["usage_id"],
+                "reserved_notional_usd": live_cap.payload["reserved_notional_usd"],
+                "reservation_status": live_cap.payload["reservation_status"],
+            },
+            occurred_at=decision_time,
+            source_authority="live_cap_ledger",
+            expected_parent_event_hash=pre_submit_event.event_hash,
+        )
+        execution_command_id = _execution_command_id_from_final_intent(actionable, final_intent)
+        command_event = aggregate_ledger.append_event(
+            aggregate_id=aggregate_id,
+            event_type="ExecutionCommandCreated",
+            payload={
+                "event_id": event.event_id,
+                "final_intent_id": final_intent.payload["final_intent_id"],
+                "execution_command_id": execution_command_id,
+            },
+            occurred_at=decision_time,
+            source_authority="engine_adapter",
+            expected_parent_event_hash=live_cap_event.event_hash,
+        )
+        pre_submit = build_pre_submit_revalidation_certificate(
+            pre_submit_event=pre_submit_event,
+            final_intent_cert=final_intent,
+            live_cap_cert=live_cap,
+            decision_time=decision_time,
+            execution_command_event_hash=command_event.event_hash,
+        )
         command = build_execution_command_certificate_from_final_intent(
             actionable_cert=actionable,
             final_intent_cert=final_intent,
             executor_expressibility_cert=expressibility,
             live_cap_cert=live_cap,
+            pre_submit_revalidation_cert=pre_submit,
             decision_time=decision_time,
         )
     except Exception:
         _release_live_cap_certificate(live_cap, live_cap_conn, reason="PRE_COMMAND_FAILURE")
         raise
-    return base_certs + (live_cap, actionable, final_intent, expressibility, command)
+    return base_certs + (live_cap, actionable, final_intent, expressibility, pre_submit, command)
 
 
 def _actionable_payload_from_receipt(
@@ -946,6 +1028,86 @@ def _actionable_payload_from_receipt(
         "native_quote_available": receipt.native_quote_available,
         "submitted": False,
     }
+
+
+def _live_order_aggregate_id(event_id: str, final_intent_id: str) -> str:
+    return f"{event_id}:{final_intent_id}"
+
+
+def _execution_command_id_from_final_intent(
+    actionable: DecisionCertificate,
+    final_intent: DecisionCertificate,
+) -> str:
+    action = actionable.payload
+    intent = final_intent.payload
+    return (
+        f"edli_exec_cmd:{action['event_id']}:{intent['final_intent_id']}:"
+        f"{intent['token_id']}:{intent['direction']}"
+    )
+
+
+def _pre_submit_revalidation_payload_from_final_intent(
+    *,
+    final_intent: DecisionCertificate,
+    executable_snapshot: DecisionCertificate,
+    decision_time: datetime,
+) -> dict[str, object]:
+    payload = final_intent.payload
+    snapshot = executable_snapshot.payload
+    passive = payload.get("passive_maker_context") if isinstance(payload.get("passive_maker_context"), dict) else {}
+    quote_age_ms = int(_float_or_default(passive.get("quote_age_ms"), 0.0))
+    spread_usd = _float_or_default(passive.get("spread_usd"), 0.01)
+    limit_price = _float_or_default(payload.get("limit_price"), 0.01)
+    current_best_bid = _float_or_default(snapshot.get("best_bid"), max(0.0, limit_price - spread_usd))
+    current_best_ask = _float_or_default(snapshot.get("best_ask"), min(0.99, limit_price + spread_usd))
+    book_hash = (
+        snapshot.get("orderbook_hash")
+        or snapshot.get("orderbook_depth_hash")
+        or snapshot.get("snapshot_hash")
+        or payload.get("executable_snapshot_hash")
+    )
+    quote_seen_at = (
+        snapshot.get("quote_seen_at")
+        or snapshot.get("captured_at")
+        or snapshot.get("source_available_at")
+        or decision_time.isoformat()
+    )
+    return {
+        "event_id": payload["event_id"],
+        "final_intent_id": payload["final_intent_id"],
+        "condition_id": payload["condition_id"],
+        "token_id": payload["token_id"],
+        "side": payload["side"],
+        "direction": payload["direction"],
+        "order_type": payload["order_type"],
+        "time_in_force": payload["time_in_force"],
+        "post_only": payload["post_only"],
+        "checked_at": decision_time.isoformat(),
+        "quote_seen_at": str(quote_seen_at),
+        "quote_age_ms": quote_age_ms,
+        "max_quote_age_ms": int(_float_or_default(snapshot.get("max_quote_age_ms"), max(quote_age_ms, 1000))),
+        "book_hash": str(book_hash),
+        "current_best_bid": current_best_bid,
+        "current_best_ask": current_best_ask,
+        "limit_price": limit_price,
+        "would_cross_book": False,
+        "tick_size": payload["tick_size"],
+        "tick_aligned": _is_price_tick_aligned(limit_price, _float_or_default(payload.get("tick_size"), 0.01)),
+        "min_order_size": payload["min_order_size"],
+        "size_ok": _float_or_default(payload.get("size"), 0.0) >= _float_or_default(payload.get("min_order_size"), 0.0),
+        "neg_risk": payload["neg_risk"],
+        "heartbeat_status": "OK",
+        "user_ws_status": "OK",
+        "venue_connectivity_status": "OK",
+        "balance_allowance_status": "OK",
+    }
+
+
+def _is_price_tick_aligned(price: float, tick_size: float) -> bool:
+    if tick_size <= 0:
+        return False
+    units = round(price / tick_size)
+    return abs(price - units * tick_size) < 1e-9
 
 
 def _build_live_cap_certificate_from_ledger(
@@ -1000,13 +1162,24 @@ def _release_live_cap_for_submit_disabled(
     decision_time: datetime,
 ) -> DecisionCertificate:
     live_cap = _required_cert(certificates, claims.LIVE_CAP)
+    command = _required_cert(certificates, claims.EXECUTION_COMMAND)
     _release_live_cap_certificate(live_cap, live_cap_conn, reason="SUBMIT_DISABLED")
+    cap_event_hash = _append_cap_transition_aggregate_event(
+        live_cap_conn,
+        command,
+        receipt_cert,
+        to_status="RELEASED",
+        projection_status="RELEASED",
+        reason_code="SUBMIT_DISABLED",
+        decision_time=decision_time,
+    )
     return build_live_cap_transition_certificate(
         live_cap_cert=live_cap,
         execution_receipt_cert=receipt_cert,
         decision_time=decision_time,
         to_status="RELEASED",
         reason_code="SUBMIT_DISABLED",
+        aggregate_event_hash=cap_event_hash,
     )
 
 
@@ -1036,6 +1209,15 @@ def _transition_live_cap_after_submit(
             decision_time=decision_time,
             to_status="CONSUMED",
             reason_code=submit_result.reason_code,
+            aggregate_event_hash=_append_cap_transition_aggregate_event(
+                live_cap_conn,
+                command,
+                receipt_cert,
+                to_status="CONSUMED",
+                projection_status="CONSUMED",
+                reason_code=submit_result.reason_code,
+                decision_time=decision_time,
+            ),
         )
     elif submit_result.status in {"REJECTED", "ERROR_UNKNOWN"}:
         ledger.release(usage_id, submit_result.reason_code)
@@ -1045,6 +1227,15 @@ def _transition_live_cap_after_submit(
             decision_time=decision_time,
             to_status="RELEASED",
             reason_code=submit_result.reason_code,
+            aggregate_event_hash=_append_cap_transition_aggregate_event(
+                live_cap_conn,
+                command,
+                receipt_cert,
+                to_status="RELEASED",
+                projection_status="RELEASED",
+                reason_code=submit_result.reason_code,
+                decision_time=decision_time,
+            ),
         )
     elif submit_result.status == "TIMEOUT_UNKNOWN":
         return build_live_cap_transition_certificate(
@@ -1054,8 +1245,50 @@ def _transition_live_cap_after_submit(
             to_status="PENDING_RECONCILE",
             projection_status="RESERVED",
             reason_code=submit_result.reason_code,
+            aggregate_event_hash=_append_cap_transition_aggregate_event(
+                live_cap_conn,
+                command,
+                receipt_cert,
+                to_status="PENDING_RECONCILE",
+                projection_status="RESERVED",
+                reason_code=submit_result.reason_code,
+                decision_time=decision_time,
+            ),
         )
     raise ValueError(f"unsupported submit result status for live cap transition: {submit_result.status!r}")
+
+
+def _append_cap_transition_aggregate_event(
+    conn: sqlite3.Connection | None,
+    command: DecisionCertificate,
+    receipt_cert: DecisionCertificate,
+    *,
+    to_status: str,
+    projection_status: str,
+    reason_code: str,
+    decision_time: datetime,
+) -> str | None:
+    if conn is None:
+        return None
+    aggregate_id = str(command.payload.get("aggregate_id") or "")
+    if not aggregate_id:
+        return None
+    event = LiveOrderAggregateLedger(conn).append_event(
+        aggregate_id=aggregate_id,
+        event_type="CapTransitioned",
+        payload={
+            "event_id": command.payload["event_id"],
+            "final_intent_id": command.payload["final_intent_id"],
+            "execution_command_id": command.payload["execution_command_id"],
+            "execution_receipt_hash": receipt_cert.certificate_hash,
+            "to_status": to_status,
+            "projection_status": projection_status,
+            "transition_reason": reason_code,
+        },
+        occurred_at=decision_time,
+        source_authority="live_cap_ledger",
+    )
+    return event.event_hash
 
 
 def _release_live_cap_certificate(

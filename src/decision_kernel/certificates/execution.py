@@ -16,6 +16,7 @@ from src.decision_kernel.verifier import (
     verify_final_intent,
     verify_live_cap_transition,
 )
+from src.events.live_order_aggregate import LiveOrderAggregateEvent
 
 
 def build_final_intent_certificate_from_actionable(
@@ -157,6 +158,7 @@ def build_execution_command_certificate_from_final_intent(
     final_intent_cert: DecisionCertificate,
     executor_expressibility_cert: DecisionCertificate,
     live_cap_cert: DecisionCertificate,
+    pre_submit_revalidation_cert: DecisionCertificate,
     decision_time: datetime,
 ) -> DecisionCertificate:
     action = actionable_cert.payload
@@ -199,6 +201,11 @@ def build_execution_command_certificate_from_final_intent(
         "min_order_size": final_intent["min_order_size"],
         "fee_rate": final_intent["fee_rate"],
         "idempotency_key": idempotency_key,
+        "aggregate_id": pre_submit_revalidation_cert.payload["aggregate_id"],
+        "aggregate_pre_submit_event_hash": pre_submit_revalidation_cert.payload["aggregate_event_hash"],
+        "aggregate_execution_command_event_hash": pre_submit_revalidation_cert.payload.get(
+            "aggregate_execution_command_event_hash"
+        ),
         "submitted": False,
         "venue_order_id": None,
     }
@@ -207,7 +214,7 @@ def build_execution_command_certificate_from_final_intent(
         f"execution_command:{payload['event_id']}:{payload['execution_command_id']}",
         payload,
         decision_time,
-        (actionable_cert, final_intent_cert, executor_expressibility_cert, live_cap_cert),
+        (actionable_cert, final_intent_cert, executor_expressibility_cert, live_cap_cert, pre_submit_revalidation_cert),
     )
 
 
@@ -265,6 +272,7 @@ def build_live_cap_transition_certificate(
     to_status: str,
     reason_code: str,
     projection_status: str | None = None,
+    aggregate_event_hash: str | None = None,
 ) -> DecisionCertificate:
     live_cap = live_cap_cert.payload
     receipt = execution_receipt_cert.payload
@@ -279,12 +287,41 @@ def build_live_cap_transition_certificate(
         "execution_command_id": receipt["execution_command_id"],
         "execution_receipt_hash": execution_receipt_cert.certificate_hash,
     }
+    if aggregate_event_hash:
+        payload["aggregate_cap_transition_event_hash"] = aggregate_event_hash
     return _build_cert(
         claims.LIVE_CAP_TRANSITION,
         f"live_cap_transition:{payload['usage_id']}:{payload['to_status']}:{payload['execution_command_id']}",
         payload,
         decision_time,
         (live_cap_cert, execution_receipt_cert),
+    )
+
+
+def build_pre_submit_revalidation_certificate(
+    *,
+    pre_submit_event: LiveOrderAggregateEvent,
+    final_intent_cert: DecisionCertificate,
+    live_cap_cert: DecisionCertificate,
+    decision_time: datetime,
+    execution_command_event_hash: str | None = None,
+) -> DecisionCertificate:
+    payload = {
+        **pre_submit_event.payload,
+        "aggregate_id": pre_submit_event.aggregate_id,
+        "aggregate_event_id": pre_submit_event.aggregate_event_id,
+        "aggregate_event_hash": pre_submit_event.event_hash,
+        "aggregate_event_sequence": pre_submit_event.event_sequence,
+        "aggregate_execution_command_event_hash": execution_command_event_hash,
+        "final_intent_certificate_hash": final_intent_cert.certificate_hash,
+        "live_cap_usage_id": live_cap_cert.payload["usage_id"],
+    }
+    return _build_cert(
+        claims.PRE_SUBMIT_REVALIDATION,
+        f"pre_submit_revalidation:{payload['event_id']}:{payload['final_intent_id']}:{pre_submit_event.event_hash[:16]}",
+        payload,
+        decision_time,
+        (final_intent_cert, live_cap_cert),
     )
 
 
@@ -380,6 +417,7 @@ __all__ = [
     "build_executor_expressibility_certificate",
     "build_final_intent_certificate_from_actionable",
     "build_live_cap_transition_certificate",
+    "build_pre_submit_revalidation_certificate",
     "verify_execution_command",
     "verify_execution_receipt",
     "verify_executor_expressibility",

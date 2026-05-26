@@ -204,7 +204,7 @@ class OpportunityEventReactor:
             self._reject_event(event, proof_stage, proof_reason, result, receipt=receipt, decision_time=decision_time)
             return
         if receipt.side_effect_status in LIVE_EXECUTION_RECEIPT_TERMINAL_STATUSES and not self._config.real_order_submit_enabled:
-            self._reject_event(event, "EXECUTOR_EXPRESSIBILITY", "EDLI_REAL_ORDER_SUBMIT_DISABLED", result, receipt=receipt, decision_time=decision_time)
+            self._reject_event(event, "EXECUTOR_EXPRESSIBILITY", "EDLI_REAL_ORDER_SIDE_EFFECT_FORBIDDEN", result, receipt=receipt, decision_time=decision_time)
             return
         if receipt.side_effect_status not in {"NO_SUBMIT"} | EXECUTION_RECEIPT_TERMINAL_STATUSES and not self._config.real_order_submit_enabled:
             self._reject_event(event, "EXECUTOR_EXPRESSIBILITY", "EDLI_REAL_ORDER_SUBMIT_DISABLED", result, receipt=receipt, decision_time=decision_time)

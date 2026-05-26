@@ -245,7 +245,7 @@ def test_processed_event_terminal_surface_includes_execution_receipt_certificate
     )
     from src.engine.event_bound_final_intent import validate_final_intent_cert_for_existing_executor
     from tests.decision_kernel.test_actionable_trade_certificate import actionable_graph
-    from tests.decision_kernel.test_execution_command_certificate import _cert, _live_cap_payload
+    from tests.decision_kernel.test_execution_command_certificate import _cert, _live_cap_payload, _pre_submit_cert
     from src.decision_kernel import claims
 
     conn, store = _store()
@@ -277,15 +277,17 @@ def test_processed_event_terminal_surface_includes_execution_receipt_certificate
         decision_time=decision_time,
         executor_native_intent_hash=validate_final_intent_cert_for_existing_executor(final_intent),
     )
+    pre_submit = _pre_submit_cert(final_intent, live_cap)
     command = build_execution_command_certificate_from_final_intent(
         actionable_cert=action,
         final_intent_cert=final_intent,
         executor_expressibility_cert=expressibility,
         live_cap_cert=live_cap,
+        pre_submit_revalidation_cert=pre_submit,
         decision_time=decision_time,
     )
     receipt_cert = build_execution_receipt_certificate(execution_command_cert=command, decision_time=decision_time)
-    cert_bundle = action_parents + (action, final_intent, executable, live_cap, expressibility, command, receipt_cert)
+    cert_bundle = action_parents + (action, final_intent, executable, live_cap, expressibility, pre_submit, command, receipt_cert)
 
     def _submit(_event, _decision_time):
         return EventSubmissionReceipt(
@@ -342,7 +344,7 @@ def test_live_submitted_execution_receipt_certificate_is_terminal_when_submit_en
     )
     from src.engine.event_bound_final_intent import validate_final_intent_cert_for_existing_executor
     from tests.decision_kernel.test_actionable_trade_certificate import actionable_graph
-    from tests.decision_kernel.test_execution_command_certificate import _cert, _live_cap_payload
+    from tests.decision_kernel.test_execution_command_certificate import _cert, _live_cap_payload, _pre_submit_cert
     from src.decision_kernel import claims
 
     conn, store = _store()
@@ -374,11 +376,13 @@ def test_live_submitted_execution_receipt_certificate_is_terminal_when_submit_en
         decision_time=decision_time,
         executor_native_intent_hash=validate_final_intent_cert_for_existing_executor(final_intent),
     )
+    pre_submit = _pre_submit_cert(final_intent, live_cap)
     command = build_execution_command_certificate_from_final_intent(
         actionable_cert=action,
         final_intent_cert=final_intent,
         executor_expressibility_cert=expressibility,
         live_cap_cert=live_cap,
+        pre_submit_revalidation_cert=pre_submit,
         decision_time=decision_time,
     )
     receipt_cert = build_execution_receipt_certificate(
@@ -391,7 +395,7 @@ def test_live_submitted_execution_receipt_certificate_is_terminal_when_submit_en
         venue_order_id="venue-1",
         raw_response={"status": "submitted"},
     )
-    cert_bundle = action_parents + (action, final_intent, executable, live_cap, expressibility, command, receipt_cert)
+    cert_bundle = action_parents + (action, final_intent, executable, live_cap, expressibility, pre_submit, command, receipt_cert)
 
     def _submit(_event, _decision_time):
         return EventSubmissionReceipt(
@@ -1282,7 +1286,7 @@ def test_reactor_blocks_real_order_side_effect_when_no_submit_mode():
 
     assert result.rejected == 1
     assert rejected[0][1] == "EXECUTOR_EXPRESSIBILITY"
-    assert rejected[0][2] == "EDLI_REAL_ORDER_SUBMIT_DISABLED"
+    assert rejected[0][2] == "EDLI_REAL_ORDER_SIDE_EFFECT_FORBIDDEN"
 
 
 def test_no_submit_day0_does_not_consume_tiny_cap():
