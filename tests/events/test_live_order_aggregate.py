@@ -183,6 +183,77 @@ def test_live_order_submit_unknown_stays_pending_until_reconcile():
     assert projection.pending_reconcile is False
 
 
+def test_live_order_cap_transition_pending_reconcile_sets_projection_pending():
+    ledger = LiveOrderAggregateLedger(_conn())
+    ledger.append_event(
+        aggregate_id="event-1:intent-1",
+        event_type="DecisionProofAccepted",
+        payload={"event_id": "event-1", "final_intent_id": "intent-1"},
+        occurred_at=NOW,
+        source_authority="decision_kernel",
+    )
+    ledger.append_event(
+        aggregate_id="event-1:intent-1",
+        event_type="SubmitPlanBuilt",
+        payload={"event_id": "event-1", "final_intent_id": "intent-1"},
+        occurred_at=NOW,
+        source_authority="engine_adapter",
+    )
+    pre_submit = ledger.append_event(
+        aggregate_id="event-1:intent-1",
+        event_type="PreSubmitRevalidated",
+        payload=_pre_submit_payload(),
+        occurred_at=NOW,
+        source_authority="engine_adapter",
+    )
+    live_cap = ledger.append_event(
+        aggregate_id="event-1:intent-1",
+        event_type="LiveCapReserved",
+        payload={"event_id": "event-1", "final_intent_id": "intent-1", "usage_id": "usage-1"},
+        occurred_at=NOW,
+        source_authority="live_cap_ledger",
+    )
+    ledger.append_event(
+        aggregate_id="event-1:intent-1",
+        event_type="ExecutionCommandCreated",
+        payload={
+            "event_id": "event-1",
+            "final_intent_id": "intent-1",
+            "execution_command_id": "cmd-1",
+            "pre_submit_event_hash": pre_submit.event_hash,
+            "live_cap_reserved_event_hash": live_cap.event_hash,
+        },
+        occurred_at=NOW,
+        source_authority="engine_adapter",
+    )
+    ledger.append_event(
+        aggregate_id="event-1:intent-1",
+        event_type="SubmitUnknown",
+        payload={"event_id": "event-1", "final_intent_id": "intent-1"},
+        occurred_at=NOW,
+        source_authority="existing_executor",
+    )
+    ledger.append_event(
+        aggregate_id="event-1:intent-1",
+        event_type="CapTransitioned",
+        payload={
+            "event_id": "event-1",
+            "final_intent_id": "intent-1",
+            "execution_command_id": "cmd-1",
+            "to_status": "PENDING_RECONCILE",
+            "projection_status": "RESERVED",
+            "transition_reason": "SUBMIT_TIMEOUT",
+            "execution_receipt_hash": "receipt-hash",
+        },
+        occurred_at=NOW,
+        source_authority="live_cap_ledger",
+    )
+
+    projection = ledger.get_projection("event-1:intent-1")
+    assert projection.pending_reconcile is True
+    assert projection.current_state == "PENDING_RECONCILE"
+
+
 def test_execution_command_requires_pre_submit_revalidation():
     ledger = LiveOrderAggregateLedger(_conn())
     ledger.append_event(

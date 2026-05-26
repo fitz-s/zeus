@@ -679,7 +679,10 @@ def _no_submit_payload() -> dict:
 
 
 def _role(certificate_type: str) -> str:
-    return certificate_type.removesuffix("Certificate").replace("Evidence", "").lower()
+    import re
+
+    base = certificate_type.removesuffix("Certificate").replace("Evidence", "")
+    return re.sub(r"(?<!^)(?=[A-Z])", "_", base).lower()
 
 
 def _required_forecast_validations() -> tuple[str, ...]:

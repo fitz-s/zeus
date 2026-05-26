@@ -503,14 +503,91 @@ def builder_chain(final_payload: dict | None = None):
         "actionable:event-1",
         {**_actionable_payload(), "live_cap_reserved_notional_usd": 5.0, "neg_risk": False},
     )
-    final_intent = build_final_intent_certificate_from_actionable(actionable_cert=actionable, decision_time=NOW)
-    if final_payload:
-        final_intent = _cert(claims.FINAL_INTENT, "final-intent:intent-1", {**final_intent.payload, **final_payload}, parents=(actionable,))
+    forecast = _cert(
+        claims.FORECAST_AUTHORITY,
+        "forecast:event-1",
+        {
+            "source_id": "forecast_live",
+            "model_family": "edli_v1",
+            "forecast_issue_time": NOW.isoformat(),
+            "forecast_valid_time": NOW.isoformat(),
+            "forecast_fetch_time": NOW.isoformat(),
+            "forecast_available_at": NOW.isoformat(),
+            "raw_payload_hash": "c" * 64,
+            "degradation_level": "OK",
+            "forecast_source_role": "entry_primary",
+            "authority_tier": "FORECAST",
+            "decision_time": NOW.isoformat(),
+            "decision_time_status": "OK",
+            "observation_time": NOW.isoformat(),
+            "observation_available_at": NOW.isoformat(),
+            "polymarket_end_anchor_source": "gamma_explicit",
+            "first_member_observed_time": NOW.isoformat(),
+            "run_complete_time": NOW.isoformat(),
+            "zeus_submit_intent_time": NOW.isoformat(),
+            "venue_ack_time": NOW.isoformat(),
+        },
+    )
+    quote = _cert(
+        claims.QUOTE_FEASIBILITY,
+        "quote:event-1",
+        {
+            "side": "BUY",
+            "outcome": "YES",
+            "execution_price_type": "ExecutionPrice",
+            "native_execution_price": 0.4,
+            "best_bid": 0.39,
+            "best_ask": 0.41,
+            "visible_depth": 100.0,
+            "tick_size": 0.01,
+            "min_order_size": 1.0,
+            "neg_risk": False,
+            "fill_claim": False,
+        },
+    )
+    cost = _cert(
+        claims.COST_MODEL,
+        "cost:event-1",
+        {
+            "cost_basis_hash": "b" * 64,
+            "cost_basis_id": "cost_basis:" + ("b" * 16),
+            "condition_id": "condition-1",
+            "token_id": "yes-1",
+            "cost_source": "native_orderbook_ask",
+            "quote_source_kind": "executable_market_snapshot_native_book",
+            "forbidden_cost_source": False,
+            "execution_price_type": "ExecutionPrice",
+        },
+    )
     executable = _cert(
         claims.EXECUTABLE_SNAPSHOT,
         "executable:exec-1",
-        {"condition_id": "condition-1", "token_id": "yes-1", "neg_risk": False},
+        {
+            "executable_snapshot_hash": "a" * 64,
+            "condition_id": "condition-1",
+            "token_id": "yes-1",
+            "neg_risk": False,
+        },
     )
+    final_intent = build_final_intent_certificate_from_actionable(
+        actionable_cert=actionable,
+        executable_snapshot_cert=executable,
+        quote_feasibility_cert=quote,
+        cost_model_cert=cost,
+        forecast_authority_cert=forecast,
+        decision_source_context=forecast.payload,
+        passive_maker_context={
+            "spread_usd": 0.02,
+            "quote_age_ms": 0,
+            "expected_fill_probability": "0.1",
+            "queue_depth_ahead": None,
+            "adverse_selection_score": None,
+            "orderbook_hash_age_ms": 0,
+        },
+        decision_time=NOW,
+    )
+    if final_payload:
+        final_intent = _cert(claims.FINAL_INTENT, "final-intent:intent-1", {**final_intent.payload, **final_payload}, parents=(actionable, executable, quote, cost, forecast))
     live_cap = _cert(claims.LIVE_CAP, "live-cap:cap-1", _live_cap_payload())
     expressibility = build_executor_expressibility_certificate(
         final_intent_cert=final_intent,
@@ -772,7 +849,10 @@ def _cert(certificate_type: str, semantic_key: str, payload: dict, *, mode: str 
 
 
 def _role(certificate_type: str) -> str:
-    return certificate_type.removesuffix("Certificate").replace("Evidence", "").lower()
+    import re
+
+    base = certificate_type.removesuffix("Certificate").replace("Evidence", "")
+    return re.sub(r"(?<!^)(?=[A-Z])", "_", base).lower()
 
 
 def _conn() -> sqlite3.Connection:

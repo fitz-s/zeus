@@ -205,11 +205,17 @@ class LiveOrderAggregateLedger:
             if payload.get("venue_order_id") is not None:
                 venue_order_id = str(payload["venue_order_id"])
             event_type = str(row["event_type"])
-            current_state = EVENT_STATE[event_type]
             if event_type == "SubmitUnknown":
+                current_state = EVENT_STATE[event_type]
+                pending_reconcile = True
+            elif event_type == "CapTransitioned" and str(payload.get("to_status") or "") == "PENDING_RECONCILE":
+                current_state = "PENDING_RECONCILE"
                 pending_reconcile = True
             elif event_type == "Reconciled":
+                current_state = EVENT_STATE[event_type]
                 pending_reconcile = bool(payload.get("pending_reconcile", False))
+            else:
+                current_state = EVENT_STATE[event_type]
         last = rows[-1]
         self.conn.execute(
             """

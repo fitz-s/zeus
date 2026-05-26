@@ -50,6 +50,8 @@ from src.events.money_path_adapters import evaluate_fdr_full_family, evaluate_ke
 from src.events.opportunity_event import OpportunityEvent
 from src.events.reactor import EventSubmissionReceipt, OpportunityEventReactor, ReactorConfig
 from src.riskguard.risk_level import RiskLevel
+from src.signal.ensemble_signal import p_raw_vector_from_maxes
+from src.strategy.market_fusion import MODEL_ONLY_POSTERIOR_MODE
 from src.types.market import Bin
 
 
@@ -916,6 +918,7 @@ def _build_live_execution_command_certificates(
         decision_time=decision_time,
         max_notional_usd=tiny_live_max_notional_usd,
         live_cap_conn=live_cap_conn,
+        persist=False,
     )
     try:
         actionable = build_actionable_trade_certificate(
@@ -923,21 +926,27 @@ def _build_live_execution_command_certificates(
             parent_certificates=base_certs + (live_cap,),
             decision_time=decision_time,
         )
+        forecast_authority = _required_cert(base_certs, claims.FORECAST_AUTHORITY)
+        quote_feasibility = _required_cert(base_certs, claims.QUOTE_FEASIBILITY)
+        cost_model = _required_cert(base_certs, claims.COST_MODEL)
         final_intent = build_final_intent_certificate_from_actionable(
             actionable_cert=actionable,
             executable_snapshot_cert=executable_snapshot,
+            quote_feasibility_cert=quote_feasibility,
+            cost_model_cert=cost_model,
+            forecast_authority_cert=forecast_authority,
+            decision_source_context=forecast_authority.payload,
+            passive_maker_context=_passive_maker_context_from_authorities(
+                actionable=actionable,
+                quote_feasibility_cert=quote_feasibility,
+                executable_snapshot_cert=executable_snapshot,
+                decision_time=decision_time,
+            ),
             decision_time=decision_time,
             tick_size=_float_or_default(executable_snapshot.payload.get("min_tick_size"), 0.01),
             min_order_size=_float_or_default(executable_snapshot.payload.get("min_order_size"), 1.0),
         )
         executor_native_intent_hash = validate_final_intent_cert_for_existing_executor(final_intent)
-        expressibility = build_executor_expressibility_certificate(
-            final_intent_cert=final_intent,
-            executable_snapshot_cert=executable_snapshot,
-            live_cap_cert=live_cap,
-            decision_time=decision_time,
-            executor_native_intent_hash=executor_native_intent_hash,
-        )
         aggregate_ledger = LiveOrderAggregateLedger(live_cap_conn)
         aggregate_id = _live_order_aggregate_id(event.event_id, str(final_intent.payload["final_intent_id"]))
         decision_event = aggregate_ledger.append_event(
@@ -1004,6 +1013,13 @@ def _build_live_execution_command_certificates(
             expected_parent_event_hash=pre_submit_event.event_hash,
         )
         execution_command_id = _execution_command_id_from_final_intent(actionable, final_intent)
+        expressibility = build_executor_expressibility_certificate(
+            final_intent_cert=final_intent,
+            executable_snapshot_cert=executable_snapshot,
+            live_cap_cert=live_cap,
+            decision_time=decision_time,
+            executor_native_intent_hash=executor_native_intent_hash,
+        )
         command_event = aggregate_ledger.append_event(
             aggregate_id=aggregate_id,
             event_type="ExecutionCommandCreated",
@@ -1034,8 +1050,21 @@ def _build_live_execution_command_certificates(
             pre_submit_revalidation_cert=pre_submit,
             decision_time=decision_time,
         )
+        from src.events.live_cap import LiveCapLedger
+
+        reserve_result = LiveCapLedger(live_cap_conn).reserve(
+            event_id=event.event_id,
+            decision_time=decision_time,
+            cap_scope="tiny_live_canary",
+            requested_notional_usd=float(live_cap.payload["reserved_notional_usd"]),
+            max_notional_usd=float(tiny_live_max_notional_usd),
+            max_orders_per_day=1,
+            final_intent_id=str(final_intent.payload["final_intent_id"]),
+            execution_command_id=execution_command_id,
+        )
+        if reserve_result.usage_id != str(live_cap.payload["usage_id"]):
+            raise ValueError("live cap reservation drift for provisional certificate")
     except Exception:
-        _release_live_cap_certificate(live_cap, live_cap_conn, reason="PRE_COMMAND_FAILURE")
         raise
     return base_certs + (live_cap, actionable, final_intent, expressibility, pre_submit, command)
 
@@ -1214,23 +1243,40 @@ def _build_live_cap_certificate_from_ledger(
     decision_time: datetime,
     max_notional_usd: float,
     live_cap_conn: sqlite3.Connection | None,
+    persist: bool = True,
 ) -> DecisionCertificate:
     if live_cap_conn is None:
         raise ValueError("LIVE_CAP_LEDGER_CONNECTION_REQUIRED")
     from src.events.live_cap import LiveCapLedger
-
     price = _float_or_default(receipt.c_fee_adjusted, 0.01)
     min_order_notional = min(max_notional_usd, max(price, 0.01))
     requested_notional = max(min(float(receipt.kelly_size_usd or 0.0), max_notional_usd), min_order_notional)
-    reservation = LiveCapLedger(live_cap_conn).reserve(
-        event_id=event.event_id,
-        decision_time=decision_time,
-        cap_scope="tiny_live_canary",
-        requested_notional_usd=float(requested_notional),
-        max_notional_usd=float(max_notional_usd),
-        max_orders_per_day=1,
-        final_intent_id=receipt.final_intent_id,
-    )
+    usage_id = LiveCapLedger._usage_id(event.event_id, "tiny_live_canary")
+    if persist:
+        reservation = LiveCapLedger(live_cap_conn).reserve(
+            event_id=event.event_id,
+            decision_time=decision_time,
+            cap_scope="tiny_live_canary",
+            requested_notional_usd=float(requested_notional),
+            max_notional_usd=float(max_notional_usd),
+            max_orders_per_day=1,
+            final_intent_id=receipt.final_intent_id,
+        )
+    else:
+        from src.events.live_cap import LiveCapReservation
+
+        reservation = LiveCapReservation(
+            usage_id=usage_id,
+            event_id=event.event_id,
+            decision_time=decision_time,
+            cap_scope="tiny_live_canary",
+            max_notional_usd=float(max_notional_usd),
+            max_orders_per_day=1,
+            reserved_notional_usd=float(requested_notional),
+            order_count=1,
+            reservation_status="RESERVED",
+            final_intent_id=receipt.final_intent_id,
+        )
     payload = reservation.certificate_payload()
     return build_certificate(
         certificate_type=claims.LIVE_CAP,
@@ -1335,6 +1381,13 @@ def _transition_live_cap_after_submit(
             ),
         )
     elif submit_result.status in {"TIMEOUT_UNKNOWN", "POST_SUBMIT_UNKNOWN"}:
+        _append_submit_unknown_aggregate_event(
+            live_cap_conn,
+            command,
+            receipt_cert,
+            submit_result=submit_result,
+            decision_time=decision_time,
+        )
         return build_live_cap_transition_certificate(
             live_cap_cert=live_cap,
             execution_receipt_cert=receipt_cert,
@@ -1386,6 +1439,69 @@ def _append_cap_transition_aggregate_event(
         source_authority="live_cap_ledger",
     )
     return event.event_hash
+
+
+def _append_submit_unknown_aggregate_event(
+    conn: sqlite3.Connection | None,
+    command: DecisionCertificate,
+    receipt_cert: DecisionCertificate,
+    *,
+    submit_result: EventBoundExecutorSubmitResult,
+    decision_time: datetime,
+) -> str | None:
+    if conn is None:
+        return None
+    aggregate_id = str(command.payload.get("aggregate_id") or "")
+    if not aggregate_id:
+        return None
+    event = LiveOrderAggregateLedger(conn).append_event(
+        aggregate_id=aggregate_id,
+        event_type="SubmitUnknown",
+        payload={
+            "event_id": command.payload["event_id"],
+            "final_intent_id": command.payload["final_intent_id"],
+            "execution_command_id": command.payload["execution_command_id"],
+            "execution_receipt_hash": receipt_cert.certificate_hash,
+            "submit_status": submit_result.status,
+            "reason_code": submit_result.reason_code,
+            "venue_call_started": submit_result.venue_call_started,
+            "side_effect_known": submit_result.side_effect_known,
+            "reconciliation_followup_required": submit_result.reconciliation_followup_required,
+        },
+        occurred_at=decision_time,
+        source_authority="existing_executor",
+    )
+    return event.event_hash
+
+
+def _passive_maker_context_from_authorities(
+    *,
+    actionable: DecisionCertificate,
+    quote_feasibility_cert: DecisionCertificate,
+    executable_snapshot_cert: DecisionCertificate,
+    decision_time: datetime,
+) -> dict[str, object]:
+    quote_payload = quote_feasibility_cert.payload
+    best_bid = quote_payload.get("best_bid")
+    best_ask = quote_payload.get("best_ask")
+    if best_bid in (None, "") or best_ask in (None, ""):
+        raise ValueError("QUOTE_FEASIBILITY_BID_ASK_REQUIRED")
+    quote_available_at = quote_feasibility_cert.header.source_available_at
+    snapshot_available_at = executable_snapshot_cert.header.source_available_at
+    if quote_available_at is None:
+        raise ValueError("QUOTE_FEASIBILITY_SOURCE_AVAILABLE_AT_REQUIRED")
+    if snapshot_available_at is None:
+        raise ValueError("EXECUTABLE_SNAPSHOT_SOURCE_AVAILABLE_AT_REQUIRED")
+    spread_usd = max(0.0, float(best_ask) - float(best_bid))
+    p_fill_lcb = float(actionable.payload.get("p_fill_lcb") or 0.0)
+    return {
+        "spread_usd": spread_usd,
+        "quote_age_ms": int(max(0.0, (decision_time - quote_available_at).total_seconds() * 1000.0)),
+        "expected_fill_probability": str(max(min(p_fill_lcb, 1.0), 0.0001)),
+        "queue_depth_ahead": None,
+        "adverse_selection_score": None,
+        "orderbook_hash_age_ms": int(max(0.0, (decision_time - snapshot_available_at).total_seconds() * 1000.0)),
+    }
 
 
 def _release_live_cap_certificate(
@@ -2190,6 +2306,8 @@ def _canonical_probability_and_fdr_proof(
         payload=_payload(event),
         decision_time=decision_time,
     )
+    from src.strategy.market_analysis_family_scan import scan_full_hypothesis_family
+
     hypotheses = scan_full_hypothesis_family(analysis, n_bootstrap=edge_n_bootstrap())
     hypothesis_by_label_direction = {
         (hypothesis.range_label, hypothesis.direction): hypothesis
@@ -2308,6 +2426,8 @@ def _canonical_hypothesis_rows(
     payload: dict[str, object],
     decision_time: datetime | None,
 ) -> MarketAnalysis:
+    from src.strategy.market_analysis import MarketAnalysis
+
     bins = list(family.bins)
     members = _snapshot_members(snapshot)
     p_raw = _snapshot_p_raw(snapshot, family=family, bins=bins, members=members, payload=payload)

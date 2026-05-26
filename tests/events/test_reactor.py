@@ -260,16 +260,54 @@ def test_processed_event_terminal_surface_includes_execution_receipt_certificate
             claims.LIVE_CAP: {"event_id": event.event_id},
         },
     )
-    final_intent = build_final_intent_certificate_from_actionable(
-        actionable_cert=action,
-        decision_time=decision_time,
-    )
-    executable = _cert(
+    parents_by_type = {cert.certificate_type: cert for cert in action_parents}
+    action_executable_snapshot = parents_by_type[claims.EXECUTABLE_SNAPSHOT]
+    quote_feasibility = parents_by_type[claims.QUOTE_FEASIBILITY]
+    action_cost_model = parents_by_type[claims.COST_MODEL]
+    forecast_authority = parents_by_type[claims.FORECAST_AUTHORITY]
+    live_cap = parents_by_type[claims.LIVE_CAP]
+    executable_snapshot = _cert(
         claims.EXECUTABLE_SNAPSHOT,
         "executable:exec-1",
-        {"condition_id": "condition-1", "token_id": "yes-1", "neg_risk": False},
+        {
+            "executable_snapshot_hash": "a" * 64,
+            "condition_id": "condition-1",
+            "token_id": "yes-1",
+            "neg_risk": False,
+        },
     )
-    live_cap = _cert(claims.LIVE_CAP, "live-cap:cap-1", {**_live_cap_payload(), "event_id": event.event_id})
+    cost_model = _cert(
+        claims.COST_MODEL,
+        "cost:1",
+        {
+            "cost_basis_hash": "b" * 64,
+            "cost_basis_id": "cost_basis:" + ("b" * 16),
+            "condition_id": "condition-1",
+            "token_id": "yes-1",
+            "cost_source": "native_orderbook_ask",
+            "quote_source_kind": "executable_market_snapshot_native_book",
+            "forbidden_cost_source": False,
+            "execution_price_type": "ExecutionPrice",
+        },
+    )
+    final_intent = build_final_intent_certificate_from_actionable(
+        actionable_cert=action,
+        executable_snapshot_cert=executable_snapshot,
+        quote_feasibility_cert=quote_feasibility,
+        cost_model_cert=cost_model,
+        forecast_authority_cert=forecast_authority,
+        decision_source_context=forecast_authority.payload,
+        passive_maker_context={
+            "spread_usd": 0.02,
+            "quote_age_ms": 0,
+            "expected_fill_probability": "0.1",
+            "queue_depth_ahead": None,
+            "adverse_selection_score": None,
+            "orderbook_hash_age_ms": 0,
+        },
+        decision_time=decision_time,
+    )
+    executable = executable_snapshot
     expressibility = build_executor_expressibility_certificate(
         final_intent_cert=final_intent,
         executable_snapshot_cert=executable,
@@ -287,7 +325,7 @@ def test_processed_event_terminal_surface_includes_execution_receipt_certificate
         decision_time=decision_time,
     )
     receipt_cert = build_execution_receipt_certificate(execution_command_cert=command, decision_time=decision_time)
-    cert_bundle = action_parents + (action, final_intent, executable, live_cap, expressibility, pre_submit, command, receipt_cert)
+    cert_bundle = action_parents + (action, final_intent, executable, cost_model, expressibility, pre_submit, command, receipt_cert)
 
     def _submit(_event, _decision_time):
         return EventSubmissionReceipt(
@@ -359,16 +397,54 @@ def test_live_submitted_execution_receipt_certificate_is_terminal_when_submit_en
             claims.LIVE_CAP: {"event_id": event.event_id},
         },
     )
-    final_intent = build_final_intent_certificate_from_actionable(
-        actionable_cert=action,
-        decision_time=decision_time,
-    )
-    executable = _cert(
+    parents_by_type = {cert.certificate_type: cert for cert in action_parents}
+    action_executable_snapshot = parents_by_type[claims.EXECUTABLE_SNAPSHOT]
+    quote_feasibility = parents_by_type[claims.QUOTE_FEASIBILITY]
+    action_cost_model = parents_by_type[claims.COST_MODEL]
+    forecast_authority = parents_by_type[claims.FORECAST_AUTHORITY]
+    live_cap = parents_by_type[claims.LIVE_CAP]
+    executable_snapshot = _cert(
         claims.EXECUTABLE_SNAPSHOT,
         "executable:exec-1",
-        {"condition_id": "condition-1", "token_id": "yes-1", "neg_risk": False},
+        {
+            "executable_snapshot_hash": "a" * 64,
+            "condition_id": "condition-1",
+            "token_id": "yes-1",
+            "neg_risk": False,
+        },
     )
-    live_cap = _cert(claims.LIVE_CAP, "live-cap:cap-1", {**_live_cap_payload(), "event_id": event.event_id})
+    cost_model = _cert(
+        claims.COST_MODEL,
+        "cost:1",
+        {
+            "cost_basis_hash": "b" * 64,
+            "cost_basis_id": "cost_basis:" + ("b" * 16),
+            "condition_id": "condition-1",
+            "token_id": "yes-1",
+            "cost_source": "native_orderbook_ask",
+            "quote_source_kind": "executable_market_snapshot_native_book",
+            "forbidden_cost_source": False,
+            "execution_price_type": "ExecutionPrice",
+        },
+    )
+    final_intent = build_final_intent_certificate_from_actionable(
+        actionable_cert=action,
+        executable_snapshot_cert=executable_snapshot,
+        quote_feasibility_cert=quote_feasibility,
+        cost_model_cert=cost_model,
+        forecast_authority_cert=forecast_authority,
+        decision_source_context=forecast_authority.payload,
+        passive_maker_context={
+            "spread_usd": 0.02,
+            "quote_age_ms": 0,
+            "expected_fill_probability": "0.1",
+            "queue_depth_ahead": None,
+            "adverse_selection_score": None,
+            "orderbook_hash_age_ms": 0,
+        },
+        decision_time=decision_time,
+    )
+    executable = executable_snapshot
     expressibility = build_executor_expressibility_certificate(
         final_intent_cert=final_intent,
         executable_snapshot_cert=executable,
@@ -395,7 +471,7 @@ def test_live_submitted_execution_receipt_certificate_is_terminal_when_submit_en
         venue_order_id="venue-1",
         raw_response={"status": "submitted"},
     )
-    cert_bundle = action_parents + (action, final_intent, executable, live_cap, expressibility, pre_submit, command, receipt_cert)
+    cert_bundle = action_parents + (action, final_intent, executable, cost_model, expressibility, pre_submit, command, receipt_cert)
 
     def _submit(_event, _decision_time):
         return EventSubmissionReceipt(

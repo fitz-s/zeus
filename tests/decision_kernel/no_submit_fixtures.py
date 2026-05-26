@@ -36,6 +36,10 @@ def build_test_no_submit_proof_bundle(
     snapshot_id = str(getattr(receipt, "executable_snapshot_id", None) or "snapshot-exec-1")
     cost_basis_id = str(getattr(receipt, "kelly_cost_basis_id", None) or "cost-1")
     direction = str(getattr(receipt, "direction", None) or "buy_yes")
+    executable_snapshot_hash = stable_hash((snapshot_id, condition_id, token_id, direction))
+    best_bid = 0.39
+    best_ask = 0.41
+    cost_basis_hash = stable_hash((cost_basis_id, condition_id, token_id, direction))
     hypothesis_id = f"{family_id}:{token_id}"
     final_intent_id = str(getattr(receipt, "final_intent_id", None) or f"edli_intent:{event.event_id}:{token_id}")
     bin_labels_hash = stable_hash(("70-71F",))
@@ -222,6 +226,7 @@ def build_test_no_submit_proof_bundle(
                 "selected_snapshot_id": snapshot_id,
                 "condition_id": condition_id,
                 "token_id": token_id,
+                "executable_snapshot_hash": executable_snapshot_hash,
             },
             quote_clock,
             "test.executable_snapshot",
@@ -241,6 +246,9 @@ def build_test_no_submit_proof_bundle(
                 "quote_source_kind": "executable_market_snapshot_native_book",
                 "forbidden_cost_source": False,
                 "execution_price_type": "ExecutionPrice",
+                "best_bid": best_bid,
+                "best_ask": best_ask,
+                "book_hash": stable_hash((snapshot_id, condition_id, token_id, best_bid, best_ask)),
             },
             quote_clock,
             "test.quote_feasibility",
@@ -258,6 +266,7 @@ def build_test_no_submit_proof_bundle(
                 "quote_source_kind": "executable_market_snapshot_native_book",
                 "forbidden_cost_source": False,
                 "execution_price_type": "ExecutionPrice",
+                "cost_basis_hash": cost_basis_hash,
             },
             quote_clock,
             "test.cost_model",

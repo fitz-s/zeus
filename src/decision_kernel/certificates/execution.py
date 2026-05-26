@@ -22,8 +22,13 @@ from src.events.live_order_aggregate import LiveOrderAggregateEvent
 def build_final_intent_certificate_from_actionable(
     *,
     actionable_cert: DecisionCertificate,
+    executable_snapshot_cert: DecisionCertificate,
+    quote_feasibility_cert: DecisionCertificate,
+    cost_model_cert: DecisionCertificate,
+    forecast_authority_cert: DecisionCertificate,
+    decision_source_context,
+    passive_maker_context,
     decision_time: datetime,
-    executable_snapshot_cert: DecisionCertificate | None = None,
     order_type: str = "POST_ONLY_LIMIT",
     time_in_force: str = "GTC",
     tick_size: float = 0.01,
@@ -35,33 +40,10 @@ def build_final_intent_certificate_from_actionable(
     reserved_notional = float(action.get("live_cap_reserved_notional_usd") or action.get("kelly_size_usd") or 0.0)
     size = max(float(min_order_size), reserved_notional / limit_price)
     notional = size * limit_price
-    snapshot_payload = executable_snapshot_cert.payload if executable_snapshot_cert is not None else {}
-    executable_snapshot_hash = str(
-        snapshot_payload.get("executable_snapshot_hash")
-        or snapshot_payload.get("snapshot_hash")
-        or stable_hash(
-            {
-                "certificate_hash": executable_snapshot_cert.certificate_hash if executable_snapshot_cert is not None else None,
-                "executable_snapshot_id": action["executable_snapshot_id"],
-                "condition_id": action["condition_id"],
-                "token_id": action["token_id"],
-            }
-        )
-    )
-    cost_basis_hash = stable_hash(
-        {
-            "event_id": action["event_id"],
-            "executable_snapshot_hash": executable_snapshot_hash,
-            "token_id": action["token_id"],
-            "direction": action["direction"],
-            "limit_price": limit_price,
-            "size": size,
-            "order_policy": "post_only_passive_limit",
-            "time_in_force": time_in_force,
-        }
-    )
-    decision_source_context = _decision_source_context(action, decision_time)
-    passive_maker_context = _passive_maker_context(action)
+    executable_snapshot_hash = _required_text(executable_snapshot_cert.payload, "executable_snapshot_hash")
+    cost_basis_hash = _required_text(cost_model_cert.payload, "cost_basis_hash")
+    decision_source_context_payload = _context_payload(decision_source_context, "decision_source_context")
+    passive_maker_context_payload = _context_payload(passive_maker_context, "passive_maker_context")
     payload = {
         "event_id": action["event_id"],
         "actionable_certificate_hash": actionable_cert.certificate_hash,
@@ -86,8 +68,8 @@ def build_final_intent_certificate_from_actionable(
         "executable_snapshot_hash": executable_snapshot_hash,
         "cost_basis_hash": cost_basis_hash,
         "cost_basis_id": f"cost_basis:{cost_basis_hash[:16]}",
-        "decision_source_context": decision_source_context,
-        "passive_maker_context": passive_maker_context,
+        "decision_source_context": decision_source_context_payload,
+        "passive_maker_context": passive_maker_context_payload,
         "neg_risk": bool(action.get("neg_risk", False)),
         "tick_size": float(tick_size),
         "min_order_size": float(min_order_size),
@@ -102,7 +84,7 @@ def build_final_intent_certificate_from_actionable(
         f"final_intent:{payload['event_id']}:{payload['final_intent_id']}",
         payload,
         decision_time,
-        (actionable_cert,),
+        (actionable_cert, executable_snapshot_cert, quote_feasibility_cert, cost_model_cert, forecast_authority_cert),
     )
 
 
@@ -372,52 +354,36 @@ def _side_for_direction(direction: str) -> str:
     raise ValueError(f"unsupported EDLI direction: {direction!r}")
 
 
-def _decision_source_context(action: Mapping[str, object], decision_time: datetime) -> dict[str, object]:
-    available_at = str(action.get("source_available_at") or decision_time.isoformat())
-    snapshot_hash = stable_hash(
-        {
-            "event_id": action["event_id"],
-            "causal_snapshot_id": action["causal_snapshot_id"],
-            "executable_snapshot_id": action["executable_snapshot_id"],
-        }
-    )
-    return {
-        "source_id": str(action.get("source_id") or "edli_event_bound"),
-        "model_family": str(action.get("model_family") or "edli_v1"),
-        "forecast_issue_time": str(action.get("forecast_issue_time") or available_at),
-        "forecast_valid_time": str(action.get("forecast_valid_time") or available_at),
-        "forecast_fetch_time": str(action.get("forecast_fetch_time") or available_at),
-        "forecast_available_at": available_at,
-        "raw_payload_hash": snapshot_hash,
-        "degradation_level": "OK",
-        "forecast_source_role": "entry_primary",
-        "authority_tier": "FORECAST",
-        "decision_time": decision_time.isoformat(),
-        "decision_time_status": "OK",
-        "observation_time": available_at,
-        "observation_available_at": available_at,
-        "polymarket_end_anchor_source": "gamma_explicit",
-        "first_member_observed_time": available_at,
-        "run_complete_time": available_at,
-        "zeus_submit_intent_time": decision_time.isoformat(),
-        "venue_ack_time": decision_time.isoformat(),
-    }
-
-
-def _passive_maker_context(action: Mapping[str, object]) -> dict[str, object]:
-    p_fill_lcb = float(action.get("p_fill_lcb") or 0.01)
-    return {
-        "spread_usd": "0.01",
-        "quote_age_ms": 0,
-        "expected_fill_probability": str(max(min(p_fill_lcb, 1.0), 0.0001)),
-        "queue_depth_ahead": None,
-        "adverse_selection_score": None,
-        "orderbook_hash_age_ms": 0,
-    }
-
-
 def _role(certificate_type: str) -> str:
-    return certificate_type.removesuffix("Certificate").replace("Evidence", "").lower()
+    import re
+
+    base = certificate_type.removesuffix("Certificate").replace("Evidence", "")
+    return re.sub(r"(?<!^)(?=[A-Z])", "_", base).lower()
+
+
+def _context_payload(context, field_name: str) -> dict[str, object]:
+    if context is None:
+        raise ValueError(f"{field_name} required")
+    if isinstance(context, Mapping):
+        payload = dict(context)
+    elif hasattr(context, "__dict__"):
+        payload = {
+            key: value
+            for key, value in vars(context).items()
+            if not key.startswith("_")
+        }
+    else:
+        raise ValueError(f"{field_name} required")
+    if not payload:
+        raise ValueError(f"{field_name} required")
+    return payload
+
+
+def _required_text(payload: Mapping[str, object], field: str) -> str:
+    value = str(payload.get(field) or "").strip()
+    if not value:
+        raise ValueError(f"{field} missing")
+    return value
 
 
 __all__ = [

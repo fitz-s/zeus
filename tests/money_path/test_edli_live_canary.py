@@ -444,43 +444,52 @@ def test_live_adapter_submit_enabled_canary_enabled_calls_executor_mock(monkeypa
     from src.engine.event_bound_final_intent import EventBoundExecutorSubmitResult
     from src.events.reactor import EventSubmissionReceipt
     from src.riskguard.risk_level import RiskLevel
+    from tests.decision_kernel.no_submit_fixtures import build_test_no_submit_proof_bundle
 
     event = _forecast_event()
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     called = {"count": 0}
-    monkeypatch.setattr(adapter, "build_event_bound_no_submit_receipt", lambda *_args, **_kwargs: _accepted_receipt(event))
-    monkeypatch.setattr(adapter, "_build_live_execution_command_certificates", _command_bundle_with_real_cap)
+    accepted = replace(
+        _accepted_receipt(event),
+        decision_proof_bundle=build_test_no_submit_proof_bundle(event, _accepted_receipt(event), decision_time=datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc)),
+    )
+    original_build = adapter.build_event_bound_no_submit_receipt
+    adapter.build_event_bound_no_submit_receipt = lambda *_args, **_kwargs: accepted
 
-    def _submit(_final_intent, _command):
-        called["count"] += 1
-        return EventBoundExecutorSubmitResult(
-            status="SUBMITTED",
-            reason_code="OK",
-            venue_order_id="venue-1",
-            submit_started_at="2026-05-24T18:10:00+00:00",
-            submit_finished_at="2026-05-24T18:10:01+00:00",
-            raw_response={"status": "submitted"},
+    try:
+        def _submit(_final_intent, _command):
+            called["count"] += 1
+            return EventBoundExecutorSubmitResult(
+                status="SUBMITTED",
+                reason_code="OK",
+                venue_order_id="venue-1",
+                submit_started_at="2026-05-24T18:10:00+00:00",
+                submit_finished_at="2026-05-24T18:10:01+00:00",
+                raw_response={"status": "submitted"},
+            )
+
+        submit = adapter.event_bound_live_adapter_from_trade_conn(
+            conn,
+            live_cap_conn=conn,
+            get_current_level=lambda: RiskLevel.GREEN,
+            real_order_submit_enabled=True,
+            live_canary_enabled=True,
+            executor_submit=_submit,
+            pre_submit_authority_provider=_pre_submit_authority_provider,
         )
 
-    submit = adapter.event_bound_live_adapter_from_trade_conn(
-        conn,
-        live_cap_conn=conn,
-        get_current_level=lambda: RiskLevel.GREEN,
-        real_order_submit_enabled=True,
-        live_canary_enabled=True,
-        executor_submit=_submit,
-    )
+        receipt = submit(event, datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc))
 
-    receipt = submit(event, datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc))
-
-    assert called["count"] == 1
-    assert receipt.submitted is True
-    assert receipt.side_effect_status == "SUBMITTED"
-    assert _receipt_status(receipt) == "SUBMITTED"
-    assert conn.execute("SELECT reservation_status FROM edli_live_cap_usage").fetchone()["reservation_status"] == "CONSUMED"
-    assert _cap_transition_status(receipt) == "CONSUMED"
-    assert _cap_transition_projection_status(receipt) == "CONSUMED"
+        assert called["count"] == 1
+        assert receipt.submitted is True
+        assert receipt.side_effect_status == "SUBMITTED"
+        assert _receipt_status(receipt) == "SUBMITTED"
+        assert conn.execute("SELECT reservation_status FROM edli_live_cap_usage").fetchone()["reservation_status"] == "CONSUMED"
+        assert _cap_transition_status(receipt) == "CONSUMED"
+        assert _cap_transition_projection_status(receipt) == "CONSUMED"
+    finally:
+        adapter.build_event_bound_no_submit_receipt = original_build
 
 
 def test_live_adapter_records_rejected_fixture_response(monkeypatch):
@@ -488,36 +497,45 @@ def test_live_adapter_records_rejected_fixture_response(monkeypatch):
     from src.engine.event_bound_final_intent import EventBoundExecutorSubmitResult
     from src.events.reactor import EventSubmissionReceipt
     from src.riskguard.risk_level import RiskLevel
+    from tests.decision_kernel.no_submit_fixtures import build_test_no_submit_proof_bundle
 
     event = _forecast_event()
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
-    monkeypatch.setattr(adapter, "build_event_bound_no_submit_receipt", lambda *_args, **_kwargs: _accepted_receipt(event))
-    monkeypatch.setattr(adapter, "_build_live_execution_command_certificates", _command_bundle_with_real_cap)
-    submit = adapter.event_bound_live_adapter_from_trade_conn(
-        conn,
-        live_cap_conn=conn,
-        get_current_level=lambda: RiskLevel.GREEN,
-        real_order_submit_enabled=True,
-        live_canary_enabled=True,
-        executor_submit=lambda _final_intent, _command: EventBoundExecutorSubmitResult(
-            status="REJECTED",
-            reason_code="VENUE_REJECTED",
-            submit_started_at="2026-05-24T18:10:00+00:00",
-            submit_finished_at="2026-05-24T18:10:01+00:00",
-            raw_response={"status": "rejected"},
-        ),
+    accepted = replace(
+        _accepted_receipt(event),
+        decision_proof_bundle=build_test_no_submit_proof_bundle(event, _accepted_receipt(event), decision_time=datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc)),
     )
+    original_build = adapter.build_event_bound_no_submit_receipt
+    adapter.build_event_bound_no_submit_receipt = lambda *_args, **_kwargs: accepted
+    try:
+        submit = adapter.event_bound_live_adapter_from_trade_conn(
+            conn,
+            live_cap_conn=conn,
+            get_current_level=lambda: RiskLevel.GREEN,
+            real_order_submit_enabled=True,
+            live_canary_enabled=True,
+            executor_submit=lambda _final_intent, _command: EventBoundExecutorSubmitResult(
+                status="REJECTED",
+                reason_code="VENUE_REJECTED",
+                submit_started_at="2026-05-24T18:10:00+00:00",
+                submit_finished_at="2026-05-24T18:10:01+00:00",
+                raw_response={"status": "rejected"},
+            ),
+            pre_submit_authority_provider=_pre_submit_authority_provider,
+        )
 
-    receipt = submit(event, datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc))
+        receipt = submit(event, datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc))
 
-    assert receipt.submitted is False
-    assert receipt.side_effect_status == "REJECTED"
-    assert receipt.reason == "VENUE_REJECTED"
-    assert _receipt_status(receipt) == "REJECTED"
-    assert conn.execute("SELECT reservation_status FROM edli_live_cap_usage").fetchone()["reservation_status"] == "RELEASED"
-    assert _cap_transition_status(receipt) == "RELEASED"
-    assert _cap_transition_projection_status(receipt) == "RELEASED"
+        assert receipt.submitted is False
+        assert receipt.side_effect_status == "REJECTED"
+        assert receipt.reason == "VENUE_REJECTED"
+        assert _receipt_status(receipt) == "REJECTED"
+        assert conn.execute("SELECT reservation_status FROM edli_live_cap_usage").fetchone()["reservation_status"] == "RELEASED"
+        assert _cap_transition_status(receipt) == "RELEASED"
+        assert _cap_transition_projection_status(receipt) == "RELEASED"
+    finally:
+        adapter.build_event_bound_no_submit_receipt = original_build
 
 
 def test_live_adapter_records_timeout_unknown_fixture_response(monkeypatch):
@@ -525,92 +543,145 @@ def test_live_adapter_records_timeout_unknown_fixture_response(monkeypatch):
     from src.engine.event_bound_final_intent import EventBoundExecutorSubmitResult
     from src.events.reactor import EventSubmissionReceipt
     from src.riskguard.risk_level import RiskLevel
+    from tests.decision_kernel.no_submit_fixtures import build_test_no_submit_proof_bundle
 
     event = _forecast_event()
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
-    monkeypatch.setattr(adapter, "build_event_bound_no_submit_receipt", lambda *_args, **_kwargs: _accepted_receipt(event))
-    monkeypatch.setattr(adapter, "_build_live_execution_command_certificates", _command_bundle_with_real_cap)
-    submit = adapter.event_bound_live_adapter_from_trade_conn(
-        conn,
-        live_cap_conn=conn,
-        get_current_level=lambda: RiskLevel.GREEN,
-        real_order_submit_enabled=True,
-        live_canary_enabled=True,
-        executor_submit=lambda _final_intent, _command: EventBoundExecutorSubmitResult(
-            status="TIMEOUT_UNKNOWN",
-            reason_code="SUBMIT_TIMEOUT",
-            submit_started_at="2026-05-24T18:10:00+00:00",
-            submit_finished_at="2026-05-24T18:10:30+00:00",
-            raw_response={"status": "timeout"},
-            reconciliation_followup_required=True,
-        ),
+    accepted = replace(
+        _accepted_receipt(event),
+        decision_proof_bundle=build_test_no_submit_proof_bundle(event, _accepted_receipt(event), decision_time=datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc)),
     )
+    original_build = adapter.build_event_bound_no_submit_receipt
+    adapter.build_event_bound_no_submit_receipt = lambda *_args, **_kwargs: accepted
+    try:
+        submit = adapter.event_bound_live_adapter_from_trade_conn(
+            conn,
+            live_cap_conn=conn,
+            get_current_level=lambda: RiskLevel.GREEN,
+            real_order_submit_enabled=True,
+            live_canary_enabled=True,
+            executor_submit=lambda _final_intent, _command: EventBoundExecutorSubmitResult(
+                status="TIMEOUT_UNKNOWN",
+                reason_code="SUBMIT_TIMEOUT",
+                submit_started_at="2026-05-24T18:10:00+00:00",
+                submit_finished_at="2026-05-24T18:10:30+00:00",
+                raw_response={"status": "timeout"},
+                reconciliation_followup_required=True,
+            ),
+            pre_submit_authority_provider=_pre_submit_authority_provider,
+        )
 
-    receipt = submit(event, datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc))
+        receipt = submit(event, datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc))
 
-    assert receipt.submitted is False
-    assert receipt.side_effect_status == "TIMEOUT_UNKNOWN"
-    assert _receipt_status(receipt) == "TIMEOUT_UNKNOWN"
-    receipt_cert = _receipt_cert(receipt)
-    assert receipt_cert.payload["reconciliation_followup_required"] is True
-    assert conn.execute("SELECT reservation_status FROM edli_live_cap_usage").fetchone()["reservation_status"] == "RESERVED"
-    assert _cap_transition_status(receipt) == "PENDING_RECONCILE"
-    assert _cap_transition_projection_status(receipt) == "RESERVED"
+        assert receipt.submitted is False
+        assert receipt.side_effect_status == "TIMEOUT_UNKNOWN"
+        assert _receipt_status(receipt) == "TIMEOUT_UNKNOWN"
+        receipt_cert = _receipt_cert(receipt)
+        assert receipt_cert.payload["reconciliation_followup_required"] is True
+        assert conn.execute("SELECT reservation_status FROM edli_live_cap_usage").fetchone()["reservation_status"] == "RESERVED"
+        event_types = [row["event_type"] for row in conn.execute("SELECT event_type FROM edli_live_order_events ORDER BY event_sequence")]
+        assert event_types == [
+            "DecisionProofAccepted",
+            "SubmitPlanBuilt",
+            "PreSubmitRevalidated",
+            "LiveCapReserved",
+            "ExecutionCommandCreated",
+            "SubmitUnknown",
+            "CapTransitioned",
+        ]
+        assert _cap_transition_status(receipt) == "PENDING_RECONCILE"
+        assert _cap_transition_projection_status(receipt) == "RESERVED"
+        projection = conn.execute("SELECT current_state, pending_reconcile FROM edli_live_order_projection").fetchone()
+        assert bool(projection["pending_reconcile"]) is True
+        assert projection["current_state"] in {"PENDING_RECONCILE", "CAP_TRANSITIONED"}
+    finally:
+        adapter.build_event_bound_no_submit_receipt = original_build
 
 
 def test_live_adapter_records_post_submit_unknown_as_pending_reconcile(monkeypatch):
     from src.engine import event_reactor_adapter as adapter
     from src.engine.event_bound_final_intent import EventBoundExecutorSubmitResult
     from src.riskguard.risk_level import RiskLevel
+    from tests.decision_kernel.no_submit_fixtures import build_test_no_submit_proof_bundle
 
     event = _forecast_event()
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
-    monkeypatch.setattr(adapter, "build_event_bound_no_submit_receipt", lambda *_args, **_kwargs: _accepted_receipt(event))
-    monkeypatch.setattr(adapter, "_build_live_execution_command_certificates", _command_bundle_with_real_cap)
-    submit = adapter.event_bound_live_adapter_from_trade_conn(
-        conn,
-        live_cap_conn=conn,
-        get_current_level=lambda: RiskLevel.GREEN,
-        real_order_submit_enabled=True,
-        live_canary_enabled=True,
-        executor_submit=lambda _final_intent, _command: EventBoundExecutorSubmitResult(
-            status="POST_SUBMIT_UNKNOWN",
-            reason_code="SDK_EXCEPTION_AFTER_SEND",
-            submit_started_at="2026-05-24T18:10:00+00:00",
-            submit_finished_at="2026-05-24T18:10:01+00:00",
-            raw_response={"status": "exception_after_send"},
-            reconciliation_followup_required=True,
-            venue_call_started=True,
-            venue_ack_received=False,
-            side_effect_known=False,
-        ),
+    accepted = replace(
+        _accepted_receipt(event),
+        decision_proof_bundle=build_test_no_submit_proof_bundle(event, _accepted_receipt(event), decision_time=datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc)),
     )
+    original_build = adapter.build_event_bound_no_submit_receipt
+    adapter.build_event_bound_no_submit_receipt = lambda *_args, **_kwargs: accepted
+    try:
+        submit = adapter.event_bound_live_adapter_from_trade_conn(
+            conn,
+            live_cap_conn=conn,
+            get_current_level=lambda: RiskLevel.GREEN,
+            real_order_submit_enabled=True,
+            live_canary_enabled=True,
+            executor_submit=lambda _final_intent, _command: EventBoundExecutorSubmitResult(
+                status="POST_SUBMIT_UNKNOWN",
+                reason_code="SDK_EXCEPTION_AFTER_SEND",
+                submit_started_at="2026-05-24T18:10:00+00:00",
+                submit_finished_at="2026-05-24T18:10:01+00:00",
+                raw_response={"status": "exception_after_send"},
+                reconciliation_followup_required=True,
+                venue_call_started=True,
+                venue_ack_received=False,
+                side_effect_known=False,
+            ),
+            pre_submit_authority_provider=_pre_submit_authority_provider,
+        )
 
-    receipt = submit(event, datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc))
+        receipt = submit(event, datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc))
 
-    assert receipt.submitted is False
-    assert receipt.side_effect_status == "POST_SUBMIT_UNKNOWN"
-    assert _receipt_status(receipt) == "POST_SUBMIT_UNKNOWN"
-    receipt_cert = _receipt_cert(receipt)
-    assert receipt_cert.payload["venue_call_started"] is True
-    assert receipt_cert.payload["side_effect_known"] is False
-    assert conn.execute("SELECT reservation_status FROM edli_live_cap_usage").fetchone()["reservation_status"] == "RESERVED"
-    assert _cap_transition_status(receipt) == "PENDING_RECONCILE"
-    assert _cap_transition_projection_status(receipt) == "RESERVED"
+        assert receipt.submitted is False
+        assert receipt.side_effect_status == "POST_SUBMIT_UNKNOWN"
+        assert _receipt_status(receipt) == "POST_SUBMIT_UNKNOWN"
+        receipt_cert = _receipt_cert(receipt)
+        assert receipt_cert.payload["venue_call_started"] is True
+        assert receipt_cert.payload["side_effect_known"] is False
+        assert conn.execute("SELECT reservation_status FROM edli_live_cap_usage").fetchone()["reservation_status"] == "RESERVED"
+        event_types = [row["event_type"] for row in conn.execute("SELECT event_type FROM edli_live_order_events ORDER BY event_sequence")]
+        assert event_types == [
+            "DecisionProofAccepted",
+            "SubmitPlanBuilt",
+            "PreSubmitRevalidated",
+            "LiveCapReserved",
+            "ExecutionCommandCreated",
+            "SubmitUnknown",
+            "CapTransitioned",
+        ]
+        assert _cap_transition_status(receipt) == "PENDING_RECONCILE"
+        assert _cap_transition_projection_status(receipt) == "RESERVED"
+        projection = conn.execute("SELECT current_state, pending_reconcile FROM edli_live_order_projection").fetchone()
+        assert bool(projection["pending_reconcile"]) is True
+        assert projection["current_state"] in {"PENDING_RECONCILE", "CAP_TRANSITIONED"}
+    finally:
+        adapter.build_event_bound_no_submit_receipt = original_build
 
 
-def test_production_executor_boundary_rejects_unenriched_final_intent_before_executor():
+@pytest.mark.parametrize(
+    ("field", "message"),
+    [
+        ("executable_snapshot_hash", "executable_snapshot_hash missing"),
+        ("cost_basis_hash", "cost_basis_hash missing"),
+        ("decision_source_context", "decision_source_context missing"),
+        ("passive_maker_context", "passive_maker_context missing"),
+    ],
+)
+def test_production_executor_boundary_rejects_unenriched_final_intent_before_executor(field, message):
     from src.engine.event_bound_final_intent import (
         EventBoundExecutorExpressibilityError,
         submit_event_bound_final_intent_via_existing_executor,
     )
 
     _actionable, final_intent, _expressibility, _live_cap, command = _command_cert_bundle()
-    stripped = _replace_payload(final_intent, {"executable_snapshot_hash": ""})
+    stripped = _replace_payload(final_intent, {field: ""})
 
-    with pytest.raises(EventBoundExecutorExpressibilityError, match="executable_snapshot_hash missing"):
+    with pytest.raises(EventBoundExecutorExpressibilityError, match=message):
         submit_event_bound_final_intent_via_existing_executor(
             final_intent_cert=stripped,
             execution_command_cert=command,
@@ -694,8 +765,19 @@ def test_main_pre_submit_authority_provider_hydrates_typed_provenance(monkeypatc
         def __exit__(self, exc_type, exc, tb):
             return False
 
-        def get_wallet_balance(self):
-            return 25.0
+        def v2_preflight(self):
+            return {"ok": True}
+
+        def _ensure_v2_adapter(self):
+            return self
+
+        def get_collateral_payload(self):
+            return {
+                "pusd_balance_micro": 25_000_000,
+                "pusd_allowance_micro": 25_000_000,
+                "ctf_token_balances_units": {"yes-1": 25.0},
+                "ctf_token_allowances_units": {"yes-1": 25.0},
+            }
 
     monkeypatch.setattr(polymarket_client, "PolymarketClient", FakePolymarketClient)
     provider = main._edli_pre_submit_authority_provider_from_world_conn(
@@ -708,6 +790,7 @@ def test_main_pre_submit_authority_provider_hydrates_typed_provenance(monkeypatc
     final_intent = SimpleNamespace(
         payload={
             "token_id": "yes-1",
+            "side": "BUY",
             "tick_size": 0.01,
             "min_order_size": 1.0,
             "neg_risk": False,
@@ -723,6 +806,154 @@ def test_main_pre_submit_authority_provider_hydrates_typed_provenance(monkeypatc
     assert witness.user_ws_authority_id == "ws_gap_guard"
     assert witness.balance_allowance_authority_id == "polymarket_wallet_readonly"
     assert witness.balance_allowance_status == "OK"
+
+
+def test_main_pre_submit_authority_provider_blocks_insufficient_buy_allowance(monkeypatch):
+    import src.main as main
+    import src.control.heartbeat_supervisor as heartbeat_supervisor
+    import src.control.ws_gap_guard as ws_gap_guard
+    import src.data.polymarket_client as polymarket_client
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """
+        CREATE TABLE execution_feasibility_evidence (
+            token_id TEXT,
+            quote_seen_at TEXT,
+            book_hash_before TEXT,
+            best_bid_before REAL,
+            best_ask_before REAL
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO execution_feasibility_evidence
+            (token_id, quote_seen_at, book_hash_before, best_bid_before, best_ask_before)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        ("yes-1", "2026-05-25T11:59:59.950000+00:00", "book-hash-1", 0.39, 0.41),
+    )
+    monkeypatch.setattr(heartbeat_supervisor, "summary", lambda: {"entry": {"allow_submit": True}})
+    monkeypatch.setattr(ws_gap_guard, "summary", lambda *, now=None: {"entry": {"allow_submit": True}})
+
+    class FakePolymarketClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def v2_preflight(self):
+            return {"ok": True}
+
+        def _ensure_v2_adapter(self):
+            return self
+
+        def get_collateral_payload(self):
+            return {
+                "pusd_balance_micro": 25_000_000,
+                "pusd_allowance_micro": 1_000_000,
+                "ctf_token_balances_units": {"yes-1": 25.0},
+                "ctf_token_allowances_units": {"yes-1": 25.0},
+            }
+
+    monkeypatch.setattr(polymarket_client, "PolymarketClient", FakePolymarketClient)
+    provider = main._edli_pre_submit_authority_provider_from_world_conn(
+        conn,
+        {
+            "pre_submit_max_quote_age_ms": 1000,
+            "pre_submit_balance_allowance_check_enabled": True,
+        },
+    )
+    final_intent = SimpleNamespace(
+        payload={
+            "token_id": "yes-1",
+            "side": "BUY",
+            "tick_size": 0.01,
+            "min_order_size": 1.0,
+            "neg_risk": False,
+            "notional_usd": 5.0,
+        }
+    )
+
+    with pytest.raises(ValueError, match="PRE_SUBMIT_PUSD_ALLOWANCE_INSUFFICIENT"):
+        provider(final_intent, object(), datetime(2026, 5, 25, 12, tzinfo=timezone.utc))
+
+
+def test_main_pre_submit_authority_provider_blocks_venue_connectivity_failure(monkeypatch):
+    import src.main as main
+    import src.control.heartbeat_supervisor as heartbeat_supervisor
+    import src.control.ws_gap_guard as ws_gap_guard
+    import src.data.polymarket_client as polymarket_client
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """
+        CREATE TABLE execution_feasibility_evidence (
+            token_id TEXT,
+            quote_seen_at TEXT,
+            book_hash_before TEXT,
+            best_bid_before REAL,
+            best_ask_before REAL
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO execution_feasibility_evidence
+            (token_id, quote_seen_at, book_hash_before, best_bid_before, best_ask_before)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        ("yes-1", "2026-05-25T11:59:59.950000+00:00", "book-hash-1", 0.39, 0.41),
+    )
+    monkeypatch.setattr(heartbeat_supervisor, "summary", lambda: {"entry": {"allow_submit": True}})
+    monkeypatch.setattr(ws_gap_guard, "summary", lambda *, now=None: {"entry": {"allow_submit": True}})
+
+    class FakePolymarketClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def v2_preflight(self):
+            raise ValueError("POLYMARKET_PREFLIGHT_DOWN")
+
+        def _ensure_v2_adapter(self):
+            return self
+
+        def get_collateral_payload(self):
+            return {
+                "pusd_balance_micro": 25_000_000,
+                "pusd_allowance_micro": 25_000_000,
+                "ctf_token_balances_units": {"yes-1": 25.0},
+                "ctf_token_allowances_units": {"yes-1": 25.0},
+            }
+
+    monkeypatch.setattr(polymarket_client, "PolymarketClient", FakePolymarketClient)
+    provider = main._edli_pre_submit_authority_provider_from_world_conn(
+        conn,
+        {
+            "pre_submit_max_quote_age_ms": 1000,
+            "pre_submit_balance_allowance_check_enabled": True,
+        },
+    )
+    final_intent = SimpleNamespace(
+        payload={
+            "token_id": "yes-1",
+            "side": "BUY",
+            "tick_size": 0.01,
+            "min_order_size": 1.0,
+            "neg_risk": False,
+            "notional_usd": 5.0,
+        }
+    )
+
+    with pytest.raises(ValueError, match="POLYMARKET_PREFLIGHT_DOWN"):
+        provider(final_intent, object(), datetime(2026, 5, 25, 12, tzinfo=timezone.utc))
 
 
 def _accepted_receipt(event):
@@ -832,7 +1063,11 @@ def _pre_submit_cert(final_intent, live_cap):
         persisted_at=now,
         payload=payload,
         parent_edges=tuple(
-            ParentEdge(parent.certificate_type.removesuffix("Certificate").lower(), parent.certificate_hash, parent.certificate_type)
+            ParentEdge(
+                __import__("re").sub(r"(?<!^)(?=[A-Z])", "_", parent.certificate_type.removesuffix("Certificate")).lower(),
+                parent.certificate_hash,
+                parent.certificate_type,
+            )
             for parent in parents
         ),
         parent_certificates=parents,

@@ -29,10 +29,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from apscheduler.schedulers.blocking import BlockingScheduler
-
 from src.config import cities_by_name, get_mode, settings
-from src.engine.cycle_runner import run_cycle
 from src.engine.discovery_mode import DiscoveryMode
 from src.observability.scheduler_health import _write_scheduler_health
 from src.state.db import init_schema, init_schema_trade_only, get_world_connection, get_trade_connection
@@ -112,6 +109,8 @@ def _run_mode(mode: DiscoveryMode):
         )
         return
     try:
+        from src.engine.cycle_runner import run_cycle
+
         _write_scheduler_health(
             f"run_mode:{mode.value}",
             failed=False,
@@ -2639,6 +2638,7 @@ def _edli_pre_submit_authority_provider_from_world_conn(world_conn, edli_cfg):
 
         heartbeat_summary = _edli_heartbeat_authority_summary()
         user_ws_summary = _edli_user_ws_authority_summary(checked_at)
+        venue_summary = _edli_venue_connectivity_authority_summary(checked_at)
         balance_status, balance_authority_id = _edli_balance_allowance_status(
             final_intent,
             checked_at,
@@ -2655,7 +2655,7 @@ def _edli_pre_submit_authority_provider_from_world_conn(world_conn, edli_cfg):
             neg_risk=bool(intent.get("neg_risk", False)),
             heartbeat_status="OK" if heartbeat_summary["allow_submit"] else "BLOCKED",
             user_ws_status="OK" if user_ws_summary["allow_submit"] else "BLOCKED",
-            venue_connectivity_status="OK",
+            venue_connectivity_status="OK" if venue_summary["allow_submit"] else "BLOCKED",
             balance_allowance_status=balance_status,
             book_authority_id="execution_feasibility_evidence",
             book_captured_at=quote_seen_at,
@@ -2663,7 +2663,7 @@ def _edli_pre_submit_authority_provider_from_world_conn(world_conn, edli_cfg):
             heartbeat_checked_at=checked_at.isoformat(),
             user_ws_authority_id=str(user_ws_summary["authority_id"]),
             user_ws_checked_at=checked_at.isoformat(),
-            venue_connectivity_authority_id="execution_feasibility_evidence",
+            venue_connectivity_authority_id=str(venue_summary["authority_id"]),
             venue_connectivity_checked_at=checked_at.isoformat(),
             balance_allowance_authority_id=balance_authority_id,
             balance_allowance_checked_at=checked_at.isoformat(),
@@ -2711,23 +2711,50 @@ def _edli_user_ws_authority_summary(checked_at: datetime) -> dict[str, object]:
     }
 
 
-def _edli_balance_allowance_status(final_intent, checked_at: datetime, *, enabled: bool) -> tuple[str, str]:
-    if not enabled:
-        return "BLOCKED", "polymarket_wallet_readonly_disabled"
+def _edli_venue_connectivity_authority_summary(checked_at: datetime) -> dict[str, object]:
     from src.data.polymarket_client import PolymarketClient
 
-    required_notional = float(final_intent.payload.get("notional_usd") or 0.0)
     with PolymarketClient() as clob:
-        balance = float(clob.get_wallet_balance())
-    if balance < required_notional:
-        logger.warning(
-            "EDLI pre-submit balance/allowance blocked: balance=%.4f required=%.4f checked_at=%s",
-            balance,
-            required_notional,
-            checked_at.isoformat(),
-        )
-        return "INSUFFICIENT", "polymarket_wallet_readonly"
-    return "OK", "polymarket_wallet_readonly"
+        clob.v2_preflight()
+    return {
+        "authority_id": "polymarket_v2_preflight",
+        "allow_submit": True,
+        "checked_at": checked_at.isoformat(),
+    }
+
+
+def _edli_balance_allowance_status(final_intent, checked_at: datetime, *, enabled: bool) -> tuple[str, str]:
+    if not enabled:
+        raise ValueError("PRE_SUBMIT_ALLOWANCE_CHECK_DISABLED")
+    from src.data.polymarket_client import PolymarketClient
+
+    intent = final_intent.payload
+    side = str(intent.get("side") or "").upper()
+    token_id = str(intent.get("token_id") or "")
+    size = float(intent.get("size") or 0.0)
+    notional = float(intent.get("notional_usd") or 0.0)
+    with PolymarketClient() as clob:
+        collateral = clob._ensure_v2_adapter().get_collateral_payload()
+    if side == "BUY":
+        balance_micro = int(collateral.get("pusd_balance_micro") or 0)
+        allowance_micro = int(collateral.get("pusd_allowance_micro") or 0)
+        required_micro = int(round(notional * 1_000_000))
+        if balance_micro < required_micro:
+            raise ValueError("PRE_SUBMIT_PUSD_BALANCE_INSUFFICIENT")
+        if allowance_micro < required_micro:
+            raise ValueError("PRE_SUBMIT_PUSD_ALLOWANCE_INSUFFICIENT")
+        return "OK", "polymarket_wallet_readonly"
+    if side == "SELL":
+        balances = collateral.get("ctf_token_balances_units") or {}
+        allowances = collateral.get("ctf_token_allowances_units") or {}
+        token_balance = float(balances.get(token_id, 0) or 0)
+        token_allowance = float(allowances.get(token_id, 0) or 0)
+        if token_balance < size:
+            raise ValueError("PRE_SUBMIT_CTF_BALANCE_INSUFFICIENT")
+        if token_allowance < size:
+            raise ValueError("PRE_SUBMIT_CTF_ALLOWANCE_INSUFFICIENT")
+        return "OK", "polymarket_wallet_readonly"
+    raise ValueError(f"PRE_SUBMIT_SIDE_UNSUPPORTED:{side}")
 
 
 def _row_get(row, key: str):
@@ -2937,6 +2964,8 @@ def _edli_market_channel_ingestor_cycle() -> None:
 
 
 def main():
+    from apscheduler.schedulers.blocking import BlockingScheduler
+
     _start = time.monotonic()  # F86: process start time for SIGTERM elapsed log
     mode = get_mode()
     once = "--once" in sys.argv
