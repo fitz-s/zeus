@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 # Created: 2026-05-25
 # Last reused or audited: 2026-05-25
+# Lifecycle: created=2026-05-25; last_reviewed=2026-05-25; last_reused=never
+# Purpose: Unit tests for check_full_transport_ship_readiness — gate returns FAIL today; check names match spec.
+# Reuse: Inspect ship-readiness check functions before reuse; tests expect all checks to FAIL until ship.
 # Authority basis: docs/operations/FT_SHIP_MASTER_SPEC_2026-05-25.md §Antibody
 """Unit tests for check_full_transport_ship_readiness.
 
