@@ -110,7 +110,9 @@ def test_edli_reactor_job_wired_behind_live_execution_mode_gate():
     assert "run_cycle" not in edli_source
     assert "_assert_live_execution_mode_contract" in source
     assert "live_execution_mode == \"legacy_cron\"" in source
-    assert "live_execution_mode == \"edli_event_driven\"" in source
+    assert "edli_submit_disabled_bridge" in source
+    assert "edli_live_canary" in source
+    assert "EDLI_EVENT_DRIVEN_MODES" in source
     for existing_job in ("opening_hunt", "day0_capture", "imminent_open_capture", "market_discovery", "harvester"):
         assert existing_job in source
 
@@ -154,14 +156,14 @@ def test_pr332_scoped_daemon_restart_smoke_registers_event_driven_no_legacy_cron
         monkeypatch,
         {
             "enabled": True,
-            "live_execution_mode": "edli_event_driven",
+            "live_execution_mode": "edli_submit_disabled_bridge",
             "reactor_mode": "submit_disabled_live_bridge",
             "event_writer_enabled": True,
             "forecast_snapshot_trigger_enabled": True,
             "day0_extreme_trigger_enabled": False,
             "day0_hard_fact_live_enabled": False,
-            "market_channel_ingestor_enabled": False,
-            "edli_user_channel_reconcile_enabled": False,
+            "market_channel_ingestor_enabled": True,
+            "edli_user_channel_reconcile_enabled": True,
             "real_order_submit_enabled": False,
             "taker_fok_fak_live_enabled": False,
         },
@@ -171,8 +173,8 @@ def test_pr332_scoped_daemon_restart_smoke_registers_event_driven_no_legacy_cron
     assert scheduler.started is True
     assert scheduler.shutdown_called is True
     assert "edli_event_reactor" in job_ids
-    assert "edli_market_channel_ingestor" not in job_ids
-    assert "edli_user_channel_reconcile" not in job_ids
+    assert "edli_market_channel_ingestor" in job_ids
+    assert "edli_user_channel_reconcile" in job_ids
     assert "opening_hunt" not in job_ids
     assert not any(job_id.startswith("update_reaction_") for job_id in job_ids)
     assert "day0_capture" not in job_ids
@@ -180,11 +182,11 @@ def test_pr332_scoped_daemon_restart_smoke_registers_event_driven_no_legacy_cron
     assert "market_discovery" not in job_ids
     assert "harvester" not in job_ids
     assert "heartbeat" in job_ids
-    assert settings_copy["edli_v1"]["live_execution_mode"] == "edli_event_driven"
+    assert settings_copy["edli_v1"]["live_execution_mode"] == "edli_submit_disabled_bridge"
     assert settings_copy["edli_v1"]["forecast_snapshot_trigger_enabled"] is True
     assert settings_copy["edli_v1"]["day0_extreme_trigger_enabled"] is False
-    assert settings_copy["edli_v1"]["market_channel_ingestor_enabled"] is False
-    assert settings_copy["edli_v1"]["edli_user_channel_reconcile_enabled"] is False
+    assert settings_copy["edli_v1"]["market_channel_ingestor_enabled"] is True
+    assert settings_copy["edli_v1"]["edli_user_channel_reconcile_enabled"] is True
     assert settings_copy["edli_v1"]["real_order_submit_enabled"] is False
 
 
@@ -214,6 +216,56 @@ def test_live_execution_mode_rejects_disabled_with_edli_runtime_enabled(monkeypa
                 "event_writer_enabled": True,
                 "forecast_snapshot_trigger_enabled": False,
                 "real_order_submit_enabled": False,
+            },
+        )
+
+
+def test_live_execution_mode_rejects_ambiguous_edli_event_driven_mode(monkeypatch):
+    with pytest.raises(ValueError, match="UNSUPPORTED_LIVE_EXECUTION_MODE:edli_event_driven"):
+        _run_main_with_fake_scheduler(
+            monkeypatch,
+            {
+                "enabled": True,
+                "live_execution_mode": "edli_event_driven",
+                "reactor_mode": "submit_disabled_live_bridge",
+                "event_writer_enabled": True,
+                "forecast_snapshot_trigger_enabled": True,
+                "real_order_submit_enabled": False,
+            },
+        )
+
+
+def test_submit_disabled_bridge_requires_lifecycle_authorities(monkeypatch):
+    with pytest.raises(RuntimeError, match="EDLI_SUBMIT_DISABLED_BRIDGE_REQUIRES_MARKET_CHANNEL_INGESTOR_ENABLED"):
+        _run_main_with_fake_scheduler(
+            monkeypatch,
+            {
+                "enabled": True,
+                "live_execution_mode": "edli_submit_disabled_bridge",
+                "reactor_mode": "submit_disabled_live_bridge",
+                "event_writer_enabled": True,
+                "forecast_snapshot_trigger_enabled": True,
+                "market_channel_ingestor_enabled": False,
+                "edli_user_channel_reconcile_enabled": True,
+                "real_order_submit_enabled": False,
+            },
+        )
+
+
+def test_live_canary_requires_submit_and_canary_flags(monkeypatch):
+    with pytest.raises(RuntimeError, match="EDLI_LIVE_CANARY_REQUIRES_REAL_ORDER_SUBMIT_ENABLED_AND_LIVE_CANARY_ENABLED"):
+        _run_main_with_fake_scheduler(
+            monkeypatch,
+            {
+                "enabled": True,
+                "live_execution_mode": "edli_live_canary",
+                "reactor_mode": "live",
+                "event_writer_enabled": True,
+                "forecast_snapshot_trigger_enabled": True,
+                "market_channel_ingestor_enabled": True,
+                "edli_user_channel_reconcile_enabled": True,
+                "real_order_submit_enabled": False,
+                "live_canary_enabled": False,
             },
         )
 

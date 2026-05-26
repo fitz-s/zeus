@@ -8,17 +8,19 @@ can be scheduled.
 
 ## Scope
 
-- Add `live_execution_mode` with allowed values `legacy_cron`,
-  `edli_event_driven`, and `disabled`.
+- Add `live_execution_mode` with explicit allowed values `legacy_cron`,
+  `edli_shadow_no_submit`, `edli_submit_disabled_bridge`,
+  `edli_live_canary`, `edli_live`, and `disabled`.
 - Default EDLI runtime scheduler surfaces off in `config/settings.json`.
 - Enforce scheduler mutual exclusion:
   - `legacy_cron` schedules legacy run-cycle cron jobs and never schedules EDLI
     workers.
-  - `edli_event_driven` schedules only explicitly allowed EDLI workers and
-    skips legacy run-cycle/market-discovery cron jobs.
+  - EDLI event-driven stages schedule only explicitly allowed EDLI workers and
+    skip legacy run-cycle/market-discovery cron jobs.
   - `disabled` schedules neither legacy run-cycle jobs nor EDLI workers.
 - Fail boot when EDLI runtime flags conflict with `legacy_cron` mode or when
-  event-driven mode is requested without EDLI enabled.
+  an EDLI event-driven stage is requested without its required runtime
+  authorities.
 - Add focused daemon-smoke tests for inert default, legacy-vs-EDLI exclusion,
   and conflict fail-closed behavior.
 

@@ -45,7 +45,20 @@ logger = logging.getLogger("zeus")
 _cycle_lock = threading.Lock()
 _market_discovery_lock = threading.Lock()
 OPENING_HUNT_FIRST_DELAY_SECONDS = 30.0
-LIVE_EXECUTION_MODES = {"legacy_cron", "edli_event_driven", "disabled"}
+LIVE_EXECUTION_MODES = {
+    "legacy_cron",
+    "edli_shadow_no_submit",
+    "edli_submit_disabled_bridge",
+    "edli_live_canary",
+    "edli_live",
+    "disabled",
+}
+EDLI_EVENT_DRIVEN_MODES = {
+    "edli_shadow_no_submit",
+    "edli_submit_disabled_bridge",
+    "edli_live_canary",
+    "edli_live",
+}
 EDLI_RUNTIME_FLAGS = (
     "enabled",
     "event_writer_enabled",
@@ -83,14 +96,37 @@ def _edli_runtime_requested(edli_cfg: dict) -> bool:
     return any(bool(edli_cfg.get(flag, False)) for flag in EDLI_RUNTIME_FLAGS)
 
 
+def _require_edli_flags(edli_cfg: dict, mode: str, flags: tuple[str, ...]) -> None:
+    missing = [flag for flag in flags if not bool(edli_cfg.get(flag, False))]
+    if missing:
+        raise RuntimeError(f"{mode.upper()}_REQUIRES_{'_AND_'.join(missing).upper()}")
+
+
 def _assert_live_execution_mode_contract(edli_cfg: dict) -> str:
     mode = _live_execution_mode(edli_cfg)
     if mode == "legacy_cron" and _edli_runtime_requested(edli_cfg):
         raise RuntimeError("EDLI_RUNTIME_CONFLICTS_WITH_LEGACY_CRON")
-    if mode == "edli_event_driven" and not bool(edli_cfg.get("enabled", False)):
-        raise RuntimeError("EDLI_EVENT_DRIVEN_REQUIRES_EDLI_ENABLED")
     if mode == "disabled" and _edli_runtime_requested(edli_cfg):
         raise RuntimeError("EDLI_RUNTIME_CONFLICTS_WITH_DISABLED_MODE")
+    if mode in EDLI_EVENT_DRIVEN_MODES:
+        _require_edli_flags(edli_cfg, mode, ("enabled", "event_writer_enabled", "forecast_snapshot_trigger_enabled"))
+    if mode == "edli_shadow_no_submit" and bool(edli_cfg.get("real_order_submit_enabled", False)):
+        raise RuntimeError("EDLI_SHADOW_NO_SUBMIT_FORBIDS_REAL_ORDER_SUBMIT")
+    if mode == "edli_submit_disabled_bridge":
+        _require_edli_flags(edli_cfg, mode, ("market_channel_ingestor_enabled", "edli_user_channel_reconcile_enabled"))
+        if bool(edli_cfg.get("real_order_submit_enabled", False)):
+            raise RuntimeError("EDLI_SUBMIT_DISABLED_BRIDGE_FORBIDS_REAL_ORDER_SUBMIT")
+    if mode in {"edli_live_canary", "edli_live"}:
+        _require_edli_flags(
+            edli_cfg,
+            mode,
+            (
+                "market_channel_ingestor_enabled",
+                "edli_user_channel_reconcile_enabled",
+                "real_order_submit_enabled",
+                "live_canary_enabled",
+            ),
+        )
     return mode
 
 
@@ -3220,7 +3256,7 @@ def main():
             max_instances=1,
             coalesce=True,
         )
-    if live_execution_mode == "edli_event_driven" and edli_cfg.get("enabled"):
+    if live_execution_mode in EDLI_EVENT_DRIVEN_MODES and edli_cfg.get("enabled"):
         scheduler.add_job(
             _edli_event_reactor_cycle,
             "interval",
@@ -3230,7 +3266,7 @@ def main():
             max_instances=1,
             coalesce=True,
         )
-    if live_execution_mode == "edli_event_driven" and edli_cfg.get("market_channel_ingestor_enabled"):
+    if live_execution_mode in EDLI_EVENT_DRIVEN_MODES and edli_cfg.get("market_channel_ingestor_enabled"):
         scheduler.add_job(
             _edli_market_channel_ingestor_cycle,
             "interval",
@@ -3240,7 +3276,7 @@ def main():
             max_instances=1,
             coalesce=True,
         )
-    if live_execution_mode == "edli_event_driven" and edli_cfg.get("edli_user_channel_reconcile_enabled"):
+    if live_execution_mode in EDLI_EVENT_DRIVEN_MODES and edli_cfg.get("edli_user_channel_reconcile_enabled"):
         scheduler.add_job(
             _edli_user_channel_reconcile_cycle,
             "interval",
