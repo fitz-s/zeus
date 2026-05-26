@@ -11,6 +11,35 @@ from src.decision_kernel.canonicalization import canonical_json, stable_hash
 from src.state.schema.edli_live_order_events_schema import LIVE_ORDER_EVENT_TYPES, ensure_tables
 
 
+PRE_SUBMIT_REQUIRED_FIELDS = (
+    "event_id",
+    "final_intent_id",
+    "condition_id",
+    "token_id",
+    "side",
+    "direction",
+    "order_type",
+    "time_in_force",
+    "post_only",
+    "checked_at",
+    "quote_seen_at",
+    "quote_age_ms",
+    "book_hash",
+    "current_best_bid",
+    "current_best_ask",
+    "limit_price",
+    "would_cross_book",
+    "tick_size",
+    "tick_aligned",
+    "min_order_size",
+    "size_ok",
+    "neg_risk",
+    "heartbeat_status",
+    "user_ws_status",
+    "venue_connectivity_status",
+    "balance_allowance_status",
+)
+
 EVENT_STATE = {
     "DecisionProofAccepted": "DECISION_PROOF_ACCEPTED",
     "SubmitPlanBuilt": "SUBMIT_PLAN_BUILT",
@@ -84,6 +113,7 @@ class LiveOrderAggregateLedger:
         latest = self._latest_row(aggregate_id)
         if latest is not None and payload.get("event_id") != _payload(latest).get("event_id"):
             raise LiveOrderAggregateError("live-order aggregate event_id drift")
+        self._validate_event_append(event_type=event_type, payload=payload, latest=latest)
         parent_hash = latest["event_hash"] if latest is not None else None
         next_sequence = int(latest["event_sequence"]) + 1 if latest is not None else 1
         if expected_parent_event_hash is not None and expected_parent_event_hash != parent_hash:
@@ -245,6 +275,27 @@ class LiveOrderAggregateLedger:
             (aggregate_id,),
         ).fetchone()
 
+    def _validate_event_append(
+        self,
+        *,
+        event_type: str,
+        payload: dict[str, Any],
+        latest: sqlite3.Row | None,
+    ) -> None:
+        if event_type == "PreSubmitRevalidated":
+            _validate_pre_submit_revalidation_payload(payload)
+            return
+        if event_type == "ExecutionCommandCreated":
+            if latest is None or latest["event_type"] != "PreSubmitRevalidated":
+                raise LiveOrderAggregateError(
+                    "ExecutionCommandCreated requires immediately preceding PreSubmitRevalidated event"
+                )
+            revalidation = _payload(latest)
+            _validate_pre_submit_revalidation_payload(revalidation)
+            if payload.get("final_intent_id") != revalidation.get("final_intent_id"):
+                raise LiveOrderAggregateError("ExecutionCommandCreated final_intent_id must match pre-submit revalidation")
+            return
+
 
 def _event_from_row(row: sqlite3.Row) -> LiveOrderAggregateEvent:
     return LiveOrderAggregateEvent(
@@ -268,6 +319,56 @@ def _payload(row: sqlite3.Row) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise LiveOrderAggregateError("live-order event payload must be an object")
     return payload
+
+
+def _validate_pre_submit_revalidation_payload(payload: dict[str, Any]) -> None:
+    missing = [field for field in PRE_SUBMIT_REQUIRED_FIELDS if field not in payload]
+    if missing:
+        raise LiveOrderAggregateError("PreSubmitRevalidated missing required fields: " + ",".join(missing))
+    if payload.get("would_cross_book") is not False:
+        raise LiveOrderAggregateError("PreSubmitRevalidated requires would_cross_book=false")
+    if payload.get("tick_aligned") is not True:
+        raise LiveOrderAggregateError("PreSubmitRevalidated requires tick_aligned=true")
+    if payload.get("size_ok") is not True:
+        raise LiveOrderAggregateError("PreSubmitRevalidated requires size_ok=true")
+    if payload.get("heartbeat_status") != "OK":
+        raise LiveOrderAggregateError("PreSubmitRevalidated requires heartbeat_status=OK")
+    if payload.get("user_ws_status") != "OK":
+        raise LiveOrderAggregateError("PreSubmitRevalidated requires user_ws_status=OK")
+    if payload.get("venue_connectivity_status") != "OK":
+        raise LiveOrderAggregateError("PreSubmitRevalidated requires venue_connectivity_status=OK")
+    if payload.get("balance_allowance_status") != "OK":
+        raise LiveOrderAggregateError("PreSubmitRevalidated requires balance_allowance_status=OK")
+    quote_age_ms = _non_negative_number(payload.get("quote_age_ms"), "quote_age_ms")
+    max_quote_age_ms = _non_negative_number(payload.get("max_quote_age_ms", quote_age_ms), "max_quote_age_ms")
+    if quote_age_ms > max_quote_age_ms:
+        raise LiveOrderAggregateError("PreSubmitRevalidated quote_age_ms exceeds max_quote_age_ms")
+    _positive_number(payload.get("tick_size"), "tick_size")
+    _positive_number(payload.get("min_order_size"), "min_order_size")
+    _non_negative_number(payload.get("current_best_bid"), "current_best_bid")
+    _non_negative_number(payload.get("current_best_ask"), "current_best_ask")
+    _non_negative_number(payload.get("limit_price"), "limit_price")
+    if payload.get("post_only") is not True:
+        raise LiveOrderAggregateError("PreSubmitRevalidated requires post_only=true for current EDLI executor law")
+    if payload.get("time_in_force") not in {"GTC", "GTD"}:
+        raise LiveOrderAggregateError("PreSubmitRevalidated post_only requires GTC/GTD time_in_force")
+
+
+def _positive_number(value: Any, name: str) -> float:
+    number = _non_negative_number(value, name)
+    if number <= 0:
+        raise LiveOrderAggregateError(f"PreSubmitRevalidated requires positive {name}")
+    return number
+
+
+def _non_negative_number(value: Any, name: str) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        raise LiveOrderAggregateError(f"PreSubmitRevalidated requires numeric {name}") from None
+    if number < 0:
+        raise LiveOrderAggregateError(f"PreSubmitRevalidated requires non-negative {name}")
+    return number
 
 
 def _dt(value: datetime) -> str:

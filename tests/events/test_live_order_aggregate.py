@@ -54,6 +54,13 @@ def test_live_order_projection_rebuilds_from_append_only_events():
     )
     ledger.append_event(
         aggregate_id="event-1:intent-1",
+        event_type="PreSubmitRevalidated",
+        payload=_pre_submit_payload(),
+        occurred_at=NOW,
+        source_authority="engine_adapter",
+    )
+    ledger.append_event(
+        aggregate_id="event-1:intent-1",
         event_type="ExecutionCommandCreated",
         payload={"event_id": "event-1", "final_intent_id": "intent-1", "execution_command_id": "cmd-1"},
         occurred_at=NOW,
@@ -64,7 +71,7 @@ def test_live_order_projection_rebuilds_from_append_only_events():
     rebuilt = ledger.rebuild_projection("event-1:intent-1")
 
     assert rebuilt.current_state == "EXECUTION_COMMAND_CREATED"
-    assert rebuilt.last_sequence == 2
+    assert rebuilt.last_sequence == 3
 
 
 def test_live_order_aggregate_rejects_parent_hash_mismatch():
@@ -161,6 +168,87 @@ def test_live_order_submit_unknown_stays_pending_until_reconcile():
     assert projection.pending_reconcile is False
 
 
+def test_execution_command_requires_pre_submit_revalidation():
+    ledger = LiveOrderAggregateLedger(_conn())
+    ledger.append_event(
+        aggregate_id="event-1:intent-1",
+        event_type="DecisionProofAccepted",
+        payload={"event_id": "event-1", "final_intent_id": "intent-1"},
+        occurred_at=NOW,
+        source_authority="decision_kernel",
+    )
+
+    with pytest.raises(LiveOrderAggregateError, match="PreSubmitRevalidated"):
+        ledger.append_event(
+            aggregate_id="event-1:intent-1",
+            event_type="ExecutionCommandCreated",
+            payload={"event_id": "event-1", "final_intent_id": "intent-1", "execution_command_id": "cmd-1"},
+            occurred_at=NOW,
+            source_authority="engine_adapter",
+        )
+
+
+@pytest.mark.parametrize(
+    ("override", "message"),
+    [
+        ({"quote_age_ms": 1001, "max_quote_age_ms": 1000}, "quote_age_ms exceeds"),
+        ({"would_cross_book": True}, "would_cross_book=false"),
+        ({"tick_aligned": False}, "tick_aligned=true"),
+        ({"size_ok": False}, "size_ok=true"),
+        ({"heartbeat_status": "EXPIRED"}, "heartbeat_status=OK"),
+        ({"user_ws_status": "GAP"}, "user_ws_status=OK"),
+        ({"venue_connectivity_status": "DOWN"}, "venue_connectivity_status=OK"),
+        ({"balance_allowance_status": "INSUFFICIENT"}, "balance_allowance_status=OK"),
+        ({"time_in_force": "FOK"}, "GTC/GTD"),
+    ],
+)
+def test_pre_submit_revalidation_failures_block_command(override, message):
+    ledger = LiveOrderAggregateLedger(_conn())
+    ledger.append_event(
+        aggregate_id="event-1:intent-1",
+        event_type="DecisionProofAccepted",
+        payload={"event_id": "event-1", "final_intent_id": "intent-1"},
+        occurred_at=NOW,
+        source_authority="decision_kernel",
+    )
+
+    with pytest.raises(LiveOrderAggregateError, match=message):
+        ledger.append_event(
+            aggregate_id="event-1:intent-1",
+            event_type="PreSubmitRevalidated",
+            payload=_pre_submit_payload(**override),
+            occurred_at=NOW,
+            source_authority="engine_adapter",
+        )
+
+
+def test_execution_command_final_intent_must_match_pre_submit_revalidation():
+    ledger = LiveOrderAggregateLedger(_conn())
+    ledger.append_event(
+        aggregate_id="event-1:intent-1",
+        event_type="DecisionProofAccepted",
+        payload={"event_id": "event-1", "final_intent_id": "intent-1"},
+        occurred_at=NOW,
+        source_authority="decision_kernel",
+    )
+    ledger.append_event(
+        aggregate_id="event-1:intent-1",
+        event_type="PreSubmitRevalidated",
+        payload=_pre_submit_payload(final_intent_id="intent-1"),
+        occurred_at=NOW,
+        source_authority="engine_adapter",
+    )
+
+    with pytest.raises(LiveOrderAggregateError, match="final_intent_id must match"):
+        ledger.append_event(
+            aggregate_id="event-1:intent-1",
+            event_type="ExecutionCommandCreated",
+            payload={"event_id": "event-1", "final_intent_id": "intent-2", "execution_command_id": "cmd-1"},
+            occurred_at=NOW,
+            source_authority="engine_adapter",
+        )
+
+
 def test_init_schema_creates_live_order_aggregate_tables():
     conn = sqlite3.connect(":memory:")
     init_schema(conn)
@@ -171,6 +259,40 @@ def test_init_schema_creates_live_order_aggregate_tables():
         ).fetchall()
     }
     assert {"edli_live_order_events", "edli_live_order_projection"} <= tables
+
+
+def _pre_submit_payload(**overrides):
+    payload = {
+        "event_id": "event-1",
+        "final_intent_id": "intent-1",
+        "condition_id": "condition-1",
+        "token_id": "token-yes",
+        "side": "BUY",
+        "direction": "buy_yes",
+        "order_type": "LIMIT",
+        "time_in_force": "GTC",
+        "post_only": True,
+        "checked_at": "2026-05-25T18:00:00+00:00",
+        "quote_seen_at": "2026-05-25T17:59:59.950000+00:00",
+        "quote_age_ms": 50,
+        "max_quote_age_ms": 1000,
+        "book_hash": "book-hash-1",
+        "current_best_bid": 0.41,
+        "current_best_ask": 0.43,
+        "limit_price": 0.40,
+        "would_cross_book": False,
+        "tick_size": 0.01,
+        "tick_aligned": True,
+        "min_order_size": 5.0,
+        "size_ok": True,
+        "neg_risk": False,
+        "heartbeat_status": "OK",
+        "user_ws_status": "OK",
+        "venue_connectivity_status": "OK",
+        "balance_allowance_status": "OK",
+    }
+    payload.update(overrides)
+    return payload
 
 
 def _conn() -> sqlite3.Connection:
