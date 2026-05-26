@@ -29,6 +29,11 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+try:
+    from apscheduler.schedulers.blocking import BlockingScheduler
+except ModuleNotFoundError:  # pragma: no cover - local minimal test env fallback
+    BlockingScheduler = None
+
 from src.config import cities_by_name, get_mode, settings
 from src.engine.discovery_mode import DiscoveryMode
 from src.observability.scheduler_health import _write_scheduler_health
@@ -2964,9 +2969,12 @@ def _edli_market_channel_ingestor_cycle() -> None:
 
 
 def main():
-    from apscheduler.schedulers.blocking import BlockingScheduler
-
     _start = time.monotonic()  # F86: process start time for SIGTERM elapsed log
+    global BlockingScheduler
+    if BlockingScheduler is None:
+        from apscheduler.schedulers.blocking import BlockingScheduler as _BlockingScheduler
+
+        BlockingScheduler = _BlockingScheduler
     mode = get_mode()
     once = "--once" in sys.argv
     # F85: route INFO (below-WARNING) to stdout (.log) and WARNING+ to stderr (.err).

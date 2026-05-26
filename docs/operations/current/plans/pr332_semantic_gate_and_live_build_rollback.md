@@ -18,6 +18,8 @@ rows after a failed live command build.
 - Add focused tests proving the registry accepts the states and a forced
   post-aggregate build failure cannot leave `ExecutionCommandCreated` projection
   state behind.
+- Keep the daemon scheduler constructor patchable at module scope so PR332's
+  required no-submit daemon smoke can replace it without starting APScheduler.
 
 ## Non-goals
 
@@ -29,5 +31,6 @@ rows after a failed live command build.
 
 - `python scripts/ci/semantic_diff_classifier.py --base origin/main --head HEAD --objects architecture/money_path_objects.yaml --mapping architecture/money_path_ci.yaml --fail-on-unregistered`
 - `python scripts/check_schema_version.py`
+- `python -m pytest -q tests/money_path --maxfail=5 --timeout=300`
 - Focused EDLI money-path tests covering live-order aggregate rollback and
   pre-submit authority states.
