@@ -1,0 +1,96 @@
+# Created: 2026-05-26
+# Last reused or audited: 2026-05-26
+# Authority basis: docs/operations/current/plans/ci_topology_refactor_refined.md §3
+#                  External spec: ci topology refactor.md §11 Override Protocol
+#
+# Override registry — bounded escape hatch for Context Pack / topology
+# enforcement rules. Each override must declare:
+#   - rule_id being overridden
+#   - owner accepting risk
+#   - reason + risk_accepted (no empty strings)
+#   - expiry_date (cannot be open-ended)
+#   - follow_up issue/PR
+#   - allowed_changed_files (override does NOT extend to other files)
+#
+# No-override hazards are listed in architecture/topology_enforcement.yaml
+# under `no_override_rules:` and cannot be bypassed by any entry here.
+#
+# Status: advisory only in Phase A. Validated by
+# scripts/ci/check_context_pack_overrides.py (Phase D).
+
+schema_version: 1
+
+metadata:
+  created: "2026-05-26"
+  owner: "ci-infra"
+  purpose: >
+    Registry of time-bounded, owner-attributed CI rule overrides. CI fails if
+    any active override is malformed, expired, or attempts to bypass a
+    no_override rule.
+  authority_basis:
+    - architecture/topology_enforcement.yaml
+    - architecture/context_pack_schema.yaml
+
+# ---------------------------------------------------------------------------
+# Override entry schema
+# ---------------------------------------------------------------------------
+override_schema:
+  id: string                            # OVR-YYYY-MM-DD-<slug>
+  rule_id: string                       # rule being overridden (must exist in topology_enforcement.yaml)
+  applies_to:
+    pr_number: integer|null
+    branch_pattern: string|null         # glob; if non-null, override is branch-wide
+    changed_files: [string]             # exhaustive list; override does NOT extend beyond these
+  owner: string                         # human-or-agent owner accepting risk
+  reviewer_approval_required: boolean
+  approved_by: [string]                 # populated when reviewer approves
+  reason: string                        # non-empty
+  risk_accepted: string                 # non-empty; specific risk
+  expiry_date: string                   # YYYY-MM-DD; cannot be more than 60 days from creation
+  follow_up:
+    required: boolean
+    issue_or_pr: string                 # URL
+    due_date: string                    # YYYY-MM-DD
+  demotion_type: blocking_to_advisory|advisory_suppression
+  allowed_changed_files: [string]       # subset of applies_to.changed_files
+  disallowed_if_rule_has_no_override: boolean
+
+# ---------------------------------------------------------------------------
+# Active overrides (currently none)
+# ---------------------------------------------------------------------------
+overrides: []
+
+# ---------------------------------------------------------------------------
+# CI failure rules (enforced by scripts/ci/check_context_pack_overrides.py)
+# ---------------------------------------------------------------------------
+failure_rules:
+  - id: override_expired
+    description: "active override past expiry_date"
+    severity: blocking
+  - id: override_owner_missing
+    description: "owner field empty or unknown"
+    severity: blocking
+  - id: override_reason_empty
+    description: "reason field empty"
+    severity: blocking
+  - id: override_risk_accepted_empty
+    description: "risk_accepted field empty"
+    severity: blocking
+  - id: override_path_scope_wider_than_changed_files
+    description: "allowed_changed_files contains files not in applies_to.changed_files OR override applied to files not in allowed_changed_files"
+    severity: blocking
+  - id: override_followup_missing_for_p0_p1_surface
+    description: "P0/P1 surface override without follow_up.required = true AND follow_up.issue_or_pr"
+    severity: blocking
+  - id: override_reviewer_approval_missing
+    description: "reviewer_approval_required = true AND approved_by is empty"
+    severity: blocking
+  - id: override_attempts_no_override_rule
+    description: "rule_id is listed in topology_enforcement.yaml#no_override_rules"
+    severity: blocking
+  - id: override_expiry_too_distant
+    description: "expiry_date more than 60 days from override creation"
+    severity: blocking
+  - id: override_id_collision
+    description: "two overrides share the same id"
+    severity: blocking

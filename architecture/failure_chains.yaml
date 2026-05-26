@@ -1,0 +1,462 @@
+# Created: 2026-05-26
+# Last reused or audited: 2026-05-26
+# Authority basis: docs/operations/current/plans/ci_topology_refactor_refined.md §3
+#                  External spec: ci topology refactor.md §6 Failure Chain Registry Schema
+#
+# Failure Chain Registry — FC-01..FC-10 formalized as machine-readable objects.
+# Each chain captures: root hazard, historical PR/commit evidence, affected
+# surfaces, missed guard type, required context-pack additions, required
+# gates/tests, recurrence escalation, agent runtime warnings, and (CRITICAL)
+# what topology is NOT responsible for proving.
+#
+# The `not_topology_responsibility` field prevents topology from becoming fake
+# runtime authority. Topology routes context; runtime/tests prove truth.
+#
+# Status: advisory only in Phase A. Consumed by scripts/topology_doctor_context_pack.py
+# (Phase B) and scripts/ci/check_context_pack_integrity.py (Phase D).
+
+schema_version: 1
+
+metadata:
+  created: "2026-05-26"
+  owner: "ci-infra / topology"
+  purpose: >
+    Formal registry of historical failure chains. Each FC encodes a root
+    hazard, the surfaces it touches, what kind of guard was missed, and
+    which Context Pack components must reference it.
+  authority_basis:
+    - architecture/topology_surfaces.yaml
+    - architecture/fatal_misreads.yaml
+    - architecture/money_path_ci.yaml
+    - architecture/money_path_objects.yaml
+
+# ---------------------------------------------------------------------------
+# Failure chain object schema
+# ---------------------------------------------------------------------------
+failure_chain_schema:
+  id: string                          # FC-NN
+  name: string                        # short kebab-case
+  status: active|mitigated|advisory|retired
+  root_hazard: string
+  historical_evidence:
+    prs: [integer]
+    commits: [string]
+    notes: string
+  touched_surfaces: [string]           # surface_id refs to topology_surfaces.yaml
+  money_path_segments: [string]
+  missed_guard_type:
+    - WRONG_LAYER_GUARD
+    - TEST_DOES_NOT_HIT_RUNTIME_PATH
+    - MOCK_ONLY_TEST
+    - SHADOW_PATH_UNCOVERED
+    - PATH_TRIGGER_ABSENT
+    - EXTERNAL_SEMANTICS_UNCHECKED
+    - STATIC_PATTERN_NOT_ENCODED
+    - MANIFEST_DRIFT
+    - DOC_AUTHORITY_OUTPACED_RUNTIME
+    - SCHEMA_STATE_UNTESTED
+    - CROSS_DB_BOUNDARY_UNTESTED
+    - ADVISORY_ONLY_GUARD
+    - REVIEW_SCOPE_MISCLASSIFIED
+  required_context_packs: [string]
+  required_tests: [string]
+  required_static_gates: [string]
+  required_ci_workflows: [string]
+  recurrence_escalation:
+    advisory_signal: string
+    threshold: string
+    escalates_to: string
+  agent_runtime_warnings: [string]
+  not_topology_responsibility: [string]
+  owner: string
+  sunset_condition: string|null
+
+allowed_status: [active, mitigated, advisory, retired]
+
+# ---------------------------------------------------------------------------
+# Failure chains (FC-01..FC-10)
+# ---------------------------------------------------------------------------
+chains:
+
+  FC-01:
+    name: forecast_bundle_extrema_authority
+    status: active
+    root_hazard: >
+      Snapshot-level or latest-cycle forecast selection can choose a non-contributing
+      local-day extrema run; correct authority lives at coherent forecast-bundle
+      selection across source_run_coverage/readiness/snapshot.
+    historical_evidence:
+      prs: [309, 312, 333]
+      commits: []
+      notes: "PR #312 followed #309 because initial fix did not hit production bundle layer."
+    touched_surfaces:
+      - executable_forecast_reader
+      - evaluator_forecast_consumption
+    money_path_segments: [source_truth, forecast_signal, executable_edge]
+    missed_guard_type:
+      - WRONG_LAYER_GUARD
+      - TEST_DOES_NOT_HIT_RUNTIME_PATH
+      - MOCK_ONLY_TEST
+    required_context_packs: [forecast_bundle_extrema]
+    required_tests:
+      - tests/test_executable_forecast_bundle_selection.py
+      - tests/test_executable_forecast_reader.py
+    required_static_gates:
+      - source_rationale_delta_gate
+    required_ci_workflows:
+      - topology-context-required.yml
+    recurrence_escalation:
+      advisory_signal: forecast_authority_churn
+      threshold: "2 fix/review/P0/P1 PRs touching executable_forecast_reader within 20 merged PRs"
+      escalates_to: "blocking root-cause proof"
+    agent_runtime_warnings:
+      - "Latest forecast snapshot is not necessarily the contributing local-day extrema authority."
+      - "Fixture with shared source_run_id can mask bundle-lock bugs."
+    not_topology_responsibility:
+      - "Topology does not decide which forecast cycle is actually fresh."
+      - "Tests must prove bundle ranking and readiness/source_run coherence."
+    owner: forecast-reader-owner
+    sunset_condition: "retire only after bundle-layer gate is superseded by stronger replay fixture"
+
+  FC-02:
+    name: market_discovery_coverage_collapse
+    status: active
+    root_hazard: >
+      Runtime discovery can silently route through narrow slug-only path or global
+      cap, reducing executable substrate city coverage.
+    historical_evidence:
+      prs: [203, 221, 325, 333]
+      commits: []
+      notes: "PR #325 repaired slug-only wiring and global top-K collapse."
+    touched_surfaces:
+      - market_discovery_scanner
+    money_path_segments: [contract_semantics, source_truth, market_prior, executable_edge]
+    missed_guard_type:
+      - SHADOW_PATH_UNCOVERED
+      - TEST_DOES_NOT_HIT_RUNTIME_PATH
+      - PATH_TRIGGER_ABSENT
+    required_context_packs: [market_discovery_substrate]
+    required_tests:
+      - tests/test_market_discovery_full_coverage.py
+      - tests/test_market_scanner_provenance.py
+    required_static_gates:
+      - source_rationale_delta_gate
+    required_ci_workflows:
+      - topology-context-required.yml
+    recurrence_escalation:
+      advisory_signal: substrate_coverage_churn
+      threshold: "second scanner/main discovery fix within 15 merged PRs"
+      escalates_to: "blocking scanner runtime-path test update"
+    agent_runtime_warnings:
+      - "Do not prove slug helper correctness while leaving daemon runtime path untested."
+      - "Global cap can collapse city breadth even when discovery itself sees all cities."
+    not_topology_responsibility:
+      - "Topology does not prove live Gamma/CLOB availability."
+      - "Runtime tests must prove full tag path and breadth-first substrate coverage."
+    owner: market-data-owner
+    sunset_condition: null
+
+  FC-03:
+    name: execution_fresh_at_submit
+    status: active
+    root_hazard: >
+      A snapshot fresh at discovery/evaluation can be stale by submit time;
+      stale cycle snapshot reuse kills valid edges or risks stale execution.
+    historical_evidence:
+      prs: [330, 333]
+      commits: []
+      notes: "PR #330 added fresh-at-submit recapture."
+    touched_surfaces:
+      - execution_cycle_runtime
+      - execution_venue_boundary
+    money_path_segments: [executable_edge, sizing, execution]
+    missed_guard_type:
+      - WRONG_LAYER_GUARD
+      - EXTERNAL_SEMANTICS_UNCHECKED
+      - TEST_DOES_NOT_HIT_RUNTIME_PATH
+    required_context_packs: [execution_fresh_submit]
+    required_tests:
+      - tests/test_exec_freshness_recapture.py
+      - tests/test_executable_market_snapshot_v2.py
+    required_static_gates:
+      - tier0_paired_relationship_test_gate
+      - workflow_refs_exist
+    required_ci_workflows:
+      - topology-context-required.yml
+    recurrence_escalation:
+      advisory_signal: execution_freshness_churn
+      threshold: "any second P0/P1 stale/freshness fix touching cycle_runtime/execution in 20 PRs"
+      escalates_to: "blocking root-cause gate and manual reviewer checklist"
+    agent_runtime_warnings:
+      - "Do not fix by widening the stale threshold."
+      - "Fresh snapshot id and sibling executable facts must propagate together."
+      - "No CLOB client must remain fail-closed."
+    not_topology_responsibility:
+      - "Topology does not prove live CLOB book freshness."
+      - "Fake CLOB/runtime tests must prove recapture and fail-closed behavior."
+    owner: execution-runtime-owner
+    sunset_condition: null
+
+  FC-04:
+    name: ingest_scheduler_registry_spec_ast_mismatch
+    status: active
+    root_hazard: >
+      Static scheduler registry guard recognized only old add_job syntax and missed
+      new registry spec-list/dict wiring.
+    historical_evidence:
+      prs: [329, 335]
+      commits: []
+      notes: "PR #335 updated AST guard for add_job, dict(), and dict literal specs."
+    touched_surfaces:
+      - ingest_scheduler
+    money_path_segments: [source_truth, monitoring]
+    missed_guard_type:
+      - STATIC_PATTERN_NOT_ENCODED
+      - MANIFEST_DRIFT
+    required_context_packs: [ingest_scheduler_registry]
+    required_tests:
+      - tests/test_writer_jobs_registry_guard.py
+      - tests/test_source_job_registry.py
+    required_static_gates: []
+    required_ci_workflows:
+      - topology-context-required.yml
+    recurrence_escalation:
+      advisory_signal: scheduler_registry_churn
+      threshold: "any scheduler job registry repair after registry wiring change"
+      escalates_to: "blocking scheduler registry AST gate"
+    agent_runtime_warnings:
+      - "Changing scheduler representation requires updating the writer-job guard parser."
+      - "A guard that only understands old syntax can create a fatal boot false positive."
+    not_topology_responsibility:
+      - "Topology does not prove daemon runtime success."
+      - "Static guard/test must prove job IDs and registry shape."
+    owner: ingest-owner
+    sunset_condition: null
+
+  FC-05:
+    name: hko_scheduler_job_id_drift
+    status: active
+    root_hazard: >
+      Scheduler job id and registered/decorated writer id can drift, causing boot-time
+      registry failure or missing source collection.
+    historical_evidence:
+      prs: [320, 324, 335]
+      commits: []
+      notes: "HKO job id mismatch fixed by PR #324; spec parser hardened by #335."
+    touched_surfaces:
+      - ingest_scheduler
+    money_path_segments: [source_truth]
+    missed_guard_type:
+      - TEST_DOES_NOT_HIT_RUNTIME_PATH
+      - STATIC_PATTERN_NOT_ENCODED
+    required_context_packs: [ingest_scheduler_registry]
+    required_tests:
+      - tests/test_writer_jobs_registry_guard.py
+    required_static_gates: []
+    required_ci_workflows:
+      - topology-context-required.yml
+    recurrence_escalation:
+      advisory_signal: hko_scheduler_churn
+      threshold: "any HKO scheduler id drift"
+      escalates_to: "blocking scheduler id fixture"
+    agent_runtime_warnings:
+      - "Job id, decorator id, and table registry id must stay aligned."
+    not_topology_responsibility:
+      - "Topology does not prove HKO data correctness."
+    owner: ingest-owner
+    sunset_condition: null
+
+  FC-06:
+    name: ecmwf_opendata_safe_fetch_schedule
+    status: active
+    root_hazard: >
+      Forecast-live daemon schedule can fire before safe_fetch/release-calendar window,
+      making source data present but temporally wrong.
+    historical_evidence:
+      prs: [316, 329]
+      commits: []
+      notes: "Exact current implementation REVIEW_REQUIRED; chain preserved from archaeology."
+    touched_surfaces:
+      - forecast_live_daemon
+    money_path_segments: [source_truth, forecast_signal]
+    missed_guard_type:
+      - EXTERNAL_SEMANTICS_UNCHECKED
+      - WRONG_LAYER_GUARD
+    required_context_packs: [external_source_temporal]
+    required_tests:
+      - tests/test_ecmwf_opendata_ingest_schedule.py
+      - tests/test_release_calendar.py
+    required_static_gates:
+      - source_rationale_delta_gate
+    required_ci_workflows:
+      - topology-context-required.yml
+    recurrence_escalation:
+      advisory_signal: source_temporal_churn
+      threshold: "second OpenData/source calendar fix within 20 PRs"
+      escalates_to: "blocking temporal source schedule gate"
+    agent_runtime_warnings:
+      - "Data present is not equivalent to usable cycle data."
+      - "Write time is not source/event time."
+    not_topology_responsibility:
+      - "Topology does not prove ECMWF external dissemination freshness."
+      - "Release-calendar tests and runtime source_run evidence must prove timing."
+    owner: data-source-owner
+    sunset_condition: null
+
+  FC-07:
+    name: source_plane_collapse_day0_settlement_hourly_forecast
+    status: active
+    root_hazard: >
+      Agents collapse settlement, Day0 monitoring, historical hourly, and forecast
+      skill sources into a single generic weather source.
+    historical_evidence:
+      prs: [317, 320, 326]
+      commits: []
+      notes: "Fatal misreads already encode this pattern; context packs must inject them."
+    touched_surfaces:
+      - day0_observation_reader
+      - forecast_live_daemon
+    money_path_segments: [contract_semantics, source_truth, forecast_signal, calibration, settlement]
+    missed_guard_type:
+      - DOC_AUTHORITY_OUTPACED_RUNTIME
+      - TEST_DOES_NOT_HIT_RUNTIME_PATH
+    required_context_packs:
+      - day0_source_plane
+      - external_source_temporal
+    required_tests:
+      - tests/test_day0_observation_reader.py
+      - tests/test_settlement_semantics.py
+      - tests/test_calibration_pairs_v2_metric_linter.py
+    required_static_gates:
+      - source_rationale_delta_gate
+    required_ci_workflows:
+      - topology-context-required.yml
+    recurrence_escalation:
+      advisory_signal: source_plane_churn
+      threshold: "any P0/P1 source-plane repair after source/doc change"
+      escalates_to: "blocking source-plane relationship fixture"
+    agent_runtime_warnings:
+      - "Settlement source != Day0 live source != historical hourly source != forecast skill source."
+      - "Endpoint availability is not settlement correctness."
+    not_topology_responsibility:
+      - "Topology does not decide current source validity."
+      - "Source contract/runtime tests must prove the specific source role."
+    owner: source-truth-owner
+    sunset_condition: null
+
+  FC-08:
+    name: cross_db_ownership_ghost_tables
+    status: active
+    root_hazard: >
+      Schema/table changes can drift from db_table_ownership and ghost-reader
+      exclusion, corrupting cross-DB boundaries.
+    historical_evidence:
+      prs: [260, 265, 318, 329]
+      commits: []
+      notes: "DB ownership and INV-37 are active authority; context gate must enforce deltas."
+    touched_surfaces:
+      - db_schema_authority
+    money_path_segments: [source_truth, execution, learning, settlement]
+    missed_guard_type:
+      - MANIFEST_DRIFT
+      - SCHEMA_STATE_UNTESTED
+      - CROSS_DB_BOUNDARY_UNTESTED
+    required_context_packs: [db_schema_ownership]
+    required_tests:
+      - tests/state/test_schema_current_invariant.py
+      - tests/state/test_table_registry_coherence.py
+      - tests/test_inv37_writer_schema_qualification.py
+    required_static_gates:
+      - db_table_delta_gate
+    required_ci_workflows:
+      - topology-context-required.yml
+    recurrence_escalation:
+      advisory_signal: schema_manifest_churn
+      threshold: "any new table without owner or second schema fixup in 20 PRs"
+      escalates_to: "no-override blocking"
+    agent_runtime_warnings:
+      - "A table existing in SQLite is not enough; owner DB and ghost status must be declared."
+      - "Independent cross-DB writes are forbidden outside sanctioned ATTACH/SAVEPOINT paths."
+    not_topology_responsibility:
+      - "Topology does not prove DB contents are migrated."
+      - "Schema/current invariant tests and migration replay must prove runtime state."
+    owner: state-schema-owner
+    sunset_condition: null
+
+  FC-09:
+    name: topology_sprawl_advisory_blocking_boundary
+    status: active
+    root_hazard: >
+      Topology can over-warn on arrangement while under-blocking structural hazards;
+      file movement should warn unless it breaks active readers/registries.
+    historical_evidence:
+      prs: [304, 306, 319]
+      commits: []
+      notes: "PR #306 stdlib shadowing demonstrates structural blocker; operations sprawl is advisory unless reader broken."
+    touched_surfaces:
+      - topology_v_next
+      - operations_docs
+    money_path_segments: []
+    missed_guard_type:
+      - ADVISORY_ONLY_GUARD
+      - MANIFEST_DRIFT
+    required_context_packs:
+      - operations_docs_topology
+      - topology_structural
+    required_tests:
+      - tests/topology/test_file_arrangement.py
+    required_static_gates:
+      - workflow_refs_exist
+      - stdlib_shadowing_gate
+    required_ci_workflows:
+      - topology-context-required.yml
+      - topology-context-advisory.yml
+    recurrence_escalation:
+      advisory_signal: topology_sprawl_churn
+      threshold: "warning affects registered active reader/enforcer"
+      escalates_to: "blocking structural reference integrity"
+    agent_runtime_warnings:
+      - "Do not promote arrangement warnings into runtime truth."
+      - "Block missing readers/refs, not harmless archive movement."
+    not_topology_responsibility:
+      - "Topology does not decide runtime correctness."
+    owner: topology-owner
+    sunset_condition: null
+
+  FC-10:
+    name: review_scope_advisory_gap
+    status: active
+    root_hazard: >
+      Tier 0 live-money path can change without paired relationship test while
+      review-scope remains advisory.
+    historical_evidence:
+      prs: [304, 310, 321]
+      commits: []
+      notes: "review-scope advisory exists; narrow high-confidence Tier0 no-test case should block."
+    touched_surfaces:
+      - review_scope_collect
+      - execution_cycle_runtime
+      - execution_venue_boundary
+    money_path_segments: [execution, monitoring, settlement]
+    missed_guard_type:
+      - ADVISORY_ONLY_GUARD
+      - REVIEW_SCOPE_MISCLASSIFIED
+    required_context_packs: [review_scope_tier0_pairing]
+    required_tests:
+      - tests/test_review_scope_collect.py
+    required_static_gates:
+      - tier0_paired_relationship_test_gate
+    required_ci_workflows:
+      - topology-context-required.yml
+    recurrence_escalation:
+      advisory_signal: tier0_without_test_warning
+      threshold: "immediate for Tier0 runtime path without paired test or valid override"
+      escalates_to: "blocking"
+    agent_runtime_warnings:
+      - "Empty findings plus partial coverage is not a clean pass."
+      - "Tier 0 changed surface needs relationship-test proof, not generic unit test count."
+    not_topology_responsibility:
+      - "Topology does not review the PR for correctness."
+      - "It only enforces that required context and tests are present."
+    owner: review-ci-owner
+    sunset_condition: null

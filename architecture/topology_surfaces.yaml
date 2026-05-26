@@ -1,0 +1,467 @@
+# Created: 2026-05-26
+# Last reused or audited: 2026-05-26
+# Authority basis: docs/operations/current/plans/ci_topology_refactor_refined.md §3
+#                  External spec: ci topology refactor.md §5 Surface Registry Schema
+#
+# Surface Registry — deterministic path/symbol/table/source/workflow/test/manifest
+# mapping to money-path objects, risk tier, context packs, required manifests,
+# tests, and static gates.
+#
+# DELIBERATE DESIGN: structural signals (path glob, module/import, function/class,
+# DB table, source/provider, workflow job, test file, manifest key, operation
+# folder route, PR-body checkbox, failure-chain ref). Task-text keyword is an
+# auxiliary WEAK signal only — it cannot override a path match.
+#
+# Multi-file UNION: when a PR touches N files matching M surfaces, all M
+# surfaces are returned to the assembler. No "primary" winner.
+#
+# Status: advisory only in Phase A. Consumed by scripts/topology_doctor_context_pack.py
+# (Phase B) and scripts/ci/context_pack_gate_router.py (Phase E).
+
+schema_version: 1
+
+metadata:
+  created: "2026-05-26"
+  owner: "ci-infra / topology"
+  purpose: >
+    Map repo structural surfaces (paths/symbols/tables/sources/workflows/tests)
+    to money-path objects, risk tiers, and context packs. This is the
+    deterministic input that the Context Pack Assembler reads first, before
+    consulting any phrase or task-text signal.
+  authority_basis:
+    - architecture/money_path_ci.yaml
+    - architecture/money_path_objects.yaml
+    - architecture/db_table_ownership.yaml
+    - architecture/source_rationale.yaml
+    - architecture/test_topology.yaml
+    - architecture/fatal_misreads.yaml
+
+# ---------------------------------------------------------------------------
+# Surface object schema
+# ---------------------------------------------------------------------------
+surface_schema:
+  id: string
+  type: path|symbol|db_table|source|workflow|test|doc_authority|operation|manifest
+  description: string
+  patterns:
+    path_globs: [string]
+    symbols: [string]
+    db_tables: [string]
+    sources: [string]
+    workflow_jobs: [string]
+    manifest_keys: [string]
+    pr_body_checkboxes: [string]
+    failure_chain_refs: [string]
+  money_path_segments: [string]   # one or more of allowed_money_path_segments in context_pack_schema.yaml
+  risk_tier: T0|T1|T2|T3|T4
+  scoped_agents: [string]
+  context_packs: [string]
+  manifests_required:
+    db_table_ownership: boolean
+    source_rationale: boolean
+    test_topology: boolean
+    money_path_ci: boolean
+    money_path_objects: boolean
+    workflow_refs: boolean
+  relationship_tests:
+    - path: string
+      required_when_changed: boolean
+  static_gates:
+    - id: string
+      script: string
+      blocking: boolean
+  advisory_signals: [string]
+  owners: [string]
+  notes: string|null
+
+# ---------------------------------------------------------------------------
+# Surfaces (initial set, mapped to historical failure chains)
+# ---------------------------------------------------------------------------
+surfaces:
+
+  # ---- FC-03 execution fresh-at-submit ---------------------------------
+  execution_cycle_runtime:
+    type: path
+    description: "Cycle runtime submit/reprice/final-intent path (PR #330 fresh-at-submit recapture)"
+    patterns:
+      path_globs:
+        - src/engine/cycle_runtime.py
+      symbols:
+        - _reprice_decision_from_executable_snapshot
+        - _ensure_fresh_executable_snapshot
+        - FinalExecutionIntent
+    money_path_segments: [executable_edge, sizing, execution]
+    risk_tier: T0
+    scoped_agents:
+      - src/AGENTS.md
+      - src/engine/AGENTS.md
+      - src/execution/AGENTS.md
+    context_packs: [execution_fresh_submit]
+    manifests_required:
+      db_table_ownership: false
+      source_rationale: false
+      test_topology: true
+      money_path_ci: true
+      money_path_objects: true
+      workflow_refs: false
+    relationship_tests:
+      - path: tests/test_exec_freshness_recapture.py
+        required_when_changed: true
+    static_gates:
+      - id: tier0_paired_relationship_test_gate
+        script: scripts/ci/check_topology_structural_blockers.py
+        blocking: true
+    advisory_signals: [hot_file_churn, repeated_fix_chain]
+    owners: [execution-runtime-owner]
+
+  execution_venue_boundary:
+    type: path
+    description: "Live execution / CLOB adapter boundary"
+    patterns:
+      path_globs:
+        - src/execution/**
+        - src/venue/**
+        - src/contracts/settlement_semantics.py
+        - src/contracts/execution_price.py
+        - src/contracts/venue_submission_envelope.py
+    money_path_segments: [execution, settlement]
+    risk_tier: T0
+    scoped_agents:
+      - src/execution/AGENTS.md
+      - src/venue/AGENTS.md
+    context_packs: [execution_fresh_submit]
+    manifests_required:
+      db_table_ownership: false
+      source_rationale: false
+      test_topology: true
+      money_path_ci: true
+      money_path_objects: true
+      workflow_refs: false
+    relationship_tests:
+      - path: tests/test_executor_command_split.py
+        required_when_changed: true
+    static_gates:
+      - id: tier0_paired_relationship_test_gate
+        script: scripts/ci/check_topology_structural_blockers.py
+        blocking: true
+    advisory_signals: [hot_file_churn]
+    owners: [execution-runtime-owner]
+
+  # ---- FC-01 forecast bundle extrema -----------------------------------
+  executable_forecast_reader:
+    type: path
+    description: "Executable forecast bundle/source_run_coverage/readiness reader (PR #312 bundle-layer fix)"
+    patterns:
+      path_globs:
+        - src/data/executable_forecast_reader.py
+        - src/data/forecast_extrema_authority.py
+      symbols:
+        - read_executable_forecast
+        - _candidate_forecast_bundles
+        - _bundle_rank
+        - classify_forecast_extrema_authority
+      db_tables:
+        - source_run_coverage
+        - readiness_state
+        - ensemble_snapshots_v2
+    money_path_segments: [source_truth, forecast_signal, executable_edge]
+    risk_tier: T1
+    scoped_agents:
+      - src/AGENTS.md
+      - src/data/AGENTS.md
+      - src/engine/AGENTS.md
+    context_packs: [forecast_bundle_extrema]
+    manifests_required:
+      db_table_ownership: false
+      source_rationale: true
+      test_topology: true
+      money_path_ci: true
+      money_path_objects: true
+      workflow_refs: false
+    relationship_tests:
+      - path: tests/test_executable_forecast_bundle_selection.py
+        required_when_changed: true
+      - path: tests/test_executable_forecast_reader.py
+        required_when_changed: true
+    static_gates:
+      - id: source_rationale_delta_gate
+        script: scripts/ci/check_source_rationale_delta.py
+        blocking: true
+    advisory_signals: [forecast_authority_churn]
+    owners: [forecast-reader-owner]
+
+  evaluator_forecast_consumption:
+    type: path
+    description: "Evaluator consumption of forecast bundle output"
+    patterns:
+      path_globs:
+        - src/engine/evaluator.py
+      symbols:
+        - _consume_forecast_bundle
+    money_path_segments: [forecast_signal, executable_edge]
+    risk_tier: T1
+    scoped_agents:
+      - src/engine/AGENTS.md
+    context_packs: [forecast_bundle_extrema]
+    manifests_required:
+      test_topology: true
+      money_path_ci: true
+      money_path_objects: true
+    relationship_tests:
+      - path: tests/test_executable_forecast_bundle_selection.py
+        required_when_changed: true
+    static_gates: []
+    advisory_signals: []
+    owners: [evaluator-owner]
+
+  # ---- FC-02 market discovery coverage collapse ------------------------
+  market_discovery_scanner:
+    type: path
+    description: "Polymarket/Gamma discovery and executable market substrate (PR #325 slug-only wiring fix)"
+    patterns:
+      path_globs:
+        - src/data/market_scanner.py
+        - src/data/polymarket_client.py
+        - src/main.py
+      symbols:
+        - find_weather_markets
+        - find_slug_pattern_weather_markets
+        - _market_discovery_cycle
+        - refresh_executable_market_substrate_snapshots
+      sources:
+        - Gamma
+        - Polymarket CLOB
+    money_path_segments: [contract_semantics, source_truth, market_prior, executable_edge]
+    risk_tier: T1
+    scoped_agents:
+      - src/data/AGENTS.md
+      - src/engine/AGENTS.md
+    context_packs: [market_discovery_substrate]
+    manifests_required:
+      source_rationale: true
+      test_topology: true
+      money_path_ci: true
+      money_path_objects: true
+    relationship_tests:
+      - path: tests/test_market_discovery_full_coverage.py
+        required_when_changed: true
+      - path: tests/test_market_scanner_provenance.py
+        required_when_changed: true
+    static_gates:
+      - id: source_rationale_delta_gate
+        script: scripts/ci/check_source_rationale_delta.py
+        blocking: true
+    advisory_signals: [substrate_coverage_churn]
+    owners: [market-data-owner]
+
+  # ---- FC-04 / FC-05 scheduler registry --------------------------------
+  ingest_scheduler:
+    type: path
+    description: "Ingest scheduler / source job registry / writer-jobs guard (PR #335 AST gate update)"
+    patterns:
+      path_globs:
+        - src/ingest_main.py
+        - src/data/source_job_registry.py
+        - src/data/scheduler_adapter.py
+      symbols:
+        - register_writer_job
+        - assert_writer_jobs_registered
+      db_tables:
+        - writer_jobs
+        - source_run_coverage
+    money_path_segments: [source_truth, monitoring]
+    risk_tier: T1
+    scoped_agents:
+      - src/ingest/AGENTS.md
+      - src/data/AGENTS.md
+    context_packs: [ingest_scheduler_registry]
+    manifests_required:
+      source_rationale: true
+      test_topology: true
+    relationship_tests:
+      - path: tests/test_writer_jobs_registry_guard.py
+        required_when_changed: true
+      - path: tests/test_source_job_registry.py
+        required_when_changed: true
+    static_gates: []
+    advisory_signals: [scheduler_registry_churn]
+    owners: [ingest-owner]
+
+  # ---- FC-06 ECMWF OpenData safe-fetch schedule ------------------------
+  forecast_live_daemon:
+    type: path
+    description: "Forecast-live daemon schedule and ECMWF safe_fetch window"
+    patterns:
+      path_globs:
+        - src/data/ecmwf_opendata*.py
+        - src/data/forecast_live_*.py
+        - config/source_release_calendar.yaml
+    money_path_segments: [source_truth, forecast_signal]
+    risk_tier: T1
+    scoped_agents:
+      - src/data/AGENTS.md
+      - src/ingest/AGENTS.md
+    context_packs: [external_source_temporal]
+    manifests_required:
+      source_rationale: true
+      test_topology: true
+    relationship_tests:
+      - path: tests/test_ecmwf_opendata_ingest_schedule.py
+        required_when_changed: true
+      - path: tests/test_release_calendar.py
+        required_when_changed: true
+    static_gates: []
+    advisory_signals: [source_temporal_churn]
+    owners: [data-source-owner]
+
+  # ---- FC-07 source-plane collapse -------------------------------------
+  day0_observation_reader:
+    type: path
+    description: "Day0 observation reader / evaluator day0 source plane"
+    patterns:
+      path_globs:
+        - src/data/day0_*.py
+        - src/engine/evaluator_day0.py
+    money_path_segments: [source_truth, monitoring, settlement]
+    risk_tier: T1
+    scoped_agents:
+      - src/data/AGENTS.md
+      - src/engine/AGENTS.md
+    context_packs: [day0_source_plane]
+    manifests_required:
+      source_rationale: true
+      test_topology: true
+    relationship_tests:
+      - path: tests/test_day0_observation_reader.py
+        required_when_changed: true
+    static_gates: []
+    advisory_signals: [source_plane_churn]
+    owners: [source-truth-owner]
+
+  # ---- FC-08 cross-DB ownership ----------------------------------------
+  db_schema_authority:
+    type: path
+    description: "DB schema/table ownership migration boundary (PR #318 schema bump)"
+    patterns:
+      path_globs:
+        - src/state/db.py
+        - src/state/schema/**
+        - scripts/migrations/**
+        - scripts/migrate_*.py
+        - architecture/db_table_ownership.yaml
+    money_path_segments: [source_truth, execution, learning, settlement]
+    risk_tier: T0
+    scoped_agents:
+      - src/state/AGENTS.md
+    context_packs: [db_schema_ownership]
+    manifests_required:
+      db_table_ownership: true
+      test_topology: true
+      money_path_ci: true
+    relationship_tests:
+      - path: tests/state/test_schema_current_invariant.py
+        required_when_changed: true
+      - path: tests/state/test_table_registry_coherence.py
+        required_when_changed: true
+      - path: tests/test_inv37_writer_schema_qualification.py
+        required_when_changed: true
+    static_gates:
+      - id: db_table_delta_gate
+        script: scripts/ci/check_db_table_delta.py
+        blocking: true
+    advisory_signals: [schema_manifest_churn]
+    owners: [state-schema-owner]
+
+  # ---- FC-09 topology sprawl boundary ----------------------------------
+  topology_v_next:
+    type: path
+    description: "topology_v_next package — stdlib shadow prevention (PR #306 dataclasses.py crash)"
+    patterns:
+      path_globs:
+        - scripts/topology_v_next/**
+      manifest_keys:
+        - architecture/topology_v_next_binding.yaml
+        - architecture/topology.yaml
+    money_path_segments: []
+    risk_tier: T2
+    scoped_agents: []
+    context_packs: [topology_structural]
+    manifests_required:
+      workflow_refs: true
+    relationship_tests:
+      - path: tests/topology_v_next/test_admission_engine.py
+        required_when_changed: true
+    static_gates:
+      - id: stdlib_shadowing_gate
+        script: scripts/ci/check_stdlib_shadowing.py
+        blocking: true
+      - id: workflow_refs_exist
+        script: scripts/ci/check_workflow_repo_refs.py
+        blocking: true
+    advisory_signals: [topology_sprawl_churn]
+    owners: [topology-owner]
+
+  operations_docs:
+    type: path
+    description: "Operations / docs / archive arrangement (FC-09 advisory unless registry breaks)"
+    patterns:
+      path_globs:
+        - docs/operations/**
+        - docs/archive/**
+        - architecture/docs_registry.yaml
+        - architecture/topology.yaml
+    money_path_segments: []
+    risk_tier: T4
+    scoped_agents:
+      - docs/operations/AGENTS.md
+    context_packs: [operations_docs_topology]
+    manifests_required:
+      workflow_refs: true
+    relationship_tests: []
+    static_gates:
+      - id: workflow_refs_exist
+        script: scripts/ci/check_workflow_repo_refs.py
+        blocking: true
+    advisory_signals: [topology_sprawl_churn]
+    owners: [topology-owner]
+
+  # ---- FC-10 review-scope advisory gap ---------------------------------
+  review_scope_collect:
+    type: path
+    description: "Review-scope collector and Tier 0 pairing gate"
+    patterns:
+      path_globs:
+        - scripts/review_scope_collect.py
+        - .github/pull_request_template.md
+    money_path_segments: [execution, monitoring, settlement]
+    risk_tier: T2
+    scoped_agents: []
+    context_packs: [review_scope_tier0_pairing]
+    manifests_required:
+      test_topology: true
+    relationship_tests:
+      - path: tests/test_review_scope_collect.py
+        required_when_changed: true
+    static_gates: []
+    advisory_signals: [tier0_without_test_warning]
+    owners: [review-ci-owner]
+
+# ---------------------------------------------------------------------------
+# Integrity rules
+# ---------------------------------------------------------------------------
+integrity_rules:
+  - id: surface_id_kebab_case
+    description: "surface id must be lower_snake_case"
+    severity: blocking
+  - id: surface_context_pack_resolvable
+    description: "every context_packs[] entry must resolve in a Context Pack template (defined inline or in architecture/context_pack_profiles.yaml extension)"
+    severity: advisory   # advisory in Phase A until packs themselves are defined
+  - id: surface_relationship_test_exists
+    description: "every relationship_tests[].path must be a real file"
+    severity: blocking
+  - id: surface_static_gate_script_exists
+    description: "every static_gates[].script must be a real .py file"
+    severity: advisory   # advisory in Phase A until Phase D ships scripts/ci/check_*
+  - id: surface_money_path_segments_in_allowed
+    description: "every money_path_segments entry must be in allowed_money_path_segments"
+    severity: blocking
