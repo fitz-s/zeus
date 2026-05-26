@@ -2061,6 +2061,22 @@ def main() -> int:
     # skip schema init, skip PRAGMA journal_mode=WAL, and skip the bulk
     # writer lock entirely (no writers compete with a read-only opener).
     if args.dry_run:
+        # 2026-05-25 antibody gap fix: run preflight in advisory (non-blocking)
+        # mode during dry-run so preflight failures surface BEFORE launch rather
+        # than only at live launch time. This closes the gap where a clean dry-run
+        # could silently mask a preflight gate that only fires at --no-dry-run.
+        dry_run_db_path = Path(args.db_path) if args.db_path else None
+        if dry_run_db_path is None:
+            from src.state.db import ZEUS_FORECASTS_DB_PATH  # noqa: PLC0415
+            dry_run_db_path = Path(ZEUS_FORECASTS_DB_PATH)
+        print("\n=== DRY-RUN PREFLIGHT ADVISORY (non-blocking) ===")
+        try:
+            _assert_rebuild_preflight_ready(dry_run_db_path)
+            print("  Preflight: READY — live launch would pass gate")
+        except RuntimeError as _pf_err:
+            print(f"  Preflight: WARN — live launch would be blocked: {_pf_err}")
+        print("=== END DRY-RUN PREFLIGHT ADVISORY ===\n")
+
         if args.db_path:
             uri_path = Path(args.db_path).resolve().as_uri().replace("file://", "file:")
             conn = sqlite3.connect(f"{uri_path}?mode=ro", uri=True)
