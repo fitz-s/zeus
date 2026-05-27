@@ -227,6 +227,33 @@ FILL_AUTHORITY_NONE = "none"
 # downstream training gates (PR D Finding 9) MUST treat it as not training-
 # eligible. Distinct from venue_confirmed_full which requires a trade fact.
 FILL_AUTHORITY_VENUE_POSITION_OBSERVED = "venue_position_observed"
+
+# PR D2 (Finding 9, 2026-05-27): authorities that MAY produce training rows.
+# `is_training_eligible_position(pos)` is the type-boundary that downstream
+# learning/calibration writers must consult before writing a row to
+# `calibration_pairs_v2`. Authorities outside this set carry insufficient
+# causality / fill provenance to support model fitting.
+TRAINING_ELIGIBLE_FILL_AUTHORITIES = frozenset({
+    "venue_confirmed_full",
+    "venue_confirmed_partial",
+    "cancelled_remainder",
+    "settled",
+})
+
+
+def is_training_eligible_position(pos: object) -> bool:
+    """Return True iff this position's fill economics are strong enough to
+    feed model training (Finding 9, PR D2).
+
+    Rejects:
+      - venue_position_observed   (PR C3 degraded recovery from aggregate balance)
+      - optimistic_submitted      (no venue confirmation)
+      - none                      (no fill at all)
+      - legacy_unknown            (pre-typed-authority rows)
+      - any unknown value         (fail-closed)
+    """
+    authority = str(getattr(pos, "fill_authority", "") or "").strip()
+    return authority in TRAINING_ELIGIBLE_FILL_AUTHORITIES
 FILL_AUTHORITY_OPTIMISTIC_SUBMITTED = "optimistic_submitted"
 FILL_AUTHORITY_VENUE_CONFIRMED_PARTIAL = "venue_confirmed_partial"
 FILL_AUTHORITY_VENUE_CONFIRMED_FULL = "venue_confirmed_full"
