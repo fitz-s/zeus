@@ -115,7 +115,7 @@ from src.contracts.ensemble_snapshot_provenance import (
 )
 from src.contracts.settlement_semantics import SettlementSemantics
 from src.signal.ensemble_signal import p_raw_vector_from_maxes
-from src.state.db import init_schema, ZEUS_WORLD_DB_PATH
+from src.state.db import init_schema, init_schema_forecasts, ZEUS_WORLD_DB_PATH
 from src.state.db_writer_lock import (  # noqa: E402
     BulkChunker,
     bulk_lock_with_chunker,
@@ -2143,7 +2143,13 @@ def main() -> int:
         ) as chunker:
             # DDL inside the lock: apply_v2_schema contains DROP TABLE IF EXISTS
             # and CREATE TABLE IF NOT EXISTS — must run while bulk flock is held.
-            init_schema(conn)
+            # BUG FIX 2026-05-27: was calling init_schema (WORLD schema, bumps
+            # user_version to SCHEMA_VERSION=37) on the FORECASTS DB connection,
+            # corrupting forecasts.db user_version 7→37 and breaking live daemon
+            # boot (assert_schema_current_forecasts fails). Use init_schema_forecasts
+            # which sets user_version=SCHEMA_FORECASTS_VERSION=7 and creates only
+            # forecast-class tables.
+            init_schema_forecasts(conn)
             apply_v2_schema(conn)
             try:
                 per_metric = rebuild_all_v2(
