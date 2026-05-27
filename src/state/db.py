@@ -9220,7 +9220,7 @@ def query_chain_only_quarantine_rows(conn: sqlite3.Connection | None) -> list[di
           AND NOT EXISTS (
               SELECT 1 FROM position_current pc
               WHERE (pc.token_id = ts.token_id OR pc.no_token_id = ts.token_id)
-                AND pc.phase IN ('settled', 'voided', 'admin_closed')
+                AND pc.phase IN ('settled', 'voided', 'admin_closed', 'economically_closed', 'quarantined')
           )
         ORDER BY ts.created_at ASC, ts.token_id ASC
         """
