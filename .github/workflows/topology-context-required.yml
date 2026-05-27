@@ -1,0 +1,121 @@
+name: topology-context-required
+
+# Created: 2026-05-26
+# Authority basis: docs/operations/current/plans/ci_topology_refactor_refined.md Phase D
+#                  architecture/topology_enforcement.yaml
+#
+# REQUIRED merge gate: runs the Phase D structural-blocker enforcers.
+# Fails the PR build ONLY when a `no_override: true` rule fires; rules
+# that allow override stay informational at this layer (the wider net
+# is the Phase C advisory workflow).
+#
+# Gate owner: ci-infra (per architecture/topology_enforcement.yaml)
+# Review condition: relax to advisory only if the no_override rule set
+#   is empirically generating false positives. Add new no_override rules
+#   only through a dedicated PR that updates topology_enforcement.yaml +
+#   adds proving test.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths:
+      - 'src/**'
+      - 'tests/**'
+      - 'scripts/**'
+      - 'architecture/**'
+      - 'config/**'
+      - '.github/workflows/**'
+
+concurrency:
+  group: topology-context-required-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  no-override-blockers:
+    name: topology-context (required, no_override)
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    env:
+      GATE_OWNER: "ci-infra (per architecture/topology_enforcement.yaml)"
+      GATE_RATIONALE: >
+        Phase D structural blockers — fails only when a no_override rule
+        fires. Wider advisory net is topology-context-advisory.yml.
+    steps:
+      - name: Checkout (full history for diff)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install PyYAML
+        run: pip install --quiet pyyaml
+
+      - name: Compute changed files vs base
+        id: diff
+        run: |
+          set -euo pipefail
+          BASE_SHA="${{ github.event.pull_request.base.sha }}"
+          HEAD_SHA="${{ github.event.pull_request.head.sha }}"
+          git diff --name-only "$BASE_SHA"..."$HEAD_SHA" > /tmp/changed-files.txt || true
+          echo "Changed file count: $(wc -l < /tmp/changed-files.txt)"
+
+      - name: Run structural-blocker orchestrator (NO_OVERRIDE only)
+        id: orchestrator
+        # `|| true` here so a failing rule does NOT short-circuit before we
+        # capture the JSON artifact. The actual fail-the-build step is
+        # "Enforce no_override exit" below, which reads the same JSON.
+        run: |
+          set -uo pipefail
+          # shellcheck disable=SC2046
+          if [ -s /tmp/changed-files.txt ]; then
+            python scripts/ci/check_topology_structural_blockers.py \
+              --changed-files $(cat /tmp/changed-files.txt) \
+              --json > /tmp/blockers.json || true
+          else
+            python scripts/ci/check_topology_structural_blockers.py \
+              --json > /tmp/blockers.json || true
+          fi
+          python -c "import json;d=json.load(open('/tmp/blockers.json'));print('rules failed:', d['failure_count']);print('no_override failed:', d['no_override_failure_count'])"
+
+      - name: Upload structural-blocker artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: topology-blockers-${{ github.event.pull_request.number }}
+          path: /tmp/blockers.json
+          retention-days: 14
+          if-no-files-found: warn
+
+      - name: Enforce no_override exit (fails build only on no_override)
+        # Read the same artifact the orchestrator wrote — single source of
+        # truth. Avoids running the orchestrator twice (which was producing
+        # inconsistent counts because the second run used git diff defaults
+        # rather than the precomputed changed-files list).
+        run: |
+          set -euo pipefail
+          python -c "
+          import json, sys
+          d = json.load(open('/tmp/blockers.json'))
+          failures = [r for r in d['results'] if r['exit_code'] != 0 and not r.get('skipped')]
+          no_override = [r for r in failures if not r['override_allowed']]
+          if no_override:
+              print(f'BLOCKING: {len(no_override)} no_override rule(s) failed:')
+              for r in no_override:
+                  print(f'  - {r[\"rule_id\"]}')
+                  for ln in (r.get('stdout') or '').splitlines()[:5]:
+                      print(f'      {ln}')
+              sys.exit(1)
+          if failures:
+              print(f'Advisory: {len(failures)} override-allowed rule(s) failed (non-blocking).')
+              for r in failures:
+                  print(f'  - {r[\"rule_id\"]}')
+          else:
+              print('OK: all rules pass.')
+          "
