@@ -26,7 +26,8 @@ CREATE TABLE IF NOT EXISTS position_events (
         'SETTLED',
         'ADMIN_VOIDED',
         'MANUAL_OVERRIDE_APPLIED',
-        'VENUE_POSITION_OBSERVED'
+        'VENUE_POSITION_OBSERVED',
+        'REVIEW_REQUIRED'
     )),
     occurred_at TEXT NOT NULL
         CHECK (occurred_at LIKE '____-__-__T%' OR occurred_at = 'QUARANTINE'),
