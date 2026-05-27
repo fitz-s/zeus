@@ -3,6 +3,23 @@
 Public symbols:
   ChainState (enum)
   classify_chain_state(*, fetched_at, chain_positions, portfolio, ...) -> ChainState
+
+Timestamp contract (Finding 1, PR C0, 2026-05-27):
+  This classifier consults `Position.chain_verified_at` to decide whether a
+  fresh chain-empty snapshot reflects reality (CHAIN_EMPTY → safe to void)
+  or a degraded API (CHAIN_UNKNOWN → never void).
+
+  The contract REQUIRES `chain_verified_at` to be a POSITIVE-observation
+  timestamp — i.e. it is updated only when the venue/chain confirmed the
+  position is held (rescue, size correction, sync). Negative observations
+  (position absent from snapshot) live in `Position.last_chain_absence_observed_at`
+  and MUST NOT advance `chain_verified_at`. Violating the contract inverts
+  CHAIN_EMPTY vs CHAIN_UNKNOWN: a recent absence-write would falsely prove
+  recent positive verification and force CHAIN_UNKNOWN, blocking legitimate
+  voids on a genuinely complete empty snapshot.
+
+  Producers of `chain_verified_at` (positive-only): see src/state/chain_reconciliation.py
+  lines 838, 897, 965, 1024.
 """
 from __future__ import annotations
 

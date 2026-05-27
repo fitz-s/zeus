@@ -35,13 +35,6 @@ def _read(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "PR A scaffold (Finding 1): Position.last_chain_absence_observed_at "
-        "does not yet exist; PR C0 (same session) adds it."
-    ),
-)
 def test_position_has_chain_absence_observation_field() -> None:
     """Position dataclass must have a typed absence-observation timestamp distinct
     from `chain_verified_at`."""
@@ -52,51 +45,45 @@ def test_position_has_chain_absence_observation_field() -> None:
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "PR A scaffold (Finding 1): chain_reconciliation.py:920 and :931 still write "
-        "`chain_verified_at = now` on absence branches. PR C0 switches these to "
-        "`last_chain_absence_observed_at`."
-    ),
-)
 def test_chain_reconciliation_absence_branches_do_not_advance_positive_timestamp() -> None:
-    """Walk chain_reconciliation.py AST; any assignment of `pos.chain_verified_at`
-    inside a function body that ALSO references a known absence-branch marker
-    (`local_only`, `exit_pending_missing`, "missing from chain") is a violation.
+    """Every `<expr>.chain_verified_at = ...` write in chain_reconciliation.py
+    must be in a POSITIVE-observation context. A positive context has
+    `chain_state` set to `"synced"` (or assigned from a positive-context
+    `rescued`/`corrected` object) within ±10 lines. An absence context
+    (`chain_state` set to `"local_only"` / `"exit_pending_missing"` /
+    `"chain_only"`) within ±10 lines is a violation.
 
-    Heuristic acknowledged: this catches the documented sites but is intentionally
-    conservative. After PR C0 those assignments become writes to
-    `last_chain_absence_observed_at` and this test passes.
+    Heuristic chosen because each reconcile branch is bounded by an explicit
+    chain_state mutation in immediate vicinity.
     """
     source = _read(CHAIN_RECON_PATH)
+    lines = source.splitlines()
     tree = ast.parse(source)
 
-    ABSENCE_MARKERS = ("local_only", "exit_pending_missing", "missing from chain", "not in chain")
+    POSITIVE_STATES = ("synced",)
+    ABSENCE_STATES = ("local_only", "exit_pending_missing", "chain_only")
 
     violations: list[str] = []
-    for node in ast.walk(tree):
-        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+    for sub in ast.walk(tree):
+        if not isinstance(sub, ast.Assign):
             continue
-        body_segment = ast.get_source_segment(source, node) or ""
-        # Only inspect functions that touch absence branches.
-        if not any(marker in body_segment for marker in ABSENCE_MARKERS):
-            continue
-        # In an absence-touching function, find every `pos.chain_verified_at = ...` write.
-        for sub in ast.walk(node):
-            if not isinstance(sub, ast.Assign):
+        for target in sub.targets:
+            if not (isinstance(target, ast.Attribute) and target.attr == "chain_verified_at"):
                 continue
-            for target in sub.targets:
-                if (
-                    isinstance(target, ast.Attribute)
-                    and target.attr == "chain_verified_at"
-                ):
-                    violations.append(
-                        f"{CHAIN_RECON_PATH.name}:{sub.lineno}: "
-                        f"{node.name}() writes chain_verified_at while body references absence markers"
-                    )
+            lineno = sub.lineno
+            lo = max(1, lineno - 10)
+            hi = min(len(lines), lineno + 10)
+            window = "\n".join(lines[lo - 1 : hi])
+            positive_hit = any(f'chain_state = "{s}"' in window for s in POSITIVE_STATES)
+            absence_hit = any(f'chain_state = "{s}"' in window for s in ABSENCE_STATES)
+            if absence_hit and not positive_hit:
+                violations.append(
+                    f"{CHAIN_RECON_PATH.name}:{lineno}: chain_verified_at write near "
+                    f"absence-state mutation (chain_state set to one of {ABSENCE_STATES})"
+                )
 
     assert not violations, (
         "chain_verified_at must represent POSITIVE chain observation only. "
+        "Use last_chain_absence_observed_at for absence reconciles. "
         "Detected absence-branch writes:\n  " + "\n  ".join(violations)
     )

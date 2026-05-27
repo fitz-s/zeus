@@ -374,7 +374,15 @@ class Position:
     # Chain reconciliation (Blueprint v2 §5)
     chain_state: str = ChainState.UNKNOWN.value
     chain_shares: float = 0.0
+    # `chain_verified_at` is a POSITIVE observation timestamp ONLY: it records
+    # when the venue/chain confirmed this position is held (rescue, size
+    # correction, sync). It MUST NOT be advanced when the chain snapshot does
+    # not see this position — that case uses `last_chain_absence_observed_at`.
+    # Finding 1 (PR C0, 2026-05-27): conflating positive and absence
+    # observations into one timestamp inverted CHAIN_EMPTY vs CHAIN_UNKNOWN
+    # semantics downstream. See docs/plans/2026-05-27-chain-local-position-model-refactor.md.
     chain_verified_at: str = ""
+    last_chain_absence_observed_at: str = ""
 
     # Token IDs for CLOB orderbook queries
     token_id: str = ""

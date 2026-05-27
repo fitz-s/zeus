@@ -917,7 +917,13 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
                 and pos.state in {"entered", "holding", "day0_window"}
             ):
                 pos.chain_state = "local_only"
-                pos.chain_verified_at = now
+                # Finding 1 (PR C0): this branch fires when the local position is
+                # ABSENT from the chain snapshot. Record absence, NOT positive
+                # verification — chain_verified_at must remain a positive-only marker
+                # so classify_chain_state() can correctly distinguish CHAIN_EMPTY
+                # (fresh complete snapshot saw nothing) from CHAIN_UNKNOWN
+                # (incomplete/stale snapshot).
+                pos.last_chain_absence_observed_at = now
                 stats["awaiting_chain_entry"] = stats.get("awaiting_chain_entry", 0) + 1
                 continue
             if _pending_exit_owned_by_exit_lifecycle(pos):
@@ -928,7 +934,10 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
                     pos.exit_state,
                 )
                 pos.chain_state = "exit_pending_missing"
-                pos.chain_verified_at = now
+                # Finding 1 (PR C0): exit-in-flight branch fires when the chain
+                # snapshot does NOT contain this position. Absence ≠ positive
+                # verification — see Position.chain_verified_at docstring.
+                pos.last_chain_absence_observed_at = now
                 stats["skipped_pending_exit"] = stats.get("skipped_pending_exit", 0) + 1
                 continue
             # Rule 2: Local but NOT on chain → VOID immediately
