@@ -565,6 +565,88 @@ def build_economic_close_canonical_write(
     return [event], projection
 
 
+def build_venue_position_observed_canonical_write(
+    position: Any,
+    *,
+    sequence_no: int,
+    source_module: str = "src.state.chain_reconciliation",
+) -> tuple[list[dict], dict]:
+    """Canonical event for balance-only rescue (Finding D0 / Part-2 audit, 2026-05-27).
+
+    Emitted when chain reconciliation detects a held venue balance for a
+    pending entry but CANNOT link the balance to a venue trade fact. Distinct
+    from `build_reconciliation_rescue_canonical_write` (trade-verified rescue):
+    the payload carries `fill_authority=venue_position_observed`,
+    `recovery_authority=balance_only`, `causality_status=UNVERIFIED`,
+    `training_eligible=false` so downstream consumers reading position_events
+    can distinguish degraded recovery from verified fill at the event-grammar
+    level. The position still folds to ACTIVE so monitor/exit can manage
+    exposure; the authority signal lives in the event payload + the runtime
+    Position.fill_authority field. A later cycle that obtains a real venue
+    trade fact appends a separate verified ENTRY_ORDER_FILLED / CHAIN_SYNCED
+    event upgrading the authority.
+    """
+    projection = build_position_current_projection(position)
+    if projection["phase"] != ACTIVE:
+        raise ValueError("venue_position_observed canonical builder requires an active position projection")
+
+    occurred_at = _non_empty(
+        getattr(position, "entered_at", ""),
+        getattr(position, "chain_verified_at", ""),
+        projection["updated_at"],
+    )
+    payload = json.dumps(
+        {
+            "status": "entered",
+            "source": "chain_reconciliation",
+            "reason": "balance_only_recovery",
+            "from_state": "pending_tracked",
+            "to_state": "entered",
+            "entry_order_id": getattr(position, "entry_order_id", "") or getattr(position, "order_id", ""),
+            "entry_method": getattr(position, "entry_method", ""),
+            "selected_method": getattr(position, "selected_method", "") or getattr(position, "entry_method", ""),
+            "applied_validations": list(getattr(position, "applied_validations", []) or []),
+            "entry_fill_verified": getattr(position, "entry_fill_verified", False),
+            "shares": getattr(position, "shares", None),
+            "cost_basis_usd": getattr(position, "cost_basis_usd", None),
+            "size_usd": getattr(position, "size_usd", None),
+            "condition_id": getattr(position, "condition_id", ""),
+            "rescue_condition_id": getattr(position, "condition_id", ""),
+            "order_status": getattr(position, "order_status", ""),
+            "chain_state": getattr(position, "chain_state", ""),
+            # PR D0 additions — explicit degraded-recovery signal:
+            "fill_authority": getattr(position, "fill_authority", "venue_position_observed"),
+            "recovery_authority": "balance_only",
+            "causality_status": "UNVERIFIED",
+            "training_eligible": False,
+        },
+        default=str,
+        sort_keys=True,
+    )
+    event = {
+        "event_id": f"{getattr(position, 'trade_id')}:venue_position_observed:{sequence_no}",
+        "position_id": getattr(position, "trade_id"),
+        "event_version": 1,
+        "sequence_no": sequence_no,
+        "event_type": "VENUE_POSITION_OBSERVED",
+        "occurred_at": occurred_at,
+        "phase_before": PENDING_ENTRY,
+        "phase_after": fold_lifecycle_phase(PENDING_ENTRY, ACTIVE).value,
+        "strategy_key": _strategy_key(position),
+        "decision_id": None,
+        "snapshot_id": _nullable(getattr(position, "decision_snapshot_id", "")),
+        "order_id": _nullable(getattr(position, "order_id", "")),
+        "command_id": None,
+        "caused_by": "balance_only_recovery",
+        "idempotency_key": f"{getattr(position, 'trade_id')}:venue_position_observed:{sequence_no}",
+        "venue_status": _nullable(getattr(position, "order_status", "")),
+        "source_module": source_module,
+        "env": _position_env(position),
+        "payload_json": payload,
+    }
+    return [event], projection
+
+
 def build_reconciliation_rescue_canonical_write(
     position: Any,
     *,

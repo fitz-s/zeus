@@ -2381,30 +2381,44 @@ def test_chain_reconciliation_rescue_updates_trade_lifecycle_row(tmp_path):
     assert "POSITION_OPEN_INTENT" in entry_event_types
     assert "ENTRY_ORDER_POSTED" in entry_event_types
 
-    # Rescue emission: post-T4.1b the canonical event_type is CHAIN_SYNCED
-    # with source_module='src.state.chain_reconciliation' and
-    # payload_json carrying the rescue metadata.
-    rescue_events = [e for e in events if e["event_type"] == "CHAIN_SYNCED"]
+    # Rescue emission: PR D0 (Finding D0, 2026-05-27) — the fixture has no
+    # linked venue trade fact, so the canonical event_type is now
+    # VENUE_POSITION_OBSERVED (degraded recovery) rather than the previous
+    # CHAIN_SYNCED. Same source_module + same metadata fields; the payload
+    # additionally carries recovery_authority/causality_status/training_eligible.
+    rescue_events = [e for e in events if e["event_type"] == "VENUE_POSITION_OBSERVED"]
     assert len(rescue_events) == 1
     rescue = rescue_events[0]
     assert rescue["source"] == "src.state.chain_reconciliation"
     assert rescue["order_id"] == "buy_123"
     details = rescue["details"]
     assert details["source"] == "chain_reconciliation"
-    assert details["reason"] == "pending_fill_rescued"
+    assert details["reason"] == "balance_only_recovery"
     assert details["from_state"] == "pending_tracked"
     assert details["to_state"] == "entered"
     assert details["entry_order_id"] == "buy_123"
-    assert details["entry_fill_verified"] is True
+    assert details["entry_fill_verified"] is True  # back-compat — runtime bool still set
     assert details["chain_state"] == "synced"
     assert details["condition_id"] == "cond-1"
+    assert details["recovery_authority"] == "balance_only"
+    assert details["causality_status"] == "UNVERIFIED"
+    assert details["training_eligible"] is False
 
 
 def test_chain_reconciliation_rescue_emits_exactly_one_stage_event(tmp_path):
     """T1.c-followup rewrite 2026-04-23: post-T4.1b, rescue emits exactly
-    one CHAIN_SYNCED canonical event on first rescue; repeat reconcile
-    calls on the same trade_id do not double-emit (idempotency guard
-    via position_current phase check + already-logged check)."""
+    one canonical event on first rescue; repeat reconcile calls on the
+    same trade_id do not double-emit (idempotency guard via
+    position_current phase check + already-logged check).
+
+    PR D0 (Finding D0, 2026-05-27): the fixture has no linked venue trade
+    fact, so the canonical event now uses event_type=VENUE_POSITION_OBSERVED
+    and reason='balance_only_recovery' (degraded-recovery path), not the
+    previous CHAIN_SYNCED / 'pending_fill_rescued' shape which applied
+    when a trade fact existed. Trade-verified rescues still emit
+    CHAIN_SYNCED via the unchanged builder; see the verified-path
+    coverage in test_chain_reconciliation_rescues_commanded_pending_entry_with_trade_fact.
+    """
     from src.state.chain_reconciliation import ChainPosition, reconcile
     from src.state.db import get_connection, init_schema, query_position_events
 
@@ -2442,10 +2456,12 @@ def test_chain_reconciliation_rescue_emits_exactly_one_stage_event(tmp_path):
 
     assert stats_first["rescued_pending"] == 1
     assert stats_second["rescued_pending"] == 0
-    # Exactly ONE canonical rescue event (idempotency).
+    # PR D0 (Finding D0, 2026-05-27): balance-only rescue (no linked trade
+    # fact) emits VENUE_POSITION_OBSERVED. Exactly ONE canonical event
+    # (idempotency); payload carries degraded-recovery markers.
     rescue_events = [
         e for e in events
-        if e["event_type"] == "CHAIN_SYNCED"
+        if e["event_type"] == "VENUE_POSITION_OBSERVED"
         and e["source"] == "src.state.chain_reconciliation"
     ]
     assert len(rescue_events) == 1
@@ -2454,12 +2470,13 @@ def test_chain_reconciliation_rescue_emits_exactly_one_stage_event(tmp_path):
     assert details["from_state"] == "pending_tracked"
     assert details["to_state"] == "entered"
     assert details["source"] == "chain_reconciliation"
-    assert details["reason"] == "pending_fill_rescued"
-    assert details["historical_entry_method"] == "ens_member_counting"
-    assert details["historical_selected_method"] == "ens_member_counting"
+    assert details["reason"] == "balance_only_recovery"
     assert details["shares"] == 25.0
     assert details["cost_basis_usd"] == 11.0
     assert details["condition_id"] == "cond-1"
+    assert details["recovery_authority"] == "balance_only"
+    assert details["causality_status"] == "UNVERIFIED"
+    assert details["training_eligible"] is False
 
 
 @pytest.mark.parametrize("exit_state", ["exit_intent", "sell_placed", "sell_pending", "retry_pending"])

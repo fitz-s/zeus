@@ -427,11 +427,28 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
         if not _canonical_rescue_baseline_available(getattr(position, "trade_id", "")):
             return False
 
-        from src.engine.lifecycle_events import build_reconciliation_rescue_canonical_write
+        # PR D0 (Finding D0 / Part-2 audit, 2026-05-27): emit distinct
+        # canonical event grammar for balance-only vs trade-verified rescue.
+        # When the position has no linked venue trade fact (legacy /
+        # pre-command-journal pending rows that still reach rescue), emit
+        # VENUE_POSITION_OBSERVED with recovery_authority=balance_only +
+        # training_eligible=false in the payload. Trade-verified rescues
+        # continue to emit CHAIN_SYNCED via the original builder.
+        from src.engine.lifecycle_events import (
+            build_reconciliation_rescue_canonical_write,
+            build_venue_position_observed_canonical_write,
+        )
         from src.state.db import append_many_and_project
 
+        has_trade_fact = _pending_entry_has_linked_fill_fact(position)
+        builder = (
+            build_reconciliation_rescue_canonical_write
+            if has_trade_fact
+            else build_venue_position_observed_canonical_write
+        )
+
         try:
-            events, projection = build_reconciliation_rescue_canonical_write(
+            events, projection = builder(
                 position,
                 sequence_no=_next_canonical_sequence_no(getattr(position, "trade_id", "")),
                 source_module="src.state.chain_reconciliation",
