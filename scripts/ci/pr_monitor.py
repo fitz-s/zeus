@@ -94,6 +94,12 @@ def _empty_state() -> dict[str, Any]:
     return {
         "reported_threads": set(),
         "reported_failures": set(),
+        # check_name → last-reported conclusion. Used to detect
+        # FAILURE → SUCCESS transitions and emit CI_RECOVERED.
+        # (Operator first-principle iteration 2026-05-26: silence after
+        # a reported failure looked broken; recovery IS a signal.)
+        "failed_checks": {},
+        "reported_recoveries": set(),
         # Float Unix timestamps. None until the first event/tick.
         "last_event_at": None,
         "last_stale_emit_at": None,
@@ -110,6 +116,8 @@ def load_state(path: Path) -> dict[str, Any]:
         return {
             "reported_threads": set(raw.get("reported_threads", [])),
             "reported_failures": set(raw.get("reported_failures", [])),
+            "failed_checks": dict(raw.get("failed_checks", {})),
+            "reported_recoveries": set(raw.get("reported_recoveries", [])),
             "last_event_at": raw.get("last_event_at"),
             "last_stale_emit_at": raw.get("last_stale_emit_at"),
             "monitor_started_at": raw.get("monitor_started_at"),
@@ -122,6 +130,8 @@ def save_state(path: Path, state: dict[str, Any]) -> None:
     serialized = {
         "reported_threads": sorted(state["reported_threads"]),
         "reported_failures": sorted(state["reported_failures"]),
+        "failed_checks": dict(state.get("failed_checks") or {}),
+        "reported_recoveries": sorted(state.get("reported_recoveries") or []),
         "last_event_at": state.get("last_event_at"),
         "last_stale_emit_at": state.get("last_stale_emit_at"),
         "monitor_started_at": state.get("monitor_started_at"),
@@ -373,6 +383,26 @@ def format_terminal_line(pr: int, state: str) -> str:
     return f"PR#{pr} TERMINAL state={state}"
 
 
+def format_ci_recovered_line(pr: int, check_name: str, prior_conclusion: str) -> str:
+    """
+    Emitted when a previously-reported FAILURE check is now SUCCESS.
+    Dedup by check_name — at most one recovery emission per check, per
+    monitor instance (state persisted in `reported_recoveries`).
+    Per first principle: signal change, not heartbeat.
+    """
+    return f"PR#{pr} CI_RECOVERED {check_name} (was {prior_conclusion})"
+
+
+def extract_currently_passing_checks(pr_data: dict[str, Any]) -> set[str]:
+    """Return names of checks whose conclusion is SUCCESS in the latest poll."""
+    out: set[str] = set()
+    for check in pr_data.get("statusCheckRollup") or []:
+        if check.get("conclusion") == "SUCCESS":
+            name = check.get("name") or check.get("context") or "unknown"
+            out.add(name)
+    return out
+
+
 def format_gh_error_line(pr: int, error: str) -> str:
     """
     Emitted when the underlying gh CLI fails (auth, network, PR-ref drift,
@@ -506,13 +536,56 @@ def tick_once(
             state["reported_threads"].add(tid)
             emitted_any = True
 
-        # 2. CI failures — dedup by name:conclusion (re-emits if check re-runs differently)
+        # 2. CI failures — dedup by name:conclusion, BUT a new failure after a
+        # recovery is itself meaningful: clear any prior reported_recoveries
+        # entry for the same check so the next recovery can re-fire, and clear
+        # stale name:conclusion dedup keys for that check (so the same failure
+        # mode coming back after a pass is reported again, not silently
+        # absorbed). Without this, a FAIL→PASS→FAIL cycle goes silent on the
+        # second FAIL — operator-tested scene 3 antibody (2026-05-26).
+        currently_failing_names = set()
         for failure in extract_ci_failures(pr_data):
-            key = f"{failure['name']}:{failure['conclusion']}"
+            name = failure["name"]
+            currently_failing_names.add(name)
+            key = f"{name}:{failure['conclusion']}"
+            failed_checks = state.setdefault("failed_checks", {})
+            # If we previously emitted a recovery for this check and it's
+            # failing again, clear the recovery dedup so the NEXT recovery
+            # can re-emit, AND clear the prior reported_failures key so the
+            # fresh failure re-emits.
+            recoveries: set[str] = state.setdefault("reported_recoveries", set())
+            if name in recoveries:
+                recoveries.discard(name)
+                # Drop any prior fail keys for THIS check so re-failure re-emits.
+                state["reported_failures"] = {
+                    k for k in state["reported_failures"]
+                    if not k.startswith(f"{name}:")
+                }
+            failed_checks[name] = failure["conclusion"]
             if key in state["reported_failures"]:
                 continue
             emit(format_ci_fail_line(pr, failure), as_json=as_json, kind="ci_fail")
             state["reported_failures"].add(key)
+            emitted_any = True
+
+        # 2b. CI_RECOVERED — previously-failed checks that are now SUCCESS.
+        # First-principle iteration (operator complaint twice 2026-05-26):
+        # silence after a reported failure is misread as "monitor broke" when
+        # the underlying check actually recovered. Recovery IS meaningful.
+        # Dedup per check; if the check fails again later, the failure branch
+        # above clears the recovery dedup so a future recovery can re-emit.
+        currently_passing = extract_currently_passing_checks(pr_data)
+        failed_checks = state.setdefault("failed_checks", {})
+        recovered_names = [
+            name for name in list(failed_checks.keys())
+            if name in currently_passing and name not in state.setdefault("reported_recoveries", set())
+        ]
+        for name in recovered_names:
+            prior = failed_checks.get(name, "?")
+            emit(format_ci_recovered_line(pr, name, prior),
+                 as_json=as_json, kind="ci_recovered")
+            state["reported_recoveries"].add(name)
+            failed_checks.pop(name, None)
             emitted_any = True
 
         # 3. Terminal

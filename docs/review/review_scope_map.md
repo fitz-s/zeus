@@ -28,6 +28,7 @@ src/execution/**
 src/venue/**                        — Polymarket V2 adapter, CLOB submit, on-chain
 src/main.py                         — live daemon entry
 src/engine/cycle_runner.py          — cycle orchestration
+src/engine/cycle_runtime.py         — submit/reprice/final-intent runtime boundary (FC-03)
 src/engine/evaluator.py             — candidate → decision pipeline
 src/engine/monitor_refresh.py       — monitoring lane
 src/contracts/settlement_semantics.py     — INV-06 enforcement, integer rounding
@@ -61,6 +62,9 @@ src/calibration/**                  — Platt fitting, manager, replay
 src/signal/**                       — P_raw, ensemble, Monte Carlo, ASOS rounding
 src/strategy/**                     — strategy_key grammar, market_phase, oracle wiring
 src/data/**                         — forecast ingest, fields, dual-track
+src/data/executable_forecast_reader.py    — executable forecast bundle/readiness reader (FC-01)
+src/data/forecast_extrema_authority.py    — local-day extrema contribution authority (FC-01)
+src/data/market_scanner.py                — Gamma/CLOB discovery + executable substrate (FC-02)
 src/ingest/**                       — event ingest boundary
 src/oracle/**                       — oracle interactions (resolution lookup, etc.)
 src/observability/**                — metrics, telemetry, structured events
@@ -170,6 +174,16 @@ config/AGENTS.md, config/reality_contracts/AGENTS.md  — config-area routers
 scripts/AGENTS.md                   — scripts router
 raw/AGENTS.md                       — raw data router
 ```
+
+### Effect-tier rule for registry manifests
+
+`architecture/test_topology.yaml`, `architecture/money_path_ci.yaml`,
+`architecture/source_rationale.yaml`, and `architecture/db_table_ownership.yaml`
+are Tier 3 by path, but may carry Tier 0 or Tier 1 **effect** when they
+register or route tests/gates/sources/tables for live-money surfaces. A
+change that retargets the `required_tests:` for a Tier 0 invariant or
+reassigns an owning DB is a Tier 0/Tier 1 effect. Review the affected
+runtime object, not only YAML syntax.
 
 ---
 

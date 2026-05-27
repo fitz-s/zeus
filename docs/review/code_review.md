@@ -353,6 +353,57 @@ is at least Important.
 
 ---
 
+## 10b. Bot Review Precision
+
+Automated review is useful only when it localizes the bug to the runtime
+object that can fail. Do not stop at the helper, fixture, or manifest if
+the risk is in a reader, daemon, executor, scheduler, or DB owner boundary.
+
+### Failure modes to detect
+
+- **WRONG_LAYER_GUARD**: classifier/helper test passes, production reader or executor still fails.
+- **SHADOW_PATH_UNCOVERED**: tests cover helper A while runtime calls helper B.
+- **TEST_DOES_NOT_HIT_RUNTIME_PATH**: unit test proves local behavior, not module boundary.
+- **MANIFEST_DRIFT**: table/source/test/workflow manifest points to wrong owner or test.
+- **ADVISORY_ONLY_GUARD**: warning exists but live-money invariant still lacks a relationship test.
+
+### Good bot finding shape
+
+`Severity | Path:function | Object | Invariant | Runtime failure | Missing guard | Required test`
+
+**Bad:** "Add a test for this."
+
+**Good:** "Important — `tests/test_market_discovery_full_coverage.py::R1`
+creates one event per city, so it does not catch the runtime bug where
+`refresh_executable_market_substrate_snapshots()` caps per event slug
+rather than per city. This is FC-02 / market discovery substrate. Add
+a fixture with two slugs for one city and assert the per-city cap is
+shared across both."
+
+### Historical review heuristics
+
+- **FC-01 forecast bundle/extrema**: latest snapshot/classifier proof is
+  not enough; inspect production bundle enumeration across
+  `source_run_coverage`, `readiness_state`, source_run, and snapshot.
+- **FC-02 market discovery**: helper tests are not enough; inspect
+  `_market_discovery_cycle()` and substrate breadth/cap behavior.
+- **FC-03 execution freshness**: selection-time snapshot is not
+  submit-time truth; inspect submit/reprice boundary and fresh
+  `snapshot_id` propagation.
+- **FC-04/05 scheduler registry**: guard must parse every wiring shape,
+  not only literal `add_job`.
+- **FC-06 source timing**: release-calendar safe-fetch is source contract,
+  not generic freshness.
+- **FC-07 source planes**: settlement, Day0, historical hourly, and
+  forecast-skill sources are not interchangeable.
+- **FC-08 schema/table ownership**: new table/column needs owner DB,
+  writer path, reader path, and ghost-table exclusion.
+- **FC-09 topology**: block structural hazards; warn on arrangement drift.
+- **FC-10 review scope**: Tier 0 path without paired relationship test
+  is not a clean pass.
+
+---
+
 ## 11. Reviewing migrations / schema changes
 
 `migrations/**` and `architecture/2026_04_02_architecture_kernel.sql` are

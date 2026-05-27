@@ -69,6 +69,29 @@
 <paths>
 ```
 
+### Review-routing inputs (helps bots localize root path)
+
+- Changed economic object(s):
+  ```
+  <e.g. executable price, forecast bundle authority, settlement_value, schema/DB ownership>
+  ```
+- Root runtime path(s) the reviewer should hit:
+  ```
+  <e.g. src/engine/cycle_runtime.py::_reprice_decision_from_executable_snapshot, src/data/executable_forecast_reader.py>
+  ```
+- Failure-chain risk (if any):
+  ```
+  <e.g. FC-03 stale-at-submit, FC-01 forecast bundle, FC-08 ghost table>
+  ```
+- Paired relationship test(s):
+  ```
+  <e.g. tests/test_exec_freshness_recapture.py, tests/test_executable_forecast_bundle_selection.py>
+  ```
+- Manifest / source / db_table / test_topology deltas:
+  ```
+  <architecture/*.yaml or .github/workflows/** that route or register tests/gates>
+  ```
+
 ### Explicit reviewer instruction
 
 > AI reviewers: prioritize the checked surfaces above before file-order

@@ -13,6 +13,14 @@ Group changed paths into Tiers using the path patterns below.
 Exhaust Tier 0 before Tier 1. Tier 2 verifies 0/1. Tier 3 only if budget
 remains.
 
+## Root target rule
+
+Findings name the runtime boundary that can fail: reader, daemon,
+executor, scheduler, DB writer/reader, or manifest consumer. Helper-only
+comments insufficient when caller boundary is the bug. Tier 0/1 invariant
+change without paired relationship test = Important (Critical when live
+submit / venue / settlement / schema truth can regress).
+
 ## Tier 0 — live money / runtime safety
 
 `src/execution/**`, `src/venue/**`, `src/main.py`,

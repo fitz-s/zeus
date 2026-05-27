@@ -10,31 +10,24 @@ as **authority review**, not prose review.
 
 ## What to check
 
-1. **Authority direction.** Does the change introduce contradiction
-   with another authority surface? Code outranks docs; canonical DB
-   outranks derived JSON; chain outranks portfolio cache; scoped
-   `src/**/AGENTS.md` outranks root for module-specific rules.
+1. **Authority direction.** Change introduces contradiction with another
+   authority? Code outranks docs; canonical DB outranks derived JSON;
+   chain outranks portfolio cache; scoped `src/**/AGENTS.md` outranks
+   root for module-specific rules.
 2. **Reader contract.** Each doc has a named reader (Codex, Copilot,
-   Claude session, human). Does the change preserve or break that
-   contract? Bloating `.github/copilot-instructions.md` past 4000
-   bytes breaks the Copilot contract — check `wc -c` (bytes).
-3. **Scope creep.** Does the doc grow beyond its job? A "review" doc
-   absorbing routing rules, a "skill" doc becoming a universal ritual,
-   a manifest absorbing prose are all scope creep. Important.
-4. **Stale citations.** If the doc points readers to other files
-   (`scripts/topology_doctor.py`, `architecture/invariants.yaml`,
-   scoped `AGENTS.md`), are those still current? Stale citation is
-   Important; a doc that confidently misroutes is more dangerous than
-   one that says "I don't know."
-5. **Sunset / staleness self-awareness.** Is the doc dated and aware
-   of when it can be retired?
+   Claude, human). `.github/copilot-instructions.md` >4000 bytes
+   breaks the Copilot contract — check `wc -c`.
+3. **Scope creep.** Review doc absorbing routing rules, skill doc
+   becoming universal ritual, manifest absorbing prose. Important.
+4. **Stale citations.** Pointers to other files still current? Stale
+   citation that confidently misroutes is worse than "I don't know."
+   Important.
+5. **Sunset / staleness.** Doc dated + aware when it can retire?
 6. **Contradiction with invariants.** A docs change that flips an
-   invariant statement is not a docs change — it is a runtime change
-   in disguise. Critical.
-7. **Mesh maintenance.** If a new directory was added under
-   `src/**` / `tests/**` / `docs/**` / `architecture/**`, does it have
-   a scoped `AGENTS.md`? Per root `AGENTS.md` §4 "Mesh maintenance,"
-   unregistered files are invisible to future agents.
+   invariant statement is a runtime change in disguise. Critical.
+7. **Mesh maintenance.** New dir under `src/**` / `tests/**` /
+   `docs/**` / `architecture/**` has scoped `AGENTS.md`? Unregistered
+   files are invisible to future agents.
 
 ## What to ignore
 
@@ -58,12 +51,21 @@ noise.
 
 `.agents/**`, `.claude/skills/**`, `.claude/agents/**`,
 `.claude/hooks/**`, `.claude/settings.json` affect agent behavior.
-Check for:
-- Inline anti-pattern warnings inside the file. Inline prose warnings
-  alone are insufficient to prevent ritual drift; structural enforcement
-  (path-scoped `applyTo`, mandatory triggers, scoped routers) is what
-  actually catches it. Do not weaken the prose, but do not rely on it.
-- New mandatory rituals (default-on hooks, always-active skills,
-  unconditional gates) that expand the proof tax for unrelated changes.
+Check for: inline prose warnings as sole defense (structural
+enforcement via `applyTo` / mandatory triggers / scoped routers is what
+catches drift); new mandatory rituals (default-on hooks, always-active
+skills, unconditional gates) that tax unrelated changes.
 
-Deeper context: `REVIEW.md`, `docs/review/code_review.md`.
+Deeper: `REVIEW.md`, `docs/review/code_review.md`.
+
+## Advisory vs structural topology
+
+Do NOT treat every docs/operations movement as runtime failure.
+Block / Important only when:
+- active registry/index/reader points to a missing path;
+- duplicate active authority appears;
+- workflow / script / test path reference breaks;
+- instruction file exceeds Copilot budget or lacks `applyTo`.
+
+Archive movement, sidecar `.gitignore` policy, and task-folder
+arrangement are advisory unless they break an active reader/enforcer.

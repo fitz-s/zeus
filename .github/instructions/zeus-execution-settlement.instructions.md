@@ -1,5 +1,5 @@
 ---
-applyTo: "src/execution/**/*.py,src/venue/**/*.py,scripts/*redeem*.py,scripts/*reconcile*.py"
+applyTo: "src/execution/**/*.py,src/venue/**/*.py,src/engine/cycle_runtime.py,src/main.py,scripts/*redeem*.py,scripts/*reconcile*.py"
 ---
 
 # Zeus execution + settlement review
@@ -54,3 +54,18 @@ Event append + projection fold must be in one transaction (INV-08).
 No commit between append and fold. DB COMMIT must precede derived JSON
 export (INV-17). Cross-DB writes (world + trades) must use ATTACH +
 SAVEPOINT, never independent connections (INV-37).
+
+## Fresh-at-submit boundary (FC-03)
+
+Selection-time executable snapshot is NOT submit-time executable truth.
+When `cycle_runtime.py` or reprice/final intent changes, check:
+- stale persisted snapshot recaptures one fresh CLOB snapshot or fails closed;
+- disabled/no-client path still raises stable `executable_snapshot_stale`;
+- fresh `snapshot_id` and sibling executable facts propagate to final intent;
+- since-closed / non-tradable CLOB market is rejected at capture or submit.
+
+Bad target: comment only on `_market_dict_from_snapshot` helper.
+Good target: `_reprice_decision_from_executable_snapshot` or final-intent
+build where stale/fresh snapshot identity crosses into execution.
+Required test: relationship test driving stale snapshot through reprice
+boundary, asserting recapture or `executable_snapshot_stale`.
