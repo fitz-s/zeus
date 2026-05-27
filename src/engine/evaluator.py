@@ -283,6 +283,68 @@ def _buy_entry_price_from_orderbook(token_id: str, orderbook: dict) -> dict[str,
     }
 
 
+_ENV_EVALUATOR_EQE_ENABLED = "ZEUS_EVALUATOR_ENTRY_QUOTE_EVIDENCE_ENABLED"
+
+
+def _evaluator_eqe_enabled() -> bool:
+    """Wave 5.5 (2026-05-27) feature gate.
+
+    When OFF (default), the evaluator does NOT construct EntryQuoteEvidence
+    and MarketAnalysis falls back to the pre-Wave-5 fixed-p_market bootstrap
+    path. When ON, the evaluator fetches the full orderbook once per token,
+    constructs typed EntryQuoteEvidence with depth-walked fill_price_walk +
+    fee + cost_uncertainty, and passes per-bin arrays to MarketAnalysis so
+    the bootstrap samples c_b ~ N(all_in, σ_market) per iteration.
+
+    Activating this flag SHIFTS edge calculations by the fee amount + walks
+    depth, so live trade count may change. Pair with the matching
+    ZEUS_UNIFIED_UNCERTAINTY_BUDGET flip (Wave 6) only after replay
+    validation per architecture/market_cost_seam_executable_uncertainty_2026_05_27.md
+    §Wave 6.
+    """
+    import os
+    return os.environ.get(_ENV_EVALUATOR_EQE_ENABLED, "0") in ("1", "true", "TRUE")
+
+
+def _buy_entry_evidence_from_clob(
+    clob,
+    token_id: str,
+    *,
+    target_shares: float,
+    fee_rate: float,
+    quote_age_ms: int = 0,
+):
+    """Wave 5.5: fetch the orderbook once and produce EntryQuoteEvidence.
+
+    Returns None when the orderbook is unavailable or empty (caller falls
+    back to legacy ``_buy_entry_price_from_clob``). Never raises — wiring
+    failures must not crash the evaluator loop.
+    """
+    if not _evaluator_eqe_enabled():
+        return None
+    from src.contracts.entry_quote_evidence import (
+        entry_quote_evidence_from_orderbook,
+    )
+    orderbook_getter = getattr(clob, "get_orderbook", None)
+    if not callable(orderbook_getter):
+        return None
+    try:
+        orderbook = orderbook_getter(token_id)
+    except Exception:
+        return None
+    try:
+        return entry_quote_evidence_from_orderbook(
+            token_id=token_id,
+            side="yes",
+            orderbook=orderbook,
+            target_shares=max(1.0, float(target_shares)),
+            fee_rate=max(0.0, min(0.999, float(fee_rate))),
+            quote_age_ms=int(max(0, quote_age_ms)),
+        )
+    except (ValueError, KeyError, TypeError):
+        return None
+
+
 def _buy_entry_price_from_clob(clob, token_id: str) -> dict[str, float | bool | None]:
     """Return conservative BUY entry price without requiring two-sided VWMP.
 
@@ -1509,10 +1571,17 @@ def _size_at_execution_price_boundary(
     graceful degrade (no haircut, WARNING logged).
     """
     # PR 7: apply microstructure haircut to kelly_multiplier before sizing.
+    # Wave 6 (INV-40, 2026-05-27): when the unified-uncertainty-budget flag is
+    # ON, the microstructure haircut's information has already entered Kelly
+    # via EntryQuoteEvidence.cost_uncertainty (spread/2 + slippage_bps/10000)
+    # → σ_market → edge_LCB. Multiplying haircut() here as well = the double-
+    # count INV-40 forbids. Flag OFF (default) preserves the legacy chain.
+    from src.strategy.kelly import _unified_uncertainty_budget_enabled
+    _wave6_collapse = _unified_uncertainty_budget_enabled()
     effective_kelly_multiplier = kelly_multiplier
-    if effective_context is not None:
+    if effective_context is not None and not _wave6_collapse:
         effective_kelly_multiplier = kelly_multiplier * effective_context.haircut()
-    else:
+    elif effective_context is None:
         from src.config import get_mode as _get_mode
         if _get_mode() == "live" and not allow_missing_context:
             # Fail-closed on live: raise so any caller that forgets context
@@ -4253,6 +4322,15 @@ def evaluate_candidate(
     p_market_no = np.zeros(len(bins))
     buy_no_quote_available = np.zeros(len(bins), dtype=bool)
     market_is_complete = True
+    # Wave 5.5: per-bin EntryQuoteEvidence arrays. Populated only when the
+    # evaluator-EQE feature flag is ON; otherwise stay None and MarketAnalysis
+    # falls back to the pre-Wave-5 fixed-p_market bootstrap path.
+    eqe_yes_list: list | None = (
+        [None] * len(bins) if _evaluator_eqe_enabled() else None
+    )
+    eqe_no_list: list | None = (
+        [None] * len(bins) if _evaluator_eqe_enabled() else None
+    )
     try:
         # The legacy flag name says "multibin", but the authority rule is now
         # broader: every executable buy_no needs native NO-token quote evidence.
@@ -4300,6 +4378,28 @@ def evaluate_candidate(
             bid_sz = float(yes_quote["bid_size"] or 0.0)
             ask_sz = float(yes_quote["ask_size"] or 0.0)
             p_market[idx] = float(yes_quote["price"])
+            # Wave 5.5: build typed EntryQuoteEvidence per token when the
+            # evaluator-EQE feature flag is ON. Best-effort: failure to
+            # construct (e.g. orderbook not depth-walkable, fee_rate lookup
+            # error) leaves the slot None and bootstrap falls back to the
+            # legacy fixed-p_market path for that bin.
+            if eqe_yes_list is not None:
+                try:
+                    _fee_rate = _fee_rate_for_token(clob, o.get("token_id", ""))
+                except Exception:
+                    _fee_rate = 0.05
+                # Conservative target-shares estimate: min_order_usd / best_ask.
+                # Captures the slippage a minimum-size order would face; Wave 6
+                # may iterate on this with the post-Kelly size for a re-eval.
+                _target_shares = max(
+                    1.0,
+                    float(limits.min_order_usd) / max(1e-6, float(p_market[idx])),
+                )
+                eqe_yes_list[idx] = _buy_entry_evidence_from_clob(
+                    clob, o["token_id"],
+                    target_shares=_target_shares,
+                    fee_rate=_fee_rate,
+                )
 
             # Injection Point 7: Data completeness - record microstructure snapshot
             if callable(microstructure_sink):
@@ -4332,6 +4432,21 @@ def evaluate_candidate(
                         no_quote = _buy_entry_price_from_clob(clob, no_token_id)
                         p_market_no[idx] = float(no_quote["price"])
                         buy_no_quote_available[idx] = True
+                        # Wave 5.5: NO-side EQE (mirrors yes-side wiring).
+                        if eqe_no_list is not None:
+                            try:
+                                _no_fee_rate = _fee_rate_for_token(clob, no_token_id)
+                            except Exception:
+                                _no_fee_rate = 0.05
+                            _no_target_shares = max(
+                                1.0,
+                                float(limits.min_order_usd) / max(1e-6, float(p_market_no[idx])),
+                            )
+                            eqe_no_list[idx] = _buy_entry_evidence_from_clob(
+                                clob, no_token_id,
+                                target_shares=_no_target_shares,
+                                fee_rate=_no_fee_rate,
+                            )
                     except Exception as no_exc:
                         logger.warning(
                             "Native NO quote unavailable for %s/%s; buy_no disabled for this bin: %s",
@@ -4781,6 +4896,8 @@ def evaluate_candidate(
         bias_reference=bias_reference,
         posterior_mode=MODEL_ONLY_POSTERIOR_MODE,
         transfer_logit_sigma=_transfer_logit_sigma,
+        entry_quote_evidence_yes=eqe_yes_list,
+        entry_quote_evidence_no=eqe_no_list,
         bootstrap_probability_sampler=(
             (lambda _analysis, _n_members: day0.p_vector(bins, n_mc=1, rng=_analysis._rng))
             if is_day0_mode

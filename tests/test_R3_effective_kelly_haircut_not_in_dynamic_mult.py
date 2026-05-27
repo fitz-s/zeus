@@ -1,14 +1,23 @@
 # Created: 2026-05-27
 # Last reused or audited: 2026-05-27
-# Authority basis: architecture/market_cost_seam_executable_uncertainty_2026_05_27.md §Wave1 + INV-40
-"""R3: Spread/depth uncertainty must appear ONCE in the sizing chain.
+# Authority basis: architecture/market_cost_seam_executable_uncertainty_2026_05_27.md §Wave6 + INV-40
+"""R3: spread/depth uncertainty must appear ONCE in the sizing chain.
 
-RED today — EffectiveKellyContext.haircut() multiplies into the size chain AND
-the same spread/depth signal feeds ci_width which also reduces dynamic_kelly_mult
-(D1: ci_width > 0.10 → ×0.7, > 0.15 → ×0.35 cumulative). Wave 6 collapses this
-to single uncertainty contribution via kelly_uncertainty_budget.
+Pre-Wave-6 the EffectiveKellyContext.haircut() spread/depth signal multiplied
+the Kelly multiplier AND the same spread information also reached
+dynamic_kelly_mult.ci_width as a haircut — double-count INV-40 forbids.
 
-Antibody for INV-40 (uncertainty_single_count).
+Wave 6 ships the collapse behind ``ZEUS_UNIFIED_UNCERTAINTY_BUDGET``:
+
+  - flag OFF (default): legacy double-count chain preserved bit-identically
+    (operator-promotion-only safety; no behavioural change for live capital
+    until operator explicitly flips the flag).
+  - flag ON: dynamic_kelly_mult skips ci_width haircuts; the boundary site
+    ``_size_at_execution_price_boundary`` skips the EffectiveKellyContext
+    multiplication. Soft-spread/depth uncertainty enters Kelly EXACTLY ONCE
+    via edge_LCB (via σ_market from Wave 5 + EntryQuoteEvidence).
+
+Antibody for INV-40 (uncertainty_single_count) — Wave 6 arm.
 """
 from __future__ import annotations
 
@@ -17,49 +26,92 @@ from decimal import Decimal
 import pytest
 
 from src.contracts.effective_kelly_context import EffectiveKellyContext
-
-
-@pytest.mark.xfail(
-    reason="Wave 6 — spread/depth haircut appears both in EffectiveKellyContext.haircut() "
-           "and in ci_width-driven dynamic_kelly_mult (D1 double-count). "
-           "Flip GREEN when kelly_uncertainty_budget unifies to single σ contribution.",
-    strict=True,
+from src.strategy.kelly import (
+    _ENV_UNIFIED_UNCERTAINTY_BUDGET,
+    _unified_uncertainty_budget_enabled,
+    dynamic_kelly_mult,
 )
-def test_r3_spread_uncertainty_appears_once_in_size_chain() -> None:
-    """Spread-driven haircut must appear exactly once — not in both EffectiveKellyContext AND ci_width.
 
-    Setup: spread_usd=0.10, bid=0.40, ask=0.50 → ci_width_proxy ≈ 0.22 > 0.15
-    Today: EKC.haircut() fires (× TIGHT/SHALLOW multiplier) AND ci_width > 0.15
-           triggers an additional ×0.35 in dynamic_kelly_mult. Double-count.
-    Post-Wave-6: ci_width path removed; EKC.haircut() is the sole mechanism.
+
+def _ci_width_legacy_haircut(ci_width: float) -> float:
+    """Reproduce dynamic_kelly_mult's pre-Wave-6 ci_width contribution."""
+    h = 1.0
+    if ci_width > 0.10:
+        h *= 0.7
+    if ci_width > 0.15:
+        h *= 0.5
+    return h
+
+
+class TestFlagOffPreservesLegacyDoubleCount:
+    """Default behaviour: ci_width haircut + EKC.haircut both fire.
+
+    This test PINS the legacy chain so an accidental Wave-6 default-on flip
+    (or a partial collapse) is caught immediately.
     """
-    spread_usd = Decimal("0.10")
-    bid = Decimal("0.40")
-    ask = Decimal("0.50")
 
-    ctx = EffectiveKellyContext(
-        spread_usd=spread_usd,
-        depth_at_best_ask=50,
-        order_type="FOK",
-    )
-    haircut_value = ctx.haircut()
-    assert 0.0 < haircut_value <= 1.0  # sanity
+    def test_flag_off_dynamic_mult_applies_ci_width_haircut(self, monkeypatch):
+        monkeypatch.delenv(_ENV_UNIFIED_UNCERTAINTY_BUDGET, raising=False)
+        m_baseline = dynamic_kelly_mult(base=0.25, ci_width=0.05)
+        m_wide = dynamic_kelly_mult(base=0.25, ci_width=0.20)
+        # Pre-Wave-6 chain: ×0.7 (>0.10) × ×0.5 (>0.15) = ×0.35
+        assert m_wide == pytest.approx(m_baseline * 0.35)
 
-    # The proxy ci_width a WIDE spread would produce in dynamic_kelly_mult
-    mid = float(bid + ask) / 2.0
-    ci_width_proxy = float(spread_usd) / mid  # ≈ 0.222
 
-    # Post-Wave-6 expectation: ci_width must NOT drive an additional multiplier
-    # because that uncertainty is already captured in EKC.haircut().
-    # Today ci_width_proxy > 0.15 → dynamic_kelly_mult returns 0.35 extra.
-    ci_width_extra_mult = 1.0  # expected post-fix
-    if ci_width_proxy > 0.15:
-        ci_width_extra_mult = 0.35  # actual today (D1 defect: ×0.7 × ×0.5)
-    elif ci_width_proxy > 0.10:
-        ci_width_extra_mult = 0.70  # actual today (D1 defect: ×0.7 only)
+class TestFlagOnSingleCountEnforced:
+    """Wave 6 ON: ci_width haircut is REMOVED from dynamic_kelly_mult, and
+    EffectiveKellyContext.haircut() is NOT multiplied at the boundary."""
 
-    assert ci_width_extra_mult == 1.0, (
-        f"ci_width_proxy={ci_width_proxy:.3f} causes dynamic_kelly_mult extra "
-        f"haircut ×{ci_width_extra_mult} in addition to EKC.haircut()={haircut_value:.3f}. "
-        "This is the D1/INV-40 double-count defect; Wave 6 must remove ci_width path."
-    )
+    def test_flag_on_dynamic_mult_skips_ci_width_haircut(self, monkeypatch):
+        monkeypatch.setenv(_ENV_UNIFIED_UNCERTAINTY_BUDGET, "1")
+        assert _unified_uncertainty_budget_enabled() is True
+        m_baseline = dynamic_kelly_mult(base=0.25, ci_width=0.05)
+        m_wide = dynamic_kelly_mult(base=0.25, ci_width=0.20)
+        assert m_wide == pytest.approx(m_baseline), (
+            "Wave 6 flag ON must remove the multiplicative ci_width haircut "
+            f"(legacy chain returned {m_baseline * 0.35:.6f}, Wave 6 should keep {m_baseline:.6f})"
+        )
+
+    def test_flag_on_effective_kelly_haircut_helper_unchanged(self, monkeypatch):
+        """The haircut value computed by EffectiveKellyContext.haircut() itself
+        is identical under both flag values — the collapse is about WHERE the
+        haircut is APPLIED, not what it returns. The boundary site
+        ``_size_at_execution_price_boundary`` is responsible for skipping the
+        multiplication when the flag is ON (covered in test_wave6_*.py)."""
+        ctx = EffectiveKellyContext(
+            spread_usd=Decimal("0.10"),
+            depth_at_best_ask=50,
+            order_type="FOK",
+        )
+        monkeypatch.setenv(_ENV_UNIFIED_UNCERTAINTY_BUDGET, "1")
+        h_on = ctx.haircut()
+        monkeypatch.setenv(_ENV_UNIFIED_UNCERTAINTY_BUDGET, "0")
+        h_off = ctx.haircut()
+        assert h_on == h_off
+        assert 0.0 < h_on <= 1.0
+
+
+class TestNoLegacyDoubleCountWithFlagOn:
+    """When the flag is ON and BOTH spread (via EKC.haircut) and ci_width
+    appear simultaneously, the multiplicative chain must reflect only ONE of
+    them. Today (flag OFF) the double-count is the load-bearing legacy chain;
+    flag ON removes the ci_width side, leaving EKC.haircut to do its job at
+    the boundary (which is now skipped too — so the duplicate is dropped on
+    BOTH sides, and the compensating widening lives in edge_LCB / σ_market).
+    """
+
+    def test_flag_on_ci_width_and_ekc_haircut_are_both_inactive(self, monkeypatch):
+        monkeypatch.setenv(_ENV_UNIFIED_UNCERTAINTY_BUDGET, "1")
+        # ci_width haircut removed → multiplier unchanged regardless of ci_width
+        m_no_ci = dynamic_kelly_mult(base=0.25, ci_width=0.0)
+        m_with_ci = dynamic_kelly_mult(base=0.25, ci_width=0.20)
+        assert m_no_ci == pytest.approx(m_with_ci)
+
+        # EKC.haircut() helper itself still returns its bucket value (it's
+        # informational; the boundary site no longer multiplies it).
+        ctx = EffectiveKellyContext(
+            spread_usd=Decimal("0.10"),
+            depth_at_best_ask=50,
+            order_type="FOK",
+        )
+        assert ctx.haircut() < 1.0  # informational only under flag ON

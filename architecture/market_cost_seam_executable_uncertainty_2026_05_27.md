@@ -299,12 +299,29 @@ Every uncertainty source contributes to size reduction EXACTLY ONCE — either v
 ## Execution order
 
 ```
-Wave 0  ──► Wave 1  ──► Wave 2 ──► Wave 3 ──► Wave 5 ──► Wave 6 ──► Wave 7
-                  │                              │
-                  └──► Wave 4 ────────────── ────┘
+Wave 0  ──► Wave 1  ──► Wave 2 ──► Wave 3 ──► Wave 5 ──► Wave 5.5 ──► Wave 6 ──► Wave 7
+                  │                              │                       │
+                  └──► Wave 4 ─────────────── ──┘                        │
+                                       Stage-promotion gates ────────────┘
 ```
 
 Wave 4 (Stage B activation) is independent of Waves 2/3 boundary work and can land in parallel.
+
+**Wave 5.5 (added 2026-05-27, advisor-flagged dependency):** evaluator-wiring of `EntryQuoteEvidence`. Wave 5 made `MarketAnalysis` capable of consuming EQE-driven `σ_market` but the evaluator did not actually construct EQE — so live trades stayed on the legacy fixed-`p_market` bootstrap path. Wave 5.5 fixes this with a feature-flagged wiring (`ZEUS_EVALUATOR_ENTRY_QUOTE_EVIDENCE_ENABLED`, default OFF). Operator promotes when ready; default OFF preserves pre-Wave-5 bootstrap behaviour bit-identically.
+
+### Staged promotion contract
+
+Three stages, each operator-flippable:
+
+| Stage | EQE wiring | Unified budget | Effect |
+|---|---|---|---|
+| 0 | OFF (default) | OFF (default) | Pre-Wave-5 bootstrap + legacy 15-multiplier chain (current production behaviour) |
+| 1 | ON | OFF | σ_market enters edge_LCB AND multiplier chain still active = double-count, more conservative |
+| 2 | ON | ON | σ_market in edge_LCB only; ci_width + EffectiveKellyContext.haircut() collapsed; single-count math correct |
+
+Stage 1 is the safe observation tier: total size strictly less-than-or-equal to Stage 0 because we add one σ source without removing any multiplier. Operator observes for N days. Stage 2 removes the duplicate multipliers; size becomes equal-or-larger than Stage 1 (compensating widening from edge_LCB matches removed haircuts).
+
+Stage 2 without Stage 1 is UNSAFE — removes multipliers without compensating edge_LCB widening. The plan + INV-40 antibody enforce the ordering.
 
 ## Acceptance for declaring upgrade complete
 

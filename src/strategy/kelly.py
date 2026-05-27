@@ -369,6 +369,35 @@ def city_kelly_multiplier(city: str | None) -> float:
     return _CITY_KELLY_CACHE.get(name, 1.0)
 
 
+_ENV_UNIFIED_UNCERTAINTY_BUDGET = "ZEUS_UNIFIED_UNCERTAINTY_BUDGET"
+
+
+def _unified_uncertainty_budget_enabled() -> bool:
+    """Wave 6 (2026-05-27, INV-40) feature gate.
+
+    When OFF (default), dynamic_kelly_mult applies the legacy ci_width
+    multiplicative haircuts AND ``_size_at_execution_price_boundary``
+    multiplies ``effective_context.haircut()`` into the Kelly multiplier
+    — even though the same uncertainty also reaches edge_ci_lower when
+    Wave 5+5.5 are wired (double-count, conservative).
+
+    When ON, the multiplicative haircuts are SKIPPED so the soft-uncertainty
+    contribution enters Kelly EXACTLY ONCE via edge_LCB (per INV-40). Hard
+    vetoes (oracle_penalty=0, strategy_phase=0, executable_mask=0) stay
+    multiplicative.
+
+    SAFETY-DIRECTION CONTRACT: flag ON must produce equal-or-smaller sizes
+    than flag OFF on the SAME inputs when σ_market has widened edge_LCB
+    sufficiently. The flag is meant to REMOVE the over-conservative double-
+    count, not introduce new exposure. Pair with
+    ``ZEUS_EVALUATOR_ENTRY_QUOTE_EVIDENCE_ENABLED`` (Wave 5.5) activation.
+    See architecture/market_cost_seam_executable_uncertainty_2026_05_27.md
+    §Wave 6 + docs/reference/zeus_math_spec.md §15.8.
+    """
+    import os
+    return os.environ.get(_ENV_UNIFIED_UNCERTAINTY_BUDGET, "0") in ("1", "true", "TRUE")
+
+
 def dynamic_kelly_mult(
     base: float = 0.25,
     ci_width: float = 0.0,
@@ -398,10 +427,16 @@ def dynamic_kelly_mult(
     m = base
 
     # CI width: wider CI → less confident → smaller size
-    if ci_width > 0.10:
-        m *= 0.7
-    if ci_width > 0.15:
-        m *= 0.5  # Cumulative: 0.25 * 0.7 * 0.5 = 0.0875
+    # Wave 6 (INV-40, 2026-05-27): when the unified-uncertainty-budget flag
+    # is ON, ci_width information already enters Kelly via edge_LCB (the
+    # bootstrap ci_lower of p_LCB - c_UCB). Applying a multiplicative
+    # haircut on top is the double-count INV-40 forbids. Flag OFF (default)
+    # preserves the legacy chain bit-identically until the operator promotes.
+    if not _unified_uncertainty_budget_enabled():
+        if ci_width > 0.10:
+            m *= 0.7
+        if ci_width > 0.15:
+            m *= 0.5  # Cumulative: 0.25 * 0.7 * 0.5 = 0.0875
 
     # Lead time: longer lead → less reliable forecast
     if lead_days >= 5:

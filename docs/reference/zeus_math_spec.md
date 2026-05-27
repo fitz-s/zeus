@@ -909,6 +909,55 @@ over selected leg combinations of an exclusive-outcome payoff matrix; default `m
 
 **Status (2026-05-27):** plan + spec amendment + INV registration only; Waves 1-7 pending.
 
+### 15.8 Unified uncertainty budget (Wave 6 math)
+
+**Authority:** `architecture/market_cost_seam_executable_uncertainty_2026_05_27.md` §Wave 6.
+
+**Claim.** Under the post-Wave-5 + Wave-5.5 pipeline (σ_market sampled in `_bootstrap_bin`; EntryQuoteEvidence wired in evaluator), the ci_width multiplicative haircuts in `dynamic_kelly_mult` (×0.7 above 0.10; ×0.5 above 0.15) and the EffectiveKellyContext.haircut() spread/depth multiplier in `_size_at_execution_price_boundary` are mathematically REDUNDANT — the same soft uncertainty also enters `edge_LCB` via the bootstrap CI lower bound — so applying them on top of edge_LCB is a double-count INV-40 forbids.
+
+**Setup.** Let `e` be the edge random variable computed inside `_bootstrap_bin`:
+```
+e_i = p_post,i - c_b,i
+p_post,i = π(ens_resample_i, platt_resample_i, lead, ...)   ← forecast σ
+c_b,i = c_mean + ε_market,i,   ε_market ~ N(0, σ_market²)     ← market σ (Wave 5)
+```
+Then by construction:
+```
+edge_LCB = quantile_5%(e_i)
+Var(e) ≈ Var(p_post) + Var(c_b)   ← independence by RNG-stream split (Wave 5)
+       = σ_forecast² + σ_market²
+```
+So `edge_LCB` is a single-pass aggregation of forecast σ AND market σ.
+
+**Legacy chain.** Pre-Wave-6 Kelly size = `f*(p_post, c) × kelly_mult` where `kelly_mult` ALSO carries multiplicative haircuts driven by the SAME σ_forecast (via `ci_width`) and σ_market (via `EffectiveKellyContext.haircut(spread, depth)`). Numerically:
+```
+size_legacy = f*(p_post, c) × base × h_ci(σ_forecast) × h_micro(σ_market) × {hard vetoes}
+```
+
+**Unified budget (Wave 6 flag ON).** Kelly receives the bootstrap CI lower bound IMPLICITLY via the standard edge formula on the same (p_post, c) inputs because c_b is already σ_market-sampled. Removing `h_ci` and `h_micro` from `kelly_mult` gives:
+```
+size_unified = f*(p_post, c) × base × {hard vetoes}
+```
+where the soft σ contribution lives entirely in the bootstrap-CI side of the pipeline.
+
+**Equivalence direction.** `size_unified ≥ size_legacy` for every input because we removed `0 < h_ci, h_micro ≤ 1` multipliers without adding any new haircut. The compensating EQUIVALENT-RISK widening comes from the bootstrap edge floor being already wider than the pre-Wave-5 fixed-c_b CI. Operator promotes only after replay validates that:
+```
+σ_market and σ_forecast in edge_LCB ≥ implied haircut reduction from h_ci × h_micro
+```
+i.e. the bootstrap-side widening is at least as large as the multiplicative shrinkage that was removed. Equality holds asymptotically (large n_bootstrap + correctly calibrated σ_market); strict inequality (size_unified > size_legacy) indicates over-conservative pre-Wave-6 sizing.
+
+**Hard vetoes preserved.** `oracle_penalty` (METRIC_UNSUPPORTED → 0), `kelly_for_phase` (PHASE_BLOCKED → 0), `executable_mask` (non-executable → 0), `MissingEffectiveContextError` (live without context → raise) all remain multiplicative `{0, 1}` gates. INV-40 only forbids double-count of SOFT σ contributions.
+
+**Activation gates.**
+1. `ZEUS_EVALUATOR_ENTRY_QUOTE_EVIDENCE_ENABLED=1` — evaluator constructs EntryQuoteEvidence per token and passes per-bin arrays to MarketAnalysis. σ_market enters `_bootstrap_bin`.
+2. `ZEUS_UNIFIED_UNCERTAINTY_BUDGET=1` — `dynamic_kelly_mult` skips ci_width haircuts; `_size_at_execution_price_boundary` skips EffectiveKellyContext multiplier. Single-count enforced.
+
+Flipping (2) without (1) is unsafe (removes multipliers without widening edge_LCB). The evaluator-wiring flag must lead. The plan doc §Wave 5.5 + §Wave 6 documents the staged promotion.
+
+**Acceptance for §15.8 being closed:** R3 GREEN under flag ON; replay before/after on stored decision_log: average `size_unified / size_legacy ∈ [1.0, 1.2]` (compensating widening matches removed haircuts within tolerance); zero `MissingEffectiveContextError` raises under flag ON in shadow.
+
+**Status (2026-05-27):** Wave 5.5 wiring + Wave 6 collapse implemented behind both feature flags; both default OFF; R3 antibody GREEN under flag ON; live promotion gated on operator replay validation.
+
 ---
 
 ## 16. What this spec does NOT specify
