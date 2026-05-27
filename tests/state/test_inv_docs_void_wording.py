@@ -16,10 +16,16 @@ Scanned files:
   - docs/reference/zeus_execution_lifecycle_reference.md
   - src/state/chain_reconciliation.py (module docstring + Rule-2 comment)
 
-Rule: any line containing "void" (case-insensitive) within ±10 lines of
-"NOT on chain" / "not on chain" MUST also have "CHAIN_EMPTY" or
+Rule: any line containing "void" (case-insensitive) within ±WINDOW lines
+(see constant below — currently ±30, paragraph-scale not statement-scale)
+of "NOT on chain" / "not on chain" MUST also have "CHAIN_EMPTY" or
 "chain_empty" within the same window. Sites that intentionally describe
 the void path itself must therefore reference the completeness gate.
+
+Window sizing rationale: ±10 was too narrow (false positives on counter
+increments inside void blocks); ±30 is paragraph-scale and catches drift
+without over-firing on incidental `voided += 1` style counters. Update
+the failure message + this docstring together if WINDOW changes.
 """
 from __future__ import annotations
 
@@ -89,7 +95,7 @@ def test_void_wording_always_names_chain_empty_precondition() -> None:
 
     assert not violations, (
         "'void' near 'not on chain' must be qualified by CHAIN_EMPTY/chain_empty "
-        "within ±10 lines (Finding 10 / PR F — prevent regression to unsafe "
+        f"within ±{WINDOW} lines (Finding 10 / PR F — prevent regression to unsafe "
         '"VOID immediately" wording that ignores degraded snapshots).\n'
         "Violations:\n  " + "\n  ".join(violations)
     )

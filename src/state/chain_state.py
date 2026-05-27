@@ -18,8 +18,15 @@ Timestamp contract (Finding 1, PR C0, 2026-05-27):
   recent positive verification and force CHAIN_UNKNOWN, blocking legitimate
   voids on a genuinely complete empty snapshot.
 
-  Producers of `chain_verified_at` (positive-only): see src/state/chain_reconciliation.py
-  lines 838, 897, 965, 1024.
+  Producers of `chain_verified_at` (positive-only): the rescue branch and
+  size-correction branch in `src/state/chain_reconciliation.py:reconcile()`.
+  Concrete line numbers intentionally omitted because they drift with every
+  edit to the file; grep for `chain_verified_at = ` to enumerate writers,
+  and confirm each lives inside a branch where `chain_state` is set to
+  `"synced"` (positive observation) rather than `"local_only"` /
+  `"exit_pending_missing"` (absence). The
+  `test_chain_reconciliation_absence_branches_do_not_advance_positive_timestamp`
+  test enforces that invariant statically.
 """
 from __future__ import annotations
 
