@@ -316,7 +316,7 @@ def run_parallel_rebuild(
                         # 'none' baseline row on the 8-col UNIQUE key (which excludes
                         # error_model_family). The baseline row already represents
                         # this fail-open snapshot; skip + count.
-                        if applied_family != error_model_family:
+                        if applied_family != (error_model_family or "none"):
                             stats.snapshots_fail_open_skipped += 1
                             continue
                         _write_snapshot_pairs_v2(
