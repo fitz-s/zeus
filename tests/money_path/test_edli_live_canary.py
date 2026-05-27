@@ -513,6 +513,7 @@ def test_live_adapter_submit_enabled_canary_enabled_calls_executor_mock(monkeypa
             get_current_level=lambda: RiskLevel.GREEN,
             real_order_submit_enabled=True,
             live_canary_enabled=True,
+            durable_submit_outbox_enabled=True,
             executor_submit=_submit,
             pre_submit_authority_provider=_pre_submit_authority_provider,
         )
@@ -526,6 +527,50 @@ def test_live_adapter_submit_enabled_canary_enabled_calls_executor_mock(monkeypa
         assert conn.execute("SELECT reservation_status FROM edli_live_cap_usage").fetchone()["reservation_status"] == "CONSUMED"
         assert _cap_transition_status(receipt) == "CONSUMED"
         assert _cap_transition_projection_status(receipt) == "CONSUMED"
+    finally:
+        adapter.build_event_bound_no_submit_receipt = original_build
+
+
+def test_live_adapter_blocks_real_submit_without_durable_outbox(monkeypatch):
+    from src.engine import event_reactor_adapter as adapter
+    from src.engine.event_bound_final_intent import EventBoundExecutorSubmitResult
+    from src.events.reactor import EventSubmissionReceipt
+    from src.riskguard.risk_level import RiskLevel
+    from tests.decision_kernel.no_submit_fixtures import build_test_no_submit_proof_bundle
+
+    event = _forecast_event()
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    called = {"count": 0}
+    accepted = replace(
+        _accepted_receipt(event),
+        decision_proof_bundle=build_test_no_submit_proof_bundle(event, _accepted_receipt(event), decision_time=datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc)),
+    )
+    original_build = adapter.build_event_bound_no_submit_receipt
+    adapter.build_event_bound_no_submit_receipt = lambda *_args, **_kwargs: accepted
+
+    try:
+        def _submit(_final_intent, _command):
+            called["count"] += 1
+            return EventBoundExecutorSubmitResult(status="SUBMITTED")
+
+        submit = adapter.event_bound_live_adapter_from_trade_conn(
+            conn,
+            live_cap_conn=conn,
+            get_current_level=lambda: RiskLevel.GREEN,
+            real_order_submit_enabled=True,
+            live_canary_enabled=True,
+            executor_submit=_submit,
+            pre_submit_authority_provider=_pre_submit_authority_provider,
+        )
+
+        receipt = submit(event, datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc))
+
+        assert called["count"] == 0
+        assert receipt.proof_accepted is False
+        assert receipt.reason == "EDLI_DURABLE_SUBMIT_OUTBOX_REQUIRED"
+        assert _table_count(conn, "edli_live_order_events") == 0
+        assert _table_count(conn, "edli_live_cap_usage") == 0
     finally:
         adapter.build_event_bound_no_submit_receipt = original_build
 
@@ -553,6 +598,7 @@ def test_live_adapter_records_rejected_fixture_response(monkeypatch):
             get_current_level=lambda: RiskLevel.GREEN,
             real_order_submit_enabled=True,
             live_canary_enabled=True,
+            durable_submit_outbox_enabled=True,
             executor_submit=lambda _final_intent, _command: EventBoundExecutorSubmitResult(
                 status="REJECTED",
                 reason_code="VENUE_REJECTED",
@@ -599,6 +645,7 @@ def test_live_adapter_records_timeout_unknown_fixture_response(monkeypatch):
             get_current_level=lambda: RiskLevel.GREEN,
             real_order_submit_enabled=True,
             live_canary_enabled=True,
+            durable_submit_outbox_enabled=True,
             executor_submit=lambda _final_intent, _command: EventBoundExecutorSubmitResult(
                 status="TIMEOUT_UNKNOWN",
                 reason_code="SUBMIT_TIMEOUT",
@@ -660,6 +707,7 @@ def test_live_adapter_records_post_submit_unknown_as_pending_reconcile(monkeypat
             get_current_level=lambda: RiskLevel.GREEN,
             real_order_submit_enabled=True,
             live_canary_enabled=True,
+            durable_submit_outbox_enabled=True,
             executor_submit=lambda _final_intent, _command: EventBoundExecutorSubmitResult(
                 status="POST_SUBMIT_UNKNOWN",
                 reason_code="SDK_EXCEPTION_AFTER_SEND",

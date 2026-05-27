@@ -260,6 +260,7 @@ def event_bound_live_adapter_from_trade_conn(
     tiny_live_max_notional_usd: float = 5.0,
     executor_submit: Callable[[DecisionCertificate, DecisionCertificate], EventBoundExecutorSubmitResult] | None = None,
     pre_submit_authority_provider: Callable[[DecisionCertificate, DecisionCertificate, datetime], PreSubmitAuthorityWitness] | None = None,
+    durable_submit_outbox_enabled: bool = False,
 ) -> Callable[[OpportunityEvent, datetime], EventSubmissionReceipt]:
     """Build the event-bound live certificate chain up to the executor boundary.
 
@@ -287,6 +288,14 @@ def event_bound_live_adapter_from_trade_conn(
                 event.event_id,
                 event.causal_snapshot_id,
                 reason="LIVE_CANARY_DISABLED",
+                proof_accepted=False,
+            )
+        if real_order_submit_enabled and not durable_submit_outbox_enabled:
+            return EventSubmissionReceipt(
+                False,
+                event.event_id,
+                event.causal_snapshot_id,
+                reason="EDLI_DURABLE_SUBMIT_OUTBOX_REQUIRED",
                 proof_accepted=False,
             )
         if real_order_submit_enabled and executor_submit is None:
