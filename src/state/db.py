@@ -894,7 +894,7 @@ def get_connection(
 # CI hook scripts/check_schema_version.py diffs the sqlite_master hash of
 # a fresh-init DB against tests/state/_schema_pinned_hash.txt and fails
 # the PR if SCHEMA_VERSION did not change in lockstep.
-SCHEMA_VERSION = 36  # 2026-05-24 ENS-REFIT: calibration_pairs_v2 + platt_models_v2 gain error_model_family TEXT NOT NULL DEFAULT 'none' (predictive-error provenance tag; 'none' = byte-identical to legacy)
+SCHEMA_VERSION = 37  # 2026-05-26 FT-SHIP F2: init_schema also creates model_bias_ens_v2 (was script-only before). Required so runtime read_bias_model() does not crash on fresh world.db when full_transport_live_enabled is ON.
 
 
 def init_schema(
@@ -2584,6 +2584,13 @@ def init_schema(
     # Phase 2: apply v2 schema (idempotent — safe to run on every boot).
     from src.state.schema.v2_schema import apply_v2_schema as _apply_v2_schema
     _apply_v2_schema(conn, forecast_tables=False)
+
+    # Zeus #64 FT-ship F2 (2026-05-26): ensure model_bias_ens_v2 exists on every
+    # init_schema target so monitor_refresh + evaluator can read FT models at runtime
+    # without crashing on "no such table". Idempotent CREATE TABLE IF NOT EXISTS.
+    # Authority: docs/operations/FT_SHIP_EXECUTION_LEDGER_2026-05-25.md F2.
+    from src.calibration.ens_bias_repo import init_ens_bias_schema as _init_ens_bias_schema
+    _init_ens_bias_schema(conn)
 
     conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
