@@ -179,6 +179,36 @@ class VenuePositionFact:
 # --------------------------------------------------------------------------- #
 
 
+class ChainOnlyReviewState(str, Enum):
+    """Lifecycle status for a `ChainOnlyFact` (Finding D1, Part-2 audit, 2026-05-27).
+
+    Replaces the implicit "any chain_only suppression row blocks entries
+    forever" semantics with a typed lifecycle that mirrors the operator
+    workflow:
+
+      UNRESOLVED   — chain-only token detected; entry gate fires.
+      EXPIRED      — chain-only persisted past the 48h review window;
+                     entry gate continues to fire but the row is flagged
+                     for operator escalation. (Auto-expiry NEVER clears
+                     the fact — only operator action does.)
+      ACKNOWLEDGED — operator has reviewed and chosen to keep the fact
+                     active (e.g. waiting for redeem); equivalent to
+                     UNRESOLVED for gating purposes but reduces noise in
+                     ops dashboards.
+      RESOLVED     — operator cleared the fact (suppression_reason flipped
+                     to "operator_quarantine_clear") or the token settled
+                     (`settled_position`). Entry gate does NOT fire.
+    """
+
+    UNRESOLVED = "unresolved"
+    EXPIRED = "expired"
+    ACKNOWLEDGED = "acknowledged"
+    RESOLVED = "resolved"
+
+
+CHAIN_ONLY_REVIEW_WINDOW_HOURS: float = 48.0
+
+
 @dataclass(frozen=True)
 class ChainOnlyFact:
     """Venue token inventory with NO matching local intent (Finding 3).
@@ -190,6 +220,12 @@ class ChainOnlyFact:
     These tokens are review queue entries, not tradable positions. They
     block entry only via an explicit review gate, not by polluting the
     runtime portfolio.
+
+    PR D1 (Finding D1, Part-2 audit, 2026-05-27): adds `review_state` so
+    the entry gate and operator dashboards can discriminate unresolved
+    (entry-blocking) from resolved/expired (informational) facts.
+    `review_state` is derived from the underlying `suppression_reason` +
+    `first_seen_at` age by `src.state.portfolio._chain_only_fact_from_row`.
     """
 
     token_id: str
@@ -199,10 +235,24 @@ class ChainOnlyFact:
     cost_basis: float
     first_seen_at: str
     last_seen_at: str
+    # PR D1: lifecycle status; default UNRESOLVED so legacy producers
+    # that don't populate this field still block entries (fail-safe).
+    review_state: ChainOnlyReviewState = ChainOnlyReviewState.UNRESOLVED
 
     @property
     def is_review_required(self) -> bool:
         return True
+
+    @property
+    def blocks_entry(self) -> bool:
+        """True iff this fact should block new entries this cycle.
+
+        UNRESOLVED + EXPIRED + ACKNOWLEDGED all block. Only RESOLVED clears.
+        Expiry is an escalation marker, NOT auto-resolution — leaving an
+        expired chain-only fact in place is a stronger operator signal,
+        not a weaker one.
+        """
+        return self.review_state != ChainOnlyReviewState.RESOLVED
 
 
 @dataclass(frozen=True)
@@ -341,6 +391,8 @@ __all__ = [
     "FillAuthority",
     "CausalityStatus",
     "RecoveryAuthority",
+    "ChainOnlyReviewState",
+    "CHAIN_ONLY_REVIEW_WINDOW_HOURS",
     "LocalIntent",
     "VenueOrderFact",
     "VenueTradeFact",

@@ -134,10 +134,13 @@ def _semantic_value(value) -> str:
 def _has_quarantined_positions(portfolio: PortfolioState) -> bool:
     # PR C2 (Finding 3, 2026-05-27): also consult portfolio.chain_only_facts
     # for mid-cycle chain-only-quarantine detection. Chain reconcile now
-    # emits typed ChainOnlyFact entries instead of synthetic Position rows;
-    # this gate must observe both signals so a new chain-only token detected
-    # mid-cycle still blocks entry the same cycle it was detected.
-    if getattr(portfolio, "chain_only_facts", None):
+    # emits typed ChainOnlyFact entries instead of synthetic Position rows.
+    # PR D1 (Finding D1, Part-2 audit, 2026-05-27): gate fires only on facts
+    # whose review_state still blocks entry (UNRESOLVED / EXPIRED /
+    # ACKNOWLEDGED). RESOLVED facts (operator-cleared or settled) do NOT
+    # block — see ChainOnlyFact.blocks_entry.
+    chain_only_facts = getattr(portfolio, "chain_only_facts", None) or []
+    if any(getattr(fact, "blocks_entry", True) for fact in chain_only_facts):
         return True
     return any(
         _semantic_value(getattr(pos, "state", "")) == "quarantined"
