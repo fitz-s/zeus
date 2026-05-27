@@ -173,10 +173,28 @@ scripts/ci/tier0_pairing_gate.py         → fold into structural_blockers (one 
 - `.github/workflows/topology-context-required.yml`
 - ONLY no_override hazards block (≤6 enumerated rules).
 
-**Phase E — Gate router (PR #5, ~400 LOC).**
-- `scripts/ci/context_pack_gate_router.py`
-- Wire into `topology-context-required.yml`
-- Selected relationship tests per surface.
+**Phase E — Gate router + CI_RECOVERED monitor event (PR #5, ~600 LOC).**
+- `scripts/ci/context_pack_gate_router.py` — pure-stdlib CLI. Reads
+  a Context Pack JSON bundle (from stdin or `--context-packs <path>`),
+  emits selected relationship tests + static gates as either text
+  (newline-delimited) or a full JSON gate plan. Modes:
+    --emit-tests <path>    newline tests to file
+    --emit-gate-plan <path> full plan JSON to file
+    --blocking-only         filter to blocking=true entries only
+    --format text|json      stdout shape
+- `tests/ci/test_context_pack_gate_router.py` — 24 tests: select_tests
+  dedup + order, select_static_gates, build_gate_plan structure, CLI
+  emit modes, malformed input, end-to-end with topology_doctor_context_pack
+  on PR330/PR312/multi-surface/unmatched fixtures.
+- `scripts/ci/pr_monitor.py` — adds `CI_RECOVERED` event type and
+  failed_checks state tracking. When a previously-reported FAILURE
+  check transitions to SUCCESS, emit one
+    `PR#NN CI_RECOVERED <check_name> (was <prior_conclusion>)`
+  per check. Operator first-principle iteration (complaint twice
+  2026-05-26): silence after a reported failure looked broken; the
+  recovery itself is a meaningful state change. Dedup permanent per
+  monitor instance via `reported_recoveries` set; --reset-state re-arms.
+- `tests/ci/test_pr_monitor.py` — adds 7 CI_RECOVERED tests.
 
 **Phase F — Operator review + cutover decision (no PR).**
 - Compare topology_doctor.py + topology_v_next + new Context Pack output on 5+ live PRs.

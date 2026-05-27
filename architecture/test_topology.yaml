@@ -114,6 +114,8 @@ test_trust_policy:
     tests/topology/test_structural_blockers.py: {created: "2026-05-26", last_used: "2026-05-26"}
     tests/ci/test_structural_blockers.py: {created: "2026-05-26", last_used: "2026-05-26"}
     tests/ci/test_context_pack_overrides.py: {created: "2026-05-26", last_used: "2026-05-26"}
+    # CI Topology Phase E: gate router + CI_RECOVERED monitor event (2026-05-26).
+    tests/ci/test_context_pack_gate_router.py: {created: "2026-05-26", last_used: "2026-05-26"}
     # P1/P2 architecture review antibodies (2026-05-22): strategy routing, evidence
     # report scoping, migration clamp, evidence tier provenance.
     tests/test_p1_findings_evidence_risk.py: {created: "2026-05-22", last_used: "2026-05-22"}

@@ -42,6 +42,8 @@ def _state(**overrides):
     base = {
         "reported_threads": set(),
         "reported_failures": set(),
+        "failed_checks": {},
+        "reported_recoveries": set(),
         "last_event_at": None,
         "last_stale_emit_at": None,
         "monitor_started_at": None,
@@ -599,3 +601,118 @@ def test_state_roundtrip_preserves_stale_fields(tmp_path):
     assert loaded["last_stale_emit_at"] == 2100.0
     assert loaded["monitor_started_at"] == 1000.0
     assert loaded["reported_threads"] == {"T1"}
+
+
+# ---------------------------------------------------------------------------
+# Phase E.M: CI_RECOVERED event (operator complaint 2026-05-26)
+# ---------------------------------------------------------------------------
+
+
+def test_tick_emits_ci_recovered_after_failure_passes(monkeypatch, capsys):
+    """If a check was reported as FAILURE and now reads SUCCESS, emit
+    CI_RECOVERED once. Operator complained twice that fail→fix transitions
+    looked like 'monitor broke' because of silence; this fixes it."""
+    state = _state()
+    # First tick: pytest fails
+    monkeypatch.setattr(
+        "scripts.ci.pr_monitor.gh_pr_view_v2",
+        lambda pr_num, repo=None: (
+            _pr_data(checks=[_check("pytest", "FAILURE")]), None,
+        ),
+    )
+    tick_once(343, repo="x/y", state=state, as_json=False)
+    out1 = capsys.readouterr().out
+    assert "PR#343 CI_FAIL pytest:FAILURE" in out1
+    assert state["failed_checks"]["pytest"] == "FAILURE"
+    # Second tick: pytest passes
+    monkeypatch.setattr(
+        "scripts.ci.pr_monitor.gh_pr_view_v2",
+        lambda pr_num, repo=None: (
+            _pr_data(checks=[_check("pytest", "SUCCESS")]), None,
+        ),
+    )
+    tick_once(343, repo="x/y", state=state, as_json=False)
+    out2 = capsys.readouterr().out
+    assert "PR#343 CI_RECOVERED pytest" in out2
+    assert "(was FAILURE)" in out2
+    # And it's recorded so a third tick stays silent
+    assert "pytest" in state["reported_recoveries"]
+    assert "pytest" not in state["failed_checks"]
+
+
+def test_tick_does_not_emit_recovered_if_never_failed(monkeypatch, capsys):
+    """A check that's been passing from the start must NOT emit recovered."""
+    state = _state()
+    monkeypatch.setattr(
+        "scripts.ci.pr_monitor.gh_pr_view_v2",
+        lambda pr_num, repo=None: (
+            _pr_data(checks=[_check("pytest", "SUCCESS")]), None,
+        ),
+    )
+    tick_once(343, repo="x/y", state=state, as_json=False)
+    out = capsys.readouterr().out
+    assert "CI_RECOVERED" not in out
+
+
+def test_tick_dedups_repeated_recovery(monkeypatch, capsys):
+    """Same recovery seen twice → emit once."""
+    state = _state(failed_checks={"pytest": "FAILURE"})
+    monkeypatch.setattr(
+        "scripts.ci.pr_monitor.gh_pr_view_v2",
+        lambda pr_num, repo=None: (
+            _pr_data(checks=[_check("pytest", "SUCCESS")]), None,
+        ),
+    )
+    tick_once(343, repo="x/y", state=state, as_json=False)
+    capsys.readouterr()
+    tick_once(343, repo="x/y", state=state, as_json=False)
+    out = capsys.readouterr().out
+    assert out == ""
+
+
+def test_tick_emits_recovered_for_multiple_checks(monkeypatch, capsys):
+    state = _state(failed_checks={"pytest": "FAILURE", "ruff": "TIMED_OUT"})
+    monkeypatch.setattr(
+        "scripts.ci.pr_monitor.gh_pr_view_v2",
+        lambda pr_num, repo=None: (
+            _pr_data(checks=[
+                _check("pytest", "SUCCESS"),
+                _check("ruff", "SUCCESS"),
+            ]), None,
+        ),
+    )
+    tick_once(343, repo="x/y", state=state, as_json=False)
+    out = capsys.readouterr().out
+    assert "PR#343 CI_RECOVERED pytest" in out
+    assert "PR#343 CI_RECOVERED ruff" in out
+    assert "(was FAILURE)" in out
+    assert "(was TIMED_OUT)" in out
+
+
+def test_format_ci_recovered_line():
+    from scripts.ci.pr_monitor import format_ci_recovered_line
+    assert format_ci_recovered_line(343, "pytest", "FAILURE") == \
+        "PR#343 CI_RECOVERED pytest (was FAILURE)"
+
+
+def test_extract_currently_passing_checks_returns_only_success():
+    from scripts.ci.pr_monitor import extract_currently_passing_checks
+    pr = _pr_data(checks=[
+        _check("a", "SUCCESS"),
+        _check("b", "FAILURE"),
+        _check("c", "SUCCESS"),
+        _check("d", None),
+    ])
+    assert extract_currently_passing_checks(pr) == {"a", "c"}
+
+
+def test_state_roundtrip_preserves_recovery_fields(tmp_path):
+    spath = tmp_path / "state.json"
+    state = _state(
+        failed_checks={"pytest": "FAILURE", "ruff": "TIMED_OUT"},
+        reported_recoveries={"old_check"},
+    )
+    save_state(spath, state)
+    loaded = load_state(spath)
+    assert loaded["failed_checks"] == {"pytest": "FAILURE", "ruff": "TIMED_OUT"}
+    assert loaded["reported_recoveries"] == {"old_check"}
