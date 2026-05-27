@@ -439,54 +439,21 @@ class MarketAnalysis:
                     )
                 )
                 continue
-            # Buy YES direction: edge = p_posterior - p_market
-            edge_yes = float(self.p_posterior[i] - self.p_market[i])
-            if edge_yes > 0:
-                ci_lo, ci_hi, p_val = self._bootstrap_bin(i, n_bootstrap)
-                if ci_lo > 0:
-                    # Wave 2 (INV-38): construct typed ExecutionPrice at the
-                    # edge-scan seam so VWMP provenance from
-                    # _buy_entry_price_from_clob travels intact to the Kelly
-                    # boundary. The Kelly seam (evaluator.py
-                    # _size_at_execution_price_boundary) no longer fabricates
-                    # price_type="implied_probability" over this object.
-                    # Wave 5: prefer the EntryQuoteEvidence-derived all-in
-                    # price + fee_adjusted ExecutionPrice when EQE is
-                    # provided; otherwise stamp VWMP (Wave 2 default).
-                    eqe_yes = (
-                        self._entry_quote_evidence_yes[i]
-                        if self._entry_quote_evidence_yes is not None
-                        else None
-                    )
-                    if eqe_yes is not None:
-                        yes_entry_price = eqe_yes.to_execution_price()
-                    else:
-                        yes_entry_price = ExecutionPrice(
-                            value=float(self.p_market[i]),
-                            price_type="vwmp",
-                            fee_deducted=False,
-                            currency="probability_units",
-                        )
-                    edge = BinEdge(
-                        bin=b,
-                        direction="buy_yes",
-                        edge=edge_yes,
-                        ci_lower=ci_lo,
-                        ci_upper=ci_hi,
-                        p_model=float(self.p_cal[i]),
-                        p_market=float(self.p_market[i]),
-                        p_posterior=float(self.p_posterior[i]),
-                        entry_price=yes_entry_price,
-                        p_value=p_val,
-                        vwmp=float(self.p_market[i]),
-                        forward_edge=edge_yes,
-                        support_index=i,
-                        entry_quote_evidence=eqe_yes,
-                    )
-                    edges.append(edge)
-                    yes_decision = "yes_edge_accepted"
-                else:
-                    yes_decision = "yes_ci_lower_nonpositive"
+            # Buy YES direction.
+            # K2 (PR #348 operator review, P0-3): hard-veto BEFORE edge
+            # construction when EntryQuoteEvidence flags the orderbook as
+            # not-executable. THIN_BOOK + CROSSED reliability cannot
+            # produce a tradeable cost — there is no point computing edge
+            # statistics over them, and downstream Kelly sizing would
+            # silently use a degenerate cost.
+            eqe_yes = (
+                self._entry_quote_evidence_yes[i]
+                if self._entry_quote_evidence_yes is not None
+                else None
+            )
+            if eqe_yes is not None and eqe_yes.reliability_status in (
+                "THIN_BOOK", "CROSSED"
+            ):
                 trace.append(
                     EdgeScanTrace(
                         support_index=i,
@@ -495,31 +462,109 @@ class MarketAnalysis:
                         direction="buy_yes",
                         p_posterior=float(self.p_posterior[i]),
                         p_market=float(self.p_market[i]),
-                        raw_edge=edge_yes,
-                        ci_lower=ci_lo,
-                        ci_upper=ci_hi,
-                        p_value=p_val,
-                        decision=yes_decision,
-                        native_quote_available=True,
-                    )
-                )
-            else:
-                trace.append(
-                    EdgeScanTrace(
-                        support_index=i,
-                        bin_label=b.label,
-                        executable=True,
-                        direction="buy_yes",
-                        p_posterior=float(self.p_posterior[i]),
-                        p_market=float(self.p_market[i]),
-                        raw_edge=edge_yes,
+                        raw_edge=None,
                         ci_lower=None,
                         ci_upper=None,
                         p_value=None,
-                        decision="yes_raw_edge_nonpositive",
+                        decision=f"market_cost_hard_veto:{eqe_yes.reliability_status.lower()}",
                         native_quote_available=True,
                     )
                 )
+                # Fall through to buy_no without producing a buy_yes edge.
+                pass
+            else:
+                # K1 (PR #348, P0-2): compute edge off the cost-corrected
+                # entry-cost mean. When EQE is present, this is the all-in
+                # cost (depth-walked fill + fee). When absent, falls back
+                # to legacy p_market so behaviour is preserved for callers
+                # without EQE wiring.
+                entry_cost_mean = (
+                    float(eqe_yes.all_in_entry_price) if eqe_yes is not None
+                    else float(self.p_market[i])
+                )
+                entry_cost_uncertainty = (
+                    float(eqe_yes.cost_uncertainty) if eqe_yes is not None else 0.0
+                )
+                edge_yes = float(self.p_posterior[i]) - entry_cost_mean
+                if edge_yes > 0:
+                    ci_lo, ci_hi, p_val = self._bootstrap_bin(i, n_bootstrap)
+                    if ci_lo > 0:
+                        # Wave 2 (INV-38): construct typed ExecutionPrice at the
+                        # edge-scan seam so VWMP provenance from
+                        # _buy_entry_price_from_clob travels intact to the Kelly
+                        # boundary. The Kelly seam (evaluator.py
+                        # _size_at_execution_price_boundary) no longer fabricates
+                        # price_type="implied_probability" over this object.
+                        # Wave 5: prefer the EntryQuoteEvidence-derived all-in
+                        # price + fee_adjusted ExecutionPrice when EQE is
+                        # provided; otherwise stamp VWMP (Wave 2 default).
+                        if eqe_yes is not None:
+                            yes_entry_price = eqe_yes.to_execution_price()
+                        else:
+                            yes_entry_price = ExecutionPrice(
+                                value=float(self.p_market[i]),
+                                price_type="vwmp",
+                                fee_deducted=False,
+                                currency="probability_units",
+                            )
+                        edge = BinEdge(
+                            bin=b,
+                            direction="buy_yes",
+                            edge=edge_yes,
+                            ci_lower=ci_lo,
+                            ci_upper=ci_hi,
+                            p_model=float(self.p_cal[i]),
+                            p_market=float(self.p_market[i]),
+                            p_posterior=float(self.p_posterior[i]),
+                            entry_price=yes_entry_price,
+                            p_value=p_val,
+                            vwmp=float(self.p_market[i]),
+                            forward_edge=edge_yes,
+                            support_index=i,
+                            entry_quote_evidence=eqe_yes,
+                            entry_cost_mean=entry_cost_mean,
+                            entry_cost_uncertainty=entry_cost_uncertainty,
+                            market_cost_uncertainty_applied=(
+                                eqe_yes is not None and entry_cost_uncertainty > 0.0
+                            ),
+                        )
+                        edges.append(edge)
+                        yes_decision = "yes_edge_accepted"
+                    else:
+                        yes_decision = "yes_ci_lower_nonpositive"
+                    trace.append(
+                        EdgeScanTrace(
+                            support_index=i,
+                            bin_label=b.label,
+                            executable=True,
+                            direction="buy_yes",
+                            p_posterior=float(self.p_posterior[i]),
+                            p_market=float(self.p_market[i]),
+                            raw_edge=edge_yes,
+                            ci_lower=ci_lo,
+                            ci_upper=ci_hi,
+                            p_value=p_val,
+                            decision=yes_decision,
+                            native_quote_available=True,
+                        )
+                    )
+                else:
+                    trace.append(
+                        EdgeScanTrace(
+                            support_index=i,
+                            bin_label=b.label,
+                            executable=True,
+                            direction="buy_yes",
+                            p_posterior=float(self.p_posterior[i]),
+                            p_market=float(self.p_market[i]),
+                            raw_edge=edge_yes,
+                            ci_lower=None,
+                            ci_upper=None,
+                            p_value=None,
+                            decision="yes_raw_edge_nonpositive",
+                            native_quote_available=True,
+                        )
+                    )
 
             # Buy NO direction: payoff probability is complement; executable
             # entry price must come from the native NO side when available.
@@ -527,7 +572,42 @@ class MarketAnalysis:
                 p_model_no = 1.0 - float(self.p_cal[i])
                 p_market_no = self.buy_no_market_price(i)
                 p_post_no = 1.0 - float(self.p_posterior[i])
-                edge_no = p_post_no - p_market_no
+                # K2 (PR #348 P0-3): hard-veto NO-side too when EQE reliability
+                # is THIN_BOOK / CROSSED.
+                eqe_no = (
+                    self._entry_quote_evidence_no[i]
+                    if self._entry_quote_evidence_no is not None
+                    else None
+                )
+                if eqe_no is not None and eqe_no.reliability_status in (
+                    "THIN_BOOK", "CROSSED"
+                ):
+                    trace.append(
+                        EdgeScanTrace(
+                            support_index=i,
+                            bin_label=b.label,
+                            executable=True,
+                            direction="buy_no",
+                            p_posterior=p_post_no,
+                            p_market=p_market_no,
+                            raw_edge=None,
+                            ci_lower=None,
+                            ci_upper=None,
+                            p_value=None,
+                            decision=f"market_cost_hard_veto:{eqe_no.reliability_status.lower()}",
+                            native_quote_available=True,
+                        )
+                    )
+                    continue  # skip this bin's buy_no construction
+                # K1 (PR #348 P0-2): NO-side edge off cost-corrected mean.
+                entry_cost_mean_no = (
+                    float(eqe_no.all_in_entry_price) if eqe_no is not None
+                    else float(p_market_no)
+                )
+                entry_cost_uncertainty_no = (
+                    float(eqe_no.cost_uncertainty) if eqe_no is not None else 0.0
+                )
+                edge_no = p_post_no - entry_cost_mean_no
 
                 if edge_no > 0:
                     ci_lo, ci_hi, p_val = self._bootstrap_bin_no(i, n_bootstrap)
@@ -535,11 +615,6 @@ class MarketAnalysis:
                         # Wave 2 (INV-38): buy_no uses NATIVE NO-side VWMP from
                         # buy_no_market_price (executable NO quote, not the YES
                         # complement). Same provenance as buy_yes.
-                        eqe_no = (
-                            self._entry_quote_evidence_no[i]
-                            if self._entry_quote_evidence_no is not None
-                            else None
-                        )
                         if eqe_no is not None:
                             no_entry_price = eqe_no.to_execution_price()
                         else:
@@ -564,6 +639,11 @@ class MarketAnalysis:
                             forward_edge=edge_no,
                             support_index=i,
                             entry_quote_evidence=eqe_no,
+                            entry_cost_mean=entry_cost_mean_no,
+                            entry_cost_uncertainty=entry_cost_uncertainty_no,
+                            market_cost_uncertainty_applied=(
+                                eqe_no is not None and entry_cost_uncertainty_no > 0.0
+                            ),
                         )
                         edges.append(edge)
                         no_decision = "no_edge_accepted"

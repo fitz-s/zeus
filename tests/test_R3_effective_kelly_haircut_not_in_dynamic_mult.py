@@ -69,10 +69,11 @@ class TestFlagOnSingleCountEnforced:
         monkeypatch.setenv("ZEUS_EVALUATOR_ENTRY_QUOTE_EVIDENCE_ENABLED", "1")
         monkeypatch.setenv(_ENV_UNIFIED_UNCERTAINTY_BUDGET, "1")
         assert _unified_uncertainty_budget_enabled() is True
-        m_baseline = dynamic_kelly_mult(base=0.25, ci_width=0.05)
-        m_wide = dynamic_kelly_mult(base=0.25, ci_width=0.20)
+        # K1 (PR #348 P0-1): per-edge market_uncertainty_in_lcb required.
+        m_baseline = dynamic_kelly_mult(base=0.25, ci_width=0.05, market_uncertainty_in_lcb=True)
+        m_wide = dynamic_kelly_mult(base=0.25, ci_width=0.20, market_uncertainty_in_lcb=True)
         assert m_wide == pytest.approx(m_baseline), (
-            "Wave 6 flag ON must remove the multiplicative ci_width haircut "
+            "Wave 6 flag ON + per-edge evidence must remove the multiplicative ci_width haircut "
             f"(legacy chain returned {m_baseline * 0.35:.6f}, Wave 6 should keep {m_baseline:.6f})"
         )
 
@@ -108,9 +109,10 @@ class TestNoLegacyDoubleCountWithFlagOn:
     def test_flag_on_ci_width_and_ekc_haircut_are_both_inactive(self, monkeypatch):
         monkeypatch.setenv("ZEUS_EVALUATOR_ENTRY_QUOTE_EVIDENCE_ENABLED", "1")
         monkeypatch.setenv(_ENV_UNIFIED_UNCERTAINTY_BUDGET, "1")
+        # K1 (PR #348 P0-1): per-edge evidence required for collapse.
         # ci_width haircut removed → multiplier unchanged regardless of ci_width
-        m_no_ci = dynamic_kelly_mult(base=0.25, ci_width=0.0)
-        m_with_ci = dynamic_kelly_mult(base=0.25, ci_width=0.20)
+        m_no_ci = dynamic_kelly_mult(base=0.25, ci_width=0.0, market_uncertainty_in_lcb=True)
+        m_with_ci = dynamic_kelly_mult(base=0.25, ci_width=0.20, market_uncertainty_in_lcb=True)
         assert m_no_ci == pytest.approx(m_with_ci)
 
         # EKC.haircut() helper itself still returns its bucket value (it's

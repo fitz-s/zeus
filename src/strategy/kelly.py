@@ -440,6 +440,8 @@ def dynamic_kelly_mult(
     max_drawdown: float = 0.20,
     strategy_key: str | None = None,
     city: str | None = None,
+    *,
+    market_uncertainty_in_lcb: bool = False,
 ) -> float:
     """Compute dynamic Kelly multiplier. Spec §5.2.
 
@@ -464,7 +466,18 @@ def dynamic_kelly_mult(
     # bootstrap ci_lower of p_LCB - c_UCB). Applying a multiplicative
     # haircut on top is the double-count INV-40 forbids. Flag OFF (default)
     # preserves the legacy chain bit-identically until the operator promotes.
-    if not _unified_uncertainty_budget_enabled():
+    # K1 fix (PR #348 P0-1, 2026-05-27): the global env flag is a PRECONDITION
+    # but is NOT sufficient — the per-edge ``market_uncertainty_in_lcb`` arg
+    # must also be True (i.e. EQE actually present AND cost_uncertainty > 0
+    # AND bootstrap actually sampled σ_market for THIS edge). When the env
+    # flag is ON but THIS edge has no per-edge cost evidence in edge_LCB,
+    # the legacy ci_width haircut MUST stay applied — otherwise we'd remove
+    # the multiplier without compensating widening (operator-flagged blocker).
+    _collapse_ci_width_haircut = (
+        _unified_uncertainty_budget_enabled()
+        and bool(market_uncertainty_in_lcb)
+    )
+    if not _collapse_ci_width_haircut:
         if ci_width > 0.10:
             m *= 0.7
         if ci_width > 0.15:

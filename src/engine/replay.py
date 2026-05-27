@@ -1731,6 +1731,14 @@ def _replay_one_settlement(
                 kelly_multiplier=k_mult,
                 effective_context=None,
                 allow_missing_context=True,
+                market_uncertainty_in_lcb=bool(
+                    getattr(edge, "market_cost_uncertainty_applied", False)
+                ),
+                max_executable_shares=(
+                    float(edge.entry_quote_evidence.depth_at_target_size)
+                    if getattr(edge, "entry_quote_evidence", None) is not None
+                    else None
+                ),
             )
             size_usd = max(0.0, size_usd)
             if not market_price_linked:

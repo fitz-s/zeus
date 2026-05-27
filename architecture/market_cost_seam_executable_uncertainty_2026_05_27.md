@@ -323,6 +323,28 @@ Stage 1 is the safe observation tier: total size strictly less-than-or-equal to 
 
 Stage 2 without Stage 1 is UNSAFE — removes multipliers without compensating edge_LCB widening. The plan + INV-40 antibody enforce the ordering. Wave 6 `_unified_uncertainty_budget_enabled()` also enforces the ordering at runtime: flag-ON without the Wave 5.5 prereq is logged WARNING and treated as flag-OFF.
 
+### P0 blockers from operator review (resolved 2026-05-27)
+
+Operator deep-review on top of PR #348 identified five Stage-2-blocking
+defects. Restated as four K decisions + fixed:
+
+| P0 | K | Defect | Fix |
+|---|---|---|---|
+| P0-1 | K1 | Unified-budget was a GLOBAL env flag — haircuts collapsed even for edges whose bootstrap had no σ_market | `dynamic_kelly_mult` + `_size_at_execution_price_boundary` gain `market_uncertainty_in_lcb` per-edge param; collapse requires global flag AND per-edge `BinEdge.market_cost_uncertainty_applied=True` |
+| P0-2 | K1 | `edge` / `forward_edge` / family selection / economic floor used `p_posterior − p_market` (optimistic) even when EQE present | `find_edges` computes edge off `entry_cost_mean` (= `eqe.all_in_entry_price` when present); new `BinEdge.entry_cost_mean` / `entry_cost_uncertainty` fields; `p_market` retained for trace only |
+| P0-3 | K2 | `THIN_BOOK` / `CROSSED` reliability documented as hard-veto-eligible but not enforced | `find_edges` hard-vetoes both buy_yes + buy_no BEFORE edge construction; trace decision `market_cost_hard_veto:{status}` |
+| P0-4 | K3 | depth-walk `target_shares` = min-order floor → large Kelly orders face uncounted slippage | `_size_at_execution_price_boundary` accepts `max_executable_shares`; caps sized USD to `depth_at_target_size × price`; both call sites pass `edge.entry_quote_evidence.depth_at_target_size` |
+| P0-5 | K4 | Stage B optimizer ELG normalises over candidate legs only, not full family outcome distribution — `max_legs>1` mathematically wrong for live | `_family_portfolio_max_legs` HARD-CAPS live tier to 1 (WARNING logged) until full-outcome ELG ships; shadow tier uncapped for observation |
+
+Antibodies: `tests/test_pr348_blockers_per_edge_cost_correctness.py` (13 tests).
+Stage-2 live promotion now additionally requires: per-edge guard GREEN,
+hard-veto GREEN, depth-cap GREEN, Stage B live-refusal GREEN.
+
+**Still deferred to Wave 8:** full-outcome family ELG optimiser (so live
+`max_legs>1` can be unlocked); post-Kelly EQE re-walk for second-pass cost
+(so the depth cap can be relaxed into a re-priced size rather than a hard
+ceiling).
+
 ### Known limitations (X6, X8)
 
 **X6 — target_shares estimate is min-order floor, not Kelly-output size** (Copilot review of PR #348). Wave 5.5 evaluator wiring constructs `EntryQuoteEvidence` with `target_shares = min_order_usd / best_ask` because the actual Kelly-sized order is not yet known at edge-scan time (chicken-and-egg: Kelly needs the cost UCB, cost UCB needs the depth-walk for the order size). This means `σ_market` is computed for the SMALLEST plausible order. Larger Kelly-sized orders may face larger slippage than σ_market accounts for. The conservative direction (small σ → narrower CI → fewer marginal edges accepted; never oversizes existing edges). Future iteration: post-Kelly re-evaluation of EntryQuoteEvidence at the actual size for a second-pass cost UCB. Tracked as Wave 8 work.

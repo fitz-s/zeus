@@ -83,11 +83,16 @@ class TestMaxLegsHelper:
         with mock.patch("src.strategy.family_exclusive_dedup.get_mode", return_value="live"):
             assert _family_portfolio_max_legs() == 1
 
-    def test_live_env_only_activates_in_live_mode(self, monkeypatch):
+    def test_live_env_capped_to_1_until_full_optimizer(self, monkeypatch):
+        # K4 fix (PR #348 P0-5): live tier is HARD-CAPPED to 1 regardless of
+        # env until the Stage B optimizer ships full-family ELG. Shadow tier
+        # still honours the env value for observation.
         monkeypatch.setenv(ENV_FAMILY_PORTFOLIO_MAX_LEGS_LIVE, "2")
         monkeypatch.delenv(ENV_FAMILY_PORTFOLIO_MAX_LEGS_SHADOW, raising=False)
         with mock.patch("src.strategy.family_exclusive_dedup.get_mode", return_value="live"):
-            assert _family_portfolio_max_legs() == 2
+            assert _family_portfolio_max_legs() == 1, (
+                "K4: live max_legs must be capped to 1 until full-outcome ELG ships"
+            )
         with mock.patch("src.strategy.family_exclusive_dedup.get_mode", return_value="shadow"):
             assert _family_portfolio_max_legs() == 1
 

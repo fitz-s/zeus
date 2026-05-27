@@ -301,6 +301,30 @@ class BinEdge:
     # leave this None — the bootstrap then subtracts the fixed self.p_market
     # value, preserving pre-Wave-5 behaviour.
     entry_quote_evidence: "EntryQuoteEvidence | None" = None
+    # K1 fix (PR #348 operator review): per-edge cost-evidence fields drive
+    # BOTH the bootstrap CI AND the multiplier-suppression decision AND the
+    # stored edge magnitude. Pre-fix the unified-uncertainty-budget was a
+    # GLOBAL env flag — that meant haircuts were skipped even when this
+    # particular edge had NO EntryQuoteEvidence in its bootstrap (P0-1).
+    # And ``edge`` / ``forward_edge`` were always computed off legacy
+    # ``p_market``, so family selection + economic floors used optimistic
+    # numbers even when EQE was present (P0-2). These three fields close
+    # both holes:
+    #
+    #   entry_cost_mean — the value Kelly should use as cost-of-entry
+    #                     (= eqe.all_in_entry_price when EQE present,
+    #                      else legacy p_market). ``edge`` / ``forward_edge``
+    #                     must be computed off this, NOT off p_market.
+    #   entry_cost_uncertainty — σ_market (0.0 when no EQE present).
+    #   market_cost_uncertainty_applied — True iff the bootstrap actually
+    #                     consumed σ_market for this edge. Caller-side
+    #                     unified-budget consumers (dynamic_kelly_mult,
+    #                     _size_at_execution_price_boundary) gate their
+    #                     haircut suppression on this PER EDGE, not on
+    #                     the global env flag alone.
+    entry_cost_mean: float = 0.0
+    entry_cost_uncertainty: float = 0.0
+    market_cost_uncertainty_applied: bool = False
 
     def __post_init__(self) -> None:
         if isinstance(self.entry_price, ExecutionPrice):

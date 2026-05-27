@@ -103,19 +103,29 @@ class TestFlagOffPreservesLegacy:
 
 class TestFlagOnCollapsesDuplicates:
     def test_flag_on_skips_ci_width_haircut_above_010(self, monkeypatch):
+        # K1 (PR #348 P0-1): collapse now requires the per-edge
+        # market_uncertainty_in_lcb flag in addition to the global env flag.
         monkeypatch.setenv("ZEUS_EVALUATOR_ENTRY_QUOTE_EVIDENCE_ENABLED", "1")
         monkeypatch.setenv(_ENV_UNIFIED_UNCERTAINTY_BUDGET, "1")
-        m_no_ci = dynamic_kelly_mult(base=0.25, ci_width=0.05)
-        m_wide_ci = dynamic_kelly_mult(base=0.25, ci_width=0.12)
+        m_no_ci = dynamic_kelly_mult(base=0.25, ci_width=0.05, market_uncertainty_in_lcb=True)
+        m_wide_ci = dynamic_kelly_mult(base=0.25, ci_width=0.12, market_uncertainty_in_lcb=True)
         # No multiplier difference — ci_width contribution moved to edge_LCB.
         assert m_wide_ci == pytest.approx(m_no_ci)
 
     def test_flag_on_skips_ci_width_haircut_above_015(self, monkeypatch):
         monkeypatch.setenv("ZEUS_EVALUATOR_ENTRY_QUOTE_EVIDENCE_ENABLED", "1")
         monkeypatch.setenv(_ENV_UNIFIED_UNCERTAINTY_BUDGET, "1")
-        m_no_ci = dynamic_kelly_mult(base=0.25, ci_width=0.05)
-        m_widest_ci = dynamic_kelly_mult(base=0.25, ci_width=0.20)
+        m_no_ci = dynamic_kelly_mult(base=0.25, ci_width=0.05, market_uncertainty_in_lcb=True)
+        m_widest_ci = dynamic_kelly_mult(base=0.25, ci_width=0.20, market_uncertainty_in_lcb=True)
         assert m_widest_ci == pytest.approx(m_no_ci)
+
+    def test_flag_on_without_per_edge_evidence_keeps_haircut(self, monkeypatch):
+        # K1 P0-1: global flag ON but per-edge evidence False → haircut stays.
+        monkeypatch.setenv("ZEUS_EVALUATOR_ENTRY_QUOTE_EVIDENCE_ENABLED", "1")
+        monkeypatch.setenv(_ENV_UNIFIED_UNCERTAINTY_BUDGET, "1")
+        m_no_ci = dynamic_kelly_mult(base=0.25, ci_width=0.05, market_uncertainty_in_lcb=False)
+        m_wide_ci = dynamic_kelly_mult(base=0.25, ci_width=0.20, market_uncertainty_in_lcb=False)
+        assert m_wide_ci == pytest.approx(m_no_ci * 0.35)
 
 
 # ---------------------------------------------------------------------------

@@ -1560,6 +1560,8 @@ def _size_at_execution_price_boundary(
     kelly_multiplier: float,
     effective_context: EffectiveKellyContext | None = None,
     allow_missing_context: bool = False,
+    market_uncertainty_in_lcb: bool = False,
+    max_executable_shares: float | None = None,
 ) -> float:
     """Size a trade at the evaluator→Kelly boundary using typed entry cost.
 
@@ -1586,7 +1588,12 @@ def _size_at_execution_price_boundary(
     # → σ_market → edge_LCB. Multiplying haircut() here as well = the double-
     # count INV-40 forbids. Flag OFF (default) preserves the legacy chain.
     # X9 fix (Copilot review of PR #348): import moved to module top.
-    _wave6_collapse = _unified_uncertainty_budget_enabled()
+    # K1 fix (PR #348 P0-1, 2026-05-27): collapse requires BOTH the global env
+    # flag AND per-edge evidence — when an edge has no σ_market in its
+    # bootstrap, the EffectiveKellyContext haircut MUST stay applied.
+    _wave6_collapse = (
+        _unified_uncertainty_budget_enabled() and bool(market_uncertainty_in_lcb)
+    )
     effective_kelly_multiplier = kelly_multiplier
     if effective_context is not None and not _wave6_collapse:
         effective_kelly_multiplier = kelly_multiplier * effective_context.haircut()
@@ -1646,6 +1653,26 @@ def _size_at_execution_price_boundary(
         sizing_bankroll,
         effective_kelly_multiplier,
     )
+
+    # K3 fix (PR #348 operator review, P0-4, 2026-05-27): cap the sized order
+    # to the depth-walked executable authority. The σ_market that fed edge_LCB
+    # was computed for ``EntryQuoteEvidence.depth_at_target_size`` shares; an
+    # order larger than that walks deeper into the book than the cost estimate
+    # accounted for, so its real slippage exceeds the σ_market in the CI.
+    # Capping USD size to ``max_executable_shares * price`` ensures live
+    # execution never exceeds the depth the cost evidence actually priced.
+    # None (default / legacy / no-EQE path) leaves size unchanged.
+    if max_executable_shares is not None and max_executable_shares > 0:
+        price_value = ep_fee_adjusted.value
+        if price_value > 0:
+            cap_usd = float(max_executable_shares) * price_value
+            if fee_adjusted_size > cap_usd:
+                logger.info(
+                    "[DEPTH_CAP] sized=%.4f > depth_authority=%.4f USD "
+                    "(%.1f shares @ %.4f) — capping to depth-walked authority",
+                    fee_adjusted_size, cap_usd, float(max_executable_shares), price_value,
+                )
+                fee_adjusted_size = cap_usd
 
     # P10E strict: shadow-off path removed. R10 requires fee-adjusted typed price.
     return fee_adjusted_size
@@ -5862,6 +5889,16 @@ def evaluate_candidate(
                 kelly_multiplier=km * risk_throttle,
                 effective_context=None,
                 allow_missing_context=True,
+                # K1 (PR #348 P0-1): per-edge gate for unified-budget collapse.
+                market_uncertainty_in_lcb=bool(
+                    getattr(edge, "market_cost_uncertainty_applied", False)
+                ),
+                # K3 (PR #348 P0-4): cap to depth-walked executable authority.
+                max_executable_shares=(
+                    float(edge.entry_quote_evidence.depth_at_target_size)
+                    if getattr(edge, "entry_quote_evidence", None) is not None
+                    else None
+                ),
             )
         except ValueError as exc:
             decisions.append(EdgeDecision(
