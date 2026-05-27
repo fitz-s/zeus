@@ -38,13 +38,22 @@ Input:
         }
 
 Output (one of):
-    --emit-tests <path>       newline-delimited test paths
-    --emit-gate-plan <path>   JSON gate plan {tests, static_gates, packs}
-    (default to stdout if no output flag given)
+    --emit-tests <path>       newline-delimited test paths to file
+    --emit-gate-plan <path>   full gate-plan JSON to file
+    (default: tests one-per-line on stdout, or full JSON with --format json)
 
 Filters:
-    --blocking-only           only emit gates with blocking: true
-    --dedupe                  (default true) collapse duplicate paths
+    --blocking-only           only emit entries with blocking: true
+    --format text|json        stdout shape when no --emit-* file is given
+
+Dedup is always-on in build_gate_plan + select_static_gates (tests
+preserve first-occurrence; gates dedup by id). select_tests accepts
+a `dedupe=False` kwarg for unit tests; the CLI does not expose it.
+
+Wiring status: this script is NOT yet invoked by
+.github/workflows/topology-context-required.yml. Phase E.1 follow-up
+will pipe assembler → router → pytest -k <emitted tests>. For now,
+local/manual invocation only.
 
 Exit codes:
     0 — success, with or without emitted gates

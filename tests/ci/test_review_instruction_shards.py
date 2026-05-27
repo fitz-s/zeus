@@ -79,14 +79,18 @@ def test_required_shard_has_apply_to(name):
 
 
 def test_root_copilot_instructions_under_budget():
-    size = ROOT_INSTR.stat().st_size
-    assert size <= CHAR_BUDGET, f"{ROOT_INSTR} is {size} chars > {CHAR_BUDGET}"
+    # Use len(text) — char count — to match scripts/ci/check_copilot_instruction_budget.py.
+    # Path.stat().st_size returns bytes, which diverges from char count on
+    # multi-byte UTF-8 content (e.g. em-dash, NBSP) and can produce a test
+    # verdict that disagrees with the actual budget enforcer.
+    chars = len(_text(ROOT_INSTR))
+    assert chars <= CHAR_BUDGET, f"{ROOT_INSTR} is {chars} chars > {CHAR_BUDGET}"
 
 
 @pytest.mark.parametrize("shard", sorted(p.name for p in INSTR.glob("*.instructions.md")))
 def test_every_shard_under_budget(shard):
-    size = (INSTR / shard).stat().st_size
-    assert size <= CHAR_BUDGET, f"{shard} is {size} chars > {CHAR_BUDGET}"
+    chars = len(_text(INSTR / shard))
+    assert chars <= CHAR_BUDGET, f"{shard} is {chars} chars > {CHAR_BUDGET}"
 
 
 # ---------------------------------------------------------------------------

@@ -65,4 +65,3 @@ Per finding: contract above. Mark **Uncertain** if unresolvable from diff.
 
 Tier scope: `.github/instructions/tier-scope.instructions.md`.
 Invariants: `architecture/invariants.yaml`.
-</content>
