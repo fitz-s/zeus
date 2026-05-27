@@ -3437,38 +3437,7 @@ def _find_decision_outcome(market: dict, tokens: dict) -> dict | None:
     return None
 
 
-# Quasi-static CLOB-fact TTL caches (per daemon process).
-#
-# A market snapshot fetches THREE CLOB facts per outcome: market-info (per
-# condition_id), orderbook (per token, DYNAMIC), and fee-rate (per token).
-# market-info (tick size, neg_risk, token map) and fee-rate are effectively
-# constant over a market's tradable lifetime, yet the previous design re-fetched
-# both every cycle. At ~1.4 s/HTTP call, 3 calls/outcome capped per-cycle
-# coverage to ~3 of an event's 11 bins under the budget gate — so opening_hunt
-# evaluated a starved orderbook and rejected every candidate (EDGE_INSUFFICIENT).
-#
-# Caching the two quasi-static facts cuts steady-state HTTP to 1 call/outcome
-# (orderbook only, ALWAYS fresh), letting one budget window cover all 11 bins.
-# TTL bounds staleness (default 600 s); fee=0 weather markets and lifetime-stable
-# tick/neg_risk make this safe. Set ZEUS_CLOB_FACT_CACHE_TTL_SECONDS=0 to disable.
-_CLOB_MARKET_INFO_CACHE: dict[str, tuple[float, dict]] = {}
-_CLOB_FEE_DETAILS_CACHE: dict[str, tuple[float, dict]] = {}
-
-
-def _clob_fact_cache_ttl_seconds() -> float:
-    raw = os.getenv("ZEUS_CLOB_FACT_CACHE_TTL_SECONDS", "600")
-    try:
-        return max(0.0, float(raw))
-    except (TypeError, ValueError):
-        return 600.0
-
-
 def _fetch_clob_market_info(clob: Any, condition_id: str) -> dict:
-    ttl = _clob_fact_cache_ttl_seconds()
-    if ttl > 0:
-        cached = _CLOB_MARKET_INFO_CACHE.get(condition_id)
-        if cached is not None and (time.monotonic() - cached[0]) < ttl:
-            return dict(cached[1])
     getter = getattr(clob, "get_clob_market_info", None)
     if not callable(getter):
         raise ExecutableSnapshotCaptureError("CLOB client lacks get_clob_market_info")
@@ -3476,10 +3445,7 @@ def _fetch_clob_market_info(clob: Any, condition_id: str) -> dict:
     raw = getattr(raw, "raw", raw)
     if not isinstance(raw, dict) or not raw:
         raise ExecutableSnapshotCaptureError("CLOB market info response is empty or non-object")
-    result = dict(raw)
-    if ttl > 0:
-        _CLOB_MARKET_INFO_CACHE[condition_id] = (time.monotonic(), dict(result))
-    return result
+    return dict(raw)
 
 
 def _fetch_orderbook_snapshot(clob: Any, token_id: str) -> dict:
@@ -3495,26 +3461,13 @@ def _fetch_orderbook_snapshot(clob: Any, token_id: str) -> dict:
 
 
 def _fetch_fee_details(clob: Any, token_id: str) -> dict[str, Any]:
-    ttl = _clob_fact_cache_ttl_seconds()
-    if ttl > 0:
-        cached = _CLOB_FEE_DETAILS_CACHE.get(token_id)
-        if cached is not None and (time.monotonic() - cached[0]) < ttl:
-            return dict(cached[1])
-
-    def _cache_and_return(details: dict[str, Any]) -> dict[str, Any]:
-        if ttl > 0:
-            _CLOB_FEE_DETAILS_CACHE[token_id] = (time.monotonic(), dict(details))
-        return details
-
     details_getter = getattr(clob, "get_fee_rate_details", None)
     if callable(details_getter):
         try:
-            return _cache_and_return(
-                canonicalize_fee_details(
-                    details_getter(token_id),
-                    source="clob_fee_rate",
-                    token_id=token_id,
-                )
+            return canonicalize_fee_details(
+                details_getter(token_id),
+                source="clob_fee_rate",
+                token_id=token_id,
             )
         except MarketSnapshotMismatchError as exc:
             raise ExecutableSnapshotCaptureError("CLOB fee-rate response has invalid units") from exc
@@ -3525,12 +3478,10 @@ def _fetch_fee_details(clob: Any, token_id: str) -> dict[str, Any]:
     if not callable(getter):
         raise ExecutableSnapshotCaptureError("CLOB client lacks fee-rate fetch")
     try:
-        return _cache_and_return(
-            canonicalize_legacy_fee_rate_value(
-                getter(token_id),
-                source="clob_fee_rate",
-                token_id=token_id,
-            )
+        return canonicalize_legacy_fee_rate_value(
+            getter(token_id),
+            source="clob_fee_rate",
+            token_id=token_id,
         )
     except MarketSnapshotMismatchError as exc:
         raise ExecutableSnapshotCaptureError("CLOB fee-rate response is not numeric") from exc
