@@ -2017,6 +2017,19 @@ def _add_platt_pair_preflight_checks(report: dict, cur: sqlite3.Cursor) -> None:
                 }
             )
 
+        # 2026-05-26 fitz: skip bucket-eligibility check when this metric has
+        # no training-allowed pairs. Refit on metric A must not be blocked by
+        # metric B's pair table being empty (cross-metric concurrent rebuild
+        # scenario). Identity check above already passes trivially at 0 rows.
+        existing_pair_count = _count_params(
+            cur,
+            table,
+            "temperature_metric = ? AND COALESCE(training_allowed,0) = 1",
+            (metric,),
+        )
+        if existing_pair_count == 0:
+            continue
+
         cur.execute(
             """
             SELECT COUNT(*)
