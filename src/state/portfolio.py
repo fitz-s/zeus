@@ -31,7 +31,7 @@ from src.contracts import (
     ExpiringAssumption,
 )
 from src.contracts.position_truth import ChainOnlyFact
-from src.contracts.semantic_types import ChainState, Direction, DirectionAlias, ExitState, LifecycleState
+from src.contracts.semantic_types import VenueVisibilityStatus, Direction, DirectionAlias, ExitState, LifecycleState
 from src.contracts.settlement_outcome import SettlementOutcome
 from src.contracts.hold_value import HoldValue
 from src.strategy.correlation import get_correlation
@@ -410,7 +410,7 @@ class Position:
     nested_fills: list = field(default_factory=list)
 
     # Chain reconciliation (Blueprint v2 §5)
-    chain_state: str = ChainState.UNKNOWN.value
+    chain_state: str = VenueVisibilityStatus.UNKNOWN.value
     chain_shares: float = 0.0
     # `chain_verified_at` is a POSITIVE observation timestamp ONLY: it records
     # when the venue/chain confirmed this position is held (rescue, size
@@ -501,8 +501,8 @@ class Position:
             self.direction = Direction(self.direction)
         if not isinstance(self.state, LifecycleState):
             self.state = LifecycleState(self.state)
-        if not isinstance(self.chain_state, ChainState):
-            self.chain_state = ChainState(self.chain_state)
+        if not isinstance(self.chain_state, VenueVisibilityStatus):
+            self.chain_state = VenueVisibilityStatus(self.chain_state)
         if not isinstance(self.exit_state, ExitState):
             self.exit_state = ExitState(self.exit_state)
         if self.pre_exit_state:

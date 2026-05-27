@@ -30,7 +30,7 @@ from decimal import Decimal, InvalidOperation
 
 from src.contracts.position_truth import ChainOnlyFact
 from src.contracts.semantic_types import LifecycleState
-from src.state.chain_state import ChainState, classify_chain_state
+from src.state.chain_state import ChainSnapshotCompleteness, classify_chain_state
 from src.state.lifecycle_manager import (
     enter_chain_quarantined_runtime_state,
     phase_for_runtime_position,
@@ -169,7 +169,7 @@ class ChainPositionView:
     snapshot, never from live API calls mid-cycle. Prevents inconsistent reads
     when chain state changes during a cycle.
 
-    Fix D (Option 4b): The `state: ChainState` field has been removed.
+    Fix D (Option 4b): The `state: ChainSnapshotCompleteness` field has been removed.
     Classification is a per-reconcile-call fact computed by classify_chain_state()
     inside reconcile(), not something cached on the view. No external caller
     outside reconcile() was found to read a `.state` field on this view.
@@ -739,12 +739,12 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
     # the chain API returns a non-None response, so the fetch itself is fresh.
     # CHAIN_UNKNOWN reachability inside reconcile is exclusively via the
     # empty-chain-with-recent-local-verified branch of classify_chain_state.
-    chain_state: ChainState = classify_chain_state(
+    chain_state: ChainSnapshotCompleteness = classify_chain_state(
         fetched_at=now,  # API responded (non-None) — use current timestamp
         chain_positions=chain_positions,
         portfolio=portfolio,
     )
-    if chain_state == ChainState.CHAIN_UNKNOWN:
+    if chain_state == ChainSnapshotCompleteness.CHAIN_UNKNOWN:
         logger.warning(
             "INCOMPLETE CHAIN RESPONSE: classify_chain_state=CHAIN_UNKNOWN. "
             "Skipping Rule 2 (void) to prevent false PHANTOM kills.",
@@ -768,7 +768,7 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
     # token, not the per-lot size. Comparing chain.size vs pos.effective_shares
     # for an aggregate-backed lot would trigger false quarantine (bot PR #141).
     aggregate_backed_set: set[str] = set()
-    if chain_state != ChainState.CHAIN_UNKNOWN:
+    if chain_state != ChainSnapshotCompleteness.CHAIN_UNKNOWN:
         _token_to_positions: dict[str, list] = {}
         for _p in portfolio.positions:
             _tid = _p.token_id if _p.direction == "buy_yes" else _p.no_token_id
@@ -968,7 +968,7 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
             continue
 
         if chain is None:
-            if chain_state == ChainState.CHAIN_UNKNOWN:
+            if chain_state == ChainSnapshotCompleteness.CHAIN_UNKNOWN:
                 continue  # Don't void — API response is suspect
             if (
                 getattr(pos, "entry_fill_verified", False)
@@ -1002,7 +1002,7 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
             # Rule 2: Local but NOT on chain → VOID — but ONLY when the
             # chain snapshot reaching this line is CHAIN_EMPTY (fresh,
             # complete, authoritative). CHAIN_UNKNOWN is short-circuited
-            # earlier via `if chain_state == ChainState.CHAIN_UNKNOWN:
+            # earlier via `if chain_state == ChainSnapshotCompleteness.CHAIN_UNKNOWN:
             # continue` — see the gate above. Reaching this point with a
             # missing/stale snapshot is a contract violation.
             logger.warning("PHANTOM: %s not on chain → voiding", pos.trade_id)
