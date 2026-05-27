@@ -67,14 +67,6 @@ def _make_pos() -> Position:
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "PR A scaffold (Finding 4): get_open_positions(chain_view=...) at "
-        "portfolio.py:~2057 mutates pos.shares, pos.entry_price, and "
-        "pos.chain_state without a canonical event. PR D removes the mutation."
-    ),
-)
 def test_get_open_positions_with_chain_view_does_not_mutate_position() -> None:
     pos = _make_pos()
     pre_shares = pos.shares

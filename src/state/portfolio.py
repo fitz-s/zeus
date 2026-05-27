@@ -2058,35 +2058,29 @@ def _track_exit(state: PortfolioState, pos: Position) -> None:
 
 
 def get_open_positions(state: PortfolioState, chain_view=None) -> list[Position]:
-    """T2-E: Chain-journal merge for live position queries.
+    """Return the runtime-open positions for a PortfolioState.
 
-    No chain_view or stale chain_view: return local positions only.
-    With valid chain_view: merge chain truth (shares/price) with
-    local metadata (city, range, direction, decision context).
+    PR D1 (Finding 4, 2026-05-27): this helper is now PURE. The previous
+    `chain_view` merge branch silently mutated `pos.shares`, `pos.entry_price`,
+    and `pos.chain_state = "synced"` without appending a canonical
+    `position_events` row, which violated the "append before projection
+    mutation" law and let intra-process state diverge from durable
+    projection.
+
+    Any chain↔local size/price correction must now flow through
+    `src/state/chain_reconciliation.py` so a canonical
+    `CHAIN_SIZE_CORRECTED` / `VENUE_POSITION_OBSERVED` event accompanies
+    the projection change. The `chain_view` parameter is preserved for
+    API backwards compatibility but no longer triggers any mutation —
+    callers wishing to overlay chain-derived economics MUST construct
+    that overlay themselves (e.g. an explicit
+    `PositionProjectionWithVenueOverlay` value object) without writing
+    back into `state.positions`.
+
+    Returns a filtered list of positions whose runtime state is "open"
+    per `_is_runtime_open_position`.
     """
-    if chain_view is None or getattr(chain_view, "is_stale", True):
-        return [p for p in state.positions if _is_runtime_open_position(p)]
-
-    merged = []
-    for pos in state.positions:
-        if not _is_runtime_open_position(pos):
-            continue
-
-        tid = pos.token_id if pos.direction == "buy_yes" else pos.no_token_id
-        chain_pos = chain_view.get_position(tid) if tid else None
-
-        if chain_pos:
-            # Chain overrides size/price, local keeps metadata
-            pos.shares = chain_pos.size
-            if chain_pos.avg_price > 0:
-                pos.entry_price = chain_pos.avg_price
-            pos.chain_state = "synced"
-            merged.append(pos)
-        elif _semantic_value(pos.state) == "pending_tracked":
-            merged.append(pos)  # Just placed, chain hasn't indexed yet
-        # else: gone from chain — reconciler will handle
-
-    return merged
+    return [p for p in state.positions if _is_runtime_open_position(p)]
 
 
 def total_exposure_usd(state: PortfolioState) -> float:
