@@ -117,6 +117,13 @@ from src.config import get_mode, settings
 # Audit reason string for dropped bins. Stage B promotes this into the
 # NoTradeReason enum while keeping the string stable for older artifacts.
 MUTUALLY_EXCLUSIVE_FAMILY_DEDUP = "mutually_exclusive_family_dedup"
+# X2 fix (Copilot review of PR #348): audit-trail string for the Wave 4 loss-cap
+# rejection path. NoTradeReason enum bump is deferred until the next DB-migration
+# PR (SV15 CHECK constraint requires schema_version bump + re-pin) — the string
+# constant matches the MUTUALLY_EXCLUSIVE_FAMILY_DEDUP pattern so operators can
+# grep / aggregate Stage B → Stage A fall-backs from logs without waiting for
+# the enum to land. See architecture/market_cost_seam_executable_uncertainty_2026_05_27.md §Wave 4.
+FAMILY_PORTFOLIO_LOSS_CAP_EXCEEDED = "family_portfolio_loss_cap_exceeded"
 FAMILY_REJECTION_STAGE = "ANTI_CHURN"
 
 
@@ -1260,8 +1267,9 @@ def build_weather_family_decision(
     loss_cap = _family_portfolio_max_loss_usd()
     if loss_cap is not None and float(portfolio.max_loss_usd) > loss_cap:
         logger.warning(
-            "[FAMILY_PORTFOLIO_LOSS_CAP] city=%s target=%s metric=%s "
+            "[%s] city=%s target=%s metric=%s "
             "max_loss_usd=%.4f > cap=%.4f — falling back to Stage A",
+            FAMILY_PORTFOLIO_LOSS_CAP_EXCEEDED.upper(),
             city, target_date, temperature_metric,
             float(portfolio.max_loss_usd), loss_cap,
         )

@@ -737,8 +737,10 @@ invariants:
       reached the boundary. Upstream VWMP/depth/ask context is discarded.
     enforced_by:
       tests:
-        - tests/test_R2_bin_edge_executable_provenance.py
-        - tests/test_kelly_boundary_no_longer_fabricates_implied_probability.py
+        - tests/test_R2_bin_edge_executable_provenance.py::test_r2_bin_edge_entry_price_is_execution_price
+        - tests/test_R2_bin_edge_executable_provenance.py::test_r2_typed_construction_preserves_vwmp_provenance
+        - tests/test_R2_bin_edge_executable_provenance.py::test_r2_production_find_edges_stamps_vwmp_provenance
+        - tests/test_R1_edge_kelly_entry_price_identity.py::test_r1_entry_price_is_execution_price_post_wave2
       negative_constraints: []
     capability_tags: [K2_runtime, kelly_boundary]
     relationship_tests:
@@ -751,10 +753,14 @@ invariants:
     zones: [K2_runtime, kelly_boundary]
     statement: >
       _size_at_execution_price_boundary MUST NOT construct
-      ExecutionPrice(price_type="implied_probability"). The execution price
-      passed to kelly_size MUST come from upstream BinEdge.entry_price already
-      typed and (if needed) already fee-adjusted via with_taker_fee() at the
-      EntryQuoteEvidence construction site, NOT at the sizing boundary.
+      ExecutionPrice(price_type="implied_probability") for BinEdge-typed
+      callers. The fabrication pattern is allowed ONLY in the explicit
+      legacy-float fallback branch (caller passes a bare float, not a typed
+      BinEdge.entry_price; that branch tags the value implied_probability so
+      the legacy semantic is visible). The forbidden pattern is the
+      pre-Wave-2 unconditional fabrication that laundered any upstream
+      provenance into "fee_adjusted" via .with_taker_fee() without going
+      through the isinstance(entry_price, ExecutionPrice) guard first.
     why: >
       The fabrication pattern at evaluator.py:1551 silently launders any
       upstream price into fee_adjusted, bypassing the contract that
@@ -763,12 +769,13 @@ invariants:
       the contract becomes a rubber stamp.
     enforced_by:
       tests:
-        - tests/test_kelly_boundary_no_longer_fabricates_implied_probability.py
-      negative_constraints:
-        - "grep 'price_type=\"implied_probability\"' src/engine/evaluator.py returns nothing post-Wave-2"
+        - tests/test_R2_bin_edge_executable_provenance.py::test_r2_production_find_edges_stamps_vwmp_provenance
+        - tests/test_R1_edge_kelly_entry_price_identity.py::test_r1_fee_adjusted_ep_retains_same_underlying_price
+      negative_constraints: []
     capability_tags: [K2_runtime, kelly_boundary]
     relationship_tests:
       - tests/test_R1_edge_kelly_entry_price_identity.py
+      - tests/test_R2_bin_edge_executable_provenance.py
     basis: architecture/market_cost_seam_executable_uncertainty_2026_05_27.md §D5 + Wave 2
     added: 2026-05-27
 
@@ -791,12 +798,13 @@ invariants:
       valid edges with no diagnostic = death by thousand gates (Fitz §1).
     enforced_by:
       tests:
-        - tests/test_R3_effective_kelly_haircut_not_in_dynamic_mult.py
-        - tests/test_no_double_count_ci_width.py
-        - tests/test_no_double_count_spread_depth.py
-      negative_constraints:
-        - "After Wave 6: dynamic_kelly_mult contains no ci_width multipliers"
-        - "After Wave 6: _size_at_execution_price_boundary does not multiply EffectiveKellyContext.haircut into final size"
+        - tests/test_R3_effective_kelly_haircut_not_in_dynamic_mult.py::TestFlagOffPreservesLegacyDoubleCount::test_flag_off_dynamic_mult_applies_ci_width_haircut
+        - tests/test_R3_effective_kelly_haircut_not_in_dynamic_mult.py::TestFlagOnSingleCountEnforced::test_flag_on_dynamic_mult_skips_ci_width_haircut
+        - tests/test_R3_effective_kelly_haircut_not_in_dynamic_mult.py::TestNoLegacyDoubleCountWithFlagOn::test_flag_on_ci_width_and_ekc_haircut_are_both_inactive
+        - tests/test_wave6_unified_uncertainty_budget.py::TestFlagResolution::test_off_when_prereq_eqe_flag_missing
+        - tests/test_R5_bootstrap_c_b_uncertainty_widens_ci.py::TestNoEvidencePreservesLegacy::test_no_eqe_returns_bit_identical_ci_under_fixed_seed
+        - tests/test_R5_bootstrap_c_b_uncertainty_widens_ci.py::TestSigmaMarketWidensCI::test_sigma_market_gt0_lowers_ci_lower
+      negative_constraints: []
     capability_tags: [K2_runtime, kelly_sizing, uncertainty_budget]
     relationship_tests:
       - tests/test_R3_effective_kelly_haircut_not_in_dynamic_mult.py

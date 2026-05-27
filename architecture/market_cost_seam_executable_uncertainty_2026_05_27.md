@@ -193,7 +193,7 @@ class EntryQuoteEvidence:
 
 **Changes:**
 1. `evaluator.py` calls `preselect_single_family_edge_before_kelly` with `max_legs` from config (default still 1 for safety).
-2. New config flag `ZEUS_FAMILY_OPTIMIZER_MAX_LEGS` (default 1; shadow at 2; live promotion gated).
+2. Mode-aware config flags `ZEUS_SHADOW_FAMILY_PORTFOLIO_MAX_LEGS` (default 1) + `ZEUS_LIVE_FAMILY_PORTFOLIO_MAX_LEGS` (default 1). Operator promotes Stage B through shadow first, then live. Behaviour-preserving defaults match Stage A single-leg gate.
 3. `optimize_exclusive_outcome_portfolio` already handles multi-leg correctly. Verify ELG computation against partition payoff structure.
 4. New tests verifying ELG optimality on synthetic 2-bin families.
 
@@ -321,7 +321,13 @@ Three stages, each operator-flippable:
 
 Stage 1 is the safe observation tier: total size strictly less-than-or-equal to Stage 0 because we add one σ source without removing any multiplier. Operator observes for N days. Stage 2 removes the duplicate multipliers; size becomes equal-or-larger than Stage 1 (compensating widening from edge_LCB matches removed haircuts).
 
-Stage 2 without Stage 1 is UNSAFE — removes multipliers without compensating edge_LCB widening. The plan + INV-40 antibody enforce the ordering.
+Stage 2 without Stage 1 is UNSAFE — removes multipliers without compensating edge_LCB widening. The plan + INV-40 antibody enforce the ordering. Wave 6 `_unified_uncertainty_budget_enabled()` also enforces the ordering at runtime: flag-ON without the Wave 5.5 prereq is logged WARNING and treated as flag-OFF.
+
+### Known limitations (X6, X8)
+
+**X6 — target_shares estimate is min-order floor, not Kelly-output size** (Copilot review of PR #348). Wave 5.5 evaluator wiring constructs `EntryQuoteEvidence` with `target_shares = min_order_usd / best_ask` because the actual Kelly-sized order is not yet known at edge-scan time (chicken-and-egg: Kelly needs the cost UCB, cost UCB needs the depth-walk for the order size). This means `σ_market` is computed for the SMALLEST plausible order. Larger Kelly-sized orders may face larger slippage than σ_market accounts for. The conservative direction (small σ → narrower CI → fewer marginal edges accepted; never oversizes existing edges). Future iteration: post-Kelly re-evaluation of EntryQuoteEvidence at the actual size for a second-pass cost UCB. Tracked as Wave 8 work.
+
+**X8 — Audit script source-check uses regex over fixed-window source slices** (Copilot review of PR #348). `scripts/audit_market_price_semantics.py --mode source-check` uses a multi-line regex with a 200-character look-ahead on the `ExecutionPrice(...price_type="vwmp"...)` construction. Robust enough for the current code shape; an AST-based check (`ast.parse` walking `Call` nodes with a `price_type` keyword) would be more durable against formatting changes. Tracked as Wave 8 cleanup.
 
 ## Acceptance for declaring upgrade complete
 

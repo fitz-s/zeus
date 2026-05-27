@@ -1,6 +1,9 @@
 # Created: 2026-05-27
 # Last reused or audited: 2026-05-27
 # Authority basis: architecture/market_cost_seam_executable_uncertainty_2026_05_27.md §Wave5 + INV-40
+# Lifecycle: created=2026-05-27; last_reviewed=2026-05-27; last_reused=never
+# Purpose: R5 — relationship test antibody for σ_market sampling in bootstrap CI
+# Reuse: Behaviour preservation (no EQE = bit-identical CI at fixed seed); EQE with cost_uncertainty > 0 widens edge_ci_lower monotonically; BinEdge carries EQE end-to-end.
 """R5: σ_market sampling widens edge_ci_lower vs legacy fixed c_b.
 
 Wave 5 wires per-bin EntryQuoteEvidence into MarketAnalysis._bootstrap_bin
@@ -100,6 +103,60 @@ class TestNoEvidencePreservesLegacy:
         # Same numeric c_b, same RNG seed → identical bootstrap edges → identical CI.
         assert ci_baseline == ci_zero
 
+    def test_no_eqe_bit_identical_under_platt_fitted_calibrator(self):
+        """X7 fix (Copilot review of PR #348): the cost_rng split must NOT
+        disturb the forecast/Platt stream when a fitted calibrator is present.
+
+        Pre-X7 the behaviour-preservation contract was only validated against
+        the calibrator=None path. With a real ExtendedPlattCalibrator the
+        bootstrap consumes additional ``rng.integers`` draws for Platt
+        parameter sampling — if cost_rng accidentally shared the same numpy
+        Generator the Platt draws would shift. SeedSequence.spawn (X3 fix)
+        guarantees independence; this test pins the contract under the
+        Platt-fitted path so the pre-Wave-5 stream stays bit-identical.
+        """
+        import numpy as np
+        from src.calibration.platt import ExtendedPlattCalibrator
+        from src.strategy.market_analysis import MarketAnalysis
+
+        rng = np.random.default_rng(7)
+        n_samples = 60
+        p_raw_train = np.clip(rng.uniform(0.05, 0.95, n_samples), 0.01, 0.99)
+        leads = rng.uniform(0, 5, n_samples)
+        outcomes = (p_raw_train + rng.normal(0, 0.05, n_samples) > 0.5).astype(int)
+        cal = ExtendedPlattCalibrator()
+        cal.fit(p_raw_train, leads, outcomes, n_bootstrap=20, rng=np.random.default_rng(7))
+        assert cal.fitted
+
+        def _make_with_cal(eqe_yes=None) -> MarketAnalysis:
+            bins = _bins()
+            return MarketAnalysis(
+                p_raw=np.array([0.55, 0.45]),
+                p_cal=np.array([0.55, 0.45]),
+                p_market=np.array([0.30, 0.30]),
+                alpha=0.0,
+                bins=bins,
+                member_maxes=np.array([25.5, 25.8, 26.0, 26.3, 26.6]),
+                calibrator=cal,
+                executable_mask=np.array([True, True]),
+                rng_seed=42,
+                entry_quote_evidence_yes=eqe_yes,
+            )
+
+        a1 = _make_with_cal(eqe_yes=None)
+        a2 = _make_with_cal(eqe_yes=None)
+        # Same calibrator + same seed + no EQE → bit-identical even with the
+        # extra rng consumption for Platt parameter sampling.
+        assert a1._bootstrap_bin(0, 200) == a2._bootstrap_bin(0, 200)
+
+        # And the EQE-cost_uncertainty=0 path on the SAME numeric c_b must
+        # also stay bit-identical to the no-EQE baseline (the cost_rng
+        # SeedSequence.spawn split keeps forecast/Platt rng untouched).
+        a_with_zero_eqe = _make_with_cal(
+            eqe_yes=[_eqe(0.30, cost_uncertainty=0.0), _eqe(0.30, cost_uncertainty=0.0)],
+        )
+        assert a1._bootstrap_bin(0, 200) == a_with_zero_eqe._bootstrap_bin(0, 200)
+
 
 # ---------------------------------------------------------------------------
 # σ_market > 0 widens CI
@@ -144,11 +201,15 @@ class TestSigmaMarketWidensCI:
 
 class TestBinEdgeCarriesEvidence:
     def test_find_edges_stamps_entry_quote_evidence_on_binedge(self):
+        # n_bootstrap=200 (vs prior 50) makes the percentile-5 stable to
+        # cost_rng stream details (X3 spawn change introduces a different
+        # noise sequence than the old fixed-prime offset; small n exposes
+        # this as edge-acceptance flakiness on the boundary).
         a = _make_analysis(
             eqe_yes=[_eqe(0.30, cost_uncertainty=0.02), _eqe(0.30, cost_uncertainty=0.02)],
             rng_seed=42,
         )
-        edges = a.find_edges(n_bootstrap=50)
+        edges = a.find_edges(n_bootstrap=200)
         assert len(edges) >= 1
         for edge in edges:
             if edge.direction == "buy_yes":

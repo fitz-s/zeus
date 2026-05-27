@@ -1,6 +1,9 @@
 # Created: 2026-05-27
 # Last reused or audited: 2026-05-27
 # Authority basis: architecture/market_cost_seam_executable_uncertainty_2026_05_27.md §Wave1 + D4
+# Lifecycle: created=2026-05-27; last_reviewed=2026-05-27; last_reused=never
+# Purpose: R4 — relationship test antibody for Stage B family optimizer activation
+# Reuse: optimize_exclusive_outcome_portfolio ELG(2-leg) >= ELG(1-leg) on favourable partition; Stage A pin preserved when max_legs=1 (default).
 """R4: Stage B optimizer ELG(2-leg) >= ELG(1-leg) on a synthetic YES/NO partition.
 
 Smoke test for D4 — the Stage B optimizer exists and works but is pinned to
@@ -58,15 +61,28 @@ def test_r4_optimizer_exists_and_is_callable() -> None:
     assert callable(optimize_exclusive_outcome_portfolio)
 
 
-def test_r4_stage_b_pinned_to_max_legs_1_today() -> None:
-    """Documents that max_legs=1 today makes Stage B identical to Stage A.
+def test_r4_stage_b_default_pinned_to_max_legs_1() -> None:
+    """Documents that the SHIPPED env-var defaults make Stage B identical to Stage A.
 
-    This is D4: the optimizer exists but config pins max_legs=1.
-    Wave 4 bumps ZEUS_FAMILY_OPTIMIZER_MAX_LEGS to 2 for shadow.
+    Wave 4 renamed/split the activation env var into a mode-aware pair:
+        ZEUS_SHADOW_FAMILY_PORTFOLIO_MAX_LEGS (default 1) — used in shadow mode
+        ZEUS_LIVE_FAMILY_PORTFOLIO_MAX_LEGS   (default 1) — used in live mode
+    Both default 1 so the Stage A single-leg gate stays the operational
+    behaviour until the operator explicitly promotes either tier.
     """
     import os
-    max_legs = int(os.environ.get("ZEUS_FAMILY_OPTIMIZER_MAX_LEGS", "1"))
-    assert max_legs == 1, (
-        f"ZEUS_FAMILY_OPTIMIZER_MAX_LEGS={max_legs}; expected 1 (Stage A pinned). "
-        "If this fails, Wave 4 has landed — update this test."
+    shadow_legs = int(os.environ.get("ZEUS_SHADOW_FAMILY_PORTFOLIO_MAX_LEGS", "1"))
+    live_legs = int(os.environ.get("ZEUS_LIVE_FAMILY_PORTFOLIO_MAX_LEGS", "1"))
+    assert shadow_legs == 1, (
+        f"ZEUS_SHADOW_FAMILY_PORTFOLIO_MAX_LEGS={shadow_legs}; expected 1 by default."
+    )
+    assert live_legs == 1, (
+        f"ZEUS_LIVE_FAMILY_PORTFOLIO_MAX_LEGS={live_legs}; expected 1 by default."
+    )
+    # Confirm the LEGACY name is not silently expected anywhere by the test suite.
+    legacy = os.environ.get("ZEUS_FAMILY_OPTIMIZER_MAX_LEGS")
+    assert legacy is None, (
+        f"Legacy env var ZEUS_FAMILY_OPTIMIZER_MAX_LEGS={legacy!r} found — Wave 4 "
+        "renamed this to ZEUS_SHADOW/LIVE_FAMILY_PORTFOLIO_MAX_LEGS. "
+        "Clear the legacy export from operator config."
     )

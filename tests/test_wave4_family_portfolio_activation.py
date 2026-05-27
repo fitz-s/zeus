@@ -1,6 +1,9 @@
 # Created: 2026-05-27
 # Last reused or audited: 2026-05-27
 # Authority basis: architecture/market_cost_seam_executable_uncertainty_2026_05_27.md §Wave4 +
+# Lifecycle: created=2026-05-27; last_reviewed=2026-05-27; last_reused=never
+# Purpose: Wave 4 — Stage B family-portfolio activation gates
+# Reuse: Mode-aware env split (shadow vs live), worst-case loss cap rejection, preselect-vs-build consistency, R4-style ELG dominance under new helpers.
 #                  src/strategy/family_exclusive_dedup.py:909 (optimize_exclusive_outcome_portfolio)
 """Wave 4: Stage B family-portfolio optimizer activation gates.
 

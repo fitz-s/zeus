@@ -1,6 +1,9 @@
 # Created: 2026-05-27
 # Last reused or audited: 2026-05-27
 # Authority basis: architecture/market_cost_seam_executable_uncertainty_2026_05_27.md §Wave2 + INV-38
+# Lifecycle: created=2026-05-27; last_reviewed=2026-05-27; last_reused=never
+# Purpose: R2 — relationship test antibody for INV-38
+# Reuse: Production find_edges must construct typed ExecutionPrice(price_type='vwmp') for both buy_yes and buy_no; bare-float legacy fixtures get auto-coerced via __post_init__ to implied_probability with explicit logger WARNING.
 """R2: BinEdge.entry_price MUST be ExecutionPrice with executable provenance.
 
 Antibody for INV-38 (bin_edge_entry_price_typed) and INV-39

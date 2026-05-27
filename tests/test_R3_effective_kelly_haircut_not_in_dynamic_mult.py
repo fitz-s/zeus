@@ -1,6 +1,9 @@
 # Created: 2026-05-27
 # Last reused or audited: 2026-05-27
 # Authority basis: architecture/market_cost_seam_executable_uncertainty_2026_05_27.md §Wave6 + INV-40
+# Lifecycle: created=2026-05-27; last_reviewed=2026-05-27; last_reused=never
+# Purpose: R3 — relationship test antibody for INV-40 (spread/depth single-count)
+# Reuse: Flag OFF preserves legacy double-count chain bit-identically; flag ON skips both dynamic_kelly_mult.ci_width haircut AND EffectiveKellyContext.haircut multiplication.
 """R3: spread/depth uncertainty must appear ONCE in the sizing chain.
 
 Pre-Wave-6 the EffectiveKellyContext.haircut() spread/depth signal multiplied
@@ -63,6 +66,7 @@ class TestFlagOnSingleCountEnforced:
     EffectiveKellyContext.haircut() is NOT multiplied at the boundary."""
 
     def test_flag_on_dynamic_mult_skips_ci_width_haircut(self, monkeypatch):
+        monkeypatch.setenv("ZEUS_EVALUATOR_ENTRY_QUOTE_EVIDENCE_ENABLED", "1")
         monkeypatch.setenv(_ENV_UNIFIED_UNCERTAINTY_BUDGET, "1")
         assert _unified_uncertainty_budget_enabled() is True
         m_baseline = dynamic_kelly_mult(base=0.25, ci_width=0.05)
@@ -83,6 +87,7 @@ class TestFlagOnSingleCountEnforced:
             depth_at_best_ask=50,
             order_type="FOK",
         )
+        monkeypatch.setenv("ZEUS_EVALUATOR_ENTRY_QUOTE_EVIDENCE_ENABLED", "1")
         monkeypatch.setenv(_ENV_UNIFIED_UNCERTAINTY_BUDGET, "1")
         h_on = ctx.haircut()
         monkeypatch.setenv(_ENV_UNIFIED_UNCERTAINTY_BUDGET, "0")
@@ -101,6 +106,7 @@ class TestNoLegacyDoubleCountWithFlagOn:
     """
 
     def test_flag_on_ci_width_and_ekc_haircut_are_both_inactive(self, monkeypatch):
+        monkeypatch.setenv("ZEUS_EVALUATOR_ENTRY_QUOTE_EVIDENCE_ENABLED", "1")
         monkeypatch.setenv(_ENV_UNIFIED_UNCERTAINTY_BUDGET, "1")
         # ci_width haircut removed → multiplier unchanged regardless of ci_width
         m_no_ci = dynamic_kelly_mult(base=0.25, ci_width=0.0)

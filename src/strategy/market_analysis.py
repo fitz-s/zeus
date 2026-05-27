@@ -16,6 +16,8 @@ import numpy as np
 
 from src.calibration.platt import (
     ExtendedPlattCalibrator,
+    P_CLAMP_HIGH,
+    P_CLAMP_LOW,
     logit_safe,
     normalize_bin_probability_for_calibration,
 )
@@ -272,11 +274,20 @@ class MarketAnalysis:
         # the forecast/Platt resampling stream (self._rng) is NOT disturbed
         # when EntryQuoteEvidence is provided. Without this split the same
         # rng_seed produces different forecast samples between legacy and
-        # Wave-5 paths, defeating behaviour-preservation testing. Offset is
-        # a fixed prime so the cost stream is deterministic but uncorrelated
-        # with the forecast stream.
-        cost_seed = (rng_seed + 7919) if rng_seed is not None else None
-        self._cost_rng = np.random.default_rng(cost_seed)
+        # Wave-5 paths, defeating behaviour-preservation testing.
+        # X3 fix (Copilot review of PR #348): use numpy.random.SeedSequence.spawn
+        # — the canonical decorrelated-substream pattern — instead of a
+        # close-spaced fixed-prime offset. spawn() guarantees the substream
+        # is statistically independent of self._rng regardless of generator
+        # family (PCG64, Philox, etc), where seed+constant only happens to
+        # work for PCG64. self._rng is NOT re-seeded to preserve legacy
+        # forecast-stream behaviour bit-identically (rng_seed callers depend
+        # on the existing default_rng(rng_seed) stream).
+        if rng_seed is None:
+            self._cost_rng = np.random.default_rng()
+        else:
+            (cost_ss,) = np.random.SeedSequence(rng_seed).spawn(1)
+            self._cost_rng = np.random.default_rng(cost_ss)
         # Wave 5 (2026-05-27, INV-40): per-bin EntryQuoteEvidence carries
         # cost_uncertainty (σ_market). When provided, _bootstrap_bin samples
         # c_b ~ N(eqe.all_in_entry_price, eqe.cost_uncertainty) instead of
@@ -710,7 +721,12 @@ class MarketAnalysis:
                     c_b = float(eqe.all_in_entry_price) + self._cost_rng.normal(
                         0.0, float(eqe.cost_uncertainty)
                     )
-                    c_b = float(np.clip(c_b, 1e-6, 1.0 - 1e-6))
+                    # X5 fix (Copilot review of PR #348): clip range aligned
+                    # with Platt's operator-pinned P_CLAMP_LOW (INV-eps-spec-
+                    # conformance) so both probability-space gates use the
+                    # same bound. Tighter clipping (1e-6) was inconsistent
+                    # with the rest of the calibration pipeline.
+                    c_b = float(np.clip(c_b, P_CLAMP_LOW, P_CLAMP_HIGH))
                 elif eqe is not None:
                     c_b = float(eqe.all_in_entry_price)
             bootstrap_edges[i] = p_post[bin_idx] - c_b
@@ -783,7 +799,12 @@ class MarketAnalysis:
                     c_b = float(eqe.all_in_entry_price) + self._cost_rng.normal(
                         0.0, float(eqe.cost_uncertainty)
                     )
-                    c_b = float(np.clip(c_b, 1e-6, 1.0 - 1e-6))
+                    # X5 fix (Copilot review of PR #348): clip range aligned
+                    # with Platt's operator-pinned P_CLAMP_LOW (INV-eps-spec-
+                    # conformance) so both probability-space gates use the
+                    # same bound. Tighter clipping (1e-6) was inconsistent
+                    # with the rest of the calibration pipeline.
+                    c_b = float(np.clip(c_b, P_CLAMP_LOW, P_CLAMP_HIGH))
                 elif eqe is not None:
                     c_b = float(eqe.all_in_entry_price)
             bootstrap_edges[i] = (1.0 - p_post_yes) - c_b

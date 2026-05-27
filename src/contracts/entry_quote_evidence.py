@@ -24,6 +24,7 @@ constructed by ``entry_quote_evidence_from_orderbook`` and consumed downstream.
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Literal
 
@@ -221,11 +222,31 @@ def entry_quote_evidence_from_orderbook(
     fee_per_share = polymarket_fee(walk.fill_price_walk, fee_rate) if fee_rate > 0 else 0.0
     all_in_entry_price = walk.fill_price_walk + fee_per_share
 
-    # Wave 3 conservative cost_uncertainty: max(spread/2, slippage_bps/10000).
-    # Wave 5 will refine to: sqrt(spread^2/4 + slippage^2/10000^2 +
-    # fee_variance + quote_age_penalty^2).
+    # cost_uncertainty (σ_market) — X4 fix from Copilot review of PR #348:
+    # math spec §15.7 promised RSS composition, not the MAX placeholder.
+    # Treating spread, slippage, fee, and quote-age as independent error
+    # sources, the standard composition is:
+    #     σ_market = sqrt( (spread/2)^2 + slippage_unit^2 +
+    #                      fee_variance + quote_age_penalty^2 )
+    # Fee variance defaults to 0 here because Polymarket fee is deterministic
+    # given the realised fill price; quote_age_penalty linearly grows past
+    # the stale threshold (caller-supplied; defaults to 0 when fresh).
     slippage_unit = walk.slippage_bps / 10_000.0
-    cost_uncertainty = max(spread_usd / 2.0, slippage_unit)
+    half_spread = spread_usd / 2.0
+    fee_variance = 0.0  # deterministic — reserved for Wave 6 widening if fee_rate uncertain
+    if quote_age_ms > stale_threshold_ms:
+        # Linear penalty 0..0.005 over a 10s post-stale window (caps the
+        # contribution; staler quotes are flagged STALE/CROSSED reliability).
+        excess_ms = min(10_000, max(0, quote_age_ms - stale_threshold_ms))
+        quote_age_penalty = 0.005 * (excess_ms / 10_000.0)
+    else:
+        quote_age_penalty = 0.0
+    cost_uncertainty = math.sqrt(
+        half_spread * half_spread
+        + slippage_unit * slippage_unit
+        + fee_variance
+        + quote_age_penalty * quote_age_penalty
+    )
 
     status = _reliability_status(
         best_bid=best_bid,

@@ -1,6 +1,9 @@
 # Created: 2026-05-27
 # Last reused or audited: 2026-05-27
 # Authority basis: architecture/market_cost_seam_executable_uncertainty_2026_05_27.md §Wave3 +
+# Lifecycle: created=2026-05-27; last_reviewed=2026-05-27; last_reused=never
+# Purpose: Wave 3 — EntryQuoteEvidence dataclass + factory tests
+# Reuse: Construction from two-sided book, fee inclusion, ExecutionPrice conversion + assert_kelly_safe, reliability transitions, cost_uncertainty RSS composition (X4-corrected), schema-packet contract.
 #                  src/contracts/entry_quote_evidence.py docstring
 """Wave 3: EntryQuoteEvidence dataclass + factory.
 
@@ -199,6 +202,9 @@ class TestCostUncertainty:
 
     def test_slippage_dominates_cost_uncertainty_on_thin_top(self):
         # Top-of-book very thin so walking the ladder produces large slippage.
+        # X4 fix (Copilot review of PR #348): cost_uncertainty is the RSS
+        # composition sqrt(spread^2/4 + slippage^2 + ...), not max(...).
+        import math
         ob = _ob(
             bids=[{"price": 0.41, "size": 100.0}],
             asks=[
@@ -214,7 +220,8 @@ class TestCostUncertainty:
             fee_rate=0.0,
         )
         slip_unit = ev.slippage_bps / 10_000.0
-        assert ev.cost_uncertainty == pytest.approx(max(ev.spread_usd / 2, slip_unit))
+        expected_rss = math.sqrt((ev.spread_usd / 2.0) ** 2 + slip_unit ** 2)
+        assert ev.cost_uncertainty == pytest.approx(expected_rss, rel=1e-6)
         assert ev.cost_uncertainty >= slip_unit
 
 

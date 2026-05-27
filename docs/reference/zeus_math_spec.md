@@ -907,7 +907,7 @@ over selected leg combinations of an exclusive-outcome payoff matrix; default `m
 
 **Acceptance for §15.7 being closed:** all of INV-38, INV-39, INV-40 antibody tests GREEN, `_size_at_execution_price_boundary` constructs no `ExecutionPrice` with `price_type="implied_probability"`, `_bootstrap_bin` samples `c_b` from `EntryQuoteEvidence.cost_uncertainty`, no soft uncertainty enters Kelly via more than one path.
 
-**Status (2026-05-27):** plan + spec amendment + INV registration only; Waves 1-7 pending.
+**Status (2026-05-27):** Waves 0-7 LANDED on `claude/market-cost-seam-2026-05-27` (PR #348). Wave 5.5 + Wave 6 both feature-flagged (default OFF) per the staged-promotion contract in §15.8; operator owns Stage 1 / Stage 2 flag flips after replay validation.
 
 ### 15.8 Unified uncertainty budget (Wave 6 math)
 

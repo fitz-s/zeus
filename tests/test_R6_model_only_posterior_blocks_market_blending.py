@@ -1,6 +1,9 @@
 # Created: 2026-05-27
 # Last reused or audited: 2026-05-27
 # Authority basis: architecture/market_cost_seam_executable_uncertainty_2026_05_27.md §Wave1 + K1
+# Lifecycle: created=2026-05-27; last_reviewed=2026-05-27; last_reused=never
+# Purpose: R6 — preservation test for MODEL_ONLY default posterior mode
+# Reuse: Verifies MODEL_ONLY_POSTERIOR_MODE constant exists, is non-empty, does not contain 'market', does contain 'model', and that compute_posterior method is reachable.
 """R6: MODEL_ONLY_POSTERIOR_MODE must block market_prior blending (K1 preservation).
 
 Preservation test — K1 (market price ≠ epistemic belief) is already correct.

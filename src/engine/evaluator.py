@@ -124,6 +124,7 @@ from src.strategy.family_exclusive_dedup import (
     native_multibin_buy_no_shadow_enabled,
 )
 from src.strategy.kelly import (
+    _unified_uncertainty_budget_enabled,
     dynamic_kelly_mult,
     kelly_size,
     observed_target_day_fraction,
@@ -310,16 +311,24 @@ def _buy_entry_evidence_from_clob(
     clob,
     token_id: str,
     *,
+    side: str,
     target_shares: float,
     fee_rate: float,
     quote_age_ms: int = 0,
 ):
     """Wave 5.5: fetch the orderbook once and produce EntryQuoteEvidence.
 
+    The ``side`` parameter is REQUIRED — Copilot review of PR #348 caught
+    that hard-coding ``side="yes"`` mislabels NO-token evidence when the
+    caller passes a no_token_id (the EQE was being stamped as a YES-side
+    quote even when it represented NO-side execution context).
+
     Returns None when the orderbook is unavailable or empty (caller falls
     back to legacy ``_buy_entry_price_from_clob``). Never raises — wiring
     failures must not crash the evaluator loop.
     """
+    if side not in ("yes", "no"):
+        raise ValueError(f"side must be 'yes' or 'no', got {side!r}")
     if not _evaluator_eqe_enabled():
         return None
     from src.contracts.entry_quote_evidence import (
@@ -335,7 +344,7 @@ def _buy_entry_evidence_from_clob(
     try:
         return entry_quote_evidence_from_orderbook(
             token_id=token_id,
-            side="yes",
+            side=side,
             orderbook=orderbook,
             target_shares=max(1.0, float(target_shares)),
             fee_rate=max(0.0, min(0.999, float(fee_rate))),
@@ -1576,7 +1585,7 @@ def _size_at_execution_price_boundary(
     # via EntryQuoteEvidence.cost_uncertainty (spread/2 + slippage_bps/10000)
     # → σ_market → edge_LCB. Multiplying haircut() here as well = the double-
     # count INV-40 forbids. Flag OFF (default) preserves the legacy chain.
-    from src.strategy.kelly import _unified_uncertainty_budget_enabled
+    # X9 fix (Copilot review of PR #348): import moved to module top.
     _wave6_collapse = _unified_uncertainty_budget_enabled()
     effective_kelly_multiplier = kelly_multiplier
     if effective_context is not None and not _wave6_collapse:
@@ -4397,6 +4406,7 @@ def evaluate_candidate(
                 )
                 eqe_yes_list[idx] = _buy_entry_evidence_from_clob(
                     clob, o["token_id"],
+                    side="yes",
                     target_shares=_target_shares,
                     fee_rate=_fee_rate,
                 )
@@ -4444,6 +4454,7 @@ def evaluate_candidate(
                             )
                             eqe_no_list[idx] = _buy_entry_evidence_from_clob(
                                 clob, no_token_id,
+                                side="no",
                                 target_shares=_no_target_shares,
                                 fee_rate=_no_fee_rate,
                             )

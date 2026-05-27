@@ -1,6 +1,9 @@
 # Created: 2026-05-27
 # Last reused or audited: 2026-05-27
 # Authority basis: architecture/market_cost_seam_executable_uncertainty_2026_05_27.md §Wave1 + §Wave2
+# Lifecycle: created=2026-05-27; last_reviewed=2026-05-27; last_reused=never
+# Purpose: R1 — relationship test antibody
+# Reuse: Pre-Wave-2 identity codifier + post-Wave-2 ExecutionPrice carry-through assertion for the BinEdge.entry_price → Kelly seam value identity. Pair with INV-38.
 """R1: BinEdge.entry_price value reaches kelly_size unchanged.
 
 Codifies the invariant that whatever VALUE flows through BinEdge.entry_price

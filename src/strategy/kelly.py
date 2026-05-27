@@ -370,6 +370,7 @@ def city_kelly_multiplier(city: str | None) -> float:
 
 
 _ENV_UNIFIED_UNCERTAINTY_BUDGET = "ZEUS_UNIFIED_UNCERTAINTY_BUDGET"
+_ENV_EVALUATOR_EQE_ENABLED = "ZEUS_EVALUATOR_ENTRY_QUOTE_EVIDENCE_ENABLED"
 
 
 def _unified_uncertainty_budget_enabled() -> bool:
@@ -386,16 +387,47 @@ def _unified_uncertainty_budget_enabled() -> bool:
     vetoes (oracle_penalty=0, strategy_phase=0, executable_mask=0) stay
     multiplicative.
 
-    SAFETY-DIRECTION CONTRACT: flag ON must produce equal-or-smaller sizes
-    than flag OFF on the SAME inputs when σ_market has widened edge_LCB
-    sufficiently. The flag is meant to REMOVE the over-conservative double-
-    count, not introduce new exposure. Pair with
-    ``ZEUS_EVALUATOR_ENTRY_QUOTE_EVIDENCE_ENABLED`` (Wave 5.5) activation.
-    See architecture/market_cost_seam_executable_uncertainty_2026_05_27.md
-    §Wave 6 + docs/reference/zeus_math_spec.md §15.8.
+    SAFETY DIRECTION (corrected after Copilot review of PR #348):
+        On the multiplier basis alone, flag ON produces equal-or-LARGER
+        multipliers than flag OFF (because it REMOVES haircuts ≤ 1.0).
+        The compensating SMALLER edge comes from edge_LCB widening via
+        σ_market once Wave 5.5 (EntryQuoteEvidence) is also active in the
+        evaluator. Net sizing under the staged-promotion path:
+
+            Stage 0 (both flags OFF, default):   baseline
+            Stage 1 (Wave 5.5 ON only):          size ≤ Stage 0 (more conservative)
+            Stage 2 (both ON):                   size validated by replay to
+                                                 stay within Stage-0 envelope
+                                                 (math spec §15.8 acceptance
+                                                 criterion size_unified /
+                                                 size_legacy ∈ [1.0, 1.2]).
+
+    HARD ORDERING GUARD: flipping ``_ENV_UNIFIED_UNCERTAINTY_BUDGET=1``
+    while ``_ENV_EVALUATOR_EQE_ENABLED=0`` removes multipliers WITHOUT the
+    σ_market widening that compensates them. This combination is what the
+    staged-promotion contract explicitly forbids (Stage 2 without Stage 1).
+    Pre-Wave-6-post-Copilot-review fix (2026-05-27): this function
+    REFUSES to report enabled=True unless the Wave 5.5 flag is also set.
+    Operator must promote in order 0 → 1 → 2.
     """
     import os
-    return os.environ.get(_ENV_UNIFIED_UNCERTAINTY_BUDGET, "0") in ("1", "true", "TRUE")
+    own = os.environ.get(_ENV_UNIFIED_UNCERTAINTY_BUDGET, "0") in ("1", "true", "TRUE")
+    if not own:
+        return False
+    prereq = os.environ.get(_ENV_EVALUATOR_EQE_ENABLED, "0") in ("1", "true", "TRUE")
+    if not prereq:
+        # K5#5 + X10 fix: hard ordering guard so flag-flip ordering bug
+        # cannot silently expose live capital to single-count math without
+        # the compensating σ_market widening from Wave 5.5.
+        import logging
+        logging.getLogger(__name__).warning(
+            "ZEUS_UNIFIED_UNCERTAINTY_BUDGET=1 ignored because "
+            "ZEUS_EVALUATOR_ENTRY_QUOTE_EVIDENCE_ENABLED is not set. "
+            "Staged-promotion contract requires Wave 5.5 (EQE wiring) BEFORE "
+            "Wave 6 (unified budget) — see math spec §15.8 + plan §Wave 5.5."
+        )
+        return False
+    return True
 
 
 def dynamic_kelly_mult(

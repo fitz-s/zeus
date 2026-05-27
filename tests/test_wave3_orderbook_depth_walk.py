@@ -1,6 +1,9 @@
 # Created: 2026-05-27
 # Last reused or audited: 2026-05-27
 # Authority basis: architecture/market_cost_seam_executable_uncertainty_2026_05_27.md §Wave3
+# Lifecycle: created=2026-05-27; last_reviewed=2026-05-27; last_reused=never
+# Purpose: Wave 3 — pure-function depth-walk math tests
+# Reuse: Validates walk_asks_for_target_shares: single-level, multi-level, unsorted-ladder, thin-book partial-fill, input validation, tuple-entry interop.
 """Wave 3: depth-walk math for the asks ladder.
 
 Pure-function tests for ``walk_asks_for_target_shares``. Codifies that:
