@@ -110,6 +110,10 @@ test_trust_policy:
     # CI Topology Phase C: advisory workflow + sticky PR comment poster (2026-05-26).
     tests/ci/test_post_pr_context_pack_comment.py: {created: "2026-05-26", last_used: "2026-05-26"}
     tests/ci/test_topology_context_advisory_workflow.py: {created: "2026-05-26", last_used: "2026-05-26"}
+    # CI Topology Phase D: structural blocker enforcers + override validation (2026-05-26).
+    tests/topology/test_structural_blockers.py: {created: "2026-05-26", last_used: "2026-05-26"}
+    tests/ci/test_structural_blockers.py: {created: "2026-05-26", last_used: "2026-05-26"}
+    tests/ci/test_context_pack_overrides.py: {created: "2026-05-26", last_used: "2026-05-26"}
     # P1/P2 architecture review antibodies (2026-05-22): strategy routing, evidence
     # report scoping, migration clamp, evidence tier provenance.
     tests/test_p1_findings_evidence_risk.py: {created: "2026-05-22", last_used: "2026-05-22"}
