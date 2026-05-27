@@ -95,6 +95,33 @@ write_routes:
   script_repair_write:
     owner: scripts/**
     guardrail: dry-run/apply metadata required in later scripts manifest packet
+# PR #347 (Finding 10 cleanup, 2026-05-27): providers consumed by daemon
+# entry points (src/main.py, src/engine/cycle_runner.py, src/ingest_main.py).
+# Predates this PR — registered here so the source_rationale_delta_gate
+# (scripts/ci/check_source_rationale_delta.py) sees them as declared rather
+# than as "new unregistered providers" the next time any consumer file is
+# touched. Authority basis: docs/plans/2026-05-27-chain-local-position-model-refactor.md
+# (PR F § scope clarification — pre-existing imports surfaced by classify
+# diff being whole-file-based, not diff-based).
+providers:
+  observation:
+    role: settlement_capture_observation
+    client: src/data/observation_client.py
+    why: Hourly+daily observed-temperature observations (HKO/NOAA/WU/Ogimet);
+      used by Day0 monitor + settlement capture truth chain. Per-station
+      routing law in architecture/observation_routing.yaml.
+  polymarket:
+    role: venue_clob
+    client: src/data/polymarket_client.py
+    why: Polymarket CLOB venue — orderbook + balances + order submission.
+      Sole venue producer for chain truth; see architecture/venue_law.yaml
+      for the canonical chain-truth contract.
+  ensemble:
+    role: forecast_skill
+    client: src/data/ensemble_client.py
+    why: TIGGE / OpenData ensemble forecast distributions used for skill
+      computation + Day0 calibration. Distinct from observation (settlement
+      truth) and polymarket (venue truth) per source-plane-collapse rule.
 package_defaults:
   src/contracts:
     zone: K0_frozen_kernel

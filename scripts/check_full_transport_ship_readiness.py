@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 # Created: 2026-05-25
 # Last reused or audited: 2026-05-25
+# Lifecycle: created=2026-05-25; last_reviewed=2026-05-25; last_reused=never
+# Purpose: Executable 9-check ship-readiness gate for full_transport → live promotion (Zeus #64).
+# Reuse: All 9 checks must PASS before enabling full_transport_live_enabled. Run with prod DBs.
 # Authority basis: docs/operations/FT_SHIP_MASTER_SPEC_2026-05-25.md §Antibody
 """Executable ship-readiness gate for the full_transport → live promotion.
 
@@ -111,15 +114,29 @@ def check_error_models_persisted(world_db: str) -> CheckResult:
             if _table_exists(conn, table):
                 cols = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
                 missing = _REQUIRED_FIELDS - cols
-                count = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
                 if missing:
                     return CheckResult(
                         name, FAIL,
                         f"{table} exists but missing fields: {sorted(missing)}"
                     )
-                if count == 0:
-                    return CheckResult(name, FAIL, f"{table} exists but has 0 rows — not yet produced")
-                return CheckResult(name, PASS, f"table={table} rows={count} required_fields=present")
+                # Bug 4 fix (Zeus #64 PR #342): for the canonical model_bias_ens_v2 table,
+                # require full_transport_v1 posteriors specifically (not just any rows).
+                # Legacy ens_error_model_v1 lacks error_model_family — check row count only.
+                if table == "model_bias_ens_v2" and "error_model_family" in cols:
+                    count = conn.execute(
+                        f"SELECT COUNT(*) FROM {table} WHERE error_model_family='full_transport_v1'"
+                    ).fetchone()[0]
+                    if count == 0:
+                        return CheckResult(
+                            name, FAIL,
+                            f"{table} exists but has 0 full_transport_v1 rows — posteriors not yet produced"
+                        )
+                    return CheckResult(name, PASS, f"table={table} full_transport_v1_rows={count} required_fields=present")
+                else:
+                    count = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+                    if count == 0:
+                        return CheckResult(name, FAIL, f"{table} exists but has 0 rows — not yet produced")
+                    return CheckResult(name, PASS, f"table={table} rows={count} required_fields=present")
         return CheckResult(
             name, FAIL,
             f"no error-model table found (checked {list(_ERROR_MODEL_TABLES)}) — not yet produced"
@@ -336,37 +353,15 @@ def check_live_wiring_flag_off_byte_identical() -> CheckResult:
         # Flag exists but OFF — that's the correct gated state
         return CheckResult(name, PASS, "full_transport_live_enabled present and OFF (byte-identical-when-off)")
 
-    # Flag not present yet — Phase 1 not landed, code is still pre-wiring.
-    # This is the correct state today: no live wiring exists.
-    # Verify vs main that monitor_refresh is byte-identical (flag not introduced).
-    try:
-        result = subprocess.run(
-            ["git", "diff", "origin/main", "--", "src/engine/monitor_refresh.py"],
-            capture_output=True, text=True, cwd=str(ROOT)
-        )
-        diff = result.stdout.strip()
-        if diff:
-            # There are changes to monitor_refresh vs main, but no live flag —
-            # check if those changes introduce p_raw_vector_with_error_model calls
-            if "p_raw_vector_with_error_model" in diff:
-                return CheckResult(
-                    name, FAIL,
-                    "monitor_refresh differs from main AND introduces p_raw_vector_with_error_model without flag guard"
-                )
-            return CheckResult(
-                name, PASS,
-                "full_transport_live_enabled absent (Phase 1 not yet landed); "
-                "monitor_refresh changed vs main but no unguarded live wiring"
-            )
-        return CheckResult(
-            name, PASS,
-            "full_transport_live_enabled absent; monitor_refresh byte-identical to origin/main (no live wiring)"
-        )
-    except Exception as exc:
-        return CheckResult(
-            name, PASS,
-            f"full_transport_live_enabled absent (Phase 1 not landed) — git diff check skipped: {exc}"
-        )
+    # Bug 5 fix (Zeus #64 PR #342): flag absent = FAIL-CLOSED.
+    # The gate requires the flag to be present AND set to OFF (not absent).
+    # Absent flag means Phase 1 wiring has not landed — that is a ship-blocker,
+    # not a pass.  Exception during git diff check also → FAIL (not PASS).
+    return CheckResult(
+        name, FAIL,
+        "full_transport_live_enabled absent from monitor_refresh.py — "
+        "Phase 1 flag wiring required before ship (must be present AND set to False/OFF)"
+    )
 
 
 # ── Check 9: live_trace_smoke_pass ────────────────────────────────────────────

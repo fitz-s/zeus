@@ -142,23 +142,31 @@ def test_extract_outcomes_preserves_untradable_gamma_children_as_non_executable_
 
 # ==================== D2 (#49): Quarantine Sentinel ====================
 
-def test_quarantine_position_uses_sentinel():
-    """Quarantine positions must use QUARANTINE_SENTINEL, not 'UNKNOWN'."""
-    from src.state.portfolio import (
-        _chain_only_quarantine_position_from_row,
-        QUARANTINE_SENTINEL,
-    )
+def test_chain_only_quarantine_row_becomes_chain_only_fact():
+    """PR E2 (Finding 3, 2026-05-27): chain-only suppression rows now load as
+    typed ChainOnlyFact entries (not synthetic Position with sentinel
+    city/target_date/bin_label fields). The fact carries the same identity
+    + economics; downstream review gates consult portfolio.chain_only_facts.
+
+    Replaces the prior test_quarantine_position_uses_sentinel which asserted
+    on the legacy synthetic-Position carrier."""
+    from src.contracts.position_truth import ChainOnlyFact
+    from src.state.portfolio import _chain_only_fact_from_row
+
     row = {
         "token_id": "abc123def456",
         "evidence_json": '{"size": 10, "avg_price": 0.5, "cost": 5}',
         "condition_id": "cond_xyz",
         "updated_at": "2026-01-01T00:00:00Z",
     }
-    pos = _chain_only_quarantine_position_from_row(row)
-    assert pos.city == QUARANTINE_SENTINEL
-    assert pos.target_date == QUARANTINE_SENTINEL
-    assert pos.bin_label == QUARANTINE_SENTINEL
-    assert pos.is_quarantine_placeholder is True
+    fact = _chain_only_fact_from_row(row)
+    assert isinstance(fact, ChainOnlyFact)
+    assert fact.token_id == "abc123def456"
+    assert fact.condition_id == "cond_xyz"
+    assert fact.size == 10.0
+    assert fact.avg_price == 0.5
+    assert fact.cost_basis == 5.0
+    assert fact.last_seen_at == "2026-01-01T00:00:00Z"
 
 
 def test_normal_position_is_not_quarantine():

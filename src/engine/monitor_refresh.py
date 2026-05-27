@@ -395,20 +395,32 @@ def _load_ft_error_model(
     if not ft_enabled:
         return None
 
-    row = read_bias_model(
-        conn,
-        city=city_name,
-        season=season,
-        metric=metric,
-        live_data_version=live_data_version,
-        month=None,  # season-level pool (month=0 in schema)
-        error_model_family="full_transport_v1",  # F4 symmetry: same filter as entry path; STAGING rows must not bind
-    )
+    # Bug 1 fix (Zeus #64 PR #342): filter on error_model_family='full_transport_v1'
+    # to avoid loading a legacy/wrong-family row when multiple families coexist
+    # per (city, season, metric, live_data_version, month=0).
+    row = conn.execute(
+        "SELECT * FROM model_bias_ens_v2 WHERE city=? AND season=? AND metric=? "
+        "AND live_data_version=? AND month=0 AND error_model_family=?",
+        (city_name, season, metric, live_data_version, "full_transport_v1"),
+    ).fetchone()
     if row is None:
         logger.warning(
             "full_transport_live: flag ON but no model_bias_ens_v2 row for "
-            "city=%r season=%r metric=%r live_data_version=%r — falling back to plain p_raw",
+            "city=%r season=%r metric=%r live_data_version=%r family='full_transport_v1' "
+            "— falling back to plain p_raw",
             city_name, season, metric, live_data_version,
+        )
+        return None
+
+    # Bug 2 fix (Zeus #64 PR #342): fail-closed — if any required canonical col is
+    # NULL (pre-migration DB), return None + log WARNING so caller falls back to plain p_raw.
+    _required_cols = ("bias_c", "bias_sd_c", "heterogeneity_var_c2", "residual_sd_c")
+    _missing = [c for c in _required_cols if row[c] is None]
+    if _missing:
+        logger.warning(
+            "full_transport_live: model_bias_ens_v2 row for city=%r season=%r metric=%r "
+            "has NULL canonical cols %s — pre-migration DB? Falling back to plain p_raw.",
+            city_name, season, metric, _missing,
         )
         return None
 
@@ -582,7 +594,12 @@ def _refresh_ens_member_counting(
         analysis_member_extrema = member_extrema
     else:
         assert ens is not None
-        _ens_member_extrema = getattr(ens, "member_extrema", getattr(ens, "member_maxes"))
+        # Bug 3 fix (Zeus #64 PR #342): avoid eager evaluation of fallback getattr —
+        # getattr(ens, "member_maxes") would raise AttributeError if member_maxes also absent.
+        if hasattr(ens, "member_extrema"):
+            _ens_member_extrema = ens.member_extrema
+        else:
+            _ens_member_extrema = ens.member_maxes
         _member_unit = "degC" if city.settlement_unit == "C" else "degF"
         _ft_model = _resolve_ft_error_model(conn, city, target_d, _position_metric_str)
         if _ft_model is not None:

@@ -95,6 +95,30 @@ test_trust_policy:
     tests/topology/test_file_arrangement.py: {created: "2026-05-22", last_used: "2026-05-22"}
     # PR-T4 operations packet inventory advisory antibodies (2026-05-22).
     tests/topology/test_operations_package_inventory.py: {created: "2026-05-22", last_used: "2026-05-22"}
+    # CI Topology Context Pack Phase A schema validation (2026-05-26).
+    # Authority: docs/operations/current/plans/ci_topology_refactor_refined.md
+    tests/topology/test_context_pack_schema.py: {created: "2026-05-26", last_used: "2026-05-26"}
+    tests/topology/test_topology_surfaces_schema.py: {created: "2026-05-26", last_used: "2026-05-26"}
+    tests/topology/test_failure_chains_schema.py: {created: "2026-05-26", last_used: "2026-05-26"}
+    # CI Topology Context Pack Phase B integration (2026-05-26). Historical PR
+    # fixtures: PR325/PR330/PR335/PR312/PR306 + multi-file UNION semantics.
+    tests/topology/test_context_pack_integration.py: {created: "2026-05-26", last_used: "2026-05-26"}
+    # CI Topology Phase B.5: universal first-principle PR monitor (2026-05-26).
+    # Verifies 4 invariants: meaningful findings only, CI failure emits / success silent,
+    # dedup persistence across runs, terminal state emit-and-exit.
+    tests/ci/test_pr_monitor.py: {created: "2026-05-26", last_used: "2026-05-26"}
+    # CI Topology Phase C: advisory workflow + sticky PR comment poster (2026-05-26).
+    tests/ci/test_post_pr_context_pack_comment.py: {created: "2026-05-26", last_used: "2026-05-26"}
+    tests/ci/test_topology_context_advisory_workflow.py: {created: "2026-05-26", last_used: "2026-05-26"}
+    # CI Topology Phase D: structural blocker enforcers + override validation (2026-05-26).
+    tests/topology/test_structural_blockers.py: {created: "2026-05-26", last_used: "2026-05-26"}
+    tests/ci/test_structural_blockers.py: {created: "2026-05-26", last_used: "2026-05-26"}
+    tests/ci/test_context_pack_overrides.py: {created: "2026-05-26", last_used: "2026-05-26"}
+    # CI Topology Phase E: gate router + CI_RECOVERED monitor event (2026-05-26).
+    tests/ci/test_context_pack_gate_router.py: {created: "2026-05-26", last_used: "2026-05-26"}
+    # CI Topology Phase G: review instruction upgrade (2026-05-26).
+    tests/ci/test_review_instruction_shards.py: {created: "2026-05-26", last_used: "2026-05-26"}
+    tests/ci/test_review_scope_precision.py: {created: "2026-05-26", last_used: "2026-05-26"}
     # P1/P2 architecture review antibodies (2026-05-22): strategy routing, evidence
     # report scoping, migration clamp, evidence tier provenance.
     tests/test_p1_findings_evidence_risk.py: {created: "2026-05-22", last_used: "2026-05-22"}
@@ -3192,3 +3216,40 @@ test_metadata:
       is available. Root cause of zero live entries 2026-05-24.
     created: 2026-05-24
     last_reused_or_audited: 2026-05-24
+
+  tests/test_identity_calibrator_route.py:
+    cohort: law_antibody
+    trust: trusted
+    authority_docs:
+      - docs/operations/FT_SHIP_EXECUTION_LEDGER_2026-05-25.md
+    notes: >
+      Relationship tests for identity_full_transport_v1 calibration route (Zeus #64).
+      Three invariants: (a) identity calibrator bucket reaches evaluator gate pass with
+      p_cal==p_raw element-wise; (b) uncalibrated bucket emits CALIBRATION_IMMATURE_NO_PLATT;
+      (c) identity route is NOT confused with genuine Platt calibration.
+    created: 2026-05-25
+    last_reused_or_audited: 2026-05-25
+
+  tests/test_check_full_transport_ship_readiness.py:
+    cohort: ship_gate_antibody
+    trust: trusted
+    authority_docs:
+      - docs/operations/FT_SHIP_EXECUTION_LEDGER_2026-05-25.md
+    notes: >
+      Unit tests for check_full_transport_ship_readiness. Verifies gate returns FAIL
+      today (nothing shipped yet) and check function names match the 9 spec items exactly.
+    created: 2026-05-25
+    last_reused_or_audited: 2026-05-25
+
+  tests/test_full_transport_live_wiring.py:
+    cohort: law_antibody
+    trust: trusted
+    authority_docs:
+      - docs/operations/FT_SHIP_EXECUTION_LEDGER_2026-05-25.md
+    notes: >
+      Relationship tests for full_transport_live wiring in monitor_refresh (Zeus #64).
+      Three invariants: (a) flag OFF = p_raw byte-identical to plain path; (b) flag ON +
+      model present = p_raw differs from plain and matches direct p_raw_vector_with_error_model;
+      (c) flag ON + no model row = plain fallback + WARNING logged.
+    created: 2026-05-25
+    last_reused_or_audited: 2026-05-25

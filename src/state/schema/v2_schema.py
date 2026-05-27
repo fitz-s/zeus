@@ -569,6 +569,10 @@ def apply_v2_schema(conn: sqlite3.Connection, *, forecast_tables: bool = True) -
             "ALTER TABLE platt_models_v2 ADD COLUMN source_id TEXT NOT NULL DEFAULT 'tigge_mars'",
             "ALTER TABLE platt_models_v2 ADD COLUMN horizon_profile TEXT NOT NULL DEFAULT 'full'",
             "ALTER TABLE platt_models_v2 ADD COLUMN error_model_family TEXT NOT NULL DEFAULT 'none'",
+            # identity_full_transport_v1 (Zeus #64, 2026-05-25): explicit route for
+            # full_transport p_raw when ECE is already low — no Platt transform applied.
+            # 'platt' is the default for all existing rows (backward-compatible).
+            "ALTER TABLE platt_models_v2 ADD COLUMN calibration_method TEXT NOT NULL DEFAULT 'platt'",
         ]:
             try:
                 conn.execute(alter_sql)

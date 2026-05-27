@@ -173,6 +173,17 @@ state_machines:
       - CHAIN_QUARANTINED
       - MONITOR_REFRESHED
       - EXIT_INTENT
+      # PR #347 (Findings 1-10, 2026-05-27): canonical event grammar
+      # additions declared in src/contracts/position_truth.py
+      # CanonicalPositionEventKind. Scaffolded for PR D/E/F; not yet
+      # emitted by runtime — current emitters still use the legacy names
+      # above (EXIT_INTENT / SETTLED) and the typed grammar takes over
+      # when reconciliation events route through the canonical reducer.
+      - EXIT_INTENT_CREATED
+      - REDEEM_REQUESTED
+      - VENUE_POSITION_OBSERVED
+      - SETTLEMENT_RECORDED
+      - REVIEW_REQUIRED
       - EXIT_ORDER_POSTED
       - EXIT_ORDER_FILLED
       - EXIT_ORDER_VOIDED
@@ -184,6 +195,30 @@ state_machines:
       - tests/test_command_recovery.py
       - tests/test_exchange_reconcile.py
       - tests/test_lifecycle_terminal_predicate.py
+  fill_authority:
+    # PR #347 (Finding 5, PR C3 + D2, 2026-05-27): typed fill-authority
+    # enumeration. Wire-compatible with the legacy FILL_AUTHORITY_* string
+    # constants in src/state/portfolio.py; the type lives in
+    # src/contracts/position_truth.py.FillAuthority.
+    owner: src/state/portfolio.py  # constants live here; FillAuthority enum mirrors them
+    description: >
+      How strongly fill economics are known. Consumed by the typed
+      training-eligibility gate (is_training_eligible_position) in
+      src/state/portfolio.py — only VENUE_CONFIRMED_*, CANCELLED_REMAINDER,
+      and SETTLED authorities may produce calibration_pairs_v2 rows.
+      VENUE_POSITION_OBSERVED is the degraded recovery slot introduced
+      by PR C3 for balance-backed rescue.
+    states:
+      - NONE
+      - OPTIMISTIC_SUBMITTED
+      - VENUE_POSITION_OBSERVED
+      - VENUE_CONFIRMED_PARTIAL
+      - VENUE_CONFIRMED_FULL
+      - CANCELLED_REMAINDER
+      - SETTLED
+    invariant_tests:
+      - tests/state/test_inv_training_eligibility_gate.py
+      - tests/state/test_inv_rescue_authority_split.py
   shoulder_readiness:
     owner: scripts/shoulder_shadow_readiness_report.py
     description: >
@@ -337,6 +372,18 @@ state_machines:
       as a string literal in scripts/check_advisory_gates.py.
     states:
       - GATE_REVIEW_CONDITION
+  schema_migration_sql_ops:
+    owner: scripts/migrate_model_bias_ens_v2_canonical_fields.py
+    description: >
+      Raw SQL transaction operations used in schema migration scripts for
+      race-safe ALTER TABLE patterns. NOT a money-path state machine — these are
+      SQLite transaction control statements used in idempotent migration helpers.
+      Registered here because the "ACK" substring in ROLLBACK fires the semantic
+      classifier's ACK-prefix state check when the string literal "ROLLBACK"
+      appears in conn.execute() calls. (Zeus #64 PR #342)
+    states:
+      - ROLLBACK
+    invariant_tests: []
   decision_integrity_quarantine_reason_codes:
     owner: src/state/decision_integrity_quarantine.py
     description: >

@@ -1,5 +1,8 @@
 # Created: 2026-05-25
 # Last reused or audited: 2026-05-25
+# Lifecycle: created=2026-05-25; last_reviewed=2026-05-25; last_reused=never
+# Purpose: Replay-equivalence harness proving backup calibration_pairs_v2 p_raw values can be reused or must be regenerated.
+# Reuse: Requires backup full.db and stage_db; inspect replay tolerance before accepting PASS verdict.
 # Authority basis: FT_SHIP_MASTER_SPEC_2026-05-25 §Phase 2 + FT_POSTERIOR_SOURCE_PROBE_2026-05-25
 """Replay-equivalence harness for full_transport calibration_pairs_v2.
 

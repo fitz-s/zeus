@@ -50,3 +50,21 @@ first, with a plan to promote after one clean week.
 instruction file and requires `applyTo` frontmatter on all path-specific
 files. A CI pass that skips these checks (e.g. via `--no-verify`
 equivalent) is Important.
+
+## Relationship-test precision
+
+A relationship test must hit the runtime path that failed historically.
+Reject tests that only prove a helper if the bug can escape in the
+daemon, reader, executor, scheduler, or manifest consumer.
+
+- Bad: one event per city when reviewing per-city cap.
+  Good: two slugs/dates/metrics for the same city + many-city breadth.
+- Bad: classifier-only test for forecast extrema.
+  Good: production reader test where latest non-contributor loses
+  to earlier contributing bundle.
+- Bad: real `time.sleep()` to prove timing budget.
+  Good: fake clock / monotonic injection / deterministic fixture.
+
+When a manifest has `required_tests:`, the test must cover the SAME
+runtime surface as the invariant — not an earlier diagnostic or unit
+test. Manifest pointer drift to wrong test path is Important.

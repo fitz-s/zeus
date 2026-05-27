@@ -1579,3 +1579,128 @@ scripts:
     unguarded_write_rationale: "Read-only SELECT; writes only to stdout."
     required_helpers: []
     required_tests: []
+
+  scripts/check_full_transport_ship_readiness.py:
+    class: ship_readiness_gate
+    status: active
+    lifecycle: ft_ship_2026_05_25
+    packet: docs/operations/FT_SHIP_EXECUTION_LEDGER_2026-05-25.md
+    authority_scope: read_only
+    dangerous_if_run: false
+    dry_run_default: true
+    apply_flag: null
+    target_db: state/zeus-world.db
+    read_targets: [state/zeus-world.db, state/zeus-forecasts.db]
+    write_targets: [stdout]
+    canonical_command: "python scripts/check_full_transport_ship_readiness.py [--prod-world-db PATH] [--prod-forecasts-db PATH] [--stage-db PATH]"
+    external_inputs: []
+    delete_policy: retain_until_superseded
+    reuse_when: >
+      Run before enabling full_transport_live_enabled. All 9 checks must PASS.
+      Verifies error models persisted, replay equivalence, schema migration, calibration pin,
+      live wiring flag state, and trace smoke. Read-only against prod DBs.
+    do_not_use_when: "Prod DBs absent or posteriors not yet fitted."
+    promotion_barrier: "Gate script — do not remove. All 9 checks must PASS before ship."
+    unguarded_write_rationale: "Read-only; writes only to stdout."
+    required_helpers: []
+    required_tests: [tests/test_check_full_transport_ship_readiness.py]
+
+  scripts/fit_full_transport_error_models.py:
+    class: calibration_producer
+    status: active
+    lifecycle: ft_ship_2026_05_25
+    packet: docs/operations/FT_SHIP_EXECUTION_LEDGER_2026-05-25.md
+    authority_scope: write_isolated_staging
+    dangerous_if_run: false
+    dry_run_default: true
+    apply_flag: "--commit"
+    target_db: "isolated staging DB (never shared world DB)"
+    read_targets: [state/zeus-world.db]
+    write_targets: ["<stage-db-path>"]
+    canonical_command: "python scripts/fit_full_transport_error_models.py --db PATH [--commit] [--metric METRIC] [--city CITY]"
+    external_inputs: []
+    delete_policy: retain_until_superseded
+    reuse_when: >
+      Fit PredictiveErrorModel posteriors (full_transport_v1) into model_bias_ens_v2.
+      Use --commit to persist; dry-run by default. Requires isolated staging DB.
+      Inspect Fix-A cycle selection before reuse.
+    do_not_use_when: "Staging DB absent or calibration_pairs_v2 not yet rebuilt."
+    promotion_barrier: "Outputs must pass check_full_transport_ship_readiness before promotion."
+    unguarded_write_rationale: "Writes only to isolated staging DB specified by --db; never touches shared world DB."
+    required_helpers: [src/calibration/ens_bias_repo.py, src/calibration/ens_error_model.py]
+    required_tests: [tests/test_full_transport_live_wiring.py]
+
+  scripts/migrate_model_bias_ens_v2_canonical_fields.py:
+    class: schema_migration
+    status: active
+    lifecycle: ft_ship_2026_05_25
+    packet: docs/operations/FT_SHIP_EXECUTION_LEDGER_2026-05-25.md
+    authority_scope: write_schema_only
+    dangerous_if_run: false
+    dry_run_default: false
+    apply_flag: null
+    target_db: state/zeus-world.db
+    read_targets: [state/zeus-world.db]
+    write_targets: [state/zeus-world.db]
+    canonical_command: "python scripts/migrate_model_bias_ens_v2_canonical_fields.py [--db PATH]"
+    external_inputs: []
+    delete_policy: retain_until_superseded
+    reuse_when: >
+      Add canonical error-model columns to model_bias_ens_v2 (idempotent).
+      ALTERs are guarded by PRAGMA table_info — safe to re-run.
+      Run before fit_full_transport_error_models.py.
+    do_not_use_when: "Schema already migrated (check PRAGMA table_info first)."
+    promotion_barrier: "Migration required before posteriors can be persisted."
+    unguarded_write_rationale: "Schema-only ALTER TABLE; no row data written."
+    required_helpers: []
+    required_tests: []
+
+  scripts/audit_matched_date_proper_scores.py:
+    class: eval_diagnostic
+    status: active
+    lifecycle: ft_ship_2026_05_25
+    packet: docs/operations/FT_SHIP_EXECUTION_LEDGER_2026-05-25.md
+    authority_scope: read_only
+    dangerous_if_run: false
+    dry_run_default: true
+    apply_flag: null
+    target_db: "stage_db (read-only)"
+    read_targets: ["<stage-db-path>"]
+    write_targets: [stdout]
+    canonical_command: "python scripts/audit_matched_date_proper_scores.py --stage-db PATH [--min-matched N]"
+    external_inputs: []
+    delete_policy: retain_until_superseded
+    reuse_when: >
+      Matched-date proper-score audit: raw(none) vs full_transport_v1 on head-to-head events.
+      Requires stage_db with both raw and ft posteriors. Verify MIN_MATCHED_FLOOR before
+      accepting PASS verdict.
+    do_not_use_when: "Stage DB absent or ft posteriors not yet fitted."
+    promotion_barrier: "Evidence-generation tool; output feeds ship decision, not an automated gate."
+    unguarded_write_rationale: "Read-only SELECT; writes only to stdout."
+    required_helpers: []
+    required_tests: []
+
+  scripts/replay_equivalence_full_transport.py:
+    class: eval_diagnostic
+    status: active
+    lifecycle: ft_ship_2026_05_25
+    packet: docs/operations/FT_SHIP_EXECUTION_LEDGER_2026-05-25.md
+    authority_scope: read_only
+    dangerous_if_run: false
+    dry_run_default: true
+    apply_flag: null
+    target_db: "backup full.db + stage_db (read-only)"
+    read_targets: ["state/backups/ens_refit_full_2026-05-25.db", "<stage-db-path>"]
+    write_targets: [stdout, "<stage-db-path>::replay_equivalence_proof"]
+    canonical_command: "python scripts/replay_equivalence_full_transport.py --backup-db PATH --stage-db PATH [--commit]"
+    external_inputs: []
+    delete_policy: retain_until_superseded
+    reuse_when: >
+      Prove backup calibration_pairs_v2 p_raw values can be reused vs regenerated.
+      Samples N snapshots per cohort, reconstructs p_raw, compares stored vs regenerated.
+      Requires backup full.db and stage_db.
+    do_not_use_when: "Backup DB absent or stage_db not yet prepared."
+    promotion_barrier: "PASS verdict required by check_full_transport_ship_readiness check 3."
+    unguarded_write_rationale: "Writes only to replay_equivalence_proof table in stage_db."
+    required_helpers: [src/calibration/ens_bias_repo.py]
+    required_tests: []

@@ -1,5 +1,5 @@
 ---
-applyTo: "src/data/**/*.py,src/ingest/**/*.py,src/engine/evaluator.py"
+applyTo: "src/data/**/*.py,src/ingest/**/*.py,src/ingest_main.py,src/engine/evaluator.py"
 ---
 
 # Zeus forecast + source truth review
@@ -48,3 +48,37 @@ live candidate selection.
 Calibration pair writes must include `data_version` matching the signal
 that produced them. A calibration trained on v1 signals must not be
 applied to v2 signals without explicit version reconciliation.
+
+## Forecast bundle / extrema (FC-01)
+
+Latest snapshot ≠ enough. For `executable_forecast_reader.py`,
+`forecast_extrema_authority.py`, or evaluator forecast consumption,
+inspect production reader:
+- enumerate ALL candidate bundles, not only latest row;
+- keep source_run_coverage / readiness_state / source_run / snapshot coherent;
+- current-version NULL contribution fails closed unless explicitly legacy;
+- tests use distinct source_run_id/coverage_id across cycles.
+Required test: bundle-layer test that fails when classifier passes but
+production reader locks to wrong bundle.
+
+## Market discovery substrate (FC-02)
+
+For `market_scanner.py` / `_market_discovery_cycle`:
+- daemon calls full tag scan when full substrate required;
+- test the daemon path, not only slug helper;
+- per-city cap keys by canonical city, NOT event slug/date/metric;
+- CLOB archived/tradability checks remain authoritative pre-live;
+- tag scan has bounded fetch-loop under slow Gamma.
+Required test: multiple events/slugs for one city + many-city breadth.
+
+## Source timing + planes (FC-06/FC-07)
+
+OpenData safe-fetch/release timing is source contract, not generic
+freshness. Write time ≠ source/event time. Settlement / Day0 / historical
+hourly / forecast-skill sources are NOT interchangeable.
+
+## Changed helper API → caller migration
+
+Helper signature/return-type change: search same-module callers, tests,
+runtime numeric comparisons. Helper-local edits without caller migration
+produce silent runtime regressions (PR #335 `_persist_market_events_to_db`).

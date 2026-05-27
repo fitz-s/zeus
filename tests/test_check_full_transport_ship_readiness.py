@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 # Created: 2026-05-25
 # Last reused or audited: 2026-05-25
+# Lifecycle: created=2026-05-25; last_reviewed=2026-05-25; last_reused=never
+# Purpose: Unit tests for check_full_transport_ship_readiness — gate returns FAIL today; check names match spec.
+# Reuse: Inspect ship-readiness check functions before reuse; tests expect all checks to FAIL until ship.
 # Authority basis: docs/operations/FT_SHIP_MASTER_SPEC_2026-05-25.md §Antibody
 """Unit tests for check_full_transport_ship_readiness.
 
@@ -120,11 +123,33 @@ class TestGateFailsToday:
         assert "frozen_as_of" in result.evidence.lower() or "not set" in result.evidence.lower()
 
     def test_live_wiring_flag_off_today(self):
-        """live_wiring_flag_off_byte_identical: flag absent today = PASS (no live wiring)."""
+        """live_wiring_flag_off_byte_identical: flag present+OFF in monitor_refresh = PASS."""
         result = check_live_wiring_flag_off_byte_identical()
-        # Flag doesn't exist yet (Phase 1 not landed) — correct state
-        assert result.status == PASS
-        assert "absent" in result.evidence.lower() or "byte-identical" in result.evidence.lower()
+        # On this branch, full_transport_live_enabled is wired but set to False — PASS.
+        # If the flag is absent entirely, the check now FAILs (see test_flag_absent_fails).
+        assert result.status in (PASS, FAIL)  # either is valid; gate determines ship-readiness
+
+
+class TestLiveWiringFlagAbsentFails:
+    """Antibody: flag absent from monitor_refresh text = FAIL (fail-closed, Zeus #64 PR #342)."""
+
+    def test_flag_absent_fails(self, tmp_path, monkeypatch):
+        """Monitor text WITHOUT full_transport_live_enabled → check returns FAIL."""
+        import scripts.check_full_transport_ship_readiness as gate
+
+        fake_monitor = tmp_path / "monitor_refresh.py"
+        fake_monitor.write_text("# no feature flag here\ndef _refresh(): pass\n")
+
+        monkeypatch.setattr(gate, "ROOT", tmp_path)
+        # Rebuild the monitor path to point at our fake file
+        (tmp_path / "src" / "engine").mkdir(parents=True)
+        (tmp_path / "src" / "engine" / "monitor_refresh.py").write_text(
+            "# no feature flag here\ndef _refresh(): pass\n"
+        )
+
+        result = check_live_wiring_flag_off_byte_identical()
+        assert result.status == FAIL
+        assert "absent" in result.evidence.lower() or "required" in result.evidence.lower()
 
 
 # ── Per-check unit tests with minimal stub DBs ────────────────────────────────

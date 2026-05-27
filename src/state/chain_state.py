@@ -3,6 +3,30 @@
 Public symbols:
   ChainState (enum)
   classify_chain_state(*, fetched_at, chain_positions, portfolio, ...) -> ChainState
+
+Timestamp contract (Finding 1, PR C0, 2026-05-27):
+  This classifier consults `Position.chain_verified_at` to decide whether a
+  fresh chain-empty snapshot reflects reality (CHAIN_EMPTY → safe to void)
+  or a degraded API (CHAIN_UNKNOWN → never void).
+
+  The contract REQUIRES `chain_verified_at` to be a POSITIVE-observation
+  timestamp — i.e. it is updated only when the venue/chain confirmed the
+  position is held (rescue, size correction, sync). Negative observations
+  (position absent from snapshot) live in `Position.last_chain_absence_observed_at`
+  and MUST NOT advance `chain_verified_at`. Violating the contract inverts
+  CHAIN_EMPTY vs CHAIN_UNKNOWN: a recent absence-write would falsely prove
+  recent positive verification and force CHAIN_UNKNOWN, blocking legitimate
+  voids on a genuinely complete empty snapshot.
+
+  Producers of `chain_verified_at` (positive-only): the rescue branch and
+  size-correction branch in `src/state/chain_reconciliation.py:reconcile()`.
+  Concrete line numbers intentionally omitted because they drift with every
+  edit to the file; grep for `chain_verified_at = ` to enumerate writers,
+  and confirm each lives inside a branch where `chain_state` is set to
+  `"synced"` (positive observation) rather than `"local_only"` /
+  `"exit_pending_missing"` (absence). The
+  `test_chain_reconciliation_absence_branches_do_not_advance_positive_timestamp`
+  test enforces that invariant statically.
 """
 from __future__ import annotations
 
@@ -15,9 +39,22 @@ if TYPE_CHECKING:
 
 
 class ChainState(str, Enum):
+    """Per-cycle chain snapshot completeness (NOT per-position visibility).
+
+    Finding 7 (PR B, 2026-05-27): The name `ChainState` is shared with
+    `src/contracts/semantic_types.py.ChainState` (per-position visibility).
+    These are different real-world objects. New code SHOULD import the
+    domain-specific alias below; legacy imports of `ChainState` remain wire-
+    compatible.
+    """
+
     CHAIN_SYNCED = "chain_synced"
     CHAIN_EMPTY = "chain_empty"
     CHAIN_UNKNOWN = "chain_unknown"
+
+
+# Domain-specific alias (Finding 7 / PR B). Prefer this name in new code.
+ChainSnapshotCompleteness = ChainState
 
 
 _STALE_GUARD_SECONDS = 6 * 3600

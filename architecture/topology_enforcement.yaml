@@ -1,0 +1,271 @@
+# Created: 2026-05-26
+# Last reused or audited: 2026-05-26
+# Authority basis: docs/operations/current/plans/ci_topology_refactor_refined.md §3
+#                  External spec: ci topology refactor.md §9 Topology Enforcement Split
+#
+# Splits topology rules into BLOCKING structural hazards (have enforcer +
+# proving test, fail CI immediately) vs ADVISORY warnings (PR-summary signal,
+# never block by themselves) vs NO_OVERRIDE (cannot be bypassed by any entry
+# in architecture/ci_overrides.yaml).
+#
+# Status: advisory only in Phase A. Loaded by
+# scripts/ci/check_topology_structural_blockers.py (Phase D).
+
+schema_version: 1
+
+metadata:
+  created: "2026-05-26"
+  owner: "ci-infra / topology"
+  purpose: >
+    Enumerate which topology hazards block CI vs which warn vs which cannot
+    be overridden. Every blocking rule must declare an enforcer script + a
+    proving test, otherwise it is a fake guard.
+  authority_basis:
+    - architecture/context_pack_schema.yaml
+    - architecture/ci_overrides.yaml
+    - architecture/topology_surfaces.yaml
+    - architecture/failure_chains.yaml
+
+# ---------------------------------------------------------------------------
+# Rule object schema
+# ---------------------------------------------------------------------------
+rule_schema:
+  id: string                            # rule_id; unique
+  category: blocking_structural|advisory|no_override
+  description: string
+  enforcer: string                      # scripts/ci/check_*.py path
+  proving_test: string                  # tests/.../test_*.py path
+  applies_to_surfaces: [string]         # surface_id refs (empty = repo-wide)
+  override_allowed: boolean
+  severity: blocking|important|advisory
+  owner: string
+
+# ---------------------------------------------------------------------------
+# Blocking structural hazards (enforced; can be overridden EXCEPT no_override)
+# ---------------------------------------------------------------------------
+blocking_structural:
+
+  - id: context_pack_schema_invalid
+    description: "Context Pack output fails architecture/context_pack_schema.yaml validation"
+    enforcer: scripts/ci/check_context_pack_integrity.py
+    proving_test: tests/topology/test_context_pack_schema.py
+    applies_to_surfaces: []
+    override_allowed: false      # NO_OVERRIDE
+    severity: blocking
+    owner: ci-infra
+
+  - id: context_pack_references_missing_file
+    description: "Context Pack references a file/test/manifest that does not exist"
+    enforcer: scripts/ci/check_context_pack_integrity.py
+    proving_test: tests/topology/test_context_pack_schema.py
+    applies_to_surfaces: []
+    override_allowed: true
+    severity: blocking
+    owner: ci-infra
+
+  - id: high_risk_surface_no_context_pack
+    description: "Changed file matches a T0/T1 surface but no Context Pack was emitted"
+    enforcer: REVIEW_REQUIRED  # was self-recursive; needs dedicated enforcer (Phase E+)
+    proving_test: tests/topology/test_structural_blockers.py
+    applies_to_surfaces:
+      - execution_cycle_runtime
+      - execution_venue_boundary
+      - executable_forecast_reader
+      - market_discovery_scanner
+      - db_schema_authority
+    override_allowed: true
+    severity: blocking
+    owner: ci-infra
+
+  - id: workflow_refs_exist
+    description: "Workflow `run:` repo-local path must exist"
+    enforcer: scripts/ci/check_workflow_repo_refs.py
+    proving_test: tests/ci/test_structural_blockers.py
+    applies_to_surfaces: []
+    override_allowed: false      # NO_OVERRIDE
+    severity: blocking
+    owner: ci-infra
+
+  - id: new_test_unregistered
+    description: "New tests/test_*.py without architecture/test_topology.yaml registration"
+    enforcer: REVIEW_REQUIRED  # was self-recursive; needs dedicated enforcer (Phase E+)
+    proving_test: tests/topology/test_structural_blockers.py
+    applies_to_surfaces: []
+    override_allowed: false      # NO_OVERRIDE — false protection
+    severity: blocking
+    owner: ci-infra
+
+  - id: source_rationale_delta_gate
+    description: "New external source/provider without architecture/source_rationale.yaml entry"
+    enforcer: scripts/ci/check_source_rationale_delta.py
+    proving_test: tests/topology/test_structural_blockers.py
+    applies_to_surfaces:
+      - market_discovery_scanner
+      - executable_forecast_reader
+      - forecast_live_daemon
+      - day0_observation_reader
+    override_allowed: false      # NO_OVERRIDE — source-plane collapse risk
+    severity: blocking
+    owner: ci-infra
+
+  - id: db_table_delta_gate
+    description: "New DB table without architecture/db_table_ownership.yaml entry"
+    enforcer: scripts/ci/check_db_table_delta.py
+    proving_test: tests/topology/test_structural_blockers.py
+    applies_to_surfaces:
+      - db_schema_authority
+    override_allowed: false      # NO_OVERRIDE — ghost/cross-DB drift
+    severity: blocking
+    owner: ci-infra
+
+  - id: stdlib_shadowing_gate
+    description: "Python file in imported package shadows a stdlib module name (PR #306 prevention)"
+    enforcer: scripts/ci/check_stdlib_shadowing.py
+    proving_test: tests/topology/test_structural_blockers.py
+    applies_to_surfaces:
+      - topology_v_next
+    override_allowed: false      # NO_OVERRIDE — direct import crash
+    severity: blocking
+    owner: ci-infra
+
+  - id: duplicate_active_authority
+    description: "Two files claim active authority for the same fact class"
+    enforcer: REVIEW_REQUIRED  # was self-recursive; needs dedicated enforcer (Phase E+)
+    proving_test: tests/topology/test_structural_blockers.py
+    applies_to_surfaces: []
+    override_allowed: true
+    severity: blocking
+    owner: ci-infra
+
+  - id: expired_override
+    description: "architecture/ci_overrides.yaml entry past expiry_date"
+    enforcer: scripts/ci/check_context_pack_overrides.py
+    proving_test: tests/ci/test_context_pack_overrides.py
+    applies_to_surfaces: []
+    override_allowed: false      # NO_OVERRIDE (recursive)
+    severity: blocking
+    owner: ci-infra
+
+  - id: blocking_rule_lacks_enforcer
+    description: "A rule marked blocking has no enforcer or no proving_test"
+    enforcer: scripts/ci/check_context_pack_integrity.py
+    proving_test: tests/topology/test_context_pack_schema.py
+    applies_to_surfaces: []
+    override_allowed: false      # NO_OVERRIDE — fake guard prevention
+    severity: blocking
+    owner: ci-infra
+
+  - id: tier0_paired_relationship_test_gate
+    description: "Tier 0 surface changed without paired required_relationship_test"
+    enforcer: REVIEW_REQUIRED  # was self-recursive; needs dedicated enforcer (Phase E+)
+    proving_test: tests/topology/test_structural_blockers.py
+    applies_to_surfaces:
+      - execution_cycle_runtime
+      - execution_venue_boundary
+      - db_schema_authority
+    override_allowed: true       # allowed via ci_overrides.yaml with owner + expiry
+    severity: blocking
+    owner: ci-infra
+
+# ---------------------------------------------------------------------------
+# Advisory warnings (PR-summary signal only, never block)
+# ---------------------------------------------------------------------------
+advisory:
+
+  - id: task_folder_sprawl
+    description: "Multiple sibling task_* folders in docs/operations/current/"
+    enforcer: REVIEW_REQUIRED  # was self-recursive; needs dedicated enforcer (Phase E+)
+    proving_test: tests/topology/test_anti_bureaucracy.py
+    applies_to_surfaces: [operations_docs]
+    override_allowed: true
+    severity: advisory
+    owner: topology-owner
+
+  - id: archive_movement
+    description: "Files moved into docs/archive/ — safe if registry converges"
+    enforcer: REVIEW_REQUIRED  # was self-recursive; needs dedicated enforcer (Phase E+)
+    proving_test: tests/topology/test_anti_bureaucracy.py
+    applies_to_surfaces: [operations_docs]
+    override_allowed: true
+    severity: advisory
+    owner: topology-owner
+
+  - id: docs_current_tense_mismatch
+    description: "Docs claim current state that doesn't match runtime evidence"
+    enforcer: REVIEW_REQUIRED  # was self-recursive; needs dedicated enforcer (Phase E+)
+    proving_test: tests/topology/test_anti_bureaucracy.py
+    applies_to_surfaces: [operations_docs]
+    override_allowed: true
+    severity: advisory
+    owner: topology-owner
+
+  - id: hot_file_churn
+    description: "File touched >N times in last 20 PRs (risk signal, not proof)"
+    enforcer: REVIEW_REQUIRED  # was self-recursive; needs dedicated enforcer (Phase E+)
+    proving_test: tests/topology/test_anti_bureaucracy.py
+    applies_to_surfaces: []
+    override_allowed: true
+    severity: advisory
+    owner: topology-owner
+
+  - id: repeated_fix_chain
+    description: "Same subsystem fixed multiple times before recurrence threshold"
+    enforcer: REVIEW_REQUIRED  # was self-recursive; needs dedicated enforcer (Phase E+)
+    proving_test: tests/topology/test_anti_bureaucracy.py
+    applies_to_surfaces: []
+    override_allowed: true
+    severity: advisory
+    owner: topology-owner
+
+  - id: weak_keyword_only_match
+    description: "Context Pack matched on task-text keyword only, no path/symbol/table evidence"
+    enforcer: scripts/ci/check_context_pack_integrity.py
+    proving_test: tests/topology/test_anti_bureaucracy.py
+    applies_to_surfaces: []
+    override_allowed: true
+    severity: advisory
+    owner: ci-infra
+
+# ---------------------------------------------------------------------------
+# Escalation rules — advisory becomes blocking when threshold met
+# ---------------------------------------------------------------------------
+escalation_rules:
+
+  - id: repeated_fix_chain_blocks
+    advisory_id: repeated_fix_chain
+    condition: "same subsystem has 2+ fix PRs within 20 merged PRs"
+    escalates_to: tier0_paired_relationship_test_gate
+    rationale: "Recurrence proves prior fix was symptomatic; force root-cause gate."
+
+  - id: weak_match_breaks_active_reader
+    advisory_id: weak_keyword_only_match
+    condition: "warning affects a registered active reader/enforcer"
+    escalates_to: high_risk_surface_no_context_pack
+    rationale: "Weak match on Tier 0/1 surface = blind spot."
+
+  - id: workflow_path_resolution_failure
+    advisory_id: archive_movement
+    condition: "archive move breaks .github/workflows/ run path resolution"
+    escalates_to: workflow_refs_exist
+    rationale: "Moving an active reader is not docs cleanup; it is CI break."
+
+  - id: tier0_no_test_immediate_block
+    advisory_id: tier0_without_test_warning
+    condition: "Tier 0 surface changed AND no relationship test AND no valid override"
+    escalates_to: tier0_paired_relationship_test_gate
+    rationale: "FC-10 — live-money path without test is structural defect."
+
+# ---------------------------------------------------------------------------
+# No-override hazards — cannot be bypassed by architecture/ci_overrides.yaml
+# (computed from blocking_structural[].override_allowed = false; listed here
+# explicitly for fast lookup)
+# ---------------------------------------------------------------------------
+no_override_rules:
+  - context_pack_schema_invalid
+  - workflow_refs_exist
+  - new_test_unregistered
+  - source_rationale_delta_gate
+  - db_table_delta_gate
+  - stdlib_shadowing_gate
+  - expired_override
+  - blocking_rule_lacks_enforcer

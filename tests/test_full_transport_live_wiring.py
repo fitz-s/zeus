@@ -1,5 +1,8 @@
 # Created: 2026-05-25
 # Last reused or audited: 2026-05-25
+# Lifecycle: created=2026-05-25; last_reviewed=2026-05-25; last_reused=never
+# Purpose: Relationship tests for full_transport_live wiring in monitor_refresh (flag OFF/ON/missing-model).
+# Reuse: Inspect _load_ft_error_model + p_raw_vector_with_error_model before reuse; requires in-memory fixture DB.
 # Authority basis: Zeus #64 task spec — full_transport_live_enabled flag wiring into monitor_refresh
 """Relationship tests for full_transport_live wiring in monitor_refresh.
 
@@ -117,6 +120,7 @@ def _make_db_with_row():
         correction_strength=1.0,
         effective_bias_c=2.0,
         total_residual_sd_c=float(np.sqrt(1.2**2 + 0.04)),
+        error_model_family="full_transport_v1",  # required by Bug 1 fix: filter on family
     )
     conn.commit()
     return conn

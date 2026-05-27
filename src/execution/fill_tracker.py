@@ -17,6 +17,7 @@ from decimal import Decimal, InvalidOperation
 from types import SimpleNamespace
 from typing import Any, Optional
 
+from src.contracts.semantic_types import LifecycleState
 from src.state.lifecycle_manager import (
     enter_filled_entry_runtime_state,
     enter_voided_entry_runtime_state,
@@ -1328,7 +1329,13 @@ def _handle_no_order_id(
 
     # If it's been pending for too long without an order ID, quarantine it
     # rather than destroying it, since it may have hit the exchange engine.
-    pos.state = "quarantine_no_order_id"
+    # PR E (Finding 2, 2026-05-27): previous string "quarantine_no_order_id"
+    # was outside LifecycleState; phase_for_runtime_position mapped it to
+    # UNKNOWN. The "no_order_id" sub-reason is preserved in the log warning
+    # one stack frame up; state itself carries the canonical phase. There
+    # are zero consumers of the old literal in src/ or tests/ — verified
+    # via grep before this change.
+    pos.state = LifecycleState.QUARANTINED.value
     _maybe_update_trade_lifecycle(pos, deps=deps)
     return "still_pending", True, False
 

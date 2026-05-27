@@ -1982,20 +1982,25 @@ def _add_platt_pair_preflight_checks(report: dict, cur: sqlite3.Cursor) -> None:
     for spec in METRIC_SPECS:
         identity = spec.identity
         metric = identity.temperature_metric
+        # PR #341 fix: use plural allowed_data_versions (spec may declare multiple valid versions
+        # e.g. contract_window_v2 LOW has two versions; singular spec.allowed_data_version
+        # falsely flagged legitimate rows as identity_mismatch).
+        allowed_versions = tuple(spec.allowed_data_versions)
+        dv_placeholders = _sql_placeholders(allowed_versions)
         mismatch_count = _count_params(
             cur,
             table,
-            """
+            f"""
             temperature_metric = ?
             AND COALESCE(training_allowed, 0) = 1
             AND (
                 observation_field IS NULL
                 OR observation_field != ?
                 OR data_version IS NULL
-                OR data_version != ?
+                OR data_version NOT IN ({dv_placeholders})
             )
             """,
-            (metric, identity.observation_field, spec.allowed_data_version),
+            (metric, identity.observation_field, *allowed_versions),
         )
         mismatch_met = mismatch_count == 0
         mismatch_check_id = f"calibration_pairs_v2.{metric}.identity_safe"
@@ -2031,7 +2036,7 @@ def _add_platt_pair_preflight_checks(report: dict, cur: sqlite3.Cursor) -> None:
             continue
 
         cur.execute(
-            """
+            f"""
             SELECT COUNT(*)
             FROM (
                 SELECT cluster, season, data_version,
@@ -2039,7 +2044,7 @@ def _add_platt_pair_preflight_checks(report: dict, cur: sqlite3.Cursor) -> None:
                 FROM calibration_pairs_v2
                 WHERE temperature_metric = ?
                   AND observation_field = ?
-                  AND data_version = ?
+                  AND data_version IN ({dv_placeholders})
                   AND COALESCE(training_allowed, 0) = 1
                   AND authority = 'VERIFIED'
                   AND UPPER(TRIM(CAST(causality_status AS TEXT))) = 'OK'
@@ -2063,7 +2068,7 @@ def _add_platt_pair_preflight_checks(report: dict, cur: sqlite3.Cursor) -> None:
             (
                 metric,
                 identity.observation_field,
-                spec.allowed_data_version,
+                *allowed_versions,
                 MIN_PLATT_DECISION_GROUPS,
             ),
         )

@@ -155,18 +155,34 @@ Size mismatch handling (when `|chain.size - local_shares| > 0.01`):
 - If canonical baseline is available → emit `SIZE_CORRECTED` event → update
   shares to chain value
 - If no canonical baseline → quarantine position with
-  `state="quarantine_size_mismatch"`, keep local shares
+  `state=LifecycleState.QUARANTINED.value` and
+  `chain_state="size_mismatch_unresolved"` (the size-mismatch discriminator
+  lives in chain_state; state carries the canonical phase). Keep local
+  shares. *(PR C1 fix, 2026-05-27 — previously wrote the illegal string
+  `"quarantine_size_mismatch"` which phase_for_runtime_position mapped to
+  UNKNOWN.)*
 
 **Rule 2: Local but NOT on chain → VOID.**
-Only fires when `chain_state ≠ CHAIN_UNKNOWN`. Additional skip conditions:
+Only fires when the per-cycle classifier reports `ChainSnapshotCompleteness.
+CHAIN_EMPTY` (fresh, complete, authoritatively empty). `CHAIN_UNKNOWN`
+(missing/stale/incomplete API response) is short-circuited earlier in the
+function — degraded snapshots are NEVER evidence of absence. Additional
+skip conditions:
 - Position is pending exit (exit lifecycle owns the decision)
 - Position has `entry_fill_verified=True` with `chain_state ∈ {"local_only",
   "unknown"}` (recently filled, chain may be lagging)
 
-**Rule 3: Chain but NOT local → QUARANTINE.**
-Creates a synthetic `Position` with `QUARANTINE_SENTINEL` values for trade_id,
-market_id, city, target_date, bin_label. Writes a quarantine fact via
-`record_token_suppression()`. Skips tokens in `portfolio.ignored_tokens`
+`Position.chain_verified_at` is a positive-observation timestamp ONLY
+(PR C0 fix, 2026-05-27). Absence observations land in
+`Position.last_chain_absence_observed_at`. The classifier reads positive
+observations only — see `src/state/chain_state.py` module docstring.
+
+**Rule 3: Chain but NOT local → emit ChainOnlyFact.**
+Writes a typed `ChainOnlyFact` review-queue entry to
+`PortfolioState.chain_only_facts` and a corresponding suppression row via
+`record_token_suppression()`. Earlier versions of this module synthesized a
+fake `Position(direction="unknown", ...)`; that path is removed (PR C2 +
+PR E2, 2026-05-27). Skips tokens in `portfolio.ignored_tokens`
 (settled/redeemed tokens that should not be resurrected).
 
 ### 2.3 Pending entry rescue

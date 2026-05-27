@@ -1,5 +1,8 @@
 # Created: 2026-05-25
 # Last reused or audited: 2026-05-25
+# Lifecycle: created=2026-05-25; last_reviewed=2026-05-25; last_reused=never
+# Purpose: Fit PredictiveErrorModel posteriors for all (city, metric, season) buckets and persist to model_bias_ens_v2.
+# Reuse: Requires isolated staging DB; inspect Fix-A cycle selection commit before reuse.
 # Authority basis: Zeus #64 / #69 — fit + persist ft posteriors → model_bias_ens_v2.
 #   Ported from reference: scripts/run_offline_platt_refit.py + onboard_cities.py
 #   _run_fit_ens_bias_v2 logic. Uses Fix A's corrected metric-aware cycle selection
@@ -179,8 +182,9 @@ def fit_all(
     from src.calibration.ens_error_model import fit_city_predictive_error  # noqa: PLC0415
     from src.calibration.ens_bias_repo import load_bucket_residuals  # noqa: PLC0415
 
-    init_ens_bias_schema(conn)
     if not dry_run:
+        # Both schema helpers write to DB — must not run on the read-only dry-run connection.
+        init_ens_bias_schema(conn)
         _apply_canonical_migration(conn)
         conn.commit()
 
@@ -376,10 +380,18 @@ def main(argv: list[str] | None = None) -> int:
     else:
         logger.info("Fitting and persisting posteriors to: %s", db_path)
 
-    conn = sqlite3.connect(str(db_path))
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA busy_timeout = 60000")
-    conn.execute("PRAGMA journal_mode=WAL")
+    # Bug 6 fix (Zeus #64 PR #342): dry-run must not open RW / run PRAGMA journal_mode=WAL
+    # (that creates -wal/-shm side-effect files even though nothing is committed).
+    if dry_run:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA busy_timeout = 60000")
+        # No WAL pragma in dry-run: read-only URI mode; WAL would create side-effect files.
+    else:
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA busy_timeout = 60000")
+        conn.execute("PRAGMA journal_mode=WAL")
 
     try:
         result = fit_all(

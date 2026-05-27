@@ -55,6 +55,7 @@ TIER_RULES: list[tuple[int, str]] = [
     (0, "src/supervisor_api/**/*"),
     (0, "src/main.py"),
     (0, "src/engine/cycle_runner.py"),
+    (0, "src/engine/cycle_runtime.py"),
     (0, "src/engine/evaluator.py"),
     (0, "src/engine/monitor_refresh.py"),
     (0, "migrations/*"),

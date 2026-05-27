@@ -1,5 +1,8 @@
 # Created: 2026-05-25
 # Last reused or audited: 2026-05-25
+# Lifecycle: created=2026-05-25; last_reviewed=2026-05-25; last_reused=never
+# Purpose: Matched-date proper-score audit comparing raw(none) vs full_transport_v1 on head-to-head events.
+# Reuse: Requires stage_db with both raw and ft posteriors; confirm matched event count >= MIN_MATCHED_FLOOR.
 # Authority basis: Zeus #64 eval tool — matched-date §4.1 re-evaluation.
 #   Kills the 0%-overlap confound that invalidated §4.1 of
 #   ENS_REFIT_REFINEMENT_ROADMAP_2026-05-25.md (raw and ft were scored on
