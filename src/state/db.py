@@ -9188,15 +9188,41 @@ def query_chain_only_quarantine_rows(conn: sqlite3.Connection | None) -> list[di
     Reads from `token_suppression` which is either the legacy mutable table
     (pre-migration) or the VIEW alias created by B071 migration. The VIEW
     projects the latest row per token_id from the append-only history.
+
+    2026-05-27 fitz: exclude rows whose parent market has reached chain-terminal
+    phase (settled / voided / admin_closed). Per the chain-is-truth principle,
+    once chain finalizes a market, any chain-only-quarantined token on that
+    market carries no live exposure and must not appear in the portfolio
+    as a quarantined position blocking new entries. The suppression row
+    remains in the append-only history for audit; this query filters it out
+    of runtime consumption.
     """
     if conn is None or not _table_or_view_exists(conn, "token_suppression"):
         return []
+    # If position_current is absent we cannot determine terminal status —
+    # fall back to original behavior (return all rows). Tests with minimal
+    # schema land here.
+    if not _table_exists(conn, "position_current"):
+        rows = conn.execute(
+            """
+            SELECT token_id, condition_id, created_at, updated_at, evidence_json
+            FROM token_suppression
+            WHERE suppression_reason = 'chain_only_quarantined'
+            ORDER BY created_at ASC, token_id ASC
+            """
+        ).fetchall()
+        return [dict(row) for row in rows]
     rows = conn.execute(
         """
-        SELECT token_id, condition_id, created_at, updated_at, evidence_json
-        FROM token_suppression
-        WHERE suppression_reason = 'chain_only_quarantined'
-        ORDER BY created_at ASC, token_id ASC
+        SELECT ts.token_id, ts.condition_id, ts.created_at, ts.updated_at, ts.evidence_json
+        FROM token_suppression ts
+        WHERE ts.suppression_reason = 'chain_only_quarantined'
+          AND NOT EXISTS (
+              SELECT 1 FROM position_current pc
+              WHERE (pc.token_id = ts.token_id OR pc.no_token_id = ts.token_id)
+                AND pc.phase IN ('settled', 'voided', 'admin_closed')
+          )
+        ORDER BY ts.created_at ASC, ts.token_id ASC
         """
     ).fetchall()
     return [dict(row) for row in rows]
