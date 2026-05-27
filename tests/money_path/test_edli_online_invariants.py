@@ -394,58 +394,60 @@ def test_edli_live_requires_promotion_artifact(monkeypatch):
 
 
 def test_edli_live_blocks_unresolved_unknowns(monkeypatch, tmp_path):
-    artifact = tmp_path / "promotion.json"
-    artifact.write_text(
-        json.dumps(
-            {
-                "canary_count": 1,
-                "unresolved_unknowns": 1,
-                "realized_edge_bps": 10,
-            }
-        )
+    artifact, db_path = _write_db_backed_promotion_artifact(
+        tmp_path,
+        realized_edge=0.01,
+        audit_state="POST_SUBMIT_UNKNOWN",
     )
 
     with pytest.raises(RuntimeError, match="EDLI_LIVE_PROMOTION_UNRESOLVED_UNKNOWN"):
         _run_main_with_fake_scheduler(
             monkeypatch,
             _edli_live_updates(edli_live_promotion_artifact_path=str(artifact)),
+            world_db_path=db_path,
         )
 
 
 def test_edli_live_blocks_non_positive_realized_edge(monkeypatch, tmp_path):
-    artifact = tmp_path / "promotion.json"
-    artifact.write_text(
-        json.dumps(
-            {
-                "canary_count": 1,
-                "unresolved_unknowns": 0,
-                "realized_edge_bps": -1,
-            }
-        )
-    )
+    artifact, db_path = _write_db_backed_promotion_artifact(tmp_path, realized_edge=-0.01)
 
     with pytest.raises(RuntimeError, match="EDLI_LIVE_PROMOTION_REALIZED_EDGE_INSUFFICIENT"):
+        _run_main_with_fake_scheduler(
+            monkeypatch,
+            _edli_live_updates(edli_live_promotion_artifact_path=str(artifact)),
+            world_db_path=db_path,
+        )
+
+
+def test_edli_live_blocks_scalar_promotion_artifact_without_db_proof(monkeypatch, tmp_path):
+    artifact = tmp_path / "promotion.json"
+    artifact.write_text(json.dumps({"canary_count": 1, "unresolved_unknowns": 0, "realized_edge_bps": 1}))
+
+    with pytest.raises(RuntimeError, match="EDLI_LIVE_PROMOTION_ARTIFACT_SCHEMA_INVALID"):
         _run_main_with_fake_scheduler(
             monkeypatch,
             _edli_live_updates(edli_live_promotion_artifact_path=str(artifact)),
         )
 
 
-def test_edli_live_accepts_positive_promotion_artifact(monkeypatch, tmp_path):
-    artifact = tmp_path / "promotion.json"
-    artifact.write_text(
-        json.dumps(
-            {
-                "canary_count": 1,
-                "unresolved_unknowns": 0,
-                "realized_edge_bps": 1,
-            }
+def test_edli_live_blocks_exact_zero_realized_edge(monkeypatch, tmp_path):
+    artifact, db_path = _write_db_backed_promotion_artifact(tmp_path, realized_edge=0.0)
+
+    with pytest.raises(RuntimeError, match="EDLI_LIVE_PROMOTION_REALIZED_EDGE_INSUFFICIENT"):
+        _run_main_with_fake_scheduler(
+            monkeypatch,
+            _edli_live_updates(edli_live_promotion_artifact_path=str(artifact)),
+            world_db_path=db_path,
         )
-    )
+
+
+def test_edli_live_accepts_positive_promotion_artifact(monkeypatch, tmp_path):
+    artifact, db_path = _write_db_backed_promotion_artifact(tmp_path, realized_edge=0.000001)
 
     scheduler, settings_copy = _run_main_with_fake_scheduler(
         monkeypatch,
         _edli_live_updates(edli_live_promotion_artifact_path=str(artifact)),
+        world_db_path=db_path,
     )
 
     job_ids = {job.id for job in scheduler.jobs}
@@ -535,7 +537,7 @@ def test_no_shadow_named_edli_modules():
     assert all("shadow_" not in path.name for path in edli_paths)
 
 
-def _run_main_with_fake_scheduler(monkeypatch, edli_updates):
+def _run_main_with_fake_scheduler(monkeypatch, edli_updates, *, world_db_path=None):
     import src.main as main
 
     settings_source = main.settings._data if hasattr(main.settings, "_data") else main.settings
@@ -560,9 +562,12 @@ def _run_main_with_fake_scheduler(monkeypatch, edli_updates):
     monkeypatch.setenv("ZEUS_BOOT_REGISTRY_ASSERT_ENABLED", "0")
 
     def _conn():
-        return sqlite3.connect(":memory:")
+        conn = sqlite3.connect(world_db_path or ":memory:")
+        conn.row_factory = sqlite3.Row
+        return conn
 
     monkeypatch.setattr(main, "get_world_connection", lambda *args, **kwargs: _conn())
+    monkeypatch.setattr(main, "get_world_connection_read_only", lambda *args, **kwargs: _conn())
     monkeypatch.setattr(main, "get_trade_connection", lambda *args, **kwargs: _conn())
 
     class FakeScheduler:
@@ -591,3 +596,152 @@ def _run_main_with_fake_scheduler(monkeypatch, edli_updates):
     monkeypatch.setattr(main, "BlockingScheduler", FakeScheduler)
     main.main()
     return FakeScheduler.instances[-1], settings_copy
+
+
+def _write_db_backed_promotion_artifact(tmp_path, *, realized_edge: float, audit_state: str | None = None):
+    from datetime import datetime, timezone
+
+    from src.events.live_order_aggregate import LiveOrderAggregateLedger
+    from src.events.live_profit_audit import write_promotion_artifact
+
+    db_path = tmp_path / "world.db"
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    now = datetime(2026, 5, 26, 12, tzinfo=timezone.utc)
+    ledger = LiveOrderAggregateLedger(conn)
+    ledger.append_event(
+        aggregate_id="event-1:intent-1",
+        event_type="DecisionProofAccepted",
+        payload={"event_id": "event-1", "final_intent_id": "intent-1"},
+        occurred_at=now,
+        source_authority="decision_kernel",
+    )
+    ledger.append_event(
+        aggregate_id="event-1:intent-1",
+        event_type="SubmitPlanBuilt",
+        payload={"event_id": "event-1", "final_intent_id": "intent-1"},
+        occurred_at=now,
+        source_authority="engine_adapter",
+    )
+    pre_submit = ledger.append_event(
+        aggregate_id="event-1:intent-1",
+        event_type="PreSubmitRevalidated",
+        payload=_pre_submit_payload_for_promotion(realized_edge=realized_edge),
+        occurred_at=now,
+        source_authority="engine_adapter",
+    )
+    live_cap = ledger.append_event(
+        aggregate_id="event-1:intent-1",
+        event_type="LiveCapReserved",
+        payload={"event_id": "event-1", "final_intent_id": "intent-1", "usage_id": "usage-1", "reserved_notional_usd": 5.0, "reservation_status": "RESERVED"},
+        occurred_at=now,
+        source_authority="live_cap_ledger",
+    )
+    ledger.append_event(
+        aggregate_id="event-1:intent-1",
+        event_type="ExecutionCommandCreated",
+        payload={
+            "event_id": "event-1",
+            "final_intent_id": "intent-1",
+            "execution_command_id": "command-1",
+            "pre_submit_event_hash": pre_submit.event_hash,
+            "live_cap_reserved_event_hash": live_cap.event_hash,
+            "usage_id": "usage-1",
+        },
+        occurred_at=now,
+        source_authority="engine_adapter",
+    )
+    ledger.append_event(
+        aggregate_id="event-1:intent-1",
+        event_type="UserTradeObserved",
+        payload={
+            "event_id": "event-1",
+            "final_intent_id": "intent-1",
+            "source_authority": "polymarket_user_channel",
+            "trade_status": "CONFIRMED",
+            "fill_authority_state": "FILL_CONFIRMED",
+            "venue_order_id": "venue-1",
+            "realized_edge": realized_edge,
+        },
+        occurred_at=now,
+        source_authority="user_channel",
+    )
+    ledger.append_event(
+        aggregate_id="event-1:intent-1",
+        event_type="CapTransitioned",
+        payload={
+            "event_id": "event-1",
+            "final_intent_id": "intent-1",
+            "execution_command_id": "command-1",
+            "execution_receipt_hash": "receipt-hash-1",
+            "to_status": "CONSUMED",
+            "projection_status": "CONSUMED",
+            "transition_reason": "CONFIRMED",
+        },
+        occurred_at=now,
+        source_authority="live_cap_ledger",
+    )
+    if audit_state is not None:
+        from src.events.live_profit_audit import LiveProfitAuditLedger
+
+        LiveProfitAuditLedger(conn).insert_record(
+            event_id="event-1",
+            aggregate_id="event-1:intent-1",
+            final_intent_id="intent-1",
+            execution_command_id="command-1",
+            condition_id="condition-1",
+            token_id="token-1",
+            direction="YES",
+            side="BUY",
+            realized_edge=realized_edge,
+            order_lifecycle_state=audit_state,
+        )
+    artifact = tmp_path / "promotion.json"
+    write_promotion_artifact(conn, str(artifact))
+    conn.commit()
+    conn.close()
+    return artifact, db_path
+
+
+def _pre_submit_payload_for_promotion(**overrides):
+    payload = {
+        "event_id": "event-1",
+        "final_intent_id": "intent-1",
+        "condition_id": "condition-1",
+        "token_id": "token-1",
+        "side": "BUY",
+        "direction": "YES",
+        "order_type": "LIMIT",
+        "time_in_force": "GTC",
+        "post_only": True,
+        "checked_at": "2026-05-26T12:00:00+00:00",
+        "quote_seen_at": "2026-05-26T11:59:59.900000+00:00",
+        "quote_age_ms": 100,
+        "max_quote_age_ms": 1000,
+        "book_hash": "book-hash-1",
+        "current_best_bid": 0.42,
+        "current_best_ask": 0.43,
+        "limit_price": 0.42,
+        "would_cross_book": False,
+        "tick_size": 0.01,
+        "tick_aligned": True,
+        "min_order_size": 5.0,
+        "size_ok": True,
+        "neg_risk": False,
+        "heartbeat_status": "OK",
+        "user_ws_status": "OK",
+        "venue_connectivity_status": "OK",
+        "balance_allowance_status": "OK",
+        "book_authority_id": "execution_feasibility_evidence",
+        "book_captured_at": "2026-05-26T11:59:59.900000+00:00",
+        "heartbeat_authority_id": "heartbeat_supervisor",
+        "heartbeat_checked_at": "2026-05-26T12:00:00+00:00",
+        "user_ws_authority_id": "authenticated_user_channel",
+        "user_ws_checked_at": "2026-05-26T12:00:00+00:00",
+        "venue_connectivity_authority_id": "polymarket_preflight",
+        "venue_connectivity_checked_at": "2026-05-26T12:00:00+00:00",
+        "balance_allowance_authority_id": "polymarket_wallet_readonly",
+        "balance_allowance_checked_at": "2026-05-26T12:00:00+00:00",
+    }
+    payload.update(overrides)
+    return payload

@@ -38,7 +38,13 @@ except ModuleNotFoundError:  # pragma: no cover - local minimal test env fallbac
 from src.config import cities_by_name, get_mode, settings
 from src.engine.discovery_mode import DiscoveryMode
 from src.observability.scheduler_health import _write_scheduler_health
-from src.state.db import init_schema, init_schema_trade_only, get_world_connection, get_trade_connection
+from src.state.db import (
+    init_schema,
+    init_schema_trade_only,
+    get_world_connection,
+    get_trade_connection,
+    get_world_connection_read_only,
+)
 
 logger = logging.getLogger("zeus")
 
@@ -131,12 +137,21 @@ def _assert_edli_live_promotion_artifact(edli_cfg: dict) -> None:
     max_unresolved_unknowns = int(edli_cfg.get("edli_live_max_unresolved_unknowns", 0))
     min_realized_edge_bps = float(edli_cfg.get("edli_live_min_realized_edge_bps", 0.0))
 
-    if int(artifact.get("canary_count", 0)) < min_canary_count:
-        raise RuntimeError("EDLI_LIVE_PROMOTION_CANARY_COUNT_INSUFFICIENT")
-    if int(artifact.get("unresolved_unknowns", 0)) > max_unresolved_unknowns:
-        raise RuntimeError("EDLI_LIVE_PROMOTION_UNRESOLVED_UNKNOWN")
-    if float(artifact.get("realized_edge_bps", 0.0)) <= min_realized_edge_bps:
-        raise RuntimeError("EDLI_LIVE_PROMOTION_REALIZED_EDGE_INSUFFICIENT")
+    from src.events.live_profit_audit import verify_edli_live_promotion_artifact
+
+    conn = get_world_connection_read_only()
+    try:
+        verified = verify_edli_live_promotion_artifact(
+            conn,
+            artifact,
+            min_canary_count=min_canary_count,
+            max_unresolved_unknowns=max_unresolved_unknowns,
+            min_realized_edge_bps=min_realized_edge_bps,
+        )
+    finally:
+        conn.close()
+    if not verified.ok:
+        raise RuntimeError(verified.reason)
 
 
 def _assert_edli_live_scope(edli_cfg: dict) -> None:
@@ -3016,6 +3031,46 @@ def _resolve_edli_user_channel_aggregate_id(conn, message: dict) -> str:
     raise RuntimeError("EDLI_USER_CHANNEL_MESSAGE_AGGREGATE_UNRESOLVED")
 
 
+def _edli_user_channel_message_seen(conn, *, aggregate_id: str, message_hash: str) -> bool:
+    import json as _json
+
+    if not message_hash:
+        return False
+    rows = conn.execute(
+        """
+        SELECT payload_json
+        FROM edli_live_order_events
+        WHERE aggregate_id = ? AND event_type IN ('UserOrderObserved','UserTradeObserved')
+        """,
+        (aggregate_id,),
+    ).fetchall()
+    for row in rows:
+        payload = _json.loads(str(_row_get(row, "payload_json")))
+        if payload.get("raw_user_channel_message_hash") == message_hash:
+            return True
+    return False
+
+
+def _edli_user_channel_message_not_stale(conn, *, aggregate_id: str, occurred_at: datetime) -> None:
+    row = conn.execute(
+        """
+        SELECT occurred_at
+        FROM edli_live_order_events
+        WHERE aggregate_id = ? AND event_type = 'ExecutionCommandCreated'
+        ORDER BY event_sequence DESC
+        LIMIT 1
+        """,
+        (aggregate_id,),
+    ).fetchone()
+    if row is None:
+        return
+    command_time = datetime.fromisoformat(str(_row_get(row, "occurred_at")))
+    if command_time.tzinfo is None:
+        command_time = command_time.replace(tzinfo=timezone.utc)
+    if occurred_at < command_time:
+        raise RuntimeError("EDLI_USER_CHANNEL_MESSAGE_STALE_BEFORE_COMMAND")
+
+
 def _edli_pending_reconcile_aggregates(conn, *, limit: int) -> list:
     return list(
         conn.execute(
@@ -3058,11 +3113,18 @@ def _edli_user_channel_reconcile_cycle() -> None:
         user_channel_reader = _edli_user_channel_reader(edli_cfg)
         for message in user_channel_reader.poll(max_messages=max_messages):
             aggregate_id = _resolve_edli_user_channel_aggregate_id(conn, message)
+            message_hash = str(message.get("message_hash") or "").strip()
+            if not message_hash:
+                raise RuntimeError("EDLI_USER_CHANNEL_MESSAGE_HASH_REQUIRED")
+            occurred_at = _parse_edli_runtime_time(message, default=now)
+            _edli_user_channel_message_not_stale(conn, aggregate_id=aggregate_id, occurred_at=occurred_at)
+            if _edli_user_channel_message_seen(conn, aggregate_id=aggregate_id, message_hash=message_hash):
+                continue
             append_user_channel_message(
                 ledger,
                 aggregate_id=aggregate_id,
                 message=message,
-                occurred_at=_parse_edli_runtime_time(message, default=now),
+                occurred_at=occurred_at,
             )
             message_count += 1
 

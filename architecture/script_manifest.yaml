@@ -534,17 +534,17 @@ scripts:
     class: enforcement
     lifecycle: long_lived
     status: active
-    authority_scope: edli_live_canary_gate_read_only
-    canonical_command: "python3 scripts/check_edli_live_canary_gate.py --artifact state/edli_live_canary_artifact.json --json"
-    read_targets: [repo, state/edli_live_canary_artifact.json]
+    authority_scope: edli_live_canary_gate_db_verified_read_only
+    canonical_command: "python3 scripts/check_edli_live_canary_gate.py --artifact state/edli_live_canary_artifact.json --world-db state/zeus-world.db --verify-db --json"
+    read_targets: [repo, state/edli_live_canary_artifact.json, state/zeus-world.db]
     write_targets: [stdout]
     dry_run_default: true
     apply_flag: null
     target_db: null
-    external_inputs: [edli_live_canary_artifact]
+    external_inputs: [edli_live_canary_artifact, edli_live_order_events, edli_live_order_projection, decision_certificates, edli_live_cap_usage, edli_live_profit_audit]
     dangerous_if_run: false
     delete_policy: retain_until_superseded
-    reuse_when: "Before EDLI live canary/live promotion to prove a canary packet binds pre-submit evidence, command, venue outcome, user-channel/reconcile, cap transition, lifecycle projection, and edge evidence."
+    reuse_when: "Before EDLI live canary/live promotion to prove a canary packet binds pre-submit evidence, command, venue outcome, user-channel/reconcile, cap transition, lifecycle projection, and edge evidence against canonical DB rows."
     do_not_use_when: "As live authorization without operator approval; WAITING_FOR_QUALIFYING_EVENT blocks deploy-ready claims."
     required_tests: [tests/scripts/test_check_edli_live_canary_gate.py]
   live_health_probe.py:

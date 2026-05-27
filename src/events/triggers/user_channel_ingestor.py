@@ -32,6 +32,7 @@ def append_user_channel_message(
     event_id = _required(message, "event_id")
     final_intent_id = _required(message, "final_intent_id")
     venue_order_id = _required(message, "venue_order_id")
+    message_hash = _required(message, "message_hash")
     message_kind = str(message.get("message_type") or message.get("type") or "").lower()
     if message_kind == "order":
         return append_user_order_observed(
@@ -43,7 +44,7 @@ def append_user_channel_message(
             order_update_type=_required(message, "order_update_type"),
             venue_order_id=venue_order_id,
             occurred_at=occurred_at,
-            payload={"raw_user_channel_message_hash": str(message.get("message_hash") or "")},
+            payload={"raw_user_channel_message_hash": message_hash},
         )
     if message_kind == "trade":
         return append_user_trade_observed(
@@ -55,7 +56,7 @@ def append_user_channel_message(
             trade_status=_required(message, "trade_status"),
             venue_order_id=venue_order_id,
             occurred_at=occurred_at,
-            payload={"raw_user_channel_message_hash": str(message.get("message_hash") or "")},
+            payload={"raw_user_channel_message_hash": message_hash},
         )
     raise EdliUserChannelIngestorError(f"unsupported EDLI user-channel message type: {message_kind!r}")
 

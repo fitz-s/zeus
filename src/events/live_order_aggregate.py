@@ -67,6 +67,15 @@ EVENT_STATE = {
     "OrderLifecycleProjected": "ORDER_LIFECYCLE_PROJECTED",
 }
 
+PROFIT_AUDIT_TRIGGER_EVENTS = {
+    "VenueSubmitAcknowledged",
+    "SubmitRejected",
+    "SubmitUnknown",
+    "UserTradeObserved",
+    "Reconciled",
+    "CapTransitioned",
+}
+
 
 class LiveOrderAggregateError(ValueError):
     """Raised when EDLI live-order aggregate append law is violated."""
@@ -177,6 +186,10 @@ class LiveOrderAggregateLedger:
             ),
         )
         self.rebuild_projection(aggregate_id)
+        if event_type in PROFIT_AUDIT_TRIGGER_EVENTS:
+            from src.events.live_profit_audit import record_edli_live_profit_audit_from_aggregate
+
+            record_edli_live_profit_audit_from_aggregate(self.conn, aggregate_id)
         return self.get_event(aggregate_event_id)
 
     def rebuild_projection(self, aggregate_id: str) -> LiveOrderProjection:

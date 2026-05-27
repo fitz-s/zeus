@@ -196,6 +196,26 @@ def test_user_channel_ingestor_appends_order_and_confirmed_trade_events():
     assert trade_event.payload["fill_authority_state"] == "FILL_CONFIRMED"
 
 
+def test_user_channel_ingestor_requires_message_hash_for_idempotency():
+    ledger = LiveOrderAggregateLedger(_conn())
+    _seed(ledger)
+
+    with pytest.raises(EdliUserChannelIngestorError, match="message_hash"):
+        append_user_channel_message(
+            ledger,
+            aggregate_id="event-1:intent-1",
+            message={
+                "source": "polymarket_user_channel",
+                "type": "order",
+                "event_id": "event-1",
+                "final_intent_id": "intent-1",
+                "venue_order_id": "venue-1",
+                "order_update_type": "UPDATE",
+            },
+            occurred_at=NOW,
+        )
+
+
 def test_user_channel_reconcile_cycle_processes_authenticated_queue(monkeypatch, tmp_path):
     import src.main as main
 
@@ -217,6 +237,7 @@ def test_user_channel_reconcile_cycle_processes_authenticated_queue(monkeypatch,
                         "final_intent_id": "intent-1",
                         "venue_order_id": "venue-1",
                         "order_update_type": "UPDATE",
+                        "message_hash": "order-msg-1",
                         "occurred_at": NOW.isoformat(),
                     }
                 ),
@@ -229,6 +250,7 @@ def test_user_channel_reconcile_cycle_processes_authenticated_queue(monkeypatch,
                         "final_intent_id": "intent-1",
                         "venue_order_id": "venue-1",
                         "trade_status": "CONFIRMED",
+                        "message_hash": "trade-msg-1",
                         "occurred_at": NOW.isoformat(),
                     }
                 ),
@@ -265,6 +287,56 @@ def test_user_channel_reconcile_cycle_processes_authenticated_queue(monkeypatch,
     ).fetchone()
     payload = json.loads(row["payload_json"])
     assert payload["fill_authority_state"] == "FILL_CONFIRMED"
+
+
+def test_user_channel_reconcile_cycle_is_idempotent_for_duplicate_queue_messages(monkeypatch, tmp_path):
+    import src.main as main
+
+    db_path = tmp_path / "world.db"
+    conn = _conn(db_path)
+    ledger = LiveOrderAggregateLedger(conn)
+    _seed(ledger)
+    conn.commit()
+    queue_path = tmp_path / "user_channel.jsonl"
+    queue_path.write_text(
+        json.dumps(
+            {
+                "source": "polymarket_user_channel",
+                "type": "order",
+                "aggregate_id": "event-1:intent-1",
+                "event_id": "event-1",
+                "final_intent_id": "intent-1",
+                "venue_order_id": "venue-1",
+                "order_update_type": "UPDATE",
+                "message_hash": "order-msg-1",
+                "occurred_at": NOW.isoformat(),
+            }
+        )
+        + "\n"
+    )
+    monkeypatch.setattr(
+        main,
+        "settings",
+        {
+            "edli_v1": {
+                "enabled": True,
+                "edli_user_channel_reconcile_enabled": True,
+                "edli_user_channel_message_queue_path": str(queue_path),
+                "edli_venue_reconcile_facts_path": "",
+            }
+        },
+    )
+    monkeypatch.setattr(main, "get_world_connection", lambda *args, **kwargs: _conn(db_path))
+    monkeypatch.setattr(main, "_write_scheduler_health", lambda *args, **kwargs: None)
+
+    main._edli_user_channel_reconcile_cycle.__wrapped__()
+    main._edli_user_channel_reconcile_cycle.__wrapped__()
+
+    check_conn = _conn(db_path)
+    count = check_conn.execute(
+        "SELECT COUNT(*) FROM edli_live_order_events WHERE event_type = 'UserOrderObserved'"
+    ).fetchone()[0]
+    assert count == 1
 
 
 def test_user_channel_reconcile_cycle_clears_submit_unknown_from_venue_fact(monkeypatch, tmp_path):

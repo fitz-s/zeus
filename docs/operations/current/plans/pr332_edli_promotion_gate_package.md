@@ -8,8 +8,8 @@ Authority basis: PR332 live-after-merge review packet; user requested implementa
 Implement the remaining non-deploying EDLI promotion capabilities inside PR332:
 
 - Runtime user-channel/reconcile processor behind existing disabled-by-default flags.
-- Machine-readable EDLI live canary proof gate.
-- Event-bound realized-edge/profit audit projection and scaleout artifact support.
+- DB-backed, machine-readable EDLI live canary proof gate.
+- Event-bound realized-edge/profit audit projection and DB-verified scaleout artifact support.
 - Forecast-only Day0 scope fail-closed rule.
 - Manifest and schema registration required by topology and money-path semantic CI.
 
@@ -31,4 +31,8 @@ Implement the remaining non-deploying EDLI promotion capabilities inside PR332:
   - `python scripts/check_schema_version.py`
 - Money-path semantic classifier:
   - `python scripts/ci/semantic_diff_classifier.py --base origin/main --head HEAD --objects architecture/money_path_objects.yaml --mapping architecture/money_path_ci.yaml --fail-on-unregistered`
+- Canary gate:
+  - `python scripts/check_edli_live_canary_gate.py --artifact state/edli_live_canary_artifact.json --world-db state/zeus-world.db --verify-db --json`
+- Promotion artifact:
+  - `edli_live` boot recomputes the promotion summary from canonical world DB rows and rejects scalar, stale, mismatched, or pending-reconcile artifacts.
 - Required money-path gates before completion claim.

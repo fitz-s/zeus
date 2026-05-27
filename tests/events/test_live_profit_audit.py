@@ -9,6 +9,8 @@ import sqlite3
 import pytest
 
 from src.events.live_profit_audit import LiveProfitAuditLedger, promotion_summary, write_promotion_artifact
+from src.events.live_order_aggregate import LiveOrderAggregateLedger
+from src.events.live_profit_audit import verify_edli_live_promotion_artifact
 
 
 def test_profit_audit_requires_event_bound_identity_fields():
@@ -59,11 +61,201 @@ def test_profit_audit_records_terminal_and_unknown_lifecycle_states(tmp_path):
 
     artifact_path = tmp_path / "promotion.json"
     write_promotion_artifact(conn, str(artifact_path))
-    assert json.loads(artifact_path.read_text()) == {
-        "canary_count": 1,
-        "realized_edge_bps": 100.0,
-        "unresolved_unknowns": 1,
+    artifact = json.loads(artifact_path.read_text())
+    assert artifact["schema"] == "edli_live_promotion_v1"
+    assert artifact["canary_count"] == 1
+    assert artifact["realized_edge_bps"] == 100.0
+    assert artifact["unresolved_unknowns"] == 1
+    assert artifact["audit_ids"]
+    assert artifact["source_summary_hash"]
+
+
+def test_verified_promotion_artifact_rejects_scalar_or_stale_json(tmp_path):
+    conn = _conn()
+    _seed_confirmed_aggregate(conn)
+    artifact_path = tmp_path / "promotion.json"
+    write_promotion_artifact(conn, str(artifact_path))
+    artifact = json.loads(artifact_path.read_text())
+
+    verified = verify_edli_live_promotion_artifact(
+        conn,
+        artifact,
+        min_canary_count=1,
+        max_unresolved_unknowns=0,
+        min_realized_edge_bps=0,
+    )
+    assert verified.ok is True
+
+    scalar = {"canary_count": 1, "unresolved_unknowns": 0, "realized_edge_bps": 1}
+    rejected = verify_edli_live_promotion_artifact(
+        conn,
+        scalar,
+        min_canary_count=1,
+        max_unresolved_unknowns=0,
+        min_realized_edge_bps=0,
+    )
+    assert rejected.ok is False
+    assert rejected.reason == "EDLI_LIVE_PROMOTION_ARTIFACT_SCHEMA_INVALID"
+
+    conn.execute(
+        "UPDATE edli_live_profit_audit SET realized_edge = ? WHERE aggregate_id = ?",
+        (-0.01, "event-1:intent-1"),
+    )
+    stale = verify_edli_live_promotion_artifact(
+        conn,
+        artifact,
+        min_canary_count=1,
+        max_unresolved_unknowns=0,
+        min_realized_edge_bps=0,
+    )
+    assert stale.ok is False
+    assert stale.reason.startswith("EDLI_LIVE_PROMOTION_ARTIFACT_DB_MISMATCH")
+
+
+def test_live_order_lifecycle_events_emit_profit_audit_rows():
+    conn = _conn()
+    ledger = _seed_confirmed_aggregate(conn)
+
+    row = conn.execute(
+        "SELECT * FROM edli_live_profit_audit WHERE aggregate_id = ?",
+        ("event-1:intent-1",),
+    ).fetchone()
+    assert row is not None
+    assert row["order_lifecycle_state"] == "CONFIRMED"
+    assert row["condition_id"] == "condition-1"
+    assert row["token_id"] == "token-1"
+    assert ledger.get_projection("event-1:intent-1").pending_reconcile is False
+
+
+def _seed_confirmed_aggregate(conn: sqlite3.Connection) -> LiveOrderAggregateLedger:
+    ledger = LiveOrderAggregateLedger(conn)
+    now = "2026-05-26T12:00:00+00:00"
+    from datetime import datetime
+
+    occurred_at = datetime.fromisoformat(now)
+    ledger.append_event(
+        aggregate_id="event-1:intent-1",
+        event_type="DecisionProofAccepted",
+        payload={"event_id": "event-1", "final_intent_id": "intent-1"},
+        occurred_at=occurred_at,
+        source_authority="decision_kernel",
+    )
+    ledger.append_event(
+        aggregate_id="event-1:intent-1",
+        event_type="SubmitPlanBuilt",
+        payload={"event_id": "event-1", "final_intent_id": "intent-1"},
+        occurred_at=occurred_at,
+        source_authority="engine_adapter",
+    )
+    pre_submit = ledger.append_event(
+        aggregate_id="event-1:intent-1",
+        event_type="PreSubmitRevalidated",
+        payload=_pre_submit_payload(),
+        occurred_at=occurred_at,
+        source_authority="engine_adapter",
+    )
+    live_cap = ledger.append_event(
+        aggregate_id="event-1:intent-1",
+        event_type="LiveCapReserved",
+        payload={
+            "event_id": "event-1",
+            "final_intent_id": "intent-1",
+            "usage_id": "usage-1",
+            "reserved_notional_usd": 5.0,
+            "reservation_status": "RESERVED",
+        },
+        occurred_at=occurred_at,
+        source_authority="live_cap_ledger",
+    )
+    ledger.append_event(
+        aggregate_id="event-1:intent-1",
+        event_type="ExecutionCommandCreated",
+        payload={
+            "event_id": "event-1",
+            "final_intent_id": "intent-1",
+            "execution_command_id": "command-1",
+            "pre_submit_event_hash": pre_submit.event_hash,
+            "live_cap_reserved_event_hash": live_cap.event_hash,
+            "usage_id": "usage-1",
+        },
+        occurred_at=occurred_at,
+        source_authority="engine_adapter",
+    )
+    ledger.append_event(
+        aggregate_id="event-1:intent-1",
+        event_type="UserTradeObserved",
+        payload={
+            "event_id": "event-1",
+            "final_intent_id": "intent-1",
+            "source_authority": "polymarket_user_channel",
+            "trade_status": "CONFIRMED",
+            "fill_authority_state": "FILL_CONFIRMED",
+            "venue_order_id": "venue-1",
+            "realized_edge": 0.01,
+        },
+        occurred_at=occurred_at,
+        source_authority="user_channel",
+    )
+    ledger.append_event(
+        aggregate_id="event-1:intent-1",
+        event_type="CapTransitioned",
+        payload={
+            "event_id": "event-1",
+            "final_intent_id": "intent-1",
+            "execution_command_id": "command-1",
+            "execution_receipt_hash": "receipt-hash-1",
+            "to_status": "CONSUMED",
+            "projection_status": "CONSUMED",
+            "transition_reason": "CONFIRMED",
+        },
+        occurred_at=occurred_at,
+        source_authority="live_cap_ledger",
+    )
+    return ledger
+
+
+def _pre_submit_payload(**overrides):
+    payload = {
+        "event_id": "event-1",
+        "final_intent_id": "intent-1",
+        "condition_id": "condition-1",
+        "token_id": "token-1",
+        "side": "BUY",
+        "direction": "YES",
+        "order_type": "LIMIT",
+        "time_in_force": "GTC",
+        "post_only": True,
+        "checked_at": "2026-05-26T12:00:00+00:00",
+        "quote_seen_at": "2026-05-26T11:59:59.900000+00:00",
+        "quote_age_ms": 100,
+        "max_quote_age_ms": 1000,
+        "book_hash": "book-hash-1",
+        "current_best_bid": 0.42,
+        "current_best_ask": 0.43,
+        "limit_price": 0.42,
+        "would_cross_book": False,
+        "tick_size": 0.01,
+        "tick_aligned": True,
+        "min_order_size": 5.0,
+        "size_ok": True,
+        "neg_risk": False,
+        "heartbeat_status": "OK",
+        "user_ws_status": "OK",
+        "venue_connectivity_status": "OK",
+        "balance_allowance_status": "OK",
+        "book_authority_id": "execution_feasibility_evidence",
+        "book_captured_at": "2026-05-26T11:59:59.900000+00:00",
+        "heartbeat_authority_id": "heartbeat_supervisor",
+        "heartbeat_checked_at": "2026-05-26T12:00:00+00:00",
+        "user_ws_authority_id": "authenticated_user_channel",
+        "user_ws_checked_at": "2026-05-26T12:00:00+00:00",
+        "venue_connectivity_authority_id": "polymarket_preflight",
+        "venue_connectivity_checked_at": "2026-05-26T12:00:00+00:00",
+        "balance_allowance_authority_id": "polymarket_wallet_readonly",
+        "balance_allowance_checked_at": "2026-05-26T12:00:00+00:00",
     }
+    payload.update(overrides)
+    return payload
 
 
 def _conn() -> sqlite3.Connection:
