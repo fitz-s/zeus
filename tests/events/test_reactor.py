@@ -1,5 +1,5 @@
 # Created: 2026-05-24
-# Last reused/audited: 2026-05-25
+# Last reused/audited: 2026-05-27
 # Authority basis: EDLI v1 implementation prompt §13 event reactor no-bypass contract.
 from __future__ import annotations
 
@@ -363,7 +363,7 @@ def test_processed_event_terminal_surface_includes_execution_receipt_certificate
         riskguard_gate=lambda _event: True,
         final_intent_submit=_submit,
         reject=lambda *_args: None,
-        config=ReactorConfig(real_order_submit_enabled=False),
+        config=ReactorConfig(reactor_mode="submit_disabled_live_bridge", real_order_submit_enabled=False),
         regret_ledger=NoTradeRegretLedger(store.conn),
     )
 

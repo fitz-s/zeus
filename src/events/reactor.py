@@ -27,6 +27,7 @@ LIVE_EXECUTION_RECEIPT_TERMINAL_STATUSES = frozenset({
     "POST_SUBMIT_UNKNOWN",
 })
 EXECUTION_RECEIPT_TERMINAL_STATUSES = DRY_EXECUTION_RECEIPT_TERMINAL_STATUSES | LIVE_EXECUTION_RECEIPT_TERMINAL_STATUSES
+EDLI_PROCESSING_REACTOR_MODES = frozenset({"live", "live_no_submit", "submit_disabled_live_bridge"})
 
 Gate = Callable[[OpportunityEvent], bool]
 ExecutableSnapshotGate = Callable[[OpportunityEvent, datetime], bool]
@@ -183,7 +184,7 @@ class OpportunityEventReactor:
         if event.event_type in {"BOOK_SNAPSHOT", "BEST_BID_ASK_CHANGED", "NEW_MARKET_DISCOVERED"}:
             self._reject_event(event, "EXECUTABLE_QUOTE", "MARKET_CHANNEL_EVENT_NO_DIRECT_STALE_TRADE", result, decision_time=decision_time)
             return
-        if self._config.reactor_mode not in {"live", "live_no_submit"}:
+        if self._config.reactor_mode not in EDLI_PROCESSING_REACTOR_MODES:
             self._reject_event(event, "LIVE_CAP", "REACTOR_NOT_LIVE", result, decision_time=decision_time)
             return
         if event.event_type == "DAY0_EXTREME_UPDATED" and not _day0_hard_fact_payload_live_eligible(event):
