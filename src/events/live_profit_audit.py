@@ -47,14 +47,23 @@ _AUDIT_FIELDS = (
     "realized_edge",
     "pnl_usd",
     "reject_reason",
+    "expected_edge_source_certificate_hash",
+    "cost_basis_source_certificate_hash",
+    "fill_source_event_hash",
+    "settlement_source_event_hash",
+    "promotion_eligible",
 )
 
 
 @dataclass(frozen=True)
 class LiveProfitPromotionSummary:
     canary_count: int
+    confirmed_fill_count: int
+    terminal_no_fill_count: int
+    reconciled_no_order_count: int
     unresolved_unknowns: int
     realized_edge_bps: float
+    median_realized_edge_bps_from_confirmed_fills: float
     aggregate_ids: tuple[str, ...] = ()
     audit_ids: tuple[str, ...] = ()
     execution_command_ids: tuple[str, ...] = ()
@@ -70,8 +79,12 @@ class LiveProfitPromotionSummary:
             "generated_at": _utc_now_iso(),
             "db_user_version": self.db_user_version,
             "canary_count": self.canary_count,
+            "confirmed_fill_count": self.confirmed_fill_count,
+            "terminal_no_fill_count": self.terminal_no_fill_count,
+            "reconciled_no_order_count": self.reconciled_no_order_count,
             "unresolved_unknowns": self.unresolved_unknowns,
             "realized_edge_bps": self.realized_edge_bps,
+            "median_realized_edge_bps_from_confirmed_fills": self.median_realized_edge_bps_from_confirmed_fills,
             "aggregate_ids": list(self.aggregate_ids),
             "audit_ids": list(self.audit_ids),
             "execution_command_ids": list(self.execution_command_ids),
@@ -97,6 +110,7 @@ class LiveProfitAuditLedger:
         now = _utc_now_iso()
         created_at = str(record.get("created_at") or now)
         normalized = {field: record.get(field) for field in _AUDIT_FIELDS}
+        normalized["promotion_eligible"] = 1 if normalized.get("promotion_eligible") else 0
         missing = [
             field
             for field in ("event_id", "aggregate_id", "condition_id", "token_id", "order_lifecycle_state")
@@ -122,11 +136,14 @@ class LiveProfitAuditLedger:
                 best_bid, best_ask, limit_price, order_type, time_in_force,
                 venue_order_id, order_lifecycle_state, avg_fill_price,
                 filled_size, fees, post_fill_mark, settlement_outcome,
-                realized_edge, pnl_usd, reject_reason, created_at,
+                realized_edge, pnl_usd, reject_reason,
+                expected_edge_source_certificate_hash,
+                cost_basis_source_certificate_hash, fill_source_event_hash,
+                settlement_source_event_hash, promotion_eligible, created_at,
                 schema_version
             ) VALUES (
                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
             )
             ON CONFLICT(audit_id) DO UPDATE SET
                 event_id = excluded.event_id,
@@ -160,6 +177,11 @@ class LiveProfitAuditLedger:
                 realized_edge = excluded.realized_edge,
                 pnl_usd = excluded.pnl_usd,
                 reject_reason = excluded.reject_reason,
+                expected_edge_source_certificate_hash = excluded.expected_edge_source_certificate_hash,
+                cost_basis_source_certificate_hash = excluded.cost_basis_source_certificate_hash,
+                fill_source_event_hash = excluded.fill_source_event_hash,
+                settlement_source_event_hash = excluded.settlement_source_event_hash,
+                promotion_eligible = excluded.promotion_eligible,
                 created_at = excluded.created_at,
                 schema_version = excluded.schema_version
             """,
@@ -207,7 +229,11 @@ def verify_edli_live_promotion_artifact(
     for field in (
         "db_user_version",
         "canary_count",
+        "confirmed_fill_count",
+        "terminal_no_fill_count",
+        "reconciled_no_order_count",
         "unresolved_unknowns",
+        "median_realized_edge_bps_from_confirmed_fills",
         "aggregate_ids",
         "audit_ids",
         "execution_command_ids",
@@ -224,11 +250,12 @@ def verify_edli_live_promotion_artifact(
         return PromotionVerification(False, "EDLI_LIVE_PROMOTION_REALIZED_EDGE_INVALID")
     if abs(artifact_edge - float(recomputed.get("realized_edge_bps", 0.0))) > 1e-9:
         return PromotionVerification(False, "EDLI_LIVE_PROMOTION_ARTIFACT_DB_MISMATCH:realized_edge_bps")
-    if int(comparable.get("canary_count", 0)) < min_canary_count:
+    fill_edge = float(comparable.get("median_realized_edge_bps_from_confirmed_fills", 0.0))
+    if int(comparable.get("confirmed_fill_count", 0)) < min_canary_count:
         return PromotionVerification(False, "EDLI_LIVE_PROMOTION_CANARY_COUNT_INSUFFICIENT")
     if int(comparable.get("unresolved_unknowns", 0)) > max_unresolved_unknowns:
         return PromotionVerification(False, "EDLI_LIVE_PROMOTION_UNRESOLVED_UNKNOWN")
-    if artifact_edge <= min_realized_edge_bps:
+    if fill_edge <= min_realized_edge_bps:
         return PromotionVerification(False, "EDLI_LIVE_PROMOTION_REALIZED_EDGE_INSUFFICIENT")
     if _pending_projection_count(conn, tuple(comparable.get("aggregate_ids") or ())) > 0:
         return PromotionVerification(False, "EDLI_LIVE_PROMOTION_PENDING_RECONCILE")
@@ -250,6 +277,20 @@ def record_edli_live_profit_audit_from_aggregate(conn: sqlite3.Connection, aggre
     state = _audit_state(lifecycle_type, lifecycle_payload)
     if not state:
         return None
+    event_hash = _latest_event_hash(events, lifecycle_type)
+    fill_source_event_hash = event_hash if lifecycle_type == "UserTradeObserved" else None
+    settlement_source_event_hash = event_hash if lifecycle_type == "Reconciled" else None
+    expected_edge_source_certificate_hash = pre_submit.get("expected_edge_source_certificate_hash")
+    cost_basis_source_certificate_hash = pre_submit.get("cost_basis_source_certificate_hash")
+    promotion_eligible = (
+        state == "CONFIRMED"
+        and lifecycle_type == "UserTradeObserved"
+        and lifecycle_payload.get("fill_authority_state") == "FILL_CONFIRMED"
+        and bool(expected_edge_source_certificate_hash)
+        and bool(cost_basis_source_certificate_hash)
+        and bool(fill_source_event_hash)
+        and lifecycle_payload.get("realized_edge") is not None
+    )
     return LiveProfitAuditLedger(conn).insert_record(
         event_id=pre_submit.get("event_id"),
         aggregate_id=aggregate_id,
@@ -276,6 +317,11 @@ def record_edli_live_profit_audit_from_aggregate(conn: sqlite3.Connection, aggre
         realized_edge=lifecycle_payload.get("realized_edge"),
         pnl_usd=lifecycle_payload.get("pnl_usd"),
         reject_reason=lifecycle_payload.get("reason_code") or lifecycle_payload.get("reject_reason"),
+        expected_edge_source_certificate_hash=expected_edge_source_certificate_hash,
+        cost_basis_source_certificate_hash=cost_basis_source_certificate_hash,
+        fill_source_event_hash=fill_source_event_hash,
+        settlement_source_event_hash=settlement_source_event_hash,
+        promotion_eligible=1 if promotion_eligible else 0,
     )
 
 
@@ -283,9 +329,22 @@ def _promotion_summary_from_rows(
     conn: sqlite3.Connection,
     rows: dict[str, list[dict[str, Any]]],
 ) -> LiveProfitPromotionSummary:
-    canary_count = int(
-        sum(1 for row in rows["audit_rows"] if row.get("order_lifecycle_state") in {"CONFIRMED", "RECONCILED", "TERMINAL_NO_FILL"})
+    confirmed_fill_rows = [
+        row
+        for row in rows["audit_rows"]
+        if row.get("order_lifecycle_state") == "CONFIRMED" and int(row.get("promotion_eligible") or 0) == 1
+    ]
+    terminal_no_fill_count = int(
+        sum(1 for row in rows["audit_rows"] if row.get("order_lifecycle_state") == "TERMINAL_NO_FILL")
     )
+    reconciled_no_order_count = int(
+        sum(
+            1
+            for row in rows["audit_rows"]
+            if row.get("order_lifecycle_state") == "RECONCILED" and not row.get("avg_fill_price")
+        )
+    )
+    canary_count = int(len(confirmed_fill_rows) + terminal_no_fill_count + reconciled_no_order_count)
     unresolved_unknowns = int(
         sum(1 for row in rows["audit_rows"] if row.get("order_lifecycle_state") in {"TIMEOUT_UNKNOWN", "POST_SUBMIT_UNKNOWN", "PENDING_RECONCILE"})
         + _pending_projection_count(conn, tuple(row["aggregate_id"] for row in rows["audit_rows"]))
@@ -295,11 +354,21 @@ def _promotion_summary_from_rows(
         for row in rows["audit_rows"]
         if row.get("realized_edge") is not None
     ]
+    confirmed_fill_edges = [
+        float(row["realized_edge"])
+        for row in confirmed_fill_rows
+        if row.get("realized_edge") is not None
+    ]
     realized_edge_bps = float(median(realized_edges) * 10_000.0) if realized_edges else 0.0
+    fill_edge_bps = float(median(confirmed_fill_edges) * 10_000.0) if confirmed_fill_edges else 0.0
     return LiveProfitPromotionSummary(
         canary_count=canary_count,
+        confirmed_fill_count=len(confirmed_fill_rows),
+        terminal_no_fill_count=terminal_no_fill_count,
+        reconciled_no_order_count=reconciled_no_order_count,
         unresolved_unknowns=unresolved_unknowns,
         realized_edge_bps=realized_edge_bps,
+        median_realized_edge_bps_from_confirmed_fills=fill_edge_bps,
         aggregate_ids=tuple(row["aggregate_id"] for row in rows["audit_rows"]),
         audit_ids=tuple(row["audit_id"] for row in rows["audit_rows"]),
         execution_command_ids=tuple(
@@ -445,6 +514,13 @@ def _latest_payload(events: list[tuple[str, dict[str, Any], str]], event_type: s
     for current_type, payload, _event_hash in reversed(events):
         if current_type == event_type:
             return payload
+    return None
+
+
+def _latest_event_hash(events: list[tuple[str, dict[str, Any], str]], event_type: str) -> str | None:
+    for current_type, _payload, event_hash in reversed(events):
+        if current_type == event_type:
+            return event_hash
     return None
 
 

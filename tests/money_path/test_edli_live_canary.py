@@ -260,33 +260,28 @@ def test_live_cap_certificate_is_backed_by_usage_row():
 def test_submit_disabled_live_bridge_releases_live_cap_row(monkeypatch):
     from src.engine import event_reactor_adapter as adapter
     from src.riskguard.risk_level import RiskLevel
+    from tests.decision_kernel.no_submit_fixtures import build_test_no_submit_proof_bundle
 
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     event = _forecast_event()
-    monkeypatch.setattr(adapter, "build_event_bound_no_submit_receipt", lambda *_args, **_kwargs: _accepted_receipt(event))
-
-    def _command_bundle_with_real_cap(**kwargs):
-        live_cap = adapter._build_live_cap_certificate_from_ledger(
-            event=kwargs["event"],
-            receipt=kwargs["receipt"],
-            decision_time=kwargs["decision_time"],
-            max_notional_usd=kwargs["tiny_live_max_notional_usd"],
-            live_cap_conn=kwargs["live_cap_conn"],
-        )
-        actionable, final_intent, expressibility, _old_live_cap, command = _command_cert_bundle()
-        return (actionable, live_cap, final_intent, expressibility, command)
-
-    monkeypatch.setattr(adapter, "_build_live_execution_command_certificates", _command_bundle_with_real_cap)
+    decision_time = datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc)
+    accepted = _accepted_receipt(event)
+    accepted = replace(
+        accepted,
+        decision_proof_bundle=build_test_no_submit_proof_bundle(event, accepted, decision_time=decision_time),
+    )
+    monkeypatch.setattr(adapter, "build_event_bound_no_submit_receipt", lambda *_args, **_kwargs: accepted)
 
     submit = adapter.event_bound_live_adapter_from_trade_conn(
         conn,
         live_cap_conn=conn,
         get_current_level=lambda: RiskLevel.GREEN,
         real_order_submit_enabled=False,
+        pre_submit_authority_provider=_pre_submit_authority_provider,
     )
 
-    receipt = submit(event, datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc))
+    receipt = submit(event, decision_time)
     rows = conn.execute("SELECT reservation_status FROM edli_live_cap_usage").fetchall()
 
     assert receipt.side_effect_status == "SUBMIT_DISABLED"
@@ -630,6 +625,7 @@ def test_live_adapter_records_timeout_unknown_fixture_response(monkeypatch):
             "PreSubmitRevalidated",
             "LiveCapReserved",
             "ExecutionCommandCreated",
+            "VenueSubmitAttempted",
             "SubmitUnknown",
             "CapTransitioned",
         ]
@@ -694,6 +690,7 @@ def test_live_adapter_records_post_submit_unknown_as_pending_reconcile(monkeypat
             "PreSubmitRevalidated",
             "LiveCapReserved",
             "ExecutionCommandCreated",
+            "VenueSubmitAttempted",
             "SubmitUnknown",
             "CapTransitioned",
         ]

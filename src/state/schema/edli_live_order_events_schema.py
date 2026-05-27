@@ -77,6 +77,17 @@ CREATE INDEX IF NOT EXISTS idx_edli_live_order_events_type
     ON edli_live_order_events(event_type, occurred_at)
 """
 
+CREATE_USER_MESSAGE_DEDUP_INDEX_SQL = """
+CREATE UNIQUE INDEX IF NOT EXISTS idx_edli_live_order_user_msg_hash
+    ON edli_live_order_events(
+        aggregate_id,
+        json_extract(payload_json, '$.raw_user_channel_message_hash')
+    )
+    WHERE event_type IN ('UserOrderObserved', 'UserTradeObserved')
+      AND json_extract(payload_json, '$.raw_user_channel_message_hash') IS NOT NULL
+      AND json_extract(payload_json, '$.raw_user_channel_message_hash') != ''
+"""
+
 CREATE_PROJECTION_STATE_INDEX_SQL = """
 CREATE INDEX IF NOT EXISTS idx_edli_live_order_projection_state
     ON edli_live_order_projection(current_state, updated_at)
@@ -104,6 +115,7 @@ def ensure_tables(conn: sqlite3.Connection) -> None:
     conn.execute(CREATE_PROJECTION_SQL)
     conn.execute(CREATE_INDEX_SQL)
     conn.execute(CREATE_TYPE_INDEX_SQL)
+    conn.execute(CREATE_USER_MESSAGE_DEDUP_INDEX_SQL)
     conn.execute(CREATE_PROJECTION_STATE_INDEX_SQL)
     conn.execute(CREATE_NO_UPDATE_TRIGGER_SQL)
     conn.execute(CREATE_NO_DELETE_TRIGGER_SQL)

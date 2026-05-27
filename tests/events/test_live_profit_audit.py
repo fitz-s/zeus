@@ -40,6 +40,10 @@ def test_profit_audit_records_terminal_and_unknown_lifecycle_states(tmp_path):
         expected_edge=0.02,
         realized_edge=0.01,
         order_lifecycle_state="CONFIRMED",
+        expected_edge_source_certificate_hash="actionable-hash-1",
+        cost_basis_source_certificate_hash="cost-hash-1",
+        fill_source_event_hash="fill-event-hash-1",
+        promotion_eligible=1,
     )
     ledger.insert_record(
         event_id="event-2",
@@ -56,15 +60,21 @@ def test_profit_audit_records_terminal_and_unknown_lifecycle_states(tmp_path):
 
     summary = promotion_summary(conn)
     assert summary.canary_count == 1
+    assert summary.confirmed_fill_count == 1
+    assert summary.terminal_no_fill_count == 0
+    assert summary.reconciled_no_order_count == 0
     assert summary.unresolved_unknowns == 1
     assert summary.realized_edge_bps == 100.0
+    assert summary.median_realized_edge_bps_from_confirmed_fills == 100.0
 
     artifact_path = tmp_path / "promotion.json"
     write_promotion_artifact(conn, str(artifact_path))
     artifact = json.loads(artifact_path.read_text())
     assert artifact["schema"] == "edli_live_promotion_v1"
     assert artifact["canary_count"] == 1
+    assert artifact["confirmed_fill_count"] == 1
     assert artifact["realized_edge_bps"] == 100.0
+    assert artifact["median_realized_edge_bps_from_confirmed_fills"] == 100.0
     assert artifact["unresolved_unknowns"] == 1
     assert artifact["audit_ids"]
     assert artifact["source_summary_hash"]
@@ -112,12 +122,70 @@ def test_verified_promotion_artifact_rejects_scalar_or_stale_json(tmp_path):
     assert stale.reason.startswith("EDLI_LIVE_PROMOTION_ARTIFACT_DB_MISMATCH")
 
 
+def test_terminal_no_fill_does_not_unlock_scaleout_promotion(tmp_path):
+    conn = _conn()
+    _seed_confirmed_aggregate(conn)
+    conn.execute("DELETE FROM edli_live_profit_audit WHERE aggregate_id = ?", ("event-1:intent-1",))
+    ledger = LiveProfitAuditLedger(conn)
+    ledger.insert_record(
+        event_id="event-1",
+        aggregate_id="event-1:intent-1",
+        final_intent_id="intent-1",
+        execution_command_id="command-1",
+        condition_id="condition-1",
+        token_id="token-1",
+        order_lifecycle_state="TERMINAL_NO_FILL",
+    )
+
+    artifact_path = tmp_path / "promotion.json"
+    write_promotion_artifact(conn, str(artifact_path))
+    artifact = json.loads(artifact_path.read_text())
+
+    assert artifact["terminal_no_fill_count"] == 1
+    assert artifact["confirmed_fill_count"] == 0
+    rejected = verify_edli_live_promotion_artifact(
+        conn,
+        artifact,
+        min_canary_count=1,
+        max_unresolved_unknowns=0,
+        min_realized_edge_bps=0,
+    )
+    assert rejected.ok is False
+    assert rejected.reason == "EDLI_LIVE_PROMOTION_CANARY_COUNT_INSUFFICIENT"
+
+
+def test_confirmed_fill_requires_positive_realized_edge_for_scaleout(tmp_path):
+    conn = _conn()
+    _seed_confirmed_aggregate(conn, realized_edge=0.0)
+    artifact_path = tmp_path / "promotion.json"
+    write_promotion_artifact(conn, str(artifact_path))
+    artifact = json.loads(artifact_path.read_text())
+
+    rejected = verify_edli_live_promotion_artifact(
+        conn,
+        artifact,
+        min_canary_count=1,
+        max_unresolved_unknowns=0,
+        min_realized_edge_bps=0,
+    )
+    assert rejected.ok is False
+    assert rejected.reason == "EDLI_LIVE_PROMOTION_REALIZED_EDGE_INSUFFICIENT"
+
+
 def test_live_order_lifecycle_events_emit_profit_audit_rows():
     conn = _conn()
     ledger = _seed_confirmed_aggregate(conn)
 
     row = conn.execute(
         "SELECT * FROM edli_live_profit_audit WHERE aggregate_id = ?",
+        ("event-1:intent-1",),
+    ).fetchone()
+    row = conn.execute(
+        """
+        SELECT *
+        FROM edli_live_profit_audit
+        WHERE aggregate_id = ? AND order_lifecycle_state = 'CONFIRMED'
+        """,
         ("event-1:intent-1",),
     ).fetchone()
     assert row is not None
@@ -127,7 +195,7 @@ def test_live_order_lifecycle_events_emit_profit_audit_rows():
     assert ledger.get_projection("event-1:intent-1").pending_reconcile is False
 
 
-def _seed_confirmed_aggregate(conn: sqlite3.Connection) -> LiveOrderAggregateLedger:
+def _seed_confirmed_aggregate(conn: sqlite3.Connection, *, realized_edge: float = 0.01) -> LiveOrderAggregateLedger:
     ledger = LiveOrderAggregateLedger(conn)
     now = "2026-05-26T12:00:00+00:00"
     from datetime import datetime
@@ -183,6 +251,25 @@ def _seed_confirmed_aggregate(conn: sqlite3.Connection) -> LiveOrderAggregateLed
     )
     ledger.append_event(
         aggregate_id="event-1:intent-1",
+        event_type="VenueSubmitAttempted",
+        payload={"event_id": "event-1", "final_intent_id": "intent-1", "execution_command_id": "command-1"},
+        occurred_at=occurred_at,
+        source_authority="existing_executor",
+    )
+    ledger.append_event(
+        aggregate_id="event-1:intent-1",
+        event_type="VenueSubmitAcknowledged",
+        payload={
+            "event_id": "event-1",
+            "final_intent_id": "intent-1",
+            "execution_command_id": "command-1",
+            "venue_order_id": "venue-1",
+        },
+        occurred_at=occurred_at,
+        source_authority="existing_executor",
+    )
+    ledger.append_event(
+        aggregate_id="event-1:intent-1",
         event_type="UserTradeObserved",
         payload={
             "event_id": "event-1",
@@ -191,7 +278,8 @@ def _seed_confirmed_aggregate(conn: sqlite3.Connection) -> LiveOrderAggregateLed
             "trade_status": "CONFIRMED",
             "fill_authority_state": "FILL_CONFIRMED",
             "venue_order_id": "venue-1",
-            "realized_edge": 0.01,
+            "realized_edge": realized_edge,
+            "raw_user_channel_message_hash": "trade-msg-1",
         },
         occurred_at=occurred_at,
         source_authority="user_channel",
@@ -253,6 +341,8 @@ def _pre_submit_payload(**overrides):
         "venue_connectivity_checked_at": "2026-05-26T12:00:00+00:00",
         "balance_allowance_authority_id": "polymarket_wallet_readonly",
         "balance_allowance_checked_at": "2026-05-26T12:00:00+00:00",
+        "expected_edge_source_certificate_hash": "actionable-hash-1",
+        "cost_basis_source_certificate_hash": "cost-hash-1",
     }
     payload.update(overrides)
     return payload

@@ -653,6 +653,25 @@ def _write_db_backed_promotion_artifact(tmp_path, *, realized_edge: float, audit
     )
     ledger.append_event(
         aggregate_id="event-1:intent-1",
+        event_type="VenueSubmitAttempted",
+        payload={"event_id": "event-1", "final_intent_id": "intent-1", "execution_command_id": "command-1"},
+        occurred_at=now,
+        source_authority="existing_executor",
+    )
+    ledger.append_event(
+        aggregate_id="event-1:intent-1",
+        event_type="VenueSubmitAcknowledged",
+        payload={
+            "event_id": "event-1",
+            "final_intent_id": "intent-1",
+            "execution_command_id": "command-1",
+            "venue_order_id": "venue-1",
+        },
+        occurred_at=now,
+        source_authority="existing_executor",
+    )
+    ledger.append_event(
+        aggregate_id="event-1:intent-1",
         event_type="UserTradeObserved",
         payload={
             "event_id": "event-1",
@@ -662,6 +681,7 @@ def _write_db_backed_promotion_artifact(tmp_path, *, realized_edge: float, audit
             "fill_authority_state": "FILL_CONFIRMED",
             "venue_order_id": "venue-1",
             "realized_edge": realized_edge,
+            "raw_user_channel_message_hash": "trade-msg-1",
         },
         occurred_at=now,
         source_authority="user_channel",
@@ -695,6 +715,10 @@ def _write_db_backed_promotion_artifact(tmp_path, *, realized_edge: float, audit
             side="BUY",
             realized_edge=realized_edge,
             order_lifecycle_state=audit_state,
+            expected_edge_source_certificate_hash="actionable-hash-1",
+            cost_basis_source_certificate_hash="cost-hash-1",
+            fill_source_event_hash="fill-event-hash-1" if audit_state == "CONFIRMED" else None,
+            promotion_eligible=1 if audit_state == "CONFIRMED" and realized_edge > 0 else 0,
         )
     artifact = tmp_path / "promotion.json"
     write_promotion_artifact(conn, str(artifact))
@@ -742,6 +766,8 @@ def _pre_submit_payload_for_promotion(**overrides):
         "venue_connectivity_checked_at": "2026-05-26T12:00:00+00:00",
         "balance_allowance_authority_id": "polymarket_wallet_readonly",
         "balance_allowance_checked_at": "2026-05-26T12:00:00+00:00",
+        "expected_edge_source_certificate_hash": "actionable-hash-1",
+        "cost_basis_source_certificate_hash": "cost-hash-1",
     }
     payload.update(overrides)
     return payload

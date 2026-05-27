@@ -314,6 +314,11 @@ def event_bound_live_adapter_from_trade_conn(
                 final_intent = _required_cert(command_certificates, claims.FINAL_INTENT)
                 command = _required_cert(command_certificates, claims.EXECUTION_COMMAND)
                 assert executor_submit is not None
+                _append_venue_submit_attempted_aggregate_event(
+                    live_cap_conn or trade_conn,
+                    command,
+                    decision_time=decision_time.astimezone(UTC),
+                )
                 submit_result = executor_submit(final_intent, command)
                 receipt_cert = build_execution_receipt_certificate(
                     execution_command_cert=command,
@@ -329,6 +334,13 @@ def event_bound_live_adapter_from_trade_conn(
                     venue_call_started=submit_result.venue_call_started,
                     venue_ack_received=submit_result.venue_ack_received,
                     side_effect_known=submit_result.side_effect_known,
+                )
+                _append_submit_terminal_aggregate_event(
+                    live_cap_conn or trade_conn,
+                    command,
+                    receipt_cert,
+                    submit_result=submit_result,
+                    decision_time=decision_time.astimezone(UTC),
                 )
                 transition_cert = _transition_live_cap_after_submit(
                     command_certificates,
@@ -1205,6 +1217,9 @@ def _pre_submit_revalidation_payload_from_final_intent(
         "venue_connectivity_checked_at": authority_witness.venue_connectivity_checked_at,
         "balance_allowance_authority_id": authority_witness.balance_allowance_authority_id,
         "balance_allowance_checked_at": authority_witness.balance_allowance_checked_at,
+        "expected_edge_source_certificate_hash": payload.get("actionable_certificate_hash"),
+        "cost_basis_source_certificate_hash": payload.get("cost_basis_hash"),
+        "final_intent_certificate_hash": final_intent.certificate_hash,
     }
 
 
@@ -1429,6 +1444,82 @@ def _transition_live_cap_after_submit(
             ),
         )
     raise ValueError(f"unsupported submit result status for live cap transition: {submit_result.status!r}")
+
+
+def _append_venue_submit_attempted_aggregate_event(
+    conn: sqlite3.Connection | None,
+    command: DecisionCertificate,
+    *,
+    decision_time: datetime,
+) -> str | None:
+    if conn is None:
+        return None
+    aggregate_id = str(command.payload.get("aggregate_id") or "")
+    if not aggregate_id:
+        return None
+    event = LiveOrderAggregateLedger(conn).append_event(
+        aggregate_id=aggregate_id,
+        event_type="VenueSubmitAttempted",
+        payload={
+            "event_id": command.payload["event_id"],
+            "final_intent_id": command.payload["final_intent_id"],
+            "execution_command_id": command.payload["execution_command_id"],
+            "idempotency_key": command.payload.get("idempotency_key"),
+        },
+        occurred_at=decision_time,
+        source_authority="existing_executor",
+    )
+    return event.event_hash
+
+
+def _append_submit_terminal_aggregate_event(
+    conn: sqlite3.Connection | None,
+    command: DecisionCertificate,
+    receipt_cert: DecisionCertificate,
+    *,
+    submit_result: EventBoundExecutorSubmitResult,
+    decision_time: datetime,
+) -> str | None:
+    if conn is None:
+        return None
+    aggregate_id = str(command.payload.get("aggregate_id") or "")
+    if not aggregate_id:
+        return None
+    if submit_result.status == "SUBMITTED":
+        event = LiveOrderAggregateLedger(conn).append_event(
+            aggregate_id=aggregate_id,
+            event_type="VenueSubmitAcknowledged",
+            payload={
+                "event_id": command.payload["event_id"],
+                "final_intent_id": command.payload["final_intent_id"],
+                "execution_command_id": command.payload["execution_command_id"],
+                "execution_receipt_hash": receipt_cert.certificate_hash,
+                "venue_order_id": submit_result.venue_order_id,
+                "venue_ack_received": submit_result.venue_ack_received,
+                "raw_response_hash": submit_result.raw_response_hash,
+            },
+            occurred_at=decision_time,
+            source_authority="existing_executor",
+        )
+        return event.event_hash
+    if submit_result.status in {"REJECTED", "PRE_SUBMIT_ERROR"}:
+        event = LiveOrderAggregateLedger(conn).append_event(
+            aggregate_id=aggregate_id,
+            event_type="SubmitRejected",
+            payload={
+                "event_id": command.payload["event_id"],
+                "final_intent_id": command.payload["final_intent_id"],
+                "execution_command_id": command.payload["execution_command_id"],
+                "execution_receipt_hash": receipt_cert.certificate_hash,
+                "reason_code": submit_result.reason_code,
+                "venue_order_id": submit_result.venue_order_id,
+                "raw_response_hash": submit_result.raw_response_hash,
+            },
+            occurred_at=decision_time,
+            source_authority="existing_executor",
+        )
+        return event.event_hash
+    return None
 
 
 def _append_cap_transition_aggregate_event(

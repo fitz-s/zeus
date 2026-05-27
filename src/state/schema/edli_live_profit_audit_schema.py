@@ -39,6 +39,11 @@ CREATE TABLE IF NOT EXISTS edli_live_profit_audit (
     realized_edge REAL,
     pnl_usd REAL,
     reject_reason TEXT,
+    expected_edge_source_certificate_hash TEXT,
+    cost_basis_source_certificate_hash TEXT,
+    fill_source_event_hash TEXT,
+    settlement_source_event_hash TEXT,
+    promotion_eligible INTEGER NOT NULL DEFAULT 0 CHECK (promotion_eligible IN (0,1)),
     created_at TEXT NOT NULL,
     schema_version INTEGER NOT NULL CHECK (schema_version >= 1),
     UNIQUE(aggregate_id, execution_command_id, order_lifecycle_state)
@@ -55,8 +60,30 @@ CREATE INDEX IF NOT EXISTS idx_edli_live_profit_audit_state
     ON edli_live_profit_audit(order_lifecycle_state, created_at)
 """
 
+CREATE_PROMOTION_INDEX_SQL = """
+CREATE INDEX IF NOT EXISTS idx_edli_live_profit_audit_promotion
+    ON edli_live_profit_audit(promotion_eligible, order_lifecycle_state, created_at)
+"""
+
+
+_COLUMN_MIGRATIONS = {
+    "expected_edge_source_certificate_hash": "ALTER TABLE edli_live_profit_audit ADD COLUMN expected_edge_source_certificate_hash TEXT",
+    "cost_basis_source_certificate_hash": "ALTER TABLE edli_live_profit_audit ADD COLUMN cost_basis_source_certificate_hash TEXT",
+    "fill_source_event_hash": "ALTER TABLE edli_live_profit_audit ADD COLUMN fill_source_event_hash TEXT",
+    "settlement_source_event_hash": "ALTER TABLE edli_live_profit_audit ADD COLUMN settlement_source_event_hash TEXT",
+    "promotion_eligible": "ALTER TABLE edli_live_profit_audit ADD COLUMN promotion_eligible INTEGER NOT NULL DEFAULT 0 CHECK (promotion_eligible IN (0,1))",
+}
+
 
 def ensure_table(conn: sqlite3.Connection) -> None:
     conn.execute(CREATE_AUDIT_SQL)
+    existing = {
+        str(row[1])
+        for row in conn.execute("PRAGMA table_info(edli_live_profit_audit)").fetchall()
+    }
+    for column, ddl in _COLUMN_MIGRATIONS.items():
+        if column not in existing:
+            conn.execute(ddl)
     conn.execute(CREATE_AGGREGATE_INDEX_SQL)
     conn.execute(CREATE_STATE_INDEX_SQL)
+    conn.execute(CREATE_PROMOTION_INDEX_SQL)

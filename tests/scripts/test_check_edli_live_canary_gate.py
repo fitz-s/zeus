@@ -97,6 +97,44 @@ def test_db_verification_rejects_mismatched_pre_submit_token():
     assert "CANARY_DB_PRE_SUBMIT_TOKEN_ID_MISMATCH" in result.reasons
 
 
+def test_db_verification_rejects_command_certificate_wrong_aggregate_hash():
+    conn = _conn()
+    _seed_canary_db(conn)
+    payload = json.loads(
+        conn.execute(
+            "SELECT payload_json FROM decision_certificates WHERE certificate_id = ?",
+            ("cert-command-1",),
+        ).fetchone()["payload_json"]
+    )
+    payload["aggregate_execution_command_event_hash"] = "wrong-command-event-hash"
+    conn.execute(
+        "UPDATE decision_certificates SET payload_json = ? WHERE certificate_id = ?",
+        (json.dumps(payload), "cert-command-1"),
+    )
+
+    result = evaluate_canary_artifact(_valid_artifact(), conn=conn)
+
+    assert result.status == FAIL
+    assert "CANARY_DB_EXECUTION_COMMAND_EVENT_HASH_MISMATCH" in result.reasons
+
+
+def test_db_verification_rejects_command_certificate_missing_pre_submit_parent():
+    conn = _conn()
+    _seed_canary_db(conn)
+    conn.execute(
+        """
+        DELETE FROM decision_certificate_edges
+        WHERE child_certificate_id = ? AND parent_certificate_type = ?
+        """,
+        ("cert-command-1", "PreSubmitRevalidationCertificate"),
+    )
+
+    result = evaluate_canary_artifact(_valid_artifact(), conn=conn)
+
+    assert result.status == FAIL
+    assert "CANARY_DB_COMMAND_CERT_PARENT_MISSING:PreSubmitRevalidationCertificate" in result.reasons
+
+
 def test_db_verification_passes_matching_canonical_rows():
     conn = _conn()
     _seed_canary_db(conn)
@@ -196,6 +234,25 @@ def _seed_canary_db(conn: sqlite3.Connection, *, include_profit_audit: bool = Tr
     )
     ledger.append_event(
         aggregate_id="event-1:intent-1",
+        event_type="VenueSubmitAttempted",
+        payload={"event_id": "event-1", "final_intent_id": "intent-1", "execution_command_id": "command-1"},
+        occurred_at=now,
+        source_authority="existing_executor",
+    )
+    ledger.append_event(
+        aggregate_id="event-1:intent-1",
+        event_type="VenueSubmitAcknowledged",
+        payload={
+            "event_id": "event-1",
+            "final_intent_id": "intent-1",
+            "execution_command_id": "command-1",
+            "venue_order_id": "venue-1",
+        },
+        occurred_at=now,
+        source_authority="existing_executor",
+    )
+    ledger.append_event(
+        aggregate_id="event-1:intent-1",
         event_type="UserTradeObserved",
         payload={
             "event_id": "event-1",
@@ -204,6 +261,8 @@ def _seed_canary_db(conn: sqlite3.Connection, *, include_profit_audit: bool = Tr
             "trade_status": "CONFIRMED",
             "fill_authority_state": "FILL_CONFIRMED",
             "venue_order_id": "venue-1",
+            "raw_user_channel_message_hash": "trade-msg-1",
+            "realized_edge": 0.01,
         },
         occurred_at=now,
         source_authority="user_channel",
@@ -259,13 +318,40 @@ def _seed_canary_db(conn: sqlite3.Connection, *, include_profit_audit: bool = Tr
             "v1",
             "test",
             "v1",
-            json.dumps({"execution_command_id": "command-1"}),
+            json.dumps(
+                {
+                    "execution_command_id": "command-1",
+                    "aggregate_id": "event-1:intent-1",
+                    "aggregate_pre_submit_event_hash": pre_submit.event_hash,
+                    "aggregate_execution_command_event_hash": ledger.latest_event_of_type("event-1:intent-1", "ExecutionCommandCreated").event_hash,
+                    "condition_id": "condition-1",
+                    "token_id": "token-1",
+                    "side": "BUY",
+                    "direction": "YES",
+                    "live_cap_usage_id": "usage-1",
+                }
+            ),
             "payload-hash",
             "command-hash",
             "VERIFIED",
             now.isoformat(),
         ),
     )
+    for role, parent_type in (
+        ("actionable", "ActionableTradeCertificate"),
+        ("final_intent", "FinalIntentCertificate"),
+        ("pre_submit_revalidation", "PreSubmitRevalidationCertificate"),
+        ("live_cap", "LiveCapCertificate"),
+    ):
+        conn.execute(
+            """
+            INSERT INTO decision_certificate_edges (
+                child_certificate_id, parent_role, parent_certificate_hash,
+                parent_certificate_type, required, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            ("cert-command-1", role, f"{role}-hash", parent_type, 1, now.isoformat()),
+        )
     if include_profit_audit:
         LiveProfitAuditLedger(conn).insert_record(
             event_id="event-1",
@@ -278,6 +364,10 @@ def _seed_canary_db(conn: sqlite3.Connection, *, include_profit_audit: bool = Tr
             side="BUY",
             realized_edge=0.01,
             order_lifecycle_state="CONFIRMED",
+            expected_edge_source_certificate_hash="actionable-hash",
+            cost_basis_source_certificate_hash="cost-hash",
+            fill_source_event_hash="fill-event-hash",
+            promotion_eligible=1,
         )
     else:
         conn.execute("DELETE FROM edli_live_profit_audit WHERE aggregate_id = ?", ("event-1:intent-1",))
@@ -322,6 +412,8 @@ def _pre_submit_payload(**overrides):
         "venue_connectivity_checked_at": "2026-05-26T12:00:00+00:00",
         "balance_allowance_authority_id": "polymarket_wallet_readonly",
         "balance_allowance_checked_at": "2026-05-26T12:00:00+00:00",
+        "expected_edge_source_certificate_hash": "actionable-hash-1",
+        "cost_basis_source_certificate_hash": "cost-hash-1",
     }
     payload.update(overrides)
     return payload

@@ -132,7 +132,13 @@ class LiveOrderAggregateLedger:
         latest = self._latest_row(aggregate_id)
         if latest is not None and payload.get("event_id") != _payload(latest).get("event_id"):
             raise LiveOrderAggregateError("live-order aggregate event_id drift")
-        self._validate_event_append(event_type=event_type, payload=payload, latest=latest)
+        self._validate_event_append(
+            aggregate_id=aggregate_id,
+            event_type=event_type,
+            payload=payload,
+            latest=latest,
+            occurred_at=occurred_at,
+        )
         parent_hash = latest["event_hash"] if latest is not None else None
         next_sequence = int(latest["event_sequence"]) + 1 if latest is not None else 1
         if expected_parent_event_hash is not None and expected_parent_event_hash != parent_hash:
@@ -324,9 +330,11 @@ class LiveOrderAggregateLedger:
     def _validate_event_append(
         self,
         *,
+        aggregate_id: str,
         event_type: str,
         payload: dict[str, Any],
         latest: sqlite3.Row | None,
+        occurred_at: datetime,
     ) -> None:
         if event_type == "PreSubmitRevalidated":
             _validate_pre_submit_revalidation_payload(payload)
@@ -360,6 +368,59 @@ class LiveOrderAggregateLedger:
             if payload.get("live_cap_reserved_event_hash") != live_cap_row["event_hash"]:
                 raise LiveOrderAggregateError("ExecutionCommandCreated live_cap_reserved_event_hash must match LiveCapReserved event")
             return
+        if event_type == "VenueSubmitAttempted":
+            command_row = self._require_latest_row_of_type(aggregate_id, "ExecutionCommandCreated", event_type)
+            self._require_command_binding(event_type, payload, command_row)
+            if self._latest_row_of_type(aggregate_id, "VenueSubmitAttempted") is not None:
+                raise LiveOrderAggregateError("VenueSubmitAttempted already exists for aggregate")
+            return
+        if event_type == "VenueSubmitAcknowledged":
+            command_row = self._require_latest_row_of_type(aggregate_id, "ExecutionCommandCreated", event_type)
+            self._require_latest_row_of_type(aggregate_id, "VenueSubmitAttempted", event_type)
+            self._require_command_binding(event_type, payload, command_row)
+            if not str(payload.get("venue_order_id") or "").strip():
+                raise LiveOrderAggregateError("VenueSubmitAcknowledged requires venue_order_id")
+            return
+        if event_type == "SubmitRejected":
+            command_row = self._require_latest_row_of_type(aggregate_id, "ExecutionCommandCreated", event_type)
+            self._require_latest_row_of_type(aggregate_id, "VenueSubmitAttempted", event_type)
+            self._require_command_binding(event_type, payload, command_row)
+            if not str(payload.get("reason_code") or payload.get("reject_reason") or "").strip():
+                raise LiveOrderAggregateError("SubmitRejected requires reason_code")
+            return
+        if event_type == "SubmitUnknown":
+            command_row = self._require_latest_row_of_type(aggregate_id, "ExecutionCommandCreated", event_type)
+            self._require_latest_row_of_type(aggregate_id, "VenueSubmitAttempted", event_type)
+            self._require_command_binding(event_type, payload, command_row)
+            return
+        if event_type in {"UserOrderObserved", "UserTradeObserved"}:
+            command_row = self._require_latest_row_of_type(aggregate_id, "ExecutionCommandCreated", event_type)
+            self._require_user_channel_submit_binding(aggregate_id, event_type, payload, command_row, occurred_at)
+            return
+        if event_type == "Reconciled":
+            self._require_latest_row_of_type(aggregate_id, "ExecutionCommandCreated", event_type)
+            projection = self.conn.execute(
+                "SELECT pending_reconcile FROM edli_live_order_projection WHERE aggregate_id = ?",
+                (aggregate_id,),
+            ).fetchone()
+            if self._latest_row_of_type(aggregate_id, "SubmitUnknown") is None and not (
+                projection is not None and bool(projection["pending_reconcile"])
+            ):
+                raise LiveOrderAggregateError("Reconciled requires SubmitUnknown or pending_reconcile projection")
+            return
+        if event_type == "CapTransitioned":
+            command_row = self._require_latest_row_of_type(aggregate_id, "ExecutionCommandCreated", event_type)
+            self._require_command_binding(event_type, payload, command_row)
+            to_status = str(payload.get("to_status") or "")
+            reason = str(payload.get("transition_reason") or payload.get("reason_code") or "")
+            if to_status == "PENDING_RECONCILE" and self._latest_row_of_type(aggregate_id, "SubmitUnknown") is None:
+                raise LiveOrderAggregateError("CapTransitioned PENDING_RECONCILE requires SubmitUnknown")
+            if to_status == "CONSUMED" and self._latest_row_of_type(aggregate_id, "VenueSubmitAcknowledged") is None:
+                raise LiveOrderAggregateError("CapTransitioned CONSUMED requires VenueSubmitAcknowledged")
+            if to_status == "RELEASED" and reason != "SUBMIT_DISABLED":
+                if self._latest_row_of_type(aggregate_id, "SubmitRejected") is None and self._latest_row_of_type(aggregate_id, "Reconciled") is None:
+                    raise LiveOrderAggregateError("CapTransitioned RELEASED requires SubmitRejected or Reconciled")
+            return
 
     def _latest_row_of_type(self, aggregate_id: str, event_type: str) -> sqlite3.Row | None:
         return self.conn.execute(
@@ -372,6 +433,73 @@ class LiveOrderAggregateLedger:
             """,
             (aggregate_id, event_type),
         ).fetchone()
+
+    def _require_latest_row_of_type(self, aggregate_id: str, required_type: str, event_type: str) -> sqlite3.Row:
+        row = self._latest_row_of_type(aggregate_id, required_type)
+        if row is None:
+            raise LiveOrderAggregateError(f"{event_type} requires preceding {required_type}")
+        return row
+
+    def _require_command_binding(self, event_type: str, payload: dict[str, Any], command_row: sqlite3.Row) -> None:
+        command = _payload(command_row)
+        if payload.get("event_id") != command.get("event_id"):
+            raise LiveOrderAggregateError(f"{event_type} event_id must match ExecutionCommandCreated")
+        if payload.get("final_intent_id") != command.get("final_intent_id"):
+            raise LiveOrderAggregateError(f"{event_type} final_intent_id must match ExecutionCommandCreated")
+        command_id = command.get("execution_command_id")
+        if payload.get("execution_command_id") is not None and payload.get("execution_command_id") != command_id:
+            raise LiveOrderAggregateError(f"{event_type} execution_command_id must match ExecutionCommandCreated")
+
+    def _require_user_channel_submit_binding(
+        self,
+        aggregate_id: str,
+        event_type: str,
+        payload: dict[str, Any],
+        command_row: sqlite3.Row,
+        occurred_at: datetime,
+    ) -> None:
+        self._require_command_binding(event_type, payload, command_row)
+        projection = self.conn.execute(
+            "SELECT current_state, pending_reconcile FROM edli_live_order_projection WHERE aggregate_id = ?",
+            (aggregate_id,),
+        ).fetchone()
+        if projection is not None and projection["current_state"] == "RECONCILED" and not bool(projection["pending_reconcile"]):
+            raise LiveOrderAggregateError("user-channel event cannot append after terminal Reconciled projection")
+        if _dt(occurred_at) < str(command_row["occurred_at"]):
+            raise LiveOrderAggregateError("user-channel event occurred_at precedes ExecutionCommandCreated")
+        if not any(
+            self._latest_row_of_type(aggregate_id, submit_type) is not None
+            for submit_type in ("VenueSubmitAttempted", "VenueSubmitAcknowledged", "SubmitUnknown")
+        ):
+            raise LiveOrderAggregateError(f"{event_type} requires venue submit attempt, acknowledgement, or unknown")
+        venue_order_id = str(payload.get("venue_order_id") or "").strip()
+        if not venue_order_id:
+            raise LiveOrderAggregateError(f"{event_type} requires venue_order_id")
+        ack_row = self._latest_row_of_type(aggregate_id, "VenueSubmitAcknowledged")
+        unknown_row = self._latest_row_of_type(aggregate_id, "SubmitUnknown")
+        bound_order_id = None
+        if ack_row is not None:
+            bound_order_id = _payload(ack_row).get("venue_order_id")
+        elif unknown_row is not None:
+            bound_order_id = _payload(unknown_row).get("venue_order_id")
+        if bound_order_id and venue_order_id != str(bound_order_id):
+            raise LiveOrderAggregateError(f"{event_type} venue_order_id must match submitted order")
+        message_hash = str(payload.get("raw_user_channel_message_hash") or "").strip()
+        if not message_hash:
+            raise LiveOrderAggregateError(f"{event_type} requires raw_user_channel_message_hash")
+        duplicate = self.conn.execute(
+            """
+            SELECT 1
+            FROM edli_live_order_events
+            WHERE aggregate_id = ?
+              AND event_type IN ('UserOrderObserved', 'UserTradeObserved')
+              AND json_extract(payload_json, '$.raw_user_channel_message_hash') = ?
+            LIMIT 1
+            """,
+            (aggregate_id, message_hash),
+        ).fetchone()
+        if duplicate is not None:
+            raise LiveOrderAggregateError("duplicate user-channel message hash for aggregate")
 
 
 def _event_from_row(row: sqlite3.Row) -> LiveOrderAggregateEvent:

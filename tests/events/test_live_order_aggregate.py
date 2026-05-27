@@ -154,17 +154,16 @@ def test_live_order_events_table_is_append_only():
 
 def test_live_order_submit_unknown_stays_pending_until_reconcile():
     ledger = LiveOrderAggregateLedger(_conn())
-    ledger.append_event(
-        aggregate_id="event-1:intent-1",
-        event_type="DecisionProofAccepted",
-        payload={"event_id": "event-1", "final_intent_id": "intent-1"},
-        occurred_at=NOW,
-        source_authority="decision_kernel",
-    )
+    _seed_command_with_submit_attempt(ledger)
     ledger.append_event(
         aggregate_id="event-1:intent-1",
         event_type="SubmitUnknown",
-        payload={"event_id": "event-1", "final_intent_id": "intent-1"},
+        payload={
+            "event_id": "event-1",
+            "final_intent_id": "intent-1",
+            "execution_command_id": "cmd-1",
+            "venue_order_id": "venue-unknown",
+        },
         occurred_at=NOW,
         source_authority="existing_executor",
     )
@@ -228,8 +227,20 @@ def test_live_order_cap_transition_pending_reconcile_sets_projection_pending():
     )
     ledger.append_event(
         aggregate_id="event-1:intent-1",
+        event_type="VenueSubmitAttempted",
+        payload={"event_id": "event-1", "final_intent_id": "intent-1", "execution_command_id": "cmd-1"},
+        occurred_at=NOW,
+        source_authority="existing_executor",
+    )
+    ledger.append_event(
+        aggregate_id="event-1:intent-1",
         event_type="SubmitUnknown",
-        payload={"event_id": "event-1", "final_intent_id": "intent-1"},
+        payload={
+            "event_id": "event-1",
+            "final_intent_id": "intent-1",
+            "execution_command_id": "cmd-1",
+            "venue_order_id": "venue-unknown",
+        },
         occurred_at=NOW,
         source_authority="existing_executor",
     )
@@ -442,9 +453,62 @@ def _pre_submit_payload(**overrides):
         "venue_connectivity_checked_at": "2026-05-25T18:00:00+00:00",
         "balance_allowance_authority_id": "polymarket_wallet_readonly",
         "balance_allowance_checked_at": "2026-05-25T18:00:00+00:00",
+        "expected_edge_source_certificate_hash": "actionable-hash-1",
+        "cost_basis_source_certificate_hash": "cost-hash-1",
     }
     payload.update(overrides)
     return payload
+
+
+def _seed_command_with_submit_attempt(ledger: LiveOrderAggregateLedger) -> None:
+    ledger.append_event(
+        aggregate_id="event-1:intent-1",
+        event_type="DecisionProofAccepted",
+        payload={"event_id": "event-1", "final_intent_id": "intent-1"},
+        occurred_at=NOW,
+        source_authority="decision_kernel",
+    )
+    ledger.append_event(
+        aggregate_id="event-1:intent-1",
+        event_type="SubmitPlanBuilt",
+        payload={"event_id": "event-1", "final_intent_id": "intent-1"},
+        occurred_at=NOW,
+        source_authority="engine_adapter",
+    )
+    pre_submit = ledger.append_event(
+        aggregate_id="event-1:intent-1",
+        event_type="PreSubmitRevalidated",
+        payload=_pre_submit_payload(),
+        occurred_at=NOW,
+        source_authority="engine_adapter",
+    )
+    live_cap = ledger.append_event(
+        aggregate_id="event-1:intent-1",
+        event_type="LiveCapReserved",
+        payload={"event_id": "event-1", "final_intent_id": "intent-1", "usage_id": "usage-1"},
+        occurred_at=NOW,
+        source_authority="live_cap_ledger",
+    )
+    ledger.append_event(
+        aggregate_id="event-1:intent-1",
+        event_type="ExecutionCommandCreated",
+        payload={
+            "event_id": "event-1",
+            "final_intent_id": "intent-1",
+            "execution_command_id": "cmd-1",
+            "pre_submit_event_hash": pre_submit.event_hash,
+            "live_cap_reserved_event_hash": live_cap.event_hash,
+        },
+        occurred_at=NOW,
+        source_authority="engine_adapter",
+    )
+    ledger.append_event(
+        aggregate_id="event-1:intent-1",
+        event_type="VenueSubmitAttempted",
+        payload={"event_id": "event-1", "final_intent_id": "intent-1", "execution_command_id": "cmd-1"},
+        occurred_at=NOW,
+        source_authority="existing_executor",
+    )
 
 
 def _conn() -> sqlite3.Connection:
