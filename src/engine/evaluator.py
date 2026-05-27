@@ -37,6 +37,20 @@ if TYPE_CHECKING:
 from src.calibration.manager import edge_threshold_multiplier, get_calibrator
 from src.calibration.manager import season_from_date
 from src.calibration.platt import calibrate_and_normalize
+# Zeus #64 FT-ship F1 (2026-05-26): full_transport_live entry-path wiring.
+# These imports enable the evaluator to call p_raw_vector_with_error_model and
+# reconstruct a PredictiveErrorModel from model_bias_ens_v2 — mirroring the
+# logic already present in monitor_refresh._resolve_ft_error_model.
+# Cannot import _resolve_ft_error_model directly: monitor_refresh imports evaluator
+# (circular). Logic is inlined below as _resolve_ft_error_model_for_entry().
+# Authority: docs/operations/FT_SHIP_EXECUTION_LEDGER_2026-05-25.md F1.
+from src.calibration.ens_bias_repo import read_bias_model as _read_bias_model_for_entry
+from src.calibration.ens_error_model import (
+    PredictiveErrorModel as _PredictiveErrorModel,
+    predictive_error_from_posterior as _predictive_error_from_posterior,
+    p_raw_vector_with_error_model as _p_raw_vector_with_error_model,
+)
+from src.calibration.ens_bias_model import PosteriorBias as _PosteriorBias
 from src.config import (
     CONFIG_DIR,
     PROJECT_ROOT,
@@ -3038,6 +3052,66 @@ def _layer7_dedup_fires(conn, portfolio: "PortfolioState", token_id: str) -> boo
     return has_same_token_open(portfolio, token_id)
 
 
+def _resolve_ft_error_model_for_entry(
+    conn,
+    city,
+    target_date: "date",
+    metric_str: str,
+) -> "_PredictiveErrorModel | None":
+    """Entry-path analogue of monitor_refresh._resolve_ft_error_model.
+
+    Zeus #64 FT-ship F1 (2026-05-26): resolves a PredictiveErrorModel from
+    model_bias_ens_v2 for the entry evaluator so the full_transport_live flag
+    drives BOTH the monitor refresh path AND the entry p_raw computation
+    symmetrically.
+
+    Cannot reuse monitor_refresh._resolve_ft_error_model directly: monitor_refresh
+    imports evaluator (circular).  The logic is byte-equivalent to the monitor
+    version; any future change to the resolution algorithm must be applied to both.
+
+    Returns None on flag-OFF, missing config, or missing model row (fail-open —
+    caller falls back to plain p_raw_vector_from_maxes).  Logging mirrors the
+    monitor version so operators see the same WARNING on both paths.
+    Authority: docs/operations/FT_SHIP_EXECUTION_LEDGER_2026-05-25.md F1.
+    """
+    if not bool(settings["feature_flags"].get("full_transport_live_enabled", False)):
+        return None
+    try:
+        cfg = entry_forecast_config()
+        track = track_for_metric(cfg, metric_str)
+        live_data_version = data_version_for_track(track)
+    except Exception:
+        return None
+    season = season_from_date(target_date.isoformat(), lat=city.lat)
+    _FT_FAMILY = "full_transport_v1"
+    row = _read_bias_model_for_entry(
+        conn,
+        city=city.name,
+        season=season,
+        metric=metric_str,
+        live_data_version=live_data_version,
+        month=None,
+        error_model_family=_FT_FAMILY,
+    )
+    if row is None:
+        import logging as _logging
+        _logging.getLogger(__name__).warning(
+            "full_transport_live entry: flag ON but no VERIFIED model_bias_ens_v2 row for "
+            "city=%r season=%r metric=%r live_data_version=%r family=%r — plain p_raw",
+            city.name, season, metric_str, live_data_version, _FT_FAMILY,
+        )
+        return None
+    posterior = _PosteriorBias(
+        bias=float(row["bias_c"]),
+        sd=float(row["bias_sd_c"]),
+        weight_live=0.0,
+        n_live=0,
+        disagreement_high=False,
+        heterogeneity_var=float(row["heterogeneity_var_c2"]),
+    )
+    return _predictive_error_from_posterior(posterior, float(row["residual_sd_c"]))
+
+
 def evaluate_candidate(
     candidate: MarketCandidate,
     conn,
@@ -3784,13 +3858,35 @@ def evaluate_candidate(
                     rejection_reason_enum=NoTradeReason.EXECUTABLE_FORECAST_MEMBER_EXTREMA_INVALID,
                     rejection_reason_detail="EXECUTABLE_FORECAST_MEMBER_EXTREMA_INVALID",
                 )]
-            p_raw = p_raw_vector_from_maxes(
-                member_extrema,
-                city,
-                settlement_semantics,
-                bins,
-                n_mc=ensemble_n_mc(),
+            # Zeus #64 FT-ship F1 (2026-05-26): full_transport_live entry wiring.
+            # Attempt to resolve a VERIFIED PredictiveErrorModel; falls back to plain
+            # p_raw_vector_from_maxes when flag OFF, model absent, or conn unavailable.
+            # GFS crosscheck site (gfs_p = p_raw_vector_from_maxes below) is NOT wired:
+            # model_bias_ens_v2 is trained on TIGGE ENS members; applying it to GFS
+            # members would be a wrong-error-model regression.
+            # Authority: FT_SHIP_EXECUTION_LEDGER_2026-05-25.md F1.
+            _ft_model = _resolve_ft_error_model_for_entry(
+                conn, city, target_date, temperature_metric.temperature_metric
             )
+            if _ft_model is not None:
+                p_raw = _p_raw_vector_with_error_model(
+                    member_extrema,
+                    _ft_model,
+                    city,
+                    settlement_semantics,
+                    bins,
+                    member_unit=ens_result.get("members_unit", city.settlement_unit or "F"),
+                    n_mc=ensemble_n_mc(),
+                    rng=None,
+                )
+            else:
+                p_raw = p_raw_vector_from_maxes(
+                    member_extrema,
+                    city,
+                    settlement_semantics,
+                    bins,
+                    n_mc=ensemble_n_mc(),
+                )
             ensemble_spread = TemperatureDelta(
                 float(np.std(member_extrema)),
                 city.settlement_unit,
@@ -3811,7 +3907,24 @@ def evaluate_candidate(
             )
         else:
             assert ens is not None
-            p_raw = ens.p_raw_vector(bins, n_mc=ensemble_n_mc())
+            # Zeus #64 FT-ship F1 (2026-05-26): ens-signal branch FT wiring.
+            # Same error-model resolution as the period_extrema branch above.
+            _ft_model_ens = _resolve_ft_error_model_for_entry(
+                conn, city, target_date, temperature_metric.temperature_metric
+            )
+            if _ft_model_ens is not None:
+                p_raw = _p_raw_vector_with_error_model(
+                    ens.member_extrema,
+                    _ft_model_ens,
+                    city,
+                    settlement_semantics,
+                    bins,
+                    member_unit=city.settlement_unit or "F",
+                    n_mc=ensemble_n_mc(),
+                    rng=None,
+                )
+            else:
+                p_raw = ens.p_raw_vector(bins, n_mc=ensemble_n_mc())
             ensemble_spread = ens.spread()
             analysis_member_extrema = ens.member_extrema
             entry_validations = ["ens_fetch", "mc_instrument_noise"]
