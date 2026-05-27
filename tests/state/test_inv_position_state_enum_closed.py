@@ -78,14 +78,6 @@ def _collect_state_string_assignments(source: str, path: Path) -> list[tuple[int
     return hits
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "PR A scaffold (Finding 2): chain_reconciliation.py:1003 writes "
-        '`pos.state = "quarantine_size_mismatch"`, illegal under LifecycleState. '
-        "PR C replaces ad-hoc state with canonical REVIEW_REQUIRED event."
-    ),
-)
 def test_every_position_state_literal_is_legal_lifecycle_state() -> None:
     violations: list[str] = []
     for scan_dir in SCAN_DIRS:
