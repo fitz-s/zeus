@@ -42,6 +42,7 @@ CREATE TABLE IF NOT EXISTS edli_live_profit_audit (
     post_fill_mark REAL,
     settlement_outcome TEXT,
     realized_edge REAL,
+    edge_value_usd REAL,
     pnl_usd REAL,
     reject_reason TEXT,
     expected_edge_source_certificate_hash TEXT,
@@ -82,6 +83,7 @@ _COLUMN_MIGRATIONS = {
     "fill_source_event_hash": "ALTER TABLE edli_live_profit_audit ADD COLUMN fill_source_event_hash TEXT",
     "settlement_source_event_hash": "ALTER TABLE edli_live_profit_audit ADD COLUMN settlement_source_event_hash TEXT",
     "promotion_eligible": "ALTER TABLE edli_live_profit_audit ADD COLUMN promotion_eligible INTEGER NOT NULL DEFAULT 0 CHECK (promotion_eligible IN (0,1))",
+    "edge_value_usd": "ALTER TABLE edli_live_profit_audit ADD COLUMN edge_value_usd REAL",
 }
 
 

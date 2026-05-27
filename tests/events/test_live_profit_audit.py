@@ -259,7 +259,8 @@ def test_live_order_lifecycle_events_emit_profit_audit_rows():
     assert row["filled_size"] == 10.0
     assert row["fees"] == 0.0
     assert row["realized_edge"] == pytest.approx(0.01)
-    assert row["pnl_usd"] == pytest.approx(0.1)
+    assert row["edge_value_usd"] == pytest.approx(0.1)
+    assert row["pnl_usd"] is None
     assert row["promotion_eligible"] == 1
     assert ledger.get_projection("event-1:intent-1").pending_reconcile is False
 
@@ -270,7 +271,7 @@ def test_spoofed_lifecycle_realized_edge_is_ignored():
 
     row = conn.execute(
         """
-        SELECT realized_edge, pnl_usd, promotion_eligible
+        SELECT realized_edge, edge_value_usd, pnl_usd, promotion_eligible
         FROM edli_live_profit_audit
         WHERE aggregate_id = ? AND order_lifecycle_state = 'CONFIRMED'
         """,
@@ -278,7 +279,8 @@ def test_spoofed_lifecycle_realized_edge_is_ignored():
     ).fetchone()
 
     assert row["realized_edge"] == pytest.approx(0.01)
-    assert row["pnl_usd"] == pytest.approx(0.1)
+    assert row["edge_value_usd"] == pytest.approx(0.1)
+    assert row["pnl_usd"] is None
     assert row["promotion_eligible"] == 1
 
 
@@ -311,7 +313,8 @@ def test_realized_edge_computes_sell_yes_proceeds_semantics():
 
     assert realized is not None
     assert realized["realized_edge"] == pytest.approx(0.47 - 0.45 - (0.01 / 5.0))
-    assert realized["pnl_usd"] == pytest.approx((0.47 - 0.45 - (0.01 / 5.0)) * 5.0)
+    assert realized["edge_value_usd"] == pytest.approx((0.47 - 0.45 - (0.01 / 5.0)) * 5.0)
+    assert "pnl_usd" not in realized
 
 
 def test_realized_edge_partial_fill_uses_filled_size_not_requested_size():
@@ -337,7 +340,7 @@ def test_realized_edge_partial_fill_uses_filled_size_not_requested_size():
 
     assert realized is not None
     assert realized["realized_edge"] == pytest.approx(0.01)
-    assert realized["pnl_usd"] == pytest.approx(0.02)
+    assert realized["edge_value_usd"] == pytest.approx(0.02)
 
 
 @pytest.mark.parametrize(

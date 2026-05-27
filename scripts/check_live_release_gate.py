@@ -90,9 +90,12 @@ class GateResult:
 @dataclass(frozen=True)
 class ReleaseGateReport:
     status: str
+    stage_status: str
     gate_count: int
     passed_count: int
     stage: str
+    daemon_start_allowed: bool
+    deploy_ready: bool
     live_entries_allowed: bool
     submit_allowed: bool
     scaleout_allowed: bool
@@ -390,8 +393,11 @@ def evaluate_release_gate(args: argparse.Namespace) -> ReleaseGateReport:
         _check_redeem_state(args.trade_db, tuple(args.allow_redeem_command or ()), now),
         _check_fresh_file("source_health", args.source_health_json, max_age_seconds=args.source_max_age_seconds, now=now),
         _check_fresh_file("status_summary", args.status_json, max_age_seconds=args.status_max_age_seconds, now=now),
-        _check_paper_proof(args.paper_proof_json),
     ]
+    if str(args.stage) in {"legacy_cron", "edli_submit_disabled_bridge"}:
+        results.append(_check_paper_proof(args.paper_proof_json))
+    if args.settings_json:
+        results.append(_check_stage_settings(args.stage, args.settings_json))
     results.extend(_edli_stage_results(args))
     passed = sum(1 for result in results if result.status == PASS)
     status = PASS if passed == len(results) else FAIL
@@ -400,11 +406,17 @@ def evaluate_release_gate(args: argparse.Namespace) -> ReleaseGateReport:
         status=status,
         results=tuple(results),
     )
+    stage_status = _stage_status(str(args.stage), status=status, results=tuple(results))
+    daemon_start_allowed = status == PASS and stage_status in {PASS, "WAITING_FOR_QUALIFYING_EVENT"}
+    deploy_ready = status == PASS and stage_status == PASS
     return ReleaseGateReport(
         status=status,
+        stage_status=stage_status,
         gate_count=len(results),
         passed_count=passed,
         stage=str(args.stage),
+        daemon_start_allowed=daemon_start_allowed,
+        deploy_ready=deploy_ready,
         live_entries_allowed=live_entries_allowed,
         submit_allowed=submit_allowed,
         scaleout_allowed=scaleout_allowed,
@@ -490,11 +502,78 @@ def _check_edli_promotion_artifact(args: argparse.Namespace) -> GateResult:
     )
 
 
+_REACTOR_MODE_BY_STAGE = {
+    "legacy_cron": "disabled",
+    "edli_submit_disabled_bridge": "submit_disabled_live_bridge",
+    "edli_live_canary": "live",
+    "edli_live": "live",
+}
+
+
+def _check_stage_settings(stage: str, settings_json: Path) -> GateResult:
+    if not settings_json.exists():
+        return GateResult("stage_settings", FAIL, f"missing:{settings_json}")
+    try:
+        settings = json.loads(settings_json.read_text())
+    except json.JSONDecodeError as exc:
+        return GateResult("stage_settings", FAIL, f"invalid_json:{exc}")
+    edli_cfg = settings.get("edli_v1") if isinstance(settings, dict) else None
+    if not isinstance(edli_cfg, dict):
+        return GateResult("stage_settings", FAIL, "missing_edli_v1")
+    errors: list[str] = []
+    if str(edli_cfg.get("live_execution_mode") or "") != stage:
+        errors.append(f"live_execution_mode={edli_cfg.get('live_execution_mode')!r}")
+    expected_reactor = _REACTOR_MODE_BY_STAGE.get(stage)
+    if expected_reactor and str(edli_cfg.get("reactor_mode") or "disabled") != expected_reactor:
+        errors.append(f"reactor_mode={edli_cfg.get('reactor_mode')!r}:expected={expected_reactor}")
+    if stage == "legacy_cron":
+        if bool(edli_cfg.get("enabled", False)):
+            errors.append("enabled=true")
+        if bool(edli_cfg.get("real_order_submit_enabled", False)):
+            errors.append("real_order_submit_enabled=true")
+    if stage in {"edli_submit_disabled_bridge", "edli_live_canary", "edli_live"}:
+        if not bool(edli_cfg.get("enabled", False)):
+            errors.append("enabled=false")
+        if not bool(edli_cfg.get("market_channel_ingestor_enabled", False)):
+            errors.append("market_channel_ingestor_enabled=false")
+        if not bool(edli_cfg.get("edli_user_channel_reconcile_enabled", False)):
+            errors.append("edli_user_channel_reconcile_enabled=false")
+    if stage == "edli_submit_disabled_bridge" and bool(edli_cfg.get("real_order_submit_enabled", False)):
+        errors.append("real_order_submit_enabled=true")
+    if stage in {"edli_live_canary", "edli_live"}:
+        if not bool(edli_cfg.get("real_order_submit_enabled", False)):
+            errors.append("real_order_submit_enabled=false")
+        if not bool(edli_cfg.get("live_canary_enabled", False)):
+            errors.append("live_canary_enabled=false")
+    if stage == "edli_live" and not bool(edli_cfg.get("edli_live_scaleout_enabled", False)):
+        errors.append("edli_live_scaleout_enabled=false")
+    if errors:
+        return GateResult("stage_settings", FAIL, ",".join(errors))
+    return GateResult("stage_settings", PASS, f"settings_match_stage:{stage}")
+
+
 def _result_status(results: tuple[GateResult, ...], name: str) -> str | None:
     for result in results:
         if result.name == name:
             return result.status
     return None
+
+
+def _result_detail(results: tuple[GateResult, ...], name: str) -> str:
+    for result in results:
+        if result.name == name:
+            return result.detail
+    return ""
+
+
+def _stage_status(stage: str, *, status: str, results: tuple[GateResult, ...]) -> str:
+    if status != PASS:
+        return FAIL
+    if stage == "edli_live_canary":
+        detail = _result_detail(results, "edli_stage_readiness")
+        if "status=WAITING_FOR_QUALIFYING_EVENT" in detail:
+            return "WAITING_FOR_QUALIFYING_EVENT"
+    return PASS
 
 
 def _stage_allowance(
@@ -627,6 +706,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--source-health-json", type=Path, default=ROOT / "state" / "source_health.json")
     parser.add_argument("--status-json", type=Path, default=ROOT / "state" / "status_summary.json")
     parser.add_argument("--paper-proof-json", type=Path, default=ROOT / "state" / "paper_money_path_proof.json")
+    parser.add_argument("--settings-json", type=Path)
     parser.add_argument("--canary-artifact-json", type=Path)
     parser.add_argument("--promotion-artifact-json", type=Path)
     parser.add_argument("--edli-live-min-canary-count", type=int, default=1)

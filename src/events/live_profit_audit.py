@@ -50,6 +50,7 @@ _AUDIT_FIELDS = (
     "post_fill_mark",
     "settlement_outcome",
     "realized_edge",
+    "edge_value_usd",
     "pnl_usd",
     "reject_reason",
     "expected_edge_source_certificate_hash",
@@ -143,14 +144,14 @@ class LiveProfitAuditLedger:
                 best_bid, best_ask, limit_price, order_type, time_in_force,
                 venue_order_id, order_lifecycle_state, avg_fill_price,
                 filled_size, fees, post_fill_mark, settlement_outcome,
-                realized_edge, pnl_usd, reject_reason,
+                realized_edge, edge_value_usd, pnl_usd, reject_reason,
                 expected_edge_source_certificate_hash,
                 cost_basis_source_certificate_hash, fill_source_event_hash,
                 settlement_source_event_hash, promotion_eligible, created_at,
                 schema_version
             ) VALUES (
                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
             )
             ON CONFLICT(audit_id) DO UPDATE SET
                 event_id = excluded.event_id,
@@ -187,6 +188,7 @@ class LiveProfitAuditLedger:
                 post_fill_mark = excluded.post_fill_mark,
                 settlement_outcome = excluded.settlement_outcome,
                 realized_edge = excluded.realized_edge,
+                edge_value_usd = excluded.edge_value_usd,
                 pnl_usd = excluded.pnl_usd,
                 reject_reason = excluded.reject_reason,
                 expected_edge_source_certificate_hash = excluded.expected_edge_source_certificate_hash,
@@ -365,7 +367,8 @@ def record_edli_live_profit_audit_from_aggregate(conn: sqlite3.Connection, aggre
         filled_size=(computed or {}).get("filled_size") or lifecycle_payload.get("filled_size") or lifecycle_payload.get("size"),
         fees=(computed or {}).get("fees") if computed is not None else lifecycle_payload.get("fees"),
         realized_edge=(computed or {}).get("realized_edge"),
-        pnl_usd=(computed or {}).get("pnl_usd"),
+        edge_value_usd=(computed or {}).get("edge_value_usd"),
+        pnl_usd=lifecycle_payload.get("pnl_usd") if settlement_source_event_hash else None,
         reject_reason=lifecycle_payload.get("reason_code") or lifecycle_payload.get("reject_reason"),
         expected_edge_source_certificate_hash=expected_edge_source_certificate_hash,
         cost_basis_source_certificate_hash=cost_basis_source_certificate_hash,
@@ -434,7 +437,7 @@ def compute_realized_edge_from_authorities(
         "fees": fees,
         "expected_cost_basis": expected_cost_basis,
         "realized_edge": realized_edge,
-        "pnl_usd": realized_edge * filled_size,
+        "edge_value_usd": realized_edge * filled_size,
     }
 
 
