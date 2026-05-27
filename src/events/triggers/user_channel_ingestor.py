@@ -199,7 +199,7 @@ def append_user_channel_message(
                 trade_status=_required(message, "trade_status"),
                 venue_order_id=venue_order_id,
                 occurred_at=occurred_at,
-                payload={"raw_user_channel_message_hash": message_hash},
+                payload=_trade_payload(message, message_hash=message_hash),
             ),
         )
     raise EdliUserChannelIngestorError(f"unsupported EDLI user-channel message type: {message_kind!r}")
@@ -260,3 +260,30 @@ def _stable_json(payload: dict[str, Any]) -> str:
     import json
 
     return json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+
+
+def _trade_payload(message: dict[str, Any], *, message_hash: str) -> dict[str, Any]:
+    payload: dict[str, Any] = {"raw_user_channel_message_hash": message_hash}
+    field_map = {
+        "fill_price": ("fill_price", "price"),
+        "avg_fill_price": ("avg_fill_price", "fill_price", "price"),
+        "filled_size": ("filled_size", "size", "amount"),
+        "fees": ("fees", "fee"),
+        "trade_id": ("trade_id", "id"),
+        "maker_taker": ("maker_taker", "liquidity"),
+        "matched_at": ("matched_at",),
+        "confirmed_at": ("confirmed_at",),
+    }
+    for target, candidates in field_map.items():
+        value = _first_present(message, candidates)
+        if value is not None:
+            payload[target] = value
+    return payload
+
+
+def _first_present(message: dict[str, Any], fields: tuple[str, ...]) -> Any:
+    for field in fields:
+        value = message.get(field)
+        if value not in (None, ""):
+            return value
+    return None

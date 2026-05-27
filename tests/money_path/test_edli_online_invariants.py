@@ -369,7 +369,9 @@ def test_edli_live_canary_stage_readiness_waits_on_clean_db(monkeypatch, tmp_pat
     )
 
     assert report.status == "WAITING_FOR_QUALIFYING_EVENT"
-    assert report.live_entries_allowed is False
+    assert report.live_entries_allowed is True
+    assert report.submit_allowed is True
+    assert report.scaleout_allowed is False
 
 
 def test_edli_live_canary_stage_readiness_blocks_unresolved_unknown(monkeypatch, tmp_path):
@@ -768,8 +770,10 @@ def _write_db_backed_promotion_artifact(tmp_path, *, realized_edge: float, audit
             "trade_status": "CONFIRMED",
             "fill_authority_state": "FILL_CONFIRMED",
             "venue_order_id": "venue-1",
-            "realized_edge": realized_edge,
             "raw_user_channel_message_hash": "trade-msg-1",
+            "avg_fill_price": 0.45 - realized_edge,
+            "filled_size": 10.0,
+            "fees": 0.0,
         },
         occurred_at=now,
         source_authority="user_channel",
@@ -834,6 +838,7 @@ def _pre_submit_payload_for_promotion(**overrides):
         "current_best_bid": 0.42,
         "current_best_ask": 0.43,
         "limit_price": 0.42,
+        "q_live": 0.45,
         "expected_cost_basis": 0.421,
         "expected_fee": 0.001,
         "expected_spread_cost": 0.0005,

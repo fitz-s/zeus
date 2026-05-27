@@ -282,6 +282,13 @@ def test_user_channel_ingestor_appends_order_and_confirmed_trade_events():
             "venue_order_id": "venue-1",
             "trade_status": "CONFIRMED",
             "message_hash": "trade-msg-1",
+            "price": 0.44,
+            "size": 10.0,
+            "fees": 0.01,
+            "trade_id": "trade-1",
+            "maker_taker": "maker",
+            "matched_at": "2026-05-26T12:00:00+00:00",
+            "confirmed_at": "2026-05-26T12:00:01+00:00",
         },
         occurred_at=NOW,
     )
@@ -289,6 +296,12 @@ def test_user_channel_ingestor_appends_order_and_confirmed_trade_events():
     assert order_event.event_type == "UserOrderObserved"
     assert trade_event.event_type == "UserTradeObserved"
     assert trade_event.payload["fill_authority_state"] == "FILL_CONFIRMED"
+    assert trade_event.payload["avg_fill_price"] == 0.44
+    assert trade_event.payload["fill_price"] == 0.44
+    assert trade_event.payload["filled_size"] == 10.0
+    assert trade_event.payload["fees"] == 0.01
+    assert trade_event.payload["trade_id"] == "trade-1"
+    assert trade_event.payload["maker_taker"] == "maker"
 
 
 def test_user_channel_ingestor_requires_message_hash_for_idempotency():

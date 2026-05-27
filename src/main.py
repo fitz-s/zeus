@@ -104,6 +104,8 @@ class EdliStageReadiness:
     stage: str
     status: str
     live_entries_allowed: bool
+    submit_allowed: bool = False
+    scaleout_allowed: bool = False
     reasons: tuple[str, ...] = ()
 
 
@@ -254,7 +256,9 @@ def evaluate_edli_stage_readiness(
                     return EdliStageReadiness(
                         stage=stage,
                         status=EDLI_STAGE_WAITING,
-                        live_entries_allowed=False,
+                        live_entries_allowed=True,
+                        submit_allowed=True,
+                        scaleout_allowed=False,
                         reasons=tuple(canary.reasons),
                     )
             elif canary.status not in {CANARY_SAFETY_PASS, CANARY_PROFIT_PASS}:
@@ -268,7 +272,21 @@ def evaluate_edli_stage_readiness(
         return EdliStageReadiness(stage=stage, status=EDLI_STAGE_PASS, live_entries_allowed=False)
     if stage == "edli_shadow_no_submit":
         return EdliStageReadiness(stage=stage, status=EDLI_STAGE_PASS, live_entries_allowed=False)
-    return EdliStageReadiness(stage=stage, status=EDLI_STAGE_PASS, live_entries_allowed=True)
+    if stage == "edli_live_canary":
+        return EdliStageReadiness(
+            stage=stage,
+            status=EDLI_STAGE_PASS,
+            live_entries_allowed=True,
+            submit_allowed=True,
+            scaleout_allowed=False,
+        )
+    return EdliStageReadiness(
+        stage=stage,
+        status=EDLI_STAGE_PASS,
+        live_entries_allowed=True,
+        submit_allowed=True,
+        scaleout_allowed=True,
+    )
 
 
 def _assert_edli_stage_readiness(edli_cfg: dict) -> EdliStageReadiness:
@@ -294,10 +312,12 @@ def _assert_edli_stage_readiness(edli_cfg: dict) -> EdliStageReadiness:
     if stage == "edli_live_canary":
         risk_reasons = [reason for reason in report.reasons if reason.startswith(EDLI_STAGE_RISK_REASON_PREFIXES)]
         if report.status not in {EDLI_STAGE_PASS, EDLI_STAGE_WAITING} or risk_reasons:
-            raise RuntimeError("EDLI_STAGE_READINESS_FAILED:" + ",".join(report.reasons or (report.status,)))
+            raise RuntimeError("EDLI_LIVE_CANARY_READINESS_FAIL:" + ",".join(report.reasons or (report.status,)))
+        if report.submit_allowed is not True:
+            raise RuntimeError("EDLI_LIVE_CANARY_SUBMIT_NOT_ALLOWED")
         return report
-    if stage == "edli_live" and report.status != EDLI_STAGE_PASS:
-        raise RuntimeError("EDLI_STAGE_READINESS_FAILED:" + ",".join(report.reasons or (report.status,)))
+    if stage == "edli_live" and (report.status != EDLI_STAGE_PASS or report.scaleout_allowed is not True):
+        raise RuntimeError("EDLI_LIVE_SCALEOUT_READINESS_FAIL:" + ",".join(report.reasons or (report.status,)))
     return report
 
 

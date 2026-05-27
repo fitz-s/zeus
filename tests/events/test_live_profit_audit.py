@@ -249,7 +249,32 @@ def test_live_order_lifecycle_events_emit_profit_audit_rows():
     assert row["visible_depth_fill_lcb"] == 0.95
     assert row["order_policy"] == "maker_post_only"
     assert row["native_token_side"] == "YES"
+    assert row["avg_fill_price"] == 0.44
+    assert row["filled_size"] == 10.0
+    assert row["fees"] == 0.0
+    assert row["realized_edge"] == pytest.approx(0.01)
+    assert row["pnl_usd"] == pytest.approx(0.1)
+    assert row["promotion_eligible"] == 1
     assert ledger.get_projection("event-1:intent-1").pending_reconcile is False
+
+
+def test_confirmed_fill_without_fill_economics_is_not_promotion_eligible():
+    conn = _conn()
+    _seed_confirmed_aggregate(conn, include_fill_economics=False)
+
+    row = conn.execute(
+        """
+        SELECT realized_edge, avg_fill_price, filled_size, promotion_eligible
+        FROM edli_live_profit_audit
+        WHERE aggregate_id = ?
+        """,
+        ("event-1:intent-1",),
+    ).fetchone()
+
+    assert row["realized_edge"] is None
+    assert row["avg_fill_price"] is None
+    assert row["filled_size"] is None
+    assert row["promotion_eligible"] == 0
 
 
 def test_missing_cost_basis_certificate_keeps_audit_non_promotion_eligible():
@@ -274,7 +299,12 @@ def test_missing_cost_basis_certificate_keeps_audit_non_promotion_eligible():
     assert ledger.get_projection("event-1:intent-1").current_state == "CAP_TRANSITIONED"
 
 
-def _seed_confirmed_aggregate(conn: sqlite3.Connection, *, realized_edge: float = 0.01) -> LiveOrderAggregateLedger:
+def _seed_confirmed_aggregate(
+    conn: sqlite3.Connection,
+    *,
+    realized_edge: float = 0.01,
+    include_fill_economics: bool = True,
+) -> LiveOrderAggregateLedger:
     ledger = LiveOrderAggregateLedger(conn)
     now = "2026-05-26T12:00:00+00:00"
     from datetime import datetime
@@ -347,19 +377,27 @@ def _seed_confirmed_aggregate(conn: sqlite3.Connection, *, realized_edge: float 
         occurred_at=occurred_at,
         source_authority="existing_executor",
     )
+    trade_payload = {
+        "event_id": "event-1",
+        "final_intent_id": "intent-1",
+        "source_authority": "polymarket_user_channel",
+        "trade_status": "CONFIRMED",
+        "fill_authority_state": "FILL_CONFIRMED",
+        "venue_order_id": "venue-1",
+        "raw_user_channel_message_hash": "trade-msg-1",
+    }
+    if include_fill_economics:
+        trade_payload.update(
+            {
+                "avg_fill_price": 0.45 - realized_edge,
+                "filled_size": 10.0,
+                "fees": 0.0,
+            }
+        )
     ledger.append_event(
         aggregate_id="event-1:intent-1",
         event_type="UserTradeObserved",
-        payload={
-            "event_id": "event-1",
-            "final_intent_id": "intent-1",
-            "source_authority": "polymarket_user_channel",
-            "trade_status": "CONFIRMED",
-            "fill_authority_state": "FILL_CONFIRMED",
-            "venue_order_id": "venue-1",
-            "realized_edge": realized_edge,
-            "raw_user_channel_message_hash": "trade-msg-1",
-        },
+        payload=trade_payload,
         occurred_at=occurred_at,
         source_authority="user_channel",
     )
@@ -400,6 +438,7 @@ def _pre_submit_payload(**overrides):
         "current_best_bid": 0.42,
         "current_best_ask": 0.43,
         "limit_price": 0.42,
+        "q_live": 0.45,
         "expected_cost_basis": 0.421,
         "expected_fee": 0.001,
         "expected_spread_cost": 0.0005,

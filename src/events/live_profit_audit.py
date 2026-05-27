@@ -233,9 +233,6 @@ def verify_edli_live_promotion_artifact(
         return PromotionVerification(False, "EDLI_LIVE_PROMOTION_CAP_TRANSITION_MISSING")
     if aggregate_ids and not rows["user_or_reconcile_event_hashes"]:
         return PromotionVerification(False, "EDLI_LIVE_PROMOTION_USER_OR_RECONCILE_MISSING")
-    row_verification = _verify_promotion_eligible_confirmed_rows(rows["audit_rows"])
-    if row_verification is not None:
-        return PromotionVerification(False, row_verification)
     recomputed = summary.as_artifact()
     for volatile in ("generated_at",):
         recomputed.pop(volatile, None)
@@ -265,6 +262,9 @@ def verify_edli_live_promotion_artifact(
         return PromotionVerification(False, "EDLI_LIVE_PROMOTION_REALIZED_EDGE_INVALID")
     if abs(artifact_edge - float(recomputed.get("realized_edge_bps", 0.0))) > 1e-9:
         return PromotionVerification(False, "EDLI_LIVE_PROMOTION_ARTIFACT_DB_MISMATCH:realized_edge_bps")
+    row_verification = _verify_promotion_eligible_confirmed_rows(rows["audit_rows"])
+    if row_verification is not None:
+        return PromotionVerification(False, row_verification)
     fill_edge = float(comparable.get("median_realized_edge_bps_from_confirmed_fills", 0.0))
     if int(comparable.get("confirmed_fill_count", 0)) < min_canary_count:
         return PromotionVerification(False, "EDLI_LIVE_PROMOTION_CANARY_COUNT_INSUFFICIENT")
@@ -281,14 +281,16 @@ def _verify_promotion_eligible_confirmed_rows(rows: list[dict[str, Any]]) -> str
     for row in rows:
         if row.get("order_lifecycle_state") != "CONFIRMED":
             continue
-        if int(row.get("promotion_eligible") or 0) != 1:
-            return "EDLI_LIVE_PROMOTION_CONFIRMED_FILL_NOT_PROMOTION_ELIGIBLE"
         if not str(row.get("expected_edge_source_certificate_hash") or "").strip():
             return "EDLI_LIVE_PROMOTION_EXPECTED_EDGE_PROVENANCE_MISSING"
         if not str(row.get("cost_basis_source_certificate_hash") or "").strip():
             return "EDLI_LIVE_PROMOTION_COST_BASIS_PROVENANCE_MISSING"
         if not str(row.get("fill_source_event_hash") or "").strip():
             return "EDLI_LIVE_PROMOTION_FILL_PROVENANCE_MISSING"
+        if _float_or_none(row.get("realized_edge")) is not None and float(row.get("realized_edge") or 0.0) <= 0:
+            return "EDLI_LIVE_PROMOTION_REALIZED_EDGE_INSUFFICIENT"
+        if int(row.get("promotion_eligible") or 0) != 1:
+            return "EDLI_LIVE_PROMOTION_CONFIRMED_FILL_NOT_PROMOTION_ELIGIBLE"
     return None
 
 
@@ -313,6 +315,13 @@ def record_edli_live_profit_audit_from_aggregate(conn: sqlite3.Connection, aggre
     expected_edge_source_certificate_hash = pre_submit.get("expected_edge_source_certificate_hash")
     cost_basis_source_certificate_hash = pre_submit.get("cost_basis_source_certificate_hash")
     expected_cost_basis = pre_submit.get("expected_cost_basis")
+    computed = compute_realized_edge_from_authorities(
+        cost_model_cert_hash=str(cost_basis_source_certificate_hash or ""),
+        expected_edge_cert_hash=str(expected_edge_source_certificate_hash or ""),
+        fill_event_hash=str(fill_source_event_hash or ""),
+        pre_submit=pre_submit,
+        fill_payload=lifecycle_payload,
+    )
     promotion_eligible = (
         state == "CONFIRMED"
         and lifecycle_type == "UserTradeObserved"
@@ -321,7 +330,8 @@ def record_edli_live_profit_audit_from_aggregate(conn: sqlite3.Connection, aggre
         and bool(cost_basis_source_certificate_hash)
         and bool(fill_source_event_hash)
         and expected_cost_basis is not None
-        and lifecycle_payload.get("realized_edge") is not None
+        and computed is not None
+        and computed["realized_edge"] > 0
     )
     return LiveProfitAuditLedger(conn).insert_record(
         event_id=pre_submit.get("event_id"),
@@ -348,11 +358,11 @@ def record_edli_live_profit_audit_from_aggregate(conn: sqlite3.Connection, aggre
         time_in_force=pre_submit.get("time_in_force"),
         venue_order_id=lifecycle_payload.get("venue_order_id"),
         order_lifecycle_state=state,
-        avg_fill_price=lifecycle_payload.get("avg_fill_price") or lifecycle_payload.get("fill_price"),
-        filled_size=lifecycle_payload.get("filled_size") or lifecycle_payload.get("size"),
-        fees=lifecycle_payload.get("fees"),
-        realized_edge=lifecycle_payload.get("realized_edge"),
-        pnl_usd=lifecycle_payload.get("pnl_usd"),
+        avg_fill_price=(computed or {}).get("avg_fill_price") or lifecycle_payload.get("avg_fill_price") or lifecycle_payload.get("fill_price"),
+        filled_size=(computed or {}).get("filled_size") or lifecycle_payload.get("filled_size") or lifecycle_payload.get("size"),
+        fees=(computed or {}).get("fees") if computed is not None else lifecycle_payload.get("fees"),
+        realized_edge=(computed or {}).get("realized_edge"),
+        pnl_usd=(computed or {}).get("pnl_usd"),
         reject_reason=lifecycle_payload.get("reason_code") or lifecycle_payload.get("reject_reason"),
         expected_edge_source_certificate_hash=expected_edge_source_certificate_hash,
         cost_basis_source_certificate_hash=cost_basis_source_certificate_hash,
@@ -360,6 +370,59 @@ def record_edli_live_profit_audit_from_aggregate(conn: sqlite3.Connection, aggre
         settlement_source_event_hash=settlement_source_event_hash,
         promotion_eligible=1 if promotion_eligible else 0,
     )
+
+
+def compute_realized_edge_from_authorities(
+    *,
+    cost_model_cert_hash: str,
+    expected_edge_cert_hash: str,
+    fill_event_hash: str,
+    pre_submit: dict[str, Any],
+    fill_payload: dict[str, Any],
+) -> dict[str, float] | None:
+    """Compute realized edge from cost-basis and fill authority fields.
+
+    This intentionally refuses to use a caller-supplied realized_edge value.
+    Promotion-eligible audit rows need a cost-basis authority hash, expected-edge
+    authority hash, fill event hash, and typed fill economics.
+    """
+
+    if not cost_model_cert_hash or not expected_edge_cert_hash or not fill_event_hash:
+        return None
+    side = str(pre_submit.get("side") or "").upper()
+    if side not in {"BUY", "SELL"}:
+        return None
+    q_live = _float_or_none(pre_submit.get("q_live"))
+    if q_live is None:
+        q_live = _float_or_none(pre_submit.get("expected_probability"))
+    if q_live is None:
+        return None
+    avg_fill_price = _float_or_none(fill_payload.get("avg_fill_price") or fill_payload.get("fill_price"))
+    filled_size = _float_or_none(fill_payload.get("filled_size") or fill_payload.get("size"))
+    fees = _float_or_none(fill_payload.get("fees")) or 0.0
+    if avg_fill_price is None or filled_size is None or filled_size <= 0:
+        return None
+    fee_per_share = fees / filled_size
+    if side == "BUY":
+        realized_edge = q_live - avg_fill_price - fee_per_share
+    else:
+        realized_edge = avg_fill_price - q_live - fee_per_share
+    return {
+        "avg_fill_price": avg_fill_price,
+        "filled_size": filled_size,
+        "fees": fees,
+        "realized_edge": realized_edge,
+        "pnl_usd": realized_edge * filled_size,
+    }
+
+
+def _float_or_none(value: Any) -> float | None:
+    if value in (None, ""):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _promotion_summary_from_rows(
