@@ -345,6 +345,7 @@ def test_realized_edge_partial_fill_uses_filled_size_not_requested_size():
     (
         ("cost", "condition_id", "other-condition"),
         ("cost", "token_id", "other-token"),
+        ("edge", "condition_id", "other-condition"),
         ("edge", "token_id", "other-token"),
         ("edge", "direction", "NO"),
         ("cost", "native_token_side", "NO"),

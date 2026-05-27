@@ -281,6 +281,15 @@ def evaluate_edli_stage_readiness(
                     )
             elif canary.status not in {CANARY_SAFETY_PASS, CANARY_PROFIT_PASS}:
                 reasons.append(f"EDLI_STAGE_CANARY_GATE_UNSUPPORTED:{canary.status}")
+            elif not reasons:
+                return EdliStageReadiness(
+                    stage=stage,
+                    status=EDLI_STAGE_PASS,
+                    live_entries_allowed=True,
+                    submit_allowed=True,
+                    scaleout_allowed=False,
+                    reasons=(canary.status,),
+                )
     finally:
         conn.close()
 

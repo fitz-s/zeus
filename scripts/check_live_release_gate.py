@@ -398,6 +398,7 @@ def evaluate_release_gate(args: argparse.Namespace) -> ReleaseGateReport:
     live_entries_allowed, submit_allowed, scaleout_allowed, gate_basis = _stage_allowance(
         str(args.stage),
         status=status,
+        results=tuple(results),
     )
     return ReleaseGateReport(
         status=status,
@@ -489,7 +490,19 @@ def _check_edli_promotion_artifact(args: argparse.Namespace) -> GateResult:
     )
 
 
-def _stage_allowance(stage: str, *, status: str) -> tuple[bool, bool, bool, tuple[str, ...]]:
+def _result_status(results: tuple[GateResult, ...], name: str) -> str | None:
+    for result in results:
+        if result.name == name:
+            return result.status
+    return None
+
+
+def _stage_allowance(
+    stage: str,
+    *,
+    status: str,
+    results: tuple[GateResult, ...],
+) -> tuple[bool, bool, bool, tuple[str, ...]]:
     if stage not in LIVE_RELEASE_STAGES:
         raise ValueError(f"UNSUPPORTED_LIVE_RELEASE_STAGE:{stage}")
     basis = (
@@ -505,10 +518,18 @@ def _stage_allowance(stage: str, *, status: str) -> tuple[bool, bool, bool, tupl
     if stage == "legacy_cron":
         return False, False, False, basis + ("legacy_cron_preservation",)
     if stage == "edli_submit_disabled_bridge":
+        if _result_status(results, "edli_stage_readiness") != PASS:
+            return False, False, False, basis + ("submit_disabled", "edli_stage_readiness_required")
         return False, False, False, basis + ("submit_disabled",)
     if stage == "edli_live_canary":
+        if _result_status(results, "edli_stage_readiness") != PASS:
+            return False, False, False, basis + ("canary_preflight_required", "tiny_cap_only")
         return True, True, False, basis + ("canary_preflight", "tiny_cap_only")
     if stage == "edli_live":
+        if _result_status(results, "edli_stage_readiness") != PASS:
+            return False, False, False, basis + ("edli_stage_readiness_required", "scaleout_blocked")
+        if _result_status(results, "edli_promotion_artifact") != PASS:
+            return False, False, False, basis + ("verified_promotion_artifact_required", "scaleout_blocked")
         return True, True, True, basis + ("verified_promotion_artifact", "scaleout_allowed")
     return False, False, False, basis
 
