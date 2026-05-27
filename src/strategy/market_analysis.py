@@ -20,6 +20,7 @@ from src.calibration.platt import (
     normalize_bin_probability_for_calibration,
 )
 from src.config import edge_n_bootstrap
+from src.contracts.execution_price import ExecutionPrice
 from src.contracts.settlement_semantics import apply_settlement_rounding, round_wmo_half_up_values
 from src.signal.forecast_uncertainty import (
     analysis_bootstrap_sigma,
@@ -397,6 +398,18 @@ class MarketAnalysis:
             if edge_yes > 0:
                 ci_lo, ci_hi, p_val = self._bootstrap_bin(i, n_bootstrap)
                 if ci_lo > 0:
+                    # Wave 2 (INV-38): construct typed ExecutionPrice at the
+                    # edge-scan seam so VWMP provenance from
+                    # _buy_entry_price_from_clob travels intact to the Kelly
+                    # boundary. The Kelly seam (evaluator.py
+                    # _size_at_execution_price_boundary) no longer fabricates
+                    # price_type="implied_probability" over this object.
+                    yes_entry_price = ExecutionPrice(
+                        value=float(self.p_market[i]),
+                        price_type="vwmp",
+                        fee_deducted=False,
+                        currency="probability_units",
+                    )
                     edge = BinEdge(
                         bin=b,
                         direction="buy_yes",
@@ -406,7 +419,7 @@ class MarketAnalysis:
                         p_model=float(self.p_cal[i]),
                         p_market=float(self.p_market[i]),
                         p_posterior=float(self.p_posterior[i]),
-                        entry_price=float(self.p_market[i]),
+                        entry_price=yes_entry_price,
                         p_value=p_val,
                         vwmp=float(self.p_market[i]),
                         forward_edge=edge_yes,
@@ -461,6 +474,15 @@ class MarketAnalysis:
                 if edge_no > 0:
                     ci_lo, ci_hi, p_val = self._bootstrap_bin_no(i, n_bootstrap)
                     if ci_lo > 0:
+                        # Wave 2 (INV-38): buy_no uses NATIVE NO-side VWMP from
+                        # buy_no_market_price (executable NO quote, not the YES
+                        # complement). Same provenance as buy_yes.
+                        no_entry_price = ExecutionPrice(
+                            value=float(p_market_no),
+                            price_type="vwmp",
+                            fee_deducted=False,
+                            currency="probability_units",
+                        )
                         edge = BinEdge(
                             bin=b,
                             direction="buy_no",
@@ -470,7 +492,7 @@ class MarketAnalysis:
                             p_model=p_model_no,
                             p_market=p_market_no,
                             p_posterior=p_post_no,
-                            entry_price=p_market_no,
+                            entry_price=no_entry_price,
                             p_value=p_val,
                             vwmp=p_market_no,
                             forward_edge=edge_no,

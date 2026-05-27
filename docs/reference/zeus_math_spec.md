@@ -846,6 +846,69 @@ Two stages: P(Y > 0 | x), E[Y | Y > 0, x]. Preserves the physics constraint that
 ### 15.6 Execution microstructure (edge half-life)
 Use the existing `token_price_log` to model whether an edge persists 5/15/30 minutes into the future. Deferred.
 
+### 15.7 Market-cost executable seam + executable-uncertainty (2026-05-27)
+
+**Authority:** `architecture/market_cost_seam_executable_uncertainty_2026_05_27.md` (Fitz §1 5-K decision restatement of current `BinEdge.entry_price: float` defect + scattered 15-multiplier chain).
+
+**Problem.** Current edge math is:
+```
+edge_i = p_posterior[i] - p_market[i]
+```
+where `p_market[i]` is `float(vwmp(bid, ask, bid_size, ask_size))` from `_buy_entry_price_from_orderbook` (top-of-book only — `_top_book_level_decimal`). At the Kelly boundary, this float is re-typed at `evaluator.py:_size_at_execution_price_boundary` by constructing
+```
+ExecutionPrice(value=raw, price_type="implied_probability", fee_deducted=False)
+.with_taker_fee(fee_rate)
+```
+which **launders the implied-probability tag into `fee_adjusted` at the same call** that calls `assert_kelly_safe()`. The contract that `ExecutionPrice` was created to enforce (INV-12 typed seam, D3 resolution) is defeated at its own enforcement site.
+
+Independently, `_bootstrap_bin` samples forecast / Platt / transfer uncertainty per iteration but subtracts the FIXED `p_market[i]` unchanged — so `edge_ci_lower` ignores market-cost uncertainty (spread, slippage, fill probability, quote staleness, fee variance).
+
+Separately, Kelly sizing applies 15 multiplicative haircuts spread across `dynamic_kelly_mult` (7), `phase_aware_kelly_multiplier` (4), `EffectiveKellyContext.haircut` (1), oracle/observed-fraction/phase-source guards. Multiple soft uncertainties (CI width, spread, depth) appear in BOTH `edge_ci_lower` AND multiplier chain → silent double-counting → death-by-thousand-gates collapse of valid edges.
+
+**Upgrade.** Restate as:
+
+```
+edge_LCB,i = p_LCB,i - c_UCB,i
+
+where
+  p_LCB,i = p_posterior,i - z · σ_p,i        (already in code via bootstrap CI)
+  c_UCB,i = c_mean,i + z · σ_c,i             (NEW — Wave 5 bootstrap c_b sampling)
+
+  σ_c,i = sqrt(
+            (spread_usd,i / 2)^2
+          + slippage_walk_variance,i
+          + fee_variance,i
+          + quote_age_penalty,i^2
+          )
+
+  c_mean,i = depth_walk_fill_price,i + polymarket_fee(c_mean,i)
+  c_mean,i carried as typed ExecutionPrice(price_type="fee_adjusted", fee_deducted=True)
+           with provenance ∈ {"vwmp", "ask", "depth_walked"} preserved upstream
+```
+
+`σ_c` enters the edge bootstrap exactly once. The previously-scattered soft multipliers (CI width haircut, spread/depth haircut, transfer σ already exists) collapse to either:
+
+1. **Hard veto** (multiplicative {0, 1}) — `executable_mask`, `oracle_penalty=0`, `strategy_phase=0`, `quote_age > stale_threshold`, `reliability_status ∈ {THIN_BOOK, CROSSED}`. These remain as multiplicative gates.
+2. **Soft σ contribution** — every other uncertainty enters `σ_edge` (forecast σ + Platt σ + transfer σ + market σ) which produces `edge_LCB` once. No second multiplication.
+
+**Kelly formula unchanged at the boundary:**
+```
+f* = (p_LCB - c_UCB) / (1 - c_UCB)
+```
+with `c_UCB` supplied as a typed `ExecutionPrice` whose provenance was set at `_buy_entry_price_from_clob` and propagated through `BinEdge.entry_price: ExecutionPrice`. `_size_at_execution_price_boundary` no longer fabricates `price_type`.
+
+**Family-level optimum.** Within one `(city, target_date, temperature_metric)` family, bins are a partition. The existing `optimize_exclusive_outcome_portfolio` (`src/strategy/family_exclusive_dedup.py:909`) already maximises
+```
+max_f  E[ log(1 + Σ_i f_i · R_i(Y)) ]
+```
+over selected leg combinations of an exclusive-outcome payoff matrix; default `max_legs=1` keeps it behaviourally identical to the Stage A emergency gate. Wave 4 bumps `max_legs` via caller config (shadow first), preserving Stage A as fallback.
+
+**Market prior fusion stays shadow-only.** `MODEL_ONLY_POSTERIOR_MODE` remains the default `posterior_mode` for `MarketAnalysis`. `MarketPriorDistribution` contract (complete normalised distribution + lineage + freshness + liquidity + validation evidence) gates any future blending experiment. KL-divergence inequality `KL(p ‖ (1−β)p + βm) ≥ 0` forbids unverified blending of a calibrated model with an unvalidated market distribution.
+
+**Acceptance for §15.7 being closed:** all of INV-38, INV-39, INV-40 antibody tests GREEN, `_size_at_execution_price_boundary` constructs no `ExecutionPrice` with `price_type="implied_probability"`, `_bootstrap_bin` samples `c_b` from `EntryQuoteEvidence.cost_uncertainty`, no soft uncertainty enters Kelly via more than one path.
+
+**Status (2026-05-27):** plan + spec amendment + INV registration only; Waves 1-7 pending.
+
 ---
 
 ## 16. What this spec does NOT specify

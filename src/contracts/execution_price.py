@@ -120,6 +120,129 @@ class ExecutionPrice:
             "required_fields": ["value", "price_type", "fee_deducted", "currency"],
         }
 
+    # ------------------------------------------------------------------
+    # Wave 2 (2026-05-27, INV-38): numeric dunders so consumers that
+    # historically read a bare float (e.g. cycle_runtime/evaluator/replay
+    # arithmetic + comparison sites) keep working after BinEdge.entry_price
+    # is typed. Comparisons + arithmetic operate on ``self.value`` only —
+    # the returned scalar is a plain float because it is a DERIVED numeric
+    # value that has lost provenance (e.g. price + fee, price > 0.99).
+    # The TYPE CONTRACT (price_type / fee_deducted / currency) is still
+    # enforced via ``isinstance(x, ExecutionPrice)`` + ``assert_kelly_safe``
+    # at the Kelly boundary; these dunders ONLY make numeric ergonomics
+    # transparent. Do NOT add operators that return ExecutionPrice — that
+    # would re-introduce silent type laundering (D5 defect).
+    # ------------------------------------------------------------------
+
+    def __float__(self) -> float:
+        return float(self.value)
+
+    def __round__(self, ndigits: int = 0) -> float:
+        return round(float(self.value), ndigits)
+
+    def __format__(self, format_spec: str) -> str:
+        if format_spec == "":
+            return str(self)
+        return format(float(self.value), format_spec)
+
+    def _other_value(self, other) -> float | None:
+        if isinstance(other, ExecutionPrice):
+            return float(other.value)
+        if isinstance(other, (int, float)):
+            return float(other)
+        return None
+
+    def __lt__(self, other) -> bool:
+        v = self._other_value(other)
+        if v is None:
+            return NotImplemented
+        return float(self.value) < v
+
+    def __le__(self, other) -> bool:
+        v = self._other_value(other)
+        if v is None:
+            return NotImplemented
+        return float(self.value) <= v
+
+    def __gt__(self, other) -> bool:
+        v = self._other_value(other)
+        if v is None:
+            return NotImplemented
+        return float(self.value) > v
+
+    def __ge__(self, other) -> bool:
+        v = self._other_value(other)
+        if v is None:
+            return NotImplemented
+        return float(self.value) >= v
+
+    def __add__(self, other) -> float:
+        v = self._other_value(other)
+        if v is None:
+            return NotImplemented
+        return float(self.value) + v
+
+    def __radd__(self, other) -> float:
+        return self.__add__(other)
+
+    def __sub__(self, other) -> float:
+        v = self._other_value(other)
+        if v is None:
+            return NotImplemented
+        return float(self.value) - v
+
+    def __rsub__(self, other) -> float:
+        v = self._other_value(other)
+        if v is None:
+            return NotImplemented
+        return v - float(self.value)
+
+    def __mul__(self, other) -> float:
+        v = self._other_value(other)
+        if v is None:
+            return NotImplemented
+        return float(self.value) * v
+
+    def __rmul__(self, other) -> float:
+        return self.__mul__(other)
+
+    def __truediv__(self, other) -> float:
+        v = self._other_value(other)
+        if v is None:
+            return NotImplemented
+        return float(self.value) / v
+
+    def __rtruediv__(self, other) -> float:
+        v = self._other_value(other)
+        if v is None:
+            return NotImplemented
+        return v / float(self.value)
+
+    def __bool__(self) -> bool:
+        return float(self.value) != 0.0
+
+    # __eq__ override allows ExecutionPrice == float / int comparisons so
+    # legacy fixtures and assertions that used a bare-float seam keep
+    # working post-INV-38 type-bump. Equality between ExecutionPrice
+    # instances retains FULL-FIELD identity (price_type / fee_deducted /
+    # currency MUST match) — this guards against silent provenance loss.
+    # __hash__ matches the dataclass default field tuple so frozen-dataclass
+    # set/dict semantics remain intact.
+    def __eq__(self, other) -> bool:
+        if isinstance(other, ExecutionPrice):
+            return (
+                self.value == other.value
+                and self.price_type == other.price_type
+                and self.fee_deducted == other.fee_deducted
+                and self.currency == other.currency
+            )
+        if isinstance(other, (int, float)):
+            return float(self.value) == float(other)
+        return NotImplemented
+
+    def __hash__(self) -> int:
+        return hash((self.value, self.price_type, self.fee_deducted, self.currency))
+
 
 class ExecutionPriceContractError(Exception):
     """Raised when an ExecutionPrice is used unsafely at the Kelly sizing boundary.

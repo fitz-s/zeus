@@ -1,9 +1,14 @@
 """Market types: Bin and BinEdge."""
 
 from dataclasses import dataclass, field
+import logging
 import math
 
 import numpy as np
+
+from src.contracts.execution_price import ExecutionPrice
+
+logger = logging.getLogger(__name__)
 
 
 _INF_LOW_SENTINEL = -32768
@@ -255,6 +260,20 @@ class BinEdge:
     """A detected trading edge on a specific bin. Spec §4.1.
 
     Not frozen — ev_per_dollar is set by rank_edges() after construction.
+
+    Wave 2 (2026-05-27, INV-38): ``entry_price`` is a typed ``ExecutionPrice``
+    so the execution-price provenance set at edge-scan time (VWMP from
+    ``_buy_entry_price_from_clob``, or native NO VWMP) carries through to the
+    Kelly boundary intact. The Kelly seam (``_size_at_execution_price_boundary``
+    in ``src/engine/evaluator.py``) MUST NOT fabricate a synthetic
+    ``price_type="implied_probability"`` over this object — see INV-39.
+
+    Legacy-coercion: bare floats passed by older fixtures / tests are
+    auto-coerced via ``__post_init__`` into an ExecutionPrice tagged
+    ``price_type="implied_probability"`` (so the legacy semantic is preserved
+    explicitly, not silently). A WARNING is logged so production-side legacy
+    callers can be discovered and migrated. Production code should construct
+    the ExecutionPrice at the edge-scan site with the real upstream provenance.
     """
     bin: Bin
     direction: str  # "buy_yes" or "buy_no"
@@ -264,9 +283,39 @@ class BinEdge:
     p_model: float
     p_market: float
     p_posterior: float
-    entry_price: float
+    entry_price: ExecutionPrice
     p_value: float
     vwmp: float
     forward_edge: float = 0.0
     support_index: int | None = None
     ev_per_dollar: float = 0.0
+
+    def __post_init__(self) -> None:
+        if isinstance(self.entry_price, ExecutionPrice):
+            return
+        if isinstance(self.entry_price, (int, float)):
+            raw = float(self.entry_price)
+            # INV-38: legacy float coercion. Tagged implied_probability so the
+            # Kelly boundary's assert_kelly_safe() still flags this path as
+            # needing with_taker_fee() conversion (which preserves the D3
+            # contract: legacy bare floats cannot reach kelly_size without
+            # being type-laundered into fee_adjusted first).
+            self.entry_price = ExecutionPrice(
+                value=raw,
+                price_type="implied_probability",
+                fee_deducted=False,
+                currency="probability_units",
+            )
+            # Plan-doc + Wave 2 brief: WARNING (not DEBUG) so legacy callers
+            # surface in production logs and Wave 7 verification can sweep them.
+            logger.warning(
+                "BinEdge.entry_price legacy float coerced to ExecutionPrice "
+                "(value=%.6f, provenance=implied_probability); production callers "
+                "should construct ExecutionPrice at the edge-scan site",
+                raw,
+            )
+            return
+        raise TypeError(
+            f"BinEdge.entry_price must be ExecutionPrice or numeric (got "
+            f"{type(self.entry_price).__name__})"
+        )

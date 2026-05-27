@@ -1533,14 +1533,30 @@ def _size_at_execution_price_boundary(
                 _mode,
             )
 
-    raw_entry_price = float(entry_price)
-    ep = ExecutionPrice(
-        value=raw_entry_price,
-        price_type="implied_probability",
-        fee_deducted=False,
-        currency="probability_units",
-    )
-    ep_fee_adjusted = ep.with_taker_fee(fee_rate)
+    # Wave 2 (INV-39, 2026-05-27): DO NOT fabricate
+    # ExecutionPrice(price_type="implied_probability") at this boundary.
+    # The upstream BinEdge.entry_price (constructed at edge-scan in
+    # MarketAnalysis.find_edges) is already a typed ExecutionPrice carrying
+    # real provenance (e.g. "vwmp" from _buy_entry_price_from_clob). Fabricating
+    # implied_probability here, then immediately laundering it into
+    # "fee_adjusted" via .with_taker_fee(), defeats the D3/INV-12 contract that
+    # ExecutionPrice was created to enforce — assert_kelly_safe() would only
+    # pass because of the laundering, not because real provenance reached the
+    # boundary. See architecture/market_cost_seam_executable_uncertainty_2026_05_27.md §D5.
+    if isinstance(entry_price, ExecutionPrice):
+        ep = entry_price
+    else:
+        # Legacy float caller (test fixture / non-BinEdge path). Coerce with
+        # explicit implied_probability tag so the legacy semantic is preserved
+        # but visible; INV-38 fix in BinEdge.__post_init__ catches the BinEdge
+        # path before it reaches here.
+        ep = ExecutionPrice(
+            value=float(entry_price),
+            price_type="implied_probability",
+            fee_deducted=False,
+            currency="probability_units",
+        )
+    ep_fee_adjusted = ep if ep.fee_deducted else ep.with_taker_fee(fee_rate)
     ep_fee_adjusted.assert_kelly_safe()
 
     # DT#5 P9B (INV-21): pass the full ExecutionPrice object, not `.value`.
@@ -5765,7 +5781,11 @@ def evaluate_candidate(
 
         effective_min_order_usd, min_order_authority = _effective_min_order_usd_for_entry(
             tokens=tokens,
-            entry_price=edge.entry_price,
+            # Wave 2 (INV-38): coerce typed ExecutionPrice → float because
+            # _effective_min_order_usd_for_entry does Decimal(str(entry_price))
+            # which would fail silently (InvalidOperation → fallback) on the
+            # dataclass repr of a raw ExecutionPrice.
+            entry_price=float(edge.entry_price),
             fallback_min_order_usd=limits.min_order_usd,
         )
         if min_order_authority == "executable_snapshot_min_order_size":
