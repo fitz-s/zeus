@@ -223,14 +223,23 @@ def _sentinel_status_for_metrics(
         if any_in_progress_for_wanted:
             out[metric] = "in_progress"
             continue
-        # Then look for an exact-scope complete sentinel: data_version
-        # must match the wanted set (NOT just `all`), AND start/end == all.
+        # Look for a complete sentinel covering the requested data_version:
+        #   start=all AND end=all AND status=complete AND
+        #   data_version IN wanted_dvs OR data_version='all'
+        # (rationale: rebuild script writes `data_version=all` for broad-scope
+        # complete sentinels; that's a SUPERSET of any specific dv. Per Codex P1
+        # above, in_progress for a specific wanted_dv has already been excluded,
+        # so accepting `data_version=all` here is safe — it cannot mask a
+        # partial rebuild for our requested data_version. 2026-05-27 fitz.)
         full_complete = [
             s
             for s in relevant
             if s["scope"].get("start") == "all"  # type: ignore[union-attr]
             and s["scope"].get("end") == "all"  # type: ignore[union-attr]
-            and s["scope"].get("data_version") in wanted_dvs  # type: ignore[union-attr]
+            and (
+                s["scope"].get("data_version") in wanted_dvs  # type: ignore[union-attr]
+                or s["scope"].get("data_version") == "all"  # type: ignore[union-attr]
+            )
             and s["payload"].get("status") == "complete"  # type: ignore[union-attr]
         ]
         if full_complete:
