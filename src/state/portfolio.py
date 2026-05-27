@@ -30,6 +30,7 @@ from src.contracts import (
     compute_forward_edge,
     ExpiringAssumption,
 )
+from src.contracts.position_truth import ChainOnlyFact
 from src.contracts.semantic_types import ChainState, Direction, DirectionAlias, ExitState, LifecycleState
 from src.contracts.settlement_outcome import SettlementOutcome
 from src.contracts.hold_value import HoldValue
@@ -221,6 +222,12 @@ ENTRY_ECONOMICS_AVG_FILL_PRICE = "avg_fill_price"
 ENTRY_ECONOMICS_CORRECTED_COST_BASIS = "corrected_executable_cost_basis"
 
 FILL_AUTHORITY_NONE = "none"
+# PR C3 (Finding 5, 2026-05-27): degraded recovery authority. Set when chain
+# reconciliation rescues a pending entry against an aggregate venue balance
+# WITHOUT a linked venue trade fact. Tradable as active exposure, but
+# downstream training gates (PR D Finding 9) MUST treat it as not training-
+# eligible. Distinct from venue_confirmed_full which requires a trade fact.
+FILL_AUTHORITY_VENUE_POSITION_OBSERVED = "venue_position_observed"
 FILL_AUTHORITY_OPTIMISTIC_SUBMITTED = "optimistic_submitted"
 FILL_AUTHORITY_VENUE_CONFIRMED_PARTIAL = "venue_confirmed_partial"
 FILL_AUTHORITY_VENUE_CONFIRMED_FULL = "venue_confirmed_full"
@@ -247,6 +254,37 @@ FILL_AUTHORITY_RANK = {
     FILL_AUTHORITY_VENUE_CONFIRMED_FULL: 3,
     FILL_AUTHORITY_SETTLED: 4,
 }
+
+# PR D2 (Finding 9, 2026-05-27): authorities that MAY produce training rows.
+# `is_training_eligible_position(pos)` is the type-boundary that downstream
+# learning/calibration writers must consult before writing a row to
+# `calibration_pairs_v2`. Authorities outside this set carry insufficient
+# causality / fill provenance to support model fitting.
+#
+# References the FILL_AUTHORITY_* constants by name (not bare string literals)
+# so a future rename produces a NameError at import time, not silent
+# mis-categorization — per Copilot review on PR #347 (2026-05-27).
+TRAINING_ELIGIBLE_FILL_AUTHORITIES = frozenset({
+    FILL_AUTHORITY_VENUE_CONFIRMED_FULL,
+    FILL_AUTHORITY_VENUE_CONFIRMED_PARTIAL,
+    FILL_AUTHORITY_CANCELLED_REMAINDER,
+    FILL_AUTHORITY_SETTLED,
+})
+
+
+def is_training_eligible_position(pos: object) -> bool:
+    """Return True iff this position's fill economics are strong enough to
+    feed model training (Finding 9, PR D2).
+
+    Rejects:
+      - FILL_AUTHORITY_VENUE_POSITION_OBSERVED  (PR C3 degraded recovery from aggregate balance)
+      - FILL_AUTHORITY_OPTIMISTIC_SUBMITTED     (no venue confirmation)
+      - FILL_AUTHORITY_NONE                     (no fill at all)
+      - "legacy_unknown"                        (pre-typed-authority rows)
+      - any unknown value                       (fail-closed)
+    """
+    authority = str(getattr(pos, "fill_authority", "") or "").strip()
+    return authority in TRAINING_ELIGIBLE_FILL_AUTHORITIES
 
 
 def _finite_float_or_zero(value: object) -> float:
@@ -374,7 +412,15 @@ class Position:
     # Chain reconciliation (Blueprint v2 §5)
     chain_state: str = ChainState.UNKNOWN.value
     chain_shares: float = 0.0
+    # `chain_verified_at` is a POSITIVE observation timestamp ONLY: it records
+    # when the venue/chain confirmed this position is held (rescue, size
+    # correction, sync). It MUST NOT be advanced when the chain snapshot does
+    # not see this position — that case uses `last_chain_absence_observed_at`.
+    # Finding 1 (PR C0, 2026-05-27): conflating positive and absence
+    # observations into one timestamp inverted CHAIN_EMPTY vs CHAIN_UNKNOWN
+    # semantics downstream. See docs/plans/2026-05-27-chain-local-position-model-refactor.md.
     chain_verified_at: str = ""
+    last_chain_absence_observed_at: str = ""
 
     # Token IDs for CLOB orderbook queries
     token_id: str = ""
@@ -1166,6 +1212,15 @@ class PortfolioState:
     recent_exits: list[dict] = field(default_factory=list)
     # T2-C: Tokens to never resurrect (redeemed, expired, manually closed)
     ignored_tokens: list[str] = field(default_factory=list)
+    # PR C2 (Finding 3, 2026-05-27): typed review-queue entries for chain-only
+    # venue inventory (tokens visible on chain with NO matching local intent).
+    # Replaces the synthetic `Position(direction="unknown", ...)` construction
+    # in chain_reconciliation. Consumers that gate on chain-only inventory
+    # (e.g. cycle_runner._has_quarantined_positions) MUST check both
+    # `positions` (legacy synthetic placeholders, still emitted by loader) AND
+    # `chain_only_facts` (new typed signal from reconcile). Loader synthesis
+    # is removed in PR E once all consumers migrate.
+    chain_only_facts: list = field(default_factory=list)
     # P4 (Tier 2.1): when True, DB projection failed and portfolio is empty.
     # Cycle runner must suppress new entries when this flag is set.
     portfolio_loader_degraded: bool = False
@@ -1397,9 +1452,17 @@ def _canonical_recent_exits_from_settlement_rows(rows: list[dict]) -> list[dict]
     return exits
 
 
-def _chain_only_quarantine_position_from_row(row: dict) -> Position:
+def _chain_only_fact_from_row(row: dict) -> ChainOnlyFact:
+    """Build a ChainOnlyFact from a token_suppression row of reason
+    `chain_only_quarantined` (PR E2 replacement for the legacy
+    `_chain_only_quarantine_position_from_row` synthetic-Position path).
+
+    The fact carries the same identity + economics the synthetic Position
+    used to carry; consumers read it from `portfolio.chain_only_facts`
+    instead of `portfolio.positions`.
+    """
     token_id = str(row.get("token_id") or "")
-    evidence = {}
+    evidence: dict = {}
     try:
         evidence = json.loads(str(row.get("evidence_json") or "{}"))
     except (TypeError, json.JSONDecodeError):
@@ -1413,32 +1476,26 @@ def _chain_only_quarantine_position_from_row(row: dict) -> Position:
         or row.get("updated_at")
         or ""
     )
+    last_seen = str(row.get("updated_at") or first_seen)
     condition_id = str(row.get("condition_id") or evidence.get("condition_id") or "")
-    return Position(
-        trade_id=f"quarantine_{token_id[:8]}",
-        market_id=condition_id,
-        city=QUARANTINE_SENTINEL,
-        cluster="Other",
-        target_date=QUARANTINE_SENTINEL,
-        bin_label=QUARANTINE_SENTINEL,
-        direction="unknown",
-        size_usd=cost,
-        entry_price=avg_price,
-        p_posterior=avg_price,
-        edge=0.0,
-        entered_at=first_seen,
+    return ChainOnlyFact(
         token_id=token_id,
-        state=enter_chain_quarantined_runtime_state(),
-        strategy="",
-        edge_source="",
-        cost_basis_usd=cost,
-        shares=shares,
-        chain_state="quarantined",
-        chain_shares=shares,
-        chain_verified_at=str(row.get("updated_at") or first_seen),
         condition_id=condition_id,
-        quarantined_at=first_seen,
+        size=shares,
+        avg_price=avg_price,
+        cost_basis=cost,
+        first_seen_at=first_seen,
+        last_seen_at=last_seen,
     )
+
+
+# PR E2 (Finding 3, 2026-05-27): the legacy `_chain_only_quarantine_position_from_row`
+# constructor was DELETED. Its callers in `load_portfolio` now use
+# `_chain_only_fact_from_row` (defined above) to emit typed
+# `ChainOnlyFact` review-queue entries on `PortfolioState.chain_only_facts`
+# instead of synthetic `Position(direction="unknown")` rows on
+# `PortfolioState.positions`. The cycle entry gate
+# `_has_quarantined_positions` consults both signals (see PR C2).
 
 
 def load_portfolio(path: Optional[Path] = None) -> PortfolioState:
@@ -1526,16 +1583,22 @@ def load_portfolio(path: Optional[Path] = None) -> PortfolioState:
             policy.reason,
         )
         _guard_deprecated_portfolio_json(path)
-        degraded_positions = [
-            _chain_only_quarantine_position_from_row(row)
+        # PR E2 (Finding 3, 2026-05-27): chain-only quarantine rows now
+        # populate `chain_only_facts` as typed ChainOnlyFact entries instead
+        # of synthesizing fake Position objects. `_has_quarantined_positions`
+        # in cycle_runner already consults this list (since PR C2), so the
+        # entry gate continues to fire on these rows.
+        degraded_facts = [
+            _chain_only_fact_from_row(row)
             for row in chain_only_quarantines
         ]
         return PortfolioState(
-            positions=degraded_positions,
+            positions=[],
             bankroll=bankroll,
             daily_baseline_total=bankroll,
             weekly_baseline_total=bankroll,
             ignored_tokens=ignored_tokens,
+            chain_only_facts=degraded_facts,
             portfolio_loader_degraded=True,
             authority="degraded",
         )
@@ -1553,11 +1616,15 @@ def load_portfolio(path: Optional[Path] = None) -> PortfolioState:
         for token in (getattr(pos, "token_id", ""), getattr(pos, "no_token_id", ""))
         if token
     }
-    positions.extend(
-        _chain_only_quarantine_position_from_row(row)
+    # PR E2 (Finding 3, 2026-05-27): canonical-path chain-only quarantine
+    # rows that are NOT already represented by a real local position become
+    # typed ChainOnlyFact review-queue entries instead of synthetic
+    # Position objects.
+    chain_only_facts = [
+        _chain_only_fact_from_row(row)
         for row in chain_only_quarantines
         if str(row.get("token_id") or "") not in represented_tokens
-    )
+    ]
     return PortfolioState(
         positions=positions,
         bankroll=bankroll,
@@ -1567,6 +1634,7 @@ def load_portfolio(path: Optional[Path] = None) -> PortfolioState:
         weekly_baseline_total=bankroll,
         recent_exits=_canonical_recent_exits_from_settlement_rows(settlement_rows),
         ignored_tokens=ignored_tokens,
+        chain_only_facts=chain_only_facts,
         authority="canonical_db",
     )
 
@@ -2035,35 +2103,29 @@ def _track_exit(state: PortfolioState, pos: Position) -> None:
 
 
 def get_open_positions(state: PortfolioState, chain_view=None) -> list[Position]:
-    """T2-E: Chain-journal merge for live position queries.
+    """Return the runtime-open positions for a PortfolioState.
 
-    No chain_view or stale chain_view: return local positions only.
-    With valid chain_view: merge chain truth (shares/price) with
-    local metadata (city, range, direction, decision context).
+    PR D1 (Finding 4, 2026-05-27): this helper is now PURE. The previous
+    `chain_view` merge branch silently mutated `pos.shares`, `pos.entry_price`,
+    and `pos.chain_state = "synced"` without appending a canonical
+    `position_events` row, which violated the "append before projection
+    mutation" law and let intra-process state diverge from durable
+    projection.
+
+    Any chain↔local size/price correction must now flow through
+    `src/state/chain_reconciliation.py` so a canonical
+    `CHAIN_SIZE_CORRECTED` / `VENUE_POSITION_OBSERVED` event accompanies
+    the projection change. The `chain_view` parameter is preserved for
+    API backwards compatibility but no longer triggers any mutation —
+    callers wishing to overlay chain-derived economics MUST construct
+    that overlay themselves (e.g. an explicit
+    `PositionProjectionWithVenueOverlay` value object) without writing
+    back into `state.positions`.
+
+    Returns a filtered list of positions whose runtime state is "open"
+    per `_is_runtime_open_position`.
     """
-    if chain_view is None or getattr(chain_view, "is_stale", True):
-        return [p for p in state.positions if _is_runtime_open_position(p)]
-
-    merged = []
-    for pos in state.positions:
-        if not _is_runtime_open_position(pos):
-            continue
-
-        tid = pos.token_id if pos.direction == "buy_yes" else pos.no_token_id
-        chain_pos = chain_view.get_position(tid) if tid else None
-
-        if chain_pos:
-            # Chain overrides size/price, local keeps metadata
-            pos.shares = chain_pos.size
-            if chain_pos.avg_price > 0:
-                pos.entry_price = chain_pos.avg_price
-            pos.chain_state = "synced"
-            merged.append(pos)
-        elif _semantic_value(pos.state) == "pending_tracked":
-            merged.append(pos)  # Just placed, chain hasn't indexed yet
-        # else: gone from chain — reconciler will handle
-
-    return merged
+    return [p for p in state.positions if _is_runtime_open_position(p)]
 
 
 def total_exposure_usd(state: PortfolioState) -> float:

@@ -4,9 +4,21 @@ Blueprint v2 §5: Three sources of truth WILL disagree.
 Chain > Chronicler > Portfolio. Always.
 
 Rules:
-1. Local + chain match → SYNCED
-2. Local but NOT on chain → VOID immediately (don't ask why)
-3. Chain but NOT local → QUARANTINE (low confidence, 48h forced exit eval)
+1. Local + chain match → SYNCED.
+2. Local but NOT on chain → VOID *only if* the chain snapshot is
+   CHAIN_EMPTY (fresh, complete, and authoritatively empty).
+   CHAIN_UNKNOWN (missing/stale/incomplete API response) MUST NEVER void
+   — degraded snapshots are not evidence of absence. Finding 1 / PR C0
+   (2026-05-27) split this further: positive observation timestamps
+   (`Position.chain_verified_at`) and absence observation timestamps
+   (`Position.last_chain_absence_observed_at`) are now separate fields so
+   `classify_chain_state()` can reason about chain freshness without
+   conflating the two signals.
+3. Chain but NOT local → emit a typed `ChainOnlyFact` review-queue entry
+   (PR C2 / PR E2, 2026-05-27). Earlier versions of this module
+   synthesized a fake `Position(direction="unknown", ...)` for these
+   tokens; that is no longer permitted. Downstream consumers consult
+   `PortfolioState.chain_only_facts`.
 
 Live mode: MANDATORY every cycle before any trading.
 """
@@ -16,13 +28,23 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 
+from src.contracts.position_truth import ChainOnlyFact
+from src.contracts.semantic_types import LifecycleState
 from src.state.chain_state import ChainState, classify_chain_state
 from src.state.lifecycle_manager import (
     enter_chain_quarantined_runtime_state,
     phase_for_runtime_position,
     rescue_pending_runtime_state,
 )
-from src.state.portfolio import INACTIVE_RUNTIME_STATES, QUARANTINE_SENTINEL, Position, PortfolioState, void_position
+from src.state.portfolio import (
+    FILL_AUTHORITY_VENUE_CONFIRMED_FULL,
+    FILL_AUTHORITY_VENUE_POSITION_OBSERVED,
+    INACTIVE_RUNTIME_STATES,
+    QUARANTINE_SENTINEL,
+    Position,
+    PortfolioState,
+    void_position,
+)
 from src.observability.counters import increment as _cnt_inc
 
 logger = logging.getLogger(__name__)
@@ -861,6 +883,26 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
                     logger.warning("telemetry_counter event=cost_basis_chain_mutation_blocked_total field=shares")
             rescued.entry_fill_verified = True
             rescued.order_status = "filled"
+            # PR C3 (Finding 5, 2026-05-27): discriminate rescue authority by
+            # whether the position has a linked venue trade fact. With trade
+            # fact = full venue confirmation; without = degraded recovery
+            # against aggregate chain balance only. Downstream training gates
+            # (Finding 9, PR D) must reject venue_position_observed authority.
+            # Note: the gate at the top of this branch already skipped
+            # commanded pending entries that lack a fill fact, so a missing
+            # fill fact here means the position was pre-command-journal legacy.
+            if _pending_entry_has_linked_fill_fact(pos):
+                rescued.fill_authority = FILL_AUTHORITY_VENUE_CONFIRMED_FULL
+            else:
+                rescued.fill_authority = FILL_AUTHORITY_VENUE_POSITION_OBSERVED
+                logger.warning(
+                    "RESCUE_DEGRADED_AUTHORITY: trade_id=%s token=%s — chain balance present "
+                    "but no linked venue trade fact; setting fill_authority=%s. Position is "
+                    "tradable but NOT eligible for training/learning rows.",
+                    getattr(rescued, "trade_id", "?"),
+                    tid,
+                    FILL_AUTHORITY_VENUE_POSITION_OBSERVED,
+                )
             rescued.state = rescue_pending_runtime_state(
                 rescued.state,
                 exit_state=getattr(rescued, "exit_state", ""),
@@ -917,7 +959,13 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
                 and pos.state in {"entered", "holding", "day0_window"}
             ):
                 pos.chain_state = "local_only"
-                pos.chain_verified_at = now
+                # Finding 1 (PR C0): this branch fires when the local position is
+                # ABSENT from the chain snapshot. Record absence, NOT positive
+                # verification — chain_verified_at must remain a positive-only marker
+                # so classify_chain_state() can correctly distinguish CHAIN_EMPTY
+                # (fresh complete snapshot saw nothing) from CHAIN_UNKNOWN
+                # (incomplete/stale snapshot).
+                pos.last_chain_absence_observed_at = now
                 stats["awaiting_chain_entry"] = stats.get("awaiting_chain_entry", 0) + 1
                 continue
             if _pending_exit_owned_by_exit_lifecycle(pos):
@@ -928,10 +976,18 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
                     pos.exit_state,
                 )
                 pos.chain_state = "exit_pending_missing"
-                pos.chain_verified_at = now
+                # Finding 1 (PR C0): exit-in-flight branch fires when the chain
+                # snapshot does NOT contain this position. Absence ≠ positive
+                # verification — see Position.chain_verified_at docstring.
+                pos.last_chain_absence_observed_at = now
                 stats["skipped_pending_exit"] = stats.get("skipped_pending_exit", 0) + 1
                 continue
-            # Rule 2: Local but NOT on chain → VOID immediately
+            # Rule 2: Local but NOT on chain → VOID — but ONLY when the
+            # chain snapshot reaching this line is CHAIN_EMPTY (fresh,
+            # complete, authoritative). CHAIN_UNKNOWN is short-circuited
+            # earlier via `if chain_state == ChainState.CHAIN_UNKNOWN:
+            # continue` — see the gate above. Reaching this point with a
+            # missing/stale snapshot is a contract violation.
             logger.warning("PHANTOM: %s not on chain → voiding", pos.trade_id)
             phase_before = phase_for_runtime_position(
                 state=getattr(pos, "state", ""),
@@ -1007,7 +1063,14 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
                         "(local=%.4f, chain=%.4f); quarantining position",
                         pos.trade_id, local_shares, chain.size,
                     )
-                    corrected.state = "quarantine_size_mismatch"
+                    # Finding 2 (PR C1, 2026-05-27): the previous string
+                    # "quarantine_size_mismatch" was NOT a member of LifecycleState
+                    # and downstream phase_for_runtime_position() mapped it to
+                    # LifecyclePhase.UNKNOWN — exposure/exit/harvester then saw
+                    # inconsistent phases. The size-mismatch discriminator already
+                    # lives in chain_state (SIZE_MISMATCH_UNRESOLVED); state must
+                    # carry the canonical LifecycleState.QUARANTINED.value.
+                    corrected.state = LifecycleState.QUARANTINED.value
                     corrected.chain_state = "size_mismatch_unresolved"
                     if not _size_mismatch_eligible:
                         corrected.shares = local_shares
@@ -1041,41 +1104,25 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
                 tid[:8],
                 tid[-4:],
             )
-            quarantine_pos = Position(
-                # B066: synthesize IDs with an explicit QUARANTINE_SENTINEL
-                # value rather than empty strings. Empty-string trade_id /
-                # market_id can collide with degraded-but-live positions
-                # elsewhere (e.g. pre-fill pending state where the venue
-                # order_id has not yet been returned). Using the same
-                # sentinel already adopted by portfolio.py void_position()
-                # for city/target_date/bin_label keeps the quarantine-vs-
-                # real classification deterministic: downstream consumers
-                # can match on ``is_quarantine_placeholder`` OR on any of
-                # these sentinel-valued identifier fields.
-                trade_id=QUARANTINE_SENTINEL,
-                market_id=QUARANTINE_SENTINEL,
-                city=QUARANTINE_SENTINEL, cluster=QUARANTINE_SENTINEL,
-                target_date=QUARANTINE_SENTINEL, bin_label=QUARANTINE_SENTINEL,
-                direction="unknown",
-                size_usd=0.0,
-                entry_price=0.0,
-                p_posterior=0.0,
-                edge=0.0,
-                entered_at="unknown_entered_at",  # QUARANTINE_SENTINEL pattern: all fields are sentinel; intentional (distinct from line-658 bug fixed in F8). Do NOT replace with `now`.
-                token_id=tid,
-                state=enter_chain_quarantined_runtime_state(),
-                strategy="",
-                edge_source="",
-                cost_basis_usd=chain.cost or (chain.size * chain.avg_price),
-                shares=chain.size,
-                chain_state="quarantined",
-                chain_shares=chain.size,
-                chain_verified_at=now,
-                condition_id=chain.condition_id,
-                quarantined_at=now,
-            )
+            # PR C2 (Finding 3, 2026-05-27): emit typed ChainOnlyFact instead
+            # of synthesizing a fake Position with direction="unknown" and
+            # sentinel identity. The suppression row was already written via
+            # _persist_chain_only_quarantine_fact, so durable storage is
+            # unchanged. portfolio.chain_only_facts carries the in-memory
+            # review-queue signal that cycle gates consult alongside
+            # portfolio.positions during the migration window.
             _persist_chain_only_quarantine_fact(tid, chain)
-            portfolio.positions.append(quarantine_pos)
+            portfolio.chain_only_facts.append(
+                ChainOnlyFact(
+                    token_id=tid,
+                    condition_id=getattr(chain, "condition_id", "") or "",
+                    size=float(chain.size),
+                    avg_price=float(getattr(chain, "avg_price", 0.0) or 0.0),
+                    cost_basis=float(chain.cost or (chain.size * (chain.avg_price or 0.0))),
+                    first_seen_at=now,
+                    last_seen_at=now,
+                )
+            )
             stats["quarantined"] += 1
 
     return stats

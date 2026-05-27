@@ -106,8 +106,16 @@ Every cycle reconciles local state against on-chain truth:
 | Condition | Action |
 |-----------|--------|
 | Local + chain match | SYNCED |
-| Local exists, NOT on chain | VOID immediately |
-| Chain exists, NOT local | QUARANTINE 48h |
+| Local exists, chain snapshot CHAIN_EMPTY (fresh, complete) | VOID |
+| Local exists, chain snapshot CHAIN_UNKNOWN (stale / missing API response) | NO-OP — never void on a degraded snapshot |
+| Chain exists, NOT local | Emit `ChainOnlyFact` (typed review entry); 48h forced exit eval |
+
+`CHAIN_EMPTY` vs `CHAIN_UNKNOWN` is the snapshot completeness classifier
+(`src/state/chain_state.py.ChainSnapshotCompleteness`). Treating a missing
+API response as `CHAIN_EMPTY` would void real live positions on degraded
+infra; the void rule applies ONLY to authoritatively empty snapshots.
+See `docs/plans/2026-05-27-chain-local-position-model-refactor.md` (PR C0,
+Finding 1) for the timestamp-split that keeps the classifier honest.
 
 ---
 
