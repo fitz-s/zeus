@@ -1210,6 +1210,14 @@ def _reprice_decision_from_executable_snapshot(
     )
     # The first candidate is a passive maker limit. If the book supports an
     # immediate fill, the marketable branch below resizes with taker fees.
+    # Wave 6 / K1 (PR #348): per-edge unified-budget gate. The EKC haircut at
+    # this LIVE microstructure boundary is the duplicate that INV-40 drops once
+    # σ_market already entered edge_LCB at edge-scan. No-op at flag-OFF (the
+    # boundary ANDs with _unified_uncertainty_budget_enabled()). Single source
+    # of truth: the edge carries whether σ_market was applied.
+    _market_unc_in_lcb = bool(
+        getattr(decision.edge, "market_cost_uncertainty_applied", False)
+    )
     repriced_size_at_snapshot_vwmp = _size_at_execution_price_boundary(
         p_posterior=float(decision.edge.p_posterior),
         entry_price=float(snapshot_vwmp),
@@ -1217,6 +1225,7 @@ def _reprice_decision_from_executable_snapshot(
         sizing_bankroll=sizing_bankroll,
         kelly_multiplier=kelly_multiplier,
         effective_context=_maker_effective_context,  # W2
+        market_uncertainty_in_lcb=_market_unc_in_lcb,
     )
     if repriced_size_at_snapshot_vwmp <= 0.0:
         raise ValueError("EXECUTABLE_REPRICE_REJECTED: repriced size is zero")
@@ -1259,6 +1268,7 @@ def _reprice_decision_from_executable_snapshot(
             sizing_bankroll=sizing_bankroll,
             kelly_multiplier=kelly_multiplier,
             effective_context=_taker_effective_context,  # W3
+            market_uncertainty_in_lcb=_market_unc_in_lcb,
         )
         best_ask_fee_adjusted_edge = best_ask_edge - (
             taker_fee_rate * best_ask_float * (1.0 - best_ask_float)
@@ -1338,6 +1348,7 @@ def _reprice_decision_from_executable_snapshot(
             sizing_bankroll=sizing_bankroll,
             kelly_multiplier=kelly_multiplier,
             effective_context=_taker_effective_context,  # W4
+            market_uncertainty_in_lcb=_market_unc_in_lcb,
         )
         if size_at_depth_limit <= 0.0:
             final_best_ask = None

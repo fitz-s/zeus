@@ -5738,6 +5738,15 @@ def evaluate_candidate(
                 portfolio_heat=current_heat,
                 strategy_key=None,
                 city=city.name,
+                # Wave 6 / K1 (PR #348): the per-edge unified-budget gate must
+                # reach the ci_width haircut here too, not only the
+                # EffectiveKellyContext boundary — otherwise a Stage-2 flip
+                # collapses one duplicate haircut and leaves ci_width applied
+                # (INV-40 double-count). No-op at flag-OFF (the collapse ANDs
+                # with _unified_uncertainty_budget_enabled()).
+                market_uncertainty_in_lcb=bool(
+                    getattr(edge, "market_cost_uncertainty_applied", False)
+                ),
             )
         except ValueError as exc:
             decisions.append(EdgeDecision(
