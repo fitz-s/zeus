@@ -760,8 +760,28 @@ def maybe_write_learning_pair(
     # position_current, so we can join and reject training rows derived
     # from degraded recovery (FILL_AUTHORITY_VENUE_POSITION_OBSERVED) or
     # other non-training-eligible authorities.
+    # PR #352 (Part-3 audit, bot #5 on PR #351, 2026-05-27): position_current is
+    # canonically owned by zeus_trades.db (the world.db copy is a ghost shell).
+    # The harvester runtime passes the *forecasts* connection (which owns
+    # calibration_pairs_v2) as `conn`; querying position_current on it raises
+    # "no such table", is swallowed by the gate's fail-closed except, and would
+    # silently block EVERY calibration write in production. Acquire a read-only
+    # trades connection for the per-position authority join. INV-37: this is a
+    # single-DB READ (no cross-DB write), so no ATTACH+SAVEPOINT is required.
     snapshot_id = context.get("decision_snapshot_id") or ""
-    if not _snapshot_position_training_eligible(conn, snapshot_id):
+    try:
+        from src.state.db import get_trade_connection_read_only
+
+        _trade_conn = get_trade_connection_read_only()
+        try:
+            _eligible = _snapshot_position_training_eligible(_trade_conn, snapshot_id)
+        finally:
+            _trade_conn.close()
+    except Exception:
+        # Trades DB unreachable → fail closed (do not emit calibration rows we
+        # cannot authority-verify).
+        _eligible = False
+    if not _eligible:
         _emit_learning_write_blocked("position_fill_authority_not_training_eligible")
         return 0
 

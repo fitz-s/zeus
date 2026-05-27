@@ -260,7 +260,18 @@ def upsert_position_current(conn: sqlite3.Connection, projection: dict) -> None:
             order_id=excluded.order_id,
             order_status=excluded.order_status,
             updated_at=excluded.updated_at,
-            temperature_metric=excluded.temperature_metric
+            temperature_metric=excluded.temperature_metric,
+            -- PR #352 (Part-3 audit, bot #7 on PR #351, 2026-05-27): the rescue
+            -- path UPDATEs an existing pending-entry position_current row, so the
+            -- authority columns MUST be in the conflict-update set too. Without
+            -- this, balance-only recovery would write fill_authority on first
+            -- INSERT only and leave it stale on every subsequent rescue UPDATE,
+            -- defeating the durable-authority guarantee D0b was meant to provide.
+            fill_authority=excluded.fill_authority,
+            recovery_authority=excluded.recovery_authority,
+            chain_shares=excluded.chain_shares,
+            chain_seen_at=excluded.chain_seen_at,
+            chain_absence_at=excluded.chain_absence_at
         """,
         ordered_values(projection, CANONICAL_POSITION_CURRENT_COLUMNS),
     )

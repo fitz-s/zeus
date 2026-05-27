@@ -70,17 +70,29 @@ def canonical_phase_for_position(position: Any) -> str:
 def projection_updated_at(position: Any) -> str:
     # Finding 1 (PR C0, 2026-05-27): chain_verified_at is positive-observation
     # only. last_chain_absence_observed_at carries the parallel absence-
-    # observation signal so projection "as of" still advances on absence
-    # reconciles. Both contribute to the fallback chain; ordering is most-
-    # specific signal first.
-    return _non_empty(
-        getattr(position, "last_exit_at", ""),
-        getattr(position, "chain_verified_at", ""),
-        getattr(position, "last_chain_absence_observed_at", ""),
-        getattr(position, "day0_entered_at", ""),
-        getattr(position, "entered_at", ""),
-        getattr(position, "order_posted_at", ""),
-    )
+    # observation signal.
+    #
+    # PR #352 (Part-3 audit, bot #4 on PR #350, 2026-05-27): updated_at is the
+    # projection "as of" time — the MOST RECENT thing we learned about this
+    # position, not a fixed-priority pick. The former first-non-empty ordering
+    # placed chain_verified_at before last_chain_absence_observed_at, so a later
+    # absence reconcile on a position with an older positive verification would
+    # NOT advance updated_at (the stale positive timestamp won). Take the max
+    # over all observation/lifecycle timestamps so any later observation —
+    # positive or absence — advances the projection clock. Timestamps are UTC
+    # ISO-8601 from one system, so lexicographic max == chronological max.
+    candidates = [
+        str(getattr(position, "last_exit_at", "") or ""),
+        str(getattr(position, "chain_verified_at", "") or ""),
+        str(getattr(position, "last_chain_absence_observed_at", "") or ""),
+        str(getattr(position, "day0_entered_at", "") or ""),
+        str(getattr(position, "entered_at", "") or ""),
+        str(getattr(position, "order_posted_at", "") or ""),
+    ]
+    present = [c for c in candidates if c not in ("", "unknown_entered_at")]
+    if not present:
+        raise ValueError("missing required timestamp for canonical lifecycle builder")
+    return max(present)
 
 
 def build_position_current_projection(position: Any) -> dict:
@@ -598,6 +610,16 @@ def build_venue_position_observed_canonical_write(
     projection = build_position_current_projection(position)
     if projection["phase"] != ACTIVE:
         raise ValueError("venue_position_observed canonical builder requires an active position projection")
+
+    # PR #352 (Part-3 audit, bot #6 on PR #351, 2026-05-27): the base projection
+    # mirrors Position.fill_authority / .recovery_authority, but the runtime
+    # rescue path does not always set those attributes before calling this
+    # builder. Since THIS builder is, by definition, the balance-only degraded
+    # recovery event, it owns the authority truth: force it onto the durable
+    # projection so the position_current row matches the event payload
+    # (recovery_authority=balance_only) instead of persisting NULL.
+    projection["recovery_authority"] = "balance_only"
+    projection["fill_authority"] = projection.get("fill_authority") or "venue_position_observed"
 
     occurred_at = _non_empty(
         getattr(position, "entered_at", ""),
