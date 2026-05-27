@@ -4648,6 +4648,20 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
         )
         summary["candidates"] += 1
         _frontier_increment("candidate_frontier", "candidate_objects_built")
+        # DEBUG-LOOP-REACH 2026-05-27: confirm loop body executes per candidate.
+        # Placed immediately after the increment so any city/target reaching this
+        # line MUST emit. If candidate_objects_built=49 but ZERO DEBUG_LOOP_REACH
+        # lines emit, the daemon is loading a stale cycle_runtime module from a
+        # different path than what we're editing.
+        try:
+            deps.logger.info(
+                "DEBUG_LOOP_REACH city=%s tgt=%s mode=%s",
+                getattr(candidate, "city", "?"),
+                getattr(candidate, "target_date", "?"),
+                getattr(mode, "value", str(mode)),
+            )
+        except Exception as _dbg_lr_exc:
+            pass
 
         # OBS-AUTHORITY-FOUNDATION (2026-05-23): for settlement-day/day0
         # candidates (the only ones for which a day0/settlement observation was
@@ -4696,6 +4710,22 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
             # opportunity_fact row links back to the runtime observation object.
             stamp_observation_authority_id_onto_decisions(candidate, decisions)
             _frontier_increment("math_frontier", "evaluator_candidates")
+            # DEBUG-49-DROP 2026-05-27: instrument per-candidate result to surface
+            # why 49 candidate_objects_built → 0 traces post-restart.
+            try:
+                _dbg_n = len(decisions) if decisions else 0
+                _dbg_reasons = [str(getattr(_d, "rejection_reason_enum", None) or "?") for _d in (decisions or [])][:3]
+                _dbg_should_trade = [bool(getattr(_d, "should_trade", False)) for _d in (decisions or [])]
+                deps.logger.info(
+                    "DEBUG_49DROP city=%s tgt=%s n=%d should_trade=%s reasons=%s",
+                    getattr(candidate, "city", "?"),
+                    getattr(candidate, "target_date", "?"),
+                    _dbg_n,
+                    _dbg_should_trade,
+                    _dbg_reasons,
+                )
+            except Exception as _dbg_exc:
+                deps.logger.warning("DEBUG_49DROP log failed: %s", _dbg_exc)
             if decisions:
                 _frontier_increment("math_frontier", "evaluator_decisions", len(decisions))
                 _frontier_increment(

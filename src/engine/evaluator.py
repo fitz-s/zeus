@@ -3082,7 +3082,10 @@ def _resolve_ft_error_model_for_entry(
         live_data_version = data_version_for_track(track)
     except Exception:
         return None
-    season = season_from_date(target_date.isoformat(), lat=city.lat)
+    # 2026-05-27 bugfix: target_date is already a string (MarketCandidate.target_date: str);
+    # prior call `target_date.isoformat()` raised AttributeError → outer except swallowed
+    # the trace → ALL opening_hunt candidates silently dropped (49→0 trades blocker).
+    season = season_from_date(str(target_date), lat=city.lat)
     _FT_FAMILY = "full_transport_v1"
     row = _read_bias_model_for_entry(
         conn,
