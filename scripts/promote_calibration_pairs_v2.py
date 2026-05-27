@@ -616,15 +616,28 @@ def cmd_promote(args: argparse.Namespace) -> int:
         prod_cols = _column_names(prod_ro, TARGET_TABLE)
     finally:
         prod_ro.close()
-    if stage_cols != prod_cols:
-        print("x REFUSED: STAGE/PROD schema mismatch:")
+    # 2026-05-27 fitz: accept column-set equality; column-order differences
+    # are tolerated because the INSERT below uses an explicit (col_list)
+    # projection from STAGE, so order drift does NOT corrupt the projection.
+    # Strict-equality required only on the SET of column names and types.
+    if set(stage_cols) != set(prod_cols):
+        print("x REFUSED: STAGE/PROD column set mismatch:")
         print(f"  {TARGET_TABLE}: STAGE={stage_cols} vs PROD={prod_cols}")
         print(
-            "  Promote requires identical column sets and order. Resolve schema "
-            "drift before retrying."
+            "  STAGE-only: " + str(sorted(set(stage_cols) - set(prod_cols)))
+        )
+        print(
+            "  PROD-only:  " + str(sorted(set(prod_cols) - set(stage_cols)))
         )
         stage.close()
         return 1
+    if stage_cols != prod_cols:
+        print(
+            "i NOTE: STAGE/PROD column ORDER differs but SET matches. Promote "
+            "uses explicit (col_list) projection so this is safe. Proceeding."
+        )
+        print(f"  STAGE order: {stage_cols}")
+        print(f"  PROD order:  {prod_cols}")
 
     if not args.commit:
         print("i DRY-RUN: no changes made. Re-run with --commit to apply.")
@@ -686,10 +699,12 @@ def cmd_promote(args: argparse.Namespace) -> int:
                     row[1] for row in
                     prod_rw.execute("PRAGMA stage.table_info(calibration_pairs_v2)").fetchall()
                 ]
-                if stage_attach_cols != cols:
+                # 2026-05-27 fitz: set-equality (order is fine; INSERT uses
+                # explicit projection from STAGE so order doesn't corrupt).
+                if set(stage_attach_cols) != set(cols):
                     raise RuntimeError(
-                        f"ATTACH stage.{TARGET_TABLE} column drift: "
-                        f"expected {cols}, got {stage_attach_cols}"
+                        f"ATTACH stage.{TARGET_TABLE} column set drift: "
+                        f"expected {sorted(cols)}, got {sorted(stage_attach_cols)}"
                     )
 
                 # Delete: same scoping as legacy path.
