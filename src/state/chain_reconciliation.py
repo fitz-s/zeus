@@ -16,6 +16,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 
+from src.contracts.position_truth import ChainOnlyFact
 from src.contracts.semantic_types import LifecycleState
 from src.state.chain_state import ChainState, classify_chain_state
 from src.state.lifecycle_manager import (
@@ -1058,41 +1059,25 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
                 tid[:8],
                 tid[-4:],
             )
-            quarantine_pos = Position(
-                # B066: synthesize IDs with an explicit QUARANTINE_SENTINEL
-                # value rather than empty strings. Empty-string trade_id /
-                # market_id can collide with degraded-but-live positions
-                # elsewhere (e.g. pre-fill pending state where the venue
-                # order_id has not yet been returned). Using the same
-                # sentinel already adopted by portfolio.py void_position()
-                # for city/target_date/bin_label keeps the quarantine-vs-
-                # real classification deterministic: downstream consumers
-                # can match on ``is_quarantine_placeholder`` OR on any of
-                # these sentinel-valued identifier fields.
-                trade_id=QUARANTINE_SENTINEL,
-                market_id=QUARANTINE_SENTINEL,
-                city=QUARANTINE_SENTINEL, cluster=QUARANTINE_SENTINEL,
-                target_date=QUARANTINE_SENTINEL, bin_label=QUARANTINE_SENTINEL,
-                direction="unknown",
-                size_usd=0.0,
-                entry_price=0.0,
-                p_posterior=0.0,
-                edge=0.0,
-                entered_at="unknown_entered_at",  # QUARANTINE_SENTINEL pattern: all fields are sentinel; intentional (distinct from line-658 bug fixed in F8). Do NOT replace with `now`.
-                token_id=tid,
-                state=enter_chain_quarantined_runtime_state(),
-                strategy="",
-                edge_source="",
-                cost_basis_usd=chain.cost or (chain.size * chain.avg_price),
-                shares=chain.size,
-                chain_state="quarantined",
-                chain_shares=chain.size,
-                chain_verified_at=now,
-                condition_id=chain.condition_id,
-                quarantined_at=now,
-            )
+            # PR C2 (Finding 3, 2026-05-27): emit typed ChainOnlyFact instead
+            # of synthesizing a fake Position with direction="unknown" and
+            # sentinel identity. The suppression row was already written via
+            # _persist_chain_only_quarantine_fact, so durable storage is
+            # unchanged. portfolio.chain_only_facts carries the in-memory
+            # review-queue signal that cycle gates consult alongside
+            # portfolio.positions during the migration window.
             _persist_chain_only_quarantine_fact(tid, chain)
-            portfolio.positions.append(quarantine_pos)
+            portfolio.chain_only_facts.append(
+                ChainOnlyFact(
+                    token_id=tid,
+                    condition_id=getattr(chain, "condition_id", "") or "",
+                    size=float(chain.size),
+                    avg_price=float(getattr(chain, "avg_price", 0.0) or 0.0),
+                    cost_basis=float(chain.cost or (chain.size * (chain.avg_price or 0.0))),
+                    first_seen_at=now,
+                    last_seen_at=now,
+                )
+            )
             stats["quarantined"] += 1
 
     return stats

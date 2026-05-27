@@ -1174,6 +1174,15 @@ class PortfolioState:
     recent_exits: list[dict] = field(default_factory=list)
     # T2-C: Tokens to never resurrect (redeemed, expired, manually closed)
     ignored_tokens: list[str] = field(default_factory=list)
+    # PR C2 (Finding 3, 2026-05-27): typed review-queue entries for chain-only
+    # venue inventory (tokens visible on chain with NO matching local intent).
+    # Replaces the synthetic `Position(direction="unknown", ...)` construction
+    # in chain_reconciliation. Consumers that gate on chain-only inventory
+    # (e.g. cycle_runner._has_quarantined_positions) MUST check both
+    # `positions` (legacy synthetic placeholders, still emitted by loader) AND
+    # `chain_only_facts` (new typed signal from reconcile). Loader synthesis
+    # is removed in PR E once all consumers migrate.
+    chain_only_facts: list = field(default_factory=list)
     # P4 (Tier 2.1): when True, DB projection failed and portfolio is empty.
     # Cycle runner must suppress new entries when this flag is set.
     portfolio_loader_degraded: bool = False
