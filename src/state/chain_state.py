@@ -32,9 +32,22 @@ if TYPE_CHECKING:
 
 
 class ChainState(str, Enum):
+    """Per-cycle chain snapshot completeness (NOT per-position visibility).
+
+    Finding 7 (PR B, 2026-05-27): The name `ChainState` is shared with
+    `src/contracts/semantic_types.py.ChainState` (per-position visibility).
+    These are different real-world objects. New code SHOULD import the
+    domain-specific alias below; legacy imports of `ChainState` remain wire-
+    compatible.
+    """
+
     CHAIN_SYNCED = "chain_synced"
     CHAIN_EMPTY = "chain_empty"
     CHAIN_UNKNOWN = "chain_unknown"
+
+
+# Domain-specific alias (Finding 7 / PR B). Prefer this name in new code.
+ChainSnapshotCompleteness = ChainState
 
 
 _STALE_GUARD_SECONDS = 6 * 3600
