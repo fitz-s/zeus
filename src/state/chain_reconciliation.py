@@ -4,9 +4,21 @@ Blueprint v2 §5: Three sources of truth WILL disagree.
 Chain > Chronicler > Portfolio. Always.
 
 Rules:
-1. Local + chain match → SYNCED
-2. Local but NOT on chain → VOID immediately (don't ask why)
-3. Chain but NOT local → QUARANTINE (low confidence, 48h forced exit eval)
+1. Local + chain match → SYNCED.
+2. Local but NOT on chain → VOID *only if* the chain snapshot is
+   CHAIN_EMPTY (fresh, complete, and authoritatively empty).
+   CHAIN_UNKNOWN (missing/stale/incomplete API response) MUST NEVER void
+   — degraded snapshots are not evidence of absence. Finding 1 / PR C0
+   (2026-05-27) split this further: positive observation timestamps
+   (`Position.chain_verified_at`) and absence observation timestamps
+   (`Position.last_chain_absence_observed_at`) are now separate fields so
+   `classify_chain_state()` can reason about chain freshness without
+   conflating the two signals.
+3. Chain but NOT local → emit a typed `ChainOnlyFact` review-queue entry
+   (PR C2 / PR E2, 2026-05-27). Earlier versions of this module
+   synthesized a fake `Position(direction="unknown", ...)` for these
+   tokens; that is no longer permitted. Downstream consumers consult
+   `PortfolioState.chain_only_facts`.
 
 Live mode: MANDATORY every cycle before any trading.
 """
@@ -970,7 +982,12 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
                 pos.last_chain_absence_observed_at = now
                 stats["skipped_pending_exit"] = stats.get("skipped_pending_exit", 0) + 1
                 continue
-            # Rule 2: Local but NOT on chain → VOID immediately
+            # Rule 2: Local but NOT on chain → VOID — but ONLY when the
+            # chain snapshot reaching this line is CHAIN_EMPTY (fresh,
+            # complete, authoritative). CHAIN_UNKNOWN is short-circuited
+            # earlier via `if chain_state == ChainState.CHAIN_UNKNOWN:
+            # continue` — see the gate above. Reaching this point with a
+            # missing/stale snapshot is a contract violation.
             logger.warning("PHANTOM: %s not on chain → voiding", pos.trade_id)
             phase_before = phase_for_runtime_position(
                 state=getattr(pos, "state", ""),
