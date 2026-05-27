@@ -221,6 +221,12 @@ ENTRY_ECONOMICS_AVG_FILL_PRICE = "avg_fill_price"
 ENTRY_ECONOMICS_CORRECTED_COST_BASIS = "corrected_executable_cost_basis"
 
 FILL_AUTHORITY_NONE = "none"
+# PR C3 (Finding 5, 2026-05-27): degraded recovery authority. Set when chain
+# reconciliation rescues a pending entry against an aggregate venue balance
+# WITHOUT a linked venue trade fact. Tradable as active exposure, but
+# downstream training gates (PR D Finding 9) MUST treat it as not training-
+# eligible. Distinct from venue_confirmed_full which requires a trade fact.
+FILL_AUTHORITY_VENUE_POSITION_OBSERVED = "venue_position_observed"
 FILL_AUTHORITY_OPTIMISTIC_SUBMITTED = "optimistic_submitted"
 FILL_AUTHORITY_VENUE_CONFIRMED_PARTIAL = "venue_confirmed_partial"
 FILL_AUTHORITY_VENUE_CONFIRMED_FULL = "venue_confirmed_full"

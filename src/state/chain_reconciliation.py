@@ -24,7 +24,15 @@ from src.state.lifecycle_manager import (
     phase_for_runtime_position,
     rescue_pending_runtime_state,
 )
-from src.state.portfolio import INACTIVE_RUNTIME_STATES, QUARANTINE_SENTINEL, Position, PortfolioState, void_position
+from src.state.portfolio import (
+    FILL_AUTHORITY_VENUE_CONFIRMED_FULL,
+    FILL_AUTHORITY_VENUE_POSITION_OBSERVED,
+    INACTIVE_RUNTIME_STATES,
+    QUARANTINE_SENTINEL,
+    Position,
+    PortfolioState,
+    void_position,
+)
 from src.observability.counters import increment as _cnt_inc
 
 logger = logging.getLogger(__name__)
@@ -863,6 +871,26 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
                     logger.warning("telemetry_counter event=cost_basis_chain_mutation_blocked_total field=shares")
             rescued.entry_fill_verified = True
             rescued.order_status = "filled"
+            # PR C3 (Finding 5, 2026-05-27): discriminate rescue authority by
+            # whether the position has a linked venue trade fact. With trade
+            # fact = full venue confirmation; without = degraded recovery
+            # against aggregate chain balance only. Downstream training gates
+            # (Finding 9, PR D) must reject venue_position_observed authority.
+            # Note: the gate at the top of this branch already skipped
+            # commanded pending entries that lack a fill fact, so a missing
+            # fill fact here means the position was pre-command-journal legacy.
+            if _pending_entry_has_linked_fill_fact(pos):
+                rescued.fill_authority = FILL_AUTHORITY_VENUE_CONFIRMED_FULL
+            else:
+                rescued.fill_authority = FILL_AUTHORITY_VENUE_POSITION_OBSERVED
+                logger.warning(
+                    "RESCUE_DEGRADED_AUTHORITY: trade_id=%s token=%s — chain balance present "
+                    "but no linked venue trade fact; setting fill_authority=%s. Position is "
+                    "tradable but NOT eligible for training/learning rows.",
+                    getattr(rescued, "trade_id", "?"),
+                    tid,
+                    FILL_AUTHORITY_VENUE_POSITION_OBSERVED,
+                )
             rescued.state = rescue_pending_runtime_state(
                 rescued.state,
                 exit_state=getattr(rescued, "exit_state", ""),
