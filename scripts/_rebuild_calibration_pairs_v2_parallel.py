@@ -309,6 +309,16 @@ def run_parallel_rebuild(
                             )
                         sid = int(result["snapshot_id"])
                         snap, settlement_value, applied_family = snap_index[sid]
+                        # 2026-05-27 UNIQUE-collision fix: when this is a non-'none'
+                        # rebuild but the snapshot's bucket was fail-open
+                        # (applied_family downgraded to 'none'), do NOT write it.
+                        # Writing 'none' here would collide with the pre-existing
+                        # 'none' baseline row on the 8-col UNIQUE key (which excludes
+                        # error_model_family). The baseline row already represents
+                        # this fail-open snapshot; skip + count.
+                        if applied_family != error_model_family:
+                            stats.snapshots_fail_open_skipped += 1
+                            continue
                         _write_snapshot_pairs_v2(
                             conn,
                             snap,
