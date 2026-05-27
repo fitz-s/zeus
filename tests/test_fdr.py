@@ -532,7 +532,9 @@ class TestSelectionFamilySubstrate:
         assert len(no_hypotheses) == 1
         assert no_hypotheses[0].range_label == "67°F or lower"
         assert no_hypotheses[0].p_market == 0.55
-        assert no_hypotheses[0].entry_price == 0.55
+        # entry_price is typed ExecutionPrice (INV-38); compare the scalar
+        # explicitly — EP does not equal a bare float (PR #348 Blocker 1).
+        assert float(no_hypotheses[0].entry_price) == 0.55
 
     def test_market_analysis_multi_bin_buy_no_requires_native_no_quote(self):
         bins = [
@@ -559,7 +561,9 @@ class TestSelectionFamilySubstrate:
             ("67°F or lower", "buy_no")
         ]
         assert edges[0].p_market == 0.55
-        assert edges[0].entry_price == 0.55
+        # entry_price is typed ExecutionPrice (INV-38); compare the scalar
+        # explicitly — EP does not equal a bare float (PR #348 Blocker 1).
+        assert float(edges[0].entry_price) == 0.55
         assert edges[0].vwmp == 0.55
 
     def test_market_analysis_multi_bin_buy_no_requires_explicit_quote_mask(self):
@@ -1067,7 +1071,9 @@ class TestSelectionFamilySubstrate:
         assert decisions[0].rejection_stage == "SIZING_TOO_SMALL"
         assert decisions[0].edge.direction == "buy_no"
         assert decisions[0].edge.p_market == pytest.approx(0.5)
-        assert decisions[0].edge.entry_price == pytest.approx(0.5)
+        # entry_price is typed ExecutionPrice (INV-38); compare the scalar
+        # explicitly — EP does not equal a bare float (PR #348 Blocker 1).
+        assert float(decisions[0].edge.entry_price) == pytest.approx(0.5)
         assert decisions[0].edge.vwmp == pytest.approx(0.5)
         assert family_count == 1
         assert hypothesis_count == 5

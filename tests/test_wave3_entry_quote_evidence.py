@@ -202,8 +202,9 @@ class TestCostUncertainty:
 
     def test_slippage_dominates_cost_uncertainty_on_thin_top(self):
         # Top-of-book very thin so walking the ladder produces large slippage.
-        # X4 fix (Copilot review of PR #348): cost_uncertainty is the RSS
-        # composition sqrt(spread^2/4 + slippage^2 + ...), not max(...).
+        # Blocker 2 (PR #348 second-pass review): cost_uncertainty is the RSS
+        # of ABSOLUTE-price-unit terms — slippage_abs = fill_price_walk -
+        # best_ask, NOT the relative bps ratio (slippage_bps / 10_000).
         import math
         ob = _ob(
             bids=[{"price": 0.41, "size": 100.0}],
@@ -219,10 +220,17 @@ class TestCostUncertainty:
             target_shares=100.0,
             fee_rate=0.0,
         )
-        slip_unit = ev.slippage_bps / 10_000.0
-        expected_rss = math.sqrt((ev.spread_usd / 2.0) ** 2 + slip_unit ** 2)
+        slippage_abs = ev.fill_price_walk - ev.best_ask  # absolute price units
+        expected_rss = math.sqrt((ev.spread_usd / 2.0) ** 2 + slippage_abs ** 2)
         assert ev.cost_uncertainty == pytest.approx(expected_rss, rel=1e-6)
-        assert ev.cost_uncertainty >= slip_unit
+        assert ev.cost_uncertainty >= slippage_abs
+        # Guard the dimensional fix: the relative bps ratio (> slippage_abs
+        # because best_ask < 1) must NOT be what cost_uncertainty composes.
+        slip_unit_bps = ev.slippage_bps / 10_000.0
+        assert slip_unit_bps > slippage_abs  # confirms the two differ here
+        assert ev.cost_uncertainty < math.sqrt(
+            (ev.spread_usd / 2.0) ** 2 + slip_unit_bps ** 2
+        )
 
 
 # ---------------------------------------------------------------------------

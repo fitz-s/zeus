@@ -221,13 +221,21 @@ class ExecutionPrice:
     def __bool__(self) -> bool:
         return float(self.value) != 0.0
 
-    # __eq__ override allows ExecutionPrice == float / int comparisons so
-    # legacy fixtures and assertions that used a bare-float seam keep
-    # working post-INV-38 type-bump. Equality between ExecutionPrice
-    # instances retains FULL-FIELD identity (price_type / fee_deducted /
-    # currency MUST match) — this guards against silent provenance loss.
+    # Equality is FULL-FIELD ExecutionPrice identity only. We deliberately do
+    # NOT compare equal to a bare float (PR #348 operator review, Blocker 1):
+    #   - hash/eq invariant: ``a == b`` requires ``hash(a) == hash(b)``. A
+    #     float ``0.5`` hashes as ``hash(0.5)`` while this object hashes the
+    #     full provenance tuple, so EP-equals-float + tuple-hash would corrupt
+    #     any set/dict that mixes the two.
+    #   - transitivity: two ExecutionPrices with the same ``value`` but
+    #     different provenance would BOTH equal ``0.5`` yet not equal each
+    #     other — a == c, b == c, a != b.
+    # Numeric ergonomics for legacy float readers stay available via
+    # ``__float__`` / ordering / arithmetic dunders; equality is the one
+    # operator that MUST preserve provenance. Callers that genuinely want a
+    # scalar comparison use ``float(ep) == x`` or ``ep.value == x`` explicitly.
     # __hash__ matches the dataclass default field tuple so frozen-dataclass
-    # set/dict semantics remain intact.
+    # set/dict semantics remain intact and consistent with __eq__.
     def __eq__(self, other) -> bool:
         if isinstance(other, ExecutionPrice):
             return (
@@ -236,8 +244,6 @@ class ExecutionPrice:
                 and self.fee_deducted == other.fee_deducted
                 and self.currency == other.currency
             )
-        if isinstance(other, (int, float)):
-            return float(self.value) == float(other)
         return NotImplemented
 
     def __hash__(self) -> int:

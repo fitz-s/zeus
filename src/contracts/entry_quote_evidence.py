@@ -51,6 +51,13 @@ ReliabilityStatus = Literal[
 # Default stale threshold — Wave 5 may make this caller-configurable.
 DEFAULT_STALE_THRESHOLD_MS = 2_500
 
+# ASK_ONLY cost-uncertainty floor (probability units). When the book is
+# one-sided (no bid), the spread is unknown and ``spread_usd`` defaults to 0,
+# which understates the true execution uncertainty. This conservative
+# absolute floor keeps σ_market from looking artificially tight on one-sided
+# books so edge_LCB widens appropriately (PR #348 operator review, Blocker 5c).
+ASK_ONLY_COST_UNCERTAINTY_FLOOR = 0.02
+
 
 @dataclass(frozen=True)
 class EntryQuoteEvidence:
@@ -77,9 +84,11 @@ class EntryQuoteEvidence:
         fee_per_share: ``polymarket_fee(fill_price_walk, fee_rate)``.
         all_in_entry_price: ``fill_price_walk + fee_per_share`` — the
             value that Kelly must use as the cost-of-entry.
-        cost_uncertainty: σ_market input for Wave 5 bootstrap. Conservative
-            initial formula: ``max(spread_usd/2, slippage_bps/10000)``
-            (Wave 5 will refine to include fee variance + quote_age penalty).
+        cost_uncertainty: σ_market input for Wave 5 bootstrap. RSS of
+            independent error sources, all in ABSOLUTE price units:
+            ``sqrt(half_spread^2 + slippage_abs^2 + ask_only_penalty^2 +
+            quote_age_penalty^2 + fee_variance)``. ``slippage_bps`` is NOT
+            used here (it is a relative ratio kept for audit only).
         reliability_status: see ReliabilityStatus above.
     """
 
@@ -138,12 +147,20 @@ def _reliability_status(
     quote_age_ms: int,
     stale_threshold_ms: int,
 ) -> ReliabilityStatus:
+    # Severity order (PR #348 operator review, Blocker 5b):
+    #   CROSSED > THIN_BOOK > STALE > ASK_ONLY > LIVE_OK
+    # Hard-veto-eligible statuses (CROSSED, THIN_BOOK) MUST dominate the soft
+    # statuses (STALE, ASK_ONLY). The previous order returned "STALE" for a
+    # stale+thin book, which slipped past the market_analysis hard-veto
+    # (``reliability_status in ("THIN_BOOK", "CROSSED")``) and let a degenerate
+    # depth-insufficient book reach edge construction. THIN_BOOK before STALE
+    # closes that boundary hole.
     if best_bid is not None and best_bid >= best_ask:
         return "CROSSED"
-    if quote_age_ms > stale_threshold_ms:
-        return "STALE"
     if not depth_sufficient:
         return "THIN_BOOK"
+    if quote_age_ms > stale_threshold_ms:
+        return "STALE"
     if best_bid is None:
         return "ASK_ONLY"
     return "LIVE_OK"
@@ -222,30 +239,35 @@ def entry_quote_evidence_from_orderbook(
     fee_per_share = polymarket_fee(walk.fill_price_walk, fee_rate) if fee_rate > 0 else 0.0
     all_in_entry_price = walk.fill_price_walk + fee_per_share
 
-    # cost_uncertainty (σ_market) — X4 fix from Copilot review of PR #348:
-    # math spec §15.7 promised RSS composition, not the MAX placeholder.
-    # Treating spread, slippage, fee, and quote-age as independent error
-    # sources, the standard composition is:
-    #     σ_market = sqrt( (spread/2)^2 + slippage_unit^2 +
-    #                      fee_variance + quote_age_penalty^2 )
-    # Fee variance defaults to 0 here because Polymarket fee is deterministic
-    # given the realised fill price; quote_age_penalty linearly grows past
-    # the stale threshold (caller-supplied; defaults to 0 when fresh).
-    slippage_unit = walk.slippage_bps / 10_000.0
+    # cost_uncertainty (σ_market) — Blocker 2 (PR #348 operator review):
+    # every term MUST be in ABSOLUTE price units (probability_units), the same
+    # space as ``all_in_entry_price``. The earlier formula mixed an absolute
+    # half-spread with a RELATIVE slippage ratio (``slippage_bps / 10_000`` =
+    # (fill - ask) / ask), which is dimensionally invalid under RSS. Compose
+    # independent error sources entirely in absolute price units:
+    #     σ_market = sqrt( half_spread^2 + slippage_abs^2 + ask_only_penalty^2
+    #                      + quote_age_penalty^2 + fee_variance )
+    # ``slippage_bps`` is retained on the dataclass for trace/audit only — it
+    # never enters the variance composition.
+    slippage_abs = max(0.0, walk.fill_price_walk - best_ask)  # absolute price units
     half_spread = spread_usd / 2.0
-    fee_variance = 0.0  # deterministic — reserved for Wave 6 widening if fee_rate uncertain
+    fee_variance = 0.0  # deterministic given realised fill; reserved if fee_rate uncertain
+    # ASK_ONLY floor (Blocker 5c): bids missing → spread_usd=0 understates the
+    # true execution uncertainty, so apply a conservative absolute floor.
+    ask_only_penalty = ASK_ONLY_COST_UNCERTAINTY_FLOOR if best_bid is None else 0.0
     if quote_age_ms > stale_threshold_ms:
         # Linear penalty 0..0.005 over a 10s post-stale window (caps the
-        # contribution; staler quotes are flagged STALE/CROSSED reliability).
+        # contribution; staler quotes are flagged STALE/THIN_BOOK reliability).
         excess_ms = min(10_000, max(0, quote_age_ms - stale_threshold_ms))
         quote_age_penalty = 0.005 * (excess_ms / 10_000.0)
     else:
         quote_age_penalty = 0.0
     cost_uncertainty = math.sqrt(
         half_spread * half_spread
-        + slippage_unit * slippage_unit
-        + fee_variance
+        + slippage_abs * slippage_abs
+        + ask_only_penalty * ask_only_penalty
         + quote_age_penalty * quote_age_penalty
+        + fee_variance
     )
 
     status = _reliability_status(
