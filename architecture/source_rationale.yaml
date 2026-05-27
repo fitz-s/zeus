@@ -95,6 +95,53 @@ write_routes:
   script_repair_write:
     owner: scripts/**
     guardrail: dry-run/apply metadata required in later scripts manifest packet
+# External provider registry — consumed by scripts/ci/check_source_rationale_delta.py.
+# Pre-existing imports (src/data/<provider>_(client|adapter|ingest|provider).py) are
+# enumerated here so the source_rationale_delta_gate can verify role-explicit usage
+# across changed files. Added 2026-05-27 alongside the market-cost-seam upgrade
+# (PR #348) — gate was firing FAIL on every PR that touched evaluator.py / cycle_runtime.py
+# because no flat provider key existed for it to compare against.
+providers:
+  - id: polymarket
+    role: venue_orderbook
+    file: src/data/polymarket_client.py
+    notes: CLOB orderbook + execution venue. NOT a forecast/settlement truth source.
+  - id: observation
+    role: settlement_truth_low_authority
+    file: src/data/observation_client.py
+    notes: Open-Meteo + WeatherUnderground hourly observation reader. day0 + settlement_capture inputs only.
+  - id: ecmwf_open_data
+    role: forecast_skill_live
+    file: src/data/ecmwf_open_data_ingest.py
+    notes: Cycle-aligned live forecast producer (00z / 06z / 12z / 18z).
+  - id: tigge
+    role: forecast_skill_historical
+    file: src/data/tigge_client.py
+    notes: 51-member ENS historical archive for Platt fit.
+  - id: ensemble
+    role: forecast_derived
+    file: src/data/ensemble_client.py
+    notes: Composed ENS reader over already-ingested forecast rows. Derived, not external.
+  - id: meteostat_bulk
+    role: historical_hourly_archive
+    file: src/data/meteostat_bulk_client.py
+    notes: Long-horizon historical hourly archive backfill.
+  - id: ogimet_hourly
+    role: historical_hourly_archive
+    file: src/data/ogimet_hourly_client.py
+    notes: Secondary historical hourly archive (ogimet provider).
+  - id: openmeteo
+    role: forecast_or_observation_complementary
+    file: src/data/openmeteo_client.py
+    notes: Open-Meteo direct client (separate from observation_client composite).
+  - id: wu_hourly
+    role: historical_hourly_archive
+    file: src/data/wu_hourly_client.py
+    notes: WeatherUnderground hourly archive feed.
+  - id: scheduler
+    role: internal_adapter
+    file: src/data/scheduler_adapter.py
+    notes: Internal scheduling adapter. NOT an external truth source.
 package_defaults:
   src/contracts:
     zone: K0_frozen_kernel
