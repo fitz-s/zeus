@@ -536,13 +536,32 @@ def tick_once(
             state["reported_threads"].add(tid)
             emitted_any = True
 
-        # 2. CI failures — dedup by name:conclusion (re-emits if check re-runs differently).
-        # Also track the failed check_name → conclusion mapping so we can
-        # detect transitions back to SUCCESS (CI_RECOVERED) below.
+        # 2. CI failures — dedup by name:conclusion, BUT a new failure after a
+        # recovery is itself meaningful: clear any prior reported_recoveries
+        # entry for the same check so the next recovery can re-fire, and clear
+        # stale name:conclusion dedup keys for that check (so the same failure
+        # mode coming back after a pass is reported again, not silently
+        # absorbed). Without this, a FAIL→PASS→FAIL cycle goes silent on the
+        # second FAIL — operator-tested scene 3 antibody (2026-05-26).
+        currently_failing_names = set()
         for failure in extract_ci_failures(pr_data):
-            key = f"{failure['name']}:{failure['conclusion']}"
-            # Always record the current failure mapping (used by recovery detection).
-            state.setdefault("failed_checks", {})[failure["name"]] = failure["conclusion"]
+            name = failure["name"]
+            currently_failing_names.add(name)
+            key = f"{name}:{failure['conclusion']}"
+            failed_checks = state.setdefault("failed_checks", {})
+            # If we previously emitted a recovery for this check and it's
+            # failing again, clear the recovery dedup so the NEXT recovery
+            # can re-emit, AND clear the prior reported_failures key so the
+            # fresh failure re-emits.
+            recoveries: set[str] = state.setdefault("reported_recoveries", set())
+            if name in recoveries:
+                recoveries.discard(name)
+                # Drop any prior fail keys for THIS check so re-failure re-emits.
+                state["reported_failures"] = {
+                    k for k in state["reported_failures"]
+                    if not k.startswith(f"{name}:")
+                }
+            failed_checks[name] = failure["conclusion"]
             if key in state["reported_failures"]:
                 continue
             emit(format_ci_fail_line(pr, failure), as_json=as_json, kind="ci_fail")
@@ -553,7 +572,8 @@ def tick_once(
         # First-principle iteration (operator complaint twice 2026-05-26):
         # silence after a reported failure is misread as "monitor broke" when
         # the underlying check actually recovered. Recovery IS meaningful.
-        # Dedup once per check via reported_recoveries.
+        # Dedup per check; if the check fails again later, the failure branch
+        # above clears the recovery dedup so a future recovery can re-emit.
         currently_passing = extract_currently_passing_checks(pr_data)
         failed_checks = state.setdefault("failed_checks", {})
         recovered_names = [
@@ -565,10 +585,6 @@ def tick_once(
             emit(format_ci_recovered_line(pr, name, prior),
                  as_json=as_json, kind="ci_recovered")
             state["reported_recoveries"].add(name)
-            # Clear from failed_checks so a future fail→pass cycle can re-fire
-            # under a different reported_recoveries gate (the recovery dedup
-            # is permanent per check name across the monitor's lifetime, which
-            # is fine — operator can --reset-state to re-arm).
             failed_checks.pop(name, None)
             emitted_any = True
 

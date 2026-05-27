@@ -21,6 +21,7 @@ FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n", re.DOTALL)
 APPLY_TO_RE = re.compile(r'^applyTo\s*:\s*"?([^"\n]+)"?', re.MULTILINE)
 
 REQUIRED_COVERAGE = [
+    # Pre-existing baseline.
     "src/engine/evaluator.py",
     "src/contracts/execution_price.py",
     "src/contracts/settlement_semantics.py",
@@ -31,6 +32,19 @@ REQUIRED_COVERAGE = [
     "src/backtest",
     "scripts/ci",
     "architecture/money_path_ci.yaml",
+    # Phase G additions — hot surfaces named in docs/review/review_scope_map.md
+    # and historical failure chains FC-01/FC-02/FC-03/FC-08.
+    "src/engine/cycle_runtime.py",                  # FC-03
+    "src/data/executable_forecast_reader.py",       # FC-01
+    "src/data/forecast_extrema_authority.py",       # FC-01
+    "src/data/market_scanner.py",                   # FC-02
+    "src/ingest_main.py",                           # FC-04/FC-05
+    "src/state/venue_command_repo.py",
+    "scripts/review_scope_collect.py",
+    "scripts/topology_doctor.py",
+    "architecture/db_table_ownership.yaml",         # FC-08
+    "architecture/source_rationale.yaml",           # FC-06/FC-07
+    "architecture/test_topology.yaml",
 ]
 
 

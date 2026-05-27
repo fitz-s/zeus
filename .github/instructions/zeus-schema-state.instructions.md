@@ -52,3 +52,16 @@ Any code that writes JSON first and DB second is Critical.
 
 `authority="VERIFIED"` must not be assigned to a projection row that
 was built from degraded or incomplete facts (INV-23).
+
+## Verification + owner DB (FC-08)
+
+A verification script/report must query the OWNING DB for each table.
+If a table is forecast-class in `db_table_ownership.yaml`, querying only
+zeus-world and reporting SKIP/table missing is a false pass. Findings
+should name both the table AND the owner DB.
+
+New table/column review target:
+- owner DB in `architecture/db_table_ownership.yaml`;
+- writer module path;
+- reader/exclusion path for ghost/legacy copies;
+- migration/hash/current-schema test.

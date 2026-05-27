@@ -241,6 +241,23 @@ Findings: <N Critical, N Important, N Nit, N Uncertain>
 
 Empty findings + partial coverage is reported as such, not as a clean pass.
 
+### Bot-review precision rule
+
+Zeus findings should locate the **root runtime object**, not only the
+nearest helper or test. For Tier 0 / Tier 1 changes, each Critical or
+Important finding must name:
+
+- economic object / money-path segment touched;
+- root runtime path or table (`function`, caller, or DB table);
+- violated invariant / contract;
+- why the existing test/guard misses the runtime path when relevant;
+- required relationship test or manifest update.
+
+"Add tests" without naming the runtime path and invariant is not enough.
+If a Tier 0 / Tier 1 relationship invariant changes and no paired
+relationship test is present, report Important — or Critical if live
+submit, venue side effect, settlement/redeem, or schema truth can regress.
+
 ---
 
 ## 8. Pre-review local commands (for human reviewers)

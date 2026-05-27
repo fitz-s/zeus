@@ -706,6 +706,42 @@ def test_extract_currently_passing_checks_returns_only_success():
     assert extract_currently_passing_checks(pr) == {"a", "c"}
 
 
+def test_fail_recover_fail_cycle_re_emits_each_event(monkeypatch, capsys):
+    """Operator-tested scene 3 antibody (2026-05-26):
+    FAIL → RECOVER → FAIL-AGAIN must emit CI_FAIL twice and CI_RECOVERED once,
+    with the second CI_FAIL not silently absorbed by the name:conclusion dedup.
+    Without this, a check that goes red, gets fixed, then breaks again silently."""
+    state = _state()
+    # Tick 1: FAILURE
+    monkeypatch.setattr(
+        "scripts.ci.pr_monitor.gh_pr_view_v2",
+        lambda pr_num, repo=None: (_pr_data(checks=[_check("pytest", "FAILURE")]), None),
+    )
+    tick_once(999, repo="x/y", state=state, as_json=False)
+    out1 = capsys.readouterr().out
+    assert "PR#999 CI_FAIL pytest:FAILURE" in out1
+    # Tick 2: SUCCESS (recovery)
+    monkeypatch.setattr(
+        "scripts.ci.pr_monitor.gh_pr_view_v2",
+        lambda pr_num, repo=None: (_pr_data(checks=[_check("pytest", "SUCCESS")]), None),
+    )
+    tick_once(999, repo="x/y", state=state, as_json=False)
+    out2 = capsys.readouterr().out
+    assert "PR#999 CI_RECOVERED pytest" in out2
+    # Tick 3: FAILURE AGAIN — must re-emit CI_FAIL (not silent)
+    monkeypatch.setattr(
+        "scripts.ci.pr_monitor.gh_pr_view_v2",
+        lambda pr_num, repo=None: (_pr_data(checks=[_check("pytest", "FAILURE")]), None),
+    )
+    tick_once(999, repo="x/y", state=state, as_json=False)
+    out3 = capsys.readouterr().out
+    assert "PR#999 CI_FAIL pytest:FAILURE" in out3, (
+        f"Scene 3 regression: second FAIL after RECOVER was silent. out3={out3!r}"
+    )
+    # And recovery dedup cleared so a future recovery can re-fire.
+    assert "pytest" not in state["reported_recoveries"]
+
+
 def test_state_roundtrip_preserves_recovery_fields(tmp_path):
     spath = tmp_path / "state.json"
     state = _state(

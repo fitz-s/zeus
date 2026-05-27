@@ -196,6 +196,49 @@ scripts/ci/tier0_pairing_gate.py         → fold into structural_blockers (one 
   monitor instance via `reported_recoveries` set; --reset-state re-arms.
 - `tests/ci/test_pr_monitor.py` — adds 7 CI_RECOVERED tests.
 
+**Phase G — Review Upgrade (added to PR #5, ~700 LOC).**
+Operator-supplied external spec 2026-05-26: tighten Copilot bot-review
+precision via instruction file shards + tier classification + tests.
+- `scripts/review_scope_collect.py`: add `src/engine/cycle_runtime.py`
+  to Tier 0 rules (FC-03 root); `docs/review/review_scope_map.md` adds
+  cycle_runtime + 3 named Tier 1 hot surfaces (executable_forecast_reader,
+  forecast_extrema_authority, market_scanner) + effect-tier note for
+  manifest yamls.
+- `.github/copilot-instructions.md`: rewrite within 3600-char budget.
+  Adds Step 2 "Root runtime path", Step 3 "Finding quality contract"
+  (`Severity | Path | Object | Invariant | Runtime failure | Existing
+  guard miss | Required fix/test`), 6 compact historical miss patterns.
+- 6 instruction shards updated:
+  - `tier-scope.instructions.md`: add Root target rule
+  - `zeus-execution-settlement.instructions.md`: add cycle_runtime.py
+    + src/main.py to applyTo; FC-03 fresh-at-submit section with bad/good
+    targets
+  - `zeus-forecast-source.instructions.md`: add src/ingest_main.py to
+    applyTo; FC-01/02/06/07 review checks; changed-helper-API caller
+    migration rule
+  - `zeus-schema-state.instructions.md`: FC-08 verification + owner DB
+  - `zeus-ci-tests.instructions.md`: relationship-test precision with
+    bad/good examples
+  - `docs-agent-review.instructions.md`: advisory vs structural topology
+- `REVIEW.md`: add Bot-review precision rule in §7
+- `docs/review/code_review.md`: new §10b "Bot Review Precision" with
+  WRONG_LAYER_GUARD / SHADOW_PATH / TEST_DOES_NOT_HIT_RUNTIME /
+  MANIFEST_DRIFT / ADVISORY_ONLY taxonomy + good/bad finding shape +
+  FC-01..FC-10 heuristics
+- `.github/pull_request_template.md`: add Review-routing inputs section
+  (changed economic object, root runtime path, failure-chain risk,
+  paired relationship test, manifest deltas)
+- `scripts/ci/check_review_instruction_coverage.py`: extend
+  REQUIRED_COVERAGE from 10 → 22 entries (hot surfaces + manifests)
+- `tests/ci/test_review_instruction_shards.py` (new, 178 LOC, 22 tests):
+  required shards exist, have applyTo, under 3600 budget, hot-surface
+  routing, required precision phrases, no external-link-only content
+- `tests/ci/test_review_scope_precision.py` (new, 78 LOC, 11 tests):
+  cycle_runtime is Tier 0, forecast/discovery hot surfaces Tier 1,
+  review-instruction surfaces Tier 3, archived paths skipped
+
+All instruction files verified ≤ 3600 chars (budget script CHAR_BUDGET).
+
 **Phase F — Operator review + cutover decision (no PR).**
 - Compare topology_doctor.py + topology_v_next + new Context Pack output on 5+ live PRs.
 - Operator decides: keep three-system shadow, retire topology_doctor's profile matching, or retire topology_v_next.
