@@ -316,12 +316,15 @@ def record_edli_live_profit_audit_from_aggregate(conn: sqlite3.Connection, aggre
     cost_basis_source_certificate_hash = pre_submit.get("cost_basis_source_certificate_hash")
     expected_cost_basis = pre_submit.get("expected_cost_basis")
     computed = compute_realized_edge_from_authorities(
+        conn=conn,
         cost_model_cert_hash=str(cost_basis_source_certificate_hash or ""),
         expected_edge_cert_hash=str(expected_edge_source_certificate_hash or ""),
         fill_event_hash=str(fill_source_event_hash or ""),
         pre_submit=pre_submit,
         fill_payload=lifecycle_payload,
     )
+    if computed is not None:
+        expected_cost_basis = computed["expected_cost_basis"]
     promotion_eligible = (
         state == "CONFIRMED"
         and lifecycle_type == "UserTradeObserved"
@@ -374,6 +377,7 @@ def record_edli_live_profit_audit_from_aggregate(conn: sqlite3.Connection, aggre
 
 def compute_realized_edge_from_authorities(
     *,
+    conn: sqlite3.Connection,
     cost_model_cert_hash: str,
     expected_edge_cert_hash: str,
     fill_event_hash: str,
@@ -389,12 +393,25 @@ def compute_realized_edge_from_authorities(
 
     if not cost_model_cert_hash or not expected_edge_cert_hash or not fill_event_hash:
         return None
+    cost_payload = _load_verified_certificate_payload(conn, cost_model_cert_hash)
+    edge_payload = _load_verified_certificate_payload(conn, expected_edge_cert_hash)
+    if cost_payload is None or edge_payload is None:
+        return None
     side = str(pre_submit.get("side") or "").upper()
     if side not in {"BUY", "SELL"}:
         return None
-    q_live = _float_or_none(pre_submit.get("q_live"))
+    expected_cost_basis = _float_or_none(cost_payload.get("expected_cost_basis"))
+    if expected_cost_basis is None:
+        return None
+    q_live = _float_or_none(edge_payload.get("q_live"))
+    if q_live is None:
+        q_live = _float_or_none(edge_payload.get("expected_probability"))
+    if q_live is None:
+        q_live = _float_or_none(edge_payload.get("p_posterior"))
     if q_live is None:
         q_live = _float_or_none(pre_submit.get("expected_probability"))
+    if q_live is None:
+        q_live = _float_or_none(pre_submit.get("q_live"))
     if q_live is None:
         return None
     avg_fill_price = _float_or_none(fill_payload.get("avg_fill_price") or fill_payload.get("fill_price"))
@@ -411,9 +428,30 @@ def compute_realized_edge_from_authorities(
         "avg_fill_price": avg_fill_price,
         "filled_size": filled_size,
         "fees": fees,
+        "expected_cost_basis": expected_cost_basis,
         "realized_edge": realized_edge,
         "pnl_usd": realized_edge * filled_size,
     }
+
+
+def _load_verified_certificate_payload(conn: sqlite3.Connection, certificate_hash: str) -> dict[str, Any] | None:
+    if not certificate_hash or not _table_exists(conn, "decision_certificates"):
+        return None
+    row = conn.execute(
+        """
+        SELECT payload_json
+        FROM decision_certificates
+        WHERE certificate_hash = ?
+          AND verifier_status = 'VERIFIED'
+        """,
+        (certificate_hash,),
+    ).fetchone()
+    if row is None:
+        return None
+    try:
+        return json.loads(str(row["payload_json"] if isinstance(row, sqlite3.Row) else row[0]))
+    except json.JSONDecodeError:
+        return None
 
 
 def _float_or_none(value: Any) -> float | None:

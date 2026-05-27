@@ -374,6 +374,56 @@ def test_edli_live_canary_stage_readiness_waits_on_clean_db(monkeypatch, tmp_pat
     assert report.scaleout_allowed is False
 
 
+def test_edli_live_canary_boot_runs_stage_readiness_before_registering_edli_jobs(monkeypatch):
+    import src.main as main
+
+    calls: list[str] = []
+
+    def _fake_readiness(_cfg):
+        calls.append("readiness")
+        return main.EdliStageReadiness(
+            stage="edli_live_canary",
+            status=main.EDLI_STAGE_WAITING,
+            live_entries_allowed=True,
+            submit_allowed=True,
+            scaleout_allowed=False,
+            reasons=("CANARY_ARTIFACT_MISSING",),
+        )
+
+    monkeypatch.setattr(main, "_assert_edli_stage_readiness", _fake_readiness)
+    _run_main_with_fake_scheduler(
+        monkeypatch,
+        _edli_live_canary_updates(),
+        scheduler_calls=calls,
+    )
+
+    edli_job_indices = [
+        index for index, call in enumerate(calls) if call.startswith("add_job:edli_")
+    ]
+    assert edli_job_indices
+    assert calls.index("readiness") < min(edli_job_indices)
+
+
+def test_edli_live_canary_boot_readiness_failure_blocks_edli_job_registration(monkeypatch):
+    import src.main as main
+
+    calls: list[str] = []
+
+    def _fake_readiness(_cfg):
+        calls.append("readiness")
+        raise RuntimeError("EDLI_LIVE_CANARY_READINESS_FAIL:EDLI_STAGE_UNRESOLVED_SUBMIT_UNKNOWN")
+
+    monkeypatch.setattr(main, "_assert_edli_stage_readiness", _fake_readiness)
+    with pytest.raises(RuntimeError, match="EDLI_LIVE_CANARY_READINESS_FAIL"):
+        _run_main_with_fake_scheduler(
+            monkeypatch,
+            _edli_live_canary_updates(),
+            scheduler_calls=calls,
+        )
+
+    assert calls == ["readiness"]
+
+
 def test_edli_live_canary_stage_readiness_blocks_unresolved_unknown(monkeypatch, tmp_path):
     import src.main as main
 
@@ -444,6 +494,22 @@ def test_edli_live_canary_stage_readiness_blocks_stale_source(monkeypatch, tmp_p
 
     assert report.status == "FAIL"
     assert any(reason.startswith("EDLI_STAGE_SOURCE_HEALTH_STALE") for reason in report.reasons)
+
+
+def _edli_live_canary_updates(**overrides):
+    values = {
+        "enabled": True,
+        "live_execution_mode": "edli_live_canary",
+        "reactor_mode": "live",
+        "event_writer_enabled": True,
+        "forecast_snapshot_trigger_enabled": True,
+        "market_channel_ingestor_enabled": True,
+        "edli_user_channel_reconcile_enabled": True,
+        "real_order_submit_enabled": True,
+        "live_canary_enabled": True,
+    }
+    values.update(overrides)
+    return values
 
 
 def _edli_live_updates(**overrides):
@@ -627,7 +693,7 @@ def test_no_shadow_named_edli_modules():
     assert all("shadow_" not in path.name for path in edli_paths)
 
 
-def _run_main_with_fake_scheduler(monkeypatch, edli_updates, *, world_db_path=None):
+def _run_main_with_fake_scheduler(monkeypatch, edli_updates, *, world_db_path=None, scheduler_calls=None):
     import src.main as main
 
     settings_source = main.settings._data if hasattr(main.settings, "_data") else main.settings
@@ -671,6 +737,8 @@ def _run_main_with_fake_scheduler(monkeypatch, edli_updates, *, world_db_path=No
             FakeScheduler.instances.append(self)
 
         def add_job(self, func, trigger, *args, id=None, **kwargs):
+            if scheduler_calls is not None:
+                scheduler_calls.append(f"add_job:{id or getattr(func, '__name__', '<unknown>')}")
             self.jobs.append(SimpleNamespace(id=id, func=func, trigger=trigger, kwargs=kwargs))
 
         def get_jobs(self):
@@ -693,10 +761,12 @@ def _write_db_backed_promotion_artifact(tmp_path, *, realized_edge: float, audit
 
     from src.events.live_order_aggregate import LiveOrderAggregateLedger
     from src.events.live_profit_audit import write_promotion_artifact
+    from src.state.schema.decision_certificates_schema import ensure_tables as ensure_decision_certificate_tables
 
     db_path = tmp_path / "world.db"
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
+    _seed_promotion_authority_certificates(conn, ensure_decision_certificate_tables=ensure_decision_certificate_tables)
     now = datetime(2026, 5, 26, 12, tzinfo=timezone.utc)
     ledger = LiveOrderAggregateLedger(conn)
     ledger.append_event(
@@ -817,6 +887,59 @@ def _write_db_backed_promotion_artifact(tmp_path, *, realized_edge: float, audit
     conn.commit()
     conn.close()
     return artifact, db_path
+
+
+def _seed_promotion_authority_certificates(conn, *, ensure_decision_certificate_tables):
+    ensure_decision_certificate_tables(conn)
+    rows = (
+        (
+            "actionable-cert-1",
+            "ActionableTradeCertificate",
+            "actionable-hash-1",
+            {"q_live": 0.45, "expected_edge": 0.029, "condition_id": "condition-1", "token_id": "token-1"},
+        ),
+        (
+            "cost-cert-1",
+            "ExecutableCostCertificate",
+            "cost-hash-1",
+            {
+                "expected_cost_basis": 0.421,
+                "expected_fee": 0.001,
+                "expected_spread_cost": 0.0005,
+                "visible_depth_fill_lcb": 0.95,
+                "order_policy": "maker_post_only",
+                "native_token_side": "YES",
+            },
+        ),
+    )
+    for certificate_id, certificate_type, certificate_hash, payload in rows:
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO decision_certificates (
+                certificate_id, certificate_type, schema_version,
+                canonicalization_version, semantic_key, claim_type, mode,
+                decision_time, source_available_at, agent_received_at,
+                persisted_at, max_parent_source_available_at,
+                max_parent_agent_received_at, max_parent_persisted_at,
+                authority_id, authority_version, algorithm_id, algorithm_version,
+                config_hash, model_version_hash, payload_json, payload_hash,
+                certificate_hash, verifier_status, created_at
+            ) VALUES (
+                ?, ?, 1, 'canonical-json-v1', ?, 'edli_live_profit_authority', 'LIVE',
+                '2026-05-26T12:00:00+00:00', NULL, NULL, NULL, NULL, NULL, NULL,
+                'test_authority', 'v1', 'test_algorithm', 'v1',
+                NULL, NULL, ?, ?, ?, 'VERIFIED', '2026-05-26T12:00:00+00:00'
+            )
+            """,
+            (
+                certificate_id,
+                certificate_type,
+                certificate_id,
+                json.dumps(payload, sort_keys=True),
+                f"payload-{certificate_id}",
+                certificate_hash,
+            ),
+        )
 
 
 def _pre_submit_payload_for_promotion(**overrides):

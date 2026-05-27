@@ -8,9 +8,15 @@ import sqlite3
 
 import pytest
 
-from src.events.live_profit_audit import LiveProfitAuditLedger, promotion_summary, write_promotion_artifact
+from src.events.live_profit_audit import (
+    LiveProfitAuditLedger,
+    compute_realized_edge_from_authorities,
+    promotion_summary,
+    write_promotion_artifact,
+)
 from src.events.live_order_aggregate import LiveOrderAggregateLedger
 from src.events.live_profit_audit import verify_edli_live_promotion_artifact
+from src.state.schema.decision_certificates_schema import ensure_tables as ensure_decision_certificate_tables
 
 
 def test_profit_audit_requires_event_bound_identity_fields():
@@ -258,6 +264,60 @@ def test_live_order_lifecycle_events_emit_profit_audit_rows():
     assert ledger.get_projection("event-1:intent-1").pending_reconcile is False
 
 
+def test_spoofed_lifecycle_realized_edge_is_ignored():
+    conn = _conn()
+    _seed_confirmed_aggregate(conn, realized_edge=0.01, spoofed_lifecycle_realized_edge=999.0)
+
+    row = conn.execute(
+        """
+        SELECT realized_edge, pnl_usd, promotion_eligible
+        FROM edli_live_profit_audit
+        WHERE aggregate_id = ? AND order_lifecycle_state = 'CONFIRMED'
+        """,
+        ("event-1:intent-1",),
+    ).fetchone()
+
+    assert row["realized_edge"] == pytest.approx(0.01)
+    assert row["pnl_usd"] == pytest.approx(0.1)
+    assert row["promotion_eligible"] == 1
+
+
+def test_realized_edge_computes_sell_yes_proceeds_semantics():
+    conn = _conn()
+    _seed_authority_certificates(conn)
+
+    realized = compute_realized_edge_from_authorities(
+        conn=conn,
+        cost_model_cert_hash="cost-hash-1",
+        expected_edge_cert_hash="actionable-hash-1",
+        fill_event_hash="fill-event-hash-1",
+        pre_submit={"side": "SELL", "direction": "YES", "requested_size": 100.0},
+        fill_payload={"avg_fill_price": 0.47, "filled_size": 5.0, "fees": 0.01},
+    )
+
+    assert realized is not None
+    assert realized["realized_edge"] == pytest.approx(0.47 - 0.45 - (0.01 / 5.0))
+    assert realized["pnl_usd"] == pytest.approx((0.47 - 0.45 - (0.01 / 5.0)) * 5.0)
+
+
+def test_realized_edge_partial_fill_uses_filled_size_not_requested_size():
+    conn = _conn()
+    _seed_authority_certificates(conn)
+
+    realized = compute_realized_edge_from_authorities(
+        conn=conn,
+        cost_model_cert_hash="cost-hash-1",
+        expected_edge_cert_hash="actionable-hash-1",
+        fill_event_hash="fill-event-hash-1",
+        pre_submit={"side": "BUY", "direction": "YES", "requested_size": 100.0},
+        fill_payload={"avg_fill_price": 0.44, "filled_size": 2.0, "fees": 0.0},
+    )
+
+    assert realized is not None
+    assert realized["realized_edge"] == pytest.approx(0.01)
+    assert realized["pnl_usd"] == pytest.approx(0.02)
+
+
 def test_confirmed_fill_without_fill_economics_is_not_promotion_eligible():
     conn = _conn()
     _seed_confirmed_aggregate(conn, include_fill_economics=False)
@@ -266,7 +326,7 @@ def test_confirmed_fill_without_fill_economics_is_not_promotion_eligible():
         """
         SELECT realized_edge, avg_fill_price, filled_size, promotion_eligible
         FROM edli_live_profit_audit
-        WHERE aggregate_id = ?
+        WHERE aggregate_id = ? AND order_lifecycle_state = 'CONFIRMED'
         """,
         ("event-1:intent-1",),
     ).fetchone()
@@ -279,16 +339,7 @@ def test_confirmed_fill_without_fill_economics_is_not_promotion_eligible():
 
 def test_missing_cost_basis_certificate_keeps_audit_non_promotion_eligible():
     conn = _conn()
-    ledger = _seed_confirmed_aggregate(conn)
-    conn.execute(
-        """
-        UPDATE edli_live_profit_audit
-        SET cost_basis_source_certificate_hash = NULL,
-            promotion_eligible = 0
-        WHERE aggregate_id = ?
-        """,
-        ("event-1:intent-1",),
-    )
+    ledger = _seed_confirmed_aggregate(conn, seed_cost_certificate=False)
 
     row = conn.execute(
         "SELECT promotion_eligible FROM edli_live_profit_audit WHERE aggregate_id = ?",
@@ -304,7 +355,10 @@ def _seed_confirmed_aggregate(
     *,
     realized_edge: float = 0.01,
     include_fill_economics: bool = True,
+    seed_cost_certificate: bool = True,
+    spoofed_lifecycle_realized_edge: float | None = None,
 ) -> LiveOrderAggregateLedger:
+    _seed_authority_certificates(conn, include_cost=seed_cost_certificate)
     ledger = LiveOrderAggregateLedger(conn)
     now = "2026-05-26T12:00:00+00:00"
     from datetime import datetime
@@ -394,6 +448,8 @@ def _seed_confirmed_aggregate(
                 "fees": 0.0,
             }
         )
+    if spoofed_lifecycle_realized_edge is not None:
+        trade_payload["realized_edge"] = spoofed_lifecycle_realized_edge
     ledger.append_event(
         aggregate_id="event-1:intent-1",
         event_type="UserTradeObserved",
@@ -417,6 +473,62 @@ def _seed_confirmed_aggregate(
         source_authority="live_cap_ledger",
     )
     return ledger
+
+
+def _seed_authority_certificates(conn: sqlite3.Connection, *, include_cost: bool = True) -> None:
+    ensure_decision_certificate_tables(conn)
+    rows = [
+        (
+            "actionable-cert-1",
+            "ActionableTradeCertificate",
+            "actionable-hash-1",
+            {"q_live": 0.45, "expected_edge": 0.029, "condition_id": "condition-1", "token_id": "token-1"},
+        )
+    ]
+    if include_cost:
+        rows.append(
+            (
+                "cost-cert-1",
+                "ExecutableCostCertificate",
+                "cost-hash-1",
+                {
+                    "expected_cost_basis": 0.421,
+                    "expected_fee": 0.001,
+                    "expected_spread_cost": 0.0005,
+                    "visible_depth_fill_lcb": 0.95,
+                    "order_policy": "maker_post_only",
+                    "native_token_side": "YES",
+                },
+            )
+        )
+    for certificate_id, certificate_type, certificate_hash, payload in rows:
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO decision_certificates (
+                certificate_id, certificate_type, schema_version,
+                canonicalization_version, semantic_key, claim_type, mode,
+                decision_time, source_available_at, agent_received_at,
+                persisted_at, max_parent_source_available_at,
+                max_parent_agent_received_at, max_parent_persisted_at,
+                authority_id, authority_version, algorithm_id, algorithm_version,
+                config_hash, model_version_hash, payload_json, payload_hash,
+                certificate_hash, verifier_status, created_at
+            ) VALUES (
+                ?, ?, 1, 'canonical-json-v1', ?, 'edli_live_profit_authority', 'LIVE',
+                '2026-05-26T12:00:00+00:00', NULL, NULL, NULL, NULL, NULL, NULL,
+                'test_authority', 'v1', 'test_algorithm', 'v1',
+                NULL, NULL, ?, ?, ?, 'VERIFIED', '2026-05-26T12:00:00+00:00'
+            )
+            """,
+            (
+                certificate_id,
+                certificate_type,
+                certificate_id,
+                json.dumps(payload, sort_keys=True),
+                f"payload-{certificate_id}",
+                certificate_hash,
+            ),
+        )
 
 
 def _pre_submit_payload(**overrides):
