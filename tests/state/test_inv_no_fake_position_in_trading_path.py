@@ -63,15 +63,6 @@ def _calls_position_with_unknown_direction(source: str) -> list[int]:
     return hits
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "PR A scaffold (Finding 3): chain_reconciliation.py:~1055 and "
-        "portfolio._chain_only_quarantine_position_from_row still construct fake "
-        'Position objects with direction="unknown" (chain-only stub marker). '
-        "PR C replaces them with typed ChainOnlyFact entries."
-    ),
-)
 def test_no_position_constructed_with_unknown_direction() -> None:
     violations: list[str] = []
     for rel_path in FORBIDDEN_PRODUCER_FILES:

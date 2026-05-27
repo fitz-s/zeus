@@ -30,6 +30,7 @@ from src.contracts import (
     compute_forward_edge,
     ExpiringAssumption,
 )
+from src.contracts.position_truth import ChainOnlyFact
 from src.contracts.semantic_types import ChainState, Direction, DirectionAlias, ExitState, LifecycleState
 from src.contracts.settlement_outcome import SettlementOutcome
 from src.contracts.hold_value import HoldValue
@@ -1447,9 +1448,17 @@ def _canonical_recent_exits_from_settlement_rows(rows: list[dict]) -> list[dict]
     return exits
 
 
-def _chain_only_quarantine_position_from_row(row: dict) -> Position:
+def _chain_only_fact_from_row(row: dict) -> ChainOnlyFact:
+    """Build a ChainOnlyFact from a token_suppression row of reason
+    `chain_only_quarantined` (PR E2 replacement for the legacy
+    `_chain_only_quarantine_position_from_row` synthetic-Position path).
+
+    The fact carries the same identity + economics the synthetic Position
+    used to carry; consumers read it from `portfolio.chain_only_facts`
+    instead of `portfolio.positions`.
+    """
     token_id = str(row.get("token_id") or "")
-    evidence = {}
+    evidence: dict = {}
     try:
         evidence = json.loads(str(row.get("evidence_json") or "{}"))
     except (TypeError, json.JSONDecodeError):
@@ -1463,32 +1472,26 @@ def _chain_only_quarantine_position_from_row(row: dict) -> Position:
         or row.get("updated_at")
         or ""
     )
+    last_seen = str(row.get("updated_at") or first_seen)
     condition_id = str(row.get("condition_id") or evidence.get("condition_id") or "")
-    return Position(
-        trade_id=f"quarantine_{token_id[:8]}",
-        market_id=condition_id,
-        city=QUARANTINE_SENTINEL,
-        cluster="Other",
-        target_date=QUARANTINE_SENTINEL,
-        bin_label=QUARANTINE_SENTINEL,
-        direction="unknown",
-        size_usd=cost,
-        entry_price=avg_price,
-        p_posterior=avg_price,
-        edge=0.0,
-        entered_at=first_seen,
+    return ChainOnlyFact(
         token_id=token_id,
-        state=enter_chain_quarantined_runtime_state(),
-        strategy="",
-        edge_source="",
-        cost_basis_usd=cost,
-        shares=shares,
-        chain_state="quarantined",
-        chain_shares=shares,
-        chain_verified_at=str(row.get("updated_at") or first_seen),
         condition_id=condition_id,
-        quarantined_at=first_seen,
+        size=shares,
+        avg_price=avg_price,
+        cost_basis=cost,
+        first_seen_at=first_seen,
+        last_seen_at=last_seen,
     )
+
+
+# PR E2 (Finding 3, 2026-05-27): the legacy `_chain_only_quarantine_position_from_row`
+# constructor was DELETED. Its callers in `load_portfolio` now use
+# `_chain_only_fact_from_row` (defined above) to emit typed
+# `ChainOnlyFact` review-queue entries on `PortfolioState.chain_only_facts`
+# instead of synthetic `Position(direction="unknown")` rows on
+# `PortfolioState.positions`. The cycle entry gate
+# `_has_quarantined_positions` consults both signals (see PR C2).
 
 
 def load_portfolio(path: Optional[Path] = None) -> PortfolioState:
@@ -1576,16 +1579,22 @@ def load_portfolio(path: Optional[Path] = None) -> PortfolioState:
             policy.reason,
         )
         _guard_deprecated_portfolio_json(path)
-        degraded_positions = [
-            _chain_only_quarantine_position_from_row(row)
+        # PR E2 (Finding 3, 2026-05-27): chain-only quarantine rows now
+        # populate `chain_only_facts` as typed ChainOnlyFact entries instead
+        # of synthesizing fake Position objects. `_has_quarantined_positions`
+        # in cycle_runner already consults this list (since PR C2), so the
+        # entry gate continues to fire on these rows.
+        degraded_facts = [
+            _chain_only_fact_from_row(row)
             for row in chain_only_quarantines
         ]
         return PortfolioState(
-            positions=degraded_positions,
+            positions=[],
             bankroll=bankroll,
             daily_baseline_total=bankroll,
             weekly_baseline_total=bankroll,
             ignored_tokens=ignored_tokens,
+            chain_only_facts=degraded_facts,
             portfolio_loader_degraded=True,
             authority="degraded",
         )
@@ -1603,11 +1612,15 @@ def load_portfolio(path: Optional[Path] = None) -> PortfolioState:
         for token in (getattr(pos, "token_id", ""), getattr(pos, "no_token_id", ""))
         if token
     }
-    positions.extend(
-        _chain_only_quarantine_position_from_row(row)
+    # PR E2 (Finding 3, 2026-05-27): canonical-path chain-only quarantine
+    # rows that are NOT already represented by a real local position become
+    # typed ChainOnlyFact review-queue entries instead of synthetic
+    # Position objects.
+    chain_only_facts = [
+        _chain_only_fact_from_row(row)
         for row in chain_only_quarantines
         if str(row.get("token_id") or "") not in represented_tokens
-    )
+    ]
     return PortfolioState(
         positions=positions,
         bankroll=bankroll,
@@ -1617,6 +1630,7 @@ def load_portfolio(path: Optional[Path] = None) -> PortfolioState:
         weekly_baseline_total=bankroll,
         recent_exits=_canonical_recent_exits_from_settlement_rows(settlement_rows),
         ignored_tokens=ignored_tokens,
+        chain_only_facts=chain_only_facts,
         authority="canonical_db",
     )
 
