@@ -16,6 +16,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 
+from src.contracts.semantic_types import LifecycleState
 from src.state.chain_state import ChainState, classify_chain_state
 from src.state.lifecycle_manager import (
     enter_chain_quarantined_runtime_state,
@@ -1016,7 +1017,14 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
                         "(local=%.4f, chain=%.4f); quarantining position",
                         pos.trade_id, local_shares, chain.size,
                     )
-                    corrected.state = "quarantine_size_mismatch"
+                    # Finding 2 (PR C1, 2026-05-27): the previous string
+                    # "quarantine_size_mismatch" was NOT a member of LifecycleState
+                    # and downstream phase_for_runtime_position() mapped it to
+                    # LifecyclePhase.UNKNOWN — exposure/exit/harvester then saw
+                    # inconsistent phases. The size-mismatch discriminator already
+                    # lives in chain_state (SIZE_MISMATCH_UNRESOLVED); state must
+                    # carry the canonical LifecycleState.QUARANTINED.value.
+                    corrected.state = LifecycleState.QUARANTINED.value
                     corrected.chain_state = "size_mismatch_unresolved"
                     if not _size_mismatch_eligible:
                         corrected.shares = local_shares

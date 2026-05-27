@@ -28,14 +28,6 @@ CHAIN_RECON_PATH = REPO_ROOT / "src" / "state" / "chain_reconciliation.py"
 LEGAL_LIFECYCLE_VALUES = {member.value for member in LifecycleState}
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "PR A scaffold (Finding 2): chain_reconciliation.py:1003 writes "
-        '`pos.state = "quarantine_size_mismatch"`. PR C replaces this with '
-        "a canonical REVIEW_REQUIRED event + LifecyclePhase.QUARANTINED."
-    ),
-)
 def test_size_mismatch_state_writes_use_legal_lifecycle_values() -> None:
     source = CHAIN_RECON_PATH.read_text(encoding="utf-8")
     tree = ast.parse(source)
