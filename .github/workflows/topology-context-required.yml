@@ -67,19 +67,22 @@ jobs:
           echo "Changed file count: $(wc -l < /tmp/changed-files.txt)"
 
       - name: Run structural-blocker orchestrator (NO_OVERRIDE only)
+        id: orchestrator
+        # `|| true` here so a failing rule does NOT short-circuit before we
+        # capture the JSON artifact. The actual fail-the-build step is
+        # "Enforce no_override exit" below, which reads the same JSON.
         run: |
-          set -euo pipefail
+          set -uo pipefail
           # shellcheck disable=SC2046
           if [ -s /tmp/changed-files.txt ]; then
             python scripts/ci/check_topology_structural_blockers.py \
               --changed-files $(cat /tmp/changed-files.txt) \
-              --json > /tmp/blockers.json
+              --json > /tmp/blockers.json || true
           else
             python scripts/ci/check_topology_structural_blockers.py \
-              --json > /tmp/blockers.json
+              --json > /tmp/blockers.json || true
           fi
-          python scripts/ci/check_topology_structural_blockers.py \
-            --json | python -c "import json,sys;d=json.load(sys.stdin);print('rules failed:', d['failure_count']);print('no_override failed:', d['no_override_failure_count'])"
+          python -c "import json;d=json.load(open('/tmp/blockers.json'));print('rules failed:', d['failure_count']);print('no_override failed:', d['no_override_failure_count'])"
 
       - name: Upload structural-blocker artifact
         if: always()
@@ -90,13 +93,29 @@ jobs:
           retention-days: 14
           if-no-files-found: warn
 
-      - name: Re-run orchestrator with exit code (fails build only on no_override)
+      - name: Enforce no_override exit (fails build only on no_override)
+        # Read the same artifact the orchestrator wrote — single source of
+        # truth. Avoids running the orchestrator twice (which was producing
+        # inconsistent counts because the second run used git diff defaults
+        # rather than the precomputed changed-files list).
         run: |
           set -euo pipefail
-          if [ -s /tmp/changed-files.txt ]; then
-            # shellcheck disable=SC2046
-            python scripts/ci/check_topology_structural_blockers.py \
-              --changed-files $(cat /tmp/changed-files.txt)
-          else
-            python scripts/ci/check_topology_structural_blockers.py
-          fi
+          python -c "
+          import json, sys
+          d = json.load(open('/tmp/blockers.json'))
+          failures = [r for r in d['results'] if r['exit_code'] != 0 and not r.get('skipped')]
+          no_override = [r for r in failures if not r['override_allowed']]
+          if no_override:
+              print(f'BLOCKING: {len(no_override)} no_override rule(s) failed:')
+              for r in no_override:
+                  print(f'  - {r[\"rule_id\"]}')
+                  for ln in (r.get('stdout') or '').splitlines()[:5]:
+                      print(f'      {ln}')
+              sys.exit(1)
+          if failures:
+              print(f'Advisory: {len(failures)} override-allowed rule(s) failed (non-blocking).')
+              for r in failures:
+                  print(f'  - {r[\"rule_id\"]}')
+          else:
+              print('OK: all rules pass.')
+          "

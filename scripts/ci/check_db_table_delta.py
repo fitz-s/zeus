@@ -97,31 +97,64 @@ def _changed_files_from_git(base: str, head: str) -> list[str]:
     return [ln.strip() for ln in out.stdout.splitlines() if ln.strip()]
 
 
+_DB_OWNER_KEYS = (
+    "zeus_world", "zeus_forecasts", "zeus_trades",
+    "world", "forecasts", "trades",
+)
+_IDENT_RE = re.compile(r"^[a-z][a-z0-9_]*$")
+
+
 def _known_tables(ownership_doc: dict) -> set[str]:
-    """Extract every table name listed in db_table_ownership.yaml."""
+    """
+    Extract table names from architecture/db_table_ownership.yaml.
+
+    Only collects names that appear in a DB-owner scope. The previous
+    implementation walked the whole document and treated any `name:` or
+    `id:` string as a table — that incorrectly captured `name: applied_at`
+    inside `required_columns` entries (Copilot finding on PR #345),
+    which let real new tables sneak past as already-known.
+
+    Recognized shapes:
+      <db>:
+        <table_name>:           # dict-of-tables
+          ...
+        - <table_name>          # list-of-strings
+        - {table: <name>}       # list-of-objects (table key)
+        - {name: <name>, ...}   # list-of-objects (name key — common shape)
+
+      tables:
+        <table_name>: ...
+        - <name>
+    """
     names: set[str] = set()
-    # Walk all dict/list structures looking for `table:` or `name:` keys
-    # whose value looks like an identifier.
-    def walk(node):
+
+    def _scan_table_scope(node):
+        """Within a known DB-owner scope, extract table-level names."""
         if isinstance(node, dict):
+            # dict-of-tables: keys ARE table names
             for k, v in node.items():
-                if k in ("table", "table_name", "name", "id") and isinstance(v, str):
-                    if re.match(r"^[a-z][a-z0-9_]*$", v):
-                        names.add(v)
-                walk(v)
-        elif isinstance(node, list):
-            for item in node:
-                walk(item)
-    walk(ownership_doc)
-    # Also: tables can appear as YAML keys at the top of nested mappings
-    for db_key in ("zeus_world", "zeus_forecasts", "zeus_trades", "world", "forecasts", "trades", "tables"):
-        node = ownership_doc.get(db_key)
-        if isinstance(node, dict):
-            names.update(k for k in node if isinstance(k, str) and re.match(r"^[a-z][a-z0-9_]*$", k))
+                if isinstance(k, str) and _IDENT_RE.match(k):
+                    # Only treat as table name if value is a dict-shaped
+                    # table descriptor (skip when value itself looks like
+                    # a column list or scalar).
+                    if isinstance(v, (dict, list, type(None))):
+                        names.add(k)
         elif isinstance(node, list):
             for entry in node:
-                if isinstance(entry, str) and re.match(r"^[a-z][a-z0-9_]*$", entry):
+                if isinstance(entry, str) and _IDENT_RE.match(entry):
                     names.add(entry)
+                elif isinstance(entry, dict):
+                    for key in ("table", "table_name", "name", "id"):
+                        v = entry.get(key)
+                        if isinstance(v, str) and _IDENT_RE.match(v):
+                            names.add(v)
+                            break
+
+    for db_key in _DB_OWNER_KEYS + ("tables",):
+        node = ownership_doc.get(db_key)
+        if node is not None:
+            _scan_table_scope(node)
+
     return names
 
 

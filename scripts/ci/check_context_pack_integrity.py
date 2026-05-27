@@ -99,17 +99,38 @@ def validate_pack(
         if fmid and fmid not in known_misreads and "REVIEW_REQUIRED" not in (fm.get("reason") or ""):
             fail("fatal_misread_id_exists", f"unknown fatal_misread id: {fmid!r}")
 
-    # Invariant ids resolve in one of the canonical sources
+    # Invariant ids resolve in one of the canonical sources.
+    # Collect only IDs that match the canonical invariant naming patterns
+    # (MP-XYZ-NNN, INV-NN, MP-NNN). Field names like `p_raw`, `applied_at`,
+    # `final_limit_price` from money_path_objects.economic_objects.fields
+    # are NOT invariants and must not be treated as such.
+    import re as _re
+    _INV_ID = _re.compile(r"^(MP-[A-Z]+-?\d+|INV-\d+)$")
     known_inv: set[str] = set()
-    for inv in (money_path_ci.get("invariants") or {}):
-        known_inv.add(inv)
-    for obj in (money_path_objects.get("economic_objects") or {}).values():
-        if isinstance(obj, dict):
-            for k in (obj.get("fields") or {}):
-                known_inv.add(k)
+    for inv_id in (money_path_ci.get("invariants") or {}):
+        if _INV_ID.match(str(inv_id)):
+            known_inv.add(inv_id)
+    # money_path_objects: any required_invariants list referenced under
+    # economic_objects / state_machines / etc. is a list of MP-* IDs.
+    def _collect_invariant_refs(node):
+        if isinstance(node, dict):
+            for k, v in node.items():
+                if k in ("required_invariants", "invariant_ids") and isinstance(v, list):
+                    for item in v:
+                        if isinstance(item, str) and _INV_ID.match(item):
+                            known_inv.add(item)
+                else:
+                    _collect_invariant_refs(v)
+        elif isinstance(node, list):
+            for item in node:
+                _collect_invariant_refs(item)
+    _collect_invariant_refs(money_path_objects)
+    _collect_invariant_refs(money_path_ci)
     for inv in (invariants_yaml.get("invariants") or []):
         if isinstance(inv, dict) and inv.get("id"):
-            known_inv.add(inv["id"])
+            iid = inv["id"]
+            if _INV_ID.match(str(iid)):
+                known_inv.add(iid)
     for inv in pack.get("active_invariants") or []:
         iid = inv.get("id")
         if iid and iid not in known_inv:

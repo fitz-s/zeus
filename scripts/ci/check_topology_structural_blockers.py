@@ -56,6 +56,7 @@ def run_enforcer(
     rule: dict,
     repo: Path,
     changed_files: list[str] | None,
+    context_packs_path: str | None = None,
 ) -> dict:
     """
     Invoke the enforcer script and capture its result.
@@ -110,6 +111,15 @@ def run_enforcer(
             "override_allowed": rule.get("override_allowed", True),
         }
     cmd = [sys.executable, str(enforcer_path), "--repo-root", str(repo)]
+    # Forward --context-packs to the integrity enforcer so pack-level rules
+    # (failure_chain_id_exists, surface_id_exists, etc.) actually run rather
+    # than only the enforcement-registry coherence checks. Other enforcers
+    # don't accept the flag, so we only pass it to the one that does.
+    if (
+        context_packs_path
+        and enforcer_path.name == "check_context_pack_integrity.py"
+    ):
+        cmd.extend(["--context-packs", context_packs_path])
     # Pass changed_files if the enforcer accepts it (we just try; if it errors
     # we fall back without).
     if changed_files is not None:
@@ -149,6 +159,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--changed-files", nargs="*", default=None)
     p.add_argument("--include", nargs="*", default=None,
                    help="Only run these rule_ids (default: all blocking_structural)")
+    p.add_argument("--context-packs", default=None,
+                   help="Path to context_packs JSON; forwarded to integrity enforcer "
+                        "so pack-level rules also run (not just enforcement registry)")
     p.add_argument("--strict", action="store_true",
                    help="Fail on any blocking rule, not just no_override")
     p.add_argument("--json", action="store_true")
@@ -170,7 +183,12 @@ def main(argv: list[str] | None = None) -> int:
 
     results: list[dict] = []
     for rule in rules:
-        results.append(run_enforcer(rule, repo, args.changed_files))
+        results.append(
+            run_enforcer(
+                rule, repo, args.changed_files,
+                context_packs_path=args.context_packs,
+            )
+        )
 
     # Treat skipped placeholders as informational, not failures.
     failures = [r for r in results if r["exit_code"] != 0 and not r.get("skipped")]

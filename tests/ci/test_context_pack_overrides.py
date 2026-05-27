@@ -199,3 +199,47 @@ def test_emits_json(tmp_path: Path):
     payload = json.loads(r.stdout)
     assert "violations" in payload
     assert payload["count"] >= 1
+
+
+# ---------------------------------------------------------------------------
+# Phase D.2 — --strict separates schema errors from rule violations
+# ---------------------------------------------------------------------------
+
+
+def test_strict_returns_2_on_schema_failure(tmp_path: Path):
+    """Phase D.2 fix: --strict makes "override entry not a dict" exit 2
+    instead of exit 1, so callers can distinguish malformed yaml from
+    well-formed-but-rule-violating overrides."""
+    arch = tmp_path / "architecture"
+    arch.mkdir()
+    (arch / "ci_overrides.yaml").write_text(
+        "schema_version: 1\n"
+        "overrides:\n"
+        "  - 'not a dict, just a string'\n"  # schema-level failure
+    )
+    (arch / "topology_enforcement.yaml").write_text(
+        "schema_version: 1\nblocking_structural: []\nno_override_rules: []\n"
+    )
+    r = _run(tmp_path, "--strict", today="2026-05-26")
+    assert r.returncode == 2, f"expected exit 2 on schema failure, got {r.returncode}: {r.stdout}"
+
+
+def test_strict_returns_1_on_rule_violation_only(tmp_path: Path):
+    """--strict does NOT change exit code for normal rule violations."""
+    repo = _build_repo(tmp_path, [_valid_override(owner="")])
+    r = _run(repo, "--strict", today="2026-05-26")
+    assert r.returncode == 1
+
+
+def test_non_strict_returns_1_on_schema_failure_too(tmp_path: Path):
+    """Without --strict, schema failures still produce exit 1."""
+    arch = tmp_path / "architecture"
+    arch.mkdir()
+    (arch / "ci_overrides.yaml").write_text(
+        "schema_version: 1\noverrides:\n  - 'not a dict'\n"
+    )
+    (arch / "topology_enforcement.yaml").write_text(
+        "schema_version: 1\nblocking_structural: []\nno_override_rules: []\n"
+    )
+    r = _run(repo=tmp_path, today="2026-05-26")
+    assert r.returncode == 1

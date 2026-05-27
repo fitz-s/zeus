@@ -355,13 +355,25 @@ def test_all_new_phase_d_tests_registered_in_test_topology():
 
 
 # ---------------------------------------------------------------------------
-# duplicate_active_authority
+# duplicate_active_authority — PARTIAL coverage; full enforcer is REVIEW_REQUIRED
 # ---------------------------------------------------------------------------
+#
+# The duplicate_active_authority rule says "two files cannot both claim active
+# authority for the same fact class". A real implementation would parse the
+# topology authority graph (architecture/topology.yaml, architecture/docs_registry.yaml,
+# scoped AGENTS files, etc.) and detect conflicting active_authority claims.
+# That's deferred to a Phase E+ dedicated enforcer (currently REVIEW_REQUIRED
+# in architecture/topology_enforcement.yaml).
+#
+# Below is a SMOKE check on one easy dimension: workflow names must be unique.
+# It's labeled accordingly and does NOT claim to cover the full rule.
 
 
-def test_no_duplicate_active_authority_in_workflows():
-    """Two files cannot both claim active authority for the same fact class.
-    Smoke check: each workflow has a unique name."""
+def test_workflow_names_are_unique_smoke():
+    """Smoke check related to duplicate_active_authority: each workflow yaml
+    has a unique top-level `name:` field. Full rule coverage (cross-file
+    authority graph) requires a dedicated enforcer (REVIEW_REQUIRED in
+    architecture/topology_enforcement.yaml#duplicate_active_authority)."""
     wf_dir = REPO_ROOT / ".github" / "workflows"
     names: dict[str, str] = {}
     import yaml
@@ -374,3 +386,24 @@ def test_no_duplicate_active_authority_in_workflows():
                 f"workflow name {name!r} duplicated: {names[name]} and {path.name}"
             )
             names[name] = path.name
+
+
+def test_duplicate_active_authority_rule_acknowledges_review_required():
+    """The duplicate_active_authority rule in topology_enforcement.yaml must
+    currently be REVIEW_REQUIRED until a dedicated enforcer ships. This
+    assertion prevents accidentally pointing it at the orchestrator (fork
+    bomb hazard) or at a script that doesn't actually implement it."""
+    import yaml
+    enforce_path = REPO_ROOT / "architecture" / "topology_enforcement.yaml"
+    with enforce_path.open() as f:
+        enforce = yaml.safe_load(f)
+    rule = next(
+        (r for r in (enforce.get("blocking_structural") or [])
+         if r.get("id") == "duplicate_active_authority"),
+        None,
+    )
+    assert rule is not None, "duplicate_active_authority rule must exist in yaml"
+    assert rule["enforcer"] == "REVIEW_REQUIRED", (
+        f"duplicate_active_authority enforcer must be REVIEW_REQUIRED "
+        f"until dedicated enforcer ships; got {rule['enforcer']!r}"
+    )

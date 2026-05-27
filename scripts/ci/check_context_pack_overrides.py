@@ -139,7 +139,15 @@ def validate_override(
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("--repo-root", default=str(REPO_ROOT))
-    p.add_argument("--strict", action="store_true")
+    p.add_argument(
+        "--strict",
+        action="store_true",
+        help=(
+            "Treat schema-level/type errors (override entry not a dict, "
+            "missing yaml file) as exit 2 instead of exit 1, so callers can "
+            "distinguish 'overrides malformed' from 'overrides violate rules'."
+        ),
+    )
     p.add_argument("--json", action="store_true")
     p.add_argument("--today", default=None, help="Override today's date (YYYY-MM-DD) for testing")
     args = p.parse_args(argv)
@@ -165,11 +173,14 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     findings: list[dict] = []
+    schema_failures: list[dict] = []
     seen_ids: set[str] = set()
     for override in (overrides_doc.get("overrides") or []):
         if not isinstance(override, dict):
-            findings.append({"override_id": None, "rule": "schema",
-                             "message": f"override entry not a dict: {override!r}"})
+            entry = {"override_id": None, "rule": "schema",
+                     "message": f"override entry not a dict: {override!r}"}
+            findings.append(entry)
+            schema_failures.append(entry)
             continue
         findings.extend(validate_override(override, no_override_rules, today, seen_ids))
 
@@ -184,7 +195,13 @@ def main(argv: list[str] | None = None) -> int:
             for f in findings:
                 print(f"  [{f['rule']}] {f.get('override_id','-')}: {f['message']}")
 
-    return 0 if not findings else 1
+    if not findings:
+        return 0
+    if args.strict and schema_failures:
+        # In strict mode, schema-level errors are a separate severity tier
+        # (exit 2) so callers can distinguish them from rule violations.
+        return 2
+    return 1
 
 
 if __name__ == "__main__":
