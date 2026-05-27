@@ -221,6 +221,9 @@ def verify_edli_live_promotion_artifact(
         return PromotionVerification(False, "EDLI_LIVE_PROMOTION_CAP_TRANSITION_MISSING")
     if aggregate_ids and not rows["user_or_reconcile_event_hashes"]:
         return PromotionVerification(False, "EDLI_LIVE_PROMOTION_USER_OR_RECONCILE_MISSING")
+    row_verification = _verify_promotion_eligible_confirmed_rows(rows["audit_rows"])
+    if row_verification is not None:
+        return PromotionVerification(False, row_verification)
     recomputed = summary.as_artifact()
     for volatile in ("generated_at",):
         recomputed.pop(volatile, None)
@@ -260,6 +263,21 @@ def verify_edli_live_promotion_artifact(
     if _pending_projection_count(conn, tuple(comparable.get("aggregate_ids") or ())) > 0:
         return PromotionVerification(False, "EDLI_LIVE_PROMOTION_PENDING_RECONCILE")
     return PromotionVerification(True)
+
+
+def _verify_promotion_eligible_confirmed_rows(rows: list[dict[str, Any]]) -> str | None:
+    for row in rows:
+        if row.get("order_lifecycle_state") != "CONFIRMED":
+            continue
+        if int(row.get("promotion_eligible") or 0) != 1:
+            return "EDLI_LIVE_PROMOTION_CONFIRMED_FILL_NOT_PROMOTION_ELIGIBLE"
+        if not str(row.get("expected_edge_source_certificate_hash") or "").strip():
+            return "EDLI_LIVE_PROMOTION_EXPECTED_EDGE_PROVENANCE_MISSING"
+        if not str(row.get("cost_basis_source_certificate_hash") or "").strip():
+            return "EDLI_LIVE_PROMOTION_COST_BASIS_PROVENANCE_MISSING"
+        if not str(row.get("fill_source_event_hash") or "").strip():
+            return "EDLI_LIVE_PROMOTION_FILL_PROVENANCE_MISSING"
+    return None
 
 
 def record_edli_live_profit_audit_from_aggregate(conn: sqlite3.Connection, aggregate_id: str) -> str | None:

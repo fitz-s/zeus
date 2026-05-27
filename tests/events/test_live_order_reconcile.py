@@ -308,6 +308,99 @@ def test_user_channel_ingestor_requires_message_hash_for_idempotency():
         )
 
 
+def test_user_channel_ingestor_requires_trade_message_hash_for_idempotency():
+    ledger = LiveOrderAggregateLedger(_conn())
+    _seed(ledger)
+
+    with pytest.raises(EdliUserChannelIngestorError, match="message_hash"):
+        append_user_channel_message(
+            ledger,
+            aggregate_id="event-1:intent-1",
+            message={
+                "source": "polymarket_user_channel",
+                "type": "trade",
+                "event_id": "event-1",
+                "final_intent_id": "intent-1",
+                "venue_order_id": "venue-1",
+                "trade_status": "CONFIRMED",
+            },
+            occurred_at=NOW,
+        )
+
+
+def test_user_channel_ingestor_rejects_message_hash_drift():
+    ledger = LiveOrderAggregateLedger(_conn())
+    _seed(ledger)
+    append_user_channel_message(
+        ledger,
+        aggregate_id="event-1:intent-1",
+        message={
+            "source": "polymarket_user_channel",
+            "type": "trade",
+            "event_id": "event-1",
+            "final_intent_id": "intent-1",
+            "venue_order_id": "venue-1",
+            "trade_status": "CONFIRMED",
+            "message_hash": "trade-msg-drift",
+        },
+        occurred_at=NOW,
+    )
+
+    with pytest.raises(EdliUserChannelIngestorError, match="EDLI_USER_CHANNEL_MESSAGE_HASH_DRIFT"):
+        append_user_channel_message(
+            ledger,
+            aggregate_id="event-2:intent-2",
+            message={
+                "source": "polymarket_user_channel",
+                "type": "trade",
+                "event_id": "event-2",
+                "final_intent_id": "intent-2",
+                "venue_order_id": "venue-1",
+                "trade_status": "CONFIRMED",
+                "message_hash": "trade-msg-drift",
+            },
+            occurred_at=NOW,
+        )
+
+
+def test_reconciled_without_submit_unknown_fails_append_law():
+    ledger = LiveOrderAggregateLedger(_conn())
+    _seed(ledger)
+
+    with pytest.raises(Exception, match="Reconciled requires SubmitUnknown"):
+        append_reconciled(
+            ledger,
+            aggregate_id="event-1:intent-1",
+            event_id="event-1",
+            final_intent_id="intent-1",
+            source="venue_reconcile",
+            pending_reconcile=False,
+            occurred_at=NOW,
+        )
+
+
+def test_cap_consumed_before_venue_authority_fails_append_law():
+    ledger = LiveOrderAggregateLedger(_conn())
+    _seed_command_without_submit_attempt(ledger)
+
+    with pytest.raises(Exception, match="CONSUMED requires VenueSubmitAcknowledged"):
+        ledger.append_event(
+            aggregate_id="event-1:intent-1",
+            event_type="CapTransitioned",
+            payload={
+                "event_id": "event-1",
+                "final_intent_id": "intent-1",
+                "execution_command_id": "command-1",
+                "execution_receipt_hash": "receipt-hash-1",
+                "to_status": "CONSUMED",
+                "projection_status": "CONSUMED",
+                "transition_reason": "CONFIRMED",
+            },
+            occurred_at=NOW,
+            source_authority="live_cap_ledger",
+        )
+
+
 def test_user_channel_reconcile_cycle_processes_authenticated_queue(monkeypatch, tmp_path):
     import src.main as main
 
@@ -427,6 +520,56 @@ def test_user_channel_reconcile_cycle_is_idempotent_for_duplicate_queue_messages
     check_conn = _conn(db_path)
     count = check_conn.execute(
         "SELECT COUNT(*) FROM edli_live_order_events WHERE event_type = 'UserOrderObserved'"
+    ).fetchone()[0]
+    assert count == 1
+
+
+def test_user_channel_reconcile_cycle_is_idempotent_for_duplicate_trade_messages(monkeypatch, tmp_path):
+    import src.main as main
+
+    db_path = tmp_path / "world.db"
+    conn = _conn(db_path)
+    ledger = LiveOrderAggregateLedger(conn)
+    _seed(ledger)
+    conn.commit()
+    queue_path = tmp_path / "user_channel.jsonl"
+    queue_path.write_text(
+        json.dumps(
+            {
+                "source": "polymarket_user_channel",
+                "type": "trade",
+                "aggregate_id": "event-1:intent-1",
+                "event_id": "event-1",
+                "final_intent_id": "intent-1",
+                "venue_order_id": "venue-1",
+                "trade_status": "CONFIRMED",
+                "message_hash": "trade-msg-1",
+                "occurred_at": NOW.isoformat(),
+            }
+        )
+        + "\n"
+    )
+    monkeypatch.setattr(
+        main,
+        "settings",
+        {
+            "edli_v1": {
+                "enabled": True,
+                "edli_user_channel_reconcile_enabled": True,
+                "edli_user_channel_message_queue_path": str(queue_path),
+                "edli_venue_reconcile_facts_path": "",
+            }
+        },
+    )
+    monkeypatch.setattr(main, "get_world_connection", lambda *args, **kwargs: _conn(db_path))
+    monkeypatch.setattr(main, "_write_scheduler_health", lambda *args, **kwargs: None)
+
+    main._edli_user_channel_reconcile_cycle.__wrapped__()
+    main._edli_user_channel_reconcile_cycle.__wrapped__()
+
+    check_conn = _conn(db_path)
+    count = check_conn.execute(
+        "SELECT COUNT(*) FROM edli_live_order_events WHERE event_type = 'UserTradeObserved'"
     ).fetchone()[0]
     assert count == 1
 

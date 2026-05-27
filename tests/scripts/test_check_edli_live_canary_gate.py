@@ -118,6 +118,90 @@ def test_db_verification_rejects_command_certificate_wrong_aggregate_hash():
     assert "CANARY_DB_EXECUTION_COMMAND_EVENT_HASH_MISMATCH" in result.reasons
 
 
+def test_db_verification_rejects_command_certificate_wrong_pre_submit_hash():
+    conn = _conn()
+    _seed_canary_db(conn)
+    payload = json.loads(
+        conn.execute(
+            "SELECT payload_json FROM decision_certificates WHERE certificate_id = ?",
+            ("cert-command-1",),
+        ).fetchone()["payload_json"]
+    )
+    payload["aggregate_pre_submit_event_hash"] = "wrong-pre-submit-event-hash"
+    conn.execute(
+        "UPDATE decision_certificates SET payload_json = ? WHERE certificate_id = ?",
+        (json.dumps(payload), "cert-command-1"),
+    )
+
+    result = evaluate_canary_artifact(_valid_artifact(), conn=conn)
+
+    assert result.status == FAIL
+    assert "CANARY_DB_PRE_SUBMIT_EVENT_HASH_MISMATCH" in result.reasons
+
+
+def test_db_verification_rejects_command_certificate_wrong_token():
+    conn = _conn()
+    _seed_canary_db(conn)
+    payload = json.loads(
+        conn.execute(
+            "SELECT payload_json FROM decision_certificates WHERE certificate_id = ?",
+            ("cert-command-1",),
+        ).fetchone()["payload_json"]
+    )
+    payload["token_id"] = "other-token"
+    conn.execute(
+        "UPDATE decision_certificates SET payload_json = ? WHERE certificate_id = ?",
+        (json.dumps(payload), "cert-command-1"),
+    )
+
+    result = evaluate_canary_artifact(_valid_artifact(), conn=conn)
+
+    assert result.status == FAIL
+    assert "CANARY_DB_COMMAND_CERT_TOKEN_ID_MISMATCH" in result.reasons
+
+
+def test_db_verification_rejects_live_cap_reserved_usage_mismatch():
+    conn = _conn()
+    _seed_canary_db(conn, live_cap_reserved_usage_id="other-usage")
+
+    result = evaluate_canary_artifact(_valid_artifact(), conn=conn)
+
+    assert result.status == FAIL
+    assert "CANARY_DB_LIVE_CAP_RESERVED_USAGE_MISMATCH" in result.reasons
+
+
+def test_db_verification_rejects_profit_audit_missing_provenance():
+    conn = _conn()
+    _seed_canary_db(conn)
+    conn.execute(
+        """
+        UPDATE edli_live_profit_audit
+        SET expected_edge_source_certificate_hash = NULL
+        WHERE aggregate_id = ?
+        """,
+        ("event-1:intent-1",),
+    )
+
+    result = evaluate_canary_artifact(_valid_artifact(), conn=conn)
+
+    assert result.status == FAIL
+    assert "CANARY_DB_PROFIT_AUDIT_PROVENANCE_MISSING:expected_edge_source_certificate_hash" in result.reasons
+
+
+def test_db_verification_rejects_profit_audit_not_promotion_eligible():
+    conn = _conn()
+    _seed_canary_db(conn)
+    conn.execute(
+        "UPDATE edli_live_profit_audit SET promotion_eligible = 0 WHERE aggregate_id = ?",
+        ("event-1:intent-1",),
+    )
+
+    result = evaluate_canary_artifact(_valid_artifact(), conn=conn)
+
+    assert result.status == FAIL
+    assert "CANARY_DB_PROFIT_AUDIT_NOT_PROMOTION_ELIGIBLE" in result.reasons
+
+
 def test_db_verification_rejects_command_certificate_missing_pre_submit_parent():
     conn = _conn()
     _seed_canary_db(conn)
@@ -181,7 +265,13 @@ def _valid_artifact(**overrides):
     return artifact
 
 
-def _seed_canary_db(conn: sqlite3.Connection, *, include_profit_audit: bool = True, token_id: str = "token-1") -> None:
+def _seed_canary_db(
+    conn: sqlite3.Connection,
+    *,
+    include_profit_audit: bool = True,
+    token_id: str = "token-1",
+    live_cap_reserved_usage_id: str = "usage-1",
+) -> None:
     now = datetime(2026, 5, 26, 12, tzinfo=timezone.utc)
     ledger = LiveOrderAggregateLedger(conn)
     ledger.append_event(
@@ -211,7 +301,7 @@ def _seed_canary_db(conn: sqlite3.Connection, *, include_profit_audit: bool = Tr
         payload={
             "event_id": "event-1",
             "final_intent_id": "intent-1",
-            "usage_id": "usage-1",
+            "usage_id": live_cap_reserved_usage_id,
             "reserved_notional_usd": 5.0,
             "reservation_status": "RESERVED",
         },

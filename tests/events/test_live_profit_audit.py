@@ -172,6 +172,56 @@ def test_confirmed_fill_requires_positive_realized_edge_for_scaleout(tmp_path):
     assert rejected.reason == "EDLI_LIVE_PROMOTION_REALIZED_EDGE_INSUFFICIENT"
 
 
+def test_confirmed_fill_must_be_promotion_eligible_for_scaleout(tmp_path):
+    conn = _conn()
+    _seed_confirmed_aggregate(conn)
+    conn.execute(
+        "UPDATE edli_live_profit_audit SET promotion_eligible = 0 WHERE aggregate_id = ?",
+        ("event-1:intent-1",),
+    )
+    artifact_path = tmp_path / "promotion.json"
+    write_promotion_artifact(conn, str(artifact_path))
+
+    rejected = verify_edli_live_promotion_artifact(
+        conn,
+        json.loads(artifact_path.read_text()),
+        min_canary_count=1,
+        max_unresolved_unknowns=0,
+        min_realized_edge_bps=0,
+    )
+    assert rejected.ok is False
+    assert rejected.reason == "EDLI_LIVE_PROMOTION_CONFIRMED_FILL_NOT_PROMOTION_ELIGIBLE"
+
+
+@pytest.mark.parametrize(
+    ("field", "reason"),
+    (
+        ("expected_edge_source_certificate_hash", "EDLI_LIVE_PROMOTION_EXPECTED_EDGE_PROVENANCE_MISSING"),
+        ("cost_basis_source_certificate_hash", "EDLI_LIVE_PROMOTION_COST_BASIS_PROVENANCE_MISSING"),
+        ("fill_source_event_hash", "EDLI_LIVE_PROMOTION_FILL_PROVENANCE_MISSING"),
+    ),
+)
+def test_confirmed_fill_requires_promotion_provenance_for_scaleout(tmp_path, field, reason):
+    conn = _conn()
+    _seed_confirmed_aggregate(conn)
+    conn.execute(
+        f"UPDATE edli_live_profit_audit SET {field} = NULL WHERE aggregate_id = ?",
+        ("event-1:intent-1",),
+    )
+    artifact_path = tmp_path / "promotion.json"
+    write_promotion_artifact(conn, str(artifact_path))
+
+    rejected = verify_edli_live_promotion_artifact(
+        conn,
+        json.loads(artifact_path.read_text()),
+        min_canary_count=1,
+        max_unresolved_unknowns=0,
+        min_realized_edge_bps=0,
+    )
+    assert rejected.ok is False
+    assert rejected.reason == reason
+
+
 def test_live_order_lifecycle_events_emit_profit_audit_rows():
     conn = _conn()
     ledger = _seed_confirmed_aggregate(conn)

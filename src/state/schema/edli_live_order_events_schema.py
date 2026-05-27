@@ -67,6 +67,17 @@ CREATE TABLE IF NOT EXISTS edli_live_order_projection (
 )
 """
 
+CREATE_USER_MESSAGE_DEDUP_SQL = """
+CREATE TABLE IF NOT EXISTS edli_user_channel_message_dedup (
+    message_hash TEXT NOT NULL PRIMARY KEY,
+    aggregate_id TEXT NOT NULL,
+    venue_order_id TEXT NOT NULL,
+    message_type TEXT NOT NULL,
+    observed_at TEXT NOT NULL,
+    created_at TEXT NOT NULL
+)
+"""
+
 CREATE_INDEX_SQL = """
 CREATE INDEX IF NOT EXISTS idx_edli_live_order_events_aggregate
     ON edli_live_order_events(aggregate_id, event_sequence)
@@ -86,6 +97,11 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_edli_live_order_user_msg_hash
     WHERE event_type IN ('UserOrderObserved', 'UserTradeObserved')
       AND json_extract(payload_json, '$.raw_user_channel_message_hash') IS NOT NULL
       AND json_extract(payload_json, '$.raw_user_channel_message_hash') != ''
+"""
+
+CREATE_USER_MESSAGE_DEDUP_AGGREGATE_INDEX_SQL = """
+CREATE INDEX IF NOT EXISTS idx_edli_user_channel_message_dedup_aggregate
+    ON edli_user_channel_message_dedup(aggregate_id, venue_order_id)
 """
 
 CREATE_PROJECTION_STATE_INDEX_SQL = """
@@ -113,9 +129,11 @@ END
 def ensure_tables(conn: sqlite3.Connection) -> None:
     conn.execute(CREATE_EVENTS_SQL)
     conn.execute(CREATE_PROJECTION_SQL)
+    conn.execute(CREATE_USER_MESSAGE_DEDUP_SQL)
     conn.execute(CREATE_INDEX_SQL)
     conn.execute(CREATE_TYPE_INDEX_SQL)
     conn.execute(CREATE_USER_MESSAGE_DEDUP_INDEX_SQL)
+    conn.execute(CREATE_USER_MESSAGE_DEDUP_AGGREGATE_INDEX_SQL)
     conn.execute(CREATE_PROJECTION_STATE_INDEX_SQL)
     conn.execute(CREATE_NO_UPDATE_TRIGGER_SQL)
     conn.execute(CREATE_NO_DELETE_TRIGGER_SQL)

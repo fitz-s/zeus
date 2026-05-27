@@ -1029,6 +1029,24 @@ tables:
       Deterministic projection of edli_live_order_events. The append-only event
       log remains source of truth; this table is rebuildable current state.
 
+  - name: edli_user_channel_message_dedup
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: message_hash
+    required_columns:
+      - {name: message_hash, type: TEXT, nullable: false}
+      - {name: aggregate_id, type: TEXT, nullable: false}
+      - {name: venue_order_id, type: TEXT, nullable: false}
+      - {name: message_type, type: TEXT, nullable: false}
+      - {name: observed_at, type: TEXT, nullable: false}
+      - {name: created_at, type: TEXT, nullable: false}
+    notes: >
+      Global EDLI authenticated user-channel message dedup ledger. It binds a
+      message_hash to exactly one aggregate/order/message kind before appending
+      UserOrderObserved or UserTradeObserved, making JSONL replay idempotent.
+
   - name: edli_live_profit_audit
     db: world
     schema_class: world_class

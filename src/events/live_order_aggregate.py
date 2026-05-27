@@ -169,28 +169,46 @@ class LiveOrderAggregateLedger:
             if existing["event_hash"] != event_hash:
                 raise LiveOrderAggregateError("live-order aggregate sequence collision")
             return _event_from_row(existing)
-        self.conn.execute(
-            """
-            INSERT INTO edli_live_order_events (
-                aggregate_event_id, aggregate_id, event_sequence, event_type,
-                parent_event_hash, event_hash, payload_json, payload_hash,
-                source_authority, occurred_at, created_at, schema_version
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
-            """,
-            (
-                aggregate_event_id,
-                aggregate_id,
-                next_sequence,
-                event_type,
-                parent_hash,
-                event_hash,
-                payload_json,
-                payload_hash,
-                source_authority,
-                _dt(occurred_at),
-                _dt(datetime.now(timezone.utc)),
-            ),
-        )
+        needs_user_dedup = event_type in {"UserOrderObserved", "UserTradeObserved"}
+        if needs_user_dedup:
+            self.conn.execute("SAVEPOINT edli_live_order_user_dedup_append")
+        try:
+            if needs_user_dedup:
+                self._reserve_user_channel_message_hash(
+                    aggregate_id=aggregate_id,
+                    event_type=event_type,
+                    payload=payload,
+                    occurred_at=occurred_at,
+                )
+            self.conn.execute(
+                """
+                INSERT INTO edli_live_order_events (
+                    aggregate_event_id, aggregate_id, event_sequence, event_type,
+                    parent_event_hash, event_hash, payload_json, payload_hash,
+                    source_authority, occurred_at, created_at, schema_version
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+                """,
+                (
+                    aggregate_event_id,
+                    aggregate_id,
+                    next_sequence,
+                    event_type,
+                    parent_hash,
+                    event_hash,
+                    payload_json,
+                    payload_hash,
+                    source_authority,
+                    _dt(occurred_at),
+                    _dt(datetime.now(timezone.utc)),
+                ),
+            )
+        except Exception:
+            if needs_user_dedup:
+                self.conn.execute("ROLLBACK TO SAVEPOINT edli_live_order_user_dedup_append")
+                self.conn.execute("RELEASE SAVEPOINT edli_live_order_user_dedup_append")
+            raise
+        if needs_user_dedup:
+            self.conn.execute("RELEASE SAVEPOINT edli_live_order_user_dedup_append")
         self.rebuild_projection(aggregate_id)
         if event_type in PROFIT_AUDIT_TRIGGER_EVENTS:
             from src.events.live_profit_audit import record_edli_live_profit_audit_from_aggregate
@@ -411,6 +429,8 @@ class LiveOrderAggregateLedger:
         if event_type == "CapTransitioned":
             command_row = self._require_latest_row_of_type(aggregate_id, "ExecutionCommandCreated", event_type)
             self._require_command_binding(event_type, payload, command_row)
+            if not str(payload.get("execution_receipt_hash") or "").strip():
+                raise LiveOrderAggregateError("CapTransitioned requires execution_receipt_hash")
             to_status = str(payload.get("to_status") or "")
             reason = str(payload.get("transition_reason") or payload.get("reason_code") or "")
             if to_status == "PENDING_RECONCILE" and self._latest_row_of_type(aggregate_id, "SubmitUnknown") is None:
@@ -500,6 +520,50 @@ class LiveOrderAggregateLedger:
         ).fetchone()
         if duplicate is not None:
             raise LiveOrderAggregateError("duplicate user-channel message hash for aggregate")
+
+    def _reserve_user_channel_message_hash(
+        self,
+        *,
+        aggregate_id: str,
+        event_type: str,
+        payload: dict[str, Any],
+        occurred_at: datetime,
+    ) -> None:
+        message_hash = str(payload.get("raw_user_channel_message_hash") or "").strip()
+        venue_order_id = str(payload.get("venue_order_id") or "").strip()
+        message_type = "order" if event_type == "UserOrderObserved" else "trade"
+        existing = self.conn.execute(
+            """
+            SELECT aggregate_id, venue_order_id, message_type
+            FROM edli_user_channel_message_dedup
+            WHERE message_hash = ?
+            """,
+            (message_hash,),
+        ).fetchone()
+        if existing is not None:
+            if (
+                str(existing["aggregate_id"]) != aggregate_id
+                or str(existing["venue_order_id"]) != venue_order_id
+                or str(existing["message_type"]) != message_type
+            ):
+                raise LiveOrderAggregateError("EDLI_USER_CHANNEL_MESSAGE_HASH_DRIFT")
+            raise LiveOrderAggregateError("duplicate user-channel message hash for aggregate")
+        self.conn.execute(
+            """
+            INSERT INTO edli_user_channel_message_dedup (
+                message_hash, aggregate_id, venue_order_id, message_type,
+                observed_at, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                message_hash,
+                aggregate_id,
+                venue_order_id,
+                message_type,
+                _dt(occurred_at),
+                _dt(datetime.now(timezone.utc)),
+            ),
+        )
 
 
 def _event_from_row(row: sqlite3.Row) -> LiveOrderAggregateEvent:

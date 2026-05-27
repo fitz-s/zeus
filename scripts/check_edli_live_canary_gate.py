@@ -193,10 +193,28 @@ def _db_verification_reasons(conn: sqlite3.Connection, artifact: dict[str, Any])
         reasons.append("CANARY_DB_CAP_TRANSITION_MISSING")
     if not any(row["event_type"] in {"UserOrderObserved", "UserTradeObserved", "Reconciled"} for row in events):
         reasons.append("CANARY_DB_USER_OR_RECONCILE_MISSING")
+    live_cap_reserved = _payload_for_event(events, "LiveCapReserved")
+    if live_cap_usage_id and live_cap_reserved and str(live_cap_reserved.get("usage_id") or "") != live_cap_usage_id:
+        reasons.append("CANARY_DB_LIVE_CAP_RESERVED_USAGE_MISMATCH")
     if live_cap_usage_id and not _table_has_row(conn, "edli_live_cap_usage", "usage_id", live_cap_usage_id):
         reasons.append("CANARY_DB_LIVE_CAP_USAGE_MISSING")
-    if not _table_has_row(conn, "edli_live_profit_audit", "aggregate_id", aggregate_id):
+    profit_audit_row = _profit_audit_row(conn, aggregate_id)
+    if profit_audit_row is None:
         reasons.append("CANARY_DB_PROFIT_AUDIT_MISSING")
+    else:
+        if int(profit_audit_row["promotion_eligible"] or 0) != 1:
+            reasons.append("CANARY_DB_PROFIT_AUDIT_NOT_PROMOTION_ELIGIBLE")
+        missing_provenance = [
+            field
+            for field in (
+                "expected_edge_source_certificate_hash",
+                "cost_basis_source_certificate_hash",
+                "fill_source_event_hash",
+            )
+            if not str(profit_audit_row[field] or "").strip()
+        ]
+        if missing_provenance:
+            reasons.append("CANARY_DB_PROFIT_AUDIT_PROVENANCE_MISSING:" + ",".join(missing_provenance))
     command_cert = _execution_command_certificate(conn, execution_command_id)
     if command_cert is None:
         reasons.append("CANARY_DB_EXECUTION_COMMAND_CERTIFICATE_MISSING")
@@ -217,7 +235,7 @@ def _db_verification_reasons(conn: sqlite3.Connection, artifact: dict[str, Any])
         for field in ("condition_id", "token_id", "side", "direction"):
             if cert_payload.get(field) is not None and str(cert_payload.get(field)) != str(artifact.get(field)):
                 reasons.append(f"CANARY_DB_COMMAND_CERT_{field.upper()}_MISMATCH")
-        if live_cap_usage_id and cert_payload.get("live_cap_usage_id") not in {None, live_cap_usage_id}:
+        if live_cap_usage_id and cert_payload.get("live_cap_usage_id") != live_cap_usage_id:
             reasons.append("CANARY_DB_COMMAND_CERT_LIVE_CAP_USAGE_MISMATCH")
         parent_types = set(command_cert["parent_types"])
         for required_parent in (
@@ -236,6 +254,22 @@ def _db_verification_reasons(conn: sqlite3.Connection, artifact: dict[str, Any])
         if quote_age_ms is not None and int(pre_submit.get("quote_age_ms", quote_age_ms)) != quote_age_ms:
             reasons.append("CANARY_DB_QUOTE_AGE_MISMATCH")
     return reasons
+
+
+def _profit_audit_row(conn: sqlite3.Connection, aggregate_id: str) -> sqlite3.Row | None:
+    try:
+        return conn.execute(
+            """
+            SELECT *
+            FROM edli_live_profit_audit
+            WHERE aggregate_id = ?
+            ORDER BY created_at DESC, audit_id DESC
+            LIMIT 1
+            """,
+            (aggregate_id,),
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return None
 
 
 def _table_has_row(conn: sqlite3.Connection, table: str, column: str, value: str) -> bool:
