@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -89,41 +90,43 @@ class LiveCapLedger:
             ):
                 raise LiveCapError("live cap reservation drift for event/cap_scope")
             return reservation
-        used = self.conn.execute(
-            """
-            SELECT COUNT(*)
-            FROM edli_live_cap_usage
-            WHERE cap_scope = ?
-              AND substr(decision_time, 1, 10) = substr(?, 1, 10)
-              AND reservation_status IN ('RESERVED','CONSUMED')
-            """,
-            (cap_scope, decision_text),
-        ).fetchone()[0]
-        if int(used) >= max_orders_per_day:
-            raise LiveCapError("live cap max_orders_per_day exhausted")
-        self.conn.execute(
-            """
-            INSERT INTO edli_live_cap_usage (
-                usage_id, event_id, decision_time, cap_scope,
-                max_notional_usd, max_orders_per_day, reserved_notional_usd,
-                order_count, reservation_status, final_intent_id,
-                execution_command_id, created_at, schema_version
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'RESERVED', ?, ?, ?, 1)
-            """,
-            (
-                usage_id,
-                event_id,
-                decision_text,
-                cap_scope,
-                float(max_notional_usd),
-                int(max_orders_per_day),
-                float(requested_notional_usd),
-                int(used) + 1,
-                final_intent_id,
-                execution_command_id,
-                created_at,
-            ),
+        cap_date = decision_text[:10]
+        slot = self._reserve_day_slot(
+            usage_id=usage_id,
+            event_id=event_id,
+            cap_scope=cap_scope,
+            cap_date=cap_date,
+            max_orders_per_day=max_orders_per_day,
+            created_at=created_at,
         )
+        try:
+            self.conn.execute(
+                """
+                INSERT INTO edli_live_cap_usage (
+                    usage_id, event_id, decision_time, cap_scope,
+                    max_notional_usd, max_orders_per_day, reserved_notional_usd,
+                    order_count, reservation_status, final_intent_id,
+                    execution_command_id, created_at, schema_version
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'RESERVED', ?, ?, ?, 1)
+                """,
+                (
+                    usage_id,
+                    event_id,
+                    decision_text,
+                    cap_scope,
+                    float(max_notional_usd),
+                    int(max_orders_per_day),
+                    float(requested_notional_usd),
+                    int(slot),
+                    final_intent_id,
+                    execution_command_id,
+                    created_at,
+                ),
+            )
+        except Exception:
+            with contextlib.suppress(Exception):
+                self.conn.execute("DELETE FROM edli_live_cap_day_slots WHERE usage_id = ?", (usage_id,))
+            raise
         return self.get(usage_id)
 
     def release(self, usage_id: str, reason: str | None = None) -> None:
@@ -144,6 +147,7 @@ class LiveCapLedger:
             """,
             (usage_id,),
         )
+        self.conn.execute("DELETE FROM edli_live_cap_day_slots WHERE usage_id = ?", (usage_id,))
 
     def consume(self, usage_id: str, *, final_intent_id: str, execution_command_id: str) -> None:
         if not final_intent_id or not execution_command_id:
@@ -179,6 +183,45 @@ class LiveCapLedger:
     @staticmethod
     def _usage_id(event_id: str, cap_scope: str) -> str:
         return "edli_live_cap:" + stable_hash({"event_id": event_id, "cap_scope": cap_scope})[:32]
+
+    def _reserve_day_slot(
+        self,
+        *,
+        usage_id: str,
+        event_id: str,
+        cap_scope: str,
+        cap_date: str,
+        max_orders_per_day: int,
+        created_at: str,
+    ) -> int:
+        existing = self.conn.execute(
+            """
+            SELECT slot, usage_id
+            FROM edli_live_cap_day_slots
+            WHERE event_id = ? AND cap_scope = ?
+            """,
+            (event_id, cap_scope),
+        ).fetchone()
+        if existing is not None:
+            slot = int(existing["slot"] if isinstance(existing, sqlite3.Row) else existing[0])
+            existing_usage_id = str(existing["usage_id"] if isinstance(existing, sqlite3.Row) else existing[1])
+            if existing_usage_id != usage_id:
+                raise LiveCapError("live cap day slot drift for event/cap_scope")
+            return slot
+        for slot in range(1, int(max_orders_per_day) + 1):
+            try:
+                self.conn.execute(
+                    """
+                    INSERT INTO edli_live_cap_day_slots (
+                        cap_scope, cap_date, slot, usage_id, event_id, created_at, schema_version
+                    ) VALUES (?, ?, ?, ?, ?, ?, 1)
+                    """,
+                    (cap_scope, cap_date, slot, usage_id, event_id, created_at),
+                )
+                return slot
+            except sqlite3.IntegrityError:
+                continue
+        raise LiveCapError("live cap max_orders_per_day exhausted")
 
 
 def _reservation_from_row(row) -> LiveCapReservation:

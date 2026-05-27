@@ -982,6 +982,25 @@ tables:
       this table for event-bound live canary reservation, release, and consume
       state before execution-command persistence.
 
+  - name: edli_live_cap_day_slots
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: "[cap_scope, cap_date, slot]"
+    required_columns:
+      - {name: cap_scope, type: TEXT, nullable: false}
+      - {name: cap_date, type: TEXT, nullable: false}
+      - {name: slot, type: INTEGER, nullable: false}
+      - {name: usage_id, type: TEXT, nullable: false}
+      - {name: event_id, type: TEXT, nullable: false}
+      - {name: created_at, type: TEXT, nullable: false}
+      - {name: schema_version, type: INTEGER, nullable: false}
+    notes: >
+      Atomic live-cap day-slot guard. The composite primary key
+      (cap_scope, cap_date, slot) prevents count-then-insert races from
+      oversubscribing tiny live-canary daily order capacity.
+
   - name: edli_live_order_events
     db: world
     schema_class: world_class

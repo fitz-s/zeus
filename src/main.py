@@ -227,12 +227,20 @@ def evaluate_edli_stage_readiness(
         reasons.extend(_edli_stage_loaded_sha_reasons(loaded_sha_file))
     conn = _edli_stage_world_connection(world_db_path)
     try:
-        unresolved = _edli_stage_pending_reconcile_count(conn)
-        if unresolved:
-            reasons.append(f"EDLI_STAGE_UNRESOLVED_SUBMIT_UNKNOWN:{unresolved}")
-        reserved = _edli_stage_open_cap_reservation_count(conn)
-        if reserved:
-            reasons.append(f"EDLI_STAGE_LIVE_CAP_RESERVED:{reserved}")
+        try:
+            unresolved = _edli_stage_pending_reconcile_count(conn)
+        except RuntimeError as exc:
+            reasons.append(str(exc))
+        else:
+            if unresolved:
+                reasons.append(f"EDLI_STAGE_UNRESOLVED_SUBMIT_UNKNOWN:{unresolved}")
+        try:
+            reserved = _edli_stage_open_cap_reservation_count(conn)
+        except RuntimeError as exc:
+            reasons.append(str(exc))
+        else:
+            if reserved:
+                reasons.append(f"EDLI_STAGE_LIVE_CAP_RESERVED:{reserved}")
         if source_health_json:
             reasons.extend(
                 _edli_stage_fresh_file_reasons(
@@ -368,8 +376,8 @@ def _edli_stage_pending_reconcile_count(conn) -> int:
             WHERE pending_reconcile = 1
             """
         ).fetchone()
-    except Exception:
-        return 0
+    except Exception as exc:
+        raise RuntimeError(f"EDLI_STAGE_PENDING_RECONCILE_QUERY_FAILED:{type(exc).__name__}") from exc
     return int(row[0] if row else 0)
 
 
@@ -410,8 +418,8 @@ def _edli_stage_open_cap_reservation_count(conn) -> int:
             WHERE reservation_status = 'RESERVED'
             """
         ).fetchone()
-    except Exception:
-        return 0
+    except Exception as exc:
+        raise RuntimeError(f"EDLI_STAGE_OPEN_CAP_QUERY_FAILED:{type(exc).__name__}") from exc
     return int(row[0] if row else 0)
 
 

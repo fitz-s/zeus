@@ -31,7 +31,27 @@ CREATE INDEX IF NOT EXISTS idx_edli_live_cap_usage_scope_time
     ON edli_live_cap_usage(cap_scope, decision_time)
 """
 
+CREATE_DAY_SLOTS_SQL = """
+CREATE TABLE IF NOT EXISTS edli_live_cap_day_slots (
+    cap_scope TEXT NOT NULL,
+    cap_date TEXT NOT NULL,
+    slot INTEGER NOT NULL CHECK (slot > 0),
+    usage_id TEXT NOT NULL UNIQUE,
+    event_id TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    schema_version INTEGER NOT NULL CHECK (schema_version >= 1),
+    PRIMARY KEY (cap_scope, cap_date, slot)
+)
+"""
+
+CREATE_DAY_SLOTS_EVENT_INDEX_SQL = """
+CREATE UNIQUE INDEX IF NOT EXISTS idx_edli_live_cap_day_slots_event
+    ON edli_live_cap_day_slots(event_id, cap_scope)
+"""
+
 
 def ensure_table(conn: sqlite3.Connection) -> None:
     conn.execute(CREATE_TABLE_SQL)
     conn.execute(CREATE_CAP_DATE_INDEX_SQL)
+    conn.execute(CREATE_DAY_SLOTS_SQL)
+    conn.execute(CREATE_DAY_SLOTS_EVENT_INDEX_SQL)

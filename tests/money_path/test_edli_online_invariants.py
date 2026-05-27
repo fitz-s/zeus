@@ -1,5 +1,5 @@
 # Created: 2026-05-24
-# Last reused/audited: 2026-05-24
+# Last reused/audited: 2026-05-27
 # Authority basis: EDLI PR332 deploy-ready review; Day0 must not be advertised
 # live while the online observation-context hook is absent.
 from __future__ import annotations
@@ -500,6 +500,39 @@ def test_edli_live_canary_stage_readiness_blocks_open_cap_reservation(monkeypatc
     assert any(reason.startswith("EDLI_STAGE_LIVE_CAP_RESERVED") for reason in report.reasons)
 
 
+def test_edli_live_canary_stage_readiness_fails_closed_on_missing_projection(monkeypatch, tmp_path):
+    import src.main as main
+
+    db_path = tmp_path / "world.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute("CREATE TABLE placeholder (id TEXT)")
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(main, "get_world_connection_read_only", lambda *args, **kwargs: _stage_conn(db_path))
+
+    report = main.evaluate_edli_stage_readiness(stage="edli_live_canary")
+
+    assert report.status == "FAIL"
+    assert any(reason.startswith("EDLI_STAGE_PENDING_RECONCILE_QUERY_FAILED") for reason in report.reasons)
+
+
+def test_edli_live_canary_stage_readiness_fails_closed_on_missing_cap_usage(monkeypatch, tmp_path):
+    import src.main as main
+    from src.state.schema.edli_live_order_events_schema import ensure_tables as ensure_live_order_tables
+
+    db_path = tmp_path / "world.db"
+    conn = sqlite3.connect(db_path)
+    ensure_live_order_tables(conn)
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(main, "get_world_connection_read_only", lambda *args, **kwargs: _stage_conn(db_path))
+
+    report = main.evaluate_edli_stage_readiness(stage="edli_live_canary")
+
+    assert report.status == "FAIL"
+    assert any(reason.startswith("EDLI_STAGE_OPEN_CAP_QUERY_FAILED") for reason in report.reasons)
+
+
 def test_edli_live_canary_stage_readiness_blocks_stale_source(monkeypatch, tmp_path):
     import src.main as main
 
@@ -743,6 +776,12 @@ def _run_main_with_fake_scheduler(monkeypatch, edli_updates, *, world_db_path=No
     def _conn():
         conn = sqlite3.connect(world_db_path or ":memory:")
         conn.row_factory = sqlite3.Row
+        if world_db_path is None:
+            from src.state.schema.edli_live_cap_usage_schema import ensure_table as ensure_live_cap_table
+            from src.state.schema.edli_live_order_events_schema import ensure_tables as ensure_live_order_tables
+
+            ensure_live_order_tables(conn)
+            ensure_live_cap_table(conn)
         return conn
 
     monkeypatch.setattr(main, "get_world_connection", lambda *args, **kwargs: _conn())
@@ -801,10 +840,12 @@ def _write_db_backed_promotion_artifact(tmp_path, *, realized_edge: float, audit
     from src.events.live_order_aggregate import LiveOrderAggregateLedger
     from src.events.live_profit_audit import write_promotion_artifact
     from src.state.schema.decision_certificates_schema import ensure_tables as ensure_decision_certificate_tables
+    from src.state.schema.edli_live_cap_usage_schema import ensure_table as ensure_live_cap_table
 
     db_path = tmp_path / "world.db"
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
+    ensure_live_cap_table(conn)
     _seed_promotion_authority_certificates(conn, ensure_decision_certificate_tables=ensure_decision_certificate_tables)
     now = datetime(2026, 5, 26, 12, tzinfo=timezone.utc)
     ledger = LiveOrderAggregateLedger(conn)
@@ -1055,8 +1096,10 @@ def _stage_conn(path) -> sqlite3.Connection:
 
 def _init_stage_world_db(path) -> sqlite3.Connection:
     from src.state.schema.edli_live_order_events_schema import ensure_tables as ensure_live_order_tables
+    from src.state.schema.edli_live_cap_usage_schema import ensure_table as ensure_live_cap_table
 
     conn = _stage_conn(path)
     ensure_live_order_tables(conn)
+    ensure_live_cap_table(conn)
     conn.commit()
     return conn

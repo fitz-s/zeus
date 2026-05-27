@@ -1,5 +1,5 @@
 # Created: 2026-05-25
-# Last reused or audited: 2026-05-25
+# Last reused or audited: 2026-05-27
 # Authority basis: docs/operations/edli_v1/EDLI_REDEMPTION_FINAL_PACKAGE_SPEC.md §14 full-live increment.
 from __future__ import annotations
 
@@ -96,6 +96,63 @@ def test_live_cap_blocks_second_canary_order():
         )
 
 
+def test_live_cap_day_slot_blocks_second_connection_same_day(tmp_path):
+    db_path = tmp_path / "cap.db"
+    first_conn = _file_conn(db_path)
+    second_conn = _file_conn(db_path)
+    first = LiveCapLedger(first_conn)
+    second = LiveCapLedger(second_conn)
+
+    first.reserve(
+        event_id="event-1",
+        decision_time=NOW,
+        cap_scope="live_canary",
+        requested_notional_usd=5.0,
+        max_notional_usd=5.0,
+        max_orders_per_day=1,
+    )
+    first_conn.commit()
+
+    with pytest.raises(LiveCapError, match="max_orders_per_day"):
+        second.reserve(
+            event_id="event-2",
+            decision_time=NOW,
+            cap_scope="live_canary",
+            requested_notional_usd=1.0,
+            max_notional_usd=5.0,
+            max_orders_per_day=1,
+        )
+
+    assert first_conn.execute("SELECT COUNT(*) FROM edli_live_cap_day_slots").fetchone()[0] == 1
+
+
+def test_live_cap_release_frees_day_slot_for_pre_command_failure(tmp_path):
+    db_path = tmp_path / "cap.db"
+    conn = _file_conn(db_path)
+    ledger = LiveCapLedger(conn)
+
+    first = ledger.reserve(
+        event_id="event-1",
+        decision_time=NOW,
+        cap_scope="live_canary",
+        requested_notional_usd=5.0,
+        max_notional_usd=5.0,
+        max_orders_per_day=1,
+    )
+    ledger.release(first.usage_id, "final_intent_failed")
+    second = ledger.reserve(
+        event_id="event-2",
+        decision_time=NOW,
+        cap_scope="live_canary",
+        requested_notional_usd=1.0,
+        max_notional_usd=5.0,
+        max_orders_per_day=1,
+    )
+
+    assert second.order_count == 1
+    assert conn.execute("SELECT COUNT(*) FROM edli_live_cap_day_slots").fetchone()[0] == 1
+
+
 def test_live_cap_blocks_notional_above_limit():
     ledger = LiveCapLedger(_conn())
 
@@ -163,5 +220,11 @@ def test_timeout_unknown_does_not_release_cap_without_reconcile():
 
 def _conn() -> sqlite3.Connection:
     conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def _file_conn(path) -> sqlite3.Connection:
+    conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row
     return conn
