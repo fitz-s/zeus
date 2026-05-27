@@ -47,6 +47,43 @@ _CREATE_TABLE = re.compile(
 )
 
 
+# Only scan paths that actually define DB schema. Other files (test fixtures,
+# error-message strings inside this script, doc examples) may contain literal
+# "CREATE TABLE" tokens without declaring a real table. False positives there
+# would no-override-block every PR that mentions SQL in test code.
+#
+# fnmatch does NOT treat `**` specially (treats it as `*`), so we use prefix +
+# suffix matching instead.
+import fnmatch as _fnmatch
+_SCHEMA_PATH_PREFIXES = (
+    "src/state/schema/",
+    "scripts/migrations/",
+)
+_SCHEMA_FILENAME_GLOBS = (
+    "scripts/migrate_*.py",
+)
+_SCHEMA_SUFFIXES = (".sql",)
+
+
+def _path_is_schema_defining(path: str) -> bool:
+    if any(path.startswith(p) for p in _SCHEMA_PATH_PREFIXES):
+        return True
+    if path.endswith(_SCHEMA_SUFFIXES):
+        return True
+    for pat in _SCHEMA_FILENAME_GLOBS:
+        if _fnmatch.fnmatch(path, pat):
+            return True
+    return False
+
+
+# Reserved SQL keywords that match \w+ but aren't real table names. Filters
+# false positives like "CREATE TABLE for ..." in docstrings.
+_SQL_RESERVED = frozenset({
+    "for", "as", "from", "where", "select", "if", "not", "exists",
+    "when", "and", "or", "join", "on", "into", "values",
+})
+
+
 def _changed_files_from_git(base: str, head: str) -> list[str]:
     try:
         out = subprocess.run(
@@ -96,11 +133,14 @@ def detect_new_tables(
     findings: list[dict] = []
     seen_new: set[tuple[str, str]] = set()
     for fp in changed_files:
+        # Restrict to actual schema-defining paths. Literal "CREATE TABLE"
+        # tokens elsewhere (test fixtures, docstrings, error messages,
+        # this script itself) are not real declarations and were producing
+        # no_override false positives that blocked every Phase D PR.
+        if not _path_is_schema_defining(fp):
+            continue
         full = repo / fp
         if not full.exists():
-            continue
-        suffix = full.suffix.lower()
-        if suffix not in (".py", ".sql", ".yaml"):
             continue
         try:
             text = full.read_text()
@@ -111,6 +151,9 @@ def detect_new_tables(
             # Skip common SQLite system / temp tables
             if name.startswith("sqlite_") or name in ("temp", "tmp"):
                 continue
+            # Skip SQL reserved-word false positives (CREATE TABLE for / as ...)
+            if name in _SQL_RESERVED:
+                continue
             if name not in known:
                 key = (fp, name)
                 if key not in seen_new:
@@ -118,7 +161,7 @@ def detect_new_tables(
                     findings.append({
                         "file": fp,
                         "table": name,
-                        "reason": "CREATE TABLE for unregistered table",
+                        "reason": "unregistered DB table",
                     })
     return findings
 

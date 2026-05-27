@@ -135,16 +135,73 @@ def test_db_table_delta_silent_on_known_table(tmp_path: Path):
     (tmp_path / "architecture" / "db_table_ownership.yaml").write_text(
         "schema_version: 1\nzeus_world:\n  known_table_a: {}\n"
     )
-    src = tmp_path / "src"
-    src.mkdir()
-    (src / "schema.py").write_text(
+    src = tmp_path / "src" / "state" / "schema"
+    src.mkdir(parents=True)
+    (src / "table_known.py").write_text(
         'sql = "CREATE TABLE known_table_a (id INTEGER)"\n'
     )
     r = _run(
         "check_db_table_delta.py",
         "--repo-root", str(tmp_path),
-        "--changed-files", "src/schema.py",
+        "--changed-files", "src/state/schema/table_known.py",
     )
+    assert r.returncode == 0
+
+
+def test_db_table_delta_ignores_test_fixture_strings(tmp_path: Path):
+    """Phase D.1 antibody: PR #345 false positive — regex matched CREATE TABLE
+    literal strings inside test fixtures and this script's own docstring.
+    Restrict scanner to schema-defining paths so non-schema files with literal
+    CREATE TABLE tokens (test fixtures, error messages) are not flagged."""
+    (tmp_path / "architecture").mkdir()
+    (tmp_path / "architecture" / "db_table_ownership.yaml").write_text(
+        "schema_version: 1\nzeus_world: {}\n"
+    )
+    # Test file outside src/state/schema/ — should be ignored even with CREATE TABLE
+    tests = tmp_path / "tests"
+    tests.mkdir()
+    (tests / "test_fixture.py").write_text(
+        'def test_x(tmp_path):\n'
+        '    sql = "CREATE TABLE fixture_table_a (id INTEGER)"\n'
+        '    # And a docstring example: CREATE TABLE for unregistered table\n'
+    )
+    # Script file outside schema dirs — also ignored
+    ci = tmp_path / "scripts" / "ci"
+    ci.mkdir(parents=True)
+    (ci / "fake_check.py").write_text(
+        '"""Comment about CREATE TABLE handling."""\n'
+    )
+    r = _run(
+        "check_db_table_delta.py",
+        "--repo-root", str(tmp_path),
+        "--changed-files",
+        "tests/test_fixture.py", "scripts/ci/fake_check.py",
+    )
+    assert r.returncode == 0, f"false positive regression: {r.stdout}"
+
+
+def test_db_table_delta_sql_reserved_words_not_treated_as_tables(tmp_path: Path):
+    """`CREATE TABLE for ...` in docstring should never produce a finding
+    named `for`."""
+    (tmp_path / "architecture").mkdir()
+    (tmp_path / "architecture" / "db_table_ownership.yaml").write_text(
+        "schema_version: 1\nzeus_world: {}\n"
+    )
+    schema = tmp_path / "src" / "state" / "schema"
+    schema.mkdir(parents=True)
+    # Schema file with malformed/docstring SQL — reserved keyword should be skipped
+    (schema / "weird.py").write_text(
+        '"""Note: CREATE TABLE for unregistered would be bad."""\n'
+        '# CREATE TABLE as if we forgot\n'
+    )
+    r = _run(
+        "check_db_table_delta.py",
+        "--repo-root", str(tmp_path),
+        "--changed-files", "src/state/schema/weird.py",
+    )
+    # Reserved words ("for", "as") must not produce findings
+    assert "table 'for'" not in r.stdout.lower()
+    assert "table 'as'" not in r.stdout.lower()
     assert r.returncode == 0
 
 
