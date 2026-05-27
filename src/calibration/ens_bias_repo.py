@@ -367,19 +367,44 @@ def read_bias_model(
     metric: str,
     live_data_version: str | None = None,
     month: int | None = None,
+    error_model_family: str | None = None,
 ) -> sqlite3.Row | None:
     """Read a bias row. ``live_data_version`` is REQUIRED — there is no
-    'latest across data versions' fallback (that would serve the wrong product)."""
+    'latest across data versions' fallback (that would serve the wrong product).
+
+    Zeus #64 FT-ship F4 (2026-05-26): when ``error_model_family`` is supplied
+    the query also filters ``error_model_family = ?`` AND ``authority = 'VERIFIED'``
+    so STAGING / LEGACY rows can never leak into the live FT path.  The filter is
+    applied only when the canonical-extension columns are present (PRAGMA guard);
+    on a schema that predates F2 migration the call degrades to the base filter.
+    No ``is_active`` column exists — authority + family are the discriminators.
+    Authority: docs/operations/FT_SHIP_EXECUTION_LEDGER_2026-05-25.md F4.
+    """
     if not live_data_version:
         raise ValueError(
             "read_bias_model requires an exact live_data_version (no latest-row fallback "
             "— serving the wrong product's bias is a correctness hazard)"
         )
-    return conn.execute(
+
+    base_sql = (
         "SELECT * FROM model_bias_ens_v2 WHERE city=? AND season=? AND metric=? "
-        "AND live_data_version=? AND month=?",
-        (city, season, metric, live_data_version, (0 if month is None else int(month))),
-    ).fetchone()
+        "AND live_data_version=? AND month=?"
+    )
+    base_params: tuple = (city, season, metric, live_data_version, (0 if month is None else int(month)))
+
+    if error_model_family is not None:
+        # Check canonical columns exist before adding the filter (defensive for DBs
+        # that haven't been migrated yet — treats them as having no matching VERIFIED row).
+        existing = {r[1] for r in conn.execute("PRAGMA table_info(model_bias_ens_v2)").fetchall()}
+        if "error_model_family" not in existing or "authority" not in existing:
+            # Schema predates F2 migration — no VERIFIED rows possible.
+            return None
+        return conn.execute(
+            base_sql + " AND error_model_family=? AND authority='VERIFIED'",
+            base_params + (error_model_family,),
+        ).fetchone()
+
+    return conn.execute(base_sql, base_params).fetchone()
 
 
 _LEGACY_NULL_CONTRIBUTOR_SQL = (
