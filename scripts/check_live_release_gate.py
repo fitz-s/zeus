@@ -392,6 +392,7 @@ def evaluate_release_gate(args: argparse.Namespace) -> ReleaseGateReport:
         _check_fresh_file("status_summary", args.status_json, max_age_seconds=args.status_max_age_seconds, now=now),
         _check_paper_proof(args.paper_proof_json),
     ]
+    results.extend(_edli_stage_results(args))
     passed = sum(1 for result in results if result.status == PASS)
     status = PASS if passed == len(results) else FAIL
     live_entries_allowed, submit_allowed, scaleout_allowed, gate_basis = _stage_allowance(
@@ -408,6 +409,83 @@ def evaluate_release_gate(args: argparse.Namespace) -> ReleaseGateReport:
         scaleout_allowed=scaleout_allowed,
         gate_basis=gate_basis,
         results=tuple(results),
+    )
+
+
+def _edli_stage_results(args: argparse.Namespace) -> list[GateResult]:
+    stage = str(args.stage)
+    if stage not in {"edli_submit_disabled_bridge", "edli_live_canary", "edli_live"}:
+        return []
+    import src.main as main
+
+    if args.expected_sha:
+        main._BOOT_STATE["sha"] = str(args.expected_sha)
+
+    report = main.evaluate_edli_stage_readiness(
+        stage=stage,
+        world_db_path=str(args.world_db),
+        trade_db_path=str(args.trade_db),
+        forecasts_db_path=str(args.forecasts_db),
+        loaded_sha_file=str(args.loaded_sha_file) if args.loaded_sha_file else "",
+        canary_artifact_path=str(args.canary_artifact_json) if args.canary_artifact_json else "",
+        promotion_artifact_path=str(args.promotion_artifact_json) if args.promotion_artifact_json else "",
+        source_health_json=str(args.source_health_json),
+        status_json=str(args.status_json),
+        max_age_seconds=min(int(args.source_max_age_seconds), int(args.status_max_age_seconds)),
+    )
+    if stage == "edli_live_canary":
+        ok = report.status in {main.EDLI_STAGE_PASS, main.EDLI_STAGE_WAITING} and report.submit_allowed
+        return [
+            GateResult(
+                "edli_stage_readiness",
+                PASS if ok else FAIL,
+                f"status={report.status}:submit_allowed={report.submit_allowed}:reasons={list(report.reasons)}",
+            )
+        ]
+    if stage == "edli_submit_disabled_bridge":
+        ok = report.status in {main.EDLI_STAGE_PASS, main.EDLI_STAGE_WAITING} and not report.submit_allowed
+        return [
+            GateResult(
+                "edli_stage_readiness",
+                PASS if ok else FAIL,
+                f"status={report.status}:submit_allowed={report.submit_allowed}:reasons={list(report.reasons)}",
+            )
+        ]
+    results = [
+        GateResult(
+            "edli_stage_readiness",
+            PASS if report.status == main.EDLI_STAGE_PASS else FAIL,
+            f"status={report.status}:scaleout_allowed={report.scaleout_allowed}:reasons={list(report.reasons)}",
+        )
+    ]
+    results.append(_check_edli_promotion_artifact(args))
+    return results
+
+
+def _check_edli_promotion_artifact(args: argparse.Namespace) -> GateResult:
+    if not args.promotion_artifact_json:
+        return GateResult("edli_promotion_artifact", FAIL, "missing_promotion_artifact_path")
+    if not args.promotion_artifact_json.exists():
+        return GateResult("edli_promotion_artifact", FAIL, f"missing:{args.promotion_artifact_json}")
+    from src.events.live_profit_audit import verify_edli_live_promotion_artifact
+
+    conn = sqlite3.connect(str(args.world_db))
+    conn.row_factory = sqlite3.Row
+    try:
+        artifact = json.loads(args.promotion_artifact_json.read_text())
+        verified = verify_edli_live_promotion_artifact(
+            conn,
+            artifact,
+            min_canary_count=int(args.edli_live_min_canary_count),
+            max_unresolved_unknowns=int(args.edli_live_max_unresolved_unknowns),
+            min_realized_edge_bps=float(args.edli_live_min_realized_edge_bps),
+        )
+    finally:
+        conn.close()
+    return GateResult(
+        "edli_promotion_artifact",
+        PASS if verified.ok else FAIL,
+        verified.reason,
     )
 
 
@@ -528,6 +606,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--source-health-json", type=Path, default=ROOT / "state" / "source_health.json")
     parser.add_argument("--status-json", type=Path, default=ROOT / "state" / "status_summary.json")
     parser.add_argument("--paper-proof-json", type=Path, default=ROOT / "state" / "paper_money_path_proof.json")
+    parser.add_argument("--canary-artifact-json", type=Path)
+    parser.add_argument("--promotion-artifact-json", type=Path)
+    parser.add_argument("--edli-live-min-canary-count", type=int, default=1)
+    parser.add_argument("--edli-live-max-unresolved-unknowns", type=int, default=0)
+    parser.add_argument("--edli-live-min-realized-edge-bps", type=float, default=0.0)
     parser.add_argument("--source-max-age-seconds", type=int, default=15 * 60)
     parser.add_argument("--status-max-age-seconds", type=int, default=15 * 60)
     parser.add_argument("--allow-redeem-command", action="append", default=[])

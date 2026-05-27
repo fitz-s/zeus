@@ -284,14 +284,28 @@ def test_spoofed_lifecycle_realized_edge_is_ignored():
 
 def test_realized_edge_computes_sell_yes_proceeds_semantics():
     conn = _conn()
-    _seed_authority_certificates(conn)
+    _seed_authority_certificates(
+        conn,
+        cert_overrides={
+            ("cost", "side"): "SELL",
+            ("edge", "side"): "SELL",
+        },
+    )
 
     realized = compute_realized_edge_from_authorities(
         conn=conn,
         cost_model_cert_hash="cost-hash-1",
         expected_edge_cert_hash="actionable-hash-1",
         fill_event_hash="fill-event-hash-1",
-        pre_submit={"side": "SELL", "direction": "YES", "requested_size": 100.0},
+        pre_submit={
+            "condition_id": "condition-1",
+            "token_id": "token-1",
+            "side": "SELL",
+            "direction": "YES",
+            "native_token_side": "YES",
+            "order_policy": "maker_post_only",
+            "requested_size": 100.0,
+        },
         fill_payload={"avg_fill_price": 0.47, "filled_size": 5.0, "fees": 0.01},
     )
 
@@ -309,13 +323,49 @@ def test_realized_edge_partial_fill_uses_filled_size_not_requested_size():
         cost_model_cert_hash="cost-hash-1",
         expected_edge_cert_hash="actionable-hash-1",
         fill_event_hash="fill-event-hash-1",
-        pre_submit={"side": "BUY", "direction": "YES", "requested_size": 100.0},
+        pre_submit={
+            "condition_id": "condition-1",
+            "token_id": "token-1",
+            "side": "BUY",
+            "direction": "YES",
+            "native_token_side": "YES",
+            "order_policy": "maker_post_only",
+            "requested_size": 100.0,
+        },
         fill_payload={"avg_fill_price": 0.44, "filled_size": 2.0, "fees": 0.0},
     )
 
     assert realized is not None
     assert realized["realized_edge"] == pytest.approx(0.01)
     assert realized["pnl_usd"] == pytest.approx(0.02)
+
+
+@pytest.mark.parametrize(
+    ("cert_kind", "field", "value"),
+    (
+        ("cost", "condition_id", "other-condition"),
+        ("cost", "token_id", "other-token"),
+        ("edge", "token_id", "other-token"),
+        ("edge", "direction", "NO"),
+        ("cost", "native_token_side", "NO"),
+    ),
+)
+def test_certificate_identity_mismatch_blocks_promotion_eligibility(cert_kind, field, value):
+    conn = _conn()
+    _seed_authority_certificates(conn, cert_overrides={(cert_kind, field): value})
+    _seed_confirmed_aggregate(conn, seed_certificates=False)
+
+    row = conn.execute(
+        """
+        SELECT realized_edge, promotion_eligible
+        FROM edli_live_profit_audit
+        WHERE aggregate_id = ? AND order_lifecycle_state = 'CONFIRMED'
+        """,
+        ("event-1:intent-1",),
+    ).fetchone()
+
+    assert row["realized_edge"] is None
+    assert row["promotion_eligible"] == 0
 
 
 def test_confirmed_fill_without_fill_economics_is_not_promotion_eligible():
@@ -356,9 +406,11 @@ def _seed_confirmed_aggregate(
     realized_edge: float = 0.01,
     include_fill_economics: bool = True,
     seed_cost_certificate: bool = True,
+    seed_certificates: bool = True,
     spoofed_lifecycle_realized_edge: float | None = None,
 ) -> LiveOrderAggregateLedger:
-    _seed_authority_certificates(conn, include_cost=seed_cost_certificate)
+    if seed_certificates:
+        _seed_authority_certificates(conn, include_cost=seed_cost_certificate)
     ledger = LiveOrderAggregateLedger(conn)
     now = "2026-05-26T12:00:00+00:00"
     from datetime import datetime
@@ -475,14 +527,47 @@ def _seed_confirmed_aggregate(
     return ledger
 
 
-def _seed_authority_certificates(conn: sqlite3.Connection, *, include_cost: bool = True) -> None:
+def _seed_authority_certificates(
+    conn: sqlite3.Connection,
+    *,
+    include_cost: bool = True,
+    cert_overrides: dict[tuple[str, str], object] | None = None,
+) -> None:
     ensure_decision_certificate_tables(conn)
+    cert_overrides = cert_overrides or {}
+    edge_payload = {
+        "q_live": 0.45,
+        "expected_edge": 0.029,
+        "condition_id": "condition-1",
+        "token_id": "token-1",
+        "side": "BUY",
+        "direction": "YES",
+        "native_token_side": "YES",
+        "order_policy": "maker_post_only",
+    }
+    cost_payload = {
+        "expected_cost_basis": 0.421,
+        "expected_fee": 0.001,
+        "expected_spread_cost": 0.0005,
+        "visible_depth_fill_lcb": 0.95,
+        "order_policy": "maker_post_only",
+        "native_token_side": "YES",
+        "condition_id": "condition-1",
+        "token_id": "token-1",
+        "side": "BUY",
+        "direction": "YES",
+    }
+    for (kind, field), value in cert_overrides.items():
+        if kind == "edge":
+            edge_payload[field] = value
+        elif kind == "cost":
+            cost_payload[field] = value
     rows = [
         (
             "actionable-cert-1",
             "ActionableTradeCertificate",
             "actionable-hash-1",
-            {"q_live": 0.45, "expected_edge": 0.029, "condition_id": "condition-1", "token_id": "token-1"},
+            edge_payload,
         )
     ]
     if include_cost:
@@ -491,14 +576,7 @@ def _seed_authority_certificates(conn: sqlite3.Connection, *, include_cost: bool
                 "cost-cert-1",
                 "ExecutableCostCertificate",
                 "cost-hash-1",
-                {
-                    "expected_cost_basis": 0.421,
-                    "expected_fee": 0.001,
-                    "expected_spread_cost": 0.0005,
-                    "visible_depth_fill_lcb": 0.95,
-                    "order_policy": "maker_post_only",
-                    "native_token_side": "YES",
-                },
+                cost_payload,
             )
         )
     for certificate_id, certificate_type, certificate_hash, payload in rows:

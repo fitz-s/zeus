@@ -193,10 +193,58 @@ def test_release_gate_is_stage_aware_for_edli_modes(tmp_path: Path) -> None:
     live_args = _make_gate_args(live_root)
     live_args.stage = "edli_live"
     live = evaluate_release_gate(live_args)
-    assert live.status == PASS
-    assert live.live_entries_allowed is True
-    assert live.submit_allowed is True
-    assert live.scaleout_allowed is True
+    assert live.status == FAIL
+    assert live.live_entries_allowed is False
+    assert live.submit_allowed is False
+    assert live.scaleout_allowed is False
+    assert any(
+        result.name == "edli_promotion_artifact" and result.status == FAIL
+        for result in live.results
+    )
+
+
+def test_release_gate_canary_blocks_pending_reconcile(tmp_path: Path) -> None:
+    from src.state.schema.edli_live_order_events_schema import ensure_tables
+
+    args = _make_gate_args(tmp_path)
+    args.stage = "edli_live_canary"
+    conn = sqlite3.connect(str(args.world_db))
+    try:
+        ensure_tables(conn)
+        conn.execute(
+            """
+            INSERT INTO edli_live_order_projection (
+                aggregate_id, event_id, final_intent_id, current_state, last_sequence,
+                last_event_type, last_event_hash, pending_reconcile, venue_order_id,
+                updated_at, schema_version
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "event-1:intent-1",
+                "event-1",
+                "intent-1",
+                "SUBMIT_UNKNOWN",
+                1,
+                "SubmitUnknown",
+                "hash-1",
+                1,
+                "venue-1",
+                datetime.now(timezone.utc).isoformat(),
+                1,
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    report = evaluate_release_gate(args)
+
+    assert report.status == FAIL
+    assert report.submit_allowed is False
+    assert any(
+        result.name == "edli_stage_readiness" and "EDLI_STAGE_UNRESOLVED_SUBMIT_UNKNOWN" in result.detail
+        for result in report.results
+    )
 
 
 def test_release_gate_fails_on_loaded_sha_mismatch(tmp_path: Path) -> None:

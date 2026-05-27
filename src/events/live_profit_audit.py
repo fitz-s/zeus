@@ -397,6 +397,10 @@ def compute_realized_edge_from_authorities(
     edge_payload = _load_verified_certificate_payload(conn, expected_edge_cert_hash)
     if cost_payload is None or edge_payload is None:
         return None
+    if not _certificate_identity_matches_pre_submit(cost_payload, pre_submit):
+        return None
+    if not _certificate_identity_matches_pre_submit(edge_payload, pre_submit):
+        return None
     side = str(pre_submit.get("side") or "").upper()
     if side not in {"BUY", "SELL"}:
         return None
@@ -452,6 +456,23 @@ def _load_verified_certificate_payload(conn: sqlite3.Connection, certificate_has
         return json.loads(str(row["payload_json"] if isinstance(row, sqlite3.Row) else row[0]))
     except json.JSONDecodeError:
         return None
+
+
+def _certificate_identity_matches_pre_submit(payload: dict[str, Any], pre_submit: dict[str, Any]) -> bool:
+    for field in ("condition_id", "token_id"):
+        if str(payload.get(field) or "") != str(pre_submit.get(field) or ""):
+            return False
+    for field in ("side", "direction", "native_token_side", "order_policy"):
+        value = payload.get(field)
+        if value in (None, ""):
+            continue
+        expected = pre_submit.get(field)
+        if field in {"side", "direction", "native_token_side"}:
+            if str(value).upper() != str(expected or "").upper():
+                return False
+        elif str(value) != str(expected or ""):
+            return False
+    return True
 
 
 def _float_or_none(value: Any) -> float | None:

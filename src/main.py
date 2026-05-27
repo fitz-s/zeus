@@ -93,6 +93,24 @@ EDLI_STAGE_RISK_REASON_PREFIXES = (
     "EDLI_STAGE_STATUS_SUMMARY_STALE",
     "EDLI_STAGE_STATUS_SUMMARY_MISSING",
 )
+REQUIRED_STAGE_FILES_BY_MODE = {
+    "edli_submit_disabled_bridge": (
+        "edli_stage_loaded_sha_file",
+        "edli_stage_source_health_json",
+        "edli_stage_status_json",
+    ),
+    "edli_live_canary": (
+        "edli_stage_loaded_sha_file",
+        "edli_stage_source_health_json",
+        "edli_stage_status_json",
+    ),
+    "edli_live": (
+        "edli_stage_loaded_sha_file",
+        "edli_stage_source_health_json",
+        "edli_stage_status_json",
+        "edli_live_promotion_artifact_path",
+    ),
+}
 
 # PR-S6 deployment freshness gate — mutable container populated in main() at boot.
 # Tests monkeypatch this dict directly; scheduler job reads it each tick.
@@ -293,6 +311,7 @@ def _assert_edli_stage_readiness(edli_cfg: dict) -> EdliStageReadiness:
     stage = _live_execution_mode(edli_cfg)
     if stage in {"legacy_cron", "disabled"}:
         return EdliStageReadiness(stage=stage, status=EDLI_STAGE_PASS, live_entries_allowed=False)
+    _require_stage_file_paths(edli_cfg, stage)
     report = evaluate_edli_stage_readiness(
         stage=stage,
         world_db_path=str(_settings_section("state", {}).get("world_db", "")) if isinstance(_settings_section("state", {}), dict) else None,
@@ -319,6 +338,16 @@ def _assert_edli_stage_readiness(edli_cfg: dict) -> EdliStageReadiness:
     if stage == "edli_live" and (report.status != EDLI_STAGE_PASS or report.scaleout_allowed is not True):
         raise RuntimeError("EDLI_LIVE_SCALEOUT_READINESS_FAIL:" + ",".join(report.reasons or (report.status,)))
     return report
+
+
+def _require_stage_file_paths(edli_cfg: dict, stage: str) -> None:
+    missing = [
+        key
+        for key in REQUIRED_STAGE_FILES_BY_MODE.get(stage, ())
+        if not str(edli_cfg.get(key) or "").strip()
+    ]
+    if missing:
+        raise RuntimeError(f"{stage.upper()}_REQUIRES_STAGE_EVIDENCE_FILES:{','.join(missing)}")
 
 
 def _edli_stage_pending_reconcile_count(conn) -> int:

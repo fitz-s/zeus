@@ -161,7 +161,7 @@ def test_live_execution_mode_legacy_cron_does_not_register_edli_reactor(monkeypa
     assert settings_copy["edli_v1"]["live_execution_mode"] == "legacy_cron"
 
 
-def test_pr332_scoped_daemon_restart_smoke_registers_event_driven_no_legacy_cron(monkeypatch):
+def test_pr332_scoped_daemon_restart_smoke_registers_event_driven_no_legacy_cron(monkeypatch, tmp_path):
     scheduler, settings_copy = _run_main_with_fake_scheduler(
         monkeypatch,
         {
@@ -176,6 +176,7 @@ def test_pr332_scoped_daemon_restart_smoke_registers_event_driven_no_legacy_cron
             "edli_user_channel_reconcile_enabled": True,
             "real_order_submit_enabled": False,
             "taker_fok_fak_live_enabled": False,
+            **_stage_evidence_updates(tmp_path),
         },
     )
 
@@ -356,6 +357,14 @@ def test_live_canary_requires_submit_and_canary_flags(monkeypatch):
         )
 
 
+def test_live_canary_requires_stage_evidence_file_paths(monkeypatch):
+    with pytest.raises(RuntimeError, match="EDLI_LIVE_CANARY_REQUIRES_STAGE_EVIDENCE_FILES"):
+        _run_main_with_fake_scheduler(
+            monkeypatch,
+            _edli_live_canary_updates(),
+        )
+
+
 def test_edli_live_canary_stage_readiness_waits_on_clean_db(monkeypatch, tmp_path):
     import src.main as main
 
@@ -372,6 +381,20 @@ def test_edli_live_canary_stage_readiness_waits_on_clean_db(monkeypatch, tmp_pat
     assert report.live_entries_allowed is True
     assert report.submit_allowed is True
     assert report.scaleout_allowed is False
+
+
+def test_edli_live_canary_with_stage_evidence_waits_for_qualifying_event(monkeypatch, tmp_path):
+    scheduler, settings_copy = _run_main_with_fake_scheduler(
+        monkeypatch,
+        _edli_live_canary_updates(**_stage_evidence_updates(tmp_path)),
+    )
+
+    job_ids = {job.id for job in scheduler.jobs}
+    assert scheduler.started is True
+    assert "edli_event_reactor" in job_ids
+    assert "edli_market_channel_ingestor" in job_ids
+    assert "edli_user_channel_reconcile" in job_ids
+    assert settings_copy["edli_v1"]["live_execution_mode"] == "edli_live_canary"
 
 
 def test_edli_live_canary_boot_runs_stage_readiness_before_registering_edli_jobs(monkeypatch):
@@ -602,7 +625,7 @@ def test_edli_live_accepts_positive_promotion_artifact(monkeypatch, tmp_path):
 
     scheduler, settings_copy = _run_main_with_fake_scheduler(
         monkeypatch,
-        _edli_live_updates(edli_live_promotion_artifact_path=str(artifact)),
+        _edli_live_updates(edli_live_promotion_artifact_path=str(artifact), **_stage_evidence_updates(tmp_path)),
         world_db_path=db_path,
     )
 
@@ -756,6 +779,22 @@ def _run_main_with_fake_scheduler(monkeypatch, edli_updates, *, world_db_path=No
     return FakeScheduler.instances[-1], settings_copy
 
 
+def _stage_evidence_updates(tmp_path):
+    loaded = tmp_path / "loaded_sha.json"
+    source = tmp_path / "source_health.json"
+    status = tmp_path / "status_summary.json"
+    now = "2026-05-26T12:00:00+00:00"
+    loaded.write_text(json.dumps({"loaded_sha": "abc123"}))
+    source.write_text(json.dumps({"generated_at": now}))
+    status.write_text(json.dumps({"generated_at": now}))
+    return {
+        "edli_stage_loaded_sha_file": str(loaded),
+        "edli_stage_source_health_json": str(source),
+        "edli_stage_status_json": str(status),
+        "edli_stage_readiness_max_age_seconds": 365 * 24 * 60 * 60,
+    }
+
+
 def _write_db_backed_promotion_artifact(tmp_path, *, realized_edge: float, audit_state: str | None = None):
     from datetime import datetime, timezone
 
@@ -896,7 +935,16 @@ def _seed_promotion_authority_certificates(conn, *, ensure_decision_certificate_
             "actionable-cert-1",
             "ActionableTradeCertificate",
             "actionable-hash-1",
-            {"q_live": 0.45, "expected_edge": 0.029, "condition_id": "condition-1", "token_id": "token-1"},
+            {
+                "q_live": 0.45,
+                "expected_edge": 0.029,
+                "condition_id": "condition-1",
+                "token_id": "token-1",
+                "side": "BUY",
+                "direction": "YES",
+                "native_token_side": "YES",
+                "order_policy": "maker_post_only",
+            },
         ),
         (
             "cost-cert-1",
@@ -909,6 +957,10 @@ def _seed_promotion_authority_certificates(conn, *, ensure_decision_certificate_
                 "visible_depth_fill_lcb": 0.95,
                 "order_policy": "maker_post_only",
                 "native_token_side": "YES",
+                "condition_id": "condition-1",
+                "token_id": "token-1",
+                "side": "BUY",
+                "direction": "YES",
             },
         ),
     )
