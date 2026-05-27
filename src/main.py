@@ -26,6 +26,7 @@ import signal
 import sys
 import threading
 import time
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -81,10 +82,29 @@ EDLI_RUNTIME_FLAGS = (
     "market_channel_ingestor_enabled",
     "edli_user_channel_reconcile_enabled",
 )
+EDLI_STAGE_PASS = "PASS"
+EDLI_STAGE_WAITING = "WAITING_FOR_QUALIFYING_EVENT"
+EDLI_STAGE_FAIL = "FAIL"
+EDLI_STAGE_RISK_REASON_PREFIXES = (
+    "EDLI_STAGE_UNRESOLVED_SUBMIT_UNKNOWN",
+    "EDLI_STAGE_LIVE_CAP_RESERVED",
+    "EDLI_STAGE_SOURCE_HEALTH_STALE",
+    "EDLI_STAGE_SOURCE_HEALTH_MISSING",
+    "EDLI_STAGE_STATUS_SUMMARY_STALE",
+    "EDLI_STAGE_STATUS_SUMMARY_MISSING",
+)
 
 # PR-S6 deployment freshness gate — mutable container populated in main() at boot.
 # Tests monkeypatch this dict directly; scheduler job reads it each tick.
 _BOOT_STATE: dict = {"sha": None, "ts": None}
+
+
+@dataclass(frozen=True)
+class EdliStageReadiness:
+    stage: str
+    status: str
+    live_entries_allowed: bool
+    reasons: tuple[str, ...] = ()
 
 
 def _utc_run_time_after(seconds: float) -> datetime:
@@ -105,6 +125,16 @@ def _live_execution_mode(edli_cfg: dict) -> str:
     if mode not in LIVE_EXECUTION_MODES:
         raise ValueError(f"UNSUPPORTED_LIVE_EXECUTION_MODE:{mode}")
     return mode
+
+
+def _settings_section(name: str, default=None):
+    source = settings._data if hasattr(settings, "_data") else settings
+    if isinstance(source, dict):
+        return source.get(name, default)
+    try:
+        return source[name]
+    except KeyError:
+        return default
 
 
 def _edli_runtime_requested(edli_cfg: dict) -> bool:
@@ -152,6 +182,202 @@ def _assert_edli_live_promotion_artifact(edli_cfg: dict) -> None:
         conn.close()
     if not verified.ok:
         raise RuntimeError(verified.reason)
+
+
+def evaluate_edli_stage_readiness(
+    *,
+    stage: str,
+    world_db_path: str | None = None,
+    trade_db_path: str | None = None,
+    forecasts_db_path: str | None = None,
+    loaded_sha_file: str | None = None,
+    canary_artifact_path: str | None = None,
+    promotion_artifact_path: str | None = None,
+    source_health_json: str | None = None,
+    status_json: str | None = None,
+    max_age_seconds: int = 15 * 60,
+) -> EdliStageReadiness:
+    del trade_db_path, forecasts_db_path, promotion_artifact_path
+    if stage in {"legacy_cron", "disabled"}:
+        return EdliStageReadiness(stage=stage, status=EDLI_STAGE_PASS, live_entries_allowed=False)
+
+    reasons: list[str] = []
+    now = datetime.now(timezone.utc)
+    if loaded_sha_file:
+        reasons.extend(_edli_stage_loaded_sha_reasons(loaded_sha_file))
+    conn = _edli_stage_world_connection(world_db_path)
+    try:
+        unresolved = _edli_stage_pending_reconcile_count(conn)
+        if unresolved:
+            reasons.append(f"EDLI_STAGE_UNRESOLVED_SUBMIT_UNKNOWN:{unresolved}")
+        reserved = _edli_stage_open_cap_reservation_count(conn)
+        if reserved:
+            reasons.append(f"EDLI_STAGE_LIVE_CAP_RESERVED:{reserved}")
+        if source_health_json:
+            reasons.extend(
+                _edli_stage_fresh_file_reasons(
+                    name="SOURCE_HEALTH",
+                    path=source_health_json,
+                    max_age_seconds=max_age_seconds,
+                    now=now,
+                )
+            )
+        if status_json:
+            reasons.extend(
+                _edli_stage_fresh_file_reasons(
+                    name="STATUS_SUMMARY",
+                    path=status_json,
+                    max_age_seconds=max_age_seconds,
+                    now=now,
+                )
+            )
+        if stage == "edli_live_canary":
+            from scripts.check_edli_live_canary_gate import (
+                CANARY_PROFIT_PASS,
+                CANARY_SAFETY_PASS,
+                FAIL,
+                WAITING_FOR_QUALIFYING_EVENT,
+                evaluate_canary_artifact,
+                load_canary_artifact,
+            )
+
+            artifact = load_canary_artifact(canary_artifact_path) if canary_artifact_path else None
+            canary = evaluate_canary_artifact(
+                artifact,
+                max_quote_age_ms=int(_settings_section("edli_v1", {}).get("pre_submit_max_quote_age_ms", 1000)),
+                conn=conn if artifact is not None else None,
+            )
+            if canary.status == FAIL:
+                reasons.extend(f"EDLI_STAGE_CANARY_GATE:{reason}" for reason in canary.reasons)
+            elif canary.status == WAITING_FOR_QUALIFYING_EVENT:
+                if not reasons:
+                    return EdliStageReadiness(
+                        stage=stage,
+                        status=EDLI_STAGE_WAITING,
+                        live_entries_allowed=False,
+                        reasons=tuple(canary.reasons),
+                    )
+            elif canary.status not in {CANARY_SAFETY_PASS, CANARY_PROFIT_PASS}:
+                reasons.append(f"EDLI_STAGE_CANARY_GATE_UNSUPPORTED:{canary.status}")
+    finally:
+        conn.close()
+
+    if reasons:
+        return EdliStageReadiness(stage=stage, status=EDLI_STAGE_FAIL, live_entries_allowed=False, reasons=tuple(reasons))
+    if stage == "edli_submit_disabled_bridge":
+        return EdliStageReadiness(stage=stage, status=EDLI_STAGE_PASS, live_entries_allowed=False)
+    if stage == "edli_shadow_no_submit":
+        return EdliStageReadiness(stage=stage, status=EDLI_STAGE_PASS, live_entries_allowed=False)
+    return EdliStageReadiness(stage=stage, status=EDLI_STAGE_PASS, live_entries_allowed=True)
+
+
+def _assert_edli_stage_readiness(edli_cfg: dict) -> EdliStageReadiness:
+    stage = _live_execution_mode(edli_cfg)
+    if stage in {"legacy_cron", "disabled"}:
+        return EdliStageReadiness(stage=stage, status=EDLI_STAGE_PASS, live_entries_allowed=False)
+    report = evaluate_edli_stage_readiness(
+        stage=stage,
+        world_db_path=str(_settings_section("state", {}).get("world_db", "")) if isinstance(_settings_section("state", {}), dict) else None,
+        trade_db_path=str(_settings_section("state", {}).get("trade_db", "")) if isinstance(_settings_section("state", {}), dict) else None,
+        forecasts_db_path=str(_settings_section("state", {}).get("forecasts_db", "")) if isinstance(_settings_section("state", {}), dict) else None,
+        loaded_sha_file=str(edli_cfg.get("edli_stage_loaded_sha_file") or ""),
+        canary_artifact_path=str(edli_cfg.get("edli_live_canary_artifact_path") or ""),
+        promotion_artifact_path=str(edli_cfg.get("edli_live_promotion_artifact_path") or ""),
+        source_health_json=str(edli_cfg.get("edli_stage_source_health_json") or ""),
+        status_json=str(edli_cfg.get("edli_stage_status_json") or ""),
+        max_age_seconds=int(edli_cfg.get("edli_stage_readiness_max_age_seconds", 15 * 60)),
+    )
+    if stage in {"edli_shadow_no_submit", "edli_submit_disabled_bridge"}:
+        if report.status not in {EDLI_STAGE_PASS, EDLI_STAGE_WAITING} or report.live_entries_allowed:
+            raise RuntimeError("EDLI_STAGE_READINESS_FAILED:" + ",".join(report.reasons or (report.status,)))
+        return report
+    if stage == "edli_live_canary":
+        risk_reasons = [reason for reason in report.reasons if reason.startswith(EDLI_STAGE_RISK_REASON_PREFIXES)]
+        if report.status not in {EDLI_STAGE_PASS, EDLI_STAGE_WAITING} or risk_reasons:
+            raise RuntimeError("EDLI_STAGE_READINESS_FAILED:" + ",".join(report.reasons or (report.status,)))
+        return report
+    if stage == "edli_live" and report.status != EDLI_STAGE_PASS:
+        raise RuntimeError("EDLI_STAGE_READINESS_FAILED:" + ",".join(report.reasons or (report.status,)))
+    return report
+
+
+def _edli_stage_pending_reconcile_count(conn) -> int:
+    try:
+        row = conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM edli_live_order_projection
+            WHERE pending_reconcile = 1
+            """
+        ).fetchone()
+    except Exception:
+        return 0
+    return int(row[0] if row else 0)
+
+
+def _edli_stage_world_connection(world_db_path: str | None):
+    if world_db_path:
+        import sqlite3
+
+        db_path = Path(world_db_path)
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        conn.row_factory = sqlite3.Row
+        return conn
+    return get_world_connection_read_only()
+
+
+def _edli_stage_loaded_sha_reasons(path: str) -> list[str]:
+    file_path = Path(path)
+    if not file_path.exists():
+        return [f"EDLI_STAGE_LOADED_SHA_MISSING:{path}"]
+    try:
+        payload = json.loads(file_path.read_text())
+    except json.JSONDecodeError:
+        return [f"EDLI_STAGE_LOADED_SHA_INVALID_JSON:{path}"]
+    loaded_sha = str(payload.get("loaded_sha") or payload.get("boot_sha") or payload.get("current_sha") or "").strip()
+    expected_sha = str(_BOOT_STATE.get("sha") or "").strip()
+    if expected_sha and loaded_sha and loaded_sha != expected_sha:
+        return [f"EDLI_STAGE_LOADED_SHA_MISMATCH:loaded={loaded_sha}:expected={expected_sha}"]
+    if not loaded_sha:
+        return ["EDLI_STAGE_LOADED_SHA_MISSING_VALUE"]
+    return []
+
+
+def _edli_stage_open_cap_reservation_count(conn) -> int:
+    try:
+        row = conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM edli_live_cap_usage
+            WHERE reservation_status = 'RESERVED'
+            """
+        ).fetchone()
+    except Exception:
+        return 0
+    return int(row[0] if row else 0)
+
+
+def _edli_stage_fresh_file_reasons(*, name: str, path: str, max_age_seconds: int, now: datetime) -> list[str]:
+    file_path = Path(path)
+    if not file_path.exists():
+        return [f"EDLI_STAGE_{name}_MISSING:{path}"]
+    try:
+        payload = json.loads(file_path.read_text())
+    except json.JSONDecodeError:
+        return [f"EDLI_STAGE_{name}_INVALID_JSON:{path}"]
+    stamp = payload.get("generated_at") or payload.get("updated_at") or payload.get("observed_at") or payload.get("captured_at")
+    if not stamp:
+        return [f"EDLI_STAGE_{name}_STALE:missing_timestamp"]
+    try:
+        parsed = datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
+    except ValueError:
+        return [f"EDLI_STAGE_{name}_STALE:invalid_timestamp"]
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    age = (now - parsed.astimezone(timezone.utc)).total_seconds()
+    if age < 0 or age > max_age_seconds:
+        return [f"EDLI_STAGE_{name}_STALE:{age:.0f}s"]
+    return []
 
 
 def _assert_edli_live_scope(edli_cfg: dict) -> None:
@@ -2527,7 +2753,7 @@ def _edli_event_reactor_cycle() -> None:
     accepted by those gates, this job is conservative and side-effect free.
     """
 
-    edli_cfg = settings.get("edli_v1", {})
+    edli_cfg = _settings_section("edli_v1", {})
     if not edli_cfg.get("enabled") or not edli_cfg.get("event_writer_enabled"):
         return
     from src.engine.event_reactor_adapter import (
@@ -3095,7 +3321,7 @@ def _edli_user_channel_reconcile_cycle() -> None:
     market-channel data remains quote evidence only.
     """
 
-    edli_cfg = settings.get("edli_v1", {})
+    edli_cfg = _settings_section("edli_v1", {})
     if not edli_cfg.get("enabled") or not edli_cfg.get("edli_user_channel_reconcile_enabled", False):
         return
     max_messages = int(edli_cfg.get("edli_user_channel_reconcile_max_messages", 50))
@@ -3105,7 +3331,17 @@ def _edli_user_channel_reconcile_cycle() -> None:
     reconcile_count = 0
     from src.events.live_order_aggregate import LiveOrderAggregateLedger
     from src.events.live_order_reconcile import append_reconciled
-    from src.events.triggers.user_channel_ingestor import append_user_channel_message
+    from src.events.triggers.user_channel_ingestor import (
+        INBOX_DUPLICATE,
+        INBOX_FAILED,
+        INBOX_PROCESSED,
+        INBOX_STALE_REJECTED,
+        append_user_channel_message,
+        enqueue_user_channel_inbox_message,
+        inbox_row_to_user_channel_message,
+        mark_user_channel_inbox_status,
+        pending_user_channel_inbox_messages,
+    )
 
     conn = get_world_connection(write_class="live")
     try:
@@ -3117,16 +3353,62 @@ def _edli_user_channel_reconcile_cycle() -> None:
             if not message_hash:
                 raise RuntimeError("EDLI_USER_CHANNEL_MESSAGE_HASH_REQUIRED")
             occurred_at = _parse_edli_runtime_time(message, default=now)
-            _edli_user_channel_message_not_stale(conn, aggregate_id=aggregate_id, occurred_at=occurred_at)
-            if _edli_user_channel_message_seen(conn, aggregate_id=aggregate_id, message_hash=message_hash):
-                continue
-            append_user_channel_message(
-                ledger,
-                aggregate_id=aggregate_id,
+            enqueue_user_channel_inbox_message(
+                conn,
                 message=message,
+                aggregate_id=aggregate_id,
                 occurred_at=occurred_at,
+                received_at=now,
             )
-            message_count += 1
+
+        for inbox_row in pending_user_channel_inbox_messages(conn, limit=max_messages):
+            message_hash = str(_row_get(inbox_row, "message_hash"))
+            aggregate_id = str(_row_get(inbox_row, "aggregate_id"))
+            try:
+                message = inbox_row_to_user_channel_message(inbox_row)
+                occurred_at = _parse_edli_runtime_time(
+                    {"occurred_at": _row_get(inbox_row, "occurred_at")},
+                    default=now,
+                )
+                _edli_user_channel_message_not_stale(conn, aggregate_id=aggregate_id, occurred_at=occurred_at)
+                if _edli_user_channel_message_seen(conn, aggregate_id=aggregate_id, message_hash=message_hash):
+                    mark_user_channel_inbox_status(
+                        conn,
+                        message_hash=message_hash,
+                        status=INBOX_DUPLICATE,
+                        processed_at=now,
+                    )
+                    continue
+                append_user_channel_message(
+                    ledger,
+                    aggregate_id=aggregate_id,
+                    message=message,
+                    occurred_at=occurred_at,
+                )
+                mark_user_channel_inbox_status(
+                    conn,
+                    message_hash=message_hash,
+                    status=INBOX_PROCESSED,
+                    processed_at=now,
+                )
+                message_count += 1
+            except RuntimeError as exc:
+                status = INBOX_STALE_REJECTED if "STALE" in str(exc) else INBOX_FAILED
+                mark_user_channel_inbox_status(
+                    conn,
+                    message_hash=message_hash,
+                    status=status,
+                    processed_at=now,
+                    error=str(exc),
+                )
+            except Exception as exc:
+                mark_user_channel_inbox_status(
+                    conn,
+                    message_hash=message_hash,
+                    status=INBOX_FAILED,
+                    processed_at=now,
+                    error=str(exc),
+                )
 
         venue_reconcile_reader = _edli_venue_reconcile_reader(edli_cfg)
         for pending in _edli_pending_reconcile_aggregates(conn, limit=pending_limit):
@@ -3169,7 +3451,7 @@ def _edli_market_channel_ingestor_cycle() -> None:
     reconcile authority only.
     """
 
-    edli_cfg = settings.get("edli_v1", {})
+    edli_cfg = _settings_section("edli_v1", {})
     if not edli_cfg.get("enabled") or not edli_cfg.get("market_channel_ingestor_enabled"):
         return
     global _edli_market_channel_thread
@@ -3503,8 +3785,9 @@ def main():
 
     # All modes use the SAME CycleRunner with different DiscoveryMode values
     # max_instances=1: prevent concurrent execution if previous cycle still running
-    edli_cfg = settings.get("edli_v1", {})
+    edli_cfg = _settings_section("edli_v1", {})
     live_execution_mode = _assert_live_execution_mode_contract(edli_cfg)
+    _assert_edli_stage_readiness(edli_cfg)
     if live_execution_mode == "legacy_cron":
         scheduler.add_job(
             lambda: _run_mode(DiscoveryMode.OPENING_HUNT), "interval",

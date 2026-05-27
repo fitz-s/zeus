@@ -160,8 +160,43 @@ def test_release_gate_passes_only_as_read_only_evidence(tmp_path: Path) -> None:
     report = evaluate_release_gate(args)
 
     assert report.status == PASS
+    assert report.stage == "legacy_cron"
     assert report.passed_count == report.gate_count
     assert report.live_entries_allowed is False
+    assert report.submit_allowed is False
+    assert report.scaleout_allowed is False
+
+
+def test_release_gate_is_stage_aware_for_edli_modes(tmp_path: Path) -> None:
+    bridge_root = tmp_path / "bridge"
+    bridge_root.mkdir()
+    bridge_args = _make_gate_args(bridge_root)
+    bridge_args.stage = "edli_submit_disabled_bridge"
+    bridge = evaluate_release_gate(bridge_args)
+    assert bridge.status == PASS
+    assert bridge.live_entries_allowed is False
+    assert bridge.submit_allowed is False
+    assert bridge.scaleout_allowed is False
+
+    canary_root = tmp_path / "canary"
+    canary_root.mkdir()
+    canary_args = _make_gate_args(canary_root)
+    canary_args.stage = "edli_live_canary"
+    canary = evaluate_release_gate(canary_args)
+    assert canary.status == PASS
+    assert canary.live_entries_allowed is True
+    assert canary.submit_allowed is True
+    assert canary.scaleout_allowed is False
+
+    live_root = tmp_path / "live"
+    live_root.mkdir()
+    live_args = _make_gate_args(live_root)
+    live_args.stage = "edli_live"
+    live = evaluate_release_gate(live_args)
+    assert live.status == PASS
+    assert live.live_entries_allowed is True
+    assert live.submit_allowed is True
+    assert live.scaleout_allowed is True
 
 
 def test_release_gate_fails_on_loaded_sha_mismatch(tmp_path: Path) -> None:

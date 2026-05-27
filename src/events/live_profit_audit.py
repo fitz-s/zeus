@@ -27,6 +27,11 @@ _AUDIT_FIELDS = (
     "q_live",
     "q_lcb_5pct",
     "expected_cost_basis",
+    "expected_fee",
+    "expected_spread_cost",
+    "visible_depth_fill_lcb",
+    "order_policy",
+    "native_token_side",
     "expected_edge",
     "kelly_size_usd",
     "live_cap_notional",
@@ -131,7 +136,9 @@ class LiveProfitAuditLedger:
             INSERT INTO edli_live_profit_audit (
                 audit_id, event_id, aggregate_id, final_intent_id,
                 execution_command_id, condition_id, token_id, direction, side,
-                q_live, q_lcb_5pct, expected_cost_basis, expected_edge,
+                q_live, q_lcb_5pct, expected_cost_basis, expected_fee,
+                expected_spread_cost, visible_depth_fill_lcb, order_policy,
+                native_token_side, expected_edge,
                 kelly_size_usd, live_cap_notional, quote_seen_at, quote_age_ms,
                 best_bid, best_ask, limit_price, order_type, time_in_force,
                 venue_order_id, order_lifecycle_state, avg_fill_price,
@@ -143,7 +150,7 @@ class LiveProfitAuditLedger:
                 schema_version
             ) VALUES (
                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
             )
             ON CONFLICT(audit_id) DO UPDATE SET
                 event_id = excluded.event_id,
@@ -157,6 +164,11 @@ class LiveProfitAuditLedger:
                 q_live = excluded.q_live,
                 q_lcb_5pct = excluded.q_lcb_5pct,
                 expected_cost_basis = excluded.expected_cost_basis,
+                expected_fee = excluded.expected_fee,
+                expected_spread_cost = excluded.expected_spread_cost,
+                visible_depth_fill_lcb = excluded.visible_depth_fill_lcb,
+                order_policy = excluded.order_policy,
+                native_token_side = excluded.native_token_side,
                 expected_edge = excluded.expected_edge,
                 kelly_size_usd = excluded.kelly_size_usd,
                 live_cap_notional = excluded.live_cap_notional,
@@ -300,6 +312,7 @@ def record_edli_live_profit_audit_from_aggregate(conn: sqlite3.Connection, aggre
     settlement_source_event_hash = event_hash if lifecycle_type == "Reconciled" else None
     expected_edge_source_certificate_hash = pre_submit.get("expected_edge_source_certificate_hash")
     cost_basis_source_certificate_hash = pre_submit.get("cost_basis_source_certificate_hash")
+    expected_cost_basis = pre_submit.get("expected_cost_basis")
     promotion_eligible = (
         state == "CONFIRMED"
         and lifecycle_type == "UserTradeObserved"
@@ -307,6 +320,7 @@ def record_edli_live_profit_audit_from_aggregate(conn: sqlite3.Connection, aggre
         and bool(expected_edge_source_certificate_hash)
         and bool(cost_basis_source_certificate_hash)
         and bool(fill_source_event_hash)
+        and expected_cost_basis is not None
         and lifecycle_payload.get("realized_edge") is not None
     )
     return LiveProfitAuditLedger(conn).insert_record(
@@ -318,7 +332,12 @@ def record_edli_live_profit_audit_from_aggregate(conn: sqlite3.Connection, aggre
         token_id=pre_submit.get("token_id"),
         direction=pre_submit.get("direction"),
         side=pre_submit.get("side"),
-        expected_cost_basis=pre_submit.get("limit_price"),
+        expected_cost_basis=expected_cost_basis,
+        expected_fee=pre_submit.get("expected_fee"),
+        expected_spread_cost=pre_submit.get("expected_spread_cost"),
+        visible_depth_fill_lcb=pre_submit.get("visible_depth_fill_lcb"),
+        order_policy=pre_submit.get("order_policy"),
+        native_token_side=pre_submit.get("native_token_side"),
         expected_edge=pre_submit.get("expected_edge"),
         quote_seen_at=pre_submit.get("quote_seen_at"),
         quote_age_ms=pre_submit.get("quote_age_ms"),

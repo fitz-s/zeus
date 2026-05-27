@@ -78,6 +78,27 @@ CREATE TABLE IF NOT EXISTS edli_user_channel_message_dedup (
 )
 """
 
+CREATE_USER_CHANNEL_INBOX_SQL = """
+CREATE TABLE IF NOT EXISTS edli_user_channel_inbox (
+    message_hash TEXT NOT NULL PRIMARY KEY,
+    source_authority TEXT NOT NULL CHECK (source_authority = 'polymarket_user_channel'),
+    message_type TEXT NOT NULL CHECK (message_type IN ('order','trade')),
+    aggregate_id TEXT NOT NULL,
+    event_id TEXT NOT NULL,
+    final_intent_id TEXT NOT NULL,
+    venue_order_id TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    occurred_at TEXT NOT NULL,
+    received_at TEXT NOT NULL,
+    processed_at TEXT,
+    processing_status TEXT NOT NULL CHECK (
+        processing_status IN ('PENDING','PROCESSED','DUPLICATE','FAILED','STALE_REJECTED')
+    ),
+    processing_error TEXT,
+    schema_version INTEGER NOT NULL CHECK (schema_version >= 1)
+)
+"""
+
 CREATE_INDEX_SQL = """
 CREATE INDEX IF NOT EXISTS idx_edli_live_order_events_aggregate
     ON edli_live_order_events(aggregate_id, event_sequence)
@@ -102,6 +123,16 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_edli_live_order_user_msg_hash
 CREATE_USER_MESSAGE_DEDUP_AGGREGATE_INDEX_SQL = """
 CREATE INDEX IF NOT EXISTS idx_edli_user_channel_message_dedup_aggregate
     ON edli_user_channel_message_dedup(aggregate_id, venue_order_id)
+"""
+
+CREATE_USER_CHANNEL_INBOX_STATUS_INDEX_SQL = """
+CREATE INDEX IF NOT EXISTS idx_edli_user_channel_inbox_status
+    ON edli_user_channel_inbox(processing_status, received_at)
+"""
+
+CREATE_USER_CHANNEL_INBOX_AGGREGATE_INDEX_SQL = """
+CREATE INDEX IF NOT EXISTS idx_edli_user_channel_inbox_aggregate
+    ON edli_user_channel_inbox(aggregate_id, venue_order_id)
 """
 
 CREATE_PROJECTION_STATE_INDEX_SQL = """
@@ -130,10 +161,13 @@ def ensure_tables(conn: sqlite3.Connection) -> None:
     conn.execute(CREATE_EVENTS_SQL)
     conn.execute(CREATE_PROJECTION_SQL)
     conn.execute(CREATE_USER_MESSAGE_DEDUP_SQL)
+    conn.execute(CREATE_USER_CHANNEL_INBOX_SQL)
     conn.execute(CREATE_INDEX_SQL)
     conn.execute(CREATE_TYPE_INDEX_SQL)
     conn.execute(CREATE_USER_MESSAGE_DEDUP_INDEX_SQL)
     conn.execute(CREATE_USER_MESSAGE_DEDUP_AGGREGATE_INDEX_SQL)
+    conn.execute(CREATE_USER_CHANNEL_INBOX_STATUS_INDEX_SQL)
+    conn.execute(CREATE_USER_CHANNEL_INBOX_AGGREGATE_INDEX_SQL)
     conn.execute(CREATE_PROJECTION_STATE_INDEX_SQL)
     conn.execute(CREATE_NO_UPDATE_TRIGGER_SQL)
     conn.execute(CREATE_NO_DELETE_TRIGGER_SQL)

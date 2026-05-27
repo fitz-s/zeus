@@ -17,7 +17,9 @@ from pathlib import Path
 from typing import Any
 
 
-CANARY_PROOF_PASS = "CANARY_PROOF_PASS"
+CANARY_SAFETY_PASS = "CANARY_SAFETY_PASS"
+CANARY_PROFIT_PASS = "CANARY_PROFIT_PASS"
+CANARY_PROOF_PASS = CANARY_PROFIT_PASS
 WAITING_FOR_QUALIFYING_EVENT = "WAITING_FOR_QUALIFYING_EVENT"
 FAIL = "FAIL"
 
@@ -100,11 +102,20 @@ def evaluate_canary_artifact(
     realized_state = str(artifact.get("realized_state") or "").upper()
     if realized_state not in {"CONFIRMED", "TERMINAL_NO_FILL", "RECONCILED", "PENDING_RECONCILE"}:
         reasons.append("CANARY_REALIZED_STATE_INVALID")
+    realized_state = str(artifact.get("realized_state") or "").upper()
+    if realized_state == "PENDING_RECONCILE":
+        reasons.append("CANARY_PENDING_RECONCILE_NOT_PASSING")
+    profit_reasons: list[str] = []
     if conn is not None:
-        reasons.extend(_db_verification_reasons(conn, artifact))
+        db_reasons, profit_reasons = _db_verification_reasons(conn, artifact)
+        reasons.extend(db_reasons)
     if reasons:
         return CanaryGateResult(FAIL, tuple(reasons))
-    return CanaryGateResult(CANARY_PROOF_PASS, ())
+    if realized_state == "CONFIRMED" and not profit_reasons:
+        return CanaryGateResult(CANARY_PROFIT_PASS, ())
+    if realized_state == "CONFIRMED":
+        return CanaryGateResult(CANARY_SAFETY_PASS, tuple(profit_reasons))
+    return CanaryGateResult(CANARY_SAFETY_PASS, ())
 
 
 def load_canary_artifact(path: str | Path) -> dict[str, Any] | None:
@@ -150,11 +161,12 @@ def _economic_object_mismatch_reasons(artifact: dict[str, Any]) -> list[str]:
     return reasons
 
 
-def _db_verification_reasons(conn: sqlite3.Connection, artifact: dict[str, Any]) -> list[str]:
+def _db_verification_reasons(conn: sqlite3.Connection, artifact: dict[str, Any]) -> tuple[list[str], list[str]]:
     aggregate_id = str(artifact.get("aggregate_id") or "")
     execution_command_id = str(artifact.get("execution_command_id") or "")
     live_cap_usage_id = str(artifact.get("live_cap_usage_id") or "")
     reasons: list[str] = []
+    profit_reasons: list[str] = []
     try:
         projection = conn.execute(
             """
@@ -165,9 +177,9 @@ def _db_verification_reasons(conn: sqlite3.Connection, artifact: dict[str, Any])
             (aggregate_id,),
         ).fetchone()
     except sqlite3.OperationalError:
-        return ["CANARY_DB_PROJECTION_MISSING"]
+        return ["CANARY_DB_PROJECTION_MISSING"], []
     if projection is None:
-        return ["CANARY_DB_PROJECTION_MISSING"]
+        return ["CANARY_DB_PROJECTION_MISSING"], []
     artifact_projection = artifact.get("order_lifecycle_projection") or {}
     if isinstance(artifact_projection, dict):
         if bool(projection["pending_reconcile"]) != bool(artifact_projection.get("pending_reconcile", False)):
@@ -215,6 +227,12 @@ def _db_verification_reasons(conn: sqlite3.Connection, artifact: dict[str, Any])
         ]
         if missing_provenance:
             reasons.append("CANARY_DB_PROFIT_AUDIT_PROVENANCE_MISSING:" + ",".join(missing_provenance))
+        try:
+            realized_edge = float(profit_audit_row["realized_edge"])
+        except (TypeError, ValueError):
+            realized_edge = 0.0
+        if realized_edge <= 0.0:
+            profit_reasons.append("CANARY_DB_PROFIT_AUDIT_REALIZED_EDGE_INSUFFICIENT")
     command_cert = _execution_command_certificate(conn, execution_command_id)
     if command_cert is None:
         reasons.append("CANARY_DB_EXECUTION_COMMAND_CERTIFICATE_MISSING")
@@ -253,7 +271,7 @@ def _db_verification_reasons(conn: sqlite3.Connection, artifact: dict[str, Any])
         quote_age_ms = _quote_age_ms(artifact)
         if quote_age_ms is not None and int(pre_submit.get("quote_age_ms", quote_age_ms)) != quote_age_ms:
             reasons.append("CANARY_DB_QUOTE_AGE_MISMATCH")
-    return reasons
+    return reasons, profit_reasons
 
 
 def _profit_audit_row(conn: sqlite3.Connection, aggregate_id: str) -> sqlite3.Row | None:
@@ -397,7 +415,7 @@ def main(argv: list[str] | None = None) -> int:
         print(result.status)
         for reason in result.reasons:
             print(reason)
-    return 0 if result.status == CANARY_PROOF_PASS else 1
+    return 0 if result.status in {CANARY_SAFETY_PASS, CANARY_PROFIT_PASS} else 1
 
 
 if __name__ == "__main__":

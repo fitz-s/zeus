@@ -1047,6 +1047,33 @@ tables:
       message_hash to exactly one aggregate/order/message kind before appending
       UserOrderObserved or UserTradeObserved, making JSONL replay idempotent.
 
+  - name: edli_user_channel_inbox
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: message_hash
+    required_columns:
+      - {name: message_hash, type: TEXT, nullable: false}
+      - {name: source_authority, type: TEXT, nullable: false}
+      - {name: message_type, type: TEXT, nullable: false}
+      - {name: aggregate_id, type: TEXT, nullable: false}
+      - {name: event_id, type: TEXT, nullable: false}
+      - {name: final_intent_id, type: TEXT, nullable: false}
+      - {name: venue_order_id, type: TEXT, nullable: false}
+      - {name: payload_json, type: TEXT, nullable: false}
+      - {name: occurred_at, type: TEXT, nullable: false}
+      - {name: received_at, type: TEXT, nullable: false}
+      - {name: processed_at, type: TEXT, nullable: true}
+      - {name: processing_status, type: TEXT, nullable: false}
+      - {name: processing_error, type: TEXT, nullable: true}
+      - {name: schema_version, type: INTEGER, nullable: false}
+    notes: >
+      Durable EDLI authenticated user-channel inbox. Runtime processors enqueue
+      user order/trade messages here before aggregate append, then mark
+      PROCESSED, DUPLICATE, FAILED, or STALE_REJECTED after the aggregate
+      transaction outcome.
+
   - name: edli_live_profit_audit
     db: world
     schema_class: world_class
@@ -1066,6 +1093,11 @@ tables:
       - {name: q_live, type: REAL, nullable: true}
       - {name: q_lcb_5pct, type: REAL, nullable: true}
       - {name: expected_cost_basis, type: REAL, nullable: true}
+      - {name: expected_fee, type: REAL, nullable: true}
+      - {name: expected_spread_cost, type: REAL, nullable: true}
+      - {name: visible_depth_fill_lcb, type: REAL, nullable: true}
+      - {name: order_policy, type: TEXT, nullable: true}
+      - {name: native_token_side, type: TEXT, nullable: true}
       - {name: expected_edge, type: REAL, nullable: true}
       - {name: kelly_size_usd, type: REAL, nullable: true}
       - {name: live_cap_notional, type: REAL, nullable: true}

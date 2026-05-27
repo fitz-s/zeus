@@ -8,7 +8,9 @@ import sqlite3
 from datetime import datetime, timezone
 
 from scripts.check_edli_live_canary_gate import (
+    CANARY_PROFIT_PASS,
     CANARY_PROOF_PASS,
+    CANARY_SAFETY_PASS,
     FAIL,
     WAITING_FOR_QUALIFYING_EVENT,
     evaluate_canary_artifact,
@@ -68,6 +70,21 @@ def test_canary_with_confirmed_lifecycle_and_cap_transition_passes():
 
     assert result.status == CANARY_PROOF_PASS
     assert result.reasons == ()
+
+
+def test_terminal_no_fill_is_safety_pass_not_profit_pass():
+    artifact = _valid_artifact(
+        realized_state="TERMINAL_NO_FILL",
+        user_channel_observation={},
+        reconcile_observation={"venue_order_exists": False},
+        cap_transition={"to_status": "RELEASED"},
+        order_lifecycle_projection={"current_state": "RECONCILED", "pending_reconcile": False},
+    )
+
+    result = evaluate_canary_artifact(artifact)
+
+    assert result.status == CANARY_SAFETY_PASS
+    assert result.status != CANARY_PROFIT_PASS
 
 
 def test_artifact_only_pass_fails_under_db_verification():
@@ -482,6 +499,12 @@ def _pre_submit_payload(**overrides):
         "current_best_bid": 0.42,
         "current_best_ask": 0.43,
         "limit_price": 0.42,
+        "expected_cost_basis": 0.421,
+        "expected_fee": 0.001,
+        "expected_spread_cost": 0.0005,
+        "visible_depth_fill_lcb": 0.95,
+        "order_policy": "maker_post_only",
+        "native_token_side": "YES",
         "would_cross_book": False,
         "tick_size": 0.01,
         "tick_aligned": True,

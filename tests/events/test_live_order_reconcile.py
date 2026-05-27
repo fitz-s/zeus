@@ -18,6 +18,9 @@ from src.events.live_order_reconcile import (
 )
 from src.events.triggers.user_channel_ingestor import (
     EdliUserChannelIngestorError,
+    enqueue_user_channel_inbox_message,
+    mark_user_channel_inbox_status,
+    pending_user_channel_inbox_messages,
     append_user_channel_message,
 )
 
@@ -522,6 +525,77 @@ def test_user_channel_reconcile_cycle_is_idempotent_for_duplicate_queue_messages
         "SELECT COUNT(*) FROM edli_live_order_events WHERE event_type = 'UserOrderObserved'"
     ).fetchone()[0]
     assert count == 1
+    inbox = check_conn.execute(
+        "SELECT processing_status FROM edli_user_channel_inbox WHERE message_hash = ?",
+        ("order-msg-1",),
+    ).fetchone()
+    assert inbox["processing_status"] in {"PROCESSED", "DUPLICATE"}
+
+
+def test_user_channel_inbox_rejects_hash_drift_before_aggregate_append():
+    conn = _conn()
+    enqueue_user_channel_inbox_message(
+        conn,
+        aggregate_id="event-1:intent-1",
+        message={
+            "source": "polymarket_user_channel",
+            "type": "trade",
+            "event_id": "event-1",
+            "final_intent_id": "intent-1",
+            "venue_order_id": "venue-1",
+            "trade_status": "CONFIRMED",
+            "message_hash": "inbox-msg-1",
+        },
+        occurred_at=NOW,
+        received_at=NOW,
+    )
+
+    with pytest.raises(EdliUserChannelIngestorError, match="EDLI_USER_CHANNEL_INBOX_HASH_DRIFT"):
+        enqueue_user_channel_inbox_message(
+            conn,
+            aggregate_id="event-2:intent-2",
+            message={
+                "source": "polymarket_user_channel",
+                "type": "trade",
+                "event_id": "event-2",
+                "final_intent_id": "intent-2",
+                "venue_order_id": "venue-1",
+                "trade_status": "CONFIRMED",
+                "message_hash": "inbox-msg-1",
+            },
+            occurred_at=NOW,
+            received_at=NOW,
+        )
+
+
+def test_user_channel_inbox_persists_pending_until_ack_status():
+    conn = _conn()
+    inserted = enqueue_user_channel_inbox_message(
+        conn,
+        aggregate_id="event-1:intent-1",
+        message={
+            "source": "polymarket_user_channel",
+            "type": "order",
+            "event_id": "event-1",
+            "final_intent_id": "intent-1",
+            "venue_order_id": "venue-1",
+            "order_update_type": "UPDATE",
+            "message_hash": "inbox-order-1",
+        },
+        occurred_at=NOW,
+        received_at=NOW,
+    )
+    assert inserted is True
+    assert len(pending_user_channel_inbox_messages(conn, limit=10)) == 1
+
+    mark_user_channel_inbox_status(
+        conn,
+        message_hash="inbox-order-1",
+        status="PROCESSED",
+        processed_at=NOW,
+    )
+
+    assert pending_user_channel_inbox_messages(conn, limit=10) == []
 
 
 def test_user_channel_reconcile_cycle_is_idempotent_for_duplicate_trade_messages(monkeypatch, tmp_path):
@@ -787,4 +861,7 @@ def _pre_submit_payload(**overrides):
 def _conn(path=":memory:") -> sqlite3.Connection:
     conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row
+    from src.state.schema.edli_live_order_events_schema import ensure_tables
+
+    ensure_tables(conn)
     return conn

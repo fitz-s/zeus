@@ -48,6 +48,12 @@ from src.state.no_trade_events import (
 
 PASS = "PASS"
 FAIL = "FAIL"
+LIVE_RELEASE_STAGES = (
+    "legacy_cron",
+    "edli_submit_disabled_bridge",
+    "edli_live_canary",
+    "edli_live",
+)
 
 UNKNOWN_COMMAND_STATES = (
     "SUBMIT_UNKNOWN_SIDE_EFFECT",
@@ -86,7 +92,11 @@ class ReleaseGateReport:
     status: str
     gate_count: int
     passed_count: int
+    stage: str
     live_entries_allowed: bool
+    submit_allowed: bool
+    scaleout_allowed: bool
+    gate_basis: tuple[str, ...]
     results: tuple[GateResult, ...]
 
     def to_dict(self) -> dict[str, Any]:
@@ -384,13 +394,45 @@ def evaluate_release_gate(args: argparse.Namespace) -> ReleaseGateReport:
     ]
     passed = sum(1 for result in results if result.status == PASS)
     status = PASS if passed == len(results) else FAIL
+    live_entries_allowed, submit_allowed, scaleout_allowed, gate_basis = _stage_allowance(
+        str(args.stage),
+        status=status,
+    )
     return ReleaseGateReport(
         status=status,
         gate_count=len(results),
         passed_count=passed,
-        live_entries_allowed=False,
+        stage=str(args.stage),
+        live_entries_allowed=live_entries_allowed,
+        submit_allowed=submit_allowed,
+        scaleout_allowed=scaleout_allowed,
+        gate_basis=gate_basis,
         results=tuple(results),
     )
+
+
+def _stage_allowance(stage: str, *, status: str) -> tuple[bool, bool, bool, tuple[str, ...]]:
+    if stage not in LIVE_RELEASE_STAGES:
+        raise ValueError(f"UNSUPPORTED_LIVE_RELEASE_STAGE:{stage}")
+    basis = (
+        "schema_current",
+        "loaded_sha",
+        "source_fresh",
+        "forecast_executable_bundle",
+        "trade_state_clear",
+        "redeem_state_clear",
+    )
+    if status != PASS:
+        return False, False, False, basis
+    if stage == "legacy_cron":
+        return False, False, False, basis + ("legacy_cron_preservation",)
+    if stage == "edli_submit_disabled_bridge":
+        return False, False, False, basis + ("submit_disabled",)
+    if stage == "edli_live_canary":
+        return True, True, False, basis + ("canary_preflight", "tiny_cap_only")
+    if stage == "edli_live":
+        return True, True, True, basis + ("verified_promotion_artifact", "scaleout_allowed")
+    return False, False, False, basis
 
 
 def _write_fixture_files(root: Path) -> argparse.Namespace:
@@ -462,6 +504,7 @@ def _write_fixture_files(root: Path) -> argparse.Namespace:
         **{key: True for key in PAPER_PROOF_KEYS},
     }))
     return parse_args([
+        "--stage", "legacy_cron",
         "--expected-sha", expected,
         "--loaded-sha-file", str(loaded),
         "--world-db", str(world_db),
@@ -476,6 +519,7 @@ def _write_fixture_files(root: Path) -> argparse.Namespace:
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--stage", choices=LIVE_RELEASE_STAGES, default="legacy_cron")
     parser.add_argument("--expected-sha", default="")
     parser.add_argument("--loaded-sha-file", type=Path)
     parser.add_argument("--world-db", type=Path, default=ROOT / "state" / "zeus-world.db")
@@ -503,7 +547,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.json:
         print(json.dumps(report.to_dict(), indent=2, sort_keys=True))
     else:
-        print(f"live_release_gate={report.status} passed={report.passed_count}/{report.gate_count}")
+        print(
+            f"live_release_gate={report.status} stage={report.stage} "
+            f"passed={report.passed_count}/{report.gate_count} "
+            f"submit_allowed={report.submit_allowed} scaleout_allowed={report.scaleout_allowed}"
+        )
         for result in report.results:
             print(f"{result.status} {result.name}: {result.detail}")
     return 0 if report.status == PASS else 1

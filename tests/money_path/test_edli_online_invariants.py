@@ -356,6 +356,94 @@ def test_live_canary_requires_submit_and_canary_flags(monkeypatch):
         )
 
 
+def test_edli_live_canary_stage_readiness_waits_on_clean_db(monkeypatch, tmp_path):
+    import src.main as main
+
+    db_path = tmp_path / "world.db"
+    _init_stage_world_db(db_path)
+    monkeypatch.setattr(main, "get_world_connection_read_only", lambda *args, **kwargs: _stage_conn(db_path))
+
+    report = main.evaluate_edli_stage_readiness(
+        stage="edli_live_canary",
+        canary_artifact_path=str(tmp_path / "missing-canary.json"),
+    )
+
+    assert report.status == "WAITING_FOR_QUALIFYING_EVENT"
+    assert report.live_entries_allowed is False
+
+
+def test_edli_live_canary_stage_readiness_blocks_unresolved_unknown(monkeypatch, tmp_path):
+    import src.main as main
+
+    db_path = tmp_path / "world.db"
+    conn = _init_stage_world_db(db_path)
+    conn.execute(
+        """
+        INSERT INTO edli_live_order_projection (
+            aggregate_id, event_id, final_intent_id, current_state, last_sequence,
+            last_event_type, last_event_hash, pending_reconcile, venue_order_id,
+            updated_at, schema_version
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        ("event-1:intent-1", "event-1", "intent-1", "SUBMIT_UNKNOWN", 1, "SubmitUnknown", "hash-1", 1, "venue-1", "2026-05-26T12:00:00+00:00", 1),
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(main, "get_world_connection_read_only", lambda *args, **kwargs: _stage_conn(db_path))
+
+    report = main.evaluate_edli_stage_readiness(stage="edli_live_canary")
+
+    assert report.status == "FAIL"
+    assert any(reason.startswith("EDLI_STAGE_UNRESOLVED_SUBMIT_UNKNOWN") for reason in report.reasons)
+
+
+def test_edli_live_canary_stage_readiness_blocks_open_cap_reservation(monkeypatch, tmp_path):
+    import src.main as main
+    from src.state.schema.edli_live_cap_usage_schema import ensure_table as ensure_live_cap_table
+
+    db_path = tmp_path / "world.db"
+    conn = _init_stage_world_db(db_path)
+    ensure_live_cap_table(conn)
+    conn.execute(
+        """
+        INSERT INTO edli_live_cap_usage (
+            usage_id, event_id, decision_time, cap_scope, max_notional_usd,
+            max_orders_per_day, reserved_notional_usd, order_count,
+            reservation_status, final_intent_id, execution_command_id,
+            created_at, schema_version
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        ("usage-open", "event-1", "2026-05-26T12:00:00+00:00", "tiny_live_canary", 5.0, 1, 5.0, 1, "RESERVED", "intent-1", "command-1", "2026-05-26T12:00:00+00:00", 1),
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(main, "get_world_connection_read_only", lambda *args, **kwargs: _stage_conn(db_path))
+
+    report = main.evaluate_edli_stage_readiness(stage="edli_live_canary")
+
+    assert report.status == "FAIL"
+    assert any(reason.startswith("EDLI_STAGE_LIVE_CAP_RESERVED") for reason in report.reasons)
+
+
+def test_edli_live_canary_stage_readiness_blocks_stale_source(monkeypatch, tmp_path):
+    import src.main as main
+
+    db_path = tmp_path / "world.db"
+    _init_stage_world_db(db_path).close()
+    source = tmp_path / "source_health.json"
+    source.write_text(json.dumps({"generated_at": "2026-01-01T00:00:00+00:00"}))
+    monkeypatch.setattr(main, "get_world_connection_read_only", lambda *args, **kwargs: _stage_conn(db_path))
+
+    report = main.evaluate_edli_stage_readiness(
+        stage="edli_live_canary",
+        source_health_json=str(source),
+        max_age_seconds=1,
+    )
+
+    assert report.status == "FAIL"
+    assert any(reason.startswith("EDLI_STAGE_SOURCE_HEALTH_STALE") for reason in report.reasons)
+
+
 def _edli_live_updates(**overrides):
     values = {
         "enabled": True,
@@ -746,6 +834,12 @@ def _pre_submit_payload_for_promotion(**overrides):
         "current_best_bid": 0.42,
         "current_best_ask": 0.43,
         "limit_price": 0.42,
+        "expected_cost_basis": 0.421,
+        "expected_fee": 0.001,
+        "expected_spread_cost": 0.0005,
+        "visible_depth_fill_lcb": 0.95,
+        "order_policy": "maker_post_only",
+        "native_token_side": "YES",
         "would_cross_book": False,
         "tick_size": 0.01,
         "tick_aligned": True,
@@ -771,3 +865,18 @@ def _pre_submit_payload_for_promotion(**overrides):
     }
     payload.update(overrides)
     return payload
+
+
+def _stage_conn(path) -> sqlite3.Connection:
+    conn = sqlite3.connect(path)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def _init_stage_world_db(path) -> sqlite3.Connection:
+    from src.state.schema.edli_live_order_events_schema import ensure_tables as ensure_live_order_tables
+
+    conn = _stage_conn(path)
+    ensure_live_order_tables(conn)
+    conn.commit()
+    return conn

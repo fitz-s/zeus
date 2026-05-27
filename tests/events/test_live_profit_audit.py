@@ -242,7 +242,36 @@ def test_live_order_lifecycle_events_emit_profit_audit_rows():
     assert row["order_lifecycle_state"] == "CONFIRMED"
     assert row["condition_id"] == "condition-1"
     assert row["token_id"] == "token-1"
+    assert row["expected_cost_basis"] == 0.421
+    assert row["expected_cost_basis"] != row["limit_price"]
+    assert row["expected_fee"] == 0.001
+    assert row["expected_spread_cost"] == 0.0005
+    assert row["visible_depth_fill_lcb"] == 0.95
+    assert row["order_policy"] == "maker_post_only"
+    assert row["native_token_side"] == "YES"
     assert ledger.get_projection("event-1:intent-1").pending_reconcile is False
+
+
+def test_missing_cost_basis_certificate_keeps_audit_non_promotion_eligible():
+    conn = _conn()
+    ledger = _seed_confirmed_aggregate(conn)
+    conn.execute(
+        """
+        UPDATE edli_live_profit_audit
+        SET cost_basis_source_certificate_hash = NULL,
+            promotion_eligible = 0
+        WHERE aggregate_id = ?
+        """,
+        ("event-1:intent-1",),
+    )
+
+    row = conn.execute(
+        "SELECT promotion_eligible FROM edli_live_profit_audit WHERE aggregate_id = ?",
+        ("event-1:intent-1",),
+    ).fetchone()
+
+    assert row["promotion_eligible"] == 0
+    assert ledger.get_projection("event-1:intent-1").current_state == "CAP_TRANSITIONED"
 
 
 def _seed_confirmed_aggregate(conn: sqlite3.Connection, *, realized_edge: float = 0.01) -> LiveOrderAggregateLedger:
@@ -371,6 +400,12 @@ def _pre_submit_payload(**overrides):
         "current_best_bid": 0.42,
         "current_best_ask": 0.43,
         "limit_price": 0.42,
+        "expected_cost_basis": 0.421,
+        "expected_fee": 0.001,
+        "expected_spread_cost": 0.0005,
+        "visible_depth_fill_lcb": 0.95,
+        "order_policy": "maker_post_only",
+        "native_token_side": "YES",
         "would_cross_book": False,
         "tick_size": 0.01,
         "tick_aligned": True,

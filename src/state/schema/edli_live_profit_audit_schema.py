@@ -19,6 +19,11 @@ CREATE TABLE IF NOT EXISTS edli_live_profit_audit (
     q_live REAL,
     q_lcb_5pct REAL,
     expected_cost_basis REAL,
+    expected_fee REAL,
+    expected_spread_cost REAL,
+    visible_depth_fill_lcb REAL,
+    order_policy TEXT,
+    native_token_side TEXT,
     expected_edge REAL,
     kelly_size_usd REAL,
     live_cap_notional REAL,
@@ -67,6 +72,11 @@ CREATE INDEX IF NOT EXISTS idx_edli_live_profit_audit_promotion
 
 
 _COLUMN_MIGRATIONS = {
+    "expected_fee": "ALTER TABLE edli_live_profit_audit ADD COLUMN expected_fee REAL",
+    "expected_spread_cost": "ALTER TABLE edli_live_profit_audit ADD COLUMN expected_spread_cost REAL",
+    "visible_depth_fill_lcb": "ALTER TABLE edli_live_profit_audit ADD COLUMN visible_depth_fill_lcb REAL",
+    "order_policy": "ALTER TABLE edli_live_profit_audit ADD COLUMN order_policy TEXT",
+    "native_token_side": "ALTER TABLE edli_live_profit_audit ADD COLUMN native_token_side TEXT",
     "expected_edge_source_certificate_hash": "ALTER TABLE edli_live_profit_audit ADD COLUMN expected_edge_source_certificate_hash TEXT",
     "cost_basis_source_certificate_hash": "ALTER TABLE edli_live_profit_audit ADD COLUMN cost_basis_source_certificate_hash TEXT",
     "fill_source_event_hash": "ALTER TABLE edli_live_profit_audit ADD COLUMN fill_source_event_hash TEXT",
