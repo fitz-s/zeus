@@ -40,6 +40,18 @@ CANONICAL_POSITION_CURRENT_COLUMNS = (
     "order_status",
     "updated_at",
     "temperature_metric",
+    # PR D0b (Finding D0/D2-wire, Part-2 audit, 2026-05-27): durable
+    # authority projection. NULL on legacy rows (ALTER TABLE ADD COLUMN
+    # default). Populated by build_position_current_projection() from
+    # Position.fill_authority / .chain_shares / .chain_verified_at /
+    # .last_chain_absence_observed_at. recovery_authority is derived at
+    # rescue time and persisted alongside; for non-rescue projections it
+    # stays NULL.
+    "fill_authority",
+    "recovery_authority",
+    "chain_shares",
+    "chain_seen_at",
+    "chain_absence_at",
 )
 
 

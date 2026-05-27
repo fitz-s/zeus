@@ -118,17 +118,26 @@ def build_position_current_projection(position: Any) -> dict:
         "updated_at": projection_updated_at(position),
         # Slice P2-C2 (PR #19 phase 2, 2026-04-26) + P2-fix2 (post-review
         # BLOCKER #1, 2026-04-26): route via resolver for audit trail
-        # (DEBUG log identifies missing-metric positions). The
-        # *_authority and *_source extension was reverted: those keys
-        # were silently dropped by upsert_position_current because they
-        # are not declared in CANONICAL_POSITION_CURRENT_COLUMNS, AND
-        # the lifecycle event payload_json builders read from raw
-        # position.* attributes (not from this projection dict). Adding
-        # the keys delivered no downstream value; persisting the
-        # authority signal requires a schema migration on
-        # position_current + payload_json builder edits, deferred to a
-        # separate packet.
+        # (DEBUG log identifies missing-metric positions). PR D0b
+        # (Finding D0/D2-wire, Part-2 audit, 2026-05-27) finally lands
+        # the authority schema migration originally deferred above:
+        # fill_authority / recovery_authority / chain_shares /
+        # chain_seen_at / chain_absence_at are now persisted on
+        # position_current, declared in CANONICAL_POSITION_CURRENT_COLUMNS,
+        # and consumed by the typed training-eligibility gate
+        # (src.state.portfolio.is_training_eligible_position) without
+        # snapshot-keyed scanner heuristics.
         "temperature_metric": _position_metric[0],
+        "fill_authority": _nullable(getattr(position, "fill_authority", "")),
+        # recovery_authority is set per-event by canonical builders
+        # (build_venue_position_observed_canonical_write sets
+        # 'balance_only'; trade-verified rescue leaves it NULL). The
+        # base projection mirrors the runtime Position attribute when
+        # the rescue path attaches it; non-rescue projections persist NULL.
+        "recovery_authority": _nullable(getattr(position, "recovery_authority", "")),
+        "chain_shares": _nullable(getattr(position, "chain_shares", None)),
+        "chain_seen_at": _nullable(getattr(position, "chain_verified_at", "")),
+        "chain_absence_at": _nullable(getattr(position, "last_chain_absence_observed_at", "")),
     }
 
 

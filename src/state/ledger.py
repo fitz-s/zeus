@@ -161,6 +161,48 @@ def _ensure_day0_window_entered_event_type(conn: sqlite3.Connection) -> None:
         conn.execute("DROP TABLE position_events_pre_day0_v1")
 
 
+def _ensure_position_current_authority_columns(conn: sqlite3.Connection) -> None:
+    """PR D0b (Finding D0/D2-wire / Part-2 audit, 2026-05-27): durable
+    authority projection columns on `position_current`.
+
+    Adds (additive, NULL-default) columns required by the typed training-
+    eligibility gate and crash-recovery loader:
+      fill_authority      TEXT
+      recovery_authority  TEXT
+      chain_shares        REAL
+      chain_seen_at       TEXT
+      chain_absence_at    TEXT
+
+    ALTER TABLE ADD COLUMN is supported by SQLite for NULL-default
+    columns without a rebuild. Idempotent: skips columns that already
+    exist (so the daemon-restart path is safe on partial migrations).
+
+    Legacy rows persist with NULL values until a future cycle rewrites
+    the projection through `build_position_current_projection`. The
+    training gate `is_training_eligible_position` fails-closed on NULL
+    fill_authority (treats it as unrecognised authority).
+    """
+    existing = table_columns(conn, "position_current")
+    if not existing:
+        # Table not yet created; kernel SQL will create it with the new
+        # columns directly.
+        return
+    additions = (
+        ("fill_authority", "TEXT"),
+        ("recovery_authority", "TEXT"),
+        ("chain_shares", "REAL"),
+        ("chain_seen_at", "TEXT"),
+        ("chain_absence_at", "TEXT"),
+    )
+    with conn:
+        for col_name, col_type in additions:
+            if col_name in existing:
+                continue
+            conn.execute(
+                f"ALTER TABLE position_current ADD COLUMN {col_name} {col_type}"
+            )
+
+
 def _ensure_venue_position_observed_event_type(conn: sqlite3.Connection) -> None:
     """PR D0 (Finding D0 / Part-2 audit, 2026-05-27): add VENUE_POSITION_OBSERVED
     to position_events.event_type CHECK constraint.
@@ -241,6 +283,7 @@ def apply_architecture_kernel_schema(conn: sqlite3.Connection) -> None:
     _ensure_token_suppression_reason_schema(conn)
     _ensure_day0_window_entered_event_type(conn)
     _ensure_venue_position_observed_event_type(conn)
+    _ensure_position_current_authority_columns(conn)
     # Legacy-DB column reconciliation: `CREATE TABLE IF NOT EXISTS` in the
     # kernel SQL no-ops when position_current exists from a pre-kernel
     # schema. Backfill every canonical column that the legacy table is
