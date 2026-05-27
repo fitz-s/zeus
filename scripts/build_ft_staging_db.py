@@ -1,4 +1,10 @@
 #!/usr/bin/env python3
+# Created: 2026-05-26
+# Last reused or audited: 2026-05-26
+# Lifecycle: created=2026-05-26; last_reviewed=2026-05-26; last_reused=never
+# Purpose: Build isolated ft_staging forecasts DB for full_transport_v1 pair generation; copies tables from prod read-only via ATTACH URI.
+# Reuse: Creates new staging DB; does NOT modify prod. Safe to re-run. Verify STAGING_DB path before use.
+# Authority basis: operator DECISION FINAL 2026-05-26 — isolated-rebuild path
 """
 Build ft_staging DB for full_transport_v1 pair generation.
 
@@ -7,9 +13,6 @@ Creates a fresh staging forecasts DB with:
   (prevents ft_v1 rows from colliding with 'none' rows)
 - ensemble_snapshots_v2, observations, observation_instants_v2, zeus_meta
   copied read-only from prod zeus-forecasts.db
-
-Created: 2026-05-26
-Authority: operator DECISION FINAL 2026-05-26 — isolated-rebuild path
 """
 from __future__ import annotations
 
@@ -88,7 +91,7 @@ def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
 
 def _copy_table(staging: sqlite3.Connection, prod_path: Path, table: str) -> int:
     """Attach prod read-only, INSERT all rows into staging, DETACH."""
-    staging.execute(f"ATTACH DATABASE '{prod_path}' AS prod")
+    staging.execute(f"ATTACH DATABASE 'file:{prod_path}?mode=ro' AS prod")
     try:
         # Get column names from prod
         cols_info = staging.execute(f"PRAGMA prod.table_info({table})").fetchall()

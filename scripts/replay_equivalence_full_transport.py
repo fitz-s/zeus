@@ -782,7 +782,7 @@ def _make_synthetic_fixture():
             observation_field TEXT, range_label TEXT,
             p_raw REAL, outcome INTEGER, lead_days REAL, season TEXT,
             cluster TEXT, forecast_available_at TEXT, decision_group_id TEXT,
-            bias_corrected INTEGER DEFAULT 0, authority TEXT DEFAULT 'VERIFIED',
+            bias_corrected INTEGER DEFAULT 0, authority TEXT,
             bin_source TEXT DEFAULT 'canonical_v2', snapshot_id INTEGER,
             data_version TEXT, training_allowed INTEGER DEFAULT 1,
             causality_status TEXT DEFAULT 'OK', cycle TEXT DEFAULT '00',

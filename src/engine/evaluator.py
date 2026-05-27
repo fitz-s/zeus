@@ -3055,7 +3055,7 @@ def _layer7_dedup_fires(conn, portfolio: "PortfolioState", token_id: str) -> boo
 def _resolve_ft_error_model_for_entry(
     conn,
     city,
-    target_date: "date",
+    target_date: str,
     metric_str: str,
 ) -> "_PredictiveErrorModel | None":
     """Entry-path analogue of monitor_refresh._resolve_ft_error_model.

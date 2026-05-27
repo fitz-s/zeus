@@ -1,5 +1,8 @@
 # Created: 2026-05-26
 # Last reused or audited: 2026-05-26
+# Lifecycle: created=2026-05-26; last_reviewed=2026-05-26; last_reused=never
+# Purpose: Promote model_bias_ens_v2 STAGING rows to VERIFIED; inspect/verify subcommands read-only.
+# Reuse: Dry-run safe (default). Pass --commit to write. Requires fit_full_transport_error_models.py STAGING rows to be present. Verify canonical columns before use.
 # Authority basis: Zeus #64 FT-ship F3 — promote STAGING→VERIFIED rows in
 #   model_bias_ens_v2 (world.db). INV-37 compliant: single-DB write via
 #   get_world_connection(write_class="bulk") + SAVEPOINT. No ATTACH needed
@@ -253,18 +256,20 @@ def main(argv: list[str] | None = None) -> int:
 
     db_path = args.db or str(ZEUS_WORLD_DB_PATH)
 
-    # INV-37: single-DB connection. write_class="bulk" for promote; None for read-only.
+    # INV-37: single-DB connection. write_class="bulk" for promote against prod;
+    # custom --db path uses direct sqlite3.connect (staging/copy DB, not INV-37 subject).
     needs_write = (args.subcommand == "promote" and args.commit)
-    if needs_write:
+    if args.db:
+        # Custom path override — connect directly (read-write if needed).
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+    elif needs_write:
         conn = get_world_connection(write_class="bulk")
     else:
         conn = get_world_connection(write_class=None)
-        if args.db:
-            # Custom path override — connect directly (read-only).
-            conn = sqlite3.connect(db_path)
-            conn.row_factory = sqlite3.Row
 
-    conn.row_factory = sqlite3.Row
+    if not args.db:
+        conn.row_factory = sqlite3.Row
 
     dispatch = {"inspect": cmd_inspect, "promote": cmd_promote, "verify": cmd_verify}
     rc = dispatch[args.subcommand](args, conn)

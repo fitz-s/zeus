@@ -1,5 +1,8 @@
 # Created: 2026-05-25
 # Last reused or audited: 2026-05-25
+# Lifecycle: created=2026-05-25; last_reviewed=2026-05-25; last_reused=never
+# Purpose: Relationship + antibody tests for Fix B: MIN_PAIRED_N gate on transport delta (Zeus #64).
+# Reuse: Inspect fit_city_predictive_error + MIN_PAIRED_N constant before reuse.
 # Authority basis: Zeus #64 Fix B — MIN_PAIRED_N gate on transport step.
 #   Root cause: n_paired=1 → statistics.variance undefined → var_d=0 → prior mean
 #   shifted by the entire single-date delta with raw prior variance unchanged →

@@ -1704,3 +1704,77 @@ scripts:
     unguarded_write_rationale: "Writes only to replay_equivalence_proof table in stage_db."
     required_helpers: [src/calibration/ens_bias_repo.py]
     required_tests: []
+
+  scripts/promote_model_bias_ens_v2.py:
+    class: repair
+    status: active
+    lifecycle: ft_ship_2026_05_26
+    packet: docs/operations/FT_SHIP_EXECUTION_LEDGER_2026-05-25.md
+    authority_scope: world_db_write
+    dangerous_if_run: true
+    dry_run_default: true
+    apply_flag: "--commit"
+    target_db: "state/zeus-world.db (or --db PATH for staging)"
+    read_targets: [state/zeus-world.db]
+    write_targets: [state/zeus-world.db]
+    canonical_command: "python scripts/promote_model_bias_ens_v2.py promote [--commit] [--db PATH] [--metric METRIC]"
+    external_inputs: []
+    delete_policy: retain_until_superseded
+    reuse_when: >
+      Promote model_bias_ens_v2 STAGING rows to VERIFIED after shadow-validation passes.
+      Requires STAGING rows from fit_full_transport_error_models.py. Use --db for staging DB;
+      omit --db to target prod world.db.
+    do_not_use_when: "STAGING rows absent or shadow-validation not yet passed."
+    promotion_barrier: "Shadow-validation evidence required before promoting to VERIFIED."
+    unguarded_write_rationale: "Writes to model_bias_ens_v2 authority column only (STAGING→VERIFIED); no row creation."
+    required_helpers: [src/state/db.py]
+    required_tests: []
+
+  scripts/build_ft_staging_db.py:
+    class: repair
+    status: active
+    lifecycle: ft_ship_2026_05_26
+    packet: docs/operations/FT_SHIP_EXECUTION_LEDGER_2026-05-25.md
+    authority_scope: isolated_staging_db
+    dangerous_if_run: false
+    dry_run_default: false
+    apply_flag: null
+    target_db: "state/ft_staging_2026-05-26.db (isolated)"
+    read_targets: [state/zeus-forecasts.db]
+    write_targets: ["state/ft_staging_2026-05-26.db"]
+    canonical_command: "python scripts/build_ft_staging_db.py"
+    external_inputs: [state/zeus-forecasts.db]
+    delete_policy: retain_until_superseded
+    reuse_when: >
+      Build isolated ft_staging DB for full_transport_v1 pair generation.
+      Copies calibration_pairs_v2, ensemble_snapshots_v2, observations etc. from prod
+      forecasts DB (read-only ATTACH URI) into a fresh staging DB.
+    do_not_use_when: "Staging DB already built and posteriors fitted. Will overwrite."
+    promotion_barrier: "Output is input to fit_full_transport_error_models.py; not directly promoted."
+    unguarded_write_rationale: "Writes only to isolated staging DB; prod ATTACHed read-only via URI mode=ro."
+    required_helpers: []
+    required_tests: []
+
+  scripts/audit_refit_proper_scores.py:
+    class: eval_diagnostic
+    status: active
+    lifecycle: ft_ship_2026_05_25
+    packet: docs/operations/FT_SHIP_EXECUTION_LEDGER_2026-05-25.md
+    authority_scope: read_only
+    dangerous_if_run: false
+    dry_run_default: true
+    apply_flag: null
+    target_db: "<stage-db-path> (read-only)"
+    read_targets: ["<stage-db-path>"]
+    write_targets: ["docs/operations/ENS_REFIT_VALIDATION_2026-05-25_results.md", stdout]
+    canonical_command: "python scripts/audit_refit_proper_scores.py --db PATH --metric {high,low}"
+    external_inputs: []
+    delete_policy: retain_until_superseded
+    reuse_when: >
+      Post-refit proper-score audit: Brier, LogLoss, RPS, PIT, ECE on group-blocked OOS held-out set.
+      Supports raw/full_transport_v1 model variants and cohort splits.
+    do_not_use_when: "DB absent or not yet fitted."
+    promotion_barrier: "Evidence-generation tool; output feeds ship decision."
+    unguarded_write_rationale: "Read-only SELECT; writes only to stdout and docs file."
+    required_helpers: []
+    required_tests: []
