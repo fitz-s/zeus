@@ -402,6 +402,7 @@ def _load_ft_error_model(
         metric=metric,
         live_data_version=live_data_version,
         month=None,  # season-level pool (month=0 in schema)
+        error_model_family="full_transport_v1",  # F4 symmetry: same filter as entry path; STAGING rows must not bind
     )
     if row is None:
         logger.warning(
