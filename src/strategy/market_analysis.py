@@ -191,6 +191,8 @@ class MarketAnalysis:
         transfer_logit_sigma: float = 0.0,
         bootstrap_probability_sampler: BootstrapProbabilitySampler | None = None,
         bootstrap_signal_type: str = "generic_ensemble",
+        entry_quote_evidence_yes: list | None = None,
+        entry_quote_evidence_no: list | None = None,
     ):
         # Semantic Provenance Guard
         if False: _ = None.selected_method; _ = None.entry_method; _ = None.bias_correction
@@ -266,6 +268,39 @@ class MarketAnalysis:
         self._transfer_logit_sigma = float(transfer_logit_sigma)
         self._bootstrap_probability_sampler = bootstrap_probability_sampler
         self._bootstrap_signal_type = str(bootstrap_signal_type or "generic_ensemble")
+        # Wave 5: dedicated independent RNG for σ_market cost-noise draws so
+        # the forecast/Platt resampling stream (self._rng) is NOT disturbed
+        # when EntryQuoteEvidence is provided. Without this split the same
+        # rng_seed produces different forecast samples between legacy and
+        # Wave-5 paths, defeating behaviour-preservation testing. Offset is
+        # a fixed prime so the cost stream is deterministic but uncorrelated
+        # with the forecast stream.
+        cost_seed = (rng_seed + 7919) if rng_seed is not None else None
+        self._cost_rng = np.random.default_rng(cost_seed)
+        # Wave 5 (2026-05-27, INV-40): per-bin EntryQuoteEvidence carries
+        # cost_uncertainty (σ_market). When provided, _bootstrap_bin samples
+        # c_b ~ N(eqe.all_in_entry_price, eqe.cost_uncertainty) instead of
+        # subtracting the fixed p_market value — so edge_ci_lower reflects
+        # market-cost uncertainty (R5 antibody) rather than only forecast
+        # uncertainty. None preserves pre-Wave-5 behaviour bit-identically.
+        self._entry_quote_evidence_yes: list | None = (
+            None if entry_quote_evidence_yes is None
+            else list(entry_quote_evidence_yes)
+        )
+        self._entry_quote_evidence_no: list | None = (
+            None if entry_quote_evidence_no is None
+            else list(entry_quote_evidence_no)
+        )
+        if self._entry_quote_evidence_yes is not None and len(self._entry_quote_evidence_yes) != expected_bins:
+            raise ValueError(
+                f"entry_quote_evidence_yes must have length {expected_bins}, "
+                f"got {len(self._entry_quote_evidence_yes)}"
+            )
+        if self._entry_quote_evidence_no is not None and len(self._entry_quote_evidence_no) != expected_bins:
+            raise ValueError(
+                f"entry_quote_evidence_no must have length {expected_bins}, "
+                f"got {len(self._entry_quote_evidence_no)}"
+            )
 
     def _compute_posterior(self, p_cal: np.ndarray) -> np.ndarray:
         if self._posterior_mode == MODEL_ONLY_POSTERIOR_MODE:
@@ -404,12 +439,23 @@ class MarketAnalysis:
                     # boundary. The Kelly seam (evaluator.py
                     # _size_at_execution_price_boundary) no longer fabricates
                     # price_type="implied_probability" over this object.
-                    yes_entry_price = ExecutionPrice(
-                        value=float(self.p_market[i]),
-                        price_type="vwmp",
-                        fee_deducted=False,
-                        currency="probability_units",
+                    # Wave 5: prefer the EntryQuoteEvidence-derived all-in
+                    # price + fee_adjusted ExecutionPrice when EQE is
+                    # provided; otherwise stamp VWMP (Wave 2 default).
+                    eqe_yes = (
+                        self._entry_quote_evidence_yes[i]
+                        if self._entry_quote_evidence_yes is not None
+                        else None
                     )
+                    if eqe_yes is not None:
+                        yes_entry_price = eqe_yes.to_execution_price()
+                    else:
+                        yes_entry_price = ExecutionPrice(
+                            value=float(self.p_market[i]),
+                            price_type="vwmp",
+                            fee_deducted=False,
+                            currency="probability_units",
+                        )
                     edge = BinEdge(
                         bin=b,
                         direction="buy_yes",
@@ -424,6 +470,7 @@ class MarketAnalysis:
                         vwmp=float(self.p_market[i]),
                         forward_edge=edge_yes,
                         support_index=i,
+                        entry_quote_evidence=eqe_yes,
                     )
                     edges.append(edge)
                     yes_decision = "yes_edge_accepted"
@@ -477,12 +524,20 @@ class MarketAnalysis:
                         # Wave 2 (INV-38): buy_no uses NATIVE NO-side VWMP from
                         # buy_no_market_price (executable NO quote, not the YES
                         # complement). Same provenance as buy_yes.
-                        no_entry_price = ExecutionPrice(
-                            value=float(p_market_no),
-                            price_type="vwmp",
-                            fee_deducted=False,
-                            currency="probability_units",
+                        eqe_no = (
+                            self._entry_quote_evidence_no[i]
+                            if self._entry_quote_evidence_no is not None
+                            else None
                         )
+                        if eqe_no is not None:
+                            no_entry_price = eqe_no.to_execution_price()
+                        else:
+                            no_entry_price = ExecutionPrice(
+                                value=float(p_market_no),
+                                price_type="vwmp",
+                                fee_deducted=False,
+                                currency="probability_units",
+                            )
                         edge = BinEdge(
                             bin=b,
                             direction="buy_no",
@@ -497,6 +552,7 @@ class MarketAnalysis:
                             vwmp=p_market_no,
                             forward_edge=edge_no,
                             support_index=i,
+                            entry_quote_evidence=eqe_no,
                         )
                         edges.append(edge)
                         no_decision = "no_edge_accepted"
@@ -641,7 +697,23 @@ class MarketAnalysis:
                 p_cal_boot_all = p_raw_all
 
             p_post = self._compute_posterior(p_cal_boot_all)
-            bootstrap_edges[i] = p_post[bin_idx] - self.p_market[bin_idx]
+            # Wave 5: σ_market sampling. When EntryQuoteEvidence is provided
+            # for this bin, draw c_b ~ N(all_in_entry_price, cost_uncertainty);
+            # otherwise fall back to the fixed-p_market path (legacy bit-
+            # identical behaviour). c_b is clipped to (0, 1) so degenerate
+            # tail samples cannot drive the edge into the unbounded region
+            # where the downstream Kelly formula loses meaning.
+            c_b = float(self.p_market[bin_idx])
+            if self._entry_quote_evidence_yes is not None:
+                eqe = self._entry_quote_evidence_yes[bin_idx]
+                if eqe is not None and float(eqe.cost_uncertainty) > 0.0:
+                    c_b = float(eqe.all_in_entry_price) + self._cost_rng.normal(
+                        0.0, float(eqe.cost_uncertainty)
+                    )
+                    c_b = float(np.clip(c_b, 1e-6, 1.0 - 1e-6))
+                elif eqe is not None:
+                    c_b = float(eqe.all_in_entry_price)
+            bootstrap_edges[i] = p_post[bin_idx] - c_b
 
         # Spec: p-value = np.mean(edges <= 0), NOT approximated
         p_value = float(np.mean(bootstrap_edges <= 0))
@@ -700,8 +772,21 @@ class MarketAnalysis:
                 p_cal_boot_all = p_raw_all
 
             p_post_yes = self._compute_posterior(p_cal_boot_all)[bin_idx]
-            p_market_no = self.buy_no_market_price(bin_idx)
-            bootstrap_edges[i] = (1.0 - p_post_yes) - p_market_no
+            # Wave 5: σ_market sampling on the NO side. Same semantics as the
+            # buy_yes path — when EntryQuoteEvidence is provided for the NO
+            # leg, draw c_b ~ N(eqe.all_in_entry_price, eqe.cost_uncertainty);
+            # legacy callers (no EQE) keep the fixed buy_no_market_price path.
+            c_b = float(self.buy_no_market_price(bin_idx))
+            if self._entry_quote_evidence_no is not None:
+                eqe = self._entry_quote_evidence_no[bin_idx]
+                if eqe is not None and float(eqe.cost_uncertainty) > 0.0:
+                    c_b = float(eqe.all_in_entry_price) + self._cost_rng.normal(
+                        0.0, float(eqe.cost_uncertainty)
+                    )
+                    c_b = float(np.clip(c_b, 1e-6, 1.0 - 1e-6))
+                elif eqe is not None:
+                    c_b = float(eqe.all_in_entry_price)
+            bootstrap_edges[i] = (1.0 - p_post_yes) - c_b
 
         p_value = float(np.mean(bootstrap_edges <= 0))
         ci_lo = float(np.percentile(bootstrap_edges, 5))

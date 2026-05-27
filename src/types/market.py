@@ -6,7 +6,12 @@ import math
 
 import numpy as np
 
+from typing import TYPE_CHECKING
+
 from src.contracts.execution_price import ExecutionPrice
+
+if TYPE_CHECKING:
+    from src.contracts.entry_quote_evidence import EntryQuoteEvidence
 
 logger = logging.getLogger(__name__)
 
@@ -289,6 +294,13 @@ class BinEdge:
     forward_edge: float = 0.0
     support_index: int | None = None
     ev_per_dollar: float = 0.0
+    # Wave 5 (2026-05-27, INV-40): optional executable-cost evidence carrying
+    # the depth-walked fill price + cost_uncertainty for the σ_market input
+    # to the bootstrap (sampled per iteration in MarketAnalysis._bootstrap_bin
+    # when present). Legacy fixtures and callers without EntryQuoteEvidence
+    # leave this None — the bootstrap then subtracts the fixed self.p_market
+    # value, preserving pre-Wave-5 behaviour.
+    entry_quote_evidence: "EntryQuoteEvidence | None" = None
 
     def __post_init__(self) -> None:
         if isinstance(self.entry_price, ExecutionPrice):
