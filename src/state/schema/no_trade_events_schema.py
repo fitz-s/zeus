@@ -2,7 +2,7 @@
 # Last reused or audited: 2026-05-23
 # Authority basis: PHASE_2_ULTRAPLAN.md v3.1 §5.2 (sha 00c2399742) + Phase 3 T2 (2026-05-21): schema_version CHECK extended to 18 + 6 SHOULDER_* NoTradeReason members + live release proof P0-3 schema compatibility marker + Phase 3 T3 (2026-05-21): CHECK extended to 23 + live authority follow-up (2026-05-21): CHECK extended to 25 + evidence governance follow-up (2026-05-21): strategy provenance columns, v26 + P1/P2 architecture review (2026-05-22): evidence lifecycle + day0_nowcast_entry, v27 + opportunity_fact strategy-key widening, v28 + 2026-05-23 review5.23 P0-2: unified schema version authority (import from src.state.db)
 
-"""T2 — CREATE TABLE DDL for no_trade_events (world DB).
+"""T2 — schema DDL for the no_trade_events table (world DB).
 
 Per §5.2 column list:
   market_slug, target_date, temperature_metric, observation_time,
@@ -143,7 +143,7 @@ def _table_columns(conn: sqlite3.Connection) -> set[str]:
 
 
 def _schema_version_in_list(table_sql: str) -> set[int]:
-    """Parse the schema_version IN (...) values from the CREATE TABLE SQL."""
+    """Parse the schema_version IN (...) values from the table-definition SQL."""
     m = re.search(r"schema_version\s+INTEGER[^C]*CHECK\s*\(schema_version\s+IN\s*\(([^)]+)\)", table_sql)
     if not m:
         return set()
