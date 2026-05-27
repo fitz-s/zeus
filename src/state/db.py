@@ -9167,10 +9167,20 @@ def query_token_suppression_tokens(conn: sqlite3.Connection | None) -> list[str]
     (pre-migration) or the VIEW alias created by
     migrate_b071_token_suppression_to_history.py --apply --drop-legacy (B071).
     The VIEW projects the latest row per token_id from the append-only history.
+
+    2026-05-27 fitz: ALSO include chain_only_quarantined tokens whose parent
+    market has reached a chain-terminal phase (settled/voided/admin_closed/
+    economically_closed/quarantined). Without this, reconcile_with_chain
+    Rule 3 re-quarantines these tokens every cycle from the chain API
+    response, regenerating chain-only quarantine positions in PortfolioState
+    and re-arming _has_quarantined_positions even when the load-portfolio
+    path correctly excludes them. The terminal-phase guard mirrors the one
+    in query_chain_only_quarantine_rows so both injection paths agree.
+    Skipped when position_current is absent (test envs).
     """
     if conn is None or not _table_or_view_exists(conn, "token_suppression"):
         return []
-    rows = conn.execute(
+    base = conn.execute(
         f"""
         SELECT token_id
         FROM token_suppression
@@ -9179,7 +9189,30 @@ def query_token_suppression_tokens(conn: sqlite3.Connection | None) -> list[str]
         """,
         RESOLVED_TOKEN_SUPPRESSION_REASONS,
     ).fetchall()
-    return [str(row["token_id"] or "") for row in rows if str(row["token_id"] or "")]
+    chain_terminal: list = []
+    if _table_exists(conn, "position_current"):
+        chain_terminal = conn.execute(
+            """
+            SELECT ts.token_id
+            FROM token_suppression ts
+            WHERE ts.suppression_reason = 'chain_only_quarantined'
+              AND EXISTS (
+                  SELECT 1 FROM position_current pc
+                  WHERE (pc.token_id = ts.token_id OR pc.no_token_id = ts.token_id)
+                    AND pc.phase IN ('settled', 'voided', 'admin_closed',
+                                     'economically_closed', 'quarantined')
+              )
+            ORDER BY ts.created_at ASC, ts.token_id ASC
+            """
+        ).fetchall()
+    out: list[str] = []
+    seen: set[str] = set()
+    for row in list(base) + list(chain_terminal):
+        tok = str(row["token_id"] or "")
+        if tok and tok not in seen:
+            seen.add(tok)
+            out.append(tok)
+    return out
 
 
 def query_chain_only_quarantine_rows(conn: sqlite3.Connection | None) -> list[dict]:
