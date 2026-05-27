@@ -95,59 +95,16 @@ write_routes:
   script_repair_write:
     owner: scripts/**
     guardrail: dry-run/apply metadata required in later scripts manifest packet
-# External provider registry — consumed by scripts/ci/check_source_rationale_delta.py.
-# Merged 2026-05-27: union of PR #347 (Finding 10 — daemon-entry providers) and
-# PR #348 (market-cost-seam — evaluator/cycle_runtime providers). Map form keyed
-# by provider id; the gate reads the keys as the set of declared sources. Both
-# PRs independently added a `providers:` block to satisfy the same gate; this
-# resolution keeps every declared id under the single canonical map.
-providers:
-  observation:
-    role: settlement_capture_observation
-    client: src/data/observation_client.py
-    why: Hourly+daily observed-temperature observations (HKO/NOAA/WU/Ogimet);
-      used by Day0 monitor + settlement capture truth chain. Per-station
-      routing law in architecture/observation_routing.yaml.
-  polymarket:
-    role: venue_clob
-    client: src/data/polymarket_client.py
-    why: Polymarket CLOB venue — orderbook + balances + order submission.
-      Sole venue producer for chain truth; see architecture/venue_law.yaml
-      for the canonical chain-truth contract. NOT a forecast/settlement source.
-  ensemble:
-    role: forecast_skill
-    client: src/data/ensemble_client.py
-    why: TIGGE / OpenData ensemble forecast distributions used for skill
-      computation + Day0 calibration. Distinct from observation (settlement
-      truth) and polymarket (venue truth) per source-plane-collapse rule.
-  ecmwf_open_data:
-    role: forecast_skill_live
-    client: src/data/ecmwf_open_data_ingest.py
-    why: Cycle-aligned live forecast producer (00z / 06z / 12z / 18z). (PR #348)
-  tigge:
-    role: forecast_skill_historical
-    client: src/data/tigge_client.py
-    why: 51-member ENS historical archive for Platt fit. (PR #348)
-  meteostat_bulk:
-    role: historical_hourly_archive
-    client: src/data/meteostat_bulk_client.py
-    why: Long-horizon historical hourly archive backfill. (PR #348)
-  ogimet_hourly:
-    role: historical_hourly_archive
-    client: src/data/ogimet_hourly_client.py
-    why: Secondary historical hourly archive (ogimet provider). (PR #348)
-  openmeteo:
-    role: forecast_or_observation_complementary
-    client: src/data/openmeteo_client.py
-    why: Open-Meteo direct client (separate from observation_client composite). (PR #348)
-  wu_hourly:
-    role: historical_hourly_archive
-    client: src/data/wu_hourly_client.py
-    why: WeatherUnderground hourly archive feed. (PR #348)
-  scheduler:
-    role: internal_adapter
-    client: src/data/scheduler_adapter.py
-    why: Internal scheduling adapter. NOT an external truth source. (PR #348)
+external_sources:
+  - id: observation
+    authority_role: current_observation_boundary
+    why: Runtime observation provider family used for Day0/monitor observation reads; settlement truth remains governed separately by settlement semantics and harvester authority.
+  - id: polymarket
+    authority_role: venue_market_and_wallet_boundary
+    why: Polymarket CLOB, orderbook, wallet, heartbeat, and user-channel venue surfaces; quote evidence and user lifecycle truth must remain separated by their scoped adapters.
+  - id: ensemble
+    authority_role: forecast_ensemble_boundary
+    why: Forecast ensemble provider family used for probability generation and executable forecast evidence; it is not settlement or user-fill authority.
 package_defaults:
   src/contracts:
     zone: K0_frozen_kernel
