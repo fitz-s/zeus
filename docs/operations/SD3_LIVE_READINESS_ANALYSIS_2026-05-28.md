@@ -158,3 +158,73 @@ Per Constraint #4 (data provenance > code correctness): **an error model whose t
 - `$CLAUDE_JOB_DIR/shadow_vs_website.csv` — 54-row bin-based comparison (superseded by the above; retained for audit).
 - `docs/operations/ROW_ACTION_MANIFEST_2026-05-28.csv` — sd3 row reproducibility (72 REPRODUCIBLE / 13 INSUFFICIENT_PRIOR / 2 COVERAGE_MISLABELED / 0 NON_REPRODUCIBLE).
 - `docs/operations/ENS_SD3_BEFORE_AFTER_2026-05-28.csv` — per-row pre/post-sd3 transition classes.
+
+---
+
+## 9 — T1/T2/T3 results: two data bugs found (2026-05-28, operator redesign)
+
+Per operator directive (evidence-ledger + candidate selection), ran the 00z/12z test and
+built the cycle-strict unit-normalized evidence extractor (`scripts/build_ens_residual_evidence.py`).
+
+**CORRECTION to §6:** the residual data is NOT gone. It lives in `state/zeus-forecasts.db`
+(33 GB): Jeddah has 7,803 HIGH ens rows + 45 settlements, 2024-2026. §6's "unauditable / data
+gone" conclusion was wrong — I had searched world/trades/empty-scratch, not forecasts.db. The
+sd3 fit IS auditable. (The provenance *antibody* in §6 still stands: the producer should persist
+its evidence; but the data exists.)
+
+### Bug 1 — 12z nighttime-window contamination (H1 CONFIRMED for a subset)
+
+Per-cycle residual (ens_mean − settlement), HIGH:
+
+| city | 00z | 12z | verdict |
+|---|---|---|---|
+| Seoul | −0.94 | −4.97 | 12z contaminated |
+| Hong Kong | +0.69 | −3.36 | 0z clean |
+| Jakarta | −3.10 | −7.83 | 12z strong |
+| Busan | −2.67 | −5.72 | 12z strong |
+| San Francisco | −3.76 | −3.76 | window-independent (station gap) |
+
+The metadata that *should* flag this (`contributes_to_target_extrema`) is unreliable — Jeddah/SF
+carry `contributes=1` on BOTH cycles. So the fix is **cycle-strict extraction** (HIGH→0z-only,
+LOW→12z-only), not metadata trust. This is why the original producer leaked 12z: it only
+*preferred* 0z and trusted a flag that doesn't exclude contaminated samples.
+
+### Bug 2 — settlement unit normalization (NEW)
+
+US-city settlements are stored in °F (members_unit='degF', settlement_value in °F). A code path
+converted ensemble members to °C while leaving settlement in °F → fabricated −40 to −54 °C
+"biases" for Austin/NYC/SF. Fix: normalize settlement with the same `members_unit`.
+
+### Clean residuals after BOTH fixes (0z-only + unit-normalized)
+
+| city/season | clean bias_c | prior sd3 |
+|---|---|---|
+| Jeddah MAM | −3.68 | −6.84 |
+| San Francisco MAM | −3.76 | (−51 raw) |
+| Jakarta SON | −3.10 | −3.80 |
+| Busan MAM | −2.67 | −3.92 |
+| Shanghai MAM | −2.60 | −3.15 |
+| Seoul MAM | −1.01 | −1.66 |
+| Hong Kong MAM | +0.69 | +0.63 |
+| Austin MAM | +0.26 | (−54 bug) |
+| NYC MAM | −0.23 | (−45 bug) |
+| London (all) | −0.2 to −0.7 | — |
+
+Most cities collapse to ±1 °C → raw/scale-only will win OOS. A residual cluster (Jeddah, SF,
+Jakarta, Busan, Shanghai at −2.6 to −3.8) stays meaningful → T4 OOS proper-score test against
+settlement must adjudicate whether these are stable station offsets (correct) or noise (use raw).
+
+### Reframe of the open-meteo comparison (§3)
+
+§3 measured ens vs open-meteo (another forecast). But the market settles on the WU station, and
+for SF/Jeddah the WU station diverges from open-meteo by several °C. So "sd3 worse vs open-meteo"
+does not prove "sd3 worse at predicting settlement." The only valid arbiter is held-out proper
+score vs SETTLEMENT (T4) — exactly the operator's Principle 1.
+
+### Status
+
+- T1 (00z/12z test): DONE — H1 confirmed for subset, refuted for SF/Jeddah (station gap).
+- T2 (evidence ledger) + T3 (cycle-strict + unit-norm extraction): DONE — `scripts/build_ens_residual_evidence.py`.
+- T4 (candidate scorer, OOS proper-score selection vs settlement): NEXT.
+- T5 (12-city smoke, pre-full-MC gate): after T4.
+- Verdict unchanged: HOLD sd3. The clean rebuild proceeds via T4/T5.
