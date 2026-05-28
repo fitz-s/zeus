@@ -2585,7 +2585,7 @@ def init_schema(
     from src.state.schema.v2_schema import apply_v2_schema as _apply_v2_schema
     _apply_v2_schema(conn, forecast_tables=False)
 
-    # Zeus #64 FT-ship F2 (2026-05-26): ensure model_bias_ens_v2 exists on every
+    # Zeus #64 FT-ship F2 (2026-05-26): ensure model_bias_ens exists on every
     # init_schema target so monitor_refresh + evaluator can read FT models at runtime
     # without crashing on "no such table". Idempotent CREATE TABLE IF NOT EXISTS.
     # Authority: docs/operations/FT_SHIP_EXECUTION_LEDGER_2026-05-25.md F2.

@@ -690,7 +690,7 @@ tables:
     created_by: init_schema
     pk_col: null
 
-  - name: model_bias_ens_v2
+  - name: model_bias_ens
     db: world
     schema_class: world_class
     schema_version_owner: SCHEMA_VERSION
@@ -703,7 +703,7 @@ tables:
       columns (error_model_family, authority, bias_c, residual_sd_c, etc.) are
       also applied idempotently by init_ens_bias_schema via PRAGMA-guarded ALTER.
       authority='STAGING' rows written by fit_full_transport_error_models.py;
-      promoted to 'VERIFIED' by scripts/promote_model_bias_ens_v2.py (operator).
+      promoted to 'VERIFIED' by scripts/promote_model_bias_ens.py (operator).
       Distinct from legacy model_bias (trained on deterministic product).
 
   # ---------------------------------------------------------------------------

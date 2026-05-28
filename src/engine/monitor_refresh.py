@@ -399,13 +399,13 @@ def _load_ft_error_model(
     # to avoid loading a legacy/wrong-family row when multiple families coexist
     # per (city, season, metric, live_data_version, month=0).
     row = conn.execute(
-        "SELECT * FROM model_bias_ens_v2 WHERE city=? AND season=? AND metric=? "
+        "SELECT * FROM model_bias_ens WHERE city=? AND season=? AND metric=? "
         "AND live_data_version=? AND month=0 AND error_model_family=?",
         (city_name, season, metric, live_data_version, "full_transport_v1"),
     ).fetchone()
     if row is None:
         logger.warning(
-            "full_transport_live: flag ON but no model_bias_ens_v2 row for "
+            "full_transport_live: flag ON but no model_bias_ens row for "
             "city=%r season=%r metric=%r live_data_version=%r family='full_transport_v1' "
             "— falling back to plain p_raw",
             city_name, season, metric, live_data_version,
@@ -418,7 +418,7 @@ def _load_ft_error_model(
     _missing = [c for c in _required_cols if row[c] is None]
     if _missing:
         logger.warning(
-            "full_transport_live: model_bias_ens_v2 row for city=%r season=%r metric=%r "
+            "full_transport_live: model_bias_ens row for city=%r season=%r metric=%r "
             "has NULL canonical cols %s — pre-migration DB? Falling back to plain p_raw.",
             city_name, season, metric, _missing,
         )

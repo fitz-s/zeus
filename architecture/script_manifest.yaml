@@ -1571,7 +1571,7 @@ scripts:
     external_inputs: []
     delete_policy: retain_until_superseded
     reuse_when: >
-      Fit PredictiveErrorModel posteriors (full_transport_v1) into model_bias_ens_v2.
+      Fit PredictiveErrorModel posteriors (full_transport_v1) into model_bias_ens.
       Use --commit to persist; dry-run by default. Requires isolated staging DB.
       Inspect Fix-A cycle selection before reuse.
     do_not_use_when: "Staging DB absent or calibration_pairs_v2 not yet rebuilt."
@@ -1580,7 +1580,7 @@ scripts:
     required_helpers: [src/calibration/ens_bias_repo.py, src/calibration/ens_error_model.py]
     required_tests: [tests/test_full_transport_live_wiring.py]
 
-  scripts/migrate_model_bias_ens_v2_canonical_fields.py:
+  scripts/migrate_model_bias_ens_canonical_fields.py:
     class: schema_migration
     status: active
     lifecycle: ft_ship_2026_05_25
@@ -1592,11 +1592,11 @@ scripts:
     target_db: state/zeus-world.db
     read_targets: [state/zeus-world.db]
     write_targets: [state/zeus-world.db]
-    canonical_command: "python scripts/migrate_model_bias_ens_v2_canonical_fields.py [--db PATH]"
+    canonical_command: "python scripts/migrate_model_bias_ens_canonical_fields.py [--db PATH]"
     external_inputs: []
     delete_policy: retain_until_superseded
     reuse_when: >
-      Add canonical error-model columns to model_bias_ens_v2 (idempotent).
+      Add canonical error-model columns to model_bias_ens (idempotent).
       ALTERs are guarded by PRAGMA table_info — safe to re-run.
       Run before fit_full_transport_error_models.py.
     do_not_use_when: "Schema already migrated (check PRAGMA table_info first)."
@@ -1655,7 +1655,7 @@ scripts:
     required_helpers: [src/calibration/ens_bias_repo.py]
     required_tests: []
 
-  scripts/promote_model_bias_ens_v2.py:
+  scripts/promote_model_bias_ens.py:
     class: repair
     status: active
     lifecycle: ft_ship_2026_05_26
@@ -1667,16 +1667,16 @@ scripts:
     target_db: "state/zeus-world.db (or --db PATH for staging)"
     read_targets: [state/zeus-world.db]
     write_targets: [state/zeus-world.db]
-    canonical_command: "python scripts/promote_model_bias_ens_v2.py promote [--commit] [--db PATH] [--metric METRIC]"
+    canonical_command: "python scripts/promote_model_bias_ens.py promote [--commit] [--db PATH] [--metric METRIC]"
     external_inputs: []
     delete_policy: retain_until_superseded
     reuse_when: >
-      Promote model_bias_ens_v2 STAGING rows to VERIFIED after shadow-validation passes.
+      Promote model_bias_ens STAGING rows to VERIFIED after shadow-validation passes.
       Requires STAGING rows from fit_full_transport_error_models.py. Use --db for staging DB;
       omit --db to target prod world.db.
     do_not_use_when: "STAGING rows absent or shadow-validation not yet passed."
     promotion_barrier: "Shadow-validation evidence required before promoting to VERIFIED."
-    unguarded_write_rationale: "Writes to model_bias_ens_v2 authority column only (STAGING→VERIFIED); no row creation."
+    unguarded_write_rationale: "Writes to model_bias_ens authority column only (STAGING→VERIFIED); no row creation."
     required_helpers: [src/state/db.py]
     required_tests: []
 

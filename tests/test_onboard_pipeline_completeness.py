@@ -62,7 +62,7 @@ REQUIRED_STEP_IDS = {
     "obs_instants_v2",      # backfill observation_instants_v2
     "ens_backfill_v2",      # ensemble_snapshots backfill
     "platt_training",       # refit_platt → promote
-    "fit_ens_bias_v2",      # model_bias_ens_v2 population
+    "fit_ens_bias_v2",      # model_bias_ens population
     "monthly_bounds",       # city_monthly_bounds.json generation
     "compute_ddd_floor",    # v2_city_floors.json entry
 }
@@ -106,7 +106,7 @@ V2_REQUIRED_TABLES = {
     "observation_instants_v2",
     "calibration_pairs_v2",
     "ensemble_snapshots",
-    "model_bias_ens_v2",
+    "model_bias_ens",
 }
 
 V1_BANNED_TABLES = {

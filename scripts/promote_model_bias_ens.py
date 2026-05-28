@@ -1,14 +1,14 @@
 # Created: 2026-05-26
 # Last reused or audited: 2026-05-26
 # Lifecycle: created=2026-05-26; last_reviewed=2026-05-26; last_reused=never
-# Purpose: Promote model_bias_ens_v2 STAGING rows to VERIFIED; inspect/verify subcommands read-only.
+# Purpose: Promote model_bias_ens STAGING rows to VERIFIED; inspect/verify subcommands read-only.
 # Reuse: Dry-run safe (default). Pass --commit to write. Requires fit_full_transport_error_models.py STAGING rows to be present. Verify canonical columns before use.
 # Authority basis: Zeus #64 FT-ship F3 — promote STAGING→VERIFIED rows in
-#   model_bias_ens_v2 (world.db). INV-37 compliant: single-DB write via
+#   model_bias_ens (world.db). INV-37 compliant: single-DB write via
 #   get_world_connection(write_class="bulk") + SAVEPOINT. No ATTACH needed
-#   (model_bias_ens_v2 is world-class only; no cross-DB writes in this path).
+#   (model_bias_ens is world-class only; no cross-DB writes in this path).
 #   Authority: docs/operations/FT_SHIP_EXECUTION_LEDGER_2026-05-25.md F3.
-"""Promote model_bias_ens_v2 STAGING rows to VERIFIED in production zeus-world.db.
+"""Promote model_bias_ens STAGING rows to VERIFIED in production zeus-world.db.
 
 STAGING rows are written by fit_full_transport_error_models.py with
 ``authority='STAGING'``.  This script promotes them to ``authority='VERIFIED'``
@@ -38,7 +38,7 @@ Options
 
 INV-37 compliance
 -----------------
-model_bias_ens_v2 is world-class (zeus-world.db).  All mutations in this
+model_bias_ens is world-class (zeus-world.db).  All mutations in this
 script use a single connection to world.db with SAVEPOINT — no ATTACH,
 no independent second connection to another DB.  This is the sanctioned
 single-DB write path.
@@ -58,7 +58,7 @@ from src.state.db import get_world_connection, ZEUS_WORLD_DB_PATH  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
-TABLE = "model_bias_ens_v2"
+TABLE = "model_bias_ens"
 _DEFAULT_FAMILY = "full_transport_v1"
 _CRITICAL_FIELDS = ("bias_c", "residual_sd_c", "heterogeneity_var_c2", "authority", "error_model_family")
 
@@ -159,7 +159,7 @@ def cmd_promote(args: argparse.Namespace, conn: sqlite3.Connection) -> int:
     rowids = [r[0] for r in candidates]
     placeholders = ",".join("?" * len(rowids))
     try:
-        conn.execute("SAVEPOINT promote_model_bias_ens_v2")
+        conn.execute("SAVEPOINT promote_model_bias_ens")
         conn.execute(
             f"UPDATE {TABLE} SET authority = 'VERIFIED' WHERE rowid IN ({placeholders})",
             rowids,
@@ -168,11 +168,11 @@ def cmd_promote(args: argparse.Namespace, conn: sqlite3.Connection) -> int:
         ic = conn.execute("PRAGMA integrity_check").fetchone()
         if ic[0] != "ok":
             raise RuntimeError(f"PRAGMA integrity_check failed: {ic[0]}")
-        conn.execute("RELEASE SAVEPOINT promote_model_bias_ens_v2")
+        conn.execute("RELEASE SAVEPOINT promote_model_bias_ens")
         print(f"Promoted {len(rowids)} rows to VERIFIED.")
     except Exception as exc:
-        conn.execute("ROLLBACK TO SAVEPOINT promote_model_bias_ens_v2")
-        conn.execute("RELEASE SAVEPOINT promote_model_bias_ens_v2")
+        conn.execute("ROLLBACK TO SAVEPOINT promote_model_bias_ens")
+        conn.execute("RELEASE SAVEPOINT promote_model_bias_ens")
         print(f"ERROR during promote — rolled back: {exc}", file=sys.stderr)
         return 1
     return 0

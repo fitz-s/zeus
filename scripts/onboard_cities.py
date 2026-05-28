@@ -411,7 +411,7 @@ PIPELINE_STEPS = [
     },
     {
         "id": "fit_ens_bias_v2",
-        "name": "Fit model_bias_ens_v2 per city (inline ens_bias_repo)",
+        "name": "Fit model_bias_ens per city (inline ens_bias_repo)",
         "type": "python",
     },
     {
@@ -1039,15 +1039,15 @@ _ENS_SEASONS: tuple[tuple[str, tuple[int, ...]], ...] = (
 
 
 def _run_fit_ens_bias_v2(city_names: list[str], dry_run: bool = False) -> set[str]:
-    """Fit model_bias_ens_v2 for each city/season/metric using ens_bias_repo.
+    """Fit model_bias_ens for each city/season/metric using ens_bias_repo.
 
     Calls fit_city_predictive_error() (from ens_error_model) per (city, season,
-    metric) bucket, then writes the posterior to model_bias_ens_v2 via
+    metric) bucket, then writes the posterior to model_bias_ens via
     write_bias_model().  init_ens_bias_schema() is called defensively so the
     table is created even if it did not exist yet in zeus-forecasts.db.
     """
     if dry_run:
-        logger.info("  [DRY RUN] Would fit model_bias_ens_v2 for: %s", city_names)
+        logger.info("  [DRY RUN] Would fit model_bias_ens for: %s", city_names)
         return set()
 
     try:
@@ -1124,7 +1124,7 @@ def _run_fit_ens_bias_v2(city_names: list[str], dry_run: bool = False) -> set[st
         if zero_coverage_cities:
             logger.warning(
                 "  fit_ens_bias_v2: ZERO buckets fitted for %s — likely no "
-                "TIGGE/GRIB coverage yet.  model_bias_ens_v2 is empty for "
+                "TIGGE/GRIB coverage yet.  model_bias_ens is empty for "
                 "these cities; recording as PENDING in deferred sidecar.",
                 sorted(zero_coverage_cities),
             )
@@ -1301,7 +1301,7 @@ def _record_deferred_artifacts(
 
     ``ens_bias_no_coverage``: set of city names where fit_ens_bias_v2
     produced zero fitted buckets (no TIGGE/GRIB coverage).  These cities
-    get an additional model_bias_ens_v2=PENDING entry in their sidecar.
+    get an additional model_bias_ens=PENDING entry in their sidecar.
 
     Written to: data/onboarding_pending/<city_slug>.json
     """
@@ -1316,7 +1316,7 @@ def _record_deferred_artifacts(
             for artifact, reason in DEFERRED_ARTIFACTS.items()
         }
         if city_name in ens_bias_no_coverage:
-            deferred["model_bias_ens_v2"] = {
+            deferred["model_bias_ens"] = {
                 "status": "PENDING",
                 "reason": (
                     "fit_ens_bias_v2 produced 0 fitted buckets — "

@@ -82,11 +82,11 @@ def _member_extrema_c():
 
 
 def _apply_canonical_columns(conn: sqlite3.Connection) -> None:
-    """Add canonical extension columns to model_bias_ens_v2 (mirrors migration script)."""
+    """Add canonical extension columns to model_bias_ens (mirrors migration script)."""
     from src.calibration.ens_bias_repo import _CANONICAL_EXTENSION_COLUMNS  # type: ignore[attr-defined]
     for col, sql_type in _CANONICAL_EXTENSION_COLUMNS:
         try:
-            conn.execute(f"ALTER TABLE model_bias_ens_v2 ADD COLUMN {col} {sql_type}")
+            conn.execute(f"ALTER TABLE model_bias_ens ADD COLUMN {col} {sql_type}")
         except Exception:
             pass  # already exists
     conn.commit()

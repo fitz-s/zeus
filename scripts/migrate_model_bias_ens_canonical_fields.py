@@ -1,13 +1,13 @@
 # Created: 2026-05-25
 # Last reused or audited: 2026-05-25
 # Lifecycle: created=2026-05-25; last_reviewed=2026-05-25; last_reused=never
-# Purpose: Schema migration — add canonical error-model columns to model_bias_ens_v2 (idempotent, guarded by PRAGMA table_info).
+# Purpose: Schema migration — add canonical error-model columns to model_bias_ens (idempotent, guarded by PRAGMA table_info).
 # Reuse: Safe to re-run; ALTERs are no-ops if columns already exist. Verify schema_version before reuse.
 # Authority basis: Zeus #64 / #68 / #69 — canonical error-model schema.
-#   Extends model_bias_ens_v2 to the full domain-identity field set per task spec
+#   Extends model_bias_ens to the full domain-identity field set per task spec
 #   (FT_SHIP_MASTER_SPEC_2026-05-25 enumerated field list).  Each ALTER is guarded
 #   by PRAGMA table_info so re-runs are no-ops.
-"""Schema migration: add canonical error-model columns to ``model_bias_ens_v2``.
+"""Schema migration: add canonical error-model columns to ``model_bias_ens``.
 
 Migration semantic policy: additive-only / idempotent.
   - Only ADD COLUMN operations; no DROP, no RENAME, no data backfill.
@@ -38,10 +38,10 @@ already has the columns is a no-op.
 Usage (zeus repo root, zeus venv active)::
 
     # dry-run (default) — prints planned ALTERs, does NOT write
-    python scripts/migrate_model_bias_ens_v2_canonical_fields.py --db /path/to/copy.db
+    python scripts/migrate_model_bias_ens_canonical_fields.py --db /path/to/copy.db
 
     # commit to a COPY of the staging DB (NEVER prod without explicit operator approval)
-    python scripts/migrate_model_bias_ens_v2_canonical_fields.py \\
+    python scripts/migrate_model_bias_ens_canonical_fields.py \\
         --db /path/to/copy.db --commit
 """
 from __future__ import annotations
@@ -57,7 +57,7 @@ sys.path.insert(0, str(ZEUS_ROOT))
 
 logger = logging.getLogger(__name__)
 
-TABLE = "model_bias_ens_v2"
+TABLE = "model_bias_ens"
 
 # (column_name, sql_type) — order matters for readability; each is guarded separately.
 _NEW_COLUMNS: list[tuple[str, str]] = [
@@ -148,7 +148,7 @@ def migrate(
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        description="Add canonical error-model columns to model_bias_ens_v2 (idempotent)."
+        description="Add canonical error-model columns to model_bias_ens (idempotent)."
     )
     p.add_argument(
         "--db",

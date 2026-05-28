@@ -95,7 +95,7 @@ def check_pairs_complete(world_db: str) -> CheckResult:
 
 # ── Check 2: error_models_persisted ──────────────────────────────────────────
 
-_ERROR_MODEL_TABLES = ("ens_error_model_v1", "model_bias_ens_v2")
+_ERROR_MODEL_TABLES = ("ens_error_model_v1", "model_bias_ens")
 # Required fields per spec §Phase 1 step 1
 _REQUIRED_FIELDS = {
     "error_model_key", "bias_c", "residual_sd_c", "heterogeneity_var_c2",
@@ -119,10 +119,10 @@ def check_error_models_persisted(world_db: str) -> CheckResult:
                         name, FAIL,
                         f"{table} exists but missing fields: {sorted(missing)}"
                     )
-                # Bug 4 fix (Zeus #64 PR #342): for the canonical model_bias_ens_v2 table,
+                # Bug 4 fix (Zeus #64 PR #342): for the canonical model_bias_ens table,
                 # require full_transport_v1 posteriors specifically (not just any rows).
                 # Legacy ens_error_model_v1 lacks error_model_family — check row count only.
-                if table == "model_bias_ens_v2" and "error_model_family" in cols:
+                if table == "model_bias_ens" and "error_model_family" in cols:
                     count = conn.execute(
                         f"SELECT COUNT(*) FROM {table} WHERE error_model_family='full_transport_v1'"
                     ).fetchone()[0]

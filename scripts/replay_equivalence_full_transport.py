@@ -26,7 +26,7 @@ ERROR-MODEL SOURCE
     canonical ens_error_model_v1 producer runs and persists rows.
 
 --error-model-db PATH: load error-model params from a persisted
-    ens_error_model_v1 (or model_bias_ens_v2) table in the supplied DB.
+    ens_error_model_v1 (or model_bias_ens) table in the supplied DB.
     (Future mode; requires the Phase-1 producer to have run.)
 
 SAFETY
@@ -296,12 +296,12 @@ def _load_error_model_from_db(
     ).fetchone()
 
     if row is None:
-        # Fallback: try model_bias_ens_v2 (older schema)
+        # Fallback: try model_bias_ens (older schema)
         row = model_db_conn.execute(
             """
             SELECT bias_c, bias_sd_c, residual_sd_c, heterogeneity_var_c2,
                    correction_strength, effective_bias_c, total_residual_sd_c
-            FROM model_bias_ens_v2
+            FROM model_bias_ens
             WHERE city = ? AND metric = ? AND season = ?
             ORDER BY recorded_at DESC
             LIMIT 1
@@ -312,7 +312,7 @@ def _load_error_model_from_db(
     if row is None:
         raise ValueError(
             f"No error-model row for ({city_name!r}, {metric!r}, {season!r}) "
-            "in ens_error_model_v1 or model_bias_ens_v2"
+            "in ens_error_model_v1 or model_bias_ens"
         )
 
     return PredictiveErrorModel(
@@ -617,7 +617,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--error-model-db",
         default=None,
-        help="Path to a DB with ens_error_model_v1 or model_bias_ens_v2 table. "
+        help="Path to a DB with ens_error_model_v1 or model_bias_ens table. "
              "When omitted, --recompute mode is used.",
     )
     p.add_argument(

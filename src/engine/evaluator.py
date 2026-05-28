@@ -39,7 +39,7 @@ from src.calibration.manager import season_from_date
 from src.calibration.platt import calibrate_and_normalize
 # Zeus #64 FT-ship F1 (2026-05-26): full_transport_live entry-path wiring.
 # These imports enable the evaluator to call p_raw_vector_with_error_model and
-# reconstruct a PredictiveErrorModel from model_bias_ens_v2 — mirroring the
+# reconstruct a PredictiveErrorModel from model_bias_ens — mirroring the
 # logic already present in monitor_refresh._resolve_ft_error_model.
 # Cannot import _resolve_ft_error_model directly: monitor_refresh imports evaluator
 # (circular). Logic is inlined below as _resolve_ft_error_model_for_entry().
@@ -3182,7 +3182,7 @@ def _resolve_ft_error_model_for_entry(
     """Entry-path analogue of monitor_refresh._resolve_ft_error_model.
 
     Zeus #64 FT-ship F1 (2026-05-26): resolves a PredictiveErrorModel from
-    model_bias_ens_v2 for the entry evaluator so the full_transport_live flag
+    model_bias_ens for the entry evaluator so the full_transport_live flag
     drives BOTH the monitor refresh path AND the entry p_raw computation
     symmetrically.
 
@@ -3220,7 +3220,7 @@ def _resolve_ft_error_model_for_entry(
     if row is None:
         import logging as _logging
         _logging.getLogger(__name__).warning(
-            "full_transport_live entry: flag ON but no VERIFIED model_bias_ens_v2 row for "
+            "full_transport_live entry: flag ON but no VERIFIED model_bias_ens row for "
             "city=%r season=%r metric=%r live_data_version=%r family=%r — plain p_raw",
             city.name, season, metric_str, live_data_version, _FT_FAMILY,
         )
@@ -3986,7 +3986,7 @@ def evaluate_candidate(
             # Attempt to resolve a VERIFIED PredictiveErrorModel; falls back to plain
             # p_raw_vector_from_maxes when flag OFF, model absent, or conn unavailable.
             # GFS crosscheck site (gfs_p = p_raw_vector_from_maxes below) is NOT wired:
-            # model_bias_ens_v2 is trained on TIGGE ENS members; applying it to GFS
+            # model_bias_ens is trained on TIGGE ENS members; applying it to GFS
             # members would be a wrong-error-model regression.
             # Authority: FT_SHIP_EXECUTION_LEDGER_2026-05-25.md F1.
             _ft_model = _resolve_ft_error_model_for_entry(

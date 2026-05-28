@@ -1,7 +1,7 @@
 # Lifecycle: created=2026-05-24; last_reviewed=2026-05-24; last_reused=never
-# Purpose: DB I/O tests: degC unit normalization, authority/contributor/causality/boundary filters, leakage cutoff, LOW metric, model_bias_ens_v2 store, read safety.
+# Purpose: DB I/O tests: degC unit normalization, authority/contributor/causality/boundary filters, leakage cutoff, LOW metric, model_bias_ens store, read safety.
 # Reuse: Inspect ens_bias_repo before reuse.
-"""TDD tests for the ENS bias DB I/O layer (residual loader + model_bias_ens_v2 store).
+"""TDD tests for the ENS bias DB I/O layer (residual loader + model_bias_ens store).
 
 In-memory fixture with the columns the loader reads. Residuals are normalized to
 CANONICAL degC (members + settlement share the city's native unit, read from
@@ -157,7 +157,7 @@ def test_low_metric_residual_sign(conn):
 
 # ---- Blocker 3 + 5: store roundtrip with lineage, read safety ----
 
-def test_model_bias_ens_v2_roundtrip_with_lineage(conn):
+def test_model_bias_ens_roundtrip_with_lineage(conn):
     init_ens_bias_schema(conn)
     write_bias_model(
         conn, city="San Francisco", season="MAM", month=5, metric="high",
@@ -276,7 +276,7 @@ def test_write_bias_model_persists_canonical_extension_fields(conn):
     """write_bias_model writes all 13 canonical extension fields when the columns exist."""
     import sys, os
     sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
-    from scripts.migrate_model_bias_ens_v2_canonical_fields import migrate
+    from scripts.migrate_model_bias_ens_canonical_fields import migrate
     init_ens_bias_schema(conn)
     migrate(conn, dry_run=False)
     conn.commit()
@@ -326,7 +326,7 @@ def test_relationship_unbiased_high_cohort_effective_bias_near_zero(conn):
     """
     import random, sys, os
     sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
-    from scripts.migrate_model_bias_ens_v2_canonical_fields import migrate
+    from scripts.migrate_model_bias_ens_canonical_fields import migrate
     from src.calibration.ens_error_model import fit_predictive_error_bucket
     init_ens_bias_schema(conn)
     migrate(conn, dry_run=False)
