@@ -95,11 +95,36 @@ _FORBIDDEN_BASENAMES = {"zeus-world.db", "zeus-forecasts.db", "zeus_trades.db"}
 
 
 def _refuse_prod_db(db_path: Path) -> None:
+    # BL-E / Blocker 4: the producer may ONLY write an isolated staging DB. Writing the
+    # canonical world DB would let an INSERT-OR-REPLACE STAGING row overwrite a same-PK
+    # VERIFIED row (model_bias_ens_v2 PK is city/season/month/metric/live_data_version —
+    # no authority in the key). STAGING→VERIFIED is the promotion script's job, never here.
     if db_path.name in _FORBIDDEN_BASENAMES:
         raise SystemExit(
             f"SAFETY: --db must point to a copy, not a production DB. "
             f"Refusing to write to {db_path}"
         )
+    # Defense-in-depth: also refuse a RENAMED copy that is the same physical file as a
+    # canonical production DB (samefile catches symlinks/hardlinks the basename check misses).
+    try:
+        from src.state.db import ZEUS_WORLD_DB_PATH, ZEUS_FORECASTS_DB_PATH  # noqa: PLC0415
+        canon = [Path(ZEUS_WORLD_DB_PATH), Path(ZEUS_FORECASTS_DB_PATH)]
+    except Exception:
+        canon = []
+    resolved = db_path.expanduser().resolve()
+    for c in canon:
+        cp = Path(c).expanduser()
+        same = resolved == cp.resolve()
+        if not same and db_path.exists() and cp.exists():
+            try:
+                same = db_path.samefile(cp)
+            except OSError:
+                same = False
+        if same:
+            raise SystemExit(
+                f"SAFETY: --db {db_path} resolves to the canonical production DB {c}; "
+                "refusing. Use an isolated staging copy + the promotion script."
+            )
 
 
 def _get_git_commit() -> str:
