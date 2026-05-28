@@ -20,7 +20,7 @@ Most `_v2` names are **K1 DB-split canonical stores** (world.db ↔ forecasts.db
 - `observation_instants` (960k, OpenMeteo filler, ungated, YAML "NOT legacy") vs `observation_instants_v2` (1.87M, WU/HKO native, gated) — designed **dual-tier**.
 - `settlements` (6,427, ingest write target) vs `settlements_v2` (4,789, calibration-replay authority) — split by role, both in forecasts.db.
 - `MarketAnalysis` (live trading) vs `MarketAnalysisVNext` (parallel measurement) — additive, not replacement.
-- `retrain_trigger.py` (full refit) vs `retrain_trigger_v2.py` (drift signal writer) — distinct responsibilities.
+- `retrain_trigger.py` (full refit) vs `drift_refit_arm.py` (drift signal writer) — distinct responsibilities.
 
 ### D. `_v1`/`_v2` that are semantic tags, NOT duplicates (KEEP)
 `data_version='v1.wu-native'` (1.8M live rows), `wu_icao_history_v1`/`hko_daily_api_v1`/`ogimet_metar_v1`, `deid_v1_`/`dgid_v1_`/`nei_v1_` hash-namespace prefixes, `blocked_oos_v1`/`hpf_v1`/`empirical_bayes_shrinkage_v1` estimator versions, `corrected_executable_cost_v1`, `uma_oo_v2`, `contract_window_v2`, `v2_city_floors.json`/`v2_nstar.json` (no v1 counterpart). These name provenance/algorithm identity — eradicating them breaks provenance or destroys algorithm-versioning.

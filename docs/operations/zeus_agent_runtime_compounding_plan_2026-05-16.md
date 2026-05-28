@@ -27,7 +27,7 @@ The parent draft Part 7 names MEMORY.md as write-only. Investigation found a **f
 | Surface | Status | Evidence |
 |---------|--------|----------|
 | `src/state/edge_observation.py` | Read-only computation library with 5 active consumers (`attribution_drift.py:57`, `calibration_observation.py:94`, `learning_loop_observation.py:128`, `ws_poll_reaction.py:70`, `scripts/edge_observation_weekly.py`); explicit `NO write path` per `:10-11`. Computation produced, time-series persistence missing. | Parent draft Part 3.D |
-| `DriftReport` | Transient dataclass returned per `compute_drift()` call (`src/calibration/retrain_trigger_v2.py`). Time-series persistence not built (parent draft Part 3.B). | Parent draft Part 3.B |
+| `DriftReport` | Transient dataclass returned per `compute_drift()` call (`src/calibration/drift_refit_arm.py`). Time-series persistence not built (parent draft Part 3.B). | Parent draft Part 3.B |
 
 **Bucket C — Write path admitted but downstream promotion/triage missing:**
 

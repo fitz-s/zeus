@@ -78,7 +78,7 @@ CALIBRATION_PAIRS_SELECT_ALLOWLIST: frozenset[str] = frozenset({
     # boundary as store.py; routing every internal calibration query through
     # store.py is over-abstraction. Same pattern as blocked_oos / effective_sample_size.
     "drift_detector.py",    # src/calibration/drift_detector.py — K2_struct approved
-    "retrain_trigger_v2.py",  # src/calibration/retrain_trigger_v2.py — K2_struct approved
+    "drift_refit_arm.py",  # src/calibration/drift_refit_arm.py — K2_struct approved
 })
 
 # H3 (2026-04-24): forbid bare SELECT FROM/JOIN settlements without a

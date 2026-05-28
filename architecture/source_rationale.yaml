@@ -1626,7 +1626,7 @@ files:
     - CALIBRATION_FAMILY_MIXING
     - DERIVED_ONLY
     downstream:
-    - src/calibration/retrain_trigger_v2.py
+    - src/calibration/drift_refit_arm.py
     - src/ingest_main.py
   src/calibration/effective_sample_size.py:
     zone: K3_extension

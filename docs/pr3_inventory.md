@@ -64,7 +64,7 @@ source. The 5 `scripts/` + 3 `tests/` files are in-scope for B4/B7.
 Key sub-categories:
 - **scripts/** (27 files): calibration/obs/settlement v2 pipeline scripts — mostly B4 delete targets.
 - **tests/** (31 files): v2 test files mapping to v2 tables/scripts — will be renamed or deleted with their subjects.
-- **src/** (5 files): `retrain_trigger_v2.py`, `executable_market_snapshot.py`,
+- **src/** (5 files): `drift_refit_arm.py`, `executable_market_snapshot.py`,
   `observation_instants_v2_writer.py`, `polymarket_v2_adapter.py`, `v2_table_schema_preference.py`.
   These are B3/B7 targets (rename or keep with justification).
 - **src/state/schema/**: `v2_schema.py` — B3 target.
