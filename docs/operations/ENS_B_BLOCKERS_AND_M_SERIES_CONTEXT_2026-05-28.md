@@ -384,7 +384,7 @@ Per operator: tasks are dominos. Each falls only after its predecessor's GREEN e
 | D9 | Verify manifest classifications sane | ⏸️ blocked by D8 | All rows ∈ {A,B,C,D,E}; no UNKNOWN; cohort counts reasonable. |
 | D10 | **GATE — all D1-D9 GREEN** | ⏸️ HARD STOP | Operator rule: no rebuild before all fix verified. If any D2-D9 RED: stop, log evidence, do NOT proceed. |
 | D11 | Launch MC rebuild on B∪E∪A_failed cohorts | ⏸️ blocked by D10 | `scripts/selective_refit_from_manifest.py --manifest <D8> --db /private/tmp/scratch_ens_fit.db --execute --n-mc 10000 --workers $(( $(sysctl -n hw.ncpu) - 2 ))`. Monitor armed with 1hr silence-alert. Hours-long. |
-| D12 | Verify MC outputs vs replay-equivalence | ⏸️ blocked by D11 | A-cohort PASS verdict; pair-batch manifest written; post-audit 100% servable. |
+| D12 | Verify MC outputs vs replay-equivalence | ✅ FELL **2026-05-28 11:11 CT** | Audit 87 rows: **72 REPRODUCIBLE, 13 INSUFFICIENT_PRIOR** (correctly SD2-tagged identity rows), **2 COVERAGE_MISLABELED** (Paris DJF cov=(2,), Sao Paulo DJF cov=(2,) — self-policing via read-time target_month guard), **0 NON_REPRODUCIBLE**. Pair-batch manifests written (HIGH `ddfbfabb...`, LOW `f5abace8...`). Rebuild sentinels both `completed=1`. **D10 HARD GATE: ALL D2-D5 + D11 + D12 GREEN.** |
 | D13 | Wait #359 merge | parallel | Monitor `bvo7624iz`. When green: M1 rebase. |
 | D14 | M1: rebase worktree onto main, replay B-patches if renamed | ⏸️ blocked by D13 (and D12 in parallel) | Push aligned branch. |
 | D15 | M3 wiring fix: probability_trace_fact writer | parallel investigation | §6 root-cause; not in critical path of D11 — runs in background. |
