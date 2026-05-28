@@ -547,6 +547,18 @@ test_trust_policy:
     tests/test_cepic_combination_candidates.py: {created: "2026-05-23", last_used: "2026-05-23"}
     # LIVE-PROB-P0 apply-metrics enforcement antibodies (2026-05-24, PR #323)
     tests/test_prob_gate_apply_list.py: {created: "2026-05-24", last_used: "2026-05-24"}
+    # Market-cost-seam upgrade R1..R6 relationship-test antibodies (2026-05-27, PR #348)
+    # INV-38 / INV-39 / INV-40 + EQE wiring + σ_market sampling + Wave 6 collapse.
+    tests/test_R1_edge_kelly_entry_price_identity.py: {created: "2026-05-27", last_used: "2026-05-27"}
+    tests/test_R2_bin_edge_executable_provenance.py: {created: "2026-05-27", last_used: "2026-05-27"}
+    tests/test_R3_effective_kelly_haircut_not_in_dynamic_mult.py: {created: "2026-05-27", last_used: "2026-05-27"}
+    tests/test_R4_family_optimizer_dominates_stage_a_when_max_legs_gt_1.py: {created: "2026-05-27", last_used: "2026-05-27"}
+    tests/test_R5_bootstrap_c_b_uncertainty_widens_ci.py: {created: "2026-05-27", last_used: "2026-05-27"}
+    tests/test_R6_model_only_posterior_blocks_market_blending.py: {created: "2026-05-27", last_used: "2026-05-27"}
+    tests/test_wave3_orderbook_depth_walk.py: {created: "2026-05-27", last_used: "2026-05-27"}
+    tests/test_wave3_entry_quote_evidence.py: {created: "2026-05-27", last_used: "2026-05-27"}
+    tests/test_wave4_family_portfolio_activation.py: {created: "2026-05-27", last_used: "2026-05-27"}
+    tests/test_wave6_unified_uncertainty_budget.py: {created: "2026-05-27", last_used: "2026-05-27"}
 
 categories:
   core_law_antibody:

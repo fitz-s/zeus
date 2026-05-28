@@ -1710,15 +1710,30 @@ def _replay_one_settlement(
                 rolling_win_rate_20=0.50,
                 portfolio_heat=0.0,
                 drawdown_pct=0.0,
+                # Wave 6 / K1 (PR #348): per-edge unified-budget gate (replay
+                # parity with the live evaluator ci_width seam). No-op at
+                # flag-OFF.
+                market_uncertainty_in_lcb=bool(
+                    getattr(edge, "market_cost_uncertainty_applied", False)
+                ),
             )
             # P10E: route through the evaluator seam so replay uses typed
             # ExecutionPrice (fee-adjusted) rather than a bare float.
             # _default_weather_fee_rate() mirrors the live-evaluation path.
             _replay_fee_rate = _default_weather_fee_rate()
-            _replay_execution_price = edge.entry_price + polymarket_fee(
-                edge.entry_price,
-                fee_rate=_replay_fee_rate,
-            )
+            # SEV-2 (PR #348 critic): edge.entry_price is a typed ExecutionPrice
+            # that is ALREADY fee-adjusted when EQE is present (all-in cost).
+            # Re-adding polymarket_fee double-charged and understated the
+            # replay share count (size_usd / price below). Only add the fee
+            # when it has not been deducted yet (legacy implied-probability).
+            _entry_price_float = float(edge.entry_price)
+            if getattr(edge.entry_price, "fee_deducted", False):
+                _replay_execution_price = _entry_price_float
+            else:
+                _replay_execution_price = _entry_price_float + polymarket_fee(
+                    _entry_price_float,
+                    fee_rate=_replay_fee_rate,
+                )
             # PR 7 (W5): no ExecutableMarketSnapshotV2 in scope at this replay
             # call point — graceful degrade (effective_context=None, no haircut).
             # allow_missing_context=True required because get_mode() returns "live"
@@ -1731,6 +1746,14 @@ def _replay_one_settlement(
                 kelly_multiplier=k_mult,
                 effective_context=None,
                 allow_missing_context=True,
+                market_uncertainty_in_lcb=bool(
+                    getattr(edge, "market_cost_uncertainty_applied", False)
+                ),
+                max_executable_shares=(
+                    float(edge.entry_quote_evidence.depth_at_target_size)
+                    if getattr(edge, "entry_quote_evidence", None) is not None
+                    else None
+                ),
             )
             size_usd = max(0.0, size_usd)
             if not market_price_linked:
