@@ -50,6 +50,13 @@ CANONICAL_POSITION_CURRENT_COLUMNS = (
     "fill_authority",
     "recovery_authority",
     "chain_shares",
+    # F1 (docs/findings_2026_05_28.md §F1, 2026-05-28): chain-observed
+    # economics on position_current so balance-only rescued positions
+    # survive daemon restart with the right exposure on
+    # `Position.effective_exposure()`. ALTER TABLE ADD COLUMN is additive
+    # on legacy DBs via _ensure_position_current_authority_columns.
+    "chain_avg_price",
+    "chain_cost_basis_usd",
     "chain_seen_at",
     "chain_absence_at",
 )

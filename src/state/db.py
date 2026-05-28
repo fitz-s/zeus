@@ -894,7 +894,7 @@ def get_connection(
 # CI hook scripts/check_schema_version.py diffs the sqlite_master hash of
 # a fresh-init DB against tests/state/_schema_pinned_hash.txt and fails
 # the PR if SCHEMA_VERSION did not change in lockstep.
-SCHEMA_VERSION = 41  # 2026-05-27 merge #349+#352: FT-ship F2 (model_bias_ens_v2 in init_schema, world.db fresh-boot safe) merged with #352 Part-3 F1/F4 (position_events.event_type CHECK gains 'REVIEW_REQUIRED'). Prior: 40 = #352 durable authority projection + REVIEW_REQUIRED event type.
+SCHEMA_VERSION = 42  # 2026-05-28 F1 (docs/findings_2026_05_28.md §F1): position_current gains chain_avg_price + chain_cost_basis_usd so balance-only rescue persists chain-observed economics without overwriting submitted entry_price/cost_basis_usd/size_usd. Prior: 41 = merge #349+#352.
 
 
 def init_schema(
@@ -1393,7 +1393,7 @@ def init_schema(
             finality_confirmed_time    TEXT,
             clock_skew_estimate_ms_at_submit INTEGER,
             raw_orderbook_hash_transition_delta_ms INTEGER,
-            schema_version INTEGER NOT NULL CHECK (schema_version IN (12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41)),
+            schema_version INTEGER NOT NULL CHECK (schema_version IN (12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42)),
             source         TEXT NOT NULL CHECK (source IN ('phase0_backfill', 'live_decision', 'shadow_decision')),
             PRIMARY KEY (market_slug, temperature_metric, target_date, observation_time, decision_seq)
         );
@@ -2665,7 +2665,7 @@ def _migrate_decision_events_schema(conn: sqlite3.Connection) -> None:
             finality_confirmed_time    TEXT,
             clock_skew_estimate_ms_at_submit INTEGER,
             raw_orderbook_hash_transition_delta_ms INTEGER,
-            schema_version INTEGER NOT NULL CHECK (schema_version IN (12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41)),
+            schema_version INTEGER NOT NULL CHECK (schema_version IN (12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42)),
             source         TEXT NOT NULL CHECK (source IN ('phase0_backfill', 'live_decision', 'shadow_decision')),
             PRIMARY KEY (market_slug, temperature_metric, target_date, observation_time, decision_seq)
         )
@@ -2701,7 +2701,7 @@ def _migrate_decision_events_schema(conn: sqlite3.Connection) -> None:
             first_inclusion_block_time, finality_confirmed_time,
             clock_skew_estimate_ms_at_submit, raw_orderbook_hash_transition_delta_ms,
             CASE
-                WHEN schema_version IN (12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41)
+                WHEN schema_version IN (12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42)
                     THEN schema_version
                 ELSE 36
             END,
@@ -3891,6 +3891,12 @@ CREATE TABLE IF NOT EXISTS position_current (
     fill_authority TEXT,
     recovery_authority TEXT,
     chain_shares REAL,
+    -- F1 (docs/findings_2026_05_28.md §F1, 2026-05-28): chain-observed
+    -- economics columns so balance-only rescued positions persist
+    -- venue truth without overwriting submitted entry economics. Additive
+    -- on legacy DBs via _ensure_position_current_authority_columns.
+    chain_avg_price REAL,
+    chain_cost_basis_usd REAL,
     chain_seen_at TEXT,
     chain_absence_at TEXT
 );
@@ -8857,7 +8863,17 @@ def query_portfolio_loader_view(conn: sqlite3.Connection | None, *, temperature_
     # position loses chain_verified_at on restart and classify_chain_state()
     # mis-reads it as CHAIN_UNKNOWN — blocking legitimate void. Guarded by
     # column presence (legacy DBs pre-D0b project NULL) like the env expr above.
-    _authority_cols = ("fill_authority", "recovery_authority", "chain_shares", "chain_seen_at", "chain_absence_at")
+    _authority_cols = (
+        "fill_authority",
+        "recovery_authority",
+        "chain_shares",
+        # F1 (docs/findings_2026_05_28.md §F1, 2026-05-28): chain-observed
+        # economics columns round-trip through the loader.
+        "chain_avg_price",
+        "chain_cost_basis_usd",
+        "chain_seen_at",
+        "chain_absence_at",
+    )
     authority_select_expr = ", ".join(
         c if c in actual_cols else f"NULL AS {c}" for c in _authority_cols
     )
@@ -8962,6 +8978,11 @@ def query_portfolio_loader_view(conn: sqlite3.Connection | None, *, temperature_
                 "chain_seen_at": str(row["chain_seen_at"] or ""),
                 "chain_absence_at": str(row["chain_absence_at"] or ""),
                 "chain_shares": _finite_float_or_none(row["chain_shares"]) or 0.0,
+                # F1 (docs/findings_2026_05_28.md §F1, 2026-05-28):
+                # chain-observed economics round-trip into Position via
+                # _position_from_row (state/portfolio.py).
+                "chain_avg_price": _finite_float_or_none(row["chain_avg_price"]) or 0.0,
+                "chain_cost_basis_usd": _finite_float_or_none(row["chain_cost_basis_usd"]) or 0.0,
                 "recovery_authority": str(row["recovery_authority"] or ""),
             }
         )

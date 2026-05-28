@@ -191,6 +191,12 @@ def _ensure_position_current_authority_columns(conn: sqlite3.Connection) -> None
         ("fill_authority", "TEXT"),
         ("recovery_authority", "TEXT"),
         ("chain_shares", "REAL"),
+        # F1 (docs/findings_2026_05_28.md §F1, 2026-05-28): chain-observed
+        # economics columns added so balance-only rescue persists venue
+        # truth on chain_avg_price / chain_cost_basis_usd without
+        # overwriting submitted entry_price / cost_basis_usd / size_usd.
+        ("chain_avg_price", "REAL"),
+        ("chain_cost_basis_usd", "REAL"),
         ("chain_seen_at", "TEXT"),
         ("chain_absence_at", "TEXT"),
     )
