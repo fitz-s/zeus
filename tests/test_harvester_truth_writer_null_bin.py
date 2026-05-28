@@ -31,7 +31,7 @@ from src.ingest.harvester_truth_writer import _write_settlement_truth
 # ---------------------------------------------------------------------------
 
 def _make_world_conn() -> sqlite3.Connection:
-    """In-memory DB with minimal settlements + settlements_v2 schema."""
+    """In-memory DB with minimal settlements + settlement_outcomes schema."""
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     conn.executescript("""
@@ -44,7 +44,7 @@ def _make_world_conn() -> sqlite3.Connection:
             provenance_json TEXT,
             PRIMARY KEY (city, target_date, market_slug)
         );
-        CREATE TABLE IF NOT EXISTS settlements_v2 (
+        CREATE TABLE IF NOT EXISTS settlement_outcomes (
             settlement_id INTEGER PRIMARY KEY,
             city TEXT NOT NULL, target_date TEXT NOT NULL,
             temperature_metric TEXT NOT NULL, market_slug TEXT,

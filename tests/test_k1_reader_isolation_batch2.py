@@ -24,7 +24,7 @@ REPO = Path(__file__).resolve().parent.parent
 FORECAST_CLASS_TABLES = {
     "observations",
     "settlements",
-    "settlements_v2",
+    "settlement_outcomes",
     "source_run",
     "job_run",
     "source_run_coverage",

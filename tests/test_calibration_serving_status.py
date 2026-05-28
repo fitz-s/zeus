@@ -545,7 +545,7 @@ def test_v2_table_schema_preference_covers_every_v2_table() -> None:
         "ensemble_snapshots",
         "platt_models",
         "historical_forecasts",
-        "settlements_v2",
+        "settlement_outcomes",
     }
     missing = expected_v2_tables - set(V2_TABLE_SCHEMA_PREFERENCE.keys())
     assert not missing, (

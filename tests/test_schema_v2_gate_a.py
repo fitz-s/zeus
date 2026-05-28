@@ -45,7 +45,7 @@ TARGET_DATE = "2026-04-16"
 def _insert_settlements_row(conn: sqlite3.Connection, metric: str) -> None:
     conn.execute(
         """
-        INSERT INTO settlements_v2
+        INSERT INTO settlement_outcomes
             (city, target_date, temperature_metric, authority, provenance_json, recorded_at)
         VALUES (?, ?, ?, 'UNVERIFIED', '{}', '2026-04-16T00:00:00Z')
         """,
@@ -147,7 +147,7 @@ def _insert_day0_metric_fact_row(conn: sqlite3.Connection, metric: str) -> None:
 # Note: historical_forecasts removed — DDL dropped in B3 (PR3): no writers
 # existed and _table_exists guards all readers (replay.py, status_summary.py).
 TABLE_INSERTERS = {
-    "settlements_v2": _insert_settlements_row,
+    "settlement_outcomes": _insert_settlements_row,
     "market_events": _insert_market_events_row,
     "ensemble_snapshots": _insert_ensemble_snapshots_row,
     "calibration_pairs": _insert_calibration_pairs_row,
@@ -622,17 +622,17 @@ class TestGateADualMetricCoexistence(unittest.TestCase):
         raises sqlite3.IntegrityError.
 
         Verifies that the UNIQUE constraints in the DDL sketch are present and
-        enforced.  Tests settlements_v2 (simplest UNIQUE).
+        enforced.  Tests settlement_outcomes (simplest UNIQUE).
         Note: historical_forecasts removed from this test — DDL dropped in B3 (PR3).
         """
         conn = _apply_and_get_conn()
 
-        # settlements_v2 has UNIQUE(city, target_date, temperature_metric)
+        # settlement_outcomes has UNIQUE(city, target_date, temperature_metric)
         _insert_settlements_row(conn, "high")
         with self.assertRaises(
             sqlite3.IntegrityError,
             msg=(
-                "settlements_v2 must reject a duplicate (city, target_date, "
+                "settlement_outcomes must reject a duplicate (city, target_date, "
                 "temperature_metric='high') row via UNIQUE constraint"
             ),
         ):

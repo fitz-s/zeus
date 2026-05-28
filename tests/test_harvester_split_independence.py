@@ -8,7 +8,7 @@ truth writer and the trading-side P&L resolver:
   Test 1: harvester_truth_writer does NOT import from trading modules.
   Test 2: harvester_pnl_resolver does NOT import from ingest_main or scripts.ingest.
   Test 3: harvester_truth_writer only writes settlement-truth tables
-          (settlements, settlements_v2, market_events), never to trade tables
+          (settlements, settlement_outcomes, market_events), never to trade tables
           (decision_log, position_*, etc.).
   Test 4: harvester_pnl_resolver does NOT write settlement-truth tables; reads only.
 """
@@ -61,7 +61,7 @@ _TRADE_WRITE_TABLES = (
 # Settlement-truth table names that harvester_pnl_resolver must NOT write
 _SETTLEMENT_TRUTH_WRITE_TABLES = (
     "settlements",
-    "settlements_v2",
+    "settlement_outcomes",
     "market_events",
     "observations",
     "observation_instants_v2",
@@ -199,7 +199,7 @@ def test_harvester_truth_writer_only_writes_settlement_truth_tables():
     """Grep: harvester_truth_writer.py must not contain SQL writes to trade tables.
 
     The ingest-side writer owns ONLY forecasts settlement-truth tables
-    (settlements, settlements_v2, market_events). It must NOT emit
+    (settlements, settlement_outcomes, market_events). It must NOT emit
     INSERT INTO / UPDATE / DELETE FROM targeting trade-side tables.
     """
     assert _TRUTH_WRITER.exists(), (
@@ -212,7 +212,7 @@ def test_harvester_truth_writer_only_writes_settlement_truth_tables():
         f"harvester_truth_writer.py contains SQL write verbs targeting trade tables: "
         f"{trade_table_hits}.\n"
         f"The ingest-side writer must only write forecasts settlement-truth tables "
-        f"(settlements, settlements_v2, market_events)."
+        f"(settlements, settlement_outcomes, market_events)."
     )
 
 

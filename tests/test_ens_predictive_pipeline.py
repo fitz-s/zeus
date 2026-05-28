@@ -34,7 +34,7 @@ def conn():
             training_allowed INTEGER, causality_status TEXT, authority TEXT)"""
     )
     c.execute(
-        """CREATE TABLE settlements_v2(city TEXT, target_date TEXT, temperature_metric TEXT,
+        """CREATE TABLE settlement_outcomes(city TEXT, target_date TEXT, temperature_metric TEXT,
             settlement_value REAL, authority TEXT)"""
     )
     return c
@@ -62,7 +62,7 @@ def test_fit_city_predictive_error_applies_transport(conn):
     for i, d in enumerate(["2026-05-08", "2026-05-09", "2026-05-10"]):
         _snap(conn, "Tokyo", d, [18.0 + i], TIG, contributes=None)     # F50
         _snap(conn, "Tokyo", d, [19.5 + i], OPD)                        # F25 = F50 + 1.5
-        conn.execute("INSERT INTO settlements_v2 VALUES (?,?,?,?,?)", ("Tokyo", d, "high", 20.0 + i, "VERIFIED"))
+        conn.execute("INSERT INTO settlement_outcomes VALUES (?,?,?,?,?)", ("Tokyo", d, "high", 20.0 + i, "VERIFIED"))
     em = fit_city_predictive_error(conn, city="Tokyo", live_data_version=OPD,
                                    prior_data_version=TIG, season_months=(3, 4, 5),
                                    min_live_n=1)

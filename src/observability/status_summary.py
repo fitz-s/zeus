@@ -420,7 +420,7 @@ _V2_TABLES = (
     "calibration_pairs",
     "ensemble_snapshots",
     "historical_forecasts",
-    "settlements_v2",
+    "settlement_outcomes",
 )
 
 # Canonical schema preference lives in v2_table_schema_preference.py so this

@@ -49,7 +49,7 @@ def conn():
             issue_time TEXT)"""
     )
     c.execute(
-        """CREATE TABLE settlements_v2(
+        """CREATE TABLE settlement_outcomes(
             city TEXT, target_date TEXT, temperature_metric TEXT,
             settlement_value REAL, authority TEXT)"""
     )
@@ -67,7 +67,7 @@ def _snap(conn, city, date, members, dv, *, unit="degC", metric="high",
 
 def _settle(conn, city, date, value, *, metric="high", authority="VERIFIED"):
     conn.execute(
-        "INSERT INTO settlements_v2 VALUES (?,?,?,?,?)",
+        "INSERT INTO settlement_outcomes VALUES (?,?,?,?,?)",
         (city, date, metric, value, authority),
     )
 

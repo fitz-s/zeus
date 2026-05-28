@@ -389,7 +389,7 @@ class TestRCPV2RowCountSensor:
             "calibration_pairs",
             "ensemble_snapshots",
             "historical_forecasts",
-            "settlements_v2",
+            "settlement_outcomes",
         ):
             conn.execute(f"CREATE TABLE {table} (id INTEGER PRIMARY KEY)")
         conn.commit()
@@ -403,7 +403,7 @@ class TestRCPV2RowCountSensor:
             "calibration_pairs",
             "ensemble_snapshots",
             "historical_forecasts",
-            "settlements_v2",
+            "settlement_outcomes",
         ):
             conn.execute(f"INSERT INTO {table} DEFAULT VALUES")
         conn.commit()
@@ -445,7 +445,7 @@ class TestRCPV2RowCountSensor:
             "calibration_pairs",
             "ensemble_snapshots",
             "historical_forecasts",
-            "settlements_v2",
+            "settlement_outcomes",
         }, "v2_row_counts must cover all 5 v2 tables"
 
         assert all(v == 0 for v in counts_empty.values()), (
@@ -494,7 +494,7 @@ class TestRCPV2RowCountSensor:
             "calibration_pairs",
             "ensemble_snapshots",
             "historical_forecasts",
-            "settlements_v2",
+            "settlement_outcomes",
         ):
             world_conn.execute(f"CREATE TABLE {table} (id INTEGER PRIMARY KEY)")
             forecasts_conn.execute(f"CREATE TABLE {table} (id INTEGER PRIMARY KEY)")
@@ -504,7 +504,7 @@ class TestRCPV2RowCountSensor:
         for _ in range(3):
             forecasts_conn.execute("INSERT INTO calibration_pairs DEFAULT VALUES")
             forecasts_conn.execute("INSERT INTO ensemble_snapshots DEFAULT VALUES")
-            forecasts_conn.execute("INSERT INTO settlements_v2 DEFAULT VALUES")
+            forecasts_conn.execute("INSERT INTO settlement_outcomes DEFAULT VALUES")
         world_conn.commit()
         forecasts_conn.commit()
         world_conn.close()
@@ -518,7 +518,7 @@ class TestRCPV2RowCountSensor:
         assert counts["historical_forecasts"] == 2
         assert counts["calibration_pairs"] == 3
         assert counts["ensemble_snapshots"] == 3
-        assert counts["settlements_v2"] == 3
+        assert counts["settlement_outcomes"] == 3
 
     def test_r_cp_1d_v2_row_counts_avoid_full_table_count_scans(self):
         """F4 latency guard: status writes must not run COUNT(*) over large v2 tables."""

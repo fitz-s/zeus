@@ -12,7 +12,7 @@ ANTIBODY CONTRACT:
     After PR 1 is merged (and backfill completes), the following SQL query
     against zeus-forecasts.db MUST return COUNT = 0:
 
-        SELECT COUNT(*) FROM settlements_v2
+        SELECT COUNT(*) FROM settlement_outcomes
         WHERE provenance_json LIKE '%harvester_live_uma_vote%'
         AND settled_at >= '2026-02-21'
 
@@ -45,9 +45,9 @@ import pytest
 # from src.state.settlement_writers import write_settlement_v2_with_era_provenance
 # from src.contracts.resolution_era import ERA_CUTOVER_DATE
 
-_PR1_MERGE_DATE = "2026-02-21"  # settlements_v2.settled_at >= this date are in scope
+_PR1_MERGE_DATE = "2026-02-21"  # settlement_outcomes.settled_at >= this date are in scope
 _ANTIBODY_QUERY = (
-    "SELECT COUNT(*) FROM settlements_v2 "
+    "SELECT COUNT(*) FROM settlement_outcomes "
     "WHERE provenance_json LIKE '%harvester_live_uma_vote%' "
     f"AND settled_at >= '{_PR1_MERGE_DATE}'"
 )
@@ -90,12 +90,12 @@ def test_antibody_zero_bleeding_rows_post_cutover_in_live_db():
     assert count == 0, (
         f"INV-era-provenance violated: {count} BLEEDING rows post-cutover (settled_at >= {_PR1_MERGE_DATE}). "
         "Either backfill regressed OR a new write path bypassed write_settlement_v2_with_era_provenance(). "
-        "Run: python scripts/backfill_settlements_v2_era_provenance.py --apply  (idempotent)."
+        "Run: python scripts/backfill_settlement_outcomes_era_provenance.py --apply  (idempotent)."
     )
 
 
 def test_antibody_zero_bleeding_rows_post_cutover_in_fixture_db(tmp_path):
-    """CI antibody (fixture DB): create an in-memory settlements_v2 with a known
+    """CI antibody (fixture DB): create an in-memory settlement_outcomes with a known
     BLEEDING row, route through the canonical writer, verify the post-write
     antibody query returns 0 for post-cutover settled_at.
 
@@ -107,7 +107,7 @@ def test_antibody_zero_bleeding_rows_post_cutover_in_fixture_db(tmp_path):
     conn = sqlite3.connect(str(fixture))
     try:
         conn.execute(
-            "CREATE TABLE settlements_v2 ("
+            "CREATE TABLE settlement_outcomes ("
             "  market_id TEXT NOT NULL,"
             "  outcome TEXT,"
             "  settled_at TEXT NOT NULL,"
@@ -117,7 +117,7 @@ def test_antibody_zero_bleeding_rows_post_cutover_in_fixture_db(tmp_path):
         # Seed one BLEEDING row post-cutover (pre-fix state).
         bleeding_provenance = json.dumps({"source": "harvester_live_uma_vote", "value": 1})
         conn.execute(
-            "INSERT INTO settlements_v2 (market_id, outcome, settled_at, provenance_json) VALUES (?, ?, ?, ?)",
+            "INSERT INTO settlement_outcomes (market_id, outcome, settled_at, provenance_json) VALUES (?, ?, ?, ?)",
             ("test_market_a", "YES", "2026-03-01T00:00:00Z", bleeding_provenance),
         )
         conn.commit()
@@ -128,7 +128,7 @@ def test_antibody_zero_bleeding_rows_post_cutover_in_fixture_db(tmp_path):
 
         # Apply the same idempotent UPDATE the backfill script uses to retag provenance.
         conn.execute(
-            "UPDATE settlements_v2 SET provenance_json = ? WHERE provenance_json LIKE '%harvester_live_uma_vote%'",
+            "UPDATE settlement_outcomes SET provenance_json = ? WHERE provenance_json LIKE '%harvester_live_uma_vote%'",
             (json.dumps({"era": "internal_resolver_post_2026_02_21"}),),
         )
         conn.commit()
@@ -146,6 +146,6 @@ def test_antibody_query_string_is_correct():
     This is a static assertion — it documents the exact query form.
     """
     assert "harvester_live_uma_vote" in _ANTIBODY_QUERY
-    assert "settlements_v2" in _ANTIBODY_QUERY
+    assert "settlement_outcomes" in _ANTIBODY_QUERY
     assert _PR1_MERGE_DATE in _ANTIBODY_QUERY
     assert "COUNT(*)" in _ANTIBODY_QUERY

@@ -173,7 +173,7 @@ def test_log_forward_market_substrate_opens_forecasts_path():
 
 def test_monitor_refresh_settlements_query_uses_forecasts_qualifier():
     """K-B regression (F48/F103): settlements query in _check_persistence_anomaly
-    must use forecasts.settlements_v2, not bare settlements or settlements_v2.
+    must use forecasts.settlement_outcomes, not bare settlements or settlement_outcomes.
 
     Bare name under cycle conn resolves to trades.db MAIN (0 rows) — silent dead-read.
     """
@@ -182,19 +182,19 @@ def test_monitor_refresh_settlements_query_uses_forecasts_qualifier():
     # Must NOT have bare FROM settlements (old name)
     assert "FROM settlements " not in src and "FROM settlements\n" not in src, (
         "monitor_refresh.py: bare 'FROM settlements' found — must use "
-        "'FROM forecasts.settlements_v2' (K-B fix F48/F103)."
+        "'FROM forecasts.settlement_outcomes' (K-B fix F48/F103)."
     )
-    # Must NOT have bare FROM settlements_v2 in SQL (comment/docstring mentions are OK)
+    # Must NOT have bare FROM settlement_outcomes in SQL (comment/docstring mentions are OK)
     import re as _re
-    # SQL context: FROM immediately before settlements_v2 (not qualified by schema prefix)
-    bare_sql = _re.search(r'FROM\s+settlements_v2\b', src)
+    # SQL context: FROM immediately before settlement_outcomes (not qualified by schema prefix)
+    bare_sql = _re.search(r'FROM\s+settlement_outcomes\b', src)
     assert bare_sql is None, (
-        "monitor_refresh.py: bare 'FROM settlements_v2' found — must use "
-        "'FROM forecasts.settlements_v2' (K-B fix F48/F103)."
+        "monitor_refresh.py: bare 'FROM settlement_outcomes' found — must use "
+        "'FROM forecasts.settlement_outcomes' (K-B fix F48/F103)."
     )
 
-    assert "forecasts.settlements_v2" in src, (
-        "monitor_refresh.py: must contain 'FROM forecasts.settlements_v2' "
+    assert "forecasts.settlement_outcomes" in src, (
+        "monitor_refresh.py: must contain 'FROM forecasts.settlement_outcomes' "
         "in _check_persistence_anomaly (K-B fix F48/F103)."
     )
 

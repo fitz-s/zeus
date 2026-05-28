@@ -348,11 +348,16 @@ class ReplayContext:
                 "Replay topology error: ensemble_snapshots not found in "
                 "forecasts, world, or main schema (legacy ensemble_snapshots removed by v1.F20)."
             )
-        self._settlements_table = _first_existing_forecast_authority_table(
-            self.conn, "settlements"
+        # B3cont (2026-05-28): bare settlements removed from forecasts.db;
+        # world.db ghost copy may still exist for legacy replay. Use direct
+        # table-exists check (not forecast-class registry) since settlements
+        # is now legacy_archived.
+        self._settlements_table = (
+            "forecasts.settlements" if _table_exists(self.conn, "forecasts", "settlements")
+            else ("settlements" if _table_exists(self.conn, "", "settlements") else "")
         )
         self._settlements_v2_table = _first_existing_forecast_authority_table(
-            self.conn, "settlements_v2"
+            self.conn, "settlement_outcomes"
         )
         self._calibration_pairs_table = _first_existing_forecast_authority_table(
             self.conn, "calibration_pairs"

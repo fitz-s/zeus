@@ -9,7 +9,7 @@ REL-2  Row counts forecasts.X == world.X for forecast-authority tables (skip unt
 REL-3  No src/ caller reads/writes forecast-authority tables on the world connection (grep).
 REL-4  forecasts.db writer-lock file path is distinct from world.db writer-lock file path.
 REL-5  Pre/post migration timing baseline (skip until operator migration runs).
-REL-6  settlements + settlements_v2 + market_events atomicity: INSERT then forced rollback
+REL-6  settlements + settlement_outcomes + market_events atomicity: INSERT then forced rollback
        leaves all 3 tables at 0 rows on a fresh forecasts connection.
 REL-7  ATTACH read latency invariant (skip until operator migration runs).
 """
@@ -31,7 +31,7 @@ FORECAST_TABLES = (
     "calibration_pairs",
     "observations",
     "settlements",
-    "settlements_v2",
+    "settlement_outcomes",
     "market_events",
     "source_run",
     "job_run",
@@ -247,7 +247,7 @@ def test_rel5_post_migration_forecasts_db_exists():
 # ---------------------------------------------------------------------------
 # REL-6: Co-transactional trio atomicity.
 #
-#   INSERT settlements + settlements_v2 + market_events on a single
+#   INSERT settlements + settlement_outcomes + market_events on a single
 #   forecasts connection inside an explicit transaction, then force ROLLBACK.
 #   All 3 tables must remain at 0 rows.
 # ---------------------------------------------------------------------------
@@ -271,7 +271,7 @@ def _insert_trio(conn: sqlite3.Connection) -> None:
     )
     conn.execute(
         """
-        INSERT INTO settlements_v2 (city, target_date, temperature_metric,
+        INSERT INTO settlement_outcomes (city, target_date, temperature_metric,
             market_slug, winning_bin, settlement_value, settlement_source,
             settled_at, authority)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -292,7 +292,7 @@ def _insert_trio(conn: sqlite3.Connection) -> None:
 
 
 def test_rel6_trio_atomicity_rollback():
-    """settlements + settlements_v2 + market_events must roll back atomically."""
+    """settlements + settlement_outcomes + market_events must roll back atomically."""
     from src.state.db import init_schema_forecasts
 
     conn = sqlite3.connect(":memory:")
@@ -305,7 +305,7 @@ def test_rel6_trio_atomicity_rollback():
     conn.execute("ROLLBACK")
 
     # All 3 tables must be empty after rollback.
-    for table in ("settlements", "settlements_v2", "market_events"):
+    for table in ("settlements", "settlement_outcomes", "market_events"):
         count = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
         assert count == 0, (
             f"REL-6: {table} has {count} rows after ROLLBACK — "
@@ -327,7 +327,7 @@ def test_rel6_trio_atomicity_commit():
     _insert_trio(conn)
     conn.execute("COMMIT")
 
-    for table in ("settlements", "settlements_v2", "market_events"):
+    for table in ("settlements", "settlement_outcomes", "market_events"):
         count = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
         assert count == 1, (
             f"REL-6: {table} has {count} rows after COMMIT — expected 1"
@@ -370,8 +370,8 @@ _CRITICAL_V2_INDEXES = frozenset({
     "idx_ens_v2_entry_lookup",
     "idx_calibration_pairs_bucket",
     "idx_calibration_pairs_refit_core",
-    "idx_settlements_v2_city_date_metric",
-    "idx_settlements_v2_settled_at",
+    "idx_settlement_outcomes_city_date_metric",
+    "idx_settlement_outcomes_settled_at",
     "idx_market_events_city_date_metric",
     "idx_market_events_open",
 })

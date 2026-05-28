@@ -1335,7 +1335,7 @@ def _check_persistence_anomaly(
             # (city, target_date) would silently match and produce a cross-
             # metric delta anyway.
             row = conn.execute(
-                "SELECT settlement_value FROM forecasts.settlements_v2 "
+                "SELECT settlement_value FROM forecasts.settlement_outcomes "
                 "WHERE city = ? AND target_date = ? "
                 "AND temperature_metric = 'high' "
                 "AND authority = 'VERIFIED' LIMIT 1",

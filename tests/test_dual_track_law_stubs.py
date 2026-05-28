@@ -41,7 +41,7 @@ def test_settlements_metric_identity_requires_non_null_and_unique_per_metric():
         for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
     }
     for v2_table in [
-        "settlements_v2", "market_events", "ensemble_snapshots",
+        "settlement_outcomes", "market_events", "ensemble_snapshots",
         "calibration_pairs", "platt_models", "observation_instants_v2",
         "historical_forecasts", "day0_metric_fact",
     ]:

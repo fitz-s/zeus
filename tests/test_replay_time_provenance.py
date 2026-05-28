@@ -430,9 +430,10 @@ def test_replay_context_prefers_forecasts_settlement_over_world_ghost(tmp_path):
         VALUES ('NYC', '2026-04-01', 'ghost', 1.0, 'high', 'VERIFIED')
         """
     )
+    # B3cont (2026-05-28): forecasts.settlements shell dropped; canonical is settlement_outcomes.
     conn.execute(
         """
-        INSERT INTO forecasts.settlements
+        INSERT INTO forecasts.settlement_outcomes
         (city, target_date, winning_bin, settlement_value, temperature_metric, authority)
         VALUES ('NYC', '2026-04-01', 'authoritative', 2.0, 'high', 'VERIFIED')
         """

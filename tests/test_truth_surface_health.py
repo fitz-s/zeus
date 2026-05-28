@@ -396,7 +396,7 @@ def _seed_minimal_ready_training_tables(conn, *, seed_observations=True):
     )
     conn.execute(
         """
-        CREATE TABLE settlements_v2 (
+        CREATE TABLE settlement_outcomes (
             city TEXT,
             target_date TEXT,
             temperature_metric TEXT,
@@ -406,7 +406,7 @@ def _seed_minimal_ready_training_tables(conn, *, seed_observations=True):
     )
     conn.execute(
         """
-        INSERT INTO settlements_v2 (
+        INSERT INTO settlement_outcomes (
             city, target_date, temperature_metric, market_slug
         ) VALUES ('NYC', '2026-04-23', 'high', 'market-slug')
         """
@@ -671,7 +671,7 @@ class TestTrainingReadinessP0:
             "platt_models",
             "market_events",
             "market_price_history",
-            "settlements_v2",
+            "settlement_outcomes",
             "observation_instants_v2",
             "observations",
         ]:
@@ -1147,8 +1147,8 @@ class TestTrainingReadinessP0:
             )
             """
         )
-        conn.execute("CREATE TABLE settlements_v2 (market_slug TEXT)")
-        conn.execute("INSERT INTO settlements_v2 (market_slug) VALUES ('market-slug')")
+        conn.execute("CREATE TABLE settlement_outcomes (market_slug TEXT)")
+        conn.execute("INSERT INTO settlement_outcomes (market_slug) VALUES ('market-slug')")
         conn.execute(
             "CREATE TABLE observation_instants_v2 (training_allowed INTEGER, source_role TEXT)"
         )
@@ -1386,12 +1386,12 @@ class TestTrainingReadinessP0:
         assert ("missing_table", "historical_forecasts") in blockers
         assert ("missing_table", "observations") in blockers
 
-    def test_training_readiness_fails_when_settlements_v2_market_slug_is_null(self, tmp_path):
+    def test_training_readiness_fails_when_settlement_outcomes_market_slug_is_null(self, tmp_path):
         db_path = _fresh_training_readiness_world_db(tmp_path)
         conn = sqlite3.connect(db_path)
         conn.execute(
             """
-            INSERT INTO settlements_v2 (
+            INSERT INTO settlement_outcomes (
                 city, target_date, temperature_metric, market_slug, authority
             ) VALUES ('NYC', '2026-04-23', 'high', NULL, 'VERIFIED')
             """
@@ -1402,7 +1402,7 @@ class TestTrainingReadinessP0:
         report = build_training_readiness_report(db_path)
 
         assert "null_market_slug" in _blocker_codes(report)
-        check = report["checks"]["settlements_v2.market_identity_present"]
+        check = report["checks"]["settlement_outcomes.market_identity_present"]
         assert check["status"] == "FAIL"
         assert check["count"] == 1
 
@@ -1537,7 +1537,7 @@ class TestTrainingReadinessP0:
         db_path = tmp_path / "legacy-evidence-only-world.db"
         conn = sqlite3.connect(db_path)
         _seed_minimal_ready_training_tables(conn, seed_observations=True)
-        conn.execute("DELETE FROM settlements_v2")
+        conn.execute("DELETE FROM settlement_outcomes")
         _create_legacy_settlements_table(conn)
         _insert_legacy_settlement(conn)
         conn.commit()
@@ -2064,7 +2064,7 @@ class TestP4Readiness:
             "p4_market_rule_acceptance_contract_missing",
             "p4_tigge_manifest_missing",
             "p4_market_events_empty",
-            "p4_settlements_v2_empty",
+            "p4_settlement_outcomes_empty",
             "p4_ensemble_snapshots_empty",
             "p4_calibration_pairs_empty",
             "p4_wu_api_key_missing",

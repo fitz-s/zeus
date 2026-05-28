@@ -49,7 +49,7 @@ from src.state.db import (
 from src.state.schema.v2_schema import (
     _create_calibration_pairs,
     _create_ensemble_snapshots,
-    _create_settlements_v2,
+    _create_settlement_outcomes,
 )
 from src.state.decision_chain import SettlementRecord, store_settlement_records
 from src.state.portfolio import (

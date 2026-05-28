@@ -1,11 +1,11 @@
 # Created: 2026-05-17
 # Last reused or audited: 2026-05-17
 # Authority basis: FIX_SEV1_BUNDLE.md §F15 + PLAN.md WAVE-4 §F15
-"""Antibody test: settlements_v2 backfill parity.
+"""Antibody test: settlement_outcomes backfill parity.
 
 Verifies:
   1. Migration runs against an in-memory DB with settlements populated.
-  2. After migration, settlements_v2 contains >= 99% of eligible settlements rows.
+  2. After migration, settlement_outcomes contains >= 99% of eligible settlements rows.
   3. Migration is idempotent (second run does not raise, count stable).
   4. Rows with NULL temperature_metric are skipped (not inserted into v2).
   5. v1-only columns are preserved in provenance_json under 'v1_extra'.
@@ -19,7 +19,7 @@ import types
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).parent.parent
-MIGRATION_PATH = REPO_ROOT / "scripts" / "migrations" / "202605_backfill_settlements_v2.py"
+MIGRATION_PATH = REPO_ROOT / "scripts" / "migrations" / "202605_backfill_settlement_outcomes.py"
 
 _SETTLEMENTS_DDL = """
 CREATE TABLE settlements (
@@ -45,7 +45,7 @@ CREATE TABLE settlements (
 """
 
 _SETTLEMENTS_V2_DDL = """
-CREATE TABLE settlements_v2 (
+CREATE TABLE settlement_outcomes (
     settlement_id INTEGER PRIMARY KEY AUTOINCREMENT,
     city TEXT NOT NULL,
     target_date TEXT NOT NULL,
@@ -107,7 +107,7 @@ class TestSettlementsParity:
         eligible = conn.execute(
             "SELECT COUNT(*) FROM settlements WHERE temperature_metric IS NOT NULL"
         ).fetchone()[0]
-        v2_count = conn.execute("SELECT COUNT(*) FROM settlements_v2").fetchone()[0]
+        v2_count = conn.execute("SELECT COUNT(*) FROM settlement_outcomes").fetchone()[0]
         assert eligible > 0
         parity = v2_count / eligible
         assert parity >= 0.99, f"v2 parity {parity:.3f} < 0.99 (v2={v2_count}, eligible={eligible})"
@@ -116,9 +116,9 @@ class TestSettlementsParity:
         mod = _load_migration()
         conn = _make_db(50)
         mod.up(conn)
-        count_after_first = conn.execute("SELECT COUNT(*) FROM settlements_v2").fetchone()[0]
+        count_after_first = conn.execute("SELECT COUNT(*) FROM settlement_outcomes").fetchone()[0]
         mod.up(conn)
-        count_after_second = conn.execute("SELECT COUNT(*) FROM settlements_v2").fetchone()[0]
+        count_after_second = conn.execute("SELECT COUNT(*) FROM settlement_outcomes").fetchone()[0]
         assert count_after_first == count_after_second
 
     def test_null_metric_rows_skipped(self):
@@ -127,7 +127,7 @@ class TestSettlementsParity:
         mod.up(conn)
         # NullCity row must not appear in v2
         null_rows = conn.execute(
-            "SELECT COUNT(*) FROM settlements_v2 WHERE city='NullCity'"
+            "SELECT COUNT(*) FROM settlement_outcomes WHERE city='NullCity'"
         ).fetchone()[0]
         assert null_rows == 0
 
@@ -136,7 +136,7 @@ class TestSettlementsParity:
         conn = _make_db(5)
         mod.up(conn)
         row = conn.execute(
-            "SELECT provenance_json FROM settlements_v2 LIMIT 1"
+            "SELECT provenance_json FROM settlement_outcomes LIMIT 1"
         ).fetchone()
         assert row is not None
         prov = json.loads(row[0])

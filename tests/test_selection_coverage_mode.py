@@ -61,7 +61,7 @@ def _make_in_memory_db(cities: list[dict]) -> sqlite3.Connection:
             bias_corrected INTEGER,
             temperature_metric TEXT DEFAULT 'high'
         );
-        CREATE TABLE settlements_v2 (
+        CREATE TABLE settlement_outcomes (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             city TEXT,
             target_date TEXT,
@@ -83,7 +83,7 @@ def _make_in_memory_db(cities: list[dict]) -> sqlite3.Connection:
 
 def _insert_settlement(conn, city, target_date, settlement_value, winning_bin, metric="high"):
     conn.execute(
-        "INSERT INTO settlements_v2 (city, target_date, settlement_value, winning_bin, temperature_metric, authority) VALUES (?, ?, ?, ?, ?, 'VERIFIED')",
+        "INSERT INTO settlement_outcomes (city, target_date, settlement_value, winning_bin, temperature_metric, authority) VALUES (?, ?, ?, ?, ?, 'VERIFIED')",
         (city, target_date, settlement_value, winning_bin, metric),
     )
 
@@ -232,7 +232,7 @@ class TestT1Dispatch:
                 bias_corrected INTEGER,
                 temperature_metric TEXT
             );
-            CREATE TABLE settlements_v2 (
+            CREATE TABLE settlement_outcomes (
                 settlement_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 city TEXT,
                 target_date TEXT,
@@ -270,7 +270,7 @@ class TestT1Dispatch:
             )
         forecasts.execute(
             """
-            INSERT INTO settlements_v2
+            INSERT INTO settlement_outcomes
             (city, target_date, settlement_value, winning_bin, temperature_metric, authority)
             VALUES ('Amsterdam', '2025-06-01', 22.0, ?, 'high', 'VERIFIED')
             """,
@@ -283,7 +283,7 @@ class TestT1Dispatch:
         world.executescript(
             """
             CREATE TABLE calibration_pairs (range_label TEXT);
-            CREATE TABLE settlements_v2 (winning_bin TEXT);
+            CREATE TABLE settlement_outcomes (winning_bin TEXT);
             CREATE TABLE ensemble_snapshots (snapshot_id INTEGER);
             """
         )

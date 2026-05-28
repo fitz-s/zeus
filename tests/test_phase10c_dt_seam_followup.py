@@ -634,13 +634,13 @@ class TestF104PersistenceNoDataLog:
         from src.engine.monitor_refresh import _check_persistence_anomaly
 
         # Build the same schema-qualified DB shape used by monitor_refresh:
-        # forecasts.settlements_v2 plus world.temp_persistence.
+        # forecasts.settlement_outcomes plus world.temp_persistence.
         conn = sqlite3.connect(":memory:")
         conn.row_factory = sqlite3.Row
         conn.execute("ATTACH DATABASE ':memory:' AS forecasts")
         conn.execute("ATTACH DATABASE ':memory:' AS world")
         conn.execute("""
-            CREATE TABLE forecasts.settlements_v2 (
+            CREATE TABLE forecasts.settlement_outcomes (
                 city TEXT, target_date TEXT, temperature_metric TEXT,
                 authority TEXT, settlement_value REAL
             )
@@ -653,7 +653,7 @@ class TestF104PersistenceNoDataLog:
         """)
         # Insert one settlement so deltas is non-empty (prevents PERSISTENCE_CHECK_DISABLED path).
         conn.execute(
-            "INSERT INTO forecasts.settlements_v2 VALUES (?,?,?,?,?)",
+            "INSERT INTO forecasts.settlement_outcomes VALUES (?,?,?,?,?)",
             ("London", "2026-05-16", "high", "VERIFIED", 68.0),
         )
         conn.commit()

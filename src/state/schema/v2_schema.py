@@ -24,10 +24,13 @@ import os
 import sqlite3
 
 
-def _create_settlements_v2(conn: sqlite3.Connection) -> None:
-    """Create settlements_v2 table + indexes. Idempotent. K1 forecast-class table."""
+def _create_settlement_outcomes(conn: sqlite3.Connection) -> None:
+    """Create settlement_outcomes table + indexes. Idempotent. K1 forecast-class table.
+
+    B3cont (2026-05-28): collapsed from settlements_v2 (dead bare settlements shell dropped).
+    """
     conn.execute("""
-        CREATE TABLE IF NOT EXISTS settlements_v2 (
+        CREATE TABLE IF NOT EXISTS settlement_outcomes (
             settlement_id INTEGER PRIMARY KEY AUTOINCREMENT,
             city TEXT NOT NULL,
             target_date TEXT NOT NULL,
@@ -47,13 +50,13 @@ def _create_settlements_v2(conn: sqlite3.Connection) -> None:
         )
     """)
     conn.execute("""
-        CREATE INDEX IF NOT EXISTS idx_settlements_v2_city_date_metric
-            ON settlements_v2(city, target_date, temperature_metric)
+        CREATE INDEX IF NOT EXISTS idx_settlement_outcomes_city_date_metric
+            ON settlement_outcomes(city, target_date, temperature_metric)
     """)
     # Architect refinement: index on settled_at for harvest scans
     conn.execute("""
-        CREATE INDEX IF NOT EXISTS idx_settlements_v2_settled_at
-            ON settlements_v2(settled_at)
+        CREATE INDEX IF NOT EXISTS idx_settlement_outcomes_settled_at
+            ON settlement_outcomes(settled_at)
     """)
 
 
@@ -397,7 +400,7 @@ def apply_v2_schema(conn: sqlite3.Connection, *, forecast_tables: bool = True) -
 
     Args:
         forecast_tables: When True (default), create the 4 forecast-class v2
-            tables (settlements_v2, market_events, ensemble_snapshots,
+            tables (settlement_outcomes, market_events, ensemble_snapshots,
             calibration_pairs_v2). Set to False for init_schema_world_only so
             world conn does not recreate tables that live on zeus-forecasts.db
             post-K1 migration. K1 split 2026-05-11.
@@ -441,14 +444,15 @@ def apply_v2_schema(conn: sqlite3.Connection, *, forecast_tables: bool = True) -
 
         if forecast_tables:
             # ----------------------------------------------------------------
-            # settlements_v2  (K1 forecast-class: moves to zeus-forecasts.db)
+            # settlement_outcomes  (K1 forecast-class: moves to zeus-forecasts.db)
+            # B3cont (2026-05-28): collapsed from settlements_v2.
             # ----------------------------------------------------------------
-            _create_settlements_v2(conn)
-            # Phase 7 T1 — ALTER for existing settlements_v2 rows on migrated DBs.
-            # _create_settlements_v2 adds outcome_type only in CREATE TABLE IF NOT EXISTS;
+            _create_settlement_outcomes(conn)
+            # Phase 7 T1 — ALTER for existing settlement_outcomes rows on migrated DBs.
+            # _create_settlement_outcomes adds outcome_type only in CREATE TABLE IF NOT EXISTS;
             # existing DBs need an explicit ALTER. Guard for duplicate column.
             try:
-                conn.execute("ALTER TABLE settlements_v2 ADD COLUMN outcome_type INTEGER")
+                conn.execute("ALTER TABLE settlement_outcomes ADD COLUMN outcome_type INTEGER")
             except Exception as exc:
                 if "duplicate column" not in str(exc).lower():
                     raise

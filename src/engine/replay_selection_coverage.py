@@ -510,10 +510,10 @@ def run_selection_coverage(
         conn.close()
         raise ReplayPreflightError(
             "selection_coverage requires forecasts calibration_pairs and "
-            "settlements_v2 authority tables."
+            "settlement_outcomes authority tables."
         )
 
-    # Check whether settlements_v2 has a snapshot_id column.
+    # Check whether settlement_outcomes has a snapshot_id column.
     # Use PRAGMA <schema>.table_info(<table>) so the query runs against the
     # correct attached schema (world.*) rather than main — the bare form
     # PRAGMA table_info(settlements_v2) silently returns 0 rows when the table

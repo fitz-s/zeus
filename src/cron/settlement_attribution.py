@@ -241,7 +241,7 @@ def run_attribution(
             sv.winning_bin,
             sv.settlement_value
         FROM decision_events de
-        LEFT JOIN forecasts.settlements_v2 sv
+        LEFT JOIN forecasts.settlement_outcomes sv
             ON  sv.market_slug = de.market_slug
             AND sv.target_date  = de.target_date
             AND sv.temperature_metric = de.temperature_metric

@@ -29,7 +29,7 @@ REQUIRED_ECONOMICS_TABLES: tuple[str, ...] = (
     "trade_decisions",
     "selection_family_fact",
     "selection_hypothesis_fact",
-    "settlements_v2",
+    "settlement_outcomes",
     "outcome_fact",
 )
 

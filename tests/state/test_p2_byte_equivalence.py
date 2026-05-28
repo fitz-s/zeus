@@ -147,7 +147,7 @@ class TestP2ByteEquivalence:
         """init_schema_world_only must NOT create v2 forecast-class tables.
 
         The v2 tables (calibration_pairs, ensemble_snapshots,
-        market_events, settlements_v2) have no legacy_archived ghost copies
+        market_events, settlement_outcomes) have no legacy_archived ghost copies
         on world.db. If world init accidentally creates them, that is K1-split
         contamination (they belong exclusively on forecasts.db).
 
@@ -201,7 +201,7 @@ class TestInitSchemaForecasts0ByteGuard:
         "observations",
         "settlements",
         "source_run",
-        "settlements_v2",
+        "settlement_outcomes",
         "market_events",
         "ensemble_snapshots",
         "calibration_pairs",

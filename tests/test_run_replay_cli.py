@@ -363,10 +363,10 @@ def test_wu_settlement_sweep_requires_market_events_for_strict_subjects(tmp_path
     conn = get_connection(db_path)
     init_schema(conn)
     init_schema_forecasts(conn)
-    # D1: wu_settlement_sweep now reads settlements_v2; fixture updated accordingly
+    # D1: wu_settlement_sweep now reads settlement_outcomes; fixture updated accordingly
     conn.execute(
         """
-        INSERT INTO settlements_v2
+        INSERT INTO settlement_outcomes
             (city, target_date, temperature_metric, winning_bin, settlement_value, authority)
         VALUES ('Paris', '2026-04-03', 'high', '12°C', 12.0, 'VERIFIED')
         """
@@ -392,10 +392,10 @@ def test_wu_settlement_sweep_rejects_wrong_market_event_label(tmp_path, monkeypa
     conn = get_connection(db_path)
     init_schema(conn)
     init_schema_forecasts(conn)
-    # D1: wu_settlement_sweep now reads settlements_v2; fixture updated accordingly
+    # D1: wu_settlement_sweep now reads settlement_outcomes; fixture updated accordingly
     conn.execute(
         """
-        INSERT INTO settlements_v2
+        INSERT INTO settlement_outcomes
             (city, target_date, temperature_metric, winning_bin, settlement_value, authority)
         VALUES ('Paris', '2026-04-03', 'high', '12°C', 12.0, 'VERIFIED')
         """
@@ -1291,14 +1291,14 @@ def test_trade_history_audit_rejects_snapshot_mismatched_outcome_fact(tmp_path, 
 
 # ---------------------------------------------------------------------------
 # T6 — wu_settlement_sweep v2 regression antibody (D1 backward-compat gate)
-# Ensures run_wu_settlement_sweep reads calibration_pairs + settlements_v2.
+# Ensures run_wu_settlement_sweep reads calibration_pairs + settlement_outcomes.
 # If the SQL is accidentally reverted to bare calibration_pairs / settlements,
 # this test returns n_settlements=0 (v1 tables are empty on main) and fails.
 # ---------------------------------------------------------------------------
 def test_wu_settlement_sweep_v2_corpus_produces_settlements(tmp_path, monkeypatch):
-    """T6: wu_settlement_sweep reads settlements_v2 + calibration_pairs (D1 antibody).
+    """T6: wu_settlement_sweep reads settlement_outcomes + calibration_pairs (D1 antibody).
 
-    Fixture inserts one VERIFIED settlement into settlements_v2 and a matching
+    Fixture inserts one VERIFIED settlement into settlement_outcomes and a matching
     calibration_pairs row. Asserts n_settlements > 0 and mode == 'wu_settlement_sweep'.
     A revert to bare settlements/calibration_pairs tables would yield n_settlements=0
     (those tables are empty) and the assertion would catch the regression.
@@ -1308,10 +1308,10 @@ def test_wu_settlement_sweep_v2_corpus_produces_settlements(tmp_path, monkeypatc
     init_schema(conn)
     init_schema_forecasts(conn)
 
-    # Seed settlements_v2 — one VERIFIED HIGH row for Paris
+    # Seed settlement_outcomes — one VERIFIED HIGH row for Paris
     conn.execute(
         """
-        INSERT INTO settlements_v2
+        INSERT INTO settlement_outcomes
             (city, target_date, temperature_metric, winning_bin, settlement_value, authority)
         VALUES ('Paris', '2026-04-10', 'high', '12°C', 12.0, 'VERIFIED')
         """
@@ -1371,7 +1371,7 @@ def test_wu_settlement_sweep_v2_corpus_produces_settlements(tmp_path, monkeypatc
     assert summary.n_settlements > 0, (
         "n_settlements=0: wu_settlement_sweep returned no rows — "
         "likely SQL still reads from bare settlements/calibration_pairs (v1 empty tables). "
-        "Verify D1 port to settlements_v2 + calibration_pairs."
+        "Verify D1 port to settlement_outcomes + calibration_pairs."
     )
     backtest = get_connection(backtest_db)
     outcome_labels = [

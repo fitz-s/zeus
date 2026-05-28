@@ -13,13 +13,13 @@ from src.contracts.settlement_outcome import SettlementOutcome
 
 
 # ---------------------------------------------------------------------------
-# Helper — minimal in-memory settlements_v2
+# Helper — minimal in-memory settlement_outcomes
 # ---------------------------------------------------------------------------
 
 def _make_conn(rows: list[dict] | None = None) -> sqlite3.Connection:
     conn = sqlite3.connect(":memory:")
     conn.execute("""
-        CREATE TABLE settlements_v2 (
+        CREATE TABLE settlement_outcomes (
             settlement_id INTEGER PRIMARY KEY AUTOINCREMENT,
             city TEXT NOT NULL,
             target_date TEXT NOT NULL,
@@ -32,7 +32,7 @@ def _make_conn(rows: list[dict] | None = None) -> sqlite3.Connection:
     if rows:
         for row in rows:
             conn.execute(
-                "INSERT INTO settlements_v2 (city, target_date, temperature_metric, authority, winning_bin, outcome_type) "
+                "INSERT INTO settlement_outcomes (city, target_date, temperature_metric, authority, winning_bin, outcome_type) "
                 "VALUES (?,?,?,?,?,?)",
                 (
                     row["city"],
@@ -94,7 +94,7 @@ class TestRunBackfill:
             "authority": "VERIFIED", "winning_bin": "80-90",
         }])
         run_backfill(conn, dry_run=False)
-        row = conn.execute("SELECT outcome_type FROM settlements_v2").fetchone()
+        row = conn.execute("SELECT outcome_type FROM settlement_outcomes").fetchone()
         assert row[0] == 3  # VENUE_RESOLVED_WIN
 
     def test_quarantined_maps_to_100(self):
@@ -103,7 +103,7 @@ class TestRunBackfill:
             "authority": "QUARANTINED",
         }])
         run_backfill(conn, dry_run=False)
-        row = conn.execute("SELECT outcome_type FROM settlements_v2").fetchone()
+        row = conn.execute("SELECT outcome_type FROM settlement_outcomes").fetchone()
         assert row[0] == 100  # DISPUTED
 
     def test_unverified_maps_to_0(self):
@@ -112,7 +112,7 @@ class TestRunBackfill:
             "authority": "UNVERIFIED",
         }])
         run_backfill(conn, dry_run=False)
-        row = conn.execute("SELECT outcome_type FROM settlements_v2").fetchone()
+        row = conn.execute("SELECT outcome_type FROM settlement_outcomes").fetchone()
         assert row[0] == 0  # UNRESOLVED
 
     def test_dry_run_no_write(self):
@@ -121,7 +121,7 @@ class TestRunBackfill:
             "authority": "VERIFIED", "winning_bin": "80-90",
         }])
         stats = run_backfill(conn, dry_run=True)
-        row = conn.execute("SELECT outcome_type FROM settlements_v2").fetchone()
+        row = conn.execute("SELECT outcome_type FROM settlement_outcomes").fetchone()
         assert row[0] is None, "dry-run must not write"
         assert stats["total_updated"] == 1  # counted but not written
 
@@ -138,11 +138,11 @@ class TestRunBackfill:
         conn = _make_conn(rows)
         run_backfill(conn, dry_run=False)
         count_after_first = conn.execute(
-            "SELECT COUNT(*) FROM settlements_v2 WHERE outcome_type IS NOT NULL"
+            "SELECT COUNT(*) FROM settlement_outcomes WHERE outcome_type IS NOT NULL"
         ).fetchone()[0]
         run_backfill(conn, dry_run=False)
         count_after_second = conn.execute(
-            "SELECT COUNT(*) FROM settlements_v2 WHERE outcome_type IS NOT NULL"
+            "SELECT COUNT(*) FROM settlement_outcomes WHERE outcome_type IS NOT NULL"
         ).fetchone()[0]
         assert count_after_first == count_after_second == 1000
 
@@ -170,5 +170,5 @@ class TestRunBackfill:
         conn.execute("BEGIN")
         run_backfill(conn, dry_run=False)
         conn.execute("ROLLBACK")
-        row = conn.execute("SELECT outcome_type FROM settlements_v2").fetchone()
+        row = conn.execute("SELECT outcome_type FROM settlement_outcomes").fetchone()
         assert row[0] is None, "rollback must undo the backfill when no top-level commit"

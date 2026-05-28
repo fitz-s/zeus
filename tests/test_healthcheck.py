@@ -800,10 +800,10 @@ def test_settlement_truth_status_rejects_stale_settled_at(tmp_path):
     db_path = tmp_path / "zeus-forecasts.db"
     conn = sqlite3.connect(str(db_path))
     conn.execute(
-        "CREATE TABLE settlements_v2 (settlement_id INTEGER PRIMARY KEY, settled_at TEXT, recorded_at TEXT)"
+        "CREATE TABLE settlement_outcomes (settlement_id INTEGER PRIMARY KEY, settled_at TEXT, recorded_at TEXT)"
     )
     conn.execute(
-        "INSERT INTO settlements_v2 (settled_at, recorded_at) VALUES (?, ?)",
+        "INSERT INTO settlement_outcomes (settled_at, recorded_at) VALUES (?, ?)",
         ("2026-05-11T19:59:13+00:00", "2026-05-11T19:59:13+00:00"),
     )
     conn.commit()

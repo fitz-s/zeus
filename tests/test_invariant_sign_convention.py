@@ -70,7 +70,7 @@ def _make_conn() -> sqlite3.Connection:
             training_allowed INTEGER, causality_status TEXT, authority TEXT)"""
     )
     c.execute(
-        """CREATE TABLE settlements_v2(
+        """CREATE TABLE settlement_outcomes(
             city TEXT, target_date TEXT, temperature_metric TEXT,
             settlement_value REAL, authority TEXT)"""
     )
@@ -107,7 +107,7 @@ def _ins_snap(
 
 def _ins_settlement(conn, *, city, date, metric, value):
     conn.execute(
-        "INSERT INTO settlements_v2 VALUES (?,?,?,?,?)",
+        "INSERT INTO settlement_outcomes VALUES (?,?,?,?,?)",
         (city, date, metric, value, "VERIFIED"),
     )
 

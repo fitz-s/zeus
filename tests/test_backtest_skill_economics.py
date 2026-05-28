@@ -254,7 +254,7 @@ def test_economics_readiness_requires_neg_risk_snapshot_fact():
     conn.execute("CREATE TABLE trade_decisions (decision_snapshot_id TEXT)")
     conn.execute("CREATE TABLE selection_family_fact (id INTEGER PRIMARY KEY)")
     conn.execute("CREATE TABLE selection_hypothesis_fact (selected_post_fdr INTEGER)")
-    conn.execute("CREATE TABLE settlements_v2 (id INTEGER PRIMARY KEY)")
+    conn.execute("CREATE TABLE settlement_outcomes (id INTEGER PRIMARY KEY)")
     conn.execute("CREATE TABLE outcome_fact (decision_snapshot_id TEXT, outcome INTEGER)")
     conn.execute("INSERT INTO market_events (outcome) VALUES ('YES')")
     conn.execute("INSERT INTO market_price_history DEFAULT VALUES")
@@ -269,7 +269,7 @@ def test_economics_readiness_requires_neg_risk_snapshot_fact():
     conn.execute("INSERT INTO trade_decisions (decision_snapshot_id) VALUES ('snap-1')")
     conn.execute("INSERT INTO selection_family_fact DEFAULT VALUES")
     conn.execute("INSERT INTO selection_hypothesis_fact (selected_post_fdr) VALUES (1)")
-    conn.execute("INSERT INTO settlements_v2 DEFAULT VALUES")
+    conn.execute("INSERT INTO settlement_outcomes DEFAULT VALUES")
     conn.execute("INSERT INTO outcome_fact (decision_snapshot_id, outcome) VALUES ('snap-1', 1)")
 
     readiness = check_economics_readiness(conn)
@@ -326,7 +326,7 @@ def test_economics_readiness_full_substrate_still_blocks_until_engine_implemente
     conn.execute("CREATE TABLE trade_decisions (decision_snapshot_id TEXT)")
     conn.execute("CREATE TABLE selection_family_fact (id INTEGER PRIMARY KEY)")
     conn.execute("CREATE TABLE selection_hypothesis_fact (selected_post_fdr INTEGER)")
-    conn.execute("CREATE TABLE settlements_v2 (id INTEGER PRIMARY KEY)")
+    conn.execute("CREATE TABLE settlement_outcomes (id INTEGER PRIMARY KEY)")
     conn.execute("CREATE TABLE outcome_fact (decision_snapshot_id TEXT, outcome INTEGER)")
     conn.execute("INSERT INTO market_events (outcome) VALUES ('YES')")
     conn.execute(
@@ -345,7 +345,7 @@ def test_economics_readiness_full_substrate_still_blocks_until_engine_implemente
     conn.execute("INSERT INTO trade_decisions (decision_snapshot_id) VALUES ('snap-1')")
     conn.execute("INSERT INTO selection_family_fact DEFAULT VALUES")
     conn.execute("INSERT INTO selection_hypothesis_fact (selected_post_fdr) VALUES (1)")
-    conn.execute("INSERT INTO settlements_v2 DEFAULT VALUES")
+    conn.execute("INSERT INTO settlement_outcomes DEFAULT VALUES")
     conn.execute("INSERT INTO outcome_fact (decision_snapshot_id, outcome) VALUES ('snap-1', 1)")
 
     readiness = check_economics_readiness(conn)

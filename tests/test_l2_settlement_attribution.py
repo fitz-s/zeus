@@ -46,7 +46,7 @@ def world_conn() -> sqlite3.Connection:
 
 @pytest.fixture()
 def fcst_conn() -> sqlite3.Connection:
-    """In-memory FCST DB with full forecast schema (contains settlements_v2)."""
+    """In-memory FCST DB with full forecast schema (contains settlement_outcomes)."""
     conn = sqlite3.connect(":memory:")
     init_schema_forecasts(conn)
     return conn
@@ -103,7 +103,7 @@ def _insert_shadow_decision(conn: sqlite3.Connection, **overrides) -> str:
 
 
 def _insert_settlement(conn: sqlite3.Connection, **overrides) -> None:
-    """Insert a row into settlements_v2 in the given (possibly in-memory) DB."""
+    """Insert a row into settlement_outcomes in the given (possibly in-memory) DB."""
     defaults = dict(
         city="Chicago",
         target_date="2026-06-15",
@@ -119,7 +119,7 @@ def _insert_settlement(conn: sqlite3.Connection, **overrides) -> None:
     defaults.update(overrides)
     conn.execute(
         """
-        INSERT INTO settlements_v2 (
+        INSERT INTO settlement_outcomes (
             city, target_date, temperature_metric, market_slug, winning_bin,
             settlement_value, settlement_source, settled_at, authority, provenance_json
         ) VALUES (
@@ -142,13 +142,13 @@ def _attach_fcst(world_conn: sqlite3.Connection, fcst_conn: sqlite3.Connection) 
 
     Simplest test approach: use a named :memory: shared-cache URI so we can
     ATTACH it by name.  Requires uri=True + shared_cache=True-ish.
-    Fallback: directly insert settlements_v2 rows into the world_conn under a
-    manually created 'forecasts.settlements_v2' via ATTACH of a second
+    Fallback: directly insert settlement_outcomes rows into the world_conn under a
+    manually created 'forecasts.settlement_outcomes' via ATTACH of a second
     :memory: DB — not possible in standard SQLite.
 
-    Workaround: create settlements_v2 in the MAIN schema of world_conn (which
+    Workaround: create settlement_outcomes in the MAIN schema of world_conn (which
     already has init_schema run, adding ghost copies of v2 tables).  Then
-    SELECT from 'settlements_v2' without schema prefix — this exercises the
+    SELECT from 'settlement_outcomes' without schema prefix — this exercises the
     ATTACH path in a unit-test compatible way.
 
     For the relationship test we simply CREATE a 'forecasts' schema by
@@ -164,9 +164,9 @@ def _attach_fcst(world_conn: sqlite3.Connection, fcst_conn: sqlite3.Connection) 
     shared = sqlite3.connect(uri, uri=True, check_same_thread=False)
     init_schema_forecasts(shared)
     # Insert settlement data into the shared cache
-    for row in fcst_conn.execute("SELECT city, target_date, temperature_metric, market_slug, winning_bin, settlement_value, settlement_source, settled_at, authority, provenance_json FROM settlements_v2").fetchall():
+    for row in fcst_conn.execute("SELECT city, target_date, temperature_metric, market_slug, winning_bin, settlement_value, settlement_source, settled_at, authority, provenance_json FROM settlement_outcomes").fetchall():
         shared.execute(
-            "INSERT OR IGNORE INTO settlements_v2 (city, target_date, temperature_metric, market_slug, winning_bin, settlement_value, settlement_source, settled_at, authority, provenance_json) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            "INSERT OR IGNORE INTO settlement_outcomes (city, target_date, temperature_metric, market_slug, winning_bin, settlement_value, settlement_source, settled_at, authority, provenance_json) VALUES (?,?,?,?,?,?,?,?,?,?)",
             row,
         )
     shared.commit()
@@ -183,7 +183,7 @@ class TestSlugJoinCorrectness:
     """R1: attributed rows join on market_slug + target_date + temperature_metric."""
 
     def test_matching_slug_produces_attribution(self, world_conn, fcst_conn) -> None:
-        """A decision_event whose market_slug matches settlements_v2 produces a regret row."""
+        """A decision_event whose market_slug matches settlement_outcomes produces a regret row."""
         deid = _insert_shadow_decision(world_conn)
         _insert_settlement(fcst_conn)
         shared = _attach_fcst(world_conn, fcst_conn)
@@ -198,7 +198,7 @@ class TestSlugJoinCorrectness:
         assert rd_count == 1
 
     def test_wrong_slug_produces_no_attribution(self, world_conn, fcst_conn) -> None:
-        """A decision_event with a slug that doesn't match settlements_v2 is skipped."""
+        """A decision_event with a slug that doesn't match settlement_outcomes is skipped."""
         _insert_shadow_decision(
             world_conn,
             market_slug="highest-temperature-in-dallas-on-06-15-2026",
@@ -502,7 +502,7 @@ class TestNoSettlementSkip:
     """R6: Unmatched decisions (no settlement row) produce no regret rows."""
 
     def test_unsettled_market_skipped(self, world_conn, fcst_conn) -> None:
-        """Decision for market with no settlements_v2 row is skipped."""
+        """Decision for market with no settlement_outcomes row is skipped."""
         _insert_shadow_decision(
             world_conn,
             market_slug="highest-temperature-in-miami-on-07-01-2026",

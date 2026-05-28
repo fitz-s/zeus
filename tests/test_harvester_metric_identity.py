@@ -1,7 +1,7 @@
 # Created: 2026-04-24
 # Last reused/audited: 2026-05-18
 # Lifecycle: created=2026-04-24; last_reviewed=2026-05-18; last_reused=2026-05-18
-# Authority basis: POST_AUDIT_HANDOFF_2026-04-24 §3.1 C6; task_2026-04-29 Phase 1B F08 learning guard; task_2026-04-29 Phase 5C.4 settlements_v2 producer; task_2026-04-29 Phase 5C.5 market_events outcome producer
+# Authority basis: POST_AUDIT_HANDOFF_2026-04-24 §3.1 C6; task_2026-04-29 Phase 1B F08 learning guard; task_2026-04-29 Phase 5C.4 settlement_outcomes producer; task_2026-04-29 Phase 5C.5 market_events outcome producer
 # Purpose: INV-14 identity spine antibody for harvester settlement writes —
 #          pins temperature_metric / physical_quantity / observation_field to
 #          canonical HIGH_LOCALDAY_MAX.* so regression to the legacy literal
@@ -210,7 +210,7 @@ def test_harvester_low_settlement_uses_canonical_low_identity(harvester_conn):
     v2_row = harvester_conn.execute(
         """
         SELECT temperature_metric, settlement_value
-        FROM settlements_v2
+        FROM settlement_outcomes
         WHERE city = ? AND target_date = ? AND temperature_metric = 'low'
         """,
         (city.name, "2026-04-24"),
@@ -372,7 +372,7 @@ def test_harvester_imports_high_localday_max():
     assert "from src.types.metric_identity" in text
 
 
-def test_harvester_settlement_mirrors_verified_to_settlements_v2(harvester_conn):
+def test_harvester_settlement_mirrors_verified_to_settlement_outcomes(harvester_conn):
     """Phase 5C.4: harvester writes v2 settlement substrate in the same transaction."""
     city = _make_city("v2_verified")
     result = harvester_mod._write_settlement_truth(
@@ -397,7 +397,7 @@ def test_harvester_settlement_mirrors_verified_to_settlements_v2(harvester_conn)
         SELECT city, target_date, temperature_metric, market_slug, winning_bin,
                settlement_value, settlement_source, settled_at, authority,
                provenance_json
-        FROM settlements_v2
+        FROM settlement_outcomes
         WHERE city = ? AND target_date = ? AND temperature_metric = 'high'
         """,
         (city.name, "2026-04-24"),
@@ -424,7 +424,7 @@ def test_harvester_settlement_mirrors_verified_to_settlements_v2(harvester_conn)
 
     readiness = check_economics_readiness(harvester_conn)
     assert readiness.ready is False
-    assert "empty_table:settlements_v2" not in readiness.blockers
+    assert "empty_table:settlement_outcomes" not in readiness.blockers
     assert "economics_engine_not_implemented" in readiness.blockers
 
 
@@ -815,7 +815,7 @@ def test_harvester_quarantined_settlement_does_not_write_market_events_outcome(h
     assert outcome is None
 
 
-def test_harvester_settlement_without_market_slug_skips_settlements_v2(harvester_conn):
+def test_harvester_settlement_without_market_slug_skips_settlement_outcomes(harvester_conn):
     """v2 settlement rows require market identity; legacy compatibility may still write."""
     city = _make_city("v2_missing_slug")
 
@@ -842,14 +842,14 @@ def test_harvester_settlement_without_market_slug_skips_settlements_v2(harvester
         (city.name, "2026-04-24"),
     ).fetchone()[0]
     v2_count = harvester_conn.execute(
-        "SELECT COUNT(*) FROM settlements_v2 WHERE city = ? AND target_date = ?",
+        "SELECT COUNT(*) FROM settlement_outcomes WHERE city = ? AND target_date = ?",
         (city.name, "2026-04-24"),
     ).fetchone()[0]
     assert legacy_count == 1
     assert v2_count == 0
 
 
-def test_harvester_settlement_mirrors_quarantine_to_settlements_v2(harvester_conn):
+def test_harvester_settlement_mirrors_quarantine_to_settlement_outcomes(harvester_conn):
     """Quarantined legacy settlements do not get promoted to VERIFIED in v2."""
     city = _make_city("v2_quarantined")
 
@@ -872,7 +872,7 @@ def test_harvester_settlement_mirrors_quarantine_to_settlements_v2(harvester_con
     row = harvester_conn.execute(
         """
         SELECT authority, settlement_value, winning_bin, provenance_json
-        FROM settlements_v2
+        FROM settlement_outcomes
         WHERE city = ? AND target_date = ?
         """,
         (city.name, "2026-04-24"),
@@ -886,7 +886,7 @@ def test_harvester_settlement_mirrors_quarantine_to_settlements_v2(harvester_con
     assert provenance["quarantine_reason"] == "harvester_live_obs_outside_bin"
 
 
-def test_harvester_settlements_v2_mirror_is_idempotent(harvester_conn):
+def test_harvester_settlement_outcomes_mirror_is_idempotent(harvester_conn):
     """v2 uses ON CONFLICT update, not INSERT OR REPLACE duplicate rows."""
     city = _make_city("v2_idempotent")
     kwargs = {
@@ -919,11 +919,11 @@ def test_harvester_settlements_v2_mirror_is_idempotent(harvester_conn):
     )
 
     count = harvester_conn.execute(
-        "SELECT COUNT(*) FROM settlements_v2 WHERE city = ? AND target_date = ?",
+        "SELECT COUNT(*) FROM settlement_outcomes WHERE city = ? AND target_date = ?",
         (city.name, "2026-04-24"),
     ).fetchone()[0]
     row = harvester_conn.execute(
-        "SELECT provenance_json FROM settlements_v2 WHERE city = ? AND target_date = ?",
+        "SELECT provenance_json FROM settlement_outcomes WHERE city = ? AND target_date = ?",
         (city.name, "2026-04-24"),
     ).fetchone()
     provenance = json.loads(row["provenance_json"])
@@ -951,7 +951,7 @@ def test_log_settlement_v2_skips_missing_table_without_creating_schema():
         recorded_at="2026-04-24T23:00:00Z",
     )
 
-    assert result == {"status": "skipped_missing_table", "table": "settlements_v2"}
+    assert result == {"status": "skipped_missing_table", "table": "settlement_outcomes"}
     assert conn.execute(
         "SELECT COUNT(*) FROM sqlite_master WHERE type='table'"
     ).fetchone()[0] == 0
@@ -960,10 +960,10 @@ def test_log_settlement_v2_skips_missing_table_without_creating_schema():
 def test_harvester_settlement_v2_missing_unique_key_does_not_abort_legacy_write(harvester_conn):
     """Malformed v2 schema cannot block the legacy settlement truth write."""
     city = _make_city("v2_bad_unique")
-    harvester_conn.execute("DROP TABLE settlements_v2")
+    harvester_conn.execute("DROP TABLE settlement_outcomes")
     harvester_conn.execute(
         """
-        CREATE TABLE settlements_v2 (
+        CREATE TABLE settlement_outcomes (
             settlement_id INTEGER PRIMARY KEY AUTOINCREMENT,
             city TEXT,
             target_date TEXT,
@@ -1007,7 +1007,7 @@ def test_harvester_settlement_v2_missing_unique_key_does_not_abort_legacy_write(
         (city.name, "2026-04-24"),
     ).fetchone()[0]
     v2_count = harvester_conn.execute(
-        "SELECT COUNT(*) FROM settlements_v2 WHERE city = ? AND target_date = ?",
+        "SELECT COUNT(*) FROM settlement_outcomes WHERE city = ? AND target_date = ?",
         (city.name, "2026-04-24"),
     ).fetchone()[0]
     assert legacy_count == 1

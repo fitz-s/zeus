@@ -197,7 +197,7 @@ def get_forecasts_connection(
 
     Owns: ensemble_snapshots, source_run, source_run_coverage,
           producer readiness_state, job_run for forecast-live work,
-          observations, settlements, settlements_v2, market_events,
+          observations, settlement_outcomes, market_events,
           calibration_pairs.
     Lock files: state/zeus-forecasts.db.writer-lock.{bulk,live}.
 
@@ -928,7 +928,7 @@ def init_schema(
     conn.execute(f"PRAGMA busy_timeout = {_busy_ms}")
 
     conn.executescript("""
-        -- Inherited from legacy predecessor: settlement outcomes
+        -- Inherited from legacy predecessor: settlement outcomes (world-class authoritative table)
         CREATE TABLE IF NOT EXISTS settlements (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             city TEXT NOT NULL,
@@ -2244,6 +2244,9 @@ def init_schema(
     # lossless on 1,561 rows + preserves authority groups (1469 VERIFIED + 92
     # QUARANTINED) + unlocks dual-track. Migration runs BEFORE trigger DROP+
     # CREATE blocks below so triggers install against the rebuilt table.
+    #
+    # B3cont (2026-05-28): this migration applies to world.db (authoritative settlements).
+    # The bare settlements shell on forecasts.db has been dropped.
     try:
         settlements_sql_row = conn.execute(
             "SELECT sql FROM sqlite_master WHERE name='settlements' AND type='table'"
@@ -2714,42 +2717,8 @@ SCHEMA_FORECASTS_VERSION: int = 7  # Data Temporal Kernel PR #329 D: source_time
 # Pull+restart WITHOUT the migration step = SystemExit, all forecast collection halts.
 
 
-def _create_settlements(conn: sqlite3.Connection) -> None:
-    """Create settlements table + indexes + ALTERs. Idempotent.
-
-    K1 forecast-class table. DDL mirrors the executescript block in init_schema;
-    uses conn.execute() so it can run standalone on zeus-forecasts.db.
-    """
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS settlements (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            city TEXT NOT NULL,
-            target_date TEXT NOT NULL,
-            market_slug TEXT,
-            winning_bin TEXT,
-            settlement_value REAL,
-            settlement_source TEXT,
-            settled_at TEXT,
-            authority TEXT NOT NULL DEFAULT 'UNVERIFIED'
-                CHECK (authority IN ('VERIFIED', 'UNVERIFIED', 'QUARANTINED')),
-            pm_bin_lo REAL,
-            pm_bin_hi REAL,
-            unit TEXT,
-            settlement_source_type TEXT,
-            temperature_metric TEXT
-                CHECK (temperature_metric IS NULL OR temperature_metric IN ('high','low')),
-            physical_quantity TEXT,
-            observation_field TEXT
-                CHECK (observation_field IS NULL OR observation_field IN ('high_temp','low_temp')),
-            data_version TEXT,
-            provenance_json TEXT,
-            UNIQUE(city, target_date, temperature_metric)
-        )
-    """)
-    conn.execute("""
-        CREATE INDEX IF NOT EXISTS idx_settlements_city_date
-            ON settlements(city, target_date)
-    """)
+# B3cont (2026-05-28): _create_settlements removed — bare world-class settlements shell dropped.
+# Canonical table is settlement_outcomes in zeus-forecasts.db (_create_settlement_outcomes).
 
 
 def _create_observations(conn: sqlite3.Connection) -> None:
@@ -3128,9 +3097,9 @@ _FORECAST_TABLES = (
     "source_run_coverage",
     "readiness_state",
     "observations",
-    "settlements",
+    # B3cont (2026-05-28): bare "settlements" world-class shell dropped; removed from forecast tuple
     "calibration_pairs",
-    "settlements_v2",
+    "settlement_outcomes",
     "market_events",
     # T2 Day0Nowcast — SCHEMA_FORECASTS_VERSION 4 (2026-05-19)
     "day0_horizon_platt_fits",
@@ -3161,16 +3130,17 @@ def _ensure_v2_forecast_indexes(conn: sqlite3.Connection) -> None:
     index is added to v2_schema.py, mirror it here in the same PR.
 
     Tables covered: ensemble_snapshots, calibration_pairs,
-    settlements_v2, market_events.
+    settlement_outcomes, market_events.
     """
-    # settlements_v2 (mirror src/state/schema/v2_schema.py:49-56)
+    # settlement_outcomes (mirror src/state/schema/v2_schema.py — _create_settlement_outcomes)
+    # B3cont (2026-05-28): renamed from settlements_v2.
     conn.execute("""
-        CREATE INDEX IF NOT EXISTS idx_settlements_v2_city_date_metric
-            ON settlements_v2(city, target_date, temperature_metric)
+        CREATE INDEX IF NOT EXISTS idx_settlement_outcomes_city_date_metric
+            ON settlement_outcomes(city, target_date, temperature_metric)
     """)
     conn.execute("""
-        CREATE INDEX IF NOT EXISTS idx_settlements_v2_settled_at
-            ON settlements_v2(settled_at)
+        CREATE INDEX IF NOT EXISTS idx_settlement_outcomes_settled_at
+            ON settlement_outcomes(settled_at)
     """)
     # market_events (mirror src/state/schema/v2_schema.py:80-89)
     conn.execute("""
@@ -3486,7 +3456,7 @@ def init_schema_forecasts(conn: sqlite3.Connection) -> None:
     (derived from registry P2):
       ensemble_snapshots, source_run, source_run_coverage,
       producer readiness_state, job_run, observations, settlements,
-      calibration_pairs, settlements_v2, market_events
+      calibration_pairs, settlement_outcomes, market_events
 
     Sets PRAGMA user_version = SCHEMA_FORECASTS_VERSION as the final step.
 
@@ -3561,16 +3531,15 @@ def init_schema_forecasts(conn: sqlite3.Connection) -> None:
             ).fetchone()
         }
         if _missing_on_fc:
-            _create_settlements(conn)
             _create_observations(conn)
             _create_source_run(conn)
             from src.state.schema.v2_schema import (
-                _create_settlements_v2,
+                _create_settlement_outcomes,
                 _create_market_events,
                 _create_ensemble_snapshots,
                 _create_calibration_pairs,
             )
-            _create_settlements_v2(conn)
+            _create_settlement_outcomes(conn)
             _create_market_events(conn)
             _create_ensemble_snapshots(conn)
             _create_calibration_pairs(conn)
@@ -3583,7 +3552,6 @@ def init_schema_forecasts(conn: sqlite3.Connection) -> None:
             "production world.db if ALTER TABLE migrations were not applied.",
             world_path,
         )
-        _create_settlements(conn)
         _create_observations(conn)
         _create_source_run(conn)
         _create_job_run(conn)
@@ -3591,12 +3559,12 @@ def init_schema_forecasts(conn: sqlite3.Connection) -> None:
         _create_readiness_state(conn)
 
         from src.state.schema.v2_schema import (
-            _create_settlements_v2,
+            _create_settlement_outcomes,
             _create_market_events,
             _create_ensemble_snapshots,
             _create_calibration_pairs,
         )
-        _create_settlements_v2(conn)
+        _create_settlement_outcomes(conn)
         _create_market_events(conn)
         _create_ensemble_snapshots(conn)
         _create_calibration_pairs(conn)
@@ -3640,9 +3608,10 @@ def init_schema_forecasts(conn: sqlite3.Connection) -> None:
     _create_market_microstructure_snapshots(conn)
 
     # Phase 7 T1 — SCHEMA_FORECASTS_VERSION 6 (2026-05-21).
-    # Add outcome_type column to settlements_v2; guard for already-migrated DBs.
+    # Add outcome_type column to settlement_outcomes; guard for already-migrated DBs.
+    # B3cont (2026-05-28): table renamed from settlements_v2.
     try:
-        conn.execute("ALTER TABLE settlements_v2 ADD COLUMN outcome_type INTEGER")
+        conn.execute("ALTER TABLE settlement_outcomes ADD COLUMN outcome_type INTEGER")
     except sqlite3.OperationalError as _exc:
         if "duplicate column" not in str(_exc).lower():
             raise
@@ -5568,13 +5537,14 @@ def log_settlement_v2(
     provenance: dict | None = None,
     recorded_at: str | None = None,
 ) -> dict:
-    """Mirror harvester settlement truth into settlements_v2.
+    """Mirror harvester settlement truth into settlement_outcomes.
 
+    B3cont (2026-05-28): table renamed from settlements_v2.
     The helper is intentionally substrate-only: it never opens a default DB,
     never creates/migrates tables, never commits, and never infers missing
     market identity.
     """
-    table = "settlements_v2"
+    table = "settlement_outcomes"
     if conn is None:
         return {"status": "skipped_no_connection", "table": table}
     if not _table_exists(conn, table):
@@ -5631,7 +5601,7 @@ def log_settlement_v2(
     try:
         conn.execute(
             """
-            INSERT INTO settlements_v2 (
+            INSERT INTO settlement_outcomes (
                 city, target_date, temperature_metric, market_slug, winning_bin,
                 settlement_value, settlement_source, settled_at, authority,
                 provenance_json, recorded_at

@@ -89,23 +89,23 @@ tables:
 
   - name: settlements
     db: forecasts
-    schema_class: forecast_class
-    schema_version_owner: SCHEMA_FORECASTS_VERSION
+    schema_class: legacy_archived
+    schema_version_owner: null
     created_by: init_schema_forecasts
     pk_col: null
     notes: >
-      K1-split 2026-05-11. Compound unique key.
-      Ghost copy on world.db declared legacy_archived below.
+      B3cont 2026-05-28: bare world-class settlements shell dropped from forecasts DB.
+      Canonical table is settlement_outcomes. Drop after 2026-08-09.
 
-  - name: settlements_v2
+  - name: settlement_outcomes
     db: forecasts
     schema_class: forecast_class
     schema_version_owner: SCHEMA_FORECASTS_VERSION
     created_by: init_schema_forecasts
     pk_col: null
     notes: >
-      K1-split 2026-05-11. v2 settlements schema (apply_v2_schema via init_schema_forecasts).
-      Ghost copy on world.db declared legacy_archived below.
+      B3cont 2026-05-28. Renamed from settlements_v2 (dead bare settlements shell dropped).
+      K1-split 2026-05-11. Canonical settlement truth table on zeus-forecasts.db.
 
   - name: source_run
     db: forecasts
@@ -287,14 +287,14 @@ tables:
       Ghost copy of settlements on world.db post-K1-split.
       Authoritative on forecasts.db. Excluded. Drop after 2026-08-09.
 
-  - name: settlements_v2
+  - name: settlement_outcomes
     db: world
     schema_class: legacy_archived
     schema_version_owner: SCHEMA_VERSION
     created_by: init_schema
     pk_col: null
     notes: >
-      Ghost copy of settlements_v2 on world.db post-K1-split.
+      Ghost copy of settlement_outcomes (formerly settlements_v2) on world.db post-K1-split.
       Authoritative on forecasts.db. Excluded. Drop after 2026-08-09.
 
   - name: source_run
@@ -1873,7 +1873,7 @@ tables:
     pk_col: null
     notes: Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Drop after 2026-08-09.
 
-  - name: settlements_v2
+  - name: settlement_outcomes
     db: trade
     schema_class: legacy_archived
     schema_version_owner: null

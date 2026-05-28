@@ -190,7 +190,7 @@ def load_bucket_residuals(
         SELECT e.target_date AS td, e.members_json AS mj, e.members_unit AS mu,
                e.available_at AS av, e.issue_time AS it, s.settlement_value AS sv
         FROM ensemble_snapshots e
-        JOIN settlements_v2 s
+        JOIN settlement_outcomes s
           ON s.city = e.city AND s.target_date = e.target_date
          AND s.temperature_metric = e.temperature_metric
         WHERE {" AND ".join(where)}
