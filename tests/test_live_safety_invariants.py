@@ -2550,9 +2550,17 @@ def test_chain_reconciliation_economically_closed_local_does_not_mask_chain_only
     )
 
     assert stats["quarantined"] == 1
-    quarantine = next(pos for pos in portfolio.positions if pos.chain_state == "quarantined")
-    assert quarantine.state == "quarantined"
-    assert quarantine.chain_state == "quarantined"
+    # PR C2 (Finding 3, 2026-05-27): chain-only inventory is now a typed
+    # ChainOnlyFact in portfolio.chain_only_facts, not a synthetic Position
+    # in portfolio.positions. Verify the new signal carries the same identity
+    # and economics; legacy Position-on-positions check removed.
+    assert len(portfolio.chain_only_facts) == 1
+    fact = portfolio.chain_only_facts[0]
+    assert fact.token_id == "tok_econ_001"
+    assert fact.size == 25.0
+    assert fact.avg_price == 0.40
+    assert fact.cost_basis == 10.0
+    assert fact.condition_id == "cond-live-1"
 
 
 def test_chain_reconciliation_does_not_void_verified_entry_waiting_for_chain():

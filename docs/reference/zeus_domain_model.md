@@ -150,8 +150,12 @@ Chain (Polymarket CLOB) > Chronicler (event log) > Portfolio (local cache)
 
 Three reconciliation rules (run every cycle before trading):
 1. **Local + chain match** → SYNCED (no action)
-2. **Local exists, NOT on chain** → VOID immediately (local state is a hallucination)
-3. **Chain exists, NOT local** → QUARANTINE 48h (unknown asset, forced exit eval)
+2. **Local exists, chain snapshot CHAIN_EMPTY** → VOID (local state is a
+   hallucination relative to an authoritative empty snapshot).
+   **CHAIN_UNKNOWN** (missing/stale/incomplete API response) is NOT
+   sufficient for void — degraded snapshots are not evidence of absence.
+3. **Chain exists, NOT local** → emit `ChainOnlyFact` (typed review entry);
+   48h forced exit eval window applies (PR C2 / PR E2, 2026-05-27).
 
 Reconciliation is mandatory on every cycle (Zeus is live; non-live execution was decommissioned in Phase 1).
 

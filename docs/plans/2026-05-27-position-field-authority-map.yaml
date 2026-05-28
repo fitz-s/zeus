@@ -1,0 +1,377 @@
+# Position Field Authority Map (Findings §2)
+# Source: docs/plans/2026-05-27-chain-local-position-model-refactor-findings.md
+# Verified against main @ cb4541da70 (2026-05-27).
+#
+# Each entry documents the CURRENT physical meaning, legit producers/readers,
+# and the target disposition under the refactor (PRs A-F).
+#
+# disposition values:
+#   KEEP                  — field stays as-is; no refactor action
+#   KEEP_DERIVED          — keep, but become projection/adapter-only (not authority)
+#   RENAME                — rename to remove collision/ambiguity
+#   SPLIT                 — split into multiple typed fields
+#   REPLACE_WITH_FACT     — eliminate field; corresponding typed fact takes over
+#   DELETE                — remove after migration
+#   ADD                   — does not exist yet; add in named PR
+
+fields:
+
+  - name: Position.state
+    location: src/state/portfolio.py:289 (dataclass)
+    type: str
+    default: LifecycleState.HOLDING.value
+    physical_meaning: |
+      Runtime lifecycle string. Legal values are LifecycleState enum members
+      (PENDING_TRACKED, PENDING_EXIT, ENTERED, HOLDING, QUARANTINED,
+      ECONOMICALLY_CLOSED, SETTLED, VOIDED, ADMIN_CLOSED). One illegal value
+      ("quarantine_size_mismatch") is written by chain_reconciliation.py:1003.
+    legit_producers:
+      - src/engine/cycle_runtime.py (materialize_position)
+      - src/execution/fill_tracker.py
+      - src/state/chain_reconciliation.py (legal + illegal mutations)
+      - src/state/portfolio.py (close/void)
+      - src/execution/exit_lifecycle.py
+    readers:
+      - src/state/lifecycle_manager.py.phase_for_runtime_position
+      - exposure filters / monitor / exit / harvester / cycle gates
+    schema_location:
+      enum: src/contracts/semantic_types.py:17 (LifecycleState)
+      column: trade_decisions.state (legacy mirror); position_current.state
+    disposition: KEEP_DERIVED
+    target_pr: D (canonical event reducer owns writes; runtime adapter only)
+
+  - name: Position.exit_state
+    location: src/state/portfolio.py (after state)
+    type: str
+    physical_meaning: Exit command substate / retry state (ExitState enum at semantic_types.py:40).
+    legit_producers:
+      - exit lifecycle and close helpers
+    readers:
+      - phase_for_runtime_position
+      - harvester settlement skip logic
+    schema_location:
+      enum: src/contracts/semantic_types.py:40 (ExitState)
+      column: NOT in CANONICAL_POSITION_CURRENT_COLUMNS
+    disposition: REPLACE_WITH_FACT
+    target_pr: D (move into canonical exit command/event payload)
+
+  - name: Position.chain_state
+    location: src/state/portfolio.py:~377
+    type: str
+    default: ChainState.UNKNOWN.value (from src/contracts/semantic_types.py)
+    physical_meaning: Per-position venue visibility string.
+    legit_producers:
+      - chain reconciliation
+      - loader synthetic rows
+      - fill_tracker (local-only)
+    readers:
+      - lifecycle fold
+      - entry gates
+      - harvester skip
+      - quarantine clear
+    schema_location:
+      enum: src/contracts/semantic_types.py:29 (ChainState — per-position)
+      column: position_current.chain_state; trade_decisions.chain_state
+    name_collision:
+      - src/state/chain_state.py:18-20 ChainState (snapshot completeness)
+      - finding: 7
+    disposition: RENAME
+    target_pr: B (rename to VenueVisibilityStatus; keep alias for one release)
+
+  - name: Position.token_id / Position.no_token_id
+    location: src/state/portfolio.py
+    type: str
+    physical_meaning: YES/NO token identity; direction decides held token.
+    legit_producers:
+      - scanner/evaluator/materialize, rescue, loader, synthetic quarantine
+    readers:
+      - monitor quote, exit, settlement redeem, red sweep, evaluator duplicate blocking
+    disposition: KEEP
+    target_pr: D (side selection must be typed; no direction-string fallback)
+
+  - name: Position.condition_id
+    location: src/state/portfolio.py
+    type: str
+    physical_meaning: Polymarket/CTF condition identity.
+    disposition: KEEP
+    constraints: Never infer from sentinel.
+
+  - name: Position.shares
+    location: src/state/portfolio.py
+    type: float
+    physical_meaning: |
+      MIXED: intended shares, filled shares, chain-held shares, legacy exposure.
+      Currently overloaded — direct mutation site at portfolio.py:2057 from chain_view.
+    legit_producers:
+      - materialize, fill tracker, chain reconciliation
+      - get_open_positions(chain_view=...) — ILLEGAL per Finding 4
+    readers:
+      - exposure, exit, settlement legacy fallback
+    finding: 4
+    disposition: SPLIT
+    target_pr: D (submitted / filled / chain_held; shares becomes derived display)
+
+  - name: Position.effective_shares
+    location: src/state/portfolio.py (property, not persisted)
+    type: float
+    physical_meaning: Derived sellable/economic shares.
+    readers:
+      - exit triggers, settlement, whale toxicity
+    disposition: KEEP_DERIVED
+    target_pr: D (source must be fill/chain authority-tagged)
+
+  - name: Position.chain_shares
+    location: src/state/portfolio.py:~378
+    type: float
+    default: 0.0
+    physical_meaning: Latest observed chain balance.
+    legit_producers:
+      - chain reconciliation
+    readers:
+      - size mismatch correction, audit
+    schema_location:
+      column: NOT in projection (per Finding 8)
+    finding: 8
+    disposition: REPLACE_WITH_FACT
+    target_pr: D (persist as venue position fact)
+
+  - name: Position.entry_price / Position.avg_price
+    location: src/state/portfolio.py
+    type: float
+    physical_meaning: |
+      COLLISION: submitted/model/legacy entry price vs avg fill vs chain avg.
+      Mutated by chain rescue and chain_view.
+    finding: 5
+    disposition: SPLIT
+    target_pr: D (rename: submitted_limit_price / avg_fill_price / chain_avg_cost_price)
+
+  - name: Position.cost_basis_usd / Position.size_usd
+    location: src/state/portfolio.py
+    type: float
+    physical_meaning: Mixed intended notional / submitted notional / filled cost / chain cost.
+    finding: 5
+    disposition: SPLIT
+    target_pr: D (intended / submitted / filled / chain; effective_cost_basis_usd derived)
+
+  - name: Position.entry_fill_verified
+    location: src/state/portfolio.py
+    type: bool
+    physical_meaning: |
+      "Local fill verified" — can be set true by chain rescue from aggregate balance
+      (Finding 5). Should require trade fact.
+    finding: 5
+    disposition: REPLACE_WITH_FACT
+    target_pr: C (replace with FillAuthority enum + source fact id)
+
+  - name: Position.order_status
+    location: src/state/portfolio.py
+    type: str
+    physical_meaning: Runtime order status string.
+    legit_producers:
+      - executor / fill tracker / rescue / cleanup
+    schema_location:
+      column: trade_decisions.order_status
+    disposition: KEEP_DERIVED
+    target_pr: D (derive from venue_order_facts / venue_commands)
+
+  - name: Position.order_id / Position.entry_order_id
+    location: src/state/portfolio.py
+    type: str
+    physical_meaning: Venue order identity; sometimes duplicate aliases.
+    legit_producers:
+      - executor / materialize / fill tracker / rescue
+    readers:
+      - pending rescue uses (entry_order_id or order_id)
+    disposition: RENAME
+    target_pr: D (canonicalize to entry_venue_order_id; alias in legacy adapter)
+
+  - name: Position.trade_id
+    location: src/state/portfolio.py:289 (identity field)
+    type: str
+    physical_meaning: |
+      Local position/runtime id. Sentinel prefixes:
+        "CHAIN_ONLY_QUARANTINE_<asset_id>" — fake chain-only (Finding 3)
+      via portfolio._chain_only_quarantine_position_from_row AND
+      chain_reconciliation:1052 (single shared prefix).
+    finding: 3
+    disposition: KEEP
+    constraints: Must be stable local position id; sentinel prefix path eliminated in PR C.
+
+  - name: Position.market_id
+    location: src/state/portfolio.py
+    type: str
+    physical_meaning: Polymarket/CTF child market id.
+    disposition: KEEP
+    target_pr: D (distinguish market_id vs condition_id)
+
+  - name: Position.quarantined_at
+    location: src/state/portfolio.py:~382
+    type: str (ISO timestamp)
+    physical_meaning: Local review timestamp.
+    legit_producers:
+      - chain-only constructor, timeout, some quarantine branches
+    disposition: KEEP_DERIVED
+    target_pr: D (move authority to ReviewRequiredEvent.occurred_at)
+
+  - name: Position.entered_at
+    location: src/state/portfolio.py:~372
+    type: str (ISO timestamp)
+    physical_meaning: |
+      MIXED: actual fill time, rescue time, projection fallback.
+      Sentinel "unknown_entered_at" handled at lifecycle_events.py:34-37.
+    legit_producers:
+      - materialize / fill tracker / rescue / loader
+    finding: 5
+    disposition: SPLIT
+    target_pr: D (decision_at / submitted_at / accepted_at / filled_at / projection_updated_at)
+
+  - name: Position.chain_verified_at
+    location: src/state/portfolio.py:~378
+    type: str (ISO timestamp)
+    physical_meaning: |
+      Currently MIXED: positive venue observation AND negative-absence observation.
+      Writers polluting it on absence: chain_reconciliation.py:920 (local missing
+      from chain), 931 (exit pending missing).
+      Legit positive writers: chain_reconciliation.py:838 (rescue), 965 (size
+      mismatch correction — chain DID see position), 1024 (final corrected update).
+    finding: 1
+    disposition: SPLIT
+    target_pr: C0 (this session — split absence into new field)
+    target_semantics_after_c0: "positive venue observation only"
+
+  - name: Position.last_chain_absence_observed_at
+    location: NOT YET EXISTS
+    type: Optional[str]
+    physical_meaning: Timestamp of most recent reconcile pass where this position was absent from chain.
+    finding: 1
+    disposition: ADD
+    target_pr: C0 (this session)
+
+  - name: position_current.phase
+    location: src/state/projection.py
+    type: str (LifecyclePhase value)
+    physical_meaning: Intended canonical durable phase.
+    legit_producers:
+      - src/engine/lifecycle_events.py.append_many_and_project
+    readers:
+      - loader, harvester terminal dedup, cleanup
+    finding: 6, 8
+    disposition: KEEP
+    target_pr: D (make sole lifecycle authority; remove "unknown" from open exposure)
+
+  - name: position_events.event_type
+    location: src/state/db.py / src/engine/lifecycle_events.py
+    physical_meaning: Append-only canonical lifecycle event grammar.
+    disposition: KEEP
+    target_pr: C (extend with typed venue observation events — VENUE_POSITION_OBSERVED, REVIEW_REQUIRED)
+
+  - name: rescue_events_v2.authority
+    location: src/state/db.py
+    physical_meaning: |
+      Rescue/fallback authority label. resolve_rescue_authority() may return
+      UNVERIFIED; _emit_rescue_event() writes causality_status="UNKNOWN".
+    finding: 9
+    disposition: REPLACE_WITH_FACT
+    target_pr: D (typed rescue fact with explicit training_eligible=false unless verified trade fact)
+
+  - name: venue_command (rows)
+    location: src/state/venue_command_repo.py
+    physical_meaning: Durable command/side-effect truth (append-only, idempotency_key, state machine).
+    legit_producers:
+      - executor, red proxy, settlement commands
+    readers:
+      - command recovery, exchange reconcile, cleanup
+    disposition: KEEP
+    target_pr: B (typed query APIs for exact trade fact linkage)
+
+  - name: ignored_tokens / token_suppression
+    location: src/state/portfolio.py / src/state/db.py
+    physical_meaning: Suppress settled/ignored/chain-only tokens from resurrection.
+    legit_producers:
+      - harvester, chain reconciliation
+    finding: 3
+    disposition: KEEP
+    target_pr: C (rename concept to IgnoredVenueTokenFact; do not synthesize Position from these rows)
+
+# Enums and types
+
+enums:
+
+  - name: LifecycleState
+    location: src/contracts/semantic_types.py:17
+    members:
+      - PENDING_TRACKED
+      - PENDING_EXIT
+      - ENTERED
+      - HOLDING
+      - QUARANTINED
+      - ECONOMICALLY_CLOSED
+      - SETTLED
+      - VOIDED
+      - ADMIN_CLOSED
+    illegal_values_written_anyway:
+      - "quarantine_size_mismatch"  # src/state/chain_reconciliation.py:1003
+    finding: 2
+
+  - name: ChainState (per-position visibility)
+    location: src/contracts/semantic_types.py:29
+    members:
+      - UNKNOWN
+      - SYNCED
+      - LOCAL_ONLY
+      - CHAIN_ONLY
+      - EXIT_PENDING_MISSING
+      - QUARANTINED
+      - QUARANTINE_EXPIRED
+      - SIZE_MISMATCH_UNRESOLVED
+    name_collision_with: src/state/chain_state.py:ChainState (snapshot completeness)
+    finding: 7
+    disposition: RENAME → VenueVisibilityStatus
+    target_pr: B
+
+  - name: ChainState (snapshot completeness)
+    location: src/state/chain_state.py:18-20
+    members:
+      - CHAIN_SYNCED
+      - CHAIN_EMPTY
+      - CHAIN_UNKNOWN
+    finding: 7
+    disposition: RENAME → ChainSnapshotCompleteness
+    target_pr: B
+
+  - name: ExitState
+    location: src/contracts/semantic_types.py:40
+    members:
+      - NONE
+      - EXIT_INTENT
+      - SELL_PLACED
+      - SELL_PENDING
+      - SELL_FILLED
+      - RETRY_PENDING
+      - BACKOFF_EXHAUSTED
+    finding: 6
+    disposition: KEEP_DERIVED
+    target_pr: D
+
+# Sentinel prefixes / values
+
+sentinels:
+
+  - value: "CHAIN_ONLY_QUARANTINE_<asset_id_prefix>"
+    field: Position.trade_id
+    producers:
+      - src/state/chain_reconciliation.py:1052
+      - src/state/portfolio.py:_chain_only_quarantine_position_from_row
+    consumers:
+      - src/state/portfolio.py:118 is_quarantine_placeholder
+    finding: 3
+    disposition: DELETE
+    target_pr: C (replace with ChainOnlyFact in review queue)
+
+  - value: "unknown_entered_at"
+    field: Position.entered_at
+    consumers:
+      - src/engine/lifecycle_events.py:32 _non_empty (special-case skip)
+    finding: 3
+    disposition: DELETE
+    target_pr: C (sentinel constructor removed; legacy rows migrated)

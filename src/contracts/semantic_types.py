@@ -27,6 +27,15 @@ class LifecycleState(str, Enum):
     ADMIN_CLOSED = "admin_closed"
 
 class ChainState(str, Enum):
+    """Per-position venue visibility status (NOT per-cycle snapshot completeness).
+
+    Finding 7 (PR B, 2026-05-27): The name `ChainState` is shared with
+    `src/state/chain_state.py.ChainState` (per-cycle snapshot completeness).
+    These are different real-world objects. New code SHOULD import the
+    domain-specific alias below; legacy imports of `ChainState` remain wire-
+    compatible.
+    """
+
     UNKNOWN = "unknown"
     SYNCED = "synced"
     LOCAL_ONLY = "local_only"
@@ -35,6 +44,10 @@ class ChainState(str, Enum):
     QUARANTINED = "quarantined"
     QUARANTINE_EXPIRED = "quarantine_expired"
     SIZE_MISMATCH_UNRESOLVED = "size_mismatch_unresolved"
+
+
+# Domain-specific alias (Finding 7 / PR B). Prefer this name in new code.
+VenueVisibilityStatus = ChainState
 
 class ExitState(str, Enum):
     """Live sell-order state machine for exit lifecycle."""

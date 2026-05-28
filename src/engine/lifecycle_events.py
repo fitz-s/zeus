@@ -68,9 +68,15 @@ def canonical_phase_for_position(position: Any) -> str:
 
 
 def projection_updated_at(position: Any) -> str:
+    # Finding 1 (PR C0, 2026-05-27): chain_verified_at is positive-observation
+    # only. last_chain_absence_observed_at carries the parallel absence-
+    # observation signal so projection "as of" still advances on absence
+    # reconciles. Both contribute to the fallback chain; ordering is most-
+    # specific signal first.
     return _non_empty(
         getattr(position, "last_exit_at", ""),
         getattr(position, "chain_verified_at", ""),
+        getattr(position, "last_chain_absence_observed_at", ""),
         getattr(position, "day0_entered_at", ""),
         getattr(position, "entered_at", ""),
         getattr(position, "order_posted_at", ""),
