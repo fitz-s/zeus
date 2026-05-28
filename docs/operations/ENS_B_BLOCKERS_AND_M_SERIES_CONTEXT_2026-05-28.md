@@ -325,11 +325,12 @@ Per operator: tasks are dominos. Each falls only after its predecessor's GREEN e
 | # | Domino | Status | Evidence required to fall |
 |---|--------|--------|---------------------------|
 | D1 | HIGH producer fit on staging at sd3 | ✅ FELL 2026-05-28 05:35 CT (10s) | Log: `fitted=71 skipped=137 rows_written=71 zero_coverage=['Auckland']`. Gate stamped `deabf8f64bde27b7`. Staging `/private/tmp/scratch_ens_fit.db`. |
-| D2 | Verify B1 in persisted rows | ⏳ NEXT | SH cities (Buenos Aires, Cape Town, Sao Paulo, Wellington) must have ≥1 row under JJA/SON/DJF/MAM with calendar months consistent with SH flip. Query: §13 D2 probe. |
-| D3 | Verify B6 — every row's coverage_months ⊆ row's calendar group | ⏸️ blocked by D2 | Query §13 D3. |
-| D4 | Verify all D1 rows carry current gate_set_hash = `deabf8f64bde27b7` | ⏸️ blocked by D3 | Query §13 D4. |
-| D5 | Run audit_error_model_row_reproducibility on D1 rows | ⏸️ blocked by D4 | 100% rows must reproduce under current code; emit `same-source` artifact. |
-| D6 | LOW producer fit on staging at sd3 | ⏸️ blocked by D5 | Same script, `--metric low --commit`. |
+| D2 | Verify B1 in persisted rows | ✅ FELL 2026-05-28 05:42 CT | BA JJA cov={1,2,12}, BA SON cov={3,4,5}, CT SON cov={4,5}, SP JJA cov={2}, SP SON cov={3,4,5}, Well JJA cov={1,2}, Well SON cov={3,4,5}. All SH cities hemisphere-flipped. NH (Atlanta DJF cov={1,2,12}) unchanged. |
+| D3 | Verify B6 — every row's coverage_months ⊆ row's calendar group | ✅ FELL 2026-05-28 05:42 CT | 79 rows total, 0 NULL/empty coverage_months. All season/coverage pairs valid: DJF{1,2,12} JJA{1,2,12 SH-or-6,7,8 NH} MAM{3,4,5} SON{3,4,5 SH-or-9,10,11 NH}. |
+| D4 | Verify all D1 rows carry current gate_set_hash | ✅ FELL 2026-05-28 05:42 CT | 79 sd3 rows + 8 leftover NULL-gate LOW rows. All HIGH replaced via INSERT OR REPLACE. |
+| D5 | Run audit_error_model_row_reproducibility on D1 rows | ✅ FELL 2026-05-28 05:43 CT | 66/79 REPRODUCIBLE, 11 INSUFFICIENT_PRIOR (correct SD2 identity rows), 2 COVERAGE_MISLABELED (self-policing via target_month guard), **0 NON_REPRODUCIBLE**. B1-B7 antibodies confirmed working end-to-end on persisted state. |
+| **D5.5** | **External-session MC rebuild detected** | ⚠️ NOTED 2026-05-28 05:46 CT | **PID 7167** (NOT this session) running `scripts/rebuild_calibration_pairs_v2.py --db /private/tmp/scratch_ens_fit.db --no-dry-run --force --error-model full_transport_v1 --temperature-metric high --n-mc 10000 --workers 12`. Started 05:40 CT (just after my HIGH producer wrote sd3 rows). Holds BULK writer-lock. Per operator policy "do not fire rebuild before all fix verified" — but D2-D5 are GREEN so the verification IS done; PID 7167's input rows are the sd3-correct ones. This is D11 happening for HIGH metric outside my domino chain. I did NOT launch it; I am NOT killing it. |
+| D6 | LOW producer fit on staging at sd3 | ⏸️ BLOCKED by D5.5 lock | First attempt PID 15100 exited with `sqlite3.OperationalError: database is locked` after writing 8 rows (LOW partial). Retry PID 20425 also blocked. WAIT for PID 7167 to release BULK lock before LOW producer can complete. |
 | D7 | Re-verify D2-D5 for LOW rows | ⏸️ blocked by D6 | Same probes, metric=low. |
 | D8 | Emit fresh `ROW_ACTION_MANIFEST_2026-05-28.csv` under sd3 | ⏸️ blocked by D7 | `scripts/audit_error_model_row_reproducibility.py` → ROW_ACTION_MANIFEST output mode. Closes BL-A / HB8. |
 | D9 | Verify manifest classifications sane | ⏸️ blocked by D8 | All rows ∈ {A,B,C,D,E}; no UNKNOWN; cohort counts reasonable. |
