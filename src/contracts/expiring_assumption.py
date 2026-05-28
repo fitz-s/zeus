@@ -16,7 +16,7 @@ class ExpiringAssumption(Generic[T]):
     last_verified_at: datetime
     max_lifespan_days: int
     kill_switch_action: str  # "halt_trading", "revert_to_fallback"
-    semantic_version: str
+    semantic_id: str
     owner: str
     verified_by: str
     verification_source: str

@@ -256,7 +256,7 @@ respectively). All map to `dataset_id` / `source_snapshot_id`.
 
 ### `src/contracts/expiring_assumption.py`
 
-`semantic_version: str` dataclass field (l.19) → `semantic_id` or `assumption_version_id`.
+`semantic_id: str` dataclass field (l.19) → `semantic_id` or `assumption_version_id`.
 
 ### `src/contracts/venue_submission_envelope.py`
 

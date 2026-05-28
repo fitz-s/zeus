@@ -2694,7 +2694,7 @@ _BUY_NO_SCALING = ExpiringAssumption[float](
     verification_source="pr_b_validation_replay",
     max_lifespan_days=180,
     kill_switch_action="revert_to_fallback",
-    semantic_version="v2",
+    semantic_id="v2",
     owner="risk_team"
 )
 
@@ -2706,7 +2706,7 @@ _BUY_YES_SCALING = ExpiringAssumption[float](
     verification_source="pr_b_validation_replay",
     max_lifespan_days=180,
     kill_switch_action="revert_to_fallback",
-    semantic_version="v2",
+    semantic_id="v2",
     owner="risk_team"
 )
 
@@ -2718,7 +2718,7 @@ _BUY_NO_FLOOR = ExpiringAssumption[float](
     verification_source="pr_b_validation_replay",
     max_lifespan_days=180,
     kill_switch_action="revert_to_fallback",
-    semantic_version="v2",
+    semantic_id="v2",
     owner="risk_team"
 )
 
@@ -2730,7 +2730,7 @@ _BUY_NO_CEILING = ExpiringAssumption[float](
     verification_source="pr_b_validation_replay",
     max_lifespan_days=180,
     kill_switch_action="revert_to_fallback",
-    semantic_version="v2",
+    semantic_id="v2",
     owner="risk_team"
 )
 
@@ -2742,7 +2742,7 @@ _BUY_YES_FLOOR = ExpiringAssumption[float](
     verification_source="pr_b_validation_replay",
     max_lifespan_days=180,
     kill_switch_action="revert_to_fallback",
-    semantic_version="v2",
+    semantic_id="v2",
     owner="risk_team"
 )
 
@@ -2754,7 +2754,7 @@ _BUY_YES_CEILING = ExpiringAssumption[float](
     verification_source="pr_b_validation_replay",
     max_lifespan_days=180,
     kill_switch_action="revert_to_fallback",
-    semantic_version="v2",
+    semantic_id="v2",
     owner="risk_team"
 )
 
@@ -2766,7 +2766,7 @@ _CONSECUTIVE_CONFIRMS = ExpiringAssumption[int](
     verification_source="pr_b_validation_replay",
     max_lifespan_days=365,
     kill_switch_action="revert_to_fallback",
-    semantic_version="v2",
+    semantic_id="v2",
     owner="risk_team"
 )
 
@@ -2778,7 +2778,7 @@ _NEAR_SETTLEMENT_HOURS = ExpiringAssumption[float](
     verification_source="pr_b_validation_replay",
     max_lifespan_days=365,
     kill_switch_action="revert_to_fallback",
-    semantic_version="v2",
+    semantic_id="v2",
     owner="risk_team"
 )
 
@@ -2790,7 +2790,7 @@ _DIVERGENCE_SOFT_THRESHOLD = ExpiringAssumption[float](
     verification_source="divergence_threshold_audit",
     max_lifespan_days=180,
     kill_switch_action="revert_to_fallback",
-    semantic_version="v2",
+    semantic_id="v2",
     owner="risk_team",
 )
 
@@ -2802,7 +2802,7 @@ _DIVERGENCE_HARD_THRESHOLD = ExpiringAssumption[float](
     verification_source="divergence_threshold_audit",
     max_lifespan_days=180,
     kill_switch_action="revert_to_fallback",
-    semantic_version="v2",
+    semantic_id="v2",
     owner="risk_team",
 )
 
@@ -2814,7 +2814,7 @@ _DIVERGENCE_VELOCITY_CONFIRM = ExpiringAssumption[float](
     verification_source="divergence_threshold_audit",
     max_lifespan_days=180,
     kill_switch_action="revert_to_fallback",
-    semantic_version="v2",
+    semantic_id="v2",
     owner="risk_team",
 )
 

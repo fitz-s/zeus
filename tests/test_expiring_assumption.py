@@ -10,7 +10,7 @@ def test_expiring_assumption_valid_window():
         last_verified_at=now,
         max_lifespan_days=30,
         kill_switch_action="revert_to_fallback",
-        semantic_version="v2",
+        semantic_id="v2",
         owner="test",
         verified_by="unit_test",
         verification_source="manual"
@@ -26,7 +26,7 @@ def test_expiring_assumption_fallback():
         last_verified_at=now - timedelta(days=40),
         max_lifespan_days=30,
         kill_switch_action="revert_to_fallback",
-        semantic_version="v2",
+        semantic_id="v2",
         owner="test",
         verified_by="unit_test",
         verification_source="manual"
@@ -42,7 +42,7 @@ def test_expiring_assumption_halt():
         last_verified_at=now - timedelta(days=40),
         max_lifespan_days=30,
         kill_switch_action="halt_trading",
-        semantic_version="v2",
+        semantic_id="v2",
         owner="test",
         verified_by="unit_test",
         verification_source="manual"
