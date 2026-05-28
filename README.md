@@ -108,7 +108,7 @@ Every cycle reconciles local state against on-chain truth:
 | Local + chain match | SYNCED |
 | Local exists, chain snapshot CHAIN_EMPTY (fresh, complete) | VOID |
 | Local exists, chain snapshot CHAIN_UNKNOWN (stale / missing API response) | NO-OP — never void on a degraded snapshot |
-| Chain exists, NOT local | Emit `ChainOnlyFact` (typed review entry); 48h forced exit eval |
+| Chain exists, NOT local | Emit `ChainOnlyFact` (typed review entry); entry stays blocked, `review_state` escalates UNRESOLVED→EXPIRED at 48h (operator-resolved) |
 
 `CHAIN_EMPTY` vs `CHAIN_UNKNOWN` is the snapshot completeness classifier
 (`src/state/chain_state.py.ChainSnapshotCompleteness`). Treating a missing

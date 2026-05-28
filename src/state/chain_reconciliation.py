@@ -28,7 +28,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 
-from src.contracts.position_truth import ChainOnlyFact
+from src.contracts.position_truth import CHAIN_ONLY_REVIEW_WINDOW_HOURS, ChainOnlyFact
 from src.contracts.semantic_types import LifecycleState
 from src.state.chain_state import ChainSnapshotCompleteness, classify_chain_state
 from src.state.lifecycle_manager import (
@@ -1252,5 +1252,35 @@ def check_quarantine_timeouts(portfolio: PortfolioState) -> int:
             )
             pos.chain_state = "quarantine_expired"
             expired += 1
+
+    # PR #352 (Part-3 audit, Copilot #350 finding): ChainOnlyFact 48h review
+    # escalation consumer. Chain-only inventory is NOT a local Position, so the
+    # position "exit evaluation" above does not apply — there is nothing to
+    # exit. Instead, its review_state escalates UNRESOLVED -> EXPIRED at the 48h
+    # window and is surfaced here for operator attention; `blocks_entry` remains
+    # True until the operator RESOLVES the suppression row. Prior to this, the
+    # 48h ChainOnlyFact lifecycle the README references had no consumer beyond
+    # the entry gate. Read-only escalation (the fact's review_state is derived);
+    # resolution is operator-driven via the suppression row.
+    for fact in getattr(portfolio, "chain_only_facts", None) or []:
+        if not getattr(fact, "blocks_entry", True):
+            continue  # RESOLVED — nothing to escalate
+        first_seen = str(getattr(fact, "first_seen_at", "") or "")
+        try:
+            seen_dt = datetime.fromisoformat(first_seen.replace("Z", "+00:00"))
+        except ValueError:
+            logger.warning(
+                "CHAIN_ONLY_REVIEW MISSING/BAD TIMESTAMP: token=%s first_seen=%r — operator review required (entry blocked)",
+                getattr(fact, "token_id", "?"), first_seen,
+            )
+            continue
+        hours_seen = (now - seen_dt).total_seconds() / 3600
+        if hours_seen > CHAIN_ONLY_REVIEW_WINDOW_HOURS:
+            logger.warning(
+                "CHAIN_ONLY_REVIEW EXPIRED: token=%s held %.0fh review_state=%s — operator review required (entry remains blocked)",
+                getattr(fact, "token_id", "?"),
+                hours_seen,
+                getattr(getattr(fact, "review_state", None), "value", "?"),
+            )
 
     return expired
