@@ -554,6 +554,8 @@ def _fetch_openmeteo_hourly(
             first_sample_time=selected[0][2],
             last_sample_time=raw_time,
             coverage_status="DIAGNOSTIC_FALLBACK",
+            observation_available_at=datetime.now(timezone.utc).isoformat(),
+            provider_reported_time=None,
         )
 
     except (httpx.HTTPError, KeyError, ValueError) as e:

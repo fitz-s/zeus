@@ -424,6 +424,166 @@ state_machines:
     invariant_tests:
       - tests/test_decision_integrity_quarantine.py
       - tests/test_decision_integrity_quarantine_extended.py
+  edli_opportunity_event_processing:
+    owner: src/events/event_store.py
+    states:
+      - pending
+      - processing
+      - processed
+      - failed
+      - dead_letter
+      - expired
+      - ignored
+    invariant_tests:
+      - tests/events/test_event_store_idempotency.py
+      - tests/state/test_edli_table_ownership.py
+  edli_live_inference_gate_status:
+    owner: src/events/reactor.py
+    description: >
+      EDLI v1 online forecast/rejection/gate labels. These are not venue order
+      states and do not prove fill truth; they classify forecast completeness,
+      FDR/Kelly/no-trade rejection evidence, and no-submit proof outcomes.
+      Registered so the semantic CI classifier treats EDLI all-caps evidence
+      labels as explicit money-path objects.
+    states:
+      - PARTIAL_ALLOWED
+      - PARTIAL_BLOCKED
+      - REJECTED
+      - UNKNOWN_REVIEW_REQUIRED
+      - REVIEW_REQUIRED
+      - NO_SUBMIT_COMPILER
+      - NO_SUBMIT_RECEIPT_REQUIRED_FOR_TRANSITION_COMPILER
+      - REPLAY_COUNTERFACTUAL_NOT_PROMOTABLE_TO_NO_SUBMIT
+      - NO_SUBMIT_PROOF_BUNDLE_REQUIRED
+      - NO_SUBMIT_CERTIFICATE
+      - EVENT_PERSISTED_AFTER_DECISION_TIME
+      - FDR_REJECTED
+      - KELLY_REJECTED
+      - NO_SUBMIT_PROOF_FALSE
+      - EXPECTED_STEPS_UNKNOWN
+      - NO_SUBMIT
+      - NO_SUBMIT_CERTIFICATE_REJECTED
+      - ACTIONABLE_NOT_SUBMITTED
+      - INTENT_BUILT
+      - SUBMIT_PLAN_BUILT
+      - PRE_SUBMIT_REVALIDATED
+      - LIVE_CAP_RESERVED
+      - EXECUTION_COMMAND_CREATED
+      - VENUE_SUBMIT_ATTEMPTED
+      - VENUE_SUBMIT_ACKED
+      - SUBMIT_DISABLED
+      - SUBMIT_REJECTED
+      - NOT_SUBMITTED_DRY_RUN
+      - SUBMITTED
+      - TIMEOUT_UNKNOWN
+      - ERROR_UNKNOWN
+      - PRE_SUBMIT_ERROR
+      - POST_SUBMIT_UNKNOWN
+      - PRE_SUBMIT_QUOTE_SEEN_AT_REQUIRED
+      - PRE_SUBMIT_AUTHORITY_WITNESS_REQUIRED
+      - PRE_SUBMIT_AUTHORITY_PROVENANCE_REQUIRED
+      - PRE_SUBMIT_BOOK_AUTHORITY_MISSING
+      - PRE_SUBMIT_BOOK_AUTHORITY_INCOMPLETE
+      - PRE_SUBMIT_BOOK_HASH_REQUIRED
+      - PRE_SUBMIT_ALLOWANCE_CHECK_DISABLED
+      - PRE_SUBMIT_PUSD_BALANCE_INSUFFICIENT
+      - PRE_SUBMIT_PUSD_ALLOWANCE_INSUFFICIENT
+      - PRE_SUBMIT_CTF_BALANCE_INSUFFICIENT
+      - PRE_SUBMIT_CTF_ALLOWANCE_INSUFFICIENT
+      - DAY0_OUT_OF_SCOPE_FOR_PR332
+      - CANARY_SAFETY_PASS
+      - CANARY_PROFIT_PASS
+      - CANARY_PROOF_PASS
+      - WAITING_FOR_QUALIFYING_EVENT
+      - FAIL
+      - CANARY_ARTIFACT_MISSING
+      - CANARY_REQUIRED_FIELDS_MISSING
+      - CANARY_REQUIRES_VENUE_ORDER_OR_SUBMIT_UNKNOWN
+      - CANARY_REQUIRES_USER_CHANNEL_OR_RECONCILE
+      - CANARY_SUBMIT_UNKNOWN_UNRESOLVED
+      - CANARY_PENDING_RECONCILE
+      - CANARY_QUOTE_STALE
+      - CANARY_EXPECTED_EDGE_INSUFFICIENT
+      - CANARY_EXPECTED_EDGE_INVALID
+      - CANARY_CAP_TRANSITION_INVALID
+      - CANARY_REALIZED_STATE_INVALID
+      - EDLI_LIVE_REQUIRES_EDLI_LIVE_SCALEOUT_ENABLED
+      - EDLI_LIVE_REQUIRES_PROMOTION_ARTIFACT_REQUIRED
+      - EDLI_LIVE_REQUIRES_PROMOTION_ARTIFACT
+      - EDLI_LIVE_PROMOTION_ARTIFACT_INVALID_JSON
+      - EDLI_LIVE_PROMOTION_ARTIFACT_SCHEMA_INVALID
+      - EDLI_LIVE_PROMOTION_ARTIFACT_DB_MISMATCH
+      - EDLI_LIVE_PROMOTION_CANARY_COUNT_INSUFFICIENT
+      - EDLI_LIVE_PROMOTION_UNRESOLVED_UNKNOWN
+      - EDLI_LIVE_PROMOTION_REALIZED_EDGE_INSUFFICIENT
+      - EDLI_LIVE_PROMOTION_REALIZED_EDGE_INVALID
+      - EDLI_LIVE_PROMOTION_PENDING_RECONCILE
+      - EDLI_LIVE_PROMOTION_PROJECTION_MISSING
+      - EDLI_LIVE_PROMOTION_CAP_TRANSITION_MISSING
+      - EDLI_LIVE_PROMOTION_USER_OR_RECONCILE_MISSING
+      - EDLI_LIVE_PROMOTION_CONFIRMED_FILL_NOT_PROMOTION_ELIGIBLE
+      - EDLI_LIVE_PROMOTION_EXPECTED_EDGE_PROVENANCE_MISSING
+      - EDLI_LIVE_PROMOTION_COST_BASIS_PROVENANCE_MISSING
+      - EDLI_LIVE_PROMOTION_FILL_PROVENANCE_MISSING
+      - EDLI_USER_CHANNEL_MESSAGE_HASH_REQUIRED
+      - EDLI_USER_CHANNEL_MESSAGE_STALE_BEFORE_COMMAND
+      - EDLI_USER_CHANNEL_MESSAGE_HASH_DRIFT
+      - EDLI_USER_CHANNEL_DEDUP_EVENT_MISSING
+      - STALE_REJECTED
+      - EDLI_STAGE_UNRESOLVED_SUBMIT_UNKNOWN
+      - EDLI_STAGE_LIVE_CAP_RESERVED
+      - EDLI_STAGE_SOURCE_HEALTH_STALE
+      - EDLI_STAGE_SOURCE_HEALTH_MISSING
+      - EDLI_STAGE_STATUS_SUMMARY_STALE
+      - EDLI_STAGE_STATUS_SUMMARY_MISSING
+      - EDLI_STAGE_READINESS_FAILED
+      - EDLI_LIVE_CANARY_READINESS_FAIL
+      - EDLI_LIVE_CANARY_SUBMIT_NOT_ALLOWED
+      - EDLI_LIVE_SCALEOUT_READINESS_FAIL
+      - CANARY_DB_PROJECTION_MISSING
+      - CANARY_DB_PENDING_RECONCILE_MISMATCH
+      - CANARY_DB_EVENT_MISSING
+      - CANARY_DB_CAP_TRANSITION_MISSING
+      - CANARY_DB_USER_OR_RECONCILE_MISSING
+      - CANARY_DB_LIVE_CAP_RESERVED_USAGE_MISMATCH
+      - CANARY_DB_LIVE_CAP_USAGE_MISSING
+      - CANARY_DB_PROFIT_AUDIT_MISSING
+      - CANARY_DB_PROFIT_AUDIT_NOT_PROMOTION_ELIGIBLE
+      - CANARY_DB_PROFIT_AUDIT_PROVENANCE_MISSING
+      - CANARY_DB_EXECUTION_COMMAND_CERTIFICATE_MISSING
+      - CANARY_DB_EXECUTION_COMMAND_ID_MISMATCH
+      - CANARY_DB_EXECUTION_COMMAND_AGGREGATE_MISMATCH
+      - CANARY_DB_EXECUTION_COMMAND_EVENT_HASH_MISMATCH
+      - CANARY_DB_PRE_SUBMIT_EVENT_HASH_MISMATCH
+      - CANARY_DB_COMMAND_CERT_CONDITION_ID_MISMATCH
+      - CANARY_DB_COMMAND_CERT_TOKEN_ID_MISMATCH
+      - CANARY_DB_COMMAND_CERT_SIDE_MISMATCH
+      - CANARY_DB_COMMAND_CERT_DIRECTION_MISMATCH
+      - CANARY_DB_COMMAND_CERT_LIVE_CAP_USAGE_MISMATCH
+      - CANARY_DB_COMMAND_CERT_PARENT_MISSING
+      - CANARY_DB_PRE_SUBMIT_CONDITION_ID_MISMATCH
+      - CANARY_DB_PRE_SUBMIT_TOKEN_ID_MISMATCH
+      - CANARY_DB_PRE_SUBMIT_SIDE_MISMATCH
+      - CANARY_DB_QUOTE_AGE_MISMATCH
+      - EDLI_SHADOW_NO_SUBMIT_FORBIDS_REAL_ORDER_SUBMIT
+      - EDLI_SUBMIT_DISABLED_BRIDGE_FORBIDS_REAL_ORDER_SUBMIT
+      - EXECUTOR_REJECTED
+      - EXECUTOR_UNKNOWN_SIDE_EFFECT
+      - RELEASED
+      - CONSUMED
+      - PENDING_RECONCILE
+      - FINAL_INTENT_READY
+      - FINAL_INTENT_RECEIPT_MISSING
+      - REAL_ORDER_SUBMIT_DISABLED
+      - EDLI_REAL_ORDER_SUBMIT_DISABLED
+      - EDLI_DURABLE_SUBMIT_OUTBOX_REQUIRED
+      - EDLI_LIVE_SUBMIT_NOT_WIRED_IN_THIS_INCREMENT
+      - EDLI_EVENT_BOUND_RECEIPT_NOT_NO_SUBMIT
+    invariant_tests:
+      - tests/events/test_forecast_snapshot_ready.py
+      - tests/events/test_reactor.py
+      - tests/engine/test_event_reactor_no_bypass.py
+      - tests/strategy/live_inference/test_no_trade_regret.py
 
   exit_family_decision_reason:
     owner: src/strategy/exit_family_optimizer.py
@@ -512,6 +672,81 @@ schema_objects:
     - scripts/migrations/**
     - scripts/migrate_*.py
   observability_surfaces:
+    edli_opportunity_events:
+      db: world
+      pk: event_id
+      writer: src/events/event_store.py::EventStore.insert_or_ignore
+      meaning: >
+        Append-only opportunity event log for EDLI v1. Event rows carry
+        observed_at, available_at, received_at, payload_hash, idempotency_key,
+        and causal_snapshot_id; mutable processing state is separate.
+      required_tests:
+        - tests/events/test_opportunity_event.py
+        - tests/events/test_event_store_idempotency.py
+        - tests/state/test_edli_table_ownership.py
+    edli_execution_feasibility_evidence:
+      db: world
+      pk: evidence_id
+      writer: src/events/triggers/market_channel_ingestor.py::insert_execution_feasibility_evidence
+      meaning: >
+        Public market-channel and submit-window evidence about quote depth,
+        book hashes, latency, and hypothetical FOK/FAK feasibility. This is
+        never accepted/fill truth; user channel and reconciliation remain the
+        only fill authorities.
+      required_tests:
+        - tests/events/test_market_channel_ingestor.py
+    edli_no_trade_regret_events:
+      db: world
+      pk: regret_event_id
+      writer: src/strategy/live_inference/no_trade_regret.py::NoTradeRegretLedger.insert_idempotent
+      meaning: >
+        Event-triggered rejection ledger. Live readers must not expose
+        later_outcome, would_have_won, would_have_filled, or regret_bucket.
+      required_tests:
+        - tests/strategy/live_inference/test_no_trade_regret.py
+    edli_live_cap_usage:
+      db: world
+      pk: usage_id
+      writer: src/events/live_cap.py::LiveCapLedger.reserve
+      meaning: >
+        Durable EDLI pilot live-cap ledger. Reserves, releases, and consumes
+        event-bound live canary count/notional quota before live action or
+        execution-command certificates can be accepted.
+      required_tests:
+        - tests/events/test_live_cap.py
+        - tests/money_path/test_edli_live_canary.py
+    edli_live_order_events:
+      db: world
+      pk: aggregate_event_id
+      writer: src/events/live_order_aggregate.py::LiveOrderAggregateLedger.append_event
+      meaning: >
+        Append-only EDLI live-order aggregate event log. It is the replayable
+        source of truth for decision proof, pre-submit revalidation, cap,
+        venue submission, user-channel, reconcile, and lifecycle facts in the
+        full-live split. It does not perform venue submit.
+      required_tests:
+        - tests/events/test_live_order_aggregate.py
+    edli_live_order_projection:
+      db: world
+      pk: aggregate_id
+      writer: src/events/live_order_aggregate.py::LiveOrderAggregateLedger.rebuild_projection
+      meaning: >
+        Rebuildable current-state projection of edli_live_order_events. It is
+        not source of truth and can be reconstructed from the append-only
+        aggregate event log after crashes or partial writes.
+      required_tests:
+        - tests/events/test_live_order_aggregate.py
+    edli_live_profit_audit:
+      db: world
+      pk: audit_id
+      writer: src/events/live_profit_audit.py::LiveProfitAuditLedger.insert_record
+      meaning: >
+        Event-bound EDLI live realized-edge audit projection. Promotion gates
+        consume it to require clean canary lifecycle evidence, zero unresolved
+        unknown side effects, and positive realized-edge telemetry before
+        scaleout.
+      required_tests:
+        - tests/events/test_live_profit_audit.py
     # OBS-AUTHORITY-FOUNDATION 2026-05-23. Persisted, auditable settlement-day
     # observation authority. Observability only — these objects record runtime
     # observation truth + per-edge day0 classification so the operator can audit

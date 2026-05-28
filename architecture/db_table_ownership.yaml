@@ -786,6 +786,363 @@ tables:
     created_by: init_schema
     pk_col: null
 
+  - name: opportunity_events
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: event_id
+    required_columns:
+      - {name: event_id, type: TEXT, nullable: false}
+      - {name: event_type, type: TEXT, nullable: false}
+      - {name: entity_key, type: TEXT, nullable: false}
+      - {name: source, type: TEXT, nullable: false}
+      - {name: observed_at, type: TEXT, nullable: false}
+      - {name: available_at, type: TEXT, nullable: false}
+      - {name: received_at, type: TEXT, nullable: false}
+      - {name: idempotency_key, type: TEXT, nullable: false}
+      - {name: payload_json, type: TEXT, nullable: false}
+    notes: >
+      EDLI v1 append-only opportunity event log. Event rows are immutable;
+      mutable consumer progress is stored in opportunity_event_processing.
+
+  - name: opportunity_event_processing
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: "[consumer_name, event_id]"
+    required_columns:
+      - {name: consumer_name, type: TEXT, nullable: false}
+      - {name: event_id, type: TEXT, nullable: false}
+      - {name: processing_status, type: TEXT, nullable: false}
+      - {name: attempt_count, type: INTEGER, nullable: false}
+    notes: >
+      EDLI v1 mutable per-consumer processing state for immutable opportunity_events.
+
+  - name: event_dead_letters
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: dead_letter_id
+    required_columns:
+      - {name: dead_letter_id, type: TEXT, nullable: false}
+      - {name: consumer_name, type: TEXT, nullable: false}
+      - {name: event_id, type: TEXT, nullable: false}
+      - {name: failure_stage, type: TEXT, nullable: false}
+    notes: >
+      EDLI v1 dead-letter record for event processing failures. No SQLite FK is
+      declared so cross-DB FK illusions cannot be introduced.
+
+  - name: execution_feasibility_evidence
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: evidence_id
+    required_columns:
+      - {name: evidence_id, type: TEXT, nullable: false}
+      - {name: event_id, type: TEXT, nullable: false}
+      - {name: condition_id, type: TEXT, nullable: false}
+      - {name: token_id, type: TEXT, nullable: false}
+      - {name: direction, type: TEXT, nullable: false}
+      - {name: quote_seen_at, type: TEXT, nullable: false}
+    notes: >
+      EDLI v1 executable quote/book feasibility evidence. Public market channel
+      rows are evidence only and cannot assert accepted/fill truth.
+
+  - name: no_trade_regret_events
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: regret_event_id
+    required_columns:
+      - {name: regret_event_id, type: TEXT, nullable: false}
+      - {name: event_id, type: TEXT, nullable: false}
+      - {name: rejection_stage, type: TEXT, nullable: false}
+      - {name: rejection_reason, type: TEXT, nullable: false}
+      - {name: regret_bucket, type: TEXT, nullable: false}
+    notes: >
+      EDLI v1 event-triggered rejection ledger. Hindsight columns exist for
+      post-settlement analysis but are excluded from live readers.
+
+  - name: edli_no_submit_receipts
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: receipt_id
+    required_columns:
+      - {name: receipt_id, type: TEXT, nullable: false}
+      - {name: event_id, type: TEXT, nullable: false}
+      - {name: decision_time, type: TEXT, nullable: false}
+      - {name: side_effect_status, type: TEXT, nullable: false}
+      - {name: receipt_json, type: TEXT, nullable: false}
+      - {name: receipt_hash, type: TEXT, nullable: false}
+    notes: >
+      EDLI v1 durable accepted no-submit receipt ledger. Rows preserve the
+      event-bound proof projection without asserting executor or venue submission.
+      Decision certificate rows are the authority for proof-carrying decisions.
+
+  - name: decision_certificates
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: certificate_id
+    required_columns:
+      - {name: certificate_id, type: TEXT, nullable: false}
+      - {name: certificate_type, type: TEXT, nullable: false}
+      - {name: semantic_key, type: TEXT, nullable: false}
+      - {name: claim_type, type: TEXT, nullable: false}
+      - {name: mode, type: TEXT, nullable: false}
+      - {name: decision_time, type: TEXT, nullable: false}
+      - {name: payload_json, type: TEXT, nullable: false}
+      - {name: payload_hash, type: TEXT, nullable: false}
+      - {name: certificate_hash, type: TEXT, nullable: false}
+      - {name: verifier_status, type: TEXT, nullable: false}
+    notes: >
+      EDLI redemption certificate ledger. This is the authority table for
+      proof-carrying decision certificates; projections such as
+      edli_no_submit_receipts are report conveniences.
+
+  - name: decision_certificate_edges
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: "[child_certificate_id, parent_role, parent_certificate_hash]"
+    required_columns:
+      - {name: child_certificate_id, type: TEXT, nullable: false}
+      - {name: parent_role, type: TEXT, nullable: false}
+      - {name: parent_certificate_hash, type: TEXT, nullable: false}
+      - {name: parent_certificate_type, type: TEXT, nullable: false}
+      - {name: required, type: INTEGER, nullable: false}
+    notes: >
+      Role-labeled certificate parent edges. Parent role participates in the
+      certificate hash and prevents semantic parent confusion.
+
+  - name: decision_certificate_supersessions
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: supersession_id
+    required_columns:
+      - {name: supersession_id, type: TEXT, nullable: false}
+      - {name: old_certificate_hash, type: TEXT, nullable: false}
+      - {name: new_certificate_hash, type: TEXT, nullable: false}
+      - {name: reason, type: TEXT, nullable: false}
+    notes: >
+      Explicit supersession trail for same semantic certificate claims when a
+      replacement proof is intentionally authorized.
+
+  - name: decision_compile_failures
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: failure_id
+    required_columns:
+      - {name: failure_id, type: TEXT, nullable: false}
+      - {name: event_id, type: TEXT, nullable: false}
+      - {name: decision_time, type: TEXT, nullable: false}
+      - {name: mode, type: TEXT, nullable: false}
+      - {name: claim_type, type: TEXT, nullable: false}
+      - {name: stage, type: TEXT, nullable: false}
+      - {name: reason_code, type: TEXT, nullable: false}
+    notes: >
+      Durable compiler failure denominator. Failed certificate construction is
+      persisted so no-submit reports cannot hide rejected looks.
+
+  - name: edli_live_cap_usage
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: usage_id
+    required_columns:
+      - {name: usage_id, type: TEXT, nullable: false}
+      - {name: event_id, type: TEXT, nullable: false}
+      - {name: decision_time, type: TEXT, nullable: false}
+      - {name: cap_scope, type: TEXT, nullable: false}
+      - {name: max_notional_usd, type: REAL, nullable: false}
+      - {name: max_orders_per_day, type: INTEGER, nullable: false}
+      - {name: reserved_notional_usd, type: REAL, nullable: false}
+      - {name: order_count, type: INTEGER, nullable: false}
+      - {name: reservation_status, type: TEXT, nullable: false}
+      - {name: final_intent_id, type: TEXT, nullable: true}
+      - {name: execution_command_id, type: TEXT, nullable: true}
+      - {name: created_at, type: TEXT, nullable: false}
+      - {name: schema_version, type: INTEGER, nullable: false}
+    notes: >
+      EDLI v1 durable pilot live-cap usage ledger. Full-live groundwork uses
+      this table for event-bound live canary reservation, release, and consume
+      state before execution-command persistence.
+
+  - name: edli_live_cap_day_slots
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: "[cap_scope, cap_date, slot]"
+    required_columns:
+      - {name: cap_scope, type: TEXT, nullable: false}
+      - {name: cap_date, type: TEXT, nullable: false}
+      - {name: slot, type: INTEGER, nullable: false}
+      - {name: usage_id, type: TEXT, nullable: false}
+      - {name: event_id, type: TEXT, nullable: false}
+      - {name: created_at, type: TEXT, nullable: false}
+      - {name: schema_version, type: INTEGER, nullable: false}
+    notes: >
+      Atomic live-cap day-slot guard. The composite primary key
+      (cap_scope, cap_date, slot) prevents count-then-insert races from
+      oversubscribing tiny live-canary daily order capacity.
+
+  - name: edli_live_order_events
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: aggregate_event_id
+    required_columns:
+      - {name: aggregate_event_id, type: TEXT, nullable: false}
+      - {name: aggregate_id, type: TEXT, nullable: false}
+      - {name: event_sequence, type: INTEGER, nullable: false}
+      - {name: event_type, type: TEXT, nullable: false}
+      - {name: parent_event_hash, type: TEXT, nullable: true}
+      - {name: event_hash, type: TEXT, nullable: false}
+      - {name: payload_json, type: TEXT, nullable: false}
+      - {name: payload_hash, type: TEXT, nullable: false}
+      - {name: source_authority, type: TEXT, nullable: false}
+      - {name: occurred_at, type: TEXT, nullable: false}
+      - {name: created_at, type: TEXT, nullable: false}
+      - {name: schema_version, type: INTEGER, nullable: false}
+    notes: >
+      EDLI full-live split append-only live-order aggregate event log. Rows
+      bind decision proof, pre-submit revalidation, cap, venue submit,
+      user-channel, reconcile, and lifecycle facts without performing live
+      submission.
+
+  - name: edli_live_order_projection
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: aggregate_id
+    required_columns:
+      - {name: aggregate_id, type: TEXT, nullable: false}
+      - {name: event_id, type: TEXT, nullable: false}
+      - {name: final_intent_id, type: TEXT, nullable: true}
+      - {name: current_state, type: TEXT, nullable: false}
+      - {name: last_sequence, type: INTEGER, nullable: false}
+      - {name: last_event_type, type: TEXT, nullable: true}
+      - {name: last_event_hash, type: TEXT, nullable: true}
+      - {name: pending_reconcile, type: INTEGER, nullable: false}
+      - {name: venue_order_id, type: TEXT, nullable: true}
+      - {name: updated_at, type: TEXT, nullable: false}
+      - {name: schema_version, type: INTEGER, nullable: false}
+    notes: >
+      Deterministic projection of edli_live_order_events. The append-only event
+      log remains source of truth; this table is rebuildable current state.
+
+  - name: edli_user_channel_message_dedup
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: message_hash
+    required_columns:
+      - {name: message_hash, type: TEXT, nullable: false}
+      - {name: aggregate_id, type: TEXT, nullable: false}
+      - {name: venue_order_id, type: TEXT, nullable: false}
+      - {name: message_type, type: TEXT, nullable: false}
+      - {name: observed_at, type: TEXT, nullable: false}
+      - {name: created_at, type: TEXT, nullable: false}
+    notes: >
+      Global EDLI authenticated user-channel message dedup ledger. It binds a
+      message_hash to exactly one aggregate/order/message kind before appending
+      UserOrderObserved or UserTradeObserved, making JSONL replay idempotent.
+
+  - name: edli_user_channel_inbox
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: message_hash
+    required_columns:
+      - {name: message_hash, type: TEXT, nullable: false}
+      - {name: source_authority, type: TEXT, nullable: false}
+      - {name: message_type, type: TEXT, nullable: false}
+      - {name: aggregate_id, type: TEXT, nullable: false}
+      - {name: event_id, type: TEXT, nullable: false}
+      - {name: final_intent_id, type: TEXT, nullable: false}
+      - {name: venue_order_id, type: TEXT, nullable: false}
+      - {name: payload_json, type: TEXT, nullable: false}
+      - {name: occurred_at, type: TEXT, nullable: false}
+      - {name: received_at, type: TEXT, nullable: false}
+      - {name: processed_at, type: TEXT, nullable: true}
+      - {name: processing_status, type: TEXT, nullable: false}
+      - {name: processing_error, type: TEXT, nullable: true}
+      - {name: schema_version, type: INTEGER, nullable: false}
+    notes: >
+      Durable EDLI authenticated user-channel inbox. Runtime processors enqueue
+      user order/trade messages here before aggregate append, then mark
+      PROCESSED, DUPLICATE, FAILED, or STALE_REJECTED after the aggregate
+      transaction outcome.
+
+  - name: edli_live_profit_audit
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: audit_id
+    required_columns:
+      - {name: audit_id, type: TEXT, nullable: false}
+      - {name: event_id, type: TEXT, nullable: false}
+      - {name: aggregate_id, type: TEXT, nullable: false}
+      - {name: final_intent_id, type: TEXT, nullable: true}
+      - {name: execution_command_id, type: TEXT, nullable: true}
+      - {name: condition_id, type: TEXT, nullable: false}
+      - {name: token_id, type: TEXT, nullable: false}
+      - {name: direction, type: TEXT, nullable: true}
+      - {name: side, type: TEXT, nullable: true}
+      - {name: q_live, type: REAL, nullable: true}
+      - {name: q_lcb_5pct, type: REAL, nullable: true}
+      - {name: expected_cost_basis, type: REAL, nullable: true}
+      - {name: expected_fee, type: REAL, nullable: true}
+      - {name: expected_spread_cost, type: REAL, nullable: true}
+      - {name: visible_depth_fill_lcb, type: REAL, nullable: true}
+      - {name: order_policy, type: TEXT, nullable: true}
+      - {name: native_token_side, type: TEXT, nullable: true}
+      - {name: expected_edge, type: REAL, nullable: true}
+      - {name: kelly_size_usd, type: REAL, nullable: true}
+      - {name: live_cap_notional, type: REAL, nullable: true}
+      - {name: quote_seen_at, type: TEXT, nullable: true}
+      - {name: quote_age_ms, type: INTEGER, nullable: true}
+      - {name: best_bid, type: REAL, nullable: true}
+      - {name: best_ask, type: REAL, nullable: true}
+      - {name: limit_price, type: REAL, nullable: true}
+      - {name: order_type, type: TEXT, nullable: true}
+      - {name: time_in_force, type: TEXT, nullable: true}
+      - {name: venue_order_id, type: TEXT, nullable: true}
+      - {name: order_lifecycle_state, type: TEXT, nullable: false}
+      - {name: avg_fill_price, type: REAL, nullable: true}
+      - {name: filled_size, type: REAL, nullable: true}
+      - {name: fees, type: REAL, nullable: true}
+      - {name: post_fill_mark, type: REAL, nullable: true}
+      - {name: settlement_outcome, type: TEXT, nullable: true}
+      - {name: realized_edge, type: REAL, nullable: true}
+      - {name: pnl_usd, type: REAL, nullable: true}
+      - {name: reject_reason, type: TEXT, nullable: true}
+      - {name: created_at, type: TEXT, nullable: false}
+      - {name: schema_version, type: INTEGER, nullable: false}
+    notes: >
+      Event-bound EDLI live realized-edge audit projection. Used by promotion
+      gates to block scaleout when canary lifecycle or economics are not proven.
+
   - name: outcome_fact
     db: world
     schema_class: world_class
