@@ -778,7 +778,7 @@ class TestF6StrategyKeyCheckMigration:
         # the .replace() below silently mangles the CHECK (e.g. dropping the
         # entire 14..40 prefix while leaving a stranded ", 41" — yielding
         # CHECK (14..27, 41) which then rejects the SCHEMA_VERSION insert).
-        current_versions = f"{old_versions}, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41"
+        current_versions = f"{old_versions}, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42"
         conn = sqlite3.connect(":memory:")
         # Build a v27-only table by replacing the full current version list.
         conn.executescript(CREATE_TABLE_SQL.replace(current_versions, old_versions))

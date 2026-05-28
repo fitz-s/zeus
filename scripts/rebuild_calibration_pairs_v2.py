@@ -2288,26 +2288,36 @@ def main() -> int:
                 return 1
 
             # SD4 / Blocker F: after a successful full_transport rebuild, record the immutable
-            # pair-batch manifest (domain identity of the pairs just generated). Best-effort —
-            # never aborts a completed rebuild.
+            # pair-batch manifest (domain identity of the pairs just generated). The operator's
+            # requirement is "必须有" (must exist) — so a missing/failed manifest FAILS the run
+            # (rc=1) loudly. The pairs are already committed; the manifest is content-addressed +
+            # idempotent, so the operator re-runs to record it. Never silently succeeds.
+            manifest_failed = False
             if (not args.dry_run) and args.error_model == "full_transport_v1" \
                     and not any(s.refused for s in per_metric.values()):
                 try:
-                    _record_pair_batch_manifest(
+                    pbid = _record_pair_batch_manifest(
                         forecasts_conn=conn,
                         city_filter=args.city,
                         temperature_metric=args.temperature_metric,
                         data_version_filter=args.data_version,
                         n_mc=args.n_mc,
                     )
-                except Exception as e:
-                    print(f"WARN: pair-batch manifest not recorded: {type(e).__name__}: {e}",
+                    if pbid is None:
+                        manifest_failed = True
+                        print("ERROR: pair-batch manifest NOT recorded — no STAGING rows matched "
+                              "the current gate_set_hash in scope. Pairs written WITHOUT a domain "
+                              "manifest; do NOT train Platt until resolved.", file=sys.stderr)
+                except Exception as e:  # noqa: BLE001
+                    manifest_failed = True
+                    print(f"ERROR: pair-batch manifest write FAILED: {type(e).__name__}: {e}. "
+                          "Pairs written WITHOUT a domain manifest; re-run to record (idempotent).",
                           file=sys.stderr)
     finally:
         conn.close()
 
     any_refused = any(s.refused for s in per_metric.values())
-    return 1 if any_refused else 0
+    return 1 if (any_refused or manifest_failed) else 0
 
 
 if __name__ == "__main__":
