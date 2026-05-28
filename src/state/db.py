@@ -10202,3 +10202,42 @@ def log_pending_exit_recovery_event(
         error=error,
         timestamp=timestamp,
     )
+
+
+# ---------------------------------------------------------------------------
+# F3 admin queries (docs/findings_2026_05_28.md §F3, 2026-05-28)
+# ---------------------------------------------------------------------------
+
+
+def query_unclassified_authority_rows(conn) -> list:
+    """Return position_current rows where fill_authority IS NULL.
+
+    Used by backfill scripts and ops tooling to verify migration completeness.
+    Each returned dict has keys: position_id, phase, updated_at.
+    """
+    rows = conn.execute(
+        """
+        SELECT position_id, phase, updated_at
+          FROM position_current
+         WHERE fill_authority IS NULL
+         ORDER BY updated_at
+        """
+    ).fetchall()
+    keys = ("position_id", "phase", "updated_at")
+    return [dict(zip(keys, r)) for r in rows]
+
+
+def report_authority_distribution(conn) -> dict:
+    """Return count of position_current rows grouped by fill_authority.
+
+    NULL rows indicate migration not yet run (unmigrated legacy).
+    Key is the fill_authority string value (or None for NULL rows).
+    """
+    rows = conn.execute(
+        """
+        SELECT fill_authority, COUNT(*) AS cnt
+          FROM position_current
+         GROUP BY fill_authority
+        """
+    ).fetchall()
+    return {r[0]: r[1] for r in rows}
