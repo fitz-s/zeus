@@ -16,6 +16,16 @@
             "description": "[Phase 2 new] After successful gh pr create or gh pr ready, emit additionalContext to arm Monitor + MONITOR_ARM_REQUIRED sentinel (ATTACK 9)"
           }
         ]
+      },
+      {
+        "matcher": "Monitor",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 .claude/hooks/dispatch.py pr_monitor_arm_ack",
+            "description": "[2026-05-27 ack] Clear pending monitor-arm sentinel when Monitor tool fires with pr_monitor.py <N> or gh pr <view|checks> <N> — stops the 2nd-tier reminder loop"
+          }
+        ]
       }
     ],
     "PreToolUse": [
