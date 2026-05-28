@@ -611,12 +611,12 @@ modules:
     authority_role: operator_script_surface
     high_risk_files:
       - scripts/topology_doctor.py
-      - scripts/backfill_obs_v2.py
+      - scripts/backfill_obs.py
       - scripts/rebuild_calibration_pairs_canonical.py
       - scripts/check_daemon_heartbeat.py
     public_entry_files:
       - scripts/topology_doctor.py
-      - scripts/backfill_obs_v2.py
+      - scripts/backfill_obs.py
     law_dependencies:
       - docs/authority/zeus_current_delivery.md
       - architecture/script_manifest.yaml

@@ -236,7 +236,7 @@ Pre-commit invariant baseline at `.claude/hooks/pre-commit-invariant-test.sh` â€
 |---|---|
 | `src/ingest/harvester_truth_writer.py` cron job (`ingest_main.py` minute 45 hourly) | Reads PM settlement; gated by `ZEUS_HARVESTER_LIVE_ENABLED` env |
 | Per-vendor backfill scripts (`scripts/backfill_*.py`, ~10 files) | Each scoped to one vendor |
-| `scripts/fill_obs_v2_dst_gaps.py` | Lagos-class fallback decision logic |
+| `scripts/fill_obs_dst_gaps.py` | Lagos-class fallback decision logic |
 | `scripts/fill_obs_v2_meteostat.py` | Bulk fallback runner |
 | `scripts/audit_observation_instants.py` | Daily audit |
 | `scripts/source_contract_auto_convert.py` | Source-tag namespace converter |
@@ -327,7 +327,7 @@ Pre-commit invariant baseline at `.claude/hooks/pre-commit-invariant-test.sh` â€
    2. Layer 5: extend `OGIMET_CITIES` whitelist (line 1019) IF Ogimet is a viable fallback for THAT city's PM-settled station
    3. Layer 5: add fallback source tag to `_build_allowed_sources_by_city()` allowed set
    4. Layer 8: future DDD will activate per `zeus_oracle_density_discount_reference.md` Â§6 â€” small-sample multiplier compensates for low Platt samples
-   5. Layer 14: trigger backfill via `fill_obs_v2_dst_gaps.py` or new fallback runner
+   5. Layer 14: trigger backfill via `fill_obs_dst_gaps.py` or new fallback runner
 5. **Verification**:
    - Bridge runs full 90-day window; mismatch + DDD both classified
    - DDD doesn't fire on routine days, fires on outage days

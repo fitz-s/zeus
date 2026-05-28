@@ -437,7 +437,7 @@ def cities_in_tier(tier: Tier) -> frozenset[str]:
     - ``tests/test_tier_resolver.py`` (antibody A3).
     - ``scripts/audit_observation_instants.py`` for per-tier row-count
       reports.
-    - ``scripts/backfill_obs_v2.py`` to split the worklist by tier and
+    - ``scripts/backfill_obs.py`` to split the worklist by tier and
       dispatch to the right hourly client.
     """
     return frozenset(name for name, t in TIER_SCHEDULE.items() if t is tier)

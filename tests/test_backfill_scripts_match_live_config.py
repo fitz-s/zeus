@@ -41,9 +41,9 @@ from src.state.schema.v2_schema import apply_v2_schema
 REPO_ROOT = Path(__file__).resolve().parent.parent
 WU_BACKFILL_PATH = REPO_ROOT / "scripts" / "backfill_wu_daily_all.py"
 OGIMET_BACKFILL_PATH = REPO_ROOT / "scripts" / "backfill_ogimet_metar.py"
-OBS_V2_BACKFILL_PATH = REPO_ROOT / "scripts" / "backfill_obs_v2.py"
+OBS_V2_BACKFILL_PATH = REPO_ROOT / "scripts" / "backfill_obs.py"
 HKO_DAILY_BACKFILL_PATH = REPO_ROOT / "scripts" / "backfill_hko_daily.py"
-OBS_V2_DST_GAP_FILL_PATH = REPO_ROOT / "scripts" / "fill_obs_v2_dst_gaps.py"
+OBS_V2_DST_GAP_FILL_PATH = REPO_ROOT / "scripts" / "fill_obs_dst_gaps.py"
 HKO_INGEST_TICK_PATH = REPO_ROOT / "scripts" / "hko_ingest_tick.py"
 OBS_V2_PRODUCER_PATHS = [
     OBS_V2_BACKFILL_PATH,
@@ -90,7 +90,7 @@ def ogimet_backfill_module():
 
 @pytest.fixture(scope="module")
 def obs_v2_backfill_module():
-    return _load_module_by_path(OBS_V2_BACKFILL_PATH, "zeus_backfill_obs_v2_identity")
+    return _load_module_by_path(OBS_V2_BACKFILL_PATH, "zeus_backfill_obs_identity")
 
 
 @pytest.fixture(scope="module")
@@ -102,7 +102,7 @@ def hko_ingest_tick_module():
 def obs_v2_dst_gap_fill_module():
     return _load_module_by_path(
         OBS_V2_DST_GAP_FILL_PATH,
-        "zeus_fill_obs_v2_dst_gaps_identity",
+        "zeus_fill_obs_dst_gaps_identity",
     )
 
 

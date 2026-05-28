@@ -719,13 +719,13 @@ SQLITE_CONNECT_ALLOWLIST: frozenset[str] = frozenset(
         "scripts/backfill_forecast_issue_time.py",          # already_guarded: reads mode=ro; writes under db_writer_lock(BULK)
         "scripts/backfill_london_f_to_c_2026_05_08.py",     # already_guarded: writes under db_writer_lock(BULK)
         "scripts/backfill_low_contract_window_evidence.py", # already_guarded: writes under db_writer_lock(BULK) when not dry_run
-        "scripts/backfill_obs_v2.py",                       # already_guarded: writes under db_writer_lock(BULK)
+        "scripts/backfill_obs.py",                       # already_guarded: writes under db_writer_lock(BULK)
         "scripts/backfill_ogimet_metar.py",                 # already_guarded: writes under db_writer_lock(BULK)
         "scripts/backfill_outcome_fact.py",                 # already_guarded: writes under db_writer_lock(BULK)
         "scripts/backfill_tigge_snapshot_p_raw_v2.py",      # already_guarded: writes under db_writer_lock(BULK)
         "scripts/backfill_wu_daily_all.py",                 # already_guarded: writes under db_writer_lock(BULK)
         "scripts/cleanup_ghost_positions.py",               # already_guarded: writes under db_writer_lock(BULK)
-        "scripts/fill_obs_v2_dst_gaps.py",                  # already_guarded: writes under db_writer_lock(BULK) when not dry_run
+        "scripts/fill_obs_dst_gaps.py",                  # already_guarded: writes under db_writer_lock(BULK) when not dry_run
         "scripts/force_cycle_with_healthy_gates.py",        # already_guarded: writes under db_writer_lock(BULK)
         "scripts/hko_ingest_tick.py",                       # already_guarded: writes under db_writer_lock(BULK)
         "scripts/ingest_grib_to_snapshots.py",              # already_guarded: writes under db_writer_lock(BULK)

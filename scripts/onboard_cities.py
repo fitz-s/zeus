@@ -368,7 +368,7 @@ PIPELINE_STEPS = [
     {
         "id": "obs_instants_v2",
         "name": "Backfill observation_instants_v2 (≥365d, data_version=v1.wu-native)",
-        "script": "backfill_obs_v2.py",
+        "script": "backfill_obs.py",
         "city_flag": "--cities",
         # --start / --end / --data-version injected dynamically via extra_args_factory
         "extra_args_factory": "_obs_instants_v2_extra_args",
@@ -695,7 +695,7 @@ _OBS_V2_BACKFILL_DAYS = 400
 
 
 def _obs_instants_v2_extra_args() -> list[str]:
-    """Dynamic args for backfill_obs_v2.py: --start, --end, --data-version."""
+    """Dynamic args for backfill_obs.py: --start, --end, --data-version."""
     end_date = date.today()
     start_date = end_date - timedelta(days=_OBS_V2_BACKFILL_DAYS)
     return [

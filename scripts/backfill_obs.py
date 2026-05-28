@@ -18,7 +18,7 @@ Default usage (Phase 0 pilot)
 -----------------------------
 ::
 
-    python scripts/backfill_obs_v2.py \\
+    python scripts/backfill_obs.py \\
         --cities Chicago London Tokyo "Sao Paulo" Moscow \\
         --start 2024-01-01 --end 2026-04-21 \\
         --data-version v1.wu-native.pilot
@@ -77,7 +77,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-# Add repo root to sys.path so `python scripts/backfill_obs_v2.py` works
+# Add repo root to sys.path so `python scripts/backfill_obs.py` works
 # without an editable install.
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(_REPO_ROOT) not in sys.path:
@@ -758,7 +758,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             )
             write_manifest(
                 manifest_path,
-                script_name="backfill_obs_v2.py",
+                script_name="backfill_obs.py",
                 run_id=run_id,
                 dry_run=args.dry_run,
                 inputs={

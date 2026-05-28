@@ -15,7 +15,7 @@
 Pre-this-slice: writer field accepts the flag (src/data/observation_instants_v2_writer.py:138);
 all callers compute it via `_is_missing_local_hour` (wu_hourly_client:331,
 ogimet_hourly_client:402, hourly_instants_append:153, daily_obs_append:668);
-historical backfill is handled by `scripts/fill_obs_v2_dst_gaps.py`. None
+historical backfill is handled by `scripts/fill_obs_dst_gaps.py`. None
 of those paths had a regression test pinning the contract.
 
 This file is the regression antibody. If a future refactor:

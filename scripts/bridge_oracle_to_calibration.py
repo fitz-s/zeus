@@ -43,7 +43,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 # _MIN_HOURS_PER_DAY = 22
-from scripts.fill_obs_v2_dst_gaps import _MIN_HOURS_PER_DAY
+from scripts.fill_obs_dst_gaps import _MIN_HOURS_PER_DAY
 _SHARED_CITY_ORACLE_SOURCE_ROLE = "shared_city_oracle_source_proxy"
 from src.data.tier_resolver import (
     allowed_sources_for_city,

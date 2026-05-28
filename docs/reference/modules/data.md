@@ -142,7 +142,7 @@ Data does not set durable law, but it is the place where semantic category error
 pytest -q tests/test_audit_city_data_readiness.py tests/test_cities_config_authoritative.py tests/test_backfill_scripts_match_live_config.py
 pytest -q tests/test_tier_resolver.py tests/test_obs_v2_writer.py tests/test_hk_rejects_vhhh_source.py tests/test_hourly_clients_parse.py
 pytest -q tests/test_ensemble_client.py
-python -m py_compile src/data/*.py scripts/backfill_obs_v2.py scripts/audit_observation_instants.py
+python -m py_compile src/data/*.py scripts/backfill_obs.py scripts/audit_observation_instants.py
 ```
 
 ## 21. Rollback strategy

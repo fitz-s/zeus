@@ -25,10 +25,10 @@ Usage
 ::
 
     # Dry-run: show what would be filled
-    python scripts/fill_obs_v2_dst_gaps.py --data-version v1.wu-native.pilot --dry-run
+    python scripts/fill_obs_dst_gaps.py --data-version v1.wu-native.pilot --dry-run
 
     # Actually fill
-    python scripts/fill_obs_v2_dst_gaps.py --data-version v1.wu-native.pilot
+    python scripts/fill_obs_dst_gaps.py --data-version v1.wu-native.pilot
 
 Idempotent via INSERT OR REPLACE on UNIQUE(city, source, utc_timestamp).
 
