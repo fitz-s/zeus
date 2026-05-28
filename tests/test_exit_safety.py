@@ -151,7 +151,7 @@ def _ensure_snapshot(
     accepting_orders: bool | None = True,
     enable_orderbook: bool = True,
 ) -> str:
-    from src.contracts.executable_market_snapshot_v2 import ExecutableMarketSnapshotV2
+    from src.contracts.executable_market_snapshot import ExecutableMarketSnapshot
     from src.state.snapshot_repo import get_snapshot, insert_snapshot
 
     snapshot_id = snapshot_id or f"snap-{token_id}"
@@ -162,7 +162,7 @@ def _ensure_snapshot(
     selected_label = outcome_label or ("NO" if selected_token == no_token else "YES")
     insert_snapshot(
         c,
-        ExecutableMarketSnapshotV2(
+        ExecutableMarketSnapshot(
             snapshot_id=snapshot_id,
             gamma_market_id="gamma-test",
             event_id="event-test",

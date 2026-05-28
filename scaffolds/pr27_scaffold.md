@@ -30,7 +30,7 @@
 
 ---
 
-## 2. PR 2 — Field declarations for ExecutableMarketSnapshotV2
+## 2. PR 2 — Field declarations for ExecutableMarketSnapshot
 
 ### New fields (appended after `freshness_deadline` in the frozen dataclass)
 
@@ -69,7 +69,7 @@ if self.depth_at_best_ask < 0:
 
 ### WIDE_SPREAD_THRESHOLD constant
 
-New constant in `executable_market_snapshot_v2.py`:
+New constant in `executable_market_snapshot.py`:
 ```python
 WIDE_SPREAD_THRESHOLD_USD = Decimal("0.10")  # Polymarket UI substitution threshold
 ```
@@ -88,7 +88,7 @@ Pattern: `ADD COLUMN … DEFAULT` matches existing SQLite ALTER pattern used by 
 
 ### market_scanner.py — populate at construction
 
-In `market_scanner.py` at the `ExecutableMarketSnapshotV2(…)` construction site (~line 1946):
+In `market_scanner.py` at the `ExecutableMarketSnapshot(…)` construction site (~line 1946):
 ```python
 # Parse spread and depth from raw_orderbook
 _spread = _compute_spread(raw_orderbook, top_bid, top_ask)
@@ -183,7 +183,7 @@ Live-money detection: import `src.contracts.run_mode` (already used in codebase 
 | W4 (cycle_runtime.py:862) | Same as W2 | Same snapshot |
 | W5 (replay.py:1722) | Graceful degrade (`effective_context=None`) — replay has no snapshot object at this call point | No snapshot in scope at line 1722; log WARNING |
 
-**Snapshot availability at W1**: `ens_result` from `clob.get_best_bid_ask` call at evaluator.py:2795 provides `bid`, `ask`, `bid_sz`, `ask_sz` — these are captured into `microstructure_sink` dict. The `spread_usd` = `ask - bid`, `depth_at_best_ask` = `int(ask_sz)`. Order type comes from `execution_intent` (default is LIMIT/FOK per market). At W1 the evaluator does NOT have the `ExecutableMarketSnapshotV2` loaded — it calls `clob.get_best_bid_ask` directly. So context is derived from raw bid/ask in the evaluate loop, not from the snapshot.
+**Snapshot availability at W1**: `ens_result` from `clob.get_best_bid_ask` call at evaluator.py:2795 provides `bid`, `ask`, `bid_sz`, `ask_sz` — these are captured into `microstructure_sink` dict. The `spread_usd` = `ask - bid`, `depth_at_best_ask` = `int(ask_sz)`. Order type comes from `execution_intent` (default is LIMIT/FOK per market). At W1 the evaluator does NOT have the `ExecutableMarketSnapshot` loaded — it calls `clob.get_best_bid_ask` directly. So context is derived from raw bid/ask in the evaluate loop, not from the snapshot.
 
 ---
 
@@ -224,7 +224,7 @@ def test_haircut_tight_gte_mid_gte_wide():
 
 ```python
 def test_wide_spread_fields_roundtrip_through_snapshot_repo():
-    """Insert ExecutableMarketSnapshotV2 with wide_spread=True, depth=50, window_ms=0;
+    """Insert ExecutableMarketSnapshot with wide_spread=True, depth=50, window_ms=0;
     reload from DB; assert fields equal."""
 ```
 
@@ -257,7 +257,7 @@ def test_cycle_runtime_reprice_passes_context_from_snapshot():
 
 | File | Action | PR |
 |---|---|---|
-| `src/contracts/executable_market_snapshot_v2.py` | ADD 3 fields + WIDE_SPREAD_THRESHOLD + validators | 2 |
+| `src/contracts/executable_market_snapshot.py` | ADD 3 fields + WIDE_SPREAD_THRESHOLD + validators | 2 |
 | `src/state/snapshot_repo.py` | ADD 3 ALTER TABLE columns + row/unrow update | 2 |
 | `src/data/market_scanner.py` | POPULATE 3 fields at construction site | 2 |
 | `src/contracts/effective_kelly_context.py` | CREATE new file: EffectiveKellyContext + MissingEffectiveContextError + haircut() | 7 |
@@ -291,7 +291,7 @@ def test_cycle_runtime_reprice_passes_context_from_snapshot():
 | `src/engine/evaluator.py` (T0) | Adding `effective_context` optional param to `_size_at_execution_price_boundary` — must not change existing callers' behavior when `effective_context=None` | Default `None` + graceful degrade = no behavioral change for pre-wired callers |
 | `src/engine/cycle_runtime.py` (T0) | Passing context derived from snapshot — snapshot already loaded in scope; construction must not raise | Defensive: if snapshot lacks new fields (legacy row), fall back to `effective_context=None` |
 | `src/state/snapshot_repo.py` (T0) | ALTER TABLE DDL at init time — idempotent guard needed | Try/except on `duplicate column` error; log INFO on skip |
-| `src/contracts/executable_market_snapshot_v2.py` (T0) | Frozen dataclass change breaks all construction sites that don't pass new fields | Fields have defaults — all existing callers unaffected without code change |
+| `src/contracts/executable_market_snapshot.py` (T0) | Frozen dataclass change breaks all construction sites that don't pass new fields | Fields have defaults — all existing callers unaffected without code change |
 | INV-kelly-effective enforcement | Fail-closed in live mode only; graceful in backtest | ZEUS_MODE detection via existing `run_mode` contract |
 
 ---
@@ -301,7 +301,7 @@ def test_cycle_runtime_reprice_passes_context_from_snapshot():
 | Category | Est. lines |
 |---|---|
 | New contract `effective_kelly_context.py` | ~80 |
-| `executable_market_snapshot_v2.py` additions | ~40 |
+| `executable_market_snapshot.py` additions | ~40 |
 | `snapshot_repo.py` additions | ~30 |
 | `market_scanner.py` additions | ~25 |
 | `evaluator.py` changes | ~40 |

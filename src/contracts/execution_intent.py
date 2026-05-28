@@ -11,7 +11,7 @@ from src.contracts.semantic_types import Direction
 
 if TYPE_CHECKING:
     from src.contracts.slippage_bps import SlippageBps
-    from src.contracts.executable_market_snapshot_v2 import ExecutableMarketSnapshotV2
+    from src.contracts.executable_market_snapshot import ExecutableMarketSnapshot
 
 
 CorrectedPricingSemanticsVersion = Literal["corrected_executable_cost_v1"]
@@ -182,7 +182,7 @@ def _outcome_label_for_direction(direction: str) -> OutcomeLabel:
 
 
 def _selected_token_for_direction(
-    snapshot: "ExecutableMarketSnapshotV2",
+    snapshot: "ExecutableMarketSnapshot",
     direction: str,
 ) -> tuple[str, OutcomeLabel]:
     outcome_label = _outcome_label_for_direction(direction)
@@ -451,7 +451,7 @@ def _assert_cost_basis_order_policy_coherent(
             )
 
 
-def _orderbook_levels(snapshot: "ExecutableMarketSnapshotV2", side: SweepBookSide) -> list[tuple[Decimal, Decimal]]:
+def _orderbook_levels(snapshot: "ExecutableMarketSnapshot", side: SweepBookSide) -> list[tuple[Decimal, Decimal]]:
     try:
         orderbook = json.loads(snapshot.orderbook_depth_jsonb)
     except (TypeError, ValueError) as exc:
@@ -504,7 +504,7 @@ class ClobSweepResult:
 
 def simulate_clob_sweep(
     *,
-    snapshot: "ExecutableMarketSnapshotV2",
+    snapshot: "ExecutableMarketSnapshot",
     direction: ExecutionDirection,
     requested_size_kind: OrderSizeKind,
     requested_size_value: Decimal,
@@ -1011,7 +1011,7 @@ class ExecutableCostBasis:
     def from_snapshot(
         cls,
         *,
-        snapshot: "ExecutableMarketSnapshotV2",
+        snapshot: "ExecutableMarketSnapshot",
         direction: ExecutionDirection,
         order_policy: OrderPolicy,
         requested_size_kind: OrderSizeKind,
@@ -1025,7 +1025,7 @@ class ExecutableCostBasis:
         min_order_status: Literal["PASS", "FAIL"] = "PASS",
         _allow_depth_pass: bool = False,
     ) -> "ExecutableCostBasis":
-        from src.contracts.executable_market_snapshot_v2 import (
+        from src.contracts.executable_market_snapshot import (
             fee_rate_fraction_from_details,
         )
 
@@ -1106,7 +1106,7 @@ class ExecutableCostBasis:
     def from_snapshot_sweep(
         cls,
         *,
-        snapshot: "ExecutableMarketSnapshotV2",
+        snapshot: "ExecutableMarketSnapshot",
         direction: ExecutionDirection,
         order_policy: OrderPolicy,
         requested_size_kind: OrderSizeKind,

@@ -551,7 +551,7 @@ external_truth_sources:
   clob:
     authority_tier: executable_venue
     endpoint_patterns: [clob.polymarket.com, /book, /orders, /trades]
-    required_tests: [tests/test_executable_market_snapshot_v2.py, tests/test_order_truth_reducer.py]
+    required_tests: [tests/test_executable_market_snapshot.py, tests/test_order_truth_reducer.py]
   ecmwf:
     authority_tier: forecast_source
     endpoint_patterns: [ecmwf, open-data, tigge]

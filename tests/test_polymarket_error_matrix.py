@@ -85,7 +85,7 @@ def _make_poly_exc(status_code: int, body: dict = None):
 
 
 def _ensure_snapshot(conn, *, token_id: str) -> dict:
-    from src.contracts.executable_market_snapshot_v2 import ExecutableMarketSnapshotV2
+    from src.contracts.executable_market_snapshot import ExecutableMarketSnapshot
     from src.state.snapshot_repo import get_snapshot, insert_snapshot
 
     now = datetime(2026, 4, 27, tzinfo=timezone.utc)
@@ -93,7 +93,7 @@ def _ensure_snapshot(conn, *, token_id: str) -> dict:
     if get_snapshot(conn, snapshot_id) is None:
         insert_snapshot(
             conn,
-            ExecutableMarketSnapshotV2(
+            ExecutableMarketSnapshot(
                 snapshot_id=snapshot_id,
                 gamma_market_id="gamma-error-matrix",
                 event_id="event-error-matrix",

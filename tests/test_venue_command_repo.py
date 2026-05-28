@@ -68,7 +68,7 @@ def _insert(c, *, command_id="cmd-001", position_id="pos-001",
 
 
 def _ensure_snapshot(c, *, token_id: str, snapshot_id: str | None = None) -> str:
-    from src.contracts.executable_market_snapshot_v2 import ExecutableMarketSnapshotV2
+    from src.contracts.executable_market_snapshot import ExecutableMarketSnapshot
     from src.state.snapshot_repo import get_snapshot, insert_snapshot
 
     snapshot_id = snapshot_id or f"snap-{token_id}"
@@ -76,7 +76,7 @@ def _ensure_snapshot(c, *, token_id: str, snapshot_id: str | None = None) -> str
         return snapshot_id
     insert_snapshot(
         c,
-        ExecutableMarketSnapshotV2(
+        ExecutableMarketSnapshot(
             snapshot_id=snapshot_id,
             gamma_market_id="gamma-test",
             event_id="event-test",

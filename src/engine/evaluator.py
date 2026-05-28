@@ -160,7 +160,7 @@ from src.contracts.decision_evidence import DecisionEvidence
 from src.contracts.no_trade_reason import NoTradeReason
 from src.observability.counters import increment as _cnt_inc
 from src.contracts.ensemble_snapshot_provenance import assert_data_version_allowed, validate_members_unit
-from src.contracts.executable_market_snapshot_v2 import (
+from src.contracts.executable_market_snapshot import (
     MarketSnapshotMismatchError,
     canonicalize_legacy_fee_rate_value,
     canonicalize_fee_details,
@@ -6002,7 +6002,7 @@ def evaluate_candidate(
             # PR 7 (W1): effective_context=None — bid/ask data for this edge's
             # token is fetched in the p_market loop (evaluator.py:~2795) in a
             # different scope.  This evaluate_candidate loop does not carry the
-            # ExecutableMarketSnapshotV2; microstructure haircut is applied at
+            # ExecutableMarketSnapshot; microstructure haircut is applied at
             # cycle_runtime W2/W3/W4 where the snapshot IS in scope.
             # allow_missing_context=True: sole authorised pre-snapshot path; see
             # _size_at_execution_price_boundary docstring for invariant contract.

@@ -36,7 +36,7 @@ def test_market_scanner_change_selects_tradeability_relationship_tests() -> None
             }
         },
         "invariants": {
-            "MP-MD-001": {"tests": ["tests/test_executable_market_snapshot_v2.py"]},
+            "MP-MD-001": {"tests": ["tests/test_executable_market_snapshot.py"]},
             "MP-MD-003": {"tests": ["tests/test_scanner_archived_filter.py"]},
             "MP-EXT-001": {"tests": ["tests/test_market_scanner_provenance.py"]},
             "MP-EXT-002": {"tests": ["tests/test_live_readiness_gates.py"]},

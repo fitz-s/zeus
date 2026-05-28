@@ -122,7 +122,7 @@ GATES: tuple[GateSpec, ...] = (
         "U1",
         "Stale executable snapshot blocks submit",
         "pytest",
-        ("tests/test_executable_market_snapshot_v2.py::test_stale_snapshot_blocks_submit",),
+        ("tests/test_executable_market_snapshot.py::test_stale_snapshot_blocks_submit",),
     ),
     GateSpec(
         "G1-07",

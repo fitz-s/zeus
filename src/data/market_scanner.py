@@ -23,10 +23,10 @@ import httpx
 
 from src import config as runtime_config
 from src.config import City, cities_by_name, state_path
-from src.contracts.executable_market_snapshot_v2 import (
+from src.contracts.executable_market_snapshot import (
     FRESHNESS_WINDOW_DEFAULT,
     WIDE_SPREAD_THRESHOLD_USD,
-    ExecutableMarketSnapshotV2,
+    ExecutableMarketSnapshot,
     ExecutableTradeabilityStatus,
     MarketSnapshotMismatchError,
     canonicalize_legacy_fee_rate_value,
@@ -2667,7 +2667,7 @@ def capture_executable_market_snapshot(
     captured = datetime.now(timezone.utc)
     # PR 2: cache spread computation to avoid calling _compute_spread twice.
     _spread_usd = _compute_spread(raw_orderbook, top_bid, top_ask)
-    snapshot = ExecutableMarketSnapshotV2(
+    snapshot = ExecutableMarketSnapshot(
         snapshot_id=_snapshot_id(
             condition_id=condition_id,
             selected_token=selected_token,

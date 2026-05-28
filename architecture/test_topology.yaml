@@ -279,7 +279,7 @@ test_trust_policy:
     tests/test_heartbeat_supervisor.py: {created: "2026-04-27", last_used: "2026-04-27"}
     tests/test_v2_adapter.py: {created: "2026-04-27", last_used: "2026-04-29"}
     tests/test_collateral_ledger.py: {created: "2026-04-27", last_used: "2026-04-27"}
-    tests/test_executable_market_snapshot_v2.py: {created: "2026-04-27", last_used: "2026-04-29"}
+    tests/test_executable_market_snapshot.py: {created: "2026-04-27", last_used: "2026-04-29"}
     tests/test_provenance_5_projections.py: {created: "2026-04-27", last_used: "2026-04-27"}
     tests/test_command_grammar_amendment.py: {created: "2026-04-27", last_used: "2026-04-27"}
     tests/test_riskguard_red_durable_cmd.py: {created: "2026-04-27", last_used: "2026-04-27"}
@@ -620,7 +620,7 @@ categories:
     - tests/test_polymarket_v2_adapter_negrisk_redeem.py
     - tests/test_ecmwf_open_data_ingest_metric_independence.py
     - tests/test_collateral_ledger.py
-    - tests/test_executable_market_snapshot_v2.py
+    - tests/test_executable_market_snapshot.py
     - tests/test_provenance_5_projections.py
     - tests/test_command_grammar_amendment.py
     - tests/test_riskguard_red_durable_cmd.py

@@ -113,7 +113,7 @@ _BARE_SOURCE_STR_PATTERN = re.compile(
 # external authority).
 _BASELINE_PER_FILE: dict[str, int] = {
     "src/contracts/execution_intent.py": 7,  # bumped P3 (2026-05-14): one additional internal-label source field surfaced (pre-P3 drift); classified internal label
-    "src/contracts/executable_market_snapshot_v2.py": 4,
+    "src/contracts/executable_market_snapshot.py": 4,
     "src/contracts/semantic_types.py": 1,
     "src/contracts/expiring_assumption.py": 1,
     # world_view/ entries REMOVED — directory retired in P3 (K1 followups, 2026-05-14).

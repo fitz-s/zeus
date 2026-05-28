@@ -865,7 +865,7 @@ def _ensure_fresh_executable_snapshot(
       primitive and return it.
     - stale + no client → raise ``executable_snapshot_stale`` (safety gate preserved).
     """
-    from src.contracts.executable_market_snapshot_v2 import is_fresh
+    from src.contracts.executable_market_snapshot import is_fresh
     from src.state.snapshot_repo import get_snapshot
 
     snapshot = get_snapshot(conn, snapshot_id)
@@ -1035,7 +1035,7 @@ def _reprice_decision_from_executable_snapshot(
     snapshot = get_snapshot(conn, snapshot_id)
     if snapshot is None:
         raise ValueError(f"EXECUTABLE_SNAPSHOT_UNAVAILABLE: {snapshot_id}")
-    from src.contracts.executable_market_snapshot_v2 import is_fresh
+    from src.contracts.executable_market_snapshot import is_fresh
 
     _now_reprice = datetime.now(timezone.utc)
     if not is_fresh(snapshot, _now_reprice):
@@ -1156,7 +1156,7 @@ def _reprice_decision_from_executable_snapshot(
     # any exception is caught and logged — the live decision is never affected.
     # Natural key params threaded from outer execute_discovery_phase loop via
     # _shadow_market_slug / _shadow_temperature_metric / _shadow_target_date /
-    # _shadow_observation_time — ExecutableMarketSnapshotV2 does NOT carry them.
+    # _shadow_observation_time — ExecutableMarketSnapshot does NOT carry them.
     # ---------------------------------------------------------------------------
     _vnext_metrics_computed = locals().get("_vnext_metrics")
     try:
@@ -4215,7 +4215,7 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
         return _execution_snapshot_fields(decision.tokens), ""
 
     def _execution_snapshot_is_stale(conn, snapshot_id: str) -> bool:
-        from src.contracts.executable_market_snapshot_v2 import is_fresh
+        from src.contracts.executable_market_snapshot import is_fresh
         from src.state.snapshot_repo import get_snapshot
 
         snapshot = get_snapshot(conn, snapshot_id)

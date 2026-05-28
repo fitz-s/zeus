@@ -72,7 +72,7 @@ This is the strongest code truth surface after executable tests. Delivery law al
 - tests/test_chronicle_dedup.py
 - tests/test_cross_module_invariants.py
 - tests/test_collateral_ledger.py
-- tests/test_executable_market_snapshot_v2.py
+- tests/test_executable_market_snapshot.py
 - tests/test_provenance_5_projections.py
 - tests/test_command_grammar_amendment.py
 - tests/test_riskguard_red_durable_cmd.py

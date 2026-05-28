@@ -11,7 +11,7 @@ from decimal import Decimal
 
 import pytest
 
-from src.contracts.executable_market_snapshot_v2 import ExecutableMarketSnapshotV2
+from src.contracts.executable_market_snapshot import ExecutableMarketSnapshot
 from src.state.schema.v2_schema import apply_v2_schema
 from src.state.snapshot_repo import init_snapshot_schema, insert_snapshot
 
@@ -79,7 +79,7 @@ def _insert_snapshot(
     captured_at = datetime(2026, 5, 9, 9, 0, tzinfo=UTC)
     insert_snapshot(
         conn,
-        ExecutableMarketSnapshotV2(
+        ExecutableMarketSnapshot(
             snapshot_id=snapshot_id,
             gamma_market_id="gamma-1",
             event_id="event-1",

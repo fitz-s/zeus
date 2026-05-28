@@ -264,7 +264,7 @@ def _exec_snapshot_kwargs(
     min_tick_size: str = "0.01",
     min_order_size: str = "0.01",
 ) -> dict:
-    from src.contracts.executable_market_snapshot_v2 import ExecutableMarketSnapshotV2
+    from src.contracts.executable_market_snapshot import ExecutableMarketSnapshot
     from src.state.snapshot_repo import get_snapshot, insert_snapshot
 
     captured_at = datetime(2026, 4, 27, tzinfo=timezone.utc)
@@ -272,7 +272,7 @@ def _exec_snapshot_kwargs(
     if get_snapshot(conn, snapshot_id) is None:
         insert_snapshot(
             conn,
-            ExecutableMarketSnapshotV2(
+            ExecutableMarketSnapshot(
                 snapshot_id=snapshot_id,
                 gamma_market_id="gamma-test",
                 event_id="event-test",

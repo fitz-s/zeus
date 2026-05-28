@@ -50,7 +50,7 @@ PROCESS_CODE_SURFACES = {
         "src/engine/cycle_runner.py",
         "src/engine/evaluator.py",
         "src/contracts/no_trade_reason.py",
-        "src/contracts/executable_market_snapshot_v2.py",
+        "src/contracts/executable_market_snapshot.py",
         "src/contracts/execution_intent.py",
         "src/control/ws_gap_guard.py",
         "src/data/market_scanner.py",

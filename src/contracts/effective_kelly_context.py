@@ -16,7 +16,7 @@ the Polymarket price-dependent fee formula (execution_price.py:130,
 fee_per_share = fee_rate × p × (1-p)) erodes edge non-linearly for
 mid-probability tokens.  $0.10 is the Polymarket UI display-substitution threshold (community-verified;
 no official Polymarket documentation URL confirmed — see also the same note in
-executable_market_snapshot_v2.py WIDE_SPREAD_THRESHOLD_USD).
+executable_market_snapshot.py WIDE_SPREAD_THRESHOLD_USD).
 
 FOK haircut ≥ FAK haircut at every (spread, depth) cell by construction:
 FOK is price-guaranteed (fill-or-kill), so only fill probability is discounted.

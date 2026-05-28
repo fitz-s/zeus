@@ -1734,7 +1734,7 @@ def _replay_one_settlement(
                     _entry_price_float,
                     fee_rate=_replay_fee_rate,
                 )
-            # PR 7 (W5): no ExecutableMarketSnapshotV2 in scope at this replay
+            # PR 7 (W5): no ExecutableMarketSnapshot in scope at this replay
             # call point — graceful degrade (effective_context=None, no haircut).
             # allow_missing_context=True required because get_mode() returns "live"
             # unconditionally; replay has no snapshot in scope at this call point.

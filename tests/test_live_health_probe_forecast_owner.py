@@ -44,7 +44,7 @@ def test_live_probe_loaded_code_surface_includes_recovery_and_m5_paths():
     daemon_paths = set(module.PROCESS_CODE_SURFACES["daemon"])
 
     assert "src/engine/evaluator.py" in daemon_paths
-    assert "src/contracts/executable_market_snapshot_v2.py" in daemon_paths
+    assert "src/contracts/executable_market_snapshot.py" in daemon_paths
     assert "src/contracts/execution_intent.py" in daemon_paths
     assert "src/data/market_scanner.py" in daemon_paths
     assert "src/control/ws_gap_guard.py" in daemon_paths

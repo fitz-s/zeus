@@ -14,7 +14,7 @@ from decimal import Decimal
 import pytest
 import yaml
 
-from src.contracts.executable_market_snapshot_v2 import ExecutableMarketSnapshotV2
+from src.contracts.executable_market_snapshot import ExecutableMarketSnapshot
 from src.contracts.venue_submission_envelope import VenueSubmissionEnvelope
 from src.state.db import init_schema
 from src.state.snapshot_repo import insert_snapshot
@@ -39,8 +39,8 @@ def conn():
     c.close()
 
 
-def _snapshot(snapshot_id: str = "snap-m1") -> ExecutableMarketSnapshotV2:
-    return ExecutableMarketSnapshotV2(
+def _snapshot(snapshot_id: str = "snap-m1") -> ExecutableMarketSnapshot:
+    return ExecutableMarketSnapshot(
         snapshot_id=snapshot_id,
         gamma_market_id="gamma-m1",
         event_id="event-m1",

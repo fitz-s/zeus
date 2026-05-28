@@ -104,13 +104,13 @@ def _trade_conn() -> sqlite3.Connection:
 
 
 def _insert_snapshot(conn: sqlite3.Connection, *, token_id: str, snapshot_id: str = "snap-1", depth_json: str = "{}") -> str:
-    from src.contracts.executable_market_snapshot_v2 import ExecutableMarketSnapshotV2
+    from src.contracts.executable_market_snapshot import ExecutableMarketSnapshot
     from src.state.snapshot_repo import insert_snapshot
 
     now = datetime(2026, 4, 27, tzinfo=timezone.utc)
     insert_snapshot(
         conn,
-        ExecutableMarketSnapshotV2(
+        ExecutableMarketSnapshot(
             snapshot_id=snapshot_id,
             gamma_market_id=f"gamma-{snapshot_id}",
             event_id=f"event-{snapshot_id}",
