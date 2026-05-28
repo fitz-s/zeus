@@ -364,7 +364,7 @@ class ReplayContext:
             _table_exists(self.conn, "world", table)
             for table in (
                 "settlements",
-                "historical_forecasts_v2",
+                "historical_forecasts",
                 "forecasts",
                 "calibration_pairs",
                 "market_events",
@@ -505,7 +505,7 @@ class ReplayContext:
         """Load diagnostic historical forecast rows for a replay fallback.
 
         Phase 9C A1 (B093 half-2): conditional v2 read. When
-        historical_forecasts_v2 is populated, query it with `AND
+        historical_forecasts is populated, query it with `AND
         temperature_metric = ?`; else fall back to legacy `forecasts`
         (preserves zero-data Golden Window behavior — v2 is empty until
         user lifts the window + runs backfill).
@@ -527,7 +527,7 @@ class ReplayContext:
                 SELECT source, available_at AS forecast_basis_date,
                        available_at AS forecast_issue_time,
                        lead_days, forecast_value, temp_unit
-                FROM {self._sp}historical_forecasts_v2
+                FROM {self._sp}historical_forecasts
                 WHERE city = ?
                   AND target_date = ?
                   AND temperature_metric = ?
@@ -2638,7 +2638,7 @@ def run_replay(
             Phase 8 (R-BP): threaded to `_replay_one_settlement`, which already
             accepts the kwarg (see L1107). Default 'high' preserves backward
             compat for every pre-P8 caller. Full B093 half-2 migration to
-            `historical_forecasts_v2` is P9 scope (requires v2 data).
+            `historical_forecasts` is P9 scope (requires v2 data).
 
     Returns:
         ReplaySummary with per-city breakdown and PnL

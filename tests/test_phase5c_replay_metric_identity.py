@@ -255,7 +255,7 @@ class TestForecastRowsMetricConditionalRead:
 
     `forecasts` table has separate forecast_high + forecast_low columns (no temperature_metric
     column). The metric-conditional branch at replay.py L281-282 selects the correct column.
-    SQL WHERE filter to historical_forecasts_v2 is Phase 7 scope.
+    SQL WHERE filter to historical_forecasts is Phase 7 scope.
     """
 
     def _make_db_with_distinct_columns(self) -> sqlite3.Connection:

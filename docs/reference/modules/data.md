@@ -121,7 +121,7 @@ Data does not set durable law, but it is the place where semantic category error
 ## 17. Planning-lock triggers
 - Any change to source routing, settlement provider mapping, fallback order, observation/forecast writers, or current-fact surfaces that gate data work.
 - Any addition/removal of a city/provider/station mapping.
-- Any change to observation_instants_v2 / historical_forecasts_v2 write contracts.
+- Any change to observation_instants_v2 / historical_forecasts write contracts.
 
 ## 18. Common false assumptions
 - A 200 response means the source is correct.

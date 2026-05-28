@@ -57,9 +57,9 @@ class TestRCLReplayLegacyWhereMetricAware:
                 temp_unit TEXT
             )
         """)
-        # historical_forecasts_v2 must exist but be empty (Golden Window)
+        # historical_forecasts must exist but be empty (Golden Window)
         conn.execute("""
-            CREATE TABLE historical_forecasts_v2 (
+            CREATE TABLE historical_forecasts (
                 id INTEGER PRIMARY KEY,
                 temperature_metric TEXT
             )
@@ -388,7 +388,7 @@ class TestRCPV2RowCountSensor:
             "platt_models_v2",
             "calibration_pairs_v2",
             "ensemble_snapshots",
-            "historical_forecasts_v2",
+            "historical_forecasts",
             "settlements_v2",
         ):
             conn.execute(f"CREATE TABLE {table} (id INTEGER PRIMARY KEY)")
@@ -402,7 +402,7 @@ class TestRCPV2RowCountSensor:
             "platt_models_v2",
             "calibration_pairs_v2",
             "ensemble_snapshots",
-            "historical_forecasts_v2",
+            "historical_forecasts",
             "settlements_v2",
         ):
             conn.execute(f"INSERT INTO {table} DEFAULT VALUES")
@@ -444,7 +444,7 @@ class TestRCPV2RowCountSensor:
             "platt_models_v2",
             "calibration_pairs_v2",
             "ensemble_snapshots",
-            "historical_forecasts_v2",
+            "historical_forecasts",
             "settlements_v2",
         }, "v2_row_counts must cover all 5 v2 tables"
 
@@ -493,14 +493,14 @@ class TestRCPV2RowCountSensor:
             "platt_models_v2",
             "calibration_pairs_v2",
             "ensemble_snapshots",
-            "historical_forecasts_v2",
+            "historical_forecasts",
             "settlements_v2",
         ):
             world_conn.execute(f"CREATE TABLE {table} (id INTEGER PRIMARY KEY)")
             forecasts_conn.execute(f"CREATE TABLE {table} (id INTEGER PRIMARY KEY)")
         for _ in range(2):
             world_conn.execute("INSERT INTO platt_models_v2 DEFAULT VALUES")
-            world_conn.execute("INSERT INTO historical_forecasts_v2 DEFAULT VALUES")
+            world_conn.execute("INSERT INTO historical_forecasts DEFAULT VALUES")
         for _ in range(3):
             forecasts_conn.execute("INSERT INTO calibration_pairs_v2 DEFAULT VALUES")
             forecasts_conn.execute("INSERT INTO ensemble_snapshots DEFAULT VALUES")
@@ -515,7 +515,7 @@ class TestRCPV2RowCountSensor:
         counts = _get_v2_row_counts(trade_conn)
 
         assert counts["platt_models_v2"] == 2
-        assert counts["historical_forecasts_v2"] == 2
+        assert counts["historical_forecasts"] == 2
         assert counts["calibration_pairs_v2"] == 3
         assert counts["ensemble_snapshots"] == 3
         assert counts["settlements_v2"] == 3

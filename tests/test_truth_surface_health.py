@@ -326,7 +326,7 @@ def _seed_minimal_ready_training_tables(conn, *, seed_observations=True):
     )
     conn.execute(
         """
-        CREATE TABLE historical_forecasts_v2 (
+        CREATE TABLE historical_forecasts (
             data_version TEXT,
             provenance_json TEXT,
             available_at TEXT
@@ -335,7 +335,7 @@ def _seed_minimal_ready_training_tables(conn, *, seed_observations=True):
     )
     conn.execute(
         """
-        INSERT INTO historical_forecasts_v2 (
+        INSERT INTO historical_forecasts (
             data_version, provenance_json, available_at
         ) VALUES ('source_v1', '{}', '2026-04-22T12:00:00Z')
         """
@@ -665,7 +665,7 @@ class TestTrainingReadinessP0:
         checks = report["checks"]
         for table in [
             "forecasts",
-            "historical_forecasts_v2",
+            "historical_forecasts",
             "ensemble_snapshots",
             "calibration_pairs_v2",
             "platt_models_v2",
@@ -1113,7 +1113,7 @@ class TestTrainingReadinessP0:
             conn.execute(f"INSERT INTO {table} (id) VALUES (1)")
         conn.execute(
             """
-            CREATE TABLE historical_forecasts_v2 (
+            CREATE TABLE historical_forecasts (
                 data_version TEXT,
                 provenance_json TEXT,
                 available_at TEXT
@@ -1122,7 +1122,7 @@ class TestTrainingReadinessP0:
         )
         conn.execute(
             """
-            INSERT INTO historical_forecasts_v2 (
+            INSERT INTO historical_forecasts (
                 data_version, provenance_json, available_at
             ) VALUES ('source_v1', '{}', '2026-04-22T12:00:00Z')
             """
@@ -1377,13 +1377,13 @@ class TestTrainingReadinessP0:
         for check_id in [
             "observation_instants_v2.training_role_unsafe",
             "observation_instants_v2.causality_unsafe",
-            "historical_forecasts_v2.available_at_not_reconstructed",
+            "historical_forecasts.available_at_not_reconstructed",
             "observations.provenance_present",
         ]:
             assert checks[check_id]["status"] == "FAIL"
         blockers = {(item["code"], item["table"]) for item in report["blockers"]}
         assert ("missing_table", "observation_instants_v2") in blockers
-        assert ("missing_table", "historical_forecasts_v2") in blockers
+        assert ("missing_table", "historical_forecasts") in blockers
         assert ("missing_table", "observations") in blockers
 
     def test_training_readiness_fails_when_settlements_v2_market_slug_is_null(self, tmp_path):
@@ -1943,12 +1943,35 @@ class TestTrainingReadinessP0:
         assert check["status"] == "FAIL"
         assert check["count"] == 1
 
-    def test_training_readiness_fails_when_historical_forecasts_v2_available_at_is_reconstructed(self, tmp_path):
+    def test_training_readiness_fails_when_historical_forecasts_available_at_is_reconstructed(self, tmp_path):
         db_path = _fresh_training_readiness_world_db(tmp_path)
         conn = sqlite3.connect(db_path)
+        # historical_forecasts DDL was dropped from apply_v2_schema in B3 (PR3).
+        # Create the table in this test's fixture so the readiness-report check
+        # can find rows to evaluate (real live DBs may still have the table from
+        # earlier schema versions; this test exercises the check logic directly).
         conn.execute(
             """
-            INSERT INTO historical_forecasts_v2 (
+            CREATE TABLE IF NOT EXISTS historical_forecasts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                city TEXT NOT NULL,
+                target_date TEXT NOT NULL,
+                source TEXT NOT NULL,
+                temperature_metric TEXT NOT NULL,
+                forecast_value REAL NOT NULL,
+                temp_unit TEXT NOT NULL,
+                lead_days INTEGER,
+                available_at TEXT,
+                recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                authority TEXT,
+                data_version TEXT,
+                provenance_json TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO historical_forecasts (
                 city, target_date, source, temperature_metric, forecast_value,
                 temp_unit, lead_days, available_at, authority, data_version,
                 provenance_json
@@ -1966,7 +1989,7 @@ class TestTrainingReadinessP0:
         report = build_training_readiness_report(db_path)
 
         assert "reconstructed_available_at" in _blocker_codes(report)
-        check = report["checks"]["historical_forecasts_v2.available_at_not_reconstructed"]
+        check = report["checks"]["historical_forecasts.available_at_not_reconstructed"]
         assert check["status"] == "FAIL"
         assert check["count"] == 1
 

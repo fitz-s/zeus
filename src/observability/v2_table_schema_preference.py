@@ -35,7 +35,7 @@ V2_TABLE_SCHEMA_PREFERENCE: dict[str, tuple[str, ...]] = {
     "ensemble_snapshots": ("forecasts", "world", "main"),
     "settlements_v2": ("forecasts", "world", "main"),
     "platt_models_v2": ("world", "main"),
-    "historical_forecasts_v2": ("world", "main"),
+    "historical_forecasts": ("world", "main"),
 }
 
 

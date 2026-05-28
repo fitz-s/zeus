@@ -816,44 +816,13 @@ def apply_v2_schema(conn: sqlite3.Connection, *, forecast_tables: bool = True) -
         """)
 
         # ----------------------------------------------------------------
-        # historical_forecasts_v2
+        # historical_forecasts_v2 — DROPPED in B3 (PR3).
+        # No writers existed (no INSERT in src/ as of PR-S4b audit 2026-05-18).
+        # Readers in replay.py / status_summary.py / verify_truth_surfaces.py
+        # are guarded by _table_exists(); they will skip gracefully on live DBs
+        # where the table has not been created. Live DB migration: ALTER/DROP
+        # handled by pr3_b3_live_table_rename.py (operator-run, not committed).
         # ----------------------------------------------------------------
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS historical_forecasts_v2 (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                city TEXT NOT NULL,
-                target_date TEXT NOT NULL,
-                source TEXT NOT NULL,
-                temperature_metric TEXT NOT NULL
-                    CHECK (temperature_metric IN ('high', 'low')),
-                forecast_value REAL NOT NULL,
-                temp_unit TEXT NOT NULL,
-                lead_days INTEGER,
-                available_at TEXT,
-                recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                authority TEXT NOT NULL DEFAULT 'UNVERIFIED'
-                    CHECK (authority IN ('VERIFIED', 'UNVERIFIED', 'QUARANTINED')),
-                data_version TEXT NOT NULL DEFAULT 'v1',
-                provenance_json TEXT NOT NULL DEFAULT '{}',
-                UNIQUE(city, target_date, source, temperature_metric, lead_days)
-            )
-        """)
-        conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_historical_forecasts_v2_lookup
-                ON historical_forecasts_v2(city, target_date, source, temperature_metric, lead_days)
-        """)
-        # Gate F Step 2: authority + data_version + provenance_json for existing DBs
-        # (idempotent). Pairs with Gap B closure in step1_schema_audit.md.
-        for alter_sql in [
-            "ALTER TABLE historical_forecasts_v2 ADD COLUMN authority TEXT NOT NULL DEFAULT 'UNVERIFIED'",
-            "ALTER TABLE historical_forecasts_v2 ADD COLUMN data_version TEXT NOT NULL DEFAULT 'v1'",
-            "ALTER TABLE historical_forecasts_v2 ADD COLUMN provenance_json TEXT NOT NULL DEFAULT '{}'",
-        ]:
-            try:
-                conn.execute(alter_sql)
-            except Exception as exc:
-                if "duplicate column" not in str(exc).lower():
-                    raise
 
         # ----------------------------------------------------------------
         # day0_metric_fact

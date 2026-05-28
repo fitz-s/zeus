@@ -445,13 +445,13 @@ class TestRCAMonitorLowMetricContinuity:
 
 class TestRCBForecastRowsV2:
     """Phase 9C A1 (B093 half-2): _forecast_rows_for queries
-    historical_forecasts_v2 WITH metric filter when v2 has data; else falls
+    historical_forecasts WITH metric filter when v2 has data; else falls
     back to legacy `forecasts` table. Before P9C the function was
     legacy-only — any v2 data was unreachable even once Golden Window lifts.
     """
 
     def test_v2_populated_query_filters_by_metric(self):
-        """R-CB.1: when historical_forecasts_v2 has rows for the city+date+metric,
+        """R-CB.1: when historical_forecasts has rows for the city+date+metric,
         _forecast_rows_for returns ONLY the v2 rows with matching metric."""
         from src.engine.replay import ReplayContext
         from src.state.schema.v2_schema import apply_v2_schema
@@ -469,7 +469,7 @@ class TestRCBForecastRowsV2:
         now = "2026-07-10T00:00:00+00:00"
         conn.execute(
             """
-            INSERT INTO historical_forecasts_v2
+            INSERT INTO historical_forecasts
                 (city, target_date, source, temperature_metric,
                  forecast_value, temp_unit, lead_days, available_at)
             VALUES
@@ -480,7 +480,7 @@ class TestRCBForecastRowsV2:
         )
         conn.execute(
             """
-            INSERT INTO historical_forecasts_v2
+            INSERT INTO historical_forecasts
                 (city, target_date, source, temperature_metric,
                  forecast_value, temp_unit, lead_days, available_at)
             VALUES

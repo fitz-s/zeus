@@ -120,7 +120,7 @@ def _insert_platt_models_row(conn: sqlite3.Connection, metric: str) -> None:
 def _insert_historical_forecasts_row(conn: sqlite3.Connection, metric: str) -> None:
     conn.execute(
         """
-        INSERT INTO historical_forecasts_v2
+        INSERT INTO historical_forecasts
             (city, target_date, source, temperature_metric, forecast_value,
              temp_unit, lead_days, recorded_at)
         VALUES (?, ?, 'NWS', ?, 72.5, 'F', 1, '2026-04-16T00:00:00Z')
@@ -144,13 +144,14 @@ def _insert_day0_metric_fact_row(conn: sqlite3.Connection, metric: str) -> None:
 
 
 # Map table name → (high inserter, low inserter with same signature)
+# Note: historical_forecasts removed — DDL dropped in B3 (PR3): no writers
+# existed and _table_exists guards all readers (replay.py, status_summary.py).
 TABLE_INSERTERS = {
     "settlements_v2": _insert_settlements_row,
     "market_events_v2": _insert_market_events_row,
     "ensemble_snapshots": _insert_ensemble_snapshots_row,
     "calibration_pairs_v2": _insert_calibration_pairs_row,
     "platt_models_v2": _insert_platt_models_row,
-    "historical_forecasts_v2": _insert_historical_forecasts_row,
     "day0_metric_fact": _insert_day0_metric_fact_row,
 }
 
@@ -621,8 +622,8 @@ class TestGateADualMetricCoexistence(unittest.TestCase):
         raises sqlite3.IntegrityError.
 
         Verifies that the UNIQUE constraints in the DDL sketch are present and
-        enforced.  Tests settlements_v2 (simplest UNIQUE) and historical_forecasts_v2.
-        Fails today with ImportError.
+        enforced.  Tests settlements_v2 (simplest UNIQUE).
+        Note: historical_forecasts removed from this test — DDL dropped in B3 (PR3).
         """
         conn = _apply_and_get_conn()
 
@@ -636,15 +637,3 @@ class TestGateADualMetricCoexistence(unittest.TestCase):
             ),
         ):
             _insert_settlements_row(conn, "high")
-
-        # historical_forecasts_v2 has UNIQUE(city, target_date, source,
-        # temperature_metric, lead_days)
-        _insert_historical_forecasts_row(conn, "low")
-        with self.assertRaises(
-            sqlite3.IntegrityError,
-            msg=(
-                "historical_forecasts_v2 must reject a duplicate "
-                "(city, target_date, source, temperature_metric, lead_days) row"
-            ),
-        ):
-            _insert_historical_forecasts_row(conn, "low")

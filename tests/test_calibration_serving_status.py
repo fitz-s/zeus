@@ -544,7 +544,7 @@ def test_v2_table_schema_preference_covers_every_v2_table() -> None:
         "calibration_pairs_v2",
         "ensemble_snapshots",
         "platt_models_v2",
-        "historical_forecasts_v2",
+        "historical_forecasts",
         "settlements_v2",
     }
     missing = expected_v2_tables - set(V2_TABLE_SCHEMA_PREFERENCE.keys())

@@ -419,7 +419,7 @@ _V2_TABLES = (
     "platt_models_v2",
     "calibration_pairs_v2",
     "ensemble_snapshots",
-    "historical_forecasts_v2",
+    "historical_forecasts",
     "settlements_v2",
 )
 

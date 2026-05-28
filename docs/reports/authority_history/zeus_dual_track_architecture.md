@@ -112,7 +112,7 @@ remain readable for audit and are frozen for new writes after Phase 4 cutover.
 | `calibration_pairs_v2` | + `temperature_metric, forecast_available_at` | yes |
 | `platt_models_v2` | `(temperature_metric, cluster, season, data_version, input_space, is_active)` | yes |
 | `observation_instants_v2` | adds `running_min` alongside `running_max` | yes |
-| `historical_forecasts_v2` | adds `temperature_metric` + `forecast_value` | yes |
+| `historical_forecasts` | adds `temperature_metric` + `forecast_value` | yes |
 | `day0_metric_fact` | replaces `day0_residual_fact`; keyed on metric | yes |
 
 Every canonical snapshot row must carry at least:

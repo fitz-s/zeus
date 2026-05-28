@@ -2716,7 +2716,7 @@ def build_training_readiness_report(world_db: Path = SHARED_DB) -> dict:
     try:
         for table in (
             "forecasts",
-            "historical_forecasts_v2",
+            "historical_forecasts",
             "ensemble_snapshots",
             "calibration_pairs_v2",
             "platt_models_v2",
@@ -2961,8 +2961,8 @@ def build_training_readiness_report(world_db: Path = SHARED_DB) -> dict:
                 detail="ensemble_snapshots table is missing",
             )
 
-        if _table_exists(cur, "historical_forecasts_v2"):
-            columns = _columns(cur, "historical_forecasts_v2")
+        if _table_exists(cur, "historical_forecasts"):
+            columns = _columns(cur, "historical_forecasts")
             predicates = []
             if "data_version" in columns:
                 predicates.append("LOWER(COALESCE(data_version, '')) LIKE '%reconstruct%'")
@@ -2971,12 +2971,12 @@ def build_training_readiness_report(world_db: Path = SHARED_DB) -> dict:
             if "available_at" in columns:
                 predicates.append("available_at IS NULL OR available_at = ''")
             where = " OR ".join(predicates) if predicates else "1=1"
-            count = _count(cur, "historical_forecasts_v2", where)
+            count = _count(cur, "historical_forecasts", where)
             met = count == 0
-            checks["historical_forecasts_v2.available_at_not_reconstructed"] = _check_entry(
-                check_id="historical_forecasts_v2.available_at_not_reconstructed",
+            checks["historical_forecasts.available_at_not_reconstructed"] = _check_entry(
+                check_id="historical_forecasts.available_at_not_reconstructed",
                 status=PASS if met else FAIL,
-                detail=f"historical_forecasts_v2 rows with missing/reconstructed available_at={count}",
+                detail=f"historical_forecasts rows with missing/reconstructed available_at={count}",
                 count=count,
                 threshold=0,
                 met=met,
@@ -2985,16 +2985,16 @@ def build_training_readiness_report(world_db: Path = SHARED_DB) -> dict:
                 blockers.append(
                     {
                         "code": "reconstructed_available_at",
-                        "table": "historical_forecasts_v2",
+                        "table": "historical_forecasts",
                         "count": count,
                     }
                 )
         else:
             _add_missing_table_check(
                 report,
-                check_id="historical_forecasts_v2.available_at_not_reconstructed",
-                table="historical_forecasts_v2",
-                detail="historical_forecasts_v2 table is missing",
+                check_id="historical_forecasts.available_at_not_reconstructed",
+                table="historical_forecasts",
+                detail="historical_forecasts table is missing",
             )
 
         if _table_exists(cur, "observations"):

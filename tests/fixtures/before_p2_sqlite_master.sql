@@ -334,8 +334,8 @@ CREATE TABLE forecasts (
                        OR availability_provenance IN ('derived_dissemination', 'fetch_time', 'reconstructed', 'recorded')),
             UNIQUE(city, target_date, source, forecast_basis_date)
         );
--- table: historical_forecasts_v2
-CREATE TABLE historical_forecasts_v2 (
+-- table: historical_forecasts
+CREATE TABLE historical_forecasts (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 city TEXT NOT NULL,
                 target_date TEXT NOT NULL,
@@ -445,9 +445,9 @@ CREATE INDEX idx_findings_unresolved
 -- index: idx_forecasts_city_date
 CREATE INDEX idx_forecasts_city_date
             ON forecasts(city, target_date);
--- index: idx_historical_forecasts_v2_lookup
-CREATE INDEX idx_historical_forecasts_v2_lookup
-                ON historical_forecasts_v2(city, target_date, source, temperature_metric, lead_days)
+-- index: idx_historical_forecasts_lookup
+CREATE INDEX idx_historical_forecasts_lookup
+                ON historical_forecasts(city, target_date, source, temperature_metric, lead_days)
         ;
 -- index: idx_job_run_job_window
 CREATE INDEX idx_job_run_job_window
