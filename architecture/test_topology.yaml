@@ -29,6 +29,43 @@ test_trust_policy:
   # Tests not in this list require audit before running.
   trusted_tests:
     tests/test_alpha_target_coherence.py: {created: "2026-04-07", last_used: "2026-04-23"}
+    tests/events/test_opportunity_event.py: {created: "2026-05-24", last_used: "2026-05-24"}
+    tests/events/test_event_candidate_binding.py: {created: "2026-05-24", last_used: "2026-05-24"}
+    tests/events/test_event_bound_decision_engine_no_runtime.py: {created: "2026-05-24", last_used: "2026-05-24"}
+    tests/events/test_event_store_idempotency.py: {created: "2026-05-24", last_used: "2026-05-24"}
+    tests/events/test_event_writer_single_writer.py: {created: "2026-05-24", last_used: "2026-05-24"}
+    tests/events/test_market_event_coalescer.py: {created: "2026-05-24", last_used: "2026-05-24"}
+    tests/events/test_forecast_snapshot_ready.py: {created: "2026-05-24", last_used: "2026-05-24"}
+    tests/events/test_day0_extreme_updated_trigger.py: {created: "2026-05-24", last_used: "2026-05-24"}
+    tests/strategy/live_inference/test_day0_absorbing_boundary.py: {created: "2026-05-24", last_used: "2026-05-24"}
+    tests/strategy/live_inference/test_live_bin_inference.py: {created: "2026-05-24", last_used: "2026-05-24"}
+    tests/strategy/live_inference/test_executable_cost.py: {created: "2026-05-24", last_used: "2026-05-24"}
+    tests/strategy/live_inference/test_trade_score.py: {created: "2026-05-24", last_used: "2026-05-24"}
+    tests/events/test_market_channel_ingestor.py: {created: "2026-05-24", last_used: "2026-05-24"}
+    tests/events/test_reactor.py: {created: "2026-05-24", last_used: "2026-05-24"}
+    tests/events/test_live_cap.py: {created: "2026-05-25", last_used: "2026-05-25"}
+    tests/events/test_live_order_aggregate.py: {created: "2026-05-25", last_used: "2026-05-25"}
+    tests/events/test_live_order_reconcile.py: {created: "2026-05-26", last_used: "2026-05-26"}
+    tests/events/test_live_profit_audit.py: {created: "2026-05-26", last_used: "2026-05-26"}
+    tests/scripts/test_check_edli_live_canary_gate.py: {created: "2026-05-26", last_used: "2026-05-26"}
+    tests/decision_kernel/test_certificate_time_filtration.py: {created: "2026-05-25", last_used: "2026-05-25"}
+    tests/decision_kernel/test_certificate_hashing.py: {created: "2026-05-25", last_used: "2026-05-25"}
+    tests/decision_kernel/test_no_submit_theorems.py: {created: "2026-05-25", last_used: "2026-05-25"}
+    tests/decision_kernel/test_no_bypass.py: {created: "2026-05-25", last_used: "2026-05-25"}
+    tests/decision_kernel/test_certificate_ledger.py: {created: "2026-05-25", last_used: "2026-05-25"}
+    tests/decision_kernel/test_actionable_trade_certificate.py: {created: "2026-05-25", last_used: "2026-05-25"}
+    tests/decision_kernel/test_execution_command_certificate.py: {created: "2026-05-25", last_used: "2026-05-25"}
+    tests/decision_kernel/test_no_submit_compiler.py: {created: "2026-05-25", last_used: "2026-05-25"}
+    tests/decision_kernel/test_forecast_authority_adapter.py: {created: "2026-05-25", last_used: "2026-05-25"}
+    tests/decision_kernel/test_quote_adapter.py: {created: "2026-05-25", last_used: "2026-05-25"}
+    tests/decision_kernel/test_market_channel_adapter.py: {created: "2026-05-25", last_used: "2026-05-25"}
+    tests/engine/test_event_reactor_no_bypass.py: {created: "2026-05-24", last_used: "2026-05-24"}
+    tests/strategy/live_inference/test_no_trade_regret.py: {created: "2026-05-24", last_used: "2026-05-24"}
+    tests/analysis/test_event_opportunity_report.py: {created: "2026-05-24", last_used: "2026-05-24"}
+    tests/money_path/test_edli_online_invariants.py: {created: "2026-05-24", last_used: "2026-05-24"}
+    tests/money_path/test_edli_live_canary.py: {created: "2026-05-25", last_used: "2026-05-25"}
+    tests/money_path/test_edli_order_lifecycle.py: {created: "2026-05-25", last_used: "2026-05-25"}
+    tests/state/test_edli_table_ownership.py: {created: "2026-05-24", last_used: "2026-05-24"}
     # task_2026-05-04_oracle_kelly_evidence_rebuild antibodies (A1-A7).
     # All packet-specific test files registered here so topology_doctor
     # accepts them as trusted; the rebuild floor (test_authority_rebuild_invariants)
@@ -2497,29 +2534,6 @@ test_metadata:
       in markets:[...] — one request per (city, date).
     created: 2026-05-19
     last_reused_or_audited: 2026-05-19
-
-  tests/test_market_discovery_full_coverage.py:
-    modules: [data, main]
-    category: core_law_antibody
-    profile: fix_market_discovery_full_city_coverage_2026_05_24
-    blocks_commit: true
-    asserted_invariants:
-      - DISCOVERY-CYCLE-CALLS-FULL-TAG-SCAN
-      - SUBSTRATE-REFRESH-BREADTH-FIRST-CITY-COVERAGE
-    source_under_test:
-      - src/main.py
-      - src/data/market_scanner.py
-    law_dependencies:
-      - architecture/invariants.yaml
-    notes: >
-      Relationship antibody for fix/market-discovery-full-city-coverage.
-      Regressed by #203 (slug-only wiring) + #221 (slug-only retained) to 7
-      cities from 51. R1 asserts substrate refresh covers ≥35 of 40 input
-      cities (breadth-first per-city selection vs global top-8 cap). R2 asserts
-      _market_discovery_cycle calls find_weather_markets (full tag-query, 51
-      cities) rather than find_slug_pattern_weather_markets (14-city slug-only).
-    created: 2026-05-24
-    last_reused_or_audited: 2026-05-24
 
   tests/test_settlement_commands_hexbytes_serializer.py:
     modules: [execution, state, venue]

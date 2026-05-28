@@ -95,59 +95,16 @@ write_routes:
   script_repair_write:
     owner: scripts/**
     guardrail: dry-run/apply metadata required in later scripts manifest packet
-# External provider registry — consumed by scripts/ci/check_source_rationale_delta.py.
-# Merged 2026-05-27: union of PR #347 (Finding 10 — daemon-entry providers) and
-# PR #348 (market-cost-seam — evaluator/cycle_runtime providers). Map form keyed
-# by provider id; the gate reads the keys as the set of declared sources. Both
-# PRs independently added a `providers:` block to satisfy the same gate; this
-# resolution keeps every declared id under the single canonical map.
-providers:
-  observation:
-    role: settlement_capture_observation
-    client: src/data/observation_client.py
-    why: Hourly+daily observed-temperature observations (HKO/NOAA/WU/Ogimet);
-      used by Day0 monitor + settlement capture truth chain. Per-station
-      routing law in architecture/observation_routing.yaml.
-  polymarket:
-    role: venue_clob
-    client: src/data/polymarket_client.py
-    why: Polymarket CLOB venue — orderbook + balances + order submission.
-      Sole venue producer for chain truth; see architecture/venue_law.yaml
-      for the canonical chain-truth contract. NOT a forecast/settlement source.
-  ensemble:
-    role: forecast_skill
-    client: src/data/ensemble_client.py
-    why: TIGGE / OpenData ensemble forecast distributions used for skill
-      computation + Day0 calibration. Distinct from observation (settlement
-      truth) and polymarket (venue truth) per source-plane-collapse rule.
-  ecmwf_open_data:
-    role: forecast_skill_live
-    client: src/data/ecmwf_open_data_ingest.py
-    why: Cycle-aligned live forecast producer (00z / 06z / 12z / 18z). (PR #348)
-  tigge:
-    role: forecast_skill_historical
-    client: src/data/tigge_client.py
-    why: 51-member ENS historical archive for Platt fit. (PR #348)
-  meteostat_bulk:
-    role: historical_hourly_archive
-    client: src/data/meteostat_bulk_client.py
-    why: Long-horizon historical hourly archive backfill. (PR #348)
-  ogimet_hourly:
-    role: historical_hourly_archive
-    client: src/data/ogimet_hourly_client.py
-    why: Secondary historical hourly archive (ogimet provider). (PR #348)
-  openmeteo:
-    role: forecast_or_observation_complementary
-    client: src/data/openmeteo_client.py
-    why: Open-Meteo direct client (separate from observation_client composite). (PR #348)
-  wu_hourly:
-    role: historical_hourly_archive
-    client: src/data/wu_hourly_client.py
-    why: WeatherUnderground hourly archive feed. (PR #348)
-  scheduler:
-    role: internal_adapter
-    client: src/data/scheduler_adapter.py
-    why: Internal scheduling adapter. NOT an external truth source. (PR #348)
+external_sources:
+  - id: observation
+    authority_role: current_observation_boundary
+    why: Runtime observation provider family used for Day0/monitor observation reads; settlement truth remains governed separately by settlement semantics and harvester authority.
+  - id: polymarket
+    authority_role: venue_market_and_wallet_boundary
+    why: Polymarket CLOB, orderbook, wallet, heartbeat, and user-channel venue surfaces; quote evidence and user lifecycle truth must remain separated by their scoped adapters.
+  - id: ensemble
+    authority_role: forecast_ensemble_boundary
+    why: Forecast ensemble provider family used for probability generation and executable forecast evidence; it is not settlement or user-fill authority.
 package_defaults:
   src/contracts:
     zone: K0_frozen_kernel
@@ -189,6 +146,11 @@ package_defaults:
     authority_role: orchestration
     gates:
     - pytest -q tests/test_architecture_contracts.py tests/test_run_replay_cli.py
+  src/events:
+    zone: K2_runtime
+    authority_role: edli_event_ingest_and_reactor_boundary
+    gates:
+    - pytest -q tests/events
   src/data:
     zone: K2_runtime
     authority_role: external_data_boundary
@@ -264,10 +226,268 @@ files:
     zone: package_marker
     authority_role: package_marker
     why: Marks src as importable package.
+  src/events/AGENTS.md:
+    zone: docs
+    authority_role: event_package_router
+    why: Scoped guidance for EDLI event-sourced opportunity modules.
+  src/events/__init__.py:
+    zone: package_marker
+    authority_role: package_marker
+    why: Marks EDLI event package as importable.
+  src/events/idempotency.py:
+    zone: K2_runtime
+    authority_role: edli_event_hashing
+    why: Deterministic canonical JSON hashing and idempotency key construction for immutable EDLI event rows.
+    downstream:
+    - src/events/opportunity_event.py
+  src/events/opportunity_event.py:
+    zone: K2_runtime
+    authority_role: edli_event_contract
+    why: Typed EDLI event and payload contract; preserves observed_at/available_at/received_at separation and deterministic event identity.
+    downstream:
+    - src/events/event_store.py
+  src/events/candidate_binding.py:
+    zone: K2_runtime
+    authority_role: edli_event_bound_candidate_family
+    why: Pure R1 proof kernel that binds forecast/Day0 events to exact city/date/metric market topology before any money-path runtime or side effect may run.
+    downstream:
+    - src/events/decision_engine.py
+  src/events/decision_engine.py:
+    zone: K2_runtime
+    authority_role: edli_event_bound_decision_kernel
+    why: R1 no-runtime decision skeleton that produces an event-bound candidate family or no-trade rejection without scheduler, run_cycle, executor, venue, websocket, or submit paths.
+    downstream:
+    - src/events/candidate_binding.py
+  src/events/forecast_completeness.py:
+    zone: K2_runtime
+    authority_role: edli_forecast_completeness_contract
+    why: Pure forecast completeness and temporal-authority classifier used to fail closed on partial, future, or unproven source_run/source_run_coverage evidence.
+    downstream:
+    - src/events/triggers/forecast_snapshot_ready.py
+  src/events/day0_authority.py:
+    zone: K2_runtime
+    authority_role: edli_day0_authority_contract
+    why: Pure Day0 live-authority contract requiring source/station/local-date/DST/metric/rounding authorization before hard facts can influence EDLI.
+    downstream:
+    - src/events/triggers/day0_extreme_updated.py
+    - src/events/reactor.py
+  src/events/money_path_adapters.py:
+    zone: K2_runtime
+    authority_role: edli_money_path_adapter_contracts
+    why: Narrow adapter proof contracts for FDR, Kelly, RiskGuard, and no-submit final-intent evidence before any runtime submit boundary.
+    downstream:
+    - src/engine/event_reactor_adapter.py
+    - src/events/reactor.py
+  src/events/event_store.py:
+    zone: K2_runtime
+    authority_role: edli_world_event_store
+    why: Single world-DB writer for append-only opportunity_events and separate mutable processing state.
+    downstream:
+    - src/state/db.py
+  src/events/no_submit_receipts.py:
+    zone: K2_runtime
+    authority_role: edli_no_submit_receipt_ledger
+    why: Durable positive-proof ledger writer for accepted EDLI no-submit final-intent receipts; records proof evidence without asserting venue submission.
+    downstream:
+    - src/events/reactor.py
+    - src/state/schema/edli_no_submit_receipts_schema.py
+  src/events/no_submit_projection.py:
+    zone: K2_runtime
+    authority_role: edli_no_submit_projection
+    why: Report projection over no-submit receipts that references decision certificate authority instead of treating receipt rows as proof source of truth.
+    downstream:
+    - src/decision_kernel/ledger.py
+    - src/events/no_submit_receipts.py
+  src/events/live_cap.py:
+    zone: K2_runtime
+    authority_role: edli_live_cap_reservation_ledger
+    why: Durable EDLI live canary cap reservation writer; atomically reserves, releases, and consumes tiny live-order quota before any ActionableTradeCertificate can be accepted.
+    downstream:
+    - src/state/schema/edli_live_cap_usage_schema.py
+    - src/decision_kernel/verifier.py
+  src/events/live_order_aggregate.py:
+    zone: K2_runtime
+    authority_role: edli_live_order_aggregate_ledger
+    why: Append-only EDLI live-order aggregate ledger and rebuildable projection substrate for full-live split work; no venue submit or user-channel side effects.
+    downstream:
+    - src/state/schema/edli_live_order_events_schema.py
+    - src/engine/event_reactor_adapter.py
+  src/events/live_order_reconcile.py:
+    zone: K2_runtime
+    authority_role: edli_live_order_reconcile_boundary
+    why: EDLI user-channel and explicit-reconcile authority boundary for live-order aggregate lifecycle facts; public market-channel data is rejected as fill truth.
+    downstream:
+    - src/events/live_order_aggregate.py
+    - src/decision_kernel/verifier.py
+  src/events/live_profit_audit.py:
+    zone: K2_runtime
+    authority_role: edli_live_profit_audit_projection
+    why: Event-bound EDLI live realized-edge audit projection and promotion-artifact summarizer; measures canary lifecycle economics without submitting orders.
+    downstream:
+    - src/state/schema/edli_live_profit_audit_schema.py
+    - src/main.py
+  src/decision_kernel/certificate.py:
+    zone: K2_runtime
+    authority_role: edli_certificate_grammar
+    why: Core proof-carrying decision certificate grammar with role-labeled parent edges and stable certificate hashes per EDLI redemption spec.
+    downstream:
+    - src/decision_kernel/verifier.py
+    - src/decision_kernel/ledger.py
+    - src/decision_kernel/compiler.py
+  src/decision_kernel/canonicalization.py:
+    zone: K2_runtime
+    authority_role: edli_certificate_canonicalization
+    why: Stable JSON/hash canonicalization for certificate payloads and certificate hashes.
+    downstream:
+    - src/decision_kernel/certificate.py
+    - src/decision_kernel/ledger.py
+  src/decision_kernel/claims.py:
+    zone: K2_runtime
+    authority_role: edli_certificate_claim_taxonomy
+    why: Canonical EDLI certificate claim and required-parent taxonomy used by the verifier to prevent no-submit/action/fill proof bypasses.
+    downstream:
+    - src/decision_kernel/verifier.py
+    - src/decision_kernel/compiler.py
+  src/decision_kernel/verifier.py:
+    zone: K2_runtime
+    authority_role: edli_certificate_verifier
+    why: Enforces agent-filtration time invariants, no-submit theorem constraints, and action/fill bypass rules for certificate DAGs.
+    downstream:
+    - src/decision_kernel/compiler.py
+    - src/decision_kernel/ledger.py
+  src/decision_kernel/ledger.py:
+    zone: K2_runtime
+    authority_role: edli_certificate_ledger
+    why: Durable world-DB writer for verified decision certificates, role-labeled edges, supersession/drift errors, and compile failure denominators.
+    downstream:
+    - src/events/reactor.py
+    - src/state/schema/decision_certificates_schema.py
+  src/decision_kernel/reports/no_submit_decision_report.py:
+    zone: K2_runtime
+    authority_role: edli_no_submit_certificate_report
+    why: Report-only projection surface for verified no-submit decision certificates; must not count raw certificate rows without accepted projection finalization.
+    downstream:
+    - src/events/no_submit_projection.py
+  src/decision_kernel/certificates/no_submit.py:
+    zone: K2_runtime
+    authority_role: edli_no_submit_decision_certificate_builder
+    why: Constructs the terminal NoSubmitDecisionCertificate and enforces the no-submit theorem boundary before durable certificate persistence.
+    downstream:
+    - src/decision_kernel/verifier.py
+    - src/decision_kernel/compiler.py
+  src/decision_kernel/certificates/action.py:
+    zone: K2_runtime
+    authority_role: edli_actionable_trade_certificate_surface
+    why: Live-money ActionableTradeCertificate verifier entrypoint; proves an event-bound EDLI candidate is actionable but not submitted before execution-command construction.
+    downstream:
+    - src/decision_kernel/verifier.py
+    - src/decision_kernel/ledger.py
+  src/decision_kernel/certificates/execution.py:
+    zone: K2_runtime
+    authority_role: edli_execution_command_certificate_surface
+    why: Live-money pre-submit ExecutionCommandCertificate verifier entrypoint; binds actionable trade proof to final intent, executor expressibility, and live-cap reservation before executor handoff.
+    downstream:
+    - src/decision_kernel/verifier.py
+    - src/decision_kernel/ledger.py
+  src/decision_kernel/compiler.py:
+    zone: K2_runtime
+    authority_role: edli_no_submit_certificate_compiler
+    why: Compiles EDLI opportunity events and no-submit projection evidence into a claim-indexed certificate DAG before reactor processing is marked complete.
+    downstream:
+    - src/events/reactor.py
+  src/decision_kernel/adapters/forecast_authority_adapter.py:
+    zone: K2_runtime
+    authority_role: edli_forecast_authority_certificate_adapter
+    why: Adapter boundary that calls the canonical executable forecast reader and preserves reader status/reason/applied validations as certificate payload, without local SQL live-eligibility policy.
+    downstream:
+    - src/decision_kernel/compiler.py
+  src/decision_kernel/adapters/quote_adapter.py:
+    zone: K2_runtime
+    authority_role: edli_native_quote_certificate_adapter
+    why: Native bid/ask quote adapter that forbids midpoint/display/last-trade/complement executable costs and keeps visible depth separate from fill evidence.
+    downstream:
+    - src/decision_kernel/compiler.py
+  src/decision_kernel/adapters/market_channel_adapter.py:
+    zone: K2_runtime
+    authority_role: edli_market_channel_certificate_adapter
+    why: Public market-channel adapter that creates MarketData/Quote certificates only and cannot assert fill evidence.
+    downstream:
+    - src/decision_kernel/compiler.py
+  src/events/event_writer.py:
+    zone: K2_runtime
+    authority_role: edli_single_event_writer
+    why: Single-writer facade around EventStore so event insertion and duplicate reporting have one runtime path.
+    downstream:
+    - src/events/event_store.py
+  src/events/event_coalescer.py:
+    zone: K2_runtime
+    authority_role: edli_event_backpressure
+    why: Coalesces noisy market-data events under DB write budget while preserving forecast and Day0 events losslessly.
+    downstream:
+    - src/events/event_writer.py
+  src/events/dead_letter.py:
+    zone: K2_runtime
+    authority_role: edli_dead_letter_evidence
+    why: Records failed EDLI event processing separately from immutable event facts and mutable processing state.
+    downstream:
+    - src/events/event_store.py
+    - src/state/schema/event_dead_letters_schema.py
+  src/events/replay.py:
+    zone: K2_runtime
+    authority_role: edli_deterministic_replay
+    why: Exposes deterministic replay batches in the same event order used by the reactor.
+    downstream:
+    - src/events/event_store.py
+  src/events/triggers/__init__.py:
+    zone: package_marker
+    authority_role: package_marker
+    why: Marks EDLI trigger package as importable.
+  src/events/triggers/forecast_snapshot_ready.py:
+    zone: K2_runtime
+    authority_role: edli_forecast_snapshot_trigger
+    why: Classifies committed source_run/source_run_coverage/snapshot evidence into COMPLETE, PARTIAL_ALLOWED, or PARTIAL_BLOCKED forecast opportunity events; live eligibility delegates to executable forecast evidence.
+    downstream:
+    - src/events/event_writer.py
+    - src/data/executable_forecast_reader.py
+  src/events/triggers/day0_extreme_updated.py:
+    zone: K2_runtime
+    authority_role: edli_day0_extreme_trigger
+    why: Emits Day0 extreme opportunity events using Day0ObservationContext availability and SettlementSemantics rounding.
+    downstream:
+    - src/events/event_writer.py
+    - src/strategy/live_inference/absorbing_boundary.py
+  src/events/triggers/market_channel_ingestor.py:
+    zone: K2_runtime
+    authority_role: edli_public_market_channel_ingest
+    why: Online public market-channel parser for quote/book/cache/evidence events; explicitly forbidden from asserting fill truth or stale-book alpha trades.
+    downstream:
+    - src/events/event_writer.py
+    - src/state/schema/execution_feasibility_evidence_schema.py
+  src/events/triggers/user_channel_ingestor.py:
+    zone: K2_runtime
+    authority_role: edli_authenticated_user_channel_ingest
+    why: Disabled-by-config authenticated user-channel adapter that maps user order/trade messages into live-order aggregate lifecycle facts while rejecting public market-channel fill truth.
+    downstream:
+    - src/events/live_order_aggregate.py
+    - src/events/live_order_reconcile.py
+  src/events/reactor.py:
+    zone: K2_runtime
+    authority_role: edli_event_reactor
+    why: Processes pending EDLI events through injected source, executable snapshot, FDR, Kelly, RiskGuard, live-cap, and final-intent gates without importing venue adapters.
+    downstream:
+    - src/events/event_store.py
+    - src/engine/event_reactor_adapter.py
+  src/engine/event_bound_final_intent.py:
+    zone: K2_runtime
+    authority_role: edli_event_bound_final_intent_receipt
+    why: No-submit final-intent receipt contract that binds event, candidate, FDR, Kelly, RiskGuard, snapshot, and final intent without creating venue side effects.
+    downstream:
+    - src/events/reactor.py
+    - src/engine/event_reactor_adapter.py
   src/main.py:
     zone: K2_runtime
     authority_role: live_daemon_entry
-    why: Live-only daemon entry point.
+    why: Live-only daemon entry point. EDLI v1 adds an edli_event_reactor scheduler hook behind config/settings.json::edli_v1.enabled while preserving existing scheduler jobs.
   src/ingest_main.py:
     zone: K2_runtime
     authority_role: ingest_daemon_entry
@@ -1346,6 +1566,10 @@ files:
     - src/execution/fill_tracker.py
     - src/execution/harvester.py
     - src/state/chain_reconciliation.py
+  src/engine/event_reactor_adapter.py:
+    zone: K2_K3_coordination
+    authority_role: edli_reactor_adapter
+    why: Constructs EDLI OpportunityEventReactor from injected existing engine/executor gate seams; no direct venue side effects.
   src/engine/monitor_refresh.py:
     zone: K2_runtime
     authority_role: position_monitoring
@@ -1747,6 +1971,76 @@ files:
     downstream:
     - src/engine/evaluator.py
     - src/engine/replay.py
+  src/strategy/live_inference/AGENTS.md:
+    zone: docs
+    authority_role: live_inference_router
+    why: Scoped guidance for EDLI live inference helpers.
+  src/strategy/live_inference/__init__.py:
+    zone: package_marker
+    authority_role: package_marker
+    why: Marks EDLI live inference package as importable.
+  src/strategy/live_inference/absorbing_boundary.py:
+    zone: K3_extension
+    authority_role: day0_absorbing_boundary_math
+    why: Pure Day0 high/low absorbing boundary logic; uses SettlementSemantics for rounding and blocks hard facts unless source/station/date/DST/metric/rounding gates pass.
+    downstream:
+    - src/events/triggers/day0_extreme_updated.py
+  src/strategy/live_inference/state.py:
+    zone: K3_extension
+    authority_role: edli_live_bin_state
+    why: Pure probability state normalization, event availability gate, Day0 mask application, and v1 orderbook no-op for q_live.
+  src/strategy/live_inference/inference_engine.py:
+    zone: K3_extension
+    authority_role: edli_event_bound_live_inference_kernel
+    why: Event-bound live-inference proof kernel that applies only forecast completeness and Day0 masks while keeping public orderbook data out of q_live.
+    downstream:
+    - src/events/decision_engine.py
+  src/strategy/live_inference/markov_smoothing.py:
+    zone: K3_extension
+    authority_role: edli_markov_smoothing
+    why: Applies declared transition matrices only; does not learn from PnL or orderbook dynamics.
+  src/strategy/live_inference/bayesian_factors.py:
+    zone: K3_extension
+    authority_role: edli_bayesian_factor_math
+    why: Applies capped forecast likelihood ratios and live-validated market priors while blocking partial forecasts from live inference.
+  src/strategy/live_inference/executable_cost.py:
+    zone: K2_runtime
+    authority_role: edli_native_executable_cost
+    why: Computes native YES/NO ask and held-token bid book-walk costs as typed ExecutionPrice values; forbids midpoint, last-trade, displayed, and NO-complement costs.
+    downstream:
+    - src/contracts/execution_price.py
+  src/strategy/live_inference/trade_score.py:
+    zone: K3_extension
+    authority_role: edli_robust_trade_score
+    why: Pure robust TradeScore and pre-execution gates for causal snapshot, availability, taker policy, and passive-fill constraints.
+  src/strategy/live_inference/no_trade_regret.py:
+    zone: K3_extension
+    authority_role: edli_no_trade_regret_ledger
+    why: Writes event-triggered rejection ledger rows and exposes a live-reader shape that denies hindsight outcome/regret columns.
+    downstream:
+    - src/state/schema/no_trade_regret_events_schema.py
+  src/strategy/live_inference/promotion_ledger.py:
+    zone: K3_extension
+    authority_role: edli_promotion_guard
+    why: Keeps no-trade regret training/promotions disabled in EDLI v1 and owns durable Day0 pilot live-cap usage reservations.
+    downstream:
+    - src/state/schema/edli_live_cap_usage_schema.py
+  src/analysis/event_opportunity_report.py:
+    zone: K4_experimental
+    authority_role: edli_event_report
+    why: Read-only EDLI event, processing, regret, and violation summary report.
+  src/analysis/day0_boundary_report.py:
+    zone: K4_experimental
+    authority_role: edli_day0_report
+    why: Read-only Day0 boundary event and regret summary.
+  src/analysis/forecast_release_reaction_report.py:
+    zone: K4_experimental
+    authority_role: edli_forecast_report
+    why: Read-only forecast release event and forecast-completeness block summary.
+  src/analysis/orderbook_execution_feasibility_report.py:
+    zone: K4_experimental
+    authority_role: edli_orderbook_feasibility_report
+    why: Read-only execution feasibility evidence summary.
   src/strategy/market_analysis.py:
     zone: K3_extension
     authority_role: edge_bootstrap_engine
@@ -2207,6 +2501,83 @@ files:
     why: "Phase 2 T2 (PHASE_2_ULTRAPLAN.md v3.1 §5.2): DDL owner for no_trade_events table (world DB). SCHEMA_VERSION 14→18. _rebuild_stale_no_trade_events_table handles in-place CHECK expansion across version bumps. Phase 3 T2: extended CHECK to include 6 SHOULDER_* NoTradeReason members + schema_version IN (14,15,16,17,18)."
     downstream:
     - src/state/db.py
+  src/state/schema/phase6_evidence_schema.py:
+    zone: K2_runtime
+    authority_role: phase6_evidence_schema_owner
+    why: "DDL owner for phase6_evidence schema-version compatibility; EDLI v1 bumps the live schema version and must keep this evidence table's CHECK constraints aligned with src/state/db.py."
+    downstream:
+    - src/state/db.py
+  src/state/schema/opportunity_events_schema.py:
+    zone: K2_runtime
+    authority_role: edli_opportunity_events_schema_owner
+    why: "EDLI v1 append-only opportunity_events DDL owner. Rows are immutable event facts in world DB; processing state is intentionally excluded from this table."
+    downstream:
+    - src/state/db.py
+    - src/events/event_store.py
+  src/state/schema/opportunity_event_processing_schema.py:
+    zone: K2_runtime
+    authority_role: edli_event_processing_schema_owner
+    why: "EDLI v1 mutable per-consumer event-processing DDL owner. Separates claim/attempt/dead-letter status from immutable opportunity event facts."
+    downstream:
+    - src/state/db.py
+    - src/events/event_store.py
+  src/state/schema/event_dead_letters_schema.py:
+    zone: K2_runtime
+    authority_role: edli_dead_letter_schema_owner
+    why: "EDLI v1 dead-letter DDL owner for event processing failures. No SQLite FK is declared, preserving DB-boundary invariants."
+    downstream:
+    - src/state/db.py
+    - src/events/event_store.py
+  src/state/schema/execution_feasibility_evidence_schema.py:
+    zone: K2_runtime
+    authority_role: edli_execution_feasibility_evidence_schema_owner
+    why: EDLI v1 evidence table for quote/book feasibility. Public market-channel rows remain evidence only and are not fill/order truth.
+    downstream:
+    - src/state/db.py
+    - src/events/triggers/market_channel_ingestor.py
+  src/state/schema/no_trade_regret_events_schema.py:
+    zone: K2_runtime
+    authority_role: edli_no_trade_regret_schema_owner
+    why: EDLI v1 no-trade regret ledger DDL owner; hindsight columns are post-settlement only and excluded from live readers.
+    downstream:
+    - src/state/db.py
+    - src/strategy/live_inference/no_trade_regret.py
+  src/state/schema/edli_no_submit_receipts_schema.py:
+    zone: K2_runtime
+    authority_role: edli_no_submit_receipts_schema_owner
+    why: EDLI v1 durable accepted no-submit receipt DDL owner; records proof receipts without implying executor or venue submission.
+    downstream:
+    - src/state/db.py
+    - src/events/no_submit_receipts.py
+    - src/events/reactor.py
+  src/state/schema/decision_certificates_schema.py:
+    zone: K2_runtime
+    authority_role: edli_decision_certificates_schema_owner
+    why: EDLI redemption certificate-ledger DDL owner for decision_certificates, role-labeled edges, supersessions, and compile failure denominator tables.
+    downstream:
+    - src/state/db.py
+    - src/decision_kernel/ledger.py
+  src/state/schema/edli_live_cap_usage_schema.py:
+    zone: K2_runtime
+    authority_role: edli_live_cap_usage_schema_owner
+    why: EDLI v1 durable live-cap usage DDL owner for Day0 hard-fact pilot count/notional caps across daemon scheduler ticks.
+    downstream:
+    - src/state/db.py
+    - src/strategy/live_inference/promotion_ledger.py
+  src/state/schema/edli_live_order_events_schema.py:
+    zone: K2_runtime
+    authority_role: edli_live_order_aggregate_schema_owner
+    why: EDLI full-live split DDL owner for append-only live-order aggregate events and deterministic projection; event log is source of truth.
+    downstream:
+    - src/state/db.py
+    - src/events/live_order_aggregate.py
+  src/state/schema/edli_live_profit_audit_schema.py:
+    zone: K2_runtime
+    authority_role: edli_live_profit_audit_schema_owner
+    why: EDLI live promotion DDL owner for event-bound realized-edge audit rows used by scaleout gates.
+    downstream:
+    - src/state/db.py
+    - src/events/live_profit_audit.py
   src/state/schema/tail_stress_scenarios_schema.py:
     zone: K2_runtime
     authority_role: tail_stress_scenarios_schema_owner

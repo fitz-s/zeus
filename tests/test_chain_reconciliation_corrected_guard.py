@@ -124,7 +124,19 @@ class TestRescueBranch:
         )
 
     def test_rescue_eligible_blocks_all_d6_mutations(self, caplog):
-        """eligible=True: chain values must NOT overwrite D6 fields."""
+        """eligible=True: chain values must NOT overwrite D6 fields.
+
+        F1 (docs/findings_2026_05_28.md §F1, 2026-05-28): the balance-only
+        rescue branch no longer mutates D6 fields at all, regardless of
+        `corrected_executable_economics_eligible` — chain economics land on
+        chain_avg_price / chain_cost_basis_usd / chain_shares. The
+        `cost_basis_chain_mutation_blocked_total` counter is therefore not
+        emitted on the balance-only path (the original guard fired only
+        when the legacy-mutation code was about to overwrite). The
+        counter remains live on the trade-verified rescue branch where
+        mutation still happens — covered in
+        `test_inv_f1_chain_economics_split.py::test_trade_verified_rescue_still_writes_fill_economics`.
+        """
         conn = _make_conn()
         # Pre-populate canonical rescue baseline so rescue proceeds
         from src.engine.lifecycle_events import build_entry_canonical_write
@@ -155,24 +167,21 @@ class TestRescueBranch:
         assert reconciled.shares == pytest.approx(20.0), (
             f"shares should remain 20.0, got {reconciled.shares}"
         )
-
-        # Counters must be emitted for each of the 4 fields
-        counter_records = [
-            r for r in caplog.records
-            if COUNTER_EVENT in r.message
-        ]
-        emitted_fields = {
-            r.message.split("field=")[1].strip()
-            for r in counter_records
-            if "field=" in r.message
-        }
-        assert emitted_fields == set(D6_FIELDS), (
-            f"Expected counters for all 4 D6 fields, got: {emitted_fields}"
-        )
+        # F1: chain economics land on chain_* fields (not on the D6 fields).
+        assert reconciled.chain_avg_price == pytest.approx(0.6)
+        assert reconciled.chain_cost_basis_usd == pytest.approx(15.0)
+        assert reconciled.chain_shares == pytest.approx(25.0)
         conn.close()
 
     def test_rescue_legacy_allows_all_d6_mutations(self, caplog):
-        """eligible=False: chain values MUST overwrite D6 fields (legacy path)."""
+        """eligible=False: F1 (docs/findings_2026_05_28.md §F1, 2026-05-28)
+        balance-only rescue no longer mutates D6 fields. The chain aggregate
+        flows into chain_avg_price / chain_cost_basis_usd / chain_shares;
+        submitted entry economics survive. The previous "legacy path
+        mutates D6" semantics now apply only to the trade-verified rescue
+        branch (linked venue trade fact), covered in
+        `test_inv_f1_chain_economics_split.py::test_trade_verified_rescue_still_writes_fill_economics`.
+        """
         conn = _make_conn()
         from src.engine.lifecycle_events import build_entry_canonical_write
         from src.state.db import append_many_and_project
@@ -189,27 +198,26 @@ class TestRescueBranch:
             reconcile(portfolio, chain_positions, conn=conn)
 
         reconciled = portfolio.positions[0]
-        # Chain values should have been applied
-        assert reconciled.entry_price == pytest.approx(0.6), (
-            f"entry_price should be 0.6 (chain), got {reconciled.entry_price}"
+        # F1: balance-only rescue preserves submitted entry economics; chain
+        # values land on chain_* fields only.
+        assert reconciled.entry_price == pytest.approx(0.5), (
+            f"entry_price should remain 0.5 (submitted) post-F1, got {reconciled.entry_price}"
         )
-        assert reconciled.cost_basis_usd == pytest.approx(15.0), (
-            f"cost_basis_usd should be 15.0 (chain), got {reconciled.cost_basis_usd}"
-        )
-        assert reconciled.size_usd == pytest.approx(15.0), (
-            f"size_usd should be 15.0 (chain), got {reconciled.size_usd}"
-        )
-        assert reconciled.shares == pytest.approx(25.0), (
-            f"shares should be 25.0 (chain), got {reconciled.shares}"
-        )
+        assert reconciled.cost_basis_usd == pytest.approx(10.0)
+        assert reconciled.size_usd == pytest.approx(10.0)
+        assert reconciled.shares == pytest.approx(20.0)
+        assert reconciled.chain_avg_price == pytest.approx(0.6)
+        assert reconciled.chain_cost_basis_usd == pytest.approx(15.0)
+        assert reconciled.chain_shares == pytest.approx(25.0)
 
-        # NO block counters should be emitted for legacy
+        # NO block counters should be emitted (balance-only path no longer
+        # has a mutation site to guard).
         counter_records = [
             r for r in caplog.records
             if COUNTER_EVENT in r.message
         ]
         assert len(counter_records) == 0, (
-            f"No block counters should fire for legacy positions; got {counter_records}"
+            f"No block counters should fire on balance-only rescue post-F1; got {counter_records}"
         )
         conn.close()
 

@@ -894,7 +894,7 @@ def get_connection(
 # CI hook scripts/check_schema_version.py diffs the sqlite_master hash of
 # a fresh-init DB against tests/state/_schema_pinned_hash.txt and fails
 # the PR if SCHEMA_VERSION did not change in lockstep.
-SCHEMA_VERSION = 42  # 2026-05-28 domain-canonicality antibody: model_bias_ens_v2 gains gate_set_hash + coverage_months canonical-extension columns (additive, nullable; idempotent ALTER via init_ens_bias_schema). Reader rejects rows whose gate_set_hash != current + target month outside coverage_months. Prior: 41 = #349+#352 merge (FT-ship F2 + REVIEW_REQUIRED event type).
+SCHEMA_VERSION = 55  # 2026-05-28 PR358 domain-canonicality antibody: model_bias_ens_v2 gains gate_set_hash + coverage_months. Prior: 54 = F1 position_current chain cols (rebased onto main post-#355).
 
 
 def init_schema(
@@ -1393,7 +1393,7 @@ def init_schema(
             finality_confirmed_time    TEXT,
             clock_skew_estimate_ms_at_submit INTEGER,
             raw_orderbook_hash_transition_delta_ms INTEGER,
-            schema_version INTEGER NOT NULL CHECK (schema_version IN (12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42)),
+            schema_version INTEGER NOT NULL CHECK (schema_version IN (12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55)),
             source         TEXT NOT NULL CHECK (source IN ('phase0_backfill', 'live_decision', 'shadow_decision')),
             PRIMARY KEY (market_slug, temperature_metric, target_date, observation_time, decision_seq)
         );
@@ -2558,6 +2558,42 @@ def init_schema(
     from src.state.schema.no_trade_events_schema import migrate_no_trade_events_schema as _migrate_no_trade_events_schema
     _migrate_no_trade_events_schema(conn)
 
+    # EDLI v1 (2026-05-24): append-only opportunity event store tables.
+    from src.state.schema.opportunity_events_schema import ensure_table as _ensure_opportunity_events_table
+    from src.state.schema.opportunity_event_processing_schema import ensure_table as _ensure_opportunity_event_processing_table
+    from src.state.schema.event_dead_letters_schema import ensure_table as _ensure_event_dead_letters_table
+    _ensure_opportunity_events_table(conn)
+    _ensure_opportunity_event_processing_table(conn)
+    _ensure_event_dead_letters_table(conn)
+
+    # EDLI v1 (2026-05-24): executable quote/book feasibility evidence.
+    from src.state.schema.execution_feasibility_evidence_schema import ensure_table as _ensure_execution_feasibility_evidence_table
+    _ensure_execution_feasibility_evidence_table(conn)
+
+    # EDLI v1 (2026-05-24): event-triggered no-trade regret ledger.
+    from src.state.schema.no_trade_regret_events_schema import ensure_table as _ensure_no_trade_regret_events_table
+    _ensure_no_trade_regret_events_table(conn)
+
+    # EDLI v1 (2026-05-24): durable accepted no-submit receipt ledger.
+    from src.state.schema.edli_no_submit_receipts_schema import ensure_table as _ensure_edli_no_submit_receipts_table
+    _ensure_edli_no_submit_receipts_table(conn)
+
+    # EDLI v1 (2026-05-24): durable tiny live-cap usage ledger.
+    from src.state.schema.edli_live_cap_usage_schema import ensure_table as _ensure_edli_live_cap_usage_table
+    _ensure_edli_live_cap_usage_table(conn)
+
+    # EDLI full-live split (2026-05-25): live-order aggregate event log + projection.
+    from src.state.schema.edli_live_order_events_schema import ensure_tables as _ensure_edli_live_order_events_tables
+    _ensure_edli_live_order_events_tables(conn)
+
+    # EDLI live promotion (2026-05-26): event-bound realized-edge audit projection.
+    from src.state.schema.edli_live_profit_audit_schema import ensure_table as _ensure_edli_live_profit_audit_table
+    _ensure_edli_live_profit_audit_table(conn)
+
+    # EDLI redemption (2026-05-25): proof-carrying decision certificate ledger.
+    from src.state.schema.decision_certificates_schema import ensure_tables as _ensure_decision_certificate_tables
+    _ensure_decision_certificate_tables(conn)
+
     # 2026-05-21 live authority follow-up: decision_events CHECK constraints
     # must admit shadow_decision / unknown_legacy before PRAGMA user_version is
     # stamped current. CREATE TABLE IF NOT EXISTS cannot upgrade stale CHECKs.
@@ -2626,13 +2662,14 @@ def _migrate_decision_events_schema(conn: sqlite3.Connection) -> None:
         "unknown_legacy" in table_sql
         and "shadow_decision" in table_sql
         and "12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28" in table_sql
+        and str(SCHEMA_VERSION) in table_sql
     ):
         conn.execute("DROP TABLE IF EXISTS decision_events_new")
         return
 
     conn.execute("DROP TABLE IF EXISTS decision_events_new")
     conn.execute(
-        """
+        f"""
         CREATE TABLE decision_events_new (
             market_slug         TEXT NOT NULL,
             temperature_metric  TEXT NOT NULL CHECK (temperature_metric IN ('high', 'low')),
@@ -2665,7 +2702,7 @@ def _migrate_decision_events_schema(conn: sqlite3.Connection) -> None:
             finality_confirmed_time    TEXT,
             clock_skew_estimate_ms_at_submit INTEGER,
             raw_orderbook_hash_transition_delta_ms INTEGER,
-            schema_version INTEGER NOT NULL CHECK (schema_version IN (12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42)),
+            schema_version INTEGER NOT NULL CHECK (schema_version IN (12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55)),
             source         TEXT NOT NULL CHECK (source IN ('phase0_backfill', 'live_decision', 'shadow_decision')),
             PRIMARY KEY (market_slug, temperature_metric, target_date, observation_time, decision_seq)
         )
@@ -2701,9 +2738,9 @@ def _migrate_decision_events_schema(conn: sqlite3.Connection) -> None:
             first_inclusion_block_time, finality_confirmed_time,
             clock_skew_estimate_ms_at_submit, raw_orderbook_hash_transition_delta_ms,
             CASE
-                WHEN schema_version IN (12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42)
+                WHEN schema_version IN (12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55)
                     THEN schema_version
-                ELSE 36
+                ELSE 51
             END,
             CASE
                 WHEN source IN ('phase0_backfill', 'live_decision', 'shadow_decision')
@@ -3891,6 +3928,12 @@ CREATE TABLE IF NOT EXISTS position_current (
     fill_authority TEXT,
     recovery_authority TEXT,
     chain_shares REAL,
+    -- F1 (docs/findings_2026_05_28.md §F1, 2026-05-28): chain-observed
+    -- economics columns so balance-only rescued positions persist
+    -- venue truth without overwriting submitted entry economics. Additive
+    -- on legacy DBs via _ensure_position_current_authority_columns.
+    chain_avg_price REAL,
+    chain_cost_basis_usd REAL,
     chain_seen_at TEXT,
     chain_absence_at TEXT
 );
@@ -4609,6 +4652,30 @@ def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
         (table,),
     ).fetchone()
     return row is not None
+
+
+def _attached_table_exists(conn: sqlite3.Connection, schema: str, table: str) -> bool:
+    if schema not in {"world", "forecasts"}:
+        return False
+    row = conn.execute(
+        f"SELECT 1 FROM {schema}.sqlite_master WHERE type = 'table' AND name = ?",
+        (table,),
+    ).fetchone()
+    return row is not None
+
+
+def _selection_fact_table_ref(conn: sqlite3.Connection, table: str) -> str | None:
+    if table not in {"selection_family_fact", "selection_hypothesis_fact"}:
+        return None
+    try:
+        attached = {str(row[1]) for row in conn.execute("PRAGMA database_list").fetchall()}
+        if "world" in attached and _attached_table_exists(conn, "world", table):
+            return f"world.{table}"
+    except sqlite3.Error:
+        pass
+    if _table_exists(conn, table):
+        return table
+    return None
 
 
 def _table_has_unique_key(
@@ -6769,13 +6836,14 @@ def log_selection_family_fact(
 ) -> dict:
     if conn is None:
         return {"status": "skipped_no_connection", "table": "selection_family_fact"}
-    if not _table_exists(conn, "selection_family_fact"):
+    table_ref = _selection_fact_table_ref(conn, "selection_family_fact")
+    if table_ref is None:
         return {"status": "skipped_missing_table", "table": "selection_family_fact"}
     if not family_id:
         return {"status": "skipped_missing_family_id", "table": "selection_family_fact"}
     conn.execute(
-        """
-        INSERT INTO selection_family_fact (
+        f"""
+        INSERT INTO {table_ref} (
             family_id, cycle_mode, decision_snapshot_id, city, target_date,
             strategy_key, discovery_mode, created_at, meta_json, decision_time_status
         )
@@ -6832,7 +6900,8 @@ def log_selection_hypothesis_fact(
 ) -> dict:
     if conn is None:
         return {"status": "skipped_no_connection", "table": "selection_hypothesis_fact"}
-    if not _table_exists(conn, "selection_hypothesis_fact"):
+    table_ref = _selection_fact_table_ref(conn, "selection_hypothesis_fact")
+    if table_ref is None:
         return {"status": "skipped_missing_table", "table": "selection_hypothesis_fact"}
     if not hypothesis_id:
         return {"status": "skipped_missing_hypothesis_id", "table": "selection_hypothesis_fact"}
@@ -6840,8 +6909,8 @@ def log_selection_hypothesis_fact(
         return {"status": "skipped_missing_family_id", "table": "selection_hypothesis_fact"}
     direction_value = direction if direction in {"buy_yes", "buy_no"} else "unknown"
     conn.execute(
-        """
-        INSERT INTO selection_hypothesis_fact (
+        f"""
+        INSERT INTO {table_ref} (
             hypothesis_id, family_id, decision_id, candidate_id, city, target_date,
             range_label, direction, p_value, q_value, ci_lower, ci_upper, edge,
             tested, passed_prefilter, selected_post_fdr, rejection_stage,
@@ -8857,7 +8926,17 @@ def query_portfolio_loader_view(conn: sqlite3.Connection | None, *, temperature_
     # position loses chain_verified_at on restart and classify_chain_state()
     # mis-reads it as CHAIN_UNKNOWN — blocking legitimate void. Guarded by
     # column presence (legacy DBs pre-D0b project NULL) like the env expr above.
-    _authority_cols = ("fill_authority", "recovery_authority", "chain_shares", "chain_seen_at", "chain_absence_at")
+    _authority_cols = (
+        "fill_authority",
+        "recovery_authority",
+        "chain_shares",
+        # F1 (docs/findings_2026_05_28.md §F1, 2026-05-28): chain-observed
+        # economics columns round-trip through the loader.
+        "chain_avg_price",
+        "chain_cost_basis_usd",
+        "chain_seen_at",
+        "chain_absence_at",
+    )
     authority_select_expr = ", ".join(
         c if c in actual_cols else f"NULL AS {c}" for c in _authority_cols
     )
@@ -8962,6 +9041,11 @@ def query_portfolio_loader_view(conn: sqlite3.Connection | None, *, temperature_
                 "chain_seen_at": str(row["chain_seen_at"] or ""),
                 "chain_absence_at": str(row["chain_absence_at"] or ""),
                 "chain_shares": _finite_float_or_none(row["chain_shares"]) or 0.0,
+                # F1 (docs/findings_2026_05_28.md §F1, 2026-05-28):
+                # chain-observed economics round-trip into Position via
+                # _position_from_row (state/portfolio.py).
+                "chain_avg_price": _finite_float_or_none(row["chain_avg_price"]) or 0.0,
+                "chain_cost_basis_usd": _finite_float_or_none(row["chain_cost_basis_usd"]) or 0.0,
                 "recovery_authority": str(row["recovery_authority"] or ""),
             }
         )
@@ -9590,6 +9674,18 @@ def _position_current_effective_entry_economics(row, fill_hint: dict | None) -> 
         }
 
     pnl_cost_basis_usd = projection_cost_basis_usd if projection_cost_basis_usd > 0.0 else submitted_size_usd
+    # PR #355 Copilot SEV-1: if the projection row already carries a non-NULL,
+    # non-"none" fill_authority (e.g. "venue_position_observed" written by the
+    # F1 balance-only rescue), honour it rather than unconditionally returning
+    # FILL_AUTHORITY_NONE.  The Position properties (effective_shares,
+    # effective_cost_basis_usd, effective_exposure) already route correctly via
+    # has_chain_observed_authority when fill_authority is preserved here.
+    row_fill_authority = str(row["fill_authority"] or "").strip()
+    effective_fill_authority = (
+        row_fill_authority
+        if row_fill_authority and row_fill_authority != FILL_AUTHORITY_NONE
+        else FILL_AUTHORITY_NONE
+    )
     return {
         "submitted_size_usd": submitted_size_usd,
         "projection_cost_basis_usd": projection_cost_basis_usd,
@@ -9601,7 +9697,7 @@ def _position_current_effective_entry_economics(row, fill_hint: dict | None) -> 
         "shares_filled": 0.0,
         "filled_cost_basis_usd": 0.0,
         "entry_economics_authority": ENTRY_ECONOMICS_LEGACY_UNKNOWN,
-        "fill_authority": FILL_AUTHORITY_NONE,
+        "fill_authority": effective_fill_authority,
         "entry_economics_source": "position_current_projection",
         "entry_fill_verified": False,
         "execution_fact_intent_id": "",

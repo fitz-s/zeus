@@ -1,6 +1,16 @@
 """Portfolio state management. Spec §6.4.
 
-Atomic JSON + SQL mirror. Positions are the source of truth.
+Atomic JSON + SQL mirror. Positions are projection-cache adapters; canonical
+truth is `position_events` + `position_current` (see PR #352, F1 in
+docs/findings_2026_05_28.md). The `Position` dataclass is a runtime view that
+combines submitted-intent economics, verified fill economics, and chain-
+observed economics into a single object — but each economics object has its
+own authority field on `position_current` and event payloads. The legacy
+``entry_price`` / ``cost_basis_usd`` / ``size_usd`` / ``shares`` attributes
+remain as derived/compatibility views and MUST NOT be mutated by chain-
+balance rescue after F1: balance-only rescue writes the chain aggregate into
+``chain_avg_price`` / ``chain_cost_basis_usd`` / ``chain_shares`` only.
+
 Provides exposure queries for risk limit enforcement.
 """
 
@@ -355,6 +365,39 @@ def _finite_float_or_zero(value: object) -> float:
     return result if math.isfinite(result) else 0.0
 
 
+# F1 (docs/findings_2026_05_28.md §F1, 2026-05-28): effective-exposure typed
+# view consumed by exit_triggers / monitor_refresh / risk gates. Routes by
+# fill_authority so balance-only (venue_position_observed) positions expose
+# chain economics, and trade-verified positions expose fill economics — both
+# without any consumer needing to read raw Position.shares / entry_price /
+# cost_basis_usd.
+EFFECTIVE_EXPOSURE_SOURCE_VENUE_TRADE_FILL = "venue_trade_fill"
+EFFECTIVE_EXPOSURE_SOURCE_VENUE_POSITION_OBSERVED = "venue_position_observed"
+EFFECTIVE_EXPOSURE_SOURCE_SUBMITTED_INTENT = "submitted_intent"
+EFFECTIVE_EXPOSURE_SOURCE_NONE = "none"
+
+
+@dataclass(frozen=True)
+class EffectiveExposure:
+    """Derived view: a Position's currently-effective exposure for exit/risk.
+
+    Authority routing (F1):
+      - venue_confirmed_* fill_authority → fill economics
+        (filled_cost_basis_usd, shares_filled, avg_fill_price)
+      - venue_position_observed         → chain economics
+        (chain_cost_basis_usd, chain_shares, chain_avg_price)
+      - pending / unverified            → 0.0 / submitted intent (per state)
+
+    Consumers MUST read this rather than raw Position.shares /
+    Position.entry_price / Position.cost_basis_usd for exit-sizing,
+    risk-exposure, and EV gating.
+    """
+    shares: float
+    cost_basis_usd: float
+    avg_price: float
+    source_authority: str
+
+
 def fill_authority_effective_open_cost_basis(
     *,
     current_open_cost: object,
@@ -472,6 +515,13 @@ class Position:
     # Chain reconciliation (Blueprint v2 §5)
     chain_state: str = VenueVisibilityStatus.UNKNOWN.value
     chain_shares: float = 0.0
+    # F1 (docs/findings_2026_05_28.md, 2026-05-28): chain-observed economics
+    # carry their own typed slots so balance-only rescue does not overwrite
+    # decision/fill economics on `entry_price` / `cost_basis_usd` / `size_usd`.
+    # Set by chain_reconciliation balance-only rescue branch; consumed by
+    # `effective_exposure()` when fill_authority == venue_position_observed.
+    chain_avg_price: float = 0.0
+    chain_cost_basis_usd: float = 0.0
     # `chain_verified_at` is a POSITIVE observation timestamp ONLY: it records
     # when the venue/chain confirmed this position is held (rescue, size
     # correction, sync). It MUST NOT be advanced when the chain snapshot does
@@ -589,6 +639,12 @@ class Position:
             if current_open_shares > 0:
                 return min(current_open_shares, entry_fill_shares)
             return entry_fill_shares
+        # F1: balance-only rescue (venue_position_observed). chain_shares is
+        # the ONLY truth — the legacy `shares` field is no longer mutated by
+        # the rescue branch, so falling through to it would return the
+        # pre-rescue submitted shares (or zero).
+        if self.has_chain_observed_authority and self.chain_shares > 0:
+            return float(self.chain_shares)
         if self.shares > 0:
             return self.shares
         if self.entry_price > 0:
@@ -606,6 +662,9 @@ class Position:
                 entry_fill_cost=self.filled_cost_basis_usd,
                 entry_fill_shares=self.shares_filled,
             )
+        # F1: balance-only rescue routes through chain_cost_basis_usd.
+        if self.has_chain_observed_authority and self.chain_cost_basis_usd > 0:
+            return float(self.chain_cost_basis_usd)
         return self.cost_basis_usd if self.cost_basis_usd > 0 else self.size_usd
 
     @property
@@ -615,6 +674,82 @@ class Position:
             and self.fill_authority in FILL_GRADE_FILL_AUTHORITIES
             and self.shares_filled > 0
             and self.filled_cost_basis_usd > 0
+        )
+
+    @property
+    def has_chain_observed_authority(self) -> bool:
+        """F1: True iff this position's economics are chain-observed only
+        (balance-only rescue with no linked venue trade fact)."""
+        return self.fill_authority == FILL_AUTHORITY_VENUE_POSITION_OBSERVED
+
+    def effective_exposure(self) -> EffectiveExposure:
+        """Typed effective-exposure view for exit/risk consumers (F1).
+
+        Authority routing:
+          - venue_confirmed_* fill_authority → fill economics
+          - venue_position_observed         → chain economics
+          - pending / unverified            → zero exposure or submitted-intent
+            depending on lifecycle state
+
+        Returns:
+            EffectiveExposure with `source_authority` identifying the
+            economics object the exposure was derived from.
+        """
+        # Pending-entry without authority: no real exposure yet.
+        if self.is_pending_entry_without_fill_authority:
+            return EffectiveExposure(
+                shares=0.0,
+                cost_basis_usd=0.0,
+                avg_price=0.0,
+                source_authority=EFFECTIVE_EXPOSURE_SOURCE_NONE,
+            )
+        # Trade-verified fill: route to fill economics.
+        if self.has_fill_economics_authority:
+            shares = float(self.effective_shares or 0.0)
+            cost = float(
+                fill_authority_effective_open_cost_basis(
+                    current_open_cost=self.cost_basis_usd,
+                    current_open_shares=self.shares,
+                    entry_fill_cost=self.filled_cost_basis_usd,
+                    entry_fill_shares=self.shares_filled,
+                )
+                or 0.0
+            )
+            avg_price = (
+                cost / shares if shares > 0 else float(self.entry_price_avg_fill or self.entry_price or 0.0)
+            )
+            return EffectiveExposure(
+                shares=shares,
+                cost_basis_usd=cost,
+                avg_price=float(avg_price),
+                source_authority=EFFECTIVE_EXPOSURE_SOURCE_VENUE_TRADE_FILL,
+            )
+        # Balance-only rescue: chain economics are the only truth.
+        if self.has_chain_observed_authority:
+            shares = float(self.chain_shares or 0.0)
+            cost = float(self.chain_cost_basis_usd or 0.0)
+            avg_price = float(self.chain_avg_price or 0.0)
+            if avg_price <= 0.0 and shares > 0.0 and cost > 0.0:
+                avg_price = cost / shares
+            return EffectiveExposure(
+                shares=shares,
+                cost_basis_usd=cost,
+                avg_price=avg_price,
+                source_authority=EFFECTIVE_EXPOSURE_SOURCE_VENUE_POSITION_OBSERVED,
+            )
+        # Submitted intent fallback (legacy / pre-F1 positions). entry_price /
+        # size_usd / cost_basis_usd here reflect the local intent and are not
+        # authoritative; record the source so downstream gates can degrade.
+        shares = float(self.shares or 0.0)
+        cost = float(self.cost_basis_usd or self.size_usd or 0.0)
+        avg_price = float(self.entry_price or 0.0)
+        if shares <= 0 and avg_price > 0 and cost > 0:
+            shares = cost / avg_price
+        return EffectiveExposure(
+            shares=shares,
+            cost_basis_usd=cost,
+            avg_price=avg_price,
+            source_authority=EFFECTIVE_EXPOSURE_SOURCE_SUBMITTED_INTENT,
         )
 
     @property
@@ -1491,6 +1626,12 @@ def _position_from_projection_row(row: dict, *, current_mode: str) -> Position:
             row.get("last_chain_absence_observed_at") or row.get("chain_absence_at") or ""
         ),
         chain_shares=float(row.get("chain_shares") or 0.0),
+        # F1 (docs/findings_2026_05_28.md §F1, 2026-05-28): chain-observed
+        # economics round-trip via position_current so a balance-only
+        # rescued position survives daemon restart with the correct
+        # exposure on `effective_exposure()`.
+        chain_avg_price=float(row.get("chain_avg_price") or 0.0),
+        chain_cost_basis_usd=float(row.get("chain_cost_basis_usd") or 0.0),
         fill_authority=str(row.get("fill_authority") or FILL_AUTHORITY_NONE),
     )
     for field_name in {f.name for f in fields(Position)}:

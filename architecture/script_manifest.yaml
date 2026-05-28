@@ -527,6 +527,26 @@ scripts:
     required_helpers: [src.state.no_trade_events.assert_no_trade_events_schema_current_for_live]
     required_tests: [tests/test_live_release_gate.py]
     reason: "P0 release gate for the May 21 live-proof packet. It makes discovery fallback, stale schemas, unknown command states, blocking redeem rows, stale business-plane JSON, and overclaimed paper proof fail closed before live entry."
+  check_edli_live_canary_gate.py:
+    # Created: 2026-05-26
+    # Last reused or audited: 2026-05-26
+    # Authority basis: PR332 EDLI live promotion package.
+    class: enforcement
+    lifecycle: long_lived
+    status: active
+    authority_scope: edli_live_canary_gate_db_verified_read_only
+    canonical_command: "python3 scripts/check_edli_live_canary_gate.py --artifact state/edli_live_canary_artifact.json --world-db state/zeus-world.db --verify-db --json"
+    read_targets: [repo, state/edli_live_canary_artifact.json, state/zeus-world.db]
+    write_targets: [stdout]
+    dry_run_default: true
+    apply_flag: null
+    target_db: null
+    external_inputs: [edli_live_canary_artifact, edli_live_order_events, edli_live_order_projection, decision_certificates, edli_live_cap_usage, edli_live_profit_audit]
+    dangerous_if_run: false
+    delete_policy: retain_until_superseded
+    reuse_when: "Before EDLI live canary/live promotion to prove a canary packet binds pre-submit evidence, command, venue outcome, user-channel/reconcile, cap transition, lifecycle projection, and edge evidence against canonical DB rows."
+    do_not_use_when: "As live authorization without operator approval; WAITING_FOR_QUALIFYING_EVENT blocks deploy-ready claims."
+    required_tests: [tests/scripts/test_check_edli_live_canary_gate.py]
   live_health_probe.py:
     # Created: 2026-05-11
     # Last reused or audited: 2026-05-18

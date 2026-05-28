@@ -138,6 +138,28 @@ def current(
             )
 
 
+def cached(*, max_age_seconds: float = _DEFAULT_FAIL_CLOSED_AFTER_SECONDS) -> Optional[BankrollOfRecord]:
+    """Return a cached bankroll observation without contacting the venue.
+
+    This is intentionally weaker than ``current()``: it never refreshes from
+    Polymarket.  Proof-only/no-submit paths can use it to fail closed without
+    introducing a wallet/API side effect.
+    """
+    with _lock:
+        if _last_value_usd is None or _last_fetched_at is None:
+            return None
+        now = _now_utc()
+        age = (now - _last_fetched_at).total_seconds()
+        if age > max_age_seconds:
+            return None
+        return BankrollOfRecord(
+            value_usd=_last_value_usd,
+            fetched_at=_last_fetched_at.isoformat(),
+            staleness_seconds=age,
+            cached=True,
+        )
+
+
 def reset_cache_for_tests() -> None:
     """Clear the module-level cache. Tests only — not part of the public contract."""
     global _last_value_usd, _last_fetched_at

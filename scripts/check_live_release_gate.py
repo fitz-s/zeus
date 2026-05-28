@@ -48,6 +48,12 @@ from src.state.no_trade_events import (
 
 PASS = "PASS"
 FAIL = "FAIL"
+LIVE_RELEASE_STAGES = (
+    "legacy_cron",
+    "edli_submit_disabled_bridge",
+    "edli_live_canary",
+    "edli_live",
+)
 
 UNKNOWN_COMMAND_STATES = (
     "SUBMIT_UNKNOWN_SIDE_EFFECT",
@@ -84,9 +90,16 @@ class GateResult:
 @dataclass(frozen=True)
 class ReleaseGateReport:
     status: str
+    stage_status: str
     gate_count: int
     passed_count: int
+    stage: str
+    daemon_start_allowed: bool
+    deploy_ready: bool
     live_entries_allowed: bool
+    submit_allowed: bool
+    scaleout_allowed: bool
+    gate_basis: tuple[str, ...]
     results: tuple[GateResult, ...]
 
     def to_dict(self) -> dict[str, Any]:
@@ -380,17 +393,224 @@ def evaluate_release_gate(args: argparse.Namespace) -> ReleaseGateReport:
         _check_redeem_state(args.trade_db, tuple(args.allow_redeem_command or ()), now),
         _check_fresh_file("source_health", args.source_health_json, max_age_seconds=args.source_max_age_seconds, now=now),
         _check_fresh_file("status_summary", args.status_json, max_age_seconds=args.status_max_age_seconds, now=now),
-        _check_paper_proof(args.paper_proof_json),
     ]
+    if str(args.stage) in {"legacy_cron", "edli_submit_disabled_bridge"}:
+        results.append(_check_paper_proof(args.paper_proof_json))
+    if args.settings_json:
+        results.append(_check_stage_settings(args.stage, args.settings_json))
+    results.extend(_edli_stage_results(args))
     passed = sum(1 for result in results if result.status == PASS)
     status = PASS if passed == len(results) else FAIL
-    return ReleaseGateReport(
+    live_entries_allowed, submit_allowed, scaleout_allowed, gate_basis = _stage_allowance(
+        str(args.stage),
         status=status,
-        gate_count=len(results),
-        passed_count=passed,
-        live_entries_allowed=False,
         results=tuple(results),
     )
+    stage_status = _stage_status(str(args.stage), status=status, results=tuple(results))
+    daemon_start_allowed = status == PASS and stage_status in {PASS, "WAITING_FOR_QUALIFYING_EVENT"}
+    deploy_ready = status == PASS and stage_status == PASS
+    return ReleaseGateReport(
+        status=status,
+        stage_status=stage_status,
+        gate_count=len(results),
+        passed_count=passed,
+        stage=str(args.stage),
+        daemon_start_allowed=daemon_start_allowed,
+        deploy_ready=deploy_ready,
+        live_entries_allowed=live_entries_allowed,
+        submit_allowed=submit_allowed,
+        scaleout_allowed=scaleout_allowed,
+        gate_basis=gate_basis,
+        results=tuple(results),
+    )
+
+
+def _edli_stage_results(args: argparse.Namespace) -> list[GateResult]:
+    stage = str(args.stage)
+    if stage not in {"edli_submit_disabled_bridge", "edli_live_canary", "edli_live"}:
+        return []
+    import src.main as main
+
+    if args.expected_sha:
+        main._BOOT_STATE["sha"] = str(args.expected_sha)
+
+    report = main.evaluate_edli_stage_readiness(
+        stage=stage,
+        world_db_path=str(args.world_db),
+        trade_db_path=str(args.trade_db),
+        forecasts_db_path=str(args.forecasts_db),
+        loaded_sha_file=str(args.loaded_sha_file) if args.loaded_sha_file else "",
+        canary_artifact_path=str(args.canary_artifact_json) if args.canary_artifact_json else "",
+        promotion_artifact_path=str(args.promotion_artifact_json) if args.promotion_artifact_json else "",
+        source_health_json=str(args.source_health_json),
+        status_json=str(args.status_json),
+        max_age_seconds=min(int(args.source_max_age_seconds), int(args.status_max_age_seconds)),
+    )
+    if stage == "edli_live_canary":
+        ok = report.status in {main.EDLI_STAGE_PASS, main.EDLI_STAGE_WAITING} and report.submit_allowed
+        return [
+            GateResult(
+                "edli_stage_readiness",
+                PASS if ok else FAIL,
+                f"status={report.status}:submit_allowed={report.submit_allowed}:reasons={list(report.reasons)}",
+            )
+        ]
+    if stage == "edli_submit_disabled_bridge":
+        ok = report.status in {main.EDLI_STAGE_PASS, main.EDLI_STAGE_WAITING} and not report.submit_allowed
+        return [
+            GateResult(
+                "edli_stage_readiness",
+                PASS if ok else FAIL,
+                f"status={report.status}:submit_allowed={report.submit_allowed}:reasons={list(report.reasons)}",
+            )
+        ]
+    results = [
+        GateResult(
+            "edli_stage_readiness",
+            PASS if report.status == main.EDLI_STAGE_PASS else FAIL,
+            f"status={report.status}:scaleout_allowed={report.scaleout_allowed}:reasons={list(report.reasons)}",
+        )
+    ]
+    results.append(_check_edli_promotion_artifact(args))
+    return results
+
+
+def _check_edli_promotion_artifact(args: argparse.Namespace) -> GateResult:
+    if not args.promotion_artifact_json:
+        return GateResult("edli_promotion_artifact", FAIL, "missing_promotion_artifact_path")
+    if not args.promotion_artifact_json.exists():
+        return GateResult("edli_promotion_artifact", FAIL, f"missing:{args.promotion_artifact_json}")
+    from src.events.live_profit_audit import verify_edli_live_promotion_artifact
+
+    conn = sqlite3.connect(str(args.world_db))
+    conn.row_factory = sqlite3.Row
+    try:
+        artifact = json.loads(args.promotion_artifact_json.read_text())
+        verified = verify_edli_live_promotion_artifact(
+            conn,
+            artifact,
+            min_canary_count=int(args.edli_live_min_canary_count),
+            max_unresolved_unknowns=int(args.edli_live_max_unresolved_unknowns),
+            min_realized_edge_bps=float(args.edli_live_min_realized_edge_bps),
+        )
+    finally:
+        conn.close()
+    return GateResult(
+        "edli_promotion_artifact",
+        PASS if verified.ok else FAIL,
+        verified.reason,
+    )
+
+
+_REACTOR_MODE_BY_STAGE = {
+    "legacy_cron": "disabled",
+    "edli_submit_disabled_bridge": "submit_disabled_live_bridge",
+    "edli_live_canary": "live",
+    "edli_live": "live",
+}
+
+
+def _check_stage_settings(stage: str, settings_json: Path) -> GateResult:
+    if not settings_json.exists():
+        return GateResult("stage_settings", FAIL, f"missing:{settings_json}")
+    try:
+        settings = json.loads(settings_json.read_text())
+    except json.JSONDecodeError as exc:
+        return GateResult("stage_settings", FAIL, f"invalid_json:{exc}")
+    edli_cfg = settings.get("edli_v1") if isinstance(settings, dict) else None
+    if not isinstance(edli_cfg, dict):
+        return GateResult("stage_settings", FAIL, "missing_edli_v1")
+    errors: list[str] = []
+    if str(edli_cfg.get("live_execution_mode") or "") != stage:
+        errors.append(f"live_execution_mode={edli_cfg.get('live_execution_mode')!r}")
+    expected_reactor = _REACTOR_MODE_BY_STAGE.get(stage)
+    if expected_reactor and str(edli_cfg.get("reactor_mode") or "disabled") != expected_reactor:
+        errors.append(f"reactor_mode={edli_cfg.get('reactor_mode')!r}:expected={expected_reactor}")
+    if stage == "legacy_cron":
+        if bool(edli_cfg.get("enabled", False)):
+            errors.append("enabled=true")
+        if bool(edli_cfg.get("real_order_submit_enabled", False)):
+            errors.append("real_order_submit_enabled=true")
+    if stage in {"edli_submit_disabled_bridge", "edli_live_canary", "edli_live"}:
+        if not bool(edli_cfg.get("enabled", False)):
+            errors.append("enabled=false")
+        if not bool(edli_cfg.get("market_channel_ingestor_enabled", False)):
+            errors.append("market_channel_ingestor_enabled=false")
+        if not bool(edli_cfg.get("edli_user_channel_reconcile_enabled", False)):
+            errors.append("edli_user_channel_reconcile_enabled=false")
+    if stage == "edli_submit_disabled_bridge" and bool(edli_cfg.get("real_order_submit_enabled", False)):
+        errors.append("real_order_submit_enabled=true")
+    if stage in {"edli_live_canary", "edli_live"}:
+        if not bool(edli_cfg.get("real_order_submit_enabled", False)):
+            errors.append("real_order_submit_enabled=false")
+        if not bool(edli_cfg.get("live_canary_enabled", False)):
+            errors.append("live_canary_enabled=false")
+    if stage == "edli_live" and not bool(edli_cfg.get("edli_live_scaleout_enabled", False)):
+        errors.append("edli_live_scaleout_enabled=false")
+    if errors:
+        return GateResult("stage_settings", FAIL, ",".join(errors))
+    return GateResult("stage_settings", PASS, f"settings_match_stage:{stage}")
+
+
+def _result_status(results: tuple[GateResult, ...], name: str) -> str | None:
+    for result in results:
+        if result.name == name:
+            return result.status
+    return None
+
+
+def _result_detail(results: tuple[GateResult, ...], name: str) -> str:
+    for result in results:
+        if result.name == name:
+            return result.detail
+    return ""
+
+
+def _stage_status(stage: str, *, status: str, results: tuple[GateResult, ...]) -> str:
+    if status != PASS:
+        return FAIL
+    if stage == "edli_live_canary":
+        detail = _result_detail(results, "edli_stage_readiness")
+        if "status=WAITING_FOR_QUALIFYING_EVENT" in detail:
+            return "WAITING_FOR_QUALIFYING_EVENT"
+    return PASS
+
+
+def _stage_allowance(
+    stage: str,
+    *,
+    status: str,
+    results: tuple[GateResult, ...],
+) -> tuple[bool, bool, bool, tuple[str, ...]]:
+    if stage not in LIVE_RELEASE_STAGES:
+        raise ValueError(f"UNSUPPORTED_LIVE_RELEASE_STAGE:{stage}")
+    basis = (
+        "schema_current",
+        "loaded_sha",
+        "source_fresh",
+        "forecast_executable_bundle",
+        "trade_state_clear",
+        "redeem_state_clear",
+    )
+    if status != PASS:
+        return False, False, False, basis
+    if stage == "legacy_cron":
+        return False, False, False, basis + ("legacy_cron_preservation",)
+    if stage == "edli_submit_disabled_bridge":
+        if _result_status(results, "edli_stage_readiness") != PASS:
+            return False, False, False, basis + ("submit_disabled", "edli_stage_readiness_required")
+        return False, False, False, basis + ("submit_disabled",)
+    if stage == "edli_live_canary":
+        if _result_status(results, "edli_stage_readiness") != PASS:
+            return False, False, False, basis + ("canary_preflight_required", "tiny_cap_only")
+        return True, True, False, basis + ("canary_preflight", "tiny_cap_only")
+    if stage == "edli_live":
+        if _result_status(results, "edli_stage_readiness") != PASS:
+            return False, False, False, basis + ("edli_stage_readiness_required", "scaleout_blocked")
+        if _result_status(results, "edli_promotion_artifact") != PASS:
+            return False, False, False, basis + ("verified_promotion_artifact_required", "scaleout_blocked")
+        return True, True, True, basis + ("verified_promotion_artifact", "scaleout_allowed")
+    return False, False, False, basis
 
 
 def _write_fixture_files(root: Path) -> argparse.Namespace:
@@ -462,6 +682,7 @@ def _write_fixture_files(root: Path) -> argparse.Namespace:
         **{key: True for key in PAPER_PROOF_KEYS},
     }))
     return parse_args([
+        "--stage", "legacy_cron",
         "--expected-sha", expected,
         "--loaded-sha-file", str(loaded),
         "--world-db", str(world_db),
@@ -476,6 +697,7 @@ def _write_fixture_files(root: Path) -> argparse.Namespace:
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--stage", choices=LIVE_RELEASE_STAGES, default="legacy_cron")
     parser.add_argument("--expected-sha", default="")
     parser.add_argument("--loaded-sha-file", type=Path)
     parser.add_argument("--world-db", type=Path, default=ROOT / "state" / "zeus-world.db")
@@ -484,6 +706,12 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--source-health-json", type=Path, default=ROOT / "state" / "source_health.json")
     parser.add_argument("--status-json", type=Path, default=ROOT / "state" / "status_summary.json")
     parser.add_argument("--paper-proof-json", type=Path, default=ROOT / "state" / "paper_money_path_proof.json")
+    parser.add_argument("--settings-json", type=Path)
+    parser.add_argument("--canary-artifact-json", type=Path)
+    parser.add_argument("--promotion-artifact-json", type=Path)
+    parser.add_argument("--edli-live-min-canary-count", type=int, default=1)
+    parser.add_argument("--edli-live-max-unresolved-unknowns", type=int, default=0)
+    parser.add_argument("--edli-live-min-realized-edge-bps", type=float, default=0.0)
     parser.add_argument("--source-max-age-seconds", type=int, default=15 * 60)
     parser.add_argument("--status-max-age-seconds", type=int, default=15 * 60)
     parser.add_argument("--allow-redeem-command", action="append", default=[])
@@ -503,7 +731,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.json:
         print(json.dumps(report.to_dict(), indent=2, sort_keys=True))
     else:
-        print(f"live_release_gate={report.status} passed={report.passed_count}/{report.gate_count}")
+        print(
+            f"live_release_gate={report.status} stage={report.stage} "
+            f"passed={report.passed_count}/{report.gate_count} "
+            f"submit_allowed={report.submit_allowed} scaleout_allowed={report.scaleout_allowed}"
+        )
         for result in report.results:
             print(f"{result.status} {result.name}: {result.detail}")
     return 0 if report.status == PASS else 1
