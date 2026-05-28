@@ -28,7 +28,7 @@ import pytest
 
 FORECAST_TABLES = (
     "ensemble_snapshots",
-    "calibration_pairs_v2",
+    "calibration_pairs",
     "observations",
     "settlements",
     "settlements_v2",
@@ -95,7 +95,7 @@ def test_rel1_init_schema_forecasts_critical_indexes():
     # At minimum these covering indexes are required for hot-path queries.
     required = {
         "idx_ensemble_snapshots_lookup",
-        "idx_calibration_pairs_v2_city_date_metric",
+        "idx_calibration_pairs_city_date_metric",
     }
     missing = required - existing_indexes
     assert not missing, (
@@ -365,11 +365,11 @@ def test_rel7_attach_read_latency():
 
 _CRITICAL_V2_INDEXES = frozenset({
     "idx_ensemble_snapshots_lookup",
-    "idx_calibration_pairs_v2_city_date_metric",
+    "idx_calibration_pairs_city_date_metric",
     "idx_ens_v2_source_run",
     "idx_ens_v2_entry_lookup",
-    "idx_calibration_pairs_v2_bucket",
-    "idx_calibration_pairs_v2_refit_core",
+    "idx_calibration_pairs_bucket",
+    "idx_calibration_pairs_refit_core",
     "idx_settlements_v2_city_date_metric",
     "idx_settlements_v2_settled_at",
     "idx_market_events_city_date_metric",
@@ -421,7 +421,7 @@ def test_relA_attach_partial_world_still_produces_critical_indexes(
     have = _indexes_on(fcast)
     required = {
         "idx_ensemble_snapshots_lookup",
-        "idx_calibration_pairs_v2_city_date_metric",
+        "idx_calibration_pairs_city_date_metric",
     }
     missing = required - have
     fcast.close()

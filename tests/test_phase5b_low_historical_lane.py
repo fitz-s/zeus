@@ -1,10 +1,10 @@
 # Lifecycle: created=2026-04-17; last_reviewed=2026-04-17; last_reused=never
 # Purpose: Phase 5B R-AF..R-AM invariants: low historical lane ingest gating + rebuild/refit metric isolation
-# Reuse: Anchors on zeus_dual_track_refactor_package_v2_2026-04-16/04_CODE_SNIPPETS/ingest_snapshot_contract.py + 08_TIGGE_DUAL_TRACK_INTEGRATION_zh.md §3-§5 + rebuild_calibration_pairs_v2.py. Confirms Phase 5B contract; fails RED until 5B lands.
+# Reuse: Anchors on zeus_dual_track_refactor_package_v2_2026-04-16/04_CODE_SNIPPETS/ingest_snapshot_contract.py + 08_TIGGE_DUAL_TRACK_INTEGRATION_zh.md §3-§5 + rebuild_calibration_pairs.py. Confirms Phase 5B contract; fails RED until 5B lands.
 """Phase 5B low historical lane tests: R-AF, R-AG, R-AH, R-AI, R-AJ, R-AK, R-AL, R-AM
 
 Tests anchored to SPEC semantics from the DT v2 package (ingest_snapshot_contract.py,
-08_TIGGE_DUAL_TRACK_INTEGRATION_zh.md §3-§5, rebuild_calibration_pairs_v2.py) and the
+08_TIGGE_DUAL_TRACK_INTEGRATION_zh.md §3-§5, rebuild_calibration_pairs.py) and the
 Phase 5B opening brief. Tests are spec-anchored and MUST fail RED until exec-dan/exec-emma
 implement Phase 5B.
 
@@ -27,7 +27,7 @@ R-AJ (causality first-class): low extractor emits causality_status as a first-cl
     in the extracted JSON — never defaulted-absent. Absent causality_status fails contract.
 
 R-AK (METRIC_SPECS tuple covers both tracks): CalibrationMetricSpec + METRIC_SPECS are
-    importable from scripts.rebuild_calibration_pairs_v2 and include both HIGH_LOCALDAY_MAX
+    importable from scripts.rebuild_calibration_pairs and include both HIGH_LOCALDAY_MAX
     and LOW_LOCALDAY_MIN entries.
 
 R-AL (iter_training_snapshots metric isolation): iter_training_snapshots filters by
@@ -353,27 +353,27 @@ class TestMetricSpecsTupleCoversLow:
     The DT v2 package specifies METRIC_SPECS as a 2-tuple: one entry per track.
     No --track CLI flag. The tuple drives rebuild/refit iteration.
 
-    Import target: scripts.rebuild_calibration_pairs_v2 (does not exist yet — ImportError = RED)
+    Import target: scripts.rebuild_calibration_pairs (does not exist yet — ImportError = RED)
     """
 
     def test_calibration_metric_spec_is_importable(self):
         """R-AK (acceptance): CalibrationMetricSpec must be importable from rebuild script."""
-        from scripts.rebuild_calibration_pairs_v2 import CalibrationMetricSpec  # noqa: F401
+        from scripts.rebuild_calibration_pairs import CalibrationMetricSpec  # noqa: F401
 
     def test_metric_specs_tuple_is_importable(self):
         """R-AK (acceptance): METRIC_SPECS must be importable from rebuild script."""
-        from scripts.rebuild_calibration_pairs_v2 import METRIC_SPECS  # noqa: F401
+        from scripts.rebuild_calibration_pairs import METRIC_SPECS  # noqa: F401
 
     def test_metric_specs_contains_exactly_two_entries(self):
         """R-AK (acceptance): METRIC_SPECS must have exactly 2 entries (one per track)."""
-        from scripts.rebuild_calibration_pairs_v2 import METRIC_SPECS
+        from scripts.rebuild_calibration_pairs import METRIC_SPECS
 
         assert len(METRIC_SPECS) == 2
 
     def test_metric_specs_covers_high_track(self):
         """R-AK (acceptance): METRIC_SPECS must include a HIGH_LOCALDAY_MAX entry."""
         from src.types.metric_identity import HIGH_LOCALDAY_MAX
-        from scripts.rebuild_calibration_pairs_v2 import METRIC_SPECS
+        from scripts.rebuild_calibration_pairs import METRIC_SPECS
 
         high_specs = [s for s in METRIC_SPECS if s.identity.temperature_metric == "high"]
         assert len(high_specs) == 1
@@ -382,7 +382,7 @@ class TestMetricSpecsTupleCoversLow:
     def test_metric_specs_covers_low_track(self):
         """R-AK (acceptance): METRIC_SPECS must include a LOW_LOCALDAY_MIN entry."""
         from src.types.metric_identity import LOW_LOCALDAY_MIN
-        from scripts.rebuild_calibration_pairs_v2 import METRIC_SPECS
+        from scripts.rebuild_calibration_pairs import METRIC_SPECS
 
         low_specs = [s for s in METRIC_SPECS if s.identity.temperature_metric == "low"]
         assert len(low_specs) == 1
@@ -391,7 +391,7 @@ class TestMetricSpecsTupleCoversLow:
     def test_low_metric_spec_allowed_data_version_matches_identity(self):
         """R-AK (acceptance): low CalibrationMetricSpec.allowed_data_version must match LOW_LOCALDAY_MIN.data_version."""
         from src.types.metric_identity import LOW_LOCALDAY_MIN
-        from scripts.rebuild_calibration_pairs_v2 import METRIC_SPECS
+        from scripts.rebuild_calibration_pairs import METRIC_SPECS
 
         low_spec = next(s for s in METRIC_SPECS if s.identity.temperature_metric == "low")
         assert low_spec.allowed_data_version == LOW_LOCALDAY_MIN.data_version
@@ -408,7 +408,7 @@ class TestIterTrainingSnapshotsMetricIsolation:
     Cross-contamination — a high snapshot appearing in a low calibration family or vice versa —
     would silently corrupt Platt models and downstream posteriors.
 
-    Import target: scripts.rebuild_calibration_pairs_v2 (does not exist yet — ImportError = RED)
+    Import target: scripts.rebuild_calibration_pairs (does not exist yet — ImportError = RED)
     """
 
     def _make_db_with_mixed_snapshots(self, tmp_path):
@@ -463,7 +463,7 @@ class TestIterTrainingSnapshotsMetricIsolation:
     def test_iter_training_snapshots_low_spec_returns_only_low_rows(self, tmp_path):
         """R-AL (acceptance): iter_training_snapshots with low spec must return only low-metric rows."""
         from src.types.metric_identity import LOW_LOCALDAY_MIN
-        from scripts.rebuild_calibration_pairs_v2 import CalibrationMetricSpec, iter_training_snapshots
+        from scripts.rebuild_calibration_pairs import CalibrationMetricSpec, iter_training_snapshots
 
         db = self._make_db_with_mixed_snapshots(tmp_path)
         low_spec = CalibrationMetricSpec(
@@ -480,7 +480,7 @@ class TestIterTrainingSnapshotsMetricIsolation:
     def test_iter_training_snapshots_high_spec_returns_only_high_rows(self, tmp_path):
         """R-AL (acceptance): iter_training_snapshots with high spec must return only high-metric rows."""
         from src.types.metric_identity import HIGH_LOCALDAY_MAX
-        from scripts.rebuild_calibration_pairs_v2 import CalibrationMetricSpec, iter_training_snapshots
+        from scripts.rebuild_calibration_pairs import CalibrationMetricSpec, iter_training_snapshots
 
         db = self._make_db_with_mixed_snapshots(tmp_path)
         high_spec = CalibrationMetricSpec(
@@ -497,7 +497,7 @@ class TestIterTrainingSnapshotsMetricIsolation:
     def test_low_and_high_iter_results_are_disjoint(self, tmp_path):
         """R-AL (acceptance): snapshot_ids returned by low spec and high spec must not overlap."""
         from src.types.metric_identity import HIGH_LOCALDAY_MAX, LOW_LOCALDAY_MIN
-        from scripts.rebuild_calibration_pairs_v2 import CalibrationMetricSpec, iter_training_snapshots
+        from scripts.rebuild_calibration_pairs import CalibrationMetricSpec, iter_training_snapshots
 
         db = self._make_db_with_mixed_snapshots(tmp_path)
         high_spec = CalibrationMetricSpec(HIGH_LOCALDAY_MAX, HIGH_LOCALDAY_MAX.data_version)
@@ -767,7 +767,7 @@ class TestRefitPlattV2LowMetricIsolation:
         db.row_factory = _sqlite3.Row
         db.executescript(
             """
-            CREATE TABLE calibration_pairs_v2 (
+            CREATE TABLE calibration_pairs (
                 city TEXT,
                 target_date TEXT,
                 temperature_metric TEXT,

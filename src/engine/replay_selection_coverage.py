@@ -3,7 +3,7 @@
 # Authority basis: backtest_v2_port_2026_05_07.md §D2+D3
 #
 # Dynamic SQL safety (PR #87 Copilot reply): all f-string SQL in this module
-# interpolates only module-level table-name constants (sv2_table, cp_v2_table,
+# interpolates only module-level table-name constants (sv2_table, cp_table,
 # etc.) resolved from the ReplayContext dataclass, which are themselves derived
 # from compile-time string literals — never from user-controlled input.
 # check_dynamic_sql.py baseline has been updated to include this file.
@@ -262,16 +262,16 @@ def _score_one_snapshot(
         base_result["missing_reason"] = "empty_p_raw"
         return base_result
 
-    if not ctx._calibration_pairs_v2_table:
+    if not ctx._calibration_pairs_table:
         raise ReplayPreflightError(
-            "selection_coverage requires forecasts calibration_pairs_v2 authority table."
+            "selection_coverage requires forecasts calibration_pairs authority table."
         )
 
     # -- Load calibration pair labels for bin construction
     cp_rows = ctx.conn.execute(
         f"""
         SELECT DISTINCT range_label
-        FROM {ctx._calibration_pairs_v2_table}
+        FROM {ctx._calibration_pairs_table}
         WHERE city = ?
           AND target_date = ?
           AND temperature_metric = ?
@@ -504,12 +504,12 @@ def run_selection_coverage(
     conn.row_factory = sqlite3.Row
     ctx = ReplayContext(conn, allow_snapshot_only_reference=True)
 
-    cp_v2_table = ctx._calibration_pairs_v2_table
+    cp_table = ctx._calibration_pairs_table
     sv2_table = ctx._settlements_v2_table
-    if not cp_v2_table or not sv2_table:
+    if not cp_table or not sv2_table:
         conn.close()
         raise ReplayPreflightError(
-            "selection_coverage requires forecasts calibration_pairs_v2 and "
+            "selection_coverage requires forecasts calibration_pairs and "
             "settlements_v2 authority tables."
         )
 
@@ -555,7 +555,7 @@ def run_selection_coverage(
         raw_clim = conn.execute(
             f"""
             SELECT city, target_date, range_label, outcome
-            FROM {cp_v2_table}
+            FROM {cp_table}
             WHERE temperature_metric = ?
             ORDER BY target_date, city, range_label
             """,

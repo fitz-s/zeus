@@ -890,7 +890,7 @@ def _drift_detector_tick():
     Acquires advisory lock.
     """
     from src.data.dual_run_lock import acquire_lock
-    from src.calibration.retrain_trigger_v2 import check_and_arm_refit
+    from src.calibration.drift_refit_arm import check_and_arm_refit
     from src.state.db import get_world_connection
 
     with acquire_lock("drift_detector") as acquired:

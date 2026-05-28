@@ -198,7 +198,7 @@ def get_forecasts_connection(
     Owns: ensemble_snapshots, source_run, source_run_coverage,
           producer readiness_state, job_run for forecast-live work,
           observations, settlements, settlements_v2, market_events,
-          calibration_pairs_v2.
+          calibration_pairs.
     Lock files: state/zeus-forecasts.db.writer-lock.{bulk,live}.
 
     K1 split 2026-05-11: physically separate flock from zeus-world.db so
@@ -894,7 +894,7 @@ def get_connection(
 # CI hook scripts/check_schema_version.py diffs the sqlite_master hash of
 # a fresh-init DB against tests/state/_schema_pinned_hash.txt and fails
 # the PR if SCHEMA_VERSION did not change in lockstep.
-SCHEMA_VERSION = 42  # 2026-05-28 F1 (docs/findings_2026_05_28.md §F1): position_current gains chain_avg_price + chain_cost_basis_usd so balance-only rescue persists chain-observed economics without overwriting submitted entry_price/cost_basis_usd/size_usd. Prior: 41 = merge #349+#352.
+SCHEMA_VERSION = 43  # 2026-05-28 B3: calibration_pairs_v2 → calibration_pairs (drop bare shell from init_schema; v2 DDL now canonical). Prior: 42 = F1 position_current chain economics.
 
 
 def init_schema(
@@ -1056,24 +1056,8 @@ def init_schema(
         -- DDL removed here to prevent recreating the table on every boot after
         -- the operator runs the DROP migration.
 
-        -- Calibration: raw → calibrated probability pairs
-        CREATE TABLE IF NOT EXISTS calibration_pairs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            city TEXT NOT NULL,
-            target_date TEXT NOT NULL,
-            range_label TEXT NOT NULL,
-            p_raw REAL NOT NULL,
-            outcome INTEGER NOT NULL,
-            lead_days REAL NOT NULL,
-            season TEXT NOT NULL,
-            cluster TEXT NOT NULL,
-            forecast_available_at TEXT NOT NULL,
-            settlement_value REAL,
-            decision_group_id TEXT,
-            bias_corrected INTEGER NOT NULL DEFAULT 0 CHECK (bias_corrected IN (0, 1)),
-            authority TEXT NOT NULL DEFAULT 'UNVERIFIED' CHECK (authority IN ('VERIFIED', 'UNVERIFIED', 'QUARANTINED')),
-            bin_source TEXT NOT NULL DEFAULT 'legacy'
-        );
+        -- calibration_pairs bare shell dropped (B3 rename: table now owned by
+        -- apply_v2_schema/_create_calibration_pairs with canonical v2 schema).
 
         -- Independent forecast-event units derived from calibration_pairs.
         -- Behavior-neutral substrate: active Platt routing still uses existing
@@ -1567,8 +1551,7 @@ def init_schema(
             ON token_price_log(token_id, timestamp);
         -- idx_market_events_slug removed in B3cont (PR3): bare market_events shell dropped.
         -- v1.F20: idx_ensemble_city_date removed (ensemble_snapshots table dropped).
-        CREATE INDEX IF NOT EXISTS idx_calibration_bucket
-            ON calibration_pairs(cluster, season);
+        -- idx_calibration_bucket removed in B3 (PR3): bare calibration_pairs shell dropped.
 
         -- K2 data-coverage index — the immune system's memory for live data ingestion.
         -- One row per expected (data_table × city × data_source × target_date × sub_key);
@@ -2235,22 +2218,8 @@ def init_schema(
     except sqlite3.OperationalError:
         pass
 
-    for ddl in [
-        "ALTER TABLE calibration_pairs ADD COLUMN decision_group_id TEXT;",
-        "ALTER TABLE calibration_pairs ADD COLUMN bias_corrected INTEGER NOT NULL DEFAULT 0;",
-        # 2026-04-14 refactor: bin_source discriminator separates canonical-grid
-        # training pairs from legacy market-derived pairs so the destructive
-        # DELETE path in rebuild_calibration_pairs_canonical.py can target
-        # WHERE bin_source='canonical_v1' without LIKE blast radius.
-        "ALTER TABLE calibration_pairs ADD COLUMN bin_source TEXT NOT NULL DEFAULT 'legacy';",
-        # v1.F20 (2026-05-18): ALTER TABLE ensemble_snapshots ADD COLUMN bias_corrected removed.
-        # ensemble_snapshots table dropped; migration no longer applicable.
-    ]:
-        try:
-            conn.execute(ddl)
-        except sqlite3.OperationalError as exc:
-            if "duplicate column" not in str(exc).lower():
-                raise
+    # calibration_pairs bare ALTER TABLE blocks removed in B3 (PR3):
+    # bare calibration_pairs shell dropped; v2 schema owns the table.
 
     # P-B (2026-04-23): INV-14 identity spine + provenance vehicle on settlements.
     # Plan: docs/operations/task_2026-04-23_data_readiness_remediation/evidence/pb_schema_plan.md
@@ -2474,17 +2443,9 @@ def init_schema(
     except sqlite3.OperationalError:
         pass
 
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_calibration_pairs_decision_group ON calibration_pairs(decision_group_id)"
-    )
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_calibration_pairs_group_lookup "
-        "ON calibration_pairs(city, target_date, forecast_available_at)"
-    )
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_calibration_pairs_group_lookup_lead "
-        "ON calibration_pairs(city, target_date, forecast_available_at, lead_days)"
-    )
+    # idx_calibration_pairs_decision_group, idx_calibration_pairs_group_lookup,
+    # idx_calibration_pairs_group_lookup_lead removed in B3 (PR3):
+    # bare calibration_pairs shell dropped; indexes now owned by apply_v2_schema.
     _ensure_calibration_decision_group_lead_key(conn)
 
     _ensure_runtime_bootstrap_support_tables(conn)
@@ -3185,7 +3146,7 @@ _FORECAST_TABLES = (
     "readiness_state",
     "observations",
     "settlements",
-    "calibration_pairs_v2",
+    "calibration_pairs",
     "settlements_v2",
     "market_events",
     # T2 Day0Nowcast — SCHEMA_FORECASTS_VERSION 4 (2026-05-19)
@@ -3216,7 +3177,7 @@ def _ensure_v2_forecast_indexes(conn: sqlite3.Connection) -> None:
     here must match those helpers byte-for-byte. If a new v2 forecast-class
     index is added to v2_schema.py, mirror it here in the same PR.
 
-    Tables covered: ensemble_snapshots, calibration_pairs_v2,
+    Tables covered: ensemble_snapshots, calibration_pairs,
     settlements_v2, market_events.
     """
     # settlements_v2 (mirror src/state/schema/v2_schema.py:49-56)
@@ -3259,18 +3220,18 @@ def _ensure_v2_forecast_indexes(conn: sqlite3.Connection) -> None:
                 source_run_id
             )
     """)
-    # calibration_pairs_v2 (mirror src/state/schema/v2_schema.py:288-299)
+    # calibration_pairs (mirror src/state/schema/v2_schema.py — _create_calibration_pairs)
     conn.execute("""
-        CREATE INDEX IF NOT EXISTS idx_calibration_pairs_v2_bucket
-            ON calibration_pairs_v2(temperature_metric, cluster, season, lead_days)
+        CREATE INDEX IF NOT EXISTS idx_calibration_pairs_bucket
+            ON calibration_pairs(temperature_metric, cluster, season, lead_days)
     """)
     conn.execute("""
-        CREATE INDEX IF NOT EXISTS idx_calibration_pairs_v2_city_date_metric
-            ON calibration_pairs_v2(city, target_date, temperature_metric)
+        CREATE INDEX IF NOT EXISTS idx_calibration_pairs_city_date_metric
+            ON calibration_pairs(city, target_date, temperature_metric)
     """)
     conn.execute("""
-        CREATE INDEX IF NOT EXISTS idx_calibration_pairs_v2_refit_core
-            ON calibration_pairs_v2(temperature_metric, data_version, training_allowed, authority)
+        CREATE INDEX IF NOT EXISTS idx_calibration_pairs_refit_core
+            ON calibration_pairs(temperature_metric, data_version, training_allowed, authority)
     """)
 
 
@@ -3542,7 +3503,7 @@ def init_schema_forecasts(conn: sqlite3.Connection) -> None:
     (derived from registry P2):
       ensemble_snapshots, source_run, source_run_coverage,
       producer readiness_state, job_run, observations, settlements,
-      calibration_pairs_v2, settlements_v2, market_events
+      calibration_pairs, settlements_v2, market_events
 
     Sets PRAGMA user_version = SCHEMA_FORECASTS_VERSION as the final step.
 
@@ -3624,12 +3585,12 @@ def init_schema_forecasts(conn: sqlite3.Connection) -> None:
                 _create_settlements_v2,
                 _create_market_events,
                 _create_ensemble_snapshots,
-                _create_calibration_pairs_v2,
+                _create_calibration_pairs,
             )
             _create_settlements_v2(conn)
             _create_market_events(conn)
             _create_ensemble_snapshots(conn)
-            _create_calibration_pairs_v2(conn)
+            _create_calibration_pairs(conn)
     else:
         # --- Fresh-deploy fallback: static helpers (must stay in sync manually) ---
         import logging as _logging
@@ -3650,12 +3611,12 @@ def init_schema_forecasts(conn: sqlite3.Connection) -> None:
             _create_settlements_v2,
             _create_market_events,
             _create_ensemble_snapshots,
-            _create_calibration_pairs_v2,
+            _create_calibration_pairs,
         )
         _create_settlements_v2(conn)
         _create_market_events(conn)
         _create_ensemble_snapshots(conn)
-        _create_calibration_pairs_v2(conn)
+        _create_calibration_pairs(conn)
 
     # Forecast authority post-condition: older world.db schemas or partial K1
     # copies can omit the live source-chain tables. These helpers are

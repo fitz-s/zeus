@@ -2487,7 +2487,7 @@ class TestSourceContractGate:
         conn.row_factory = sqlite3.Row
         conn.execute(
             """
-            CREATE TABLE calibration_pairs_v2 (
+            CREATE TABLE calibration_pairs (
                 temperature_metric TEXT,
                 training_allowed INTEGER,
                 authority TEXT,
@@ -2506,7 +2506,7 @@ class TestSourceContractGate:
             for idx in range(refit_platt.MIN_DECISION_GROUPS):
                 conn.execute(
                     """
-                    INSERT INTO calibration_pairs_v2 (
+                    INSERT INTO calibration_pairs (
                         temperature_metric, training_allowed, authority,
                         decision_group_id, p_raw, city, target_date,
                         cluster, season, data_version

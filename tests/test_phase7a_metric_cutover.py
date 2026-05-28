@@ -55,7 +55,7 @@ def _insert_canonical_pair(
     )
     conn.execute(
         """
-        INSERT INTO calibration_pairs_v2
+        INSERT INTO calibration_pairs
         (city, target_date, temperature_metric, observation_field, range_label,
          p_raw, outcome, lead_days, season, cluster, forecast_available_at,
          settlement_value, decision_group_id, bias_corrected, authority,
@@ -78,7 +78,7 @@ class TestR_BH_DeleteSliceMetricScoped:
 
     def test_R_BH_1_delete_slice_high_preserves_low(self, conn):
         """_delete_canonical_v2_slice(spec=HIGH_SPEC) must NOT delete LOW canonical_v2 rows."""
-        from scripts.rebuild_calibration_pairs_v2 import (
+        from scripts.rebuild_calibration_pairs import (
             _delete_canonical_v2_slice, METRIC_SPECS,
         )
         high_spec = METRIC_SPECS[0]
@@ -88,10 +88,10 @@ class TestR_BH_DeleteSliceMetricScoped:
         _delete_canonical_v2_slice(conn, spec=high_spec)
 
         remaining_low = conn.execute(
-            "SELECT COUNT(*) FROM calibration_pairs_v2 WHERE temperature_metric = 'low'"
+            "SELECT COUNT(*) FROM calibration_pairs WHERE temperature_metric = 'low'"
         ).fetchone()[0]
         remaining_high = conn.execute(
-            "SELECT COUNT(*) FROM calibration_pairs_v2 WHERE temperature_metric = 'high'"
+            "SELECT COUNT(*) FROM calibration_pairs WHERE temperature_metric = 'high'"
         ).fetchone()[0]
 
         assert remaining_low == 1, "LOW canonical_v2 row must survive HIGH-scoped delete"
@@ -99,7 +99,7 @@ class TestR_BH_DeleteSliceMetricScoped:
 
     def test_R_BH_2_delete_slice_low_preserves_high(self, conn):
         """_delete_canonical_v2_slice(spec=LOW_SPEC) must NOT delete HIGH canonical_v2 rows."""
-        from scripts.rebuild_calibration_pairs_v2 import (
+        from scripts.rebuild_calibration_pairs import (
             _delete_canonical_v2_slice, METRIC_SPECS,
         )
         low_spec = METRIC_SPECS[1]
@@ -109,10 +109,10 @@ class TestR_BH_DeleteSliceMetricScoped:
         _delete_canonical_v2_slice(conn, spec=low_spec)
 
         remaining_high = conn.execute(
-            "SELECT COUNT(*) FROM calibration_pairs_v2 WHERE temperature_metric = 'high'"
+            "SELECT COUNT(*) FROM calibration_pairs WHERE temperature_metric = 'high'"
         ).fetchone()[0]
         remaining_low = conn.execute(
-            "SELECT COUNT(*) FROM calibration_pairs_v2 WHERE temperature_metric = 'low'"
+            "SELECT COUNT(*) FROM calibration_pairs WHERE temperature_metric = 'low'"
         ).fetchone()[0]
 
         assert remaining_high == 1, "HIGH canonical_v2 row must survive LOW-scoped delete"
@@ -120,7 +120,7 @@ class TestR_BH_DeleteSliceMetricScoped:
 
     def test_R_BH_3_collect_pre_delete_count_metric_scoped(self, conn):
         """_collect_pre_delete_count(spec=HIGH) counts only HIGH canonical_v2 rows."""
-        from scripts.rebuild_calibration_pairs_v2 import (
+        from scripts.rebuild_calibration_pairs import (
             _collect_pre_delete_count, METRIC_SPECS,
         )
         high_spec = METRIC_SPECS[0]
@@ -144,7 +144,7 @@ class TestR_BI_MainIteratesMetricSpecs:
 
     def test_R_BI_1_main_iterates_both_specs_in_dry_run(self, conn, capsys):
         """Top-level rebuild_all_v2 (or main) invokes rebuild_v2 for every METRIC_SPEC."""
-        from scripts.rebuild_calibration_pairs_v2 import METRIC_SPECS, rebuild_all_v2
+        from scripts.rebuild_calibration_pairs import METRIC_SPECS, rebuild_all_v2
 
         results = rebuild_all_v2(conn, dry_run=True, force=False)
 
@@ -160,7 +160,7 @@ class TestR_BI_MainIteratesMetricSpecs:
         """rebuild_v2 signature must require explicit `spec` (no HIGH default)."""
         import inspect
 
-        from scripts.rebuild_calibration_pairs_v2 import rebuild_v2
+        from scripts.rebuild_calibration_pairs import rebuild_v2
 
         sig = inspect.signature(rebuild_v2)
         spec_param = sig.parameters.get("spec")
@@ -179,7 +179,7 @@ class TestR_BJ_OuterSavepointAtomicity:
 
     def test_R_BJ_1_low_failure_rolls_back_high(self, conn):
         """If LOW rebuild raises, HIGH writes also roll back — no orphan state."""
-        from scripts.rebuild_calibration_pairs_v2 import (
+        from scripts.rebuild_calibration_pairs import (
             METRIC_SPECS, rebuild_all_v2,
         )
 
@@ -195,17 +195,17 @@ class TestR_BJ_OuterSavepointAtomicity:
                     conn_arg, city="Chicago", target_date="2026-06-16",
                     temperature_metric="high",
                 )
-                from scripts.rebuild_calibration_pairs_v2 import RebuildStatsV2
+                from scripts.rebuild_calibration_pairs import RebuildStatsV2
                 return RebuildStatsV2(pairs_written=1, snapshots_processed=1)
             else:
                 raise RuntimeError("SIMULATED: LOW-side hard failure, test R-BJ-1")
 
-        with patch("scripts.rebuild_calibration_pairs_v2.rebuild_v2", side_effect=fake_rebuild_v2):
+        with patch("scripts.rebuild_calibration_pairs.rebuild_v2", side_effect=fake_rebuild_v2):
             with pytest.raises(RuntimeError, match="SIMULATED"):
                 rebuild_all_v2(conn, dry_run=False, force=True)
 
         remaining_2026_06_16 = conn.execute(
-            "SELECT COUNT(*) FROM calibration_pairs_v2 WHERE target_date = '2026-06-16'"
+            "SELECT COUNT(*) FROM calibration_pairs WHERE target_date = '2026-06-16'"
         ).fetchone()[0]
         assert remaining_2026_06_16 == 0, (
             "HIGH-side write on 2026-06-16 must be rolled back when LOW fails — "
@@ -213,7 +213,7 @@ class TestR_BJ_OuterSavepointAtomicity:
         )
 
         preserved_legacy = conn.execute(
-            "SELECT COUNT(*) FROM calibration_pairs_v2 WHERE bin_source = 'legacy_keep_me'"
+            "SELECT COUNT(*) FROM calibration_pairs WHERE bin_source = 'legacy_keep_me'"
         ).fetchone()[0]
         assert preserved_legacy == 1, "unrelated legacy rows must remain untouched"
 
@@ -349,7 +349,7 @@ class TestR_BM_FetchObservationMetricAware:
 
     def test_R_BM_1_fetch_observation_high_spec_returns_high_temp(self, conn):
         """spec=HIGH yields observed_value from high_temp column."""
-        from scripts.rebuild_calibration_pairs_v2 import (
+        from scripts.rebuild_calibration_pairs import (
             _fetch_verified_observation, METRIC_SPECS,
         )
         self._setup_observations(conn)
@@ -364,7 +364,7 @@ class TestR_BM_FetchObservationMetricAware:
 
     def test_R_BM_2_fetch_observation_low_spec_returns_low_temp(self, conn):
         """spec=LOW yields observed_value from low_temp column (CRITICAL-1 fix)."""
-        from scripts.rebuild_calibration_pairs_v2 import (
+        from scripts.rebuild_calibration_pairs import (
             _fetch_verified_observation, METRIC_SPECS,
         )
         self._setup_observations(conn)
@@ -379,7 +379,7 @@ class TestR_BM_FetchObservationMetricAware:
 
     def test_R_BM_3_fetch_observation_low_ignores_high_only_rows(self, conn):
         """spec=LOW must NOT return rows where low_temp IS NULL (even if high_temp present)."""
-        from scripts.rebuild_calibration_pairs_v2 import (
+        from scripts.rebuild_calibration_pairs import (
             _fetch_verified_observation, METRIC_SPECS,
         )
         self._setup_observations(conn)

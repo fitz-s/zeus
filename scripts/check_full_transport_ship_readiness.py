@@ -74,17 +74,17 @@ def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
 # ── Check 1: pairs_complete ────────────────────────────────────────────────────
 
 def check_pairs_complete(world_db: str) -> CheckResult:
-    """calibration_pairs_v2 has rows with error_model_family='full_transport_v1'."""
+    """calibration_pairs has rows with error_model_family='full_transport_v1'."""
     name = "pairs_complete"
     try:
         conn = _conn(world_db)
     except (FileNotFoundError, ValueError) as exc:
         return CheckResult(name, FAIL, f"world_db unavailable: {exc}")
     try:
-        if not _table_exists(conn, "calibration_pairs_v2"):
-            return CheckResult(name, FAIL, "calibration_pairs_v2 table not found")
+        if not _table_exists(conn, "calibration_pairs"):
+            return CheckResult(name, FAIL, "calibration_pairs table not found")
         count = conn.execute(
-            "SELECT COUNT(*) FROM calibration_pairs_v2 WHERE error_model_family='full_transport_v1'",
+            "SELECT COUNT(*) FROM calibration_pairs WHERE error_model_family='full_transport_v1'",
         ).fetchone()[0]
         if count == 0:
             return CheckResult(name, FAIL, "no rows with error_model_family='full_transport_v1' — not yet produced")

@@ -2,12 +2,12 @@
 # Last reused or audited: 2026-05-12
 # Authority basis: K1 workload-class DB split; PR #112 Option (c) split.
 # Tests for scripts/promote_calibration.py.
-"""Unit tests for the STAGE -> prod calibration_pairs_v2 promotion script.
+"""Unit tests for the STAGE -> prod calibration_pairs promotion script.
 
 Each test builds a tiny synthetic STAGE_DB and PROD_DB inside ``tmp_path``,
 exercises one subcommand, and asserts the expected outcome. None of these
 tests touch the real production zeus-forecasts.db. Tests target ONLY the
-calibration_pairs_v2 surface (its sibling platt_models_v2 promotion lives
+calibration_pairs surface (its sibling platt_models_v2 promotion lives
 on zeus-world.db and is covered by tests/test_promote_platt.py).
 """
 
@@ -31,7 +31,7 @@ from scripts import promote_calibration as P  # noqa: E402
 # --------------------------------------------------------------------------
 
 PAIRS_SCHEMA = """
-CREATE TABLE calibration_pairs_v2 (
+CREATE TABLE calibration_pairs (
     pair_id INTEGER PRIMARY KEY AUTOINCREMENT,
     city TEXT NOT NULL,
     target_date TEXT NOT NULL,
@@ -67,7 +67,7 @@ DV_LOW = "tigge_mn2t6_local_calendar_day_min_v1"
 
 
 def _build_db(path: Path, *, with_meta: bool = True) -> None:
-    """Build a tiny calibration_pairs_v2-only DB. Stand-in for zeus-forecasts.db."""
+    """Build a tiny calibration_pairs-only DB. Stand-in for zeus-forecasts.db."""
     conn = sqlite3.connect(str(path))
     conn.executescript(PAIRS_SCHEMA)
     if with_meta:
@@ -86,7 +86,7 @@ def _insert_pair(
 ) -> None:
     conn.execute(
         """
-        INSERT INTO calibration_pairs_v2
+        INSERT INTO calibration_pairs
         (pair_id, city, target_date, temperature_metric, observation_field,
          range_label, p_raw, outcome, lead_days, season, cluster,
          forecast_available_at, snapshot_id, data_version)
@@ -153,7 +153,7 @@ def test_default_prod_db_targets_zeus_forecasts():
     """K1 invariant: this script's default PROD is zeus-forecasts.db, NOT
     zeus-world.db. Cross-DB confusion would break the workload-class split."""
     assert P.DEFAULT_PROD_DB == "state/zeus-forecasts.db"
-    assert P.TARGET_TABLE == "calibration_pairs_v2"
+    assert P.TARGET_TABLE == "calibration_pairs"
 
 
 # --------------------------------------------------------------------------
@@ -274,10 +274,10 @@ def test_promote_commit_replaces_metric_rows(tmp_path, capsys):
 
     p = sqlite3.connect(str(prod))
     high_cities = {r[0] for r in p.execute(
-        "SELECT city FROM calibration_pairs_v2 WHERE data_version=?", (DV_HIGH,)
+        "SELECT city FROM calibration_pairs WHERE data_version=?", (DV_HIGH,)
     )}
     low_cities = {r[0] for r in p.execute(
-        "SELECT city FROM calibration_pairs_v2 WHERE data_version=?", (DV_LOW,)
+        "SELECT city FROM calibration_pairs WHERE data_version=?", (DV_LOW,)
     )}
     p.close()
     assert high_cities == {"Tokyo", "London"}, f"got {high_cities}"
@@ -314,13 +314,13 @@ def test_promote_creates_verifiable_backup(tmp_path, capsys):
     # VACUUM INTO) for ~50x speed on 35 GB PROD. Filename now ends
     # in .db; restorable via ATTACH + INSERT...SELECT.
     backups = list(
-        backup_dir.glob("zeus-forecasts.db.calibration_pairs_v2_pre_promotion_*.db")
+        backup_dir.glob("zeus-forecasts.db.calibration_pairs_pre_promotion_*.db")
     )
     assert len(backups) == 1, f"expected 1 backup, got {backups}"
     backup = backups[0]
 
     # Open the backup as an actual SQLite DB and verify it contains
-    # the pre-promotion row in calibration_pairs_v2 scoped to the
+    # the pre-promotion row in calibration_pairs scoped to the
     # requested data_versions.
     bk = sqlite3.connect(str(backup))
     try:
@@ -328,7 +328,7 @@ def test_promote_creates_verifiable_backup(tmp_path, capsys):
         assert ic == "ok", f"backup integrity_check = {ic}"
         cities = {
             r[0] for r in bk.execute(
-                "SELECT city FROM calibration_pairs_v2 WHERE data_version = ?",
+                "SELECT city FROM calibration_pairs WHERE data_version = ?",
                 (DV_HIGH,),
             )
         }
@@ -338,7 +338,7 @@ def test_promote_creates_verifiable_backup(tmp_path, capsys):
         # Scope guard: backup must NOT contain rows for any other
         # data_version (the trim step deletes them).
         other = bk.execute(
-            "SELECT COUNT(*) FROM calibration_pairs_v2 WHERE data_version != ?",
+            "SELECT COUNT(*) FROM calibration_pairs WHERE data_version != ?",
             (DV_HIGH,),
         ).fetchone()[0]
         assert other == 0, (
@@ -354,7 +354,7 @@ def test_promote_creates_verifiable_backup(tmp_path, capsys):
         # Provenance metadata must be written by the backup function.
         prov_row = bk.execute(
             "SELECT value FROM zeus_meta WHERE key = ?",
-            ("calibration_pairs_v2_backup_provenance",),
+            ("calibration_pairs_backup_provenance",),
         ).fetchone()
         assert prov_row is not None, "Backup must record provenance in zeus_meta"
         prov = json.loads(prov_row[0])
@@ -396,7 +396,7 @@ def test_promote_skip_backup_writes_no_artifact(tmp_path, capsys):
     # And the promotion must still have applied
     p = sqlite3.connect(str(prod))
     high_cities = {r[0] for r in p.execute(
-        "SELECT city FROM calibration_pairs_v2 WHERE data_version = ?",
+        "SELECT city FROM calibration_pairs WHERE data_version = ?",
         (DV_HIGH,),
     )}
     p.close()
@@ -421,7 +421,7 @@ def test_promote_rollback_on_integrity_failure(tmp_path, capsys, monkeypatch):
     # Capture row state before
     p = sqlite3.connect(str(prod))
     pre_cities = {r[0] for r in p.execute(
-        "SELECT city FROM calibration_pairs_v2 WHERE data_version=?", (DV_HIGH,)
+        "SELECT city FROM calibration_pairs WHERE data_version=?", (DV_HIGH,)
     )}
     p.close()
 
@@ -442,7 +442,7 @@ def test_promote_rollback_on_integrity_failure(tmp_path, capsys, monkeypatch):
     # PROD content must be unchanged (rollback worked).
     p = sqlite3.connect(str(prod))
     post_cities = {r[0] for r in p.execute(
-        "SELECT city FROM calibration_pairs_v2 WHERE data_version=?", (DV_HIGH,)
+        "SELECT city FROM calibration_pairs WHERE data_version=?", (DV_HIGH,)
     )}
     p.close()
     assert post_cities == pre_cities, (
@@ -507,7 +507,7 @@ def test_promote_refuses_when_stage_has_zero_rows(tmp_path, capsys):
     # PROD must be untouched
     p = sqlite3.connect(str(prod))
     cities = {r[0] for r in p.execute(
-        "SELECT city FROM calibration_pairs_v2 WHERE data_version=?", (DV_HIGH,)
+        "SELECT city FROM calibration_pairs WHERE data_version=?", (DV_HIGH,)
     )}
     p.close()
     assert cities == {"LiveCity"}
@@ -521,13 +521,13 @@ def test_promote_refuses_on_schema_mismatch(tmp_path, capsys):
     _build_db(stage)
     _build_db(prod)
 
-    # Drop a column on STAGE to force schema drift on calibration_pairs_v2.
+    # Drop a column on STAGE to force schema drift on calibration_pairs.
     # SQLite ALTER TABLE DROP COLUMN was added in 3.35.
     s = sqlite3.connect(str(stage))
     _insert_complete_sentinel(s, "high", DV_HIGH)
     _insert_pair(s, "Tokyo", DV_HIGH)
     try:
-        s.execute("ALTER TABLE calibration_pairs_v2 DROP COLUMN horizon_profile")
+        s.execute("ALTER TABLE calibration_pairs DROP COLUMN horizon_profile")
     except sqlite3.OperationalError:
         pytest.skip("SQLite < 3.35 does not support DROP COLUMN")
     s.commit()
@@ -558,7 +558,7 @@ def test_promote_null_snapshot_id_flag(tmp_path, capsys):
     # Pair with non-NULL snapshot_id
     s.execute(
         """
-        INSERT INTO calibration_pairs_v2
+        INSERT INTO calibration_pairs
         (city, target_date, temperature_metric, observation_field, range_label,
          p_raw, outcome, lead_days, season, cluster, forecast_available_at,
          snapshot_id, data_version)
@@ -585,7 +585,7 @@ def test_promote_null_snapshot_id_flag(tmp_path, capsys):
     p = sqlite3.connect(str(prod))
     snapshot_ids = [
         r[0] for r in p.execute(
-            "SELECT snapshot_id FROM calibration_pairs_v2 WHERE data_version=?",
+            "SELECT snapshot_id FROM calibration_pairs WHERE data_version=?",
             (DV_HIGH,),
         )
     ]
@@ -666,7 +666,7 @@ def test_verify_pass(tmp_path, capsys):
     rc = args.func(args)
     out = capsys.readouterr().out
     assert rc == 0
-    assert "calibration_pairs_v2 has" in out
+    assert "calibration_pairs has" in out
     assert "All identity columns are non-NULL" in out
     # Must NOT do a cross-DB JOIN against platt_models_v2 (K1: lives on
     # zeus-world.db).

@@ -46,7 +46,7 @@ def _make_in_memory_db(cities: list[dict]) -> sqlite3.Connection:
             data_version TEXT,
             temperature_metric TEXT
         );
-        CREATE TABLE calibration_pairs_v2 (
+        CREATE TABLE calibration_pairs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             city TEXT,
             target_date TEXT,
@@ -115,7 +115,7 @@ def _insert_snapshot(conn, city, target_date, snapshot_id, p_raw, lead_hours=72.
 
 def _insert_calibration_pair(conn, city, target_date, range_label, p_raw, outcome, lead_days=3.0, metric="high"):
     conn.execute(
-        """INSERT INTO calibration_pairs_v2
+        """INSERT INTO calibration_pairs
            (city, target_date, range_label, p_raw, outcome, lead_days, season, cluster,
             forecast_available_at, decision_group_id, bias_corrected, temperature_metric)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
@@ -217,7 +217,7 @@ class TestT1Dispatch:
                 data_version TEXT,
                 temperature_metric TEXT
             );
-            CREATE TABLE calibration_pairs_v2 (
+            CREATE TABLE calibration_pairs (
                 pair_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 city TEXT,
                 target_date TEXT,
@@ -259,7 +259,7 @@ class TestT1Dispatch:
         for label in _REAL_LABELS[:3]:
             forecasts.execute(
                 """
-                INSERT INTO calibration_pairs_v2
+                INSERT INTO calibration_pairs
                 (city, target_date, range_label, p_raw, outcome, lead_days, season,
                  cluster, forecast_available_at, decision_group_id, bias_corrected,
                  temperature_metric)
@@ -282,12 +282,12 @@ class TestT1Dispatch:
         world = sqlite3.connect(str(world_db))
         world.executescript(
             """
-            CREATE TABLE calibration_pairs_v2 (range_label TEXT);
+            CREATE TABLE calibration_pairs (range_label TEXT);
             CREATE TABLE settlements_v2 (winning_bin TEXT);
             CREATE TABLE ensemble_snapshots (snapshot_id INTEGER);
             """
         )
-        world.execute("INSERT INTO calibration_pairs_v2 VALUES ('99°C')")
+        world.execute("INSERT INTO calibration_pairs VALUES ('99°C')")
         world.commit()
         world.close()
 

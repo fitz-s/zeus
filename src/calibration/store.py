@@ -111,26 +111,26 @@ def _v2_table_has_stratification(conn: sqlite3.Connection, table_ref: str) -> bo
 
 
 def _v2_pairs_table_has_stratification(conn: sqlite3.Connection) -> bool:
-    """True iff calibration_pairs_v2 has cycle/source_id/horizon_profile columns.
+    """True iff calibration_pairs has cycle/source_id/horizon_profile columns.
 
-    Used by add_calibration_pair_v2 to choose between the migrated INSERT
+    Used by add_calibration_pair to choose between the migrated INSERT
     form (with stratification columns) and the legacy form.  Pre-migration
     fixtures lack the columns so legacy form is the safe fallback.
     """
     return has_columns(
-        conn, "calibration_pairs_v2",
+        conn, "calibration_pairs",
         "cycle", "source_id", "horizon_profile",
     )
 
 
 def _v2_pairs_table_has_error_model_family(conn: sqlite3.Connection) -> bool:
-    """True iff calibration_pairs_v2 has the error_model_family column.
+    """True iff calibration_pairs has the error_model_family column.
 
-    Used by add_calibration_pair_v2 to choose whether to write the predictive-
+    Used by add_calibration_pair to choose whether to write the predictive-
     error provenance tag. Pre-migration fixtures lack the column so callers
     silently fall back to the unstamped INSERT (family is implicitly 'none').
     """
-    return has_columns(conn, "calibration_pairs_v2", "error_model_family")
+    return has_columns(conn, "calibration_pairs", "error_model_family")
 
 
 def infer_bin_width_from_label(range_label: str) -> float | None:
@@ -163,59 +163,6 @@ def infer_bin_width_from_label(range_label: str) -> float | None:
     return None
 
 
-def add_calibration_pair(
-    conn: sqlite3.Connection,
-    city: str,
-    target_date: str,
-    range_label: str,
-    p_raw: float,
-    outcome: int,
-    lead_days: float,
-    season: str,
-    cluster: str,
-    forecast_available_at: str,
-    settlement_value: Optional[float] = None,
-    decision_group_id: Optional[str] = None,
-    bias_corrected: bool = False,
-    *,
-    bin_source: str = "legacy",
-    authority: str = "UNVERIFIED",
-    city_obj: "City",
-) -> None:
-    """Insert a calibration pair (one per bin per settled market).
-
-    Spec §8.1: Harvester generates 11 pairs per settlement (1 outcome=1, 10 outcome=0).
-    settlement_value is stored for audit only — defensive round to integer per contract.
-
-    2026-04-14 refactor: ``bin_source`` defaults to ``"legacy"`` so existing
-    callers (market-bin-derived harvester path, generate_calibration_pairs.py)
-    are unchanged. The new canonical-grid rebuild script passes
-    ``bin_source="canonical_v1"`` to mark rows it owns, which the destructive
-    DELETE path in that script targets by equality match.
-
-    city_obj: City for SettlementSemantics dispatch (HKO oracle_truncate).
-    Required (P10E strict). Use SettlementSemantics.for_city(city_obj).
-    """
-    if settlement_value is not None:
-        from src.contracts.settlement_semantics import SettlementSemantics
-        round_fn = SettlementSemantics.for_city(city_obj).round_values
-        settlement_value = round_fn([float(settlement_value)])[0]
-    if decision_group_id is None or not str(decision_group_id).strip():
-        raise ValueError(
-            "decision_group_id is required; use "
-            "src.calibration.decision_group.compute_id() to generate it"
-        )
-    conn.execute("""
-        INSERT INTO calibration_pairs
-        (city, target_date, range_label, p_raw, outcome, lead_days,
-         season, cluster, forecast_available_at, settlement_value,
-         decision_group_id, bias_corrected, bin_source, authority)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, (city, target_date, range_label, p_raw, outcome, lead_days,
-          season, cluster, forecast_available_at, settlement_value,
-          decision_group_id, int(bool(bias_corrected)), bin_source, authority))
-
-
 def _resolve_training_allowed(source: str, data_version: str, requested: bool) -> bool:
     """INV-15: enforce source whitelist on training_allowed.
 
@@ -236,7 +183,7 @@ def _resolve_training_allowed(source: str, data_version: str, requested: bool) -
 
 
 @capability("calibration_rebuild")
-def add_calibration_pair_v2(
+def add_calibration_pair(
     conn: sqlite3.Connection,
     city: str,
     target_date: str,
@@ -265,7 +212,7 @@ def add_calibration_pair_v2(
     horizon_profile: Optional[str] = None,
     error_model_family: str = "none",
 ) -> None:
-    """Insert a calibration pair into calibration_pairs_v2.
+    """Insert a calibration pair into calibration_pairs.
 
     Requires metric_identity (4A.3 — no legacy default). INV-15: training_allowed
     is silently forced to False if source is not in the canonical whitelist
@@ -293,7 +240,7 @@ def add_calibration_pair_v2(
     # path.
     #
     # Codex P1 #6 collateral (2026-05-04): degrade gracefully when the
-    # calibration_pairs_v2 schema lacks the cycle/source_id/horizon_profile
+    # calibration_pairs schema lacks the cycle/source_id/horizon_profile
     # columns (test fixtures that build the schema directly).  Pre-fix,
     # passing any non-None stratification kwarg with a pre-migration
     # schema raised OperationalError; now we route to the legacy INSERT
@@ -309,7 +256,7 @@ def add_calibration_pair_v2(
     _emf_val = (error_model_family,) if _has_emf else ()
     if cycle is None and source_id is None and horizon_profile is None or not _has_strat_pairs:
         conn.execute(f"""
-            INSERT INTO calibration_pairs_v2
+            INSERT INTO calibration_pairs
             (city, target_date, temperature_metric, observation_field, range_label,
              p_raw, outcome, lead_days, season, cluster, forecast_available_at,
              settlement_value, decision_group_id, bias_corrected, authority,
@@ -326,7 +273,7 @@ def add_calibration_pair_v2(
         ) + _emf_val)
     else:
         conn.execute(f"""
-            INSERT INTO calibration_pairs_v2
+            INSERT INTO calibration_pairs
             (city, target_date, temperature_metric, observation_field, range_label,
              p_raw, outcome, lead_days, season, cluster, forecast_available_at,
              settlement_value, decision_group_id, bias_corrected, authority,
@@ -400,7 +347,7 @@ def get_pairs_for_bucket(
         raise NotImplementedError(
             "get_pairs_for_bucket reads legacy `calibration_pairs`, which "
             "is HIGH-only by Phase 9C L3 convention (no temperature_metric "
-            "column). LOW reads must use calibration_pairs_v2 via the v2 "
+            "column). LOW reads must use calibration_pairs via the v2 "
             "lookup API (load_platt_model_v2 / dedicated v2 readers)."
         )
     table = _qualified_calibration_read_table(conn, "calibration_pairs")
@@ -469,7 +416,7 @@ def get_pairs_count(
     if metric == "low":
         raise NotImplementedError(
             "get_pairs_count reads legacy `calibration_pairs`, which is "
-            "HIGH-only. For LOW counts use the calibration_pairs_v2 API."
+            "HIGH-only. For LOW counts use the calibration_pairs API."
         )
     table = _qualified_calibration_read_table(conn, "calibration_pairs")
     if authority_filter == "any" or not _has_authority_column(conn):
@@ -501,7 +448,7 @@ def get_decision_group_count(
     if metric == "low":
         raise NotImplementedError(
             "get_decision_group_count reads legacy `calibration_pairs`, "
-            "which is HIGH-only. For LOW counts use the calibration_pairs_v2 API."
+            "which is HIGH-only. For LOW counts use the calibration_pairs API."
         )
     table = _qualified_calibration_read_table(conn, "calibration_pairs")
     if authority_filter == "any" or not _has_authority_column(conn):
@@ -604,7 +551,7 @@ def save_platt_model_v2(
     pair source.
 
     error_model_family (2026-05-24): the predictive-error correction family the
-    source calibration_pairs_v2 rows were built under ('none' = uncorrected).
+    source calibration_pairs rows were built under ('none' = uncorrected).
     Appended to model_key ONLY when != 'none' so legacy/uncorrected model_keys
     stay byte-identical to pre-error-model refits; a corrected model lives under
     a distinct key and never collides with the uncorrected one.

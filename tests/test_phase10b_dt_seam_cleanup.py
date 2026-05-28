@@ -386,7 +386,7 @@ class TestRCPV2RowCountSensor:
         conn = sqlite3.connect(":memory:")
         for table in (
             "platt_models_v2",
-            "calibration_pairs_v2",
+            "calibration_pairs",
             "ensemble_snapshots",
             "historical_forecasts",
             "settlements_v2",
@@ -400,7 +400,7 @@ class TestRCPV2RowCountSensor:
         conn = self._make_empty_v2_conn()
         for table in (
             "platt_models_v2",
-            "calibration_pairs_v2",
+            "calibration_pairs",
             "ensemble_snapshots",
             "historical_forecasts",
             "settlements_v2",
@@ -442,7 +442,7 @@ class TestRCPV2RowCountSensor:
 
         assert set(counts_empty.keys()) == {
             "platt_models_v2",
-            "calibration_pairs_v2",
+            "calibration_pairs",
             "ensemble_snapshots",
             "historical_forecasts",
             "settlements_v2",
@@ -491,7 +491,7 @@ class TestRCPV2RowCountSensor:
         forecasts_conn = sqlite3.connect(str(forecasts_path))
         for table in (
             "platt_models_v2",
-            "calibration_pairs_v2",
+            "calibration_pairs",
             "ensemble_snapshots",
             "historical_forecasts",
             "settlements_v2",
@@ -502,7 +502,7 @@ class TestRCPV2RowCountSensor:
             world_conn.execute("INSERT INTO platt_models_v2 DEFAULT VALUES")
             world_conn.execute("INSERT INTO historical_forecasts DEFAULT VALUES")
         for _ in range(3):
-            forecasts_conn.execute("INSERT INTO calibration_pairs_v2 DEFAULT VALUES")
+            forecasts_conn.execute("INSERT INTO calibration_pairs DEFAULT VALUES")
             forecasts_conn.execute("INSERT INTO ensemble_snapshots DEFAULT VALUES")
             forecasts_conn.execute("INSERT INTO settlements_v2 DEFAULT VALUES")
         world_conn.commit()
@@ -516,7 +516,7 @@ class TestRCPV2RowCountSensor:
 
         assert counts["platt_models_v2"] == 2
         assert counts["historical_forecasts"] == 2
-        assert counts["calibration_pairs_v2"] == 3
+        assert counts["calibration_pairs"] == 3
         assert counts["ensemble_snapshots"] == 3
         assert counts["settlements_v2"] == 3
 

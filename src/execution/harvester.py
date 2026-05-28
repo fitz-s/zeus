@@ -24,7 +24,7 @@ import httpx
 from src.calibration.manager import maybe_refit_bucket, season_from_date
 from src.calibration.effective_sample_size import build_decision_group_for_key, write_decision_groups
 from src.calibration.decision_group import compute_id
-from src.calibration.store import add_calibration_pair_v2
+from src.calibration.store import add_calibration_pair
 from src.types.metric_identity import HIGH_LOCALDAY_MAX, LOW_LOCALDAY_MIN, MetricIdentity
 from src.config import City, cities_by_name, get_mode
 from src.contracts.settlement_semantics import SettlementSemantics
@@ -180,7 +180,7 @@ _HARVESTER_STAGE2_SHARED_TABLES = (
     # live on forecasts.db. Legacy v1 (ensemble_snapshots removed by v1.F20; calibration_pairs)
     # remain on world.db and are not checked here post-migration.
     "ensemble_snapshots",
-    "calibration_pairs_v2",
+    "calibration_pairs",
 )
 
 _TRAINING_FORECAST_SOURCES = frozenset({"tigge", "ecmwf_ens"})
@@ -2213,10 +2213,10 @@ def harvest_settlement(
             issue_time,
             source_model_version or "",
         )
-        # C5 routes both tracks through add_calibration_pair_v2. The row also
+        # C5 routes both tracks through add_calibration_pair. The row also
         # preserves forecast-source lineage so runtime/fallback p_raw cannot be
         # rebranded as canonical TIGGE training data.
-        add_calibration_pair_v2(
+        add_calibration_pair(
             conn, city=city.name, target_date=target_date,
             range_label=label, p_raw=p_raw, outcome=outcome,
             lead_days=lead_days, season=season, cluster=city.cluster,
@@ -2234,6 +2234,7 @@ def harvest_settlement(
             cycle=_phase2_cycle,
             source_id=_phase2_source_id_field,
             horizon_profile=_phase2_horizon_profile,
+            bin_source="legacy",
         )
         count += 1
 

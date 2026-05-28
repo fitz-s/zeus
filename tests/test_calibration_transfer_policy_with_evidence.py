@@ -140,7 +140,7 @@ def _insert_target_pairs_for_transfer(
     ]
     conn.executemany(
         """
-        INSERT OR IGNORE INTO calibration_pairs_v2 (
+        INSERT OR IGNORE INTO calibration_pairs (
             pair_id,
             city, target_date, temperature_metric, observation_field, range_label,
             p_raw, outcome, lead_days, season, cluster,

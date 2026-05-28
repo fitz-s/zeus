@@ -628,7 +628,7 @@ class TestHarvester:
 
         # Post-C5: HIGH default routes to calibration_pairs_v2.
         rows = conn.execute(
-            "SELECT outcome, COUNT(*) FROM calibration_pairs_v2 GROUP BY outcome"
+            "SELECT outcome, COUNT(*) FROM calibration_pairs GROUP BY outcome"
         ).fetchall()
         outcome_counts = {r[0]: r[1] for r in rows}
         assert outcome_counts[1] == 1

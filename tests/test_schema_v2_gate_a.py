@@ -85,7 +85,7 @@ def _insert_calibration_pairs_row(conn: sqlite3.Connection, metric: str) -> None
     obs_field = "high_temp" if metric == "high" else "low_temp"
     conn.execute(
         """
-        INSERT INTO calibration_pairs_v2
+        INSERT INTO calibration_pairs
             (city, target_date, temperature_metric, observation_field, range_label,
              p_raw, outcome, lead_days, season, cluster, forecast_available_at,
              bias_corrected, authority, bin_source, data_version,
@@ -150,7 +150,7 @@ TABLE_INSERTERS = {
     "settlements_v2": _insert_settlements_row,
     "market_events": _insert_market_events_row,
     "ensemble_snapshots": _insert_ensemble_snapshots_row,
-    "calibration_pairs_v2": _insert_calibration_pairs_row,
+    "calibration_pairs": _insert_calibration_pairs_row,
     "platt_models_v2": _insert_platt_models_row,
     "day0_metric_fact": _insert_day0_metric_fact_row,
 }

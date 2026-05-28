@@ -557,7 +557,7 @@ def target_transfer_cohort_evidence_valid(
             SELECT pair_id, p_raw, lead_days, outcome, recorded_at,
                    forecast_available_at, target_date, decision_group_id,
                    range_label
-              FROM calibration_pairs_v2
+              FROM calibration_pairs
              WHERE source_id           = ?
                AND cycle               = ?
                AND season              = ?

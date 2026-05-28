@@ -24,7 +24,7 @@ SCRIPTS = REPO / "scripts"
 # Tables that are exclusively forecast_class post-K1-split (not ghost-copied to world)
 # Per architecture/db_table_ownership.yaml: forecast_class entries with no world ghost.
 FORECAST_ONLY_TABLES = {
-    "calibration_pairs_v2",   # 91M rows in forecasts.db; ghost on world is legacy_archived
+    "calibration_pairs",   # 91M rows in forecasts.db; ghost on world is legacy_archived
     "source_run",
     "source_run_coverage",
     "readiness_state",

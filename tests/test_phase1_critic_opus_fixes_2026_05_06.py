@@ -542,9 +542,9 @@ class TestFixD:
         return conn
 
     def _insert_platt_pairs(self, conn, cluster: str, season: str, n: int = 30) -> None:
-        """Insert minimal calibration_pairs_v2 rows for the bucket.
+        """Insert minimal calibration_pairs rows for the bucket.
 
-        calibration_pairs_v2 columns (from v2_schema.py):
+        calibration_pairs columns (from v2_schema.py):
           city, target_date, temperature_metric, observation_field, range_label,
           p_raw, outcome, lead_days, season, cluster, forecast_available_at,
           decision_group_id, bin_source, data_version, cycle, source_id,
@@ -562,7 +562,7 @@ class TestFixD:
             group_id = f"{cluster}_{season}_{i}"
             conn.execute(
                 """
-                INSERT INTO calibration_pairs_v2
+                INSERT INTO calibration_pairs
                     (city, target_date, temperature_metric, observation_field,
                      range_label, p_raw, outcome, lead_days,
                      season, cluster, forecast_available_at,

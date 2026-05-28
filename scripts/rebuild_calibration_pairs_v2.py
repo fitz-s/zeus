@@ -96,7 +96,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.calibration.decision_group import compute_id
 from src.calibration.metric_specs import CalibrationMetricSpec, METRIC_SPECS
-from src.calibration.store import add_calibration_pair_v2
+from src.calibration.store import add_calibration_pair
 from src.config import City, calibration_batch_rebuild_n_mc, cities_by_name
 from src.contracts.season import season_from_date
 from src.contracts.calibration_bins import (
@@ -1001,7 +1001,7 @@ def _scoped_pair_predicate(
     horizon_profile_filter: Optional[str] = None,
     error_model_family_filter: Optional[str] = None,
 ) -> tuple[str, list]:
-    columns = _table_columns(conn, "calibration_pairs_v2")
+    columns = _table_columns(conn, "calibration_pairs")
     where_parts = ["bin_source = ?", "temperature_metric = ?"]
     params: list = [CANONICAL_BIN_SOURCE_V2, spec.identity.temperature_metric]
     # P1 (2026-05-25): scope delete/count to the specific error_model_family being
@@ -1065,7 +1065,7 @@ def _collect_pre_delete_count(
         error_model_family_filter=error_model_family_filter,
     )
     return conn.execute(
-        f"SELECT COUNT(*) FROM calibration_pairs_v2 WHERE {where}",
+        f"SELECT COUNT(*) FROM calibration_pairs WHERE {where}",
         tuple(params),
     ).fetchone()[0]
 
@@ -1096,7 +1096,7 @@ def _delete_canonical_v2_slice(
         error_model_family_filter=error_model_family_filter,
     )
     conn.execute(
-        f"DELETE FROM calibration_pairs_v2 WHERE {where}",
+        f"DELETE FROM calibration_pairs WHERE {where}",
         tuple(params),
     )
 
@@ -1343,7 +1343,7 @@ def _write_snapshot_pairs_v2(
     pairs_this_snapshot = 0
     for b, p in zip(bins, p_raw_vec):
         outcome = 1 if b is winning_bin else 0
-        add_calibration_pair_v2(
+        add_calibration_pair(
             conn,
             city=city.name,
             target_date=target_date,

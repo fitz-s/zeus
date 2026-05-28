@@ -67,7 +67,7 @@ ALLOWLISTED_WRITE_MODULES: frozenset[str] = frozenset(
         # Backfill and rebuild scripts (operator-run offline)
         "scripts/backfill_wu_daily_all.py",
         "scripts/rebuild_calibration_pairs_canonical.py",
-        "scripts/rebuild_calibration_pairs_v2.py",
+        "scripts/rebuild_calibration_pairs.py",
         "scripts/rebuild_settlements.py",
         "scripts/migrate_add_authority_column.py",
         # Calibration producers (trading-side read-only target per Q2; writers here
@@ -132,7 +132,7 @@ WORLD_DB_TABLES: tuple[str, ...] = (
     "settlements",
     "ensemble_snapshots",
     "ensemble_snapshots",
-    "calibration_pairs_v2",
+    "calibration_pairs",
     "platt_models_v2",
     "model_bias",
     "forecast_skill",

@@ -3,13 +3,13 @@
 # Authority basis: team_lead_handoff.md §"Phase 5C scope" Gate D; docs/authority/zeus_dual_track_architecture.md §6
 """Phase 5C Gate D: low-purity isolation tests — R-AZ
 
-Asserts calibration_pairs_v2 and platt_models_v2 have zero cross-metric leakage:
+Asserts calibration_pairs and platt_models_v2 have zero cross-metric leakage:
   - HIGH rebuild does not write LOW-metric rows.
   - LOW rebuild does not write HIGH-metric rows.
   - Platt model buckets do not share (temperature_metric, cluster, season) keys across metrics.
 
 R-AZ (TestGateDLowPurityIsolation): insert mixed high+low snapshot rows; run rebuild_v2
-for each spec; assert no cross-metric rows appear in calibration_pairs_v2; assert
+for each spec; assert no cross-metric rows appear in calibration_pairs; assert
 platt_models_v2 model_key is scoped per metric.
 """
 from __future__ import annotations
@@ -49,7 +49,7 @@ CREATE TABLE IF NOT EXISTS ensemble_snapshots (
 """
 
 _CALIBRATION_PAIRS_V2_DDL = """
-CREATE TABLE IF NOT EXISTS calibration_pairs_v2 (
+CREATE TABLE IF NOT EXISTS calibration_pairs (
     id INTEGER PRIMARY KEY,
     city TEXT, target_date TEXT, temperature_metric TEXT, observation_field TEXT,
     range_label TEXT, p_raw REAL, outcome INTEGER, lead_days REAL, season TEXT,
@@ -147,7 +147,7 @@ def _make_gate_d_db() -> sqlite3.Connection:
 # ---------------------------------------------------------------------------
 
 class TestGateDLowPurityIsolation:
-    """R-AZ: calibration_pairs_v2 and platt_models_v2 must have zero cross-metric leakage."""
+    """R-AZ: calibration_pairs and platt_models_v2 must have zero cross-metric leakage."""
 
     def test_R_AZ_1_high_rebuild_writes_only_high_rows(self):
         """R-AZ-1 (RED): rebuild_v2 with HIGH_SPEC must not write any temperature_metric='low' rows.
@@ -156,7 +156,7 @@ class TestGateDLowPurityIsolation:
         If the SQL filter in rebuild_v2 is missing or weak, LOW rows from ensemble_snapshots
         could be processed. Post-fix: spec param + data_version assertion makes this impossible.
         """
-        from scripts.rebuild_calibration_pairs_v2 import rebuild_v2, CalibrationMetricSpec, RebuildStatsV2
+        from scripts.rebuild_calibration_pairs import rebuild_v2, CalibrationMetricSpec, RebuildStatsV2
         from src.types.metric_identity import HIGH_LOCALDAY_MAX
 
         conn = _make_gate_d_db()
@@ -181,10 +181,10 @@ class TestGateDLowPurityIsolation:
             pass
 
         low_rows = conn.execute(
-            "SELECT COUNT(*) FROM calibration_pairs_v2 WHERE temperature_metric = 'low'"
+            "SELECT COUNT(*) FROM calibration_pairs WHERE temperature_metric = 'low'"
         ).fetchone()[0]
         assert low_rows == 0, (
-            f"HIGH rebuild wrote {low_rows} temperature_metric='low' rows to calibration_pairs_v2. "
+            f"HIGH rebuild wrote {low_rows} temperature_metric='low' rows to calibration_pairs. "
             "Cross-metric leakage confirmed. Fix: spec param must filter to HIGH data_version only."
         )
 
@@ -198,7 +198,7 @@ class TestGateDLowPurityIsolation:
         cross-metric leakage would first appear — if the SQL WHERE clause drops
         or mishandles temperature_metric, LOW rebuild would process HIGH rows.
         """
-        from scripts.rebuild_calibration_pairs_v2 import (
+        from scripts.rebuild_calibration_pairs import (
             _fetch_eligible_snapshots_v2, CalibrationMetricSpec,
         )
         from src.types.metric_identity import HIGH_LOCALDAY_MAX, LOW_LOCALDAY_MIN
@@ -226,7 +226,7 @@ class TestGateDLowPurityIsolation:
         )
 
     def test_R_AZ_2a_eligible_snapshot_query_requires_explicit_spec(self):
-        from scripts.rebuild_calibration_pairs_v2 import _fetch_eligible_snapshots_v2
+        from scripts.rebuild_calibration_pairs import _fetch_eligible_snapshots_v2
 
         conn = _make_gate_d_db()
         with pytest.raises(ValueError, match="requires an explicit CalibrationMetricSpec"):
@@ -234,7 +234,7 @@ class TestGateDLowPurityIsolation:
 
     def test_R_AZ_2b_low_rebuild_rejects_ambiguous_contract_window_even_if_training_allowed(self):
         """LOW pair rebuild must not trust training_allowed over contract-window evidence."""
-        from scripts.rebuild_calibration_pairs_v2 import (
+        from scripts.rebuild_calibration_pairs import (
             METRIC_SPECS,
             RebuildStatsV2,
             _process_snapshot_v2,
@@ -298,13 +298,13 @@ class TestGateDLowPurityIsolation:
 
         assert stats.snapshots_contract_evidence_rejected == 1
         assert stats.pairs_written == 0
-        assert conn.execute("SELECT COUNT(*) FROM calibration_pairs_v2").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM calibration_pairs").fetchone()[0] == 0
         assert stats.contract_evidence_rejection_reasons == {
             "low_window_not_target_full:AMBIGUOUS_CROSSES_LOCAL_DAY_BOUNDARY": 1
         }
 
     def test_R_AZ_2c_low_contract_evidence_accepts_fully_inside_target_window(self):
-        from scripts.rebuild_calibration_pairs_v2 import (
+        from scripts.rebuild_calibration_pairs import (
             METRIC_SPECS,
             _low_contract_evidence_rejection,
         )
@@ -368,7 +368,7 @@ class TestGateDLowPurityIsolation:
             assert _low_contract_evidence_rejection(snapshot, spec=METRIC_SPECS[1]) is None
 
     def test_R_AZ_2c2_rebuild_data_version_filter_scopes_fetch_and_delete(self):
-        from scripts.rebuild_calibration_pairs_v2 import (
+        from scripts.rebuild_calibration_pairs import (
             CANONICAL_BIN_SOURCE_V2,
             METRIC_SPECS,
             _delete_canonical_v2_slice,
@@ -406,7 +406,7 @@ class TestGateDLowPurityIsolation:
         )
         conn.execute(
             """
-            INSERT INTO calibration_pairs_v2 (
+            INSERT INTO calibration_pairs (
                 city, target_date, temperature_metric, range_label, p_raw,
                 outcome, lead_days, season, cluster, forecast_available_at,
                 settlement_value, decision_group_id, authority, bin_source,
@@ -444,12 +444,12 @@ class TestGateDLowPurityIsolation:
             data_version_filter=ECMWF_OPENDATA_LOW_CONTRACT_WINDOW_DATA_VERSION,
         )
         remaining = conn.execute(
-            "SELECT data_version FROM calibration_pairs_v2 ORDER BY data_version"
+            "SELECT data_version FROM calibration_pairs ORDER BY data_version"
         ).fetchall()
         assert [row["data_version"] for row in remaining] == [LOW_LOCALDAY_MIN.data_version]
 
     def test_R_AZ_2c2_rebuild_stratification_filters_scope_fetch_and_delete(self):
-        from scripts.rebuild_calibration_pairs_v2 import (
+        from scripts.rebuild_calibration_pairs import (
             CANONICAL_BIN_SOURCE_V2,
             METRIC_SPECS,
             _delete_canonical_v2_slice,
@@ -506,7 +506,7 @@ class TestGateDLowPurityIsolation:
         )
         conn.executemany(
             """
-            INSERT INTO calibration_pairs_v2 (
+            INSERT INTO calibration_pairs (
                 city, target_date, temperature_metric, range_label, p_raw,
                 outcome, lead_days, season, cluster, forecast_available_at,
                 settlement_value, decision_group_id, authority, bin_source,
@@ -578,7 +578,7 @@ class TestGateDLowPurityIsolation:
         remaining = conn.execute(
             """
             SELECT target_date, data_version, cycle, source_id, horizon_profile
-            FROM calibration_pairs_v2
+            FROM calibration_pairs
             ORDER BY target_date
             """
         ).fetchall()
@@ -609,7 +609,7 @@ class TestGateDLowPurityIsolation:
         ]
 
     def test_R_AZ_2c3_rebuild_dry_run_evaluates_low_contract_and_observation_gates(self):
-        from scripts.rebuild_calibration_pairs_v2 import METRIC_SPECS, rebuild_v2
+        from scripts.rebuild_calibration_pairs import METRIC_SPECS, rebuild_v2
         from src.state.db import init_schema
         from src.state.schema.v2_schema import apply_v2_schema
         from src.types.metric_identity import LOW_LOCALDAY_MIN
@@ -688,7 +688,7 @@ class TestGateDLowPurityIsolation:
         assert stats.pairs_written == 0
 
     def test_R_AZ_2d_low_recovery_data_version_requires_contract_evidence(self):
-        from scripts.rebuild_calibration_pairs_v2 import (
+        from scripts.rebuild_calibration_pairs import (
             METRIC_SPECS,
             _low_contract_evidence_rejection,
         )
@@ -746,7 +746,7 @@ class TestGateDLowPurityIsolation:
         model_key = '{temperature_metric}:{cluster}:{season}' — HIGH and LOW must never collide
         on the same model_key even if cluster+season are identical.
         """
-        from scripts.rebuild_calibration_pairs_v2 import CalibrationMetricSpec
+        from scripts.rebuild_calibration_pairs import CalibrationMetricSpec
         from src.types.metric_identity import HIGH_LOCALDAY_MAX, LOW_LOCALDAY_MIN
         from src.calibration.store import save_platt_model_v2
 

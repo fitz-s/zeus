@@ -208,7 +208,7 @@ def _insert_pairs(
     ]
     conn.executemany(
         """
-        INSERT INTO calibration_pairs_v2 (
+        INSERT INTO calibration_pairs (
             pair_id,
             city, target_date, temperature_metric, observation_field, range_label,
             p_raw, outcome, lead_days, season, cluster,
@@ -437,7 +437,7 @@ def test_missing_decision_group_cannot_write_transfer_evidence() -> None:
         season="summer", cluster="cl_a", metric="high",
         n=1000, p_raw=0.7, outcome=1,
     )
-    conn.execute("UPDATE calibration_pairs_v2 SET decision_group_id = NULL")
+    conn.execute("UPDATE calibration_pairs SET decision_group_id = NULL")
 
     summary = run_oos_evaluation(conn, now=_NOW)
 

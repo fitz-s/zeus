@@ -268,7 +268,7 @@ def _seed_minimal_ready_training_tables(conn, *, seed_observations=True):
     conn.execute("INSERT INTO forecasts (id, retrieved_at) VALUES (1, '2026-04-22T12:00:00Z')")
     conn.execute(
         """
-        CREATE TABLE calibration_pairs_v2 (
+        CREATE TABLE calibration_pairs (
             city TEXT,
             target_date TEXT,
             temperature_metric TEXT,
@@ -530,7 +530,7 @@ def _seed_platt_refit_pairs(conn, *, n_groups=None):
         for index in range(n_groups):
             conn.execute(
                 """
-                INSERT INTO calibration_pairs_v2 (
+                INSERT INTO calibration_pairs (
                     city, target_date, temperature_metric, observation_field,
                     range_label, p_raw, outcome, lead_days, season, cluster,
                     forecast_available_at, settlement_value, decision_group_id,
@@ -667,7 +667,7 @@ class TestTrainingReadinessP0:
             "forecasts",
             "historical_forecasts",
             "ensemble_snapshots",
-            "calibration_pairs_v2",
+            "calibration_pairs",
             "platt_models_v2",
             "market_events",
             "market_price_history",
@@ -708,7 +708,7 @@ class TestTrainingReadinessP0:
         _seed_minimal_ready_training_tables(conn, seed_observations=True)
         conn.execute(
             """
-            DELETE FROM calibration_pairs_v2
+            DELETE FROM calibration_pairs
             WHERE temperature_metric = 'high'
               AND target_date = '2026-04-01'
             """
@@ -720,8 +720,8 @@ class TestTrainingReadinessP0:
 
         assert report["ready"] is False
         assert "empty_platt_refit_bucket" in _blocker_codes(report)
-        high_check = report["checks"]["calibration_pairs_v2.high.mature_bucket_present"]
-        low_check = report["checks"]["calibration_pairs_v2.low.mature_bucket_present"]
+        high_check = report["checks"]["calibration_pairs.high.mature_bucket_present"]
+        low_check = report["checks"]["calibration_pairs.low.mature_bucket_present"]
         assert high_check["status"] == "FAIL"
         assert high_check["count"] == 0
         assert low_check["status"] == "PASS"
@@ -738,7 +738,7 @@ class TestTrainingReadinessP0:
 
         assert report["ready"] is True
         assert report["mode"] == "calibration-pair-rebuild-preflight"
-        assert "calibration_pairs_v2" not in report["checks"]
+        assert "calibration_pairs" not in report["checks"]
         assert "platt_models_v2" not in report["checks"]
         assert training_report["ready"] is False
         assert "empty_v2_table" in _blocker_codes(training_report)
@@ -1025,8 +1025,8 @@ class TestTrainingReadinessP0:
         assert report["ready"] is True
         assert report["mode"] == "platt-refit-preflight"
         assert "platt_models_v2" not in report["checks"]
-        assert report["checks"]["calibration_pairs_v2.high.mature_bucket_present"]["status"] == "PASS"
-        assert report["checks"]["calibration_pairs_v2.low.mature_bucket_present"]["status"] == "PASS"
+        assert report["checks"]["calibration_pairs.high.mature_bucket_present"]["status"] == "PASS"
+        assert report["checks"]["calibration_pairs.low.mature_bucket_present"]["status"] == "PASS"
 
     def test_platt_refit_preflight_fails_when_pair_inputs_are_unsafe(self, tmp_path):
         db_path = _fresh_training_readiness_world_db(tmp_path)
@@ -1034,7 +1034,7 @@ class TestTrainingReadinessP0:
         _seed_platt_refit_pairs(conn)
         conn.execute(
             """
-            UPDATE calibration_pairs_v2
+            UPDATE calibration_pairs
             SET p_raw = 1.2, causality_status = 'UNKNOWN', decision_group_id = ''
             WHERE temperature_metric = 'high'
               AND target_date = '2026-04-01'
@@ -1046,9 +1046,9 @@ class TestTrainingReadinessP0:
         report = build_platt_refit_preflight_report(db_path)
 
         blockers = _blocker_codes(report)
-        assert "calibration_pairs_v2.p_raw_domain_unsafe" in blockers
-        assert "calibration_pairs_v2.causality_unsafe" in blockers
-        assert "calibration_pairs_v2.decision_group_missing" in blockers
+        assert "calibration_pairs.p_raw_domain_unsafe" in blockers
+        assert "calibration_pairs.causality_unsafe" in blockers
+        assert "calibration_pairs.decision_group_missing" in blockers
 
     def test_rebuild_live_write_refuses_when_preflight_is_not_ready(
         self,
@@ -1056,15 +1056,15 @@ class TestTrainingReadinessP0:
         monkeypatch,
         capsys,
     ):
-        from scripts import rebuild_calibration_pairs_v2
+        from scripts import rebuild_calibration_pairs
 
         db_path = _fresh_training_readiness_world_db(tmp_path)
 
         monkeypatch.setattr(
-            rebuild_calibration_pairs_v2.sys,
+            rebuild_calibration_pairs.sys,
             "argv",
             [
-                "rebuild_calibration_pairs_v2.py",
+                "rebuild_calibration_pairs.py",
                 "--no-dry-run",
                 "--force",
                 "--db",
@@ -1072,7 +1072,7 @@ class TestTrainingReadinessP0:
             ],
         )
 
-        assert rebuild_calibration_pairs_v2.main() == 1
+        assert rebuild_calibration_pairs.main() == 1
         assert "preflight is NOT_READY" in capsys.readouterr().err
 
     def test_refit_live_write_refuses_when_preflight_is_not_ready(
@@ -1104,7 +1104,7 @@ class TestTrainingReadinessP0:
         conn = sqlite3.connect(db_path)
         for table in [
             "forecasts",
-            "calibration_pairs_v2",
+            "calibration_pairs",
             "platt_models_v2",
             "market_events",
             "market_price_history",
@@ -2066,7 +2066,7 @@ class TestP4Readiness:
             "p4_market_events_empty",
             "p4_settlements_v2_empty",
             "p4_ensemble_snapshots_empty",
-            "p4_calibration_pairs_v2_empty",
+            "p4_calibration_pairs_empty",
             "p4_wu_api_key_missing",
             "p4_scheduler_health_missing",
             "p4_forecast_row_count_evidence_missing",
@@ -2259,7 +2259,7 @@ class TestSettlementFreshness:
     def test_settlement_freshness(self):
         """Latest settlement activity must be within 48h.
 
-        Checks decision_log settlement artifacts and calibration_pairs_v2,
+        Checks decision_log settlement artifacts and calibration_pairs,
         not the deprecated legacy settlements table.
         """
         conn = get_connection()
@@ -2267,13 +2267,13 @@ class TestSettlementFreshness:
             "SELECT MAX(timestamp) FROM decision_log WHERE mode = 'settlement'"
         ).fetchone()[0]
 
-        calibration_table = "calibration_pairs_v2"
+        calibration_table = "calibration_pairs"
         max_cal_target = conn.execute(
             f"SELECT MAX(target_date) FROM {calibration_table}"
         ).fetchone()[0]
 
         assert max_settled is not None or max_cal_target is not None, (
-            "No settlement activity found in decision_log or calibration_pairs_v2"
+            "No settlement activity found in decision_log or calibration_pairs"
         )
 
         if max_settled:

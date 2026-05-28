@@ -238,14 +238,15 @@ def _create_ensemble_snapshots(conn: sqlite3.Connection) -> None:
     """)
 
 
-def _create_calibration_pairs_v2(conn: sqlite3.Connection) -> None:
-    """Create calibration_pairs_v2 table + indexes + ALTERs. Idempotent.
+def _create_calibration_pairs(conn: sqlite3.Connection) -> None:
+    """Create calibration_pairs table + indexes + ALTERs. Idempotent.
 
     K1 forecast-class table (moves to zeus-forecasts.db). Architect refinement:
     UNIQUE on the full dedup key. Phase 2 ALTERs for cycle/source_id/horizon_profile.
+    Collapsed from calibration_pairs_v2 (B3 rename — bare shell dropped).
     """
     conn.execute("""
-        CREATE TABLE IF NOT EXISTS calibration_pairs_v2 (
+        CREATE TABLE IF NOT EXISTS calibration_pairs (
             pair_id INTEGER PRIMARY KEY AUTOINCREMENT,
             city TEXT NOT NULL,
             target_date TEXT NOT NULL,
@@ -306,10 +307,10 @@ def _create_calibration_pairs_v2(conn: sqlite3.Connection) -> None:
     # cannot ALTER an existing UNIQUE, and a single rebuild scope only ever
     # writes ONE family; the destructive delete is keyed on bin_source.
     for alter_sql in [
-        "ALTER TABLE calibration_pairs_v2 ADD COLUMN cycle TEXT NOT NULL DEFAULT '00'",
-        "ALTER TABLE calibration_pairs_v2 ADD COLUMN source_id TEXT NOT NULL DEFAULT 'tigge_mars'",
-        "ALTER TABLE calibration_pairs_v2 ADD COLUMN horizon_profile TEXT NOT NULL DEFAULT 'full'",
-        "ALTER TABLE calibration_pairs_v2 ADD COLUMN error_model_family TEXT NOT NULL DEFAULT 'none'",
+        "ALTER TABLE calibration_pairs ADD COLUMN cycle TEXT NOT NULL DEFAULT '00'",
+        "ALTER TABLE calibration_pairs ADD COLUMN source_id TEXT NOT NULL DEFAULT 'tigge_mars'",
+        "ALTER TABLE calibration_pairs ADD COLUMN horizon_profile TEXT NOT NULL DEFAULT 'full'",
+        "ALTER TABLE calibration_pairs ADD COLUMN error_model_family TEXT NOT NULL DEFAULT 'none'",
     ]:
         try:
             conn.execute(alter_sql)
@@ -317,34 +318,34 @@ def _create_calibration_pairs_v2(conn: sqlite3.Connection) -> None:
             if "duplicate column" not in str(exc).lower():
                 raise
     conn.execute("""
-        CREATE INDEX IF NOT EXISTS idx_calibration_pairs_v2_bucket
-            ON calibration_pairs_v2(temperature_metric, cluster, season, lead_days)
+        CREATE INDEX IF NOT EXISTS idx_calibration_pairs_bucket
+            ON calibration_pairs(temperature_metric, cluster, season, lead_days)
     """)
     conn.execute("""
-        CREATE INDEX IF NOT EXISTS idx_calibration_pairs_v2_city_date_metric
-            ON calibration_pairs_v2(city, target_date, temperature_metric)
+        CREATE INDEX IF NOT EXISTS idx_calibration_pairs_city_date_metric
+            ON calibration_pairs(city, target_date, temperature_metric)
     """)
     conn.execute("""
-        CREATE INDEX IF NOT EXISTS idx_calibration_pairs_v2_refit_core
-            ON calibration_pairs_v2(temperature_metric, data_version, training_allowed, authority)
+        CREATE INDEX IF NOT EXISTS idx_calibration_pairs_refit_core
+            ON calibration_pairs(temperature_metric, data_version, training_allowed, authority)
     """)
     # PHASE0-PR4: Install NOT NULL triggers on fresh DBs so the enforcement invariant
     # holds from the first INSERT, not only after the operator runs the migration script.
     # Idempotent (CREATE TRIGGER IF NOT EXISTS).
     conn.execute("""
-        CREATE TRIGGER IF NOT EXISTS calibration_pairs_v2_dgid_not_null_ins
-        BEFORE INSERT ON calibration_pairs_v2
+        CREATE TRIGGER IF NOT EXISTS calibration_pairs_dgid_not_null_ins
+        BEFORE INSERT ON calibration_pairs
         WHEN NEW.decision_group_id IS NULL
         BEGIN
-            SELECT RAISE(ABORT, 'NOT NULL: calibration_pairs_v2.decision_group_id');
+            SELECT RAISE(ABORT, 'NOT NULL: calibration_pairs.decision_group_id');
         END
     """)
     conn.execute("""
-        CREATE TRIGGER IF NOT EXISTS calibration_pairs_v2_dgid_not_null_upd
-        BEFORE UPDATE OF decision_group_id ON calibration_pairs_v2
+        CREATE TRIGGER IF NOT EXISTS calibration_pairs_dgid_not_null_upd
+        BEFORE UPDATE OF decision_group_id ON calibration_pairs
         WHEN NEW.decision_group_id IS NULL
         BEGIN
-            SELECT RAISE(ABORT, 'NOT NULL: calibration_pairs_v2.decision_group_id');
+            SELECT RAISE(ABORT, 'NOT NULL: calibration_pairs.decision_group_id');
         END
     """)
 
@@ -519,9 +520,9 @@ def apply_v2_schema(conn: sqlite3.Connection, *, forecast_tables: bool = True) -
             _create_ensemble_snapshots(conn)
 
             # ----------------------------------------------------------------
-            # calibration_pairs_v2  (K1 forecast-class: moves to zeus-forecasts.db)
+            # calibration_pairs  (K1 forecast-class: moves to zeus-forecasts.db)
             # ----------------------------------------------------------------
-            _create_calibration_pairs_v2(conn)
+            _create_calibration_pairs(conn)
 
         # ----------------------------------------------------------------
         # platt_models_v2

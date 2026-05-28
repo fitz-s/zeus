@@ -2,7 +2,7 @@
 # Last reused or audited: 2026-05-13
 # Authority basis: K1 workload-class DB split; ATTACH+SQL bulk promote
 # path rewrite (2026-05-13). Verifies the cross-module relationship
-# between STAGE.calibration_pairs_v2 -> PROD.calibration_pairs_v2 under
+# between STAGE.calibration_pairs -> PROD.calibration_pairs under
 # the new INSERT...SELECT bulk path. These are RELATIONSHIP tests
 # (semantic invariants across the STAGE/PROD boundary), per the
 # project-wide "relationship tests before function tests" rule.
@@ -43,7 +43,7 @@ DV_LOW = "tigge_mn2t6_local_calendar_day_min_v1"
 DV_LOW_CONTRACT = "tigge_mn2t6_local_calendar_day_min_contract_window_v2"
 
 PAIRS_SCHEMA = """
-CREATE TABLE calibration_pairs_v2 (
+CREATE TABLE calibration_pairs (
     pair_id INTEGER PRIMARY KEY AUTOINCREMENT,
     city TEXT NOT NULL,
     target_date TEXT NOT NULL,
@@ -94,7 +94,7 @@ def _insert_pair(
 ) -> None:
     conn.execute(
         """
-        INSERT INTO calibration_pairs_v2
+        INSERT INTO calibration_pairs
         (pair_id, city, target_date, temperature_metric, observation_field,
          range_label, p_raw, outcome, lead_days, season, cluster,
          forecast_available_at, snapshot_id, data_version)
@@ -225,9 +225,9 @@ def test_attach_path_null_snapshot_id(tmp_path, capsys):
     assert rc == 0
     with sqlite3.connect(str(prod)) as p:
         not_null = p.execute(
-            "SELECT COUNT(*) FROM calibration_pairs_v2 WHERE snapshot_id IS NOT NULL"
+            "SELECT COUNT(*) FROM calibration_pairs WHERE snapshot_id IS NOT NULL"
         ).fetchone()[0]
-        total = p.execute("SELECT COUNT(*) FROM calibration_pairs_v2").fetchone()[0]
+        total = p.execute("SELECT COUNT(*) FROM calibration_pairs").fetchone()[0]
     assert total == 8, f"expected 8 rows (4 high + 4 low), got {total}"
     assert not_null == 0, (
         f"--null-snapshot-id MUST null every inserted snapshot_id "
@@ -249,7 +249,7 @@ def test_attach_path_null_snapshot_id(tmp_path, capsys):
     assert rc2 == 0
     with sqlite3.connect(str(prod2)) as p:
         rows = {(r[0], r[1]) for r in p.execute(
-            "SELECT city, snapshot_id FROM calibration_pairs_v2 "
+            "SELECT city, snapshot_id FROM calibration_pairs "
             "WHERE data_version = ?", (DV_HIGH,)
         )}
     assert rows == {("H0", 900), ("H1", 901)}, (
@@ -307,10 +307,10 @@ def test_attach_path_metric_scope(tmp_path, capsys):
     # Touched data_versions: replaced with STAGE rows.
     with sqlite3.connect(str(prod)) as p:
         high_cities = {r[0] for r in p.execute(
-            "SELECT city FROM calibration_pairs_v2 WHERE data_version = ?",
+            "SELECT city FROM calibration_pairs WHERE data_version = ?",
             (DV_HIGH,))}
         low_cities = {r[0] for r in p.execute(
-            "SELECT city FROM calibration_pairs_v2 WHERE data_version = ?",
+            "SELECT city FROM calibration_pairs WHERE data_version = ?",
             (DV_LOW,))}
     assert high_cities == {"H0", "H1", "H2"}
     assert low_cities == {"L0", "L1", "L2"}
@@ -351,7 +351,7 @@ def test_attach_path_speedup_1k_rows(tmp_path, capsys):
         "Either CI is degraded or the bulk path regressed."
     )
     with sqlite3.connect(str(prod)) as p:
-        n = p.execute("SELECT COUNT(*) FROM calibration_pairs_v2").fetchone()[0]
+        n = p.execute("SELECT COUNT(*) FROM calibration_pairs").fetchone()[0]
     assert n == 1000, f"expected 1000 rows after promote, got {n}"
 
 
@@ -361,7 +361,7 @@ def test_attach_path_speedup_1k_rows(tmp_path, capsys):
 
 
 def _full_snapshot(prod: Path) -> list[tuple]:
-    """Capture all calibration_pairs_v2 rows ordered deterministically.
+    """Capture all calibration_pairs rows ordered deterministically.
 
     Used by atomicity test to compare pre/post state. We project the
     full row tuple so that any silent mutation (deleted snapshot_id,
@@ -371,7 +371,7 @@ def _full_snapshot(prod: Path) -> list[tuple]:
     try:
         return list(conn.execute(
             "SELECT pair_id, city, target_date, temperature_metric, snapshot_id, "
-            "data_version FROM calibration_pairs_v2 ORDER BY pair_id"
+            "data_version FROM calibration_pairs ORDER BY pair_id"
         ))
     finally:
         conn.close()
@@ -381,7 +381,7 @@ def _data_version_snapshot(prod: Path, data_version: str) -> list[tuple]:
     conn = sqlite3.connect(str(prod))
     try:
         return list(conn.execute(
-            "SELECT pair_id, city, snapshot_id, data_version FROM calibration_pairs_v2 "
+            "SELECT pair_id, city, snapshot_id, data_version FROM calibration_pairs "
             "WHERE data_version = ? ORDER BY pair_id",
             (data_version,),
         ))

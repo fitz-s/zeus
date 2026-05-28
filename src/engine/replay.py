@@ -354,8 +354,8 @@ class ReplayContext:
         self._settlements_v2_table = _first_existing_forecast_authority_table(
             self.conn, "settlements_v2"
         )
-        self._calibration_pairs_v2_table = _first_existing_forecast_authority_table(
-            self.conn, "calibration_pairs_v2"
+        self._calibration_pairs_table = _first_existing_forecast_authority_table(
+            self.conn, "calibration_pairs"
         )
         # _sp is the schema prefix for world-class legacy replay tables. It must
         # reflect whether zeus-world.db is ATTACHed as 'world', not where
@@ -2106,11 +2106,11 @@ def run_wu_settlement_sweep(
         conn,
         allow_snapshot_only_reference=allow_snapshot_only_reference,
     )
-    if not ctx._settlements_v2_table or not ctx._calibration_pairs_v2_table:
+    if not ctx._settlements_v2_table or not ctx._calibration_pairs_table:
         conn.close()
         raise ReplayPreflightError(
             "wu_settlement_sweep requires forecasts settlements_v2 and "
-            "calibration_pairs_v2 authority tables."
+            "calibration_pairs authority tables."
         )
     rows = conn.execute(
         f"""
@@ -2172,7 +2172,7 @@ def run_wu_settlement_sweep(
             SELECT range_label, p_raw, outcome AS stored_outcome, lead_days,
                    season, cluster, forecast_available_at, decision_group_id,
                    bias_corrected
-            FROM {ctx._calibration_pairs_v2_table}
+            FROM {ctx._calibration_pairs_table}
             WHERE city = ?
               AND target_date = ?
               AND temperature_metric = ?
@@ -2305,7 +2305,7 @@ def run_wu_settlement_sweep(
                 derived_wu_outcome=outcome,
                 truth_source="wu_settlement_value",
                 divergence_status="not_applicable",
-                decision_reference_source="calibration_pairs_v2.forecast_available_at",
+                decision_reference_source="calibration_pairs.forecast_available_at",
                 forecast_reference_id=forecast_reference_id,
                 evidence={
                     "p_raw": round(p_raw, 12),

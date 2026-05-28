@@ -2,9 +2,9 @@
 # Purpose: Refit metric-aware Platt v2 models behind dry-run and preflight gates.
 # Reuse: Inspect architecture/script_manifest.yaml and active packet receipt before live writes.
 
-"""Refit Platt calibration models from calibration_pairs_v2 (high track).
+"""Refit Platt calibration models from calibration_pairs (high track).
 
-Phase 4D — reads high-track calibration pairs from ``calibration_pairs_v2``
+Phase 4D — reads high-track calibration pairs from ``calibration_pairs``
 and writes per-bucket Platt models to ``platt_models_v2`` via
 ``save_platt_model_v2(metric_identity=HIGH_LOCALDAY_MAX)``.
 
@@ -309,7 +309,7 @@ def _fetch_affected_bucket_keys(
     horizon_profile='full'.
     """
 
-    columns = _table_columns(conn, "calibration_pairs_v2")
+    columns = _table_columns(conn, "calibration_pairs")
     where = [
         "temperature_metric = ?",
         "training_allowed = 1",
@@ -355,7 +355,7 @@ def _fetch_affected_bucket_keys(
                {cycle_expr} AS cycle,
                {source_expr} AS source_id,
                {horizon_expr} AS horizon_profile
-        FROM calibration_pairs_v2
+        FROM calibration_pairs
         WHERE {" AND ".join(where)}
         ORDER BY cluster, season, data_version, cycle, source_id, horizon_profile
     """, tuple(params)).fetchall()
@@ -416,8 +416,8 @@ def _fetch_buckets(
     horizon_profile_filter: str | None = None,
     error_model_family: str = "none",
 ) -> list[sqlite3.Row]:
-    """Fetch metric-scoped buckets with sufficient maturity from calibration_pairs_v2."""
-    columns = _table_columns(conn, "calibration_pairs_v2")
+    """Fetch metric-scoped buckets with sufficient maturity from calibration_pairs."""
+    columns = _table_columns(conn, "calibration_pairs")
     affected_keys = None
     if city_filter or start_date or end_date:
         affected_keys = _fetch_affected_bucket_keys(
@@ -479,7 +479,7 @@ def _fetch_buckets(
                {source_expr} AS source_id,
                {horizon_expr} AS horizon_profile,
                COUNT(DISTINCT decision_group_id) AS n_eff
-        FROM calibration_pairs_v2
+        FROM calibration_pairs
         WHERE {" AND ".join(where)}
         GROUP BY cluster, season, data_version, {cycle_expr}, {source_expr}, {horizon_expr}
         HAVING n_eff >= ?
@@ -497,7 +497,7 @@ def _fetch_pairs_for_bucket(
     metric_identity: MetricIdentity,
     error_model_family: str = "none",
 ) -> list[sqlite3.Row]:
-    columns = _table_columns(conn, "calibration_pairs_v2")
+    columns = _table_columns(conn, "calibration_pairs")
     where = [
         "temperature_metric = ?",
         "training_allowed = 1",
@@ -544,12 +544,12 @@ def _fetch_pairs_for_bucket(
         where.append(
             f"NOT EXISTS ("
             f"SELECT 1 FROM {_q_ref} q"
-            f" WHERE q.table_name = 'calibration_pairs_v2'"
+            f" WHERE q.table_name = 'calibration_pairs'"
             f" AND q.row_id = CAST(pair_id AS TEXT))"
         )
     return conn.execute(f"""
         SELECT p_raw, lead_days, outcome, range_label, decision_group_id
-        FROM calibration_pairs_v2
+        FROM calibration_pairs
         WHERE {" AND ".join(where)}
     """, tuple(params)).fetchall()
 
@@ -892,7 +892,7 @@ def refit_v2(
     stats = RefitStatsV2()
 
     print("=" * 70)
-    print("PLATT V2 REFIT (calibration_pairs_v2 → platt_models_v2)")
+    print("PLATT V2 REFIT (calibration_pairs → platt_models_v2)")
     print("=" * 70)
     print(f"Mode:           {'DRY-RUN' if dry_run else 'LIVE WRITE'}")
     print(f"MetricIdentity: {metric_identity}")
@@ -1179,7 +1179,7 @@ def refit_all_v2(
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Refit Platt v2 models from calibration_pairs_v2 (both tracks).",
+        description="Refit Platt v2 models from calibration_pairs (both tracks).",
     )
     parser.add_argument(
         "--dry-run", dest="dry_run", action="store_true", default=True,
@@ -1236,7 +1236,7 @@ def main() -> int:
         dest="error_model",
         default="none",
         help=(
-            "Predictive-error correction family the source calibration_pairs_v2 "
+            "Predictive-error correction family the source calibration_pairs "
             "rows were built under. 'none' (default) trains on uncorrected pairs "
             "and keeps legacy model_keys byte-identical; 'full_transport_v1' "
             "trains on full_transport_v1-corrected pairs and tags the model_key + "

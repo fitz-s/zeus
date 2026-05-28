@@ -70,7 +70,7 @@ _SETTLEMENT_TRUTH_WRITE_TABLES = (
     "data_coverage",
     "ensemble_snapshots",
     "ensemble_snapshots",
-    "calibration_pairs_v2",
+    "calibration_pairs",
     "platt_models_v2",
     "model_bias",
     "forecast_skill",

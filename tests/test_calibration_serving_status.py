@@ -127,7 +127,7 @@ def _insert_verified_pair(
 ) -> None:
     conn.execute(
         """
-        INSERT INTO calibration_pairs_v2 (
+        INSERT INTO calibration_pairs (
             city, target_date, temperature_metric, observation_field, range_label,
             p_raw, outcome, lead_days, season, cluster, forecast_available_at,
             decision_group_id, authority, bin_source, data_version,
@@ -410,7 +410,7 @@ def test_missing_tables_return_query_error_without_mutation() -> None:
     assert {error["source"] for error in report["source_errors"]} == {
         "readiness_state",
         "platt_models_v2",
-        "calibration_pairs_v2",
+        "calibration_pairs",
     }
 
 
@@ -429,21 +429,21 @@ def test_empty_tables_return_certified_empty_visibility() -> None:
 
 # ---------------------------------------------------------------------------
 # K1-ghost antibody (2026-05-19 alpha-loss postmortem):
-# K1 migration moved calibration_pairs_v2 from world.db to forecasts.db but
+# K1 migration moved calibration_pairs from world.db to forecasts.db but
 # left an empty ghost shell in world.db. A sensor that searches
 # ["world", "main"] hits the ghost first and reports 0 verified pairs for
 # every bucket — even though forecasts.db holds 91M VERIFIED rows. The
 # `calibration_serving_status` route reports BLOCKED to operators and the
 # entry pipeline treats every market as CALIBRATION_IMMATURE.
 #
-# Relationship invariant: _table_ref must resolve calibration_pairs_v2 to
+# Relationship invariant: _table_ref must resolve calibration_pairs to
 # the schema that holds real data. With both `world` (empty) and `forecasts`
 # (populated) attached, it MUST return the forecasts ref. Sed-flip:
 # removing `"forecasts"` from _TABLE_SCHEMA_PREFERENCE causes RED.
 # ---------------------------------------------------------------------------
 
 
-def test_table_ref_prefers_forecasts_over_world_ghost_for_calibration_pairs_v2(
+def test_table_ref_prefers_forecasts_over_world_ghost_for_calibration_pairs(
     tmp_path,
 ) -> None:
     from src.observability.calibration_serving_status import _table_ref
@@ -453,17 +453,17 @@ def test_table_ref_prefers_forecasts_over_world_ghost_for_calibration_pairs_v2(
 
     world = sqlite3.connect(str(world_path))
     world.execute(
-        "CREATE TABLE calibration_pairs_v2 (id INTEGER PRIMARY KEY, value INTEGER)"
+        "CREATE TABLE calibration_pairs (id INTEGER PRIMARY KEY, value INTEGER)"
     )
     world.commit()
     world.close()
 
     forecasts = sqlite3.connect(str(forecasts_path))
     forecasts.execute(
-        "CREATE TABLE calibration_pairs_v2 (id INTEGER PRIMARY KEY, value INTEGER)"
+        "CREATE TABLE calibration_pairs (id INTEGER PRIMARY KEY, value INTEGER)"
     )
     forecasts.executemany(
-        "INSERT INTO calibration_pairs_v2 (id, value) VALUES (?, ?)",
+        "INSERT INTO calibration_pairs (id, value) VALUES (?, ?)",
         [(1, 100), (2, 200), (3, 300)],
     )
     forecasts.commit()
@@ -473,10 +473,10 @@ def test_table_ref_prefers_forecasts_over_world_ghost_for_calibration_pairs_v2(
     conn.execute("ATTACH DATABASE ? AS world", (str(world_path),))
     conn.execute("ATTACH DATABASE ? AS forecasts", (str(forecasts_path),))
 
-    resolved = _table_ref(conn, "calibration_pairs_v2")
-    assert resolved == "forecasts.calibration_pairs_v2", (
+    resolved = _table_ref(conn, "calibration_pairs")
+    assert resolved == "forecasts.calibration_pairs", (
         f"K1-ghost antibody FAIL: _table_ref resolved to {resolved!r}; "
-        f"expected 'forecasts.calibration_pairs_v2'. World.db holds an empty "
+        f"expected 'forecasts.calibration_pairs'. World.db holds an empty "
         f"K1-orphan shell; reading it produces a false-BLOCKED signal."
     )
 
@@ -492,14 +492,14 @@ def test_table_ref_prefers_forecasts_over_world_ghost_for_calibration_pairs_v2(
 
 def test_table_ref_falls_back_to_world_when_forecasts_unattached(tmp_path) -> None:
     """If only `world` is attached (e.g. ETL standalone scripts), the sensor
-    must still resolve to world.calibration_pairs_v2 rather than returning
+    must still resolve to world.calibration_pairs rather than returning
     None. Verifies the preference map is ordered, not hardcoded."""
     from src.observability.calibration_serving_status import _table_ref
 
     world_path = tmp_path / "world.db"
     world = sqlite3.connect(str(world_path))
     world.execute(
-        "CREATE TABLE calibration_pairs_v2 (id INTEGER PRIMARY KEY)"
+        "CREATE TABLE calibration_pairs (id INTEGER PRIMARY KEY)"
     )
     world.commit()
     world.close()
@@ -507,8 +507,8 @@ def test_table_ref_falls_back_to_world_when_forecasts_unattached(tmp_path) -> No
     conn = sqlite3.connect(":memory:")
     conn.execute("ATTACH DATABASE ? AS world", (str(world_path),))
 
-    resolved = _table_ref(conn, "calibration_pairs_v2")
-    assert resolved == "world.calibration_pairs_v2"
+    resolved = _table_ref(conn, "calibration_pairs")
+    assert resolved == "world.calibration_pairs"
     conn.close()
 
 
@@ -541,7 +541,7 @@ def test_v2_table_schema_preference_covers_every_v2_table() -> None:
     from src.observability.v2_table_schema_preference import V2_TABLE_SCHEMA_PREFERENCE
 
     expected_v2_tables = {
-        "calibration_pairs_v2",
+        "calibration_pairs",
         "ensemble_snapshots",
         "platt_models_v2",
         "historical_forecasts",

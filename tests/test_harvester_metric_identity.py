@@ -1103,7 +1103,7 @@ def test_missing_forecast_issue_time_does_not_create_training_pairs(harvester_co
 
     assert count == 0
     pair_count = harvester_conn.execute(
-        "SELECT COUNT(*) FROM calibration_pairs_v2 WHERE city = ?",
+        "SELECT COUNT(*) FROM calibration_pairs WHERE city = ?",
         (city.name,),
     ).fetchone()[0]
     assert pair_count == 0
@@ -1134,7 +1134,7 @@ def test_openmeteo_p_raw_lineage_does_not_write_tigge_training_pair(harvester_co
         """
         SELECT data_version, training_allowed, causality_status, snapshot_id,
                cycle, source_id, horizon_profile
-        FROM calibration_pairs_v2
+        FROM calibration_pairs
         WHERE city = ?
         """,
         (city.name,),
@@ -1171,7 +1171,7 @@ def test_malformed_forecast_issue_time_does_not_default_to_tigge_bucket(harveste
 
     assert count == 0
     pair_count = harvester_conn.execute(
-        "SELECT COUNT(*) FROM calibration_pairs_v2 WHERE city = ?",
+        "SELECT COUNT(*) FROM calibration_pairs WHERE city = ?",
         (city.name,),
     ).fetchone()[0]
     assert pair_count == 0
@@ -1201,7 +1201,7 @@ def test_snapshot_training_disallowed_blocks_direct_harvest_pairs(harvester_conn
 
     assert count == 0
     pair_count = harvester_conn.execute(
-        "SELECT COUNT(*) FROM calibration_pairs_v2 WHERE city = ?",
+        "SELECT COUNT(*) FROM calibration_pairs WHERE city = ?",
         (city.name,),
     ).fetchone()[0]
     assert pair_count == 0
@@ -1236,7 +1236,7 @@ def test_context_explicit_training_disallow_overrides_learning_ready(harvester_c
 
     assert count == 0
     pair_count = harvester_conn.execute(
-        "SELECT COUNT(*) FROM calibration_pairs_v2 WHERE city = ?",
+        "SELECT COUNT(*) FROM calibration_pairs WHERE city = ?",
         (city.name,),
     ).fetchone()[0]
     assert pair_count == 0
@@ -1267,7 +1267,7 @@ def test_snapshot_causality_not_ok_blocks_direct_harvest_pairs(harvester_conn):
 
     assert count == 0
     pair_count = harvester_conn.execute(
-        "SELECT COUNT(*) FROM calibration_pairs_v2 WHERE city = ?",
+        "SELECT COUNT(*) FROM calibration_pairs WHERE city = ?",
         (city.name,),
     ).fetchone()[0]
     assert pair_count == 0
@@ -1302,7 +1302,7 @@ def test_context_causality_not_ok_blocks_learning_pairs(harvester_conn):
 
     assert count == 0
     pair_count = harvester_conn.execute(
-        "SELECT COUNT(*) FROM calibration_pairs_v2 WHERE city = ?",
+        "SELECT COUNT(*) FROM calibration_pairs WHERE city = ?",
         (city.name,),
     ).fetchone()[0]
     assert pair_count == 0
@@ -1333,7 +1333,7 @@ def test_serialized_training_disallow_blocks_direct_harvest_pairs(harvester_conn
 
     assert count == 0
     pair_count = harvester_conn.execute(
-        "SELECT COUNT(*) FROM calibration_pairs_v2 WHERE city = ?",
+        "SELECT COUNT(*) FROM calibration_pairs WHERE city = ?",
         (city.name,),
     ).fetchone()[0]
     assert pair_count == 0
@@ -1369,7 +1369,7 @@ def test_serialized_context_training_disallow_blocks_learning_pairs(harvester_co
 
     assert count == 0
     pair_count = harvester_conn.execute(
-        "SELECT COUNT(*) FROM calibration_pairs_v2 WHERE city = ?",
+        "SELECT COUNT(*) FROM calibration_pairs WHERE city = ?",
         (city.name,),
     ).fetchone()[0]
     assert pair_count == 0

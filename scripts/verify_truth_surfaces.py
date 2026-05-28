@@ -47,7 +47,7 @@ from src.types.metric_identity import physical_quantity_for_data_version
 
 DEFAULT_TRADE_DB = STATE_DIR / "zeus_trades.db"
 # K1 split 2026-05-11: forecast-class tables (ensemble_snapshots, observations,
-# settlements, settlements_v2, market_events_v2, calibration_pairs_v2) moved to
+# settlements, settlements_v2, market_events_v2, calibration_pairs) moved to
 # zeus-forecasts.db.  SHARED_DB now resolves to forecasts.db so all read-only
 # checks in this script hit the correct physical file.
 SHARED_DB = ZEUS_FORECASTS_DB_PATH
@@ -1892,20 +1892,20 @@ def _add_rebuild_observation_preflight_checks(report: dict, cur: sqlite3.Cursor)
 
 
 def _add_platt_pair_preflight_checks(report: dict, cur: sqlite3.Cursor) -> None:
-    table = "calibration_pairs_v2"
+    table = "calibration_pairs"
     if not _add_required_columns_check(
         report,
         cur,
         table=table,
-        check_id="calibration_pairs_v2.preflight_columns_present",
+        check_id="calibration_pairs.preflight_columns_present",
         columns=CALIBRATION_PAIR_PREFLIGHT_COLUMNS,
     ):
         return
 
     pair_quality_checks = (
         (
-            "calibration_pairs_v2.authority_safe",
-            "calibration_pairs_v2.authority_unsafe",
+            "calibration_pairs.authority_safe",
+            "calibration_pairs.authority_unsafe",
             """
             COALESCE(training_allowed, 0) = 1
             AND (
@@ -1917,8 +1917,8 @@ def _add_platt_pair_preflight_checks(report: dict, cur: sqlite3.Cursor) -> None:
             "training-allowed calibration pair rows with non-VERIFIED authority",
         ),
         (
-            "calibration_pairs_v2.causality_safe",
-            "calibration_pairs_v2.causality_unsafe",
+            "calibration_pairs.causality_safe",
+            "calibration_pairs.causality_unsafe",
             """
             COALESCE(training_allowed, 0) = 1
             AND (
@@ -1930,8 +1930,8 @@ def _add_platt_pair_preflight_checks(report: dict, cur: sqlite3.Cursor) -> None:
             "training-allowed calibration pair rows with unsafe causality_status",
         ),
         (
-            "calibration_pairs_v2.decision_group_present",
-            "calibration_pairs_v2.decision_group_missing",
+            "calibration_pairs.decision_group_present",
+            "calibration_pairs.decision_group_missing",
             """
             COALESCE(training_allowed, 0) = 1
             AND authority = 'VERIFIED'
@@ -1940,8 +1940,8 @@ def _add_platt_pair_preflight_checks(report: dict, cur: sqlite3.Cursor) -> None:
             "VERIFIED training-allowed calibration pair rows missing decision_group_id",
         ),
         (
-            "calibration_pairs_v2.p_raw_domain_safe",
-            "calibration_pairs_v2.p_raw_domain_unsafe",
+            "calibration_pairs.p_raw_domain_safe",
+            "calibration_pairs.p_raw_domain_unsafe",
             """
             COALESCE(training_allowed, 0) = 1
             AND authority = 'VERIFIED'
@@ -1950,8 +1950,8 @@ def _add_platt_pair_preflight_checks(report: dict, cur: sqlite3.Cursor) -> None:
             "VERIFIED training-allowed calibration pair rows with p_raw outside [0, 1]",
         ),
         (
-            "calibration_pairs_v2.required_values_present",
-            "calibration_pairs_v2.required_values_missing",
+            "calibration_pairs.required_values_present",
+            "calibration_pairs.required_values_missing",
             f"""
             COALESCE(training_allowed, 0) = 1
             AND authority = 'VERIFIED'
@@ -2003,7 +2003,7 @@ def _add_platt_pair_preflight_checks(report: dict, cur: sqlite3.Cursor) -> None:
             (metric, identity.observation_field, *allowed_versions),
         )
         mismatch_met = mismatch_count == 0
-        mismatch_check_id = f"calibration_pairs_v2.{metric}.identity_safe"
+        mismatch_check_id = f"calibration_pairs.{metric}.identity_safe"
         report["checks"][mismatch_check_id] = _check_entry(
             check_id=mismatch_check_id,
             status=PASS if mismatch_met else FAIL,
@@ -2015,7 +2015,7 @@ def _add_platt_pair_preflight_checks(report: dict, cur: sqlite3.Cursor) -> None:
         if not mismatch_met:
             report["blockers"].append(
                 {
-                    "code": "calibration_pairs_v2.identity_mismatch",
+                    "code": "calibration_pairs.identity_mismatch",
                     "table": table,
                     "count": mismatch_count,
                     "temperature_metric": metric,
@@ -2041,7 +2041,7 @@ def _add_platt_pair_preflight_checks(report: dict, cur: sqlite3.Cursor) -> None:
             FROM (
                 SELECT cluster, season, data_version,
                        COUNT(DISTINCT decision_group_id) AS n_eff
-                FROM calibration_pairs_v2
+                FROM calibration_pairs
                 WHERE temperature_metric = ?
                   AND observation_field = ?
                   AND data_version IN ({dv_placeholders})
@@ -2075,7 +2075,7 @@ def _add_platt_pair_preflight_checks(report: dict, cur: sqlite3.Cursor) -> None:
         bucket_row = cur.fetchone()
         bucket_count = int(bucket_row[0] if bucket_row else 0)
         bucket_met = bucket_count >= 1
-        bucket_check_id = f"calibration_pairs_v2.{metric}.mature_bucket_present"
+        bucket_check_id = f"calibration_pairs.{metric}.mature_bucket_present"
         report["checks"][bucket_check_id] = _check_entry(
             check_id=bucket_check_id,
             status=PASS if bucket_met else FAIL,
@@ -2456,7 +2456,7 @@ def _p4_lane_for_generic_blocker(blocker: dict) -> tuple[str, str] | None:
         "ensemble_snapshots.metric_scope_unsafe",
     } or table == "ensemble_snapshots":
         return "p4_ensemble_snapshot_inputs_not_ready", "4.6.B"
-    if code.startswith("calibration_pairs_v2") or code == "empty_platt_refit_bucket" or table == "calibration_pairs_v2":
+    if code.startswith("calibration_pairs") or code == "empty_platt_refit_bucket" or table == "calibration_pairs":
         return "p4_calibration_pairs_not_refit_ready", "4.6.C"
     if code == "missing_table":
         return "p4_required_table_missing", "4.6.A"
@@ -2573,9 +2573,9 @@ def build_p4_readiness_report(
             _add_p4_table_populated_check(
                 report,
                 cur,
-                table="calibration_pairs_v2",
+                table="calibration_pairs",
                 lane="4.6.C",
-                code="p4_calibration_pairs_v2_empty",
+                code="p4_calibration_pairs_empty",
             )
             _add_platt_pair_preflight_checks(report, cur)
         finally:
@@ -2601,10 +2601,10 @@ def build_p4_readiness_report(
 
 
 def build_calibration_pair_rebuild_preflight_report(world_db: Path = SHARED_DB) -> dict:
-    """Return a read-only input preflight for calibration_pairs_v2 rebuilds.
+    """Return a read-only input preflight for calibration_pairs rebuilds.
 
     This is narrower than full training readiness: it checks only upstream
-    rebuild inputs and intentionally does not require calibration_pairs_v2,
+    rebuild inputs and intentionally does not require calibration_pairs,
     platt_models_v2, market_events_v2, market_price_history, or settlements_v2.
     """
     report = _new_report("calibration-pair-rebuild-preflight", world_db)
@@ -2628,7 +2628,7 @@ def build_calibration_pair_rebuild_preflight_report(world_db: Path = SHARED_DB) 
 def build_platt_refit_preflight_report(world_db: Path = SHARED_DB) -> dict:
     """Return a read-only input preflight for platt_models_v2 refits.
 
-    This validates calibration_pairs_v2 as the refit input and intentionally
+    This validates calibration_pairs as the refit input and intentionally
     does not require platt_models_v2 to already be populated.
     """
     report = _new_report("platt-refit-preflight", world_db)
@@ -2645,7 +2645,7 @@ def build_platt_refit_preflight_report(world_db: Path = SHARED_DB) -> dict:
         # OperationalError: no such column. Stage6 fails closed here with a
         # specific verdict so watcher's stage7 never fires against a regressed schema.
         required_strat_cols = ("cycle", "source_id", "horizon_profile")
-        for table in ("calibration_pairs_v2", "platt_models_v2"):
+        for table in ("calibration_pairs", "platt_models_v2"):
             cols = {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
             missing = [c for c in required_strat_cols if c not in cols]
             if missing:
@@ -2718,7 +2718,7 @@ def build_training_readiness_report(world_db: Path = SHARED_DB) -> dict:
             "forecasts",
             "historical_forecasts",
             "ensemble_snapshots",
-            "calibration_pairs_v2",
+            "calibration_pairs",
             "platt_models_v2",
             "market_events_v2",
             "market_price_history",

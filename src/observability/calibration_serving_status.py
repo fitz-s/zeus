@@ -240,9 +240,9 @@ def _merge_calibration_counts(
     *,
     source_errors: list[dict[str, str]],
 ) -> None:
-    pairs_table = _table_ref(conn, "calibration_pairs_v2")
+    pairs_table = _table_ref(conn, "calibration_pairs")
     if pairs_table is None:
-        source_errors.append({"source": "calibration_pairs_v2", "error": "table_missing"})
+        source_errors.append({"source": "calibration_pairs", "error": "table_missing"})
     else:
         rows = conn.execute(
             f"""

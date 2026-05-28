@@ -104,7 +104,7 @@ def test_calibration_pairs_not_optional():
 
 V2_REQUIRED_TABLES = {
     "observation_instants_v2",
-    "calibration_pairs_v2",
+    "calibration_pairs",
     "ensemble_snapshots",
     "model_bias_ens",
 }

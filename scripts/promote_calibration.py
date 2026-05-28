@@ -2,17 +2,17 @@
 # Last reused or audited: 2026-05-13
 # Authority basis: K1 workload-class DB split; PR #112 Option (c) split.
 # 2026-05-13: Replaced Python row-by-row promote loop with ATTACH+SQL
-# bulk path (INSERT INTO ... SELECT FROM stage.calibration_pairs_v2)
+# bulk path (INSERT INTO ... SELECT FROM stage.calibration_pairs)
 # after first attempt blocked on 83M-row workload (6.6k rows/sec ~= 3.5h).
-# STAGE_DB -> production zeus-forecasts.db promotion of calibration_pairs_v2
-# artifacts produced by scripts/rebuild_calibration_pairs_v2.py.
+# STAGE_DB -> production zeus-forecasts.db promotion of calibration_pairs
+# artifacts produced by scripts/rebuild_calibration_pairs.py.
 # All mutations are gated by --commit; default behavior is dry-run with
 # full backup + rollback semantics.
-"""Promote calibration_pairs_v2 artifacts from a STAGE_DB to zeus-forecasts.db.
+"""Promote calibration_pairs artifacts from a STAGE_DB to zeus-forecasts.db.
 
 Per AGENTS.md K=3 K1 (workload-class DB split, 2026-05-11),
-``calibration_pairs_v2`` lives in ``state/zeus-forecasts.db`` (the forecasts
-DB). This script handles ONLY ``calibration_pairs_v2``; its sibling
+``calibration_pairs`` lives in ``state/zeus-forecasts.db`` (the forecasts
+DB). This script handles ONLY ``calibration_pairs``; its sibling
 ``promote_platt.py`` handles ``platt_models_v2`` on
 ``state/zeus-world.db``. The two scripts share no code by import to keep
 them independently runnable.
@@ -25,12 +25,12 @@ Subcommands
   Exits 1 if STAGE has any in_progress sentinel or missing COMPLETE markers
   for the requested metrics.
 * ``promote``  - dry-run by default. With ``--commit``: backs up PROD
-  ``calibration_pairs_v2`` to a gzipped SQL dump under ``state/backups/``,
+  ``calibration_pairs`` to a gzipped SQL dump under ``state/backups/``,
   opens PROD with ``BEGIN IMMEDIATE``, replaces rows filtered by
   ``data_version`` derived from the metric set, runs ``PRAGMA integrity_check``,
   and rolls back on any failure.
 * ``verify``   - read-only post-promote consistency check. Confirms every
-  ``calibration_pairs_v2`` row in PROD has well-formed identity columns
+  ``calibration_pairs`` row in PROD has well-formed identity columns
   (city, data_version, temperature_metric, target_date) and reports
   (city, data_version) bucket coverage.
   Cross-DB joins against ``platt_models_v2`` (which lives on
@@ -53,8 +53,8 @@ Constraints
   independently verifiable via ``gunzip + sqlite3``.
 * Generic over ``--stage-db PATH`` and ``--prod-db PATH``. No hardcoded
   STAGE_DB filename. Defaults to ``state/zeus-forecasts.db`` when
-  --prod-db is omitted (K1: calibration_pairs_v2 lives in the forecasts DB).
-* Snapshot FK: ``calibration_pairs_v2.snapshot_id`` references
+  --prod-db is omitted (K1: calibration_pairs lives in the forecasts DB).
+* Snapshot FK: ``calibration_pairs.snapshot_id`` references
   ``ensemble_snapshots(snapshot_id)`` but PRAGMA foreign_keys is OFF
   in zeus-forecasts.db. STAGE snapshot_ids may not exist in PROD; we
   preserve them as-is (FK not enforced) but expose ``--null-snapshot-id``
@@ -75,7 +75,7 @@ from typing import Iterable
 # Stratification-key building requires the rebuild module's sentinel parser.
 # We keep this script self-contained: re-implement minimal sentinel-key parser.
 
-REBUILD_COMPLETE_META_PREFIX = "calibration_pairs_v2_rebuild_complete"
+REBUILD_COMPLETE_META_PREFIX = "calibration_pairs_rebuild_complete"
 
 # Mapping from logical metric label to expected data_version values.
 METRIC_TO_DATA_VERSIONS: dict[str, tuple[str, ...]] = {
@@ -88,7 +88,7 @@ ALL_METRICS: tuple[str, ...] = ("high", "low", "low_contract")
 
 DEFAULT_PROD_DB = "state/zeus-forecasts.db"
 
-TARGET_TABLE = "calibration_pairs_v2"
+TARGET_TABLE = "calibration_pairs"
 
 
 # --------------------------------------------------------------------------
@@ -395,7 +395,7 @@ def _backup_prod_tables(
     metrics: list[str],
     backup_dir: Path,
 ) -> Path:
-    """Atomic, bit-exact backup of PROD ``calibration_pairs_v2`` rows
+    """Atomic, bit-exact backup of PROD ``calibration_pairs`` rows
     matching any of the metric data_versions. Returns final backup
     file path.
 
@@ -408,8 +408,8 @@ def _backup_prod_tables(
 
         sqlite3 PROD_DB \\
           "ATTACH '<backup.db>' AS bak; \\
-           DELETE FROM calibration_pairs_v2 WHERE data_version IN (...); \\
-           INSERT INTO calibration_pairs_v2 SELECT * FROM bak.calibration_pairs_v2;"
+           DELETE FROM calibration_pairs WHERE data_version IN (...); \\
+           INSERT INTO calibration_pairs SELECT * FROM bak.calibration_pairs;"
 
     Atomicity: VACUUM INTO writes to a ``.tmp`` path that we move into
     place only after the trim+VACUUM succeeds. Independently
@@ -417,7 +417,7 @@ def _backup_prod_tables(
     """
     backup_dir.mkdir(parents=True, exist_ok=True)
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    final = backup_dir / f"zeus-forecasts.db.calibration_pairs_v2_pre_promotion_{ts}.db"
+    final = backup_dir / f"zeus-forecasts.db.calibration_pairs_pre_promotion_{ts}.db"
     tmp = final.with_suffix(".db.tmp")
     # VACUUM INTO refuses to write to an existing file. Clear any prior
     # tmp from a killed run; the final path is timestamped so it cannot
@@ -494,7 +494,7 @@ def _backup_prod_tables(
             )
         # Record provenance metadata in zeus_meta. Idempotent under
         # INSERT OR REPLACE.
-        meta_key = "calibration_pairs_v2_backup_provenance"
+        meta_key = "calibration_pairs_backup_provenance"
         meta_value = json.dumps({
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "source_prod": str(prod_path),
@@ -596,7 +596,7 @@ def cmd_promote(args: argparse.Namespace) -> int:
     # Copilot C (#112): refuse to commit when STAGE has 0 rows for the
     # tables we would touch. Otherwise --commit would silently DELETE
     # PROD rows for the requested data_versions and INSERT nothing,
-    # wiping calibration_pairs_v2 if STAGE is empty/mis-specified.
+    # wiping calibration_pairs if STAGE is empty/mis-specified.
     if sc == 0 and not args.allow_empty_stage:
         print(
             f"x REFUSED: STAGE has 0 rows for {TARGET_TABLE} matching the "
@@ -697,7 +697,7 @@ def cmd_promote(args: argparse.Namespace) -> int:
                 # the SELECT projection.
                 stage_attach_cols = [
                     row[1] for row in
-                    prod_rw.execute("PRAGMA stage.table_info(calibration_pairs_v2)").fetchall()
+                    prod_rw.execute("PRAGMA stage.table_info(calibration_pairs)").fetchall()
                 ]
                 # 2026-05-27 fitz: set-equality (order is fine; INSERT uses
                 # explicit projection from STAGE so order doesn't corrupt).
@@ -747,8 +747,8 @@ def cmd_promote(args: argparse.Namespace) -> int:
                     print(
                         "  Restore via the .db artifact:"
                         " ATTACH '<backup.db>' AS bak;"
-                        " INSERT INTO calibration_pairs_v2"
-                        " SELECT * FROM bak.calibration_pairs_v2;"
+                        " INSERT INTO calibration_pairs"
+                        " SELECT * FROM bak.calibration_pairs;"
                     )
                 else:
                     print(
@@ -792,11 +792,11 @@ def cmd_promote(args: argparse.Namespace) -> int:
 
 
 def cmd_verify(args: argparse.Namespace) -> int:
-    """Table-local consistency check on PROD.calibration_pairs_v2.
+    """Table-local consistency check on PROD.calibration_pairs.
 
     Per K1 (workload-class DB split), platt_models_v2 now lives on
     zeus-world.db, so this script does NOT cross-DB JOIN. Instead we
-    check that calibration_pairs_v2 has no rows with NULL identity columns
+    check that calibration_pairs has no rows with NULL identity columns
     and report (city, data_version) bucket coverage.
     """
     prod_path = Path(args.prod_db).resolve()
@@ -856,7 +856,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="promote_calibration",
         description=(
-            "Promote calibration_pairs_v2 STAGE_DB -> production zeus-forecasts.db "
+            "Promote calibration_pairs STAGE_DB -> production zeus-forecasts.db "
             "(K1 workload-class split)."
         ),
     )
@@ -876,7 +876,7 @@ def build_parser() -> argparse.ArgumentParser:
                     help=f"PROD DB path (default: {DEFAULT_PROD_DB}; K1: forecasts DB).")
     pp.add_argument("--metrics", default=None)
     pp.add_argument("--null-snapshot-id", action="store_true",
-                    help="NULL out snapshot_id on inserted calibration_pairs_v2 rows "
+                    help="NULL out snapshot_id on inserted calibration_pairs rows "
                          "(safer if STAGE snapshot_ids may not exist in PROD).")
     pp.add_argument("--allow-incomplete", action="store_true",
                     help="Bypass sentinel-completeness gate (DANGEROUS).")
@@ -887,7 +887,7 @@ def build_parser() -> argparse.ArgumentParser:
     pp.add_argument("--backup-dir", default="state/backups")
     pp.add_argument("--skip-backup", action="store_true",
                     help="Skip the pre-promotion .db backup of PROD "
-                         "calibration_pairs_v2. Use only when STAGE_DB is a "
+                         "calibration_pairs. Use only when STAGE_DB is a "
                          "verified recovery source AND disk space is tight "
                          "(the backup VACUUM INTO step alone needs ~PROD_SIZE "
                          "GB free + transient scratch). Existing gzipped "

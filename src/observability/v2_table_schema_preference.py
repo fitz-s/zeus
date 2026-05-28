@@ -31,7 +31,7 @@ from __future__ import annotations
 # fixtures; "world" is zeus-world.db (entry-side surfaces); "forecasts" is
 # zeus-forecasts.db (calibration + ensemble + settlement archives).
 V2_TABLE_SCHEMA_PREFERENCE: dict[str, tuple[str, ...]] = {
-    "calibration_pairs_v2": ("forecasts", "world", "main"),
+    "calibration_pairs": ("forecasts", "world", "main"),
     "ensemble_snapshots": ("forecasts", "world", "main"),
     "settlements_v2": ("forecasts", "world", "main"),
     "platt_models_v2": ("world", "main"),

@@ -8,7 +8,7 @@
 # SCHEDULING NOTE (F17 — 2026-05-17): This script is intentionally NOT registered in cron/jobs.json.
 # The validated_calibration_transfers table is a Phase B upgrade path only.  At launch Zeus uses the
 # legacy static-mapping path (ZEUS_CALIBRATION_TRANSFER_OOS_EVAL_ENABLED flag OFF).  The cron entry
-# should NOT be added until Phase B is activated (~2-4 weeks post-launch, once ECMWF calibration_pairs_v2
+# should NOT be added until Phase B is activated (~2-4 weeks post-launch, once ECMWF calibration_pairs
 # rows have accumulated).  Authority: docs/operations/LIVE_LAUNCH_HANDOFF.md §A.4 and §B.3;
 # docs/operations/PLIST_UPDATE_FOR_RELOCK.md §1.5.  Flipping the flag prematurely silently falls to
 # SHADOW_ONLY because no validated_calibration_transfers rows exist for the ECMWF target_source_id.
@@ -44,7 +44,7 @@ require it to be true — this evaluator *produces* evidence independently of
 whether the policy gate reads from it.  The flag governs the reader; this
 script is the writer.
 
-Today (2026-05-05): calibration_pairs_v2 is 100% (tigge_mars, 00z).
+Today (2026-05-05): calibration_pairs is 100% (tigge_mars, 00z).
 All active Platt models are (tigge_mars, 00z).  Zero cross-domain candidates
 exist → script writes 0 rows.  Ready for Phase 1 12z TIGGE ingest.
 """
@@ -285,11 +285,11 @@ def _iter_active_platt_models(conn, limit: int | None = None) -> Iterator[dict]:
 
 
 def _enumerate_target_domains(conn) -> list[tuple[str, str]]:
-    """Return distinct (source_id, cycle) pairs present in calibration_pairs_v2."""
+    """Return distinct (source_id, cycle) pairs present in calibration_pairs."""
     rows = conn.execute(
         f"""
         SELECT DISTINCT source_id, cycle
-          FROM calibration_pairs_v2
+          FROM calibration_pairs
          WHERE 1 = 1
 {_TARGET_PAIR_ELIGIBILITY_SQL}
          ORDER BY source_id, cycle
@@ -321,7 +321,7 @@ def _fetch_held_out_pairs(
         SELECT pair_id, p_raw, lead_days, outcome,
                target_date, forecast_available_at, decision_group_id,
                range_label
-          FROM calibration_pairs_v2
+          FROM calibration_pairs
          WHERE source_id           = ?
            AND cycle               = ?
            AND season              = ?
@@ -504,7 +504,7 @@ def run_oos_evaluation(
     brier_diff_threshold = _load_brier_threshold(policy_id)
 
     target_domains = _enumerate_target_domains(conn)
-    logger.info("target domains in calibration_pairs_v2: %s", target_domains)
+    logger.info("target domains in calibration_pairs: %s", target_domains)
 
     models = list(_iter_active_platt_models(conn, limit=limit_models))
     logger.info("active Platt models to iterate: %d", len(models))
@@ -697,7 +697,7 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    # K1 fix F41 2026-05-17: calibration_pairs_v2 is forecast_class (91M rows in
+    # K1 fix F41 2026-05-17: calibration_pairs is forecast_class (91M rows in
     # forecasts.db, 0 in world post-K1); validated_calibration_transfers is world_class.
     # get_forecasts_connection_with_world: MAIN=forecasts.db, world.db ATTACHed.
     # All world-class table refs below use world.* qualification.

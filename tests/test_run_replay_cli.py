@@ -1291,15 +1291,15 @@ def test_trade_history_audit_rejects_snapshot_mismatched_outcome_fact(tmp_path, 
 
 # ---------------------------------------------------------------------------
 # T6 — wu_settlement_sweep v2 regression antibody (D1 backward-compat gate)
-# Ensures run_wu_settlement_sweep reads calibration_pairs_v2 + settlements_v2.
+# Ensures run_wu_settlement_sweep reads calibration_pairs + settlements_v2.
 # If the SQL is accidentally reverted to bare calibration_pairs / settlements,
 # this test returns n_settlements=0 (v1 tables are empty on main) and fails.
 # ---------------------------------------------------------------------------
 def test_wu_settlement_sweep_v2_corpus_produces_settlements(tmp_path, monkeypatch):
-    """T6: wu_settlement_sweep reads settlements_v2 + calibration_pairs_v2 (D1 antibody).
+    """T6: wu_settlement_sweep reads settlements_v2 + calibration_pairs (D1 antibody).
 
     Fixture inserts one VERIFIED settlement into settlements_v2 and a matching
-    calibration_pairs_v2 row. Asserts n_settlements > 0 and mode == 'wu_settlement_sweep'.
+    calibration_pairs row. Asserts n_settlements > 0 and mode == 'wu_settlement_sweep'.
     A revert to bare settlements/calibration_pairs tables would yield n_settlements=0
     (those tables are empty) and the assertion would catch the regression.
     """
@@ -1317,10 +1317,10 @@ def test_wu_settlement_sweep_v2_corpus_produces_settlements(tmp_path, monkeypatc
         """
     )
 
-    # Seed calibration_pairs_v2 — matching forecast row for the same city/date
+    # Seed calibration_pairs — matching forecast row for the same city/date
     conn.execute(
         """
-        INSERT INTO calibration_pairs_v2
+        INSERT INTO calibration_pairs
             (city, target_date, temperature_metric, observation_field,
              range_label, p_raw, outcome, lead_days, season, cluster,
              forecast_available_at, data_version, bias_corrected, authority)
@@ -1353,7 +1353,7 @@ def test_wu_settlement_sweep_v2_corpus_produces_settlements(tmp_path, monkeypatc
     conn = get_connection(db_path)
     conn.execute(
         """
-        INSERT INTO calibration_pairs_v2
+        INSERT INTO calibration_pairs
             (city, target_date, temperature_metric, observation_field,
              range_label, p_raw, outcome, lead_days, season, cluster,
              forecast_available_at, data_version, bias_corrected, authority)
@@ -1371,7 +1371,7 @@ def test_wu_settlement_sweep_v2_corpus_produces_settlements(tmp_path, monkeypatc
     assert summary.n_settlements > 0, (
         "n_settlements=0: wu_settlement_sweep returned no rows — "
         "likely SQL still reads from bare settlements/calibration_pairs (v1 empty tables). "
-        "Verify D1 port to settlements_v2 + calibration_pairs_v2."
+        "Verify D1 port to settlements_v2 + calibration_pairs."
     )
     backtest = get_connection(backtest_db)
     outcome_labels = [
@@ -1387,7 +1387,7 @@ def test_wu_settlement_sweep_v2_corpus_produces_settlements(tmp_path, monkeypatc
     ]
     backtest.close()
     assert outcome_labels == ["12°C"], (
-        "WU settlement sweep must join calibration_pairs_v2 by "
+        "WU settlement sweep must join calibration_pairs by "
         "city/date/temperature_metric; LOW rows for the same city/date must not "
         "be scored against a HIGH settlement."
     )

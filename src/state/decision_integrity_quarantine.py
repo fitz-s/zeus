@@ -306,14 +306,14 @@ def _snap_ref(conn: sqlite3.Connection) -> str:
 # Per-table quarantine entry points
 # ---------------------------------------------------------------------------
 
-def quarantine_calibration_pairs_v2_for_noncontributing_forecast(
+def quarantine_calibration_pairs_for_noncontributing_forecast(
     conn: sqlite3.Connection,
     *,
     dry_run: bool = False,
 ) -> dict:
-    """Tag calibration_pairs_v2 rows whose forecast snapshot is non-contributing.
+    """Tag calibration_pairs rows whose forecast snapshot is non-contributing.
 
-    calibration_pairs_v2 lives in zeus-forecasts.db; in production, conn must be a
+    calibration_pairs lives in zeus-forecasts.db; in production, conn must be a
     forecasts connection (or have forecasts as 'main'). ensemble_snapshots is
     in the same forecasts DB, so no ATTACH is needed for this table.
 
@@ -328,7 +328,7 @@ def quarantine_calibration_pairs_v2_for_noncontributing_forecast(
             CAST(cp2.pair_id AS TEXT) AS row_id,
             cp2.snapshot_id           AS snapshot_id,
             esv.source_run_id         AS source_run_id
-        FROM calibration_pairs_v2 cp2
+        FROM calibration_pairs cp2
         JOIN {snap_ref} esv ON cp2.snapshot_id = esv.snapshot_id
         WHERE cp2.snapshot_id IS NOT NULL
           AND esv.contributes_to_target_extrema IS NOT NULL
@@ -340,7 +340,7 @@ def quarantine_calibration_pairs_v2_for_noncontributing_forecast(
     """
     return _quarantine_table_via_snapshot(
         conn,
-        target_table="calibration_pairs_v2",
+        target_table="calibration_pairs",
         find_sql=find_sql,
         dry_run=dry_run,
     )
@@ -659,7 +659,7 @@ def quarantine_all_tables_for_noncontributing_forecast(
     # Mapping from function to the table name it quarantines.
     fn_table_pairs = [
         (quarantine_decisions_for_noncontributing_forecast, "opportunity_fact"),
-        (quarantine_calibration_pairs_v2_for_noncontributing_forecast, "calibration_pairs_v2"),
+        (quarantine_calibration_pairs_for_noncontributing_forecast, "calibration_pairs"),
         (quarantine_probability_trace_fact_for_noncontributing_forecast, "probability_trace_fact"),
         (quarantine_selection_family_fact_for_noncontributing_forecast, "selection_family_fact"),
         (quarantine_selection_hypothesis_fact_for_noncontributing_forecast, "selection_hypothesis_fact"),

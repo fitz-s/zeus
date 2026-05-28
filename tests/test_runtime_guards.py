@@ -8184,7 +8184,7 @@ def _insert_runtime_transfer_sigma_row(
             ]
             conn.executemany(
                 """
-                INSERT OR IGNORE INTO calibration_pairs_v2 (
+                INSERT OR IGNORE INTO calibration_pairs (
                     pair_id,
                     city, target_date, decision_group_id,
                     temperature_metric, observation_field, range_label,

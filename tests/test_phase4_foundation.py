@@ -12,24 +12,24 @@ import pytest
 
 
 # ---------------------------------------------------------------------------
-# R-I: add_calibration_pair_v2 requires metric_identity
+# R-I: add_calibration_pair requires metric_identity
 # ---------------------------------------------------------------------------
 
 class TestCalibrationPairRequiresMetricIdentity:
     """R-I: add_calibration_pair() called without metric_identity raises TypeError."""
 
-    def test_add_calibration_pair_v2_missing_metric_identity_raises_type_error(self):
-        """R-I: Calling add_calibration_pair_v2 without metric_identity must raise TypeError.
+    def test_add_calibration_pair_missing_metric_identity_raises_type_error(self):
+        """R-I: Calling add_calibration_pair without metric_identity must raise TypeError.
 
         The new v2 signature must declare metric_identity as a required keyword
         argument. Omitting it must raise TypeError at call time — not silently
         default to a legacy fallback.
         """
-        from src.calibration.store import add_calibration_pair_v2  # noqa: F401 — must exist
+        from src.calibration.store import add_calibration_pair  # noqa: F401 — must exist
 
         conn = sqlite3.connect(":memory:")
         with pytest.raises(TypeError):
-            add_calibration_pair_v2(
+            add_calibration_pair(
                 conn=conn,
                 city="NYC",
                 target_date="2026-04-16",
@@ -46,13 +46,13 @@ class TestCalibrationPairRequiresMetricIdentity:
                 # metric_identity intentionally omitted
             )
 
-    def test_add_calibration_pair_v2_with_metric_identity_does_not_raise_type_error(self):
+    def test_add_calibration_pair_with_metric_identity_does_not_raise_type_error(self):
         """R-I complement: calling with all required args including metric_identity must not raise TypeError.
 
         The real DB write may fail for other reasons (table not yet created, etc.)
         but TypeError specifically means the signature contract is violated.
         """
-        from src.calibration.store import add_calibration_pair_v2
+        from src.calibration.store import add_calibration_pair
         from src.config import City
         from src.types.metric_identity import HIGH_LOCALDAY_MAX
 
@@ -71,7 +71,7 @@ class TestCalibrationPairRequiresMetricIdentity:
 
         # Must not raise TypeError (may raise IntegrityError or similar for data reasons)
         try:
-            add_calibration_pair_v2(
+            add_calibration_pair(
                 conn=conn,
                 city="NYC",
                 target_date="2026-04-16",
@@ -90,7 +90,7 @@ class TestCalibrationPairRequiresMetricIdentity:
             )
         except TypeError:
             pytest.fail(
-                "add_calibration_pair_v2 raised TypeError even though all required "
+                "add_calibration_pair raised TypeError even though all required "
                 "args including metric_identity were supplied (R-I violated)"
             )
 

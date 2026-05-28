@@ -232,7 +232,7 @@ def test_T5_live_praw_blocked(shared_conn, caplog):
 
     # No pairs written to DB
     pair_count = shared_conn.execute(
-        "SELECT COUNT(*) FROM calibration_pairs_v2 WHERE city = ?",
+        "SELECT COUNT(*) FROM calibration_pairs WHERE city = ?",
         (city.name,),
     ).fetchone()[0]
     assert pair_count == 0

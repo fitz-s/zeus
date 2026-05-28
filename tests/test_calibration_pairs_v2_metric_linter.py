@@ -6,7 +6,7 @@
 
 Phase 1 §11 + parent post-review addendum deferred a semantic_linter
 extension for calibration_pairs reads (the P3 4.5.A pattern for
-settlements). Phase 4 closeout delivers it for calibration_pairs_v2:
+settlements). Phase 4 closeout delivers it for calibration_pairs:
 every SELECT/JOIN against the v2 table must carry a temperature_metric
 predicate or the linter emits an error.
 
@@ -16,9 +16,9 @@ against future regressions — pinning the convention before it's
 silently broken.
 
 Tests:
-1. SQL with calibration_pairs_v2 + temperature_metric WHERE → no
+1. SQL with calibration_pairs + temperature_metric WHERE → no
    violation (happy path).
-2. SQL with calibration_pairs_v2 + NO metric predicate → violation.
+2. SQL with calibration_pairs + NO metric predicate → violation.
 3. SQL with calibration_pairs (legacy) → no v2 violation (legacy is
    covered by the K2_struct check at _check_calibration_pairs_select).
 4. Allowlisted file path → no violation even if metric absent.
@@ -32,7 +32,7 @@ PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from scripts.semantic_linter import (
-    _check_calibration_pairs_v2_metric_filter,
+    _check_calibration_pairs_metric_filter,
 )
 
 
@@ -43,14 +43,14 @@ def test_v2_read_with_metric_predicate_passes():
 conn.execute(
     """
     SELECT p_raw, lead_days, outcome
-    FROM calibration_pairs_v2
+    FROM calibration_pairs
     WHERE temperature_metric = ?
       AND cluster = ?
     """,
     (metric, cluster),
 )
 '''
-    violations = _check_calibration_pairs_v2_metric_filter(py_file, content)
+    violations = _check_calibration_pairs_metric_filter(py_file, content)
     assert violations == [], (
         f"Expected 0 violations for v2 read with metric predicate; "
         f"got {len(violations)}: {violations}"
@@ -64,24 +64,25 @@ def test_v2_read_without_metric_predicate_violates():
 conn.execute(
     """
     SELECT p_raw, lead_days, outcome
-    FROM calibration_pairs_v2
+    FROM calibration_pairs
     WHERE cluster = ?
     """,
     (cluster,),
 )
 '''
-    violations = _check_calibration_pairs_v2_metric_filter(py_file, content)
+    violations = _check_calibration_pairs_metric_filter(py_file, content)
     assert len(violations) == 1, (
         f"Expected 1 violation for metric-less v2 read; got {len(violations)}"
     )
-    assert "calibration_pairs_v2" in violations[0]
+    assert "calibration_pairs" in violations[0]
     assert "A1b" in violations[0]
     assert "temperature_metric predicate" in violations[0]
 
 
-def test_legacy_calibration_pairs_read_does_not_trigger_v2_lint():
-    """Legacy calibration_pairs is K2_struct-locked; v2 lint doesn't apply."""
-    py_file = PROJECT_ROOT / "scripts" / "fake_legacy_reader.py"
+def test_calibration_pairs_read_without_metric_triggers_lint():
+    """Post-B3: calibration_pairs IS the v2 dual-track table; reads without
+    temperature_metric predicate must trigger A1b lint."""
+    py_file = PROJECT_ROOT / "scripts" / "fake_reader.py"
     content = '''
 conn.execute(
     """
@@ -90,10 +91,11 @@ conn.execute(
     (cluster,),
 )
 '''
-    violations = _check_calibration_pairs_v2_metric_filter(py_file, content)
-    assert violations == [], (
-        "Legacy calibration_pairs read must not trigger A1b v2 lint."
+    violations = _check_calibration_pairs_metric_filter(py_file, content)
+    assert len(violations) == 1, (
+        f"calibration_pairs read without metric must trigger A1b lint; got {violations}"
     )
+    assert "A1b" in violations[0]
 
 
 def test_v2_read_with_aliased_metric_predicate_passes():
@@ -102,13 +104,13 @@ def test_v2_read_with_aliased_metric_predicate_passes():
     content = '''
 conn.execute(
     """
-    SELECT p.p_raw FROM calibration_pairs_v2 AS p
+    SELECT p.p_raw FROM calibration_pairs AS p
     WHERE p.temperature_metric = ?
     """,
     (metric,),
 )
 '''
-    violations = _check_calibration_pairs_v2_metric_filter(py_file, content)
+    violations = _check_calibration_pairs_metric_filter(py_file, content)
     assert violations == [], "Aliased metric predicate must pass."
 
 
@@ -117,9 +119,9 @@ def test_test_files_skipped_by_lint():
     legitimately query without metric for diagnostic reasons)."""
     py_file = PROJECT_ROOT / "tests" / "test_some_v2_reader.py"
     content = '''
-conn.execute("SELECT * FROM calibration_pairs_v2")
+conn.execute("SELECT * FROM calibration_pairs")
 '''
-    violations = _check_calibration_pairs_v2_metric_filter(py_file, content)
+    violations = _check_calibration_pairs_metric_filter(py_file, content)
     assert violations == [], "Test files must not trigger v2 metric lint."
 
 
@@ -127,9 +129,9 @@ def test_migrations_skipped_by_lint():
     """Migration scripts may legitimately bulk-touch v2 without metric scope."""
     py_file = PROJECT_ROOT / "migrations" / "fake_migration.py"
     content = '''
-conn.execute("SELECT * FROM calibration_pairs_v2")
+conn.execute("SELECT * FROM calibration_pairs")
 '''
-    violations = _check_calibration_pairs_v2_metric_filter(py_file, content)
+    violations = _check_calibration_pairs_metric_filter(py_file, content)
     assert violations == [], "Migration files must not trigger v2 metric lint."
 
 
@@ -139,14 +141,14 @@ def test_current_v2_readers_pass_lint():
     scoped; this test pins that fact and detects future regressions."""
     expected_v2_readers = [
         PROJECT_ROOT / "scripts" / "refit_platt.py",
-        PROJECT_ROOT / "scripts" / "rebuild_calibration_pairs_v2.py",
+        PROJECT_ROOT / "scripts" / "rebuild_calibration_pairs.py",
         PROJECT_ROOT / "scripts" / "verify_truth_surfaces.py",
         PROJECT_ROOT / "scripts" / "backfill_tigge_snapshot_p_raw_v2.py",
     ]
     for py_file in expected_v2_readers:
         if not py_file.exists():
             continue  # Skip if file moved/renamed
-        violations = _check_calibration_pairs_v2_metric_filter(
+        violations = _check_calibration_pairs_metric_filter(
             py_file, py_file.read_text(encoding="utf-8", errors="replace"),
         )
         assert violations == [], (
