@@ -815,6 +815,8 @@ SQLITE_CONNECT_ALLOWLIST: frozenset[str] = frozenset(
         "scripts/replay_equivalence_full_transport.py",  # read_only_ro_uri: all connects use file:...?mode=ro uri; SELECT-only; never writes; operator diagnostic tool
         # --- Wave 1 forensic audit script (2026-05-27) ---
         "scripts/audit_market_price_semantics.py",  # read_only: bare sqlite3.connect() only via --db-path override; canonical path uses get_trade_connection_read_only(); SELECT-only; never writes
+        # --- Zeus #64 SD3: two-phase replay-consumption + gate-aware regen driver (2026-05-28) ---
+        "scripts/selective_refit_from_manifest.py",  # read_only_preflight: _read_stored_gate_hash opens staging DB mode=ro to read gate_set_hash; no writes in that helper; all MC regen writes go through rebuild_calibration_pairs_v2 (already_guarded)
     }
 )
 

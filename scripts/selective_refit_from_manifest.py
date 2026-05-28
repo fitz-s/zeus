@@ -1,5 +1,5 @@
 # Created: 2026-05-28
-# Last reused or audited: 2026-05-28
+# Last reused or audited: 2026-05-28  (SD3: two-phase replay consumption + gate-aware full-reproduce)
 # Lifecycle: created=2026-05-28; last_reviewed=2026-05-28; last_reused=never
 # Purpose: Manifest-driven selective full_transport refit/MC-regen driver (dry-run default).
 # Reuse: Requires isolated staging DB copy + frozen source + live pause for --execute. Never targets a prod DB.
@@ -48,10 +48,12 @@ from __future__ import annotations
 import argparse
 import csv
 import logging
+import sqlite3
 import subprocess
 import sys
 from collections import defaultdict
 from pathlib import Path
+from typing import Optional
 
 ZEUS_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ZEUS_ROOT))
@@ -64,6 +66,7 @@ _PY = sys.executable
 # Action classes that REQUIRE MC pair regeneration (Θ changed → p_raw changed).
 _REGEN_ACTIONS = {"B_REFIT_AND_REGEN_COHORT", "E_LOW_SCALE_REGEN"}
 # Action classes that need a fit row but only conditional regen.
+# C/D not in regen scope until manifest carries explicit served/changed flags.
 _FIT_ONLY_ACTIONS = {"C_NO_LEARNED_CORRECTION", "D_MONTH_SCOPE"}
 # Reuse-pending-replay: replay first, regen only on failure.
 _REPLAY_ACTIONS = {"A_REUSE_PENDING_REPLAY"}
@@ -83,6 +86,142 @@ def _run(cmd: list[str], *, execute: bool) -> int:
     return subprocess.call(cmd, cwd=str(ZEUS_ROOT))
 
 
+def _read_stored_gate_hash(db_path: Path) -> Optional[str]:
+    """Return the gate_set_hash stamped on the most recent model_bias_ens_v2 row,
+    or None if the DB has no rows or the column does not yet exist."""
+    if not db_path.exists():
+        return None
+    try:
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+        existing_cols = {r[1] for r in conn.execute("PRAGMA table_info(model_bias_ens_v2)").fetchall()}
+        if "gate_set_hash" not in existing_cols:
+            conn.close()
+            return None
+        row = conn.execute(
+            "SELECT gate_set_hash FROM model_bias_ens_v2 "
+            "WHERE gate_set_hash IS NOT NULL ORDER BY recorded_at DESC LIMIT 1"
+        ).fetchone()
+        conn.close()
+        return row["gate_set_hash"] if row else None
+    except (sqlite3.OperationalError, sqlite3.DatabaseError):
+        return None
+
+
+# ---------------------------------------------------------------------------
+# SD3 — pure helpers (test-targetable)
+# ---------------------------------------------------------------------------
+
+def _run_replay_for_a_cohorts(
+    a_rows: list[dict],
+    db_path: Path,
+    *,
+    n_per_cohort: int = 5,
+    n_mc: int = 1000,
+    tol: float = 1e-3,
+) -> dict[tuple[str, str, str], bool]:
+    """Run replay-equivalence for every A-cohort in a_rows.
+
+    Returns a dict mapping (city, season, metric) -> pass_verdict (True=PASS).
+
+    Imports ``_evaluate_cohort`` from replay_equivalence_full_transport directly so
+    we get per-cohort CohortResult.pass_verdict — subprocess approach only yields
+    an overall exit code and cannot recover per-cohort PASS/FAIL granularity.
+
+    The DB is opened read-only; no writes occur here.
+    """
+    import numpy as np
+
+    # Import the replay harness inline to avoid circular-import issues at module load.
+    from scripts.replay_equivalence_full_transport import _evaluate_cohort, _open_readonly  # type: ignore[import]
+
+    results: dict[tuple[str, str, str], bool] = {}
+    rng = np.random.default_rng(42)
+
+    conn = _open_readonly(str(db_path))
+    try:
+        for r in a_rows:
+            city = r["city"]
+            season = r["season"]
+            metric = r["metric"]
+            key = (city, season, metric)
+            if key in results:
+                continue  # de-dup: same cohort may appear multiple times
+            cr = _evaluate_cohort(
+                backup_conn=conn,
+                city_name=city,
+                metric=metric,
+                season=season,
+                error_model_source="recompute",
+                model_db_conn=None,
+                n_per_cohort=n_per_cohort,
+                n_mc=n_mc,
+                tol=tol,
+                rng=rng,
+            )
+            results[key] = cr.pass_verdict
+            logger.info(
+                "replay %s/%s/%s -> %s",
+                city, season, metric,
+                "PASS" if cr.pass_verdict else f"FAIL ({cr.fail_reason})",
+            )
+    finally:
+        conn.close()
+
+    return results
+
+
+def compute_final_regen(
+    manifest_rows: list[dict],
+    replay_results: dict[tuple[str, str, str], bool],
+    gate_changed: bool,
+) -> set[tuple[str, str, str]]:
+    """Compute the minimal set of cohorts requiring MC pair regeneration.
+
+    Args:
+        manifest_rows: list of manifest CSV row dicts (keys: city, season, metric, action).
+        replay_results: map (city, season, metric) -> pass_verdict from _run_replay_for_a_cohorts.
+            Ignored when gate_changed=True.
+        gate_changed: if True, ALL cohorts must be regenerated (gate change invalidates
+            every stored row regardless of action class).
+
+    Returns:
+        Set of (city, season, metric) tuples that need MC pair regeneration.
+        final_regen = B ∪ E ∪ A_failed   (gate_changed=False)
+        final_regen = ALL cohorts          (gate_changed=True)
+
+        Note: C and D are not included unless they appear as B/E/A_failed.
+        C/D need a fit row only (identity or month-scoped), not MC pair regen,
+        until the manifest carries explicit served/changed flags.
+    """
+    all_cohorts = {
+        (r["city"], r["season"], r["metric"])
+        for r in manifest_rows
+    }
+
+    if gate_changed:
+        logger.warning(
+            "gate change -> full reproduce: all %d cohorts queued for MC regen", len(all_cohorts)
+        )
+        return set(all_cohorts)
+
+    regen: set[tuple[str, str, str]] = set()
+
+    for r in manifest_rows:
+        key = (r["city"], r["season"], r["metric"])
+        action = r.get("action", "UNKNOWN")
+        if action in _REGEN_ACTIONS:
+            # B and E: always regen
+            regen.add(key)
+        elif action in _REPLAY_ACTIONS:
+            # A: regen only if replay FAILED (or no result available → fail-closed)
+            passed = replay_results.get(key, False)
+            if not passed:
+                regen.add(key)
+
+    return regen
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--manifest", required=True, type=Path)
@@ -94,6 +233,12 @@ def main() -> int:
     ap.add_argument("--workers", type=int, default=4,
                     help="MC workers (<=4: WAL multi-writer starvation above that).")
     ap.add_argument("--metrics", default="high,low")
+    ap.add_argument("--n-per-cohort-replay", type=int, default=5,
+                    help="Snapshots sampled per A-cohort during replay equivalence check.")
+    ap.add_argument("--replay-n-mc", type=int, default=1000,
+                    help="MC iterations for replay check (lower than production MC is fine).")
+    ap.add_argument("--tol", type=float, default=1e-3,
+                    help="max_abs_diff tolerance for replay PASS verdict.")
     ap.add_argument("--log-level", default="INFO")
     args = ap.parse_args()
 
@@ -111,15 +256,31 @@ def main() -> int:
     for r in rows:
         by_action[r.get("action", "UNKNOWN")].append(r)
 
+    # ---- Gate-change detection: snapshot BEFORE Step 1 rewrites rows ----
+    # Query the stored gate_set_hash from the DB NOW, before the fit pass stamps the new hash.
+    from src.calibration.ens_error_model import current_gate_set_hash
+    current_hash = current_gate_set_hash()
+    stored_hash = _read_stored_gate_hash(args.db)
+    gate_changed = (stored_hash is not None) and (stored_hash != current_hash)
+    if stored_hash is None:
+        logger.info("gate check: no stored rows in DB — treating as gate_changed=False")
+    elif gate_changed:
+        logger.warning(
+            "gate change detected: stored_hash=%s  current_hash=%s → full reproduce",
+            stored_hash, current_hash,
+        )
+    else:
+        logger.info("gate check: stored_hash=%s matches current — selective regen allowed", stored_hash)
+
     logger.info("=" * 64)
     logger.info("SELECTIVE REFIT PLAN  (execute=%s)  manifest=%s", args.execute, args.manifest.name)
     for action in sorted(by_action):
         logger.info("  %-26s %d cohorts", action, len(by_action[action]))
-    regen_cohorts = [r for a in _REGEN_ACTIONS for r in by_action.get(a, [])]
+    regen_cohorts_mandatory = [r for a in _REGEN_ACTIONS for r in by_action.get(a, [])]
     fit_only = [r for a in _FIT_ONLY_ACTIONS for r in by_action.get(a, [])]
-    replay = [r for a in _REPLAY_ACTIONS for r in by_action.get(a, [])]
+    replay_rows = [r for a in _REPLAY_ACTIONS for r in by_action.get(a, [])]
     logger.info("MANDATORY MC regen: %d  |  fit-only (C/D): %d  |  replay-then-maybe (A): %d",
-                len(regen_cohorts), len(fit_only), len(replay))
+                len(regen_cohorts_mandatory), len(fit_only), len(replay_rows))
     logger.info("=" * 64)
 
     rc_total = 0
@@ -138,35 +299,60 @@ def main() -> int:
             cmd.append("--commit")
         rc_total |= _run(cmd, execute=args.execute)
 
-    # ---- Step 2: replay-equivalence for A rows (decide reuse vs regen) ----
-    logger.info("STEP 2 — replay-equivalence for %d A cohorts (reuse if pass)", len(replay))
-    # NOTE: replay is scoped by (city, metric); the replay harness filters per
-    # (city, season, metric) bucket internally. A cohort here is one
-    # (city, season, metric) row, so the same city+metric may appear for multiple
-    # seasons — de-dup the replay invocation per (city, metric) to avoid redundant
-    # runs while still covering every A-row's season inside the harness.
-    seen_replay: set[tuple[str, str]] = set()
-    for r in replay:
-        key = (r["city"], r["metric"])
-        if key in seen_replay:
-            continue
-        seen_replay.add(key)
-        cmd = [_PY, "scripts/replay_equivalence_full_transport.py",
-               "--db", str(args.db), "--recompute",
-               "--city", r["city"], "--metric", r["metric"]]
-        rc_total |= _run(cmd, execute=args.execute)
+    # ---- Phase 1: run replay for A cohorts; classify each PASS/FAIL ----
+    # Skipped when gate_changed=True (gate change invalidates everything; no point).
+    replay_results: dict[tuple[str, str, str], bool] = {}
+    if gate_changed:
+        logger.warning(
+            "PHASE 1 (replay) — SKIPPED: gate change detected; all A cohorts treated as FAIL"
+        )
+    else:
+        logger.info(
+            "PHASE 1 — replay-equivalence for %d A cohorts (execute=%s)",
+            len(replay_rows), args.execute,
+        )
+        if args.execute:
+            replay_results = _run_replay_for_a_cohorts(
+                replay_rows,
+                args.db,
+                n_per_cohort=args.n_per_cohort_replay,
+                n_mc=args.replay_n_mc,
+                tol=args.tol,
+            )
+            a_passed = sum(1 for v in replay_results.values() if v)
+            a_failed = sum(1 for v in replay_results.values() if not v)
+            logger.info("replay: %d PASS, %d FAIL out of %d A cohorts",
+                        a_passed, a_failed, len(replay_results))
+        else:
+            # Dry-run: log intent; treat all A as PASS (conservative plan estimate).
+            logger.info("[plan] would run replay on %d A cohorts (all shown as plan-PASS)",
+                        len(replay_rows))
+            for r in replay_rows:
+                key = (r["city"], r["season"], r["metric"])
+                replay_results[key] = True  # plan-only placeholder
 
-    # ---- Step 3: MC regenerate ONLY the mandatory cohorts (B + E) ----
-    logger.info("STEP 3 — MC regenerate %d mandatory cohorts (B+E)", len(regen_cohorts))
-    for r in regen_cohorts:
-        season = r["season"]
+    # ---- Compute final_regen_manifest via pure helper ----
+    final_regen = compute_final_regen(rows, replay_results, gate_changed)
+    logger.info(
+        "final_regen_manifest: %d cohorts  (B∪E=%d, A_failed=%d, gate_changed=%s)",
+        len(final_regen),
+        len(regen_cohorts_mandatory),
+        sum(1 for r in replay_rows
+            if not replay_results.get((r["city"], r["season"], r["metric"]), True)),
+        gate_changed,
+    )
+
+    # ---- Phase 2: MC regenerate ONLY final_regen_manifest cohorts ----
+    logger.info("PHASE 2 — MC regenerate %d cohorts from final_regen_manifest", len(final_regen))
+    for key in sorted(final_regen):
+        city, season, metric = key
         months = _SEASON_MONTHS.get(season)
         if not months:
-            logger.warning("skip cohort %s/%s/%s: unknown season", r["city"], season, r["metric"])
+            logger.warning("skip cohort %s/%s/%s: unknown season", city, season, metric)
             continue
         cmd = [_PY, "scripts/rebuild_calibration_pairs_v2.py",
-               "--db", str(args.db), "--city", r["city"],
-               "--temperature-metric", r["metric"],
+               "--db", str(args.db), "--city", city,
+               "--temperature-metric", metric,
                "--error-model", "full_transport_v1",
                "--n-mc", str(args.n_mc), "--workers", str(args.workers)]
         if args.execute:
