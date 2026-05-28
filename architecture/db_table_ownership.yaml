@@ -1126,6 +1126,23 @@ tables:
       persists). Catalogued 2026-05-27 (PR D0b) when the schema_version
       CHECK list was extended to include 38/39.
 
+  - name: evidence_tier_assignments_new
+    db: world
+    schema_class: legacy_archived
+    schema_version_owner: SCHEMA_VERSION
+    created_by: "src/state/schema/phase6_evidence_schema.py (rebuild-pattern transient table; renamed to evidence_tier_assignments at end of migration)"
+    pk_col: null
+    notes: >
+      Transient rebuild table used by the evidence_tier_assignments schema
+      migration (_migrate_evidence_tier_assignments_schema). Same rebuild
+      pattern as no_trade_events_new: created with the current column set +
+      widened schema_version CHECK, rows copied, old table dropped, then
+      renamed. Never live outside a migration transaction, so classed
+      legacy_archived — known to the check_db_table_delta gate, excluded from
+      assert_db_matches_registry on-disk coherence. Catalogued 2026-05-27
+      (PR #352 Part-5) when the schema_version CHECK list was extended to 40
+      and the gate re-scanned the touched phase6_evidence_schema.py.
+
   - name: tail_stress_scenarios
     db: world
     schema_class: world_class
