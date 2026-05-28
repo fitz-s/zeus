@@ -435,6 +435,9 @@ def _position(**kwargs) -> Position:
         state="entered",
         edge_source="opening_inertia",
         strategy="opening_inertia",
+        # condition_id required for open-phase canonical writes (Fix B, 2026-05-19)
+        condition_id="cond-t1-default",
+        decision_snapshot_id="snap-t1-default",
     )
     defaults.update(kwargs)
     return Position(**defaults)
