@@ -802,20 +802,60 @@ def _run_advisory_check_pr_open_monitor_arm(
     tool_input = payload.get("tool_input", {})
     command = tool_input.get("command", "") if isinstance(tool_input, dict) else ""
 
-    import re
-    if not re.search(r"gh\s+pr\s+(create|ready)", command):
-        return None
-
     output = ""
     if isinstance(tool_response, dict):
         output = tool_response.get("output", "") or ""
     elif isinstance(tool_response, str):
         output = tool_response
 
+    import re
+    # 2026-05-27 fix (round 3): false-positive elimination.
+    # Round-1 regex (`gh\s+pr\s+(create|ready)`) matched any substring so
+    # `git commit -m "... gh pr create ..."` fired. Round-2 anchored to
+    # shell separators (`\n;&|`) but STILL fired on multi-line heredocs and
+    # Python source containing "gh pr create" in string literals. Round-3
+    # uses two complementary signals; either is sufficient:
+    #   STRONG: tool_response output contains a GitHub PR URL (the PR was
+    #           actually opened — unambiguous).
+    #   WEAK:   command begins literally with `gh pr (create|ready)` after
+    #           leading whitespace stripping (the FIRST tokens of the
+    #           command, not buried in a heredoc / quoted -m body).
+    # Both signals together: zero false-positive on commit-message bodies
+    # and heredocs while catching every real `gh pr create` invocation.
+    strong_signal = bool(re.search(r"https?://[^\s]+/pull/\d+", output))
+    weak_signal = bool(re.match(r"\s*gh\s+pr\s+(create|ready)\b", command))
+    if not (strong_signal or weak_signal):
+        return None
+
     pr_num: str | None = None
     m = re.search(r"#(\d+)", output) or re.search(r"pulls?/(\d+)", output)
     if m:
         pr_num = m.group(1)
+
+    # 2026-05-27 fix: when gh stdout is empty / truncated / consumed by a
+    # subagent's Bash result wrapper, fall back to `gh pr list --head
+    # <current-branch>` to resolve the PR# from the just-pushed branch.
+    # Removes the "MONITOR_ARM_REQUIRED:unknown:..." dead-end that forced
+    # operator/orchestrator to manually rediscover the PR # every time
+    # git-master opened a PR in a subagent context.
+    if pr_num is None:
+        try:
+            branch_proc = subprocess.run(
+                ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                capture_output=True, text=True, timeout=5, cwd=REPO_ROOT,
+            )
+            branch = (branch_proc.stdout or "").strip()
+            if branch and branch != "HEAD":
+                list_proc = subprocess.run(
+                    ["gh", "pr", "list", "--head", branch, "--state", "open",
+                     "--json", "number", "--jq", ".[0].number"],
+                    capture_output=True, text=True, timeout=10, cwd=REPO_ROOT,
+                )
+                candidate = (list_proc.stdout or "").strip()
+                if candidate.isdigit():
+                    pr_num = candidate
+        except (subprocess.TimeoutExpired, OSError, FileNotFoundError):
+            pass  # gh / git absent → leave pr_num=None and fall through to generic advisory
 
     from datetime import timedelta
     expiry = datetime.now(timezone.utc) + timedelta(minutes=60)
@@ -1307,24 +1347,101 @@ def _run_advisory_check_monitor_arm_overdue_advisor(
             return None
         oldest = min(sentinels, key=lambda p: p.stat().st_mtime)
         age = time.time() - oldest.stat().st_mtime
-        if age < 120:
-            return None  # not yet overdue
+        if age < 30:
+            return None  # not yet overdue (lowered from 120s to 30s)
         pr_num = oldest.stem  # "<pr_num>" or "unknown"
-        # Fire ONCE then delete sentinel to avoid spam
-        try: oldest.unlink()
-        except Exception: pass
+        # 2026-05-27 fix: STOP being one-shot. The PostToolUse:Monitor ack
+        # handler (`pr_monitor_arm_ack`) is the *only* path that removes the
+        # sentinel. This guarantees the reminder fires on every Bash until
+        # the agent actually arms the Monitor. Rate-limit reminders to once
+        # per 60s so a burst of Bash calls doesn't spam.
+        ratelimit_path = sentinel_dir / f"{pr_num}.lastfire"
+        if ratelimit_path.exists():
+            since = time.time() - ratelimit_path.stat().st_mtime
+            if since < 60:
+                return None
+        try:
+            ratelimit_path.touch()
+        except Exception:
+            pass
+        # Build a fully-resolved Monitor template the agent can copy verbatim.
+        monitor_template = (
+            f'Monitor(persistent=true, '
+            f'command="python3 scripts/pr_monitor.py {pr_num}", '
+            f'description="PR #{pr_num} reviews + CI + threads")'
+        ) if pr_num.isdigit() else "Monitor(persistent=true, command=\"<arm with resolved PR#>\")"
         return (
             f"[monitor_arm_overdue_advisor] ⛔ 2nd-tier: Monitor STILL not armed "
             f"{int(age)}s after PR #{pr_num} was opened.\n"
-            f"  pr_open_monitor_arm fired a STOP advisory; you proceeded without\n"
-            f"  arming a Monitor. Bot auto-review fires ONCE per PR-open (5-8 min)\n"
-            f"  — you may have already missed it.\n"
-            f"  ARM NOW: Monitor(persistent=true, command=\"...\"). See pr_open_monitor_arm\n"
-            f"  output for the exact command template. Or document why intentional\n"
-            f"  (e.g. manual review) by silencing future fires with the sentinel.\n"
-            f"  This 2nd-tier reminder is one-shot per PR open."
+            f"  Bot auto-review fires ONCE per PR-open (5-8 min); paid reviewers\n"
+            f"  may have already fired. Arm Monitor NOW so the next event lands.\n"
+            f"  This reminder repeats every 60s on every Bash UNTIL Monitor is\n"
+            f"  armed (ack via PostToolUse:Monitor). Operator may manually\n"
+            f"  silence by removing state/.monitor_arm_pending/{pr_num}.lock.\n\n"
+            f"  ARM EXACTLY THIS:\n    {monitor_template}\n"
         )
     except Exception as exc:
+        _emit_signal(hook_id, event, "error", f"dispatch_error:{exc}", payload)
+        return None
+
+
+def _run_advisory_check_pr_monitor_arm_ack(
+    payload: dict[str, Any],
+) -> str | None:
+    """PostToolUse (Monitor): ack a pending monitor-arm sentinel.
+
+    When the agent calls the Monitor tool, scan the command for
+    ``pr_monitor.py <N>`` (the canonical PR Monitor template emitted by
+    ``pr_open_monitor_arm`` / ``monitor_arm_overdue_advisor``). If the
+    invocation targets a PR with a pending sentinel, delete the
+    sentinel + ratelimit file so the 2nd-tier reminder stops firing.
+
+    Also recognises ad-hoc ``gh pr view <N>`` / ``gh pr checks <N>`` style
+    monitor commands so operators can arm a hand-rolled Monitor without
+    needing the canonical script and still get the sentinel cleared.
+
+    The 2026-05-27 antibody for the "PR opened in subagent → sentinel
+    lives forever → operator sees stale advisory on every Bash" loop.
+    """
+    hook_id = "pr_monitor_arm_ack"
+    event = payload.get("hook_event_name", "PostToolUse")
+    try:
+        if payload.get("tool_name", "") != "Monitor":
+            return None
+        tool_input = payload.get("tool_input", {})
+        if not isinstance(tool_input, dict):
+            return None
+        command = str(tool_input.get("command", ""))
+        if not command:
+            return None
+        import re as _re
+        # PR# extraction: canonical script first, then `gh pr` patterns.
+        pr_match = (
+            _re.search(r"pr_monitor\.py\s+(\d+)", command)
+            or _re.search(r"\bgh\s+pr\s+(?:view|checks|comments|review)\s+(\d+)", command)
+            or _re.search(r"\bPR=(\d+)\b", command)
+        )
+        if pr_match is None:
+            return None
+        pr_num = pr_match.group(1)
+        sentinel_dir = REPO_ROOT / "state" / ".monitor_arm_pending"
+        if not sentinel_dir.exists():
+            return None
+        removed_any = False
+        for stem in (pr_num, "unknown"):
+            lock_path = sentinel_dir / f"{stem}.lock"
+            ratelimit_path = sentinel_dir / f"{stem}.lastfire"
+            for path in (lock_path, ratelimit_path):
+                if path.exists():
+                    try:
+                        path.unlink()
+                        removed_any = True
+                    except OSError:
+                        pass
+        if removed_any:
+            return f"[pr_monitor_arm_ack] sentinel cleared for PR #{pr_num} — 2nd-tier reminder will not re-fire."
+        return None
+    except Exception as exc:  # noqa: BLE001
         _emit_signal(hook_id, event, "error", f"dispatch_error:{exc}", payload)
         return None
 
@@ -1438,6 +1555,7 @@ _ADVISORY_HANDLERS: dict[str, Any] = {
     "maintenance_worker_dry_run_floor": _run_advisory_check_maintenance_worker_dry_run_floor,
     "pre_branch_create_in_primary": _run_advisory_check_pre_branch_create_in_primary,
     "monitor_arm_overdue_advisor": _run_advisory_check_monitor_arm_overdue_advisor,
+    "pr_monitor_arm_ack": _run_advisory_check_pr_monitor_arm_ack,
 }
 
 # External-module handlers registered conditionally (None if import failed → boot
