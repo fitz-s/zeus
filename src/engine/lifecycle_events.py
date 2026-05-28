@@ -148,6 +148,12 @@ def build_position_current_projection(position: Any) -> dict:
         # the rescue path attaches it; non-rescue projections persist NULL.
         "recovery_authority": _nullable(getattr(position, "recovery_authority", "")),
         "chain_shares": _nullable(getattr(position, "chain_shares", None)),
+        # F1 (docs/findings_2026_05_28.md §F1, 2026-05-28): chain-observed
+        # economics carry their own typed projection columns so balance-only
+        # rescue persists venue truth on chain_avg_price / chain_cost_basis_usd
+        # without overwriting submitted entry_price / cost_basis_usd / size_usd.
+        "chain_avg_price": _nullable(getattr(position, "chain_avg_price", None)),
+        "chain_cost_basis_usd": _nullable(getattr(position, "chain_cost_basis_usd", None)),
         "chain_seen_at": _nullable(getattr(position, "chain_verified_at", "")),
         "chain_absence_at": _nullable(getattr(position, "last_chain_absence_observed_at", "")),
     }
@@ -654,6 +660,15 @@ def build_venue_position_observed_canonical_write(
             "recovery_authority": _RECOVERY_AUTHORITY,
             "causality_status": "UNVERIFIED",
             "training_eligible": False,
+            # F1 (docs/findings_2026_05_28.md §F1, 2026-05-28): chain
+            # economics on the canonical event grammar. Downstream
+            # consumers reading position_events for balance-only rescues
+            # consult these directly; the legacy `shares` / `cost_basis_usd`
+            # / `size_usd` fields above will reflect submitted economics
+            # rather than chain aggregate.
+            "chain_shares": getattr(position, "chain_shares", None),
+            "chain_avg_price": getattr(position, "chain_avg_price", None),
+            "chain_cost_basis_usd": getattr(position, "chain_cost_basis_usd", None),
         },
         default=str,
         sort_keys=True,
