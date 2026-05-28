@@ -8,7 +8,8 @@
 #   name               — table name
 #   db                 — physical DB: world | forecasts | trade | risk_state | backtest
 #   schema_class       — forecast_class | world_class | trade_class | risk_class |
-#                        backtest_class | legacy_archived
+#                        backtest_class | legacy_archived | archive
+#                        (archive: table exists for audit/export only, no live writes)
 #   schema_version_owner — SCHEMA_VERSION | SCHEMA_FORECASTS_VERSION | none
 #   created_by         — init_schema | init_schema_forecasts | apply_v2_schema |
 #                        scripts.migrations._ensure_ledger |
@@ -1015,13 +1016,14 @@ tables:
 
   - name: trade_decisions
     db: trade
-    schema_class: trade_class
+    schema_class: archive
     schema_version_owner: SCHEMA_VERSION
     created_by: init_schema
     pk_col: null
-    cutover_note: >
-      Re-owned trade per 2026-05-17 audit. Writers:
-      src/state/db.py:5961, :6151.
+    notes: >
+      F5 demotion (2026-05-28): audit-only legacy export. Live entry path no longer
+      writes here (log_trade_entry demoted). Canonical truth: position_events /
+      position_current. Retained for historical read/replay tooling only.
 
   - name: uma_resolution
     db: world
