@@ -26,7 +26,7 @@ ERROR-MODEL SOURCE
     canonical ens_error_model_v1 producer runs and persists rows.
 
 --error-model-db PATH: load error-model params from a persisted
-    ens_error_model_v1 (or model_bias_ens) table in the supplied DB.
+    ens_error_model_v1 (or model_bias_ens_v2) table in the supplied DB.
     (Future mode; requires the Phase-1 producer to have run.)
 
 SAFETY
@@ -221,9 +221,9 @@ def _fetch_snapshot_meta(
     conn: sqlite3.Connection,
     snapshot_id: int,
 ) -> Optional[sqlite3.Row]:
-    """Fetch ensemble_snapshots row for a snapshot_id."""
+    """Fetch ensemble_snapshots_v2 row for a snapshot_id."""
     return conn.execute(
-        "SELECT * FROM ensemble_snapshots WHERE snapshot_id = ?",
+        "SELECT * FROM ensemble_snapshots_v2 WHERE snapshot_id = ?",
         (snapshot_id,),
     ).fetchone()
 
@@ -273,46 +273,50 @@ def _load_error_model_from_db(
     city_name: str,
     metric: str,
     season: str,
+    *,
+    target_month: int | None = None,
 ) -> object:
-    """Load error-model params from a persisted ens_error_model_v1 table.
+    """Load error-model params from the persisted canonical model_bias_ens_v2 row,
+    via `read_bias_model` so the canonical-contract filters apply.
 
-    Reconstructs a PredictiveErrorModel from the stored fields. Requires the
-    Phase-1 producer to have written rows with at minimum:
-        bias_c, bias_sd_c, residual_sd_c, heterogeneity_var_c2,
-        correction_strength, effective_bias_c, total_residual_sd_c.
+    B3 / Operator pre-MC re-audit (2026-05-28): pre-fix this function ran a bare SELECT
+    ordered by recorded_at with no family / authority / gate / month filters, so a
+    stale-gate row (or VERIFIED row written under a superseded gate) could leak into
+    the A-cohort replay verdict. The canonical contract requires:
+      * `error_model_family='full_transport_v1'`  (no cross-family leak)
+      * `authority='STAGING'`                     (replay validates the rebuild's NEW rows)
+      * `require_gate_set_hash=<current>`         (stale-gate rows rejected fail-closed)
+      * `target_month=<snapshot month>`           (month-scope guard per snapshot)
+    A row that does not match ALL four filters MUST NOT be returned.
+
+    Raises ValueError when no canonical row matches — caller (the per-snapshot loop
+    in `_evaluate_cohort` db-mode) counts the snapshot as an acquisition failure.
     """
-    from src.calibration.ens_error_model import PredictiveErrorModel
+    from src.calibration.ens_bias_repo import read_bias_model  # noqa: PLC0415
+    from src.calibration.ens_error_model import (  # noqa: PLC0415
+        PredictiveErrorModel, current_gate_set_hash,
+    )
 
-    row = model_db_conn.execute(
-        """
-        SELECT bias_c, bias_sd_c, residual_sd_c, heterogeneity_var_c2,
-               correction_strength, effective_bias_c, total_residual_sd_c
-        FROM ens_error_model_v1
-        WHERE city = ? AND metric = ? AND season = ?
-        ORDER BY recorded_at DESC
-        LIMIT 1
-        """,
-        (city_name, metric, season),
-    ).fetchone()
-
-    if row is None:
-        # Fallback: try model_bias_ens (older schema)
-        row = model_db_conn.execute(
-            """
-            SELECT bias_c, bias_sd_c, residual_sd_c, heterogeneity_var_c2,
-                   correction_strength, effective_bias_c, total_residual_sd_c
-            FROM model_bias_ens
-            WHERE city = ? AND metric = ? AND season = ?
-            ORDER BY recorded_at DESC
-            LIMIT 1
-            """,
-            (city_name, metric, season),
-        ).fetchone()
+    live_dv = _LIVE_DV_HIGH if metric == "high" else _LIVE_DV_LOW
+    row = read_bias_model(
+        model_db_conn,
+        city=city_name,
+        season=season,
+        metric=metric,
+        live_data_version=live_dv,
+        error_model_family="full_transport_v1",
+        authority="STAGING",
+        require_gate_set_hash=current_gate_set_hash(),
+        target_month=target_month,
+    )
 
     if row is None:
         raise ValueError(
-            f"No error-model row for ({city_name!r}, {metric!r}, {season!r}) "
-            "in ens_error_model_v1 or model_bias_ens"
+            f"No canonical STAGING row for ({city_name!r}, {metric!r}, {season!r}, "
+            f"target_month={target_month!r}) under family='full_transport_v1' + "
+            f"current gate_set_hash. The producer must have written a row that "
+            f"matches ALL four filters (family, authority=STAGING, current gate, "
+            f"month covered)."
         )
 
     return PredictiveErrorModel(
@@ -359,7 +363,7 @@ def _compare_snapshot(
 
     snap = _fetch_snapshot_meta(backup_conn, snapshot_id)
     if snap is None:
-        logging.warning("Snapshot %d not found in ensemble_snapshots", snapshot_id)
+        logging.warning("Snapshot %d not found in ensemble_snapshots_v2", snapshot_id)
         return None
 
     try:
@@ -368,7 +372,7 @@ def _compare_snapshot(
         logging.warning("Snapshot %d: bad members_json: %s", snapshot_id, exc)
         return None
 
-    # members_json is already in settlement_unit (verified by rebuild_calibration_pairs unit checks)
+    # members_json is already in settlement_unit (verified by rebuild_calibration_pairs_v2 unit checks)
     members_unit = snap["members_unit"] or city.settlement_unit
 
     grid = grid_for_city(city)
@@ -455,23 +459,31 @@ def _evaluate_cohort(
     log = logging.getLogger(__name__)
     log.info("Evaluating cohort: %s / %s / %s", city_name, metric, season)
 
-    # Acquire error model
-    try:
-        if error_model_source == "recompute":
-            error_model = _recompute_error_model(backup_conn, city_name, metric, season)
-        else:
-            error_model = _load_error_model_from_db(model_db_conn, city_name, metric, season)
-    except Exception as exc:
-        log.warning(
-            "Failed to acquire error model for %s/%s/%s: %s", city_name, metric, season, exc
-        )
-        return CohortResult(
-            city=city_name, metric=metric, season=season,
-            n_sampled=0, n_errors=1,
-            max_abs_diff=float("nan"), pct_argmax_match=float("nan"),
-            mean_brier_delta=float("nan"), pass_verdict=False,
-            fail_reason=f"error-model acquisition failed: {exc}",
-        )
+    is_db_mode = (error_model_source != "recompute")
+
+    # B3 / Operator pre-MC re-audit (2026-05-28): in db mode the model load is
+    # deferred PER SNAPSHOT (each snapshot's target_month gates the canonical read);
+    # in recompute mode the legacy once-per-cohort fit is preserved. A cohort-level
+    # db load would ignore target_month and let a row with non-empty coverage but
+    # the WRONG month silently serve, undoing the month-scope antibody.
+    error_model_cohort = None
+    if not is_db_mode:
+        try:
+            error_model_cohort = _recompute_error_model(
+                backup_conn, city_name, metric, season
+            )
+        except Exception as exc:
+            log.warning(
+                "Failed to acquire error model for %s/%s/%s: %s",
+                city_name, metric, season, exc,
+            )
+            return CohortResult(
+                city=city_name, metric=metric, season=season,
+                n_sampled=0, n_errors=1,
+                max_abs_diff=float("nan"), pct_argmax_match=float("nan"),
+                mean_brier_delta=float("nan"), pass_verdict=False,
+                fail_reason=f"error-model acquisition failed: {exc}",
+            )
 
     # Sample snapshots
     sampled = _fetch_cohort_snapshots(backup_conn, city_name, metric, season, n_per_cohort, rng)
@@ -488,6 +500,32 @@ def _evaluate_cohort(
     errors = 0
 
     for row in sampled:
+        # B3: per-snapshot model load in db mode. Derive target_month from the
+        # snapshot's target_date and gate via the canonical-read contract.
+        if is_db_mode:
+            snap = _fetch_snapshot_meta(backup_conn, int(row["snapshot_id"]))
+            target_month: int | None = None
+            if snap is not None:
+                try:
+                    target_month = int(str(snap["target_date"])[5:7])
+                except (ValueError, IndexError, KeyError, TypeError):
+                    target_month = None
+            try:
+                error_model_snap = _load_error_model_from_db(
+                    model_db_conn, city_name, metric, season,
+                    target_month=target_month,
+                )
+            except Exception as exc:
+                log.warning(
+                    "Per-snapshot DB load failed for snapshot %s "
+                    "(%s/%s/%s, target_month=%s): %s",
+                    row["snapshot_id"], city_name, metric, season, target_month, exc,
+                )
+                errors += 1
+                continue
+        else:
+            error_model_snap = error_model_cohort
+
         sr = _compare_snapshot(
             backup_conn=backup_conn,
             snapshot_id=row["snapshot_id"],
@@ -495,7 +533,7 @@ def _evaluate_cohort(
             city_name=city_name,
             metric=metric,
             season=season,
-            error_model=error_model,
+            error_model=error_model_snap,
             n_mc=n_mc,
             tol=tol,
         )
@@ -617,7 +655,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--error-model-db",
         default=None,
-        help="Path to a DB with ens_error_model_v1 or model_bias_ens table. "
+        help="Path to a DB with ens_error_model_v1 or model_bias_ens_v2 table. "
              "When omitted, --recompute mode is used.",
     )
     p.add_argument(
@@ -763,7 +801,7 @@ def _make_synthetic_fixture():
     conn = sqlite3.connect(":memory:")
     conn.executescript(
         """
-        CREATE TABLE ensemble_snapshots (
+        CREATE TABLE ensemble_snapshots_v2 (
             snapshot_id INTEGER PRIMARY KEY,
             city TEXT, target_date TEXT, temperature_metric TEXT,
             lead_hours REAL, members_json TEXT, members_unit TEXT,

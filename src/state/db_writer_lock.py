@@ -692,6 +692,7 @@ SQLITE_CONNECT_ALLOWLIST: frozenset[str] = frozenset(
         "scripts/check_live_release_gate.py",           # read_only_live + temp_fixture (release gate verifier; no canonical DB writes)
         "scripts/check_edli_live_canary_gate.py",       # read_only_ro_uri (EDLI canary verifier; mode=ro only)
         "scripts/check_full_transport_ship_readiness.py",  # read_only_ro_uri (full_transport ship-readiness gate; SELECT-only, no writes)
+        "scripts/audit_error_model_row_reproducibility.py",  # read_only_ro_uri (row reproducibility audit; both DBs opened mode=ro, SELECT-only)
         "scripts/produce_activation_evidence.py",       # in_memory_only (":memory:" only)
         "scripts/replay_correctness_gate.py",           # read_only (SELECT-only)
         "scripts/replay_probability_edge_bin_sanity.py", # read_only (SELECT-only; LIVE-PROB-P0 §D.4 replay)
@@ -805,6 +806,10 @@ SQLITE_CONNECT_ALLOWLIST: frozenset[str] = frozenset(
         "scripts/replay_equivalence_full_transport.py",  # read_only_ro_uri: all connects use file:...?mode=ro uri; SELECT-only; never writes; operator diagnostic tool
         # --- Wave 1 forensic audit script (2026-05-27) ---
         "scripts/audit_market_price_semantics.py",  # read_only: bare sqlite3.connect() only via --db-path override; canonical path uses get_trade_connection_read_only(); SELECT-only; never writes
+        # --- Zeus #64 SD3: two-phase replay-consumption + gate-aware regen driver (2026-05-28) ---
+        "scripts/selective_refit_from_manifest.py",  # read_only_preflight: _read_stored_gate_hash opens staging DB mode=ro to read gate_set_hash; no writes in that helper; all MC regen writes go through rebuild_calibration_pairs_v2 (already_guarded)
+        # --- Zeus #64 SD6: MC entry gate (P0-P3 code gates) (2026-05-28) ---
+        "scripts/mc_entry_gate.py",  # read_only_gate: P0 opens world DB mode=ro; P2 uses an isolated :memory: DB for the reader-behaviour check; never writes any production DB
     }
 )
 

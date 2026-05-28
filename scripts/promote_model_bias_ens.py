@@ -169,6 +169,13 @@ def cmd_promote(args: argparse.Namespace, conn: sqlite3.Connection) -> int:
         if ic[0] != "ok":
             raise RuntimeError(f"PRAGMA integrity_check failed: {ic[0]}")
         conn.execute("RELEASE SAVEPOINT promote_model_bias_ens")
+        # Task #107 fix (2026-05-28, #358): `get_world_connection(write_class="bulk")` returns
+        # a connection in DEFERRED isolation_level. Releasing the outermost SAVEPOINT in
+        # deferred mode does NOT commit the implicit transaction — the UPDATE stays in
+        # the per-connection write buffer and is dropped when the script exits. Without
+        # an explicit commit() here the promote "succeeds" (no exception, integrity_check
+        # passes, RELEASE returns) but no row actually gains authority='VERIFIED' on disk.
+        conn.commit()
         print(f"Promoted {len(rowids)} rows to VERIFIED.")
     except Exception as exc:
         conn.execute("ROLLBACK TO SAVEPOINT promote_model_bias_ens")

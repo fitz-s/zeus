@@ -174,6 +174,7 @@ def run_parallel_rebuild(
     source_id_filter: Optional[str],
     horizon_profile_filter: Optional[str],
     n_mc: Optional[int],
+    months: Optional[tuple] = None,
     seed_base: Optional[int] = None,
     stats: Any = None,
     error_model_family: Optional[str] = None,
@@ -232,6 +233,7 @@ def run_parallel_rebuild(
                     source_id_filter=source_id_filter,
                     horizon_profile_filter=horizon_profile_filter,
                     error_model_family_filter=error_model_family,
+                    months=months,  # BL-B: month-scope the parallel DELETE too (else wipes other seasons)
                 )
 
                 # ---- Step A: pre-process in main; build payloads for survivors.
