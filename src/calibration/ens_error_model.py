@@ -41,6 +41,54 @@ SNR_HI = 2.0
 # Matches _ERROR_MODEL_MIN_LIVE_N in ens_bias_model.py (both are 5).
 MIN_PAIRED_N = 5
 
+# Default sufficiency thresholds used by fit_city_predictive_error. Centralised
+# here so the gate-set hash below stays in lockstep with the actual fit gates.
+DEFAULT_MIN_LIVE_N = 20
+DEFAULT_RESIDUAL_FLOOR_C = 0.5
+# Minimum TIGGE prior samples for a confident learned correction. Below this the
+# producer must write an identity/no-correction row, NOT a confident city bias
+# (n_prior=1 cannot support a VERIFIED correction — Qingdao class). 2026-05-28.
+MIN_PRIOR_N = 2
+
+# Version tag for the gate-set hash. Bump ONLY when the gate SEMANTICS change in a
+# way that invalidates previously-fit rows (not for unrelated refactors). A bump
+# (or any threshold change above) yields a new gate_set_hash, which makes the
+# reader auto-reject every row fit under the old gate set.
+_GATE_SET_VERSION = "ftgate-2026-05-28"
+
+
+def current_gate_set_hash() -> str:
+    """Stable 16-char hash of the ACTIVE math-gate set for full_transport fits.
+
+    The hash pins every threshold that determines whether a stored bias row is
+    canonical: the SNR breakpoints, the transport paired-N gate, the live/prior
+    sufficiency floors, and the residual floor. ``write_bias_model`` stamps this
+    onto each row; ``read_bias_model(require_gate_set_hash=...)`` rejects any row
+    whose stamp differs from the current one.
+
+    This is the structural antibody for the pre-gate-transport-delta contamination
+    (2026-05-27 audit: 49% of stored rows were fit before MIN_PAIRED_N=5 existed).
+    Rather than rename the family to a version suffix, the gate-set hash carries the
+    probability-domain identity: change a gate, and stale rows auto-quarantine at
+    read time. Deterministic across processes (sorted JSON, no dict ordering).
+    """
+    import hashlib
+    import json
+
+    payload = json.dumps(
+        {
+            "version": _GATE_SET_VERSION,
+            "SNR_LO": SNR_LO,
+            "SNR_HI": SNR_HI,
+            "MIN_PAIRED_N": MIN_PAIRED_N,
+            "MIN_PRIOR_N": MIN_PRIOR_N,
+            "DEFAULT_MIN_LIVE_N": DEFAULT_MIN_LIVE_N,
+            "DEFAULT_RESIDUAL_FLOOR_C": DEFAULT_RESIDUAL_FLOOR_C,
+        },
+        sort_keys=True,
+    ).encode()
+    return hashlib.sha256(payload).hexdigest()[:16]
+
 
 def correction_strength(*, bias: float, bias_sd: float, heterogeneity_var: float) -> float:
     """Universal confidence gate λ ∈ [0, 1] from signal-to-noise.

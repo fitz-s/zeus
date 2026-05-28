@@ -894,7 +894,7 @@ def get_connection(
 # CI hook scripts/check_schema_version.py diffs the sqlite_master hash of
 # a fresh-init DB against tests/state/_schema_pinned_hash.txt and fails
 # the PR if SCHEMA_VERSION did not change in lockstep.
-SCHEMA_VERSION = 41  # 2026-05-27 merge #349+#352: FT-ship F2 (model_bias_ens_v2 in init_schema, world.db fresh-boot safe) merged with #352 Part-3 F1/F4 (position_events.event_type CHECK gains 'REVIEW_REQUIRED'). Prior: 40 = #352 durable authority projection + REVIEW_REQUIRED event type.
+SCHEMA_VERSION = 42  # 2026-05-28 domain-canonicality antibody: model_bias_ens_v2 gains gate_set_hash + coverage_months canonical-extension columns (additive, nullable; idempotent ALTER via init_ens_bias_schema). Reader rejects rows whose gate_set_hash != current + target month outside coverage_months. Prior: 41 = #349+#352 merge (FT-ship F2 + REVIEW_REQUIRED event type).
 
 
 def init_schema(

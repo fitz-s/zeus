@@ -84,6 +84,15 @@ _CANONICAL_EXTENSION_COLUMNS: list[tuple[str, str]] = [
     ("code_commit",          "TEXT"),          # git HEAD SHA at fit time
     ("fit_signature_hash",   "TEXT"),          # sha256 of sorted inputs+params (16-char prefix)
     ("authority",            "TEXT"),          # 'STAGING' | 'VERIFIED' | 'LEGACY'
+    # gate-set + coverage identity (domain-canonicality antibody, 2026-05-28).
+    # gate_set_hash pins the active math-gate set (MIN_PAIRED_N, min_live_n,
+    # min_prior_n, residual_floor) at fit time; the reader rejects any served
+    # row whose gate_set_hash != current so a future gate change auto-quarantines
+    # stale rows (replaces version-suffix family renames — no full_transport_v2).
+    # coverage_months records the months actually present in the fit window so a
+    # season-labelled row cannot be misapplied to a month it never trained on.
+    ("gate_set_hash",        "TEXT"),          # sha256(active gate names+thresholds)[:16]
+    ("coverage_months",      "TEXT"),          # CSV of months covered, e.g. '3,4,5'
 ]
 
 _POSITIVE_CONTRIBUTOR_SQL = (
@@ -290,6 +299,8 @@ def write_bias_model(
     code_commit: str | None = None,
     fit_signature_hash: str | None = None,
     authority: str | None = None,
+    gate_set_hash: str | None = None,
+    coverage_months: str | None = None,
 ) -> None:
     """Persist one bias-model row to model_bias_ens_v2.
 
@@ -344,6 +355,15 @@ def write_bias_model(
             fit_signature_hash,
             authority,
         ]
+        # gate_set_hash + coverage_months are themselves canonical-extension columns
+        # but were added after the original F2 migration; guard each independently so
+        # a DB migrated to F2 but not yet to this column-set still writes the rest.
+        if "gate_set_hash" in _existing:
+            ext_cols += ", gate_set_hash"
+            ext_vals.append(gate_set_hash)
+        if "coverage_months" in _existing:
+            ext_cols += ", coverage_months"
+            ext_vals.append(coverage_months)
         placeholders = ",".join(["?"] * (len(base_vals) + len(ext_vals)))
         conn.execute(
             f"INSERT OR REPLACE INTO model_bias_ens_v2 ({base_cols}{ext_cols}) "
@@ -368,6 +388,8 @@ def read_bias_model(
     live_data_version: str | None = None,
     month: int | None = None,
     error_model_family: str | None = None,
+    require_gate_set_hash: str | None = None,
+    target_month: int | None = None,
 ) -> sqlite3.Row | None:
     """Read a bias row. ``live_data_version`` is REQUIRED — there is no
     'latest across data versions' fallback (that would serve the wrong product).
@@ -379,6 +401,20 @@ def read_bias_model(
     on a schema that predates F2 migration the call degrades to the base filter.
     No ``is_active`` column exists — authority + family are the discriminators.
     Authority: docs/operations/FT_SHIP_EXECUTION_LEDGER_2026-05-25.md F4.
+
+    Domain-canonicality antibody (2026-05-28):
+      * ``require_gate_set_hash``: when supplied, the row is REJECTED (returns None)
+        unless its ``gate_set_hash`` equals this value. A stale row fit under a
+        superseded gate set (e.g. pre-MIN_PAIRED_N) can never be served. This is the
+        structural fix for the pre-gate-transport-delta contamination — it replaces
+        version-suffix family renames; the family name stays stable and the gate-set
+        hash carries the probability-domain identity.
+      * ``target_month``: when supplied AND the row has a non-empty ``coverage_months``,
+        the row is REJECTED unless ``target_month`` is in its covered set. A
+        season-labelled row whose fit window only covered one month cannot be applied
+        to a month it never trained on (COVERAGE_MISLABELED guard).
+    Both guards fail CLOSED (return None) so a missing/old column degrades to "no
+    servable row" rather than silently serving a stale one.
     """
     if not live_data_version:
         raise ValueError(
@@ -399,12 +435,43 @@ def read_bias_model(
         if "error_model_family" not in existing or "authority" not in existing:
             # Schema predates F2 migration — no VERIFIED rows possible.
             return None
-        return conn.execute(
+        row = conn.execute(
             base_sql + " AND error_model_family=? AND authority='VERIFIED'",
             base_params + (error_model_family,),
         ).fetchone()
+        if row is None:
+            return None
+        # Antibody 1: gate-set-hash must match current. Fail closed on mismatch OR
+        # on a row that predates the column (NULL gate_set_hash = pre-antibody = stale).
+        if require_gate_set_hash is not None:
+            if "gate_set_hash" not in existing:
+                return None
+            if (row["gate_set_hash"] or "") != require_gate_set_hash:
+                return None
+        # Antibody 2: month-scope guard. Only enforced when the row declares coverage.
+        if target_month is not None and "coverage_months" in existing:
+            covered = _parse_coverage_months(row["coverage_months"])
+            if covered and int(target_month) not in covered:
+                return None
+        return row
 
     return conn.execute(base_sql, base_params).fetchone()
+
+
+def _parse_coverage_months(raw: object) -> set[int]:
+    """Parse a 'coverage_months' CSV cell into a set of ints. Empty/NULL -> empty set
+    (interpreted as 'no declared scope', so the month guard is a no-op for that row)."""
+    if not raw:
+        return set()
+    out: set[int] = set()
+    for tok in str(raw).split(","):
+        tok = tok.strip()
+        if tok:
+            try:
+                out.add(int(tok))
+            except ValueError:
+                continue
+    return out
 
 
 _LEGACY_NULL_CONTRIBUTOR_SQL = (

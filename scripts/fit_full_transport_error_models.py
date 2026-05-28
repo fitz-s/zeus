@@ -142,6 +142,49 @@ def _discover_cities(conn: sqlite3.Connection) -> list[str]:
     return [r[0] for r in rows]
 
 
+def _observed_coverage_months(
+    conn: sqlite3.Connection,
+    *,
+    city: str,
+    data_version: str,
+    metric: str,
+    season_months: tuple[int, ...],
+    settled_before: str,
+) -> str:
+    """CSV of distinct target-date months actually present in the prior fit slice.
+
+    Mirrors the contributor / lead / cutoff filters used by load_bucket_residuals
+    (legacy_tigge_null_passthrough population) so the recorded coverage matches the
+    data the fit actually saw. Returns e.g. '3,4,5' or '' if none. Used to stamp
+    coverage_months on the row for the reader's month-scope guard.
+    """
+    if not season_months:
+        return ""
+    ph = ",".join("?" for _ in season_months)
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT DISTINCT CAST(SUBSTR(e.target_date, 6, 2) AS INTEGER) AS m
+            FROM ensemble_snapshots_v2 e
+            JOIN settlements_v2 s
+              ON s.city = e.city AND s.target_date = e.target_date
+             AND s.temperature_metric = e.temperature_metric
+            WHERE e.city = ? AND e.data_version = ? AND e.temperature_metric = ?
+              AND e.lead_hours <= 48
+              AND (e.contributes_to_target_extrema IS NULL
+                   OR e.contributes_to_target_extrema = 1)
+              AND COALESCE(e.boundary_ambiguous, 0) = 0
+              AND (? IS NULL OR e.target_date < ?)
+              AND CAST(SUBSTR(e.target_date, 6, 2) AS INTEGER) IN ({ph})
+            ORDER BY m
+            """,
+            [city, data_version, metric, settled_before, settled_before, *season_months],
+        ).fetchall()
+        return ",".join(str(int(r[0])) for r in rows)
+    except sqlite3.Error:
+        return ""
+
+
 def _apply_canonical_migration(conn: sqlite3.Connection) -> None:
     """Ensure canonical columns exist in the target DB (run migration inline)."""
     from scripts.migrate_model_bias_ens_v2_canonical_fields import migrate  # noqa: PLC0415
@@ -179,7 +222,9 @@ def fit_all(
     from src.calibration.ens_bias_repo import (  # noqa: PLC0415
         init_ens_bias_schema, write_bias_model,
     )
-    from src.calibration.ens_error_model import fit_city_predictive_error  # noqa: PLC0415
+    from src.calibration.ens_error_model import (  # noqa: PLC0415
+        fit_city_predictive_error, current_gate_set_hash, MIN_PRIOR_N,
+    )
     from src.calibration.ens_bias_repo import load_bucket_residuals  # noqa: PLC0415
 
     if not dry_run:
@@ -196,8 +241,10 @@ def fit_all(
     )
 
     code_commit = _get_git_commit()
+    gate_set_hash = current_gate_set_hash()
     today_str = datetime.now(timezone.utc).date().isoformat()
     transport_delta_policy = f"kappa={kappa};delta=paired_load_bucket_residuals"
+    logger.info("gate_set_hash=%s code_commit=%s", gate_set_hash, code_commit[:12])
 
     fitted = 0
     skipped = 0
@@ -254,16 +301,59 @@ def fit_all(
                         f"|full_transport_v1|{_live_dv}"
                     )
 
+                    # Coverage months actually present in the prior fit window. A
+                    # season-labelled row that only covered one month must declare it
+                    # so the reader's month-scope guard can reject misapplication
+                    # (COVERAGE_MISLABELED antibody, 2026-05-28).
+                    coverage_months_csv = _observed_coverage_months(
+                        conn, city=city, data_version=_prior_dv, metric=metric,
+                        season_months=season_months, settled_before=today_str,
+                    )
+
+                    # C-handler: insufficient prior cannot support a confident learned
+                    # correction (n_prior=1 → Qingdao class). Write an explicit
+                    # identity/no-correction row instead of a confident city bias.
+                    is_identity = len(tig_residuals) < MIN_PRIOR_N
+
                     if dry_run:
                         logger.info(
-                            "[dry-run] %s: bias_c=%.4f  effective_bias_c=%.4f"
+                            "[dry-run] %s: %sbias_c=%.4f  effective_bias_c=%.4f"
                             "  residual_sd_c=%.4f  correction_strength=%.3f"
-                            "  n_tig=%d  n_opd=%d",
+                            "  n_tig=%d  n_opd=%d  coverage=%s",
                             bucket_label,
-                            model.bias_c, model.effective_bias_c,
-                            model.residual_sd_c, model.correction_strength,
-                            len(tig_residuals), len(opd_residuals),
+                            "IDENTITY " if is_identity else "",
+                            0.0 if is_identity else model.bias_c,
+                            0.0 if is_identity else model.effective_bias_c,
+                            model.residual_sd_c, 0.0 if is_identity else model.correction_strength,
+                            len(tig_residuals), len(opd_residuals), coverage_months_csv,
                         )
+                    elif is_identity:
+                        # Identity / no-correction: bias forced to 0, correction_strength 0,
+                        # estimator tagged, authority STAGING. Served as "no learned shift",
+                        # never as a confident correction.
+                        write_bias_model(
+                            conn,
+                            city=city, season=season, metric=metric,
+                            live_data_version=_live_dv, prior_data_version=_prior_dv,
+                            posterior_bias_c=0.0, posterior_sd_c=model.bias_sd_c,
+                            n_live=len(opd_residuals), n_prior=len(tig_residuals),
+                            weight_live=0.0,
+                            estimator="ens_error_model.identity_insufficient_prior",
+                            training_cutoff=today_str, recorded_at=today_str,
+                            error_model_family="full_transport_v1",
+                            error_model_key=error_model_key,
+                            transport_delta_policy=transport_delta_policy,
+                            bias_c=0.0, bias_sd_c=model.bias_sd_c,
+                            residual_sd_c=model.residual_sd_c,
+                            heterogeneity_var_c2=model.heterogeneity_var_c2,
+                            correction_strength=0.0, effective_bias_c=0.0,
+                            total_residual_sd_c=model.total_residual_sd_c,
+                            code_commit=code_commit, fit_signature_hash=sig_hash,
+                            authority="STAGING",
+                            gate_set_hash=gate_set_hash,
+                            coverage_months=coverage_months_csv,
+                        )
+                        rows_written += 1
                     else:
                         write_bias_model(
                             conn,
@@ -294,6 +384,8 @@ def fit_all(
                             code_commit=code_commit,
                             fit_signature_hash=sig_hash,
                             authority="STAGING",
+                            gate_set_hash=gate_set_hash,
+                            coverage_months=coverage_months_csv,
                         )
                         rows_written += 1
 
