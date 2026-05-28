@@ -2026,19 +2026,25 @@ def _record_pair_batch_manifest(
         where.append("live_data_version = ?")
         params.append(data_version_filter)
 
-    wconn = sqlite3.connect(f"file:{ZEUS_WORLD_DB_PATH}?mode=ro", uri=True)
-    wconn.row_factory = sqlite3.Row
+    # SD4 / Blocker 3.2 (operator pre-MC re-audit): query model_bias_ens_v2 from the SAME DB the
+    # MC actually read p_raw from — the rebuild's conn (the isolated --db where the producer wrote
+    # the STAGING rows and where _native_error_params_for_snapshot reads them). Reading the shared
+    # world DB here would record the WRONG domain (old prod rows), not the rows the pairs were
+    # generated from. Same-source is the whole point of the manifest.
     try:
-        rows = wconn.execute(
+        rows = forecasts_conn.execute(
             "SELECT city, season, metric, live_data_version, fit_signature_hash, gate_set_hash "
             f"FROM model_bias_ens_v2 WHERE {' AND '.join(where)}",
             params,
         ).fetchall()
-    finally:
-        wconn.close()
+    except sqlite3.Error as exc:
+        print("WARN: pair-batch manifest skipped — model_bias_ens_v2 not queryable on the rebuild "
+              f"DB ({exc}); the producer must have written STAGING rows to this same --db.",
+              file=sys.stderr)
+        return None
     if not rows:
         print("WARN: pair-batch manifest skipped — no STAGING rows match current gate_set_hash "
-              f"({cur_hash}) in scope.", file=sys.stderr)
+              f"({cur_hash}) in scope on the rebuild DB.", file=sys.stderr)
         return None
 
     try:
