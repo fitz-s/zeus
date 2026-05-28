@@ -1478,6 +1478,20 @@ def _position_from_projection_row(row: dict, *, current_mode: str) -> Position:
         last_monitor_market_price=row.get("last_monitor_market_price"),
         admin_exit_reason=str(row.get("admin_exit_reason") or ""),
         entry_fill_verified=bool(row.get("entry_fill_verified", False)),
+        # PR #352 (Part-5 audit Finding 1): the durable projection stores chain
+        # observation timestamps under chain_seen_at / chain_absence_at; the
+        # runtime Position carries them as chain_verified_at /
+        # last_chain_absence_observed_at. Without this translation a chain-synced
+        # position reloads with empty chain_verified_at and classify_chain_state()
+        # mis-reads it as CHAIN_UNKNOWN — blocking a legitimate void after
+        # restart. Prefer the legacy runtime name if present, else the durable
+        # projection column.
+        chain_verified_at=str(row.get("chain_verified_at") or row.get("chain_seen_at") or ""),
+        last_chain_absence_observed_at=str(
+            row.get("last_chain_absence_observed_at") or row.get("chain_absence_at") or ""
+        ),
+        chain_shares=float(row.get("chain_shares") or 0.0),
+        fill_authority=str(row.get("fill_authority") or FILL_AUTHORITY_NONE),
     )
     for field_name in {f.name for f in fields(Position)}:
         if field_name in payload:

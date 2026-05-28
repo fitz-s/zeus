@@ -102,3 +102,110 @@ def test_resolved_chain_only_fact_skipped(caplog) -> None:
     with caplog.at_level(logging.WARNING, logger="src.state.chain_reconciliation"):
         check_quarantine_timeouts(portfolio)
     assert not any("CHAIN_ONLY_REVIEW EXPIRED" in r.message for r in caplog.records)
+
+
+# ---------- Part-5 Finding 1: durable chain timestamps round-trip via loader ----------
+
+def _projection_row(**overrides) -> dict:
+    row = {
+        "position_id": "p-1", "trade_id": "p-1", "phase": "active", "state": "entered",
+        "market_id": "m", "city": "London", "cluster": "eu", "target_date": "2026-06-01",
+        "bin_label": "b", "direction": "buy_yes", "unit": "C", "size_usd": 1.0, "shares": 1.0,
+        "cost_basis_usd": 1.0, "entry_price": 0.5, "p_posterior": 0.5,
+        "decision_snapshot_id": "snap", "entry_method": "limit", "strategy_key": "center_buy",
+        "chain_state": "synced", "token_id": "tok", "condition_id": "cond",
+        "order_id": "o", "order_status": "filled", "updated_at": "2026-06-01T00:00:00Z",
+    }
+    row.update(overrides)
+    return row
+
+
+def test_loader_maps_chain_seen_at_to_chain_verified_at() -> None:
+    from src.state.portfolio import _position_from_projection_row
+    pos = _position_from_projection_row(
+        _projection_row(chain_seen_at="2026-06-01T12:00:00+00:00"), current_mode="live"
+    )
+    assert pos.chain_verified_at == "2026-06-01T12:00:00+00:00", (
+        "chain_seen_at must map to runtime chain_verified_at, else classify_chain_state "
+        "mis-reads a restarted chain-synced position as CHAIN_UNKNOWN"
+    )
+
+
+def test_loader_maps_chain_absence_at_to_runtime_field() -> None:
+    from src.state.portfolio import _position_from_projection_row
+    pos = _position_from_projection_row(
+        _projection_row(chain_absence_at="2026-06-01T18:00:00+00:00"), current_mode="live"
+    )
+    assert pos.last_chain_absence_observed_at == "2026-06-01T18:00:00+00:00"
+
+
+def test_loader_prefers_legacy_chain_verified_at_when_present() -> None:
+    from src.state.portfolio import _position_from_projection_row
+    pos = _position_from_projection_row(
+        _projection_row(
+            chain_verified_at="2026-06-01T09:00:00+00:00",
+            chain_seen_at="2026-06-01T12:00:00+00:00",
+        ),
+        current_mode="live",
+    )
+    assert pos.chain_verified_at == "2026-06-01T09:00:00+00:00"
+
+
+# ---------- Part-5 Finding 2: venue builder payload == projection authority ----------
+
+def test_venue_observed_payload_matches_projection_even_with_wrong_attr() -> None:
+    import json
+    from src.engine.lifecycle_events import build_venue_position_observed_canonical_write
+
+    class _P:
+        def __init__(self):
+            for k, v in dict(
+                trade_id="t", market_id="m", city="London", cluster="eu",
+                target_date="2026-06-01", bin_label="b", direction="buy_yes", unit="C",
+                size_usd=1.0, shares=1.0, cost_basis_usd=1.0, entry_price=0.5, p_posterior=0.5,
+                decision_snapshot_id="s", entry_method="limit", strategy_key="center_buy",
+                strategy="center_buy", chain_state="synced", token_id="tok", condition_id="c",
+                order_id="o", order_status="filled", state="entered", exit_state="",
+                entered_at="2026-06-01T10:00:00+00:00", env="test",
+                fill_authority="venue_confirmed_full",  # deliberately WRONG for this builder
+            ).items():
+                setattr(self, k, v)
+
+    events, projection = build_venue_position_observed_canonical_write(_P(), sequence_no=1)
+    payload = json.loads(events[0]["payload_json"])
+    assert payload["fill_authority"] == "venue_position_observed"
+    assert payload["recovery_authority"] == "balance_only"
+    assert projection["fill_authority"] == payload["fill_authority"]
+    assert projection["recovery_authority"] == payload["recovery_authority"]
+
+
+# ---------- Part-5 Finding 3: no exposure gate reads entry_fill_verified ----------
+
+def test_no_exposure_module_branches_on_entry_fill_verified() -> None:
+    """entry_fill_verified is a fill-verification signal, not an exposure gate.
+    Exposure/risk/exit decisions must use has_tradable_exposure / fill_authority
+    so balance-only rescued positions (entry_fill_verified=False, but real
+    on-chain exposure) stay managed. Ban conditional branches on the bool in the
+    exposure-side modules (construction `entry_fill_verified=...` is allowed)."""
+    import re
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[2]
+    exposure_modules = [
+        root / "src" / "riskguard" / "riskguard.py",
+        root / "src" / "execution" / "exit_lifecycle.py",
+    ]
+    # Gate patterns: `if ... entry_fill_verified`, `and/or entry_fill_verified`,
+    # `not entry_fill_verified`, `if pos.entry_fill_verified:`.
+    gate_re = re.compile(r"\b(if|elif|and|or|not|while|assert)\b[^\n=]*entry_fill_verified")
+    for mod in exposure_modules:
+        if not mod.exists():
+            continue
+        for ln in mod.read_text().splitlines():
+            stripped = ln.strip()
+            if stripped.startswith("#"):
+                continue
+            assert not gate_re.search(ln), (
+                f"{mod.name}: exposure decision branches on entry_fill_verified "
+                f"(use has_tradable_exposure / fill_authority): {stripped!r}"
+            )

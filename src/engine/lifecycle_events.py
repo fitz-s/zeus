@@ -611,15 +611,17 @@ def build_venue_position_observed_canonical_write(
     if projection["phase"] != ACTIVE:
         raise ValueError("venue_position_observed canonical builder requires an active position projection")
 
-    # PR #352 (Part-3 audit, bot #6 on PR #351, 2026-05-27): the base projection
-    # mirrors Position.fill_authority / .recovery_authority, but the runtime
-    # rescue path does not always set those attributes before calling this
-    # builder. Since THIS builder is, by definition, the balance-only degraded
-    # recovery event, it owns the authority truth: force it onto the durable
-    # projection so the position_current row matches the event payload
-    # (recovery_authority=balance_only) instead of persisting NULL.
-    projection["recovery_authority"] = "balance_only"
-    projection["fill_authority"] = projection.get("fill_authority") or "venue_position_observed"
+    # PR #352 (Part-3 bot #6 + Part-5 Finding 2 on PR #351, 2026-05-27): THIS
+    # builder is, by definition, the balance-only degraded-recovery event, so it
+    # OWNS the authority truth — it must not trust the runtime Position attribute
+    # for a field it semantically defines. Force both the durable projection AND
+    # the event payload from the same local constants so they can never diverge
+    # (the prior code read getattr(position,"fill_authority",...) for the payload
+    # while forcing the projection — an empty/wrong attribute would split them).
+    _FILL_AUTHORITY = "venue_position_observed"
+    _RECOVERY_AUTHORITY = "balance_only"
+    projection["recovery_authority"] = _RECOVERY_AUTHORITY
+    projection["fill_authority"] = _FILL_AUTHORITY
 
     occurred_at = _non_empty(
         getattr(position, "entered_at", ""),
@@ -645,9 +647,11 @@ def build_venue_position_observed_canonical_write(
             "rescue_condition_id": getattr(position, "condition_id", ""),
             "order_status": getattr(position, "order_status", ""),
             "chain_state": getattr(position, "chain_state", ""),
-            # PR D0 additions — explicit degraded-recovery signal:
-            "fill_authority": getattr(position, "fill_authority", "venue_position_observed"),
-            "recovery_authority": "balance_only",
+            # PR D0 additions — explicit degraded-recovery signal. Sourced from
+            # the same local constants as the projection (Part-5 Finding 2) so
+            # payload and durable projection authority can never disagree.
+            "fill_authority": _FILL_AUTHORITY,
+            "recovery_authority": _RECOVERY_AUTHORITY,
             "causality_status": "UNVERIFIED",
             "training_eligible": False,
         },

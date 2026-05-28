@@ -8845,6 +8845,16 @@ def query_portfolio_loader_view(conn: sqlite3.Connection | None, *, temperature_
         else "NULL AS env"
     )
 
+    # PR #352 (Part-3/Part-5 audit Finding 1, 2026-05-27): the D0b durable
+    # authority columns must round-trip through the loader, else a chain-synced
+    # position loses chain_verified_at on restart and classify_chain_state()
+    # mis-reads it as CHAIN_UNKNOWN — blocking legitimate void. Guarded by
+    # column presence (legacy DBs pre-D0b project NULL) like the env expr above.
+    _authority_cols = ("fill_authority", "recovery_authority", "chain_shares", "chain_seen_at", "chain_absence_at")
+    authority_select_expr = ", ".join(
+        c if c in actual_cols else f"NULL AS {c}" for c in _authority_cols
+    )
+
     rows = conn.execute(
         f"""
         SELECT position_id, phase, trade_id, market_id, city, cluster, target_date, bin_label,
@@ -8852,7 +8862,7 @@ def query_portfolio_loader_view(conn: sqlite3.Connection | None, *, temperature_
                last_monitor_prob, last_monitor_edge, last_monitor_market_price,
                decision_snapshot_id, entry_method, strategy_key, edge_source, discovery_mode,
                chain_state, token_id, no_token_id, condition_id, order_id, order_status, updated_at,
-               temperature_metric, {position_current_env_expr}
+               temperature_metric, {position_current_env_expr}, {authority_select_expr}
         FROM position_current {where_clause}
         ORDER BY updated_at DESC, position_id
         """,
@@ -8935,6 +8945,17 @@ def query_portfolio_loader_view(conn: sqlite3.Connection | None, *, temperature_
                     or fill_economics["entry_fill_verified"]
                 ),
                 "temperature_metric": str(row["temperature_metric"] or "high"),
+                # PR #352 (Part-5 audit Finding 1): durable chain-observation +
+                # authority columns round-trip into the runtime Position so that
+                # chain_verified_at / last_chain_absence_observed_at survive
+                # restart. _position_from_projection_row maps chain_seen_at ->
+                # chain_verified_at and chain_absence_at ->
+                # last_chain_absence_observed_at. (fill_authority already flows
+                # via fill_economics above.)
+                "chain_seen_at": str(row["chain_seen_at"] or ""),
+                "chain_absence_at": str(row["chain_absence_at"] or ""),
+                "chain_shares": _finite_float_or_none(row["chain_shares"]) or 0.0,
+                "recovery_authority": str(row["recovery_authority"] or ""),
             }
         )
     return {
