@@ -174,6 +174,77 @@ def assert_model_bias_schema_ready(conn: sqlite3.Connection) -> None:
         )
 
 
+def build_pair_batch_manifest(
+    consumed_rows: list,
+    *,
+    error_model_family: str,
+    gate_set_hash: str,
+    generator_commit: str,
+    n_mc: int,
+    scope: dict,
+) -> dict:
+    """Immutable, content-addressed manifest of ONE calibration-pair rebuild batch (SD4 / Blocker F).
+
+    ``consumed_rows`` are the model_bias_ens_v2 STAGING rows the rebuild drew p_raw from — each a
+    mapping with city, season, metric, live_data_version, fit_signature_hash, gate_set_hash. The
+    manifest records the error-model DOMAIN identity so a downstream Platt/identity fit can verify
+    its pairs belong to the intended gate set and were generated from the expected sources (the
+    operator-accepted alternative to stamping every pair). pair_batch_id == manifest_hash
+    (content-addressed): identical inputs -> identical id (idempotent re-run), any change -> new id.
+    The manifest is never mutated in place (see write_pair_batch_manifest).
+    """
+    import hashlib  # noqa: PLC0415
+    import json  # noqa: PLC0415
+
+    def _g(r, k):
+        try:
+            return r[k]
+        except (KeyError, IndexError, TypeError):
+            return (r.get(k) if hasattr(r, "get") else None)
+
+    sig_set = sorted({str(_g(r, "fit_signature_hash")) for r in consumed_rows
+                      if _g(r, "fit_signature_hash")})
+    source_tuples = sorted(
+        [str(_g(r, "city")), str(_g(r, "season")), str(_g(r, "metric")),
+         str(_g(r, "live_data_version")), str(_g(r, "fit_signature_hash") or "")]
+        for r in consumed_rows
+    )
+    source_db_snapshot_hash = hashlib.sha256(
+        json.dumps(source_tuples, sort_keys=True).encode()
+    ).hexdigest()
+    core = {
+        "error_model_family": error_model_family,
+        "gate_set_hash": gate_set_hash,
+        "fit_signature_hashes": sig_set,
+        "generator_commit": generator_commit,
+        "n_mc": int(n_mc),
+        "source_db_snapshot_hash": source_db_snapshot_hash,
+        "scope": scope,
+        "n_consumed_rows": len(list(consumed_rows)),
+    }
+    manifest_hash = hashlib.sha256(json.dumps(core, sort_keys=True).encode()).hexdigest()
+    return {**core, "manifest_hash": manifest_hash, "pair_batch_id": manifest_hash}
+
+
+def write_pair_batch_manifest(conn: sqlite3.Connection, manifest: dict) -> str:
+    """Persist an IMMUTABLE pair-batch manifest to zeus_meta (key='pair_batch:<id>').
+
+    INSERT ... ON CONFLICT(key) DO NOTHING: identical content (same pair_batch_id) is a no-op; a
+    manifest row is never overwritten — provenance is append-only. Returns the pair_batch_id. Uses
+    zeus_meta (already a registered forecast-class meta table) so a new domain table is not required
+    on the ATTACH-replicated forecasts schema (no SCHEMA_FORECASTS_VERSION / world-pin cascade).
+    """
+    import json  # noqa: PLC0415
+
+    pbid = manifest["pair_batch_id"]
+    conn.execute(
+        "INSERT INTO zeus_meta (key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP) "
+        "ON CONFLICT(key) DO NOTHING",
+        (f"pair_batch:{pbid}", json.dumps(manifest, sort_keys=True)),
+    )
+    return pbid
+
+
 def load_bucket_residuals(
     conn: sqlite3.Connection,
     *,

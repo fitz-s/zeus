@@ -1989,6 +1989,82 @@ def _print_rebuild_gate_stats(stats: RebuildStatsV2) -> None:
             print(f"    {count:6d}  {reason}")
 
 
+def _record_pair_batch_manifest(
+    *,
+    forecasts_conn: sqlite3.Connection,
+    city_filter: str | None,
+    temperature_metric: str,
+    data_version_filter: str | None,
+    n_mc: int | None,
+) -> str | None:
+    """SD4 / Blocker F: write an immutable pair-batch manifest after a full_transport rebuild.
+
+    Re-queries the model_bias_ens_v2 STAGING rows (world.db) the rebuild drew p_raw from — the
+    rows matching the CURRENT gate_set_hash within this run's scope — and records their domain
+    identity (gate set + fit-signature set + source snapshot) as an immutable zeus_meta row on the
+    forecasts DB. A downstream Platt/identity fit can then verify its pairs belong to the intended
+    error-model domain. Best-effort: never aborts a completed rebuild.
+    """
+    import subprocess  # noqa: PLC0415
+    from src.calibration.ens_error_model import current_gate_set_hash  # noqa: PLC0415
+    from src.calibration.ens_bias_repo import (  # noqa: PLC0415
+        build_pair_batch_manifest, write_pair_batch_manifest,
+    )
+    from src.config import calibration_batch_rebuild_n_mc  # noqa: PLC0415
+
+    cur_hash = current_gate_set_hash()
+    where = ["authority = 'STAGING'", "error_model_family = 'full_transport_v1'",
+             "gate_set_hash = ?"]
+    params: list = [cur_hash]
+    if city_filter:
+        where.append("city = ?")
+        params.append(city_filter)
+    if temperature_metric and temperature_metric != "all":
+        where.append("metric = ?")
+        params.append(temperature_metric)
+    if data_version_filter:
+        where.append("live_data_version = ?")
+        params.append(data_version_filter)
+
+    wconn = sqlite3.connect(f"file:{ZEUS_WORLD_DB_PATH}?mode=ro", uri=True)
+    wconn.row_factory = sqlite3.Row
+    try:
+        rows = wconn.execute(
+            "SELECT city, season, metric, live_data_version, fit_signature_hash, gate_set_hash "
+            f"FROM model_bias_ens_v2 WHERE {' AND '.join(where)}",
+            params,
+        ).fetchall()
+    finally:
+        wconn.close()
+    if not rows:
+        print("WARN: pair-batch manifest skipped — no STAGING rows match current gate_set_hash "
+              f"({cur_hash}) in scope.", file=sys.stderr)
+        return None
+
+    try:
+        commit = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=str(Path(__file__).resolve().parent.parent),
+            text=True,
+        ).strip()
+    except Exception:
+        commit = "unknown"
+
+    manifest = build_pair_batch_manifest(
+        rows,
+        error_model_family="full_transport_v1",
+        gate_set_hash=cur_hash,
+        generator_commit=commit,
+        n_mc=int(n_mc) if n_mc is not None else calibration_batch_rebuild_n_mc(),
+        scope={"city": city_filter, "metric": temperature_metric,
+               "data_version": data_version_filter},
+    )
+    pbid = write_pair_batch_manifest(forecasts_conn, manifest)
+    forecasts_conn.commit()
+    print(f"pair-batch manifest recorded: pair_batch_id={pbid} "
+          f"gate_set_hash={cur_hash} n_rows={len(rows)} n_sigs={len(manifest['fit_signature_hashes'])}")
+    return pbid
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Rebuild calibration_pairs_v2 from ensemble_snapshots_v2 (high track).",
@@ -2210,6 +2286,23 @@ def main() -> int:
             except Exception as e:
                 print(f"ERROR: {type(e).__name__}: {e}", file=sys.stderr)
                 return 1
+
+            # SD4 / Blocker F: after a successful full_transport rebuild, record the immutable
+            # pair-batch manifest (domain identity of the pairs just generated). Best-effort —
+            # never aborts a completed rebuild.
+            if (not args.dry_run) and args.error_model == "full_transport_v1" \
+                    and not any(s.refused for s in per_metric.values()):
+                try:
+                    _record_pair_batch_manifest(
+                        forecasts_conn=conn,
+                        city_filter=args.city,
+                        temperature_metric=args.temperature_metric,
+                        data_version_filter=args.data_version,
+                        n_mc=args.n_mc,
+                    )
+                except Exception as e:
+                    print(f"WARN: pair-batch manifest not recorded: {type(e).__name__}: {e}",
+                          file=sys.stderr)
     finally:
         conn.close()
 
