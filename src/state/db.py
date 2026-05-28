@@ -894,7 +894,7 @@ def get_connection(
 # CI hook scripts/check_schema_version.py diffs the sqlite_master hash of
 # a fresh-init DB against tests/state/_schema_pinned_hash.txt and fails
 # the PR if SCHEMA_VERSION did not change in lockstep.
-SCHEMA_VERSION = 42  # 2026-05-28 F1 (docs/findings_2026_05_28.md §F1): position_current gains chain_avg_price + chain_cost_basis_usd so balance-only rescue persists chain-observed economics without overwriting submitted entry_price/cost_basis_usd/size_usd. Prior: 41 = merge #349+#352.
+SCHEMA_VERSION = 43  # 2026-05-28 B6 (docs/findings_2026_05_28.md §B6): drop event_version column from position_events. Prior: 42 = F1 chain_avg_price + chain_cost_basis_usd on position_current.
 
 
 def init_schema(
@@ -1393,7 +1393,7 @@ def init_schema(
             finality_confirmed_time    TEXT,
             clock_skew_estimate_ms_at_submit INTEGER,
             raw_orderbook_hash_transition_delta_ms INTEGER,
-            schema_version INTEGER NOT NULL CHECK (schema_version IN (12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42)),
+            schema_version INTEGER NOT NULL CHECK (schema_version IN (12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43)),
             source         TEXT NOT NULL CHECK (source IN ('phase0_backfill', 'live_decision', 'shadow_decision')),
             PRIMARY KEY (market_slug, temperature_metric, target_date, observation_time, decision_seq)
         );
@@ -2665,7 +2665,7 @@ def _migrate_decision_events_schema(conn: sqlite3.Connection) -> None:
             finality_confirmed_time    TEXT,
             clock_skew_estimate_ms_at_submit INTEGER,
             raw_orderbook_hash_transition_delta_ms INTEGER,
-            schema_version INTEGER NOT NULL CHECK (schema_version IN (12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42)),
+            schema_version INTEGER NOT NULL CHECK (schema_version IN (12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43)),
             source         TEXT NOT NULL CHECK (source IN ('phase0_backfill', 'live_decision', 'shadow_decision')),
             PRIMARY KEY (market_slug, temperature_metric, target_date, observation_time, decision_seq)
         )
@@ -2701,7 +2701,7 @@ def _migrate_decision_events_schema(conn: sqlite3.Connection) -> None:
             first_inclusion_block_time, finality_confirmed_time,
             clock_skew_estimate_ms_at_submit, raw_orderbook_hash_transition_delta_ms,
             CASE
-                WHEN schema_version IN (12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42)
+                WHEN schema_version IN (12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43)
                     THEN schema_version
                 ELSE 36
             END,
@@ -3458,6 +3458,22 @@ def _migrate_world_strategy_key_checks(conn: sqlite3.Connection) -> None:
             conn.execute(idx_sql)
 
 
+def _migrate_position_events_drop_event_version(conn: sqlite3.Connection) -> None:
+    """B6 (2026-05-28): drop event_version column from position_events.
+
+    event_version was always written as 1 and never branched on. SQLite ≥3.35
+    supports ALTER TABLE ... DROP COLUMN directly. Idempotent: no-op if the
+    column is already absent.
+    """
+    cols = {
+        row[1]
+        for row in conn.execute("PRAGMA table_info(position_events)").fetchall()
+    }
+    if "event_version" not in cols:
+        return  # Already dropped — idempotent
+    conn.execute("ALTER TABLE position_events DROP COLUMN event_version")
+
+
 def _migrate_trade_strategy_key_checks(conn: sqlite3.Connection) -> None:
     """Remove stale hardcoded strategy_key CHECK from trade-class tables.
 
@@ -3782,7 +3798,6 @@ _TRADE_CLASS_DDL = """
 CREATE TABLE IF NOT EXISTS position_events (
     event_id TEXT PRIMARY KEY,
     position_id TEXT NOT NULL,
-    event_version INTEGER NOT NULL DEFAULT 1 CHECK (event_version >= 1),
     sequence_no INTEGER NOT NULL CHECK (sequence_no >= 1),
     event_type TEXT NOT NULL CHECK (event_type IN (
         'POSITION_OPEN_INTENT',
@@ -4289,6 +4304,8 @@ def init_schema_trade_only(conn: sqlite3.Connection) -> None:
 
     # Create the trade runtime tables (IF NOT EXISTS — idempotent).
     conn.executescript(_TRADE_CLASS_DDL)
+    # B6 (2026-05-28): drop event_version from existing live position_events rows.
+    _migrate_position_events_drop_event_version(conn)
     _migrate_trade_strategy_key_checks(conn)
     # Executable market substrate is live execution evidence. The market
     # discovery scheduler passes this same trade connection to snapshot_repo and
