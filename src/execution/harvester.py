@@ -1435,7 +1435,7 @@ def _write_settlement_truth(
     _SOURCE_TYPE_MAP = {"wu_icao": "WU", "hko": "HKO", "noaa": "NOAA", "cwa_station": "CWA"}
     db_source_type = _SOURCE_TYPE_MAP.get(city.settlement_source_type, city.settlement_source_type.upper())
     data_version = _HARVESTER_LIVE_DATA_VERSION.get(
-        city.settlement_source_type, "unknown_v0"
+        city.settlement_source_type, "unknown"
     )
     metric_identity = _metric_identity_for(temperature_metric)
     settled_at = datetime.now(timezone.utc).isoformat(timespec="seconds")

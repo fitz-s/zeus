@@ -780,7 +780,7 @@ def test_live_process_loaded_code_surface_includes_recovery_and_m5_paths():
     live_paths = set(healthcheck.PROCESS_CODE_SURFACES["live_trading"])
 
     assert "src/engine/evaluator.py" in live_paths
-    assert "src/contracts/executable_market_snapshot_v2.py" in live_paths
+    assert "src/contracts/executable_market_snapshot.py" in live_paths
     assert "src/contracts/execution_intent.py" in live_paths
     assert "src/data/market_scanner.py" in live_paths
     assert "src/data/polymarket_client.py" in live_paths

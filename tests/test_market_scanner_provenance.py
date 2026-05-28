@@ -32,7 +32,7 @@ import httpx
 import pytest
 
 from src.backtest.economics import check_economics_readiness
-from src.contracts.executable_market_snapshot_v2 import ExecutableMarketSnapshotV2
+from src.contracts.executable_market_snapshot import ExecutableMarketSnapshot
 from src.data import market_scanner as ms
 from src.data.market_scanner import (
     MarketSnapshot,
@@ -716,7 +716,7 @@ def _insert_full_linkage_snapshot(
     captured_at = datetime(2026, 4, 30, 16, 0, tzinfo=timezone.utc)
     insert_snapshot(
         conn,
-        ExecutableMarketSnapshotV2(
+        ExecutableMarketSnapshot(
             snapshot_id=snapshot_id,
             gamma_market_id="gamma-full-linkage",
             event_id="event-full-linkage",

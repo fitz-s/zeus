@@ -17,7 +17,7 @@
 | `_f1_fallback_end_utc(` invocation | `src/strategy/market_phase.py` | 236 | write-site for `polymarket_end_anchor_source` |
 | `confirmation_count=_extract_int` | `src/execution/fill_tracker.py` | 542 | PR 6 split site |
 | `if rows and observed_members < 51` | `src/data/ecmwf_open_data.py` | 775 | `first_member_observed_time` capture site |
-| `raw_orderbook_hash: str` | `src/contracts/executable_market_snapshot_v2.py` | 94 | READ-ONLY for B/36 (B/27 owns writes); fresh grep shows :94 NOT :97 — B/27 not yet merged into this branch; access is by attribute so line number is informational |
+| `raw_orderbook_hash: str` | `src/contracts/executable_market_snapshot.py` | 94 | READ-ONLY for B/36 (B/27 owns writes); fresh grep shows :94 NOT :97 — B/27 not yet merged into this branch; access is by attribute so line number is informational |
 | `def _store_ens_snapshot(` | `src/engine/evaluator.py` | 3912 | writer for `ensemble_snapshots`; reads `raw_orderbook_hash_transition_delta_ms` from `ens_result` dict |
 | `def capture_executable_market_snapshot(` | `src/data/market_scanner.py` | 1804 | hash computation site; B1 cache lives here |
 | `raw_orderbook_hash=_sha256_json(raw_orderbook),` | `src/data/market_scanner.py` | 1949 | hash assignment within snapshot construction |
@@ -71,7 +71,7 @@ _prev_orderbook_hash_by_market: dict[str, tuple[str, float]] = {}
 - **Lifetime**: process-local. No persistence needed for Phase 0 instrument.
 - **Null semantics**: `raw_orderbook_hash_transition_delta_ms = None` for first observation per market (no prior to compare against).
 
-**Location constraint**: B/36 adds this dict to `src/data/market_scanner.py` only. B/27 owns `src/contracts/executable_market_snapshot_v2.py` — B/36 reads `snapshot.raw_orderbook_hash` as an attribute access at construction time, no edits to that file.
+**Location constraint**: B/36 adds this dict to `src/data/market_scanner.py` only. B/27 owns `src/contracts/executable_market_snapshot.py` — B/36 reads `snapshot.raw_orderbook_hash` as an attribute access at construction time, no edits to that file.
 
 ---
 
@@ -659,7 +659,7 @@ ALTER TABLE wrap_unwrap_commands ADD COLUMN finality_confirmed_time TEXT;
 
 ## Non-collision with B/27
 
-- `src/contracts/executable_market_snapshot_v2.py`: B/36 reads `raw_orderbook_hash` attribute to derive `raw_orderbook_hash_transition_delta_ms`. B/36 does NOT write to this file. B/27 owns all writes. Fresh grep at worktree HEAD shows `:94` (not `:97`); B/27 not yet merged into this branch; access is by attribute.
+- `src/contracts/executable_market_snapshot.py`: B/36 reads `raw_orderbook_hash` attribute to derive `raw_orderbook_hash_transition_delta_ms`. B/36 does NOT write to this file. B/27 owns all writes. Fresh grep at worktree HEAD shows `:94` (not `:97`); B/27 not yet merged into this branch; access is by attribute.
 - **B1 correction**: The derivation site for `raw_orderbook_hash_transition_delta_ms` is in `src/data/market_scanner.py::capture_executable_market_snapshot()` (NOT `monitor_refresh.py`). This is the only module where `raw_orderbook_hash` is in scope. B/36 adds module-level `_prev_orderbook_hash_by_market` dict here.
 - B/36 does NOT edit `src/engine/monitor_refresh.py` for the hash cache (prior SCAFFOLD was wrong; corrected per Wave-B opus critic B1).
 

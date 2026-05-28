@@ -1038,7 +1038,7 @@ def _build_pre_submit_envelope(
 ):
     """Build the U2 venue-submission envelope before SDK contact.
 
-    This deliberately uses only the already-captured ExecutableMarketSnapshotV2
+    This deliberately uses only the already-captured ExecutableMarketSnapshot
     plus the command's intended order shape.  It does not resolve keychain
     credentials or instantiate the SDK client, preserving INV-30's
     persist-before-submit ordering.  If the snapshot is missing or the token is
@@ -1047,7 +1047,7 @@ def _build_pre_submit_envelope(
     """
 
     from src.contracts.venue_submission_envelope import VenueSubmissionEnvelope
-    from src.contracts.executable_market_snapshot_v2 import canonicalize_fee_details
+    from src.contracts.executable_market_snapshot import canonicalize_fee_details
     from src.state.snapshot_repo import get_snapshot
     from src.venue.polymarket_v2_adapter import DEFAULT_V2_HOST
 
@@ -2057,7 +2057,7 @@ def execute_exit_order(
     from src.data.polymarket_client import PolymarketClient
     from src.execution.command_bus import IdempotencyKey, IntentKind, VenueCommand, CommandState
     from src.state.venue_command_repo import append_order_fact, insert_command, append_event, get_command
-    from src.contracts.executable_market_snapshot_v2 import MarketSnapshotError
+    from src.contracts.executable_market_snapshot import MarketSnapshotError
     from src.state.collateral_ledger import CollateralInsufficient
 
     current_price = intent.current_price
@@ -2971,7 +2971,7 @@ def _live_order(
     from src.data.polymarket_client import PolymarketClient, V2PreflightError
     from src.execution.command_bus import IdempotencyKey, IntentKind
     from src.state.venue_command_repo import append_order_fact, append_trade_fact, insert_command, append_event
-    from src.contracts.executable_market_snapshot_v2 import MarketSnapshotError
+    from src.contracts.executable_market_snapshot import MarketSnapshotError
     from src.state.collateral_ledger import CollateralInsufficient
 
     cutover_component = _assert_cutover_allows_submit(IntentKind.ENTRY)

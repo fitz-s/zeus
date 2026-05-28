@@ -20,7 +20,7 @@ from decimal import Decimal
 
 import pytest
 
-from src.contracts.executable_market_snapshot_v2 import ExecutableMarketSnapshotV2
+from src.contracts.executable_market_snapshot import ExecutableMarketSnapshot
 from src.contracts.venue_submission_envelope import VenueSubmissionEnvelope
 from src.control import ws_gap_guard
 from src.ingest.polymarket_user_channel import PolymarketUserChannelIngestor, WSAuth, _parse_dt
@@ -57,8 +57,8 @@ def conn():
     ws_gap_guard.clear_for_test(observed_at=NOW)
 
 
-def _snapshot(snapshot_id: str = "snap-ws") -> ExecutableMarketSnapshotV2:
-    return ExecutableMarketSnapshotV2(
+def _snapshot(snapshot_id: str = "snap-ws") -> ExecutableMarketSnapshot:
+    return ExecutableMarketSnapshot(
         snapshot_id=snapshot_id,
         gamma_market_id="gamma-ws",
         event_id="event-ws",

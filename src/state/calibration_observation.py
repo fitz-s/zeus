@@ -322,7 +322,7 @@ def compute_platt_parameter_snapshot_per_bucket(
         bucket_key = raw["model_key"]
         out[bucket_key] = _build_snapshot_record(
             bucket_key=bucket_key,
-            source="v2",
+            source="canonical",
             raw=raw,
             window_start=window_start,
             window_end=window_end,

@@ -24,8 +24,8 @@ from src.data.market_scanner import (
     capture_executable_market_snapshot,
 )
 from src.data.polymarket_client import PolymarketClient
-from src.contracts.executable_market_snapshot_v2 import (
-    ExecutableMarketSnapshotV2,
+from src.contracts.executable_market_snapshot import (
+    ExecutableMarketSnapshot,
     ExecutableTradeabilityStatus,
     MarketNotTradableError,
     MarketSnapshotMismatchError,
@@ -153,7 +153,7 @@ def conn():
     c.close()
 
 
-def _snapshot(snapshot_id: str = "snap-u1", **overrides) -> ExecutableMarketSnapshotV2:
+def _snapshot(snapshot_id: str = "snap-u1", **overrides) -> ExecutableMarketSnapshot:
     payload = dict(
         snapshot_id=snapshot_id,
         gamma_market_id="gamma-1",
@@ -190,7 +190,7 @@ def _snapshot(snapshot_id: str = "snap-u1", **overrides) -> ExecutableMarketSnap
         freshness_deadline=NOW + timedelta(seconds=30),
     )
     payload.update(overrides)
-    return ExecutableMarketSnapshotV2(**payload)
+    return ExecutableMarketSnapshot(**payload)
 
 
 def _ensure_envelope(
@@ -1321,7 +1321,7 @@ def test_init_schema_migrates_legacy_venue_commands_snapshot_column():
     assert "idx_venue_commands_snapshot" in indexes
 
 
-def _no_snapshot(**overrides) -> ExecutableMarketSnapshotV2:
+def _no_snapshot(**overrides) -> ExecutableMarketSnapshot:
     payload = dict(
         snapshot_id="snap-no",
         selected_outcome_token_id="no-token",

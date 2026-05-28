@@ -114,7 +114,7 @@ def _ensure_snapshot(
     selected_outcome_token_id: str | None = None,
     outcome_label: str = "YES",
 ) -> str:
-    from src.contracts.executable_market_snapshot_v2 import ExecutableMarketSnapshotV2
+    from src.contracts.executable_market_snapshot import ExecutableMarketSnapshot
     from src.state.snapshot_repo import get_snapshot, insert_snapshot
 
     no_token_id = no_token_id or f"{token_id}-no"
@@ -124,7 +124,7 @@ def _ensure_snapshot(
         return snapshot_id
     insert_snapshot(
         conn,
-        ExecutableMarketSnapshotV2(
+        ExecutableMarketSnapshot(
             snapshot_id=snapshot_id,
             gamma_market_id="gamma-test",
             event_id="event-test",

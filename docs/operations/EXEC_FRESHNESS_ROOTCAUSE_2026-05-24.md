@@ -10,7 +10,7 @@ construction on snapshot staleness**, NOT coverage and NOT forecast bias.
 - **Primary break:** 194 above-floor (p_market≥5c) real edges (up to 66c) reached
   `EXECUTION_FAILED` in 7 days. Dominant cause = staleness:
   - `executable_snapshot_stale` — freshness window = **30s**
-    (`src/contracts/executable_market_snapshot_v2.py:27` FRESHNESS_WINDOW_DEFAULT=30s)
+    (`src/contracts/executable_market_snapshot.py:27` FRESHNESS_WINDOW_DEFAULT=30s)
   - `collateral_snapshot_stale: age_seconds=210–700`
   - Freshest live executable snapshot observed: **111s old** vs 30s gate → nothing tradeable.
 - The 5 historical fills were `day0_window`/`settlement_capture` via the OBSERVATION path,

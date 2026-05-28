@@ -15,8 +15,8 @@ from decimal import Decimal
 
 import pytest
 
-from src.contracts.executable_market_snapshot_v2 import (
-    ExecutableMarketSnapshotV2,
+from src.contracts.executable_market_snapshot import (
+    ExecutableMarketSnapshot,
     StaleMarketSnapshotError,
 )
 from src.contracts.venue_submission_envelope import VenueSubmissionEnvelope
@@ -53,8 +53,8 @@ def conn():
     c.close()
 
 
-def _snapshot(snapshot_id: str = "snap-u2") -> ExecutableMarketSnapshotV2:
-    return ExecutableMarketSnapshotV2(
+def _snapshot(snapshot_id: str = "snap-u2") -> ExecutableMarketSnapshot:
+    return ExecutableMarketSnapshot(
         snapshot_id=snapshot_id,
         gamma_market_id="gamma-u2",
         event_id="event-u2",

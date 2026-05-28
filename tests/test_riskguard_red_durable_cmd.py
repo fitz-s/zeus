@@ -15,7 +15,7 @@ from decimal import Decimal
 from pathlib import Path
 from unittest.mock import Mock
 
-from src.contracts.executable_market_snapshot_v2 import ExecutableMarketSnapshotV2
+from src.contracts.executable_market_snapshot import ExecutableMarketSnapshot
 from src.engine import cycle_runner
 from src.engine.cycle_runner import _execute_force_exit_sweep
 from src.engine.discovery_mode import DiscoveryMode
@@ -43,9 +43,9 @@ def _file_conn(path):
     return conn
 
 
-def _snapshot(captured_at: datetime | None = None) -> ExecutableMarketSnapshotV2:
+def _snapshot(captured_at: datetime | None = None) -> ExecutableMarketSnapshot:
     captured = captured_at or NOW
-    return ExecutableMarketSnapshotV2(
+    return ExecutableMarketSnapshot(
         snapshot_id="snap-red",
         gamma_market_id="gamma-red",
         event_id="event-red",

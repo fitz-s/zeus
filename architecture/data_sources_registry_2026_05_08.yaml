@@ -700,7 +700,7 @@ sources:
       target_tables:
         - "settlements_v2 (provenance_json.reconstruction_method='gamma_backfill') [VERIFIED settlement_dual_source_truth_2026_05_07.yaml]"
         - "market_events (event metadata, condition_ids)"
-        - "snapshot_repo (ExecutableMarketSnapshotV2) [VERIFIED src/state/snapshot_repo.py]"
+        - "snapshot_repo (ExecutableMarketSnapshot) [VERIFIED src/state/snapshot_repo.py]"
       settlement_authority: >
         CANONICAL settlement source for all markets post-2026-02-21, and all LOW
         markets regardless of date. [VERIFIED settlement_dual_source_truth_2026_05_07.yaml.

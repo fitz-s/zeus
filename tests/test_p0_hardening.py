@@ -410,14 +410,14 @@ class TestR2V2PreflightBlocksPlacement:
         from datetime import datetime, timedelta, timezone
         from decimal import Decimal
 
-        from src.contracts.executable_market_snapshot_v2 import ExecutableMarketSnapshotV2
+        from src.contracts.executable_market_snapshot import ExecutableMarketSnapshot
         from src.state.snapshot_repo import insert_snapshot
 
         now = datetime(2026, 4, 27, tzinfo=timezone.utc)
         snapshot_id = f"p0-r2-snap-{token_id[-8:]}"
         insert_snapshot(
             conn,
-            ExecutableMarketSnapshotV2(
+            ExecutableMarketSnapshot(
                 snapshot_id=snapshot_id,
                 gamma_market_id="gamma-p0-r2",
                 event_id="event-p0-r2",

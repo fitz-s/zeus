@@ -141,7 +141,7 @@ class ExecutableTradeabilityStatus:
 
 
 @dataclass(frozen=True)
-class ExecutableMarketSnapshotV2:
+class ExecutableMarketSnapshot:
     """Immutable executable market truth captured before order submission."""
 
     snapshot_id: str
@@ -351,7 +351,7 @@ class ExecutableMarketSnapshotV2:
         *,
         selected_outcome_token_id: str,
         outcome_label: OutcomeLabel,
-    ) -> "ExecutableMarketSnapshotV2":
+    ) -> "ExecutableMarketSnapshot":
         """Return a copy with post-decision token selection populated."""
 
         return replace(
@@ -361,14 +361,14 @@ class ExecutableMarketSnapshotV2:
         )
 
 
-def is_fresh(snapshot: ExecutableMarketSnapshotV2, now: datetime) -> bool:
+def is_fresh(snapshot: ExecutableMarketSnapshot, now: datetime) -> bool:
     """Return whether ``snapshot`` is still inside its executable window."""
 
     return _as_utc(now, field_name="now") <= snapshot.freshness_deadline
 
 
 def assert_snapshot_executable(
-    snapshot: Optional[ExecutableMarketSnapshotV2],
+    snapshot: Optional[ExecutableMarketSnapshot],
     *,
     token_id: str,
     side: str | None = None,
@@ -387,7 +387,7 @@ def assert_snapshot_executable(
     checked_at = now or datetime.now(timezone.utc)
     if not is_fresh(snapshot, checked_at):
         raise StaleMarketSnapshotError(
-            f"ExecutableMarketSnapshotV2 {snapshot.snapshot_id} is stale at {_as_utc(checked_at, field_name='now').isoformat()}"
+            f"ExecutableMarketSnapshot {snapshot.snapshot_id} is stale at {_as_utc(checked_at, field_name='now').isoformat()}"
         )
     tradeability = snapshot.tradeability_status
     if tradeability is None or not tradeability.executable_allowed:

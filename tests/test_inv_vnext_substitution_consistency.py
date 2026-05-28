@@ -28,7 +28,7 @@ from src.analysis.market_analysis_vnext import MarketAnalysisVNext
 
 
 def _make_snapshot(bid: Decimal | None, ask: Decimal | None) -> MagicMock:
-    """Build a minimal mock ExecutableMarketSnapshotV2 with given orderbook prices."""
+    """Build a minimal mock ExecutableMarketSnapshot with given orderbook prices."""
     snapshot = MagicMock()
     snapshot.orderbook_top_bid = bid
     snapshot.orderbook_top_ask = ask

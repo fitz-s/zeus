@@ -715,13 +715,13 @@ def _insert_executable_snapshot(
     min_tick_size: str = "0.01",
     accepting_orders: bool = True,
 ) -> None:
-    from src.contracts.executable_market_snapshot_v2 import ExecutableMarketSnapshotV2
+    from src.contracts.executable_market_snapshot import ExecutableMarketSnapshot
     from src.state.snapshot_repo import insert_snapshot
 
     captured_at = captured_at or datetime.now(timezone.utc)
     insert_snapshot(
         conn,
-        ExecutableMarketSnapshotV2(
+        ExecutableMarketSnapshot(
             snapshot_id=snapshot_id,
             gamma_market_id="gamma-1",
             event_id=event_id,

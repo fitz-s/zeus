@@ -430,7 +430,7 @@ files:
     downstream:
     - src/execution/executor.py
     - src/risk_allocator/governor.py
-  src/contracts/executable_market_snapshot_v2.py:
+  src/contracts/executable_market_snapshot.py:
     zone: K0_frozen_kernel
     authority_role: executable_market_snapshot_contract
     why: R3 U1 immutable CLOB market truth contract and fail-closed freshness/tradability gate for venue command persistence.
@@ -1626,7 +1626,7 @@ files:
     - CALIBRATION_FAMILY_MIXING
     - DERIVED_ONLY
     downstream:
-    - src/calibration/retrain_trigger_v2.py
+    - src/calibration/drift_refit_arm.py
     - src/ingest_main.py
   src/calibration/effective_sample_size.py:
     zone: K3_extension

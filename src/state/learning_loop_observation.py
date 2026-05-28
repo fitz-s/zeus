@@ -379,7 +379,7 @@ def compute_learning_loop_state_per_bucket(
         }
         out[bucket_key] = _build_bucket_record(
             bucket_key=bucket_key,
-            source="v2",
+            source="canonical",
             snap=snap,
             versions=versions,
             pairs_count=pairs_total,

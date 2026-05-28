@@ -511,7 +511,7 @@ multi-bin native-NO trades.
 edge materialization, evaluator quote acquisition, snapshot capture, and
 selected-token runtime routing; live enablement remains default-off.
 **Evidence:** `tests/test_fdr.py`, `tests/test_runtime_guards.py`,
-`tests/test_executable_market_snapshot_v2.py`, `tests/test_bootstrap_symmetry.py`,
+`tests/test_executable_market_snapshot.py`, `tests/test_bootstrap_symmetry.py`,
 `tests/test_executor.py`, and `tests/test_exit_safety.py` coverage named in the
 original closeout.
 **Residual:** This does not promote Shoulder Bin Sell to live alpha or prove P&L;
