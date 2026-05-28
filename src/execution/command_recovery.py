@@ -1655,7 +1655,6 @@ def _entry_recovery_event(
     return {
         "event_id": f"{position_id}:recovered_{slug}:{command_id}",
         "position_id": position_id,
-        "event_version": 1,
         "sequence_no": sequence_no,
         "event_type": event_type,
         "occurred_at": occurred_at,
@@ -2383,7 +2382,6 @@ def _append_exit_pending_projection(
     event = {
         "event_id": event_id,
         "position_id": position_id,
-        "event_version": 1,
         "sequence_no": _latest_position_sequence(conn, position_id) + 1,
         "event_type": "EXIT_ORDER_POSTED",
         "occurred_at": occurred_at,
@@ -2597,7 +2595,6 @@ def _append_entry_order_voided_projection(
     event = {
         "event_id": event_id,
         "position_id": position_id,
-        "event_version": 1,
         "sequence_no": next_sequence,
         "event_type": "ENTRY_ORDER_VOIDED",
         "occurred_at": occurred_at,

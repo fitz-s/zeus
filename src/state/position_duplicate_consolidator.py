@@ -150,10 +150,10 @@ def _void_row(
     conn.execute(
         """
         INSERT INTO position_events (
-            event_id, position_id, event_version, sequence_no, event_type,
+            event_id, position_id, sequence_no, event_type,
             occurred_at, phase_before, phase_after, strategy_key,
             source_module, payload_json, env
-        ) VALUES (?, ?, 1, ?, 'ADMIN_VOIDED', ?, ?, 'voided', ?,
+        ) VALUES (?, ?, ?, 'ADMIN_VOIDED', ?, ?, 'voided', ?,
                   'src.state.position_duplicate_consolidator', ?, 'live')
         """,
         (

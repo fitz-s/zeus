@@ -23,7 +23,6 @@ ARCHITECTURE_KERNEL_SQL_PATH = (
 CANONICAL_POSITION_EVENT_COLUMNS = (
     "event_id",
     "position_id",
-    "event_version",
     "sequence_no",
     "event_type",
     "occurred_at",

@@ -188,7 +188,6 @@ def transition_phase(
         event = {
             "event_id": f"{trade_id}:phase_transition:{sequence_no}",
             "position_id": trade_id,
-            "event_version": 1,
             "sequence_no": sequence_no,
             "event_type": event_type,
             "occurred_at": occurred_at,

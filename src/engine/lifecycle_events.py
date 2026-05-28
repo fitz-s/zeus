@@ -273,7 +273,6 @@ def _entry_event(
     return {
         "event_id": f"{trade_id}:{slug}",
         "position_id": trade_id,
-        "event_version": 1,
         "sequence_no": sequence_no,
         "event_type": event_type,
         "occurred_at": occurred_at,
@@ -471,7 +470,6 @@ def build_day0_window_entered_canonical_write(
     event = {
         "event_id": f"{trade_id}:{slug}",
         "position_id": trade_id,
-        "event_version": 1,
         "sequence_no": sequence_no,
         "event_type": "DAY0_WINDOW_ENTERED",
         "occurred_at": day0_entered_at,
@@ -601,7 +599,6 @@ def build_settlement_canonical_write(
     event = {
         "event_id": f"{getattr(position, 'trade_id')}:settled:{sequence_no}",
         "position_id": getattr(position, "trade_id"),
-        "event_version": 1,
         "sequence_no": sequence_no,
         "event_type": "SETTLED",
         "occurred_at": occurred_at,
@@ -649,7 +646,6 @@ def build_economic_close_canonical_write(
     event = {
         "event_id": f"{getattr(position, 'trade_id')}:exit_filled:{sequence_no}",
         "position_id": getattr(position, "trade_id"),
-        "event_version": 1,
         "sequence_no": sequence_no,
         "event_type": "EXIT_ORDER_FILLED",
         "occurred_at": occurred_at,
@@ -780,7 +776,6 @@ def build_venue_position_observed_canonical_write(
     event = {
         "event_id": f"{getattr(position, 'trade_id')}:venue_position_observed:{sequence_no}",
         "position_id": getattr(position, "trade_id"),
-        "event_version": 1,
         "sequence_no": sequence_no,
         "event_type": "VENUE_POSITION_OBSERVED",
         "occurred_at": occurred_at,
@@ -854,7 +849,6 @@ def build_reconciliation_rescue_canonical_write(
     event = {
         "event_id": f"{getattr(position, 'trade_id')}:chain_synced:{sequence_no}",
         "position_id": getattr(position, "trade_id"),
-        "event_version": 1,
         "sequence_no": sequence_no,
         "event_type": "CHAIN_SYNCED",
         "occurred_at": occurred_at,
@@ -920,7 +914,6 @@ def build_chain_size_corrected_canonical_write(
     event = {
         "event_id": f"{getattr(position, 'trade_id')}:chain_size_corrected:{sequence_no}",
         "position_id": getattr(position, "trade_id"),
-        "event_version": 1,
         "sequence_no": sequence_no,
         "event_type": "CHAIN_SIZE_CORRECTED",
         "occurred_at": occurred_at,
@@ -1000,7 +993,6 @@ def build_review_required_canonical_write(
     event = {
         "event_id": f"{getattr(position, 'trade_id')}:review_required:{sequence_no}",
         "position_id": getattr(position, "trade_id"),
-        "event_version": 1,
         "sequence_no": sequence_no,
         "event_type": "REVIEW_REQUIRED",
         "occurred_at": occurred_at,
@@ -1073,7 +1065,6 @@ def build_chain_quarantined_canonical_write(
     event = {
         "event_id": f"{getattr(position, 'trade_id')}:chain_quarantined:{sequence_no}",
         "position_id": getattr(position, "trade_id"),
-        "event_version": 1,
         "sequence_no": sequence_no,
         "event_type": "CHAIN_QUARANTINED",
         "occurred_at": occurred_at,

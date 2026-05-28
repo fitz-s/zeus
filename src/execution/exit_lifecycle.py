@@ -892,7 +892,6 @@ def _void_chain_confirmed_zero(
             event = {
                 "event_id": f"{trade_id}:admin_voided_chain_zero:{sequence_no}",
                 "position_id": trade_id,
-                "event_version": 1,
                 "sequence_no": sequence_no,
                 "event_type": "ADMIN_VOIDED",
                 "occurred_at": occurred_at,
@@ -1043,7 +1042,6 @@ def _dual_write_canonical_admin_close_if_available(
         event = {
             "event_id": f"{trade_id}:admin_closed:{sequence_no}",
             "position_id": trade_id,
-            "event_version": 1,
             "sequence_no": sequence_no,
             "event_type": "MANUAL_OVERRIDE_APPLIED",
             "occurred_at": occurred_at,

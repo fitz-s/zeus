@@ -715,7 +715,6 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
             event = {
                 "event_id": f"{trade_id}:chain_void:{sequence_no}",
                 "position_id": trade_id,
-                "event_version": 1,
                 "sequence_no": sequence_no,
                 "event_type": "ADMIN_VOIDED",
                 "occurred_at": occurred_at,
