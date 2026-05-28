@@ -482,4 +482,44 @@ cat "$OUT" | base64
 
 ---
 
-**End of doc. Resume at §12 lowest-unfallen domino. Read §0 directives EVERY heartbeat.**
+## 14 — REDESIGN SUPERSESSION + heartbeat ledger (operator redesign 2026-05-28)
+
+**Operator changed direction (2026-05-28, post-D12).** The MC-rebuild-then-promote framing (D13→D17) is
+no longer the live plan. Per §11 living-doc policy ("if operator changes direction, replace §2+§0;
+preserve §1 history"), the down-chain dominoes are **retargeted**, not fired as written:
+
+> Operator verdict: *"bias_c 的训练目标没有被证明等于 live 要修正的目标."* No unconditional full_transport
+> correction. No MC-promote before the candidate proves it beats raw on held-out **proper score vs
+> settlement**. Raw baseline dominates unless a correction wins OOS. sd3 stays HOLD.
+
+**Domino retarget (current authority):**
+
+| Old domino | New authority | Why |
+|---|---|---|
+| D16 (M4 bin-bias vs open-meteo) | **SUPERSEDED by T4/T5** | open-meteo is another forecast, not the trade target. The WU settlement station diverges from open-meteo several °C for SF/Jeddah. Valid arbiter = held-out proper score vs SETTLEMENT (operator Principle 1). T4 = candidate scorer; T5 = 12-city smoke gate. |
+| D17 (M5 unshadow) | **HARD-HOLD** | Blocked until T4/T5 pass. sd3 inflated ~2× by two data bugs (12z window contamination + settlement °F/°C). Promoting it places systematically over-warm bets = losing money. |
+| D13 (#359 merge) / D14 (M1 rebase) | unchanged, external-gated | #359 still OPEN. Worktree 18 behind main. Not autonomously fireable. |
+| D15 (M3 wiring) | ✅ GREEN | trace writer healthy on world.db (§6). |
+
+**T-series (the superseding clean-rebuild gate):**
+
+| T | Subject | Status |
+|---|---|---|
+| T1 | 00z/12z window test | ✅ DONE — H1 confirmed Seoul/HK/Jakarta/Busan/Shanghai (12z contaminated); refuted SF/Jeddah (station gap, −3.7 even at 0z). |
+| T2+T3 | cycle-strict + unit-normalized residual evidence ledger | ✅ DONE — `scripts/build_ens_residual_evidence.py` (committed `89e1aec9d1`). HIGH→0z-only, LOW→12z-only; settlement °F→°C via `members_unit`. |
+| T4 | candidate scorer, blocked-fold OOS proper-score selection vs settlement | 🔵 IN PROGRESS — surface verified: reuses prod sampler `p_raw_vector_from_maxes` (`src/signal/ensemble_signal.py:173`, import pattern in `rebuild_calibration_pairs_v2.py`) + scoring engine in `scripts/audit_refit_proper_scores.py`. Baseline smoke (raw `none` vs `ft_v1`, HIGH) running. |
+| T5 | 12-city small-sample MC smoke, pass conditions A–E | ⏸️ after T4. |
+
+Candidates per (city×metric×season) bucket: {raw identity, scale-only, prior-bias, live-bias,
+transported, hierarchical-fallback}. Accept a correction **only if** it beats raw on ≥2/3 proper scores
+(LogLoss/RPS/Brier) AND bootstrap LCB(improvement)>0 AND no catastrophic cohort regression. Else raw.
+
+### Heartbeat ledger
+
+| Fire (CT) | Safety evidence | Domino acted | Verdict |
+|---|---|---|---|
+| 2026-05-28 16:43 | flag=`false`, fills4h=`0`, daemons=`6` alive, decisions firing (opening_hunt 83/2h ending 21:40 UTC), trace writer healthy | none fireable — #359 OPEN (D13 external), D17 HARD-HOLD; T4 in progress (smoke running, surface verified) | **HOLDING** |
+
+---
+
+**End of doc. CURRENT plan = §14 (T-series). D13/D14 external-gated; D17 HARD-HOLD until T4/T5 pass. Read §0 + §14 EVERY heartbeat.**
