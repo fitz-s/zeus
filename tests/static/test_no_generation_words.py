@@ -3,8 +3,18 @@
 # Authority basis: docs/findings_2026_05_28.md §B1 — generation-naming denylist
 """
 Test 1: Repo path + text scan for generation-naming words.
-xfail(strict=False): repo-owned source still contains many forbidden tokens;
-PR3 sweep will eradicate them.
+xfail(strict=False): 1185 violations remain across src/ (226), tests/ (550),
+docs/scaffolds/ (119), config/ (71), other (219). Breakdown:
+  - src/: _version fields in Position/calibration (B5 deferred), vnext module paths,
+    legacy comments in docstrings, ESTIMATOR_NAME/IDENTITY_CALIBRATION_METHOD with _v1
+    suffixes in calibration constants
+  - tests/: authority-basis comments citing vnext plan paths, _v2 in test names,
+    ECMWF_OPENDATA_HIGH_DATA_VERSION constant (live contract name — do not rename)
+  - docs/scaffolds/: historical scaffold refs to observation_instants_v2 (intentional §C),
+    vnext phase plan paths
+  - config/: source_release_calendar.yaml schema_version field, provenance_registry.yaml
+    legacy comments
+Full repo-wide sweep is iterative — deferred post-PR3.
 """
 import pathlib
 import re
@@ -81,7 +91,17 @@ def _collect_violations():
     return violations
 
 
-@pytest.mark.xfail(strict=False, reason="awaits PR3 sweep — generation words still present in repo source")
+@pytest.mark.xfail(
+    strict=False,
+    reason=(
+        "1185 generation-naming violations remain (src/: 226, tests/: 550, docs/scaffolds/: 119, "
+        "config/: 71, other: 219). Includes live contract constant ECMWF_OPENDATA_HIGH_DATA_VERSION "
+        "(do not rename), vnext module paths (src/analysis/market_analysis_vnext.py, "
+        "src/contracts/shoulder_strategy_vnext.py), _version fields in Position (B5 deferred), "
+        "schema_version in source_release_calendar.yaml (external format). "
+        "Full repo-wide sweep is iterative — deferred post-PR3."
+    ),
+)
 def test_no_forbidden_generation_words_in_paths_or_text():
     """Repo-owned source must contain zero generation-naming tokens."""
     violations = _collect_violations()
