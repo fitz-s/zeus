@@ -5,14 +5,14 @@
 """Refit Platt calibration models from calibration_pairs (high track).
 
 Phase 4D — reads high-track calibration pairs from ``calibration_pairs``
-and writes per-bucket Platt models to ``platt_models_v2`` via
-``save_platt_model_v2(metric_identity=HIGH_LOCALDAY_MAX)``.
+and writes per-bucket Platt models to ``platt_models`` via
+``save_platt_model(metric_identity=HIGH_LOCALDAY_MAX)``.
 
 Bucket key: (temperature_metric, cluster, season, data_version, input_space).
 NO city or target_date columns (Phase 2 semantic-pollution fix).
 
-Before each INSERT, calls ``deactivate_model_v2`` to flip any prior
-is_active=1 row to is_active=0 for that bucket — because save_platt_model_v2
+Before each INSERT, calls ``deactivate_model`` to flip any prior
+is_active=1 row to is_active=0 for that bucket — because save_platt_model
 uses plain INSERT (not INSERT OR REPLACE). After a full successful refit,
 hard-deletes all is_active=0 rows for the high track to keep the table clean.
 
@@ -58,9 +58,9 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.architecture.decorators import capability, protects
 from src.calibration.store import (
-    deactivate_model_v2,
+    deactivate_model,
     infer_bin_width_from_label,
-    save_platt_model_v2,
+    save_platt_model,
 )
 from src.config import (
     calibration_batch_rebuild_n_mc,
@@ -569,7 +569,7 @@ def _active_verified_model_exists(
     row = conn.execute(
         """
         SELECT 1
-        FROM platt_models_v2
+        FROM platt_models
         WHERE temperature_metric = ?
           AND cluster = ?
           AND season = ?
@@ -610,7 +610,7 @@ def _delete_active_shadow_model(
 ) -> int:
     result = conn.execute(
         """
-        DELETE FROM platt_models_v2
+        DELETE FROM platt_models
         WHERE temperature_metric = ?
           AND cluster = ?
           AND season = ?
@@ -764,7 +764,7 @@ def _fit_bucket(
     # fit (typically caused by extreme-low base rate climates where the
     # in-sample sigmoid latches onto noise) and would lose money live.
     #
-    # Run BEFORE deactivate_model_v2 + save_platt_model_v2 so a noisy refit
+    # Run BEFORE deactivate_model + save_platt_model so a noisy refit
     # never overwrites a previously healthy VERIFIED row with a QUARANTINED
     # one (PR #70 Copilot review): the loader filters authority='VERIFIED',
     # so writing QUARANTINED-replacing-VERIFIED would silently downgrade live
@@ -796,7 +796,7 @@ def _fit_bucket(
         label = "SHADOW"
 
     if authority == "VERIFIED":
-        deactivated = deactivate_model_v2(
+        deactivated = deactivate_model(
             conn,
             metric_identity=metric_identity,
             cluster=cluster,
@@ -843,7 +843,7 @@ def _fit_bucket(
             input_space=cal.input_space,
         )
 
-    save_platt_model_v2(
+    save_platt_model(
         conn,
         metric_identity=metric_identity,
         cluster=cluster,
@@ -892,7 +892,7 @@ def refit_v2(
     stats = RefitStatsV2()
 
     print("=" * 70)
-    print("PLATT V2 REFIT (calibration_pairs → platt_models_v2)")
+    print("PLATT V2 REFIT (calibration_pairs → platt_models)")
     print("=" * 70)
     print(f"Mode:           {'DRY-RUN' if dry_run else 'LIVE WRITE'}")
     print(f"MetricIdentity: {metric_identity}")

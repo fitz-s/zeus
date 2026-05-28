@@ -33,7 +33,7 @@ _TRAINING_ALLOWED_SOURCES = frozenset({"tigge", "ecmwf_ens"})
 _CALIBRATION_READ_TABLES = frozenset({
     "calibration_pairs",
     "platt_models",
-    "platt_models_v2",
+    # platt_models_v2 removed B3cont: table renamed to platt_models (canonical).
 })
 
 
@@ -487,40 +487,13 @@ def canonical_pairs_ready_for_refit(conn: sqlite3.Connection) -> bool:
     return canonical_rows > 0 and unsafe_rows == 0
 
 
-def save_platt_model(
-    conn: sqlite3.Connection,
-    bucket_key: str,
-    A: float,
-    B: float,
-    C: float,
-    bootstrap_params: list[tuple[float, float, float]],
-    n_samples: int,
-    brier_insample: Optional[float] = None,
-    input_space: str = "raw_probability",
-    authority: str = "VERIFIED",
-) -> None:
-    """Save a fitted Platt model.
-
-    Uses INSERT OR REPLACE to handle refits on the UNIQUE(bucket_key) constraint.
-    authority defaults to 'VERIFIED': this function writes a freshly fitted,
-    trusted model. Pass authority='UNVERIFIED' only for diagnostic/test data.
-    """
-    now = datetime.now(timezone.utc).isoformat()
-    conn.execute("""
-        INSERT OR REPLACE INTO platt_models
-        (bucket_key, param_A, param_B, param_C, bootstrap_params_json,
-         n_samples, brier_insample, fitted_at, is_active, input_space, authority)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
-    """, (
-        bucket_key, A, B, C,
-        json.dumps(bootstrap_params),
-        n_samples, brier_insample, now, input_space, authority
-    ))
+# TOMBSTONE: bare save_platt_model(conn, bucket_key, A, B, C, ...) removed B3cont.
+# Wrote to dead platt_models bare table (0 rows). Canonical fn below.
 
 
 @capability("calibration_persistence_write", lease=True)
 @protects("INV-15", "INV-21")
-def save_platt_model_v2(
+def save_platt_model(
     conn: sqlite3.Connection,
     *,
     metric_identity: "MetricIdentity",
@@ -540,7 +513,7 @@ def save_platt_model_v2(
     horizon_profile: str = "full",
     error_model_family: str = "none",
 ) -> None:
-    """Save a fitted Platt model to platt_models_v2.
+    """Save a fitted Platt model to platt_models (canonical; B3cont rename from platt_models_v2).
 
     Requires metric_identity (4A.4 — no legacy default). Derives model_key
     from (temperature_metric, cluster, season, data_version, cycle, source_id,
@@ -563,12 +536,12 @@ def save_platt_model_v2(
     if error_model_family and error_model_family != "none":
         model_key = f"{model_key}:emf={error_model_family}"
     now = datetime.now(timezone.utc).isoformat()
-    _has_emf = has_columns(conn, "platt_models_v2", "error_model_family")
+    _has_emf = has_columns(conn, "platt_models", "error_model_family")
     _emf_col = ", error_model_family" if _has_emf else ""
     _emf_ph = ", ?" if _has_emf else ""
     _emf_val = (error_model_family,) if _has_emf else ()
     conn.execute(f"""
-        INSERT INTO platt_models_v2
+        INSERT INTO platt_models
         (model_key, temperature_metric, cluster, season, data_version,
          input_space, param_A, param_B, param_C, bootstrap_params_json,
          n_samples, brier_insample, fitted_at, is_active, authority,
@@ -585,7 +558,7 @@ def save_platt_model_v2(
     ) + _emf_val)
 
 
-def deactivate_model_v2(
+def deactivate_model(
     conn: sqlite3.Connection,
     *,
     metric_identity: "MetricIdentity",
@@ -598,10 +571,10 @@ def deactivate_model_v2(
     horizon_profile: str = "full",
     error_model_family: str = "none",
 ) -> int:
-    """Delete the existing platt_models_v2 row for a bucket before refit.
+    """Delete the existing platt_models row for a bucket before refit (B3cont: renamed from platt_models_v2).
 
     Returns the number of rows deleted (0 or 1). Called by refit_platt.py
-    before save_platt_model_v2. Deletion (not soft-deactivation) is required
+    before save_platt_model. Deletion (not soft-deactivation) is required
     because UNIQUE(model_key) means the old row must be removed before the
     new INSERT can succeed with the same key.
 
@@ -633,52 +606,21 @@ def deactivate_model_v2(
         cluster, season, data_version, input_space,
         cycle, source_id, horizon_profile,
     ]
-    if has_columns(conn, "platt_models_v2", "error_model_family"):
+    if has_columns(conn, "platt_models", "error_model_family"):
         where.append("error_model_family = ?")
         params.append(error_model_family)
     result = conn.execute(
-        f"DELETE FROM platt_models_v2 WHERE {' AND '.join(where)}",
+        f"DELETE FROM platt_models WHERE {' AND '.join(where)}",
         tuple(params),
     )
     return result.rowcount
 
 
+# TOMBSTONE: bare load_platt_model(conn, bucket_key) removed B3cont.
+# Read from dead bare platt_models table (0 rows). Canonical fn below.
+
+
 def load_platt_model(
-    conn: sqlite3.Connection,
-    bucket_key: str,
-) -> Optional[dict]:
-    """Load a fitted Platt model. Returns None if not found, inactive, or not VERIFIED."""
-    table = _qualified_calibration_read_table(conn, "platt_models")
-    row = conn.execute(f"""
-        SELECT param_A, param_B, param_C, bootstrap_params_json,
-               n_samples, brier_insample, fitted_at, input_space
-        FROM {table}
-        WHERE bucket_key = ? AND is_active = 1 AND authority = 'VERIFIED'
-    """, (bucket_key,)).fetchone()
-
-    if row is None:
-        return None
-
-    # Legacy table has no Phase 2 stratification columns — bucket_* are
-    # None so evaluator's transfer gate falls back to the cross-domain
-    # rejection path when an OpenData forecast lands here.
-    return {
-        "A": row["param_A"],
-        "B": row["param_B"],
-        "C": row["param_C"],
-        "bootstrap_params": json.loads(row["bootstrap_params_json"]),
-        "n_samples": row["n_samples"],
-        "brier_insample": row["brier_insample"],
-        "fitted_at": row["fitted_at"],
-        "input_space": row["input_space"] or "raw_probability",
-        "bucket_cycle": None,
-        "bucket_source_id": None,
-        "bucket_horizon_profile": None,
-        "bucket_data_version": None,
-    }
-
-
-def load_platt_model_v2(
     conn: sqlite3.Connection,
     *,
     temperature_metric: str,
@@ -755,7 +697,7 @@ def load_platt_model_v2(
     Returns:
         Same dict shape as load_platt_model, or None.
     """
-    table = _qualified_calibration_read_table(conn, "platt_models_v2")
+    table = _qualified_calibration_read_table(conn, "platt_models")
 
     # Codex P1 review #6 (2026-05-04): SELECT includes the bucket identity
     # columns (cycle, source_id, horizon_profile, data_version) so callers
@@ -774,7 +716,7 @@ def load_platt_model_v2(
     # interprets a missing bucket_source_id as "fell back to legacy" and
     # still rejects cross-domain.
     _strat_cols = _v2_table_has_stratification(conn, table)
-    _has_cal_method = has_columns(conn, "platt_models_v2", "calibration_method")
+    _has_cal_method = has_columns(conn, "platt_models", "calibration_method")
     _cal_method_col = ", calibration_method" if _has_cal_method else ""
     if _strat_cols:
         _v2_select_cols = (
@@ -927,12 +869,8 @@ def load_platt_model_v2(
     }
 
 
-def deactivate_model(conn: sqlite3.Connection, bucket_key: str) -> None:
-    """Mark a model as inactive (for refit/replacement)."""
-    conn.execute("""
-        UPDATE platt_models SET is_active = 0
-        WHERE bucket_key = ?
-    """, (bucket_key,))
+# TOMBSTONE: bare deactivate_model(conn, bucket_key) removed B3cont.
+# Did UPDATE platt_models SET is_active=0 WHERE bucket_key=? on dead bare table. Canonical fn above.
 
 
 # =====================================================================
@@ -952,7 +890,7 @@ def deactivate_model(conn: sqlite3.Connection, bucket_key: str) -> None:
 # L18 (persistence module on the active routing path).
 
 
-def list_active_platt_models_v2(conn: sqlite3.Connection) -> list[dict]:
+def list_active_platt_models(conn: sqlite3.Connection) -> list[dict]:
     """List all currently-active platt_models_v2 rows.
 
     K1-compliant pure-SELECT lister — counterpart to single-bucket
@@ -972,7 +910,7 @@ def list_active_platt_models_v2(conn: sqlite3.Connection) -> list[dict]:
     trajectories without re-reading the canonical surface row-by-row.
     """
     try:
-        table = _qualified_calibration_read_table(conn, "platt_models_v2")
+        table = _qualified_calibration_read_table(conn, "platt_models")
         rows = conn.execute(
             f"""
             SELECT temperature_metric, cluster, season, data_version,
@@ -985,7 +923,7 @@ def list_active_platt_models_v2(conn: sqlite3.Connection) -> list[dict]:
             """
         ).fetchall()
     except sqlite3.OperationalError:
-        # Pre-migration DB without platt_models_v2 — same posture as
+        # Pre-migration DB without platt_models — same posture as
         # _has_authority_column at L197 (graceful empty for missing table).
         return []
     out: list[dict] = []
@@ -1009,56 +947,8 @@ def list_active_platt_models_v2(conn: sqlite3.Connection) -> list[dict]:
     return out
 
 
-def list_active_platt_models_legacy(conn: sqlite3.Connection) -> list[dict]:
-    """List all currently-active legacy platt_models rows.
-
-    K1-compliant pure-SELECT lister — counterpart to single-bucket
-    load_platt_model (L488). Returns one dict per bucket_key where
-    is_active=1 AND authority='VERIFIED'. Mirrors load_platt_model's read
-    filter (L497) so what shows up here is what the legacy lookup path
-    would actually serve.
-
-    The legacy table has NO temperature_metric column (per Phase 9C L3
-    convention "LOW has never existed in legacy" cited at get_pairs_for_bucket
-    L228), NO data_version, NO input_space-as-key. bucket_key is
-    `f"{cluster}_{season}"` per src/calibration/manager.py:73 (bucket_key
-    helper). Both legacy and v2 readers exist because manager.py's get_calibrator
-    falls back v2→legacy (L42-62 dedup pattern); both surfaces remain
-    observable to the operator until full cutover.
-
-    Used by src.state.calibration_observation.compute_platt_parameter_snapshot_per_bucket
-    in conjunction with list_active_platt_models_v2 for full coverage.
-    Each result dict carries an explicit `source: 'legacy'` tag downstream.
-    """
-    try:
-        table = _qualified_calibration_read_table(conn, "platt_models")
-        rows = conn.execute(
-            f"""
-            SELECT bucket_key, param_A, param_B, param_C,
-                   bootstrap_params_json, n_samples, brier_insample,
-                   fitted_at, input_space, authority
-            FROM {table}
-            WHERE is_active = 1 AND authority = 'VERIFIED'
-            ORDER BY bucket_key, fitted_at DESC
-            """
-        ).fetchall()
-    except sqlite3.OperationalError:
-        return []
-    out: list[dict] = []
-    for row in rows:
-        out.append({
-            "bucket_key": row["bucket_key"],
-            "param_A": row["param_A"],
-            "param_B": row["param_B"],
-            "param_C": row["param_C"],
-            "bootstrap_params": json.loads(row["bootstrap_params_json"]),
-            "n_samples": row["n_samples"],
-            "brier_insample": row["brier_insample"],
-            "fitted_at": row["fitted_at"],
-            "input_space": row["input_space"] or "raw_probability",
-            "authority": row["authority"],
-        })
-    return out
+# TOMBSTONE: list_active_platt_models_legacy removed B3cont.
+# Read from dead bare platt_models table (bucket_key schema). Table dropped.
 
 
 # ---------------------------------------------------------------------------

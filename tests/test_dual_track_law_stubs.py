@@ -42,7 +42,7 @@ def test_settlements_metric_identity_requires_non_null_and_unique_per_metric():
     }
     for v2_table in [
         "settlements_v2", "market_events", "ensemble_snapshots",
-        "calibration_pairs", "platt_models_v2", "observation_instants_v2",
+        "calibration_pairs", "platt_models", "observation_instants_v2",
         "historical_forecasts", "day0_metric_fact",
     ]:
         assert v2_table in tables, f"v2 table {v2_table!r} must exist after init_schema"

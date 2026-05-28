@@ -1,7 +1,7 @@
 # Created: 2026-05-03
 # Last reused/audited: 2026-05-03
 # Authority basis: RERUN_PLAN_v2.md §5 F1 (Platt loader frozen-as-of pin)
-"""Tests for ``load_platt_model_v2(frozen_as_of=, model_key=)``.
+"""Tests for ``load_platt_model(frozen_as_of=, model_key=)``.
 
 The pin parameters are the F1 forward-fix from
 ``docs/operations/task_2026-05-03_ddd_implementation_plan/RERUN_PLAN_v2.md``.
@@ -24,7 +24,7 @@ import sqlite3
 
 import pytest
 
-from src.calibration.store import load_platt_model_v2, save_platt_model_v2
+from src.calibration.store import load_platt_model, save_platt_model
 from src.state.db import init_schema
 from src.state.schema.v2_schema import apply_v2_schema
 from src.types.metric_identity import HIGH_LOCALDAY_MAX
@@ -53,7 +53,7 @@ def _save_one(
     authority: str = "VERIFIED",
 ):
     """Save one row, then patch fitted_at, recorded_at, is_active."""
-    save_platt_model_v2(
+    save_platt_model(
         conn,
         metric_identity=HIGH_LOCALDAY_MAX,
         cluster=cluster,
@@ -96,7 +96,7 @@ def _read_model_key(conn, cluster: str) -> str:
 
 def test_frozen_as_of_admits_row_recorded_before_pin(conn):
     _save_one(conn, recorded_at="2026-04-01 00:00:00", A=1.0)
-    pinned = load_platt_model_v2(
+    pinned = load_platt_model(
         conn,
         temperature_metric="high",
         cluster="NYC",
@@ -112,7 +112,7 @@ def test_frozen_as_of_excludes_row_recorded_after_pin(conn):
     """The core F1 protection: a row recorded after the operator-blessed
     snapshot is hidden from live serving."""
     _save_one(conn, recorded_at="2026-05-02 00:00:00", A=99.0)
-    pinned = load_platt_model_v2(
+    pinned = load_platt_model(
         conn,
         temperature_metric="high",
         cluster="NYC",
@@ -129,7 +129,7 @@ def test_frozen_as_of_excludes_row_recorded_after_pin(conn):
 def test_frozen_as_of_unset_returns_row(conn):
     """No pin → legacy behavior: any is_active=VERIFIED row is eligible."""
     _save_one(conn, recorded_at="2026-05-02 00:00:00", A=99.0)
-    legacy = load_platt_model_v2(
+    legacy = load_platt_model(
         conn,
         temperature_metric="high",
         cluster="NYC",
@@ -143,7 +143,7 @@ def test_frozen_as_of_unset_returns_row(conn):
 def test_frozen_as_of_with_data_version_none_path(conn):
     """frozen_as_of also works on the legacy path (data_version=None)."""
     _save_one(conn, recorded_at="2026-05-02 00:00:00", A=42.0)
-    pinned = load_platt_model_v2(
+    pinned = load_platt_model(
         conn,
         temperature_metric="high",
         cluster="NYC",
@@ -152,7 +152,7 @@ def test_frozen_as_of_with_data_version_none_path(conn):
         frozen_as_of="2026-04-15 00:00:00",
     )
     assert pinned is None
-    admitted = load_platt_model_v2(
+    admitted = load_platt_model(
         conn,
         temperature_metric="high",
         cluster="NYC",
@@ -171,7 +171,7 @@ def test_model_key_pin_matches_exact_row(conn):
     _save_one(conn, cluster="NYC", A=1.0)
     nyc_key = _read_model_key(conn, "NYC")
     # Even with mismatched cluster/season args, model_key wins
-    pinned = load_platt_model_v2(
+    pinned = load_platt_model(
         conn,
         temperature_metric="high",
         cluster="DOES_NOT_EXIST",
@@ -185,7 +185,7 @@ def test_model_key_pin_matches_exact_row(conn):
 
 def test_model_key_pin_returns_none_for_unknown_key(conn):
     _save_one(conn, A=1.0)
-    pinned = load_platt_model_v2(
+    pinned = load_platt_model(
         conn,
         temperature_metric="high",
         cluster="NYC",
@@ -200,7 +200,7 @@ def test_model_key_pin_still_requires_authority_verified(conn):
     """model_key cannot rescue an UNVERIFIED row (fail-CLOSED)."""
     _save_one(conn, A=1.0, authority="UNVERIFIED")
     nyc_key = _read_model_key(conn, "NYC")
-    pinned = load_platt_model_v2(
+    pinned = load_platt_model(
         conn,
         temperature_metric="high",
         cluster="NYC",
@@ -215,7 +215,7 @@ def test_model_key_pin_still_requires_is_active(conn):
     """model_key cannot rescue an inactive row (fail-CLOSED)."""
     _save_one(conn, A=1.0, is_active=0)
     nyc_key = _read_model_key(conn, "NYC")
-    pinned = load_platt_model_v2(
+    pinned = load_platt_model(
         conn,
         temperature_metric="high",
         cluster="NYC",
@@ -235,7 +235,7 @@ def test_model_key_takes_precedence_over_frozen_as_of(conn):
     nyc_key = _read_model_key(conn, "NYC")
     # frozen_as_of would normally exclude the row (recorded_at > pin),
     # but model_key bypasses match filters
-    pinned = load_platt_model_v2(
+    pinned = load_platt_model(
         conn,
         temperature_metric="high",
         cluster="NYC",

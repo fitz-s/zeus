@@ -670,7 +670,7 @@ def test_verify_pass(tmp_path, capsys):
     assert "All identity columns are non-NULL" in out
     # Must NOT do a cross-DB JOIN against platt_models_v2 (K1: lives on
     # zeus-world.db).
-    assert "platt_models_v2" not in out
+    assert "platt_models" not in out
 
 
 def test_verify_fail_when_empty(tmp_path, capsys):

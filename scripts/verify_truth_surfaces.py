@@ -2605,7 +2605,7 @@ def build_calibration_pair_rebuild_preflight_report(world_db: Path = SHARED_DB) 
 
     This is narrower than full training readiness: it checks only upstream
     rebuild inputs and intentionally does not require calibration_pairs,
-    platt_models_v2, market_events_v2, market_price_history, or settlements_v2.
+    platt_models, market_events_v2, market_price_history, or settlements_v2.
     """
     report = _new_report("calibration-pair-rebuild-preflight", world_db)
     if not world_db.exists():
@@ -2626,10 +2626,10 @@ def build_calibration_pair_rebuild_preflight_report(world_db: Path = SHARED_DB) 
 
 
 def build_platt_refit_preflight_report(world_db: Path = SHARED_DB) -> dict:
-    """Return a read-only input preflight for platt_models_v2 refits.
+    """Return a read-only input preflight for platt_models refits.
 
     This validates calibration_pairs as the refit input and intentionally
-    does not require platt_models_v2 to already be populated.
+    does not require platt_models to already be populated.
     """
     report = _new_report("platt-refit-preflight", world_db)
     if not world_db.exists():
@@ -2645,7 +2645,7 @@ def build_platt_refit_preflight_report(world_db: Path = SHARED_DB) -> dict:
         # OperationalError: no such column. Stage6 fails closed here with a
         # specific verdict so watcher's stage7 never fires against a regressed schema.
         required_strat_cols = ("cycle", "source_id", "horizon_profile")
-        for table in ("calibration_pairs", "platt_models_v2"):
+        for table in ("calibration_pairs", "platt_models"):
             cols = {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
             missing = [c for c in required_strat_cols if c not in cols]
             if missing:
@@ -2657,11 +2657,11 @@ def build_platt_refit_preflight_report(world_db: Path = SHARED_DB) -> dict:
                     "missing_columns": missing,
                 }
 
-        # Verify platt_models_v2 UNIQUE includes stratification keys (post-migration shape).
+        # Verify platt_models UNIQUE includes stratification keys (post-migration shape).
         # Check the UNIQUE clause text specifically — the column names also appear as
         # column definitions so a full-sql substring search is insufficient.
         platt_create_sql = conn.execute(
-            "SELECT sql FROM sqlite_master WHERE type='table' AND name='platt_models_v2'"
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='platt_models'"
         ).fetchone()
         if platt_create_sql:
             sql_lower = (platt_create_sql[0] or "").lower()
@@ -2672,7 +2672,7 @@ def build_platt_refit_preflight_report(world_db: Path = SHARED_DB) -> dict:
                 return {
                     "ready": False,
                     "verdict": "aborted_platt_unique_not_extended",
-                    "reason": "platt_models_v2 UNIQUE missing stratification keys; legacy 6-tuple still in place",
+                    "reason": "platt_models UNIQUE missing stratification keys; legacy 6-tuple still in place",
                 }
 
         _add_platt_pair_preflight_checks(report, cur)
@@ -2719,7 +2719,7 @@ def build_training_readiness_report(world_db: Path = SHARED_DB) -> dict:
             "historical_forecasts",
             "ensemble_snapshots",
             "calibration_pairs",
-            "platt_models_v2",
+            "platt_models",
             "market_events_v2",
             "market_price_history",
             "settlements_v2",

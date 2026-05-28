@@ -63,8 +63,7 @@ _P1_BASELINE_VIOLATIONS: frozenset[str] = frozenset({
     # Do not grow this set.
     "src/calibration/effective_sample_size.py::write_decision_groups",
     "src/calibration/retrain_trigger.py::_insert_version",
-    "src/calibration/store.py::save_platt_model",
-    "src/calibration/store.py::save_platt_model_v2",
+    "src/calibration/store.py::save_platt_model",  # canonical (was save_platt_model_v2)
     "src/data/daily_obs_append.py::_write_atom_with_coverage",
     "src/data/daily_obs_append.py::append_hko_months",
     "src/data/daily_obs_append.py::append_ogimet_city",

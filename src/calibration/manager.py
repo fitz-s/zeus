@@ -25,7 +25,6 @@ from src.calibration.store import (
     get_pairs_for_bucket,
     get_decision_group_count,
     load_platt_model,
-    load_platt_model_v2,
     save_platt_model,
 )
 from src.config import City, calibration_clusters, calibration_maturity_thresholds
@@ -606,7 +605,7 @@ def get_calibration_authority_result(
             season=season,
             input_space="width_normalized_density",
         )
-        primary_model = load_platt_model_v2(
+        primary_model = load_platt_model(
             conn,
             temperature_metric=temperature_metric,
             cluster=cluster,
@@ -850,7 +849,7 @@ def get_calibrator(
             lookup_cycle, lookup_source_id, lookup_horizon = "00", "tigge_mars", "full"
         else:
             lookup_cycle, lookup_source_id, lookup_horizon = cycle, source_id, horizon_profile
-        model_data = load_platt_model_v2(
+        model_data = load_platt_model(
             conn,
             temperature_metric=temperature_metric,
             cluster=cluster,
@@ -878,18 +877,7 @@ def get_calibrator(
             season=season,
             data_version_used=tigge_rescue_data_version,
         )
-    if model_data is None and temperature_metric == "high":
-        # Legacy fallback only for HIGH — LOW has never existed in legacy
-        bk = bucket_key(cluster, season)
-        model_data = load_platt_model(conn, bk)
-        # Slice P3.4 + P3-fix2 (post-review MAJOR from both reviewers,
-        # 2026-04-26): operator-visible WARNING when v2 misses and legacy
-        # fills, deduplicated per-(path,cluster,season,metric) for the
-        # process lifetime. v2 coverage may be sparse → first cycle alerts
-        # operator; subsequent cycles for the same bucket suppress to
-        # avoid log spam (one fact, one alert).
-        if model_data is not None:
-            _emit_v2_legacy_fallback_warning("primary", cluster, season, "high")
+    # B3cont: legacy platt_models bare-table fallback removed (0 rows, table dropped).
     if model_data is not None:
         if model_data.get("input_space") != "width_normalized_density":
             refit = _fit_from_pairs(
@@ -988,7 +976,7 @@ def get_calibrator(
                 lookup_cycle, lookup_source_id, lookup_horizon = "00", "tigge_mars", "full"
             else:
                 lookup_cycle, lookup_source_id, lookup_horizon = cycle, source_id, horizon_profile
-            model_data = load_platt_model_v2(
+            model_data = load_platt_model(
                 conn,
                 temperature_metric=temperature_metric,
                 cluster=fallback_cluster,
@@ -1016,14 +1004,7 @@ def get_calibrator(
                 season=season,
                 data_version_used=season_pool_tigge_rescue_dv,
             )
-        if model_data is None and temperature_metric == "high":
-            bk_fb = bucket_key(fallback_cluster, season)
-            model_data = load_platt_model(conn, bk_fb)
-            # Slice P3.4 + P3-fix2: twin-site dedup per-bucket WARNING.
-            if model_data is not None:
-                _emit_v2_legacy_fallback_warning(
-                    "season-pool", fallback_cluster, season, "high",
-                )
+        # B3cont: legacy platt_models bare-table fallback removed (0 rows, table dropped).
         if model_data is not None and model_data["n_samples"] >= level3:
             if model_data.get("input_space") != "width_normalized_density":
                 logger.warning(
@@ -1187,14 +1168,22 @@ def _fit_from_pairs(
         f":{_eff_dv}:{_eff_cycle}:{_eff_source_id}:{_eff_horizon}:{cal.input_space}"
     )
 
-    # Save to DB for future use
-    bk = bucket_key(cluster, season)
+    # Save to DB for future use (B3cont: canonical save_platt_model — HIGH-only, v2 kwargs)
     save_platt_model(
-        conn, bk,
-        cal.A, cal.B, cal.C,
-        cal.bootstrap_params,
-        cal.n_samples,
+        conn,
+        metric_identity=HIGH_LOCALDAY_MAX,
+        cluster=cluster,
+        season=season,
+        data_version=_eff_dv,
+        param_A=cal.A,
+        param_B=cal.B,
+        param_C=cal.C,
+        bootstrap_params=cal.bootstrap_params,
+        n_samples=cal.n_samples,
         input_space=cal.input_space,
+        cycle=_eff_cycle,
+        source_id=_eff_source_id,
+        horizon_profile=_eff_horizon,
     )
     conn.commit()
 

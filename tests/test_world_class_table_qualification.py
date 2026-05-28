@@ -32,7 +32,7 @@ WORLD_ONLY_TABLES = {
     "temp_persistence",                # F102 — world_class, ETL writes to zeus-world.db
     "validated_calibration_transfers", # F41 — world_class
     "observation_instants_v2",         # F43 — 1.8M rows in world.db
-    "platt_models_v2",                 # F43 — 1.4K rows in world.db
+    "platt_models",                 # F43 — 1.4K rows in world.db
     "data_coverage",                   # F43 — world-class (cross-DB write target post-K1)
     "daily_observation_revisions",     # F43 — world-class
 }

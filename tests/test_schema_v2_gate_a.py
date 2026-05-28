@@ -151,7 +151,7 @@ TABLE_INSERTERS = {
     "market_events": _insert_market_events_row,
     "ensemble_snapshots": _insert_ensemble_snapshots_row,
     "calibration_pairs": _insert_calibration_pairs_row,
-    "platt_models_v2": _insert_platt_models_row,
+    "platt_models": _insert_platt_models_row,
     "day0_metric_fact": _insert_day0_metric_fact_row,
 }
 
@@ -486,7 +486,7 @@ class TestGateADualMetricCoexistence(unittest.TestCase):
             with self.subTest(table=table):
                 inserter(conn, "high")
                 inserter(conn, "low")
-                if table == "platt_models_v2":
+                if table == "platt_models":
                     # Fix C: platt_models_v2 has no city/target_date columns.
                     # Verify 2 distinct temperature_metric values were inserted.
                     (count,) = conn.execute(

@@ -142,19 +142,33 @@ class TestStoreRoundTrip:
         return conn
 
     def test_save_and_load_model(self, tmp_path):
+        from src.types.metric_identity import HIGH_LOCALDAY_MAX
         conn = self._get_test_conn(tmp_path)
 
         bootstrap = [(1.0, 0.1, -0.5), (0.9, 0.12, -0.48)]
         save_platt_model(
-            conn, "US-Northeast_DJF",
-            A=1.0, B=0.1, C=-0.5,
+            conn,
+            metric_identity=HIGH_LOCALDAY_MAX,
+            cluster="US-Northeast",
+            season="DJF",
+            data_version=HIGH_LOCALDAY_MAX.data_version,
+            param_A=1.0,
+            param_B=0.1,
+            param_C=-0.5,
             bootstrap_params=bootstrap,
             n_samples=200,
             brier_insample=0.22,
+            input_space="width_normalized_density",
         )
         conn.commit()
 
-        loaded = load_platt_model(conn, "US-Northeast_DJF")
+        loaded = load_platt_model(
+            conn,
+            temperature_metric="high",
+            cluster="US-Northeast",
+            season="DJF",
+            data_version=HIGH_LOCALDAY_MAX.data_version,
+        )
         assert loaded is not None
         assert loaded["A"] == 1.0
         assert loaded["B"] == 0.1
@@ -166,7 +180,12 @@ class TestStoreRoundTrip:
 
     def test_load_nonexistent_returns_none(self, tmp_path):
         conn = self._get_test_conn(tmp_path)
-        assert load_platt_model(conn, "NONEXISTENT_DJF") is None
+        assert load_platt_model(
+            conn,
+            temperature_metric="high",
+            cluster="NONEXISTENT",
+            season="DJF",
+        ) is None
         conn.close()
 
     def test_add_and_get_pairs(self, tmp_path):
@@ -964,10 +983,18 @@ class TestGetCalibrator:
         apply_v2_schema(conn)
 
         # Store a pre-fitted model under K3 bucket key (city.name_season)
+        from src.types.metric_identity import HIGH_LOCALDAY_MAX
+        season = season_from_date("2026-01-15", lat=NYC.lat)
         bootstrap = [(1.0, 0.1, -0.5)] * 50
         save_platt_model(
-            conn, "NYC_DJF",
-            A=1.0, B=0.1, C=-0.5,
+            conn,
+            metric_identity=HIGH_LOCALDAY_MAX,
+            cluster=NYC.cluster,
+            season=season,
+            data_version=HIGH_LOCALDAY_MAX.data_version,
+            param_A=1.0,
+            param_B=0.1,
+            param_C=-0.5,
             bootstrap_params=bootstrap,
             n_samples=200,
             input_space="width_normalized_density",
@@ -990,12 +1017,17 @@ class TestGetCalibrator:
         conn = get_connection(db_path)
         init_schema(conn)
         apply_v2_schema(conn)
+        from src.types.metric_identity import HIGH_LOCALDAY_MAX
+        season = season_from_date("2026-01-15", lat=NYC.lat)
         save_platt_model(
             conn,
-            "NYC_DJF",
-            A=1.0,
-            B=0.1,
-            C=-0.5,
+            metric_identity=HIGH_LOCALDAY_MAX,
+            cluster=NYC.cluster,
+            season=season,
+            data_version=HIGH_LOCALDAY_MAX.data_version,
+            param_A=1.0,
+            param_B=0.1,
+            param_C=-0.5,
             bootstrap_params=[(1.0, 0.1, -0.5)] * 5,
             n_samples=200,
             input_space="raw_probability",
@@ -1025,10 +1057,10 @@ class TestTiggeOpendataBridge:
         return conn
 
     def _save_high_tigge_v2(self, conn, cluster, season):
-        from src.calibration.store import save_platt_model_v2
+        from src.calibration.store import save_platt_model
         from src.types.metric_identity import HIGH_LOCALDAY_MAX
 
-        save_platt_model_v2(
+        save_platt_model(
             conn,
             metric_identity=HIGH_LOCALDAY_MAX,
             cluster=cluster,
@@ -1080,14 +1112,14 @@ class TestTiggeOpendataBridge:
         """LOW + ecmwf_opendata + only TIGGE LOW Platt present → returns
         None (no fallback). Purity doctrine ``_low_purity_doctrine_2026_05_07``
         forbids cross-source rescue for LOW."""
-        from src.calibration.store import save_platt_model_v2
+        from src.calibration.store import save_platt_model
         from src.types.metric_identity import LOW_LOCALDAY_MIN
 
         conn = self._v2_conn(tmp_path, "low_no_bridge")
         season = season_from_date("2026-01-15", lat=NYC.lat)
         # Seed a TIGGE-keyed LOW Platt; the bridge MUST NOT serve it to an
         # ecmwf_opendata LOW caller.
-        save_platt_model_v2(
+        save_platt_model(
             conn,
             metric_identity=LOW_LOCALDAY_MIN,
             cluster=NYC.cluster,

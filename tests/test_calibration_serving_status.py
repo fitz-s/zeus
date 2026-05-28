@@ -409,7 +409,7 @@ def test_missing_tables_return_query_error_without_mutation() -> None:
     assert report["authority"] == "derived_operator_visibility"
     assert {error["source"] for error in report["source_errors"]} == {
         "readiness_state",
-        "platt_models_v2",
+        "platt_models",
         "calibration_pairs",
     }
 
@@ -543,7 +543,7 @@ def test_v2_table_schema_preference_covers_every_v2_table() -> None:
     expected_v2_tables = {
         "calibration_pairs",
         "ensemble_snapshots",
-        "platt_models_v2",
+        "platt_models",
         "historical_forecasts",
         "settlements_v2",
     }

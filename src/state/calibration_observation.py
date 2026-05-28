@@ -88,8 +88,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
 
 from src.calibration.store import (
-    list_active_platt_models_legacy,
-    list_active_platt_models_v2,
+    list_active_platt_models,
 )
 from src.state.edge_observation import _classify_sample_quality
 
@@ -317,8 +316,8 @@ def compute_platt_parameter_snapshot_per_bucket(
 
     out: dict[str, dict[str, Any]] = {}
 
-    # v2 first (canonical post-Phase-9C surface).
-    for raw in list_active_platt_models_v2(conn):
+    # Canonical platt_models surface (post-B3cont: legacy table dropped).
+    for raw in list_active_platt_models(conn):
         bucket_key = raw["model_key"]
         out[bucket_key] = _build_snapshot_record(
             bucket_key=bucket_key,
@@ -330,25 +329,7 @@ def compute_platt_parameter_snapshot_per_bucket(
             window_end_dt=window_end_dt,
         )
 
-    # Legacy second; v2 entries win on collision (same logical bucket).
-    for raw in list_active_platt_models_legacy(conn):
-        bucket_key = raw["bucket_key"]
-        if bucket_key in out:
-            # v2 already covered this bucket key — skip the legacy duplicate.
-            # Sibling-coherent with manager.py L172-189 v2-then-legacy
-            # model-fallback-load (per LOW-CITATION-CALIBRATION-1-1 fix:
-            # the L42-62 helper in manager.py is the WARNING dedup, NOT the
-            # model-load; this comment cites the model-load precedent).
-            continue
-        out[bucket_key] = _build_snapshot_record(
-            bucket_key=bucket_key,
-            source="legacy",
-            raw=raw,
-            window_start=window_start,
-            window_end=window_end,
-            window_start_dt=window_start_dt,
-            window_end_dt=window_end_dt,
-        )
+    # B3cont (2026-05-28): legacy platt_models table dropped; legacy iteration removed.
 
     return out
 

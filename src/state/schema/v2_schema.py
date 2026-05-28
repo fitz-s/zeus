@@ -525,10 +525,10 @@ def apply_v2_schema(conn: sqlite3.Connection, *, forecast_tables: bool = True) -
             _create_calibration_pairs(conn)
 
         # ----------------------------------------------------------------
-        # platt_models_v2
+        # platt_models
         # ----------------------------------------------------------------
         conn.execute("""
-            CREATE TABLE IF NOT EXISTS platt_models_v2 (
+            CREATE TABLE IF NOT EXISTS platt_models (
                 model_key TEXT PRIMARY KEY,
                 temperature_metric TEXT NOT NULL
                     CHECK (temperature_metric IN ('high', 'low')),
@@ -568,17 +568,17 @@ def apply_v2_schema(conn: sqlite3.Connection, *, forecast_tables: bool = True) -
         # F so the live serving guard (assert_bias_state_consistent) can refuse a
         # train/serve mismatch (live bias-correction enabled while the active
         # Platt was fit on a different family's input space). Concatenated into
-        # model_key in save_platt_model_v2. Not in UNIQUE (same rationale as
+        # model_key in save_platt_model. Not in UNIQUE (same rationale as
         # calibration_pairs_v2): SQLite cannot ALTER an existing UNIQUE.
         for alter_sql in [
-            "ALTER TABLE platt_models_v2 ADD COLUMN cycle TEXT NOT NULL DEFAULT '00'",
-            "ALTER TABLE platt_models_v2 ADD COLUMN source_id TEXT NOT NULL DEFAULT 'tigge_mars'",
-            "ALTER TABLE platt_models_v2 ADD COLUMN horizon_profile TEXT NOT NULL DEFAULT 'full'",
-            "ALTER TABLE platt_models_v2 ADD COLUMN error_model_family TEXT NOT NULL DEFAULT 'none'",
+            "ALTER TABLE platt_models ADD COLUMN cycle TEXT NOT NULL DEFAULT '00'",
+            "ALTER TABLE platt_models ADD COLUMN source_id TEXT NOT NULL DEFAULT 'tigge_mars'",
+            "ALTER TABLE platt_models ADD COLUMN horizon_profile TEXT NOT NULL DEFAULT 'full'",
+            "ALTER TABLE platt_models ADD COLUMN error_model_family TEXT NOT NULL DEFAULT 'none'",
             # identity_full_transport_v1 (Zeus #64, 2026-05-25): explicit route for
             # full_transport p_raw when ECE is already low — no Platt transform applied.
             # 'platt' is the default for all existing rows (backward-compatible).
-            "ALTER TABLE platt_models_v2 ADD COLUMN calibration_method TEXT NOT NULL DEFAULT 'platt'",
+            "ALTER TABLE platt_models ADD COLUMN calibration_method TEXT NOT NULL DEFAULT 'platt'",
         ]:
             try:
                 conn.execute(alter_sql)
@@ -586,8 +586,8 @@ def apply_v2_schema(conn: sqlite3.Connection, *, forecast_tables: bool = True) -
                 if "duplicate column" not in str(exc).lower():
                     raise
         conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_platt_models_v2_lookup
-                ON platt_models_v2(temperature_metric, cluster, season, data_version, input_space, is_active)
+            CREATE INDEX IF NOT EXISTS idx_platt_models_lookup
+                ON platt_models(temperature_metric, cluster, season, data_version, input_space, is_active)
         """)
 
         # ----------------------------------------------------------------

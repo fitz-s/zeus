@@ -57,7 +57,7 @@ DEFAULT_DRIFT_THRESHOLD_MULTIPLIER_LOW = _mod.DEFAULT_DRIFT_THRESHOLD_MULTIPLIER
 
 import argparse  # noqa: E402
 
-from src.calibration.store import save_platt_model, save_platt_model_v2  # noqa: E402
+from src.calibration.store import save_platt_model, save_platt_model  # noqa: E402
 from src.state.db import init_schema  # noqa: E402
 from src.state.schema.v2_schema import apply_v2_schema  # noqa: E402
 from src.types.metric_identity import HIGH_LOCALDAY_MAX, LOW_LOCALDAY_MIN  # noqa: E402
@@ -92,11 +92,11 @@ def _seed_v2_model(
     n_samples: int = 60,
     bootstrap_size: int = 30,
 ):
-    """Seed one platt_models_v2 row via canonical save_platt_model_v2 path."""
+    """Seed one platt_models_v2 row via canonical save_platt_model path."""
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
     try:
-        save_platt_model_v2(
+        save_platt_model(
             conn,
             metric_identity=metric_identity,
             cluster=cluster,
@@ -171,7 +171,7 @@ def test_drift_detected_propagates_to_exit_1(tmp_path: Path, capsys: pytest.Capt
     HIGH threshold = 1.3 (default); ratio = (5.0 - 1.05) / std-of-trailing
     will far exceed 2.0 → critical.
 
-    Each fit is a NEW save_platt_model_v2 call which deactivates the prior
+    Each fit is a NEW save_platt_model call which deactivates the prior
     row (UNIQUE on (..., is_active=1)) — so only the latest fit is "active".
     For the historical-window query to see prior fits, we'd need them to
     remain active in their own time window, which they don't post-refit.
@@ -317,7 +317,7 @@ def test_bootstrap_usable_count_surfaces_in_per_bucket_snapshot(tmp_path: Path):
     scalar is silently skipped by the isinstance guard, so usable_count
     < count.
 
-    Direct save_platt_model_v2 only accepts well-formed bootstrap, so
+    Direct save_platt_model only accepts well-formed bootstrap, so
     we use a direct INSERT bypass (mirrors the test_calibration_observation
     _insert_v2_raw helper pattern).
     """

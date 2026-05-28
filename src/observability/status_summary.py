@@ -416,7 +416,7 @@ def _get_risk_details() -> dict:
 
 
 _V2_TABLES = (
-    "platt_models_v2",
+    "platt_models",
     "calibration_pairs",
     "ensemble_snapshots",
     "historical_forecasts",

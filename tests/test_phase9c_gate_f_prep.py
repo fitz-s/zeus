@@ -38,7 +38,7 @@ class TestRBZGetCalibratorMetricAware:
     deployment.
 
     Relationship antibody per critic-carol cycle-3 L9 runtime-probe pattern:
-    the cross-module invariant is writer (save_platt_model_v2) ↔ reader
+    the cross-module invariant is writer (save_platt_model) ↔ reader
     (get_calibrator) symmetric on `temperature_metric` axis. Constructs a
     DB with both HIGH + LOW rows for same (cluster, season) and asserts
     get_calibrator returns the metric-matching row.
@@ -828,7 +828,7 @@ class TestRCGFitFromPairsLowSkip:
 
     P9C.1 fix: `_fit_from_pairs` accepts `temperature_metric` (default
     "high"), early-returns None for anything else. LOW refits MUST go
-    through scripts/refit_platt.py → save_platt_model_v2 (Golden-
+    through scripts/refit_platt.py → save_platt_model (Golden-
     Window-gated). R-CG locks this invariant.
     """
 

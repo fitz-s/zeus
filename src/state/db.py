@@ -1080,21 +1080,7 @@ def init_schema(
         CREATE INDEX IF NOT EXISTS idx_calibration_decision_group_bucket
             ON calibration_decision_group(cluster, season, lead_days);
 
-        -- Platt model parameters per bucket
-        CREATE TABLE IF NOT EXISTS platt_models (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            bucket_key TEXT NOT NULL UNIQUE,
-            param_A REAL NOT NULL,
-            param_B REAL NOT NULL,
-            param_C REAL NOT NULL DEFAULT 0.0,
-            bootstrap_params_json TEXT NOT NULL,
-            n_samples INTEGER NOT NULL,
-            brier_insample REAL,
-            fitted_at TEXT NOT NULL,
-            is_active INTEGER NOT NULL DEFAULT 1,
-            input_space TEXT NOT NULL DEFAULT 'raw_probability',
-            authority TEXT NOT NULL DEFAULT 'UNVERIFIED' CHECK (authority IN ('VERIFIED', 'UNVERIFIED', 'QUARANTINED'))
-        );
+        -- B3cont: bare platt_models DDL removed (0 rows; canonical table is platt_models in zeus-forecasts.db via v2_schema.py)
 
         -- Trade decisions with full audit trail
         CREATE TABLE IF NOT EXISTS trade_decisions (
@@ -2159,10 +2145,7 @@ def init_schema(
         pass
     conn.execute("CREATE INDEX IF NOT EXISTS idx_venue_commands_snapshot ON venue_commands(snapshot_id);")
 
-    try:
-        conn.execute("ALTER TABLE platt_models ADD COLUMN input_space TEXT NOT NULL DEFAULT 'raw_probability';")
-    except sqlite3.OperationalError:
-        pass
+    # B3cont: ALTER TABLE platt_models (bare) removed — table dropped.
 
     # Provenance: env column on trade-facing tables (Decision 2).
     # Existing non-event rows default to 'live' for legacy compatibility.

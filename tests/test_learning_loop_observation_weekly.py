@@ -58,7 +58,7 @@ DEFAULT_HIGH_DRIFT = _mod.DEFAULT_HIGH_DRIFT
 DEFAULT_LOW_PAIR_GROWTH = _mod.DEFAULT_LOW_PAIR_GROWTH
 DEFAULT_LOW_PAIRS_READY = _mod.DEFAULT_LOW_PAIRS_READY
 
-from src.calibration.store import save_platt_model_v2  # noqa: E402
+from src.calibration.store import save_platt_model  # noqa: E402
 from src.state.db import init_schema  # noqa: E402
 from src.state.schema.v2_schema import apply_v2_schema  # noqa: E402
 from src.types.metric_identity import HIGH_LOCALDAY_MAX, LOW_LOCALDAY_MIN  # noqa: E402
@@ -89,7 +89,7 @@ def _seed_v2_model(
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
     try:
-        save_platt_model_v2(
+        save_platt_model(
             conn, metric_identity=metric_identity, cluster=cluster,
             season=season, data_version=data_version,
             param_A=A, param_B=0.3, param_C=0.0,

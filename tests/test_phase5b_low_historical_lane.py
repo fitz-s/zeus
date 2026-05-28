@@ -827,8 +827,8 @@ class TestRefitPlattV2LowMetricIsolation:
         def fake_save(conn, *, metric_identity, cluster, season, data_version, **kwargs):
             captured_keys.append(f"{metric_identity.temperature_metric}:{cluster}:{season}:{data_version}")
 
-        with patch("scripts.refit_platt.save_platt_model_v2", side_effect=fake_save), \
-             patch("scripts.refit_platt.deactivate_model_v2", return_value=0):
+        with patch("scripts.refit_platt.save_platt_model", side_effect=fake_save), \
+             patch("scripts.refit_platt.deactivate_model", return_value=0):
             refit_v2(db, metric_identity=LOW_LOCALDAY_MIN, dry_run=False, force=True)
 
         high_keys = [k for k in captured_keys if k.startswith("high:")]
@@ -838,7 +838,7 @@ class TestRefitPlattV2LowMetricIsolation:
         )
 
     def test_refit_platt_low_calls_deactivate_with_low_metric_identity(self, tmp_path):
-        """R-AO (acceptance): deactivate_model_v2 must be called with metric_identity=LOW_LOCALDAY_MIN
+        """R-AO (acceptance): deactivate_model must be called with metric_identity=LOW_LOCALDAY_MIN
         during a low-track refit, never with HIGH_LOCALDAY_MAX."""
         from unittest.mock import patch, call
         from src.types.metric_identity import LOW_LOCALDAY_MIN, HIGH_LOCALDAY_MAX
@@ -856,18 +856,18 @@ class TestRefitPlattV2LowMetricIsolation:
             deactivate_calls.append(metric_identity)
             return 0
 
-        with patch("scripts.refit_platt.deactivate_model_v2", side_effect=fake_deactivate), \
-             patch("scripts.refit_platt.save_platt_model_v2", return_value=None):
+        with patch("scripts.refit_platt.deactivate_model", side_effect=fake_deactivate), \
+             patch("scripts.refit_platt.save_platt_model", return_value=None):
             refit_v2(db, metric_identity=LOW_LOCALDAY_MIN, dry_run=False, force=True)
 
         high_calls = [m for m in deactivate_calls if m == HIGH_LOCALDAY_MAX]
         assert not high_calls, (
-            f"deactivate_model_v2 was called with HIGH_LOCALDAY_MAX during low-track refit. "
+            f"deactivate_model was called with HIGH_LOCALDAY_MAX during low-track refit. "
             f"All deactivate calls: {deactivate_calls}"
         )
 
     def test_refit_platt_low_calls_save_with_low_metric_identity(self, tmp_path):
-        """R-AO (acceptance): save_platt_model_v2 must be called with metric_identity=LOW_LOCALDAY_MIN
+        """R-AO (acceptance): save_platt_model must be called with metric_identity=LOW_LOCALDAY_MIN
         during a low-track refit, never with HIGH_LOCALDAY_MAX."""
         from unittest.mock import patch
         from src.types.metric_identity import LOW_LOCALDAY_MIN, HIGH_LOCALDAY_MAX
@@ -884,13 +884,13 @@ class TestRefitPlattV2LowMetricIsolation:
         def fake_save(conn, *, metric_identity, **kwargs):
             save_calls.append(metric_identity)
 
-        with patch("scripts.refit_platt.save_platt_model_v2", side_effect=fake_save), \
-             patch("scripts.refit_platt.deactivate_model_v2", return_value=0):
+        with patch("scripts.refit_platt.save_platt_model", side_effect=fake_save), \
+             patch("scripts.refit_platt.deactivate_model", return_value=0):
             refit_v2(db, metric_identity=LOW_LOCALDAY_MIN, dry_run=False, force=True)
 
         high_calls = [m for m in save_calls if m == HIGH_LOCALDAY_MAX]
         assert not high_calls, (
-            f"save_platt_model_v2 was called with HIGH_LOCALDAY_MAX during low-track refit. "
+            f"save_platt_model was called with HIGH_LOCALDAY_MAX during low-track refit. "
             f"All save calls: {save_calls}"
         )
 
@@ -916,8 +916,8 @@ class TestRefitPlattV2LowMetricIsolation:
         def fake_save(conn, *, metric_identity, cluster, season, data_version, **kwargs):
             captured_keys.append(f"{metric_identity.temperature_metric}:{cluster}:{season}:{data_version}")
 
-        with patch("scripts.refit_platt.save_platt_model_v2", side_effect=fake_save), \
-             patch("scripts.refit_platt.deactivate_model_v2", return_value=0):
+        with patch("scripts.refit_platt.save_platt_model", side_effect=fake_save), \
+             patch("scripts.refit_platt.deactivate_model", return_value=0):
             refit_v2(db, metric_identity=HIGH_LOCALDAY_MAX, dry_run=False, force=True)
 
         low_keys = [k for k in captured_keys if k.startswith("low:")]

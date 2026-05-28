@@ -61,9 +61,9 @@ DEFAULT_HORIZON_PROFILE = "full"
 
 ALTERS = [
     # platt_models_v2
-    ("platt_models_v2", "cycle", "TEXT NOT NULL DEFAULT '00'"),
-    ("platt_models_v2", "source_id", "TEXT NOT NULL DEFAULT 'tigge_mars'"),
-    ("platt_models_v2", "horizon_profile", "TEXT NOT NULL DEFAULT 'full'"),
+    ("platt_models", "cycle", "TEXT NOT NULL DEFAULT '00'"),
+    ("platt_models", "source_id", "TEXT NOT NULL DEFAULT 'tigge_mars'"),
+    ("platt_models", "horizon_profile", "TEXT NOT NULL DEFAULT 'full'"),
     # calibration_pairs_v2
     ("calibration_pairs_v2", "cycle", "TEXT NOT NULL DEFAULT '00'"),
     ("calibration_pairs_v2", "source_id", "TEXT NOT NULL DEFAULT 'tigge_mars'"),
@@ -179,7 +179,7 @@ def _backfill_platt_models_source_id(conn, dry_run: bool) -> dict:
     Mirrors the calibration_pairs_v2 prefix-match logic (line 167-174). Pre-existing
     OpenData-trained Platt rows stay mislabeled 'tigge_mars' otherwise.
     """
-    if dry_run and not _column_exists(conn, "platt_models_v2", "source_id"):
+    if dry_run and not _column_exists(conn, "platt_models", "source_id"):
         # ALTER not applied in dry-run; estimate via data_version prefix only.
         candidate = conn.execute(
             "SELECT COUNT(*) FROM platt_models_v2 "

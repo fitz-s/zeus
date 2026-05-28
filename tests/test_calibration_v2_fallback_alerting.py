@@ -9,7 +9,7 @@ falls back from v2 to legacy models.
 
 Pre-fix: src/calibration/manager.py:172 (primary bucket fallback) and
 :232 (season-only fallback) executed `load_platt_model(conn, bk)` (legacy
-read) silently when `load_platt_model_v2` returned None. Operators
+read) silently when `load_platt_model` returned None. Operators
 monitoring calibration health had no signal that v2 coverage was
 incomplete for some (cluster, season).
 
@@ -81,7 +81,7 @@ def test_v2_miss_with_legacy_hit_logs_fallback_warning(monkeypatch, caplog):
     city = _city()
 
     monkeypatch.setattr(
-        mgr_module, "load_platt_model_v2",
+        mgr_module, "load_platt_model",
         lambda conn, *, temperature_metric, cluster, season, data_version=None, **_kwargs: None,
     )
     monkeypatch.setattr(
@@ -113,7 +113,7 @@ def test_v2_hit_does_not_log_fallback_warning(monkeypatch, caplog):
     city = _city()
 
     monkeypatch.setattr(
-        mgr_module, "load_platt_model_v2",
+        mgr_module, "load_platt_model",
         lambda conn, *, temperature_metric, cluster, season, data_version=None, **_kwargs: _populated_legacy_model(),
     )
 
@@ -136,7 +136,7 @@ def test_both_v2_and_legacy_miss_no_fallback_warning(monkeypatch, caplog):
     city = _city()
 
     monkeypatch.setattr(
-        mgr_module, "load_platt_model_v2",
+        mgr_module, "load_platt_model",
         lambda conn, *, temperature_metric, cluster, season, data_version=None, **_kwargs: None,
     )
     monkeypatch.setattr(
@@ -173,7 +173,7 @@ def test_repeated_fallback_for_same_bucket_logs_only_once(monkeypatch, caplog):
     city = _city()
 
     monkeypatch.setattr(
-        mgr_module, "load_platt_model_v2",
+        mgr_module, "load_platt_model",
         lambda conn, *, temperature_metric, cluster, season, data_version=None, **_kwargs: None,
     )
     monkeypatch.setattr(
@@ -205,7 +205,7 @@ def test_low_metric_does_not_attempt_legacy_fallback(monkeypatch, caplog):
     city = _city()
 
     monkeypatch.setattr(
-        mgr_module, "load_platt_model_v2",
+        mgr_module, "load_platt_model",
         lambda conn, *, temperature_metric, cluster, season, data_version=None, **_kwargs: None,
     )
     legacy_calls: list[str] = []

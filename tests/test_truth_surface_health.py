@@ -668,7 +668,7 @@ class TestTrainingReadinessP0:
             "historical_forecasts",
             "ensemble_snapshots",
             "calibration_pairs",
-            "platt_models_v2",
+            "platt_models",
             "market_events",
             "market_price_history",
             "settlements_v2",
@@ -739,7 +739,7 @@ class TestTrainingReadinessP0:
         assert report["ready"] is True
         assert report["mode"] == "calibration-pair-rebuild-preflight"
         assert "calibration_pairs" not in report["checks"]
-        assert "platt_models_v2" not in report["checks"]
+        assert "platt_models" not in report["checks"]
         assert training_report["ready"] is False
         assert "empty_v2_table" in _blocker_codes(training_report)
 
@@ -1024,7 +1024,7 @@ class TestTrainingReadinessP0:
 
         assert report["ready"] is True
         assert report["mode"] == "platt-refit-preflight"
-        assert "platt_models_v2" not in report["checks"]
+        assert "platt_models" not in report["checks"]
         assert report["checks"]["calibration_pairs.high.mature_bucket_present"]["status"] == "PASS"
         assert report["checks"]["calibration_pairs.low.mature_bucket_present"]["status"] == "PASS"
 
@@ -1105,7 +1105,7 @@ class TestTrainingReadinessP0:
         for table in [
             "forecasts",
             "calibration_pairs",
-            "platt_models_v2",
+            "platt_models",
             "market_events",
             "market_price_history",
         ]:

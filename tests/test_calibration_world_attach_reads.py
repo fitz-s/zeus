@@ -13,7 +13,7 @@ import json
 import sqlite3
 
 from src.calibration.manager import get_calibrator
-from src.calibration.store import load_platt_model_v2
+from src.calibration.store import load_platt_model
 from src.config import City
 
 
@@ -78,10 +78,10 @@ def _attached_trade_conn(tmp_path) -> sqlite3.Connection:
     return conn
 
 
-def test_load_platt_model_v2_prefers_attached_world_over_empty_trade_shadow(tmp_path):
+def test_load_platt_model_prefers_attached_world_over_empty_trade_shadow(tmp_path):
     conn = _attached_trade_conn(tmp_path)
 
-    loaded = load_platt_model_v2(
+    loaded = load_platt_model(
         conn,
         temperature_metric="low",
         cluster="London",

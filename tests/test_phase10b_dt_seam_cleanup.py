@@ -385,7 +385,7 @@ class TestRCPV2RowCountSensor:
         """In-memory DB with 5 v2 tables, all empty."""
         conn = sqlite3.connect(":memory:")
         for table in (
-            "platt_models_v2",
+            "platt_models",
             "calibration_pairs",
             "ensemble_snapshots",
             "historical_forecasts",
@@ -399,7 +399,7 @@ class TestRCPV2RowCountSensor:
         """In-memory DB with all v2 tables having 1 row."""
         conn = self._make_empty_v2_conn()
         for table in (
-            "platt_models_v2",
+            "platt_models",
             "calibration_pairs",
             "ensemble_snapshots",
             "historical_forecasts",
@@ -441,7 +441,7 @@ class TestRCPV2RowCountSensor:
         counts_empty = _get_v2_row_counts(empty_conn)
 
         assert set(counts_empty.keys()) == {
-            "platt_models_v2",
+            "platt_models",
             "calibration_pairs",
             "ensemble_snapshots",
             "historical_forecasts",
@@ -452,10 +452,10 @@ class TestRCPV2RowCountSensor:
             "Empty v2 tables must return 0 counts (not hardcoded)"
         )
 
-        # Verify it actually queries — insert 1 row to platt_models_v2
+        # Verify it actually queries — insert 1 row to platt_models
         populated_conn = self._make_populated_v2_conn()
         counts_populated = _get_v2_row_counts(populated_conn)
-        assert counts_populated["platt_models_v2"] == 1, (
+        assert counts_populated["platt_models"] == 1, (
             "_get_v2_row_counts must return actual row count, not hardcoded 0"
         )
 
@@ -490,7 +490,7 @@ class TestRCPV2RowCountSensor:
         world_conn = sqlite3.connect(str(world_path))
         forecasts_conn = sqlite3.connect(str(forecasts_path))
         for table in (
-            "platt_models_v2",
+            "platt_models",
             "calibration_pairs",
             "ensemble_snapshots",
             "historical_forecasts",
@@ -499,7 +499,7 @@ class TestRCPV2RowCountSensor:
             world_conn.execute(f"CREATE TABLE {table} (id INTEGER PRIMARY KEY)")
             forecasts_conn.execute(f"CREATE TABLE {table} (id INTEGER PRIMARY KEY)")
         for _ in range(2):
-            world_conn.execute("INSERT INTO platt_models_v2 DEFAULT VALUES")
+            world_conn.execute("INSERT INTO platt_models DEFAULT VALUES")
             world_conn.execute("INSERT INTO historical_forecasts DEFAULT VALUES")
         for _ in range(3):
             forecasts_conn.execute("INSERT INTO calibration_pairs DEFAULT VALUES")
@@ -514,7 +514,7 @@ class TestRCPV2RowCountSensor:
         trade_conn.execute("ATTACH DATABASE ? AS forecasts", (str(forecasts_path),))
         counts = _get_v2_row_counts(trade_conn)
 
-        assert counts["platt_models_v2"] == 2
+        assert counts["platt_models"] == 2
         assert counts["historical_forecasts"] == 2
         assert counts["calibration_pairs"] == 3
         assert counts["ensemble_snapshots"] == 3
@@ -530,7 +530,7 @@ class TestRCPV2RowCountSensor:
 
         counts = _get_v2_row_counts(conn)
 
-        assert counts["platt_models_v2"] == 1
+        assert counts["platt_models"] == 1
         assert not any("COUNT(*)" in statement.upper() for statement in statements), (
             "v2 status row-count telemetry must not full-scan large tables every cycle"
         )

@@ -267,9 +267,9 @@ def _merge_calibration_counts(
             item = buckets.setdefault(_bucket_key(bucket), _blank_bucket(bucket))
             item["calibration"]["verified_pair_count"] = int(row["verified_pair_count"] or 0)
 
-    models_table = _table_ref(conn, "platt_models_v2")
+    models_table = _table_ref(conn, "platt_models")
     if models_table is None:
-        source_errors.append({"source": "platt_models_v2", "error": "table_missing"})
+        source_errors.append({"source": "platt_models", "error": "table_missing"})
     else:
         rows = conn.execute(
             f"""

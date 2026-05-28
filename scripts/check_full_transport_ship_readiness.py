@@ -173,34 +173,34 @@ def check_p_raw_replay_equivalence_pass(stage_db: str) -> CheckResult:
 # ── Check 4: platt_or_identity_coverage_complete ─────────────────────────────
 
 def check_platt_or_identity_coverage_complete(world_db: str) -> CheckResult:
-    """Every full_transport_v1 bucket in platt_models_v2 has an explicit route."""
+    """Every full_transport_v1 bucket in platt_models has an explicit route."""
     name = "platt_or_identity_coverage_complete"
     try:
         conn = _conn(world_db)
     except (FileNotFoundError, ValueError) as exc:
         return CheckResult(name, FAIL, f"world_db unavailable: {exc}")
     try:
-        if not _table_exists(conn, "platt_models_v2"):
-            return CheckResult(name, FAIL, "platt_models_v2 table not found")
+        if not _table_exists(conn, "platt_models"):
+            return CheckResult(name, FAIL, "platt_models table not found")
         # Count ft rows with an explicit calibration_method set
         has_col = any(
             r[1] == "calibration_method"
-            for r in conn.execute("PRAGMA table_info(platt_models_v2)")
+            for r in conn.execute("PRAGMA table_info(platt_models)")
         )
         if not has_col:
             # calibration_method column not yet added — Phase 1 incomplete
             return CheckResult(
                 name, FAIL,
-                "platt_models_v2 lacks calibration_method column (Phase 1 schema not landed) — not yet produced"
+                "platt_models lacks calibration_method column (Phase 1 schema not landed) — not yet produced"
             )
         total_ft = conn.execute(
-            "SELECT COUNT(*) FROM platt_models_v2 WHERE error_model_family='full_transport_v1'"
+            "SELECT COUNT(*) FROM platt_models WHERE error_model_family='full_transport_v1'"
         ).fetchone()[0]
         if total_ft == 0:
             return CheckResult(name, FAIL, "no full_transport_v1 Platt/identity rows — not yet produced")
         uncovered = conn.execute(
             """
-            SELECT COUNT(*) FROM platt_models_v2
+            SELECT COUNT(*) FROM platt_models
             WHERE error_model_family='full_transport_v1'
               AND (calibration_method IS NULL OR calibration_method = '')
             """

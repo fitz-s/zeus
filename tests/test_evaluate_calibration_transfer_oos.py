@@ -36,7 +36,7 @@ def _make_conn() -> sqlite3.Connection:
     conn = sqlite3.connect(":memory:")
     apply_v2_schema(conn)
     conn.execute("ATTACH DATABASE ':memory:' AS world")
-    _clone_main_table_to_world(conn, "platt_models_v2")
+    _clone_main_table_to_world(conn, "platt_models")
     _clone_main_table_to_world(conn, "validated_calibration_transfers")
     return conn
 

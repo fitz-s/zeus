@@ -86,9 +86,9 @@ def _save_low_v2_model(
     param_A: float = 1.0,
     n_samples: int = 80,
 ) -> None:
-    from src.calibration.store import save_platt_model_v2
+    from src.calibration.store import save_platt_model
 
-    save_platt_model_v2(
+    save_platt_model(
         conn,
         metric_identity=LOW_LOCALDAY_MIN,
         cluster=cluster,
@@ -134,7 +134,7 @@ def test_get_calibrator_low_caller_with_v2_fallback_does_not_raise_unbound_level
     )
     fallback_cluster = other_clusters[0]
 
-    # Stub load_platt_model_v2: return a populated model only when queried
+    # Stub load_platt_model: return a populated model only when queried
     # for the fallback cluster. This forces the fallback loop to enter the
     # `if model_data is not None and model_data["n_samples"] >= level3:`
     # branch — which is where pre-fix code crashed.
@@ -157,7 +157,7 @@ def test_get_calibrator_low_caller_with_v2_fallback_does_not_raise_unbound_level
             }
         return None
 
-    monkeypatch.setattr(mgr_module, "load_platt_model_v2", fake_v2)
+    monkeypatch.setattr(mgr_module, "load_platt_model", fake_v2)
 
     # Pre-fix: this raises UnboundLocalError inside the fallback loop.
     # Post-fix: returns cleanly.
@@ -477,7 +477,7 @@ def test_calibration_authority_result_blocks_mismatched_primary_v2_domain(monkey
             "bootstrap_params": [],
         }
 
-    monkeypatch.setattr(mgr_module, "load_platt_model_v2", fake_v2)
+    monkeypatch.setattr(mgr_module, "load_platt_model", fake_v2)
 
     result = get_calibration_authority_result(
         conn,

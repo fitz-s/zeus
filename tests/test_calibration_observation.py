@@ -3,8 +3,8 @@
 # Authority basis: round3_verdict.md §1 #2 (FOURTH edge packet) + ULTIMATE_PLAN.md §4 #2
 # (CALIBRATION_HARDENING — Extended Platt parameter monitoring). Per Fitz "test
 # relationships, not just functions" — these tests verify the CROSS-MODULE invariant
-# that compute_platt_parameter_snapshot_per_bucket reads list_active_platt_models_v2
-# + list_active_platt_models_legacy via the K1-compliant store.py readers (pure SELECT,
+# that compute_platt_parameter_snapshot_per_bucket reads list_active_platt_models
+# + list_active_platt_models via the K1-compliant store.py readers (pure SELECT,
 # is_active=1 + authority='VERIFIED' filter at source), assembles per-bucket snapshots
 # with bootstrap statistics, and applies window/sample-quality classification.
 """BATCH 1 tests for calibration_observation (PATH A bucket-snapshot).
@@ -12,9 +12,9 @@
 Eleven relationship tests covering:
 
   store.py read-side additions (3 tests pin the new canonical surface):
-  1. test_list_active_platt_models_v2_filters_to_active_verified — UNVERIFIED + is_active=0 excluded
-  2. test_list_active_platt_models_legacy_filters_to_active_verified — same filter on legacy
-  3. test_list_active_platt_models_v2_pre_migration_returns_empty — graceful on missing table
+  1. test_list_active_platt_models_filters_to_active_verified — UNVERIFIED + is_active=0 excluded
+  2. test_list_active_platt_models_filters_to_active_verified — same filter on legacy
+  3. test_list_active_platt_models_pre_migration_returns_empty — graceful on missing table
 
   calibration_observation projection (8 tests pin the cross-module behavior):
   4. test_empty_db_safety — no models → empty dict
@@ -34,10 +34,8 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from src.calibration.store import (
-    list_active_platt_models_legacy,
-    list_active_platt_models_v2,
+    list_active_platt_models,
     save_platt_model,
-    save_platt_model_v2,
 )
 from src.state.calibration_observation import (
     _stddev,
@@ -106,14 +104,14 @@ def _insert_v2_raw(
     fitted_at: str | None = None,
     bootstrap_size: int = 10,
 ):
-    """Direct insert into platt_models_v2 bypassing save_platt_model_v2."""
+    """Direct insert into platt_models bypassing save_platt_model."""
     if fitted_at is None:
         fitted_at = datetime.now(timezone.utc).isoformat()
     import json
     model_key = f"high:{cluster}:{season}:{data_version}:{input_space}"
     conn.execute(
         """
-        INSERT INTO platt_models_v2
+        INSERT INTO platt_models
         (model_key, temperature_metric, cluster, season, data_version,
          input_space, param_A, param_B, param_C, bootstrap_params_json,
          n_samples, brier_insample, fitted_at, is_active, authority, recorded_at)
@@ -128,40 +126,40 @@ def _insert_v2_raw(
 # --- store.py reader tests (3) --------------------------------------------
 
 
-def test_list_active_platt_models_v2_filters_to_active_verified():
-    """RELATIONSHIP: list_active_platt_models_v2 returns only is_active=1 +
-    authority='VERIFIED'. Mirrors load_platt_model_v2 read filter (L555-557)."""
+def test_list_active_platt_models_filters_to_active_verified():
+    """RELATIONSHIP: list_active_platt_models returns only is_active=1 +
+    authority='VERIFIED'. Mirrors load_platt_model read filter (L555-557)."""
     conn = _make_conn()
     _insert_v2_raw(conn, cluster="A", season="DJF", is_active=1, authority="VERIFIED")
     _insert_v2_raw(conn, cluster="B", season="DJF", is_active=0, authority="VERIFIED")
     _insert_v2_raw(conn, cluster="C", season="DJF", is_active=1, authority="UNVERIFIED")
     _insert_v2_raw(conn, cluster="D", season="DJF", is_active=1, authority="QUARANTINED")
-    rows = list_active_platt_models_v2(conn)
+    rows = list_active_platt_models(conn)
     clusters = sorted(r["cluster"] for r in rows)
     assert clusters == ["A"], f"only A is active+VERIFIED; got {clusters}"
 
 
-def test_list_active_platt_models_legacy_filters_to_active_verified():
+def test_list_active_platt_models_filters_to_active_verified():
     """RELATIONSHIP: legacy reader same filter. Mirror load_platt_model L497."""
     conn = _make_conn()
     _insert_legacy_raw(conn, bucket_key="A_DJF", is_active=1, authority="VERIFIED")
     _insert_legacy_raw(conn, bucket_key="B_DJF", is_active=0, authority="VERIFIED")
     _insert_legacy_raw(conn, bucket_key="C_DJF", is_active=1, authority="UNVERIFIED")
     _insert_legacy_raw(conn, bucket_key="D_DJF", is_active=1, authority="QUARANTINED")
-    rows = list_active_platt_models_legacy(conn)
+    rows = list_active_platt_models(conn)
     keys = sorted(r["bucket_key"] for r in rows)
     assert keys == ["A_DJF"], f"only A_DJF is active+VERIFIED; got {keys}"
 
 
-def test_list_active_platt_models_v2_pre_migration_returns_empty():
-    """RELATIONSHIP: pre-migration DB without platt_models_v2 → graceful
+def test_list_active_platt_models_pre_migration_returns_empty():
+    """RELATIONSHIP: pre-migration DB without platt_models → graceful
     empty list, NOT a crash. Mirrors _has_authority_column posture (store.py L197)."""
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     # Intentionally do NOT call init_schema or apply_v2_schema_idempotent.
     # Both readers should silently return [] on missing table.
-    assert list_active_platt_models_v2(conn) == []
-    assert list_active_platt_models_legacy(conn) == []
+    assert list_active_platt_models(conn) == []
+    assert list_active_platt_models(conn) == []
 
 
 # --- calibration_observation projection tests (8) ------------------------
@@ -207,7 +205,7 @@ def test_v2_only_snapshot_shape():
     """RELATIONSHIP: v2 model surfaces with source='v2' + temperature_metric,
     cluster, season, data_version populated."""
     conn = _make_conn()
-    save_platt_model_v2(
+    save_platt_model(
         conn,
         metric_identity=HIGH_LOCALDAY_MAX,
         cluster="TestCity",
@@ -247,7 +245,7 @@ def test_v2_legacy_dedup_v2_wins():
     # manager.py, not here).
     save_platt_model(conn, "TestCity_DJF", 1.5, 0.3, 0.0,
                      [(1.5, 0.3, 0.0)] * 10, 50)
-    save_platt_model_v2(
+    save_platt_model(
         conn, metric_identity=HIGH_LOCALDAY_MAX, cluster="TestCity",
         season="DJF", data_version="v1", param_A=1.6, param_B=0.25, param_C=0.0,
         bootstrap_params=[(1.6, 0.25, 0.0)] * 10, n_samples=60,
@@ -260,7 +258,7 @@ def test_v2_legacy_dedup_v2_wins():
     # Now simulate true dedup: insert raw legacy with bucket_key MATCHING the
     # v2 model_key string. v2-listed-first should win; legacy duplicate dropped.
     # Phase 2 (2026-05-04): v2 model_key now includes cycle/source_id/horizon_profile —
-    # for save_platt_model_v2 above we relied on defaults (00/tigge_mars/full).
+    # for save_platt_model above we relied on defaults (00/tigge_mars/full).
     _insert_legacy_raw(conn,
                        bucket_key="high:TestCity:DJF:v1:00:tigge_mars:full:raw_probability",
                        A=99.0, B=99.0, C=99.0)

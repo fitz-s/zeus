@@ -8,7 +8,7 @@ Covers:
   P0 #2 — _resolve_pin_for_bucket key includes cycle axis
   P1 #3 — _write_entry_readiness_for_candidate derives route keys
   P2 #5 — derive_phase2_keys_from_ens_result uses parse_cycle_from_issue_time
-  P2 #6 — deactivate_model_v2 uses 9-tuple WHERE (matches legacy-keyed rows)
+  P2 #6 — deactivate_model uses 9-tuple WHERE (matches legacy-keyed rows)
 
 P1 #4 (_bucket_model_key threading) tested implicitly via load→calibrator round-trip.
 """
@@ -33,9 +33,9 @@ from src.calibration.forecast_calibration_domain import (
 from src.calibration import manager as mgr_module
 from src.calibration.manager import _resolve_pin_for_bucket, get_calibrator
 from src.calibration.store import (
-    deactivate_model_v2,
-    load_platt_model_v2,
-    save_platt_model_v2,
+    deactivate_model,
+    load_platt_model,
+    save_platt_model,
 )
 from src.config import City
 from src.state.db import init_schema
@@ -72,7 +72,7 @@ def _city(cluster: str = "US-Northeast") -> City:
 
 def _save_v2(conn, cluster: str, season: str, cycle: str = "00",
              source_id: str = "tigge_mars", n_samples: int = 50) -> None:
-    save_platt_model_v2(
+    save_platt_model(
         conn,
         metric_identity=HIGH_LOCALDAY_MAX,
         cluster=cluster,
@@ -265,11 +265,11 @@ def test_write_entry_readiness_midday_gets_cycle_00():
 # ---------------------------------------------------------------------------
 
 def test_model_key_threaded_onto_calibrator():
-    """P1 #4: calibrator built from load_platt_model_v2 carries _bucket_model_key."""
+    """P1 #4: calibrator built from load_platt_model carries _bucket_model_key."""
     conn = _make_conn()
     _save_v2(conn, cluster="Test-Cluster", season="DJF", cycle="12")
 
-    model_data = load_platt_model_v2(
+    model_data = load_platt_model(
         conn,
         temperature_metric="high",
         cluster="Test-Cluster",
@@ -281,7 +281,7 @@ def test_model_key_threaded_onto_calibrator():
         horizon_profile="full",
     )
     assert model_data is not None
-    assert model_data.get("model_key") is not None, "model_key must be returned by load_platt_model_v2"
+    assert model_data.get("model_key") is not None, "model_key must be returned by load_platt_model"
 
     from src.calibration.manager import _model_data_to_calibrator
     cal = _model_data_to_calibrator(model_data)
@@ -322,10 +322,10 @@ def test_derive_phase2_keys_datetime_object():
 
 
 # ---------------------------------------------------------------------------
-# P2 #6 — deactivate_model_v2 uses 9-tuple WHERE (matches legacy-keyed rows)
+# P2 #6 — deactivate_model uses 9-tuple WHERE (matches legacy-keyed rows)
 # ---------------------------------------------------------------------------
 
-def test_deactivate_model_v2_matches_legacy_keyed_row():
+def test_deactivate_model_matches_legacy_keyed_row():
     """P2 #6: row with OLD-format model_key (no cycle in string) is deleted by
     9-tuple WHERE matching on column values, not reconstructed key string.
     """
@@ -348,7 +348,7 @@ def test_deactivate_model_v2_matches_legacy_keyed_row():
     )
     conn.commit()
 
-    count = deactivate_model_v2(
+    count = deactivate_model(
         conn,
         metric_identity=HIGH_LOCALDAY_MAX,
         cluster="Test-Cluster",
@@ -366,12 +366,12 @@ def test_deactivate_model_v2_matches_legacy_keyed_row():
     assert row == 0, "Row should be deleted"
 
 
-def test_deactivate_model_v2_new_format_key_also_works():
+def test_deactivate_model_new_format_key_also_works():
     """P2 #6: new-format model_key row is also deleted by the 9-tuple WHERE."""
     conn = _make_conn()
     _save_v2(conn, cluster="Test-Cluster", season="DJF", cycle="00")
 
-    count = deactivate_model_v2(
+    count = deactivate_model(
         conn,
         metric_identity=HIGH_LOCALDAY_MAX,
         cluster="Test-Cluster",

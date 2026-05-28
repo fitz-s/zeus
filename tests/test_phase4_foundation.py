@@ -2,7 +2,7 @@
 
 R-I: add_calibration_pair() without metric_identity raises TypeError.
 R-K: ensemble_snapshots.members_unit is NOT NULL (4A.2 column).
-R-N: platt_models_v2 has no city/target_date columns; UNIQUE enforced.
+R-N: platt_models has no city/target_date columns; UNIQUE enforced.
 """
 from __future__ import annotations
 
@@ -154,11 +154,11 @@ class TestEnsembleSnapshotsV2MembersUnit:
 
 
 # ---------------------------------------------------------------------------
-# R-N: platt_models_v2 schema — no city/target_date columns, UNIQUE enforced
+# R-N: platt_models schema — no city/target_date columns, UNIQUE enforced
 # ---------------------------------------------------------------------------
 
 class TestPlattModelsV2Schema:
-    """R-N: platt_models_v2 must not have city or target_date columns (Phase 2 pollution fix).
+    """R-N: platt_models must not have city or target_date columns (Phase 2 pollution fix).
     UNIQUE(temperature_metric, cluster, season, data_version, input_space, is_active) enforced.
     """
 
@@ -171,26 +171,26 @@ class TestPlattModelsV2Schema:
         apply_v2_schema(conn)
         return conn
 
-    def test_platt_models_v2_has_no_city_column(self):
-        """R-N: 'city' column must not exist in platt_models_v2."""
+    def test_platt_models_has_no_city_column(self):
+        """R-N: 'city' column must not exist in platt_models."""
         conn = self._make_conn()
-        cols = {row[1] for row in conn.execute("PRAGMA table_info(platt_models_v2)")}
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(platt_models)")}
         assert "city" not in cols, (
-            "platt_models_v2 has a 'city' column — Phase 2 semantic pollution (R-N violated). "
+            "platt_models has a 'city' column — Phase 2 semantic pollution (R-N violated). "
             "Platt models are keyed by (temperature_metric, cluster, season, data_version, input_space), "
             "not by city."
         )
 
-    def test_platt_models_v2_has_no_target_date_column(self):
-        """R-N: 'target_date' column must not exist in platt_models_v2."""
+    def test_platt_models_has_no_target_date_column(self):
+        """R-N: 'target_date' column must not exist in platt_models."""
         conn = self._make_conn()
-        cols = {row[1] for row in conn.execute("PRAGMA table_info(platt_models_v2)")}
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(platt_models)")}
         assert "target_date" not in cols, (
-            "platt_models_v2 has a 'target_date' column — Phase 2 semantic pollution (R-N violated). "
+            "platt_models has a 'target_date' column — Phase 2 semantic pollution (R-N violated). "
             "Platt models are bucket-family keyed, not date-keyed."
         )
 
-    def test_platt_models_v2_unique_key_enforced(self):
+    def test_platt_models_unique_key_enforced(self):
         """R-N: UNIQUE(temperature_metric, cluster, season, data_version, input_space, is_active) must fire."""
         conn = self._make_conn()
         import json
@@ -210,7 +210,7 @@ class TestPlattModelsV2Schema:
             fitted_at="2026-04-16T00:00:00",
         )
         conn.execute("""
-            INSERT INTO platt_models_v2
+            INSERT INTO platt_models
             (model_key, temperature_metric, cluster, season, data_version, input_space,
              param_A, param_B, param_C, bootstrap_params_json, n_samples, fitted_at)
             VALUES (:model_key, :temperature_metric, :cluster, :season, :data_version,
@@ -223,7 +223,7 @@ class TestPlattModelsV2Schema:
         row2 = dict(row, model_key="test_model_002")
         with pytest.raises(sqlite3.IntegrityError):
             conn.execute("""
-                INSERT INTO platt_models_v2
+                INSERT INTO platt_models
                 (model_key, temperature_metric, cluster, season, data_version, input_space,
                  param_A, param_B, param_C, bootstrap_params_json, n_samples, fitted_at)
                 VALUES (:model_key, :temperature_metric, :cluster, :season, :data_version,

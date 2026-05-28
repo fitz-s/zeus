@@ -121,8 +121,7 @@ from src.calibration.retrain_trigger import (
 from src.calibration.store import (
     get_decision_group_count,
     get_pairs_count,
-    list_active_platt_models_legacy,
-    list_active_platt_models_v2,
+    list_active_platt_models,
 )
 from src.state.calibration_observation import _resolve_window
 from src.state.edge_observation import _classify_sample_quality
@@ -357,8 +356,8 @@ def compute_learning_loop_state_per_bucket(
 
     out: dict[str, dict[str, Any]] = {}
 
-    # v2 first (canonical post-Phase-9C surface).
-    for v2_row in list_active_platt_models_v2(conn):
+    # Canonical platt_models surface (post-B3cont: legacy table dropped).
+    for v2_row in list_active_platt_models(conn):
         bucket_key = v2_row["model_key"]
         cluster = v2_row.get("cluster")
         season = v2_row.get("season")
@@ -392,61 +391,7 @@ def compute_learning_loop_state_per_bucket(
             window_end_dt=window_end_dt,
         )
 
-    # Legacy second; v2 entries win on collision (same logical bucket).
-    for legacy_row in list_active_platt_models_legacy(conn):
-        bucket_key = legacy_row["bucket_key"]
-        if bucket_key in out:
-            # v2 already covered this bucket — skip the legacy duplicate.
-            # Sibling-coherent with src/state/calibration_observation.py L317-321
-            # v2-then-legacy fallback model-load (per LOW-CITATION-CALIBRATION-3-1
-            # cite-discipline: cite the model-load precedent at manager.py:172-189,
-            # NOT the L42-62 warning helper).
-            continue
-        # Legacy bucket_key has shape "{cluster}_{season}" (per manager.py:73).
-        # Decompose to query pair counts.
-        bk_parts = bucket_key.rsplit("_", 1)
-        if len(bk_parts) == 2:
-            cluster = bk_parts[0]
-            season = bk_parts[1]
-        else:
-            cluster = bucket_key
-            season = None
-
-        pairs_total = 0
-        pairs_verified = 0
-        n_decision_groups = 0
-        if cluster and season:
-            try:
-                pairs_total = get_pairs_count(conn, cluster=cluster, season=season, authority_filter="any")
-                pairs_verified = get_pairs_count(conn, cluster=cluster, season=season, authority_filter="VERIFIED")
-                n_decision_groups = get_decision_group_count(conn, cluster=cluster, season=season)
-            except Exception:
-                # Defensive: malformed legacy bucket_key → graceful zero counts.
-                pass
-
-        snap = {
-            "temperature_metric": None,  # legacy has no temperature_metric
-            "cluster": cluster,
-            "season": season,
-            "data_version": None,
-            "input_space": legacy_row.get("input_space"),
-            "fitted_at": legacy_row.get("fitted_at"),
-            "n_samples": legacy_row.get("n_samples"),
-        }
-        out[bucket_key] = _build_bucket_record(
-            bucket_key=bucket_key,
-            source="legacy",
-            snap=snap,
-            versions=versions,
-            pairs_count=pairs_total,
-            pairs_verified_count=pairs_verified,
-            n_decision_groups=n_decision_groups,
-            retrain_status_str=retrain_status_str,
-            window_start=window_start,
-            window_end=window_end,
-            window_start_dt=window_start_dt,
-            window_end_dt=window_end_dt,
-        )
+    # B3cont (2026-05-28): legacy platt_models table dropped; legacy iteration removed.
 
     return out
 

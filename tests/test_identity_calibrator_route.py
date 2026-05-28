@@ -72,7 +72,7 @@ def _make_conn(tmp_path: Path, name: str = "test") -> sqlite3.Connection:
 def _insert_identity_row(conn: sqlite3.Connection, cluster: str, season: str) -> None:
     """Insert an identity_full_transport_v1 platt_models_v2 row directly.
 
-    Bypasses save_platt_model_v2 (which is a @capability-gated write function)
+    Bypasses save_platt_model (which is a @capability-gated write function)
     to insert the identity row without triggering capability enforcement.
     The row uses:
       - calibration_method = 'identity_full_transport_v1'
@@ -111,11 +111,11 @@ def _insert_identity_row(conn: sqlite3.Connection, cluster: str, season: str) ->
 def _insert_platt_row(
     conn: sqlite3.Connection, cluster: str, season: str, n_samples: int = 200
 ) -> None:
-    """Insert a normal (learned) Platt row via save_platt_model_v2."""
-    from src.calibration.store import save_platt_model_v2
+    """Insert a normal (learned) Platt row via save_platt_model."""
+    from src.calibration.store import save_platt_model
     from src.types.metric_identity import HIGH_LOCALDAY_MAX
 
-    save_platt_model_v2(
+    save_platt_model(
         conn,
         metric_identity=HIGH_LOCALDAY_MAX,
         cluster=cluster,

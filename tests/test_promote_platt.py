@@ -140,7 +140,7 @@ def test_default_prod_db_targets_zeus_world():
     """K1 invariant: this script's default PROD is zeus-world.db, NOT
     zeus-forecasts.db. Cross-DB confusion would break the workload-class split."""
     assert P.DEFAULT_PROD_DB == "state/zeus-world.db"
-    assert P.TARGET_TABLE == "platt_models_v2"
+    assert P.TARGET_TABLE == "platt_models"
 
 
 # --------------------------------------------------------------------------

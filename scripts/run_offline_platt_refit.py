@@ -33,7 +33,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="Offline isolated platt_models_v2 refit.")
+    ap = argparse.ArgumentParser(description="Offline isolated platt_models refit.")
     ap.add_argument("--db", required=True)
     ap.add_argument("--temperature-metric", default="all", choices=("high", "low", "all"))
     ap.add_argument("--data-version", default=None)

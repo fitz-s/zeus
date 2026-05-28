@@ -9,7 +9,7 @@ Covers:
     when data_version is OpenData; legacy defaults applied for TIGGE.
   * Copilot #3 — ensemble_client refuses ecmwf_open_data for ALL roles
     when ingest_class is None (not just entry_primary).
-  * Codex P1 #6 — load_platt_model_v2 returns the loaded bucket's
+  * Codex P1 #6 — load_platt_model returns the loaded bucket's
     identity, _model_data_to_calibrator attaches it to the calibrator
     object, and the evaluator's transfer gate constructs
     calibrator_domain from the actual bucket (not hardcoded TIGGE).
@@ -56,18 +56,18 @@ def _make_v2_table(conn: sqlite3.Connection) -> None:
     )
 
 
-def test_load_platt_model_v2_raises_on_opendata_missing_keys():
+def test_load_platt_model_raises_on_opendata_missing_keys():
     """OpenData data_version with no cycle/source_id/horizon_profile must
     fail-closed (ValueError) — Copilot #2.  Pre-fix: silently picked
     schema-default 00z TIGGE bucket for an OpenData forecast.
     """
-    from src.calibration.store import load_platt_model_v2
+    from src.calibration.store import load_platt_model
 
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     _make_v2_table(conn)
     with pytest.raises(ValueError, match="OpenData data_version"):
-        load_platt_model_v2(
+        load_platt_model(
             conn,
             temperature_metric="high",
             cluster="London",
@@ -77,11 +77,11 @@ def test_load_platt_model_v2_raises_on_opendata_missing_keys():
         )
 
 
-def test_load_platt_model_v2_tigge_missing_keys_uses_legacy_defaults():
+def test_load_platt_model_tigge_missing_keys_uses_legacy_defaults():
     """TIGGE data_version with None stratification keys defaults to legacy
     schema (00/tigge_mars/full) and continues working — backward compat.
     """
-    from src.calibration.store import load_platt_model_v2
+    from src.calibration.store import load_platt_model
 
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
@@ -100,7 +100,7 @@ def test_load_platt_model_v2_tigge_missing_keys_uses_legacy_defaults():
                 '00','tigge_mars','full')
         """
     )
-    result = load_platt_model_v2(
+    result = load_platt_model(
         conn,
         temperature_metric="high",
         cluster="London",
@@ -116,11 +116,11 @@ def test_load_platt_model_v2_tigge_missing_keys_uses_legacy_defaults():
     assert result["bucket_source_id"] == "tigge_mars"
 
 
-def test_load_platt_model_v2_returns_bucket_identity():
-    """load_platt_model_v2 must include bucket_cycle/source_id/horizon_profile
+def test_load_platt_model_returns_bucket_identity():
+    """load_platt_model must include bucket_cycle/source_id/horizon_profile
     /data_version in the returned dict — Codex P1 #6.
     """
-    from src.calibration.store import load_platt_model_v2
+    from src.calibration.store import load_platt_model
 
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
@@ -139,7 +139,7 @@ def test_load_platt_model_v2_returns_bucket_identity():
                 '12','ecmwf_open_data','full')
         """
     )
-    result = load_platt_model_v2(
+    result = load_platt_model(
         conn,
         temperature_metric="high",
         cluster="London",

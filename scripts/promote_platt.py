@@ -81,7 +81,7 @@ ALL_METRICS: tuple[str, ...] = ("high", "low", "low_contract")
 
 DEFAULT_PROD_DB = "state/zeus-world.db"
 
-TARGET_TABLE = "platt_models_v2"
+TARGET_TABLE = "platt_models"
 
 
 # --------------------------------------------------------------------------

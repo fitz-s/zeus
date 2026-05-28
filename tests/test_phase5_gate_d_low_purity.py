@@ -748,18 +748,18 @@ class TestGateDLowPurityIsolation:
         """
         from scripts.rebuild_calibration_pairs import CalibrationMetricSpec
         from src.types.metric_identity import HIGH_LOCALDAY_MAX, LOW_LOCALDAY_MIN
-        from src.calibration.store import save_platt_model_v2
+        from src.calibration.store import save_platt_model
 
         import inspect
         try:
-            sig = inspect.signature(save_platt_model_v2)
+            sig = inspect.signature(save_platt_model)
         except Exception:
-            pytest.fail("save_platt_model_v2 not importable from src.calibration.store.")
+            pytest.fail("save_platt_model not importable from src.calibration.store.")
 
         conn = _make_gate_d_db()
 
         # Write a HIGH model then a LOW model with same cluster/season
-        save_platt_model_v2(
+        save_platt_model(
             conn,
             metric_identity=HIGH_LOCALDAY_MAX,
             cluster="warm_midwest",
@@ -767,7 +767,7 @@ class TestGateDLowPurityIsolation:
             data_version=HIGH_LOCALDAY_MAX.data_version,
             param_A=-1.0, param_B=0.5, bootstrap_params=[], n_samples=50,
         )
-        save_platt_model_v2(
+        save_platt_model(
             conn,
             metric_identity=LOW_LOCALDAY_MIN,
             cluster="warm_midwest",

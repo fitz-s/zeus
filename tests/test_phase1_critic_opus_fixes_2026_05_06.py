@@ -6,7 +6,7 @@
 Covers:
   Fix G — evaluate_calibration_transfer_policy_with_evidence flag-off passes live_promotion_approved=True
   Fix E — _fit_from_pairs sets all 5 _bucket_* attrs
-  Fix B — get_active_platt_model threads cycle/source_id/horizon_profile to load_platt_model_v2
+  Fix B — get_active_platt_model threads cycle/source_id/horizon_profile to load_platt_model
   Fix C — _resolve_pin_for_bucket handles cycle-stratified frozen_as_of dict
   Fix F — OOS evaluator --refresh flag skips fresh rows; writes stale rows
   Fix D — refit_platt per-bucket SAVEPOINT isolation; bad bucket rolls back individually
@@ -27,7 +27,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.calibration.manager import _resolve_pin_for_bucket, get_calibrator
 from src.calibration import manager as mgr_module
-from src.calibration.store import save_platt_model_v2, load_platt_model_v2
+from src.calibration.store import save_platt_model, load_platt_model
 from src.config import City, entry_forecast_config
 from src.calibration.store import get_active_platt_model
 from src.contracts.ensemble_snapshot_provenance import (
@@ -69,7 +69,7 @@ def _city(cluster: str = "US-Northeast") -> City:
 def _save_v2(conn, cluster: str = "US-Northeast", season: str = "MAM",
              cycle: str = "00", source_id: str = "tigge_mars",
              n_samples: int = 50) -> None:
-    save_platt_model_v2(
+    save_platt_model(
         conn,
         metric_identity=HIGH_LOCALDAY_MAX,
         cluster=cluster,
@@ -304,12 +304,12 @@ class TestFixE:
 # ---------------------------------------------------------------------------
 
 class TestFixB:
-    """get_active_platt_model must thread cycle/source_id/horizon_profile to load_platt_model_v2."""
+    """get_active_platt_model must thread cycle/source_id/horizon_profile to load_platt_model."""
 
     def test_world_view_calibration_threads_phase2_keys(self):
-        """Fix B: phase-2 keys passed to get_active_platt_model reach load_platt_model_v2.
+        """Fix B: phase-2 keys passed to get_active_platt_model reach load_platt_model.
 
-        Before Fix B, get_active_platt_model called load_platt_model_v2 without
+        Before Fix B, get_active_platt_model called load_platt_model without
         cycle/source_id/horizon_profile → always resolved schema-default (00z TIGGE full).
         A 12z OpenData call would receive the 00z TIGGE Platt.
         """
@@ -318,7 +318,7 @@ class TestFixB:
         season = "MAM"
 
         # Save a cycle='12' model only — cycle='00' absent
-        save_platt_model_v2(
+        save_platt_model(
             conn,
             metric_identity=HIGH_LOCALDAY_MAX,
             cluster=cluster,
@@ -357,14 +357,14 @@ class TestFixB:
         )
 
     def test_world_view_calibration_backward_compat_no_keys(self):
-        """Fix B: omitting phase-2 keys (backward-compat) returns load_platt_model_v2 default."""
+        """Fix B: omitting phase-2 keys (backward-compat) returns load_platt_model default."""
         conn = _make_conn()
         _save_v2(conn, cycle="00")  # default schema bucket
 
         # Call without the new keys — must still work (keyword defaults = None)
         result = get_active_platt_model(conn, "US-Northeast", "MAM", HIGH_LOCALDAY_MAX)
         # May be None or a model — just must not raise
-        # (None is valid: load_platt_model_v2 with cycle=None hits schema default)
+        # (None is valid: load_platt_model with cycle=None hits schema default)
         # We only assert no exception here
         assert result is None or hasattr(result, "param_A")
 
