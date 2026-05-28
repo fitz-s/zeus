@@ -163,7 +163,31 @@ When writing recency / health probes, use these column names — wrong names giv
 
 ---
 
-## 6 — WIRING BREAK: probability_trace_fact silent (M3 work)
+## 6 — WIRING BREAK: probability_trace_fact silent (M3 work) — PROGRESS 05:50 CT
+
+**Architecture mapped (2026-05-28 05:50 CT)**:
+- Writer: `src/state/db.py:6424 log_probability_trace_fact` → `_log_probability_trace_fact_inner` :6453. Returns `{status: "written"|"skipped_missing_table"|"skipped_missing_decision_id"|...}`.
+- Single caller: `src/engine/cycle_runtime.py:3916 _record_probability_trace(candidate, decision)` → queues `_write` closure via `_queue_derived_write("probability_trace:...", _write)`.
+- Queue: `derived_writes: list[(name, writer)]`. Mutated by `_queue_derived_write` (3826) + `_flush_derived_writes` (3830).
+- Flush: line 3830 `while derived_writes: ... writer()` with try/except — **fail-soft**, exceptions go to `deps.logger.warning("Derived discovery write failed for %s: %s", name, exc)` + sets `summary["degraded"] = True`.
+- Flush invocations: 4472 (end of per-market) + 6106 (end of cycle).
+- Caller of `_record_probability_trace`: only 4947 (`for trace_decision in decisions: _record_probability_trace(candidate, trace_decision)`).
+
+**Evidence collected**:
+- `probability_trace_fact` last row: `2026-05-18T01:51:04 UTC` (10 days ago); 33203 total rows, all old.
+- `decision_log` 2h: 44 rows (`opening_hunt` mode = 38, `imminent_open_capture` = 6).
+- `zeus-live.log`: ZERO entries matching `probability_trace`, `trace_fact`, `Derived discovery write failed`, or related. → **Writer closure never fires AND warning path never fires** → either (a) line 4947 unreachable on current cycle path, or (b) `decisions` list is empty when reached.
+
+**Hypotheses for root cause** (to investigate post-rebuild):
+- H1: The cycle path that reaches 4947 is gated behind a condition that turned off recently (e.g. a refactor moved the trace call into an `else` branch never entered when shadow path is the only path).
+- H2: `decisions` (the per-bin-decision objects collected per candidate) is empty in current cycles even though `decision_log` rows exist (they may be `imminent_open_capture` / `opening_hunt` rows that don't produce per-bin decisions). Then iterating empty `decisions` is a no-op.
+- H3: A refactor between 2026-05-18 and 2026-05-28 (mostly the chain/local position-model + state refactors #347/#352/#354/#357/#358) inadvertently broke the call site.
+
+**Park**: investigate after external PID 7167 rebuild releases lock + after D6-D11 unblock. Not blocking the rebuild chain.
+
+### (legacy text below kept for reference)
+
+
 
 **Discovered 2026-05-28 05:26 CT.** Operator's warned wiring problem confirmed.
 
