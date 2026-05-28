@@ -285,7 +285,7 @@ class TestR_BL_BackfillMetricScoped:
 
         conn.execute(
             """
-            INSERT INTO ensemble_snapshots_v2
+            INSERT INTO ensemble_snapshots
             (city, target_date, issue_time, lead_hours, available_at,
              temperature_metric, physical_quantity, observation_field,
              fetch_time, model_version,
@@ -313,10 +313,10 @@ class TestR_BL_BackfillMetricScoped:
         backfill_v2(conn, dry_run=False, force=True, spec=high_spec)
 
         high_row = conn.execute(
-            "SELECT p_raw_json FROM ensemble_snapshots_v2 WHERE temperature_metric = 'high'"
+            "SELECT p_raw_json FROM ensemble_snapshots WHERE temperature_metric = 'high'"
         ).fetchone()
         low_row = conn.execute(
-            "SELECT p_raw_json FROM ensemble_snapshots_v2 WHERE temperature_metric = 'low'"
+            "SELECT p_raw_json FROM ensemble_snapshots WHERE temperature_metric = 'low'"
         ).fetchone()
 
         assert high_row["p_raw_json"] is not None, (
@@ -398,7 +398,7 @@ class TestR_BM_FetchObservationMetricAware:
 # ---------------------------------------------------------------------------
 
 class TestR_BN_SchemaRefusesMinimalInsert:
-    """R-BN: ensemble_snapshots_v2 INSERT without observation_field must raise
+    """R-BN: ensemble_snapshots INSERT without observation_field must raise
     (category-impossibility preserved at SQL seam)."""
 
     def test_R_BN_1_insert_without_observation_field_raises(self, conn):
@@ -406,7 +406,7 @@ class TestR_BN_SchemaRefusesMinimalInsert:
         with pytest.raises(sqlite3.IntegrityError, match="observation_field"):
             conn.execute(
                 """
-                INSERT INTO ensemble_snapshots_v2
+                INSERT INTO ensemble_snapshots
                 (city, target_date, temperature_metric, issue_time, available_at,
                  lead_hours, members_json, data_version, authority, training_allowed,
                  causality_status, physical_quantity, fetch_time, model_version)
@@ -426,7 +426,7 @@ class TestR_BN_SchemaRefusesMinimalInsert:
         with pytest.raises(sqlite3.IntegrityError, match="physical_quantity"):
             conn.execute(
                 """
-                INSERT INTO ensemble_snapshots_v2
+                INSERT INTO ensemble_snapshots
                 (city, target_date, temperature_metric, issue_time, available_at,
                  lead_hours, members_json, data_version, authority, training_allowed,
                  causality_status, observation_field, fetch_time, model_version)
@@ -458,7 +458,7 @@ class TestR_BO_BackfillDataVersionContract:
         # Insert snapshot with a NON-canonical data_version (not in CANONICAL_ENSEMBLE_DATA_VERSIONS)
         conn.execute(
             """
-            INSERT INTO ensemble_snapshots_v2
+            INSERT INTO ensemble_snapshots
             (city, target_date, issue_time, lead_hours, available_at,
              temperature_metric, physical_quantity, observation_field,
              fetch_time, model_version,
@@ -481,7 +481,7 @@ class TestR_BO_BackfillDataVersionContract:
 
         # Row must not have been updated (rollback / no write)
         row = conn.execute(
-            "SELECT p_raw_json FROM ensemble_snapshots_v2 WHERE data_version = 'tigge_experimental_v99'"
+            "SELECT p_raw_json FROM ensemble_snapshots WHERE data_version = 'tigge_experimental_v99'"
         ).fetchone()
         assert row["p_raw_json"] is None, (
             "Backfill must NOT write p_raw to quarantined-data_version rows"

@@ -68,7 +68,7 @@ def _insert_ensemble_snapshots_row(conn: sqlite3.Connection, metric: str) -> Non
     obs_field = "high_temp" if metric == "high" else "low_temp"
     conn.execute(
         """
-        INSERT INTO ensemble_snapshots_v2
+        INSERT INTO ensemble_snapshots
             (city, target_date, temperature_metric, physical_quantity, observation_field,
              available_at, fetch_time, lead_hours, members_json, model_version,
              data_version, training_allowed, causality_status, boundary_ambiguous,
@@ -147,7 +147,7 @@ def _insert_day0_metric_fact_row(conn: sqlite3.Connection, metric: str) -> None:
 TABLE_INSERTERS = {
     "settlements_v2": _insert_settlements_row,
     "market_events_v2": _insert_market_events_row,
-    "ensemble_snapshots_v2": _insert_ensemble_snapshots_row,
+    "ensemble_snapshots": _insert_ensemble_snapshots_row,
     "calibration_pairs_v2": _insert_calibration_pairs_row,
     "platt_models_v2": _insert_platt_models_row,
     "historical_forecasts_v2": _insert_historical_forecasts_row,
@@ -513,19 +513,19 @@ class TestGateADualMetricCoexistence(unittest.TestCase):
                         ),
                     )
 
-    def test_ensemble_snapshots_v2_has_members_unit_and_precision(self):
-        """4A.2: ensemble_snapshots_v2 must have members_unit and members_precision columns."""
+    def test_ensemble_snapshots_has_members_unit_and_precision(self):
+        """4A.2: ensemble_snapshots must have members_unit and members_precision columns."""
         conn = _apply_and_get_conn()
         columns = {
             row[1]
-            for row in conn.execute("PRAGMA table_info(ensemble_snapshots_v2)")
+            for row in conn.execute("PRAGMA table_info(ensemble_snapshots)")
         }
         self.assertIn("members_unit", columns,
-                      msg="ensemble_snapshots_v2 missing members_unit (4A.2 schema migration)")
+                      msg="ensemble_snapshots missing members_unit (4A.2 schema migration)")
         self.assertIn("members_precision", columns,
-                      msg="ensemble_snapshots_v2 missing members_precision (4A.2 schema migration)")
+                      msg="ensemble_snapshots missing members_precision (4A.2 schema migration)")
 
-    def test_ensemble_snapshots_v2_can_hold_contract_window_evidence(self):
+    def test_ensemble_snapshots_can_hold_contract_window_evidence(self):
         """LOW/HIGH recovery requires contract-object and forecast-window evidence.
 
         The columns are nullable shadow evidence only. Their presence must not
@@ -534,7 +534,7 @@ class TestGateADualMetricCoexistence(unittest.TestCase):
         conn = _apply_and_get_conn()
         columns = {
             row[1]
-            for row in conn.execute("PRAGMA table_info(ensemble_snapshots_v2)")
+            for row in conn.execute("PRAGMA table_info(ensemble_snapshots)")
         }
         required_columns = {
             "city_timezone",
@@ -555,12 +555,12 @@ class TestGateADualMetricCoexistence(unittest.TestCase):
         }
         self.assertTrue(
             required_columns <= columns,
-            msg="ensemble_snapshots_v2 missing LOW/HIGH contract-window evidence columns",
+            msg="ensemble_snapshots missing LOW/HIGH contract-window evidence columns",
         )
 
         conn.execute(
             """
-            INSERT INTO ensemble_snapshots_v2 (
+            INSERT INTO ensemble_snapshots (
                 city, target_date, temperature_metric, physical_quantity,
                 observation_field, available_at, fetch_time, lead_hours,
                 members_json, model_version, data_version,
@@ -590,7 +590,7 @@ class TestGateADualMetricCoexistence(unittest.TestCase):
             SELECT training_allowed, causality_status, settlement_unit,
                    forecast_window_attribution_status,
                    contributes_to_target_extrema
-            FROM ensemble_snapshots_v2
+            FROM ensemble_snapshots
             WHERE city = 'Kuala Lumpur'
             """
         ).fetchone()
@@ -603,7 +603,7 @@ class TestGateADualMetricCoexistence(unittest.TestCase):
         with self.assertRaises(sqlite3.IntegrityError):
             conn.execute(
                 """
-                INSERT INTO ensemble_snapshots_v2 (
+                INSERT INTO ensemble_snapshots (
                     city, target_date, temperature_metric, physical_quantity,
                     observation_field, available_at, fetch_time, lead_hours,
                     members_json, model_version, data_version, settlement_unit

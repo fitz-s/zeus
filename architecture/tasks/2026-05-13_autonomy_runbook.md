@@ -82,7 +82,7 @@ Promote script (`659ca79637 perf(promote): skip post-DELETE VACUUM + drop indexe
 
 ### Auto-actions
 - A1. Wait for executor `a23445483b0b87b66` completion.
-- A2. On completion, read `state/zeus-forecasts.db` for ensemble_snapshots_v2 max(fetch_time). If advanced past `2026-05-12T02:57` → A3. Else → A5.
+- A2. On completion, read `state/zeus-forecasts.db` for ensemble_snapshots max(fetch_time). If advanced past `2026-05-12T02:57` → A3. Else → A5.
 - A3. Wait 30 min after first advance. Re-read max(fetch_time) — should advance by ≥1 cycle.
 - A4. Mark task #28 completed in TaskUpdate. Proceed to Phase B.
 - A5. If ECMWF still stale after fix landed: spawn second opus executor with deeper diagnostic (py-spy with sudo if needed, EXPLAIN QUERY PLAN on every SQL the ingest path runs, identify any other missing infrastructure).
@@ -245,7 +245,7 @@ Promote script (`659ca79637 perf(promote): skip post-DELETE VACUUM + drop indexe
 
 ### Data corruption
 - Any sqlite3 PRAGMA integrity_check fails → halt writes, brief user
-- ensemble_snapshots_v2 max(fetch_time) goes BACKWARDS → halt writes, brief user
+- ensemble_snapshots max(fetch_time) goes BACKWARDS → halt writes, brief user
 
 ### Test regressions
 - Pytest run on changed files fails → revert offending commit, retry once
@@ -341,7 +341,7 @@ Per memory rule "Accumulate changes before opening a PR": batch related work ont
 
 ## Success criteria for this mission
 
-- [ ] ECMWF flow restored — ensemble_snapshots_v2 advancing every cycle
+- [ ] ECMWF flow restored — ensemble_snapshots advancing every cycle
 - [ ] Test suite green on touched files
 - [ ] PR opened with honest empirical proof
 - [ ] PR merged

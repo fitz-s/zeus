@@ -105,7 +105,7 @@ def _insert_venue_position_observed_event(conn, *, position_id: str) -> None:
     conn.execute(
         """
         INSERT INTO position_events (
-            event_id, position_id, sequence_no, event_type,
+            event_id, position_id, event_version, sequence_no, event_type,
             occurred_at, phase_before, phase_after, strategy_key,
             decision_id, snapshot_id, order_id, command_id, caused_by,
             idempotency_key, venue_status, source_module, env, payload_json

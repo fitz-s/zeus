@@ -421,7 +421,7 @@ def test_forecast_ready_uses_latest_safe_cycle_not_arbitrary_latest_blocked_row(
         "INSERT INTO source_run_coverage VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             "ecmwf_open_data",
-            "ensemble_snapshots_v2_db_reader",
+            "ensemble_snapshots_db_reader",
             source_run_id,
             "mx2t6_high_full_horizon",
             "high",

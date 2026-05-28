@@ -777,7 +777,7 @@ def _read_v2_snapshot_metadata(
 ) -> dict:
     """Phase 9C A4 (DT#7 wire) + P10D S1 (M3 causality wire):
     read boundary_ambiguous, causality_status, and snapshot_id metadata
-    for one (city, target_date, metric) row from ensemble_snapshots_v2.
+    for one (city, target_date, metric) row from ensemble_snapshots.
 
     Pre-Golden-Window-lift: v2 is empty → query returns no rows → returns
     empty dict → boundary_ambiguous_refuses_signal() returns False → no
@@ -822,7 +822,7 @@ def _read_v2_snapshot_metadata(
             row = conn.execute(
                 f"""
                 SELECT boundary_ambiguous, causality_status, snapshot_id, bin_grid_id
-                FROM {sp}ensemble_snapshots_v2
+                FROM {sp}ensemble_snapshots
                 WHERE city = ?
                   AND target_date = ?
                   AND temperature_metric = ?
@@ -840,7 +840,7 @@ def _read_v2_snapshot_metadata(
                     row = conn.execute(
                         f"""
                         SELECT boundary_ambiguous, causality_status, snapshot_id
-                        FROM {sp}ensemble_snapshots_v2
+                        FROM {sp}ensemble_snapshots
                         WHERE city = ?
                           AND target_date = ?
                           AND temperature_metric = ?
@@ -3891,7 +3891,7 @@ def evaluate_candidate(
         # conn=None below: write_nowcast_run acquires its own forecasts connection
         # (INV-37: world conn from evaluate_candidate must not touch forecasts DB).
         # T4 F4: deferred write — stash params here, write after v2_snapshot_meta
-        # is populated so bin_grid_id can be threaded from ensemble_snapshots_v2.
+        # is populated so bin_grid_id can be threaded from ensemble_snapshots.
         if temperature_metric.is_high() and hours_remaining <= 6.0:
             _obs_time_for_nowcast = _day0_observation_field(
                 candidate.observation, "observation_time"
@@ -4067,7 +4067,7 @@ def evaluate_candidate(
         )]
 
     # Store ENS snapshot AFTER all semantic gates pass (#67 — no write-before-validate).
-    # Executable reader rows already have an audited ensemble_snapshots_v2 id;
+    # Executable reader rows already have an audited ensemble_snapshots id;
     # reuse it instead of writing a second legacy snapshot for the same source run.
     snapshot_persistence_conn = None if use_forecasts_live_snapshot_store else conn
     if using_period_extrema:
@@ -6339,14 +6339,14 @@ def _attached_table_exists(conn, schema: str, table: str) -> bool:
     return row is not None
 
 
-def _ensemble_snapshots_v2_table(conn) -> str:
-    if _attached_table_exists(conn, "forecasts", "ensemble_snapshots_v2"):
-        return "forecasts.ensemble_snapshots_v2"
-    if _attached_table_exists(conn, "world", "ensemble_snapshots_v2"):
-        return "world.ensemble_snapshots_v2"
+def _ensemble_snapshots_table(conn) -> str:
+    if _attached_table_exists(conn, "forecasts", "ensemble_snapshots"):
+        return "forecasts.ensemble_snapshots"
+    if _attached_table_exists(conn, "world", "ensemble_snapshots"):
+        return "world.ensemble_snapshots"
     try:
         row = conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'ensemble_snapshots_v2'"
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'ensemble_snapshots'"
         ).fetchone()
     except sqlite3.OperationalError as exc:
         if _sqlite_operational_error_is_lock(exc):
@@ -6356,7 +6356,7 @@ def _ensemble_snapshots_v2_table(conn) -> str:
         raise
     except Exception:
         return ""
-    return "ensemble_snapshots_v2" if row is not None else ""
+    return "ensemble_snapshots" if row is not None else ""
 
 
 def _sqlite_operational_error_is_lock(exc: sqlite3.OperationalError) -> bool:
@@ -6430,7 +6430,7 @@ def _store_ens_snapshot(conn, city, target_date, ens, ens_result) -> str:
 
     with _snapshot_forecasts_live_write_connection(conn) as conn:
       try:
-        v2_table = _ensemble_snapshots_v2_table(conn)
+        v2_table = _ensemble_snapshots_table(conn)
         issue_time_value = _snapshot_issue_time_value(ens_result)
         valid_time_value = _snapshot_valid_time_value(target_date, ens_result)
         fetch_time_value = _snapshot_time_value(ens_result.get("fetch_time"))
@@ -6602,13 +6602,13 @@ def _store_ens_snapshot(conn, city, target_date, ens, ens_result) -> str:
             snapshot_id = str(row["snapshot_id"]) if row is not None else ""
             if not snapshot_id:
                 raise ValueError(
-                    "canonical ensemble_snapshots_v2 insert/lookup failed"
+                    "canonical ensemble_snapshots insert/lookup failed"
                 )
         else:
-            # v1.F20: ensemble_snapshots_v2 is the only accepted writer target.
+            # v1.F20: ensemble_snapshots is the only accepted writer target.
             # No legacy ensemble_snapshots fallback; fail closed if v2 is absent.
             raise ValueError(
-                "_store_ens_snapshot requires ensemble_snapshots_v2 to be "
+                "_store_ens_snapshot requires ensemble_snapshots to be "
                 "available (v1.F20: legacy ensemble_snapshots removed)"
             )
         conn.commit()
@@ -6722,11 +6722,11 @@ def _store_snapshot_p_raw(
                     raise ValueError(
                         "p_raw_topology fusion status does not match executable_mask"
                     )
-        v2_table = _ensemble_snapshots_v2_table(conn)
+        v2_table = _ensemble_snapshots_table(conn)
         if not v2_table:
             # v1.F20: legacy ensemble_snapshots removed; fail closed if v2 absent.
             raise ValueError(
-                "_store_snapshot_p_raw requires ensemble_snapshots_v2 to be "
+                "_store_snapshot_p_raw requires ensemble_snapshots to be "
                 "available (v1.F20: legacy ensemble_snapshots removed)"
             )
         v2_row = conn.execute(f"""
@@ -6739,11 +6739,11 @@ def _store_snapshot_p_raw(
         if v2_row is None:
             if topology_payload and bool(topology_payload.get("requires_atomic_topology")):
                 raise ValueError(
-                    "canonical p_raw_topology persistence requires ensemble_snapshots_v2 "
+                    "canonical p_raw_topology persistence requires ensemble_snapshots "
                     f"for partial-executable support snapshot_id {snapshot_id}"
                 )
             raise ValueError(
-                f"ensemble_snapshots_v2 row not found for snapshot_id {snapshot_id}; "
+                f"ensemble_snapshots row not found for snapshot_id {snapshot_id}; "
                 "cannot persist p_raw (v1.F20: no legacy fallback)"
             )
         if topology_payload is not None:
@@ -6766,7 +6766,7 @@ def _store_snapshot_p_raw(
             )
         if result.rowcount != 1:
             raise ValueError(
-                "canonical ensemble_snapshots_v2 p_raw update affected "
+                "canonical ensemble_snapshots p_raw update affected "
                 f"{result.rowcount} rows for snapshot_id {snapshot_id}"
             )
         conn.commit()

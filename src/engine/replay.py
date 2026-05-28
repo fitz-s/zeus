@@ -45,7 +45,7 @@ LEGACY_SHADOW_SIGNAL_TABLE = "shadow_signals"
 LEGACY_SHADOW_SIGNAL_DIAGNOSTIC_SOURCE = "legacy_shadow_signal_diagnostic"
 DIAGNOSTIC_REPLAY_REFERENCE_SOURCES = frozenset({
     LEGACY_SHADOW_SIGNAL_DIAGNOSTIC_SOURCE,
-    "ensemble_snapshots_v2.available_at",
+    "ensemble_snapshots.available_at",
     "forecasts_table_synthetic",
 })
 LEGACY_OUTCOME_FACT_DIAGNOSTIC_SOURCE = "outcome_fact_legacy_lifecycle_projection"
@@ -69,7 +69,7 @@ def _table_exists(conn, schema: str, table: str) -> bool:
 
 
 def _first_existing_table(conn, table: str) -> str:
-    # K1 (2026-05-11): forecast-class tables (ensemble_snapshots_v2, ...) live in
+    # K1 (2026-05-11): forecast-class tables (ensemble_snapshots, ...) live in
     # zeus-forecasts.db, ATTACHed as 'forecasts' by get_trade_connection_with_world().
     # Check forecasts first; fall back to world (legacy / monolithic-test layout),
     # then main (pure in-memory test schema with no ATTACH).
@@ -151,7 +151,7 @@ def _metric_filter_sql(columns: set[str], source: str, temperature_metric: str) 
     """Return metric predicate and whether this table can satisfy v2 identity."""
     if "temperature_metric" in columns:
         return " AND temperature_metric = ?", (temperature_metric,), True
-    if source == "ensemble_snapshots_v2":
+    if source == "ensemble_snapshots":
         return "", (), False
     return "", (), True
 
@@ -341,11 +341,11 @@ class ReplayContext:
         self._decision_ref_cache: dict[tuple[str, str, str], Optional[dict]] = {}
         self._snapshot_table_column_cache: dict[str, set[str]] = {}
         self._snapshot_v2_table = _first_existing_forecast_authority_table(
-            self.conn, "ensemble_snapshots_v2"
+            self.conn, "ensemble_snapshots"
         )
         if not self._snapshot_v2_table:
             raise RuntimeError(
-                "Replay topology error: ensemble_snapshots_v2 not found in "
+                "Replay topology error: ensemble_snapshots not found in "
                 "forecasts, world, or main schema (legacy ensemble_snapshots removed by v1.F20)."
             )
         self._settlements_table = _first_existing_forecast_authority_table(
@@ -396,7 +396,7 @@ class ReplayContext:
             "available_at", "fetch_time", "data_version",
         )
         for table, source in (
-            (self._snapshot_v2_table, "ensemble_snapshots_v2"),
+            (self._snapshot_v2_table, "ensemble_snapshots"),
         ):
             if not table:
                 continue
@@ -460,7 +460,7 @@ class ReplayContext:
     ):
         """Lightweight diagnostic reference lookup; full snapshot payload may not exist."""
         for table, source in (
-            (self._snapshot_v2_table, "ensemble_snapshots_v2"),
+            (self._snapshot_v2_table, "ensemble_snapshots"),
         ):
             if not table:
                 continue
@@ -935,7 +935,7 @@ class ReplayContext:
             "snapshot_source": row["snapshot_source"],
             "authority_scope": (
                 "canonical_snapshot_v2"
-                if row["snapshot_source"] == "ensemble_snapshots_v2"
+                if row["snapshot_source"] == "ensemble_snapshots"
                 else BACKTEST_AUTHORITY_SCOPE
             ),
             "n_members": len(members),

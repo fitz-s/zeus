@@ -46,7 +46,7 @@ from src.state.db import ZEUS_FORECASTS_DB_PATH
 from src.types.metric_identity import physical_quantity_for_data_version
 
 DEFAULT_TRADE_DB = STATE_DIR / "zeus_trades.db"
-# K1 split 2026-05-11: forecast-class tables (ensemble_snapshots_v2, observations,
+# K1 split 2026-05-11: forecast-class tables (ensemble_snapshots, observations,
 # settlements, settlements_v2, market_events_v2, calibration_pairs_v2) moved to
 # zeus-forecasts.db.  SHARED_DB now resolves to forecasts.db so all read-only
 # checks in this script hit the correct physical file.
@@ -1340,7 +1340,7 @@ def _add_low_contract_evidence_preflight_check(
             f"evidence={unsafe_count}"
         )
     met = unsafe_count == 0
-    check_id = "ensemble_snapshots_v2.low.contract_window_evidence_safe"
+    check_id = "ensemble_snapshots.low.contract_window_evidence_safe"
     report["checks"][check_id] = _check_entry(
         check_id=check_id,
         status=PASS if met else FAIL,
@@ -1352,7 +1352,7 @@ def _add_low_contract_evidence_preflight_check(
     if not met:
         report["blockers"].append(
             {
-                "code": "ensemble_snapshots_v2.low_contract_evidence_unsafe",
+                "code": "ensemble_snapshots.low_contract_evidence_unsafe",
                 "table": table,
                 "count": unsafe_count,
                 "temperature_metric": "low",
@@ -1471,12 +1471,12 @@ def _add_observation_instants_safety_checks(report: dict, cur: sqlite3.Cursor) -
 
 
 def _add_rebuild_snapshot_preflight_checks(report: dict, cur: sqlite3.Cursor) -> None:
-    table = "ensemble_snapshots_v2"
+    table = "ensemble_snapshots"
     if not _add_required_columns_check(
         report,
         cur,
         table=table,
-        check_id="ensemble_snapshots_v2.preflight_columns_present",
+        check_id="ensemble_snapshots.preflight_columns_present",
         columns=ENSEMBLE_SNAPSHOT_PREFLIGHT_COLUMNS,
     ):
         return
@@ -1503,11 +1503,11 @@ def _add_rebuild_snapshot_preflight_checks(report: dict, cur: sqlite3.Cursor) ->
         """,
     )
     invalid_metric_met = invalid_metric_count == 0
-    report["checks"]["ensemble_snapshots_v2.metric_scope_safe"] = _check_entry(
-        check_id="ensemble_snapshots_v2.metric_scope_safe",
+    report["checks"]["ensemble_snapshots.metric_scope_safe"] = _check_entry(
+        check_id="ensemble_snapshots.metric_scope_safe",
         status=PASS if invalid_metric_met else FAIL,
         detail=(
-            "training-allowed ensemble_snapshots_v2 rows with invalid "
+            "training-allowed ensemble_snapshots rows with invalid "
             f"temperature_metric={invalid_metric_count}"
         ),
         count=invalid_metric_count,
@@ -1517,7 +1517,7 @@ def _add_rebuild_snapshot_preflight_checks(report: dict, cur: sqlite3.Cursor) ->
     if not invalid_metric_met:
         report["blockers"].append(
             {
-                "code": "ensemble_snapshots_v2.metric_scope_unsafe",
+                "code": "ensemble_snapshots.metric_scope_unsafe",
                 "table": table,
                 "count": invalid_metric_count,
             }
@@ -1606,11 +1606,11 @@ def _add_rebuild_snapshot_preflight_checks(report: dict, cur: sqlite3.Cursor) ->
             ),
         )
         eligible_met = eligible_count >= 1
-        eligible_check_id = f"ensemble_snapshots_v2.{metric}.rebuild_eligible_present"
+        eligible_check_id = f"ensemble_snapshots.{metric}.rebuild_eligible_present"
         report["checks"][eligible_check_id] = _check_entry(
             check_id=eligible_check_id,
             status=PASS if eligible_met else FAIL,
-            detail=f"{metric} rebuild-eligible ensemble_snapshots_v2 rows={eligible_count}",
+            detail=f"{metric} rebuild-eligible ensemble_snapshots rows={eligible_count}",
             count=eligible_count,
             threshold=1,
             met=eligible_met,
@@ -1671,7 +1671,7 @@ def _add_rebuild_snapshot_preflight_checks(report: dict, cur: sqlite3.Cursor) ->
             ),
         )
         unsafe_met = unsafe_count == 0
-        unsafe_check_id = f"ensemble_snapshots_v2.{metric}.rebuild_input_safe"
+        unsafe_check_id = f"ensemble_snapshots.{metric}.rebuild_input_safe"
         report["checks"][unsafe_check_id] = _check_entry(
             check_id=unsafe_check_id,
             status=PASS if unsafe_met else FAIL,
@@ -1683,7 +1683,7 @@ def _add_rebuild_snapshot_preflight_checks(report: dict, cur: sqlite3.Cursor) ->
         if not unsafe_met:
             report["blockers"].append(
                 {
-                    "code": "ensemble_snapshots_v2.rebuild_input_unsafe",
+                    "code": "ensemble_snapshots.rebuild_input_unsafe",
                     "table": table,
                     "count": unsafe_count,
                     "temperature_metric": metric,
@@ -2452,9 +2452,9 @@ def _p4_lane_for_generic_blocker(blocker: dict) -> tuple[str, str] | None:
         return "p4_observation_instants_reader_inputs_not_ready", "4.5.B-full"
     if code in {
         "empty_rebuild_eligible_snapshots",
-        "ensemble_snapshots_v2.rebuild_input_unsafe",
-        "ensemble_snapshots_v2.metric_scope_unsafe",
-    } or table == "ensemble_snapshots_v2":
+        "ensemble_snapshots.rebuild_input_unsafe",
+        "ensemble_snapshots.metric_scope_unsafe",
+    } or table == "ensemble_snapshots":
         return "p4_ensemble_snapshot_inputs_not_ready", "4.6.B"
     if code.startswith("calibration_pairs_v2") or code == "empty_platt_refit_bucket" or table == "calibration_pairs_v2":
         return "p4_calibration_pairs_not_refit_ready", "4.6.C"
@@ -2564,9 +2564,9 @@ def build_p4_readiness_report(
             _add_p4_table_populated_check(
                 report,
                 cur,
-                table="ensemble_snapshots_v2",
+                table="ensemble_snapshots",
                 lane="4.6.B",
-                code="p4_ensemble_snapshots_v2_empty",
+                code="p4_ensemble_snapshots_empty",
             )
             _add_rebuild_snapshot_preflight_checks(report, cur)
             _add_observation_instants_safety_checks(report, cur)
@@ -2717,7 +2717,7 @@ def build_training_readiness_report(world_db: Path = SHARED_DB) -> dict:
         for table in (
             "forecasts",
             "historical_forecasts_v2",
-            "ensemble_snapshots_v2",
+            "ensemble_snapshots",
             "calibration_pairs_v2",
             "platt_models_v2",
             "market_events_v2",
@@ -2927,20 +2927,20 @@ def build_training_readiness_report(world_db: Path = SHARED_DB) -> dict:
         _add_payload_identity_check(report, cur)
         _add_observation_reader_identity_check(report, cur)
 
-        if _table_exists(cur, "ensemble_snapshots_v2"):
-            columns = _columns(cur, "ensemble_snapshots_v2")
+        if _table_exists(cur, "ensemble_snapshots"):
+            columns = _columns(cur, "ensemble_snapshots")
             missing_time_predicates = []
             for column in ("issue_time", "available_at", "fetch_time"):
                 if column in columns:
                     missing_time_predicates.append(f"{column} IS NULL OR {column} = ''")
                 else:
                     missing_time_predicates.append("1=1")
-            count = _count(cur, "ensemble_snapshots_v2", " OR ".join(missing_time_predicates))
+            count = _count(cur, "ensemble_snapshots", " OR ".join(missing_time_predicates))
             met = count == 0
-            checks["ensemble_snapshots_v2.issue_time_present"] = _check_entry(
-                check_id="ensemble_snapshots_v2.issue_time_present",
+            checks["ensemble_snapshots.issue_time_present"] = _check_entry(
+                check_id="ensemble_snapshots.issue_time_present",
                 status=PASS if met else FAIL,
-                detail=f"ensemble_snapshots_v2 rows missing issue/available/fetch time={count}",
+                detail=f"ensemble_snapshots rows missing issue/available/fetch time={count}",
                 count=count,
                 threshold=0,
                 met=met,
@@ -2949,16 +2949,16 @@ def build_training_readiness_report(world_db: Path = SHARED_DB) -> dict:
                 blockers.append(
                     {
                         "code": "missing_issue_time",
-                        "table": "ensemble_snapshots_v2",
+                        "table": "ensemble_snapshots",
                         "count": count,
                     }
                 )
         else:
             _add_missing_table_check(
                 report,
-                check_id="ensemble_snapshots_v2.issue_time_present",
-                table="ensemble_snapshots_v2",
-                detail="ensemble_snapshots_v2 table is missing",
+                check_id="ensemble_snapshots.issue_time_present",
+                table="ensemble_snapshots",
+                detail="ensemble_snapshots table is missing",
             )
 
         if _table_exists(cur, "historical_forecasts_v2"):

@@ -27,7 +27,7 @@ import pytest
 # ---------------------------------------------------------------------------
 
 FORECAST_TABLES = (
-    "ensemble_snapshots_v2",
+    "ensemble_snapshots",
     "calibration_pairs_v2",
     "observations",
     "settlements",
@@ -94,7 +94,7 @@ def test_rel1_init_schema_forecasts_critical_indexes():
 
     # At minimum these covering indexes are required for hot-path queries.
     required = {
-        "idx_ensemble_snapshots_v2_lookup",
+        "idx_ensemble_snapshots_lookup",
         "idx_calibration_pairs_v2_city_date_metric",
     }
     missing = required - existing_indexes
@@ -177,7 +177,7 @@ def test_rel3_no_forecast_tables_on_world_connection():
 def test_rel3_grep_smoke_no_crash():
     """REL-3 grep infra smoke: grep runs without error (pre-§5.5 advisory)."""
     result = subprocess.run(
-        ["grep", "-rn", "--include=*.py", "ensemble_snapshots_v2", "src/"],
+        ["grep", "-rn", "--include=*.py", "ensemble_snapshots", "src/"],
         capture_output=True,
         text=True,
         cwd=str(_REPO_ROOT),
@@ -349,7 +349,7 @@ def test_rel7_attach_read_latency():
     conn = sqlite3.connect(f"file:{ZEUS_WORLD_DB_PATH}?mode=ro", uri=True)
     conn.execute(f"ATTACH DATABASE ? AS fcast", (str(ZEUS_FORECASTS_DB_PATH),))
     t0 = time.monotonic()
-    conn.execute("SELECT COUNT(*) FROM fcast.ensemble_snapshots_v2").fetchone()
+    conn.execute("SELECT COUNT(*) FROM fcast.ensemble_snapshots").fetchone()
     elapsed = time.monotonic() - t0
     conn.close()
     assert elapsed < 5.0, f"REL-7: ATTACH COUNT(*) took {elapsed:.2f}s (> 5s threshold)"
@@ -364,7 +364,7 @@ def test_rel7_attach_read_latency():
 # ---------------------------------------------------------------------------
 
 _CRITICAL_V2_INDEXES = frozenset({
-    "idx_ensemble_snapshots_v2_lookup",
+    "idx_ensemble_snapshots_lookup",
     "idx_calibration_pairs_v2_city_date_metric",
     "idx_ens_v2_source_run",
     "idx_ens_v2_entry_lookup",
@@ -420,7 +420,7 @@ def test_relA_attach_partial_world_still_produces_critical_indexes(
 
     have = _indexes_on(fcast)
     required = {
-        "idx_ensemble_snapshots_v2_lookup",
+        "idx_ensemble_snapshots_lookup",
         "idx_calibration_pairs_v2_city_date_metric",
     }
     missing = required - have

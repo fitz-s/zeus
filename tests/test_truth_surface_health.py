@@ -342,7 +342,7 @@ def _seed_minimal_ready_training_tables(conn, *, seed_observations=True):
     )
     conn.execute(
         """
-        CREATE TABLE ensemble_snapshots_v2 (
+        CREATE TABLE ensemble_snapshots (
             city TEXT,
             target_date TEXT,
             temperature_metric TEXT,
@@ -365,7 +365,7 @@ def _seed_minimal_ready_training_tables(conn, *, seed_observations=True):
     )
     conn.executemany(
         """
-        INSERT INTO ensemble_snapshots_v2 (
+        INSERT INTO ensemble_snapshots (
             city, target_date, temperature_metric, physical_quantity,
             observation_field, issue_time, valid_time, available_at,
             fetch_time, lead_hours, members_json, model_version,
@@ -479,7 +479,7 @@ def _seed_rebuild_preflight_inputs(conn):
     for metric, physical_quantity, observation_field, data_version in snapshot_rows:
         conn.execute(
             """
-            INSERT INTO ensemble_snapshots_v2 (
+            INSERT INTO ensemble_snapshots (
                 city, target_date, temperature_metric, physical_quantity,
                 observation_field, issue_time, valid_time, available_at,
                 fetch_time, lead_hours, members_json, model_version,
@@ -666,7 +666,7 @@ class TestTrainingReadinessP0:
         for table in [
             "forecasts",
             "historical_forecasts_v2",
-            "ensemble_snapshots_v2",
+            "ensemble_snapshots",
             "calibration_pairs_v2",
             "platt_models_v2",
             "market_events_v2",
@@ -684,7 +684,7 @@ class TestTrainingReadinessP0:
         _seed_minimal_ready_training_tables(conn, seed_observations=True)
         conn.execute(
             """
-            UPDATE ensemble_snapshots_v2
+            UPDATE ensemble_snapshots
             SET training_allowed = 0
             WHERE temperature_metric = 'high'
             """
@@ -696,8 +696,8 @@ class TestTrainingReadinessP0:
 
         assert report["ready"] is False
         assert "empty_rebuild_eligible_snapshots" in _blocker_codes(report)
-        high_check = report["checks"]["ensemble_snapshots_v2.high.rebuild_eligible_present"]
-        low_check = report["checks"]["ensemble_snapshots_v2.low.rebuild_eligible_present"]
+        high_check = report["checks"]["ensemble_snapshots.high.rebuild_eligible_present"]
+        low_check = report["checks"]["ensemble_snapshots.low.rebuild_eligible_present"]
         assert high_check["status"] == "FAIL"
         assert high_check["count"] == 0
         assert low_check["status"] == "PASS"
@@ -749,7 +749,7 @@ class TestTrainingReadinessP0:
         _seed_rebuild_preflight_inputs(conn)
         conn.execute(
             """
-            UPDATE ensemble_snapshots_v2
+            UPDATE ensemble_snapshots
             SET physical_quantity = '',
                 available_at = 'reconstructed_from_target_date'
             WHERE temperature_metric = 'high'
@@ -761,7 +761,7 @@ class TestTrainingReadinessP0:
         report = build_calibration_pair_rebuild_preflight_report(db_path)
 
         assert report["ready"] is False
-        assert "ensemble_snapshots_v2.rebuild_input_unsafe" in _blocker_codes(report)
+        assert "ensemble_snapshots.rebuild_input_unsafe" in _blocker_codes(report)
         assert "empty_rebuild_eligible_snapshots" in _blocker_codes(report)
 
     def test_rebuild_preflight_accepts_allowed_low_data_versions_with_contract_evidence(
@@ -776,7 +776,7 @@ class TestTrainingReadinessP0:
         ):
             conn.execute(
                 """
-                INSERT INTO ensemble_snapshots_v2 (
+                INSERT INTO ensemble_snapshots (
                     city, target_date, temperature_metric, physical_quantity,
                     observation_field, issue_time, valid_time, available_at,
                     fetch_time, lead_hours, members_json, model_version,
@@ -807,9 +807,9 @@ class TestTrainingReadinessP0:
 
         report = build_calibration_pair_rebuild_preflight_report(db_path)
 
-        assert "ensemble_snapshots_v2.rebuild_input_unsafe" not in _blocker_codes(report)
-        assert "ensemble_snapshots_v2.low_contract_evidence_unsafe" not in _blocker_codes(report)
-        assert report["checks"]["ensemble_snapshots_v2.low.contract_window_evidence_safe"][
+        assert "ensemble_snapshots.rebuild_input_unsafe" not in _blocker_codes(report)
+        assert "ensemble_snapshots.low_contract_evidence_unsafe" not in _blocker_codes(report)
+        assert report["checks"]["ensemble_snapshots.low.contract_window_evidence_safe"][
             "status"
         ] == "PASS"
 
@@ -821,7 +821,7 @@ class TestTrainingReadinessP0:
         _seed_rebuild_preflight_inputs(conn)
         conn.execute(
             """
-            INSERT INTO ensemble_snapshots_v2 (
+            INSERT INTO ensemble_snapshots (
                 city, target_date, temperature_metric, physical_quantity,
                 observation_field, issue_time, valid_time, available_at,
                 fetch_time, lead_hours, members_json, model_version,
@@ -844,9 +844,9 @@ class TestTrainingReadinessP0:
         report = build_calibration_pair_rebuild_preflight_report(db_path)
 
         blockers = _blocker_codes(report)
-        assert "ensemble_snapshots_v2.rebuild_input_unsafe" not in blockers
-        assert "ensemble_snapshots_v2.low_contract_evidence_unsafe" in blockers
-        assert report["checks"]["ensemble_snapshots_v2.low.contract_window_evidence_safe"][
+        assert "ensemble_snapshots.rebuild_input_unsafe" not in blockers
+        assert "ensemble_snapshots.low_contract_evidence_unsafe" in blockers
+        assert report["checks"]["ensemble_snapshots.low.contract_window_evidence_safe"][
             "count"
         ] == 1
 
@@ -925,7 +925,7 @@ class TestTrainingReadinessP0:
         # Insert a HIGH mx2t3 OpenData snapshot with FULLY_INSIDE attribution.
         conn.execute(
             """
-            INSERT INTO ensemble_snapshots_v2 (
+            INSERT INTO ensemble_snapshots (
                 city, target_date, temperature_metric, physical_quantity,
                 observation_field, issue_time, valid_time, available_at,
                 fetch_time, lead_hours, members_json, model_version,
@@ -955,10 +955,10 @@ class TestTrainingReadinessP0:
         report = build_calibration_pair_rebuild_preflight_report(db_path)
 
         blockers = _blocker_codes(report)
-        assert "ensemble_snapshots_v2.rebuild_input_unsafe" not in blockers, (
+        assert "ensemble_snapshots.rebuild_input_unsafe" not in blockers, (
             f"mx2t3 OpenData row wrongly rejected: blockers={blockers}"
         )
-        assert report["checks"]["ensemble_snapshots_v2.high.rebuild_eligible_present"][
+        assert report["checks"]["ensemble_snapshots.high.rebuild_eligible_present"][
             "status"
         ] == "PASS"
 
@@ -975,12 +975,12 @@ class TestTrainingReadinessP0:
         _seed_rebuild_preflight_inputs(conn)
         # Remove the TIGGE HIGH seed row so the only HIGH row is the legacy mx2t6.
         conn.execute(
-            "DELETE FROM ensemble_snapshots_v2 WHERE temperature_metric = 'high'"
+            "DELETE FROM ensemble_snapshots WHERE temperature_metric = 'high'"
         )
         # Insert legacy ecmwf_opendata_mx2t6 snapshot (not in allowed_data_versions).
         conn.execute(
             """
-            INSERT INTO ensemble_snapshots_v2 (
+            INSERT INTO ensemble_snapshots (
                 city, target_date, temperature_metric, physical_quantity,
                 observation_field, issue_time, valid_time, available_at,
                 fetch_time, lead_hours, members_json, model_version,
@@ -1129,7 +1129,7 @@ class TestTrainingReadinessP0:
         )
         conn.execute(
             """
-            CREATE TABLE ensemble_snapshots_v2 (
+            CREATE TABLE ensemble_snapshots (
                 issue_time TEXT,
                 available_at TEXT,
                 fetch_time TEXT
@@ -1138,7 +1138,7 @@ class TestTrainingReadinessP0:
         )
         conn.execute(
             """
-            INSERT INTO ensemble_snapshots_v2 (
+            INSERT INTO ensemble_snapshots (
                 issue_time, available_at, fetch_time
             ) VALUES (
                 '2026-04-22T12:00:00Z',
@@ -1906,14 +1906,14 @@ class TestTrainingReadinessP0:
         assert check["count"] == 0
 
     @pytest.mark.parametrize("missing_column", ["issue_time", "available_at", "fetch_time"])
-    def test_training_readiness_fails_when_ensemble_snapshots_v2_time_is_missing(
+    def test_training_readiness_fails_when_ensemble_snapshots_time_is_missing(
         self, tmp_path, missing_column
     ):
         db_path = tmp_path / "legacy-ensemble-world.db"
         conn = sqlite3.connect(db_path)
         conn.execute(
             """
-            CREATE TABLE ensemble_snapshots_v2 (
+            CREATE TABLE ensemble_snapshots (
                 issue_time TEXT,
                 available_at TEXT,
                 fetch_time TEXT
@@ -1928,7 +1928,7 @@ class TestTrainingReadinessP0:
         values[missing_column] = "NULL"
         conn.execute(
             f"""
-            INSERT INTO ensemble_snapshots_v2 (
+            INSERT INTO ensemble_snapshots (
                 issue_time, available_at, fetch_time
             ) VALUES ({values["issue_time"]}, {values["available_at"]}, {values["fetch_time"]})
             """
@@ -1939,7 +1939,7 @@ class TestTrainingReadinessP0:
         report = build_training_readiness_report(db_path)
 
         assert "missing_issue_time" in _blocker_codes(report)
-        check = report["checks"]["ensemble_snapshots_v2.issue_time_present"]
+        check = report["checks"]["ensemble_snapshots.issue_time_present"]
         assert check["status"] == "FAIL"
         assert check["count"] == 1
 
@@ -2042,7 +2042,7 @@ class TestP4Readiness:
             "p4_tigge_manifest_missing",
             "p4_market_events_v2_empty",
             "p4_settlements_v2_empty",
-            "p4_ensemble_snapshots_v2_empty",
+            "p4_ensemble_snapshots_empty",
             "p4_calibration_pairs_v2_empty",
             "p4_wu_api_key_missing",
             "p4_scheduler_health_missing",

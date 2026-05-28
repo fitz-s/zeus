@@ -80,7 +80,7 @@ implementation:
     source: "TIGGE archive via ECDS (dataset=tigge-forecasts, grid=0.5/0.5)"
     existing_disk: "1.069 TiB on cloud tigge-runner (mostly c00 complete; c12 partial; some pre-ECDS provenance unverifiable)"
     backend_provenance:
-      column_required: "ensemble_snapshots_v2.ingest_backend (per critic v2 fix A1, BLOCKER)"
+      column_required: "ensemble_snapshots.ingest_backend (per critic v2 fix A1, BLOCKER)"
       values:
         - "ecds (post 2026-05-07 ECDS-routed lanes)"
         - "webapi (pre-2026-05-04 WEB-API-routed lanes — partly inferred)"

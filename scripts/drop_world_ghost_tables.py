@@ -19,7 +19,7 @@ safe to drop once the operator confirms:
 GHOST TABLES (world.db, LEGACY_ARCHIVED)
 -----------------------------------------
   observations, settlements, settlements_v2, source_run,
-  market_events_v2, ensemble_snapshots_v2, calibration_pairs_v2
+  market_events_v2, ensemble_snapshots, calibration_pairs_v2
 
 USAGE
 -----
@@ -77,7 +77,7 @@ _GHOST_TABLES = [
     "settlements_v2",
     "source_run",
     "market_events_v2",
-    "ensemble_snapshots_v2",
+    "ensemble_snapshots",
     "calibration_pairs_v2",
 ]
 

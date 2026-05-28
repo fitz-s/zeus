@@ -62,7 +62,7 @@ def _make_conn() -> sqlite3.Connection:
     c = sqlite3.connect(":memory:")
     c.row_factory = sqlite3.Row
     c.execute(
-        """CREATE TABLE ensemble_snapshots_v2(
+        """CREATE TABLE ensemble_snapshots(
             city TEXT, target_date TEXT, temperature_metric TEXT, data_version TEXT,
             members_json TEXT, members_unit TEXT, lead_hours REAL,
             available_at TEXT, issue_time TEXT,
@@ -91,11 +91,11 @@ def _ins_snap(
     issue_hour=0,
     contributes=1,
 ):
-    """Insert one ensemble_snapshots_v2 row. ``issue_hour`` controls window-selection."""
+    """Insert one ensemble_snapshots row. ``issue_hour`` controls window-selection."""
     issue_time = f"{date}T{issue_hour:02d}:00:00Z"
     available_at = f"{date}T{issue_hour:02d}:30:00Z"
     conn.execute(
-        "INSERT INTO ensemble_snapshots_v2 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO ensemble_snapshots VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (
             city, date, metric, dv,
             json.dumps(list(members)), unit, lead_hours,

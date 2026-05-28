@@ -174,7 +174,7 @@ tables:
       K1-split 2026-05-11. v2 market events (apply_v2_schema via init_schema_forecasts).
       Ghost copy on world.db declared legacy_archived below.
 
-  - name: ensemble_snapshots_v2
+  - name: ensemble_snapshots
     db: forecasts
     schema_class: forecast_class
     schema_version_owner: SCHEMA_FORECASTS_VERSION
@@ -221,7 +221,7 @@ tables:
       Writer-side hash; AFTER INSERT trigger backstop sentinel on NULL.
       Writes occur only during ≤6h applicability window (subset of 24h Day0 lifecycle).
       bin_grid_id deferred to Phase 2: no propagation path at Day0 caller sites;
-      upstream ensemble_snapshots_v2.bin_grid_id covers the 24h lifecycle bin evolution.
+      upstream ensemble_snapshots.bin_grid_id covers the 24h lifecycle bin evolution.
       SCHEMA_FORECASTS_VERSION 4. CHECK (schema_version IN (3, 4)) for migration window.
 
   - name: market_microstructure_snapshots
@@ -339,14 +339,14 @@ tables:
       data-daemon authority-chain follow-up. Authoritative on forecasts.db.
       Excluded. Drop after 2026-08-09.
 
-  - name: ensemble_snapshots_v2
+  - name: ensemble_snapshots
     db: world
     schema_class: legacy_archived
     schema_version_owner: SCHEMA_VERSION
     created_by: init_schema
     pk_col: null
     notes: >
-      Ghost copy of ensemble_snapshots_v2 on world.db post-K1-split.
+      Ghost copy of ensemble_snapshots on world.db post-K1-split.
       Authoritative on forecasts.db. Excluded. Drop after 2026-08-09.
 
   - name: calibration_pairs_v2
@@ -596,7 +596,7 @@ tables:
 
   # v1.F20 (2026-05-18): ensemble_snapshots removed — table dropped via
   # scripts/migrations/202605_drop_ensemble_snapshots_legacy.py. Canonical
-  # table is ensemble_snapshots_v2 on forecasts.db (see forecast_class section).
+  # table is ensemble_snapshots on forecasts.db (see forecast_class section).
 
   - name: exchange_reconcile_findings
     db: world
@@ -1385,14 +1385,14 @@ tables:
       K1 2026-05-11 archive snapshot of calibration_pairs_v2.
       Authoritative on forecasts.db. Excluded. Drop after 2026-08-09.
 
-  - name: ensemble_snapshots_v2_archived_2026_05_11
+  - name: ensemble_snapshots_archived_2026_05_11
     db: world
     schema_class: legacy_archived
     schema_version_owner: SCHEMA_VERSION
     created_by: migration_script_k1_archive
     pk_col: null
     notes: >
-      K1 2026-05-11 archive snapshot of ensemble_snapshots_v2.
+      K1 2026-05-11 archive snapshot of ensemble_snapshots.
       Authoritative on forecasts.db. Excluded. Drop after 2026-08-09.
 
   - name: market_events_v2_archived_2026_05_11
@@ -1595,14 +1595,6 @@ tables:
     pk_col: null
     notes: Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Drop after 2026-08-09.
 
-  - name: ensemble_snapshots_v2
-    db: trade
-    schema_class: legacy_archived
-    schema_version_owner: null
-    created_by: init_schema_pre_pr_s4b
-    pk_col: null
-    notes: Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Drop after 2026-08-09.
-
   - name: exchange_reconcile_findings
     db: trade
     schema_class: legacy_archived
@@ -1654,7 +1646,7 @@ tables:
       UNIQUE(table_name, row_id, reason_code). Writer
       src/state/decision_integrity_quarantine.py; CLI
       scripts/quarantine_bad_forecast_decisions.py (dry-run default). Co-located
-      on trade DB; cross-DB read-join against forecasts.ensemble_snapshots_v2.
+      on trade DB; cross-DB read-join against forecasts.ensemble_snapshots.
       Authority: docs/operations/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md.
 
   - name: exit_mutex_holdings

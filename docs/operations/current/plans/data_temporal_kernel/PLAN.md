@@ -96,7 +96,7 @@ New files only. No scheduler / schema / ingestion-function / calendar edits.
 ## Safety rails (whole program)
 
 No live order placement. No production DB mutation without operator-go. No deletion of
-ensemble_snapshots_v2/readiness_state/source_run/market_events_v2/settlements. No auto cities.json
+ensemble_snapshots/readiness_state/source_run/market_events_v2/settlements. No auto cities.json
 station remap. No HKO→WU/VHHH fallback. No TIGGE/Open-Meteo as live authority. Each PR has a
 named rollback (env flag or file removal). PR1 rollback = remove new files (zero runtime touch).
 

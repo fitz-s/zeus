@@ -47,7 +47,7 @@ _TARGET_DATE = "2026-05-19"
 _DECISION_TIME = _DB_FETCH_DATETIME + timedelta(minutes=30)
 
 _CREATE_TABLE_SQL = """
-CREATE TABLE IF NOT EXISTS ensemble_snapshots_v2 (
+CREATE TABLE IF NOT EXISTS ensemble_snapshots (
     snapshot_id INTEGER PRIMARY KEY AUTOINCREMENT,
     city TEXT NOT NULL,
     target_date TEXT NOT NULL,
@@ -85,7 +85,7 @@ CREATE TABLE IF NOT EXISTS ensemble_snapshots_v2 (
 """
 
 _INSERT_SQL = """
-INSERT INTO ensemble_snapshots_v2
+INSERT INTO ensemble_snapshots
     (city, target_date, temperature_metric, available_at, fetch_time,
      members_json, data_version, causality_status, authority,
      recorded_at, members_unit, issue_time, source_id)
@@ -176,7 +176,7 @@ def test_high_only_db_high_metric_succeeds(fake_city, tmp_path, monkeypatch):
     assert bundle is not None, "HIGH-only fetch returned None — cross-metric coupling still broken"
     assert bundle.source_id == "ecmwf_open_data"
     assert len(bundle.ensemble_members) == 51
-    assert bundle.raw_payload["synthesised_from"] == "ensemble_snapshots_v2.ecmwf_open_data.high_only"
+    assert bundle.raw_payload["synthesised_from"] == "ensemble_snapshots.ecmwf_open_data.high_only"
     assert len(bundle.raw_payload["times"]) == 24
 
 
@@ -200,7 +200,7 @@ def test_low_only_db_low_metric_succeeds(fake_city, tmp_path, monkeypatch):
     assert bundle is not None, "LOW-only fetch returned None — low metric independence broken"
     assert bundle.source_id == "ecmwf_open_data"
     assert len(bundle.ensemble_members) == 51
-    assert bundle.raw_payload["synthesised_from"] == "ensemble_snapshots_v2.ecmwf_open_data.low_only"
+    assert bundle.raw_payload["synthesised_from"] == "ensemble_snapshots.ecmwf_open_data.low_only"
     assert len(bundle.raw_payload["times"]) == 24
 
 

@@ -55,7 +55,7 @@ def _insert_snapshot(
     conn: sqlite3.Connection,
     *,
     source_id: str | None = "ecmwf_open_data",
-    source_transport: str | None = "ensemble_snapshots_v2_db_reader",
+    source_transport: str | None = "ensemble_snapshots_db_reader",
     source_run_id: str | None = "source-run-1",
     release_calendar_key: str | None = "ecmwf_open_data:mx2t6_high:full",
     source_cycle_time: str | None = "2026-05-03T00:00:00+00:00",
@@ -71,7 +71,7 @@ def _insert_snapshot(
     scope = _scope()
     conn.execute(
         """
-        INSERT INTO ensemble_snapshots_v2 (
+        INSERT INTO ensemble_snapshots (
             city, target_date, temperature_metric, physical_quantity,
             observation_field, issue_time, valid_time, available_at, fetch_time,
             lead_hours, members_json, model_version, data_version,
@@ -185,7 +185,7 @@ def _insert_coverage(
         coverage_id="coverage-1",
         source_run_id="source-run-1",
         source_id="ecmwf_open_data",
-        source_transport="ensemble_snapshots_v2_db_reader",
+        source_transport="ensemble_snapshots_db_reader",
         release_calendar_key="ecmwf_open_data:mx2t6_high:full",
         track="mx2t6_high_full_horizon",
         city_id=scope.city_id,
@@ -278,7 +278,7 @@ def _read_full(conn: sqlite3.Connection, *, require_entry_readiness: bool = True
         target_local_date=scope.target_local_date,
         temperature_metric=scope.temperature_metric,
         source_id="ecmwf_open_data",
-        source_transport="ensemble_snapshots_v2_db_reader",
+        source_transport="ensemble_snapshots_db_reader",
         data_version=scope.data_version,
         track="mx2t6_high_full_horizon",
         strategy_key="entry_forecast",
@@ -297,7 +297,7 @@ def test_reader_returns_only_source_linked_executable_snapshot() -> None:
         conn,
         scope=_scope(),
         source_id="ecmwf_open_data",
-        source_transport="ensemble_snapshots_v2_db_reader",
+        source_transport="ensemble_snapshots_db_reader",
         now_utc=_utc(2026, 5, 3, 9),
     )
 
@@ -324,7 +324,7 @@ def test_reader_blocks_legacy_rows_without_source_linkage() -> None:
         conn,
         scope=_scope(),
         source_id="ecmwf_open_data",
-        source_transport="ensemble_snapshots_v2_db_reader",
+        source_transport="ensemble_snapshots_db_reader",
     )
 
     assert not result.ok
@@ -358,7 +358,7 @@ def test_reader_blocks_when_linked_columns_are_partially_null() -> None:
         conn,
         scope=_scope(),
         source_id="ecmwf_open_data",
-        source_transport="ensemble_snapshots_v2_db_reader",
+        source_transport="ensemble_snapshots_db_reader",
     )
 
     assert not result.ok
@@ -374,7 +374,7 @@ def test_reader_blocks_wrong_transport_even_with_same_source_family() -> None:
         conn,
         scope=_scope(),
         source_id="ecmwf_open_data",
-        source_transport="ensemble_snapshots_v2_db_reader",
+        source_transport="ensemble_snapshots_db_reader",
     )
 
     assert result.status == "BLOCKED"
@@ -389,7 +389,7 @@ def test_reader_blocks_rows_not_available_at_decision_time() -> None:
         conn,
         scope=_scope(),
         source_id="ecmwf_open_data",
-        source_transport="ensemble_snapshots_v2_db_reader",
+        source_transport="ensemble_snapshots_db_reader",
         now_utc=_utc(2026, 5, 3, 9),
     )
 
@@ -405,7 +405,7 @@ def test_reader_blocks_non_verified_or_non_causal_rows() -> None:
         conn,
         scope=_scope(),
         source_id="ecmwf_open_data",
-        source_transport="ensemble_snapshots_v2_db_reader",
+        source_transport="ensemble_snapshots_db_reader",
     )
     assert unverified.reason_code == "EXECUTABLE_FORECAST_AUTHORITY_NOT_VERIFIED"
 
@@ -415,7 +415,7 @@ def test_reader_blocks_non_verified_or_non_causal_rows() -> None:
         conn,
         scope=_scope(),
         source_id="ecmwf_open_data",
-        source_transport="ensemble_snapshots_v2_db_reader",
+        source_transport="ensemble_snapshots_db_reader",
     )
     assert non_causal.reason_code == "EXECUTABLE_FORECAST_CAUSALITY_NOT_OK"
 

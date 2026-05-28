@@ -489,6 +489,7 @@ def _canonical_event() -> dict:
     return {
         "event_id": "evt-1",
         "position_id": "pos-1",
+        "event_version": 1,
         "sequence_no": 1,
         "event_type": "POSITION_OPEN_INTENT",
         "occurred_at": "2026-04-03T00:00:00Z",
@@ -3355,14 +3356,15 @@ def test_reconciliation_pending_fill_path_fails_loudly_when_canonical_projection
     conn.execute(
         """
         INSERT INTO position_events (
-            event_id, position_id, sequence_no, event_type, occurred_at,
+            event_id, position_id, event_version, sequence_no, event_type, occurred_at,
             phase_before, phase_after, strategy_key, decision_id, snapshot_id, order_id,
             command_id, caused_by, idempotency_key, venue_status, source_module, env, payload_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             "evt-missing-projection",
             "rt-pos-1",
+            1,
             1,
             "POSITION_OPEN_INTENT",
             "2026-04-03T00:00:00Z",

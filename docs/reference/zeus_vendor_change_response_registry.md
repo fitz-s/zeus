@@ -88,7 +88,7 @@ canary-style probing.
 | `calibration_pairs_v2.training_allowed` | The flip switch when source becomes untrusted |
 | `calibration_pairs_v2.causality_status` | OK / DST_AMBIGUOUS — boundary marker |
 | `platt_models_v2.*` | Trained on bin pairs from a specific source — invalidated on T1 |
-| `ensemble_snapshots_v2` | TIGGE forecast tied to lat/lon |
+| `ensemble_snapshots` | TIGGE forecast tied to lat/lon |
 
 ### Layer 3 — Ingestion (per-vendor clients)
 
@@ -361,7 +361,7 @@ Pre-commit invariant baseline at `.claude/hooks/pre-commit-invariant-test.sh` �
    3. Layer 1: generate `config/city_monthly_bounds.json` row (may be NULL if <30 samples; lat-band fallback in guard)
    4. Layer 3: ensure clients accept the new ICAO (check OGIMET_CITIES dict at `src/data/daily_obs_append.py:1019` if city needs Ogimet)
    5. Layer 12: extend AST guard TARGETS list if new script written
-   6. Layer 6: run `scripts/onboard_cities.py` pipeline — backfills `observation_instants_v2` (zeus-world.db, SCHEMA_VERSION=35) + `ensemble_snapshots_v2` (zeus-forecasts.db, SCHEMA_FORECASTS_VERSION=7) + triggers `rebuild_calibration_pairs_canonical.py`
+   6. Layer 6: run `scripts/onboard_cities.py` pipeline — backfills `observation_instants_v2` (zeus-world.db, SCHEMA_VERSION=35) + `ensemble_snapshots` (zeus-forecasts.db, SCHEMA_FORECASTS_VERSION=7) + triggers `rebuild_calibration_pairs_canonical.py`
    7. Layer 6b: populate `model_bias_ens_v2` (zeus-forecasts.db, SCHEMA_FORECASTS_VERSION=7, **pending ENS-refit forecasts-schema migration PR #337 — table not yet in production schema**) via `src/calibration/ens_bias_repo.py` — defaults are `contributor_policy='full_contributor_only'`, bias normalized to degC (`members_unit`), `prior_data_version` propagated from ensemble source
    8. Layer 6c: run `scripts/watch_source_contract.py` to validate Gamma settlement-source consistency for new city; address any ALERT before proceeding
    9. Layer 6d: add `SETTLEMENT_SOURCE_<CITY>` entry to `config/reality_contracts/data.yaml` (blocking criticality, appropriate `unit`, `rounding`, `ttl_seconds`, `on_change_handlers`)

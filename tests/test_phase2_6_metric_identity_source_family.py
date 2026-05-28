@@ -94,7 +94,7 @@ def test_for_metric_with_source_family_dispatches_correctly():
 def test_source_family_from_data_version_is_inverse_of_factory():
     """The reverse-lookup helper recovers source_family from any data_version
     the factory could produce. Closes the loop so evaluator can route on
-    data_version strings stored in ensemble_snapshots_v2.
+    data_version strings stored in ensemble_snapshots.
     """
     for family in ("tigge", "ecmwf_opendata"):
         for builder in (

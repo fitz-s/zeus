@@ -8,7 +8,7 @@
 ## Route A: EMOS-Style Spread-Dependent Residual Scale
 
 ### Method
-Per-snapshot ensemble spread `s_i = std(members_json, ddof=1)` computed from `ensemble_snapshots_v2.members_json`
+Per-snapshot ensemble spread `s_i = std(members_json, ddof=1)` computed from `ensemble_snapshots.members_json`
 (unit-normalized: degC members kept as-is; degF converted via `(x-32)/1.8`). Residual
 `r_i = ens_mean_i − settlement_i` in °C. Settlement values in °C for HK/London/Tokyo,
 °F→°C for US cities (per `settlement_unit` column). n=59,826 snapshot-level observations.

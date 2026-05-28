@@ -98,7 +98,7 @@ def _raw_insert_entry_posted(conn: sqlite3.Connection, trade_id: str, payload_js
     conn.execute(
         """
         INSERT INTO position_events (
-            event_id, position_id, sequence_no, event_type,
+            event_id, position_id, event_version, sequence_no, event_type,
             occurred_at, phase_before, phase_after, strategy_key,
             decision_id, snapshot_id, order_id, command_id, caused_by,
             idempotency_key, venue_status, source_module, env, payload_json
@@ -121,7 +121,7 @@ def _raw_insert_position_open_intent(conn: sqlite3.Connection, trade_id: str, pa
     conn.execute(
         """
         INSERT INTO position_events (
-            event_id, position_id, sequence_no, event_type,
+            event_id, position_id, event_version, sequence_no, event_type,
             occurred_at, phase_before, phase_after, strategy_key,
             decision_id, snapshot_id, order_id, command_id, caused_by,
             idempotency_key, venue_status, source_module, env, payload_json

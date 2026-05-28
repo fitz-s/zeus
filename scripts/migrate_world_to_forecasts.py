@@ -78,7 +78,7 @@ _TABLES: list[tuple[str, str, bool]] = [
     ("settlements",         "id",            False),  # 5,570 rows — single batch
     ("market_events_v2",    "event_id",      False),  # 6,713 rows — single batch
     ("observations",        "id",            False),  # 43,903 rows — single batch
-    ("ensemble_snapshots_v2", "snapshot_id", True),   # 1,119,662 rows — chunked
+    ("ensemble_snapshots", "snapshot_id", True),   # 1,119,662 rows — chunked
     ("calibration_pairs_v2",  "pair_id",     True),   # 53,490,902 rows — chunked
 ]
 

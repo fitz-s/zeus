@@ -1610,7 +1610,7 @@ CREATE TABLE trade_decisions (
             size_usd REAL NOT NULL,
             price REAL NOT NULL,
             timestamp TEXT NOT NULL,
-            forecast_snapshot_id INTEGER,  -- v1.F20: soft ref to ensemble_snapshots_v2.snapshot_id (cross-DB, no FK constraint)
+            forecast_snapshot_id INTEGER,  -- v1.F20: soft ref to ensemble_snapshots.snapshot_id (cross-DB, no FK constraint)
             calibration_model_version TEXT,
             p_raw REAL NOT NULL,
             p_calibrated REAL,
@@ -1892,7 +1892,7 @@ CREATE TABLE calibration_pairs_v2 (
             authority TEXT NOT NULL DEFAULT 'UNVERIFIED'
                 CHECK (authority IN ('VERIFIED', 'UNVERIFIED', 'QUARANTINED')),
             bin_source TEXT NOT NULL DEFAULT 'legacy',
-            snapshot_id INTEGER REFERENCES ensemble_snapshots_v2(snapshot_id),
+            snapshot_id INTEGER REFERENCES ensemble_snapshots(snapshot_id),
             data_version TEXT NOT NULL,
             training_allowed INTEGER NOT NULL DEFAULT 1
                 CHECK (training_allowed IN (0, 1)),
@@ -1904,8 +1904,8 @@ CREATE TABLE calibration_pairs_v2 (
             UNIQUE(city, target_date, temperature_metric, range_label, lead_days,
                    forecast_available_at, bin_source, data_version)
         );
--- table: ensemble_snapshots_v2
-CREATE TABLE ensemble_snapshots_v2 (
+-- table: ensemble_snapshots
+CREATE TABLE ensemble_snapshots (
             snapshot_id INTEGER PRIMARY KEY AUTOINCREMENT,
             city TEXT NOT NULL,
             target_date TEXT NOT NULL,
@@ -1984,7 +1984,7 @@ CREATE INDEX idx_calibration_pairs_v2_refit_core
     ;
 -- index: idx_ens_v2_entry_lookup
 CREATE INDEX idx_ens_v2_entry_lookup
-            ON ensemble_snapshots_v2(
+            ON ensemble_snapshots(
                 city,
                 target_date,
                 temperature_metric,
@@ -1996,11 +1996,11 @@ CREATE INDEX idx_ens_v2_entry_lookup
     ;
 -- index: idx_ens_v2_source_run
 CREATE INDEX idx_ens_v2_source_run
-            ON ensemble_snapshots_v2(source_id, source_transport, source_run_id)
+            ON ensemble_snapshots(source_id, source_transport, source_run_id)
     ;
--- index: idx_ensemble_snapshots_v2_lookup
-CREATE INDEX idx_ensemble_snapshots_v2_lookup
-            ON ensemble_snapshots_v2(city, target_date, temperature_metric, available_at)
+-- index: idx_ensemble_snapshots_lookup
+CREATE INDEX idx_ensemble_snapshots_lookup
+            ON ensemble_snapshots(city, target_date, temperature_metric, available_at)
     ;
 -- index: idx_market_events_v2_city_date_metric
 CREATE INDEX idx_market_events_v2_city_date_metric

@@ -378,16 +378,16 @@ PIPELINE_STEPS = [
         "name": "Backfill ENS snapshots v1 from OpenMeteo (legacy p_raw lane)",
         "script": "backfill_ens.py",
         # VESTIGIAL/BLOCKED: backfill_ens.py writes to ensemble_snapshots (unsuffixed,
-        # does not exist post-K1-split). Canonical is ensemble_snapshots_v2 in
+        # does not exist post-K1-split). Canonical is ensemble_snapshots in
         # zeus-forecasts.db with ~40 columns; pre-K1 INSERT shape is incompatible.
-        # The live daemon is the canonical writer to ensemble_snapshots_v2 and will
+        # The live daemon is the canonical writer to ensemble_snapshots and will
         # populate new cities on next operator-initiated daemon restart.
         # Marked optional so pipeline failure here is logged but non-fatal.
         "optional": True,
     },
     {
         "id": "ens_backfill_v2",
-        "name": "Backfill ensemble_snapshots_v2 from GRIB/TIGGE archive",
+        "name": "Backfill ensemble_snapshots from GRIB/TIGGE archive",
         "script": "ingest_grib_to_snapshots.py",
         "city_flag": "--cities",
         # --date-from injected via extra_args_factory
@@ -934,7 +934,7 @@ def _verification_tables() -> tuple[list[str], list[str]]:
     world-class: observations, observation_instants_v2, solar_daily,
                  temp_persistence, diurnal_curves, forecasts,
                  forecast_skill, model_bias, asos_wu_offsets
-    forecast-class: settlements_v2, market_events_v2, ensemble_snapshots_v2,
+    forecast-class: settlements_v2, market_events_v2, ensemble_snapshots,
                     calibration_pairs_v2
 
     Removed vestigial: historical_forecasts (0 rows), model_skill (table gone).
@@ -953,7 +953,7 @@ def _verification_tables() -> tuple[list[str], list[str]]:
     forecast_tables = [
         "settlements_v2",
         "market_events_v2",
-        "ensemble_snapshots_v2",
+        "ensemble_snapshots",
         "calibration_pairs_v2",
     ]
     return world_tables, forecast_tables

@@ -90,15 +90,15 @@ def _create_market_events_v2(conn: sqlite3.Connection) -> None:
     """)
 
 
-def _create_ensemble_snapshots_v2(conn: sqlite3.Connection) -> None:
-    """Create ensemble_snapshots_v2 table + indexes + ALTERs. Idempotent.
+def _create_ensemble_snapshots(conn: sqlite3.Connection) -> None:
+    """Create ensemble_snapshots table + indexes + ALTERs. Idempotent.
 
     K1 forecast-class table (moves to zeus-forecasts.db). Contains CREATE,
     4 indexes, and 27 idempotent ALTER TABLE statements for additive columns
     added across schema versions. All ALTERs suppress 'duplicate column' errors.
     """
     conn.execute("""
-        CREATE TABLE IF NOT EXISTS ensemble_snapshots_v2 (
+        CREATE TABLE IF NOT EXISTS ensemble_snapshots (
             snapshot_id INTEGER PRIMARY KEY AUTOINCREMENT,
             city TEXT NOT NULL,
             target_date TEXT NOT NULL,
@@ -165,51 +165,51 @@ def _create_ensemble_snapshots_v2(conn: sqlite3.Connection) -> None:
         )
     """)
     conn.execute("""
-        CREATE INDEX IF NOT EXISTS idx_ensemble_snapshots_v2_lookup
-            ON ensemble_snapshots_v2(city, target_date, temperature_metric, available_at)
+        CREATE INDEX IF NOT EXISTS idx_ensemble_snapshots_lookup
+            ON ensemble_snapshots(city, target_date, temperature_metric, available_at)
     """)
     # 4A.2: members_unit / members_precision — idempotent ADD COLUMN
     for alter_sql in [
-        "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN members_unit TEXT NOT NULL DEFAULT 'degC'",
-        "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN members_precision REAL",
+        "ALTER TABLE ensemble_snapshots ADD COLUMN members_unit TEXT NOT NULL DEFAULT 'degC'",
+        "ALTER TABLE ensemble_snapshots ADD COLUMN members_precision REAL",
         # 4.5: R-L provenance fields for local-calendar-day extractor
-        "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN local_day_start_utc TEXT",
-        "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN step_horizon_hours REAL",
+        "ALTER TABLE ensemble_snapshots ADD COLUMN local_day_start_utc TEXT",
+        "ALTER TABLE ensemble_snapshots ADD COLUMN step_horizon_hours REAL",
         # Phase 7A: unit column for metric-aware backfill. Formerly-accompanying
         # contract_version + boundary_min_value columns dropped in P7B (no live
         # consumer; P8 will re-add if needed when shadow-activation consumers land).
-        "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN unit TEXT",
+        "ALTER TABLE ensemble_snapshots ADD COLUMN unit TEXT",
         # PLAN_v4 executable forecast-entry linkage. NULL means legacy/shadow-only.
-        "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN source_id TEXT",
-        "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN source_transport TEXT",
-        "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN source_run_id TEXT",
-        "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN release_calendar_key TEXT",
-        "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN source_cycle_time TEXT",
-        "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN source_release_time TEXT",
-        "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN source_available_at TEXT",
+        "ALTER TABLE ensemble_snapshots ADD COLUMN source_id TEXT",
+        "ALTER TABLE ensemble_snapshots ADD COLUMN source_transport TEXT",
+        "ALTER TABLE ensemble_snapshots ADD COLUMN source_run_id TEXT",
+        "ALTER TABLE ensemble_snapshots ADD COLUMN release_calendar_key TEXT",
+        "ALTER TABLE ensemble_snapshots ADD COLUMN source_cycle_time TEXT",
+        "ALTER TABLE ensemble_snapshots ADD COLUMN source_release_time TEXT",
+        "ALTER TABLE ensemble_snapshots ADD COLUMN source_available_at TEXT",
         # 2026-05-07 LOW/HIGH alignment recovery: nullable shadow columns for
         # contract-object and explicit forecast-window evidence. These columns
         # only make evidence persistable; they do not relax training_allowed or
         # change live decision authority.
-        "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN city_timezone TEXT",
-        "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN settlement_source_type TEXT",
-        "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN settlement_station_id TEXT",
-        "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN settlement_unit TEXT CHECK (settlement_unit IS NULL OR settlement_unit IN ('F', 'C'))",
-        "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN settlement_rounding_policy TEXT",
-        "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN bin_grid_id TEXT",
-        "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN bin_schema_version TEXT",
-        "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN forecast_window_start_utc TEXT",
-        "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN forecast_window_end_utc TEXT",
-        "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN forecast_window_start_local TEXT",
-        "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN forecast_window_end_local TEXT",
-        "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN forecast_window_local_day_overlap_hours REAL",
-        "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN forecast_window_attribution_status TEXT",
-        "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN contributes_to_target_extrema INTEGER CHECK (contributes_to_target_extrema IS NULL OR contributes_to_target_extrema IN (0, 1))",
-        "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN forecast_window_block_reasons_json TEXT",
+        "ALTER TABLE ensemble_snapshots ADD COLUMN city_timezone TEXT",
+        "ALTER TABLE ensemble_snapshots ADD COLUMN settlement_source_type TEXT",
+        "ALTER TABLE ensemble_snapshots ADD COLUMN settlement_station_id TEXT",
+        "ALTER TABLE ensemble_snapshots ADD COLUMN settlement_unit TEXT CHECK (settlement_unit IS NULL OR settlement_unit IN ('F', 'C'))",
+        "ALTER TABLE ensemble_snapshots ADD COLUMN settlement_rounding_policy TEXT",
+        "ALTER TABLE ensemble_snapshots ADD COLUMN bin_grid_id TEXT",
+        "ALTER TABLE ensemble_snapshots ADD COLUMN bin_schema_version TEXT",
+        "ALTER TABLE ensemble_snapshots ADD COLUMN forecast_window_start_utc TEXT",
+        "ALTER TABLE ensemble_snapshots ADD COLUMN forecast_window_end_utc TEXT",
+        "ALTER TABLE ensemble_snapshots ADD COLUMN forecast_window_start_local TEXT",
+        "ALTER TABLE ensemble_snapshots ADD COLUMN forecast_window_end_local TEXT",
+        "ALTER TABLE ensemble_snapshots ADD COLUMN forecast_window_local_day_overlap_hours REAL",
+        "ALTER TABLE ensemble_snapshots ADD COLUMN forecast_window_attribution_status TEXT",
+        "ALTER TABLE ensemble_snapshots ADD COLUMN contributes_to_target_extrema INTEGER CHECK (contributes_to_target_extrema IS NULL OR contributes_to_target_extrema IN (0, 1))",
+        "ALTER TABLE ensemble_snapshots ADD COLUMN forecast_window_block_reasons_json TEXT",
         # PR 6 (2026-05-19): alpha-proxy timing chain fields
-        "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN first_member_observed_time TEXT",
-        "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN run_complete_time TEXT",
-        "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN raw_orderbook_hash_transition_delta_ms INTEGER",
+        "ALTER TABLE ensemble_snapshots ADD COLUMN first_member_observed_time TEXT",
+        "ALTER TABLE ensemble_snapshots ADD COLUMN run_complete_time TEXT",
+        "ALTER TABLE ensemble_snapshots ADD COLUMN raw_orderbook_hash_transition_delta_ms INTEGER",
     ]:
         try:
             conn.execute(alter_sql)
@@ -218,11 +218,11 @@ def _create_ensemble_snapshots_v2(conn: sqlite3.Connection) -> None:
                 raise
     conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_ens_v2_source_run
-            ON ensemble_snapshots_v2(source_id, source_transport, source_run_id)
+            ON ensemble_snapshots(source_id, source_transport, source_run_id)
     """)
     conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_ens_v2_entry_lookup
-            ON ensemble_snapshots_v2(
+            ON ensemble_snapshots(
                 city,
                 target_date,
                 temperature_metric,
@@ -276,7 +276,7 @@ def _create_calibration_pairs_v2(conn: sqlite3.Connection) -> None:
             authority TEXT NOT NULL DEFAULT 'UNVERIFIED'
                 CHECK (authority IN ('VERIFIED', 'UNVERIFIED', 'QUARANTINED')),
             bin_source TEXT NOT NULL DEFAULT 'legacy',
-            snapshot_id INTEGER REFERENCES ensemble_snapshots_v2(snapshot_id),
+            snapshot_id INTEGER REFERENCES ensemble_snapshots(snapshot_id),
             data_version TEXT NOT NULL,
             training_allowed INTEGER NOT NULL DEFAULT 1
                 CHECK (training_allowed IN (0, 1)),
@@ -392,7 +392,7 @@ def apply_v2_schema(conn: sqlite3.Connection, *, forecast_tables: bool = True) -
 
     Args:
         forecast_tables: When True (default), create the 4 forecast-class v2
-            tables (settlements_v2, market_events_v2, ensemble_snapshots_v2,
+            tables (settlements_v2, market_events_v2, ensemble_snapshots,
             calibration_pairs_v2). Set to False for init_schema_world_only so
             world conn does not recreate tables that live on zeus-forecasts.db
             post-K1 migration. K1 split 2026-05-11.
@@ -509,9 +509,9 @@ def apply_v2_schema(conn: sqlite3.Connection, *, forecast_tables: bool = True) -
 
         if forecast_tables:
             # ----------------------------------------------------------------
-            # ensemble_snapshots_v2  (K1 forecast-class: moves to zeus-forecasts.db)
+            # ensemble_snapshots  (K1 forecast-class: moves to zeus-forecasts.db)
             # ----------------------------------------------------------------
-            _create_ensemble_snapshots_v2(conn)
+            _create_ensemble_snapshots(conn)
 
             # ----------------------------------------------------------------
             # calibration_pairs_v2  (K1 forecast-class: moves to zeus-forecasts.db)

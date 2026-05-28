@@ -71,7 +71,7 @@ def _insert_snapshot(conn: sqlite3.Connection, *, n_members: int = 51) -> None:
     scope = _scope()
     conn.execute(
         """
-        INSERT INTO ensemble_snapshots_v2 (
+        INSERT INTO ensemble_snapshots (
             city, target_date, temperature_metric, physical_quantity,
             observation_field, issue_time, valid_time, available_at, fetch_time,
             lead_hours, members_json, model_version, data_version,
@@ -108,7 +108,7 @@ def _insert_snapshot(conn: sqlite3.Connection, *, n_members: int = 51) -> None:
             "model_version": "ecmwf_ens",
             "data_version": scope.data_version,
             "source_id": "ecmwf_open_data",
-            "source_transport": "ensemble_snapshots_v2_db_reader",
+            "source_transport": "ensemble_snapshots_db_reader",
             "source_run_id": "source-run-floor-1",
             "release_calendar_key": "ecmwf_open_data:mx2t6_high:full",
             "source_cycle_time": "2026-05-03T00:00:00+00:00",
@@ -181,7 +181,7 @@ def _insert_coverage(
         coverage_id="coverage-floor-1",
         source_run_id="source-run-floor-1",
         source_id="ecmwf_open_data",
-        source_transport="ensemble_snapshots_v2_db_reader",
+        source_transport="ensemble_snapshots_db_reader",
         release_calendar_key="ecmwf_open_data:mx2t6_high:full",
         track="mx2t6_high_full_horizon",
         city_id=scope.city_id,
@@ -292,7 +292,7 @@ def _call(conn: sqlite3.Connection, floor_config: dict) -> str:
             target_local_date=scope.target_local_date,
             temperature_metric=scope.temperature_metric,
             source_id="ecmwf_open_data",
-            source_transport="ensemble_snapshots_v2_db_reader",
+            source_transport="ensemble_snapshots_db_reader",
             data_version=scope.data_version,
             track="mx2t6_high_full_horizon",
             strategy_key=PRODUCER_READINESS_STRATEGY_KEY,

@@ -611,7 +611,7 @@ pin runtime MC floor and explicit evaluator/monitor n_mc threading.
 **Still open — data-layer packet required:** do not attempt to green-test these
 without an approved schema/data plan:
 
-- `test_calibration_weight_continuity`: current `ensemble_snapshots_v2` and
+- `test_calibration_weight_continuity`: current `ensemble_snapshots` and
   `calibration_pairs_v2` still use binary `training_allowed`; there is no
   persisted `precision_weight REAL CHECK (0 <= precision_weight <= 1)`.
 - `test_weight_floor_nonzero_for_ambig_only`: current LOW ingest can still

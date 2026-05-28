@@ -66,7 +66,7 @@ class MicrostructureMetrics:
     p_after_lower_bound: Optional[Decimal] = None  # post-event posterior lower bound p1
     stale_quote_price: Optional[Decimal] = None    # executable stale ask a0
 
-    # bin_grid_id propagated from ensemble_snapshots_v2 (F4 retrofit)
+    # bin_grid_id propagated from ensemble_snapshots (F4 retrofit)
     bin_grid_id: Optional[str] = None
     bin_schema_version: Optional[str] = None
 
@@ -109,7 +109,7 @@ class MarketAnalysisVNext:
                      Used for windowed spread observation (spread_observed_window_ms).
             polymarket_end_anchor_source: Derived by caller via market_end_anchor_source(market).
                      'gamma_explicit' | 'f1_12z_fallback'.
-            bin_grid_id: From ensemble_snapshots_v2.bin_grid_id for this snapshot's
+            bin_grid_id: From ensemble_snapshots.bin_grid_id for this snapshot's
                      triggering cycle (F4 retrofit).
             bin_schema_version: Companion to bin_grid_id.
             family_book_snapshot: Optional caller-injected neg-risk family order-book

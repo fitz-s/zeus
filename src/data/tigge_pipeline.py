@@ -22,7 +22,7 @@ Stages
    as subprocess(es) to produce the canonical local-calendar-day JSONs.
 3. Ingest stage: imports and calls ``ingest_track`` from
    ``scripts/ingest_grib_to_snapshots.py`` (zeus repo) which writes to
-   ``ensemble_snapshots_v2``. Idempotency is provided by the existing
+   ``ensemble_snapshots``. Idempotency is provided by the existing
    UNIQUE(city, target_date, temperature_metric, issue_time, data_version)
    constraint — re-runs of the same date naturally skip existing rows.
 
@@ -145,7 +145,7 @@ def check_mars_credentials(*, rc_path: Optional[Path] = None) -> dict:
 
 
 def _max_issue_date_in_db() -> Optional[date]:
-    """Return MAX(DATE(issue_time)) from ensemble_snapshots_v2 across TIGGE data_versions.
+    """Return MAX(DATE(issue_time)) from ensemble_snapshots across TIGGE data_versions.
 
     Returns None if the table is empty / missing or no TIGGE rows present.
     """
@@ -158,7 +158,7 @@ def _max_issue_date_in_db() -> Optional[date]:
     try:
         try:
             row = conn.execute(
-                "SELECT MAX(DATE(issue_time)) FROM ensemble_snapshots_v2 "
+                "SELECT MAX(DATE(issue_time)) FROM ensemble_snapshots "
                 "WHERE data_version LIKE 'mx2t6_%' OR data_version LIKE 'mn2t6_%'"
             ).fetchone()
         except Exception as exc:

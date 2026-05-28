@@ -416,7 +416,7 @@ class TestIterTrainingSnapshotsMetricIsolation:
         db.row_factory = sqlite3.Row
         db.executescript(
             """
-            CREATE TABLE ensemble_snapshots_v2 (
+            CREATE TABLE ensemble_snapshots (
                 snapshot_id TEXT PRIMARY KEY,
                 city TEXT,
                 target_date TEXT,
@@ -435,7 +435,7 @@ class TestIterTrainingSnapshotsMetricIsolation:
         # Insert one high and one low snapshot, both training_allowed=1
         db.execute(
             """
-            INSERT INTO ensemble_snapshots_v2
+            INSERT INTO ensemble_snapshots
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
@@ -447,7 +447,7 @@ class TestIterTrainingSnapshotsMetricIsolation:
         )
         db.execute(
             """
-            INSERT INTO ensemble_snapshots_v2
+            INSERT INTO ensemble_snapshots
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (

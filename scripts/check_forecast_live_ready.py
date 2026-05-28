@@ -36,7 +36,7 @@ from src.data.producer_readiness import PRODUCER_READINESS_STRATEGY_KEY
 from src.state.db import ZEUS_FORECASTS_DB_PATH
 
 SOURCE_ID = "ecmwf_open_data"
-SOURCE_TRANSPORT = "ensemble_snapshots_v2_db_reader"
+SOURCE_TRANSPORT = "ensemble_snapshots_db_reader"
 DEFAULT_HEARTBEAT_PATH = ROOT / "state" / "forecast-live-heartbeat.json"
 DEFAULT_SOURCE_HEALTH_PATH = ROOT / "state" / "source_health.json"
 

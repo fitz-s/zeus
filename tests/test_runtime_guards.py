@@ -6891,7 +6891,7 @@ def test_monitor_ens_refresh_uses_executable_forecast_reader_for_ecmwf_open_data
         "entry_forecast_config",
         lambda: types.SimpleNamespace(
             source_id="ecmwf_open_data",
-            source_transport=types.SimpleNamespace(value="ensemble_snapshots_v2_db_reader"),
+            source_transport=types.SimpleNamespace(value="ensemble_snapshots_db_reader"),
             high_track="mx2t6_high_full_horizon",
             low_track="mn2t6_low_full_horizon",
         ),
@@ -6906,7 +6906,7 @@ def test_monitor_ens_refresh_uses_executable_forecast_reader_for_ecmwf_open_data
                 "times": ["2026-04-01"],
                 "n_members": 51,
                 "source_id": "ecmwf_open_data",
-                "source_transport": "ensemble_snapshots_v2_db_reader",
+                "source_transport": "ensemble_snapshots_db_reader",
                 "source_run_id": "source-run-1",
                 "forecast_source_role": "entry_primary",
                 "degradation_level": "OK",
@@ -7002,7 +7002,7 @@ def test_monitor_ens_refresh_blocks_legacy_fallback_when_executable_reader_block
         "entry_forecast_config",
         lambda: types.SimpleNamespace(
             source_id="ecmwf_open_data",
-            source_transport=types.SimpleNamespace(value="ensemble_snapshots_v2_db_reader"),
+            source_transport=types.SimpleNamespace(value="ensemble_snapshots_db_reader"),
             high_track="mx2t6_high_full_horizon",
             low_track="mn2t6_low_full_horizon",
         ),
@@ -10800,7 +10800,7 @@ def test_load_portfolio_reads_recent_exits_from_authoritative_settlement_rows(tm
     conn.execute(
         """
         INSERT INTO position_events (
-            event_id, position_id, sequence_no, event_type, occurred_at,
+            event_id, position_id, event_version, sequence_no, event_type, occurred_at,
             phase_before, phase_after, strategy_key, decision_id, snapshot_id, order_id,
             command_id, caused_by, idempotency_key, venue_status, source_module, payload_json,
             env
@@ -12479,7 +12479,7 @@ def test_store_ens_snapshot_links_openmeteo_valid_time_without_faking_issue_time
                temperature_metric, physical_quantity, observation_field,
                data_version, training_allowed, causality_status, authority,
                members_unit, unit
-        FROM ensemble_snapshots_v2
+        FROM ensemble_snapshots
         WHERE snapshot_id = ? AND city = ? AND target_date = ?
         """,
         (snapshot_id, NYC.name, "2026-01-15"),
@@ -12574,7 +12574,7 @@ def test_store_snapshot_p_raw_persists_support_topology_in_v2_provenance(tmp_pat
     row = conn.execute(
         """
         SELECT p_raw_json, provenance_json
-        FROM ensemble_snapshots_v2
+        FROM ensemble_snapshots
         WHERE snapshot_id = ?
         """,
         (snapshot_id,),
@@ -12640,7 +12640,7 @@ def test_store_snapshot_p_raw_rejects_invalid_support_topology(tmp_path, mutate)
         p_raw_topology=topology,
     )
     row = conn.execute(
-        "SELECT p_raw_json FROM ensemble_snapshots_v2 WHERE snapshot_id = ?",
+        "SELECT p_raw_json FROM ensemble_snapshots WHERE snapshot_id = ?",
         (snapshot_id,),
     ).fetchone()
     conn.close()
@@ -12695,14 +12695,14 @@ def test_store_ens_snapshot_routes_to_attached_world_db(tmp_path):
         "SELECT COUNT(*) FROM main.ensemble_snapshots WHERE city = 'NYC'"
     ).fetchone()[0]
     main_v2_count = conn.execute(
-        "SELECT COUNT(*) FROM main.ensemble_snapshots_v2 WHERE city = 'NYC'"
+        "SELECT COUNT(*) FROM main.ensemble_snapshots WHERE city = 'NYC'"
     ).fetchone()[0]
     world_v2_row = conn.execute(
         """
         SELECT p_raw_json, data_version, training_allowed, causality_status,
                temperature_metric, physical_quantity, observation_field,
                members_unit, unit
-        FROM world.ensemble_snapshots_v2
+        FROM world.ensemble_snapshots
         WHERE snapshot_id = ? AND city = 'NYC'
         """,
         (snapshot_id,),
@@ -12792,7 +12792,7 @@ def test_store_ens_snapshot_writes_v2_independent_of_legacy_table_contents(tmp_p
         ens_result,
     )
     v2_count = conn.execute(
-        "SELECT COUNT(*) FROM ensemble_snapshots_v2 WHERE city = 'NYC'"
+        "SELECT COUNT(*) FROM ensemble_snapshots WHERE city = 'NYC'"
     ).fetchone()[0]
     conn.close()
 
@@ -12809,7 +12809,7 @@ def test_store_ens_snapshot_reuses_v2_conflict_without_legacy_fallback(tmp_path)
     issue_time = "2026-01-14T00:00:00+00:00"
     conn.execute(
         """
-        INSERT INTO ensemble_snapshots_v2
+        INSERT INTO ensemble_snapshots
         (city, target_date, temperature_metric, physical_quantity,
          observation_field, issue_time, valid_time, available_at, fetch_time,
          lead_hours, members_json, spread, is_bimodal, model_version,
@@ -12871,7 +12871,7 @@ def test_store_ens_snapshot_reuses_v2_conflict_without_legacy_fallback(tmp_path)
     v2_rows = conn.execute(
         """
         SELECT snapshot_id, valid_time, available_at, fetch_time, model_version
-          FROM ensemble_snapshots_v2
+          FROM ensemble_snapshots
          WHERE city = ?
         """,
         (NYC.name,),
@@ -12891,7 +12891,7 @@ def test_store_ens_snapshot_reuses_v2_conflict_without_legacy_fallback(tmp_path)
 @pytest.mark.skip(
     reason=(
         "2026-05-01 structural rewrite: collect_open_ens_cycle now writes to "
-        "ensemble_snapshots_v2 (not legacy ensemble_snapshots) with data_version "
+        "ensemble_snapshots (not legacy ensemble_snapshots) with data_version "
         "ecmwf_opendata_mx2t6_local_calendar_day_max_v1 (and _min_v1). The new "
         "antibody tests/test_opendata_writes_v2_table.py covers the replacement "
         "behavior. This legacy test asserted the v1 path that is now retired."
@@ -12936,7 +12936,7 @@ def test_ecmwf_open_data_collector_marks_rows_unverified_non_executable(monkeypa
     rows = conn.execute(
         """
         SELECT city, target_date, data_version, model_version, p_raw_json, authority
-        FROM ensemble_snapshots_v2
+        FROM ensemble_snapshots
         ORDER BY target_date
         """
     ).fetchall()

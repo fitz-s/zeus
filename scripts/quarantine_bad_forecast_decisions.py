@@ -158,7 +158,7 @@ def _run_forecasts_tables(
 ) -> dict:
     """Quarantine forecasts-side tables: calibration_pairs_v2.
 
-    Opens forecasts DB as main (ensemble_snapshots_v2 co-located);
+    Opens forecasts DB as main (ensemble_snapshots co-located);
     ATTACHes trade as 'trade' for writing decision_integrity_quarantine.
     """
     conn = _connect_rw(forecasts_db)

@@ -131,7 +131,7 @@ WORLD_DB_TABLES: tuple[str, ...] = (
     "data_coverage",
     "settlements",
     "ensemble_snapshots",
-    "ensemble_snapshots_v2",
+    "ensemble_snapshots",
     "calibration_pairs_v2",
     "platt_models_v2",
     "model_bias",

@@ -118,9 +118,9 @@ def from_market_event_row(row: Any) -> Optional[DecisionNaturalKey]:
 
 
 def from_ensemble_snapshot_row(row: Any) -> Optional[DecisionNaturalKey]:
-    """Extract partial key from ensemble_snapshots_v2 row.
+    """Extract partial key from ensemble_snapshots row.
 
-    ensemble_snapshots_v2 has city, target_date, temperature_metric, available_at.
+    ensemble_snapshots has city, target_date, temperature_metric, available_at.
     city is NOT market_slug — callers must resolve city → market_slug via
     market_events_v2 (keyed on city + target_date + temperature_metric).
     Returns None if required fields absent or temperature_metric invalid.

@@ -4,10 +4,10 @@
 #   Prior: PLAN docs/operations/task_2026-05-11_ecmwf_download_replacement/PLAN.md
 #   ECMWF Open Data has ~6-8h latency (vs. TIGGE's 48h public embargo) so it
 #   is the live-trading source for same-day forecasts. Rows must land in
-#   ensemble_snapshots_v2 with the canonical local-calendar-day data_version
+#   ensemble_snapshots with the canonical local-calendar-day data_version
 #   so calibration / day0 / opening_hunt readers can consume them alongside
 #   TIGGE archive rows via the data_version priority list.
-"""Collect ECMWF Open Data ENS member vectors into ensemble_snapshots_v2.
+"""Collect ECMWF Open Data ENS member vectors into ensemble_snapshots.
 
 Replaces the legacy 2t-instantaneous + ensemble_snapshots (v1) write path.
 
@@ -24,7 +24,7 @@ Pipeline
 3. Reuse the zeus repo's ``scripts/ingest_grib_to_snapshots.ingest_track``
    ingester (importable) which validates against the canonical contract,
    asserts the data_version is allow-listed, and writes the row to
-   ``ensemble_snapshots_v2`` with manifest_hash + provenance_json + members_unit.
+   ``ensemble_snapshots`` with manifest_hash + provenance_json + members_unit.
 
 Data version
 ------------
@@ -604,14 +604,14 @@ def _snapshot_rows_for_source_run(conn, *, source_run_id: str, data_version: str
         dict(row)
         for row in conn.execute(
             """
-            SELECT * FROM ensemble_snapshots_v2
+            SELECT * FROM ensemble_snapshots
             WHERE source_id = ?
               AND source_transport = ?
               AND source_run_id = ?
               AND data_version = ?
             ORDER BY city, target_date, temperature_metric, snapshot_id
             """,
-            (SOURCE_ID, "ensemble_snapshots_v2_db_reader", source_run_id, data_version),
+            (SOURCE_ID, "ensemble_snapshots_db_reader", source_run_id, data_version),
         ).fetchall()
     ]
 
@@ -681,7 +681,7 @@ def _delete_stale_source_run_snapshots(
         conn.execute(
             """
             SELECT COUNT(*)
-            FROM ensemble_snapshots_v2
+            FROM ensemble_snapshots
             WHERE source_id = ?
               AND source_transport = ?
               AND source_run_id = ?
@@ -689,7 +689,7 @@ def _delete_stale_source_run_snapshots(
             """,
             (
                 SOURCE_ID,
-                "ensemble_snapshots_v2_db_reader",
+                "ensemble_snapshots_db_reader",
                 source_run_id,
                 replace_started_at_iso,
             ),
@@ -699,7 +699,7 @@ def _delete_stale_source_run_snapshots(
         return 0
     deleted = conn.execute(
         """
-        DELETE FROM ensemble_snapshots_v2
+        DELETE FROM ensemble_snapshots
         WHERE source_id = ?
           AND source_transport = ?
           AND source_run_id = ?
@@ -707,7 +707,7 @@ def _delete_stale_source_run_snapshots(
         """,
         (
             SOURCE_ID,
-            "ensemble_snapshots_v2_db_reader",
+            "ensemble_snapshots_db_reader",
             source_run_id,
             replace_started_at_iso,
         ),
@@ -874,7 +874,7 @@ def _write_source_authority_chain(
             target_local_date=scope.target_local_date,
             temperature_metric=scope.temperature_metric,
             source_id=SOURCE_ID,
-            source_transport="ensemble_snapshots_v2_db_reader",
+            source_transport="ensemble_snapshots_db_reader",
             source_run_status=source_run_status,
             source_run_completeness=source_run_completeness,
             snapshot_target_date=target_local_date,
@@ -939,7 +939,7 @@ def _write_source_authority_chain(
             coverage_id=coverage_id,
             source_run_id=source_run_id,
             source_id=SOURCE_ID,
-            source_transport="ensemble_snapshots_v2_db_reader",
+            source_transport="ensemble_snapshots_db_reader",
             release_calendar_key=release_calendar_key,
             track=forecast_track,
             city_id=scope.city_id,
@@ -968,7 +968,7 @@ def _write_source_authority_chain(
             conn,
             scope=scope,
             source_id=SOURCE_ID,
-            source_transport="ensemble_snapshots_v2_db_reader",
+            source_transport="ensemble_snapshots_db_reader",
             track=forecast_track,
             computed_at=computed_at,
             release_calendar_key=release_calendar_key,
@@ -1596,7 +1596,7 @@ def collect_open_ens_cycle(
                         require_files=False,
                         source_run_context=_ingest_grib_SourceRunContext(
                             source_id=SOURCE_ID,
-                            source_transport="ensemble_snapshots_v2_db_reader",
+                            source_transport="ensemble_snapshots_db_reader",
                             source_run_id=source_run_id,
                             release_calendar_key=release_calendar_key,
                             source_cycle_time=source_cycle_time,
@@ -1699,7 +1699,7 @@ def data_version_priority_for_metric(temperature_metric: str) -> tuple[str, ...]
     Use this in any reader that wants "freshest source first, fall back to
     archive". Equivalent SQL pattern::
 
-        SELECT ... FROM ensemble_snapshots_v2
+        SELECT ... FROM ensemble_snapshots
          WHERE temperature_metric = ?
            AND data_version IN (<one placeholder per priority entry>)
          ORDER BY CASE data_version WHEN ? THEN 0 ELSE 1 END, available_at DESC

@@ -4,7 +4,7 @@
 |---|---|
 | Created | 2026-04-29 |
 | Last reused/audited | 2026-04-29 |
-| Authority class | **Reference / Mathematical Spec** (binds calibration weight semantics for ensemble_snapshots_v2 → calibration_pairs_v2 → platt_models_v2) |
+| Authority class | **Reference / Mathematical Spec** (binds calibration weight semantics for ensemble_snapshots → calibration_pairs_v2 → platt_models_v2) |
 | Status | ACTIVE |
 | Authority basis | Empirical: PoC v4 (`_poc_weighted_platt_2026-04-28/poc_weighted_platt.py`, 1.7M pairs, 60-day OOS, 500-resample bootstrap), PoC v5 (`_poc_weighted_platt_2026-04-28/poc_v5_temp_delta_weighted.py`, same dataset, ΔT-based weights). Theoretical: Fitz Constraint #2 (translation-loss / information-cliff). Physical: ECMWF mesoscale resolution limit at coastal/monsoon cities. |
 | Supersedes | Implicit binary `training_allowed: bool` semantics in `extract_tigge_mn2t6_localday_min.py:328-333` |
@@ -136,7 +136,7 @@ precision_weight = (
 
 with `WEIGHT_FLOOR = 0.05` and `N_MEMBERS = 51` (TIGGE ENS).
 
-Schema migration target: `ensemble_snapshots_v2.precision_weight REAL NOT NULL CHECK (precision_weight >= 0 AND precision_weight <= 1)` and the existing `training_allowed` column either dropped or maintained as a derived view: `training_allowed = (precision_weight > 0)`.
+Schema migration target: `ensemble_snapshots.precision_weight REAL NOT NULL CHECK (precision_weight >= 0 AND precision_weight <= 1)` and the existing `training_allowed` column either dropped or maintained as a derived view: `training_allowed = (precision_weight > 0)`.
 
 ### LAW 2: Per-city eligibility opt-out for coastal/monsoon cities
 

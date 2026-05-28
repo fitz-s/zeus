@@ -189,7 +189,7 @@ def load_bucket_residuals(
         f"""
         SELECT e.target_date AS td, e.members_json AS mj, e.members_unit AS mu,
                e.available_at AS av, e.issue_time AS it, s.settlement_value AS sv
-        FROM ensemble_snapshots_v2 e
+        FROM ensemble_snapshots e
         JOIN settlements_v2 s
           ON s.city = e.city AND s.target_date = e.target_date
          AND s.temperature_metric = e.temperature_metric
@@ -434,7 +434,7 @@ def _forecast_means(
     rows = conn.execute(
         f"SELECT e.target_date AS td, e.members_json AS mj, e.members_unit AS mu, "
         f"e.available_at AS av, e.issue_time AS it "
-        f"FROM ensemble_snapshots_v2 e WHERE {' AND '.join(where)} "
+        f"FROM ensemble_snapshots e WHERE {' AND '.join(where)} "
         f"ORDER BY e.available_at",
         params,
     ).fetchall()

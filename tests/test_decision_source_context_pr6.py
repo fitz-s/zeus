@@ -170,11 +170,11 @@ def test_r6_3c_clock_skew_none_no_error():
 # ---------------------------------------------------------------------------
 
 def _make_test_db() -> sqlite3.Connection:
-    """Create an in-memory DB with ensemble_snapshots_v2 schema for R-6.4 probe."""
+    """Create an in-memory DB with ensemble_snapshots schema for R-6.4 probe."""
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     conn.execute("""
-        CREATE TABLE ensemble_snapshots_v2 (
+        CREATE TABLE ensemble_snapshots (
             snapshot_id INTEGER PRIMARY KEY AUTOINCREMENT,
             city TEXT NOT NULL,
             target_date TEXT NOT NULL,
@@ -212,7 +212,7 @@ def test_r6_4_orderbook_hash_delta_non_null_via_fixture():
     conn = _make_test_db()
     # Simulate a PR6 writer inserting with non-null delta
     conn.execute("""
-        INSERT INTO ensemble_snapshots_v2
+        INSERT INTO ensemble_snapshots
             (city, target_date, temperature_metric, data_version, model_version,
              fetch_time, training_allowed, causality_status, boundary_ambiguous,
              authority, members_unit, unit,
@@ -227,7 +227,7 @@ def test_r6_4_orderbook_hash_delta_non_null_via_fixture():
     conn.commit()
 
     rows = conn.execute(
-        "SELECT raw_orderbook_hash_transition_delta_ms FROM ensemble_snapshots_v2 "
+        "SELECT raw_orderbook_hash_transition_delta_ms FROM ensemble_snapshots "
         "WHERE city = 'Chicago'"
     ).fetchall()
     assert len(rows) == 1

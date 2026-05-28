@@ -166,7 +166,7 @@ def evaluate_producer_coverage(
     del city_id, city_timezone, source_id
     reason_codes: list[str] = []
 
-    if source_transport != "ensemble_snapshots_v2_db_reader":
+    if source_transport != "ensemble_snapshots_db_reader":
         reason_codes.append("DIRECT_FETCH_ENTRY_PATH_BLOCKED")
     if source_run_status not in {"SUCCESS", "PARTIAL"}:
         reason_codes.append(f"SOURCE_RUN_{source_run_status}")

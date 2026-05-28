@@ -8,16 +8,16 @@
 # Purpose: Rebuild metric-aware calibration_pairs_v2 behind dry-run and preflight gates.
 # Reuse: Inspect architecture/script_manifest.yaml and active packet receipt before live writes.
 
-"""Rebuild calibration_pairs_v2 from ensemble_snapshots_v2 (high track).
+"""Rebuild calibration_pairs_v2 from ensemble_snapshots (high track).
 
-Phase 4C — reads high-track canonical snapshots from ``ensemble_snapshots_v2``
+Phase 4C — reads high-track canonical snapshots from ``ensemble_snapshots``
 and writes ``calibration_pairs_v2`` rows via ``add_calibration_pair_v2`` with
 ``metric_identity=HIGH_LOCALDAY_MAX``.
 
 This script is the v2 successor to ``rebuild_calibration_pairs_canonical.py``.
 Key differences from the legacy script:
 
-- Source table: ``ensemble_snapshots_v2`` (not ``ensemble_snapshots``)
+- Source table: ``ensemble_snapshots`` (not ``ensemble_snapshots``)
 - Eligibility filter: ``temperature_metric='high'``, ``training_allowed=1``,
   ``causality_status='OK'``, ``authority='VERIFIED'``
 - Write function: ``add_calibration_pair_v2(metric_identity=HIGH_LOCALDAY_MAX)``
@@ -133,7 +133,7 @@ def iter_training_snapshots(conn: sqlite3.Connection, spec: CalibrationMetricSpe
     return conn.execute(
         """
         SELECT *
-        FROM ensemble_snapshots_v2
+        FROM ensemble_snapshots
         WHERE temperature_metric = ?
           AND data_version = ?
           AND training_allowed = 1
@@ -906,7 +906,7 @@ def _fetch_eligible_snapshots_v2(
     source_id_filter: Optional[str] = None,
     horizon_profile_filter: Optional[str] = None,
 ) -> list[sqlite3.Row]:
-    """Pull eligible snapshots from ensemble_snapshots_v2 for the given spec."""
+    """Pull eligible snapshots from ensemble_snapshots for the given spec."""
     if spec is None:
         raise ValueError(
             "_fetch_eligible_snapshots_v2 requires an explicit CalibrationMetricSpec; "
@@ -919,7 +919,7 @@ def _fetch_eligible_snapshots_v2(
             f"{spec.allowed_data_versions!r}."
         )
     track = spec.identity.temperature_metric
-    columns = _table_columns(conn, "ensemble_snapshots_v2")
+    columns = _table_columns(conn, "ensemble_snapshots")
     params: list = [track, MIN_TRAINING_DATE]
     where = (
         "WHERE temperature_metric = ? "
@@ -952,7 +952,7 @@ def _fetch_eligible_snapshots_v2(
         params.append(horizon_profile_filter)
     sql = f"""
         SELECT *
-        FROM ensemble_snapshots_v2
+        FROM ensemble_snapshots
         {where}
         ORDER BY city, target_date, lead_hours
     """
@@ -1284,7 +1284,7 @@ def _write_snapshot_pairs_v2(
     """
     target_date = snapshot["target_date"]
     data_version = snapshot["data_version"] or ""
-    source = ""  # ensemble_snapshots_v2 has no source column; INV-15 gates on data_version prefix
+    source = ""  # ensemble_snapshots has no source column; INV-15 gates on data_version prefix
 
     grid = grid_for_city(city)
     bins = grid.as_bins()
@@ -1648,7 +1648,7 @@ def rebuild_v2(
         stats.refused = True
         raise RuntimeError(
             "Refusing live v2 rebuild: no eligible snapshots. "
-            "Check that 4B ingest has populated ensemble_snapshots_v2."
+            "Check that 4B ingest has populated ensemble_snapshots."
         )
 
     # T1E: Group snapshots by city and process each city in its own bounded
@@ -1980,7 +1980,7 @@ def _print_rebuild_gate_stats(stats: RebuildStatsV2) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Rebuild calibration_pairs_v2 from ensemble_snapshots_v2 (high track).",
+        description="Rebuild calibration_pairs_v2 from ensemble_snapshots (high track).",
     )
     parser.add_argument(
         "--dry-run", dest="dry_run", action="store_true", default=True,
@@ -2099,7 +2099,7 @@ def main() -> int:
             uri_path = Path(args.db_path).resolve().as_uri().replace("file://", "file:")
             conn = sqlite3.connect(f"{uri_path}?mode=ro", uri=True)
         else:
-            from src.state.db import ZEUS_FORECASTS_DB_PATH  # noqa: PLC0415  # K1-batch2 fix 2026-05-17: ensemble_snapshots_v2+calibration_pairs_v2+observations are forecast_class
+            from src.state.db import ZEUS_FORECASTS_DB_PATH  # noqa: PLC0415  # K1-batch2 fix 2026-05-17: ensemble_snapshots+calibration_pairs_v2+observations are forecast_class
             uri_path = Path(ZEUS_FORECASTS_DB_PATH).resolve().as_uri().replace("file://", "file:")
             conn = sqlite3.connect(f"{uri_path}?mode=ro", uri=True)
         conn.row_factory = sqlite3.Row

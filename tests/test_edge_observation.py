@@ -94,7 +94,7 @@ def _insert_settled(
     conn.execute(
         """
         INSERT INTO position_events (
-            event_id, position_id, sequence_no, event_type,
+            event_id, position_id, event_version, sequence_no, event_type,
             occurred_at, strategy_key, source_module, env, payload_json
         ) VALUES (?, ?, 1, ?, 'SETTLED', ?, ?, 'tests', 'live', ?)
         """,

@@ -156,7 +156,7 @@ Rollback must restore a single owner and must not delete canonical DB rows.
 6. Record `state/forecast-live-heartbeat.json`, then clear only that
    runtime-local heartbeat if the operator wants stale-heartbeat noise removed.
    Do not remove `source_run`, `source_run_coverage`, `readiness_state`,
-   `ensemble_snapshots_v2`, or `job_run` rows as part of rollback.
+   `ensemble_snapshots`, or `job_run` rows as part of rollback.
 
 ## Evidence Checklist
 

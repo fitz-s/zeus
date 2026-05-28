@@ -135,9 +135,9 @@ def _fit_signature_hash(
 
 
 def _discover_cities(conn: sqlite3.Connection) -> list[str]:
-    """Return sorted list of cities that have ensemble_snapshots_v2 data."""
+    """Return sorted list of cities that have ensemble_snapshots data."""
     rows = conn.execute(
-        "SELECT DISTINCT city FROM ensemble_snapshots_v2 ORDER BY city"
+        "SELECT DISTINCT city FROM ensemble_snapshots ORDER BY city"
     ).fetchall()
     return [r[0] for r in rows]
 

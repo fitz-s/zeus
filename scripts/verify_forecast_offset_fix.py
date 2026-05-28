@@ -51,7 +51,7 @@ ALL_CITIES = FAR_EAST_CITIES + CONTROL_CITIES
 SQL_OLD = """
     SELECT snapshot_id, source_cycle_time, contributes_to_target_extrema,
            forecast_window_attribution_status, boundary_ambiguous, members_json
-    FROM ensemble_snapshots_v2
+    FROM ensemble_snapshots
     WHERE city = ?
       AND target_date = ?
       AND temperature_metric = ?
@@ -63,7 +63,7 @@ SQL_OLD = """
 SQL_NEW = """
     SELECT snapshot_id, source_cycle_time, contributes_to_target_extrema,
            forecast_window_attribution_status, boundary_ambiguous, members_json
-    FROM ensemble_snapshots_v2
+    FROM ensemble_snapshots
     WHERE city = ?
       AND target_date = ?
       AND temperature_metric = ?

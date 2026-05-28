@@ -221,7 +221,7 @@ def _insert_status_position_event_for_view_test(
     conn.execute(
         """
         INSERT INTO position_events (
-            event_id, position_id, sequence_no, event_type, occurred_at,
+            event_id, position_id, event_version, sequence_no, event_type, occurred_at,
             phase_before, phase_after, strategy_key, decision_id, snapshot_id, order_id,
             command_id, caused_by, idempotency_key, venue_status, source_module, env, payload_json
         ) VALUES (?, ?, 1, ?, ?, ?, NULL, NULL, 'center_buy', NULL, 'snap-fill', NULL,
@@ -3271,6 +3271,7 @@ def test_append_many_and_project_rejects_missing_env_for_non_settlement_events(t
     event = {
         "event_id": "evt-missing-entry-env",
         "position_id": "pos-missing-entry-env",
+        "event_version": 1,
         "sequence_no": 1,
         "event_type": "ENTRY_ORDER_POSTED",
         "occurred_at": "2026-05-07T00:00:00Z",
@@ -3968,7 +3969,7 @@ def _insert_s2_position_event(
     conn.execute(
         """
         INSERT INTO position_events (
-            event_id, position_id, sequence_no, event_type,
+            event_id, position_id, event_version, sequence_no, event_type,
             occurred_at, phase_before, phase_after, strategy_key, decision_id,
             snapshot_id, order_id, command_id, caused_by, idempotency_key,
             venue_status, source_module, env, payload_json

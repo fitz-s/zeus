@@ -2,15 +2,15 @@
 # Last reused/audited: 2026-05-07
 # Authority basis: docs/operations/TIGGE_DOWNLOAD_SPEC_v3_2026_05_07.md §3 Phase 0 #5
 #                  + critic v2 reject for spec v3 (A1 BLOCKER):
-#                  ALTER ensemble_snapshots_v2 ADD COLUMN ingest_backend so live
+#                  ALTER ensemble_snapshots ADD COLUMN ingest_backend so live
 #                  ECDS-routed rows are distinguishable from legacy webapi-routed
 #                  rows. Pre-2026-05-07 historical = 'unknown'. Post-cutover
 #                  writes carry 'ecds' or 'webapi'.
-"""Schema migration: add ``ingest_backend`` column to ``ensemble_snapshots_v2``.
+"""Schema migration: add ``ingest_backend`` column to ``ensemble_snapshots``.
 
 What this migrates
 ------------------
-- ``ensemble_snapshots_v2 ADD COLUMN ingest_backend TEXT NOT NULL DEFAULT 'unknown'``
+- ``ensemble_snapshots ADD COLUMN ingest_backend TEXT NOT NULL DEFAULT 'unknown'``
 
 Idempotent — repeats are no-ops:
 - ``ALTER TABLE ... ADD COLUMN`` raises ``OperationalError: duplicate column name``
@@ -25,7 +25,7 @@ but the cohort intent is consistent metadata across DB.
 
 Usage (from zeus repo root, zeus venv active)::
 
-    python scripts/migrate_ensemble_snapshots_v2_add_ingest_backend.py [--dry-run]
+    python scripts/migrate_ensemble_snapshots_add_ingest_backend.py [--dry-run]
 """
 from __future__ import annotations
 
@@ -45,7 +45,7 @@ logger = logging.getLogger(__name__)
 
 
 COLUMN_NAME = "ingest_backend"
-TABLE_NAME = "ensemble_snapshots_v2"
+TABLE_NAME = "ensemble_snapshots"
 ALTER_SQL = (
     f"ALTER TABLE {TABLE_NAME} "
     f"ADD COLUMN {COLUMN_NAME} TEXT NOT NULL DEFAULT 'unknown'"

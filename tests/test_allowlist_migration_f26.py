@@ -189,7 +189,7 @@ F26_CLEANUP_PROMOTED: frozenset[str] = frozenset(
         # operator_invoked migration scripts (already_guarded)
         "scripts/migrate_add_authority_column.py",
         "scripts/migrate_b070_control_overrides_to_history.py",
-        "scripts/migrate_ensemble_snapshots_v2_add_ingest_backend.py",
+        "scripts/migrate_ensemble_snapshots_add_ingest_backend.py",
         "scripts/migrate_forecasts_availability_provenance.py",
         "scripts/migrate_observations_k1.py",
         # retrofitted: db_writer_lock wrap added in F26 cleanup

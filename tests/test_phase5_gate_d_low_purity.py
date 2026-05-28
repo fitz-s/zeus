@@ -27,7 +27,7 @@ import pytest
 # ---------------------------------------------------------------------------
 
 _SNAPSHOTS_V2_DDL = """
-CREATE TABLE IF NOT EXISTS ensemble_snapshots_v2 (
+CREATE TABLE IF NOT EXISTS ensemble_snapshots (
     snapshot_id INTEGER PRIMARY KEY,
     city TEXT NOT NULL,
     target_date TEXT NOT NULL,
@@ -104,7 +104,7 @@ def _make_gate_d_db() -> sqlite3.Connection:
 
     # One HIGH snapshot + matching observation
     conn.execute("""
-        INSERT INTO ensemble_snapshots_v2 (
+        INSERT INTO ensemble_snapshots (
             city, target_date, temperature_metric, physical_quantity, data_version,
             members_unit, training_allowed, issue_time, available_at, lead_hours,
             causality_status, authority, members_json
@@ -124,7 +124,7 @@ def _make_gate_d_db() -> sqlite3.Connection:
 
     # One LOW snapshot + matching observation
     conn.execute("""
-        INSERT INTO ensemble_snapshots_v2 (
+        INSERT INTO ensemble_snapshots (
             city, target_date, temperature_metric, physical_quantity, data_version,
             members_unit, training_allowed, issue_time, available_at, lead_hours,
             causality_status, authority, members_json
@@ -153,7 +153,7 @@ class TestGateDLowPurityIsolation:
         """R-AZ-1 (RED): rebuild_v2 with HIGH_SPEC must not write any temperature_metric='low' rows.
 
         Pre-fix: _process_snapshot_v2 has no spec param → SQL pre-filter is the only guard.
-        If the SQL filter in rebuild_v2 is missing or weak, LOW rows from ensemble_snapshots_v2
+        If the SQL filter in rebuild_v2 is missing or weak, LOW rows from ensemble_snapshots
         could be processed. Post-fix: spec param + data_version assertion makes this impossible.
         """
         from scripts.rebuild_calibration_pairs_v2 import rebuild_v2, CalibrationMetricSpec, RebuildStatsV2
@@ -250,7 +250,7 @@ class TestGateDLowPurityIsolation:
         apply_v2_schema(conn)
         conn.execute(
             """
-            INSERT INTO ensemble_snapshots_v2 (
+            INSERT INTO ensemble_snapshots (
                 city, target_date, temperature_metric, physical_quantity, observation_field,
                 issue_time, available_at, fetch_time, lead_hours, members_json,
                 model_version, data_version, training_allowed, causality_status,
@@ -283,7 +283,7 @@ class TestGateDLowPurityIsolation:
                 LOW_LOCALDAY_MIN.data_version,
             ),
         )
-        snapshot = conn.execute("SELECT * FROM ensemble_snapshots_v2").fetchone()
+        snapshot = conn.execute("SELECT * FROM ensemble_snapshots").fetchone()
 
         stats = RebuildStatsV2()
         _process_snapshot_v2(
@@ -328,7 +328,7 @@ class TestGateDLowPurityIsolation:
             apply_v2_schema(conn)
             conn.execute(
                 """
-                INSERT INTO ensemble_snapshots_v2 (
+                INSERT INTO ensemble_snapshots (
                     city, target_date, temperature_metric, physical_quantity, observation_field,
                     issue_time, available_at, fetch_time, lead_hours, members_json,
                     model_version, data_version, training_allowed, causality_status,
@@ -361,7 +361,7 @@ class TestGateDLowPurityIsolation:
                     data_version,
                 ),
             )
-            snapshot = conn.execute("SELECT * FROM ensemble_snapshots_v2").fetchone()
+            snapshot = conn.execute("SELECT * FROM ensemble_snapshots").fetchone()
 
             assert_data_version_allowed(data_version)
             assert METRIC_SPECS[1].allows_data_version(data_version)
@@ -382,7 +382,7 @@ class TestGateDLowPurityIsolation:
         conn = _make_gate_d_db()
         conn.execute(
             """
-            INSERT INTO ensemble_snapshots_v2 (
+            INSERT INTO ensemble_snapshots (
                 city, target_date, temperature_metric, physical_quantity, data_version,
                 members_unit, training_allowed, issue_time, available_at, lead_hours,
                 causality_status, authority, members_json
@@ -463,7 +463,7 @@ class TestGateDLowPurityIsolation:
         conn = _make_gate_d_db()
         conn.executemany(
             """
-            INSERT INTO ensemble_snapshots_v2 (
+            INSERT INTO ensemble_snapshots (
                 city, target_date, temperature_metric, physical_quantity, data_version,
                 members_unit, training_allowed, issue_time, source_id, available_at,
                 lead_hours, causality_status, authority, members_json
@@ -620,7 +620,7 @@ class TestGateDLowPurityIsolation:
         apply_v2_schema(conn)
         conn.execute(
             """
-            INSERT INTO ensemble_snapshots_v2 (
+            INSERT INTO ensemble_snapshots (
                 city, target_date, temperature_metric, physical_quantity, observation_field,
                 issue_time, available_at, fetch_time, lead_hours, members_json,
                 model_version, data_version, training_allowed, causality_status,
@@ -710,7 +710,7 @@ class TestGateDLowPurityIsolation:
             conn.executescript(_SNAPSHOTS_V2_DDL + ";")
             conn.execute(
                 """
-                INSERT INTO ensemble_snapshots_v2 (
+                INSERT INTO ensemble_snapshots (
                     city, target_date, temperature_metric, physical_quantity, data_version,
                     members_unit, training_allowed, issue_time, available_at, lead_hours,
                     causality_status, authority, members_json
@@ -732,7 +732,7 @@ class TestGateDLowPurityIsolation:
                     json.dumps([60.0 for _ in range(51)]),
                 ),
             )
-            snapshot = conn.execute("SELECT * FROM ensemble_snapshots_v2").fetchone()
+            snapshot = conn.execute("SELECT * FROM ensemble_snapshots").fetchone()
 
             assert_data_version_allowed(data_version)
             assert METRIC_SPECS[1].allows_data_version(data_version)

@@ -221,9 +221,9 @@ def _fetch_snapshot_meta(
     conn: sqlite3.Connection,
     snapshot_id: int,
 ) -> Optional[sqlite3.Row]:
-    """Fetch ensemble_snapshots_v2 row for a snapshot_id."""
+    """Fetch ensemble_snapshots row for a snapshot_id."""
     return conn.execute(
-        "SELECT * FROM ensemble_snapshots_v2 WHERE snapshot_id = ?",
+        "SELECT * FROM ensemble_snapshots WHERE snapshot_id = ?",
         (snapshot_id,),
     ).fetchone()
 
@@ -359,7 +359,7 @@ def _compare_snapshot(
 
     snap = _fetch_snapshot_meta(backup_conn, snapshot_id)
     if snap is None:
-        logging.warning("Snapshot %d not found in ensemble_snapshots_v2", snapshot_id)
+        logging.warning("Snapshot %d not found in ensemble_snapshots", snapshot_id)
         return None
 
     try:
@@ -763,7 +763,7 @@ def _make_synthetic_fixture():
     conn = sqlite3.connect(":memory:")
     conn.executescript(
         """
-        CREATE TABLE ensemble_snapshots_v2 (
+        CREATE TABLE ensemble_snapshots (
             snapshot_id INTEGER PRIMARY KEY,
             city TEXT, target_date TEXT, temperature_metric TEXT,
             lead_hours REAL, members_json TEXT, members_unit TEXT,

@@ -546,7 +546,7 @@ class TestRebuildDataVersionAssertion:
     """
 
     _DB_SCHEMA = """
-        CREATE TABLE IF NOT EXISTS ensemble_snapshots_v2 (
+        CREATE TABLE IF NOT EXISTS ensemble_snapshots (
             snapshot_id INTEGER PRIMARY KEY,
             city TEXT NOT NULL,
             target_date TEXT NOT NULL,
@@ -581,7 +581,7 @@ class TestRebuildDataVersionAssertion:
             "(city TEXT, target_date TEXT, high_temp REAL, unit TEXT, authority TEXT, source TEXT)"
         )
         conn.execute("""
-            INSERT INTO ensemble_snapshots_v2 (
+            INSERT INTO ensemble_snapshots (
                 city, target_date, temperature_metric, physical_quantity,
                 observation_field, fetch_time, model_version,
                 data_version, members_unit, training_allowed,
@@ -607,7 +607,7 @@ class TestRebuildDataVersionAssertion:
         ))
         conn.commit()
         return conn.execute(
-            "SELECT * FROM ensemble_snapshots_v2 LIMIT 1"
+            "SELECT * FROM ensemble_snapshots LIMIT 1"
         ).fetchone()
 
     def test_R_AU_1_global_allowlist_rejects_unknown_version(self):

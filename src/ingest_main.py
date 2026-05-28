@@ -612,7 +612,7 @@ def _opendata_mx2t6_cycle():
 
     Open Data ENS posts 00Z runs by ~07:00 UTC (latency 6-8h). This job runs
     at 07:30 UTC and writes ``ecmwf_opendata_mx2t3_local_calendar_day_max_v1``
-    rows to ``ensemble_snapshots_v2`` (post-2026-05-07 mx2t3 cutover; the
+    rows to ``ensemble_snapshots`` (post-2026-05-07 mx2t3 cutover; the
     schedule job name retains the legacy ``mx2t6`` slug for back-compat with
     ops dashboards).
     """
@@ -628,7 +628,7 @@ def _opendata_mn2t6_cycle():
 
     Runs at 07:35 UTC (5-min offset from the HIGH job to space out downloads).
     Writes ``ecmwf_opendata_mn2t3_local_calendar_day_min_v1`` rows to
-    ``ensemble_snapshots_v2`` (post-2026-05-07 mn2t3 cutover; the schedule
+    ``ensemble_snapshots`` (post-2026-05-07 mn2t3 cutover; the schedule
     job name retains the legacy ``mn2t6`` slug for back-compat with ops
     dashboards).
     """

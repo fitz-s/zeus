@@ -70,7 +70,7 @@ If you discover (a) the API payload doesn't carry `provider_reported_time`, OR (
 3. **Backfill condition for `polymarket_end_anchor_source`**: critic flagged the `tx_hash IS NULL → 'gamma_explicit'` heuristic may be inverted. Verify against `market_phase.py:236` writer logic before running the migration.
 4. **Header blocks on 3 new test files**: `Lifecycle/Purpose/Reuse` triplet per `architecture/naming_conventions.yaml`.
 5. **test_topology.yaml registration**: add the 3 new test file entries inline in the production commit. Wave-A opus critic caught this miss; don't repeat.
-6. **`db_table_ownership.yaml` column inventory** updates for the 8 new columns across `ensemble_snapshots_v2`, `settlement_commands`, `wrap_unwrap_commands`.
+6. **`db_table_ownership.yaml` column inventory** updates for the 8 new columns across `ensemble_snapshots`, `settlement_commands`, `wrap_unwrap_commands`.
 7. **`docs/operations/INDEX.md`** entry for new module `src/runtime/clock_skew_probe.py`.
 8. **LOC estimate revision**: 530 likely undercounts migrations (60-80 LOC each is realistic, not 40). With Path B writer expansion, expect ~860.
 

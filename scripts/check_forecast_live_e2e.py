@@ -54,7 +54,7 @@ CITY_ID = "LONDON"
 CITY_NAME = "London"
 CITY_TIMEZONE = "Europe/London"
 SOURCE_ID = "ecmwf_open_data"
-SOURCE_TRANSPORT = "ensemble_snapshots_v2_db_reader"
+SOURCE_TRANSPORT = "ensemble_snapshots_db_reader"
 
 
 @dataclass(frozen=True)

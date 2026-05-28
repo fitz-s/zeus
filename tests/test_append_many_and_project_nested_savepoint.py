@@ -50,6 +50,7 @@ def _canonical_event(position_id: str, event_type: str = "ENTRY_ORDER_POSTED",
     return {
         "event_id": f"evt-{position_id}-{sequence_no}",
         "position_id": position_id,
+        "event_version": 1,
         "sequence_no": sequence_no,
         "event_type": event_type,
         "occurred_at": "2026-04-23T00:00:00Z",

@@ -76,7 +76,7 @@ class TestIngestGribWritesFullProvenanceFields:
         base.update(overrides)
 
         conn.execute("""
-            INSERT INTO ensemble_snapshots_v2
+            INSERT INTO ensemble_snapshots
             (city, target_date, temperature_metric, physical_quantity, observation_field,
              issue_time, valid_time, available_at, fetch_time, lead_hours,
              members_json, model_version, data_version, training_allowed, causality_status,
@@ -97,7 +97,7 @@ class TestIngestGribWritesFullProvenanceFields:
         conn = self._make_conn()
         self._write_test_snapshot(conn)
         (val,) = conn.execute(
-            "SELECT temperature_metric FROM ensemble_snapshots_v2"
+            "SELECT temperature_metric FROM ensemble_snapshots"
         ).fetchone()
         assert val and val.strip(), "temperature_metric is NULL or empty after ingest (R-L)"
         assert val == "high"
@@ -107,7 +107,7 @@ class TestIngestGribWritesFullProvenanceFields:
         conn = self._make_conn()
         self._write_test_snapshot(conn)
         (val,) = conn.execute(
-            "SELECT physical_quantity FROM ensemble_snapshots_v2"
+            "SELECT physical_quantity FROM ensemble_snapshots"
         ).fetchone()
         assert val and val.strip(), "physical_quantity is NULL or empty after ingest (R-L)"
         assert val == "mx2t6_local_calendar_day_max"
@@ -117,7 +117,7 @@ class TestIngestGribWritesFullProvenanceFields:
         conn = self._make_conn()
         self._write_test_snapshot(conn)
         (val,) = conn.execute(
-            "SELECT observation_field FROM ensemble_snapshots_v2"
+            "SELECT observation_field FROM ensemble_snapshots"
         ).fetchone()
         assert val == "high_temp", (
             f"observation_field must be 'high_temp' for high-track ingest, got {val!r} (R-L)"
@@ -128,7 +128,7 @@ class TestIngestGribWritesFullProvenanceFields:
         conn = self._make_conn()
         self._write_test_snapshot(conn)
         (val,) = conn.execute(
-            "SELECT data_version FROM ensemble_snapshots_v2"
+            "SELECT data_version FROM ensemble_snapshots"
         ).fetchone()
         assert val == "tigge_mx2t6_local_calendar_day_max_v1", (
             f"data_version must be 'tigge_mx2t6_local_calendar_day_max_v1', got {val!r} (R-L). "
@@ -140,7 +140,7 @@ class TestIngestGribWritesFullProvenanceFields:
         conn = self._make_conn()
         self._write_test_snapshot(conn)
         (val,) = conn.execute(
-            "SELECT training_allowed FROM ensemble_snapshots_v2"
+            "SELECT training_allowed FROM ensemble_snapshots"
         ).fetchone()
         assert val in (0, 1), (
             f"training_allowed must be 0 or 1, got {val!r} (R-L)"
@@ -151,7 +151,7 @@ class TestIngestGribWritesFullProvenanceFields:
         conn = self._make_conn()
         self._write_test_snapshot(conn)
         (val,) = conn.execute(
-            "SELECT causality_status FROM ensemble_snapshots_v2"
+            "SELECT causality_status FROM ensemble_snapshots"
         ).fetchone()
         assert val and val.strip(), "causality_status is NULL or empty after ingest (R-L)"
         assert val == "OK", (
@@ -163,7 +163,7 @@ class TestIngestGribWritesFullProvenanceFields:
         conn = self._make_conn()
         self._write_test_snapshot(conn)
         (val,) = conn.execute(
-            "SELECT boundary_ambiguous FROM ensemble_snapshots_v2"
+            "SELECT boundary_ambiguous FROM ensemble_snapshots"
         ).fetchone()
         assert val in (0, 1), (
             f"boundary_ambiguous must be 0 or 1, got {val!r} (R-L)"
@@ -174,7 +174,7 @@ class TestIngestGribWritesFullProvenanceFields:
         conn = self._make_conn()
         self._write_test_snapshot(conn)
         (val,) = conn.execute(
-            "SELECT members_unit FROM ensemble_snapshots_v2"
+            "SELECT members_unit FROM ensemble_snapshots"
         ).fetchone()
         assert val == "degC", (
             f"members_unit must be 'degC', got {val!r} (R-L/R-O). "
@@ -187,7 +187,7 @@ class TestIngestGribWritesFullProvenanceFields:
         conn = self._make_conn()
         self._write_test_snapshot(conn)
         (val,) = conn.execute(
-            "SELECT manifest_hash FROM ensemble_snapshots_v2"
+            "SELECT manifest_hash FROM ensemble_snapshots"
         ).fetchone()
         assert val and len(val) > 8, (
             f"manifest_hash must be populated (non-trivial hash), got {val!r} (R-L)"
@@ -198,7 +198,7 @@ class TestIngestGribWritesFullProvenanceFields:
         conn = self._make_conn()
         self._write_test_snapshot(conn)
         (val,) = conn.execute(
-            "SELECT provenance_json FROM ensemble_snapshots_v2"
+            "SELECT provenance_json FROM ensemble_snapshots"
         ).fetchone()
         parsed = json.loads(val)
         assert parsed, (
@@ -326,7 +326,7 @@ class TestIngestJsonFileIntegration:
         row = conn.execute(
             "SELECT temperature_metric, physical_quantity, observation_field, data_version, "
             "training_allowed, causality_status, boundary_ambiguous, manifest_hash, "
-            "provenance_json, members_unit FROM ensemble_snapshots_v2"
+            "provenance_json, members_unit FROM ensemble_snapshots"
         ).fetchone()
         assert row is not None, "No row written by ingest_json_file (MAJOR-1)"
         (temp_metric, phys_qty, obs_field, dv, ta, cs, ba, mh, pj, mu) = row
@@ -389,7 +389,7 @@ class TestIngestJsonFileIntegration:
 
         assert status == "written", f"Expected 'written', got {status!r}"
         row = conn.execute(
-            "SELECT local_day_start_utc, step_horizon_hours FROM ensemble_snapshots_v2"
+            "SELECT local_day_start_utc, step_horizon_hours FROM ensemble_snapshots"
         ).fetchone()
         assert row is not None, "No row written"
         ldu, shh = row
@@ -417,7 +417,7 @@ class TestIngestJsonFileIntegration:
 
         assert status == "written"
         row = conn.execute(
-            "SELECT local_day_start_utc, step_horizon_hours FROM ensemble_snapshots_v2"
+            "SELECT local_day_start_utc, step_horizon_hours FROM ensemble_snapshots"
         ).fetchone()
         assert row is not None
         # Both columns may be NULL when extractor omits them — that is acceptable

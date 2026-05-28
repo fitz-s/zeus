@@ -7,12 +7,12 @@
 
 PR #19 phase 2 originally protected the legacy
 `ensemble_snapshots.bias_corrected` column. v1.F20 removed the legacy
-world-class table and moved canonical writes to `forecasts.ensemble_snapshots_v2`.
+world-class table and moved canonical writes to `forecasts.ensemble_snapshots`.
 
 This test now pins the current relationship:
 - fresh `init_schema()` must not recreate the removed legacy table
 - repeated `init_schema()` remains idempotent
-- writer + reader round-trip works on `ensemble_snapshots_v2`
+- writer + reader round-trip works on `ensemble_snapshots`
 """
 from __future__ import annotations
 
@@ -111,9 +111,9 @@ def test_legacy_db_without_column_gets_migrated():
 
 
 def test_store_snapshot_p_raw_round_trip_with_fresh_schema():
-    """Integration: writer + reader work end-to-end on ensemble_snapshots_v2.
+    """Integration: writer + reader work end-to-end on ensemble_snapshots.
 
-    v1.F20: migrated from legacy ensemble_snapshots to ensemble_snapshots_v2.
+    v1.F20: migrated from legacy ensemble_snapshots to ensemble_snapshots.
     Pre-P2-B1 this test verified bias_corrected column migration; post-v1.F20
     the v2 table is the canonical target and bias_corrected is a v2 column.
     """
@@ -126,26 +126,26 @@ def test_store_snapshot_p_raw_round_trip_with_fresh_schema():
     _attach_forecasts_snapshot_table(conn)
     # Insert a v2 snapshot row so we have something to UPDATE.
     conn.execute("""
-        INSERT INTO forecasts.ensemble_snapshots_v2
+        INSERT INTO forecasts.ensemble_snapshots
         (city, target_date, available_at, fetch_time, model_version, data_version,
          temperature_metric, provenance_json)
         VALUES ('NYC', '2026-04-15', '2026-04-15T12:00:00Z', '2026-04-15T12:00:00Z',
                 'ecmwf_ens', 'tigge_mx2t6_local_calendar_day_max_v1', 'high', '{}')
     """)
     snapshot_id = conn.execute(
-        "SELECT snapshot_id FROM forecasts.ensemble_snapshots_v2 WHERE city = 'NYC'"
+        "SELECT snapshot_id FROM forecasts.ensemble_snapshots WHERE city = 'NYC'"
     ).fetchone()[0]
     conn.commit()
 
     p_raw = np.array([0.2, 0.3, 0.5])
     _store_snapshot_p_raw(conn, str(snapshot_id), p_raw, bias_corrected=True)
     row = conn.execute(
-        "SELECT p_raw_json FROM forecasts.ensemble_snapshots_v2 "
+        "SELECT p_raw_json FROM forecasts.ensemble_snapshots "
         "WHERE snapshot_id = ?", (snapshot_id,),
     ).fetchone()
     assert row is not None
     assert row["p_raw_json"] is not None, (
-        "p_raw_json must persist in ensemble_snapshots_v2 (v1.F20 canonical target)"
+        "p_raw_json must persist in ensemble_snapshots (v1.F20 canonical target)"
     )
     assert json.loads(row["p_raw_json"]) == [0.2, 0.3, 0.5]
 
@@ -153,7 +153,7 @@ def test_store_snapshot_p_raw_round_trip_with_fresh_schema():
 def _attach_forecasts_snapshot_table(conn: sqlite3.Connection) -> None:
     conn.execute("ATTACH DATABASE ':memory:' AS forecasts")
     conn.execute("""
-        CREATE TABLE forecasts.ensemble_snapshots_v2 (
+        CREATE TABLE forecasts.ensemble_snapshots (
             snapshot_id INTEGER PRIMARY KEY,
             city TEXT NOT NULL,
             target_date TEXT NOT NULL,
@@ -183,7 +183,7 @@ def test_store_snapshot_p_raw_uses_attached_forecasts_v2_without_legacy_projecti
     init_schema(conn)
     _attach_forecasts_snapshot_table(conn)
     conn.execute("""
-        INSERT INTO forecasts.ensemble_snapshots_v2
+        INSERT INTO forecasts.ensemble_snapshots
         (snapshot_id, city, target_date, available_at, fetch_time,
          model_version, data_version, temperature_metric, provenance_json)
         VALUES (777, 'London', '2026-05-17', '2026-05-15T09:55:00+00:00',
@@ -195,7 +195,7 @@ def test_store_snapshot_p_raw_uses_attached_forecasts_v2_without_legacy_projecti
     assert _store_snapshot_p_raw(conn, "777", np.array([0.25, 0.75]))
 
     canonical = conn.execute(
-        "SELECT p_raw_json FROM forecasts.ensemble_snapshots_v2 WHERE snapshot_id = 777"
+        "SELECT p_raw_json FROM forecasts.ensemble_snapshots WHERE snapshot_id = 777"
     ).fetchone()
     conn.close()
 
@@ -211,7 +211,7 @@ def test_read_v2_snapshot_metadata_prefers_attached_forecasts_schema():
     init_schema(conn)
     _attach_forecasts_snapshot_table(conn)
     conn.execute("""
-        INSERT INTO forecasts.ensemble_snapshots_v2
+        INSERT INTO forecasts.ensemble_snapshots
         (snapshot_id, city, target_date, available_at, fetch_time,
          model_version, data_version, temperature_metric, boundary_ambiguous,
          causality_status)

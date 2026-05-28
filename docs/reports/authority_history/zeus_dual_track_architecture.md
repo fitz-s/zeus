@@ -108,7 +108,7 @@ remain readable for audit and are frozen for new writes after Phase 4 cutover.
 |---|---|---|
 | `settlements_v2` | `(city, target_date, temperature_metric)` | yes |
 | `market_events_v2` | + `temperature_metric` | yes |
-| `ensemble_snapshots_v2` | `(city, target_date, temperature_metric, issue_time, data_version)` | yes |
+| `ensemble_snapshots` | `(city, target_date, temperature_metric, issue_time, data_version)` | yes |
 | `calibration_pairs_v2` | + `temperature_metric, forecast_available_at` | yes |
 | `platt_models_v2` | `(temperature_metric, cluster, season, data_version, input_space, is_active)` | yes |
 | `observation_instants_v2` | adds `running_min` alongside `running_max` | yes |

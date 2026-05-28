@@ -338,7 +338,7 @@ class TestRebuildV2PipelineIntegration:
         members = list(np.full(51, self._OBS_TEMP_F).tolist())
         conn.execute(
             """
-            INSERT INTO ensemble_snapshots_v2
+            INSERT INTO ensemble_snapshots
                 (city, target_date, temperature_metric, physical_quantity, observation_field,
                  issue_time, available_at, fetch_time, lead_hours, members_json,
                  model_version, data_version, training_allowed, causality_status,

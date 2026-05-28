@@ -53,7 +53,7 @@ station siting: HKO HQ is an urban-core observatory; RJTT/RKSI are exposed airpo
 
 ### 3. Where the +6.3°C lives: FORECAST side, introduced by transport — NOT the OBS side
 
-**Raw ENS member mass-center − daily-high OBS** (refit `ensemble_snapshots_v2.members_json`
+**Raw ENS member mass-center − daily-high OBS** (refit `ensemble_snapshots.members_json`
 joined to `observations`, units degC throughout):
 
 | City | n | raw ENS−OBS mean | (°F) |
@@ -164,7 +164,7 @@ The defect has **two independent compounding layers**, both traceable to exact f
 
 `src/calibration/ens_bias_repo.py:140-163` — `load_bucket_residuals` builds the TIGGE prior
 by taking the **freshest-per-date snapshot** (`latest available_at`) among all
-`ensemble_snapshots_v2` rows with `lead_hours <= 48`.
+`ensemble_snapshots` rows with `lead_hours <= 48`.
 
 For the TIGGE archive, every target date has **two lead=0h snapshots**:
 

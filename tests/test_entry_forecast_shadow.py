@@ -50,7 +50,7 @@ def _insert_snapshot(conn: sqlite3.Connection, *, linked: bool = True) -> None:
     scope = _scope()
     conn.execute(
         """
-        INSERT INTO ensemble_snapshots_v2 (
+        INSERT INTO ensemble_snapshots (
             city, target_date, temperature_metric, physical_quantity,
             observation_field, issue_time, valid_time, available_at, fetch_time,
             lead_hours, members_json, model_version, data_version,
@@ -78,7 +78,7 @@ def _insert_snapshot(conn: sqlite3.Connection, *, linked: bool = True) -> None:
             "members_json": json.dumps([18.0] * 51),
             "data_version": scope.data_version,
             "source_id": "ecmwf_open_data" if linked else None,
-            "source_transport": "ensemble_snapshots_v2_db_reader" if linked else None,
+            "source_transport": "ensemble_snapshots_db_reader" if linked else None,
             "source_run_id": "source-run-1" if linked else None,
             "release_calendar_key": "ecmwf_open_data:mx2t6_high:full" if linked else None,
             "source_cycle_time": "2026-05-03T00:00:00+00:00" if linked else None,

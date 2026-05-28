@@ -143,7 +143,7 @@ def write_nowcast_run(
     conn=None -> get_forecasts_connection(write_class=WriteClass.LIVE).
 
     p_nowcast, p_now_raw: np.ndarray or None; stored as JSON arrays.
-    bin_grid_id, bin_schema_version: propagated from ensemble_snapshots_v2
+    bin_grid_id, bin_schema_version: propagated from ensemble_snapshots
         (F4 retrofit — SCHEMA_FORECASTS_VERSION 5, T4 2026-05-21).
     """
     from src.state.db import (

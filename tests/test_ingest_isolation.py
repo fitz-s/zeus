@@ -56,7 +56,7 @@ FORBIDDEN_IMPORT_PREFIXES: tuple[str, ...] = (
     "src.observability",
     "src.main",
     # G10 calibration-fence (2026-04-26, con-nyx NICE-TO-HAVE #4):
-    # src.calibration writes to ensemble_snapshots_v2 + platt_models — surfaces
+    # src.calibration writes to ensemble_snapshots + platt_models — surfaces
     # the ingest lane should not reach into. season helpers extracted to
     # src.contracts.season for callers that need calendar mapping only.
     "src.calibration",

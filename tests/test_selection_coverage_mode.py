@@ -29,7 +29,7 @@ def _make_in_memory_db(cities: list[dict]) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
 
     conn.executescript("""
-        CREATE TABLE ensemble_snapshots_v2 (
+        CREATE TABLE ensemble_snapshots (
             snapshot_id INTEGER PRIMARY KEY,
             city TEXT,
             target_date TEXT,
@@ -95,7 +95,7 @@ def _insert_snapshot(conn, city, target_date, snapshot_id, p_raw, lead_hours=72.
     # Use (target_date - 1 day) at 12:00Z as the available_at value.
     prev_date = (date.fromisoformat(target_date) - timedelta(days=1)).isoformat()
     conn.execute(
-        """INSERT INTO ensemble_snapshots_v2
+        """INSERT INTO ensemble_snapshots
            (snapshot_id, city, target_date, available_at, fetch_time, issue_time, valid_time,
             lead_hours, spread, is_bimodal, model_version, members_json, p_raw_json, data_version, temperature_metric)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
@@ -200,7 +200,7 @@ class TestT1Dispatch:
         forecasts = sqlite3.connect(str(forecasts_db))
         forecasts.executescript(
             """
-            CREATE TABLE ensemble_snapshots_v2 (
+            CREATE TABLE ensemble_snapshots (
                 snapshot_id INTEGER PRIMARY KEY,
                 city TEXT,
                 target_date TEXT,
@@ -245,7 +245,7 @@ class TestT1Dispatch:
         )
         forecasts.execute(
             """
-            INSERT INTO ensemble_snapshots_v2
+            INSERT INTO ensemble_snapshots
             (snapshot_id, city, target_date, available_at, fetch_time, issue_time,
              valid_time, lead_hours, spread, is_bimodal, model_version, members_json,
              p_raw_json, data_version, temperature_metric)
@@ -284,7 +284,7 @@ class TestT1Dispatch:
             """
             CREATE TABLE calibration_pairs_v2 (range_label TEXT);
             CREATE TABLE settlements_v2 (winning_bin TEXT);
-            CREATE TABLE ensemble_snapshots_v2 (snapshot_id INTEGER);
+            CREATE TABLE ensemble_snapshots (snapshot_id INTEGER);
             """
         )
         world.execute("INSERT INTO calibration_pairs_v2 VALUES ('99°C')")

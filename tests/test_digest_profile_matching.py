@@ -1205,7 +1205,7 @@ def test_phase1k_remediation_rereview_wording_keeps_forbidden_files_out_of_scope
 
 def test_dsa13_canonical_snapshot_authority_routes_to_phase1l_profile():
     digest = build_digest(
-        "DSA-13 canonical snapshot authority ensemble_snapshots_v2 canonical "
+        "DSA-13 canonical snapshot authority ensemble_snapshots canonical "
         "live snapshots legacy ensemble_snapshots projection diagnostic no "
         "production DB mutation no live venue side effects no source routing "
         "no Paris config edit",

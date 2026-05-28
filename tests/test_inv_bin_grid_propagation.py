@@ -4,15 +4,15 @@
 """Antibody test: INV-bin-grid-propagation
 
 Invariant: for every day0_nowcast_runs row written after T4_MERGE_DATE,
-bin_grid_id IS NOT NULL AND matches ensemble_snapshots_v2.bin_grid_id
+bin_grid_id IS NOT NULL AND matches ensemble_snapshots.bin_grid_id
 for the triggering snapshot (JOIN-MATCH).
 
 Cross-module relationship test:
   forecasts.day0_nowcast_runs (F4 retrofit adds bin_grid_id column)
-  vs forecasts.ensemble_snapshots_v2 (source of bin_grid_id)
+  vs forecasts.ensemble_snapshots (source of bin_grid_id)
 
 bin_grid_id propagation path (production):
-  ensemble_snapshots_v2.bin_grid_id
+  ensemble_snapshots.bin_grid_id
     → _read_v2_snapshot_metadata (evaluator.py)
     → v2_snapshot_meta["bin_grid_id"]
     → write_nowcast_run(bin_grid_id=...)
@@ -83,12 +83,12 @@ def test_inv_bin_grid_no_null_post_t4() -> None:
 
 def test_inv_bin_grid_join_match() -> None:
     """INV-bin-grid-propagation (phase 2 — JOIN-MATCH): for every day0_nowcast_runs
-    row after T4_MERGE_DATE, bin_grid_id must MATCH ensemble_snapshots_v2.bin_grid_id
+    row after T4_MERGE_DATE, bin_grid_id must MATCH ensemble_snapshots.bin_grid_id
     for the triggering snapshot.
 
     JOIN path:
       day0_nowcast_runs.market_slug + target_date + temperature_metric + observation_time
-      → ensemble_snapshots_v2 (city ~ market_slug prefix, same date/metric).
+      → ensemble_snapshots (city ~ market_slug prefix, same date/metric).
 
     Skips when T4_MERGE_DATE is placeholder, DB is absent, or JOIN fails
     (in which case the NULL check above is the primary guard).
@@ -105,7 +105,7 @@ def test_inv_bin_grid_join_match() -> None:
             """
             SELECT COUNT(*) AS cnt
             FROM day0_nowcast_runs nr
-            JOIN ensemble_snapshots_v2 es
+            JOIN ensemble_snapshots es
               ON es.city        LIKE nr.market_slug || '%'
              AND es.target_date  = nr.target_date
              AND es.temperature_metric = nr.temperature_metric
@@ -126,6 +126,6 @@ def test_inv_bin_grid_join_match() -> None:
 
     assert mismatch_count == 0, (
         f"INV-bin-grid-propagation JOIN-MATCH: {mismatch_count} day0_nowcast_runs rows "
-        f"have bin_grid_id that mismatches ensemble_snapshots_v2.bin_grid_id "
+        f"have bin_grid_id that mismatches ensemble_snapshots.bin_grid_id "
         f"after T4_MERGE_DATE={T4_MERGE_DATE!r}"
     )

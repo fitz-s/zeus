@@ -558,6 +558,7 @@ def _build_minimal_db() -> sqlite3.Connection:
         CREATE TABLE IF NOT EXISTS position_events (
             event_id TEXT PRIMARY KEY,
             position_id TEXT NOT NULL,
+            event_version INTEGER NOT NULL DEFAULT 1,
             sequence_no INTEGER NOT NULL,
             event_type TEXT NOT NULL,
             occurred_at TEXT NOT NULL,

@@ -18,7 +18,7 @@
 | `confirmation_count=_extract_int` | `src/execution/fill_tracker.py` | 542 | PR 6 split site |
 | `if rows and observed_members < 51` | `src/data/ecmwf_open_data.py` | 775 | `first_member_observed_time` capture site |
 | `raw_orderbook_hash: str` | `src/contracts/executable_market_snapshot_v2.py` | 94 | READ-ONLY for B/36 (B/27 owns writes); fresh grep shows :94 NOT :97 — B/27 not yet merged into this branch; access is by attribute so line number is informational |
-| `def _store_ens_snapshot(` | `src/engine/evaluator.py` | 3912 | writer for `ensemble_snapshots_v2`; reads `raw_orderbook_hash_transition_delta_ms` from `ens_result` dict |
+| `def _store_ens_snapshot(` | `src/engine/evaluator.py` | 3912 | writer for `ensemble_snapshots`; reads `raw_orderbook_hash_transition_delta_ms` from `ens_result` dict |
 | `def capture_executable_market_snapshot(` | `src/data/market_scanner.py` | 1804 | hash computation site; B1 cache lives here |
 | `raw_orderbook_hash=_sha256_json(raw_orderbook),` | `src/data/market_scanner.py` | 1949 | hash assignment within snapshot construction |
 
@@ -67,7 +67,7 @@ _prev_orderbook_hash_by_market: dict[str, tuple[str, float]] = {}
 - **Read**: at end of `capture_executable_market_snapshot()` after `raw_orderbook_hash` is computed, look up `_prev_orderbook_hash_by_market.get(condition_id)`. If prior entry exists AND hash differs: `delta_ms = int((time.time() - prev_ts) * 1000)`.
 - **Write**: after each hash observation (whether changed or not), update `_prev_orderbook_hash_by_market[condition_id] = (current_hash, time.time())`.
 - **Return path**: `capture_executable_market_snapshot()` currently returns a dict (`{"executable_snapshot_id": ..., ...}`). Add `"raw_orderbook_hash_transition_delta_ms": delta_ms` to that return dict (None on first observation).
-- **Consumer**: `_store_ens_snapshot(conn, city, target_date, ens, ens_result)` in `evaluator.py:3912` receives `ens_result` dict. The caller that builds `ens_result` can pass the delta value through; `_store_ens_snapshot` writes it to `ensemble_snapshots_v2`.
+- **Consumer**: `_store_ens_snapshot(conn, city, target_date, ens, ens_result)` in `evaluator.py:3912` receives `ens_result` dict. The caller that builds `ens_result` can pass the delta value through; `_store_ens_snapshot` writes it to `ensemble_snapshots`.
 - **Lifetime**: process-local. No persistence needed for Phase 0 instrument.
 - **Null semantics**: `raw_orderbook_hash_transition_delta_ms = None` for first observation per market (no prior to compare against).
 
@@ -477,13 +477,13 @@ CACHE_TTL_S = 60
 
 ### 6. Storage migrations
 
-#### `ensemble_snapshots_v2` (forecasts.db)
+#### `ensemble_snapshots` (forecasts.db)
 ```sql
-ALTER TABLE ensemble_snapshots_v2 ADD COLUMN first_member_observed_time TEXT;
-ALTER TABLE ensemble_snapshots_v2 ADD COLUMN run_complete_time TEXT;
-ALTER TABLE ensemble_snapshots_v2 ADD COLUMN raw_orderbook_hash_transition_delta_ms INTEGER;
+ALTER TABLE ensemble_snapshots ADD COLUMN first_member_observed_time TEXT;
+ALTER TABLE ensemble_snapshots ADD COLUMN run_complete_time TEXT;
+ALTER TABLE ensemble_snapshots ADD COLUMN raw_orderbook_hash_transition_delta_ms INTEGER;
 ```
-Script: `scripts/migrate_ensemble_snapshots_v2_alpha_proxy.py` (idempotent).
+Script: `scripts/migrate_ensemble_snapshots_alpha_proxy.py` (idempotent).
 
 #### `settlement_commands` (world.db)
 ```sql
@@ -491,7 +491,7 @@ ALTER TABLE settlement_commands ADD COLUMN zeus_submit_intent_time TEXT;
 ALTER TABLE settlement_commands ADD COLUMN venue_ack_time TEXT;
 ALTER TABLE settlement_commands ADD COLUMN clock_skew_estimate_ms_at_submit INTEGER;
 ```
-(Cross-DB note: `settlement_commands` lives in `world.db`, `ensemble_snapshots_v2` in `forecasts.db`. INV-37 ATTACH+SAVEPOINT only required when a SINGLE transaction spans both. These three columns are world.db-only; no INV-37 complexity. The `ensemble_snapshots_v2` migration is forecasts.db-only.)
+(Cross-DB note: `settlement_commands` lives in `world.db`, `ensemble_snapshots` in `forecasts.db`. INV-37 ATTACH+SAVEPOINT only required when a SINGLE transaction spans both. These three columns are world.db-only; no INV-37 complexity. The `ensemble_snapshots` migration is forecasts.db-only.)
 
 #### `wrap_unwrap_commands` (world.db)
 ```sql
@@ -517,20 +517,20 @@ Relationship tests R-6.1 to R-6.4:
 - R-6.3a: `abs(clock_skew_estimate_ms) > 200` → `"excessive_clock_drift"` in errors (blocking)
 - R-6.3b: `100 < abs(clock_skew_estimate_ms) <= 200` → `"clock_drift_warning"` in errors, `"excessive_clock_drift"` NOT in errors (non-blocking observability)
 - R-6.3c: `abs(clock_skew_estimate_ms) <= 100` → neither warning nor error
-- R-6.4: `raw_orderbook_hash_transition_delta_ms` non-null on every post-PR6 `ensemble_snapshots_v2` row (antibody probe via test DB fixture)
+- R-6.4: `raw_orderbook_hash_transition_delta_ms` non-null on every post-PR6 `ensemble_snapshots` row (antibody probe via test DB fixture)
 
 **`tests/test_inv_alpha_provenance.py`**
 
 Header block:
 ```python
 # Lifecycle: INV-alpha-provenance antibody test
-# Purpose: Every ensemble_snapshots_v2 write via PR6 path has non-null raw_orderbook_hash_transition_delta_ms
+# Purpose: Every ensemble_snapshots write via PR6 path has non-null raw_orderbook_hash_transition_delta_ms
 # Reuse: standalone; no shared fixtures with timing-chain tests
 # Created: 2026-05-19
 ```
 
 Content:
-- Every row inserted to `ensemble_snapshots_v2` via the writer path has non-null `raw_orderbook_hash_transition_delta_ms` (or writer raises `MissingAlphaProxyError`).
+- Every row inserted to `ensemble_snapshots` via the writer path has non-null `raw_orderbook_hash_transition_delta_ms` (or writer raises `MissingAlphaProxyError`).
 
 ### test_topology.yaml registration (non-blocking rec #5 — mandatory at production commit)
 
@@ -553,7 +553,7 @@ Add to `tests/test_topology.yaml` in the production commit:
 ### db_table_ownership.yaml column inventory (non-blocking rec #6 — mandatory at production commit)
 
 Add 8 new columns across 3 tables to `architecture/db_table_ownership.yaml`:
-- `ensemble_snapshots_v2`: `first_member_observed_time`, `run_complete_time`, `raw_orderbook_hash_transition_delta_ms`
+- `ensemble_snapshots`: `first_member_observed_time`, `run_complete_time`, `raw_orderbook_hash_transition_delta_ms`
 - `settlement_commands`: `polymarket_end_anchor_source`, `zeus_submit_intent_time`, `venue_ack_time`, `clock_skew_estimate_ms_at_submit`
 - `wrap_unwrap_commands`: `first_inclusion_block_time`, `finality_confirmed_time`
 
@@ -641,9 +641,9 @@ UPDATE settlement_commands
 ### PR 6 migrations
 ```sql
 -- forecasts.db
-ALTER TABLE ensemble_snapshots_v2 ADD COLUMN first_member_observed_time TEXT;
-ALTER TABLE ensemble_snapshots_v2 ADD COLUMN run_complete_time TEXT;
-ALTER TABLE ensemble_snapshots_v2 ADD COLUMN raw_orderbook_hash_transition_delta_ms INTEGER;
+ALTER TABLE ensemble_snapshots ADD COLUMN first_member_observed_time TEXT;
+ALTER TABLE ensemble_snapshots ADD COLUMN run_complete_time TEXT;
+ALTER TABLE ensemble_snapshots ADD COLUMN raw_orderbook_hash_transition_delta_ms INTEGER;
 
 -- world.db (settlement_commands)
 ALTER TABLE settlement_commands ADD COLUMN zeus_submit_intent_time TEXT;

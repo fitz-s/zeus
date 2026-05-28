@@ -179,7 +179,7 @@ def write_ingest_status(
     }
 
     # ensemble_snapshots: v1.F20 (2026-05-18) — table removed from world DB registry.
-    # Canonical table is ensemble_snapshots_v2 on forecasts.db. Do NOT query here;
+    # Canonical table is ensemble_snapshots on forecasts.db. Do NOT query here;
     # the world connection will return -1 from swallowed missing-table errors.
 
     # observations (daily observations — uses fetched_at from data_coverage proxy)

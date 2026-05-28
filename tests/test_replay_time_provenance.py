@@ -11,7 +11,7 @@ from src.types.metric_identity import HIGH_LOCALDAY_MAX, LOW_LOCALDAY_MIN
 
 
 def _enable_legacy_snapshot_fixture(conn):
-    """Accept old fixture inserts while mirroring them into ensemble_snapshots_v2."""
+    """Accept old fixture inserts while mirroring them into ensemble_snapshots."""
     init_schema_forecasts(conn)
     conn.executescript(
         """
@@ -35,7 +35,7 @@ def _enable_legacy_snapshot_fixture(conn):
         CREATE TEMP TRIGGER IF NOT EXISTS mirror_legacy_snapshot_fixture_to_v2
         AFTER INSERT ON ensemble_snapshots
         BEGIN
-            INSERT OR IGNORE INTO ensemble_snapshots_v2 (
+            INSERT OR IGNORE INTO ensemble_snapshots (
                 snapshot_id, city, target_date, temperature_metric,
                 physical_quantity, observation_field, issue_time, valid_time,
                 available_at, fetch_time, lead_hours, members_json, p_raw_json,
@@ -163,7 +163,7 @@ def test_replay_context_prefers_v2_snapshot_for_decision_reference(tmp_path):
     _enable_legacy_snapshot_fixture(conn)
     conn.execute(
         """
-        INSERT INTO ensemble_snapshots_v2
+        INSERT INTO ensemble_snapshots
         (snapshot_id, city, target_date, temperature_metric, physical_quantity,
          observation_field, issue_time, valid_time, available_at, fetch_time,
          lead_hours, members_json, p_raw_json, spread, is_bimodal,
@@ -230,7 +230,7 @@ def test_replay_context_prefers_v2_snapshot_for_decision_reference(tmp_path):
     assert ref is not None
     assert ref["snapshot_id"] == 111
     assert snap is not None
-    assert snap["snapshot_source"] == "ensemble_snapshots_v2"
+    assert snap["snapshot_source"] == "ensemble_snapshots"
     assert snap["authority_scope"] == "canonical_snapshot_v2"
     assert snap["model"] == "ecmwf_v2"
     assert snap["p_raw_stored"] == [0.8]
@@ -257,7 +257,7 @@ def test_replay_context_prefers_forecasts_v2_snapshot_over_world_ghost(tmp_path)
     _enable_legacy_snapshot_fixture(conn)
     conn.execute(
         """
-        INSERT INTO world.ensemble_snapshots_v2
+        INSERT INTO world.ensemble_snapshots
         (snapshot_id, city, target_date, temperature_metric, physical_quantity,
          observation_field, issue_time, valid_time, available_at, fetch_time,
          lead_hours, members_json, p_raw_json, spread, is_bimodal,
@@ -294,7 +294,7 @@ def test_replay_context_prefers_forecasts_v2_snapshot_over_world_ghost(tmp_path)
     )
     conn.execute(
         """
-        INSERT INTO forecasts.ensemble_snapshots_v2
+        INSERT INTO forecasts.ensemble_snapshots
         (snapshot_id, city, target_date, temperature_metric, physical_quantity,
          observation_field, issue_time, valid_time, available_at, fetch_time,
          lead_hours, members_json, p_raw_json, spread, is_bimodal,
@@ -363,7 +363,7 @@ def test_replay_context_prefers_forecasts_v2_snapshot_over_world_ghost(tmp_path)
     assert ref is not None
     assert ref["snapshot_id"] == 211
     assert snap is not None
-    assert snap["snapshot_source"] == "ensemble_snapshots_v2"
+    assert snap["snapshot_source"] == "ensemble_snapshots"
     assert snap["model"] == "forecasts_v2"
     assert snap["p_raw_stored"] == [0.9]
 
@@ -388,7 +388,7 @@ def test_replay_context_prefers_forecasts_settlement_over_world_ghost(tmp_path):
     conn.execute("ATTACH DATABASE ? AS forecasts", (str(forecasts_db),))
     conn.execute(
         """
-        INSERT INTO forecasts.ensemble_snapshots_v2
+        INSERT INTO forecasts.ensemble_snapshots
         (snapshot_id, city, target_date, temperature_metric, physical_quantity,
          observation_field, issue_time, valid_time, available_at, fetch_time,
          lead_hours, members_json, p_raw_json, spread, is_bimodal,
@@ -526,7 +526,7 @@ def test_replay_context_snapshot_only_fallback_is_opt_in(tmp_path):
 
     assert strict_ref is None
     assert fallback_ref is not None
-    assert fallback_ref["source"] == "ensemble_snapshots_v2.available_at"
+    assert fallback_ref["source"] == "ensemble_snapshots.available_at"
     assert fallback_ref["snapshot_id"] == 31
 
 
@@ -537,7 +537,7 @@ def test_replay_context_snapshot_only_fallback_prefers_v2(tmp_path):
     init_schema_forecasts(conn)
     conn.execute(
         """
-        INSERT INTO ensemble_snapshots_v2
+        INSERT INTO ensemble_snapshots
         (snapshot_id, city, target_date, temperature_metric, physical_quantity,
          observation_field, issue_time, valid_time, available_at, fetch_time,
          lead_hours, members_json, p_raw_json, spread, is_bimodal,
@@ -578,7 +578,7 @@ def test_replay_context_snapshot_only_fallback_prefers_v2(tmp_path):
     conn.close()
 
     assert fallback_ref is not None
-    assert fallback_ref["source"] == "ensemble_snapshots_v2.available_at"
+    assert fallback_ref["source"] == "ensemble_snapshots.available_at"
     assert fallback_ref["snapshot_id"] == 132
     assert fallback_ref["authority_scope"] == "diagnostic_non_promotion"
 
@@ -610,7 +610,7 @@ def test_replay_context_v2_snapshot_lookup_is_metric_scoped(tmp_path):
     ):
         conn.execute(
             """
-            INSERT INTO ensemble_snapshots_v2
+            INSERT INTO ensemble_snapshots
             (snapshot_id, city, target_date, temperature_metric, physical_quantity,
              observation_field, issue_time, valid_time, available_at, fetch_time,
              lead_hours, members_json, p_raw_json, spread, is_bimodal,
@@ -669,11 +669,11 @@ def test_replay_context_v2_snapshot_lookup_is_metric_scoped(tmp_path):
     conn.close()
 
     assert low_ref is not None
-    assert low_ref["source"] == "ensemble_snapshots_v2.available_at"
+    assert low_ref["source"] == "ensemble_snapshots.available_at"
     assert low_ref["snapshot_id"] == 502
     assert wrong_metric_snap is None
     assert low_snap is not None
-    assert low_snap["snapshot_source"] == "ensemble_snapshots_v2"
+    assert low_snap["snapshot_source"] == "ensemble_snapshots"
     assert low_snap["p_raw_stored"] == [0.3]
 
 
@@ -686,7 +686,7 @@ def test_replay_context_snapshot_only_fallback_requires_p_raw(tmp_path):
     _enable_legacy_snapshot_fixture(conn)
     conn.execute(
         """
-        INSERT INTO ensemble_snapshots_v2
+        INSERT INTO ensemble_snapshots
         (snapshot_id, city, target_date, temperature_metric, physical_quantity,
          observation_field, issue_time, valid_time, available_at, fetch_time,
          lead_hours, members_json, p_raw_json, spread, is_bimodal,
@@ -736,7 +736,7 @@ def test_replay_context_snapshot_only_fallback_requires_p_raw(tmp_path):
     conn.close()
 
     assert fallback_ref is not None
-    assert fallback_ref["source"] == "ensemble_snapshots_v2.available_at"
+    assert fallback_ref["source"] == "ensemble_snapshots.available_at"
     assert fallback_ref["snapshot_id"] == 602
 
 

@@ -243,7 +243,7 @@ def _read_monitor_executable_forecast(
     """Read monitor probability from the same executable forecast authority as entry.
 
     Live ecmwf_open_data entry uses producer/source-run readiness plus
-    ensemble_snapshots_v2.  A held-position monitor must not fall back to the
+    ensemble_snapshots.  A held-position monitor must not fall back to the
     legacy Open-Meteo ``fetch_ensemble`` adapter for that source, because that
     path cannot prove the executable forecast reader contract.  Non-real sqlite
     connections return ``(None, None)`` so legacy unit tests and diagnostic

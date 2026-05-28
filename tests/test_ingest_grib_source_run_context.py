@@ -98,7 +98,7 @@ def test_source_run_context_writes_executable_v2_linkage(tmp_path: Path) -> None
     )
     context = SourceRunContext(
         source_id="ecmwf_open_data",
-        source_transport="ensemble_snapshots_v2_db_reader",
+        source_transport="ensemble_snapshots_db_reader",
         source_run_id="ecmwf_open_data:mx2t6_high:2026-05-03T00Z",
         release_calendar_key="ecmwf_open_data:mx2t6_high:full",
         source_cycle_time=datetime(2026, 5, 3, tzinfo=UTC),
@@ -126,9 +126,9 @@ def test_source_run_context_writes_executable_v2_linkage(tmp_path: Path) -> None
         ingest_module._TRACK_CONFIGS["mx2t6_high"]["json_subdir"] = original
 
     assert summary["written"] == 1
-    row = conn.execute("SELECT * FROM ensemble_snapshots_v2").fetchone()
+    row = conn.execute("SELECT * FROM ensemble_snapshots").fetchone()
     assert row["source_id"] == "ecmwf_open_data"
-    assert row["source_transport"] == "ensemble_snapshots_v2_db_reader"
+    assert row["source_transport"] == "ensemble_snapshots_db_reader"
     assert row["source_run_id"] == "ecmwf_open_data:mx2t6_high:2026-05-03T00Z"
     assert row["release_calendar_key"] == "ecmwf_open_data:mx2t6_high:full"
     assert row["source_cycle_time"] == "2026-05-03T00:00:00+00:00"
@@ -162,7 +162,7 @@ def test_missing_source_run_context_leaves_v2_row_non_executable(tmp_path: Path)
         ingest_module._TRACK_CONFIGS["mx2t6_high"]["json_subdir"] = original
 
     assert summary["written"] == 1
-    row = conn.execute("SELECT * FROM ensemble_snapshots_v2").fetchone()
+    row = conn.execute("SELECT * FROM ensemble_snapshots").fetchone()
     assert row["source_id"] is None
     assert row["source_transport"] is None
     assert row["source_run_id"] is None
@@ -197,7 +197,7 @@ def test_ingest_persists_contract_outcome_and_forecast_window_evidence(tmp_path:
         ingest_module._TRACK_CONFIGS["mx2t6_high"]["json_subdir"] = original
 
     assert summary["written"] == 1
-    row = conn.execute("SELECT * FROM ensemble_snapshots_v2").fetchone()
+    row = conn.execute("SELECT * FROM ensemble_snapshots").fetchone()
     assert row["city_timezone"] == "Europe/London"
     assert row["settlement_source_type"] == "wu_icao"
     assert row["settlement_station_id"] == "EGLC"
@@ -248,7 +248,7 @@ def test_low_boundary_ambiguous_persists_block_evidence_without_relaxing_law1(tm
     )
 
     assert status == "written"
-    row = conn.execute("SELECT * FROM ensemble_snapshots_v2").fetchone()
+    row = conn.execute("SELECT * FROM ensemble_snapshots").fetchone()
     assert row["temperature_metric"] == "low"
     assert row["observation_field"] == "low_temp"
     assert row["training_allowed"] == 0

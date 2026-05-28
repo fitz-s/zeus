@@ -53,7 +53,7 @@ CANONICAL_CALIBRATION_PAIR_BIN_SOURCE = "canonical_v2"
 # Used by legacy evaluate_calibration_transfer_policy to resolve which
 # Platt model family to apply when serving OpenData forecasts.
 # 2026-05-07: Legacy mx2t6/mn2t6 keys added as bridge so the 1,568 stale
-# ensemble_snapshots_v2 rows (and 477 LIVE_ELIGIBLE readiness rows tagged
+# ensemble_snapshots rows (and 477 LIVE_ELIGIBLE readiness rows tagged
 # with legacy versions) still resolve a Platt during the mx2t3/mn2t3
 # transition. Legacy keys map to the same tigge_* calibration target as
 # the new keys — physical identity is identical (same IFS ensemble member

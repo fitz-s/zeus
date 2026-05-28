@@ -132,7 +132,7 @@ spurious large correction.
 ## Findings noted but NOT fixed (per brief)
 
 1. **Pre-existing test breakage in `tests/test_ens_predictive_pipeline.py`** — its
-   fixture CREATE TABLE for `ensemble_snapshots_v2` is missing the `issue_time`
+   fixture CREATE TABLE for `ensemble_snapshots` is missing the `issue_time`
    column. `load_bucket_residuals` (ens_bias_repo.py:191) selects `e.issue_time`,
    so both tests in that file currently fail with `sqlite3.OperationalError: no
    such column: e.issue_time`. The new file `test_invariant_sign_convention.py`

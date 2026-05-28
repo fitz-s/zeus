@@ -42,7 +42,7 @@ _CITY = "London"
 _CITY_TZ = "Europe/London"
 _TRACK = "mx2t3_high_full_horizon"
 _REL_KEY = "ecmwf_open_data:mx2t3_high:full"
-_TRANSPORT = "ensemble_snapshots_v2_db_reader"
+_TRANSPORT = "ensemble_snapshots_db_reader"
 _SOURCE_ID = "ecmwf_open_data"
 _PHYSQ = "mx2t3_local_calendar_day_max"
 _OBS_FIELD = "high_temp"
@@ -93,7 +93,7 @@ def _insert_snapshot(
     scope = _scope()
     conn.execute(
         """
-        INSERT INTO ensemble_snapshots_v2 (
+        INSERT INTO ensemble_snapshots (
             snapshot_id, city, target_date, temperature_metric, physical_quantity,
             observation_field, issue_time, valid_time, available_at, fetch_time,
             lead_hours, members_json, model_version, data_version,

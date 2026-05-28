@@ -8,7 +8,7 @@
 """PR-E — Tests for decision_integrity_quarantine tooling.
 
 Tests quarantine_decisions_for_noncontributing_forecast against an in-memory
-SQLite DB with both opportunity_fact and ensemble_snapshots_v2 co-located
+SQLite DB with both opportunity_fact and ensemble_snapshots co-located
 (no ATTACH needed — auto-detected by the function).
 
 Invariants verified:
@@ -39,7 +39,7 @@ from src.state.schema.decision_integrity_quarantine_schema import ensure_table
 
 @pytest.fixture()
 def mem_db():
-    """In-memory SQLite with opportunity_fact + ensemble_snapshots_v2 + quarantine table.
+    """In-memory SQLite with opportunity_fact + ensemble_snapshots + quarantine table.
 
     No ATTACH needed — both tables in same DB; the function auto-detects
     absence of 'forecasts' schema and uses bare table name.
@@ -47,9 +47,9 @@ def mem_db():
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
 
-    # Create ensemble_snapshots_v2 (minimal columns needed for quarantine join).
+    # Create ensemble_snapshots (minimal columns needed for quarantine join).
     conn.execute("""
-        CREATE TABLE ensemble_snapshots_v2 (
+        CREATE TABLE ensemble_snapshots (
             snapshot_id INTEGER PRIMARY KEY AUTOINCREMENT,
             city TEXT NOT NULL,
             target_date TEXT NOT NULL,
@@ -78,10 +78,10 @@ def mem_db():
 
 
 def _insert_snapshot(conn, *, contributes: int | None, attribution: str | None) -> int:
-    """Insert one ensemble_snapshots_v2 row; return snapshot_id."""
+    """Insert one ensemble_snapshots row; return snapshot_id."""
     cur = conn.execute(
         """
-        INSERT INTO ensemble_snapshots_v2
+        INSERT INTO ensemble_snapshots
             (city, target_date, temperature_metric,
              contributes_to_target_extrema, forecast_window_attribution_status)
         VALUES ('Taipei', '2026-05-22', 'high', ?, ?)

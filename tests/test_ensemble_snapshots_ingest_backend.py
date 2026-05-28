@@ -24,7 +24,7 @@ import pytest
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from scripts.migrate_ensemble_snapshots_v2_add_ingest_backend import (  # noqa: E402
+from scripts.migrate_ensemble_snapshots_add_ingest_backend import (  # noqa: E402
     COLUMN_NAME,
     TABLE_NAME,
     migrate,
@@ -68,7 +68,7 @@ def _build_pre_migration_db() -> sqlite3.Connection:
     # to mirror every column the real schema has).
     conn.execute(
         """
-        CREATE TABLE ensemble_snapshots_v2 (
+        CREATE TABLE ensemble_snapshots (
             snapshot_id INTEGER PRIMARY KEY AUTOINCREMENT,
             city TEXT NOT NULL,
             target_date TEXT NOT NULL,
@@ -81,7 +81,7 @@ def _build_pre_migration_db() -> sqlite3.Connection:
         """
     )
     conn.execute(
-        "INSERT INTO ensemble_snapshots_v2 "
+        "INSERT INTO ensemble_snapshots "
         "(city, target_date, temperature_metric, data_version, issue_time) "
         "VALUES (?, ?, ?, ?, ?)",
         ("Tokyo", "2026-04-01", "high", "tigge_mx2t6_local_calendar_day_max_v1",

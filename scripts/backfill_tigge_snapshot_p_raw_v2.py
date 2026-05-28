@@ -1,12 +1,12 @@
 # Lifecycle: created=2026-04-18; last_reviewed=2026-04-18; last_reused=never
-# Purpose: Phase 7A — metric-aware backfill of p_raw_json into ensemble_snapshots_v2 rows.
+# Purpose: Phase 7A — metric-aware backfill of p_raw_json into ensemble_snapshots rows.
 # Reuse: Anchors on phase7a_contract.md. Iterates METRIC_SPECS; writes p_raw only to rows
 #        matching spec.identity.temperature_metric. Under Zero-Data Golden Window this is
 #        scaffolding with synthetic-fixture tests; live activation at Phase 8.
 
-"""Backfill p_raw_json into ensemble_snapshots_v2 rows (metric-aware).
+"""Backfill p_raw_json into ensemble_snapshots rows (metric-aware).
 
-Phase 7A scaffolding — reads ensemble_snapshots_v2 rows that have members_json but
+Phase 7A scaffolding — reads ensemble_snapshots rows that have members_json but
 no p_raw_json, computes p_raw from member values via the canonical bin grid, and
 writes back per-row.
 
@@ -14,7 +14,7 @@ Rows are scoped per spec.identity.temperature_metric so HIGH backfill never touc
 LOW rows and vice versa (bin lookup 永不跨 metric union).
 
 Under Zero-Data Golden Window: no eligible rows → clean no-op with log output.
-Live activation at Phase 8 when ensemble_snapshots_v2 has real data.
+Live activation at Phase 8 when ensemble_snapshots has real data.
 
 USAGE:
 
@@ -179,7 +179,7 @@ def backfill_v2(
     spec: CalibrationMetricSpec,
     city_filter: Optional[str] = None,
 ) -> BackfillStatsV2:
-    """Backfill p_raw_json for all eligible ensemble_snapshots_v2 rows matching spec.
+    """Backfill p_raw_json for all eligible ensemble_snapshots rows matching spec.
 
     Eligible: temperature_metric = spec.identity.temperature_metric AND
               p_raw_json IS NULL AND members_json IS NOT NULL AND
@@ -208,7 +208,7 @@ def backfill_v2(
 
     sql = f"""
         SELECT snapshot_id, city, target_date, members_json, p_raw_json, unit, data_version
-        FROM ensemble_snapshots_v2
+        FROM ensemble_snapshots
         WHERE temperature_metric = ?
           AND p_raw_json IS NULL
           AND members_json IS NOT NULL
@@ -264,7 +264,7 @@ def backfill_v2(
             continue
 
         conn.execute(
-            "UPDATE ensemble_snapshots_v2 SET p_raw_json = ? WHERE snapshot_id = ?",
+            "UPDATE ensemble_snapshots SET p_raw_json = ? WHERE snapshot_id = ?",
             (json.dumps(p_raw), snapshot_id),
         )
         stats.snapshots_written += 1
@@ -304,7 +304,7 @@ def backfill_all_v2(
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Backfill p_raw_json into ensemble_snapshots_v2 (metric-aware).",
+        description="Backfill p_raw_json into ensemble_snapshots (metric-aware).",
     )
     parser.add_argument(
         "--dry-run", dest="dry_run", action="store_true", default=True,

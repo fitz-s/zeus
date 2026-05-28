@@ -18,7 +18,7 @@ What this migrates:
   - calibration_pairs_v2 ADD COLUMN horizon_profile TEXT NOT NULL DEFAULT 'full'
 
 After ALTER, runs idempotent UPDATEs deriving cycle from snapshot_id linkage:
-  cycle      ← substr(ensemble_snapshots_v2.issue_time, 12, 2) when joinable
+  cycle      ← substr(ensemble_snapshots.issue_time, 12, 2) when joinable
   source_id  ← stays 'tigge_mars' for legacy 'tigge_*' data_version pairs;
                flipped to 'ecmwf_open_data' if data_version starts with 'ecmwf_opendata_'
   horizon_profile ← stays 'full' (legacy is all 00z TIGGE = full horizon)
@@ -134,7 +134,7 @@ def _backfill_calibration_pairs(conn, dry_run: bool) -> dict:
     cycle_12_count = conn.execute("""
         SELECT COUNT(*) FROM calibration_pairs_v2
         WHERE snapshot_id IN (
-            SELECT snapshot_id FROM ensemble_snapshots_v2
+            SELECT snapshot_id FROM ensemble_snapshots
             WHERE substr(issue_time, 12, 2) = '12'
         )
     """).fetchone()[0]
@@ -148,7 +148,7 @@ def _backfill_calibration_pairs(conn, dry_run: bool) -> dict:
         UPDATE calibration_pairs_v2
         SET cycle = '12'
         WHERE snapshot_id IN (
-            SELECT snapshot_id FROM ensemble_snapshots_v2
+            SELECT snapshot_id FROM ensemble_snapshots
             WHERE substr(issue_time, 12, 2) = '12'
         )
     """)

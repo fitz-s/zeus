@@ -27,7 +27,7 @@ def conn():
     c = sqlite3.connect(":memory:")
     c.row_factory = sqlite3.Row
     c.execute(
-        """CREATE TABLE ensemble_snapshots_v2(
+        """CREATE TABLE ensemble_snapshots(
             city TEXT, target_date TEXT, temperature_metric TEXT, data_version TEXT,
             members_json TEXT, members_unit TEXT, lead_hours REAL, available_at TEXT,
             contributes_to_target_extrema INTEGER, boundary_ambiguous INTEGER,
@@ -42,7 +42,7 @@ def conn():
 
 def _snap(conn, city, date, members, dv, *, unit="degC", contributes=1):
     conn.execute(
-        "INSERT INTO ensemble_snapshots_v2 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO ensemble_snapshots VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (city, date, "high", dv, json.dumps(members), unit, 24.0, "2026-05-10T00:00:00Z",
          contributes, 0, 1, "OK", "VERIFIED"),
     )

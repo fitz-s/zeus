@@ -18,7 +18,7 @@ def _make_conn() -> sqlite3.Connection:
     _connect_for_tests(conn)
     conn.executescript(
         """
-        CREATE TABLE ensemble_snapshots_v2 (
+        CREATE TABLE ensemble_snapshots (
             snapshot_id INTEGER PRIMARY KEY,
             city TEXT,
             target_date TEXT,
@@ -105,7 +105,7 @@ def test_report_counts_persisted_low_window_evidence_classes() -> None:
     for idx, (status, contributes, reasons, start_local, end_local) in enumerate(rows, start=10):
         conn.execute(
             """
-            INSERT INTO ensemble_snapshots_v2 (
+            INSERT INTO ensemble_snapshots (
                 city, target_date, temperature_metric, physical_quantity, observation_field,
                 issue_time, available_at, fetch_time, lead_hours, members_json,
                 model_version, data_version, training_allowed, causality_status,
@@ -152,7 +152,7 @@ def test_report_quantifies_low_boundary_recovery_upper_bound() -> None:
     conn = _make_conn()
     conn.executemany(
         """
-        INSERT INTO ensemble_snapshots_v2 (
+        INSERT INTO ensemble_snapshots (
             city, target_date, temperature_metric, data_version,
             training_allowed, causality_status
         ) VALUES (?, ?, ?, ?, ?, ?)
@@ -212,7 +212,7 @@ def test_report_exposes_quarantined_negative_a_and_no_regression_gates() -> None
     conn = _make_conn()
     conn.execute(
         """
-        INSERT INTO ensemble_snapshots_v2 (
+        INSERT INTO ensemble_snapshots (
             city, target_date, temperature_metric, data_version,
             training_allowed, causality_status
         ) VALUES ('Jakarta', '2026-06-10', 'low', 'tigge_mn2t6_v1', 0, 'REJECTED_BOUNDARY_AMBIGUOUS')

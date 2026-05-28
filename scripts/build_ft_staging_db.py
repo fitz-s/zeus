@@ -11,7 +11,7 @@ Build ft_staging DB for full_transport_v1 pair generation.
 Creates a fresh staging forecasts DB with:
 - calibration_pairs_v2 UNIQUE key extended to include error_model_family
   (prevents ft_v1 rows from colliding with 'none' rows)
-- ensemble_snapshots_v2, observations, observation_instants_v2, zeus_meta
+- ensemble_snapshots, observations, observation_instants_v2, zeus_meta
   copied read-only from prod zeus-forecasts.db
 """
 from __future__ import annotations
@@ -28,7 +28,7 @@ STAGING_DB = ZEUS_ROOT / "state" / "ft_staging_2026-05-26.db"
 
 # Tables to copy wholesale from prod (read via ATTACH, no world-DB tables touched)
 COPY_TABLES = [
-    "ensemble_snapshots_v2",
+    "ensemble_snapshots",
     "observations",
     "observation_instants_v2",
     "zeus_meta",
@@ -59,7 +59,7 @@ CREATE TABLE IF NOT EXISTS calibration_pairs_v2 (
     authority TEXT NOT NULL DEFAULT 'UNVERIFIED'
         CHECK (authority IN ('VERIFIED', 'UNVERIFIED', 'QUARANTINED')),
     bin_source TEXT NOT NULL DEFAULT 'legacy',
-    snapshot_id INTEGER REFERENCES ensemble_snapshots_v2(snapshot_id),
+    snapshot_id INTEGER REFERENCES ensemble_snapshots(snapshot_id),
     data_version TEXT NOT NULL,
     training_allowed INTEGER NOT NULL DEFAULT 1
         CHECK (training_allowed IN (0, 1)),

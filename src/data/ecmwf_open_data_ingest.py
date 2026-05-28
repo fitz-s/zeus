@@ -18,7 +18,7 @@ per Phase 3 routing fix) was blocked unconditionally:
     route through the Open-Meteo broker for role='entry_primary' and label the
     result as source_id='ecmwf_open_data' (mis-provenance + training/serving skew)
 
-The data IS available — 504 high_temp + 416 low_temp rows in ensemble_snapshots_v2
+The data IS available — 504 high_temp + 416 low_temp rows in ensemble_snapshots
 for 2026-05-19 with 51 members each.  This class reads that table and returns a
 properly-tagged ForecastBundle so the existing guard passes.
 
@@ -67,7 +67,7 @@ _FRESHNESS_WINDOW_HOURS = 24
 class ECMWFOpenDataIngest:
     """ForecastIngestProtocol-compatible adapter for the ECMWF Open Data source.
 
-    Reads from ``ensemble_snapshots_v2`` (zeus-forecasts.db, K1 split) using
+    Reads from ``ensemble_snapshots`` (zeus-forecasts.db, K1 split) using
     the same grid-assembly strategy as tigge_db_fetcher: each target_date gets
     24 UTC timestamps, the 51-member vector is broadcast across all 24 columns
     so that ``member_maxes_for_target_date`` / ``member_mins_for_target_date``
@@ -115,14 +115,14 @@ class ECMWFOpenDataIngest:
         )
         if bundle is None:
             raise ValueError(
-                f"No VERIFIED ecmwf_open_data rows found in ensemble_snapshots_v2 "
+                f"No VERIFIED ecmwf_open_data rows found in ensemble_snapshots "
                 f"for city={getattr(self._city, 'name', self._city)!r} "
                 f"within {_FRESHNESS_WINDOW_HOURS}h of {run_init_utc.isoformat()}"
             )
         return bundle
 
     def health_check(self) -> ForecastSourceHealth:
-        """Report health by probing ensemble_snapshots_v2."""
+        """Report health by probing ensemble_snapshots."""
         ok = False
         message = "ecmwf_open_data: no VERIFIED rows in freshness window"
         try:
@@ -134,7 +134,7 @@ class ECMWFOpenDataIngest:
                 row = conn.execute(
                     """
                     SELECT COUNT(*) AS cnt
-                    FROM ensemble_snapshots_v2
+                    FROM ensemble_snapshots
                     WHERE source_id = ?
                       AND authority = 'VERIFIED'
                       AND causality_status = 'OK'
@@ -179,7 +179,7 @@ def _fetch_db_payload(
     fetch_time: datetime,
     temperature_metric: "str | None" = None,
 ) -> Optional[ForecastBundle]:
-    """Query ensemble_snapshots_v2 for ecmwf_open_data rows and build a ForecastBundle.
+    """Query ensemble_snapshots for ecmwf_open_data rows and build a ForecastBundle.
 
     Metric independence (PIPELINE_REVIEW.md §7):
     When ``temperature_metric`` is 'high' or 'low', ONLY that metric's rows are
@@ -253,7 +253,7 @@ def _fetch_db_payload(
                 all_times.append(f"{date_str}T{hour:02d}:00:00+00:00")
                 all_member_rows.append(list(vec))
 
-        synthesised_tag = f"ensemble_snapshots_v2.ecmwf_open_data.{temperature_metric}_only"
+        synthesised_tag = f"ensemble_snapshots.ecmwf_open_data.{temperature_metric}_only"
 
     else:
         # --- Combined-metric path (backward-compatible) ---
@@ -320,7 +320,7 @@ def _fetch_db_payload(
                 chosen = high_vec if use_high else low_vec
                 all_member_rows.append(list(chosen))
 
-        synthesised_tag = "ensemble_snapshots_v2.ecmwf_open_data.high+low"
+        synthesised_tag = "ensemble_snapshots.ecmwf_open_data.high+low"
 
     if not all_times:
         return None
@@ -367,7 +367,7 @@ def _query_metric(
     temperature_metric: str,
     cutoff: str,
 ) -> list:
-    """Return VERIFIED rows from ensemble_snapshots_v2 for one temperature metric.
+    """Return VERIFIED rows from ensemble_snapshots for one temperature metric.
 
     DAY0-P1 run-selection rule (2026-05-23): selects the FULL_CONTRIBUTOR snapshot
     per (city, target_date, temperature_metric), not the latest-inserted one.
@@ -398,7 +398,7 @@ def _query_metric(
                 fetch_time,
                 recorded_at,
                 members_json
-            FROM ensemble_snapshots_v2
+            FROM ensemble_snapshots
             WHERE city = ?
               AND temperature_metric = ?
               AND source_id = ?
@@ -411,10 +411,10 @@ def _query_metric(
               AND COALESCE(boundary_ambiguous, 0) = 0
               AND snapshot_id = (
                   SELECT s2.snapshot_id
-                  FROM ensemble_snapshots_v2 s2
-                  WHERE s2.city = ensemble_snapshots_v2.city
-                    AND s2.target_date = ensemble_snapshots_v2.target_date
-                    AND s2.temperature_metric = ensemble_snapshots_v2.temperature_metric
+                  FROM ensemble_snapshots s2
+                  WHERE s2.city = ensemble_snapshots.city
+                    AND s2.target_date = ensemble_snapshots.target_date
+                    AND s2.temperature_metric = ensemble_snapshots.temperature_metric
                     AND s2.source_id = ?
                     AND s2.authority = 'VERIFIED'
                     AND s2.causality_status = 'OK'

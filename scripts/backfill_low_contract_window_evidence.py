@@ -200,7 +200,7 @@ def _row_exists(
         conn.execute(
             """
             SELECT 1
-            FROM ensemble_snapshots_v2
+            FROM ensemble_snapshots
             WHERE city = ?
               AND target_date = ?
               AND temperature_metric = 'low'
@@ -225,7 +225,7 @@ def _source_snapshot_row(
     return conn.execute(
         """
         SELECT *
-        FROM ensemble_snapshots_v2
+        FROM ensemble_snapshots
         WHERE city = ?
           AND target_date = ?
           AND temperature_metric = 'low'
@@ -333,7 +333,7 @@ def _build_recovery_row(
     payload_path: Path,
     evidence: dict[str, Any],
 ) -> dict[str, Any]:
-    columns = [row["name"] for row in conn.execute("PRAGMA table_info(ensemble_snapshots_v2)")]
+    columns = [row["name"] for row in conn.execute("PRAGMA table_info(ensemble_snapshots)")]
     source_keys = set(source_row.keys())
     row = {
         column: (source_row[column] if column in source_keys else None)
@@ -378,7 +378,7 @@ def _insert_recovery_row(conn: sqlite3.Connection, row: dict[str, Any]) -> int:
     columns = list(row.keys())
     placeholders = ", ".join(f":{column}" for column in columns)
     sql = (
-        f"INSERT OR IGNORE INTO ensemble_snapshots_v2 "
+        f"INSERT OR IGNORE INTO ensemble_snapshots "
         f"({', '.join(columns)}) VALUES ({placeholders})"
     )
     before = conn.total_changes

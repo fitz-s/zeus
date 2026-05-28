@@ -30,7 +30,7 @@ FORECAST_CLASS_TABLES = {
     "source_run_coverage",
     "readiness_state",
     "market_events_v2",
-    "ensemble_snapshots_v2",
+    "ensemble_snapshots",
     "calibration_pairs_v2",
 }
 

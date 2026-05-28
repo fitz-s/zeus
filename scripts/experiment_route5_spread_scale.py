@@ -160,7 +160,7 @@ def _load_groups(conn: sqlite3.Connection, metric: str) -> list[dict]:
                cp.season, cp.cluster, cp.target_date,
                es.members_json
         FROM calibration_pairs_v2 cp
-        JOIN ensemble_snapshots_v2 es ON cp.snapshot_id = es.snapshot_id
+        JOIN ensemble_snapshots es ON cp.snapshot_id = es.snapshot_id
         WHERE cp.error_model_family = 'full_transport_v1'
           AND cp.temperature_metric = ?
           AND cp.bin_source = 'canonical_v2'

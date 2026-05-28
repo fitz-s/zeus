@@ -543,7 +543,7 @@ class TestRCBForecastRowsV2:
 
 class TestRCCBoundaryGateWired:
     """Phase 9C A4: evaluator's candidate decision flow reads
-    boundary_ambiguous from ensemble_snapshots_v2 and refuses the candidate
+    boundary_ambiguous from ensemble_snapshots and refuses the candidate
     when the flag is True. Pre-P9C the contract function
     boundary_ambiguous_refuses_signal existed as ORPHAN code (no caller).
     This antibody locks the wire.
@@ -688,11 +688,11 @@ class TestRCCBoundaryGateWired:
         apply_v2_schema(conn)
 
         # Insert a v2 snapshot row with boundary_ambiguous=1. Schema has
-        # many NOT NULL columns (see v2_schema.py ensemble_snapshots_v2).
+        # many NOT NULL columns (see v2_schema.py ensemble_snapshots).
         now = "2026-07-10T00:00:00+00:00"
         conn.execute(
             """
-            INSERT INTO ensemble_snapshots_v2
+            INSERT INTO ensemble_snapshots
                 (city, target_date, temperature_metric,
                  physical_quantity, observation_field,
                  available_at, fetch_time, lead_hours,
@@ -712,7 +712,7 @@ class TestRCCBoundaryGateWired:
         snapshot_id = conn.execute(
             """
             SELECT snapshot_id
-            FROM ensemble_snapshots_v2
+            FROM ensemble_snapshots
             WHERE city = 'NYC'
               AND target_date = '2026-07-15'
               AND temperature_metric = 'low'

@@ -1210,21 +1210,21 @@ class TestRiskGuardSettlementSource:
         import json as _json
         conn.execute("""
             INSERT INTO position_events
-            (event_id, position_id, sequence_no, event_type,
+            (event_id, position_id, event_version, sequence_no, event_type,
              occurred_at, strategy_key, source_module, env, payload_json)
             VALUES (?,?,?,?,?,?,?,?,?,?)
         """, ("exec-1:intent:1", "exec-1", 1, 1, "POSITION_OPEN_INTENT",
                "2026-04-01T10:00:00Z", "center_buy", "test", "live", '{}'))
         conn.execute("""
             INSERT INTO position_events
-            (event_id, position_id, sequence_no, event_type,
+            (event_id, position_id, event_version, sequence_no, event_type,
              occurred_at, strategy_key, source_module, env, payload_json)
             VALUES (?,?,?,?,?,?,?,?,?,?)
         """, ("exec-1:filled:2", "exec-1", 1, 2, "ENTRY_ORDER_FILLED",
                "2026-04-01T10:01:00Z", "center_buy", "test", "live", '{}'))
         conn.execute("""
             INSERT INTO position_events
-            (event_id, position_id, sequence_no, event_type,
+            (event_id, position_id, event_version, sequence_no, event_type,
              occurred_at, strategy_key, source_module, env, payload_json)
             VALUES (?,?,?,?,?,?,?,?,?,?)
         """, ("exec-2:rejected:1", "exec-2", 1, 1, "ENTRY_ORDER_REJECTED",
@@ -1779,7 +1779,7 @@ class TestStrategyPolicyResolver:
         for i in range(10):
             conn.execute("""
                 INSERT INTO position_events
-                (event_id, position_id, sequence_no, event_type,
+                (event_id, position_id, event_version, sequence_no, event_type,
                  occurred_at, strategy_key, source_module, env, payload_json)
                 VALUES (?,?,?,?,?,?,?,?,?,?)
             """, (f"reject-{i}:rejected:1", f"reject-{i}", 1, 1,

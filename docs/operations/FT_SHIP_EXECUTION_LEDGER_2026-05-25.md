@@ -76,7 +76,7 @@ This is the single source of truth for finishing the full_transport→live ship.
 **Root cause of refit #3 fail (`empty_platt_refit_bucket`):** preflight iterates BOTH metrics in METRIC_SPECS. After I wiped LOW pairs earlier, LOW bucket count=0 → preflight fails → blocks HIGH refit. Lesson #13.
 
 **Action plan executing (operator-approved plan: `/Users/leofitz/.claude/plans/transient-nibbling-beaver.md`):**
-1. ✓ Deleted 28 Jinan/Zhengzhou rows from ensemble_snapshots_v2 (56 total across metrics; partial-onboarding artifacts violating `feedback_newcity_no_partial_calibration`). Backup: `state/backups/ensemble_snapshots_v2_jinan_zhengzhou_pre_lowrebuild_20260526_194240.json`.
+1. ✓ Deleted 28 Jinan/Zhengzhou rows from ensemble_snapshots (56 total across metrics; partial-onboarding artifacts violating `feedback_newcity_no_partial_calibration`). Backup: `state/backups/ensemble_snapshots_jinan_zhengzhou_pre_lowrebuild_20260526_194240.json`.
 2. ✓ LOW rebuild **PID 61451** launched detached at 19:43, log `logs/ftrebuild_low_2026-05-26.log`, --workers 12 --n-mc 10000.
 3. ⏳ Monitor `by0qu8hfz` watches LOW progress + auto-launches HIGH refit (#4) when LOW bucket count ≥ 1.
 4. Pending: bin-check HIGH (≤1 unit), promote HIGH→world.db (INV-37 ATTACH), schema 36→37, daemon shadow restart, autonomous unshadow on shadow bin bias ≤1 verified.
@@ -218,7 +218,7 @@ full_transport → live trading: autonomous execution ledger. Read top-to-bottom
 ## CONTEXT FOR A FRESH READER (you, on wake, may have no prior memory)
 **Goal:** ship the full_transport probability correction to live Polymarket weather trading. full_transport = location + scale + SNR-gate + F50→F25 transport, applied at p_raw generation. The math shape is correct & proven (#334/#336). The 3-day stall was: an evaluation refit was mistaken for a production artifact (in-RAM posteriors, scratch DB, no live wiring, no persistence). We are now building the real production instantiation.
 
-**Probability chain:** 51-member ENS → ENS bias correction (the full_transport error model: bias b, λ SNR-gate, residual sd; src/calibration/ens_error_model.py + ens_bias_model.py) → daily-max extraction → 10k MC → p_raw → Platt OR identity calibrator → p_cal → α-fusion vs market → edge → Kelly. K1 DB split: state/zeus-world.db (platt_models_v2, traces, trades) + zeus-forecasts.db (calibration_pairs_v2, ensemble_snapshots_v2) + zeus_trades.db.
+**Probability chain:** 51-member ENS → ENS bias correction (the full_transport error model: bias b, λ SNR-gate, residual sd; src/calibration/ens_error_model.py + ens_bias_model.py) → daily-max extraction → 10k MC → p_raw → Platt OR identity calibrator → p_cal → α-fusion vs market → edge → Kelly. K1 DB split: state/zeus-world.db (platt_models_v2, traces, trades) + zeus-forecasts.db (calibration_pairs_v2, ensemble_snapshots) + zeus_trades.db.
 
 **Why the two fixes (the heart of it):**
 - **Fix A:** the HIGH bias prior was contaminated — ens_bias_repo picked the *freshest* snapshot per date = the 12Z cycle, whose window is nighttime and MISSES the afternoon daily-HIGH → every HIGH prior read −3 to −4°C too cold. Fixed: metric-aware window selection (HIGH→0Z daytime, LOW→12Z night). HK HIGH prior −3.49→+0.67°C. DB-wide. (LOW was always correct → 12Z night IS the daily-min window.)

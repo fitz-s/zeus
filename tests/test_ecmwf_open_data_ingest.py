@@ -34,7 +34,7 @@ _TARGET_DATE = "2026-05-19"
 _DECISION_TIME = _DB_FETCH_DATETIME + timedelta(minutes=30)
 
 _CREATE_TABLE_SQL = """
-CREATE TABLE ensemble_snapshots_v2 (
+CREATE TABLE ensemble_snapshots (
     snapshot_id INTEGER PRIMARY KEY AUTOINCREMENT,
     city TEXT NOT NULL,
     target_date TEXT NOT NULL,
@@ -102,7 +102,7 @@ def staged_forecasts_db(tmp_path: Path, monkeypatch):
         ("low", "ecmwf_opendata_mn2t3_local_calendar_day_min_v1", low_members),
     ):
         conn.execute(
-            """INSERT INTO ensemble_snapshots_v2
+            """INSERT INTO ensemble_snapshots
                (city, target_date, temperature_metric, available_at, fetch_time,
                 members_json, data_version, causality_status, authority,
                 recorded_at, members_unit, issue_time, source_id)

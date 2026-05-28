@@ -83,7 +83,7 @@ def _table_columns(conn: sqlite3.Connection, schema: str, table: str) -> set[str
 def _table_stats(conn: sqlite3.Connection, latest_source_run_id: str | None) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for schema in ("main", "world", "forecasts"):
-        for table in ("ensemble_snapshots_v2", "source_run", "source_run_coverage", "readiness_state"):
+        for table in ("ensemble_snapshots", "source_run", "source_run_coverage", "readiness_state"):
             item: dict[str, Any] = {"schema": schema, "table": table, "exists": _table_exists(conn, schema, table)}
             if not item["exists"]:
                 out.append(item)
@@ -282,7 +282,7 @@ def _target_range(conn: sqlite3.Connection, source_run_id: str) -> dict[str, Any
             MAX(target_date) AS max_target_date,
             COUNT(DISTINCT target_date) AS target_dates,
             COUNT(*) AS rows
-        FROM forecasts.ensemble_snapshots_v2
+        FROM forecasts.ensemble_snapshots
         WHERE source_run_id = ?
         """,
         (source_run_id,),
@@ -295,7 +295,7 @@ def _candidate_snapshot(conn: sqlite3.Connection, source_run_id: str, now_date: 
         """
         SELECT es.*
         FROM forecasts.source_run_coverage AS cov
-        JOIN forecasts.ensemble_snapshots_v2 AS es
+        JOIN forecasts.ensemble_snapshots AS es
           ON es.source_run_id = cov.source_run_id
          AND es.source_id = cov.source_id
          AND es.source_transport = cov.source_transport

@@ -40,7 +40,7 @@ isolated staging DB (`--db <iso.db>`); the live `state/zeus-forecasts.db` and
 current main (proven in STEP 2). No promotion, no merge, no activation in scope.
 
 ## Isolation
-Lean staging DB seeded with `ensemble_snapshots_v2` (+ members_unit),
+Lean staging DB seeded with `ensemble_snapshots` (+ members_unit),
 `observations`, `settlements_v2` copied from the live forecasts DB, plus the v2
 schema write targets. All rebuild reads + error-model fit + Platt refit run
 against this single isolated DB.

@@ -163,7 +163,7 @@ surfaces:
       db_tables:
         - source_run_coverage
         - readiness_state
-        - ensemble_snapshots_v2
+        - ensemble_snapshots
     money_path_segments: [source_truth, forecast_signal, executable_edge]
     risk_tier: T1
     scoped_agents:

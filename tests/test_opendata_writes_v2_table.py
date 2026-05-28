@@ -3,12 +3,12 @@
 # Authority basis: Operator directive 2026-05-01 — antibody for Invariant A;
 #   docs/archive/2026-Q2/task_2026-05-08_deep_alignment_audit/DATA_DAEMON_LIVE_EFFICIENCY_REFACTOR_PLAN.md
 #   Phase 5 forecast authority chain ownership.
-"""Antibody for Invariant A — Open Data writes target ensemble_snapshots_v2.
+"""Antibody for Invariant A — Open Data writes target ensemble_snapshots.
 
 The ingest cycle skips download/extract via test seams and runs the in-process
 ingester against a temporary opendata-shaped JSON file. We then assert:
 
-  1. ``ensemble_snapshots_v2`` got the row (not ``ensemble_snapshots``).
+  1. ``ensemble_snapshots`` got the row (not ``ensemble_snapshots``).
   2. The row's ``data_version`` is one of the canonical opendata constants.
   3. ``CANONICAL_ENSEMBLE_DATA_VERSIONS`` contains both opendata constants.
 """
@@ -147,7 +147,7 @@ def test_opendata_high_payload_lands_in_v2(tmp_path: Path, monkeypatch):
     assert summary["written"] == 1, summary
     rows = conn.execute(
         "SELECT data_version, temperature_metric, city, target_date "
-        "FROM ensemble_snapshots_v2"
+        "FROM ensemble_snapshots"
     ).fetchall()
     assert len(rows) == 1
     row = rows[0]
@@ -251,7 +251,7 @@ def test_collect_open_ens_cycle_writes_authority_chain_readable_by_live_reader(t
         target_local_date=date(2026, 5, 2),
         temperature_metric="high",
         source_id="ecmwf_open_data",
-        source_transport="ensemble_snapshots_v2_db_reader",
+        source_transport="ensemble_snapshots_db_reader",
         data_version=ECMWF_OPENDATA_HIGH_DATA_VERSION,
         track="mx2t6_high_full_horizon",
         strategy_key="entry_forecast",
@@ -508,7 +508,7 @@ def test_collect_open_ens_cycle_scopes_ingest_to_selected_cycle(tmp_path: Path, 
     rows = forecasts_conn.execute(
         """
         SELECT target_date, source_run_id, source_cycle_time
-        FROM ensemble_snapshots_v2
+        FROM ensemble_snapshots
         ORDER BY target_date
         """
     ).fetchall()
@@ -531,7 +531,7 @@ def test_collect_open_ens_cycle_clears_prior_same_source_run_rows(tmp_path: Path
     source_run_id = "ecmwf_open_data:mx2t6_high:2026-05-01T00Z"
     forecasts_conn.execute(
         """
-        INSERT INTO ensemble_snapshots_v2 (
+        INSERT INTO ensemble_snapshots (
             city, target_date, temperature_metric, physical_quantity, observation_field,
             issue_time, valid_time, available_at, fetch_time, lead_hours, members_json,
             model_version, data_version, source_id, source_transport, source_run_id,
@@ -555,7 +555,7 @@ def test_collect_open_ens_cycle_clears_prior_same_source_run_rows(tmp_path: Path
             "ecmwf_open_data",
             ECMWF_OPENDATA_HIGH_DATA_VERSION,
             "ecmwf_open_data",
-            "ensemble_snapshots_v2_db_reader",
+            "ensemble_snapshots_db_reader",
             source_run_id,
             "ecmwf_open_data:mx2t6_high:full",
             "2026-05-01T00:00:00+00:00",
@@ -573,7 +573,7 @@ def test_collect_open_ens_cycle_clears_prior_same_source_run_rows(tmp_path: Path
     )
     forecasts_conn.execute(
         """
-        INSERT INTO ensemble_snapshots_v2 (
+        INSERT INTO ensemble_snapshots (
             city, target_date, temperature_metric, physical_quantity, observation_field,
             issue_time, valid_time, available_at, fetch_time, lead_hours, members_json,
             model_version, data_version, source_id, source_transport, source_run_id,
@@ -588,7 +588,7 @@ def test_collect_open_ens_cycle_clears_prior_same_source_run_rows(tmp_path: Path
             source_run_id, release_calendar_key, source_cycle_time, source_release_time, source_available_at,
             city_timezone, settlement_unit, manifest_hash, provenance_json, members_unit,
             '2026-05-07T23:00:00+00:00', step_horizon_hours, unit
-        FROM ensemble_snapshots_v2
+        FROM ensemble_snapshots
         WHERE source_run_id = ? AND target_date = '2026-05-09'
         """,
         (source_run_id,),
@@ -641,7 +641,7 @@ def test_collect_open_ens_cycle_clears_prior_same_source_run_rows(tmp_path: Path
     assert result["cleared_authority"]["snapshots_deleted"] == 2
     assert result["cleared_authority"]["producer_readiness_deleted"] == 1
     rows = forecasts_conn.execute(
-        "SELECT target_date FROM ensemble_snapshots_v2 WHERE source_run_id = ? ORDER BY target_date",
+        "SELECT target_date FROM ensemble_snapshots WHERE source_run_id = ? ORDER BY target_date",
         (source_run_id,),
     ).fetchall()
     assert [row["target_date"] for row in rows] == ["2026-05-02"]
@@ -671,7 +671,7 @@ def test_collect_open_ens_cycle_overwrites_existing_snapshot_in_place(tmp_path: 
     issue_iso = "2026-05-01T00:00:00+00:00"
     forecasts_conn.execute(
         """
-        INSERT INTO ensemble_snapshots_v2 (
+        INSERT INTO ensemble_snapshots (
             city, target_date, temperature_metric, physical_quantity, observation_field,
             issue_time, valid_time, available_at, fetch_time, lead_hours, members_json,
             model_version, data_version, source_id, source_transport, source_run_id,
@@ -695,7 +695,7 @@ def test_collect_open_ens_cycle_overwrites_existing_snapshot_in_place(tmp_path: 
             "ecmwf_open_data",
             ECMWF_OPENDATA_HIGH_DATA_VERSION,
             "ecmwf_open_data",
-            "ensemble_snapshots_v2_db_reader",
+            "ensemble_snapshots_db_reader",
             source_run_id,
             "ecmwf_open_data:mx2t6_high:full",
             issue_iso,
@@ -712,7 +712,7 @@ def test_collect_open_ens_cycle_overwrites_existing_snapshot_in_place(tmp_path: 
         ),
     )
     before_id = forecasts_conn.execute(
-        "SELECT snapshot_id FROM ensemble_snapshots_v2 WHERE source_run_id = ?",
+        "SELECT snapshot_id FROM ensemble_snapshots WHERE source_run_id = ?",
         (source_run_id,),
     ).fetchone()["snapshot_id"]
 
@@ -741,7 +741,7 @@ def test_collect_open_ens_cycle_overwrites_existing_snapshot_in_place(tmp_path: 
 
     assert result["cleared_authority"]["snapshots_deleted"] == 0
     row = forecasts_conn.execute(
-        "SELECT snapshot_id, members_json FROM ensemble_snapshots_v2 WHERE source_run_id = ?",
+        "SELECT snapshot_id, members_json FROM ensemble_snapshots WHERE source_run_id = ?",
         (source_run_id,),
     ).fetchone()
     assert row["snapshot_id"] == before_id

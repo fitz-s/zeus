@@ -105,7 +105,7 @@ def _make_db() -> sqlite3.Connection:
     apply_v2_schema(conn)
     conn.execute(
         """
-        INSERT INTO ensemble_snapshots_v2 (
+        INSERT INTO ensemble_snapshots (
             city, target_date, temperature_metric, physical_quantity, observation_field,
             issue_time, valid_time, available_at, fetch_time, lead_hours,
             members_json, model_version, data_version, training_allowed,
@@ -135,7 +135,7 @@ def _make_db() -> sqlite3.Connection:
 def _recovery_count(conn: sqlite3.Connection) -> int:
     source = LOW_RECOVERY_SOURCES["tigge_mars"]
     return conn.execute(
-        "SELECT COUNT(*) FROM ensemble_snapshots_v2 WHERE data_version = ?",
+        "SELECT COUNT(*) FROM ensemble_snapshots WHERE data_version = ?",
         (source.recovery_data_version,),
     ).fetchone()[0]
 
@@ -229,7 +229,7 @@ def test_low_contract_window_backfill_apply_inserts_recovery_row(tmp_path: Path)
         SELECT data_version, training_allowed, causality_status,
                forecast_window_attribution_status, contributes_to_target_extrema,
                forecast_window_block_reasons_json, provenance_json
-        FROM ensemble_snapshots_v2
+        FROM ensemble_snapshots
         WHERE data_version = ?
         """,
         (source.recovery_data_version,),
@@ -377,7 +377,7 @@ def test_low_contract_window_backfill_preserves_non_boundary_block_reason(tmp_pa
         """
         SELECT training_allowed, causality_status, boundary_ambiguous,
                forecast_window_attribution_status, forecast_window_block_reasons_json
-        FROM ensemble_snapshots_v2
+        FROM ensemble_snapshots
         WHERE data_version = ?
         """,
         (source.recovery_data_version,),
@@ -409,7 +409,7 @@ def test_low_contract_window_backfill_ambiguous_window_stays_blocked(tmp_path: P
         """
         SELECT training_allowed, causality_status, forecast_window_attribution_status,
                forecast_window_block_reasons_json
-        FROM ensemble_snapshots_v2
+        FROM ensemble_snapshots
         WHERE data_version = ?
         """,
         (source.recovery_data_version,),

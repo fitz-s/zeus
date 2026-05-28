@@ -142,7 +142,7 @@ def test_candidate_snapshot_uses_live_eligible_coverage_not_first_snapshot() -> 
             data_version TEXT,
             readiness_status TEXT
         );
-        CREATE TABLE forecasts.ensemble_snapshots_v2 (
+        CREATE TABLE forecasts.ensemble_snapshots (
             snapshot_id INTEGER PRIMARY KEY,
             source_run_id TEXT,
             source_id TEXT,
@@ -168,7 +168,7 @@ def test_candidate_snapshot_uses_live_eligible_coverage_not_first_snapshot() -> 
             (
                 "ecmwf_open_data:mn2t6_low:2026-05-15T00Z",
                 "ecmwf_open_data",
-                "ensemble_snapshots_v2_db_reader",
+                "ensemble_snapshots_db_reader",
                 city,
                 "2026-05-15",
                 "low",
@@ -177,12 +177,12 @@ def test_candidate_snapshot_uses_live_eligible_coverage_not_first_snapshot() -> 
             ),
         )
         conn.execute(
-            "INSERT INTO forecasts.ensemble_snapshots_v2 VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO forecasts.ensemble_snapshots VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 snapshot_id,
                 "ecmwf_open_data:mn2t6_low:2026-05-15T00Z",
                 "ecmwf_open_data",
-                "ensemble_snapshots_v2_db_reader",
+                "ensemble_snapshots_db_reader",
                 city,
                 "2026-05-15",
                 "low",
@@ -224,7 +224,7 @@ def test_live_checker_does_not_fallback_to_older_ready_source_run() -> None:
             data_version TEXT,
             readiness_status TEXT
         );
-        CREATE TABLE forecasts.ensemble_snapshots_v2 (
+        CREATE TABLE forecasts.ensemble_snapshots (
             snapshot_id INTEGER PRIMARY KEY,
             source_run_id TEXT,
             source_id TEXT,
@@ -266,7 +266,7 @@ def test_live_checker_does_not_fallback_to_older_ready_source_run() -> None:
         (
             older_ready["source_run_id"],
             "ecmwf_open_data",
-            "ensemble_snapshots_v2_db_reader",
+            "ensemble_snapshots_db_reader",
             "London",
             "2026-05-16",
             "high",
@@ -275,12 +275,12 @@ def test_live_checker_does_not_fallback_to_older_ready_source_run() -> None:
         ),
     )
     conn.execute(
-        "INSERT INTO forecasts.ensemble_snapshots_v2 VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO forecasts.ensemble_snapshots VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         (
             10,
             older_ready["source_run_id"],
             "ecmwf_open_data",
-            "ensemble_snapshots_v2_db_reader",
+            "ensemble_snapshots_db_reader",
             "London",
             "2026-05-16",
             "high",
@@ -327,7 +327,7 @@ def test_live_checker_uses_actual_reader_bundle_identity(monkeypatch) -> None:
         "target_date": "2026-05-16",
         "temperature_metric": "high",
         "source_id": "ecmwf_open_data",
-        "source_transport": "ensemble_snapshots_v2_db_reader",
+        "source_transport": "ensemble_snapshots_db_reader",
         "data_version": "ecmwf_opendata_mx2t3_local_calendar_day_max_v1",
         "snapshot_id": 99,
     }

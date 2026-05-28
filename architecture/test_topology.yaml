@@ -76,7 +76,7 @@ test_trust_policy:
     tests/test_entry_forecast_chain_relationship.py: {created: "2026-05-03", last_used: "2026-05-03"}
     tests/test_entry_forecast_rollout.py: {created: "2026-05-03", last_used: "2026-05-03"}
     tests/test_entry_forecast_shadow.py: {created: "2026-05-03", last_used: "2026-05-03"}
-    tests/test_ensemble_snapshots_v2_executable_schema.py: {created: "2026-05-03", last_used: "2026-05-03"}
+    tests/test_ensemble_snapshots_executable_schema.py: {created: "2026-05-03", last_used: "2026-05-03"}
     tests/test_ensemble_snapshots_bias_corrected_schema.py: {created: "2026-04-26", last_used: "2026-04-26"}
     # End-to-end sign / window / transport invariant audit for the FT-ship
     # hierarchical bias-correction layer. Authority: operator critique 2026-05-27
@@ -383,7 +383,7 @@ test_trust_policy:
     tests/test_ecmwf_open_data_hang_antibodies_2026_05_13.py: {created: "2026-05-13", last_used: "2026-05-13"}
     tests/test_ecmwf_open_data_parallel_fetch.py: {created: "2026-05-11", last_used: "2026-05-15"}
     tests/test_ecmwf_open_data_source_failover.py: {created: "2026-05-11", last_used: "2026-05-11"}
-    tests/test_ensemble_snapshots_v2_ingest_backend.py: {created: "2026-05-07", last_used: "2026-05-07"}
+    tests/test_ensemble_snapshots_ingest_backend.py: {created: "2026-05-07", last_used: "2026-05-07"}
     tests/test_entries_block_registry.py: {created: "2026-05-04", last_used: "2026-05-04"}
     tests/test_entry_forecast_shadow_evidence_migration.py: {created: "2026-05-05", last_used: "2026-05-05"}
     tests/test_entry_forecast_shadow_promotion_passthrough.py: {created: "2026-05-05", last_used: "2026-05-05"}
@@ -594,7 +594,7 @@ categories:
     - tests/test_etl_skill_eligibility_filter.py
     - tests/test_calibration_bins_canonical.py
     - tests/test_platt_bootstrap_equivalence.py
-    - tests/test_ensemble_snapshots_v2_executable_schema.py
+    - tests/test_ensemble_snapshots_executable_schema.py
     - tests/test_load_platt_v2_data_version_filter.py
     - tests/test_cities_config_authoritative.py
     - tests/test_config.py
@@ -937,7 +937,7 @@ categories:
     - tests/test_ecmwf_open_data_hang_antibodies_2026_05_13.py
     - tests/test_ecmwf_open_data_parallel_fetch.py
     - tests/test_ecmwf_open_data_source_failover.py
-    - tests/test_ensemble_snapshots_v2_ingest_backend.py
+    - tests/test_ensemble_snapshots_ingest_backend.py
     - tests/test_entries_block_registry.py
     - tests/test_entry_forecast_evaluator_cutover.py
     - tests/test_entry_forecast_rollout.py

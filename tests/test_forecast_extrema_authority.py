@@ -72,7 +72,7 @@ def _insert_snapshot_row(
     scope = _scope(city)
     conn.execute(
         """
-        INSERT INTO ensemble_snapshots_v2 (
+        INSERT INTO ensemble_snapshots (
             city, target_date, temperature_metric, physical_quantity,
             observation_field, issue_time, valid_time, available_at, fetch_time,
             lead_hours, members_json, model_version, data_version,
@@ -109,7 +109,7 @@ def _insert_snapshot_row(
             "model_version": "ecmwf_ens",
             "data_version": data_version or scope.data_version,
             "source_id": "ecmwf_open_data",
-            "source_transport": "ensemble_snapshots_v2_db_reader",
+            "source_transport": "ensemble_snapshots_db_reader",
             "source_run_id": source_run_id,
             "release_calendar_key": "ecmwf_open_data:mx2t6_high:full",
             "source_cycle_time": source_cycle_time,
@@ -284,7 +284,7 @@ class TestReaderExtremaPreference:
             conn,
             scope=scope,
             source_id="ecmwf_open_data",
-            source_transport="ensemble_snapshots_v2_db_reader",
+            source_transport="ensemble_snapshots_db_reader",
             source_run_id="run-taipei",
         )
         assert result.ok, f"Expected LIVE_ELIGIBLE, got {result.status}/{result.reason_code}"
@@ -312,7 +312,7 @@ class TestReaderExtremaPreference:
             conn,
             scope=scope,
             source_id="ecmwf_open_data",
-            source_transport="ensemble_snapshots_v2_db_reader",
+            source_transport="ensemble_snapshots_db_reader",
             source_run_id="run-taipei-nc",
         )
         assert not result.ok
@@ -336,7 +336,7 @@ class TestReaderExtremaPreference:
             conn,
             scope=scope,
             source_id="ecmwf_open_data",
-            source_transport="ensemble_snapshots_v2_db_reader",
+            source_transport="ensemble_snapshots_db_reader",
             source_run_id="run-taipei-unk",
         )
         assert not result.ok
@@ -362,7 +362,7 @@ class TestReaderExtremaPreference:
             conn,
             scope=scope,
             source_id="ecmwf_open_data",
-            source_transport="ensemble_snapshots_v2_db_reader",
+            source_transport="ensemble_snapshots_db_reader",
             source_run_id="run-taipei-current-null",
         )
         assert not result.ok
@@ -391,7 +391,7 @@ class TestReaderExtremaPreference:
             conn,
             scope=scope,
             source_id="ecmwf_open_data",
-            source_transport="ensemble_snapshots_v2_db_reader",
+            source_transport="ensemble_snapshots_db_reader",
             source_run_id="run-taipei-legacy",
         )
         assert result.ok, f"Legacy NULL row should pass: {result.reason_code}"
@@ -435,7 +435,7 @@ class TestReaderExtremaPreference:
             conn,
             scope=scope,
             source_id="ecmwf_open_data",
-            source_transport="ensemble_snapshots_v2_db_reader",
+            source_transport="ensemble_snapshots_db_reader",
             source_run_id="run-ams",
         )
         assert result.ok, f"Expected LIVE_ELIGIBLE, got {result.status}/{result.reason_code}"

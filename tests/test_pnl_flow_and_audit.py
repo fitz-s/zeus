@@ -48,7 +48,7 @@ from src.state.db import (
 )
 from src.state.schema.v2_schema import (
     _create_calibration_pairs_v2,
-    _create_ensemble_snapshots_v2,
+    _create_ensemble_snapshots,
     _create_settlements_v2,
 )
 from src.state.decision_chain import SettlementRecord, store_settlement_records
@@ -542,7 +542,7 @@ def _insert_snapshot(
     observation_field = "low_temp" if temperature_metric == "low" else "high_temp"
     conn.execute(
         """
-        INSERT INTO ensemble_snapshots_v2
+        INSERT INTO ensemble_snapshots
         (snapshot_id, city, target_date, temperature_metric, physical_quantity,
          observation_field, issue_time, valid_time, available_at, fetch_time,
          lead_hours, members_json, p_raw_json, spread, is_bimodal, model_version,
@@ -802,7 +802,7 @@ def test_inv_status_reports_real_pnl(monkeypatch, tmp_path):
     conn.execute(
         """
         INSERT INTO position_events (
-            event_id, position_id, sequence_no, event_type, occurred_at,
+            event_id, position_id, event_version, sequence_no, event_type, occurred_at,
             phase_before, phase_after, strategy_key, decision_id, snapshot_id, order_id,
             command_id, caused_by, idempotency_key, venue_status, source_module, env, payload_json
         ) VALUES (?, ?, 1, 1, ?, ?, 'day0_window', 'pending_exit', ?, NULL, ?, NULL, NULL, ?, ?, NULL, 'tests', 'test', ?)
@@ -3607,7 +3607,7 @@ def test_inv_riskguard_prefers_canonical_position_events_settlement_source(monke
            "m6", "center_buy", 10.0, 25.0, 10.0, 0.40, "F", "high"))
     conn.execute("""
         INSERT INTO position_events
-        (event_id, position_id, sequence_no, event_type,
+        (event_id, position_id, event_version, sequence_no, event_type,
          occurred_at, strategy_key, source_module, env, payload_json)
         VALUES (?,?,?,?,?,?,?,?,?,?)
     """, ("rt-settle-auth:settled:1", "rt-settle-auth", 1, 1, "SETTLED",
@@ -3819,7 +3819,7 @@ def test_inv_harvester_triggers_refit(monkeypatch, tmp_path):
     db_path = tmp_path / "zeus.db"
     conn = get_connection(db_path)
     init_schema(conn)
-    _create_ensemble_snapshots_v2(conn)  # Cluster A: v2 table needed post K1 split
+    _create_ensemble_snapshots(conn)  # Cluster A: v2 table needed post K1 split
     _create_calibration_pairs_v2(conn)  # Cluster A: FK dep needed post K1 split
 
     season = season_from_date("2026-04-01")
@@ -4036,7 +4036,7 @@ def test_harvester_stage2_preflight_skips_canonical_bootstrap_shape(
     assert result["stage2_status"] == "skipped_db_shape_preflight"
     assert "decision_log" in result["stage2_missing_trade_tables"]
     assert "chronicle" in result["stage2_missing_trade_tables"]
-    assert "ensemble_snapshots_v2" in result["stage2_missing_shared_tables"]
+    assert "ensemble_snapshots" in result["stage2_missing_shared_tables"]
     assert settled_calls == [("NYC", "2026-04-01", "39-40°F")]
     assert not any("Harvester error" in record.getMessage() for record in caplog.records)
 
@@ -4045,7 +4045,7 @@ def test_inv_harvester_falls_back_to_open_portfolio_snapshot_when_no_durable_set
     db_path = tmp_path / "zeus.db"
     conn = get_connection(db_path)
     init_schema(conn)
-    _create_ensemble_snapshots_v2(conn)  # Cluster A: v2 table needed post K1 split
+    _create_ensemble_snapshots(conn)  # Cluster A: v2 table needed post K1 split
     _create_calibration_pairs_v2(conn)  # Cluster A: FK dep needed post K1 split
 
     snapshot_id = _insert_snapshot(conn, "NYC", "2026-04-01", [0.65, 0.35])
@@ -4126,7 +4126,7 @@ def test_inv_harvester_uses_legacy_decision_log_snapshot_before_open_portfolio(m
     db_path = tmp_path / "zeus.db"
     conn = get_connection(db_path)
     init_schema(conn)
-    _create_ensemble_snapshots_v2(conn)  # Cluster A: v2 table needed post K1 split
+    _create_ensemble_snapshots(conn)  # Cluster A: v2 table needed post K1 split
     _create_calibration_pairs_v2(conn)  # Cluster A: FK dep needed post K1 split
 
     legacy_snapshot_id = _insert_snapshot(conn, "NYC", "2026-04-01", [0.65, 0.35])
@@ -4251,7 +4251,7 @@ def test_inv_harvester_prefers_durable_snapshot_over_open_portfolio(monkeypatch,
     db_path = tmp_path / "zeus.db"
     conn = get_connection(db_path)
     init_schema(conn)
-    _create_ensemble_snapshots_v2(conn)  # Cluster A: v2 table needed post K1 split
+    _create_ensemble_snapshots(conn)  # Cluster A: v2 table needed post K1 split
     _create_calibration_pairs_v2(conn)  # Cluster A: FK dep needed post K1 split
 
     durable_snapshot_id = _insert_snapshot(conn, "NYC", "2026-04-01", [0.65, 0.35])
@@ -4289,7 +4289,7 @@ def test_inv_harvester_prefers_durable_snapshot_over_open_portfolio(monkeypatch,
            "m1", "center_buy", 10.0, 10.0, 10.0, 0.40, "F", "high"))
     conn.execute("""
         INSERT INTO position_events
-        (event_id, position_id, sequence_no, event_type,
+        (event_id, position_id, event_version, sequence_no, event_type,
          occurred_at, strategy_key, snapshot_id, source_module, env, payload_json)
         VALUES (?,?,?,?,?,?,?,?,?,?,?)
     """, ("trade-durable-preferred:settled:1", "trade-durable-preferred", 1, 1, "SETTLED",
@@ -4399,7 +4399,7 @@ def test_inv_harvester_marks_partial_context_resolution(monkeypatch, tmp_path):
     db_path = tmp_path / "zeus.db"
     conn = get_connection(db_path)
     init_schema(conn)
-    _create_ensemble_snapshots_v2(conn)  # Cluster A: v2 table needed post K1 split
+    _create_ensemble_snapshots(conn)  # Cluster A: v2 table needed post K1 split
     _create_calibration_pairs_v2(conn)  # Cluster A: FK dep needed post K1 split
 
     good_snapshot_id = _insert_snapshot(conn, "NYC", "2026-04-01", [0.65, 0.35])

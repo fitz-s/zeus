@@ -102,8 +102,8 @@ def test_absent_causality_field_is_rejected_by_ingest(ingest_env, tmp_path):
         "contract_rejected: PROVENANCE_VIOLATION",
     ), status
 
-    count = conn.execute("SELECT COUNT(*) FROM ensemble_snapshots_v2").fetchone()[0]
-    assert count == 0, "rejected payload must not write to ensemble_snapshots_v2"
+    count = conn.execute("SELECT COUNT(*) FROM ensemble_snapshots").fetchone()[0]
+    assert count == 0, "rejected payload must not write to ensemble_snapshots"
 
 
 def test_present_causality_field_survives_ingest_contract(ingest_env, tmp_path):
@@ -146,7 +146,7 @@ def test_present_causality_field_survives_ingest_contract(ingest_env, tmp_path):
 # Empirically verified 2026-04-24 via direct call to
 # validate_snapshot_contract: all three return accepted=True,
 # training_allowed=True, and the ingest path writes to
-# ensemble_snapshots_v2 (or would, once the write-path wiring is
+# ensemble_snapshots (or would, once the write-path wiring is
 # complete).
 #
 # These tests PIN CURRENT BEHAVIOR so an operator can see the gap is

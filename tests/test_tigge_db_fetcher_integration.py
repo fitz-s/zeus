@@ -53,7 +53,7 @@ def staged_world_db(tmp_path: Path, monkeypatch):
     conn = sqlite3.connect(str(db_path))
     conn.executescript(
         """
-        CREATE TABLE ensemble_snapshots_v2 (
+        CREATE TABLE ensemble_snapshots (
             snapshot_id INTEGER PRIMARY KEY AUTOINCREMENT,
             city TEXT NOT NULL,
             target_date TEXT NOT NULL,
@@ -107,7 +107,7 @@ def staged_world_db(tmp_path: Path, monkeypatch):
         ),
     ):
         conn.execute(
-            """INSERT INTO ensemble_snapshots_v2
+            """INSERT INTO ensemble_snapshots
             (city, target_date, temperature_metric, physical_quantity, observation_field,
              issue_time, valid_time, available_at, fetch_time, lead_hours, members_json,
              data_version, causality_status, authority, recorded_at, members_unit)
@@ -168,7 +168,7 @@ def test_db_payload_returns_none_when_no_rows(fake_city, tmp_path, monkeypatch):
     conn = sqlite3.connect(str(db_path))
     conn.executescript(
         """
-        CREATE TABLE ensemble_snapshots_v2 (
+        CREATE TABLE ensemble_snapshots (
             snapshot_id INTEGER PRIMARY KEY AUTOINCREMENT,
             city TEXT NOT NULL,
             target_date TEXT NOT NULL,

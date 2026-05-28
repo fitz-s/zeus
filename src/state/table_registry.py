@@ -36,7 +36,7 @@ import yaml
 VALID_DB_VALUES = frozenset({"world", "forecasts", "trade", "risk_state", "backtest"})
 VALID_SCHEMA_CLASS_VALUES = frozenset({
     "forecast_class", "world_class", "trade_class", "risk_class",
-    "backtest_class", "legacy_archived", "archive",
+    "backtest_class", "legacy_archived",
 })
 
 
@@ -55,7 +55,6 @@ class SchemaClass(str, Enum):
     RISK_CLASS = "risk_class"
     BACKTEST_CLASS = "backtest_class"
     LEGACY_ARCHIVED = "legacy_archived"
-    ARCHIVE = "archive"  # F5: audit-only export; table exists but no live writes
 
 
 # ---------------------------------------------------------------------------

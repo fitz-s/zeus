@@ -54,7 +54,7 @@ def _build_dual_row_db():
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     conn.execute("""
-        CREATE TABLE ensemble_snapshots_v2 (
+        CREATE TABLE ensemble_snapshots (
             snapshot_id INTEGER PRIMARY KEY AUTOINCREMENT,
             city TEXT,
             target_date TEXT,
@@ -66,13 +66,13 @@ def _build_dual_row_db():
     """)
     common = ("London", "2026-05-02", "high")
     conn.execute(
-        "INSERT INTO ensemble_snapshots_v2 (city, target_date, temperature_metric,"
+        "INSERT INTO ensemble_snapshots (city, target_date, temperature_metric,"
         " data_version, available_at, members_json) VALUES (?, ?, ?, ?, ?, ?)",
         common + ("tigge_mx2t6_local_calendar_day_max_v1",
                   "2026-04-30T00:00:00+00:00", "[]"),
     )
     conn.execute(
-        "INSERT INTO ensemble_snapshots_v2 (city, target_date, temperature_metric,"
+        "INSERT INTO ensemble_snapshots (city, target_date, temperature_metric,"
         " data_version, available_at, members_json) VALUES (?, ?, ?, ?, ?, ?)",
         common + (ECMWF_OPENDATA_HIGH_DATA_VERSION,
                   "2026-05-01T07:30:00+00:00", "[]"),
@@ -86,7 +86,7 @@ def test_priority_select_picks_opendata_when_both_present():
     rows = conn.execute(
         f"""
         SELECT data_version
-          FROM ensemble_snapshots_v2
+          FROM ensemble_snapshots
          WHERE temperature_metric = ?
            AND data_version IN ({",".join("?" for _ in priority)})
          ORDER BY CASE data_version WHEN ? THEN 0 ELSE 1 END,
@@ -103,7 +103,7 @@ def test_priority_select_falls_back_to_tigge_when_opendata_absent():
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     conn.execute("""
-        CREATE TABLE ensemble_snapshots_v2 (
+        CREATE TABLE ensemble_snapshots (
             snapshot_id INTEGER PRIMARY KEY AUTOINCREMENT,
             city TEXT,
             target_date TEXT,
@@ -114,7 +114,7 @@ def test_priority_select_falls_back_to_tigge_when_opendata_absent():
         )
     """)
     conn.execute(
-        "INSERT INTO ensemble_snapshots_v2 (city, target_date, temperature_metric,"
+        "INSERT INTO ensemble_snapshots (city, target_date, temperature_metric,"
         " data_version, available_at, members_json) VALUES (?, ?, ?, ?, ?, ?)",
         ("London", "2026-04-15", "high",
          "tigge_mx2t6_local_calendar_day_max_v1",
@@ -124,7 +124,7 @@ def test_priority_select_falls_back_to_tigge_when_opendata_absent():
     rows = conn.execute(
         f"""
         SELECT data_version
-          FROM ensemble_snapshots_v2
+          FROM ensemble_snapshots
          WHERE temperature_metric = ?
            AND data_version IN ({",".join("?" for _ in priority)})
          ORDER BY CASE data_version WHEN ? THEN 0 ELSE 1 END,

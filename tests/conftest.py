@@ -134,7 +134,7 @@ def r3_default_risk_allocator_for_unit_tests():
 # Dual-DB fixture helper — Clusters A + D (G4 cleanup, 2026-05-18)
 # ---------------------------------------------------------------------------
 # make_world_forecasts_pair(tmp_path) creates isolated world + forecasts DBs
-# for tests that INSERT into ensemble_snapshots_v2, settlements_v2, or
+# for tests that INSERT into ensemble_snapshots, settlements_v2, or
 # readiness_state — tables that live in init_schema_forecasts, not init_schema.
 #
 # Named make_world_forecasts_pair (not make_dual_db) to avoid confusion with

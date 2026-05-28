@@ -54,11 +54,11 @@ from src.state.schema.decision_integrity_quarantine_schema import ensure_table
 # ---------------------------------------------------------------------------
 
 def _make_db() -> sqlite3.Connection:
-    """In-memory DB with ensemble_snapshots_v2 + quarantine table."""
+    """In-memory DB with ensemble_snapshots + quarantine table."""
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     conn.execute("""
-        CREATE TABLE ensemble_snapshots_v2 (
+        CREATE TABLE ensemble_snapshots (
             snapshot_id INTEGER PRIMARY KEY AUTOINCREMENT,
             city TEXT NOT NULL,
             target_date TEXT NOT NULL,
@@ -75,7 +75,7 @@ def _make_db() -> sqlite3.Connection:
 
 def _snap(conn, *, contributes, attribution="OK", source_run_id=None) -> int:
     cur = conn.execute(
-        """INSERT INTO ensemble_snapshots_v2
+        """INSERT INTO ensemble_snapshots
            (city, target_date, temperature_metric,
             contributes_to_target_extrema, forecast_window_attribution_status, source_run_id)
            VALUES ('Bangkok', '2026-05-22', 'high', ?, ?, ?)""",

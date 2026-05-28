@@ -24,11 +24,11 @@ if str(PROJECT_ROOT) not in sys.path:
 # ---------------------------------------------------------------------------
 
 def _make_v2_snapshots_db(causality_status: str = "OK") -> sqlite3.Connection:
-    """In-memory DB with ensemble_snapshots_v2 table."""
+    """In-memory DB with ensemble_snapshots table."""
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     conn.execute("""
-        CREATE TABLE ensemble_snapshots_v2 (
+        CREATE TABLE ensemble_snapshots (
             snapshot_id INTEGER PRIMARY KEY AUTOINCREMENT,
             city TEXT NOT NULL,
             target_date TEXT NOT NULL,
@@ -51,7 +51,7 @@ def _make_v2_snapshots_db(causality_status: str = "OK") -> sqlite3.Connection:
     """)
     conn.execute(
         """
-        INSERT INTO ensemble_snapshots_v2
+        INSERT INTO ensemble_snapshots
         (city, target_date, temperature_metric, causality_status, boundary_ambiguous)
         VALUES (?, ?, ?, ?, ?)
         """,
@@ -63,7 +63,7 @@ def _make_v2_snapshots_db(causality_status: str = "OK") -> sqlite3.Connection:
 
 def _make_legacy_snapshots_db() -> sqlite3.Connection:
     """In-memory DB for R-DA.* tests. v1.F20: _store_ens_snapshot now requires
-    ensemble_snapshots_v2; legacy table kept for schema tests that still reference it.
+    ensemble_snapshots; legacy table kept for schema tests that still reference it.
     """
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
@@ -90,7 +90,7 @@ def _make_legacy_snapshots_db() -> sqlite3.Connection:
     """)
     # v2 table required by _store_ens_snapshot (v1.F20 canonical write target).
     conn.execute("""
-        CREATE TABLE ensemble_snapshots_v2 (
+        CREATE TABLE ensemble_snapshots (
             snapshot_id INTEGER PRIMARY KEY AUTOINCREMENT,
             city TEXT NOT NULL,
             target_date TEXT NOT NULL,
@@ -154,7 +154,7 @@ class TestRCYCausalityStatusWire:
 
         conn = _make_v2_snapshots_db(causality_status="N/A_CAUSAL_DAY_ALREADY_STARTED")
         snapshot_id = conn.execute(
-            "SELECT snapshot_id FROM ensemble_snapshots_v2 WHERE city='NYC' LIMIT 1"
+            "SELECT snapshot_id FROM ensemble_snapshots WHERE city='NYC' LIMIT 1"
         ).fetchone()["snapshot_id"]
         meta = _read_v2_snapshot_metadata(
             conn, "NYC", "2026-01-01", "low", snapshot_id=str(snapshot_id),
@@ -172,7 +172,7 @@ class TestRCYCausalityStatusWire:
         conn = sqlite3.connect(":memory:")
         conn.row_factory = sqlite3.Row
         conn.execute("""
-            CREATE TABLE ensemble_snapshots_v2 (
+            CREATE TABLE ensemble_snapshots (
                 snapshot_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 city TEXT, target_date TEXT, temperature_metric TEXT,
                 causality_status TEXT DEFAULT 'OK',
@@ -360,9 +360,9 @@ class TestRDALegacyMetricColumn:
         from src.engine.evaluator import _store_ens_snapshot
         _store_ens_snapshot(conn, city, "2026-01-01", ens, ens_result)
 
-        # v1.F20: _store_ens_snapshot writes to ensemble_snapshots_v2 (legacy removed)
+        # v1.F20: _store_ens_snapshot writes to ensemble_snapshots (legacy removed)
         row = conn.execute(
-            "SELECT temperature_metric FROM ensemble_snapshots_v2 WHERE city='NYC' LIMIT 1"
+            "SELECT temperature_metric FROM ensemble_snapshots WHERE city='NYC' LIMIT 1"
         ).fetchone()
         assert row is not None, "R-DA.2: snapshot row must exist after _store_ens_snapshot"
         assert row["temperature_metric"] == "low", (
@@ -397,9 +397,9 @@ class TestRDALegacyMetricColumn:
         from src.engine.evaluator import _store_ens_snapshot
         _store_ens_snapshot(conn, city, "2026-01-01", ens, ens_result)
 
-        # v1.F20: _store_ens_snapshot writes to ensemble_snapshots_v2 (legacy removed)
+        # v1.F20: _store_ens_snapshot writes to ensemble_snapshots (legacy removed)
         row = conn.execute(
-            "SELECT temperature_metric FROM ensemble_snapshots_v2 WHERE city='NYC' LIMIT 1"
+            "SELECT temperature_metric FROM ensemble_snapshots WHERE city='NYC' LIMIT 1"
         ).fetchone()
         assert row is not None, "R-DA.3: snapshot row must exist after _store_ens_snapshot"
         assert row["temperature_metric"] == "high", (

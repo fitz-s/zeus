@@ -1,7 +1,7 @@
 # Created: 2026-05-07
 # Last reused or audited: 2026-05-07
 # Authority basis: TIGGE spec v3 §3 Phase 0 #8 / critic v2 D1+D3 BLOCKER
-"""D1 + D3: manifest_sha drift triggers REPLACE on ensemble_snapshots_v2 ingest.
+"""D1 + D3: manifest_sha drift triggers REPLACE on ensemble_snapshots ingest.
 
 Critic v2 D1+D3 BLOCKER:
 - D1: when an incoming snapshot payload's manifest_sha256 differs from the row
@@ -76,12 +76,12 @@ def ingest_env():
 
 
 def _row_count(conn: sqlite3.Connection) -> int:
-    return conn.execute("SELECT COUNT(*) FROM ensemble_snapshots_v2").fetchone()[0]
+    return conn.execute("SELECT COUNT(*) FROM ensemble_snapshots").fetchone()[0]
 
 
 def _stored_manifest_sha(conn: sqlite3.Connection) -> str:
     row = conn.execute(
-        "SELECT provenance_json FROM ensemble_snapshots_v2 LIMIT 1"
+        "SELECT provenance_json FROM ensemble_snapshots LIMIT 1"
     ).fetchone()
     if not row:
         return ""
@@ -91,7 +91,7 @@ def _stored_manifest_sha(conn: sqlite3.Connection) -> str:
 
 def _stored_member0(conn: sqlite3.Connection) -> float:
     row = conn.execute(
-        "SELECT members_json FROM ensemble_snapshots_v2 LIMIT 1"
+        "SELECT members_json FROM ensemble_snapshots LIMIT 1"
     ).fetchone()
     members = json.loads(row["members_json"])
     return float(members[0])

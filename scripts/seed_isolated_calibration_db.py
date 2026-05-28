@@ -12,7 +12,7 @@
 
 The rebuild (`scripts/rebuild_calibration_pairs_v2.py`) and refit
 (`scripts/refit_platt.py`) read their SOURCE tables
-(`ensemble_snapshots_v2`, `observations`, `settlements_v2`) and the
+(`ensemble_snapshots`, `observations`, `settlements_v2`) and the
 predictive-error residual sources from the SAME connection they write
 `calibration_pairs_v2` / `platt_models_v2` into. To keep the live DBs
 read-only we copy just those source tables (optionally filtered to a city
@@ -39,7 +39,7 @@ PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 # Source tables both scripts read from the write connection.
-_SOURCE_TABLES = ("ensemble_snapshots_v2", "observations", "settlements_v2")
+_SOURCE_TABLES = ("ensemble_snapshots", "observations", "settlements_v2")
 
 
 def _source_db_path() -> Path:
@@ -48,7 +48,7 @@ def _source_db_path() -> Path:
     if not p.exists() or p.stat().st_size == 0:
         raise FileNotFoundError(
             f"live forecasts DB not found / empty at {p}. The source tables "
-            "(ensemble_snapshots_v2/observations/settlements_v2) live here."
+            "(ensemble_snapshots/observations/settlements_v2) live here."
         )
     return p
 
@@ -114,7 +114,7 @@ def seed(out_path: Path, cities: list[str]) -> dict[str, int]:
     _neutralize_off_union_training_flags(conn)
 
     counts["snaps_training_allowed_after_hygiene"] = conn.execute(
-        "SELECT COUNT(*) FROM ensemble_snapshots_v2 WHERE training_allowed=1"
+        "SELECT COUNT(*) FROM ensemble_snapshots WHERE training_allowed=1"
     ).fetchone()[0]
 
     conn.commit()
@@ -136,7 +136,7 @@ def _neutralize_off_union_training_flags(conn: sqlite3.Connection) -> int:
         allowed |= set(spec.allowed_data_versions)
     placeholders = ", ".join("?" for _ in allowed)
     cur = conn.execute(
-        f"UPDATE ensemble_snapshots_v2 SET training_allowed=0 "
+        f"UPDATE ensemble_snapshots SET training_allowed=0 "
         f"WHERE COALESCE(training_allowed,0)=1 AND data_version NOT IN ({placeholders})",
         tuple(sorted(allowed)),
     )

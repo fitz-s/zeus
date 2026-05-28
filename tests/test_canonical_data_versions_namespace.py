@@ -101,7 +101,7 @@ def test_assert_data_version_allowed_uses_ensemble_set():
     not the deprecation alias or another set. A future refactor that
     accidentally points the assertion at a broader set (e.g., the union
     of ensemble + settlement) would silently accept cross-domain writes
-    into ensemble_snapshots_v2."""
+    into ensemble_snapshots."""
     import inspect
     src = inspect.getsource(mod.assert_data_version_allowed)
     assert "CANONICAL_ENSEMBLE_DATA_VERSIONS" in src, (

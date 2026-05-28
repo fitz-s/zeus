@@ -606,7 +606,7 @@ scripts:
     do_not_use_when: "Before task #53 implementation and dry-run evidence exist."
     canonical_command: DO_NOT_RUN
     delete_policy: retain_until_implemented
-    # K1-batch2 fix 2026-05-17: writes ensemble_snapshots_v2 / source_run to forecasts DB.
+    # K1-batch2 fix 2026-05-17: writes ensemble_snapshots / source_run to forecasts DB.
     read_targets: [external_tigge_grib_extracts]
     write_targets: [state/zeus-forecasts.db]
     dry_run_default: true
@@ -616,7 +616,7 @@ scripts:
     dangerous_if_run: false
     promotion_barrier: "Requires task #53 implementation, dry-run evidence, and reviewer approval."
     # K1-batch2 fix 2026-05-17: now uses ZEUS_FORECASTS_DB_PATH / get_forecasts_connection
-    # (ensemble_snapshots_v2 + source_run are forecast_class post-K1 split).
+    # (ensemble_snapshots + source_run are forecast_class post-K1 split).
     required_helpers: [src.state.db.get_forecasts_connection]
     required_tests: [tests/test_data_rebuild_relationships.py, tests/test_k1_reader_isolation_batch2.py]
   investigate_ecmwf_bias.py: {class: diagnostic_report_writer, write_targets: [state/ecmwf_bias_investigation.json, stdout]}
@@ -1221,7 +1221,7 @@ scripts:
     unguarded_write_rationale: "DDL CREATE TABLE/INDEX/TRIGGER with IF NOT EXISTS; idempotent; no data mutation."
     required_helpers: [src.state.db.get_world_connection]
     required_tests: [tests/test_p2_byte_equivalence.py]
-  migrate_ensemble_snapshots_v2_alpha_proxy.py:
+  migrate_ensemble_snapshots_alpha_proxy.py:
     class: migration
     module_owner: engine
     status: active
@@ -1234,12 +1234,12 @@ scripts:
     target_db: state/zeus-forecasts.db
     read_targets: [state/zeus-forecasts.db]
     write_targets: [state/zeus-forecasts.db]
-    canonical_command: "python3 scripts/migrate_ensemble_snapshots_v2_alpha_proxy.py [--db PATH] [--dry-run | --apply]"
+    canonical_command: "python3 scripts/migrate_ensemble_snapshots_alpha_proxy.py [--db PATH] [--dry-run | --apply]"
     external_inputs: []
     delete_policy: retain_until_superseded
     reuse_when: >
       PR6 one-shot migration: adds first_member_observed_time, run_complete_time,
-      raw_orderbook_hash_transition_delta_ms to ensemble_snapshots_v2.
+      raw_orderbook_hash_transition_delta_ms to ensemble_snapshots.
       All columns nullable; no backfill required. Run once per DB; idempotent on re-run.
     do_not_use_when: "All target columns already present (idempotency guard)."
     promotion_barrier: "Requires explicit --apply flag; dry-run default shows ALTER statements only."
@@ -1697,7 +1697,7 @@ scripts:
     delete_policy: retain_until_superseded
     reuse_when: >
       Build isolated ft_staging DB for full_transport_v1 pair generation.
-      Copies calibration_pairs_v2, ensemble_snapshots_v2, observations etc. from prod
+      Copies calibration_pairs_v2, ensemble_snapshots, observations etc. from prod
       forecasts DB (read-only ATTACH URI) into a fresh staging DB.
     do_not_use_when: "Staging DB already built and posteriors fitted. Will overwrite."
     promotion_barrier: "Output is input to fit_full_transport_error_models.py; not directly promoted."

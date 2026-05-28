@@ -597,10 +597,10 @@ def test_forecast_snapshot_real_helpers_round_trip_forecasts_db(monkeypatch, tmp
     snapshot_id = decisions[0].decision_snapshot_id
     assert snapshot_id
     if trade_rooted_cycle_conn.execute(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='ensemble_snapshots_v2'"
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='ensemble_snapshots'"
     ).fetchone():
         assert trade_rooted_cycle_conn.execute(
-            "SELECT COUNT(*) FROM ensemble_snapshots_v2 WHERE snapshot_id = ?",
+            "SELECT COUNT(*) FROM ensemble_snapshots WHERE snapshot_id = ?",
             (snapshot_id,),
         ).fetchone()[0] == 0
     forecast_conn = db_module.get_forecasts_connection(write_class=None)
@@ -608,7 +608,7 @@ def test_forecast_snapshot_real_helpers_round_trip_forecasts_db(monkeypatch, tmp
         row = forecast_conn.execute(
             """
             SELECT snapshot_id, city, target_date, temperature_metric, p_raw_json, bin_grid_id
-              FROM ensemble_snapshots_v2
+              FROM ensemble_snapshots
              WHERE snapshot_id = ?
             """,
             (snapshot_id,),

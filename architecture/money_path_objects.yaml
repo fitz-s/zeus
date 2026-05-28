@@ -506,7 +506,7 @@ schema_objects:
     - explicit_verified
   protected_tables:
     world: [markets, positions, position_current, lifecycle_events]
-    forecasts: [observations, settlements, calibration_pairs_v2, ensemble_snapshots_v2, source_run, market_events_v2]
+    forecasts: [observations, settlements, calibration_pairs_v2, ensemble_snapshots, source_run, market_events_v2]
     trades: [venue_commands, venue_order_facts, venue_trade_facts, settlement_commands]
   historical_truth_policy_required_for:
     - scripts/migrations/**

@@ -74,7 +74,7 @@ trigger backstop fires on NULL setting sentinel (see §4.2.2 / Option β).
 
 | Column | Source table | DB |
 |---|---|---|
-| `raw_orderbook_hash_transition_delta_ms` | `ensemble_snapshots_v2` | forecasts |
+| `raw_orderbook_hash_transition_delta_ms` | `ensemble_snapshots` | forecasts |
 | `clock_skew_estimate_ms_at_submit` | `settlement_commands` | trade |
 | `first_inclusion_block_time`, `finality_confirmed_time` | `wrap_unwrap_commands` | world |
 | `provider_reported_time` | Path F Optional — None if WU API | — |
@@ -149,7 +149,7 @@ from v1 removed cleanly.
 `decision_events`; no cross-DB read needed for core fields).
 
 **Enrichment** (optional, independent reads keyed on natural fields):
-- forecasts: `ensemble_snapshots_v2` → PR-6 timing fields
+- forecasts: `ensemble_snapshots` → PR-6 timing fields
 - trade: `settlement_commands` → PR-6 timing + `clock_skew_estimate_ms_at_submit`
 - `city→(market_id, condition_id)` resolved Python-side via `market_events_v2`
 
@@ -180,7 +180,7 @@ Renamed file: `scripts/backfill_decision_events_from_artifact_json.py`
 **File**: `tests/test_inv_decision_events_completeness.py`
 
 - `@pytest.mark.xfail(strict=True)` (table not yet created)
-- Tests: `forecasts.ensemble_snapshots_v2` (7d window, `causality_status='OK'`)
+- Tests: `forecasts.ensemble_snapshots` (7d window, `causality_status='OK'`)
   → city resolved to `(market_id, condition_id)` via `market_events_v2`
   → `world.decision_events` COUNT ≥ 1 per natural-key tuple
 - **Independent read connections** (`get_forecasts_connection_read_only()` +

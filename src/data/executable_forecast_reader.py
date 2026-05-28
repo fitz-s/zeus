@@ -35,17 +35,17 @@ _EXTREMA_RANK_ORDER_BY = (
     " AND COALESCE(boundary_ambiguous,0)=0 THEN 0 ELSE 1 END)"
     " ASC, source_cycle_time DESC, available_at DESC, snapshot_id DESC"
 )
-SOURCE_TRANSPORT = "ensemble_snapshots_v2_db_reader"
+SOURCE_TRANSPORT = "ensemble_snapshots_db_reader"
 WORLD_SCHEMA = "world"
 FORECASTS_SCHEMA = "forecasts"
 FORECAST_AUTHORITY_TABLES = frozenset({
-    "ensemble_snapshots_v2",
+    "ensemble_snapshots",
     "readiness_state",
     "source_run",
     "source_run_coverage",
 })
 FORECASTS_OWNED_TABLES = frozenset({
-    "ensemble_snapshots_v2",
+    "ensemble_snapshots",
     "readiness_state",
     "source_run",
     "source_run_coverage",
@@ -496,7 +496,7 @@ def _latest_producer_readiness(
 
 
 def _snapshot_query_sql(table: str, *, source_run_id_present: bool) -> str:
-    if table == f"{FORECASTS_SCHEMA}.ensemble_snapshots_v2":
+    if table == f"{FORECASTS_SCHEMA}.ensemble_snapshots":
         if source_run_id_present:
             return f"""
             -- Phase B7 (REMEDIATION_PLAN_2026-05-03.md): IS NOT NULL filters
@@ -505,7 +505,7 @@ def _snapshot_query_sql(table: str, *, source_run_id_present: bool) -> str:
             -- with missing linkage land here and are rejected by the post-check
             -- with FORECAST_SOURCE_LINKAGE_MISSING (reachable reason code)
             -- instead of being silently filtered as NO_EXECUTABLE_FORECAST_ROWS_FOR_TARGET.
-            SELECT * FROM forecasts.ensemble_snapshots_v2
+            SELECT * FROM forecasts.ensemble_snapshots
             WHERE city = ?
               AND target_date = ?
               AND temperature_metric = ?
@@ -523,7 +523,7 @@ def _snapshot_query_sql(table: str, *, source_run_id_present: bool) -> str:
             -- with missing linkage land here and are rejected by the post-check
             -- with FORECAST_SOURCE_LINKAGE_MISSING (reachable reason code)
             -- instead of being silently filtered as NO_EXECUTABLE_FORECAST_ROWS_FOR_TARGET.
-            SELECT * FROM forecasts.ensemble_snapshots_v2
+            SELECT * FROM forecasts.ensemble_snapshots
             WHERE city = ?
               AND target_date = ?
               AND temperature_metric = ?
@@ -533,7 +533,7 @@ def _snapshot_query_sql(table: str, *, source_run_id_present: bool) -> str:
             ORDER BY {_EXTREMA_RANK_ORDER_BY}
             LIMIT 1
             """
-    elif table == f"{WORLD_SCHEMA}.ensemble_snapshots_v2":
+    elif table == f"{WORLD_SCHEMA}.ensemble_snapshots":
         if source_run_id_present:
             return f"""
             -- Phase B7 (REMEDIATION_PLAN_2026-05-03.md): IS NOT NULL filters
@@ -542,7 +542,7 @@ def _snapshot_query_sql(table: str, *, source_run_id_present: bool) -> str:
             -- with missing linkage land here and are rejected by the post-check
             -- with FORECAST_SOURCE_LINKAGE_MISSING (reachable reason code)
             -- instead of being silently filtered as NO_EXECUTABLE_FORECAST_ROWS_FOR_TARGET.
-            SELECT * FROM world.ensemble_snapshots_v2
+            SELECT * FROM world.ensemble_snapshots
             WHERE city = ?
               AND target_date = ?
               AND temperature_metric = ?
@@ -560,7 +560,7 @@ def _snapshot_query_sql(table: str, *, source_run_id_present: bool) -> str:
             -- with missing linkage land here and are rejected by the post-check
             -- with FORECAST_SOURCE_LINKAGE_MISSING (reachable reason code)
             -- instead of being silently filtered as NO_EXECUTABLE_FORECAST_ROWS_FOR_TARGET.
-            SELECT * FROM world.ensemble_snapshots_v2
+            SELECT * FROM world.ensemble_snapshots
             WHERE city = ?
               AND target_date = ?
               AND temperature_metric = ?
@@ -570,7 +570,7 @@ def _snapshot_query_sql(table: str, *, source_run_id_present: bool) -> str:
             ORDER BY {_EXTREMA_RANK_ORDER_BY}
             LIMIT 1
             """
-    elif table == "ensemble_snapshots_v2":
+    elif table == "ensemble_snapshots":
         if source_run_id_present:
             return f"""
             -- Phase B7 (REMEDIATION_PLAN_2026-05-03.md): IS NOT NULL filters
@@ -579,7 +579,7 @@ def _snapshot_query_sql(table: str, *, source_run_id_present: bool) -> str:
             -- with missing linkage land here and are rejected by the post-check
             -- with FORECAST_SOURCE_LINKAGE_MISSING (reachable reason code)
             -- instead of being silently filtered as NO_EXECUTABLE_FORECAST_ROWS_FOR_TARGET.
-            SELECT * FROM ensemble_snapshots_v2
+            SELECT * FROM ensemble_snapshots
             WHERE city = ?
               AND target_date = ?
               AND temperature_metric = ?
@@ -597,7 +597,7 @@ def _snapshot_query_sql(table: str, *, source_run_id_present: bool) -> str:
             -- with missing linkage land here and are rejected by the post-check
             -- with FORECAST_SOURCE_LINKAGE_MISSING (reachable reason code)
             -- instead of being silently filtered as NO_EXECUTABLE_FORECAST_ROWS_FOR_TARGET.
-            SELECT * FROM ensemble_snapshots_v2
+            SELECT * FROM ensemble_snapshots
             WHERE city = ?
               AND target_date = ?
               AND temperature_metric = ?
@@ -608,7 +608,7 @@ def _snapshot_query_sql(table: str, *, source_run_id_present: bool) -> str:
             LIMIT 1
             """
     else:
-        raise ValueError("unsupported ensemble_snapshots_v2 authority table")
+        raise ValueError("unsupported ensemble_snapshots authority table")
 
 
 def _coverage_for_producer(
@@ -651,7 +651,7 @@ def read_executable_forecast_snapshot(
     source_run_id: str | None = None,
     now_utc: datetime | None = None,
 ) -> ExecutableForecastReadResult:
-    table = _authority_table(conn, "ensemble_snapshots_v2")
+    table = _authority_table(conn, "ensemble_snapshots")
     if table is None:
         return ExecutableForecastReadResult("BLOCKED", "NO_EXECUTABLE_FORECAST_ROWS_FOR_TARGET")
     params: list[Any] = [
@@ -993,7 +993,7 @@ def _snapshot_row_for_classification(
     data_version=None, which previously fell through to LEGACY_NULL_PASSTHROUGH
     instead of UNKNOWN (fail-closed).
     """
-    table = _authority_table(conn, "ensemble_snapshots_v2")
+    table = _authority_table(conn, "ensemble_snapshots")
     if table is None:
         # Table not found — return sentinel with known data_version so the
         # classifier fails closed (UNKNOWN) rather than passing through as legacy.

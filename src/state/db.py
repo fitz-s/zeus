@@ -195,7 +195,7 @@ def get_forecasts_connection(
 ) -> sqlite3.Connection:
     """Forecast/harvester-truth co-transactional class DB (zeus-forecasts.db).
 
-    Owns: ensemble_snapshots_v2, source_run, source_run_coverage,
+    Owns: ensemble_snapshots, source_run, source_run_coverage,
           producer readiness_state, job_run for forecast-live work,
           observations, settlements, settlements_v2, market_events_v2,
           calibration_pairs_v2.
@@ -328,7 +328,7 @@ def get_trade_connection_with_world_optional(
         except sqlite3.OperationalError as exc:
             logger.warning("ATTACH world failed (non-fatal): %r", exc)
     # K1 (2026-05-11): also ATTACH forecasts DB so cross-DB joins on
-    # ensemble_snapshots_v2 / settlements / settlements_v2 / market_events_v2
+    # ensemble_snapshots / settlements / settlements_v2 / market_events_v2
     # remain possible from trade-conn query paths (evaluator, replay).
     if "forecasts" not in attached:
         try:
@@ -1063,7 +1063,7 @@ def init_schema(
         );
 
         -- v1.F20 (2026-05-18): ensemble_snapshots (legacy world-class) removed.
-        -- Canonical table is ensemble_snapshots_v2 in zeus-forecasts.db (K1 split).
+        -- Canonical table is ensemble_snapshots in zeus-forecasts.db (K1 split).
         -- DROP migration: scripts/migrations/202605_drop_ensemble_snapshots_legacy.py
         -- DDL removed here to prevent recreating the table on every boot after
         -- the operator runs the DROP migration.
@@ -1133,7 +1133,7 @@ def init_schema(
             size_usd REAL NOT NULL,
             price REAL NOT NULL,
             timestamp TEXT NOT NULL,
-            forecast_snapshot_id INTEGER,  -- v1.F20: soft ref to ensemble_snapshots_v2.snapshot_id (cross-DB, no FK constraint)
+            forecast_snapshot_id INTEGER,  -- v1.F20: soft ref to ensemble_snapshots.snapshot_id (cross-DB, no FK constraint)
             calibration_model_version TEXT,
             p_raw REAL NOT NULL,
             p_calibrated REAL,
@@ -3191,7 +3191,7 @@ def _create_readiness_state(conn: sqlite3.Connection) -> None:
 
 
 _FORECAST_TABLES = (
-    "ensemble_snapshots_v2",
+    "ensemble_snapshots",
     "source_run",
     "job_run",
     "source_run_coverage",
@@ -3229,7 +3229,7 @@ def _ensure_v2_forecast_indexes(conn: sqlite3.Connection) -> None:
     here must match those helpers byte-for-byte. If a new v2 forecast-class
     index is added to v2_schema.py, mirror it here in the same PR.
 
-    Tables covered: ensemble_snapshots_v2, calibration_pairs_v2,
+    Tables covered: ensemble_snapshots, calibration_pairs_v2,
     settlements_v2, market_events_v2.
     """
     # settlements_v2 (mirror src/state/schema/v2_schema.py:49-56)
@@ -3251,18 +3251,18 @@ def _ensure_v2_forecast_indexes(conn: sqlite3.Connection) -> None:
             ON market_events_v2(city, target_date, temperature_metric)
             WHERE outcome IS NULL
     """)
-    # ensemble_snapshots_v2 (mirror src/state/schema/v2_schema.py:166-229)
+    # ensemble_snapshots (mirror src/state/schema/v2_schema.py:166-229)
     conn.execute("""
-        CREATE INDEX IF NOT EXISTS idx_ensemble_snapshots_v2_lookup
-            ON ensemble_snapshots_v2(city, target_date, temperature_metric, available_at)
+        CREATE INDEX IF NOT EXISTS idx_ensemble_snapshots_lookup
+            ON ensemble_snapshots(city, target_date, temperature_metric, available_at)
     """)
     conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_ens_v2_source_run
-            ON ensemble_snapshots_v2(source_id, source_transport, source_run_id)
+            ON ensemble_snapshots(source_id, source_transport, source_run_id)
     """)
     conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_ens_v2_entry_lookup
-            ON ensemble_snapshots_v2(
+            ON ensemble_snapshots(
                 city,
                 target_date,
                 temperature_metric,
@@ -3553,7 +3553,7 @@ def init_schema_forecasts(conn: sqlite3.Connection) -> None:
 
     Tables owned by this DB after the live data-daemon authority split
     (derived from registry P2):
-      ensemble_snapshots_v2, source_run, source_run_coverage,
+      ensemble_snapshots, source_run, source_run_coverage,
       producer readiness_state, job_run, observations, settlements,
       calibration_pairs_v2, settlements_v2, market_events_v2
 
@@ -3636,12 +3636,12 @@ def init_schema_forecasts(conn: sqlite3.Connection) -> None:
             from src.state.schema.v2_schema import (
                 _create_settlements_v2,
                 _create_market_events_v2,
-                _create_ensemble_snapshots_v2,
+                _create_ensemble_snapshots,
                 _create_calibration_pairs_v2,
             )
             _create_settlements_v2(conn)
             _create_market_events_v2(conn)
-            _create_ensemble_snapshots_v2(conn)
+            _create_ensemble_snapshots(conn)
             _create_calibration_pairs_v2(conn)
     else:
         # --- Fresh-deploy fallback: static helpers (must stay in sync manually) ---
@@ -3662,12 +3662,12 @@ def init_schema_forecasts(conn: sqlite3.Connection) -> None:
         from src.state.schema.v2_schema import (
             _create_settlements_v2,
             _create_market_events_v2,
-            _create_ensemble_snapshots_v2,
+            _create_ensemble_snapshots,
             _create_calibration_pairs_v2,
         )
         _create_settlements_v2(conn)
         _create_market_events_v2(conn)
-        _create_ensemble_snapshots_v2(conn)
+        _create_ensemble_snapshots(conn)
         _create_calibration_pairs_v2(conn)
 
     # Forecast authority post-condition: older world.db schemas or partial K1
@@ -6210,10 +6210,10 @@ def _local_legacy_snapshot_fk(conn: sqlite3.Connection, value) -> Optional[int]:
     """Resolve a snapshot id reference for trade_decisions.forecast_snapshot_id.
 
     v1.F20 (2026-05-18): the legacy ensemble_snapshots table was dropped. The
-    canonical table is ensemble_snapshots_v2 in zeus-forecasts.db, which is
+    canonical table is ensemble_snapshots in zeus-forecasts.db, which is
     ATTACHed as 'forecasts' by get_trade_connection_with_world().
 
-    Validates existence in forecasts.ensemble_snapshots_v2 when available;
+    Validates existence in forecasts.ensemble_snapshots when available;
     falls back to trusting the coerced id when the ATTACH is absent (e.g.
     non-trade connections in tests). Returns None only when value is absent
     or the snapshot row genuinely does not exist.
@@ -6240,12 +6240,12 @@ def _local_legacy_snapshot_fk(conn: sqlite3.Connection, value) -> Optional[int]:
             return snapshot_id if row is not None else None
         except sqlite3.OperationalError:
             return None
-    # Primary path: validate against forecasts.ensemble_snapshots_v2 (K1 canonical).
+    # Primary path: validate against forecasts.ensemble_snapshots (K1 canonical).
     # Use try/except rather than _table_exists() because that helper only queries
     # sqlite_master in the *main* schema, not in ATTACHed schemas (forecasts.*).
     try:
         row = conn.execute(
-            "SELECT 1 FROM forecasts.ensemble_snapshots_v2 WHERE snapshot_id = ? LIMIT 1",
+            "SELECT 1 FROM forecasts.ensemble_snapshots WHERE snapshot_id = ? LIMIT 1",
             (snapshot_id,),
         ).fetchone()
         return snapshot_id if row is not None else None

@@ -16,7 +16,7 @@ If the session compacts and monitors die, restart them from this doc. They are s
 
 **Phase 1 status as of 2026-05-05 17:31Z**:
 - Cloud extract + tar-pipe transfer: ✅ DONE (679MB tarball, 379k JSONs × 2 tracks).
-- Snapshot ingest: ✅ DONE (71,460 NEW rows in `ensemble_snapshots_v2`).
+- Snapshot ingest: ✅ DONE (71,460 NEW rows in `ensemble_snapshots`).
 - Pair build: ⚠️ PARTIAL — only Amsterdam committed (71,400 cycle='12' pairs, 1 of 49 cities). Pair-builder process aborted mid-run before reaching other cities.
 - Refit cycle='12': ❌ NO MODELS LANDED. The 71,400 Amsterdam-only pairs are insufficient to produce stratified models across the 49-city × 4-season × 2-track bucket grid. Refit run at 17:31Z attempted only 206 cycle='00' buckets (all UNIQUE-collided with existing) and 0 cycle='12' buckets — discovery limitation under investigation.
 
@@ -40,9 +40,9 @@ Verdict file: `state/post_extract_pipeline_<ts>.json`. Read it after recovery.
    WHERE updated_at > '<watcher_start_ts>'
    GROUP BY cycle, source_id, horizon_profile;
    ```
-2. Confirm `ensemble_snapshots_v2` got 12z rows:
+2. Confirm `ensemble_snapshots` got 12z rows:
    ```sql
-   SELECT cycle, COUNT(*) FROM ensemble_snapshots_v2
+   SELECT cycle, COUNT(*) FROM ensemble_snapshots
    WHERE data_version LIKE 'tigge_%' GROUP BY cycle;
    ```
 3. Run `scripts/evaluate_calibration_transfer_oos.py --no-dry-run` to populate `validated_calibration_transfers` rows for the 90-day window. Until this runs, cross-domain transfers (e.g. `ecmwf_open_data ← tigge_mars`) stay SHADOW_ONLY.
@@ -99,7 +99,7 @@ Full procedure: `docs/operations/PLIST_UPDATE_FOR_RELOCK.md`. Summary of the **4
 1. **Plist `EnvironmentVariables`** — add `ZEUS_ENTRY_FORECAST_READINESS_WRITER=1`. **DO NOT** set `ZEUS_CALIBRATION_TRANSFER_OOS_EVAL_ENABLED` at initial launch — see `docs/operations/PLIST_UPDATE_FOR_RELOCK.md` §1.5 and `architecture/ecmwf_opendata_tigge_equivalence_2026_05_06.yaml` §4. The legacy static-mapping path (flag-OFF) is the correct calibration route at launch; flipping the OOS flag prematurely fails closed to SHADOW_ONLY because no `validated_calibration_transfers` rows exist for ECMWF target_source_id yet (Phase B uplift, ~2-4 weeks post-launch).
 2. **`config/settings.json::entry_forecast.rollout_mode`** — change from `"blocked"` to one of `shadow|canary|live` (enum in `src/config.py:160-164`; "active" is NOT a valid value).
 3. **`state/entry_forecast_promotion_evidence.json`** — must exist and parse via `read_promotion_evidence`. Operator-attestation fields (`operator_approval_id`, `g1_evidence_id`, `canary_success_evidence_id`) require operator audit before live; `status_snapshot.status` must equal `LIVE_ELIGIBLE` for the gate to permit live orders.
-4. **`ensemble_snapshots_v2` row coverage** — populated by §A. The `validated_calibration_transfers` rows are NOT required at launch (legacy mapping path); they become required at Phase B when the OOS flag is flipped.
+4. **`ensemble_snapshots` row coverage** — populated by §A. The `validated_calibration_transfers` rows are NOT required at launch (legacy mapping path); they become required at Phase B when the OOS flag is flipped.
 
 After 1–4, clear the precedence-200 lock:
 ```sql

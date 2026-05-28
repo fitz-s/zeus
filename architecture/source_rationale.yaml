@@ -552,7 +552,7 @@ files:
   src/contracts/tigge_snapshot_payload.py:
     zone: K0_frozen_kernel
     authority_role: extractor_ingest_payload_contract
-    why: Canonical payload boundary between TIGGE/OpenData local-day extrema extractors and ensemble_snapshots_v2 ingest; prevents schema drift across mx2t6/mn2t6 source JSON, causality, boundary, and forecast-window evidence fields.
+    why: Canonical payload boundary between TIGGE/OpenData local-day extrema extractors and ensemble_snapshots ingest; prevents schema drift across mx2t6/mn2t6 source JSON, causality, boundary, and forecast-window evidence fields.
     hazards:
     - SOURCE_INGEST_SCHEMA_DRIFT
     - LOW_HIGH_METRIC_MIXING
@@ -1217,7 +1217,7 @@ files:
   src/data/executable_forecast_reader.py:
     zone: K2_runtime
     authority_role: live_entry_forecast_reader
-    why: PR47 read path that joins ensemble_snapshots_v2 + readiness_state (strategy_key='entry_forecast') to produce live-entry-eligible forecast bundles. Multi-stage timing/identity checks; emits BLOCKED reason codes when any stage fails.
+    why: PR47 read path that joins ensemble_snapshots + readiness_state (strategy_key='entry_forecast') to produce live-entry-eligible forecast bundles. Multi-stage timing/identity checks; emits BLOCKED reason codes when any stage fails.
     hazards:
     - DERIVED_ONLY
     - NO_WRITE_PATH

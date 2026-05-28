@@ -2,11 +2,11 @@
 # Last reused or audited: 2026-05-19
 # Authority basis: PR 6 WAVE_B_PR_3_6_FIELD_MAP.md rows 9-11; pr36_scaffold.md PR 6 migrations
 # Lifecycle: created=2026-05-19; last_reviewed=2026-05-19; last_reused=never
-# Purpose: One-shot idempotent migration adding timing chain + alpha proxy columns to ensemble_snapshots_v2 in forecasts.db.
+# Purpose: One-shot idempotent migration adding timing chain + alpha proxy columns to ensemble_snapshots in forecasts.db.
 # Reuse: Run once per DB instance; check --dry-run output before --apply; nullable columns so no backfill required.
-"""PR 6 migration: add timing chain + alpha proxy columns to ensemble_snapshots_v2.
+"""PR 6 migration: add timing chain + alpha proxy columns to ensemble_snapshots.
 
-Adds 3 columns to ensemble_snapshots_v2 in forecasts.db:
+Adds 3 columns to ensemble_snapshots in forecasts.db:
   - first_member_observed_time TEXT  (UTC ISO; when first ENS member was downloaded)
   - run_complete_time TEXT            (UTC ISO; when all 51 members were present)
   - raw_orderbook_hash_transition_delta_ms INTEGER  (alpha proxy; NULL on first observation)
@@ -14,11 +14,11 @@ Adds 3 columns to ensemble_snapshots_v2 in forecasts.db:
 All columns are nullable. No backfill needed — pre-PR-6 rows will have NULL
 (expected; instrument measures forward from merge date).
 
-These columns are also added idempotently via v2_schema.py::_create_ensemble_snapshots_v2()
+These columns are also added idempotently via v2_schema.py::_create_ensemble_snapshots()
 which runs on every db init. This script is for manual one-shot production migration.
 
 Usage:
-    python scripts/migrate_ensemble_snapshots_v2_alpha_proxy.py [--dry-run] [--db <path>]
+    python scripts/migrate_ensemble_snapshots_alpha_proxy.py [--dry-run] [--db <path>]
 
 Dry-run is the default. Pass --no-dry-run to apply.
 """
@@ -31,19 +31,19 @@ from pathlib import Path
 
 _ALTERS = [
     (
-        "ensemble_snapshots_v2",
+        "ensemble_snapshots",
         "first_member_observed_time",
-        "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN first_member_observed_time TEXT",
+        "ALTER TABLE ensemble_snapshots ADD COLUMN first_member_observed_time TEXT",
     ),
     (
-        "ensemble_snapshots_v2",
+        "ensemble_snapshots",
         "run_complete_time",
-        "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN run_complete_time TEXT",
+        "ALTER TABLE ensemble_snapshots ADD COLUMN run_complete_time TEXT",
     ),
     (
-        "ensemble_snapshots_v2",
+        "ensemble_snapshots",
         "raw_orderbook_hash_transition_delta_ms",
-        "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN raw_orderbook_hash_transition_delta_ms INTEGER",
+        "ALTER TABLE ensemble_snapshots ADD COLUMN raw_orderbook_hash_transition_delta_ms INTEGER",
     ),
 ]
 
@@ -99,7 +99,7 @@ def main() -> None:
         from src.state.db import get_forecasts_connection
         conn = get_forecasts_connection()
 
-    print(f"{'DRY-RUN' if args.dry_run else 'APPLY'} — ensemble_snapshots_v2 PR 6 migrations")
+    print(f"{'DRY-RUN' if args.dry_run else 'APPLY'} — ensemble_snapshots PR 6 migrations")
     applied = migrate(conn, dry_run=args.dry_run)
     if args.dry_run:
         print("Dry-run complete. Pass --no-dry-run to apply.")

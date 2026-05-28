@@ -12,7 +12,7 @@
 Public entry: run_selection_coverage()
 
 Per (city, target_date, snapshot) joining calibration_pairs_v2 ⨝ settlements_v2:
-  1. Load p_raw from ensemble_snapshots_v2, calibrate via calibrate_and_normalize.
+  1. Load p_raw from ensemble_snapshots, calibrate via calibrate_and_normalize.
   2. Construct p_market per --p-market flag.
   3. Build MarketAnalysis with MODEL_ONLY_POSTERIOR_MODE.
   4. Call scan_full_hypothesis_family (LIVE FDR path — NOT find_edges + fdr_filter).
@@ -487,7 +487,7 @@ def run_selection_coverage(
     """Run selection-coverage replay: score live FDR bin picks vs settled outcomes.
 
     Reads from forecasts DB authority tables
-    (calibration_pairs_v2, settlements_v2, ensemble_snapshots_v2).
+    (calibration_pairs_v2, settlements_v2, ensemble_snapshots).
     Writes ONLY to zeus_backtest.db. Does NOT write to world.db.
 
     Args:

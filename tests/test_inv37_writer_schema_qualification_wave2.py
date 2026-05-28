@@ -136,7 +136,7 @@ def tmp_foreign_db(tmp_path):
     """A 'wrong' DB (simulates caller passing forecasts conn) — no target tables."""
     db_path = tmp_path / "zeus-forecasts.db"
     conn = sqlite3.connect(str(db_path))
-    conn.execute("CREATE TABLE IF NOT EXISTS ensemble_snapshots_v2 (id TEXT PRIMARY KEY)")
+    conn.execute("CREATE TABLE IF NOT EXISTS ensemble_snapshots (id TEXT PRIMARY KEY)")
     conn.commit()
     conn.close()
     return db_path

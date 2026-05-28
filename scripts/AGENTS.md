@@ -95,7 +95,7 @@ Only list durable entry points here; use the manifest for the full catalog.
 | `live_health_monitor.sh` | Polls live_health_probe.py every 60s; emits one line per state change; runtime support (created 2026-05-11) |
 | `local_post_extract_chain.sh` | Local post-extract chain for TIGGE downloads; pairs with cloud_tigge_autochain.sh (created 2026-05-04) |
 | `maintenance_worker_install.py` | Installer for maintenance_worker daemon and rules; config_writer (created 2026-05-15) |
-| `migrate_ensemble_snapshots_v2_add_ingest_backend.py` | Migration: add ingest_backend column to ensemble_snapshots_v2 per TIGGE_DOWNLOAD_SPEC_v3 §3 Phase 0 #5 (dry-run/apply; created 2026-05-07) |
+| `migrate_ensemble_snapshots_add_ingest_backend.py` | Migration: add ingest_backend column to ensemble_snapshots per TIGGE_DOWNLOAD_SPEC_v3 §3 Phase 0 #5 (dry-run/apply; created 2026-05-07) |
 | `migrate_phase2_cycle_stratification.py` | Migration: Phase 2 cycle stratification per DESIGN_PHASE2_PLATT_CYCLE_STRATIFICATION (dry-run/apply; created 2026-05-14) |
 | `migrate_world_observations_to_forecasts.py` | Migration: move world observation rows to zeus-forecasts.db post K1 split per task_2026-05-14_k1_followups PLAN §2 P0 (dry-run/apply; created 2026-05-14) |
 | `migrate_world_to_forecasts.py` | Migration: K1 DB split world→forecasts DB transition per task_2026-05-11_forecast_db_split PLAN §5.4 (dry-run/apply; created 2026-05-11) |

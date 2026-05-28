@@ -39,11 +39,11 @@ class TestRCLReplayLegacyWhereMetricAware:
     """
 
     def _make_test_db(self) -> sqlite3.Connection:
-        """Create minimal in-memory DB with forecasts + ensemble_snapshots_v2 tables."""
+        """Create minimal in-memory DB with forecasts + ensemble_snapshots tables."""
         conn = sqlite3.connect(":memory:")
         conn.row_factory = sqlite3.Row
-        # ReplayContext.__init__ checks for ensemble_snapshots_v2 (legacy removed by v1.F20)
-        conn.execute("CREATE TABLE ensemble_snapshots_v2 (snapshot_id INTEGER PRIMARY KEY, city TEXT, target_date TEXT, temperature_metric TEXT, available_at TEXT, fetch_time TEXT, p_raw_json TEXT, members_json TEXT, model_version TEXT, data_version TEXT, issue_time TEXT, valid_time TEXT, lead_hours REAL, spread REAL, is_bimodal INTEGER)")
+        # ReplayContext.__init__ checks for ensemble_snapshots (legacy removed by v1.F20)
+        conn.execute("CREATE TABLE ensemble_snapshots (snapshot_id INTEGER PRIMARY KEY, city TEXT, target_date TEXT, temperature_metric TEXT, available_at TEXT, fetch_time TEXT, p_raw_json TEXT, members_json TEXT, model_version TEXT, data_version TEXT, issue_time TEXT, valid_time TEXT, lead_hours REAL, spread REAL, is_bimodal INTEGER)")
         conn.execute("""
             CREATE TABLE forecasts (
                 city TEXT,
@@ -387,7 +387,7 @@ class TestRCPV2RowCountSensor:
         for table in (
             "platt_models_v2",
             "calibration_pairs_v2",
-            "ensemble_snapshots_v2",
+            "ensemble_snapshots",
             "historical_forecasts_v2",
             "settlements_v2",
         ):
@@ -401,7 +401,7 @@ class TestRCPV2RowCountSensor:
         for table in (
             "platt_models_v2",
             "calibration_pairs_v2",
-            "ensemble_snapshots_v2",
+            "ensemble_snapshots",
             "historical_forecasts_v2",
             "settlements_v2",
         ):
@@ -443,7 +443,7 @@ class TestRCPV2RowCountSensor:
         assert set(counts_empty.keys()) == {
             "platt_models_v2",
             "calibration_pairs_v2",
-            "ensemble_snapshots_v2",
+            "ensemble_snapshots",
             "historical_forecasts_v2",
             "settlements_v2",
         }, "v2_row_counts must cover all 5 v2 tables"
@@ -492,7 +492,7 @@ class TestRCPV2RowCountSensor:
         for table in (
             "platt_models_v2",
             "calibration_pairs_v2",
-            "ensemble_snapshots_v2",
+            "ensemble_snapshots",
             "historical_forecasts_v2",
             "settlements_v2",
         ):
@@ -503,7 +503,7 @@ class TestRCPV2RowCountSensor:
             world_conn.execute("INSERT INTO historical_forecasts_v2 DEFAULT VALUES")
         for _ in range(3):
             forecasts_conn.execute("INSERT INTO calibration_pairs_v2 DEFAULT VALUES")
-            forecasts_conn.execute("INSERT INTO ensemble_snapshots_v2 DEFAULT VALUES")
+            forecasts_conn.execute("INSERT INTO ensemble_snapshots DEFAULT VALUES")
             forecasts_conn.execute("INSERT INTO settlements_v2 DEFAULT VALUES")
         world_conn.commit()
         forecasts_conn.commit()
@@ -517,7 +517,7 @@ class TestRCPV2RowCountSensor:
         assert counts["platt_models_v2"] == 2
         assert counts["historical_forecasts_v2"] == 2
         assert counts["calibration_pairs_v2"] == 3
-        assert counts["ensemble_snapshots_v2"] == 3
+        assert counts["ensemble_snapshots"] == 3
         assert counts["settlements_v2"] == 3
 
     def test_r_cp_1d_v2_row_counts_avoid_full_table_count_scans(self):

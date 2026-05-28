@@ -17,7 +17,7 @@ Concurrent with this artifact, `ZEUS_TIGGE_INGEST_ENABLED=1` is added to the
 
 ## Pre-activation evidence
 
-- `ensemble_snapshots_v2` shows fresh TIGGE rows ingested today (`recorded_at`
+- `ensemble_snapshots` shows fresh TIGGE rows ingested today (`recorded_at`
   2026-05-01T18:50:55Z), `data_version=tigge_mx2t6_local_calendar_day_max_v1`,
   `model_version=ecmwf_ens`, `authority=VERIFIED`, 51 members,
   `causality_status=OK`.

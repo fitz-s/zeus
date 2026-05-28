@@ -1464,7 +1464,7 @@ def test_snapshot_context_prefers_v2_and_respects_training_allowed(harvester_con
     )
     harvester_conn.execute(
         """
-        INSERT INTO ensemble_snapshots_v2 (
+        INSERT INTO ensemble_snapshots (
             snapshot_id, city, target_date, temperature_metric,
             physical_quantity, observation_field, issue_time, valid_time,
             available_at, fetch_time, lead_hours, members_json, p_raw_json,
@@ -1506,7 +1506,7 @@ def test_snapshot_context_prefers_v2_and_respects_training_allowed(harvester_con
     p_raw = harvester_mod.get_snapshot_p_raw(harvester_conn, "501")
 
     assert context is not None
-    assert context["snapshot_source"] == "ensemble_snapshots_v2"
+    assert context["snapshot_source"] == "ensemble_snapshots"
     assert context["source_model_version"] == HIGH_LOCALDAY_MAX.data_version
     assert context["p_raw_vector"] == [0.2, 0.5, 0.3]
     assert context["snapshot_learning_ready"] is False
@@ -1592,7 +1592,7 @@ def test_snapshot_context_rejects_unrelated_v2_id_collision_for_row_identity(har
     )
     harvester_conn.execute(
         """
-        INSERT INTO ensemble_snapshots_v2 (
+        INSERT INTO ensemble_snapshots (
             snapshot_id, city, target_date, temperature_metric,
             physical_quantity, observation_field, issue_time, valid_time,
             available_at, fetch_time, lead_hours, members_json, p_raw_json,

@@ -5,7 +5,7 @@
 #   p0-2-hardening-20260523: missing/unknown data_version now fail-closed (UNKNOWN), not legacy-passthrough.
 """Forecast extrema authority classifier.
 
-Classifies whether a fetched ensemble_snapshots_v2 row contributes to the
+Classifies whether a fetched ensemble_snapshots row contributes to the
 target local-day extrema that the market settles on.  Used by
 executable_forecast_reader to prefer contributing runs (e.g. 00Z) over
 later non-contributing ones (e.g. post-peak 12Z).
@@ -60,7 +60,7 @@ CURRENT_EXTREMA_AUTHORITY_REQUIRED_DATA_VERSIONS: frozenset[str] = frozenset({
 
 # Explicit legacy data_versions for which a NULL contributes_to_target_extrema is
 # tolerated (pre-cutover mx2t6/mn2t6 era rows, written before the extrema-authority
-# extractor existed).  Historical rows in ensemble_snapshots_v2 remain readable.
+# extractor existed).  Historical rows in ensemble_snapshots remain readable.
 # DO NOT add new entries without a documented authority basis.
 LEGACY_EXTREMA_AUTHORITY_DATA_VERSIONS: frozenset[str] = frozenset({
     _ECMWF_OPENDATA_HIGH_DATA_VERSION_LEGACY,   # ecmwf_opendata_mx2t6_local_calendar_day_max_v1
@@ -137,7 +137,7 @@ def classify_forecast_extrema_authority(
 
     ``data_version`` defaults to ``row.get("data_version")`` so existing callers
     that pass only *row* still get the data-version-aware NULL handling (the
-    ensemble_snapshots_v2 row always carries its own data_version).
+    ensemble_snapshots row always carries its own data_version).
     """
     if data_version is None:
         dv = row.get("data_version")

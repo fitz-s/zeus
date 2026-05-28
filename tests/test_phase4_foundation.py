@@ -1,7 +1,7 @@
 """Phase 4 foundation tests: R-I, R-K, R-N
 
 R-I: add_calibration_pair() without metric_identity raises TypeError.
-R-K: ensemble_snapshots_v2.members_unit is NOT NULL (4A.2 column).
+R-K: ensemble_snapshots.members_unit is NOT NULL (4A.2 column).
 R-N: platt_models_v2 has no city/target_date columns; UNIQUE enforced.
 """
 from __future__ import annotations
@@ -96,11 +96,11 @@ class TestCalibrationPairRequiresMetricIdentity:
 
 
 # ---------------------------------------------------------------------------
-# R-K: ensemble_snapshots_v2.members_unit NOT NULL
+# R-K: ensemble_snapshots.members_unit NOT NULL
 # ---------------------------------------------------------------------------
 
 class TestEnsembleSnapshotsV2MembersUnit:
-    """R-K: members_unit column must be NOT NULL in ensemble_snapshots_v2 (4A.2)."""
+    """R-K: members_unit column must be NOT NULL in ensemble_snapshots (4A.2)."""
 
     def _make_conn(self) -> sqlite3.Connection:
         from src.state.db import init_schema
@@ -111,19 +111,19 @@ class TestEnsembleSnapshotsV2MembersUnit:
         apply_v2_schema(conn)
         return conn
 
-    def test_members_unit_column_exists_in_ensemble_snapshots_v2(self):
+    def test_members_unit_column_exists_in_ensemble_snapshots(self):
         """R-K pre-gate: members_unit column must exist after apply_v2_schema."""
         conn = self._make_conn()
-        cols = {row[1] for row in conn.execute("PRAGMA table_info(ensemble_snapshots_v2)")}
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(ensemble_snapshots)")}
         assert "members_unit" in cols, (
-            "ensemble_snapshots_v2 is missing 'members_unit' column (R-K: 4A.2 schema migration not applied)"
+            "ensemble_snapshots is missing 'members_unit' column (R-K: 4A.2 schema migration not applied)"
         )
 
     def test_members_unit_insert_without_value_uses_default_degc(self):
         """R-K: DEFAULT 'degC' must apply when members_unit is omitted."""
         conn = self._make_conn()
         conn.execute("""
-            INSERT INTO ensemble_snapshots_v2
+            INSERT INTO ensemble_snapshots
             (city, target_date, temperature_metric, physical_quantity, observation_field,
              available_at, fetch_time, lead_hours, members_json, model_version, data_version)
             VALUES ('NYC', '2026-04-16', 'high', 'mx2t6_local_calendar_day_max', 'high_temp',
@@ -132,7 +132,7 @@ class TestEnsembleSnapshotsV2MembersUnit:
         """)
         conn.commit()
         (unit,) = conn.execute(
-            "SELECT members_unit FROM ensemble_snapshots_v2 WHERE city='NYC'"
+            "SELECT members_unit FROM ensemble_snapshots WHERE city='NYC'"
         ).fetchone()
         assert unit == "degC", (
             f"members_unit DEFAULT must be 'degC', got {unit!r} (R-K)"
@@ -143,7 +143,7 @@ class TestEnsembleSnapshotsV2MembersUnit:
         conn = self._make_conn()
         with pytest.raises(sqlite3.IntegrityError):
             conn.execute("""
-                INSERT INTO ensemble_snapshots_v2
+                INSERT INTO ensemble_snapshots
                 (city, target_date, temperature_metric, physical_quantity, observation_field,
                  available_at, fetch_time, lead_hours, members_json, model_version, data_version,
                  members_unit)

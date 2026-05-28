@@ -29,7 +29,7 @@ FORECAST_ONLY_TABLES = {
     "source_run_coverage",
     "readiness_state",
     "market_events_v2",
-    "ensemble_snapshots_v2",
+    "ensemble_snapshots",
     "job_run",
 }
 

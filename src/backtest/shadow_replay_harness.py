@@ -329,9 +329,9 @@ def run_replay(
     temp_conn.commit()
 
     # ------------------------------------------------------------------
-    # Query ensemble_snapshots_v2 from live FCST DB (read-only)
+    # Query ensemble_snapshots from live FCST DB (read-only)
     # Shoulder candidates: bins where p_raw_json exists, available_at in window
-    # ensemble_snapshots_v2 schema: (snapshot_id, city, target_date,
+    # ensemble_snapshots schema: (snapshot_id, city, target_date,
     #   temperature_metric, physical_quantity, observation_field, issue_time,
     #   valid_time, available_at, fetch_time, lead_hours, members_json,
     #   p_raw_json, ...)
@@ -352,7 +352,7 @@ def run_replay(
         """
         SELECT snapshot_id, city, target_date, temperature_metric,
                available_at, p_raw_json
-        FROM ensemble_snapshots_v2
+        FROM ensemble_snapshots
         WHERE available_at >= ?
           AND available_at <= ?
           AND p_raw_json IS NOT NULL

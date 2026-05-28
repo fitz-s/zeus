@@ -745,7 +745,7 @@ SQLITE_CONNECT_ALLOWLIST: frozenset[str] = frozenset(
         # --- already_guarded operator migration scripts ---
         "scripts/migrate_add_authority_column.py",          # operator_invoked + already_guarded: writes under db_writer_lock(BULK)
         "scripts/migrate_b070_control_overrides_to_history.py",  # operator_invoked + already_guarded: writes under db_writer_lock(BULK)
-        "scripts/migrate_ensemble_snapshots_v2_add_ingest_backend.py",  # operator_invoked + already_guarded: writes under db_writer_lock(BULK)
+        "scripts/migrate_ensemble_snapshots_add_ingest_backend.py",  # operator_invoked + already_guarded: writes under db_writer_lock(BULK)
         "scripts/migrate_forecasts_availability_provenance.py",   # operator_invoked + already_guarded: reads mode=ro; writes under db_writer_lock(BULK)
         "scripts/migrate_observations_k1.py",               # operator_invoked + already_guarded: writes under db_writer_lock(BULK)
         # --- retrofitted migration script (F26 cleanup: lock wrap added 2026-05-18) ---
@@ -759,7 +759,7 @@ SQLITE_CONNECT_ALLOWLIST: frozenset[str] = frozenset(
         "scripts/migrate_settlement_commands_in_flight_at_era_flip.py",  # operator_invoked: quarantine DDL + SAVEPOINT
         # --- PR 3+6 (2026-05-19) migration scripts ---
         "scripts/migrate_settlement_commands_polymarket_anchor.py",  # operator_invoked: DDL-only idempotent ADD COLUMN for PR3+PR6 columns
-        "scripts/migrate_ensemble_snapshots_v2_alpha_proxy.py",     # operator_invoked: DDL-only idempotent ADD COLUMN for PR6 timing chain
+        "scripts/migrate_ensemble_snapshots_alpha_proxy.py",     # operator_invoked: DDL-only idempotent ADD COLUMN for PR6 timing chain
         # --- one-shot operator-local market injection (2026-05-19) ---
         # Untracked utility (ran 2026-05-19, 0 callers). Bare sqlite3.connect() at
         # lines 210/236/512/513 not wrapped in db_writer_lock(BULK). Allowlisted to

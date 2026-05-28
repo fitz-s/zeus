@@ -267,7 +267,7 @@ state_surfaces:
     forbidden_misread: >
       Forecast-class DB (K1 split 2026-05-11). Contains schema_class=FORECAST_CLASS tables:
       observations, settlements, settlements_v2, source_run, market_events_v2,
-      ensemble_snapshots_v2, calibration_pairs_v2. Do not write to this DB via a separate
+      ensemble_snapshots, calibration_pairs_v2. Do not write to this DB via a separate
       independent connection while also writing world.db — that violates INV-37.
       Use get_forecasts_connection() for reads and get_forecasts_connection_with_world()
       (ATTACH+SAVEPOINT) for atomic cross-DB writes.
@@ -5147,7 +5147,7 @@ digest_profiles:
     match:
       - "DSA-13 canonical snapshot authority"
       - "canonical live snapshot authority"
-      - "ensemble_snapshots_v2 canonical live snapshots"
+      - "ensemble_snapshots canonical live snapshots"
       - "legacy ensemble_snapshots projection diagnostic"
       - "snapshot authority split"
       - "live decision snapshot table authority"
@@ -5155,12 +5155,12 @@ digest_profiles:
       strong_phrases:
         - "DSA-13 canonical snapshot authority"
         - "canonical live snapshot authority"
-        - "ensemble_snapshots_v2 canonical live snapshots"
+        - "ensemble_snapshots canonical live snapshots"
         - "legacy ensemble_snapshots projection diagnostic"
         - "snapshot authority split"
         - "live decision snapshot table authority"
       weak_terms:
-        - "ensemble_snapshots_v2"
+        - "ensemble_snapshots"
         - "ensemble_snapshots"
         - "decision_snapshot_id"
         - "snapshot authority"
@@ -5418,7 +5418,7 @@ digest_profiles:
       weak_terms:
         - "status_summary"
         - "v2_row_counts"
-        - "ensemble_snapshots_v2"
+        - "ensemble_snapshots"
         - "world DB"
         - "trade shadow"
       negative_phrases:

@@ -51,25 +51,25 @@ Writes to `forecast_skill` in world.db (23,590 rows). This step replaced the old
 - `get_settlements_in_window()` line 42: LEFT JOINs `ensemble_snapshots` (unsuffixed, doesn't exist)
 - `get_bin_structure()` line 61: SELECT from `market_events` (unsuffixed, 0 rows in world.db)
 - INSERT line 131: `ensemble_snapshots` (unsuffixed, doesn't exist)
-- `ensemble_snapshots_v2` has ~40 columns; many NOT NULL without defaults:
+- `ensemble_snapshots` has ~40 columns; many NOT NULL without defaults:
   `temperature_metric`, `physical_quantity`, `observation_field`, `members_unit`,
   `ingest_backend`. This is NOT a table rename — the INSERT shape is fundamentally different.
   Rewriting backfill_ens.py to match the v2 schema is out-of-scope; it would require
   replicating the ECMWF Open Data ingest pipeline logic.
 - API constraint: OpenMeteo `past_days` max = 93 days (script only covers 93-day window).
 - **Canonical write path**: the live daemon (`src/main.py` via `src/ingest/`) writes to
-  `ensemble_snapshots_v2` for all cities in `cities_by_name` on each cycle. New cities
+  `ensemble_snapshots` for all cities in `cities_by_name` on each cycle. New cities
   will accumulate rows after the next operator-initiated daemon restart.
 - Fix: add `"optional": True` to step 13 in PIPELINE_STEPS so failure is logged not fatal.
   (Step 14 already has optional=True.)
-- **Report to operator**: ensemble_snapshots_v2 rows for ZSJN/ZHCC will be 0 at end of run.
+- **Report to operator**: ensemble_snapshots rows for ZSJN/ZHCC will be 0 at end of run.
   This is correct fail-closed cold-start behavior. Will populate after daemon restart.
 
 ### Step 14 — calibration_pairs (`rebuild_calibration_pairs_canonical.py`)
 **STALE + OPTIONAL — MARK SKIP, DISCLOSE IN REPORT**
 Current PIPELINE_STEPS: `"extra_args": ["--dry-run"]` + `"optional": True`.
 With `--dry-run`, reads `ensemble_snapshots` (unsuffixed, doesn't exist) at line 170.
-Will OperationalError. Since ensemble_snapshots_v2 will be empty for new cities anyway
+Will OperationalError. Since ensemble_snapshots will be empty for new cities anyway
 (see step 13), calibration_pairs_v2 will also be 0. Already optional — no change needed.
 Disclose in report: calibration_pairs_v2 will be 0 for ZSJN/ZHCC (cold-start, expected).
 
@@ -83,7 +83,7 @@ Current stale entries → canonical replacements:
 | `"observations"` | `"observations"` | world.db (unchanged) |
 | `"observation_instants"` | `"observation_instants_v2"` | world.db |
 | `"market_events"` | `"market_events_v2"` | forecasts.db |
-| `"ensemble_snapshots"` | `"ensemble_snapshots_v2"` | forecasts.db |
+| `"ensemble_snapshots"` | `"ensemble_snapshots"` | forecasts.db |
 | `"calibration_pairs"` | `"calibration_pairs_v2"` | forecasts.db |
 | `"historical_forecasts"` | VESTIGIAL — remove | — |
 | `"model_skill"` | VESTIGIAL — remove | — |
@@ -142,7 +142,7 @@ via `optional=True` flag. Step 13 (ens_backfill) limited to 93-day window per AP
 - `settlements_v2` (forecasts.db): +new settlement scaffold rows for ~90 days × 2 cities
 - `market_events_v2` (forecasts.db): +current Polymarket markets for ZSJN/ZHCC if live
 - `observation_instants_v2` (world.db): +hourly obs rows for 900 days × 2 cities
-- `ensemble_snapshots_v2` (forecasts.db): +ENS rows for 93-day window × 2 cities (API limit)
+- `ensemble_snapshots` (forecasts.db): +ENS rows for 93-day window × 2 cities (API limit)
 - `platt_models_v2` (forecasts.db): 0 — requires calibration_pairs_v2 which requires
   sufficient ensemble history. Cold-start behavior is correct fail-closed. Will populate
   after sufficient live trading history.

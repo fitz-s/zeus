@@ -60,7 +60,7 @@ REQUIRED_STEP_IDS = {
     "calibration_pairs",
     # new OBTAINABLE-NOW steps
     "obs_instants_v2",      # backfill observation_instants_v2
-    "ens_backfill_v2",      # ensemble_snapshots_v2 backfill
+    "ens_backfill_v2",      # ensemble_snapshots backfill
     "platt_training",       # refit_platt → promote
     "fit_ens_bias_v2",      # model_bias_ens_v2 population
     "monthly_bounds",       # city_monthly_bounds.json generation
@@ -105,7 +105,7 @@ def test_calibration_pairs_not_optional():
 V2_REQUIRED_TABLES = {
     "observation_instants_v2",
     "calibration_pairs_v2",
-    "ensemble_snapshots_v2",
+    "ensemble_snapshots",
     "model_bias_ens_v2",
 }
 

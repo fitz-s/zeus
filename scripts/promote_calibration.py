@@ -55,7 +55,7 @@ Constraints
   STAGE_DB filename. Defaults to ``state/zeus-forecasts.db`` when
   --prod-db is omitted (K1: calibration_pairs_v2 lives in the forecasts DB).
 * Snapshot FK: ``calibration_pairs_v2.snapshot_id`` references
-  ``ensemble_snapshots_v2(snapshot_id)`` but PRAGMA foreign_keys is OFF
+  ``ensemble_snapshots(snapshot_id)`` but PRAGMA foreign_keys is OFF
   in zeus-forecasts.db. STAGE snapshot_ids may not exist in PROD; we
   preserve them as-is (FK not enforced) but expose ``--null-snapshot-id``
   to NULL them out for safety.
