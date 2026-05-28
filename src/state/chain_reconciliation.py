@@ -910,30 +910,22 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
             rescued.chain_shares = chain.size
             rescued.chain_verified_at = now
             rescued.condition_id = rescued.condition_id or chain.condition_id
-            _rescue_eligible = getattr(pos, "corrected_executable_economics_eligible", False)
+            # F1 (docs/findings_2026_05_28.md §F1, 2026-05-28): chain
+            # aggregate always lands on chain_* fields, regardless of rescue
+            # authority. This is the canonical home for venue-observed
+            # economics; the legacy `entry_price` / `cost_basis_usd` /
+            # `size_usd` / `shares` fields are now only mutated by the
+            # trade-verified rescue branch below.
             if chain.avg_price > 0:
-                if not _rescue_eligible:
-                    rescued.entry_price = chain.avg_price
-                else:
-                    _cnt_inc("cost_basis_chain_mutation_blocked_total", labels={"field": "entry_price"})
-                    logger.warning("telemetry_counter event=cost_basis_chain_mutation_blocked_total field=entry_price")
+                rescued.chain_avg_price = chain.avg_price
             if chain.cost > 0:
-                if not _rescue_eligible:
-                    rescued.cost_basis_usd = chain.cost
-                    rescued.size_usd = chain.cost
-                else:
-                    _cnt_inc("cost_basis_chain_mutation_blocked_total", labels={"field": "cost_basis_usd"})
-                    logger.warning("telemetry_counter event=cost_basis_chain_mutation_blocked_total field=cost_basis_usd")
-                    _cnt_inc("cost_basis_chain_mutation_blocked_total", labels={"field": "size_usd"})
-                    logger.warning("telemetry_counter event=cost_basis_chain_mutation_blocked_total field=size_usd")
-            if chain.size > 0:
-                if not _rescue_eligible:
-                    rescued.shares = chain.size
-                else:
-                    _cnt_inc("cost_basis_chain_mutation_blocked_total", labels={"field": "shares"})
-                    logger.warning("telemetry_counter event=cost_basis_chain_mutation_blocked_total field=shares")
+                rescued.chain_cost_basis_usd = chain.cost
             # PR D0 (Finding D0, Part-2 audit, 2026-05-27): discriminate rescue
             # authority by whether the position has a linked venue trade fact.
+            # F1 (2026-05-28): the entry/fill economics mutations below now
+            # FIRE ONLY on the trade-verified branch — balance-only rescue is
+            # not authoritative for fill economics.
+            #
             # Only set entry_fill_verified=True and order_status="filled" for
             # trade-verified rescue (linked fill fact present). Balance-only
             # recovery (fill_authority=FILL_AUTHORITY_VENUE_POSITION_OBSERVED)
@@ -944,18 +936,54 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
             # PR C3 note: gate at top of this branch already skipped commanded
             # pending entries that lack a fill fact, so a missing fill fact here
             # means the position was pre-command-journal legacy.
-            if _pending_entry_has_linked_fill_fact(pos):
+            _has_linked_fill_fact = _pending_entry_has_linked_fill_fact(pos)
+            if _has_linked_fill_fact:
+                # Trade-verified rescue branch: chain economics ARE fill
+                # economics (verified by venue trade fact). Continue to
+                # mutate the legacy fields so downstream P&L and reporting
+                # see the verified fill values.
+                _rescue_eligible = getattr(pos, "corrected_executable_economics_eligible", False)
+                if chain.avg_price > 0:
+                    if not _rescue_eligible:
+                        rescued.entry_price = chain.avg_price
+                    else:
+                        _cnt_inc("cost_basis_chain_mutation_blocked_total", labels={"field": "entry_price"})
+                        logger.warning("telemetry_counter event=cost_basis_chain_mutation_blocked_total field=entry_price")
+                if chain.cost > 0:
+                    if not _rescue_eligible:
+                        rescued.cost_basis_usd = chain.cost
+                        rescued.size_usd = chain.cost
+                    else:
+                        _cnt_inc("cost_basis_chain_mutation_blocked_total", labels={"field": "cost_basis_usd"})
+                        logger.warning("telemetry_counter event=cost_basis_chain_mutation_blocked_total field=cost_basis_usd")
+                        _cnt_inc("cost_basis_chain_mutation_blocked_total", labels={"field": "size_usd"})
+                        logger.warning("telemetry_counter event=cost_basis_chain_mutation_blocked_total field=size_usd")
+                if chain.size > 0:
+                    if not _rescue_eligible:
+                        rescued.shares = chain.size
+                    else:
+                        _cnt_inc("cost_basis_chain_mutation_blocked_total", labels={"field": "shares"})
+                        logger.warning("telemetry_counter event=cost_basis_chain_mutation_blocked_total field=shares")
                 rescued.fill_authority = FILL_AUTHORITY_VENUE_CONFIRMED_FULL
                 rescued.entry_fill_verified = True
                 rescued.order_status = "filled"
             else:
+                # F1 (2026-05-28): balance-only rescue. The chain aggregate is
+                # observed exposure, NOT verified fill economics — leave
+                # submitted entry/fill economics (entry_price, cost_basis_usd,
+                # size_usd, shares) untouched. chain_avg_price /
+                # chain_cost_basis_usd / chain_shares (set above) carry the
+                # venue-observed truth. Downstream consumers consult
+                # effective_exposure() which routes to chain_* when
+                # fill_authority == venue_position_observed.
                 rescued.fill_authority = FILL_AUTHORITY_VENUE_POSITION_OBSERVED
                 # entry_fill_verified stays False for balance-only rescue.
                 # order_status stays at its current value (not forced to "filled").
                 logger.warning(
                     "RESCUE_DEGRADED_AUTHORITY: trade_id=%s token=%s — chain balance present "
                     "but no linked venue trade fact; setting fill_authority=%s. Position is "
-                    "tradable (has_tradable_exposure) but NOT fill-verified or training-eligible.",
+                    "tradable (has_tradable_exposure) but NOT fill-verified or training-eligible. "
+                    "Submitted entry economics preserved; chain economics on chain_* fields.",
                     getattr(rescued, "trade_id", "?"),
                     tid,
                     FILL_AUTHORITY_VENUE_POSITION_OBSERVED,
@@ -993,12 +1021,23 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
             pos.order_id = rescued.order_id
             pos.chain_state = rescued.chain_state
             pos.chain_shares = rescued.chain_shares
+            # F1 (2026-05-28): chain-observed economics always copy back —
+            # they are the canonical home for venue-observed truth and are
+            # set by both rescue branches above.
+            pos.chain_avg_price = rescued.chain_avg_price
+            pos.chain_cost_basis_usd = rescued.chain_cost_basis_usd
             pos.chain_verified_at = rescued.chain_verified_at
             pos.condition_id = rescued.condition_id
-            pos.entry_price = rescued.entry_price
-            pos.cost_basis_usd = rescued.cost_basis_usd
-            pos.size_usd = rescued.size_usd
-            pos.shares = rescued.shares
+            # F1 (2026-05-28): entry/fill economics copy back ONLY on the
+            # trade-verified branch. Balance-only rescue leaves submitted
+            # entry economics untouched; downstream readers must consult
+            # `effective_exposure()` for authority-routed values.
+            pos.fill_authority = rescued.fill_authority
+            if rescued.fill_authority == FILL_AUTHORITY_VENUE_CONFIRMED_FULL:
+                pos.entry_price = rescued.entry_price
+                pos.cost_basis_usd = rescued.cost_basis_usd
+                pos.size_usd = rescued.size_usd
+                pos.shares = rescued.shares
             pos.entry_fill_verified = rescued.entry_fill_verified
             pos.order_status = rescued.order_status
             pos.state = rescued.state
