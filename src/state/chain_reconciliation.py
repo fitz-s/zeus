@@ -441,18 +441,22 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
         from src.state.db import append_many_and_project
 
         has_trade_fact = _pending_entry_has_linked_fill_fact(position)
-        builder = (
-            build_reconciliation_rescue_canonical_write
-            if has_trade_fact
-            else build_venue_position_observed_canonical_write
-        )
 
         try:
-            events, projection = builder(
-                position,
-                sequence_no=_next_canonical_sequence_no(getattr(position, "trade_id", "")),
-                source_module="src.state.chain_reconciliation",
-            )
+            if has_trade_fact:
+                events, projection = build_reconciliation_rescue_canonical_write(
+                    position,
+                    chain_synced_at=now,
+                    sequence_no=_next_canonical_sequence_no(getattr(position, "trade_id", "")),
+                    source_module="src.state.chain_reconciliation",
+                )
+            else:
+                events, projection = build_venue_position_observed_canonical_write(
+                    position,
+                    venue_observed_at=now,
+                    sequence_no=_next_canonical_sequence_no(getattr(position, "trade_id", "")),
+                    source_module="src.state.chain_reconciliation",
+                )
             append_many_and_project(conn, events, projection)
         except Exception as exc:
             raise RuntimeError(
@@ -527,6 +531,7 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
         try:
             events, projection = build_review_required_canonical_write(
                 position,
+                review_detected_at=now,
                 reason=reason,
                 sequence_no=_next_canonical_sequence_no(getattr(position, "trade_id", "")),
                 source_module="src.state.chain_reconciliation",
@@ -1006,9 +1011,13 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
                     now,
                 )
                 rescued.entered_at = now  # `now` already in scope; line 668 uses it as _rescue_display_ts
+                rescued.entered_at_authority = "reconstructed_from_chain"
                 _entered_at_was_fabricated = True
             else:
                 _entered_at_was_fabricated = False
+                # F2: entered_at was already present from real venue fill data.
+                if not rescued.entered_at_authority:
+                    rescued.entered_at_authority = "verified_entry_fill"
             if canonical_rescue_baseline_available:
                 _append_canonical_rescue_if_available(rescued)
             _sync_reconciled_trade_lifecycle(rescued)
@@ -1042,6 +1051,7 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
             pos.order_status = rescued.order_status
             pos.state = rescued.state
             pos.entered_at = rescued.entered_at
+            pos.entered_at_authority = rescued.entered_at_authority
             stats["rescued_pending"] += 1
             stats["synced"] += 1
             continue
