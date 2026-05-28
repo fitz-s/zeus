@@ -507,6 +507,40 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
 
         return True
 
+    def _append_canonical_review_required(position: Position, *, reason: str) -> bool:
+        """PR #352 (Part-3 audit Finding 4): persist a durable REVIEW_REQUIRED
+        event + quarantined projection for an unresolved size mismatch.
+
+        The caller has already set position.state=QUARANTINED and
+        chain_state=size_mismatch_unresolved, so the projection phase is
+        QUARANTINED. append_many_and_project writes position_current.phase=
+        quarantined durably — the review requirement now survives daemon restart
+        instead of living only in the in-memory Position. Best-effort: if no
+        connection or the write fails, the runtime quarantine still stands (the
+        next reconcile cycle re-detects and re-attempts the durable write).
+        """
+        if conn is None:
+            return False
+        from src.engine.lifecycle_events import build_review_required_canonical_write
+        from src.state.db import append_many_and_project
+
+        try:
+            events, projection = build_review_required_canonical_write(
+                position,
+                reason=reason,
+                sequence_no=_next_canonical_sequence_no(getattr(position, "trade_id", "")),
+                source_module="src.state.chain_reconciliation",
+            )
+            append_many_and_project(conn, events, projection)
+        except Exception as exc:
+            logger.warning(
+                "REVIEW_REQUIRED canonical write failed for %s: %s (runtime quarantine stands; "
+                "next reconcile cycle retries)",
+                getattr(position, "trade_id", "?"), exc,
+            )
+            return False
+        return True
+
     def _already_logged_rescue_event(position) -> bool:
         """Check canonical position_events for a prior rescue event."""
         if conn is None:
@@ -1089,6 +1123,7 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
                     # carry the canonical LifecycleState.QUARANTINED.value.
                     corrected.state = LifecycleState.QUARANTINED.value
                     corrected.chain_state = "size_mismatch_unresolved"
+                    corrected.quarantined_at = corrected.quarantined_at or now
                     if not _size_mismatch_eligible:
                         corrected.shares = local_shares
                     else:
@@ -1097,6 +1132,17 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
                     stats["skipped_size_correction_missing_canonical_baseline"] = (
                         stats.get("skipped_size_correction_missing_canonical_baseline", 0) + 1
                     )
+                    # PR #352 (Part-3 audit Finding 4): persist the review
+                    # requirement durably. Without this, position_current stays
+                    # 'active' on disk and the quarantine/review is lost on the
+                    # next daemon restart — unresolved size mismatch is live
+                    # exposure risk and must survive process lifetime.
+                    if _append_canonical_review_required(
+                        corrected, reason="size_mismatch_unresolved_no_canonical_baseline"
+                    ):
+                        stats["review_required_persisted"] = (
+                            stats.get("review_required_persisted", 0) + 1
+                        )
                 else:
                     stats["updated"] += 1
             pos.chain_state = corrected.chain_state
@@ -1108,6 +1154,7 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
             pos.size_usd = corrected.size_usd
             pos.shares = corrected.shares
             pos.state = corrected.state
+            pos.quarantined_at = getattr(corrected, "quarantined_at", getattr(pos, "quarantined_at", ""))
             stats["synced"] += 1
 
     # Rule 3: Chain but NOT local → QUARANTINE (skip ignored tokens)

@@ -153,9 +153,20 @@ def test_pending_fill_rescue_stamps_iso_not_sentinel():
     fake_projection.state = "entered"
     fake_projection.entered_at = "2026-05-17T10:00:00+00:00"
 
+    # PR #352 (Part-3): PR #351's D0 split the rescue write into two builders —
+    # CHAIN_SYNCED (trade-verified) and VENUE_POSITION_OBSERVED (balance-only,
+    # no linked fill fact). This fixture's stub conn has no fill fact, so the
+    # rescue routes to the venue-observed builder. Patch BOTH so the test
+    # exercises entered_at stamping regardless of which branch the rescue takes
+    # (the prior single-builder patch silently let the real venue builder run
+    # and raise 'missing strategy_key' — a #351 test breakage).
     with (
         patch(
             "src.engine.lifecycle_events.build_reconciliation_rescue_canonical_write",
+            return_value=([], fake_projection),
+        ),
+        patch(
+            "src.engine.lifecycle_events.build_venue_position_observed_canonical_write",
             return_value=([], fake_projection),
         ),
         patch("src.state.db.append_many_and_project"),

@@ -796,6 +796,73 @@ def build_chain_size_corrected_canonical_write(
     return [event], projection
 
 
+def build_review_required_canonical_write(
+    position: Any,
+    *,
+    reason: str,
+    sequence_no: int,
+    source_module: str = "src.state.chain_reconciliation",
+) -> tuple[list[dict], dict]:
+    """PR #352 (Part-3 audit Finding 4, 2026-05-27): durable REVIEW_REQUIRED event.
+
+    Emitted when chain reconciliation detects an unresolved chain/local size
+    mismatch but has NO canonical baseline to write a CHAIN_SIZE_CORRECTED
+    against. Before this builder, that branch only mutated the runtime Position
+    (state=QUARANTINED, chain_state=size_mismatch_unresolved) and bumped a stats
+    counter — nothing was persisted, so on daemon restart position_current still
+    showed the position as active and the review requirement was lost.
+
+    The caller sets the runtime Position to the quarantined/size-mismatch state
+    BEFORE calling this builder, so the projection phase is QUARANTINED and
+    append_many_and_project() persists position_current.phase=quarantined +
+    chain_state=size_mismatch_unresolved durably alongside the audit event.
+    """
+    projection = build_position_current_projection(position)
+    if projection["phase"] != QUARANTINED:
+        raise ValueError("review_required canonical builder requires a quarantined position projection")
+    occurred_at = _non_empty(
+        getattr(position, "quarantined_at", ""),
+        getattr(position, "chain_verified_at", ""),
+        projection["updated_at"],
+    )
+    payload = json.dumps(
+        {
+            "source": "chain_reconciliation",
+            "reason": reason,
+            "review_state": "unresolved",
+            "chain_state": getattr(position, "chain_state", ""),
+            "local_shares": getattr(position, "shares", None),
+            "chain_shares": getattr(position, "chain_shares", None),
+            "condition_id": getattr(position, "condition_id", ""),
+            "token_id": getattr(position, "token_id", ""),
+        },
+        default=str,
+        sort_keys=True,
+    )
+    event = {
+        "event_id": f"{getattr(position, 'trade_id')}:review_required:{sequence_no}",
+        "position_id": getattr(position, "trade_id"),
+        "event_version": 1,
+        "sequence_no": sequence_no,
+        "event_type": "REVIEW_REQUIRED",
+        "occurred_at": occurred_at,
+        "phase_before": None,
+        "phase_after": fold_lifecycle_phase(None, QUARANTINED).value,
+        "strategy_key": _strategy_key(position),
+        "decision_id": None,
+        "snapshot_id": _nullable(getattr(position, "decision_snapshot_id", "")),
+        "order_id": _nullable(getattr(position, "order_id", "")),
+        "command_id": None,
+        "caused_by": reason,
+        "idempotency_key": f"{getattr(position, 'trade_id')}:review_required:{sequence_no}",
+        "venue_status": _nullable(getattr(position, "order_status", "")),
+        "source_module": source_module,
+        "env": _position_env(position),
+        "payload_json": payload,
+    }
+    return [event], projection
+
+
 def build_chain_quarantined_canonical_write(
     position: Any,
     *,

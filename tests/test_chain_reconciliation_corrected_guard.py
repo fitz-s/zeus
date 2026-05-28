@@ -360,18 +360,20 @@ class TestSizeMismatchBranch:
 class TestQuarantineBranch:
     """QUARANTINE branch: chain-only token not in local portfolio.
 
-    These positions are NEW Position() objects synthesized from chain data.
-    corrected_executable_economics_eligible defaults False (new Position default),
-    so the guard never fires — there is no existing FillAuthority position to protect.
-    The quarantine placeholder is initialized with chain data, which is the correct
-    behavior: it represents chain truth for a token the local portfolio doesn't know about.
+    PR #351 (Finding 3, E2) replaced the old behaviour — synthesizing a fake
+    `Position(direction="unknown", ...)` and appending it to
+    `portfolio.positions` — with a typed `ChainOnlyFact` appended to
+    `portfolio.chain_only_facts`. A chain-only token is NOT a local position;
+    it is a review-queue entry. This test was updated (PR #352, Part-3) to
+    assert the ChainOnlyFact contract; the prior version asserted the removed
+    fake-Position path and raised IndexError on `portfolio.positions[-1]`.
 
-    Relationship being tested: the QUARANTINE branch creates chain_shares=chain.size
-    as diagnostic metadata (NOT a locked D6 field per coordinator clarification C4).
+    Relationship being tested: the QUARANTINE branch records chain.size onto
+    the fact's `size` field as diagnostic chain truth (NOT a locked D6 field).
     """
 
-    def test_quarantine_creates_new_position_from_chain(self, caplog):
-        """Chain-only token produces a quarantine placeholder with chain data."""
+    def test_quarantine_emits_chain_only_fact_not_fake_position(self, caplog):
+        """Chain-only token produces a typed ChainOnlyFact, no fake Position."""
         conn = _make_conn()
         # Empty local portfolio — no existing positions
         portfolio = PortfolioState(positions=[])
@@ -389,14 +391,19 @@ class TestQuarantineBranch:
         with caplog.at_level(logging.WARNING, logger="src.state.chain_reconciliation"):
             stats = reconcile(portfolio, chain_positions, conn=conn)
 
-        assert stats.get("quarantined", 0) >= 1, "Expected at least 1 quarantined position"
-        quarantine_pos = portfolio.positions[-1]
-        # chain_shares is diagnostic metadata — permitted (per C4)
-        assert quarantine_pos.chain_shares == pytest.approx(10.0)
-        # New quarantine positions are NOT corrected-eligible
-        assert quarantine_pos.corrected_executable_economics_eligible is False
+        assert stats.get("quarantined", 0) >= 1, "Expected at least 1 quarantined token"
+        # No fake Position is synthesized into the trading portfolio.
+        assert portfolio.positions == [], (
+            "chain-only token must NOT create a Position; it is a ChainOnlyFact"
+        )
+        # The typed review-queue fact carries chain truth.
+        facts = [f for f in portfolio.chain_only_facts if f.token_id == "tok-quarantine-1"]
+        assert len(facts) == 1, f"Expected one ChainOnlyFact; got {portfolio.chain_only_facts}"
+        fact = facts[0]
+        assert fact.size == pytest.approx(10.0)
+        assert fact.condition_id == "cond-q1"
 
-        # No block counters: quarantine creates new positions, not mutations of eligible ones
+        # No block counters: chain-only facts are not mutations of eligible positions.
         block_records = [
             r for r in caplog.records
             if COUNTER_EVENT in r.message
