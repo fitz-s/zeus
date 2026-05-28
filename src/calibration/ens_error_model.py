@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import math
 import statistics
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from src.calibration.ens_bias_model import PosteriorBias
 
@@ -45,16 +45,29 @@ MIN_PAIRED_N = 5
 # here so the gate-set hash below stays in lockstep with the actual fit gates.
 DEFAULT_MIN_LIVE_N = 20
 DEFAULT_RESIDUAL_FLOOR_C = 0.5
+# Conservative residual floor for INSUFFICIENT-PRIOR identity rows (SD2 / Blocker C,
+# operator pre-MC review 2026-05-28). A row fit from too few prior samples carries no
+# trustworthy learned correction AND no trustworthy scale; the fit's residual can fall
+# to the 0.5C sensor floor, which paired with bias_c=0 is a confident-looking near-delta
+# on a city we barely have data for. Identity rows are floored to this WIDE value so the
+# consumed MC distribution is honestly uncertain. Frozen conservative constant (day-ahead
+# 2m-temp forecast error is typically ~1.5-2.5C; 3.0C is deliberately wider for a city
+# with <MIN_PRIOR_N priors). NOT data-derived, so the gate-set hash stays deterministic.
+CONSERVATIVE_RESIDUAL_FLOOR_C = 3.0
 # Minimum TIGGE prior samples for a confident learned correction. Below this the
-# producer must write an identity/no-correction row, NOT a confident city bias
-# (n_prior=1 cannot support a VERIFIED correction — Qingdao class). 2026-05-28.
-MIN_PRIOR_N = 2
+# producer must write an identity/no-correction row (conservative_identity_model),
+# NOT a confident city bias. Raised 2->5 (SD2 / Stat 1, 2026-05-28): a learned prior
+# correction needs at least as many samples as the paired-transport gate (MIN_PAIRED_N=5);
+# n_prior in {2,3,4} is too noisy to support a VERIFIED shift (Qingdao class).
+MIN_PRIOR_N = 5
 
 # Version tag for the gate-set hash. Bump ONLY when the gate SEMANTICS change in a
 # way that invalidates previously-fit rows (not for unrelated refactors). A bump
 # (or any threshold change above) yields a new gate_set_hash, which makes the
 # reader auto-reject every row fit under the old gate set.
-_GATE_SET_VERSION = "ftgate-2026-05-28"
+# -sd2 (2026-05-28): MIN_PRIOR_N 2->5 + CONSERVATIVE_RESIDUAL_FLOOR_C added -> every
+# pre-SD2 STAGING row auto-quarantines; this rebuild is a one-time full reproduce.
+_GATE_SET_VERSION = "ftgate-2026-05-28-sd2"
 
 
 def current_gate_set_hash() -> str:
@@ -84,6 +97,7 @@ def current_gate_set_hash() -> str:
             "MIN_PRIOR_N": MIN_PRIOR_N,
             "DEFAULT_MIN_LIVE_N": DEFAULT_MIN_LIVE_N,
             "DEFAULT_RESIDUAL_FLOOR_C": DEFAULT_RESIDUAL_FLOOR_C,
+            "CONSERVATIVE_RESIDUAL_FLOOR_C": CONSERVATIVE_RESIDUAL_FLOOR_C,
         },
         sort_keys=True,
     ).encode()
@@ -151,6 +165,31 @@ def predictive_error_from_posterior(
         correction_strength=lam,
         effective_bias_c=lam * posterior.bias,
         total_residual_sd_c=total_sd,
+    )
+
+
+def conservative_identity_model(model: PredictiveErrorModel) -> PredictiveErrorModel:
+    """Insufficient-prior identity: drop the learned shift AND widen the residual.
+
+    SD2 / Blocker C (operator pre-MC review 2026-05-28). When n_prior < MIN_PRIOR_N a
+    row cannot support a trustworthy learned correction OR a trustworthy scale. The fit's
+    ``residual_sd_c`` can fall to DEFAULT_RESIDUAL_FLOOR_C (0.5C) which, paired with
+    bias_c=0, is a confident-looking near-delta on a barely-observed city — exactly the
+    overconfident distribution the operator flagged. This transform serves an HONEST
+    identity row: zero correction (bias_c, effective_bias_c, correction_strength = 0) and
+    a residual floored to CONSERVATIVE_RESIDUAL_FLOOR_C so the consumed MC distribution is
+    appropriately wide. total_residual_sd_c is recomputed from the floored residual and the
+    (unchanged) heterogeneity so disagreement still widens but never narrows below the floor.
+    """
+    resid = max(model.residual_sd_c, CONSERVATIVE_RESIDUAL_FLOOR_C)
+    total = math.sqrt(resid * resid + model.heterogeneity_var_c2)
+    return replace(
+        model,
+        bias_c=0.0,
+        effective_bias_c=0.0,
+        correction_strength=0.0,
+        residual_sd_c=resid,
+        total_residual_sd_c=total,
     )
 
 

@@ -230,6 +230,7 @@ def fit_all(
     )
     from src.calibration.ens_error_model import (  # noqa: PLC0415
         fit_city_predictive_error, current_gate_set_hash, MIN_PRIOR_N,
+        conservative_identity_model,
     )
     from src.calibration.ens_bias_repo import load_bucket_residuals  # noqa: PLC0415
 
@@ -320,6 +321,12 @@ def fit_all(
                     # correction (n_prior=1 → Qingdao class). Write an explicit
                     # identity/no-correction row instead of a confident city bias.
                     is_identity = len(tig_residuals) < MIN_PRIOR_N
+                    # SD2 / Blocker C: an insufficient-prior identity must serve no
+                    # learned shift AND a CONSERVATIVE-WIDE residual (never the 0.5C
+                    # floor masquerading as confidence). conservative_identity_model
+                    # zeros the correction and floors residual_sd_c/total to the wide
+                    # CONSERVATIVE_RESIDUAL_FLOOR_C. Built once here; written below.
+                    ident = conservative_identity_model(model) if is_identity else None
 
                     if dry_run:
                         logger.info(
@@ -330,7 +337,8 @@ def fit_all(
                             "IDENTITY " if is_identity else "",
                             0.0 if is_identity else model.bias_c,
                             0.0 if is_identity else model.effective_bias_c,
-                            model.residual_sd_c, 0.0 if is_identity else model.correction_strength,
+                            (ident.residual_sd_c if is_identity else model.residual_sd_c),
+                            0.0 if is_identity else model.correction_strength,
                             len(tig_residuals), len(opd_residuals), coverage_months_csv,
                         )
                     elif is_identity:
@@ -341,7 +349,7 @@ def fit_all(
                             conn,
                             city=city, season=season, metric=metric,
                             live_data_version=_live_dv, prior_data_version=_prior_dv,
-                            posterior_bias_c=0.0, posterior_sd_c=model.bias_sd_c,
+                            posterior_bias_c=ident.bias_c, posterior_sd_c=ident.bias_sd_c,
                             n_live=len(opd_residuals), n_prior=len(tig_residuals),
                             weight_live=0.0,
                             estimator="ens_error_model.identity_insufficient_prior",
@@ -349,11 +357,12 @@ def fit_all(
                             error_model_family="full_transport_v1",
                             error_model_key=error_model_key,
                             transport_delta_policy=transport_delta_policy,
-                            bias_c=0.0, bias_sd_c=model.bias_sd_c,
-                            residual_sd_c=model.residual_sd_c,
-                            heterogeneity_var_c2=model.heterogeneity_var_c2,
-                            correction_strength=0.0, effective_bias_c=0.0,
-                            total_residual_sd_c=model.total_residual_sd_c,
+                            bias_c=ident.bias_c, bias_sd_c=ident.bias_sd_c,
+                            residual_sd_c=ident.residual_sd_c,
+                            heterogeneity_var_c2=ident.heterogeneity_var_c2,
+                            correction_strength=ident.correction_strength,
+                            effective_bias_c=ident.effective_bias_c,
+                            total_residual_sd_c=ident.total_residual_sd_c,
                             code_commit=code_commit, fit_signature_hash=sig_hash,
                             authority="STAGING",
                             gate_set_hash=gate_set_hash,
