@@ -140,6 +140,40 @@ def init_ens_bias_schema(conn: sqlite3.Connection) -> None:
                 raise
 
 
+# Columns a canonical producer row MUST be able to stamp. If any is absent the
+# producer would 'succeed' while silently dropping gate_set_hash / coverage / scale —
+# the row then fails closed at read time or, worse, serves without its domain identity.
+_REQUIRED_PRODUCER_COLUMNS: tuple[str, ...] = (
+    "error_model_family", "authority", "bias_c", "residual_sd_c",
+    "heterogeneity_var_c2", "correction_strength", "effective_bias_c",
+    "total_residual_sd_c", "fit_signature_hash", "gate_set_hash", "coverage_months",
+)
+
+
+def assert_model_bias_schema_ready(conn: sqlite3.Connection) -> None:
+    """Fail CLOSED if model_bias_ens_v2 lacks any canonical producer column (SD5 / Blocker G).
+
+    write_bias_model only stamps gate_set_hash / coverage_months / scale fields WHEN the
+    columns exist (PRAGMA-guarded, for backward compat). That is correct for reads but
+    DANGEROUS for a production fit: on an unmigrated schema the producer would write rows
+    with NULL domain identity and 'succeed'. This preflight makes the producer refuse to run
+    until init_ens_bias_schema / the canonical migration has been applied.
+    """
+    existing = {r[1] for r in conn.execute("PRAGMA table_info(model_bias_ens_v2)").fetchall()}
+    if not existing:
+        raise RuntimeError(
+            "assert_model_bias_schema_ready: model_bias_ens_v2 does not exist — "
+            "run init_ens_bias_schema(conn) before fitting."
+        )
+    missing = [c for c in _REQUIRED_PRODUCER_COLUMNS if c not in existing]
+    if missing:
+        raise RuntimeError(
+            "assert_model_bias_schema_ready: model_bias_ens_v2 is missing required "
+            f"canonical columns {missing}; producer refuses to run (would write rows "
+            "without domain identity). Apply init_ens_bias_schema / the canonical migration."
+        )
+
+
 def load_bucket_residuals(
     conn: sqlite3.Connection,
     *,

@@ -299,7 +299,7 @@ def fit_all(
     dict with keys: fitted, skipped, zero_coverage_cities, rows_written.
     """
     from src.calibration.ens_bias_repo import (  # noqa: PLC0415
-        init_ens_bias_schema, write_bias_model,
+        init_ens_bias_schema, write_bias_model, assert_model_bias_schema_ready,
     )
     from src.calibration.ens_error_model import (  # noqa: PLC0415
         fit_city_predictive_error, current_gate_set_hash, MIN_PRIOR_N,
@@ -314,6 +314,10 @@ def fit_all(
         init_ens_bias_schema(conn)
         _apply_canonical_migration(conn)
         conn.commit()
+        # SD5 / Blocker G: refuse to fit if the schema cannot hold a full canonical row.
+        # write_bias_model silently skips missing columns (backward-compat), so without this
+        # the producer could 'succeed' while dropping gate_set_hash / coverage / scale.
+        assert_model_bias_schema_ready(conn)
 
     metrics = [metric_filter] if metric_filter else ["high", "low"]
     cities = _discover_cities(conn) if city_filter is None else [city_filter]
