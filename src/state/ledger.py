@@ -356,6 +356,112 @@ def apply_architecture_kernel_schema(conn: sqlite3.Connection) -> None:
     assert_canonical_transaction_schema(conn)
 
 
+def backfill_fill_authority(conn: sqlite3.Connection) -> dict:
+    """F3 (docs/findings_2026_05_28.md §F3, 2026-05-28): deterministic
+    fill_authority backfill for legacy NULL rows in position_current.
+
+    After migration adds the nullable fill_authority column, rows created
+    before that migration have NULL authority. This function classifies
+    each NULL row into one of four values (first-match wins):
+
+      venue_confirmed_full     — SUM(filled_size) of linked ENTRY/BUY
+                                 venue_trade_facts (MATCHED/MINED/CONFIRMED)
+                                 equals or exceeds position_current.shares
+      venue_confirmed_partial  — linked trade facts exist and sum > 0 but
+                                 sum < position_current.shares
+      venue_position_observed  — VENUE_POSITION_OBSERVED event exists for
+                                 position_id in position_events
+      legacy_unknown           — none of the above
+
+    Idempotent: iterates only rows WHERE fill_authority IS NULL; rows
+    already classified on a prior run are untouched (counts for those
+    rows will be zero on re-run).
+
+    Linkage path: position_current.position_id
+                  → venue_commands.position_id
+                  → venue_trade_facts.command_id
+    Only ENTRY/BUY commands are summed (matching the trigger contract in
+    db.py position_lots_optimistic_trade_authority).
+
+    Wrapped in a single SAVEPOINT for atomicity.
+
+    Returns dict with keys venue_confirmed_full, venue_confirmed_partial,
+    venue_position_observed, legacy_unknown — each value is the count of
+    rows classified in this run.
+    """
+    import secrets
+
+    counts: dict = {
+        "venue_confirmed_full": 0,
+        "venue_confirmed_partial": 0,
+        "venue_position_observed": 0,
+        "legacy_unknown": 0,
+    }
+
+    unclassified = conn.execute(
+        "SELECT position_id, COALESCE(shares, 0.0) AS shares "
+        "FROM position_current "
+        "WHERE fill_authority IS NULL"
+    ).fetchall()
+
+    if not unclassified:
+        return counts
+
+    sp_name = f"sp_bfa_{secrets.token_hex(6)}"
+    conn.execute(f"SAVEPOINT {sp_name}")
+    try:
+        for row in unclassified:
+            position_id = row[0]
+            position_shares = float(row[1] or 0.0)
+
+            # Rule 1 / 2: sum filled_size from linked ENTRY/BUY trade facts
+            fill_sum_row = conn.execute(
+                """
+                SELECT COALESCE(SUM(CAST(tf.filled_size AS REAL)), 0.0)
+                  FROM venue_trade_facts tf
+                  JOIN venue_commands cmd ON cmd.command_id = tf.command_id
+                 WHERE cmd.position_id = ?
+                   AND UPPER(COALESCE(cmd.intent_kind, '')) = 'ENTRY'
+                   AND UPPER(COALESCE(cmd.side, '')) = 'BUY'
+                   AND tf.state IN ('MATCHED', 'MINED', 'CONFIRMED')
+                   AND CAST(tf.filled_size AS REAL) > 0
+                """,
+                (position_id,),
+            ).fetchone()
+            fill_sum = float(fill_sum_row[0] if fill_sum_row else 0.0)
+
+            if fill_sum > 0 and fill_sum >= position_shares - 1e-9:
+                authority = "venue_confirmed_full"
+            elif fill_sum > 0:
+                authority = "venue_confirmed_partial"
+            else:
+                # Rule 3: VENUE_POSITION_OBSERVED event
+                obs_row = conn.execute(
+                    "SELECT 1 FROM position_events "
+                    "WHERE position_id = ? AND event_type = 'VENUE_POSITION_OBSERVED' "
+                    "LIMIT 1",
+                    (position_id,),
+                ).fetchone()
+                if obs_row is not None:
+                    authority = "venue_position_observed"
+                else:
+                    authority = "legacy_unknown"
+
+            conn.execute(
+                "UPDATE position_current SET fill_authority = ? WHERE position_id = ?",
+                (authority, position_id),
+            )
+            counts[authority] += 1
+
+        conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+    except Exception:
+        conn.execute(f"ROLLBACK TO SAVEPOINT {sp_name}")
+        conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+        raise
+
+    return counts
+
+
 @capability("canonical_position_write", lease=True)
 @protects("INV-04", "INV-08")
 def append_many_and_project(

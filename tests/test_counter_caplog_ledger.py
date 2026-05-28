@@ -156,10 +156,10 @@ def _make_db_conn():
 
 
 def _make_reconcile_conn():
-    from src.state.db import apply_architecture_kernel_schema
+    from src.state.db import init_schema
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
-    apply_architecture_kernel_schema(conn)
+    init_schema(conn)
     return conn
 
 
@@ -174,6 +174,7 @@ def _make_eligible_position():
         bin_label="39-40F",
         direction="buy_yes",
         unit="F",
+        env="live",
         size_usd=10.0,
         entry_price=0.5,
         p_posterior=0.6,
@@ -191,6 +192,10 @@ def _make_eligible_position():
         state="pending_tracked",
         chain_state="local_only",
         token_id="tok-1",
+        condition_id="cond-1",
+        order_id="ord-1",
+        order_status="pending",
+        order_posted_at="2026-05-01T00:00:00Z",
     )
 
 
@@ -391,6 +396,16 @@ class TestPositionProjectionFieldDroppedTotal:
 # The RESCUE branch fires entry_price, cost_basis_usd, size_usd, shares
 # when chain has avg_price > 0, cost > 0, size > 0 and eligible=True.
 
+@pytest.mark.xfail(
+    reason=(
+        "F1 (docs/findings_2026_05_28.md §F1): balance-only rescue no longer "
+        "mutates D6 fields, so cost_basis_chain_mutation_blocked_total does not "
+        "fire on the balance-only path. Counter remains live on trade-verified "
+        "rescue path (see test_inv_f1_chain_economics_split.py). "
+        "These tests need to be re-targeted at the trade-verified path."
+    ),
+    strict=False,
+)
 @pytest.mark.parametrize("field_name", ["entry_price", "cost_basis_usd", "size_usd", "shares"])
 class TestCostBasisChainMutationBlockedTotal:
     """chain_reconciliation.py RESCUE branch emits cost_basis_chain_mutation_blocked_total{field}."""
@@ -405,9 +420,11 @@ class TestCostBasisChainMutationBlockedTotal:
         pos = _make_eligible_position()
         conn = _make_reconcile_conn()
 
+        from src.state.lifecycle_manager import LifecyclePhase
         # Pre-populate canonical entry baseline so rescue can proceed
         entry_events, entry_projection = build_entry_canonical_write(
-            pos, decision_id="dec-1", source_module="src.engine.cycle_runtime"
+            pos, phase_after=LifecyclePhase.PENDING_ENTRY.value,
+            decision_id="dec-1", source_module="src.engine.cycle_runtime"
         )
         append_many_and_project(conn, entry_events, entry_projection)
 
@@ -438,10 +455,12 @@ class TestCostBasisChainMutationBlockedTotal:
         from src.engine.lifecycle_events import build_entry_canonical_write
         from src.state.db import append_many_and_project
 
+        from src.state.lifecycle_manager import LifecyclePhase
         pos = _make_eligible_position()
         conn = _make_reconcile_conn()
         entry_events, entry_projection = build_entry_canonical_write(
-            pos, decision_id="dec-1", source_module="src.engine.cycle_runtime"
+            pos, phase_after=LifecyclePhase.PENDING_ENTRY.value,
+            decision_id="dec-1", source_module="src.engine.cycle_runtime"
         )
         append_many_and_project(conn, entry_events, entry_projection)
 

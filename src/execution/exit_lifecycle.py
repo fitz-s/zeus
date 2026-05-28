@@ -33,6 +33,7 @@ from src.execution.collateral import check_sell_collateral
 from src.observability.counters import increment as _cnt_inc
 from src.execution.executor import OrderResult, create_exit_order_intent, execute_exit_order
 from src.state.lifecycle_manager import (
+    LifecyclePhase,
     enter_pending_exit_runtime_state,
     fold_lifecycle_phase,
     phase_for_runtime_position,
@@ -603,8 +604,15 @@ def _dual_write_canonical_economic_close_if_available(
         entry_snapshot.state = "entered"
         entry_snapshot.exit_state = ""
         try:
+            # F4 (docs/findings_2026_05_28.md §F4, 2026-05-28): backfill
+            # synthesizes the canonical entry sequence for a legacy position
+            # whose journey ended at exit. The snapshot is set to "entered"
+            # (state=entered → phase ACTIVE) so we pass phase_after=ACTIVE
+            # explicitly; the builder no longer derives it from the snapshot's
+            # runtime strings.
             generated_entry_events, _ = build_entry_canonical_write(
                 entry_snapshot,
+                phase_after=LifecyclePhase.ACTIVE.value,
                 source_module="src.execution.exit_lifecycle:backfill",
                 decision_evidence_reason="backfill_legacy_position",
             )

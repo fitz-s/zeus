@@ -141,9 +141,11 @@ class TestRescueBranch:
         # Pre-populate canonical rescue baseline so rescue proceeds
         from src.engine.lifecycle_events import build_entry_canonical_write
         from src.state.db import append_many_and_project
+        from src.state.lifecycle_manager import LifecyclePhase
         pos = self._make_pending(corrected_eligible=True)
         entry_events, entry_projection = build_entry_canonical_write(
-            pos, decision_id="dec-1", source_module="src.engine.cycle_runtime"
+            pos, phase_after=LifecyclePhase.PENDING_ENTRY.value,
+            decision_id="dec-1", source_module="src.engine.cycle_runtime"
         )
         append_many_and_project(conn, entry_events, entry_projection)
 
@@ -185,9 +187,11 @@ class TestRescueBranch:
         conn = _make_conn()
         from src.engine.lifecycle_events import build_entry_canonical_write
         from src.state.db import append_many_and_project
+        from src.state.lifecycle_manager import LifecyclePhase
         pos = self._make_pending(corrected_eligible=False)
         entry_events, entry_projection = build_entry_canonical_write(
-            pos, decision_id="dec-1", source_module="src.engine.cycle_runtime"
+            pos, phase_after=LifecyclePhase.PENDING_ENTRY.value,
+            decision_id="dec-1", source_module="src.engine.cycle_runtime"
         )
         append_many_and_project(conn, entry_events, entry_projection)
 

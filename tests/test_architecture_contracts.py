@@ -1702,9 +1702,11 @@ def test_lifecycle_phase_kernel_rejects_illegal_fold():
 
 def test_entry_builder_emits_pending_entry_batch_and_projection():
     from src.engine.lifecycle_events import build_entry_canonical_write
+    from src.state.lifecycle_manager import LifecyclePhase
 
     events, projection = build_entry_canonical_write(
         _runtime_position(state="pending_tracked"),
+        phase_after=LifecyclePhase.PENDING_ENTRY.value,
         decision_id="dec-1",
         source_module="src.engine.cycle_runtime",
     )
@@ -1726,6 +1728,7 @@ def test_entry_builder_emits_filled_batch_and_projection_that_append_cleanly():
         append_many_and_project,
         apply_architecture_kernel_schema,
     )
+    from src.state.lifecycle_manager import LifecyclePhase
 
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
@@ -1733,6 +1736,7 @@ def test_entry_builder_emits_filled_batch_and_projection_that_append_cleanly():
 
     events, projection = build_entry_canonical_write(
         _runtime_position(state="entered", chain_state="unknown"),
+        phase_after=LifecyclePhase.ACTIVE.value,
         decision_id="dec-1",
         source_module="src.engine.cycle_runtime",
     )
@@ -1776,6 +1780,7 @@ def test_position_current_projection_persists_token_identity():
     conn.row_factory = sqlite3.Row
     apply_architecture_kernel_schema(conn)
 
+    from src.state.lifecycle_manager import LifecyclePhase
     pos = _runtime_position(state="entered", chain_state="unknown")
     pos.token_id = "yes-token-canonical"
     pos.no_token_id = "no-token-canonical"
@@ -1783,6 +1788,7 @@ def test_position_current_projection_persists_token_identity():
 
     events, projection = build_entry_canonical_write(
         pos,
+        phase_after=LifecyclePhase.ACTIVE.value,
         decision_id="dec-token",
         source_module="src.engine.cycle_runtime",
     )
@@ -1932,6 +1938,7 @@ def test_settlement_builder_emits_settled_event_and_projection_that_append_clean
         append_many_and_project,
         apply_architecture_kernel_schema,
     )
+    from src.state.lifecycle_manager import LifecyclePhase
 
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
@@ -1939,6 +1946,7 @@ def test_settlement_builder_emits_settled_event_and_projection_that_append_clean
 
     entry_events, entry_projection = build_entry_canonical_write(
         _runtime_position(state="entered", chain_state="unknown"),
+        phase_after=LifecyclePhase.ACTIVE.value,
         decision_id="dec-1",
         source_module="src.engine.cycle_runtime",
     )
@@ -1994,6 +2002,7 @@ def test_economic_close_builder_emits_event_and_projection_that_append_cleanly()
         append_many_and_project,
         apply_architecture_kernel_schema,
     )
+    from src.state.lifecycle_manager import LifecyclePhase
 
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
@@ -2001,6 +2010,7 @@ def test_economic_close_builder_emits_event_and_projection_that_append_cleanly()
 
     entry_events, entry_projection = build_entry_canonical_write(
         _runtime_position(state="day0_window", chain_state="unknown"),
+        phase_after=LifecyclePhase.DAY0_WINDOW.value,
         decision_id="dec-1",
         source_module="src.engine.cycle_runtime",
     )
@@ -2078,6 +2088,7 @@ def test_reconciliation_rescue_builder_emits_chain_synced_event_and_projection_t
         append_many_and_project,
         apply_architecture_kernel_schema,
     )
+    from src.state.lifecycle_manager import LifecyclePhase
 
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
@@ -2089,6 +2100,7 @@ def test_reconciliation_rescue_builder_emits_chain_synced_event_and_projection_t
     pending_pos.order_id = "ord-1"
     entry_events, entry_projection = build_entry_canonical_write(
         pending_pos,
+        phase_after=LifecyclePhase.PENDING_ENTRY.value,
         decision_id="dec-1",
         source_module="src.engine.cycle_runtime",
     )
@@ -2103,6 +2115,7 @@ def test_reconciliation_rescue_builder_emits_chain_synced_event_and_projection_t
 
     rescue_events, rescue_projection = build_reconciliation_rescue_canonical_write(
         rescued_pos,
+        chain_synced_at="2026-04-03T00:10:00Z",
         sequence_no=3,
         source_module="src.state.chain_reconciliation",
     )
@@ -2151,6 +2164,7 @@ def test_reconciliation_rescue_builder_preserves_legacy_rescue_provenance_fields
 
     events, projection = build_reconciliation_rescue_canonical_write(
         rescued_pos,
+        chain_synced_at="2026-04-03T00:10:00Z",
         sequence_no=3,
         source_module="src.state.chain_reconciliation",
     )
@@ -2189,6 +2203,7 @@ def test_chain_size_corrected_builder_emits_chain_size_corrected_event_and_proje
         append_many_and_project,
         apply_architecture_kernel_schema,
     )
+    from src.state.lifecycle_manager import LifecyclePhase
 
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
@@ -2197,6 +2212,7 @@ def test_chain_size_corrected_builder_emits_chain_size_corrected_event_and_proje
     pos = _runtime_position(state="entered", chain_state="synced")
     entry_events, entry_projection = build_entry_canonical_write(
         pos,
+        phase_after=LifecyclePhase.ACTIVE.value,
         decision_id="dec-1",
         source_module="src.engine.cycle_runtime",
     )
@@ -2214,6 +2230,7 @@ def test_chain_size_corrected_builder_emits_chain_size_corrected_event_and_proje
         local_shares_before=20.0,
         sequence_no=4,
         source_module="src.state.chain_reconciliation",
+        phase_after=LifecyclePhase.ACTIVE.value,
     )
     append_many_and_project(conn, events, projection)
 
@@ -2647,6 +2664,7 @@ def test_reconciliation_pending_fill_path_writes_canonical_rows_when_prior_histo
     from src.engine.lifecycle_events import build_entry_canonical_write
     from src.state.chain_reconciliation import ChainPosition, reconcile
     from src.state.db import append_many_and_project, apply_architecture_kernel_schema
+    from src.state.lifecycle_manager import LifecyclePhase
     from src.state.portfolio import PortfolioState
 
     conn = sqlite3.connect(":memory:")
@@ -2660,6 +2678,7 @@ def test_reconciliation_pending_fill_path_writes_canonical_rows_when_prior_histo
     pending_pos.token_id = "tok-1"
     entry_events, entry_projection = build_entry_canonical_write(
         pending_pos,
+        phase_after=LifecyclePhase.PENDING_ENTRY.value,
         decision_id="dec-1",
         source_module="src.engine.cycle_runtime",
     )
@@ -2753,6 +2772,7 @@ def test_reconciliation_pending_fill_dual_write_failure_after_legacy_steps_is_ex
     from src.engine.lifecycle_events import build_entry_canonical_write
     from src.state.chain_reconciliation import ChainPosition, reconcile
     from src.state.db import append_many_and_project, apply_architecture_kernel_schema
+    from src.state.lifecycle_manager import LifecyclePhase
     from src.state.portfolio import PortfolioState
 
     conn = sqlite3.connect(":memory:")
@@ -2766,6 +2786,7 @@ def test_reconciliation_pending_fill_dual_write_failure_after_legacy_steps_is_ex
     pending_pos.token_id = "tok-1"
     entry_events, entry_projection = build_entry_canonical_write(
         pending_pos,
+        phase_after=LifecyclePhase.PENDING_ENTRY.value,
         decision_id="dec-1",
         source_module="src.engine.cycle_runtime",
     )
@@ -2936,6 +2957,7 @@ def test_reconciliation_size_correction_path_writes_canonical_rows_when_prior_hi
     from src.engine.lifecycle_events import build_entry_canonical_write
     from src.state.chain_reconciliation import ChainPosition, reconcile
     from src.state.db import append_many_and_project, apply_architecture_kernel_schema
+    from src.state.lifecycle_manager import LifecyclePhase
     from src.state.portfolio import PortfolioState
 
     conn = sqlite3.connect(":memory:")
@@ -2946,6 +2968,7 @@ def test_reconciliation_size_correction_path_writes_canonical_rows_when_prior_hi
     pos.token_id = "tok-1"
     entry_events, entry_projection = build_entry_canonical_write(
         pos,
+        phase_after=LifecyclePhase.ACTIVE.value,
         decision_id="dec-1",
         source_module="src.engine.cycle_runtime",
     )
@@ -2994,6 +3017,7 @@ def test_reconciliation_size_correction_uses_canonical_current_to_avoid_repeated
     )
     from src.state.chain_reconciliation import ChainPosition, reconcile
     from src.state.db import append_many_and_project, apply_architecture_kernel_schema
+    from src.state.lifecycle_manager import LifecyclePhase
     from src.state.portfolio import PortfolioState
 
     conn = sqlite3.connect(":memory:")
@@ -3005,6 +3029,7 @@ def test_reconciliation_size_correction_uses_canonical_current_to_avoid_repeated
     stale_pos.shares = 20.0
     entry_events, entry_projection = build_entry_canonical_write(
         stale_pos,
+        phase_after=LifecyclePhase.ACTIVE.value,
         decision_id="dec-1",
         source_module="src.engine.cycle_runtime",
     )
@@ -3022,6 +3047,7 @@ def test_reconciliation_size_correction_uses_canonical_current_to_avoid_repeated
         local_shares_before=20.0,
         sequence_no=4,
         source_module="src.state.chain_reconciliation",
+        phase_after=LifecyclePhase.ACTIVE.value,
     )
     append_many_and_project(conn, corrected_events, corrected_projection)
 
@@ -3210,6 +3236,7 @@ def test_reconciliation_size_correction_failure_is_explicit_before_in_memory_mut
     from src.engine.lifecycle_events import build_entry_canonical_write
     from src.state.chain_reconciliation import ChainPosition, reconcile
     from src.state.db import append_many_and_project, apply_architecture_kernel_schema
+    from src.state.lifecycle_manager import LifecyclePhase
     from src.state.portfolio import PortfolioState
 
     conn = sqlite3.connect(":memory:")
@@ -3219,6 +3246,7 @@ def test_reconciliation_size_correction_failure_is_explicit_before_in_memory_mut
     pos.token_id = "tok-1"
     entry_events, entry_projection = build_entry_canonical_write(
         pos,
+        phase_after=LifecyclePhase.ACTIVE.value,
         decision_id="dec-1",
         source_module="src.engine.cycle_runtime",
     )
@@ -3383,6 +3411,7 @@ def test_reconciliation_pending_fill_path_fails_loudly_when_canonical_projection
     from src.engine.lifecycle_events import build_entry_canonical_write
     from src.state.chain_reconciliation import ChainPosition, reconcile
     from src.state.db import append_many_and_project, apply_architecture_kernel_schema
+    from src.state.lifecycle_manager import LifecyclePhase
     from src.state.portfolio import PortfolioState
 
     conn = sqlite3.connect(":memory:")
@@ -3394,6 +3423,7 @@ def test_reconciliation_pending_fill_path_fails_loudly_when_canonical_projection
     pending_pos.token_id = "tok-1"
     entry_events, entry_projection = build_entry_canonical_write(
         pending_pos,
+        phase_after=LifecyclePhase.PENDING_ENTRY.value,
         decision_id="dec-1",
         source_module="src.engine.cycle_runtime",
     )
@@ -3485,6 +3515,7 @@ def test_harvester_settlement_path_writes_canonical_rows_on_canonical_bootstrap_
     from src.engine.lifecycle_events import build_entry_canonical_write
     from src.execution.harvester import _settle_positions
     from src.state.db import apply_architecture_kernel_schema, append_many_and_project
+    from src.state.lifecycle_manager import LifecyclePhase
     from src.state.portfolio import PortfolioState
 
     conn = sqlite3.connect(":memory:")
@@ -3494,6 +3525,7 @@ def test_harvester_settlement_path_writes_canonical_rows_on_canonical_bootstrap_
     pos = _runtime_position(state="entered", chain_state="synced")
     entry_events, entry_projection = build_entry_canonical_write(
         pos,
+        phase_after=LifecyclePhase.ACTIVE.value,
         decision_id="dec-1",
         source_module="src.engine.cycle_runtime",
     )
@@ -3595,6 +3627,7 @@ def test_harvester_settlement_dual_write_failure_after_legacy_steps_is_explicit(
     from src.execution.harvester import _settle_positions
     from src.engine.lifecycle_events import build_entry_canonical_write
     from src.state.db import apply_architecture_kernel_schema, append_many_and_project
+    from src.state.lifecycle_manager import LifecyclePhase
     from src.state.portfolio import PortfolioState
 
     conn = sqlite3.connect(":memory:")
@@ -3604,6 +3637,7 @@ def test_harvester_settlement_dual_write_failure_after_legacy_steps_is_explicit(
     pos = _runtime_position(state="entered", chain_state="synced")
     entry_events, entry_projection = build_entry_canonical_write(
         pos,
+        phase_after=LifecyclePhase.ACTIVE.value,
         decision_id="dec-1",
         source_module="src.engine.cycle_runtime",
     )
@@ -3648,6 +3682,7 @@ def test_harvester_settlement_path_uses_day0_window_as_phase_before_when_applica
     from src.engine.lifecycle_events import build_entry_canonical_write
     from src.execution.harvester import _settle_positions
     from src.state.db import apply_architecture_kernel_schema, append_many_and_project
+    from src.state.lifecycle_manager import LifecyclePhase
     from src.state.portfolio import PortfolioState
 
     conn = sqlite3.connect(":memory:")
@@ -3658,6 +3693,7 @@ def test_harvester_settlement_path_uses_day0_window_as_phase_before_when_applica
     pos.day0_entered_at = "2026-04-03T00:06:00Z"
     entry_events, entry_projection = build_entry_canonical_write(
         pos,
+        phase_after=LifecyclePhase.DAY0_WINDOW.value,
         decision_id="dec-1",
         source_module="src.engine.cycle_runtime",
     )
@@ -3690,6 +3726,7 @@ def test_harvester_settlement_path_uses_economically_closed_phase_before_when_ap
     from src.engine.lifecycle_events import build_entry_canonical_write
     from src.execution.harvester import _settle_positions
     from src.state.db import apply_architecture_kernel_schema, append_many_and_project
+    from src.state.lifecycle_manager import LifecyclePhase
     from src.state.portfolio import PortfolioState
 
     conn = sqlite3.connect(":memory:")
@@ -3703,6 +3740,7 @@ def test_harvester_settlement_path_uses_economically_closed_phase_before_when_ap
     pos.last_exit_at = "2026-04-03T00:30:00Z"
     entry_events, entry_projection = build_entry_canonical_write(
         _runtime_position(state="entered", chain_state="unknown"),
+        phase_after=LifecyclePhase.ACTIVE.value,
         decision_id="dec-1",
         source_module="src.engine.cycle_runtime",
     )
@@ -3791,6 +3829,7 @@ def test_harvester_settlement_path_settles_pending_exit_residual_exposure():
     from src.execution.harvester import _settle_positions
     from src.engine.lifecycle_events import build_entry_canonical_write
     from src.state.db import apply_architecture_kernel_schema, append_many_and_project
+    from src.state.lifecycle_manager import LifecyclePhase
     from src.state.portfolio import PortfolioState
 
     conn = sqlite3.connect(":memory:")
@@ -3803,6 +3842,7 @@ def test_harvester_settlement_path_settles_pending_exit_residual_exposure():
     pos.token_id = "tok-pending-settled"
     entry_events, entry_projection = build_entry_canonical_write(
         _runtime_position(state="entered", chain_state="unknown"),
+        phase_after=LifecyclePhase.ACTIVE.value,
         decision_id="dec-1",
         source_module="src.engine.cycle_runtime",
     )
@@ -3835,6 +3875,7 @@ def test_harvester_settlement_path_allows_backoff_exhausted_positions_to_settle(
     from src.engine.lifecycle_events import build_entry_canonical_write
     from src.execution.harvester import _settle_positions
     from src.state.db import apply_architecture_kernel_schema, append_many_and_project
+    from src.state.lifecycle_manager import LifecyclePhase
     from src.state.portfolio import PortfolioState
 
     conn = sqlite3.connect(":memory:")
@@ -3849,6 +3890,7 @@ def test_harvester_settlement_path_allows_backoff_exhausted_positions_to_settle(
     pos.token_id = "tok-settled"
     entry_events, entry_projection = build_entry_canonical_write(
         _runtime_position(state="entered", chain_state="unknown"),
+        phase_after=LifecyclePhase.ACTIVE.value,
         decision_id="dec-1",
         source_module="src.engine.cycle_runtime",
     )
@@ -3944,6 +3986,7 @@ def test_harvester_settlement_skips_stale_in_memory_pos_when_position_current_sh
 def test_cycle_runtime_entry_dual_write_helper_skips_when_canonical_schema_absent():
     from src.engine.cycle_runtime import _dual_write_canonical_entry_if_available
     from src.state.db import init_schema
+    from src.state.lifecycle_manager import LifecyclePhase
 
     class _Logger:
         def debug(self, *args, **kwargs):
@@ -3966,6 +4009,7 @@ def test_cycle_runtime_entry_dual_write_helper_skips_when_canonical_schema_absen
     wrote = _dual_write_canonical_entry_if_available(
         conn,
         _runtime_position(state="entered", chain_state="unknown"),
+        phase_after=LifecyclePhase.ACTIVE.value,
         decision_id="dec-1",
         deps=_Deps(),
     )
@@ -3984,6 +4028,7 @@ def test_cycle_runtime_entry_dual_write_helper_skips_when_canonical_schema_absen
 def test_cycle_runtime_entry_dual_write_helper_appends_canonical_batch_when_schema_present():
     from src.engine.cycle_runtime import _dual_write_canonical_entry_if_available
     from src.state.db import apply_architecture_kernel_schema
+    from src.state.lifecycle_manager import LifecyclePhase
 
     class _Logger:
         def debug(self, *args, **kwargs):
@@ -3999,6 +4044,7 @@ def test_cycle_runtime_entry_dual_write_helper_appends_canonical_batch_when_sche
     wrote = _dual_write_canonical_entry_if_available(
         conn,
         _runtime_position(state="entered", chain_state="unknown"),
+        phase_after=LifecyclePhase.ACTIVE.value,
         decision_id="dec-1",
         deps=_Deps(),
     )
@@ -4123,16 +4169,18 @@ def test_cycle_runtime_entry_sequence_writes_legacy_on_legacy_db_and_canonical_o
 def test_cycle_runtime_entry_path_keeps_legacy_write_before_canonical_helper():
     text = (ROOT / "src/engine/cycle_runtime.py").read_text()
     marker = "log_trade_entry(conn, pos)"
-    start = text.index(marker)
-    # Canonical helper must appear after legacy write (ordering invariant).
-    # Window is 1000 chars to accommodate the SAVEPOINT guard block introduced
-    # in P10C (S6), which places _dual_write_canonical_entry_if_available
-    # immediately after the SAVEPOINT try/except for correctness reasons
-    # (with-conn inside that helper commits its own sub-transaction, which
-    # would release the SAVEPOINT if placed inside the try block).
-    snippet = text[start : start + 1000]
-    assert marker in snippet
-    assert "_dual_write_canonical_entry_if_available(" in snippet
+    canonical_helper = "_dual_write_canonical_entry_if_available("
+    # Ordering invariant: legacy write must appear before canonical helper.
+    # Use positional comparison rather than a fixed-width window; F4 inserted
+    # a phase_after derivation block between the two calls, shifting the helper
+    # past the original 1000-char window. The actual ordering constraint is
+    # index(log_trade_entry) < index(_dual_write_canonical_entry_if_available).
+    legacy_idx = text.index(marker)
+    canonical_idx = text.index(canonical_helper, legacy_idx)
+    assert legacy_idx < canonical_idx, (
+        "log_trade_entry must appear before _dual_write_canonical_entry_if_available "
+        f"in cycle_runtime.py (got legacy@{legacy_idx}, canonical@{canonical_idx})"
+    )
 
 
 def _stub_reprice_from_snapshot(conn, d, fields, ctx):

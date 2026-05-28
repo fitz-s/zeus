@@ -79,7 +79,7 @@ def _make_rescued_position(**overrides: Any) -> Any:
 def test_venue_position_observed_builder_emits_distinct_event_type() -> None:
     pos = _make_rescued_position(fill_authority="venue_position_observed")
     events, projection = build_venue_position_observed_canonical_write(
-        pos, sequence_no=7, source_module="src.state.chain_reconciliation"
+        pos, venue_observed_at="2026-05-27T12:00:00Z", sequence_no=7, source_module="src.state.chain_reconciliation"
     )
     assert len(events) == 1
     ev = events[0]
@@ -92,7 +92,7 @@ def test_venue_position_observed_builder_emits_distinct_event_type() -> None:
 def test_venue_position_observed_payload_marks_training_ineligible() -> None:
     pos = _make_rescued_position(fill_authority="venue_position_observed")
     events, _ = build_venue_position_observed_canonical_write(
-        pos, sequence_no=1, source_module="t"
+        pos, venue_observed_at="2026-05-27T12:00:00Z", sequence_no=1, source_module="t"
     )
     payload = json.loads(events[0]["payload_json"])
     assert payload["fill_authority"] == "venue_position_observed"
@@ -105,7 +105,7 @@ def test_verified_rescue_still_emits_chain_synced() -> None:
     """The trade-verified rescue branch is unchanged: same builder, same event_type."""
     pos = _make_rescued_position(fill_authority="venue_confirmed_full")
     events, _ = build_reconciliation_rescue_canonical_write(
-        pos, sequence_no=2, source_module="t"
+        pos, chain_synced_at="2026-05-27T12:00:00Z", sequence_no=2, source_module="t"
     )
     assert events[0]["event_type"] == "CHAIN_SYNCED"
 
@@ -115,10 +115,10 @@ def test_two_builders_differ_by_event_type_and_caused_by() -> None:
     even from the same Position. Protects against silent unification."""
     pos = _make_rescued_position()
     chain_synced_event = build_reconciliation_rescue_canonical_write(
-        pos, sequence_no=3, source_module="t"
+        pos, chain_synced_at="2026-05-27T12:00:00Z", sequence_no=3, source_module="t"
     )[0][0]
     venue_observed_event = build_venue_position_observed_canonical_write(
-        pos, sequence_no=3, source_module="t"
+        pos, venue_observed_at="2026-05-27T12:00:00Z", sequence_no=3, source_module="t"
     )[0][0]
     assert chain_synced_event["event_type"] != venue_observed_event["event_type"]
     assert chain_synced_event["caused_by"] != venue_observed_event["caused_by"]

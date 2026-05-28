@@ -691,6 +691,7 @@ def _snapshot_position_training_eligible(conn, snapshot_id: str) -> bool:
     except Exception:
         # DB query failure is fail-closed: do not emit calibration rows
         # against a snapshot whose position authority can't be verified.
+        _emit_learning_write_blocked('position_fill_authority_db_query_error')
         return False
     if not rows:
         # No position joined to this snapshot — refuse defensively. A
@@ -698,20 +699,46 @@ def _snapshot_position_training_eligible(conn, snapshot_id: str) -> bool:
         # corresponding position_current row (the snapshot was used for
         # an entry decision). Missing row = projection drift; treat as
         # ineligible until the operator investigates.
+        _emit_learning_write_blocked('position_fill_authority_no_position_joined')
         return False
     for row in rows:
+        raw_authority = row[1] if len(row) > 1 else None
+        position_id = row[0] if row else "?"
+
+        # F3 (docs/findings_2026_05_28.md §F3, 2026-05-28): distinguish
+        # unmigrated NULL (backfill not yet run) from classified
+        # legacy_unknown (backfill ran but no evidence found).
+        if raw_authority is None:
+            logger.info(
+                "harvester_learning_write_blocked: snapshot=%s position_id=%s "
+                "fill_authority=NULL unmigrated — backfill not yet run",
+                snapshot_id, position_id,
+            )
+            _emit_learning_write_blocked("position_fill_authority_unmigrated")
+            return False
+
+        if raw_authority == "legacy_unknown":
+            logger.info(
+                "harvester_learning_write_blocked: snapshot=%s position_id=%s "
+                "fill_authority=legacy_unknown — no verifiable trade evidence",
+                snapshot_id, position_id,
+            )
+            _emit_learning_write_blocked("position_fill_authority_legacy_unknown")
+            return False
+
         # Build a minimal pos-shaped stub so we route through the
         # canonical policy helper rather than re-implementing the rule.
         class _Stub:
             pass
         stub = _Stub()
-        stub.fill_authority = row[1] if len(row) > 1 else ""
+        stub.fill_authority = raw_authority
         if not is_training_eligible_position(stub):
             logger.info(
                 "harvester_learning_write_blocked: snapshot=%s position_id=%s "
                 "fill_authority=%r not training-eligible",
-                snapshot_id, row[0] if row else "?", stub.fill_authority,
+                snapshot_id, position_id, raw_authority,
             )
+            _emit_learning_write_blocked("position_fill_authority_not_training_eligible")
             return False
     return True
 
@@ -779,10 +806,10 @@ def maybe_write_learning_pair(
             _trade_conn.close()
     except Exception:
         # Trades DB unreachable → fail closed (do not emit calibration rows we
-        # cannot authority-verify).
+        # cannot authority-verify). Inner gate was never reached so emit here.
+        _emit_learning_write_blocked('position_fill_authority_trades_db_unreachable')
         _eligible = False
     if not _eligible:
-        _emit_learning_write_blocked("position_fill_authority_not_training_eligible")
         return 0
 
     # Delegate to harvest_settlement which performs the same guards again

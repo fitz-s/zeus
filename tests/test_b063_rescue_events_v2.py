@@ -290,9 +290,12 @@ class TestEmitRescueEventIntegration(unittest.TestCase):
             state="pending_tracked",
             chain_state="local_only",
             token_id="t1",
+            condition_id="cond-canonical-rescue-v2",
         )
+        from src.state.lifecycle_manager import LifecyclePhase
         events, projection = build_entry_canonical_write(
             position,
+            phase_after=LifecyclePhase.PENDING_ENTRY.value,
             decision_id="dec-canonical-rescue-v2",
             source_module="tests.test_b063_rescue_events_v2",
         )

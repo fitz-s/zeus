@@ -29,6 +29,7 @@ from src.contracts.effective_kelly_context import EffectiveKellyContext
 from src.contracts.execution_intent import DecisionSourceContext
 from src.engine.time_context import lead_hours_to_date_start, lead_hours_to_settlement_close
 from src.state.lifecycle_manager import (
+    LifecyclePhase,
     enter_day0_window_runtime_state,
     initial_entry_runtime_state_for_order_status,
     is_terminal_state,
@@ -2636,10 +2637,13 @@ def _emit_day0_window_entered_canonical_if_available(
             (getattr(pos, "trade_id", ""),),
         ).fetchone()
         next_seq = int((row[0] if row else 0) or 0) + 1
+        # F4 (docs/findings_2026_05_28.md §F4, 2026-05-28): DAY0_WINDOW
+        # transition target is the event's defining phase; pass explicitly.
         events, projection = build_day0_window_entered_canonical_write(
             pos,
             day0_entered_at=day0_entered_at,
             sequence_no=next_seq,
+            phase_after=LifecyclePhase.DAY0_WINDOW.value,
             previous_phase=previous_phase,
             source_module="src.engine.cycle_runtime",
         )
@@ -2659,6 +2663,7 @@ def _dual_write_canonical_entry_if_available(
     conn,
     pos,
     *,
+    phase_after: str,
     decision_id: str | None,
     deps,
     decision_evidence: DecisionEvidence | None = None,
@@ -2670,6 +2675,11 @@ def _dual_write_canonical_entry_if_available(
     # '$.decision_evidence_envelope')`. Remains None on paths that do not
     # originate from an accept-path `EdgeDecision` (e.g. test harnesses);
     # the payload simply omits the key, preserving pre-slice wire format.
+    #
+    # F4 (docs/findings_2026_05_28.md §F4, 2026-05-28): caller supplies
+    # the explicit ``phase_after`` so the canonical builder does not derive
+    # it from runtime Position.state strings. PENDING_ENTRY when the order
+    # is pending; ACTIVE / DAY0_WINDOW when the order has filled.
     if conn is None:
         return False
 
@@ -2679,6 +2689,7 @@ def _dual_write_canonical_entry_if_available(
     try:
         events, projection = build_entry_canonical_write(
             pos,
+            phase_after=phase_after,
             decision_id=decision_id,
             source_module="src.engine.cycle_runtime",
             decision_evidence=decision_evidence,
@@ -5959,9 +5970,21 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                             # with explicit nested SAVEPOINT, so placing the
                             # dual-write here no longer releases sp_candidate_*
                             # on commit. Closes torn-state window per T4.0 F3.
+                            # F4 (docs/findings_2026_05_28.md §F4, 2026-05-28):
+                            # derive phase_after from the runtime_order_status
+                            # (mapped to the runtime state via
+                            # initial_entry_runtime_state_for_order_status above)
+                            # rather than letting the builder read pos.state.
+                            # filled → ACTIVE; pending → PENDING_ENTRY.
+                            _entry_phase_after = (
+                                LifecyclePhase.ACTIVE.value
+                                if runtime_order_status == "filled"
+                                else LifecyclePhase.PENDING_ENTRY.value
+                            )
                             _dual_write_canonical_entry_if_available(
                                 conn,
                                 pos,
+                                phase_after=_entry_phase_after,
                                 decision_id=d.decision_id,
                                 deps=deps,
                                 decision_evidence=getattr(d, "decision_evidence", None),

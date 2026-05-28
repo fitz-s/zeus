@@ -69,7 +69,7 @@ def _quarantined_position(**overrides: Any) -> Any:
 def test_review_required_builder_emits_quarantined_projection() -> None:
     pos = _quarantined_position()
     events, projection = build_review_required_canonical_write(
-        pos, reason="size_mismatch_unresolved_no_canonical_baseline", sequence_no=2
+        pos, review_detected_at="2026-05-27T12:00:00Z", reason="size_mismatch_unresolved_no_canonical_baseline", sequence_no=2
     )
     assert len(events) == 1
     ev = events[0]
@@ -114,7 +114,7 @@ def test_review_required_survives_restart_via_position_current(tmp_path: Path) -
         apply_architecture_kernel_schema(conn)
         pos = _quarantined_position()
         events, projection = build_review_required_canonical_write(
-            pos, reason="size_mismatch_unresolved_no_canonical_baseline", sequence_no=1
+            pos, review_detected_at="2026-05-27T12:00:00Z", reason="size_mismatch_unresolved_no_canonical_baseline", sequence_no=1
         )
         append_many_and_project(conn, events, projection)
         conn.commit()

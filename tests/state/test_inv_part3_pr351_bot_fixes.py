@@ -98,7 +98,7 @@ def test_venue_position_observed_projection_forces_balance_only_authority() -> N
     pos = _Pos(chain_state="chain_only", fill_authority="", chain_verified_at="2026-05-27T11:00:00+00:00")
     # Force ACTIVE phase so the builder accepts it.
     pos.state = "entered"
-    events, projection = build_venue_position_observed_canonical_write(pos, sequence_no=4)
+    events, projection = build_venue_position_observed_canonical_write(pos, venue_observed_at="2026-05-27T12:00:00Z", sequence_no=4)
     assert projection["recovery_authority"] == "balance_only"
     assert projection["fill_authority"] == "venue_position_observed"
     # And the event payload agrees with the durable projection.

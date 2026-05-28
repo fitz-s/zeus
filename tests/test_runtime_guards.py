@@ -435,6 +435,9 @@ def _position(**kwargs) -> Position:
         state="entered",
         edge_source="opening_inertia",
         strategy="opening_inertia",
+        # condition_id required for open-phase canonical writes (Fix B, 2026-05-19)
+        condition_id="cond-t1-default",
+        decision_snapshot_id="snap-t1-default",
     )
     defaults.update(kwargs)
     return Position(**defaults)
@@ -13825,9 +13828,11 @@ def test_d4_gate_blocks_asymmetric_statistical_exit_before_execution(monkeypatch
 
     from src.engine.lifecycle_events import build_entry_canonical_write
     from src.state.db import append_many_and_project
+    from src.state.lifecycle_manager import LifecyclePhase
 
     entry_events, entry_projection = build_entry_canonical_write(
         pos,
+        phase_after=LifecyclePhase.ACTIVE.value,
         decision_id="decision-d4-asymmetry",
         source_module="tests/test_runtime_guards:d4_gate",
         decision_evidence=_entry_decision_evidence(),
@@ -14047,9 +14052,11 @@ def test_monitoring_phase_persists_live_exit_telemetry_chain_with_canonical_entr
 
     from src.engine.lifecycle_events import build_entry_canonical_write
     from src.state.db import append_many_and_project
+    from src.state.lifecycle_manager import LifecyclePhase
 
     entry_events, entry_projection = build_entry_canonical_write(
         pos,
+        phase_after=LifecyclePhase.ACTIVE.value,
         decision_id="decision-live-exit-seed",
         source_module="tests/test_runtime_guards:canonical_entry_baseline",
     )
@@ -14335,8 +14342,10 @@ def test_exit_dual_write_backfills_only_missing_entry_events_for_partial_history
         day0_entered_at="",
         decision_snapshot_id="snap-partial-entry",
     )
+    from src.state.lifecycle_manager import LifecyclePhase
     entry_events, entry_projection = build_entry_canonical_write(
         pending_entry,
+        phase_after=LifecyclePhase.PENDING_ENTRY.value,
         source_module="tests/test_runtime_guards:partial_entry_seed",
         decision_evidence_reason="already_seeded_partial",
     )
