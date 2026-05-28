@@ -173,12 +173,11 @@ class TestPrimitiveSignature:
             c.row_factory = sqlite3.Row
             return c
 
-        from src.state.db import SCHEMA_VERSION
+        SCHEMA_VERSION = 42  # B2: frozen row-provenance value; counter cancelled
 
         with (
             patch("src.state.db.get_world_connection", side_effect=_fake_world_conn),
             patch("src.state.db_writer_lock.db_writer_lock", _noop_lock),
-            patch("src.state.db.SCHEMA_VERSION", SCHEMA_VERSION),
             patch("src.state.db.ZEUS_WORLD_DB_PATH", world_db_path),
         ):
             # Must not raise — direction is a str, not an enum
@@ -210,12 +209,11 @@ class TestPrimitiveSignature:
             c.row_factory = sqlite3.Row
             return c
 
-        from src.state.db import SCHEMA_VERSION
+        SCHEMA_VERSION = 42  # B2: frozen row-provenance value; counter cancelled
 
         with (
             patch("src.state.db.get_world_connection", side_effect=_fake_world_conn),
             patch("src.state.db_writer_lock.db_writer_lock", _noop_lock),
-            patch("src.state.db.SCHEMA_VERSION", SCHEMA_VERSION),
             patch("src.state.db.ZEUS_WORLD_DB_PATH", world_db_path),
         ):
             write_decision_event(
@@ -280,12 +278,11 @@ class TestWriteReachesTable:
             c.row_factory = sqlite3.Row
             return c
 
-        from src.state.db import SCHEMA_VERSION
+        SCHEMA_VERSION = 42  # B2: frozen row-provenance value; counter cancelled
 
         with (
             patch("src.state.db.get_world_connection", side_effect=_fake_world_conn),
             patch("src.state.db_writer_lock.db_writer_lock", _noop_lock),
-            patch("src.state.db.SCHEMA_VERSION", SCHEMA_VERSION),
             patch("src.state.db.ZEUS_WORLD_DB_PATH", world_db_path),
         ):
             write_decision_event(
@@ -333,12 +330,11 @@ class TestWriteReachesTable:
             c.row_factory = sqlite3.Row
             return c
 
-        from src.state.db import SCHEMA_VERSION
+        SCHEMA_VERSION = 42  # B2: frozen row-provenance value; counter cancelled
 
         with (
             patch("src.state.db.get_world_connection", side_effect=_fake_world_conn),
             patch("src.state.db_writer_lock.db_writer_lock", _noop_lock),
-            patch("src.state.db.SCHEMA_VERSION", SCHEMA_VERSION),
             patch("src.state.db.ZEUS_WORLD_DB_PATH", world_db_path),
         ):
             write_decision_event(
@@ -382,12 +378,11 @@ class TestSourceClassTiming:
             c.row_factory = sqlite3.Row
             return c
 
-        from src.state.db import SCHEMA_VERSION
+        SCHEMA_VERSION = 42  # B2: frozen row-provenance value; counter cancelled
 
         with (
             patch("src.state.db.get_world_connection", side_effect=_fake_world_conn),
             patch("src.state.db_writer_lock.db_writer_lock", _noop_lock),
-            patch("src.state.db.SCHEMA_VERSION", SCHEMA_VERSION),
             patch("src.state.db.ZEUS_WORLD_DB_PATH", world_db_path),
         ):
             write_decision_event(

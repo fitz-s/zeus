@@ -252,22 +252,25 @@ def _write_ingest_heartbeat() -> None:
 # ---------------------------------------------------------------------------
 
 def _write_world_schema_ready_sentinel() -> None:
-    """Atomically write state/world_schema_ready.json after init_schema succeeds."""
+    """Atomically write state/world_schema_ready.json after init_schema succeeds.
+
+    B2 (2026-05-28): schema_version field now contains the content-hash fingerprint
+    from architecture/_schema_fingerprint.txt instead of the legacy yaml version.
+    world_schema_version.yaml deleted; yaml reader removed.
+    """
     from src.config import state_path
 
-    schema_version: str = "unknown_v0"
-    schema_yaml = Path(__file__).parent.parent / "architecture" / "world_schema_version.yaml"
-    if schema_yaml.exists():
+    schema_fingerprint: str = "unknown_fingerprint"
+    fingerprint_path = Path(__file__).parent.parent / "architecture" / "_schema_fingerprint.txt"
+    if fingerprint_path.exists():
         try:
-            import yaml  # type: ignore[import]
-            data = yaml.safe_load(schema_yaml.read_text())
-            schema_version = str(data.get("version", "unknown_v0")) if isinstance(data, dict) else str(data)
+            schema_fingerprint = fingerprint_path.read_text().strip()
         except Exception:
             pass
 
     payload = {
         "written_at": datetime.now(timezone.utc).isoformat(),
-        "schema_version": schema_version,
+        "schema_version": schema_fingerprint,
         "ingest_pid": os.getpid(),
         "init_schema_returned_ok": True,
     }
@@ -275,7 +278,7 @@ def _write_world_schema_ready_sentinel() -> None:
     tmp = Path(str(path) + ".tmp")
     tmp.write_text(json.dumps(payload))
     tmp.replace(path)
-    logger.info("Wrote world_schema_ready sentinel: schema_version=%s", schema_version)
+    logger.info("Wrote world_schema_ready sentinel: schema_fingerprint=%s", schema_fingerprint)
 
 
 # ---------------------------------------------------------------------------

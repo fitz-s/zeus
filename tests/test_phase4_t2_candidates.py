@@ -29,7 +29,7 @@ from decimal import Decimal
 from src.contracts.decision_natural_key import make_decision_natural_key
 from src.contracts.no_trade_reason import NoTradeReason
 from src.contracts.settlement_outcome import SettlementOutcome
-from src.state.db import SCHEMA_VERSION
+SCHEMA_VERSION = 42  # B2: frozen row-provenance value; counter cancelled
 from src.state.decision_events import write_shadow_decision_event
 from src.strategy.candidates import (
     CandidateContext,

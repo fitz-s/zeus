@@ -33,7 +33,8 @@ import pytest
 from src.contracts.decision_natural_key import make_decision_natural_key
 from src.contracts.no_trade_reason import NoTradeReason
 from src.contracts.weather_regime_tag import WeatherRegimeTag
-from src.state.db import SCHEMA_VERSION, init_schema
+SCHEMA_VERSION = 42  # B2: frozen row-provenance value; counter cancelled
+from src.state.db import init_schema
 from src.strategy.candidates import CandidateContext
 from src.strategy.candidates.cross_market_correlation_hedge import (
     CrossMarketCorrelationHedge,

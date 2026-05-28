@@ -77,11 +77,11 @@ def write_platt_fit(
     Idempotent: INSERT OR IGNORE on fit_run_id PK.
     """
     from src.state.db import (
-        SCHEMA_FORECASTS_VERSION,
         ZEUS_FORECASTS_DB_PATH,
         get_forecasts_connection,
     )
     from src.state.db_writer_lock import WriteClass, db_writer_lock
+    SCHEMA_FORECASTS_VERSION = 7  # B2: frozen row-provenance value; counter cancelled
 
     own_conn = conn is None
     if own_conn:
@@ -147,11 +147,11 @@ def write_nowcast_run(
         (F4 retrofit — SCHEMA_FORECASTS_VERSION 5, T4 2026-05-21).
     """
     from src.state.db import (
-        SCHEMA_FORECASTS_VERSION,
         ZEUS_FORECASTS_DB_PATH,
         get_forecasts_connection,
     )
     from src.state.db_writer_lock import WriteClass, db_writer_lock
+    SCHEMA_FORECASTS_VERSION = 7  # B2: frozen row-provenance value; counter cancelled
 
     _valid_dayparts = frozenset({"pre_sunrise", "morning", "afternoon", "post_peak"})
     if daypart not in _valid_dayparts:

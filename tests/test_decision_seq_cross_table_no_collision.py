@@ -34,7 +34,7 @@ from src.state.no_trade_events import (
     assert_no_trade_events_schema_current_for_live,
     write_no_trade_event,
 )
-from src.state.db import SCHEMA_VERSION
+SCHEMA_VERSION = 42  # B2: frozen row-provenance value; counter cancelled
 from src.state.schema.no_trade_events_schema import (
     ensure_table as ensure_no_trade_events_table,
     migrate_no_trade_events_schema,

@@ -684,7 +684,7 @@ SQLITE_CONNECT_ALLOWLIST: frozenset[str] = frozenset(
         "scripts/edge_observation_weekly.py",           # read_only_ro_uri
         "scripts/generate_monthly_bounds.py",           # read_only_ro_uri
         "scripts/learning_loop_observation_weekly.py",  # read_only_ro_uri
-        "scripts/check_schema_version.py",              # in_memory_only (":memory:" only — schema drift CI gate)
+        "scripts/check_schema_fingerprint.py",          # in_memory_only (":memory:" only — schema drift CI gate; B2 replaces check_schema_version.py)
         "scripts/check_data_pipeline_live_e2e.py",      # read_only_ro_uri (live E2E verifier; mode=ro only)
         "scripts/check_forecast_live_ready.py",         # read_only_ro_uri (forecast-live authority-chain verifier; mode=ro + query_only)
         "scripts/live_health_probe.py",                 # read_only_ro_uri (live health verifier; settlement truth SELECT-only)

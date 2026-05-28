@@ -225,8 +225,9 @@ def write_no_trade_event(
 
     Returns the full DecisionNaturalKey (5-tuple with derived decision_seq).
     """
-    from src.state.db import SCHEMA_VERSION, ZEUS_WORLD_DB_PATH
+    from src.state.db import ZEUS_WORLD_DB_PATH
     from src.state.db_writer_lock import WriteClass, db_writer_lock
+    SCHEMA_VERSION = 42  # B2: frozen row-provenance value; counter cancelled
 
     _db_list = conn.execute("PRAGMA database_list").fetchall()
     _actual_path = _db_list[0][2] if _db_list else ""

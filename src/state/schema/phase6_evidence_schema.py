@@ -102,7 +102,7 @@ def ensure_tables(conn: sqlite3.Connection) -> None:
 
 
 def _migrate_evidence_tier_assignments_schema(conn: sqlite3.Connection) -> None:
-    from src.state.db import SCHEMA_VERSION as _CURRENT_SCHEMA_VERSION
+    _CURRENT_SCHEMA_VERSION = 42  # B2: frozen row-provenance value; db.SCHEMA_VERSION counter cancelled
     row = conn.execute(
         "SELECT sql FROM sqlite_master WHERE type='table' AND name='evidence_tier_assignments'"
     ).fetchone()

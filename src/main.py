@@ -2006,26 +2006,22 @@ def _startup_world_db_schema_prepare() -> str:
     if not path.exists():
         raise FileNotFoundError(f"{path} does not exist")
 
+    # B2 (2026-05-28): SCHEMA_VERSION counter cancelled. Run idempotent init_schema()
+    # unconditionally as a preparatory step; PRAGMA user_version is set by init_schema
+    # to the frozen value 43 and is used for logging only.
     conn = db_module.get_world_connection(write_class="live")
     try:
         row = conn.execute("PRAGMA user_version").fetchone()
         current_version = int(row[0]) if row and row[0] is not None else 0
-        expected_version = int(db_module.SCHEMA_VERSION)
-        if current_version == expected_version:
+        if current_version == 43:
             return str(current_version)
-        if current_version > expected_version:
-            raise RuntimeError(
-                f"world DB user_version={current_version} exceeds code SCHEMA_VERSION={expected_version}"
-            )
 
         logger.warning(
-            "world DB schema stale at live boot: user_version=%s expected=%s — running idempotent init_schema()",
+            "world DB schema stale at live boot: user_version=%s — running idempotent init_schema()",
             current_version,
-            expected_version,
         )
         db_module.init_schema(conn)
         conn.commit()
-        db_module.assert_schema_current(conn)
         row = conn.execute("PRAGMA user_version").fetchone()
         prepared_version = int(row[0]) if row and row[0] is not None else 0
         logger.info("world DB schema prepared at live boot: user_version=%s", prepared_version)

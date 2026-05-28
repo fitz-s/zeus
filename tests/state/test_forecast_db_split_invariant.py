@@ -30,7 +30,7 @@ FORECAST_TABLES = (
     "ensemble_snapshots",
     "calibration_pairs",
     "observations",
-    "settlements",
+    # "settlements" dropped from forecasts.db in B3 (bare ghost shell removed; world-class table stays on zeus-world.db)
     "settlement_outcomes",
     "market_events",
     "source_run",
@@ -50,7 +50,8 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
 def test_rel1_init_schema_forecasts_tables_and_version():
     """init_schema_forecasts must create all forecast-authority tables + version."""
-    from src.state.db import SCHEMA_FORECASTS_VERSION, init_schema_forecasts
+    SCHEMA_FORECASTS_VERSION = 7  # B2: frozen; counter cancelled
+    from src.state.db import init_schema_forecasts
 
     conn = sqlite3.connect(":memory:")
     init_schema_forecasts(conn)
@@ -253,22 +254,13 @@ def test_rel5_post_migration_forecasts_db_exists():
 # ---------------------------------------------------------------------------
 
 def _insert_trio(conn: sqlite3.Connection) -> None:
-    """INSERT one row into each of the 3 co-transactional trio tables.
+    """INSERT one row into each of the co-transactional trio tables.
 
+    B3: bare settlements shell dropped from forecasts.db; trio is now
+    settlement_outcomes + market_events only on forecasts.db.
     Uses named-column INSERT so CHECK constraints and defaults are respected
     without maintaining a fragile positional tuple.
     """
-    conn.execute(
-        """
-        INSERT INTO settlements (city, target_date, temperature_metric,
-            market_slug, winning_bin, settlement_value, settlement_source,
-            settled_at, authority, observation_field, data_version)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        ("Chicago", "2026-05-11", "high",
-         "chicago-high-75", "YES", 75.0, "wu",
-         "2026-05-11T00:00:00Z", "VERIFIED", "high_temp", "v2"),
-    )
     conn.execute(
         """
         INSERT INTO settlement_outcomes (city, target_date, temperature_metric,
@@ -292,31 +284,31 @@ def _insert_trio(conn: sqlite3.Connection) -> None:
 
 
 def test_rel6_trio_atomicity_rollback():
-    """settlements + settlement_outcomes + market_events must roll back atomically."""
+    """settlement_outcomes + market_events must roll back atomically (B3: settlements ghost dropped)."""
     from src.state.db import init_schema_forecasts
 
     conn = sqlite3.connect(":memory:")
     init_schema_forecasts(conn)
     conn.commit()
 
-    # Begin explicit transaction, insert into all 3 tables, then force ROLLBACK.
+    # Begin explicit transaction, insert into all tables, then force ROLLBACK.
     conn.execute("BEGIN")
     _insert_trio(conn)
     conn.execute("ROLLBACK")
 
-    # All 3 tables must be empty after rollback.
-    for table in ("settlements", "settlement_outcomes", "market_events"):
+    # All tables must be empty after rollback.
+    for table in ("settlement_outcomes", "market_events"):
         count = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
         assert count == 0, (
             f"REL-6: {table} has {count} rows after ROLLBACK — "
-            "co-transactional trio atomicity violated"
+            "co-transactional atomicity violated"
         )
 
     conn.close()
 
 
 def test_rel6_trio_atomicity_commit():
-    """After a successful commit all 3 trio tables must show exactly 1 row."""
+    """After a successful commit settlement_outcomes + market_events must show exactly 1 row."""
     from src.state.db import init_schema_forecasts
 
     conn = sqlite3.connect(":memory:")
@@ -327,7 +319,7 @@ def test_rel6_trio_atomicity_commit():
     _insert_trio(conn)
     conn.execute("COMMIT")
 
-    for table in ("settlements", "settlement_outcomes", "market_events"):
+    for table in ("settlement_outcomes", "market_events"):
         count = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
         assert count == 1, (
             f"REL-6: {table} has {count} rows after COMMIT — expected 1"

@@ -26,7 +26,7 @@ from typing import Any
 import pytest
 
 from src.contracts.decision_natural_key import make_decision_natural_key
-from src.state.db import SCHEMA_VERSION
+SCHEMA_VERSION = 42  # B2: frozen row-provenance value; counter cancelled
 from src.strategy.candidates import CandidateContext
 
 

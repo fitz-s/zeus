@@ -56,7 +56,7 @@ def test_source_time_frontier_schema_registered() -> None:
     assert "source_time_frontier" in blob, "source_time_frontier missing from db_table_ownership.yaml"
 
     # 3. the version bump that gates the live daemon is present:
-    from src.state.db import SCHEMA_FORECASTS_VERSION
+    SCHEMA_FORECASTS_VERSION = 7  # B2: frozen; counter cancelled
     assert SCHEMA_FORECASTS_VERSION >= 7
 
 

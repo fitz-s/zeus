@@ -323,7 +323,7 @@ class TestF4EvidenceTierLifecycle:
             ).fetchall()
         ]
 
-        from src.state.db import SCHEMA_VERSION
+        SCHEMA_VERSION = 42  # B2: frozen row-provenance value; counter cancelled
         # old row stays at 27; new row stamps the live SCHEMA_VERSION (PR #352: 40).
         # Reference the constant so future bumps don't re-break this assertion.
         assert schema_versions == [27, SCHEMA_VERSION]

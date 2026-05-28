@@ -407,15 +407,14 @@ def pytest_configure(config) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Schema-version drift guard (PLAN §5.6, 2026-05-11)
+# Schema fingerprint drift guard (B2 2026-05-28 — replaces SCHEMA_VERSION counter)
 #
-# Session-scoped autouse fixture that runs scripts/check_schema_version.py
-# once per pytest invocation.  Fails fast if sqlite_master hash of a fresh
-# init_schema DB does not match tests/state/_schema_pinned_hash.txt.
+# Session-scoped autouse fixture that runs scripts/check_schema_fingerprint.py
+# once per pytest invocation.  Fails fast if DDL fingerprint of fresh
+# init_schema + init_schema_forecasts does not match architecture/_schema_fingerprint.txt.
 #
 # Remediation on failure:
-#   1. Bump SCHEMA_VERSION in src/state/db.py.
-#   2. Run:  python scripts/check_schema_version.py --write-pin
+#   python scripts/check_schema_fingerprint.py --write-pin
 # ---------------------------------------------------------------------------
 
 import subprocess as _sv_subprocess
@@ -426,17 +425,16 @@ _SV_REPO_ROOT = _wla_Path(__file__).resolve().parent.parent
 
 @pytest.fixture(scope="session", autouse=True)
 def _enforce_schema_pinned_hash():
-    """Fail the test session if schema hash drifted without bumping SCHEMA_VERSION."""
+    """Fail the test session if schema DDL fingerprint drifted."""
     r = _sv_subprocess.run(
-        [_sv_sys.executable, "scripts/check_schema_version.py"],
+        [_sv_sys.executable, "scripts/check_schema_fingerprint.py"],
         capture_output=True,
         text=True,
         cwd=str(_SV_REPO_ROOT),
     )
     if r.returncode != 0:
         pytest.exit(
-            f"SCHEMA DRIFT — bump SCHEMA_VERSION in src/state/db.py "
-            f"and re-pin with: python scripts/check_schema_version.py --write-pin\n"
+            f"SCHEMA DRIFT — re-pin with: python scripts/check_schema_fingerprint.py --write-pin\n"
             f"{r.stdout}{r.stderr}",
             returncode=1,
         )

@@ -887,14 +887,11 @@ def get_connection(
     return conn
 
 
-# Last reused or audited: 2026-05-11
-# Authority basis: PLAN docs/operations/task_2026-05-11_init_schema_boot_invariant/PLAN.md
-# Schema currency sentinel. Bump on EVERY DDL change in this file OR in
-# init_provenance_projection_schema (:1729) OR apply_v2_schema (:2222).
-# CI hook scripts/check_schema_version.py diffs the sqlite_master hash of
-# a fresh-init DB against tests/state/_schema_pinned_hash.txt and fails
-# the PR if SCHEMA_VERSION did not change in lockstep.
-SCHEMA_VERSION = 43  # 2026-05-28 B3: calibration_pairs_v2 → calibration_pairs (drop bare shell from init_schema; v2 DDL now canonical). Prior: 42 = F1 position_current chain economics.
+# B2 (2026-05-28): SCHEMA_VERSION counter cancelled. Schema drift is now detected via
+# content-hash fingerprint in scripts/check_schema_fingerprint.py + architecture/_schema_fingerprint.txt.
+# Row-level provenance columns (decision_events.schema_version etc.) retain their current
+# CHECK constraints and new rows write the last-frozen value (42) permanently.
+# Per-table schema constants in src/state/schema/* are B2-followup (out of scope here).
 
 
 def init_schema(
@@ -2526,7 +2523,7 @@ def init_schema(
     from src.calibration.ens_bias_repo import init_ens_bias_schema as _init_ens_bias_schema
     _init_ens_bias_schema(conn)
 
-    conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+    conn.execute("PRAGMA user_version = 43")
 
     # db_chunk_boundary_events — K2 live-contention event log (Cluster B fix 2026-05-18)
     conn.execute("""
@@ -2681,7 +2678,7 @@ def _migrate_decision_events_schema(conn: sqlite3.Connection) -> None:
 
 
 class SchemaOutOfDateError(RuntimeError):
-    """PRAGMA user_version != SCHEMA_VERSION."""
+    """Raised when PRAGMA user_version does not match the expected frozen value."""
 
 
 class BridgeAbsentError(RuntimeError):
@@ -2694,27 +2691,17 @@ class BridgeAbsentError(RuntimeError):
 
 
 def assert_schema_current(conn: sqlite3.Connection) -> None:
-    """O(1) currency check (page-1 metadata).
-    Boot: trade DB src/main.py:692, world DB src/ingest_main.py:1035."""
-    v = conn.execute("PRAGMA user_version").fetchone()[0]
-    if v != SCHEMA_VERSION:
-        raise SchemaOutOfDateError(
-            f"PRAGMA user_version={v}, SCHEMA_VERSION={SCHEMA_VERSION}; "
-            "boot init_schema did not run, or migration missing."
-        )
+    """B2 (2026-05-28): SCHEMA_VERSION counter cancelled; this check is now a no-op.
+    Schema drift is detected via content-hash fingerprint (scripts/check_schema_fingerprint.py).
+    Retained for call-site compatibility."""
 
 
 # ---------------------------------------------------------------------------
 # K1 forecast DB split — 2026-05-11
 # ---------------------------------------------------------------------------
-# SCHEMA_FORECASTS_VERSION: bumped whenever forecast-authority DDL changes.
-# Owned tables include the 7 K1 forecast-class tables, the live source
-# authority chain tables, producer readiness_state, and forecast-live job_run.
-SCHEMA_FORECASTS_VERSION: int = 7  # Data Temporal Kernel PR #329 D: source_time_frontier persisted authority (2026-05-24)
-# DEPLOY LANDMINE (PR #329 D): bumping this halts the live ingest/forecast daemon on restart
-# (assert_schema_current_forecasts raises until the forecasts DB is migrated). Runbook:
-#   stop daemons -> init_schema_forecasts(get_forecasts_connection()) + commit -> restart.
-# Pull+restart WITHOUT the migration step = SystemExit, all forecast collection halts.
+# B2 (2026-05-28): SCHEMA_FORECASTS_VERSION counter cancelled alongside SCHEMA_VERSION.
+# Forecast schema drift is detected via content-hash fingerprint.
+# Frozen value 7 is stamped as PRAGMA user_version by init_schema_forecasts.
 
 
 # B3cont (2026-05-28): _create_settlements removed — bare world-class settlements shell dropped.
@@ -3627,7 +3614,7 @@ def init_schema_forecasts(conn: sqlite3.Connection) -> None:
     _create_source_time_frontier(conn)
 
     # Mark schema current — MUST be last (partial failure must not mark ready).
-    conn.execute(f"PRAGMA user_version = {SCHEMA_FORECASTS_VERSION}")
+    conn.execute("PRAGMA user_version = 7")
     conn.commit()
 
 
@@ -4248,21 +4235,9 @@ def init_schema_trade_only(conn: sqlite3.Connection) -> None:
 
 
 def assert_schema_current_forecasts(conn: sqlite3.Connection) -> None:
-    """O(1) currency check for zeus-forecasts.db.
-
-    Mirrors assert_schema_current for the forecast DB. Called at boot by
-    ingest daemon after init_schema_forecasts completes, and by hot-path
-    callers (calibration, observation writer, etc.) as a ≤1 ms guard.
-
-    K1 split 2026-05-11.
-    """
-    v = conn.execute("PRAGMA user_version").fetchone()[0]
-    if v != SCHEMA_FORECASTS_VERSION:
-        raise SchemaOutOfDateError(
-            f"forecasts user_version={v}, "
-            f"SCHEMA_FORECASTS_VERSION={SCHEMA_FORECASTS_VERSION}; "
-            "init_schema_forecasts did not run at boot, or migration missing."
-        )
+    """B2 (2026-05-28): SCHEMA_FORECASTS_VERSION counter cancelled; this check is now a no-op.
+    Schema drift is detected via content-hash fingerprint (scripts/check_schema_fingerprint.py).
+    Retained for call-site compatibility."""
 
 
 _CALIBRATION_DECISION_GROUP_DDL = """

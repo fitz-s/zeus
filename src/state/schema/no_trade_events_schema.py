@@ -52,7 +52,7 @@ import re
 import sqlite3
 
 from src.contracts.no_trade_reason import NoTradeReason
-from src.state.db import SCHEMA_VERSION  # single canonical authority
+SCHEMA_VERSION = 42  # B2: frozen row-provenance value; db.SCHEMA_VERSION counter cancelled
 
 # Enum CHECK: every valid NoTradeReason value, joined for SQL IN clause.
 _REASON_VALUES_SQL = ", ".join(f"'{r.value}'" for r in NoTradeReason)

@@ -24,7 +24,8 @@ import numpy as np
 import pytest
 
 from src.contracts.weather_regime_tag import WeatherRegimeTag
-from src.state.db import SCHEMA_VERSION, init_schema
+from src.state.db import init_schema
+SCHEMA_VERSION = 42  # B2: frozen row-provenance value; counter cancelled
 from src.strategy.regime_correlation_store import RegimeCorrelationStore
 
 

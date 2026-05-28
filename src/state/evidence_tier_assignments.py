@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from src.contracts.evidence_tier import EvidenceTier
-from src.state.db import SCHEMA_VERSION
+SCHEMA_VERSION = 42  # B2: frozen row-provenance value; counter cancelled
 
 
 @dataclass(frozen=True)

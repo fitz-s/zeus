@@ -82,7 +82,7 @@ MIGRATED_ENTRIES: frozenset[str] = frozenset(
         "scripts/edge_observation_weekly.py",
         "scripts/generate_monthly_bounds.py",
         "scripts/learning_loop_observation_weekly.py",
-        "scripts/check_schema_version.py",
+        "scripts/check_schema_fingerprint.py",
         "scripts/check_data_pipeline_live_e2e.py",
         "scripts/check_forecast_live_ready.py",
         "scripts/check_live_order_e2e.py",

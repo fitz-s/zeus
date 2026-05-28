@@ -34,13 +34,17 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from src.state.db import (
-    SCHEMA_FORECASTS_VERSION,
-    SCHEMA_VERSION,
     SchemaOutOfDateError,
     assert_schema_current_forecasts,
     init_schema,
     init_schema_forecasts,
 )
+SCHEMA_VERSION = 43           # B2: frozen PRAGMA user_version written by init_schema
+SCHEMA_FORECASTS_VERSION = 7  # B2: frozen PRAGMA user_version written by init_schema_forecasts
+# B2: row-provenance value frozen in no_trade_events / decision_events schema_version columns.
+# Distinct from SCHEMA_VERSION (PRAGMA user_version) because the row-level counter
+# was last bumped at 42 and never reached 43 before the counter was cancelled.
+_ROW_SCHEMA_VERSION = 42
 from src.state.no_trade_events import (
     NoTradeEventsSchemaCompatibilityError,
     assert_no_trade_events_schema_current_for_live,
@@ -174,9 +178,11 @@ def _check_world_schema(world_db: Path) -> GateResult:
         if version != SCHEMA_VERSION:
             return GateResult("world_schema", FAIL, f"user_version={version} expected={SCHEMA_VERSION}")
         try:
+            # B2: use _ROW_SCHEMA_VERSION (42), not SCHEMA_VERSION (43 PRAGMA user_version).
+            # Row-provenance counter was frozen at 42; no_trade_events CHECK only goes to 42.
             assert_no_trade_events_schema_current_for_live(
                 conn,
-                expected_schema_version=SCHEMA_VERSION,
+                expected_schema_version=_ROW_SCHEMA_VERSION,
             )
         except NoTradeEventsSchemaCompatibilityError as exc:
             return GateResult("world_schema", FAIL, str(exc))
