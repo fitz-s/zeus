@@ -14,7 +14,7 @@ Usage
 -----
 ::
 
-    python scripts/audit_observation_instants_v2.py \\
+    python scripts/audit_observation_instants.py \\
         --data-version v1.wu-native.pilot [--json]
 
 What it reports

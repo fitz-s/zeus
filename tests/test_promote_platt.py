@@ -1,12 +1,14 @@
-# Lifecycle: created=2026-05-12; last_reviewed=2026-05-18; last_reused=2026-05-18
-# Purpose: Tests for scripts/promote_calibration_v2_stage_to_prod.py promotion safety.
-# Reuse: Run when platt promotion, verification, or pair-deprecation behavior changes.
-# Authority basis: Tests for scripts/promote_calibration_v2_stage_to_prod.py
-"""Unit tests for the STAGE→prod calibration promotion script.
+# Created: 2026-05-12
+# Last reused or audited: 2026-05-12
+# Authority basis: K1 workload-class DB split; PR #112 Option (c) split.
+# Tests for scripts/promote_platt.py.
+"""Unit tests for the STAGE -> prod platt_models_v2 promotion script.
 
 Each test builds a tiny synthetic STAGE_DB and PROD_DB inside ``tmp_path``,
 exercises one subcommand, and asserts the expected outcome. None of these
-tests touch the real production zeus-world.db.
+tests touch the real production zeus-world.db. Tests target ONLY the
+platt_models_v2 surface (its sibling calibration_pairs_v2 promotion lives
+on zeus-forecasts.db and is covered by tests/test_promote_calibration.py).
 """
 
 from __future__ import annotations
@@ -22,42 +24,12 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from scripts import promote_calibration_v2_stage_to_prod as P  # noqa: E402
+from scripts import promote_platt as P  # noqa: E402
 
 
 # --------------------------------------------------------------------------
 # Schema fixtures
 # --------------------------------------------------------------------------
-
-PAIRS_SCHEMA = """
-CREATE TABLE calibration_pairs_v2 (
-    pair_id INTEGER PRIMARY KEY AUTOINCREMENT,
-    city TEXT NOT NULL,
-    target_date TEXT NOT NULL,
-    temperature_metric TEXT NOT NULL,
-    observation_field TEXT NOT NULL,
-    range_label TEXT NOT NULL,
-    p_raw REAL NOT NULL,
-    outcome INTEGER NOT NULL,
-    lead_days REAL NOT NULL,
-    season TEXT NOT NULL,
-    cluster TEXT NOT NULL,
-    forecast_available_at TEXT NOT NULL,
-    settlement_value REAL,
-    decision_group_id TEXT,
-    bias_corrected INTEGER NOT NULL DEFAULT 0,
-    authority TEXT NOT NULL DEFAULT 'UNVERIFIED',
-    bin_source TEXT NOT NULL DEFAULT 'legacy',
-    snapshot_id INTEGER,
-    data_version TEXT NOT NULL,
-    training_allowed INTEGER NOT NULL DEFAULT 1,
-    causality_status TEXT NOT NULL DEFAULT 'OK',
-    recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    cycle TEXT NOT NULL DEFAULT '00',
-    source_id TEXT NOT NULL DEFAULT 'tigge_mars',
-    horizon_profile TEXT NOT NULL DEFAULT 'full'
-);
-"""
 
 PLATT_SCHEMA = """
 CREATE TABLE platt_models_v2 (
@@ -91,40 +63,13 @@ DV_LOW = "tigge_mn2t6_local_calendar_day_min_v1"
 
 
 def _build_db(path: Path, *, with_meta: bool = True) -> None:
+    """Build a tiny platt_models_v2-only DB. Stand-in for zeus-world.db."""
     conn = sqlite3.connect(str(path))
-    conn.executescript(PAIRS_SCHEMA + PLATT_SCHEMA)
+    conn.executescript(PLATT_SCHEMA)
     if with_meta:
         conn.executescript(META_SCHEMA)
     conn.commit()
     conn.close()
-
-
-def _insert_pair(
-    conn: sqlite3.Connection,
-    city: str,
-    data_version: str,
-    pair_id: int | None = None,
-    target_date: str = "2024-01-01",
-    metric: str = "high",
-) -> None:
-    conn.execute(
-        """
-        INSERT INTO calibration_pairs_v2
-        (pair_id, city, target_date, temperature_metric, observation_field,
-         range_label, p_raw, outcome, lead_days, season, cluster,
-         forecast_available_at, snapshot_id, data_version)
-        VALUES (?, ?, ?, ?, ?, '>=20', 0.5, 1, 0.0, 'winter', 'mid',
-                '2024-01-01T00:00:00Z', NULL, ?)
-        """,
-        (
-            pair_id,
-            city,
-            target_date,
-            metric,
-            "high_temp" if metric == "high" else "low_temp",
-            data_version,
-        ),
-    )
 
 
 def _insert_platt(
@@ -187,6 +132,18 @@ def _file_hash(path: Path) -> str:
 
 
 # --------------------------------------------------------------------------
+# K1 isolation invariant: script must target zeus-world.db
+# --------------------------------------------------------------------------
+
+
+def test_default_prod_db_targets_zeus_world():
+    """K1 invariant: this script's default PROD is zeus-world.db, NOT
+    zeus-forecasts.db. Cross-DB confusion would break the workload-class split."""
+    assert P.DEFAULT_PROD_DB == "state/zeus-world.db"
+    assert P.TARGET_TABLE == "platt_models_v2"
+
+
+# --------------------------------------------------------------------------
 # inspect
 # --------------------------------------------------------------------------
 
@@ -197,9 +154,6 @@ def test_inspect_well_formed_stage(tmp_path, capsys):
     conn = sqlite3.connect(str(stage))
     _insert_complete_sentinel(conn, "high", DV_HIGH)
     _insert_complete_sentinel(conn, "low", DV_LOW)
-    _insert_pair(conn, "Tokyo", DV_HIGH)
-    _insert_pair(conn, "London", DV_HIGH)
-    _insert_pair(conn, "Tokyo", DV_LOW, metric="low")
     _insert_platt(conn, "k1", DV_HIGH)
     _insert_platt(conn, "k2", DV_LOW, metric="low")
     conn.commit()
@@ -246,7 +200,6 @@ def test_promote_dry_run_does_not_touch_prod(tmp_path, capsys):
     _build_db(prod)
     s = sqlite3.connect(str(stage))
     _insert_complete_sentinel(s, "high", DV_HIGH)
-    _insert_pair(s, "Tokyo", DV_HIGH)
     _insert_platt(s, "k1", DV_HIGH)
     s.commit()
     s.close()
@@ -288,7 +241,6 @@ def test_promote_commit_replaces_metric_rows(tmp_path, capsys):
 
     p = sqlite3.connect(str(prod))
     _insert_platt(p, "old_high", DV_HIGH)
-    _insert_pair(p, "PairAuthorityStaysForecasts", DV_HIGH, pair_id=101)
     # Rows for OTHER data_version must be untouched
     _insert_platt(p, "untouched_low", DV_LOW, metric="low")
     p.commit()
@@ -312,122 +264,9 @@ def test_promote_commit_replaces_metric_rows(tmp_path, capsys):
     low_keys = {r[0] for r in p.execute(
         "SELECT model_key FROM platt_models_v2 WHERE data_version=?", (DV_LOW,)
     )}
-    pair_cities = {r[0] for r in p.execute(
-        "SELECT city FROM calibration_pairs_v2 WHERE data_version=?", (DV_HIGH,)
-    )}
     p.close()
     assert high_keys == {"new_k1", "new_k2"}, f"got {high_keys}"
     assert low_keys == {"untouched_low"}, "Low metric must be untouched"
-    assert pair_cities == {"PairAuthorityStaysForecasts"}, (
-        "Legacy combined promotion must not mutate calibration_pairs_v2; "
-        "pairs are forecast-class authority promoted by promote_calibration_pairs_v2.py."
-    )
-
-
-def test_promote_refuses_legacy_pair_flags(tmp_path, capsys):
-    stage = tmp_path / "stage.db"
-    prod = tmp_path / "prod.db"
-    _build_db(stage)
-    _build_db(prod)
-
-    args = P.build_parser().parse_args(
-        [
-            "promote", "--stage-db", str(stage), "--prod-db", str(prod),
-            "--metrics", "high", "--commit", "--include-pairs",
-            "--backup-dir", str(tmp_path / "backups"),
-        ]
-    )
-    rc = args.func(args)
-    out = capsys.readouterr().out
-
-    assert rc == 2
-    assert "promote_calibration_pairs_v2.py" in out
-
-
-def test_legacy_pair_flag_help_names_removed_contract(capsys):
-    with pytest.raises(SystemExit):
-        P.build_parser().parse_args(["promote", "--help"])
-    help_text = capsys.readouterr().out
-
-    assert "REMOVED: this flag now refuses promotion" in help_text
-
-
-def test_promote_refuses_empty_stage_before_deleting_prod(tmp_path, capsys):
-    stage = tmp_path / "stage.db"
-    prod = tmp_path / "prod.db"
-    _build_db(stage)
-    _build_db(prod)
-
-    s = sqlite3.connect(str(stage))
-    _insert_complete_sentinel(s, "high", DV_HIGH)
-    s.commit()
-    s.close()
-
-    p = sqlite3.connect(str(prod))
-    _insert_platt(p, "old_high", DV_HIGH)
-    p.commit()
-    p.close()
-
-    args = P.build_parser().parse_args(
-        [
-            "promote", "--stage-db", str(stage), "--prod-db", str(prod),
-            "--metrics", "high", "--commit",
-            "--backup-dir", str(tmp_path / "backups"),
-        ]
-    )
-    rc = args.func(args)
-    out = capsys.readouterr().out
-
-    p = sqlite3.connect(str(prod))
-    high_keys = {r[0] for r in p.execute(
-        "SELECT model_key FROM platt_models_v2 WHERE data_version=?", (DV_HIGH,)
-    )}
-    p.close()
-
-    assert rc == 1
-    assert "STAGE has 0 rows" in out
-    assert high_keys == {"old_high"}
-    assert not (tmp_path / "backups").exists(), "Refusal must happen before backup/write path"
-
-
-def test_promote_refuses_stage_prod_schema_mismatch_before_commit(tmp_path, capsys):
-    stage = tmp_path / "stage.db"
-    prod = tmp_path / "prod.db"
-    _build_db(stage)
-    _build_db(prod)
-
-    s = sqlite3.connect(str(stage))
-    _insert_complete_sentinel(s, "high", DV_HIGH)
-    _insert_platt(s, "new_high", DV_HIGH)
-    s.execute("ALTER TABLE platt_models_v2 ADD COLUMN schema_drift TEXT")
-    s.commit()
-    s.close()
-
-    p = sqlite3.connect(str(prod))
-    _insert_platt(p, "old_high", DV_HIGH)
-    p.commit()
-    p.close()
-
-    args = P.build_parser().parse_args(
-        [
-            "promote", "--stage-db", str(stage), "--prod-db", str(prod),
-            "--metrics", "high", "--commit",
-            "--backup-dir", str(tmp_path / "backups"),
-        ]
-    )
-    rc = args.func(args)
-    out = capsys.readouterr().out
-
-    p = sqlite3.connect(str(prod))
-    high_keys = {r[0] for r in p.execute(
-        "SELECT model_key FROM platt_models_v2 WHERE data_version=?", (DV_HIGH,)
-    )}
-    p.close()
-
-    assert rc == 1
-    assert "schema mismatch" in out
-    assert high_keys == {"old_high"}
-    assert not (tmp_path / "backups").exists(), "Schema refusal must happen before backup/write path"
 
 
 def test_promote_creates_verifiable_backup(tmp_path, capsys):
@@ -456,7 +295,9 @@ def test_promote_creates_verifiable_backup(tmp_path, capsys):
     capsys.readouterr()
     assert rc == 0
 
-    backups = list(backup_dir.glob("zeus-world.db.calibration_v2_pre_promotion_*.sql.gz"))
+    # Filename must be zeus-world.db.platt_models_v2_pre_promotion_*.sql.gz
+    # (K1: world DB; the sibling script writes zeus-forecasts.db.calibration_pairs_v2_*).
+    backups = list(backup_dir.glob("zeus-world.db.platt_models_v2_pre_promotion_*.sql.gz"))
     assert len(backups) == 1, f"expected 1 backup, got {backups}"
     backup = backups[0]
     # Verify gzip integrity
@@ -465,6 +306,8 @@ def test_promote_creates_verifiable_backup(tmp_path, capsys):
     assert "to_be_backed_up" in content, "Backup must contain pre-promotion row"
     assert "BEGIN TRANSACTION;" in content
     assert "COMMIT;" in content
+    # Backup must NOT include calibration_pairs_v2 (lives on zeus-forecasts.db).
+    assert "calibration_pairs_v2" not in content
 
 
 def test_promote_rollback_on_integrity_failure(tmp_path, capsys, monkeypatch):
@@ -504,8 +347,6 @@ def test_promote_rollback_on_integrity_failure(tmp_path, capsys, monkeypatch):
     capsys.readouterr()
 
     # PROD content must be unchanged (rollback worked).
-    # NB: we check logical content (rows), not byte-hash, because WAL journal
-    # mode rewrites file headers/checksums even on a clean ROLLBACK.
     p = sqlite3.connect(str(prod))
     post_high_keys = {r[0] for r in p.execute(
         "SELECT model_key FROM platt_models_v2 WHERE data_version=?", (DV_HIGH,)
@@ -540,8 +381,133 @@ def test_promote_refuses_when_sentinel_in_progress(tmp_path, capsys):
     assert "REFUSED" in out
 
 
+def test_promote_refuses_when_stage_has_zero_rows(tmp_path, capsys):
+    """Copilot C (#112): --commit must refuse if STAGE has 0 rows for the
+    requested metric, otherwise the DELETE+INSERT path silently wipes PROD."""
+    stage = tmp_path / "stage.db"
+    prod = tmp_path / "prod.db"
+    _build_db(stage)
+    _build_db(prod)
+
+    s = sqlite3.connect(str(stage))
+    _insert_complete_sentinel(s, "high", DV_HIGH)  # complete but no rows
+    s.commit()
+    s.close()
+
+    p = sqlite3.connect(str(prod))
+    _insert_platt(p, "live_high", DV_HIGH)
+    p.commit()
+    p.close()
+
+    args = P.build_parser().parse_args(
+        [
+            "promote", "--stage-db", str(stage), "--prod-db", str(prod),
+            "--metrics", "high", "--commit",
+            "--backup-dir", str(tmp_path / "backups"),
+        ]
+    )
+    rc = args.func(args)
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "REFUSED" in out and "0 rows" in out
+
+    # PROD must be untouched
+    p = sqlite3.connect(str(prod))
+    keys = {r[0] for r in p.execute(
+        "SELECT model_key FROM platt_models_v2 WHERE data_version=?", (DV_HIGH,)
+    )}
+    p.close()
+    assert keys == {"live_high"}
+
+
+def test_promote_refuses_on_schema_mismatch(tmp_path, capsys):
+    """Copilot M (#112): STAGE/PROD schema drift must be caught BEFORE
+    BEGIN IMMEDIATE so a mid-promotion failure cannot leave PROD partial."""
+    stage = tmp_path / "stage.db"
+    prod = tmp_path / "prod.db"
+    _build_db(stage)
+    _build_db(prod)
+
+    s = sqlite3.connect(str(stage))
+    _insert_complete_sentinel(s, "high", DV_HIGH)
+    _insert_platt(s, "new_k1", DV_HIGH)
+    try:
+        s.execute("ALTER TABLE platt_models_v2 DROP COLUMN bucket_key")
+    except sqlite3.OperationalError:
+        pytest.skip("SQLite < 3.35 does not support DROP COLUMN")
+    s.commit()
+    s.close()
+
+    args = P.build_parser().parse_args(
+        [
+            "promote", "--stage-db", str(stage), "--prod-db", str(prod),
+            "--metrics", "high", "--commit",
+            "--backup-dir", str(tmp_path / "backups"),
+        ]
+    )
+    rc = args.func(args)
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "schema mismatch" in out
+
+
+def test_sentinel_in_progress_takes_precedence_over_wildcard_complete(tmp_path):
+    """Codex P1 (#112): an older `data_version=all start=all end=all`
+    complete sentinel must NOT mask a newer scoped in_progress sentinel
+    for the same metric/data_version pair."""
+    stage = tmp_path / "stage.db"
+    _build_db(stage)
+    s = sqlite3.connect(str(stage))
+
+    # Stale wildcard complete sentinel (older rebuild scope)
+    stale_key = (
+        f"{P.REBUILD_COMPLETE_META_PREFIX}:metric=low:bin_source=canonical_v2:"
+        f"city=all:start=all:end=all:data_version=all:cycle=all:source_id=all:"
+        f"horizon=all:n_mc=10000"
+    )
+    s.execute(
+        "INSERT INTO zeus_meta (key, value) VALUES (?, ?)",
+        (stale_key, json.dumps({"status": "complete", "completed": True})),
+    )
+    # Newer scoped in_progress sentinel for the actual data_version
+    _insert_in_progress_sentinel(s, "low", DV_LOW)
+    s.commit()
+    s.close()
+
+    conn = sqlite3.connect(str(stage))
+    conn.row_factory = sqlite3.Row
+    sentinels = P._load_sentinels(conn)
+    conn.close()
+    status = P._sentinel_status_for_metrics(sentinels, ["low"])
+    assert status == {"low": "in_progress"}, (
+        f"in_progress must win over stale wildcard complete; got {status}"
+    )
+
+
+def test_rw_connect_preserves_existing_pragmas(tmp_path):
+    """Copilot M (#112): _rw_connect should not switch journal_mode/synchronous
+    on a DB that already has them at the desired values; and conversely it
+    should keep DELETE journal mode if the DB was DELETE."""
+    prod = tmp_path / "prod.db"
+    _build_db(prod)
+    # Default new DB starts in DELETE; promote it to WAL via first connect
+    conn = P._rw_connect(prod)
+    jm1 = str(conn.execute("PRAGMA journal_mode").fetchone()[0]).lower()
+    sync1 = int(conn.execute("PRAGMA synchronous").fetchone()[0])
+    conn.close()
+    assert jm1 == "wal"
+    assert sync1 == 1
+
+    # Second open: pragmas already match, _rw_connect must be idempotent
+    conn2 = P._rw_connect(prod)
+    jm2 = str(conn2.execute("PRAGMA journal_mode").fetchone()[0]).lower()
+    sync2 = int(conn2.execute("PRAGMA synchronous").fetchone()[0])
+    conn2.close()
+    assert jm2 == jm1 and sync2 == sync1
+
+
 # --------------------------------------------------------------------------
-# verify
+# verify (table-local on zeus-world.db; no cross-DB JOIN)
 # --------------------------------------------------------------------------
 
 
@@ -550,7 +516,7 @@ def test_verify_pass(tmp_path, capsys):
     _build_db(prod)
     p = sqlite3.connect(str(prod))
     _insert_platt(p, "k1", DV_HIGH)
-    _insert_pair(p, "Tokyo", DV_HIGH)
+    _insert_platt(p, "k2", DV_LOW, metric="low")
     p.commit()
     p.close()
 
@@ -558,50 +524,67 @@ def test_verify_pass(tmp_path, capsys):
     rc = args.func(args)
     out = capsys.readouterr().out
     assert rc == 0
-    assert "platt_models_v2 readable" in out
-    assert "active bucket identity unique" in out
-
-
-def test_verify_is_platt_only_and_does_not_require_world_pairs(tmp_path, capsys):
-    prod = tmp_path / "prod.db"
-    _build_db(prod)
-    p = sqlite3.connect(str(prod))
-    _insert_platt(p, "orphan", DV_HIGH)  # No corresponding pair
-    p.commit()
-    p.close()
-
-    args = P.build_parser().parse_args(["verify", "--prod-db", str(prod)])
-    rc = args.func(args)
-    out = capsys.readouterr().out
-    assert rc == 0
-    assert "platt_models_v2 readable" in out
+    assert "platt_models_v2 has" in out
+    assert "All identity columns are non-NULL" in out
+    # Must NOT do a cross-DB JOIN against calibration_pairs_v2 (K1: lives
+    # on zeus-forecasts.db).
     assert "calibration_pairs_v2" not in out
 
 
-def test_verify_refuses_empty_platt_table(tmp_path, capsys):
+def test_verify_fail_when_empty(tmp_path, capsys):
     prod = tmp_path / "prod.db"
     _build_db(prod)
+    # No rows inserted
 
     args = P.build_parser().parse_args(["verify", "--prod-db", str(prod)])
     rc = args.func(args)
     out = capsys.readouterr().out
-
     assert rc == 1
-    assert "has no rows" in out
+    assert "FAIL" in out and "empty" in out
 
 
-def test_verify_refuses_duplicate_active_bucket_identity(tmp_path, capsys):
-    prod = tmp_path / "prod.db"
-    _build_db(prod)
-    p = sqlite3.connect(str(prod))
-    _insert_platt(p, "k1", DV_HIGH)
-    _insert_platt(p, "k2", DV_HIGH)
-    p.commit()
-    p.close()
+# --------------------------------------------------------------------------
+# FIX 1 regression: data_version=all sentinel must yield "complete"
+# (was silently "missing" before the fix because full_complete filter only
+# checked wanted_dvs, not the wildcard "all" value).
+# --------------------------------------------------------------------------
 
-    args = P.build_parser().parse_args(["verify", "--prod-db", str(prod)])
-    rc = args.func(args)
-    out = capsys.readouterr().out
 
-    assert rc == 1
-    assert "duplicate active platt buckets" in out
+def test_wildcard_data_version_complete_sentinel_yields_complete(tmp_path):
+    """A sentinel with scope.data_version='all', start='all', end='all',
+    payload.status='complete' must yield status 'complete' for the metric,
+    not 'missing'.  Regression guard for Zeus #64 Phase 1a FIX 1."""
+    stage = tmp_path / "stage.db"
+    _build_db(stage)
+    conn = sqlite3.connect(str(stage))
+
+    # Build the wildcard sentinel key that a full-scope rebuild emits
+    wildcard_key = (
+        f"{P.REBUILD_COMPLETE_META_PREFIX}:metric=high:bin_source=canonical_v2:"
+        f"city=all:start=all:end=all:data_version=all:cycle=all:source_id=all:"
+        f"horizon=all:n_mc=10000"
+    )
+    conn.execute(
+        "INSERT INTO zeus_meta (key, value) VALUES (?, ?)",
+        (
+            wildcard_key,
+            json.dumps({
+                "status": "complete",
+                "completed": True,
+                "scope": {"data_version": "all", "start": "all", "end": "all"},
+            }),
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    conn = sqlite3.connect(str(stage))
+    conn.row_factory = sqlite3.Row
+    sentinels = P._load_sentinels(conn)
+    conn.close()
+
+    # Must return "complete", not "missing"
+    status = P._sentinel_status_for_metrics(sentinels, ["high"])
+    assert status == {"high": "complete"}, (
+        f"data_version=all complete sentinel must yield 'complete'; got {status}"
+    )

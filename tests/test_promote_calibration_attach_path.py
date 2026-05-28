@@ -8,7 +8,7 @@
 # project-wide "relationship tests before function tests" rule.
 """Relationship tests for the ATTACH+SQL bulk promote path.
 
-These complement ``test_promote_calibration_pairs_v2.py`` (function-level
+These complement ``test_promote_calibration.py`` (function-level
 unit tests). They assert four cross-module properties:
 
 1. Atomicity: if the integrity check fails mid-promote, PROD reverts to
@@ -36,7 +36,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from scripts import promote_calibration_pairs_v2 as P  # noqa: E402
+from scripts import promote_calibration as P  # noqa: E402
 
 DV_HIGH = "tigge_mx2t6_local_calendar_day_max_v1"
 DV_LOW = "tigge_mn2t6_local_calendar_day_min_v1"

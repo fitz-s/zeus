@@ -1,41 +1,38 @@
 # Created: 2026-05-12
-# Last reused or audited: 2026-05-13
+# Last reused or audited: 2026-05-12
 # Authority basis: K1 workload-class DB split; PR #112 Option (c) split.
-# 2026-05-13: Replaced Python row-by-row promote loop with ATTACH+SQL
-# bulk path (INSERT INTO ... SELECT FROM stage.calibration_pairs_v2)
-# after first attempt blocked on 83M-row workload (6.6k rows/sec ~= 3.5h).
-# STAGE_DB -> production zeus-forecasts.db promotion of calibration_pairs_v2
-# artifacts produced by scripts/rebuild_calibration_pairs_v2.py.
-# All mutations are gated by --commit; default behavior is dry-run with
-# full backup + rollback semantics.
-"""Promote calibration_pairs_v2 artifacts from a STAGE_DB to zeus-forecasts.db.
+# STAGE_DB -> production zeus-world.db promotion of platt_models_v2
+# artifacts produced by scripts/refit_platt.py / scripts/rebuild_calibration_pairs_v2.py
+# (which co-emits Platt models). All mutations are gated by --commit;
+# default behavior is dry-run with full backup + rollback semantics.
+"""Promote platt_models_v2 artifacts from a STAGE_DB to production zeus-world.db.
 
-Per AGENTS.md K=3 K1 (workload-class DB split, 2026-05-11),
-``calibration_pairs_v2`` lives in ``state/zeus-forecasts.db`` (the forecasts
-DB). This script handles ONLY ``calibration_pairs_v2``; its sibling
-``promote_platt_models_v2.py`` handles ``platt_models_v2`` on
-``state/zeus-world.db``. The two scripts share no code by import to keep
-them independently runnable.
+Per AGENTS.md K=3 K1 (workload-class DB split, 2026-05-11), platt_models_v2
+lives in ``state/zeus-world.db`` (the world DB). This script handles ONLY
+``platt_models_v2``; its sibling ``promote_calibration.py`` handles
+``calibration_pairs_v2`` on ``state/zeus-forecasts.db``. The two scripts
+share no code by import to keep them independently runnable.
 
 Subcommands
 -----------
 
 * ``inspect``  - read-only summary of STAGE vs PROD coverage. Reports rebuild
-  sentinel state, row counts, and (city, data_version) bucket coverage.
-  Exits 1 if STAGE has any in_progress sentinel or missing COMPLETE markers
-  for the requested metrics.
+  sentinel state, row counts, and (cluster, season) bucket coverage per
+  data_version. Exits 1 if STAGE has any in_progress sentinel or missing
+  COMPLETE markers for the requested metrics.
 * ``promote``  - dry-run by default. With ``--commit``: backs up PROD
-  ``calibration_pairs_v2`` to a gzipped SQL dump under ``state/backups/``,
+  ``platt_models_v2`` to a gzipped SQL dump under ``state/backups/``,
   opens PROD with ``BEGIN IMMEDIATE``, replaces rows filtered by
   ``data_version`` derived from the metric set, runs ``PRAGMA integrity_check``,
   and rolls back on any failure.
 * ``verify``   - read-only post-promote consistency check. Confirms every
-  ``calibration_pairs_v2`` row in PROD has well-formed identity columns
-  (city, data_version, temperature_metric, target_date) and reports
-  (city, data_version) bucket coverage.
-  Cross-DB joins against ``platt_models_v2`` (which lives on
-  ``zeus-world.db``) are intentionally NOT performed here -- the sibling
-  script handles its own table-local verify, and a wrapper may combine them.
+  ``platt_models_v2`` row in PROD has well-formed identity columns
+  (temperature_metric, cluster, season, data_version, model_key) and that
+  no (data_version, cluster, season) bucket is empty after group-by.
+  Cross-DB joins against ``calibration_pairs_v2`` (which now lives on
+  ``zeus-forecasts.db``) are intentionally NOT performed here -- the
+  sibling script handles its own table-local verify, and a wrapper may
+  combine them.
 
 Constraints
 -----------
@@ -44,7 +41,7 @@ Constraints
   the dry-run path of ``promote``.
 * PROD is opened writable in the ``promote --commit`` path via a direct
   ``sqlite3.connect`` (``_rw_connect``). PRAGMA ``foreign_keys`` is
-  intentionally left at the existing setting (off in zeus-forecasts.db);
+  intentionally left at the existing setting (off in zeus-world.db);
   ``journal_mode``/``synchronous`` are read first and only set when they
   do not already match ``WAL`` / ``NORMAL`` to avoid changing PROD
   pragmas as a side effect. Uses ``BEGIN IMMEDIATE`` and rolls back on
@@ -52,18 +49,14 @@ Constraints
 * Backup is atomically created (write to ``.tmp`` then ``os.replace``) and
   independently verifiable via ``gunzip + sqlite3``.
 * Generic over ``--stage-db PATH`` and ``--prod-db PATH``. No hardcoded
-  STAGE_DB filename. Defaults to ``state/zeus-forecasts.db`` when
-  --prod-db is omitted (K1: calibration_pairs_v2 lives in the forecasts DB).
-* Snapshot FK: ``calibration_pairs_v2.snapshot_id`` references
-  ``ensemble_snapshots_v2(snapshot_id)`` but PRAGMA foreign_keys is OFF
-  in zeus-forecasts.db. STAGE snapshot_ids may not exist in PROD; we
-  preserve them as-is (FK not enforced) but expose ``--null-snapshot-id``
-  to NULL them out for safety.
+  STAGE_DB filename. Defaults to ``state/zeus-world.db`` when --prod-db
+  is omitted (K1: platt_models_v2 lives in the world DB).
 """
 
 from __future__ import annotations
 
 import argparse
+import gzip
 import json
 import os
 import sqlite3
@@ -86,9 +79,9 @@ METRIC_TO_DATA_VERSIONS: dict[str, tuple[str, ...]] = {
 
 ALL_METRICS: tuple[str, ...] = ("high", "low", "low_contract")
 
-DEFAULT_PROD_DB = "state/zeus-forecasts.db"
+DEFAULT_PROD_DB = "state/zeus-world.db"
 
-TARGET_TABLE = "calibration_pairs_v2"
+TARGET_TABLE = "platt_models_v2"
 
 
 # --------------------------------------------------------------------------
@@ -223,22 +216,16 @@ def _sentinel_status_for_metrics(
         if any_in_progress_for_wanted:
             out[metric] = "in_progress"
             continue
-        # Look for a complete sentinel covering the requested data_version:
-        #   start=all AND end=all AND status=complete AND
-        #   data_version IN wanted_dvs OR data_version='all'
-        # (rationale: rebuild script writes `data_version=all` for broad-scope
-        # complete sentinels; that's a SUPERSET of any specific dv. Per Codex P1
-        # above, in_progress for a specific wanted_dv has already been excluded,
-        # so accepting `data_version=all` here is safe — it cannot mask a
-        # partial rebuild for our requested data_version. 2026-05-27 fitz.)
+        # Then look for an exact-scope complete sentinel: data_version
+        # must match the wanted set (NOT just `all`), AND start/end == all.
         full_complete = [
             s
             for s in relevant
             if s["scope"].get("start") == "all"  # type: ignore[union-attr]
             and s["scope"].get("end") == "all"  # type: ignore[union-attr]
-            and (
-                s["scope"].get("data_version") in wanted_dvs  # type: ignore[union-attr]
-                or s["scope"].get("data_version") == "all"  # type: ignore[union-attr]
+            and (  # accept exact data_version match OR wildcard "all" rebuild  # type: ignore[union-attr]
+                s["scope"].get("data_version") in wanted_dvs
+                or s["scope"].get("data_version") == "all"
             )
             and s["payload"].get("status") == "complete"  # type: ignore[union-attr]
         ]
@@ -280,10 +267,10 @@ def _column_names(conn: sqlite3.Connection, table: str) -> list[str]:
     return [row["name"] for row in cur.fetchall()]
 
 
-def _coverage_matrix(
+def _platt_coverage(
     conn: sqlite3.Connection, data_versions: Iterable[str] | None = None
 ) -> dict[str, dict[str, int]]:
-    """Return {data_version: {city: count}}."""
+    """Return {data_version: {(cluster, season): count}} as flat dict."""
     out: dict[str, dict[str, int]] = defaultdict(dict)
     where = ""
     params: tuple = ()
@@ -294,11 +281,12 @@ def _coverage_matrix(
         where = f"WHERE data_version IN ({','.join('?' * len(dv_list))})"
         params = tuple(dv_list)
     sql = (
-        f"SELECT data_version, city, COUNT(*) AS n FROM {TARGET_TABLE} {where} "
-        "GROUP BY data_version, city"
+        f"SELECT data_version, cluster, season, COUNT(*) AS n FROM {TARGET_TABLE} {where} "
+        "GROUP BY data_version, cluster, season"
     )
     for row in conn.execute(sql, params):
-        out[row["data_version"]][row["city"]] = int(row["n"])
+        key = f"{row['cluster']}/{row['season']}"
+        out[row["data_version"]][key] = int(row["n"])
     return dict(out)
 
 
@@ -338,36 +326,37 @@ def cmd_inspect(args: argparse.Namespace) -> int:
 
     # Stage row counts
     print("=== STAGE row counts ===")
-    sc_pairs = _row_count(
+    sc_platt = _row_count(
         stage,
         TARGET_TABLE,
         f"data_version IN ({','.join('?' * len(requested_dvs))})",
         tuple(requested_dvs),
     )
-    print(f"  {TARGET_TABLE}: {sc_pairs:>12,}")
+    print(f"  {TARGET_TABLE}: {sc_platt:>12,}")
     print()
 
     # Prod baseline
     if prod is not None:
         print("=== PROD row counts (baseline; would be replaced for these data_versions) ===")
-        pc_pairs = _row_count(
+        pc_platt = _row_count(
             prod,
             TARGET_TABLE,
             f"data_version IN ({','.join('?' * len(requested_dvs))})",
             tuple(requested_dvs),
         )
-        print(f"  {TARGET_TABLE}: {pc_pairs:>12,}")
+        print(f"  {TARGET_TABLE}: {pc_platt:>12,}")
         print()
-        total_pairs = _row_count(prod, TARGET_TABLE)
-        print(f"  (total {TARGET_TABLE} in PROD across all data_versions: {total_pairs:,})")
+        total_platt = _row_count(prod, TARGET_TABLE)
+        print(f"  (total {TARGET_TABLE} in PROD across all data_versions: {total_platt:,})")
         print()
 
     # Coverage matrix
-    print(f"=== STAGE coverage: cities x data_versions ({TARGET_TABLE}) ===")
-    cov = _coverage_matrix(stage, requested_dvs)
+    print(f"=== STAGE coverage: {TARGET_TABLE} (cluster/season buckets) ===")
+    pcov = _platt_coverage(stage, requested_dvs)
     for dv in requested_dvs:
-        cities = cov.get(dv, {})
-        print(f"  {dv}: {len(cities)} cities, {sum(cities.values()):,} pairs")
+        buckets = pcov.get(dv, {})
+        total = sum(buckets.values())
+        print(f"  {dv}: {len(buckets)} buckets, {total:,} models")
     print()
 
     # Verdict
@@ -395,125 +384,67 @@ def _backup_prod_tables(
     metrics: list[str],
     backup_dir: Path,
 ) -> Path:
-    """Atomic, bit-exact backup of PROD ``calibration_pairs_v2`` rows
-    matching any of the metric data_versions. Returns final backup
-    file path.
+    """Atomic, gzipped SQL dump of platt_models_v2 rows matching any of the
+    metric data_versions. Returns final backup file path.
 
-    2026-05-13: Replaced gzipped per-row SQL dump with ``VACUUM INTO``
-    (single-statement SQLite engine bulk copy) followed by an in-place
-    trim of non-target tables/rows. On the 35 GB PROD DB the legacy
-    Python row-by-row gzip path projected ~11h wall-clock; VACUUM INTO
-    runs at SSD bandwidth (~10-15 min for full PROD). The result is a
-    standalone ``.db`` file restorable via:
-
-        sqlite3 PROD_DB \\
-          "ATTACH '<backup.db>' AS bak; \\
-           DELETE FROM calibration_pairs_v2 WHERE data_version IN (...); \\
-           INSERT INTO calibration_pairs_v2 SELECT * FROM bak.calibration_pairs_v2;"
-
-    Atomicity: VACUUM INTO writes to a ``.tmp`` path that we move into
-    place only after the trim+VACUUM succeeds. Independently
-    verifiable: ``sqlite3 backup.db "PRAGMA integrity_check"``.
+    Independently verifiable: ``gunzip -t`` then sqlite3 import + count.
     """
     backup_dir.mkdir(parents=True, exist_ok=True)
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    final = backup_dir / f"zeus-forecasts.db.calibration_pairs_v2_pre_promotion_{ts}.db"
-    tmp = final.with_suffix(".db.tmp")
-    # VACUUM INTO refuses to write to an existing file. Clear any prior
-    # tmp from a killed run; the final path is timestamped so it cannot
-    # collide.
-    if tmp.exists():
-        tmp.unlink()
+    final = backup_dir / f"zeus-world.db.platt_models_v2_pre_promotion_{ts}.sql.gz"
+    tmp = final.with_suffix(final.suffix + ".tmp")
 
     requested_dvs: list[str] = []
     for m in metrics:
         requested_dvs.extend(METRIC_TO_DATA_VERSIONS[m])
-    dv_placeholders = ",".join("?" * len(requested_dvs))
 
     conn = _ro_connect(prod_path)
     try:
-        # Single-statement bulk copy. SQLite streams pages directly;
-        # no Python row iteration. Output is a fully-formed SQLite DB
-        # with the same schema as PROD.
-        conn.execute("VACUUM INTO ?", (str(tmp),))
+        with gzip.open(tmp, "wt", encoding="utf-8") as gz:
+            gz.write("-- Zeus platt_models_v2 pre-promotion backup\n")
+            gz.write(f"-- Generated: {datetime.now(timezone.utc).isoformat()}\n")
+            gz.write(f"-- Source PROD: {prod_path}\n")
+            gz.write(f"-- Metrics: {','.join(metrics)}\n")
+            gz.write(f"-- Data versions: {','.join(requested_dvs)}\n")
+            gz.write(f"-- Tables backed up: {TARGET_TABLE}\n\n")
+            gz.write("BEGIN TRANSACTION;\n")
+            cols = _column_names(conn, TARGET_TABLE)
+            placeholders = ",".join(cols)
+            where = (
+                f"WHERE data_version IN ({','.join('?' * len(requested_dvs))})"
+            )
+            cur = conn.execute(
+                f"SELECT {placeholders} FROM {TARGET_TABLE} {where}",
+                tuple(requested_dvs),
+            )
+            row_count = 0
+            for row in cur:
+                vals = [_sql_literal(v) for v in row]
+                gz.write(
+                    f"INSERT INTO {TARGET_TABLE} ({placeholders}) VALUES ({','.join(vals)});\n"
+                )
+                row_count += 1
+            gz.write(f"-- {TARGET_TABLE}: {row_count} rows backed up\n")
+            gz.write("COMMIT;\n")
     finally:
         conn.close()
 
-    # Trim the backup: keep ONLY TARGET_TABLE rows whose data_version
-    # is in scope, drop every other table. We keep zeus_meta (sentinel
-    # archive — useful for forensics) but drop other large tables to
-    # bring the backup down to roughly the size of the target rows.
-    trim = sqlite3.connect(str(tmp))
-    try:
-        keep_tables = {TARGET_TABLE, "zeus_meta"}
-        # Drop indexes/triggers/views referencing non-kept tables first
-        # to avoid cascading errors. sqlite_master lists everything.
-        others = [
-            row[0] for row in trim.execute(
-                "SELECT name FROM sqlite_master "
-                "WHERE type='table' AND name NOT IN ({}) "
-                "AND name NOT LIKE 'sqlite_%'".format(
-                    ",".join(f"'{t}'" for t in keep_tables)
-                )
-            )
-        ]
-        for t in others:
-            trim.execute(f"DROP TABLE IF EXISTS \"{t}\"")
-        # Scope TARGET_TABLE rows
-        trim.execute(
-            f"DELETE FROM {TARGET_TABLE} WHERE data_version NOT IN ({dv_placeholders})",
-            tuple(requested_dvs),
-        )
-        trim.commit()
-        # Drop user-defined indexes on TARGET_TABLE to shrink the
-        # backup artifact. Restoration via ATTACH+INSERT lands rows in
-        # PROD which has its own indexes; the backup does not need
-        # them. ``sqlite_autoindex_*`` indexes (PRIMARY KEY / UNIQUE)
-        # are owned by SQLite and cannot be dropped without redefining
-        # the table -- skip them.
-        idx_rows = list(trim.execute(
-            "SELECT name FROM sqlite_master WHERE type='index' "
-            "AND tbl_name=? AND name NOT LIKE 'sqlite_autoindex_%'",
-            (TARGET_TABLE,),
-        ))
-        for (idx_name,) in idx_rows:
-            trim.execute(f'DROP INDEX IF EXISTS "{idx_name}"')
-        trim.commit()
-        # Verify integrity post-DELETE+DROP INDEX. We intentionally
-        # skip the post-DELETE VACUUM: SQLite's VACUUM copies the
-        # entire DB to ``$TMPDIR/etilqs_*`` scratch then renames over
-        # the source, which on a near-full disk fails with
-        # SQLITE_FULL. The backup file is correct without VACUUM (just
-        # larger than ideal -- it carries free pages from the DELETEd
-        # rows and dropped indexes). The contents are what matters for
-        # restore, not the file size.
-        ic = trim.execute("PRAGMA integrity_check").fetchone()[0]
-        if str(ic) != "ok":
-            raise RuntimeError(
-                f"Backup integrity check failed: {ic} for {tmp}"
-            )
-        # Record provenance metadata in zeus_meta. Idempotent under
-        # INSERT OR REPLACE.
-        meta_key = "calibration_pairs_v2_backup_provenance"
-        meta_value = json.dumps({
-            "generated_at": datetime.now(timezone.utc).isoformat(),
-            "source_prod": str(prod_path),
-            "metrics": list(metrics),
-            "data_versions": requested_dvs,
-            "tool": "promote_calibration_pairs_v2.py",
-        })
-        # Ensure zeus_meta exists in the trimmed backup. PROD already
-        # has it (sentinels live there) so VACUUM INTO carried it.
-        trim.execute(
-            "INSERT OR REPLACE INTO zeus_meta (key, value) VALUES (?, ?)",
-            (meta_key, meta_value),
-        )
-        trim.commit()
-    finally:
-        trim.close()
-
     os.replace(tmp, final)
+    # Verify gzip integrity
+    with gzip.open(final, "rb") as fh:
+        head = fh.read(64)
+    if not head.startswith(b"-- Zeus platt_models_v2 pre-promotion"):
+        raise RuntimeError(f"Backup integrity check failed: bad header in {final}")
     return final
+
+
+def _sql_literal(value: object) -> str:
+    if value is None:
+        return "NULL"
+    if isinstance(value, (int, float)):
+        return repr(value)
+    s = str(value).replace("'", "''")
+    return f"'{s}'"
 
 
 # --------------------------------------------------------------------------
@@ -596,7 +527,7 @@ def cmd_promote(args: argparse.Namespace) -> int:
     # Copilot C (#112): refuse to commit when STAGE has 0 rows for the
     # tables we would touch. Otherwise --commit would silently DELETE
     # PROD rows for the requested data_versions and INSERT nothing,
-    # wiping calibration_pairs_v2 if STAGE is empty/mis-specified.
+    # wiping platt_models_v2 if STAGE is empty/mis-specified.
     if sc == 0 and not args.allow_empty_stage:
         print(
             f"x REFUSED: STAGE has 0 rows for {TARGET_TABLE} matching the "
@@ -616,159 +547,94 @@ def cmd_promote(args: argparse.Namespace) -> int:
         prod_cols = _column_names(prod_ro, TARGET_TABLE)
     finally:
         prod_ro.close()
-    # 2026-05-27 fitz: accept column-set equality; column-order differences
-    # are tolerated because the INSERT below uses an explicit (col_list)
-    # projection from STAGE, so order drift does NOT corrupt the projection.
-    # Strict-equality required only on the SET of column names and types.
-    if set(stage_cols) != set(prod_cols):
-        print("x REFUSED: STAGE/PROD column set mismatch:")
+    if stage_cols != prod_cols:
+        print("x REFUSED: STAGE/PROD schema mismatch:")
         print(f"  {TARGET_TABLE}: STAGE={stage_cols} vs PROD={prod_cols}")
         print(
-            "  STAGE-only: " + str(sorted(set(stage_cols) - set(prod_cols)))
-        )
-        print(
-            "  PROD-only:  " + str(sorted(set(prod_cols) - set(stage_cols)))
+            "  Promote requires identical column sets and order. Resolve schema "
+            "drift before retrying."
         )
         stage.close()
         return 1
-    if stage_cols != prod_cols:
-        print(
-            "i NOTE: STAGE/PROD column ORDER differs but SET matches. Promote "
-            "uses explicit (col_list) projection so this is safe. Proceeding."
-        )
-        print(f"  STAGE order: {stage_cols}")
-        print(f"  PROD order:  {prod_cols}")
 
     if not args.commit:
         print("i DRY-RUN: no changes made. Re-run with --commit to apply.")
         stage.close()
         return 0
 
-    # Backup first (unless --skip-backup).
+    # Backup first
     backup_dir = Path(args.backup_dir).resolve()
-    if getattr(args, "skip_backup", False):
-        backup_path = None
-        print(
-            f"i SKIPPING backup (--skip-backup). Recovery source: "
-            f"STAGE_DB={stage_path}; existing gzipped backups under "
-            f"{backup_dir} remain available."
-        )
-        print()
-    else:
-        print(f"Creating backup in {backup_dir}...")
-        backup_path = _backup_prod_tables(prod_path, metrics, backup_dir)
-        print(f"  + {backup_path} ({backup_path.stat().st_size:,} bytes)")
-        print()
-
-    # Close the read-only STAGE handle BEFORE writable promote opens
-    # PROD with ATTACH. The ATTACH path re-opens STAGE read-only via
-    # the writable PROD connection, so holding a second handle is
-    # wasteful and risks lock contention if STAGE were ever modified
-    # concurrently. (Stage cols already captured above.)
-    cols = _column_names(stage, TARGET_TABLE)
-    stage.close()
-    col_list = ",".join(cols)
-    # Build the SELECT column expression. With --null-snapshot-id, the
-    # snapshot_id column is emitted as a literal NULL via SQL instead of
-    # the source column, so the ATTACH path matches the legacy Python
-    # null-snapshot semantics row-for-row without a per-row branch.
-    select_exprs = [f"NULL AS {c}" if (args.null_snapshot_id and c == "snapshot_id") else c
-                    for c in cols]
-    select_list = ",".join(select_exprs)
-    dv_placeholders = ",".join("?" * len(requested_dvs))
+    print(f"Creating backup in {backup_dir}...")
+    backup_path = _backup_prod_tables(prod_path, metrics, backup_dir)
+    print(f"  + {backup_path} ({backup_path.stat().st_size:,} bytes)")
+    print()
 
     # Apply
-    print("Opening PROD writable + ATTACH STAGE read-only...")
+    print("Opening PROD writable...")
     prod_rw = _rw_connect(prod_path)
     try:
-        # ATTACH STAGE_DB read-only on the same connection so the
-        # INSERT...SELECT can stream rows DB-to-DB without round-tripping
-        # through Python. The mode=ro URI ensures the ATTACH cannot
-        # mutate STAGE even by accident.
-        stage_uri = f"file:{stage_path}?mode=ro"
-        prod_rw.execute("ATTACH DATABASE ? AS stage", (stage_uri,))
+        prod_rw.execute("BEGIN IMMEDIATE")
         try:
-            prod_rw.execute("BEGIN IMMEDIATE")
-            try:
-                # Verify ATTACHed STAGE schema matches PROD's. Defensive:
-                # we already checked above via separate connections but
-                # the ATTACH-side view is what the INSERT actually uses,
-                # and a STAGE that diverged between checks would corrupt
-                # the SELECT projection.
-                stage_attach_cols = [
-                    row[1] for row in
-                    prod_rw.execute("PRAGMA stage.table_info(calibration_pairs_v2)").fetchall()
-                ]
-                # 2026-05-27 fitz: set-equality (order is fine; INSERT uses
-                # explicit projection from STAGE so order doesn't corrupt).
-                if set(stage_attach_cols) != set(cols):
-                    raise RuntimeError(
-                        f"ATTACH stage.{TARGET_TABLE} column set drift: "
-                        f"expected {sorted(cols)}, got {sorted(stage_attach_cols)}"
+            cols = _column_names(stage, TARGET_TABLE)
+            placeholders = ",".join("?" for _ in cols)
+            col_list = ",".join(cols)
+            # Delete
+            deleted = prod_rw.execute(
+                f"DELETE FROM {TARGET_TABLE} WHERE data_version IN "
+                f"({','.join('?' * len(requested_dvs))})",
+                tuple(requested_dvs),
+            ).rowcount
+            print(f"  {TARGET_TABLE}: deleted {deleted:,} rows")
+            # Insert
+            cur = stage.execute(
+                f"SELECT {col_list} FROM {TARGET_TABLE} WHERE data_version IN "
+                f"({','.join('?' * len(requested_dvs))})",
+                tuple(requested_dvs),
+            )
+            inserted = 0
+            batch: list[tuple] = []
+            for row in cur:
+                batch.append(tuple(row))
+                if len(batch) >= 5000:
+                    prod_rw.executemany(
+                        f"INSERT INTO {TARGET_TABLE} ({col_list}) VALUES ({placeholders})",
+                        batch,
                     )
-
-                # Delete: same scoping as legacy path.
-                deleted = prod_rw.execute(
-                    f"DELETE FROM {TARGET_TABLE} WHERE data_version IN ({dv_placeholders})",
-                    tuple(requested_dvs),
-                ).rowcount
-                print(f"  {TARGET_TABLE}: deleted {deleted:,} rows")
-
-                # Bulk INSERT...SELECT from ATTACHed STAGE. SQLite executes
-                # this entirely inside its own engine: no Python row
-                # iteration, no executemany batching, no per-row branch.
-                cur = prod_rw.execute(
-                    f"INSERT INTO {TARGET_TABLE} ({col_list}) "
-                    f"SELECT {select_list} FROM stage.{TARGET_TABLE} "
-                    f"WHERE data_version IN ({dv_placeholders})",
-                    tuple(requested_dvs),
+                    inserted += len(batch)
+                    batch.clear()
+            if batch:
+                prod_rw.executemany(
+                    f"INSERT INTO {TARGET_TABLE} ({col_list}) VALUES ({placeholders})",
+                    batch,
                 )
-                inserted = cur.rowcount
-                print(f"  {TARGET_TABLE}: inserted {inserted:,} rows")
+                inserted += len(batch)
+            print(f"  {TARGET_TABLE}: inserted {inserted:,} rows")
 
-                # Integrity check (extracted for testability)
-                print("Running PRAGMA integrity_check...")
-                ic_status = _run_integrity_check(prod_rw)
-                if ic_status != "ok":
-                    raise RuntimeError(
-                        f"integrity_check FAILED: {ic_status}; rolling back."
-                    )
-                print(f"  + {ic_status}")
+            # Integrity check (extracted for testability)
+            print("Running PRAGMA integrity_check...")
+            ic_status = _run_integrity_check(prod_rw)
+            if ic_status != "ok":
+                raise RuntimeError(
+                    f"integrity_check FAILED: {ic_status}; rolling back."
+                )
+            print(f"  + {ic_status}")
 
-                prod_rw.execute("COMMIT")
-                print()
-                print("+ PROMOTION COMMITTED")
-            except Exception as exc:
-                prod_rw.execute("ROLLBACK")
-                print()
-                print(f"x ROLLBACK due to: {exc}")
-                if backup_path is not None:
-                    print(f"  Backup is at: {backup_path}")
-                    print(
-                        "  Restore via the .db artifact:"
-                        " ATTACH '<backup.db>' AS bak;"
-                        " INSERT INTO calibration_pairs_v2"
-                        " SELECT * FROM bak.calibration_pairs_v2;"
-                    )
-                else:
-                    print(
-                        "  --skip-backup was set; recovery source is STAGE_DB"
-                        f" ({stage_path}). Pre-existing gzipped backups under"
-                        f" {Path(args.backup_dir).resolve()} remain available."
-                    )
-                raise
-        finally:
-            # DETACH inside the outer try so we always release STAGE
-            # whether the BEGIN/COMMIT branch succeeded or rolled back.
-            try:
-                prod_rw.execute("DETACH DATABASE stage")
-            except sqlite3.OperationalError:
-                # ATTACH may have failed before BEGIN — DETACH would
-                # then raise "no such database: stage". Swallow to keep
-                # the outer error context.
-                pass
+            prod_rw.execute("COMMIT")
+            print()
+            print("+ PROMOTION COMMITTED")
+        except Exception as exc:
+            prod_rw.execute("ROLLBACK")
+            print()
+            print(f"x ROLLBACK due to: {exc}")
+            print(f"  Backup is at: {backup_path}")
+            print(
+                "  Restore via: gunzip -c BACKUP | sqlite3 PROD_DB"
+                " (after manually clearing affected data_versions)"
+            )
+            raise
     finally:
         prod_rw.close()
+        stage.close()
 
     print()
     print("=== Final PROD row counts ===")
@@ -792,12 +658,13 @@ def cmd_promote(args: argparse.Namespace) -> int:
 
 
 def cmd_verify(args: argparse.Namespace) -> int:
-    """Table-local consistency check on PROD.calibration_pairs_v2.
+    """Table-local consistency check on PROD.platt_models_v2.
 
-    Per K1 (workload-class DB split), platt_models_v2 now lives on
-    zeus-world.db, so this script does NOT cross-DB JOIN. Instead we
-    check that calibration_pairs_v2 has no rows with NULL identity columns
-    and report (city, data_version) bucket coverage.
+    Per K1 (workload-class DB split), calibration_pairs_v2 now lives on
+    zeus-forecasts.db, so this script does NOT cross-DB JOIN. Instead we
+    check that platt_models_v2 has no rows with NULL identity columns,
+    no empty (data_version, cluster, season) buckets after group-by, and
+    a positive total row count.
     """
     prod_path = Path(args.prod_db).resolve()
     print(f"PROD_DB: {prod_path}")
@@ -815,8 +682,8 @@ def cmd_verify(args: argparse.Namespace) -> int:
         # Check 2: no NULL identity columns
         null_check_sql = (
             f"SELECT COUNT(*) FROM {TARGET_TABLE} "
-            "WHERE city IS NULL OR data_version IS NULL "
-            "   OR temperature_metric IS NULL OR target_date IS NULL"
+            "WHERE model_key IS NULL OR temperature_metric IS NULL "
+            "   OR cluster IS NULL OR season IS NULL OR data_version IS NULL"
         )
         null_count = int(prod.execute(null_check_sql).fetchone()[0])
         if null_count > 0:
@@ -824,7 +691,15 @@ def cmd_verify(args: argparse.Namespace) -> int:
             return 1
         print("+ All identity columns are non-NULL")
 
-        # Check 3: (city, data_version) coverage report
+        # Check 3: bucket coverage report (informational; does not fail)
+        cur = prod.execute(
+            f"SELECT data_version, cluster, season, COUNT(*) AS n "
+            f"FROM {TARGET_TABLE} GROUP BY data_version, cluster, season"
+        )
+        buckets = cur.fetchall()
+        print(f"+ {len(buckets)} distinct (data_version, cluster, season) buckets")
+
+        # Check 4: data_version coverage
         dv_counts = {
             row["data_version"]: int(row["n"])
             for row in prod.execute(
@@ -834,14 +709,6 @@ def cmd_verify(args: argparse.Namespace) -> int:
         print(f"+ {len(dv_counts)} distinct data_versions:")
         for dv, n in sorted(dv_counts.items()):
             print(f"    {dv}: {n:,}")
-
-        # Check 4: city coverage
-        city_count = int(
-            prod.execute(
-                f"SELECT COUNT(DISTINCT city) FROM {TARGET_TABLE}"
-            ).fetchone()[0]
-        )
-        print(f"+ {city_count} distinct cities covered")
     finally:
         prod.close()
     return 0
@@ -854,9 +721,9 @@ def cmd_verify(args: argparse.Namespace) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        prog="promote_calibration_pairs_v2",
+        prog="promote_platt",
         description=(
-            "Promote calibration_pairs_v2 STAGE_DB -> production zeus-forecasts.db "
+            "Promote platt_models_v2 STAGE_DB -> production zeus-world.db "
             "(K1 workload-class split)."
         ),
     )
@@ -873,11 +740,8 @@ def build_parser() -> argparse.ArgumentParser:
     pp = sub.add_parser("promote", help="Promote STAGE -> PROD (dry-run by default).")
     pp.add_argument("--stage-db", required=True)
     pp.add_argument("--prod-db", default=DEFAULT_PROD_DB,
-                    help=f"PROD DB path (default: {DEFAULT_PROD_DB}; K1: forecasts DB).")
+                    help=f"PROD DB path (default: {DEFAULT_PROD_DB}; K1: world DB).")
     pp.add_argument("--metrics", default=None)
-    pp.add_argument("--null-snapshot-id", action="store_true",
-                    help="NULL out snapshot_id on inserted calibration_pairs_v2 rows "
-                         "(safer if STAGE snapshot_ids may not exist in PROD).")
     pp.add_argument("--allow-incomplete", action="store_true",
                     help="Bypass sentinel-completeness gate (DANGEROUS).")
     pp.add_argument("--allow-empty-stage", action="store_true",
@@ -885,21 +749,13 @@ def build_parser() -> argparse.ArgumentParser:
                          "promotion that wipes PROD rows for the requested "
                          "data_versions (DANGEROUS).")
     pp.add_argument("--backup-dir", default="state/backups")
-    pp.add_argument("--skip-backup", action="store_true",
-                    help="Skip the pre-promotion .db backup of PROD "
-                         "calibration_pairs_v2. Use only when STAGE_DB is a "
-                         "verified recovery source AND disk space is tight "
-                         "(the backup VACUUM INTO step alone needs ~PROD_SIZE "
-                         "GB free + transient scratch). Existing gzipped "
-                         "backups under --backup-dir remain available as "
-                         "older fallbacks. DANGEROUS without that fallback.")
     pp.add_argument("--commit", action="store_true",
                     help="Apply changes. Without this flag, dry-run only.")
     pp.set_defaults(func=cmd_promote)
 
     pv = sub.add_parser("verify", help="Read-only table-local consistency check on PROD.")
     pv.add_argument("--prod-db", default=DEFAULT_PROD_DB,
-                    help=f"PROD DB path (default: {DEFAULT_PROD_DB}; K1: forecasts DB).")
+                    help=f"PROD DB path (default: {DEFAULT_PROD_DB}; K1: world DB).")
     pv.set_defaults(func=cmd_verify)
 
     return p

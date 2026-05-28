@@ -1,14 +1,14 @@
 # Created: 2026-05-12
 # Last reused or audited: 2026-05-12
 # Authority basis: K1 workload-class DB split; PR #112 Option (c) split.
-# Tests for scripts/promote_calibration_pairs_v2.py.
+# Tests for scripts/promote_calibration.py.
 """Unit tests for the STAGE -> prod calibration_pairs_v2 promotion script.
 
 Each test builds a tiny synthetic STAGE_DB and PROD_DB inside ``tmp_path``,
 exercises one subcommand, and asserts the expected outcome. None of these
 tests touch the real production zeus-forecasts.db. Tests target ONLY the
 calibration_pairs_v2 surface (its sibling platt_models_v2 promotion lives
-on zeus-world.db and is covered by tests/test_promote_platt_models_v2.py).
+on zeus-world.db and is covered by tests/test_promote_platt.py).
 """
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from scripts import promote_calibration_pairs_v2 as P  # noqa: E402
+from scripts import promote_calibration as P  # noqa: E402
 
 
 # --------------------------------------------------------------------------
@@ -358,7 +358,7 @@ def test_promote_creates_verifiable_backup(tmp_path, capsys):
         ).fetchone()
         assert prov_row is not None, "Backup must record provenance in zeus_meta"
         prov = json.loads(prov_row[0])
-        assert prov["tool"] == "promote_calibration_pairs_v2.py"
+        assert prov["tool"] == "promote_calibration.py"
         assert DV_HIGH in prov["data_versions"]
     finally:
         bk.close()
