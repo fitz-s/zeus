@@ -171,7 +171,7 @@ def test_venue_observed_payload_matches_projection_even_with_wrong_attr() -> Non
             ).items():
                 setattr(self, k, v)
 
-    events, projection = build_venue_position_observed_canonical_write(_P(), sequence_no=1)
+    events, projection = build_venue_position_observed_canonical_write(_P(), venue_observed_at="2026-06-01T10:00:00+00:00", sequence_no=1)
     payload = json.loads(events[0]["payload_json"])
     assert payload["fill_authority"] == "venue_position_observed"
     assert payload["recovery_authority"] == "balance_only"

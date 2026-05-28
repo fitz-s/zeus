@@ -2103,6 +2103,7 @@ def test_reconciliation_rescue_builder_emits_chain_synced_event_and_projection_t
 
     rescue_events, rescue_projection = build_reconciliation_rescue_canonical_write(
         rescued_pos,
+        chain_synced_at="2026-04-03T00:10:00Z",
         sequence_no=3,
         source_module="src.state.chain_reconciliation",
     )
@@ -2151,6 +2152,7 @@ def test_reconciliation_rescue_builder_preserves_legacy_rescue_provenance_fields
 
     events, projection = build_reconciliation_rescue_canonical_write(
         rescued_pos,
+        chain_synced_at="2026-04-03T00:10:00Z",
         sequence_no=3,
         source_module="src.state.chain_reconciliation",
     )
