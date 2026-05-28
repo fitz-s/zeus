@@ -9611,6 +9611,18 @@ def _position_current_effective_entry_economics(row, fill_hint: dict | None) -> 
         }
 
     pnl_cost_basis_usd = projection_cost_basis_usd if projection_cost_basis_usd > 0.0 else submitted_size_usd
+    # PR #355 Copilot SEV-1: if the projection row already carries a non-NULL,
+    # non-"none" fill_authority (e.g. "venue_position_observed" written by the
+    # F1 balance-only rescue), honour it rather than unconditionally returning
+    # FILL_AUTHORITY_NONE.  The Position properties (effective_shares,
+    # effective_cost_basis_usd, effective_exposure) already route correctly via
+    # has_chain_observed_authority when fill_authority is preserved here.
+    row_fill_authority = str(row["fill_authority"] or "").strip()
+    effective_fill_authority = (
+        row_fill_authority
+        if row_fill_authority and row_fill_authority != FILL_AUTHORITY_NONE
+        else FILL_AUTHORITY_NONE
+    )
     return {
         "submitted_size_usd": submitted_size_usd,
         "projection_cost_basis_usd": projection_cost_basis_usd,
@@ -9622,7 +9634,7 @@ def _position_current_effective_entry_economics(row, fill_hint: dict | None) -> 
         "shares_filled": 0.0,
         "filled_cost_basis_usd": 0.0,
         "entry_economics_authority": ENTRY_ECONOMICS_LEGACY_UNKNOWN,
-        "fill_authority": FILL_AUTHORITY_NONE,
+        "fill_authority": effective_fill_authority,
         "entry_economics_source": "position_current_projection",
         "entry_fill_verified": False,
         "execution_fact_intent_id": "",
