@@ -14,6 +14,8 @@ from datetime import date, datetime, time, timezone
 from decimal import Decimal
 from typing import Any, Callable
 
+import numpy as np
+
 from src.contracts.execution_price import ExecutionPrice
 from src.decision_kernel import claims
 from src.decision_kernel.canonicalization import stable_hash
@@ -51,6 +53,8 @@ from src.events.opportunity_event import OpportunityEvent
 from src.events.reactor import EventSubmissionReceipt, OpportunityEventReactor, ReactorConfig
 from src.riskguard.risk_level import RiskLevel
 from src.signal.ensemble_signal import p_raw_vector_from_maxes
+from src.config import runtime_cities_by_name
+from src.contracts.settlement_semantics import SettlementSemantics
 from src.strategy.market_fusion import MODEL_ONLY_POSTERIOR_MODE
 from src.types.market import Bin
 
@@ -3234,6 +3238,18 @@ def _json_object(value: object) -> dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
+def _json_list(value: object) -> list[Any]:
+    if isinstance(value, list):
+        return list(value)
+    if not value:
+        return []
+    try:
+        parsed = json.loads(str(value))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return []
+    return parsed if isinstance(parsed, list) else []
+
+
 def _optional_float(value: object) -> float | None:
     if value is None or value == "":
         return None
@@ -3283,6 +3299,43 @@ def _hash_jsonish(value: object) -> str | None:
     except (TypeError, ValueError, json.JSONDecodeError):
         parsed = value
     return stable_hash(parsed)
+
+
+def _native_costs_by_candidate_direction(
+    family: Any,
+    snapshot_rows: list[dict[str, Any]],
+) -> dict[tuple[str, str], tuple[dict[str, Any] | None, "ExecutionPrice | None", float, float | None, str | None]]:
+    """Return cost tuple per (condition_id, direction) for all candidates × buy directions.
+
+    Value tuple: (quote_book_dict, execution_price, max_size_at_price, slippage_bps, source_kind)
+    Only index [1] (ExecutionPrice) is consumed by downstream callers.
+    """
+    rows_by_condition = _snapshot_rows_by_condition(snapshot_rows)
+    result: dict[tuple[str, str], tuple[dict[str, Any] | None, Any, float, float | None, str | None]] = {}
+    for candidate in family.candidates:
+        condition_id = str(candidate.condition_id or "")
+        if not condition_id:
+            continue
+        row = rows_by_condition.get(condition_id)
+        for token_id, direction in (
+            (str(candidate.yes_token_id or ""), "buy_yes"),
+            (str(candidate.no_token_id or ""), "buy_no"),
+        ):
+            source_kind = _native_cost_source_for_direction(direction)
+            if row is None or not token_id:
+                result[(condition_id, direction)] = (None, None, 0.0, None, source_kind)
+                continue
+            try:
+                execution_price, _p_fill, _c95 = _execution_price_from_snapshot(
+                    row, selected_token_id=token_id, direction=direction
+                )
+                book = _native_quote_book_from_snapshot_row(row)
+                max_size = float(book.min_order_size)
+            except Exception:
+                result[(condition_id, direction)] = (None, None, 0.0, None, source_kind)
+                continue
+            result[(condition_id, direction)] = (None, execution_price, max_size, None, source_kind)
+    return result
 
 
 def _native_side_for_direction(direction: str | None) -> str | None:
