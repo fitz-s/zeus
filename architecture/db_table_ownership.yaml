@@ -2019,3 +2019,16 @@ tables:
     created_by: init_schema_pre_pr_s4b
     pk_col: null
     notes: Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Drop after 2026-08-09.
+
+  - name: settlements_v2
+    db: world
+    schema_class: test_fixture_historical
+    schema_version_owner: null
+    created_by: tests/fixtures/before_p2_sqlite_master.sql
+    pk_col: null
+    notes: >
+      Historical schema snapshot used in test fixtures only
+      (tests/fixtures/before_p2_sqlite_master.sql). Captures pre-Phase-2
+      world.db sqlite_master state for migration regression tests. Never
+      created in production DBs; the _v2 suffix is intentional artifact
+      of the era this snapshot was taken. (PR #359)

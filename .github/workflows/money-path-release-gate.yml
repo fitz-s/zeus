@@ -87,7 +87,7 @@ jobs:
           echo "review_condition=${GATE_REVIEW_CONDITION}"
 
       - name: Check pinned schema contract
-        run: python scripts/check_schema_version.py
+        run: python scripts/check_schema_fingerprint.py
 
       - name: Run required money-path antibodies
         run: |

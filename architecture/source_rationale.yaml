@@ -148,6 +148,10 @@ providers:
     role: internal_adapter
     client: src/data/scheduler_adapter.py
     why: Internal scheduling adapter. NOT an external truth source. (PR #348)
+  forecast:
+    role: forecast_infrastructure
+    client: src/data/forecast_source_registry.py
+    why: Internal forecast infrastructure module — registry, ingest protocol, extrema authority, DB fetcher. Not an external truth source; coordinates routing between ecmwf_open_data and tigge providers. (PR #359)
 package_defaults:
   src/contracts:
     zone: K0_frozen_kernel
