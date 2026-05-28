@@ -108,12 +108,26 @@ def constrain_family_posterior_by_observation(
             raise ValueError(f"p_family[{i}] < 0: {v!r}")
         cleaned.append(v)
 
-    # ADVISORY_ONLY: no observation authority, return input unchanged.
+    # ADVISORY_ONLY: no observation authority; renormalize by total mass so
+    # p_obs is always a probability vector regardless of constraint authority
+    # status. Critic-pass-3 (Copilot 2026-05-27): without this, an
+    # unnormalized p_family + ADVISORY_ONLY would feed raw weights into
+    # optimize_exit_family's hold_value = shares × p_obs.
     if not constraint.is_deterministic():
+        total_mass = float(sum(cleaned))
+        if total_mass <= contradiction_eps:
+            return ObservationConstrainedPosterior(
+                p_obs=tuple(0.0 for _ in cleaned),
+                impossible_mask=tuple(False for _ in cleaned),
+                renormalization_mass=total_mass,
+                contradiction_flag=True,
+                authority_status=constraint.authority_status,
+            )
+        p_obs = tuple(v / total_mass for v in cleaned)
         return ObservationConstrainedPosterior(
-            p_obs=tuple(cleaned),
+            p_obs=p_obs,
             impossible_mask=tuple(False for _ in cleaned),
-            renormalization_mass=float(sum(cleaned)),
+            renormalization_mass=total_mass,
             contradiction_flag=False,
             authority_status=constraint.authority_status,
         )

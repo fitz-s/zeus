@@ -6,9 +6,12 @@
 # The operator's spec §1: the real exit objective is family-level liquidation
 # under a mutually-exclusive payoff Y ∈ {1..K} — not per-position edge
 # reversal. This module implements the family decision as a deterministic
-# pure function over typed leg inputs. The cycle_runtime monitor grouping
-# step (D3 part 2 — wired in src/engine/cycle_runtime.py) calls this once
-# per (city, target_date, temperature_metric, market_family_id) bucket.
+# pure function over typed leg inputs.
+#
+# This module is the pure-math layer of the multi-bin family exit strategy.
+# The cycle_runtime monitor grouping step (D3 part 2) is DEFERRED to the
+# follow-up integration PR per architecture/exit_strategy_integration_plan_2026_05_27.md
+# — this PR ships the pure optimizer only; no in-tree caller imports it yet.
 #
 # Math (operator §3 + §5):
 #   For each held leg i with shares x_i, observation-constrained posterior

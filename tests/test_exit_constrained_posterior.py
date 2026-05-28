@@ -130,7 +130,8 @@ class TestContradictionFlag:
 
 
 class TestAdvisoryPassthrough:
-    def test_advisory_constraint_returns_input_unchanged(self):
+    def test_advisory_constraint_returns_renormalized_input(self):
+        # Input already sums to 1.0 — renormalization is a no-op.
         bins = [_wbin(60, 61), _wbin(62, 63), _wbin(64, 65)]
         p = [0.3, 0.5, 0.2]
         result = constrain_family_posterior_by_observation(p, bins, _advisory())
@@ -139,6 +140,18 @@ class TestAdvisoryPassthrough:
         assert result.p_obs == tuple(p)
         assert result.contradiction_flag is False
         assert math.isclose(result.renormalization_mass, 1.0, rel_tol=1e-12)
+
+    def test_advisory_constraint_renormalizes_unnormalized_input(self):
+        # Critic-pass-3 antibody (Copilot 2026-05-27): unnormalized p_family
+        # + ADVISORY_ONLY must not feed raw weights into optimize_exit_family.
+        bins = [_wbin(60, 61), _wbin(62, 63), _wbin(64, 65)]
+        p = [3.0, 5.0, 2.0]  # sum = 10.0
+        result = constrain_family_posterior_by_observation(p, bins, _advisory())
+        assert result.authority_status == "ADVISORY_ONLY"
+        assert result.impossible_mask == (False, False, False)
+        assert result.p_obs == (0.3, 0.5, 0.2)
+        assert math.isclose(result.renormalization_mass, 10.0, rel_tol=1e-12)
+        assert result.contradiction_flag is False
 
 
 # ----- input validation (fail-closed entry invariants) -----

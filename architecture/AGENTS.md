@@ -91,6 +91,10 @@ Changes here are architecture or governance changes, never “just docs.”
 | `cascade_liveness_contract.yaml` | Registry of state-machine tables and their cascade liveness obligations per SCAFFOLD_F14_F16 §G.2 (created 2026-05-16) |
 | `db_table_ownership.yaml` | Canonical table→DB mapping authority post K1 DB split (eba80d2b9d); cross-reference for all DB routing decisions (created 2026-05-14) |
 | `pre_existing_failure_registry.yaml` | Central registry for tracked pre-existing failure IDs; each entry must have owner, evidence, review deadline, and active-scope conditions (created 2026-05-21) |
+| `exit_strategy_audit_2026_05_27.md` | Pre-merge audit of D1+D2+D3 exit-strategy pure-math layer; graded findings A1..A3 (created 2026-05-27) |
+| `exit_strategy_integration_plan_2026_05_27.md` | Integration plan for D3 part 2 — cycle_runtime wiring deferred to follow-up PR (created 2026-05-27) |
+| `pr_exit_strategy_premerge_critic_2026_05_27.md` | Pre-merge critic pass 1 findings for PR #353 (created 2026-05-27) |
+| `pr_exit_strategy_premerge_critic_pass2_2026_05_27.md` | Pre-merge critic pass 2 findings for PR #353; direction-flip SEV-1 catch (created 2026-05-27) |
 | `ecmwf_opendata_tigge_equivalence_2026_05_06.yaml` | ECMWF OpenData/TIGGE equivalence proof registry; calibration READ-path audit evidence (created 2026-05-06) |
 | `improvement_backlog.yaml` | Structured improvement backlog from PROPOSALS_2026-05-04 P3 context capsule (created 2026-05-04) |
 | `math_defects_2_3_2_4_3_1_design_2026-05-05.md` | Unified design for math defects 2.3/2.4/3.1; DDD INV-17 fix + calibration transfer scaffolding (created 2026-05-05) |
