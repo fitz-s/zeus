@@ -110,38 +110,34 @@ def test_b_and_e_always_in_regen():
 
 
 # ---------------------------------------------------------------------------
-# Test 5: gate change -> final_regen == all cohorts
+# Test 5: gate change -> ABORT (superseded by B7, operator pre-MC re-audit 2026-05-28)
 # ---------------------------------------------------------------------------
+# Original SD3 behavior was "gate_changed=True -> return all_cohorts (full reproduce)".
+# Operator B7 (2026-05-28): silently degrading selective rebuild into full reproduce
+# hides that the manifest itself is stale (its A/B/C/D/E classifications were computed
+# under a superseded gate). Caller must regenerate the manifest under the current gate,
+# then re-run. compute_final_regen now raises SystemExit on gate_changed=True.
 
-def test_gate_change_full_reproduce():
-    """When gate_changed=True, every cohort in the manifest must be in final_regen."""
+def test_gate_change_full_reproduce_now_aborts():
+    """B7 supersedes SD3 'full reproduce' behavior — gate_changed=True must ABORT,
+    not return all_cohorts. The manifest itself is stale under a new gate."""
     replay_results = {
-        ("Ankara", "DJF", "high"): True,   # PASS — should be ignored
-        ("Helsinki", "MAM", "high"): True,  # PASS — should be ignored
+        ("Ankara", "DJF", "high"): True,
+        ("Helsinki", "MAM", "high"): True,
     }
-    regen = compute_final_regen(MANIFEST_ROWS, replay_results, gate_changed=True)
-
-    all_keys = {(r["city"], r["season"], r["metric"]) for r in MANIFEST_ROWS}
-    assert regen == all_keys, (
-        f"gate_changed=True must produce final_regen == all cohorts.\n"
-        f"Expected: {sorted(all_keys)}\nGot: {sorted(regen)}"
-    )
+    with pytest.raises(SystemExit):
+        compute_final_regen(MANIFEST_ROWS, replay_results, gate_changed=True)
 
 
-# ---------------------------------------------------------------------------
-# Test 6: gate change ignores replay results (passed A cohorts still in regen)
-# ---------------------------------------------------------------------------
-
-def test_gate_change_ignores_replay():
-    """gate_changed=True must include A cohorts even if they have replay PASS results."""
+def test_gate_change_with_passing_a_cohort_still_aborts():
+    """B7: gate_changed=True ALWAYS aborts, regardless of replay verdicts. The
+    replay results were computed against the OLD gate's persisted rows, so they
+    are not informative under the new gate either."""
     replay_results = {
-        ("Ankara", "DJF", "high"): True,   # PASS — but gate changed, so must still regen
+        ("Ankara", "DJF", "high"): True,  # PASS under OLD gate — meaningless now
     }
-    regen = compute_final_regen(MANIFEST_ROWS, replay_results, gate_changed=True)
-
-    assert ("Ankara", "DJF", "high") in regen, (
-        "gate_changed=True must regenerate A cohorts even with replay PASS"
-    )
+    with pytest.raises(SystemExit):
+        compute_final_regen(MANIFEST_ROWS, replay_results, gate_changed=True)
 
 
 # ---------------------------------------------------------------------------

@@ -83,12 +83,51 @@ _ENS_LIVE_DATA_VERSION = _ENS_DATA_VERSIONS["high"]["live"]
 _ENS_PRIOR_DATA_VERSION = _ENS_DATA_VERSIONS["high"]["prior"]
 
 # ── season definitions ───────────────────────────────────────────────────────
+# Calendar groups only — the hemisphere-aware LABEL is derived per city via
+# _iter_seasons_for_city() (B1 antibody, 2026-05-28).
 _SEASONS: tuple[tuple[str, tuple[int, ...]], ...] = (
     ("DJF", (12, 1, 2)),
     ("MAM", (3, 4, 5)),
     ("JJA", (6, 7, 8)),
     ("SON", (9, 10, 11)),
 )
+
+
+def _iter_seasons_for_city(city):
+    """B1 / Operator pre-MC re-audit (2026-05-28): yield (season_label, months)
+    HEMISPHERE-AWARE for the given city.
+
+    The full_transport_v1 row PK is keyed by (city, season, month, metric,
+    live_data_version). The LIVE reader looks up rows via
+    `season_from_date(target_date, lat=city.lat)` which applies `_SH_FLIP` —
+    so Buenos Aires's calendar-Jan resolves to "JJA", not "DJF". If the producer
+    writes the calendar label verbatim, every SH-city row is orphaned (reader
+    queries the flipped label, finds nothing, fails open).
+
+    Fix: the calendar GROUPS stay the same (months 12,1,2 are the cold quarter
+    everywhere); only the LABEL flips for `city.lat < 0`. Producer + reader
+    agree per-city, per-month.
+
+    Accepts either a City object or a city-name string. Unknown city-name
+    strings fall back to the legacy NH labels (defensive — `_discover_cities`
+    should never emit one, but `city_filter`-driven runs may).
+    """
+    from src.contracts.season import season_from_month  # noqa: PLC0415
+    from src.config import cities_by_name  # noqa: PLC0415
+
+    if isinstance(city, str):
+        city_obj = cities_by_name.get(city)
+        lat = city_obj.lat if city_obj is not None else 90.0  # NH default
+    else:
+        lat = float(city.lat)
+
+    for _calendar_label, months in _SEASONS:
+        # Representative month: the middle of the calendar group. All months
+        # in a calendar group flip to the same label, so any month works; we
+        # pick the middle for deterministic readability.
+        repr_month = months[len(months) // 2]
+        label = season_from_month(repr_month, lat=lat)
+        yield label, months
 
 # ── production DB basenames that are NEVER valid targets ─────────────────────
 _FORBIDDEN_BASENAMES = {"zeus-world.db", "zeus-forecasts.db", "zeus_trades.db"}
@@ -388,7 +427,10 @@ def fit_all(
 
     for city in cities:
         city_fitted = 0
-        for season, months in _SEASONS:
+        # B1 / Operator pre-MC re-audit (2026-05-28): iterate seasons HEMISPHERE-AWARE
+        # for THIS city. Calendar groups (12,1,2) etc are stable; the LABEL flips for
+        # cities with lat<0 so the row PK matches what the live reader queries.
+        for season, months in _iter_seasons_for_city(city):
             for metric in metrics:
                 season_months = tuple(months)
                 bucket_label = f"{city}/{metric}/{season}"
@@ -398,17 +440,24 @@ def fit_all(
                 _live_dv = _dv["live"]
                 _prior_dv = _dv["prior"]
                 try:
+                    # B6 / Operator pre-MC re-audit (2026-05-28): every fit-side loader
+                    # must read with the SAME cutoff that is written into training_cutoff,
+                    # else the stored cutoff is a label only and two-row reproducibility
+                    # cannot reproduce a row from its declared cutoff. settled_before=today_str
+                    # mirrors the cutoff in every place residuals/coverage are read.
                     # Probe live residuals to get n counts for signature hash
                     tig_residuals = load_bucket_residuals(
                         conn, city=city, data_version=_prior_dv,
                         metric=metric, season_months=season_months,
                         require_verified=False,
                         contributor_policy="legacy_tigge_null_passthrough",
+                        settled_before=today_str,
                     )
                     opd_residuals = load_bucket_residuals(
                         conn, city=city, data_version=_live_dv,
                         metric=metric, season_months=season_months,
                         contributor_policy="full_contributor_only",
+                        settled_before=today_str,
                     )
 
                     if not tig_residuals:
@@ -424,6 +473,7 @@ def fit_all(
                         season_months=season_months,
                         metric=metric,
                         kappa=kappa,
+                        settled_before=today_str,
                     )
 
                     error_model_key = (
@@ -439,14 +489,16 @@ def fit_all(
                     # data fit_city_predictive_error actually used. A season-labelled row whose
                     # live/paired evidence covered only one month must declare it so the
                     # reader's month-scope guard rejects misapplication (COVERAGE_MISLABELED).
+                    # B6: settled_before=today_str (NOT None) so coverage matches the
+                    # cutoff the fit actually consumed AND the cutoff written into the row.
                     n_paired, paired_cov = paired_delta_coverage(
                         conn, city=city, live_data_version=_live_dv,
                         prior_data_version=_prior_dv, metric=metric,
-                        season_months=season_months, settled_before=None,
+                        season_months=season_months, settled_before=today_str,
                     )
                     coverage_months_csv = _effective_coverage_months(
                         conn, city=city, metric=metric, season_months=season_months,
-                        prior_dv=_prior_dv, live_dv=_live_dv, settled_before=None,
+                        prior_dv=_prior_dv, live_dv=_live_dv, settled_before=today_str,
                         n_opd=len(opd_residuals), min_live_n=DEFAULT_MIN_LIVE_N,
                         n_paired=n_paired, min_paired_n=MIN_PAIRED_N,
                         paired_cov=paired_cov,

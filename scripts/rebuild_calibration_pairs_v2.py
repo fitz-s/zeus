@@ -227,7 +227,17 @@ def _native_error_params_for_snapshot(
 
     metric = spec.identity.temperature_metric
     season_label = season_from_date(target_date, lat=city.lat)
-    cache_key = (city.name, season_label, metric)
+    # B2 / Operator pre-MC re-audit (2026-05-28): cache_key MUST include target_month,
+    # else two snapshots in the same (city, season, metric) but different months reuse
+    # one cache entry → either a month-scope-rejected None poisons the bucket for a
+    # later covered month, OR a covered-month row's params get reused for an off-coverage
+    # month, bypassing read_bias_model's month-scope guard. Each calendar month is a
+    # distinct probe of the canonical-read contract.
+    try:
+        target_month = int(str(target_date)[5:7])
+    except (ValueError, IndexError):
+        target_month = None
+    cache_key = (city.name, season_label, metric, target_month)
     if cache_key not in cache:
         # DOMAIN-CANONICALITY FIX (2026-05-28): read the PERSISTED canonical
         # error-model row written by fit_full_transport_error_models.py — DO NOT
@@ -241,10 +251,6 @@ def _native_error_params_for_snapshot(
         versions = _ERROR_MODEL_DATA_VERSIONS.get(metric)
         params: tuple[float, float] | None = None
         if versions is not None:
-            try:
-                target_month = int(str(target_date)[5:7])
-            except (ValueError, IndexError):
-                target_month = None
             row = read_bias_model(
                 conn,
                 city=city.name,

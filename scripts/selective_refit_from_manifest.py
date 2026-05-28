@@ -147,13 +147,18 @@ def _run_replay_for_a_cohorts(
             key = (city, season, metric)
             if key in results:
                 continue  # de-dup: same cohort may appear multiple times
+            # B3 / Operator pre-MC re-audit (2026-05-28): A-cohort reuse decision MUST
+            # compare stored pairs against the PERSISTED canonical row (db mode), not
+            # a recompute at MIN_LIVE_N=5 — the producer wrote at DEFAULT_MIN_LIVE_N=20
+            # so recompute mode evaluates the WRONG model. Db mode also enforces the
+            # per-snapshot target_month / gate_set_hash canonical-read contract.
             cr = _evaluate_cohort(
                 backup_conn=conn,
                 city_name=city,
                 metric=metric,
                 season=season,
-                error_model_source="recompute",
-                model_db_conn=None,
+                error_model_source="db",
+                model_db_conn=conn,
                 n_per_cohort=n_per_cohort,
                 n_mc=n_mc,
                 tol=tol,
@@ -200,10 +205,23 @@ def compute_final_regen(
     }
 
     if gate_changed:
-        logger.warning(
-            "gate change -> full reproduce: all %d cohorts queued for MC regen", len(all_cohorts)
+        # B7 / Operator pre-MC re-audit (2026-05-28): a stale gate_set_hash means the
+        # ROW_ACTION_MANIFEST's per-row classifications (A/B/C/D/E) were computed under
+        # a SUPERSEDED gate; the replay-equivalence verdicts they carry are no longer
+        # trustworthy. Silently regenerating ALL cohorts hides that the manifest itself
+        # is stale and bypasses the only audit trail that justifies cohort selection.
+        # Caller MUST regenerate ROW_ACTION_MANIFEST under the current gate first, then
+        # re-invoke selective_refit. This is the antibody for "selective rebuild silently
+        # degrades to full reproduce".
+        raise SystemExit(
+            "gate_set_hash changed since the manifest was generated — selective rebuild "
+            "ABORTED. The ROW_ACTION_MANIFEST's A/B/C/D/E classifications were computed "
+            "under a superseded gate and are stale; their replay/reuse verdicts cannot be "
+            "trusted under the current gate. Regenerate the manifest with the current "
+            "gate (rerun scripts/audit_error_model_row_reproducibility.py and produce a "
+            "fresh ROW_ACTION_MANIFEST under the current gate_set_hash), then re-run "
+            "selective_refit. This script will not silently full-regen."
         )
-        return set(all_cohorts)
 
     regen: set[tuple[str, str, str]] = set()
 

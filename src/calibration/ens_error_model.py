@@ -67,7 +67,12 @@ MIN_PRIOR_N = 5
 # reader auto-reject every row fit under the old gate set.
 # -sd2 (2026-05-28): MIN_PRIOR_N 2->5 + CONSERVATIVE_RESIDUAL_FLOOR_C added -> every
 # pre-SD2 STAGING row auto-quarantines; this rebuild is a one-time full reproduce.
-_GATE_SET_VERSION = "ftgate-2026-05-28-sd2"
+# -sd3 (2026-05-28): B1 hemisphere-aware season label + B6 training_cutoff threaded
+# into every fit loader. B1 changes the row PK semantics for SH cities (rows now
+# carry the SH-flipped label that matches reader queries). B6 changes the data the
+# fit consumes (settled_before=today_str at every loader vs the pre-fix None). Stats
+# thresholds unchanged.
+_GATE_SET_VERSION = "ftgate-2026-05-28-sd3"
 
 
 def current_gate_set_hash() -> str:
