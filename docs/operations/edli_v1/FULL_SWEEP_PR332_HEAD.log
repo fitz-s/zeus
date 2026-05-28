@@ -1,0 +1,2697 @@
+........................................................................ [  0%]
+........................................................................ [  1%]
+.....................................................................F.. [  1%]
+................FF...................................................... [  2%]
+........................................................................ [  2%]
+.......FFF.............FF............................................... [  3%]
+........................................................................ [  4%]
+........................................................................ [  4%]
+........................................................................ [  5%]
+....................E................................................... [  5%]
+........................................................................ [  6%]
+........................................................................ [  7%]
+........................................................................ [  7%]
+........................................................................ [  8%]
+........................................................................ [  8%]
+........................................................................ [  9%]
+........................................................................ [  9%]
+........................................................................ [ 10%]
+........................................................................ [ 11%]
+......................ssss......................................sssss.F. [ 11%]
+........................................................................ [ 12%]
+................................sss..................................... [ 12%]
+........................................................................ [ 13%]
+...........................................................ss...s..s.... [ 14%]
+.........F.............................................................. [ 14%]
+........................................................................ [ 15%]
+........................................................................ [ 15%]
+.................s...sss.s.s..s......................................... [ 16%]
+........................................................................ [ 16%]
+........................................................................ [ 17%]
+........................................................................ [ 18%]
+.........................FFFx.....................................ss.... [ 18%]
+..ssss........................ss..ssss..s.sss..s.s.s....s..s..........s. [ 19%]
+...s..................................................F................. [ 19%]
+.......................F...............s.....sssss...................... [ 20%]
+.........F...........................................................F.. [ 21%]
+............................F..F
+==================================== ERRORS ====================================
+____ ERROR at setup of test_config_task_allowlist_task_ids_exist_in_catalog ____
+
+    @pytest.fixture(scope="module")
+    def task_catalog() -> dict:
+>       return _load_yaml(TASK_CATALOG_PATH)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/maintenance_worker/test_bindings/test_zeus_config.py:56: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+tests/maintenance_worker/test_bindings/test_zeus_config.py:40: in _load_yaml
+    with path.open("r", encoding="utf-8") as fh:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = PosixPath('/Users/leofitz/.openclaw/workspace-venus/.codex-worktrees/edli-v1-no-submit-complete/docs/operations/task_2026-05-15_runtime_improvement_engineering_package/02_daily_maintenance_agent/TASK_CATALOG.yaml')
+mode = 'r', buffering = -1, encoding = 'utf-8', errors = None, newline = None
+
+    def open(self, mode='r', buffering=-1, encoding=None,
+             errors=None, newline=None):
+        """
+        Open the file pointed to by this path and return a file object, as
+        the built-in open() function does.
+        """
+        if "b" not in mode:
+            encoding = io.text_encoding(encoding)
+>       return io.open(self, mode, buffering, encoding, errors, newline)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       FileNotFoundError: [Errno 2] No such file or directory: '/Users/leofitz/.openclaw/workspace-venus/.codex-worktrees/edli-v1-no-submit-complete/docs/operations/task_2026-05-15_runtime_improvement_engineering_package/02_daily_maintenance_agent/TASK_CATALOG.yaml'
+
+../../../../miniconda3/lib/python3.14/pathlib/__init__.py:771: FileNotFoundError
+=================================== FAILURES ===================================
+________________ test_mypy_rejects_plain_decimal_without_degC_d ________________
+
+    def test_mypy_rejects_plain_decimal_without_degC_d() -> None:
+        """Sed-break: passing raw Decimal to round_to_settlement fails mypy.
+    
+        CelsiusDecimal = NewType("CelsiusDecimal", Decimal).
+        Passing a plain Decimal (not wrapped via degC_d()) is an argument type
+        error under mypy-strict.  This is the antibody: the wrong type is
+        un-constructable at the type-check boundary.
+        """
+        snippet = textwrap.dedent("""\
+            from decimal import Decimal
+            from src.contracts.settlement_semantics import WMO_HalfUp
+    
+            policy = WMO_HalfUp()
+            # BUG: passing raw Decimal instead of CelsiusDecimal -- should fail mypy
+            result = policy.round_to_settlement(Decimal("28.5"))
+        """)
+        exit_code, output = _run_mypy_strict_on_snippet(snippet)
+        assert exit_code != 0, (
+            "mypy should reject plain Decimal where CelsiusDecimal is required, "
+            f"but it exited 0. Output:\n{output}"
+        )
+>       assert "Argument" in output or "error" in output.lower(), (
+            f"Expected a type error in mypy output, got:\n{output}"
+        )
+E       AssertionError: Expected a type error in mypy output, got:
+E         /Users/leofitz/miniconda3/bin/python: No module named mypy
+E         
+E       assert ('Argument' in '/Users/leofitz/miniconda3/bin/python: No module named mypy\n' or 'error' in '/users/leofitz/miniconda3/bin/python: no module named mypy\n')
+E        +  where '/users/leofitz/miniconda3/bin/python: no module named mypy\n' = <built-in method lower of str object at 0x16da09df0>()
+E        +    where <built-in method lower of str object at 0x16da09df0> = '/Users/leofitz/miniconda3/bin/python: No module named mypy\n'.lower
+
+tests/contracts/test_settlement_semantics_unit_types.py:146: AssertionError
+_________________ test_mypy_rejects_plain_float_as_celsius_arg _________________
+
+    def test_mypy_rejects_plain_float_as_celsius_arg() -> None:
+        """Sed-break: bare float passed to a Celsius-annotated parameter fails mypy.
+    
+        Celsius = NewType("Celsius", float). Under strict mypy, a plain float
+        does not satisfy a Celsius parameter — the caller must wrap via degC().
+        This is the ingest-layer gate: parse helpers return Celsius, so downstream
+        typed functions cannot accidentally receive a wrongly-sourced float.
+        """
+        snippet = textwrap.dedent("""\
+            from src.types.temperature import Celsius
+    
+            def store(t: Celsius) -> None:
+                pass
+    
+            x: float = 20.0
+            store(x)  # should fail mypy — plain float not assignable to Celsius
+        """)
+        exit_code, output = _run_mypy_strict_on_snippet(snippet)
+        assert exit_code != 0, (
+            "mypy should reject plain float where Celsius is required, "
+            f"but it exited 0. Output:\n{output}"
+        )
+>       assert "Argument" in output or "error" in output.lower(), (
+            f"Expected a type error in mypy output, got:\n{output}"
+        )
+E       AssertionError: Expected a type error in mypy output, got:
+E         /Users/leofitz/miniconda3/bin/python: No module named mypy
+E         
+E       assert ('Argument' in '/Users/leofitz/miniconda3/bin/python: No module named mypy\n' or 'error' in '/users/leofitz/miniconda3/bin/python: no module named mypy\n')
+E        +  where '/users/leofitz/miniconda3/bin/python: no module named mypy\n' = <built-in method lower of str object at 0x33ee496f0>()
+E        +    where <built-in method lower of str object at 0x33ee496f0> = '/Users/leofitz/miniconda3/bin/python: No module named mypy\n'.lower
+
+tests/data/test_ingest_unit_types.py:152: AssertionError
+____________________ test_mypy_accepts_degc_wrapped_celsius ____________________
+
+    def test_mypy_accepts_degc_wrapped_celsius() -> None:
+        """Positive boundary: degC(t) satisfies a Celsius-annotated parameter.
+    
+        Confirms the function-boundary type guard is live for ingest paths.
+        """
+        snippet = textwrap.dedent("""\
+            from src.types.temperature import Celsius, degC
+    
+            def store(t: Celsius) -> None:
+                pass
+    
+            # CORRECT: wrapped via degC
+            store(degC(20.0))
+        """)
+        exit_code, output = _run_mypy_strict_on_snippet(snippet)
+>       assert exit_code == 0, (
+            f"mypy exited {exit_code} on correctly-typed Celsius call (import error or unexpected failure):\n{output}"
+        )
+E       AssertionError: mypy exited 1 on correctly-typed Celsius call (import error or unexpected failure):
+E         /Users/leofitz/miniconda3/bin/python: No module named mypy
+E         
+E       assert 1 == 0
+
+tests/data/test_ingest_unit_types.py:172: AssertionError
+_ TestCrossingDecisionIntegrationFlag.test_flag_off_does_not_call_crossing_decision _
+
+self = <tests.engine.test_crossing_decision.TestCrossingDecisionIntegrationFlag object at 0x331ba7250>
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x33ee4a2e0>
+
+    def test_flag_off_does_not_call_crossing_decision(self, monkeypatch: pytest.MonkeyPatch):
+        """Test 4: ZEUS_TAKER_CROSSING_ENABLED not set → _crossing_decision never called."""
+        monkeypatch.delenv("ZEUS_TAKER_CROSSING_ENABLED", raising=False)
+        decision = self._build_minimal_decision()
+        self._install_runtime_stubs(monkeypatch, self._snapshot())
+    
+        with patch("src.engine.evaluator._crossing_decision") as mock_cd:
+>           self._run_reprice(decision, {"allow_taker_upgrade": False})
+
+tests/engine/test_crossing_decision.py:161: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+tests/engine/test_crossing_decision.py:147: in _run_reprice
+    return cycle_runtime._reprice_decision_from_executable_snapshot(
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+conn = None
+decision = namespace(edge=BinEdge(bin=Bin(low=70, high=71, unit='F', label='70-71°F'), direction='buy_yes', edge=0.15, ci_lower=0...sed=0.25, execution_fee_rate=0.02, applied_validations=[], tokens={'token_id': 'yes-token', 'no_token_id': 'no-token'})
+snapshot_fields = {'executable_snapshot_id': 'snap-1'}
+final_intent_context = {'allow_taker_upgrade': False}
+
+    def _reprice_decision_from_executable_snapshot(
+        conn,
+        decision,
+        snapshot_fields: dict,
+        final_intent_context: dict | None = None,
+        *,
+        _shadow_market_slug: str = "",
+        _shadow_temperature_metric: str = "",
+        _shadow_target_date: str = "",
+        _shadow_observation_time: str = "",
+    ) -> float | None:
+        """Reprice a selected entry decision from the executable snapshot book.
+    
+        The evaluator quote selects a candidate. The post-decision executable
+        snapshot is the pre-submit pricing authority.
+        """
+    
+        snapshot_id = str(snapshot_fields.get("executable_snapshot_id") or "")
+        if not snapshot_id:
+            raise ValueError("EXECUTABLE_SNAPSHOT_UNAVAILABLE: missing snapshot_id")
+        if decision.edge is None:
+            raise ValueError("EXECUTABLE_REPRICE_REJECTED: missing edge")
+        from src.data.market_scanner import (
+            _optional_top_book_level_decimal,
+            _top_book_level_decimal,
+        )
+        from src.engine.evaluator import _size_at_execution_price_boundary
+        from src.state.snapshot_repo import get_snapshot
+        from src.strategy.market_fusion import vwmp
+    
+        snapshot = get_snapshot(conn, snapshot_id)
+        if snapshot is None:
+            raise ValueError(f"EXECUTABLE_SNAPSHOT_UNAVAILABLE: {snapshot_id}")
+        from src.contracts.executable_market_snapshot_v2 import is_fresh
+    
+        _now_reprice = datetime.now(timezone.utc)
+        if not is_fresh(snapshot, _now_reprice):
+            # Fresh-at-submit re-capture: the persisted cycle snapshot has aged past the
+            # 30s window (discovery->reprice latency); re-capture one fresh single-market
+            # snapshot rather than rejecting a real edge.  Raises executable_snapshot_stale
+            # when re-capture is disabled or unavailable (safety gate preserved).
+            snapshot = _reprice_recapture_fresh_snapshot(
+                conn,
+                snapshot_id,
+                decision=decision,
+                stale_snapshot=snapshot,
+                now=_now_reprice,
+            )
+            # _snapshot_id is content+time-based: re-capture mints a NEW id. Propagate the
+            # id AND its sibling derived facts (tick/min_order/neg_risk read at live + paper
+            # validation) so downstream trade provenance references the fresh snapshot the
+            # order was actually priced against — never a fresh id against stale derived facts.
+            if str(getattr(snapshot, "snapshot_id", "") or "") != snapshot_id:
+                snapshot_id = str(snapshot.snapshot_id)
+                _propagate_recaptured_snapshot_fields(snapshot_fields, snapshot)
+        from src.config import settings
+        from src.contracts import (
+            Direction,
+            HeldSideProbability,
+            NativeSidePrice,
+            compute_native_limit_price,
+            simulate_clob_sweep,
+        )
+        from src.contracts.slippage_bps import SlippageBps
+        tokens = dict(getattr(decision, "tokens", {}) or {})
+        selected_method = str(decision.selected_method or "").strip()
+        edge_context_entry_method = str(
+            getattr(getattr(decision, "edge_context", None), "entry_provenance", "") or ""
+        ).strip()
+        entry_method = selected_method or edge_context_entry_method or "unknown"
+        expected_token = tokens.get("no_token_id") if decision.edge.direction == "buy_no" else tokens.get("token_id")
+        expected_label = "NO" if decision.edge.direction == "buy_no" else "YES"
+        if str(snapshot.selected_outcome_token_id or "") != str(expected_token or ""):
+            raise ValueError("EXECUTABLE_SNAPSHOT_TOKEN_MISMATCH")
+        if str(snapshot.outcome_label or "").upper() != expected_label:
+            raise ValueError("EXECUTABLE_SNAPSHOT_OUTCOME_MISMATCH")
+    
+        direction = Direction(decision.edge.direction)
+        try:
+            orderbook = json.loads(snapshot.orderbook_depth_jsonb)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"EXECUTABLE_SNAPSHOT_UNAVAILABLE: invalid orderbook JSON: {exc}") from exc
+        if direction.startswith("buy_"):
+            best_bid, bid_size = _optional_top_book_level_decimal(orderbook, "bids")
+            best_ask, ask_size = _top_book_level_decimal(orderbook, "asks")
+        else:
+            best_bid, bid_size = _top_book_level_decimal(orderbook, "bids")
+            best_ask, ask_size = _top_book_level_decimal(orderbook, "asks")
+        ask_only_entry_book = direction.startswith("buy_") and best_bid is None
+        best_bid_float = None if best_bid is None else float(best_bid)
+        best_ask_float = float(best_ask)
+        bid_size_float = float(bid_size)
+        ask_size_float = float(ask_size)
+        original_edge = decision.edge
+        original_size = float(getattr(decision, "size_usd", 0.0) or 0.0)
+        snapshot_vwmp = (
+            best_ask_float
+            if ask_only_entry_book
+            else vwmp(float(best_bid_float), best_ask_float, bid_size_float, ask_size_float)
+        )
+        repriced_edge = float(decision.edge.p_posterior) - float(snapshot_vwmp)
+        if repriced_edge <= 0.0:
+            raise ValueError(f"EXECUTABLE_REPRICE_REJECTED: edge={repriced_edge:.6f}")
+        snapshot_limit_price = compute_native_limit_price(
+            HeldSideProbability(float(decision.edge.p_posterior), direction),
+            NativeSidePrice(float(snapshot_vwmp), direction),
+            limit_offset=float(settings["execution"]["limit_offset_pct"]),
+        )
+        tick_size_decimal = Decimal(str(snapshot.min_tick_size))
+        snapshot_limit_decimal = _floor_to_tick(
+            Decimal(str(round(float(snapshot_limit_price), 12))),
+            tick_size_decimal,
+        )
+        final_intent_context = final_intent_context or {}
+        slippage_reference_price = min(float(decision.edge.p_posterior), float(snapshot_vwmp))
+        max_slippage = SlippageBps(value_bps=200.0, direction="adverse")
+        best_ask_slippage_bps = 0.0
+        if slippage_reference_price > 0.0 and best_ask_float > slippage_reference_price:
+            best_ask_slippage_bps = (
+                (best_ask_float - slippage_reference_price) / slippage_reference_price * 10_000.0
+            )
+    
+        sizing_bankroll = float(getattr(decision, "sizing_bankroll", 0.0) or 0.0)
+        kelly_multiplier = float(getattr(decision, "kelly_multiplier_used", 0.0) or 0.0)
+        taker_fee_rate = float(getattr(decision, "execution_fee_rate", 0.0) or 0.0)
+        if sizing_bankroll <= 0.0 or kelly_multiplier <= 0.0:
+            raise ValueError("EXECUTABLE_REPRICE_REJECTED: missing sizing context")
+        # PR 7 — build EffectiveKellyContext from snapshot microstructure fields.
+        # Spread derived from the snapshot's orderbook top levels (already parsed above).
+        # Order type for maker path (W2) is GTC; taker paths (W3/W4) inherit the
+        # intent context order_type which defaults to "GTC" pre-upgrade.
+        # Use getattr with defaults for backward-compat with legacy SimpleNamespace mocks
+        # in tests that predate the PR2 fields (depth_at_best_ask=0, top_ask check).
+        from decimal import Decimal as _Decimal
+        _snap_top_ask = getattr(snapshot, "orderbook_top_ask", None)
+        _snap_depth = int(getattr(snapshot, "depth_at_best_ask", 0) or 0)
+        _snapshot_spread_usd = (
+            (best_ask - best_bid)
+            if _snap_top_ask is not None and best_bid is not None
+            else _Decimal("0")
+        )
+        try:
+            from src.analysis.market_analysis_vnext import MarketAnalysisVNext
+            _vnext_metrics = MarketAnalysisVNext(snapshot=snapshot, history=[]).compute()
+            _snap_depth = int(_vnext_metrics.depth_at_best_ask)
+            _vnext_wide_spread = bool(_vnext_metrics.wide_spread_display_substitution)
+        except Exception:
+            _vnext_wide_spread = False
+        # ---------------------------------------------------------------------------
+        # Track L-1: shadow candidate dispatch (fail-open, flag-gated, default OFF)
+        # PROMOTION_PIPELINE_DESIGN §4: reuses already-computed _vnext_metrics;
+        # any exception is caught and logged — the live decision is never affected.
+        # Natural key params threaded from outer execute_discovery_phase loop via
+        # _shadow_market_slug / _shadow_temperature_metric / _shadow_target_date /
+        # _shadow_observation_time — ExecutableMarketSnapshotV2 does NOT carry them.
+        # ---------------------------------------------------------------------------
+        _vnext_metrics_computed = locals().get("_vnext_metrics")
+        try:
+            from src.engine.shadow_candidate_dispatch import dispatch_shadow_candidates
+            if _vnext_metrics_computed is not None and _shadow_market_slug:
+                from types import SimpleNamespace as _SimpleNamespace
+                from src.contracts.decision_natural_key import make_decision_natural_key
+                _shadow_nk = make_decision_natural_key(
+                    market_slug=_shadow_market_slug,
+                    temperature_metric=_shadow_temperature_metric,
+                    target_date=_shadow_target_date,
+                    observation_time=_shadow_observation_time,
+                    decision_seq=0,
+                )
+                dispatch_shadow_candidates(
+                    analysis=_SimpleNamespace(metrics=_vnext_metrics_computed),
+                    natural_key=_shadow_nk,
+                    observed_at=_shadow_observation_time,
+                    # world_conn intentionally omitted: dispatch self-opens a world-DB
+                    # connection via get_world_connection(). Passing the live trade-DB
+                    # conn here caused K1 ghost-split (MAJOR-1): decision_events lives
+                    # in WORLD, not trade-DB → "no such table" → fail-open → 0 rows.
+                    decision_time=datetime.now(tz=timezone.utc),
+                )
+        except Exception:
+            logger.exception(
+                "shadow_candidate_dispatch: outer guard caught exception — "
+                "live cycle unaffected."
+            )
+        _reprice_order_type = str(final_intent_context.get("order_type") or "GTC").strip().upper()
+        strategy_key_for_live_quality = _resolve_strategy_key(decision)
+        # W2 is post-only passive maker sizing. Live strategy decisions consume
+        # observed spread/depth; legacy helper tests without canonical strategy_key
+        # keep the old neutral fixture context.
+        _maker_spread = _snapshot_spread_usd if strategy_key_for_live_quality else _Decimal("0")
+        _maker_depth = _snap_depth if strategy_key_for_live_quality else 100
+        _maker_effective_context = EffectiveKellyContext(
+            spread_usd=_maker_spread,
+            depth_at_best_ask=_maker_depth,
+            order_type="GTC",
+        )
+        _taker_order_type_for_haircut = _reprice_order_type
+        if (
+            bool(final_intent_context.get("allow_taker_upgrade"))
+            and _taker_order_type_for_haircut in {"GTC", "GTD"}
+        ):
+            _taker_order_type_for_haircut = "FOK"
+        _taker_effective_context = EffectiveKellyContext(
+            spread_usd=_snapshot_spread_usd,
+            depth_at_best_ask=_snap_depth,
+            order_type=_taker_order_type_for_haircut,
+        )
+        # The first candidate is a passive maker limit. If the book supports an
+        # immediate fill, the marketable branch below resizes with taker fees.
+        repriced_size_at_snapshot_vwmp = _size_at_execution_price_boundary(
+            p_posterior=float(decision.edge.p_posterior),
+            entry_price=float(snapshot_vwmp),
+            fee_rate=0.0,
+            sizing_bankroll=sizing_bankroll,
+            kelly_multiplier=kelly_multiplier,
+            effective_context=_maker_effective_context,  # W2
+        )
+        if repriced_size_at_snapshot_vwmp <= 0.0:
+            raise ValueError("EXECUTABLE_REPRICE_REJECTED: repriced size is zero")
+        best_ask_edge = float(decision.edge.p_posterior) - best_ask_float
+        p_posterior_decimal = Decimal(str(decision.edge.p_posterior))
+        slippage_reference_decimal = Decimal(str(slippage_reference_price))
+        slippage_cap_decimal = slippage_reference_decimal * (
+            Decimal("1") + Decimal(str(max_slippage.fraction))
+        )
+        positive_edge_cap_decimal = p_posterior_decimal - tick_size_decimal
+        passive_maker_repositioned = False
+        passive_maker_reposition_reason = ""
+        if (
+            direction.startswith("buy_")
+            and best_bid is not None
+            and snapshot_limit_decimal < best_bid
+        ):
+            if positive_edge_cap_decimal < best_bid:
+                raise ValueError(
+                    "EXECUTABLE_PASSIVE_MAKER_NO_COMPETITIVE_POSITIVE_EDGE: "
+                    f"best_bid={float(best_bid):.6f} edge_cap={float(positive_edge_cap_decimal):.6f}"
+                )
+            snapshot_limit_decimal = best_bid
+            passive_maker_repositioned = True
+            passive_maker_reposition_reason = "raised_buy_limit_to_snapshot_best_bid"
+        snapshot_limit_price = float(snapshot_limit_decimal)
+        final_best_ask: float | None = None
+        final_price = snapshot_limit_price
+        repriced_size = repriced_size_at_snapshot_vwmp
+        corrected_candidate_price = snapshot_limit_price
+        corrected_candidate_expected_fill = snapshot_limit_price
+        corrected_candidate_size = repriced_size_at_snapshot_vwmp
+        best_ask_fee_adjusted_edge = 0.0
+        best_ask_size_at_fee_adjusted_cost = 0.0
+        if best_ask_edge > 0.0:
+            best_ask_size_at_fee_adjusted_cost = _size_at_execution_price_boundary(
+                p_posterior=float(decision.edge.p_posterior),
+                entry_price=best_ask_float,
+                fee_rate=taker_fee_rate,
+                sizing_bankroll=sizing_bankroll,
+                kelly_multiplier=kelly_multiplier,
+                effective_context=_taker_effective_context,  # W3
+            )
+            best_ask_fee_adjusted_edge = best_ask_edge - (
+                taker_fee_rate * best_ask_float * (1.0 - best_ask_float)
+            )
+        best_ask_inside_edge_budget = (
+            best_ask_edge > 0.0
+            and best_ask_fee_adjusted_edge > 0.0
+            and best_ask_size_at_fee_adjusted_cost > 0.0
+        )
+        allow_taker_upgrade = bool(final_intent_context.get("allow_taker_upgrade"))
+        edge_aware_taker_enabled = allow_taker_upgrade
+        f34_crossing_evidence = None
+        # F34 cost-of-fill optimizer (OPT-IN, default OFF).
+        # ZEUS_TAKER_CROSSING_ENABLED=1 lets the math decide whether to cross the spread;
+        # default "0" preserves the existing passive-maker-only behavior exactly.
+        # Karachi safety: flag defaults OFF → zero impact on day0_window positions.
+        # Operator must validate via backtest before flipping.
+        if (
+            os.environ.get("ZEUS_TAKER_CROSSING_ENABLED", "0") == "1"
+            and allow_taker_upgrade
+            and not ask_only_entry_book
+        ):
+            from src.engine.evaluator import _crossing_decision as _f34_crossing_decision
+            _f34_order_size = best_ask_size_at_fee_adjusted_cost
+            _f34_expected_pnl = best_ask_fee_adjusted_edge * _f34_order_size
+            _f34_non_fill_prob = float(final_intent_context.get("f34_non_fill_probability", 0.5))
+            _f34_min_econ_size = float(final_intent_context.get("f34_min_economical_size", 5.0))
+            _f34_taker_fee_bps = taker_fee_rate * 10_000.0
+            should_cross, f34_evidence = _f34_crossing_decision(
+                best_ask_price=best_ask_float,
+                best_ask_size=_f34_order_size,
+                best_bid_price=best_bid_float,
+                p_posterior=float(decision.edge.p_posterior),
+                expected_pnl_if_filled=_f34_expected_pnl,
+                non_fill_probability=_f34_non_fill_prob,
+                taker_fee_bps=_f34_taker_fee_bps,
+                min_economical_size=_f34_min_econ_size,
+            )
+            f34_evidence["orderbook_best_ask_size"] = ask_size_float
+            f34_evidence["intended_order_size_usd"] = _f34_order_size
+            f34_crossing_evidence = dict(f34_evidence)
+            logger.info("F34_CROSSING_DECISION %s", f34_evidence)
+            edge_aware_taker_enabled = allow_taker_upgrade and bool(should_cross)
+        edge_aware_taker_selected = False
+        depth_sweep_limit_decimal = Decimal("0")
+        marketable_buy_below_venue_min = False
+        marketable_buy_submitted_notional_usd: Decimal | None = None
+        marketable_buy_min_notional_usd = _marketable_buy_min_notional_usd(
+            final_intent_context
+        )
+        if positive_edge_cap_decimal > Decimal("0") and slippage_cap_decimal > Decimal("0"):
+            depth_sweep_limit_decimal = _floor_to_tick(
+                min(slippage_cap_decimal, positive_edge_cap_decimal),
+                tick_size_decimal,
+            )
+        depth_sweep_limit_float = float(depth_sweep_limit_decimal)
+        best_ask_inside_slippage_budget = (
+            depth_sweep_limit_float > 0.0
+            and best_ask_float <= depth_sweep_limit_float
+        )
+        if (
+            not best_ask_inside_slippage_budget
+            and edge_aware_taker_enabled
+            and best_ask_inside_edge_budget
+        ):
+            depth_sweep_limit_decimal = _floor_to_tick(
+                Decimal(str(best_ask_float)),
+                tick_size_decimal,
+            )
+            depth_sweep_limit_float = float(depth_sweep_limit_decimal)
+            edge_aware_taker_selected = True
+        if best_ask_edge > 0.0 and (best_ask_inside_slippage_budget or edge_aware_taker_selected):
+            size_at_depth_limit = _size_at_execution_price_boundary(
+                p_posterior=float(decision.edge.p_posterior),
+                entry_price=depth_sweep_limit_float,
+                fee_rate=taker_fee_rate,
+                sizing_bankroll=sizing_bankroll,
+                kelly_multiplier=kelly_multiplier,
+                effective_context=_taker_effective_context,  # W4
+            )
+            if size_at_depth_limit <= 0.0:
+                final_best_ask = None
+            else:
+                best_ask_sweep = simulate_clob_sweep(
+                    snapshot=snapshot,
+                    direction=str(decision.edge.direction),
+                    requested_size_kind="notional_usd",
+                    requested_size_value=Decimal(str(size_at_depth_limit)),
+                    limit_price=depth_sweep_limit_decimal,
+                )
+                if best_ask_sweep.depth_status != "PASS":
+                    if ask_only_entry_book:
+                        raise ValueError(
+                            "EXECUTABLE_ASK_ONLY_PASSIVE_PRIOR_UNAVAILABLE: "
+                            f"taker depth constrained status={best_ask_sweep.depth_status} "
+                            f"visible_best_ask_usd={float(best_ask_sweep.gross_notional):.6f} "
+                            f"required_usd={size_at_depth_limit:.6f}"
+                        )
+                    raise ValueError(
+                        "EXECUTABLE_TAKER_DEPTH_CONSTRAINED: "
+                        f"visible_best_ask_usd={float(best_ask_sweep.gross_notional):.6f} "
+                        f"required_usd={size_at_depth_limit:.6f}"
+                    )
+                if direction.startswith("buy_"):
+                    marketable_buy_submitted_shares = _quantize_submit_shares(
+                        str(direction),
+                        max(best_ask_sweep.filled_shares, snapshot.min_order_size),
+                        final_limit_price=depth_sweep_limit_decimal,
+                        order_type="FOK",
+                    )
+                    marketable_buy_submitted_notional_usd = (
+                        marketable_buy_submitted_shares * depth_sweep_limit_decimal
+                    )
+                if (
+                    marketable_buy_submitted_notional_usd is not None
+                    and marketable_buy_submitted_notional_usd < marketable_buy_min_notional_usd
+                ):
+                    if ask_only_entry_book:
+                        raise ValueError(
+                            "EXECUTABLE_ASK_ONLY_MARKETABLE_BUY_BELOW_MIN_NOTIONAL_NO_PASSIVE_BID: "
+                            f"required_usd={float(marketable_buy_submitted_notional_usd):.6f} "
+                            f"marketable_min_usd={float(marketable_buy_min_notional_usd):.6f} "
+                            f"best_ask={best_ask_float:.6f}"
+                        )
+                    passive_cap = _floor_to_tick(
+                        min(
+                            snapshot_limit_decimal,
+                            best_ask - tick_size_decimal,
+                            positive_edge_cap_decimal,
+                        ),
+                        tick_size_decimal,
+                    )
+                    if (
+                        best_bid is not None
+                        and passive_cap < best_bid <= positive_edge_cap_decimal
+                        and best_bid < best_ask
+                    ):
+                        passive_cap = best_bid
+                    if passive_cap <= Decimal("0") or passive_cap >= best_ask:
+                        raise ValueError(
+                            "EXECUTABLE_MARKETABLE_BUY_BELOW_MIN_NOTIONAL_NO_PASSIVE_PRICE: "
+                            f"required_usd={float(marketable_buy_submitted_notional_usd):.6f} "
+                            f"marketable_min_usd={float(marketable_buy_min_notional_usd):.6f} "
+                            f"best_bid={float(best_bid):.6f} best_ask={best_ask_float:.6f}"
+                        )
+                    snapshot_limit_decimal = passive_cap
+                    snapshot_limit_price = float(snapshot_limit_decimal)
+                    final_price = snapshot_limit_price
+                    corrected_candidate_price = snapshot_limit_price
+                    corrected_candidate_expected_fill = snapshot_limit_price
+                    corrected_candidate_size = repriced_size_at_snapshot_vwmp
+                    repriced_size = repriced_size_at_snapshot_vwmp
+                    marketable_buy_below_venue_min = True
+                    passive_maker_repositioned = True
+                    passive_maker_reposition_reason = (
+                        "marketable_buy_notional_below_venue_min_repositioned_passive"
+                    )
+                else:
+                    final_best_ask = depth_sweep_limit_float
+                    final_price = depth_sweep_limit_float
+                    repriced_size = size_at_depth_limit
+                    corrected_candidate_price = depth_sweep_limit_float
+                    corrected_candidate_expected_fill = float(best_ask_sweep.average_price or best_ask_float)
+                    corrected_candidate_size = size_at_depth_limit
+    
+        if ask_only_entry_book and final_best_ask is None:
+            raise ValueError(
+                "EXECUTABLE_ASK_ONLY_PASSIVE_PRIOR_UNAVAILABLE: "
+                "BUY entry ask-only book has executable taker cost but no bid-side "
+                "market prior for passive maker pricing"
+            )
+    
+        passive_fill_probability = final_intent_context.get(
+            "passive_fill_probability",
+            final_intent_context.get("expected_fill_probability"),
+        )
+        if final_best_ask is None and passive_fill_probability in (None, ""):
+            try:
+                from src.analysis.market_analysis_vnext import estimate_passive_maker_execution
+    
+                passive_estimate = estimate_passive_maker_execution(
+                    conn,
+                    snapshot,
+                    quote_price=snapshot_limit_decimal,
+                )
+            except Exception:
+                passive_estimate = None
+            if passive_estimate is not None:
+                edge_profit_per_share = max(
+                    Decimal("0"),
+                    Decimal(str(decision.edge.p_posterior)) - snapshot_limit_decimal,
+                )
+                gross_profit_usd = (
+                    Decimal(str(repriced_size))
+                    * edge_profit_per_share
+                    / max(snapshot_limit_decimal, Decimal("0.000001"))
+                )
+                adverse_penalty_usd = (
+                    passive_estimate.adverse_selection_score
+                    * Decimal(str(repriced_size))
+                )
+                fill_adjusted_profit_usd = (
+                    passive_estimate.expected_fill_probability * gross_profit_usd
+                    - adverse_penalty_usd
+                )
+                min_profit_raw = final_intent_context.get("min_expected_profit_usd")
+                min_profit_usd = Decimal(str(min_profit_raw if min_profit_raw not in (None, "") else "0.05"))
+                if fill_adjusted_profit_usd >= min_profit_usd:
+                    passive_fill_probability = passive_estimate.expected_fill_probability
+                    final_intent_context["passive_fill_probability"] = str(
+                        passive_estimate.expected_fill_probability
+                    )
+                    final_intent_context["queue_depth_ahead"] = (
+                        None
+                        if passive_estimate.queue_depth_ahead is None
+                        else str(passive_estimate.queue_depth_ahead)
+                    )
+                    final_intent_context["adverse_selection_score"] = str(
+                        passive_estimate.adverse_selection_score
+                    )
+                    final_intent_context["passive_fill_model_source"] = passive_estimate.evidence_source
+                    final_intent_context["passive_fill_model_order_count"] = passive_estimate.evidence_order_count
+                    final_intent_context["passive_fill_model_fill_count"] = passive_estimate.evidence_fill_count
+                    final_intent_context["fill_adjusted_expected_profit_usd"] = str(
+                        fill_adjusted_profit_usd
+                    )
+        passive_maker_context = None
+        if final_best_ask is None and passive_fill_probability not in (None, ""):
+            from src.contracts.execution_intent import PassiveMakerExecutionContext
+    
+            captured_at = getattr(snapshot, "captured_at", None)
+            quote_age_ms = 0
+            if isinstance(captured_at, datetime):
+                captured_utc = (
+                    captured_at
+                    if captured_at.tzinfo is not None
+                    else captured_at.replace(tzinfo=timezone.utc)
+                )
+                quote_age_ms = max(
+                    0,
+                    int(
+                        (
+                            datetime.now(timezone.utc)
+                            - captured_utc.astimezone(timezone.utc)
+                        ).total_seconds()
+                        * 1000
+                    ),
+                )
+            passive_maker_context = PassiveMakerExecutionContext(
+                spread_usd=_snapshot_spread_usd,
+                quote_age_ms=quote_age_ms,
+                expected_fill_probability=Decimal(str(passive_fill_probability)),
+                queue_depth_ahead=(
+                    None
+                    if final_intent_context.get("queue_depth_ahead") in (None, "")
+                    else Decimal(str(final_intent_context.get("queue_depth_ahead")))
+                ),
+                adverse_selection_score=(
+                    None
+                    if final_intent_context.get("adverse_selection_score") in (None, "")
+                    else Decimal(str(final_intent_context.get("adverse_selection_score")))
+                ),
+                orderbook_hash_age_ms=quote_age_ms,
+            )
+        if final_best_ask is None and passive_maker_context is None:
+>           raise ValueError(
+                "PASSIVE_FILL_PROBABILITY_UNMODELED: "
+                "post_only_passive_limit requires PassiveMakerExecutionContext"
+            )
+E           ValueError: PASSIVE_FILL_PROBABILITY_UNMODELED: post_only_passive_limit requires PassiveMakerExecutionContext
+
+src/engine/cycle_runtime.py:1527: ValueError
+_ TestCrossingDecisionIntegrationFlag.test_flag_on_without_intent_gate_does_not_call_crossing_decision _
+
+self = <tests.engine.test_crossing_decision.TestCrossingDecisionIntegrationFlag object at 0x331ba7390>
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x33ee4a430>
+
+    def test_flag_on_without_intent_gate_does_not_call_crossing_decision(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """ZEUS_TAKER_CROSSING_ENABLED cannot bypass allow_taker_upgrade."""
+        monkeypatch.setenv("ZEUS_TAKER_CROSSING_ENABLED", "1")
+        decision = self._build_minimal_decision()
+        self._install_runtime_stubs(monkeypatch, self._snapshot())
+    
+        with patch("src.engine.evaluator._crossing_decision") as mock_cd:
+>           self._run_reprice(decision, {"allow_taker_upgrade": False})
+
+tests/engine/test_crossing_decision.py:175: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+tests/engine/test_crossing_decision.py:147: in _run_reprice
+    return cycle_runtime._reprice_decision_from_executable_snapshot(
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+conn = None
+decision = namespace(edge=BinEdge(bin=Bin(low=70, high=71, unit='F', label='70-71°F'), direction='buy_yes', edge=0.15, ci_lower=0...sed=0.25, execution_fee_rate=0.02, applied_validations=[], tokens={'token_id': 'yes-token', 'no_token_id': 'no-token'})
+snapshot_fields = {'executable_snapshot_id': 'snap-1'}
+final_intent_context = {'allow_taker_upgrade': False}
+
+    def _reprice_decision_from_executable_snapshot(
+        conn,
+        decision,
+        snapshot_fields: dict,
+        final_intent_context: dict | None = None,
+        *,
+        _shadow_market_slug: str = "",
+        _shadow_temperature_metric: str = "",
+        _shadow_target_date: str = "",
+        _shadow_observation_time: str = "",
+    ) -> float | None:
+        """Reprice a selected entry decision from the executable snapshot book.
+    
+        The evaluator quote selects a candidate. The post-decision executable
+        snapshot is the pre-submit pricing authority.
+        """
+    
+        snapshot_id = str(snapshot_fields.get("executable_snapshot_id") or "")
+        if not snapshot_id:
+            raise ValueError("EXECUTABLE_SNAPSHOT_UNAVAILABLE: missing snapshot_id")
+        if decision.edge is None:
+            raise ValueError("EXECUTABLE_REPRICE_REJECTED: missing edge")
+        from src.data.market_scanner import (
+            _optional_top_book_level_decimal,
+            _top_book_level_decimal,
+        )
+        from src.engine.evaluator import _size_at_execution_price_boundary
+        from src.state.snapshot_repo import get_snapshot
+        from src.strategy.market_fusion import vwmp
+    
+        snapshot = get_snapshot(conn, snapshot_id)
+        if snapshot is None:
+            raise ValueError(f"EXECUTABLE_SNAPSHOT_UNAVAILABLE: {snapshot_id}")
+        from src.contracts.executable_market_snapshot_v2 import is_fresh
+    
+        _now_reprice = datetime.now(timezone.utc)
+        if not is_fresh(snapshot, _now_reprice):
+            # Fresh-at-submit re-capture: the persisted cycle snapshot has aged past the
+            # 30s window (discovery->reprice latency); re-capture one fresh single-market
+            # snapshot rather than rejecting a real edge.  Raises executable_snapshot_stale
+            # when re-capture is disabled or unavailable (safety gate preserved).
+            snapshot = _reprice_recapture_fresh_snapshot(
+                conn,
+                snapshot_id,
+                decision=decision,
+                stale_snapshot=snapshot,
+                now=_now_reprice,
+            )
+            # _snapshot_id is content+time-based: re-capture mints a NEW id. Propagate the
+            # id AND its sibling derived facts (tick/min_order/neg_risk read at live + paper
+            # validation) so downstream trade provenance references the fresh snapshot the
+            # order was actually priced against — never a fresh id against stale derived facts.
+            if str(getattr(snapshot, "snapshot_id", "") or "") != snapshot_id:
+                snapshot_id = str(snapshot.snapshot_id)
+                _propagate_recaptured_snapshot_fields(snapshot_fields, snapshot)
+        from src.config import settings
+        from src.contracts import (
+            Direction,
+            HeldSideProbability,
+            NativeSidePrice,
+            compute_native_limit_price,
+            simulate_clob_sweep,
+        )
+        from src.contracts.slippage_bps import SlippageBps
+        tokens = dict(getattr(decision, "tokens", {}) or {})
+        selected_method = str(decision.selected_method or "").strip()
+        edge_context_entry_method = str(
+            getattr(getattr(decision, "edge_context", None), "entry_provenance", "") or ""
+        ).strip()
+        entry_method = selected_method or edge_context_entry_method or "unknown"
+        expected_token = tokens.get("no_token_id") if decision.edge.direction == "buy_no" else tokens.get("token_id")
+        expected_label = "NO" if decision.edge.direction == "buy_no" else "YES"
+        if str(snapshot.selected_outcome_token_id or "") != str(expected_token or ""):
+            raise ValueError("EXECUTABLE_SNAPSHOT_TOKEN_MISMATCH")
+        if str(snapshot.outcome_label or "").upper() != expected_label:
+            raise ValueError("EXECUTABLE_SNAPSHOT_OUTCOME_MISMATCH")
+    
+        direction = Direction(decision.edge.direction)
+        try:
+            orderbook = json.loads(snapshot.orderbook_depth_jsonb)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"EXECUTABLE_SNAPSHOT_UNAVAILABLE: invalid orderbook JSON: {exc}") from exc
+        if direction.startswith("buy_"):
+            best_bid, bid_size = _optional_top_book_level_decimal(orderbook, "bids")
+            best_ask, ask_size = _top_book_level_decimal(orderbook, "asks")
+        else:
+            best_bid, bid_size = _top_book_level_decimal(orderbook, "bids")
+            best_ask, ask_size = _top_book_level_decimal(orderbook, "asks")
+        ask_only_entry_book = direction.startswith("buy_") and best_bid is None
+        best_bid_float = None if best_bid is None else float(best_bid)
+        best_ask_float = float(best_ask)
+        bid_size_float = float(bid_size)
+        ask_size_float = float(ask_size)
+        original_edge = decision.edge
+        original_size = float(getattr(decision, "size_usd", 0.0) or 0.0)
+        snapshot_vwmp = (
+            best_ask_float
+            if ask_only_entry_book
+            else vwmp(float(best_bid_float), best_ask_float, bid_size_float, ask_size_float)
+        )
+        repriced_edge = float(decision.edge.p_posterior) - float(snapshot_vwmp)
+        if repriced_edge <= 0.0:
+            raise ValueError(f"EXECUTABLE_REPRICE_REJECTED: edge={repriced_edge:.6f}")
+        snapshot_limit_price = compute_native_limit_price(
+            HeldSideProbability(float(decision.edge.p_posterior), direction),
+            NativeSidePrice(float(snapshot_vwmp), direction),
+            limit_offset=float(settings["execution"]["limit_offset_pct"]),
+        )
+        tick_size_decimal = Decimal(str(snapshot.min_tick_size))
+        snapshot_limit_decimal = _floor_to_tick(
+            Decimal(str(round(float(snapshot_limit_price), 12))),
+            tick_size_decimal,
+        )
+        final_intent_context = final_intent_context or {}
+        slippage_reference_price = min(float(decision.edge.p_posterior), float(snapshot_vwmp))
+        max_slippage = SlippageBps(value_bps=200.0, direction="adverse")
+        best_ask_slippage_bps = 0.0
+        if slippage_reference_price > 0.0 and best_ask_float > slippage_reference_price:
+            best_ask_slippage_bps = (
+                (best_ask_float - slippage_reference_price) / slippage_reference_price * 10_000.0
+            )
+    
+        sizing_bankroll = float(getattr(decision, "sizing_bankroll", 0.0) or 0.0)
+        kelly_multiplier = float(getattr(decision, "kelly_multiplier_used", 0.0) or 0.0)
+        taker_fee_rate = float(getattr(decision, "execution_fee_rate", 0.0) or 0.0)
+        if sizing_bankroll <= 0.0 or kelly_multiplier <= 0.0:
+            raise ValueError("EXECUTABLE_REPRICE_REJECTED: missing sizing context")
+        # PR 7 — build EffectiveKellyContext from snapshot microstructure fields.
+        # Spread derived from the snapshot's orderbook top levels (already parsed above).
+        # Order type for maker path (W2) is GTC; taker paths (W3/W4) inherit the
+        # intent context order_type which defaults to "GTC" pre-upgrade.
+        # Use getattr with defaults for backward-compat with legacy SimpleNamespace mocks
+        # in tests that predate the PR2 fields (depth_at_best_ask=0, top_ask check).
+        from decimal import Decimal as _Decimal
+        _snap_top_ask = getattr(snapshot, "orderbook_top_ask", None)
+        _snap_depth = int(getattr(snapshot, "depth_at_best_ask", 0) or 0)
+        _snapshot_spread_usd = (
+            (best_ask - best_bid)
+            if _snap_top_ask is not None and best_bid is not None
+            else _Decimal("0")
+        )
+        try:
+            from src.analysis.market_analysis_vnext import MarketAnalysisVNext
+            _vnext_metrics = MarketAnalysisVNext(snapshot=snapshot, history=[]).compute()
+            _snap_depth = int(_vnext_metrics.depth_at_best_ask)
+            _vnext_wide_spread = bool(_vnext_metrics.wide_spread_display_substitution)
+        except Exception:
+            _vnext_wide_spread = False
+        # ---------------------------------------------------------------------------
+        # Track L-1: shadow candidate dispatch (fail-open, flag-gated, default OFF)
+        # PROMOTION_PIPELINE_DESIGN §4: reuses already-computed _vnext_metrics;
+        # any exception is caught and logged — the live decision is never affected.
+        # Natural key params threaded from outer execute_discovery_phase loop via
+        # _shadow_market_slug / _shadow_temperature_metric / _shadow_target_date /
+        # _shadow_observation_time — ExecutableMarketSnapshotV2 does NOT carry them.
+        # ---------------------------------------------------------------------------
+        _vnext_metrics_computed = locals().get("_vnext_metrics")
+        try:
+            from src.engine.shadow_candidate_dispatch import dispatch_shadow_candidates
+            if _vnext_metrics_computed is not None and _shadow_market_slug:
+                from types import SimpleNamespace as _SimpleNamespace
+                from src.contracts.decision_natural_key import make_decision_natural_key
+                _shadow_nk = make_decision_natural_key(
+                    market_slug=_shadow_market_slug,
+                    temperature_metric=_shadow_temperature_metric,
+                    target_date=_shadow_target_date,
+                    observation_time=_shadow_observation_time,
+                    decision_seq=0,
+                )
+                dispatch_shadow_candidates(
+                    analysis=_SimpleNamespace(metrics=_vnext_metrics_computed),
+                    natural_key=_shadow_nk,
+                    observed_at=_shadow_observation_time,
+                    # world_conn intentionally omitted: dispatch self-opens a world-DB
+                    # connection via get_world_connection(). Passing the live trade-DB
+                    # conn here caused K1 ghost-split (MAJOR-1): decision_events lives
+                    # in WORLD, not trade-DB → "no such table" → fail-open → 0 rows.
+                    decision_time=datetime.now(tz=timezone.utc),
+                )
+        except Exception:
+            logger.exception(
+                "shadow_candidate_dispatch: outer guard caught exception — "
+                "live cycle unaffected."
+            )
+        _reprice_order_type = str(final_intent_context.get("order_type") or "GTC").strip().upper()
+        strategy_key_for_live_quality = _resolve_strategy_key(decision)
+        # W2 is post-only passive maker sizing. Live strategy decisions consume
+        # observed spread/depth; legacy helper tests without canonical strategy_key
+        # keep the old neutral fixture context.
+        _maker_spread = _snapshot_spread_usd if strategy_key_for_live_quality else _Decimal("0")
+        _maker_depth = _snap_depth if strategy_key_for_live_quality else 100
+        _maker_effective_context = EffectiveKellyContext(
+            spread_usd=_maker_spread,
+            depth_at_best_ask=_maker_depth,
+            order_type="GTC",
+        )
+        _taker_order_type_for_haircut = _reprice_order_type
+        if (
+            bool(final_intent_context.get("allow_taker_upgrade"))
+            and _taker_order_type_for_haircut in {"GTC", "GTD"}
+        ):
+            _taker_order_type_for_haircut = "FOK"
+        _taker_effective_context = EffectiveKellyContext(
+            spread_usd=_snapshot_spread_usd,
+            depth_at_best_ask=_snap_depth,
+            order_type=_taker_order_type_for_haircut,
+        )
+        # The first candidate is a passive maker limit. If the book supports an
+        # immediate fill, the marketable branch below resizes with taker fees.
+        repriced_size_at_snapshot_vwmp = _size_at_execution_price_boundary(
+            p_posterior=float(decision.edge.p_posterior),
+            entry_price=float(snapshot_vwmp),
+            fee_rate=0.0,
+            sizing_bankroll=sizing_bankroll,
+            kelly_multiplier=kelly_multiplier,
+            effective_context=_maker_effective_context,  # W2
+        )
+        if repriced_size_at_snapshot_vwmp <= 0.0:
+            raise ValueError("EXECUTABLE_REPRICE_REJECTED: repriced size is zero")
+        best_ask_edge = float(decision.edge.p_posterior) - best_ask_float
+        p_posterior_decimal = Decimal(str(decision.edge.p_posterior))
+        slippage_reference_decimal = Decimal(str(slippage_reference_price))
+        slippage_cap_decimal = slippage_reference_decimal * (
+            Decimal("1") + Decimal(str(max_slippage.fraction))
+        )
+        positive_edge_cap_decimal = p_posterior_decimal - tick_size_decimal
+        passive_maker_repositioned = False
+        passive_maker_reposition_reason = ""
+        if (
+            direction.startswith("buy_")
+            and best_bid is not None
+            and snapshot_limit_decimal < best_bid
+        ):
+            if positive_edge_cap_decimal < best_bid:
+                raise ValueError(
+                    "EXECUTABLE_PASSIVE_MAKER_NO_COMPETITIVE_POSITIVE_EDGE: "
+                    f"best_bid={float(best_bid):.6f} edge_cap={float(positive_edge_cap_decimal):.6f}"
+                )
+            snapshot_limit_decimal = best_bid
+            passive_maker_repositioned = True
+            passive_maker_reposition_reason = "raised_buy_limit_to_snapshot_best_bid"
+        snapshot_limit_price = float(snapshot_limit_decimal)
+        final_best_ask: float | None = None
+        final_price = snapshot_limit_price
+        repriced_size = repriced_size_at_snapshot_vwmp
+        corrected_candidate_price = snapshot_limit_price
+        corrected_candidate_expected_fill = snapshot_limit_price
+        corrected_candidate_size = repriced_size_at_snapshot_vwmp
+        best_ask_fee_adjusted_edge = 0.0
+        best_ask_size_at_fee_adjusted_cost = 0.0
+        if best_ask_edge > 0.0:
+            best_ask_size_at_fee_adjusted_cost = _size_at_execution_price_boundary(
+                p_posterior=float(decision.edge.p_posterior),
+                entry_price=best_ask_float,
+                fee_rate=taker_fee_rate,
+                sizing_bankroll=sizing_bankroll,
+                kelly_multiplier=kelly_multiplier,
+                effective_context=_taker_effective_context,  # W3
+            )
+            best_ask_fee_adjusted_edge = best_ask_edge - (
+                taker_fee_rate * best_ask_float * (1.0 - best_ask_float)
+            )
+        best_ask_inside_edge_budget = (
+            best_ask_edge > 0.0
+            and best_ask_fee_adjusted_edge > 0.0
+            and best_ask_size_at_fee_adjusted_cost > 0.0
+        )
+        allow_taker_upgrade = bool(final_intent_context.get("allow_taker_upgrade"))
+        edge_aware_taker_enabled = allow_taker_upgrade
+        f34_crossing_evidence = None
+        # F34 cost-of-fill optimizer (OPT-IN, default OFF).
+        # ZEUS_TAKER_CROSSING_ENABLED=1 lets the math decide whether to cross the spread;
+        # default "0" preserves the existing passive-maker-only behavior exactly.
+        # Karachi safety: flag defaults OFF → zero impact on day0_window positions.
+        # Operator must validate via backtest before flipping.
+        if (
+            os.environ.get("ZEUS_TAKER_CROSSING_ENABLED", "0") == "1"
+            and allow_taker_upgrade
+            and not ask_only_entry_book
+        ):
+            from src.engine.evaluator import _crossing_decision as _f34_crossing_decision
+            _f34_order_size = best_ask_size_at_fee_adjusted_cost
+            _f34_expected_pnl = best_ask_fee_adjusted_edge * _f34_order_size
+            _f34_non_fill_prob = float(final_intent_context.get("f34_non_fill_probability", 0.5))
+            _f34_min_econ_size = float(final_intent_context.get("f34_min_economical_size", 5.0))
+            _f34_taker_fee_bps = taker_fee_rate * 10_000.0
+            should_cross, f34_evidence = _f34_crossing_decision(
+                best_ask_price=best_ask_float,
+                best_ask_size=_f34_order_size,
+                best_bid_price=best_bid_float,
+                p_posterior=float(decision.edge.p_posterior),
+                expected_pnl_if_filled=_f34_expected_pnl,
+                non_fill_probability=_f34_non_fill_prob,
+                taker_fee_bps=_f34_taker_fee_bps,
+                min_economical_size=_f34_min_econ_size,
+            )
+            f34_evidence["orderbook_best_ask_size"] = ask_size_float
+            f34_evidence["intended_order_size_usd"] = _f34_order_size
+            f34_crossing_evidence = dict(f34_evidence)
+            logger.info("F34_CROSSING_DECISION %s", f34_evidence)
+            edge_aware_taker_enabled = allow_taker_upgrade and bool(should_cross)
+        edge_aware_taker_selected = False
+        depth_sweep_limit_decimal = Decimal("0")
+        marketable_buy_below_venue_min = False
+        marketable_buy_submitted_notional_usd: Decimal | None = None
+        marketable_buy_min_notional_usd = _marketable_buy_min_notional_usd(
+            final_intent_context
+        )
+        if positive_edge_cap_decimal > Decimal("0") and slippage_cap_decimal > Decimal("0"):
+            depth_sweep_limit_decimal = _floor_to_tick(
+                min(slippage_cap_decimal, positive_edge_cap_decimal),
+                tick_size_decimal,
+            )
+        depth_sweep_limit_float = float(depth_sweep_limit_decimal)
+        best_ask_inside_slippage_budget = (
+            depth_sweep_limit_float > 0.0
+            and best_ask_float <= depth_sweep_limit_float
+        )
+        if (
+            not best_ask_inside_slippage_budget
+            and edge_aware_taker_enabled
+            and best_ask_inside_edge_budget
+        ):
+            depth_sweep_limit_decimal = _floor_to_tick(
+                Decimal(str(best_ask_float)),
+                tick_size_decimal,
+            )
+            depth_sweep_limit_float = float(depth_sweep_limit_decimal)
+            edge_aware_taker_selected = True
+        if best_ask_edge > 0.0 and (best_ask_inside_slippage_budget or edge_aware_taker_selected):
+            size_at_depth_limit = _size_at_execution_price_boundary(
+                p_posterior=float(decision.edge.p_posterior),
+                entry_price=depth_sweep_limit_float,
+                fee_rate=taker_fee_rate,
+                sizing_bankroll=sizing_bankroll,
+                kelly_multiplier=kelly_multiplier,
+                effective_context=_taker_effective_context,  # W4
+            )
+            if size_at_depth_limit <= 0.0:
+                final_best_ask = None
+            else:
+                best_ask_sweep = simulate_clob_sweep(
+                    snapshot=snapshot,
+                    direction=str(decision.edge.direction),
+                    requested_size_kind="notional_usd",
+                    requested_size_value=Decimal(str(size_at_depth_limit)),
+                    limit_price=depth_sweep_limit_decimal,
+                )
+                if best_ask_sweep.depth_status != "PASS":
+                    if ask_only_entry_book:
+                        raise ValueError(
+                            "EXECUTABLE_ASK_ONLY_PASSIVE_PRIOR_UNAVAILABLE: "
+                            f"taker depth constrained status={best_ask_sweep.depth_status} "
+                            f"visible_best_ask_usd={float(best_ask_sweep.gross_notional):.6f} "
+                            f"required_usd={size_at_depth_limit:.6f}"
+                        )
+                    raise ValueError(
+                        "EXECUTABLE_TAKER_DEPTH_CONSTRAINED: "
+                        f"visible_best_ask_usd={float(best_ask_sweep.gross_notional):.6f} "
+                        f"required_usd={size_at_depth_limit:.6f}"
+                    )
+                if direction.startswith("buy_"):
+                    marketable_buy_submitted_shares = _quantize_submit_shares(
+                        str(direction),
+                        max(best_ask_sweep.filled_shares, snapshot.min_order_size),
+                        final_limit_price=depth_sweep_limit_decimal,
+                        order_type="FOK",
+                    )
+                    marketable_buy_submitted_notional_usd = (
+                        marketable_buy_submitted_shares * depth_sweep_limit_decimal
+                    )
+                if (
+                    marketable_buy_submitted_notional_usd is not None
+                    and marketable_buy_submitted_notional_usd < marketable_buy_min_notional_usd
+                ):
+                    if ask_only_entry_book:
+                        raise ValueError(
+                            "EXECUTABLE_ASK_ONLY_MARKETABLE_BUY_BELOW_MIN_NOTIONAL_NO_PASSIVE_BID: "
+                            f"required_usd={float(marketable_buy_submitted_notional_usd):.6f} "
+                            f"marketable_min_usd={float(marketable_buy_min_notional_usd):.6f} "
+                            f"best_ask={best_ask_float:.6f}"
+                        )
+                    passive_cap = _floor_to_tick(
+                        min(
+                            snapshot_limit_decimal,
+                            best_ask - tick_size_decimal,
+                            positive_edge_cap_decimal,
+                        ),
+                        tick_size_decimal,
+                    )
+                    if (
+                        best_bid is not None
+                        and passive_cap < best_bid <= positive_edge_cap_decimal
+                        and best_bid < best_ask
+                    ):
+                        passive_cap = best_bid
+                    if passive_cap <= Decimal("0") or passive_cap >= best_ask:
+                        raise ValueError(
+                            "EXECUTABLE_MARKETABLE_BUY_BELOW_MIN_NOTIONAL_NO_PASSIVE_PRICE: "
+                            f"required_usd={float(marketable_buy_submitted_notional_usd):.6f} "
+                            f"marketable_min_usd={float(marketable_buy_min_notional_usd):.6f} "
+                            f"best_bid={float(best_bid):.6f} best_ask={best_ask_float:.6f}"
+                        )
+                    snapshot_limit_decimal = passive_cap
+                    snapshot_limit_price = float(snapshot_limit_decimal)
+                    final_price = snapshot_limit_price
+                    corrected_candidate_price = snapshot_limit_price
+                    corrected_candidate_expected_fill = snapshot_limit_price
+                    corrected_candidate_size = repriced_size_at_snapshot_vwmp
+                    repriced_size = repriced_size_at_snapshot_vwmp
+                    marketable_buy_below_venue_min = True
+                    passive_maker_repositioned = True
+                    passive_maker_reposition_reason = (
+                        "marketable_buy_notional_below_venue_min_repositioned_passive"
+                    )
+                else:
+                    final_best_ask = depth_sweep_limit_float
+                    final_price = depth_sweep_limit_float
+                    repriced_size = size_at_depth_limit
+                    corrected_candidate_price = depth_sweep_limit_float
+                    corrected_candidate_expected_fill = float(best_ask_sweep.average_price or best_ask_float)
+                    corrected_candidate_size = size_at_depth_limit
+    
+        if ask_only_entry_book and final_best_ask is None:
+            raise ValueError(
+                "EXECUTABLE_ASK_ONLY_PASSIVE_PRIOR_UNAVAILABLE: "
+                "BUY entry ask-only book has executable taker cost but no bid-side "
+                "market prior for passive maker pricing"
+            )
+    
+        passive_fill_probability = final_intent_context.get(
+            "passive_fill_probability",
+            final_intent_context.get("expected_fill_probability"),
+        )
+        if final_best_ask is None and passive_fill_probability in (None, ""):
+            try:
+                from src.analysis.market_analysis_vnext import estimate_passive_maker_execution
+    
+                passive_estimate = estimate_passive_maker_execution(
+                    conn,
+                    snapshot,
+                    quote_price=snapshot_limit_decimal,
+                )
+            except Exception:
+                passive_estimate = None
+            if passive_estimate is not None:
+                edge_profit_per_share = max(
+                    Decimal("0"),
+                    Decimal(str(decision.edge.p_posterior)) - snapshot_limit_decimal,
+                )
+                gross_profit_usd = (
+                    Decimal(str(repriced_size))
+                    * edge_profit_per_share
+                    / max(snapshot_limit_decimal, Decimal("0.000001"))
+                )
+                adverse_penalty_usd = (
+                    passive_estimate.adverse_selection_score
+                    * Decimal(str(repriced_size))
+                )
+                fill_adjusted_profit_usd = (
+                    passive_estimate.expected_fill_probability * gross_profit_usd
+                    - adverse_penalty_usd
+                )
+                min_profit_raw = final_intent_context.get("min_expected_profit_usd")
+                min_profit_usd = Decimal(str(min_profit_raw if min_profit_raw not in (None, "") else "0.05"))
+                if fill_adjusted_profit_usd >= min_profit_usd:
+                    passive_fill_probability = passive_estimate.expected_fill_probability
+                    final_intent_context["passive_fill_probability"] = str(
+                        passive_estimate.expected_fill_probability
+                    )
+                    final_intent_context["queue_depth_ahead"] = (
+                        None
+                        if passive_estimate.queue_depth_ahead is None
+                        else str(passive_estimate.queue_depth_ahead)
+                    )
+                    final_intent_context["adverse_selection_score"] = str(
+                        passive_estimate.adverse_selection_score
+                    )
+                    final_intent_context["passive_fill_model_source"] = passive_estimate.evidence_source
+                    final_intent_context["passive_fill_model_order_count"] = passive_estimate.evidence_order_count
+                    final_intent_context["passive_fill_model_fill_count"] = passive_estimate.evidence_fill_count
+                    final_intent_context["fill_adjusted_expected_profit_usd"] = str(
+                        fill_adjusted_profit_usd
+                    )
+        passive_maker_context = None
+        if final_best_ask is None and passive_fill_probability not in (None, ""):
+            from src.contracts.execution_intent import PassiveMakerExecutionContext
+    
+            captured_at = getattr(snapshot, "captured_at", None)
+            quote_age_ms = 0
+            if isinstance(captured_at, datetime):
+                captured_utc = (
+                    captured_at
+                    if captured_at.tzinfo is not None
+                    else captured_at.replace(tzinfo=timezone.utc)
+                )
+                quote_age_ms = max(
+                    0,
+                    int(
+                        (
+                            datetime.now(timezone.utc)
+                            - captured_utc.astimezone(timezone.utc)
+                        ).total_seconds()
+                        * 1000
+                    ),
+                )
+            passive_maker_context = PassiveMakerExecutionContext(
+                spread_usd=_snapshot_spread_usd,
+                quote_age_ms=quote_age_ms,
+                expected_fill_probability=Decimal(str(passive_fill_probability)),
+                queue_depth_ahead=(
+                    None
+                    if final_intent_context.get("queue_depth_ahead") in (None, "")
+                    else Decimal(str(final_intent_context.get("queue_depth_ahead")))
+                ),
+                adverse_selection_score=(
+                    None
+                    if final_intent_context.get("adverse_selection_score") in (None, "")
+                    else Decimal(str(final_intent_context.get("adverse_selection_score")))
+                ),
+                orderbook_hash_age_ms=quote_age_ms,
+            )
+        if final_best_ask is None and passive_maker_context is None:
+>           raise ValueError(
+                "PASSIVE_FILL_PROBABILITY_UNMODELED: "
+                "post_only_passive_limit requires PassiveMakerExecutionContext"
+            )
+E           ValueError: PASSIVE_FILL_PROBABILITY_UNMODELED: post_only_passive_limit requires PassiveMakerExecutionContext
+
+src/engine/cycle_runtime.py:1527: ValueError
+_ TestCrossingDecisionIntegrationFlag.test_flag_on_with_intent_gate_calls_crossing_decision_with_intended_order_size _
+
+self = <tests.engine.test_crossing_decision.TestCrossingDecisionIntegrationFlag object at 0x331b2f490>
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x33efa8670>
+
+    def test_flag_on_with_intent_gate_calls_crossing_decision_with_intended_order_size(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """Test 5: enabled flag + intent gate calls the real integration site."""
+        monkeypatch.setenv("ZEUS_TAKER_CROSSING_ENABLED", "1")
+        decision = self._build_minimal_decision()
+        self._install_runtime_stubs(monkeypatch, self._snapshot())
+        mock_cd = MagicMock(return_value=(False, {"decision": "PASSIVE"}))
+    
+        with patch("src.engine.evaluator._crossing_decision", mock_cd):
+>           self._run_reprice(decision, {"allow_taker_upgrade": True})
+
+tests/engine/test_crossing_decision.py:190: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+tests/engine/test_crossing_decision.py:147: in _run_reprice
+    return cycle_runtime._reprice_decision_from_executable_snapshot(
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+conn = None
+decision = namespace(edge=BinEdge(bin=Bin(low=70, high=71, unit='F', label='70-71°F'), direction='buy_yes', edge=0.15, ci_lower=0...sed=0.25, execution_fee_rate=0.02, applied_validations=[], tokens={'token_id': 'yes-token', 'no_token_id': 'no-token'})
+snapshot_fields = {'executable_snapshot_id': 'snap-1'}
+final_intent_context = {'allow_taker_upgrade': True}
+
+    def _reprice_decision_from_executable_snapshot(
+        conn,
+        decision,
+        snapshot_fields: dict,
+        final_intent_context: dict | None = None,
+        *,
+        _shadow_market_slug: str = "",
+        _shadow_temperature_metric: str = "",
+        _shadow_target_date: str = "",
+        _shadow_observation_time: str = "",
+    ) -> float | None:
+        """Reprice a selected entry decision from the executable snapshot book.
+    
+        The evaluator quote selects a candidate. The post-decision executable
+        snapshot is the pre-submit pricing authority.
+        """
+    
+        snapshot_id = str(snapshot_fields.get("executable_snapshot_id") or "")
+        if not snapshot_id:
+            raise ValueError("EXECUTABLE_SNAPSHOT_UNAVAILABLE: missing snapshot_id")
+        if decision.edge is None:
+            raise ValueError("EXECUTABLE_REPRICE_REJECTED: missing edge")
+        from src.data.market_scanner import (
+            _optional_top_book_level_decimal,
+            _top_book_level_decimal,
+        )
+        from src.engine.evaluator import _size_at_execution_price_boundary
+        from src.state.snapshot_repo import get_snapshot
+        from src.strategy.market_fusion import vwmp
+    
+        snapshot = get_snapshot(conn, snapshot_id)
+        if snapshot is None:
+            raise ValueError(f"EXECUTABLE_SNAPSHOT_UNAVAILABLE: {snapshot_id}")
+        from src.contracts.executable_market_snapshot_v2 import is_fresh
+    
+        _now_reprice = datetime.now(timezone.utc)
+        if not is_fresh(snapshot, _now_reprice):
+            # Fresh-at-submit re-capture: the persisted cycle snapshot has aged past the
+            # 30s window (discovery->reprice latency); re-capture one fresh single-market
+            # snapshot rather than rejecting a real edge.  Raises executable_snapshot_stale
+            # when re-capture is disabled or unavailable (safety gate preserved).
+            snapshot = _reprice_recapture_fresh_snapshot(
+                conn,
+                snapshot_id,
+                decision=decision,
+                stale_snapshot=snapshot,
+                now=_now_reprice,
+            )
+            # _snapshot_id is content+time-based: re-capture mints a NEW id. Propagate the
+            # id AND its sibling derived facts (tick/min_order/neg_risk read at live + paper
+            # validation) so downstream trade provenance references the fresh snapshot the
+            # order was actually priced against — never a fresh id against stale derived facts.
+            if str(getattr(snapshot, "snapshot_id", "") or "") != snapshot_id:
+                snapshot_id = str(snapshot.snapshot_id)
+                _propagate_recaptured_snapshot_fields(snapshot_fields, snapshot)
+        from src.config import settings
+        from src.contracts import (
+            Direction,
+            HeldSideProbability,
+            NativeSidePrice,
+            compute_native_limit_price,
+            simulate_clob_sweep,
+        )
+        from src.contracts.slippage_bps import SlippageBps
+        tokens = dict(getattr(decision, "tokens", {}) or {})
+        selected_method = str(decision.selected_method or "").strip()
+        edge_context_entry_method = str(
+            getattr(getattr(decision, "edge_context", None), "entry_provenance", "") or ""
+        ).strip()
+        entry_method = selected_method or edge_context_entry_method or "unknown"
+        expected_token = tokens.get("no_token_id") if decision.edge.direction == "buy_no" else tokens.get("token_id")
+        expected_label = "NO" if decision.edge.direction == "buy_no" else "YES"
+        if str(snapshot.selected_outcome_token_id or "") != str(expected_token or ""):
+            raise ValueError("EXECUTABLE_SNAPSHOT_TOKEN_MISMATCH")
+        if str(snapshot.outcome_label or "").upper() != expected_label:
+            raise ValueError("EXECUTABLE_SNAPSHOT_OUTCOME_MISMATCH")
+    
+        direction = Direction(decision.edge.direction)
+        try:
+            orderbook = json.loads(snapshot.orderbook_depth_jsonb)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"EXECUTABLE_SNAPSHOT_UNAVAILABLE: invalid orderbook JSON: {exc}") from exc
+        if direction.startswith("buy_"):
+            best_bid, bid_size = _optional_top_book_level_decimal(orderbook, "bids")
+            best_ask, ask_size = _top_book_level_decimal(orderbook, "asks")
+        else:
+            best_bid, bid_size = _top_book_level_decimal(orderbook, "bids")
+            best_ask, ask_size = _top_book_level_decimal(orderbook, "asks")
+        ask_only_entry_book = direction.startswith("buy_") and best_bid is None
+        best_bid_float = None if best_bid is None else float(best_bid)
+        best_ask_float = float(best_ask)
+        bid_size_float = float(bid_size)
+        ask_size_float = float(ask_size)
+        original_edge = decision.edge
+        original_size = float(getattr(decision, "size_usd", 0.0) or 0.0)
+        snapshot_vwmp = (
+            best_ask_float
+            if ask_only_entry_book
+            else vwmp(float(best_bid_float), best_ask_float, bid_size_float, ask_size_float)
+        )
+        repriced_edge = float(decision.edge.p_posterior) - float(snapshot_vwmp)
+        if repriced_edge <= 0.0:
+            raise ValueError(f"EXECUTABLE_REPRICE_REJECTED: edge={repriced_edge:.6f}")
+        snapshot_limit_price = compute_native_limit_price(
+            HeldSideProbability(float(decision.edge.p_posterior), direction),
+            NativeSidePrice(float(snapshot_vwmp), direction),
+            limit_offset=float(settings["execution"]["limit_offset_pct"]),
+        )
+        tick_size_decimal = Decimal(str(snapshot.min_tick_size))
+        snapshot_limit_decimal = _floor_to_tick(
+            Decimal(str(round(float(snapshot_limit_price), 12))),
+            tick_size_decimal,
+        )
+        final_intent_context = final_intent_context or {}
+        slippage_reference_price = min(float(decision.edge.p_posterior), float(snapshot_vwmp))
+        max_slippage = SlippageBps(value_bps=200.0, direction="adverse")
+        best_ask_slippage_bps = 0.0
+        if slippage_reference_price > 0.0 and best_ask_float > slippage_reference_price:
+            best_ask_slippage_bps = (
+                (best_ask_float - slippage_reference_price) / slippage_reference_price * 10_000.0
+            )
+    
+        sizing_bankroll = float(getattr(decision, "sizing_bankroll", 0.0) or 0.0)
+        kelly_multiplier = float(getattr(decision, "kelly_multiplier_used", 0.0) or 0.0)
+        taker_fee_rate = float(getattr(decision, "execution_fee_rate", 0.0) or 0.0)
+        if sizing_bankroll <= 0.0 or kelly_multiplier <= 0.0:
+            raise ValueError("EXECUTABLE_REPRICE_REJECTED: missing sizing context")
+        # PR 7 — build EffectiveKellyContext from snapshot microstructure fields.
+        # Spread derived from the snapshot's orderbook top levels (already parsed above).
+        # Order type for maker path (W2) is GTC; taker paths (W3/W4) inherit the
+        # intent context order_type which defaults to "GTC" pre-upgrade.
+        # Use getattr with defaults for backward-compat with legacy SimpleNamespace mocks
+        # in tests that predate the PR2 fields (depth_at_best_ask=0, top_ask check).
+        from decimal import Decimal as _Decimal
+        _snap_top_ask = getattr(snapshot, "orderbook_top_ask", None)
+        _snap_depth = int(getattr(snapshot, "depth_at_best_ask", 0) or 0)
+        _snapshot_spread_usd = (
+            (best_ask - best_bid)
+            if _snap_top_ask is not None and best_bid is not None
+            else _Decimal("0")
+        )
+        try:
+            from src.analysis.market_analysis_vnext import MarketAnalysisVNext
+            _vnext_metrics = MarketAnalysisVNext(snapshot=snapshot, history=[]).compute()
+            _snap_depth = int(_vnext_metrics.depth_at_best_ask)
+            _vnext_wide_spread = bool(_vnext_metrics.wide_spread_display_substitution)
+        except Exception:
+            _vnext_wide_spread = False
+        # ---------------------------------------------------------------------------
+        # Track L-1: shadow candidate dispatch (fail-open, flag-gated, default OFF)
+        # PROMOTION_PIPELINE_DESIGN §4: reuses already-computed _vnext_metrics;
+        # any exception is caught and logged — the live decision is never affected.
+        # Natural key params threaded from outer execute_discovery_phase loop via
+        # _shadow_market_slug / _shadow_temperature_metric / _shadow_target_date /
+        # _shadow_observation_time — ExecutableMarketSnapshotV2 does NOT carry them.
+        # ---------------------------------------------------------------------------
+        _vnext_metrics_computed = locals().get("_vnext_metrics")
+        try:
+            from src.engine.shadow_candidate_dispatch import dispatch_shadow_candidates
+            if _vnext_metrics_computed is not None and _shadow_market_slug:
+                from types import SimpleNamespace as _SimpleNamespace
+                from src.contracts.decision_natural_key import make_decision_natural_key
+                _shadow_nk = make_decision_natural_key(
+                    market_slug=_shadow_market_slug,
+                    temperature_metric=_shadow_temperature_metric,
+                    target_date=_shadow_target_date,
+                    observation_time=_shadow_observation_time,
+                    decision_seq=0,
+                )
+                dispatch_shadow_candidates(
+                    analysis=_SimpleNamespace(metrics=_vnext_metrics_computed),
+                    natural_key=_shadow_nk,
+                    observed_at=_shadow_observation_time,
+                    # world_conn intentionally omitted: dispatch self-opens a world-DB
+                    # connection via get_world_connection(). Passing the live trade-DB
+                    # conn here caused K1 ghost-split (MAJOR-1): decision_events lives
+                    # in WORLD, not trade-DB → "no such table" → fail-open → 0 rows.
+                    decision_time=datetime.now(tz=timezone.utc),
+                )
+        except Exception:
+            logger.exception(
+                "shadow_candidate_dispatch: outer guard caught exception — "
+                "live cycle unaffected."
+            )
+        _reprice_order_type = str(final_intent_context.get("order_type") or "GTC").strip().upper()
+        strategy_key_for_live_quality = _resolve_strategy_key(decision)
+        # W2 is post-only passive maker sizing. Live strategy decisions consume
+        # observed spread/depth; legacy helper tests without canonical strategy_key
+        # keep the old neutral fixture context.
+        _maker_spread = _snapshot_spread_usd if strategy_key_for_live_quality else _Decimal("0")
+        _maker_depth = _snap_depth if strategy_key_for_live_quality else 100
+        _maker_effective_context = EffectiveKellyContext(
+            spread_usd=_maker_spread,
+            depth_at_best_ask=_maker_depth,
+            order_type="GTC",
+        )
+        _taker_order_type_for_haircut = _reprice_order_type
+        if (
+            bool(final_intent_context.get("allow_taker_upgrade"))
+            and _taker_order_type_for_haircut in {"GTC", "GTD"}
+        ):
+            _taker_order_type_for_haircut = "FOK"
+        _taker_effective_context = EffectiveKellyContext(
+            spread_usd=_snapshot_spread_usd,
+            depth_at_best_ask=_snap_depth,
+            order_type=_taker_order_type_for_haircut,
+        )
+        # The first candidate is a passive maker limit. If the book supports an
+        # immediate fill, the marketable branch below resizes with taker fees.
+        repriced_size_at_snapshot_vwmp = _size_at_execution_price_boundary(
+            p_posterior=float(decision.edge.p_posterior),
+            entry_price=float(snapshot_vwmp),
+            fee_rate=0.0,
+            sizing_bankroll=sizing_bankroll,
+            kelly_multiplier=kelly_multiplier,
+            effective_context=_maker_effective_context,  # W2
+        )
+        if repriced_size_at_snapshot_vwmp <= 0.0:
+            raise ValueError("EXECUTABLE_REPRICE_REJECTED: repriced size is zero")
+        best_ask_edge = float(decision.edge.p_posterior) - best_ask_float
+        p_posterior_decimal = Decimal(str(decision.edge.p_posterior))
+        slippage_reference_decimal = Decimal(str(slippage_reference_price))
+        slippage_cap_decimal = slippage_reference_decimal * (
+            Decimal("1") + Decimal(str(max_slippage.fraction))
+        )
+        positive_edge_cap_decimal = p_posterior_decimal - tick_size_decimal
+        passive_maker_repositioned = False
+        passive_maker_reposition_reason = ""
+        if (
+            direction.startswith("buy_")
+            and best_bid is not None
+            and snapshot_limit_decimal < best_bid
+        ):
+            if positive_edge_cap_decimal < best_bid:
+                raise ValueError(
+                    "EXECUTABLE_PASSIVE_MAKER_NO_COMPETITIVE_POSITIVE_EDGE: "
+                    f"best_bid={float(best_bid):.6f} edge_cap={float(positive_edge_cap_decimal):.6f}"
+                )
+            snapshot_limit_decimal = best_bid
+            passive_maker_repositioned = True
+            passive_maker_reposition_reason = "raised_buy_limit_to_snapshot_best_bid"
+        snapshot_limit_price = float(snapshot_limit_decimal)
+        final_best_ask: float | None = None
+        final_price = snapshot_limit_price
+        repriced_size = repriced_size_at_snapshot_vwmp
+        corrected_candidate_price = snapshot_limit_price
+        corrected_candidate_expected_fill = snapshot_limit_price
+        corrected_candidate_size = repriced_size_at_snapshot_vwmp
+        best_ask_fee_adjusted_edge = 0.0
+        best_ask_size_at_fee_adjusted_cost = 0.0
+        if best_ask_edge > 0.0:
+            best_ask_size_at_fee_adjusted_cost = _size_at_execution_price_boundary(
+                p_posterior=float(decision.edge.p_posterior),
+                entry_price=best_ask_float,
+                fee_rate=taker_fee_rate,
+                sizing_bankroll=sizing_bankroll,
+                kelly_multiplier=kelly_multiplier,
+                effective_context=_taker_effective_context,  # W3
+            )
+            best_ask_fee_adjusted_edge = best_ask_edge - (
+                taker_fee_rate * best_ask_float * (1.0 - best_ask_float)
+            )
+        best_ask_inside_edge_budget = (
+            best_ask_edge > 0.0
+            and best_ask_fee_adjusted_edge > 0.0
+            and best_ask_size_at_fee_adjusted_cost > 0.0
+        )
+        allow_taker_upgrade = bool(final_intent_context.get("allow_taker_upgrade"))
+        edge_aware_taker_enabled = allow_taker_upgrade
+        f34_crossing_evidence = None
+        # F34 cost-of-fill optimizer (OPT-IN, default OFF).
+        # ZEUS_TAKER_CROSSING_ENABLED=1 lets the math decide whether to cross the spread;
+        # default "0" preserves the existing passive-maker-only behavior exactly.
+        # Karachi safety: flag defaults OFF → zero impact on day0_window positions.
+        # Operator must validate via backtest before flipping.
+        if (
+            os.environ.get("ZEUS_TAKER_CROSSING_ENABLED", "0") == "1"
+            and allow_taker_upgrade
+            and not ask_only_entry_book
+        ):
+            from src.engine.evaluator import _crossing_decision as _f34_crossing_decision
+            _f34_order_size = best_ask_size_at_fee_adjusted_cost
+            _f34_expected_pnl = best_ask_fee_adjusted_edge * _f34_order_size
+            _f34_non_fill_prob = float(final_intent_context.get("f34_non_fill_probability", 0.5))
+            _f34_min_econ_size = float(final_intent_context.get("f34_min_economical_size", 5.0))
+            _f34_taker_fee_bps = taker_fee_rate * 10_000.0
+            should_cross, f34_evidence = _f34_crossing_decision(
+                best_ask_price=best_ask_float,
+                best_ask_size=_f34_order_size,
+                best_bid_price=best_bid_float,
+                p_posterior=float(decision.edge.p_posterior),
+                expected_pnl_if_filled=_f34_expected_pnl,
+                non_fill_probability=_f34_non_fill_prob,
+                taker_fee_bps=_f34_taker_fee_bps,
+                min_economical_size=_f34_min_econ_size,
+            )
+            f34_evidence["orderbook_best_ask_size"] = ask_size_float
+            f34_evidence["intended_order_size_usd"] = _f34_order_size
+            f34_crossing_evidence = dict(f34_evidence)
+            logger.info("F34_CROSSING_DECISION %s", f34_evidence)
+            edge_aware_taker_enabled = allow_taker_upgrade and bool(should_cross)
+        edge_aware_taker_selected = False
+        depth_sweep_limit_decimal = Decimal("0")
+        marketable_buy_below_venue_min = False
+        marketable_buy_submitted_notional_usd: Decimal | None = None
+        marketable_buy_min_notional_usd = _marketable_buy_min_notional_usd(
+            final_intent_context
+        )
+        if positive_edge_cap_decimal > Decimal("0") and slippage_cap_decimal > Decimal("0"):
+            depth_sweep_limit_decimal = _floor_to_tick(
+                min(slippage_cap_decimal, positive_edge_cap_decimal),
+                tick_size_decimal,
+            )
+        depth_sweep_limit_float = float(depth_sweep_limit_decimal)
+        best_ask_inside_slippage_budget = (
+            depth_sweep_limit_float > 0.0
+            and best_ask_float <= depth_sweep_limit_float
+        )
+        if (
+            not best_ask_inside_slippage_budget
+            and edge_aware_taker_enabled
+            and best_ask_inside_edge_budget
+        ):
+            depth_sweep_limit_decimal = _floor_to_tick(
+                Decimal(str(best_ask_float)),
+                tick_size_decimal,
+            )
+            depth_sweep_limit_float = float(depth_sweep_limit_decimal)
+            edge_aware_taker_selected = True
+        if best_ask_edge > 0.0 and (best_ask_inside_slippage_budget or edge_aware_taker_selected):
+            size_at_depth_limit = _size_at_execution_price_boundary(
+                p_posterior=float(decision.edge.p_posterior),
+                entry_price=depth_sweep_limit_float,
+                fee_rate=taker_fee_rate,
+                sizing_bankroll=sizing_bankroll,
+                kelly_multiplier=kelly_multiplier,
+                effective_context=_taker_effective_context,  # W4
+            )
+            if size_at_depth_limit <= 0.0:
+                final_best_ask = None
+            else:
+                best_ask_sweep = simulate_clob_sweep(
+                    snapshot=snapshot,
+                    direction=str(decision.edge.direction),
+                    requested_size_kind="notional_usd",
+                    requested_size_value=Decimal(str(size_at_depth_limit)),
+                    limit_price=depth_sweep_limit_decimal,
+                )
+                if best_ask_sweep.depth_status != "PASS":
+                    if ask_only_entry_book:
+                        raise ValueError(
+                            "EXECUTABLE_ASK_ONLY_PASSIVE_PRIOR_UNAVAILABLE: "
+                            f"taker depth constrained status={best_ask_sweep.depth_status} "
+                            f"visible_best_ask_usd={float(best_ask_sweep.gross_notional):.6f} "
+                            f"required_usd={size_at_depth_limit:.6f}"
+                        )
+                    raise ValueError(
+                        "EXECUTABLE_TAKER_DEPTH_CONSTRAINED: "
+                        f"visible_best_ask_usd={float(best_ask_sweep.gross_notional):.6f} "
+                        f"required_usd={size_at_depth_limit:.6f}"
+                    )
+                if direction.startswith("buy_"):
+                    marketable_buy_submitted_shares = _quantize_submit_shares(
+                        str(direction),
+                        max(best_ask_sweep.filled_shares, snapshot.min_order_size),
+                        final_limit_price=depth_sweep_limit_decimal,
+                        order_type="FOK",
+                    )
+                    marketable_buy_submitted_notional_usd = (
+                        marketable_buy_submitted_shares * depth_sweep_limit_decimal
+                    )
+                if (
+                    marketable_buy_submitted_notional_usd is not None
+                    and marketable_buy_submitted_notional_usd < marketable_buy_min_notional_usd
+                ):
+                    if ask_only_entry_book:
+                        raise ValueError(
+                            "EXECUTABLE_ASK_ONLY_MARKETABLE_BUY_BELOW_MIN_NOTIONAL_NO_PASSIVE_BID: "
+                            f"required_usd={float(marketable_buy_submitted_notional_usd):.6f} "
+                            f"marketable_min_usd={float(marketable_buy_min_notional_usd):.6f} "
+                            f"best_ask={best_ask_float:.6f}"
+                        )
+                    passive_cap = _floor_to_tick(
+                        min(
+                            snapshot_limit_decimal,
+                            best_ask - tick_size_decimal,
+                            positive_edge_cap_decimal,
+                        ),
+                        tick_size_decimal,
+                    )
+                    if (
+                        best_bid is not None
+                        and passive_cap < best_bid <= positive_edge_cap_decimal
+                        and best_bid < best_ask
+                    ):
+                        passive_cap = best_bid
+                    if passive_cap <= Decimal("0") or passive_cap >= best_ask:
+                        raise ValueError(
+                            "EXECUTABLE_MARKETABLE_BUY_BELOW_MIN_NOTIONAL_NO_PASSIVE_PRICE: "
+                            f"required_usd={float(marketable_buy_submitted_notional_usd):.6f} "
+                            f"marketable_min_usd={float(marketable_buy_min_notional_usd):.6f} "
+                            f"best_bid={float(best_bid):.6f} best_ask={best_ask_float:.6f}"
+                        )
+                    snapshot_limit_decimal = passive_cap
+                    snapshot_limit_price = float(snapshot_limit_decimal)
+                    final_price = snapshot_limit_price
+                    corrected_candidate_price = snapshot_limit_price
+                    corrected_candidate_expected_fill = snapshot_limit_price
+                    corrected_candidate_size = repriced_size_at_snapshot_vwmp
+                    repriced_size = repriced_size_at_snapshot_vwmp
+                    marketable_buy_below_venue_min = True
+                    passive_maker_repositioned = True
+                    passive_maker_reposition_reason = (
+                        "marketable_buy_notional_below_venue_min_repositioned_passive"
+                    )
+                else:
+                    final_best_ask = depth_sweep_limit_float
+                    final_price = depth_sweep_limit_float
+                    repriced_size = size_at_depth_limit
+                    corrected_candidate_price = depth_sweep_limit_float
+                    corrected_candidate_expected_fill = float(best_ask_sweep.average_price or best_ask_float)
+                    corrected_candidate_size = size_at_depth_limit
+    
+        if ask_only_entry_book and final_best_ask is None:
+            raise ValueError(
+                "EXECUTABLE_ASK_ONLY_PASSIVE_PRIOR_UNAVAILABLE: "
+                "BUY entry ask-only book has executable taker cost but no bid-side "
+                "market prior for passive maker pricing"
+            )
+    
+        passive_fill_probability = final_intent_context.get(
+            "passive_fill_probability",
+            final_intent_context.get("expected_fill_probability"),
+        )
+        if final_best_ask is None and passive_fill_probability in (None, ""):
+            try:
+                from src.analysis.market_analysis_vnext import estimate_passive_maker_execution
+    
+                passive_estimate = estimate_passive_maker_execution(
+                    conn,
+                    snapshot,
+                    quote_price=snapshot_limit_decimal,
+                )
+            except Exception:
+                passive_estimate = None
+            if passive_estimate is not None:
+                edge_profit_per_share = max(
+                    Decimal("0"),
+                    Decimal(str(decision.edge.p_posterior)) - snapshot_limit_decimal,
+                )
+                gross_profit_usd = (
+                    Decimal(str(repriced_size))
+                    * edge_profit_per_share
+                    / max(snapshot_limit_decimal, Decimal("0.000001"))
+                )
+                adverse_penalty_usd = (
+                    passive_estimate.adverse_selection_score
+                    * Decimal(str(repriced_size))
+                )
+                fill_adjusted_profit_usd = (
+                    passive_estimate.expected_fill_probability * gross_profit_usd
+                    - adverse_penalty_usd
+                )
+                min_profit_raw = final_intent_context.get("min_expected_profit_usd")
+                min_profit_usd = Decimal(str(min_profit_raw if min_profit_raw not in (None, "") else "0.05"))
+                if fill_adjusted_profit_usd >= min_profit_usd:
+                    passive_fill_probability = passive_estimate.expected_fill_probability
+                    final_intent_context["passive_fill_probability"] = str(
+                        passive_estimate.expected_fill_probability
+                    )
+                    final_intent_context["queue_depth_ahead"] = (
+                        None
+                        if passive_estimate.queue_depth_ahead is None
+                        else str(passive_estimate.queue_depth_ahead)
+                    )
+                    final_intent_context["adverse_selection_score"] = str(
+                        passive_estimate.adverse_selection_score
+                    )
+                    final_intent_context["passive_fill_model_source"] = passive_estimate.evidence_source
+                    final_intent_context["passive_fill_model_order_count"] = passive_estimate.evidence_order_count
+                    final_intent_context["passive_fill_model_fill_count"] = passive_estimate.evidence_fill_count
+                    final_intent_context["fill_adjusted_expected_profit_usd"] = str(
+                        fill_adjusted_profit_usd
+                    )
+        passive_maker_context = None
+        if final_best_ask is None and passive_fill_probability not in (None, ""):
+            from src.contracts.execution_intent import PassiveMakerExecutionContext
+    
+            captured_at = getattr(snapshot, "captured_at", None)
+            quote_age_ms = 0
+            if isinstance(captured_at, datetime):
+                captured_utc = (
+                    captured_at
+                    if captured_at.tzinfo is not None
+                    else captured_at.replace(tzinfo=timezone.utc)
+                )
+                quote_age_ms = max(
+                    0,
+                    int(
+                        (
+                            datetime.now(timezone.utc)
+                            - captured_utc.astimezone(timezone.utc)
+                        ).total_seconds()
+                        * 1000
+                    ),
+                )
+            passive_maker_context = PassiveMakerExecutionContext(
+                spread_usd=_snapshot_spread_usd,
+                quote_age_ms=quote_age_ms,
+                expected_fill_probability=Decimal(str(passive_fill_probability)),
+                queue_depth_ahead=(
+                    None
+                    if final_intent_context.get("queue_depth_ahead") in (None, "")
+                    else Decimal(str(final_intent_context.get("queue_depth_ahead")))
+                ),
+                adverse_selection_score=(
+                    None
+                    if final_intent_context.get("adverse_selection_score") in (None, "")
+                    else Decimal(str(final_intent_context.get("adverse_selection_score")))
+                ),
+                orderbook_hash_age_ms=quote_age_ms,
+            )
+        if final_best_ask is None and passive_maker_context is None:
+>           raise ValueError(
+                "PASSIVE_FILL_PROBABILITY_UNMODELED: "
+                "post_only_passive_limit requires PassiveMakerExecutionContext"
+            )
+E           ValueError: PASSIVE_FILL_PROBABILITY_UNMODELED: post_only_passive_limit requires PassiveMakerExecutionContext
+
+src/engine/cycle_runtime.py:1527: ValueError
+_________________ test_mypy_rejects_plain_float_as_celsius_arg _________________
+
+    def test_mypy_rejects_plain_float_as_celsius_arg() -> None:
+        """Sed-break: bare float passed to a Celsius-annotated parameter fails mypy.
+    
+        Celsius = NewType("Celsius", float). Under strict mypy, a plain float
+        does not satisfy a Celsius parameter — the caller must wrap via degC().
+    
+        This proves the antibody infrastructure is live. Signal/evaluator internal
+        temperature values stay float (unit-polymorphic), but any NEW function
+        accepting a statically-unit-stable temperature MUST use this pattern.
+        """
+        snippet = textwrap.dedent("""\
+            from src.types.temperature import Celsius
+    
+            def store_celsius(t: Celsius) -> None:
+                pass
+    
+            x: float = 20.0
+            store_celsius(x)  # should fail mypy — plain float not assignable to Celsius
+        """)
+        exit_code, output = _run_mypy_strict_on_snippet(snippet)
+        assert exit_code != 0, (
+            "mypy should reject plain float where Celsius is required, "
+            f"but it exited 0. Output:\n{output}"
+        )
+>       assert "Argument" in output or "error" in output.lower(), (
+            f"Expected a type error in mypy output, got:\n{output}"
+        )
+E       AssertionError: Expected a type error in mypy output, got:
+E         /Users/leofitz/miniconda3/bin/python: No module named mypy
+E         
+E       assert ('Argument' in '/Users/leofitz/miniconda3/bin/python: No module named mypy\n' or 'error' in '/users/leofitz/miniconda3/bin/python: no module named mypy\n')
+E        +  where '/users/leofitz/miniconda3/bin/python: no module named mypy\n' = <built-in method lower of str object at 0x3458741f0>()
+E        +    where <built-in method lower of str object at 0x3458741f0> = '/Users/leofitz/miniconda3/bin/python: No module named mypy\n'.lower
+
+tests/engine/test_evaluator_unit_types.py:189: AssertionError
+____________________ test_mypy_accepts_degc_wrapped_celsius ____________________
+
+    def test_mypy_accepts_degc_wrapped_celsius() -> None:
+        """Positive boundary: degC(t) satisfies a Celsius-annotated parameter.
+    
+        Confirms the function-boundary type guard is live: degC(20.0) satisfies
+        a parameter annotated as Celsius, while a plain float does not (under
+        strict mypy with NewType).
+        """
+        snippet = textwrap.dedent("""\
+            from src.types.temperature import Celsius, degC
+    
+            def store_celsius(t: Celsius) -> None:
+                pass
+    
+            # CORRECT: wrapped via degC
+            store_celsius(degC(20.0))
+        """)
+        exit_code, output = _run_mypy_strict_on_snippet(snippet)
+>       assert exit_code == 0, (
+            f"mypy exited {exit_code} on correctly-typed Celsius call "
+            f"(import error or unexpected failure):\n{output}"
+        )
+E       AssertionError: mypy exited 1 on correctly-typed Celsius call (import error or unexpected failure):
+E         /Users/leofitz/miniconda3/bin/python: No module named mypy
+E         
+E       assert 1 == 0
+
+tests/engine/test_evaluator_unit_types.py:211: AssertionError
+_____________________ test_file_under_task_packet_skipped ______________________
+
+tmp_path = PosixPath('/private/var/folders/ns/d17kspxd62sf4_x5jfg4sqvh0000gn/T/pytest-of-leofitz/pytest-8570/test_file_under_task_packet_sk0')
+
+    def test_file_under_task_packet_skipped(tmp_path: Path) -> None:
+        """
+        A file under docs/operations/task_<anything>/ must be classified
+        SKIP_ACTIVE_PACKET_DIR — never quarantine active packet dirs.
+        """
+        ctx = _make_ctx(tmp_path)
+        entry = _make_entry()
+    
+        # Simulate an untracked file inside a task packet dir
+        packet_rel = "docs/archive/2026-Q2/task_2026-05-16_doc_alignment_plan/some_artifact.md"
+        packet_abs = tmp_path / packet_rel
+        packet_abs.parent.mkdir(parents=True, exist_ok=True)
+        packet_abs.write_text("artifact")
+    
+        old_mtime = time.time() - (30 * 86400)
+    
+        with patch(
+            "maintenance_worker.rules.untracked_top_level_quarantine._list_untracked_files",
+            return_value=[packet_rel],
+        ), patch(
+            "maintenance_worker.rules.untracked_top_level_quarantine._get_mtime",
+            return_value=old_mtime,
+        ):
+            results = enumerate(entry, ctx)
+    
+        # The forbidden pattern check also catches task_* — either SKIP_FORBIDDEN or
+        # SKIP_ACTIVE_PACKET is acceptable since the packet is protected.
+        skip_verdicts = {VERDICT_SKIP_FORBIDDEN, VERDICT_SKIP_ACTIVE_PACKET}
+>       assert all(c.verdict in skip_verdicts for c in results), (
+            f"Expected all SKIP verdicts; got: {[c.verdict for c in results]}"
+        )
+E       AssertionError: Expected all SKIP verdicts; got: ['UNTRACKED_QUARANTINE_CANDIDATE']
+E       assert False
+E        +  where False = all(<generator object test_file_under_task_packet_skipped.<locals>.<genexpr> at 0x33e7d0200>)
+
+tests/maintenance_worker/test_rules/test_untracked_top_level_quarantine.py:155: AssertionError
+__ TestP2ByteEquivalence.test_world_plus_forecasts_schema_names_match_fixture __
+
+self = <tests.state.test_p2_byte_equivalence.TestP2ByteEquivalence object at 0x332c36e90>
+
+    def test_world_plus_forecasts_schema_names_match_fixture(self):
+        """Table/index names from init functions must exactly match fixture.
+    
+        This is the name-set check: detects added or dropped tables/indexes.
+        Failing here means a schema object was added without updating the
+        fixture baseline (or the fixture has a name the code no longer creates).
+    
+        Uses :memory: for world, temp file for forecasts (ATTACH path requires
+        on-disk world.db).
+        """
+        import src.state.db as db_mod
+    
+        # Step 1: world init
+        world_conn = sqlite3.connect(":memory:")
+        db_mod.init_schema_world_only(world_conn)
+        world_names = _names_from_conn(world_conn)
+        world_conn.close()
+    
+        # Step 2: forecasts init (ATTACH path → needs on-disk world.db)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            world_path = Path(tmpdir) / "zeus-world.db"
+            w_conn = sqlite3.connect(str(world_path))
+            db_mod.init_schema_world_only(w_conn)
+            w_conn.close()
+    
+            original_world_path = db_mod.ZEUS_WORLD_DB_PATH
+            db_mod.ZEUS_WORLD_DB_PATH = world_path
+            try:
+                fc_conn = sqlite3.connect(":memory:")
+                db_mod.init_schema_forecasts(fc_conn)
+                forecasts_names = _names_from_conn(fc_conn)
+                fc_conn.close()
+            finally:
+                db_mod.ZEUS_WORLD_DB_PATH = original_world_path
+    
+        live_names = world_names | forecasts_names
+        fixture_names = _names_from_fixture(self.FIXTURE_PATH)
+    
+        only_in_live = live_names - fixture_names
+        only_in_fixture = fixture_names - live_names
+    
+>       assert not only_in_live and not only_in_fixture, (
+            f"Schema name drift vs {self.FIXTURE_PATH.name}.\n"
+            f"  In live init but NOT in fixture ({len(only_in_live)}): {sorted(only_in_live)}\n"
+            f"  In fixture but NOT in live init ({len(only_in_fixture)}): {sorted(only_in_fixture)}\n"
+            "If this is expected (e.g., a planned new table), update the fixture and list "
+            "the delta in the PR description."
+        )
+E       AssertionError: Schema name drift vs before_p2_sqlite_master.sql.
+E           In live init but NOT in fixture (30): ['decision_certificate_edges', 'decision_certificate_supersessions', 'decision_certificates', 'decision_compile_failures', 'edli_live_cap_usage', 'edli_no_submit_receipts', 'event_dead_letters', 'execution_feasibility_evidence', 'idx_decision_certificate_edges_parent', 'idx_decision_certificates_hash', 'idx_decision_certificates_semantic', 'idx_decision_compile_failures_event', 'idx_edli_live_cap_usage_cap_date', 'idx_edli_no_submit_receipts_decision_time', 'idx_edli_no_submit_receipts_event', 'idx_event_dead_letters_event', 'idx_execution_feasibility_evidence_token_time', 'idx_no_trade_events_strategy', 'idx_no_trade_regret_stage', 'idx_opportunity_event_processing_status', 'idx_opportunity_events_pending_order', 'idx_opportunity_events_type_available', 'idx_scv_city_date_metric', 'idx_scv_verdict', 'idx_source_time_frontier_family', 'no_trade_regret_events', 'opportunity_event_processing', 'opportunity_events', 'settlement_capture_verifications', 'source_time_frontier']
+E           In fixture but NOT in live init (0): []
+E         If this is expected (e.g., a planned new table), update the fixture and list the delta in the PR description.
+E       assert (not {'decision_certificate_edges', 'decision_certificate_supersessions', 'decision_certificates', 'decision_compile_failures', 'edli_live_cap_usage', 'edli_no_submit_receipts', ...})
+
+tests/state/test_p2_byte_equivalence.py:138: AssertionError
+----------------------------- Captured stdout call -----------------------------
+2026-05-25 13:40:15,854 [src.state.snapshot_repo] INFO: PR2 migration: column already exists, skipping: tradeability_status_json
+2026-05-25 13:40:15,912 [src.state.snapshot_repo] INFO: PR2 migration: column already exists, skipping: tradeability_status_json
+------------------------------ Captured log call -------------------------------
+INFO     src.state.snapshot_repo:snapshot_repo.py:95 PR2 migration: column already exists, skipping: tradeability_status_json
+INFO     src.state.snapshot_repo:snapshot_repo.py:95 PR2 migration: column already exists, skipping: tradeability_status_json
+_________ test_t2_negrisk_market_negrisk_adapter_in_logs_does_not_fire _________
+
+trade_conn = <sqlite3.Connection object at 0x33e2a63e0>
+world_tmp_db = '/var/folders/ns/d17kspxd62sf4_x5jfg4sqvh0000gn/T/tmp45o2ujy1.db'
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x33dfb5cc0>
+
+    def test_t2_negrisk_market_negrisk_adapter_in_logs_does_not_fire(
+        trade_conn, world_tmp_db, monkeypatch
+    ):
+        """T2 (correct routing): negRisk + PayoutRedemption emitted from NegRiskAdapter
+        → antibody does NOT fire → row marks REDEEM_CONFIRMED.
+        """
+        import src.execution.settlement_commands as sc
+    
+        _patch_world_db(monkeypatch, world_tmp_db)
+    
+        cmd_id = _insert_tx_hashed(trade_conn, _NEGRISK_CONDITION_ID, _TX_HASH_NEGRISK_OK)
+        web3 = _make_web3_with_logs(
+            _TX_HASH_NEGRISK_OK,
+            status=1,
+            logs=[_negrisk_adapter_log()],  # NegRiskAdapter emitted PayoutRedemption
+        )
+    
+        results = sc.reconcile_pending_redeems(web3, trade_conn)
+    
+        assert len(results) == 1, f"T2: expected 1 result, got {len(results)}"
+        result = results[0]
+>       assert result.state == SettlementState.REDEEM_CONFIRMED, (
+            f"T2: expected REDEEM_CONFIRMED, got {result.state}"
+        )
+E       AssertionError: T2: expected REDEEM_CONFIRMED, got SettlementState.REDEEM_REVIEW_REQUIRED
+E       assert <SettlementSt...IEW_REQUIRED'> == <SettlementSt...EM_CONFIRMED'>
+E         
+E         - REDEEM_CONFIRMED
+E         + REDEEM_REVIEW_REQUIRED
+
+tests/test_antibody_logs_address.py:274: AssertionError
+---------------------------- Captured stdout setup -----------------------------
+2026-05-25 13:40:25,859 [src.state.snapshot_repo] INFO: PR2 migration: column already exists, skipping: tradeability_status_json
+------------------------------ Captured log setup ------------------------------
+INFO     src.state.snapshot_repo:snapshot_repo.py:95 PR2 migration: column already exists, skipping: tradeability_status_json
+----------------------------- Captured stderr call -----------------------------
+2026-05-25 13:40:25,886 [src.execution.settlement_commands] WARNING: [REDEEM_NEGRISK_REVIEW_REQUIRED] command_id=2682422af4df4d598384e1854591e1d8 condition_id=0xnegrisk_logs_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa payout_from_receipt=None expected=2000000 tx_hash=0xnegrisk_ok_logs00000000000000000000000000000000000000000000000
+------------------------------ Captured log call -------------------------------
+WARNING  src.execution.settlement_commands:settlement_commands.py:1512 [REDEEM_NEGRISK_REVIEW_REQUIRED] command_id=2682422af4df4d598384e1854591e1d8 condition_id=0xnegrisk_logs_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa payout_from_receipt=None expected=2000000 tx_hash=0xnegrisk_ok_logs00000000000000000000000000000000000000000000000
+_________ test_t3_standard_market_standard_ctf_in_logs_marks_confirmed _________
+
+trade_conn = <sqlite3.Connection object at 0x33e2a4e50>
+world_tmp_db = '/var/folders/ns/d17kspxd62sf4_x5jfg4sqvh0000gn/T/tmpcsnm4uah.db'
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x33dfb5e10>
+
+    def test_t3_standard_market_standard_ctf_in_logs_marks_confirmed(
+        trade_conn, world_tmp_db, monkeypatch
+    ):
+        """T3 (standard market): non-negRisk market + Standard CTF in logs
+        → no antibody concern → row marks REDEEM_CONFIRMED.
+        """
+        import src.execution.settlement_commands as sc
+    
+        _patch_world_db(monkeypatch, world_tmp_db)
+    
+        cmd_id = _insert_tx_hashed(trade_conn, _STANDARD_CONDITION_ID, _TX_HASH_STANDARD_OK)
+        web3 = _make_web3_with_logs(
+            _TX_HASH_STANDARD_OK,
+            status=1,
+            logs=[_standard_ctf_log()],  # Standard CTF is CORRECT for standard market
+        )
+    
+        results = sc.reconcile_pending_redeems(web3, trade_conn)
+    
+        assert len(results) == 1, f"T3: expected 1 result, got {len(results)}"
+        result = results[0]
+>       assert result.state == SettlementState.REDEEM_CONFIRMED, (
+            f"T3: expected REDEEM_CONFIRMED, got {result.state}"
+        )
+E       AssertionError: T3: expected REDEEM_CONFIRMED, got SettlementState.REDEEM_REVIEW_REQUIRED
+E       assert <SettlementSt...IEW_REQUIRED'> == <SettlementSt...EM_CONFIRMED'>
+E         
+E         - REDEEM_CONFIRMED
+E         + REDEEM_REVIEW_REQUIRED
+
+tests/test_antibody_logs_address.py:305: AssertionError
+---------------------------- Captured stdout setup -----------------------------
+2026-05-25 13:40:25,899 [src.state.snapshot_repo] INFO: PR2 migration: column already exists, skipping: tradeability_status_json
+------------------------------ Captured log setup ------------------------------
+INFO     src.state.snapshot_repo:snapshot_repo.py:95 PR2 migration: column already exists, skipping: tradeability_status_json
+----------------------------- Captured stderr call -----------------------------
+2026-05-25 13:40:25,926 [src.execution.settlement_commands] WARNING: [REDEEM_STANDARD_CTF_WRONG_CONDITION] command_id=f6b35ab72c914467a50e1a529b4df959 condition_id=0xstandard_logsbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb payout_from_receipt=None tx_hash=0xstandard_ok_logs1111111111111111111111111111111111111111111111
+------------------------------ Captured log call -------------------------------
+WARNING  src.execution.settlement_commands:settlement_commands.py:1614 [REDEEM_STANDARD_CTF_WRONG_CONDITION] command_id=f6b35ab72c914467a50e1a529b4df959 condition_id=0xstandard_logsbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb payout_from_receipt=None tx_hash=0xstandard_ok_logs1111111111111111111111111111111111111111111111
+__________ test_t4_no_payout_redemption_topic_does_not_fire_antibody ___________
+
+trade_conn = <sqlite3.Connection object at 0x33e2f1d50>
+world_tmp_db = '/var/folders/ns/d17kspxd62sf4_x5jfg4sqvh0000gn/T/tmpiuqrrg65.db'
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x33dfb6270>
+
+    def test_t4_no_payout_redemption_topic_does_not_fire_antibody(
+        trade_conn, world_tmp_db, monkeypatch
+    ):
+        """T4 (no PayoutRedemption topic): logs present but none with PayoutRedemption topic
+        → adapter_addrs empty → antibody does not fire → REDEEM_CONFIRMED.
+        """
+        import src.execution.settlement_commands as sc
+    
+        _patch_world_db(monkeypatch, world_tmp_db)
+    
+        cmd_id = _insert_tx_hashed(trade_conn, _NEGRISK_CONDITION_ID, _TX_HASH_NO_TOPIC)
+        web3 = _make_web3_with_logs(
+            _TX_HASH_NO_TOPIC,
+            status=1,
+            logs=[_no_payout_topic_log()],  # Standard CTF address but wrong topic
+        )
+    
+        results = sc.reconcile_pending_redeems(web3, trade_conn)
+    
+        assert len(results) == 1, f"T4: expected 1 result, got {len(results)}"
+        result = results[0]
+>       assert result.state == SettlementState.REDEEM_CONFIRMED, (
+            f"T4: expected REDEEM_CONFIRMED (no PayoutRedemption → no antibody), got {result.state}"
+        )
+E       AssertionError: T4: expected REDEEM_CONFIRMED (no PayoutRedemption → no antibody), got SettlementState.REDEEM_OPERATOR_REQUIRED
+E       assert <SettlementSt...TOR_REQUIRED'> == <SettlementSt...EM_CONFIRMED'>
+E         
+E         - REDEEM_CONFIRMED
+E         + REDEEM_OPERATOR_REQUIRED
+
+tests/test_antibody_logs_address.py:336: AssertionError
+---------------------------- Captured stdout setup -----------------------------
+2026-05-25 13:40:25,937 [src.state.snapshot_repo] INFO: PR2 migration: column already exists, skipping: tradeability_status_json
+------------------------------ Captured log setup ------------------------------
+INFO     src.state.snapshot_repo:snapshot_repo.py:95 PR2 migration: column already exists, skipping: tradeability_status_json
+----------------------------- Captured stderr call -----------------------------
+2026-05-25 13:40:25,964 [src.execution.settlement_commands] WARNING: [REDEEM_NEGRISK_MISROUTED] command_id=496b1ba4c21a4f28a499d531cee73e15 condition_id=0xnegrisk_logs_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa tx_hash=0xno_payout_topic_2222222222222222222222222222222222222222222222 wrong_adapter_in_logs= expected=0xd91e80cf2e7be2e162c6513ced06f1dd0da35296 — resetting to REDEEM_OPERATOR_REQUIRED for autonomous retry via correct adapter
+------------------------------ Captured log call -------------------------------
+WARNING  src.execution.settlement_commands:settlement_commands.py:1339 [REDEEM_NEGRISK_MISROUTED] command_id=496b1ba4c21a4f28a499d531cee73e15 condition_id=0xnegrisk_logs_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa tx_hash=0xno_payout_topic_2222222222222222222222222222222222222222222222 wrong_adapter_in_logs= expected=0xd91e80cf2e7be2e162c6513ced06f1dd0da35296 — resetting to REDEEM_OPERATOR_REQUIRED for autonomous retry via correct adapter
+___________ test_rebuild_calibration_requires_verified_observations ____________
+
+tmp_path = PosixPath('/private/var/folders/ns/d17kspxd62sf4_x5jfg4sqvh0000gn/T/pytest-of-leofitz/pytest-8570/test_rebuild_calibration_requi0')
+
+    def test_rebuild_calibration_requires_verified_observations(tmp_path):
+        """Property: canonical calibration rebuild skips snapshots with no VERIFIED observation."""
+        import sys
+        sys.path.insert(0, str(PROJECT_ROOT))
+    
+        db_path = tmp_path / "test_world_cal.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+        from src.state.db import init_schema
+        init_schema(conn)
+        _add_authority_columns(conn)
+    
+        # Seed VERIFIED snapshots for NYC
+>       _seed_ensemble_snapshots(conn, city="NYC", authority="VERIFIED", n=4)
+
+tests/test_authority_gate.py:317: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+conn = <sqlite3.Connection object at 0x33e55a6b0>, city = 'NYC'
+authority = 'VERIFIED', n = 4
+
+    def _seed_ensemble_snapshots(
+        conn: sqlite3.Connection,
+        city: str = "NYC",
+        authority: str = "VERIFIED",
+        n: int = 3,
+    ) -> None:
+        """Seed ensemble_snapshots rows."""
+        members = json.dumps([85.0 + j * 0.5 for j in range(51)])
+        for i in range(n):
+>           conn.execute(
+                """
+                INSERT OR IGNORE INTO ensemble_snapshots
+                (city, target_date, issue_time, valid_time, available_at,
+                 fetch_time, lead_hours, members_json, model_version,
+                 data_version, authority)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'ecmwf_tigge', 'v1', ?)
+                """,
+                (
+                    city,
+                    f"2025-07-{i+1:02d}",
+                    f"2025-07-{i+1:02d}T00:00:00Z",
+                    f"2025-07-{i+1:02d}T12:00:00Z",
+                    f"2025-07-{i+1:02d}T06:00:00Z",
+                    f"2025-07-{i+1:02d}T07:00:00Z",
+                    48.0,
+                    members,
+                    authority,
+                ),
+            )
+E           sqlite3.OperationalError: no such table: ensemble_snapshots
+
+tests/test_authority_gate.py:145: OperationalError
+----------------------------- Captured stdout call -----------------------------
+2026-05-25 13:40:29,554 [src.state.snapshot_repo] INFO: PR2 migration: column already exists, skipping: tradeability_status_json
+------------------------------ Captured log call -------------------------------
+INFO     src.state.snapshot_repo:snapshot_repo.py:95 PR2 migration: column already exists, skipping: tradeability_status_json
+______ test_H2_cycle_runtime_inverse_map_matches_registry_dispatch_modes _______
+
+    def test_H2_cycle_runtime_inverse_map_matches_registry_dispatch_modes():
+        """H2 critic R6 pin: cycle_runtime's discovery_mode -> strategies map
+        must equal ``strategy_profile.cycle_axis_dispatch_inverse()``.
+        Pre-fix this was a hardcoded dict at cycle_runtime.py:46 — the 7th
+        unmigrated site flagged in the rebuild review.
+    
+        A future change that adds a strategy to the registry's
+        cycle_axis_dispatch_mode field MUST surface in cycle_runtime
+        automatically; a regression that re-hardcodes the map breaks that
+        contract."""
+        from src.engine import cycle_runtime
+        from src.strategy.strategy_profile import cycle_axis_dispatch_inverse
+    
+>       assert cycle_runtime._strategy_keys_by_discovery_mode() == cycle_axis_dispatch_inverse()
+E       AssertionError: assert {'day0_captur...pture', ...})} == {'day0_captur...il_capture'})}
+E         
+E         Omitting 1 identical items, use -vv to show
+E         Differing items:
+E         {'opening_hunt': frozenset({'center_buy', 'cross_market_correlation_hedge', 'liquidity_provision_with_heartbeat', 'neg_risk_basket', 'opening_inertia', 'shoulder_impossible_tail_capture', ...})} != {'opening_hunt': frozenset({'opening_inertia'})}
+E         {'day0_capture': frozenset({'day0_nowcast_entry', 'settlement_capture'})} != {'day0_capture': frozenset({'settlement_capture'})}
+E         {'update_reaction': frozenset({'center_buy', 'cross_market_correlation_hedge', 'liquidity_provision_with_heartbeat', 'neg_risk_basket', 'resolu...
+E         
+E         ...Full output truncated (2 lines hidden), use '-vv' to show
+
+tests/test_authority_rebuild_invariants.py:753: AssertionError
+_ TestEmitRescueEventIntegration.test_canonical_position_events_schema_does_not_suppress_rescue_v2 _
+
+self = <tests.test_b063_rescue_events_v2.TestEmitRescueEventIntegration testMethod=test_canonical_position_events_schema_does_not_suppress_rescue_v2>
+
+    def test_canonical_position_events_schema_does_not_suppress_rescue_v2(self) -> None:
+        """Canonical position_events no longer has the legacy payload/event
+        shape; a skipped legacy CHAIN_RESCUE_AUDIT write must not suppress
+        the structured rescue_events_v2 authority row.
+        """
+        from src.engine.lifecycle_events import build_entry_canonical_write
+        from src.state.chain_reconciliation import ChainPosition, reconcile
+        from src.state.db import append_many_and_project
+        from src.state.portfolio import Position, PortfolioState
+    
+        conn = self._make_canonical_conn()
+        position = Position(
+            trade_id="t-canonical-rescue-v2",
+            market_id="m-canonical-rescue-v2",
+            city="NYC",
+            cluster="US-Northeast",
+            target_date="2026-04-17",
+            bin_label="39-40°F",
+            direction="buy_yes",
+            unit="F",
+            env="live",
+            size_usd=10.0,
+            entry_price=0.40,
+            p_posterior=0.61,
+            decision_snapshot_id="snap-canonical-rescue-v2",
+            strategy_key="center_buy",
+            strategy="center_buy",
+            edge_source="center_buy",
+            order_id="ord-canonical-rescue-v2",
+            entry_order_id="ord-canonical-rescue-v2",
+            order_status="pending",
+            order_posted_at="2026-04-17T10:00:00Z",
+            state="pending_tracked",
+            chain_state="local_only",
+            token_id="t1",
+        )
+        events, projection = build_entry_canonical_write(
+            position,
+            decision_id="dec-canonical-rescue-v2",
+            source_module="tests.test_b063_rescue_events_v2",
+        )
+>       append_many_and_project(conn, events, projection)
+
+tests/test_b063_rescue_events_v2.py:299: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+src/state/ledger.py:274: in append_many_and_project
+    upsert_position_current(conn, projection)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+conn = <sqlite3.Connection object at 0x33e6c7e20>
+projection = {'bin_label': '39-40°F', 'chain_state': <ChainState.LOCAL_ONLY: 'local_only'>, 'city': 'NYC', 'cluster': 'US-Northeast', ...}
+
+    @capability("canonical_position_write", lease=True)
+    def upsert_position_current(conn: sqlite3.Connection, projection: dict) -> None:
+        # F109 writer-side idempotency check (2026-05-17).
+        # Runs before INSERT so the race window with the partial UNIQUE INDEX is
+        # tight. If a same-token open-phase row exists with a *different*
+        # position_id, this is a duplicate-open attempt — raise. The partial
+        # UNIQUE INDEX added by migration 202605_position_current_idempotent_open_per_token
+        # is the hard floor that catches any race that slips past this check;
+        # sqlite3.IntegrityError from the INDEX will propagate through the
+        # caller's SAVEPOINT and roll back the entire entry.
+        candidate_phase = str(projection.get("phase") or "")
+        candidate_token = projection.get("token_id")
+        candidate_position_id = str(projection.get("position_id") or "")
+    
+        # Fix B (2026-05-19): fail-closed guard for NULL condition_id on open phases.
+        # This makes the category of "CTF operation fails because condition_id is NULL"
+        # impossible at write-time rather than detectable only at sell/redeem time.
+        if candidate_phase in _CONDITION_ID_REQUIRED_PHASES:
+            candidate_condition_id = projection.get("condition_id")
+            if not candidate_condition_id:
+>               raise NullConditionIdOnOpenPhaseError(
+                    position_id=candidate_position_id,
+                    phase=candidate_phase,
+                )
+E               src.state.projection.NullConditionIdOnOpenPhaseError: NullConditionId: position_id='t-canonical-rescue-v2' phase='pending_entry' — condition_id must be non-empty for open-phase position writes. Check that the entry write-path populates condition_id from the executable_market_snapshot.
+
+src/state/projection.py:196: NullConditionIdOnOpenPhaseError
+----------------------------- Captured stdout call -----------------------------
+2026-05-25 13:40:30,999 [src.state.snapshot_repo] INFO: PR2 migration: column already exists, skipping: tradeability_status_json
+------------------------------ Captured log call -------------------------------
+INFO     src.state.snapshot_repo:snapshot_repo.py:95 PR2 migration: column already exists, skipping: tradeability_status_json
+_ test_onboarding_pipeline_materializes_forecast_surfaces_after_source_backfill _
+
+    def test_onboarding_pipeline_materializes_forecast_surfaces_after_source_backfill():
+        step_ids = [step["id"] for step in onboard_cities.PIPELINE_STEPS]
+        steps = {step["id"]: step for step in onboard_cities.PIPELINE_STEPS}
+    
+        assert step_ids.index("openmeteo_previous_runs") < step_ids.index("forecast_skill")
+        assert step_ids.index("forecast_skill") < step_ids.index("historical_forecasts")
+        assert "900" in steps["wu_daily"]["extra_args"]
+        assert "900" in steps["hourly_openmeteo"]["extra_args"]
+        assert "900" in steps["openmeteo_previous_runs"]["extra_args"]
+        assert "ukmo_global_deterministic_10km" in ",".join(
+            steps["openmeteo_previous_runs"]["extra_args"]
+        )
+        assert "forecasts" in onboard_cities._verification_tables()
+        assert "forecast_skill" in onboard_cities._verification_tables()
+>       assert "model_bias" in onboard_cities._verification_tables()
+E       AssertionError: assert 'model_bias' in ['observation_instants_v2', 'ensemble_snapshots_v2', 'calibration_pairs_v2', 'model_bias_ens_v2', 'settlements_v2', 'settlements', ...]
+E        +  where ['observation_instants_v2', 'ensemble_snapshots_v2', 'calibration_pairs_v2', 'model_bias_ens_v2', 'settlements_v2', 'settlements', ...] = <function _verification_tables at 0x333734ca0>()
+E        +    where <function _verification_tables at 0x333734ca0> = onboard_cities._verification_tables
+
+tests/test_backfill_openmeteo_previous_runs.py:159: AssertionError
+________ test_divergence_row_does_not_mutate_settlement_or_trade_truth _________
+
+tmp_path = PosixPath('/private/var/folders/ns/d17kspxd62sf4_x5jfg4sqvh0000gn/T/pytest-of-leofitz/pytest-8570/test_divergence_row_does_not_m0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x33e02e9e0>
+
+    def test_divergence_row_does_not_mutate_settlement_or_trade_truth(tmp_path, monkeypatch):
+        trade, trade_db, world_db, backtest_db = _init_trade_world(tmp_path)
+        _insert_position_and_outcome(trade)
+        before_trade = trade.execute("SELECT COUNT(*) FROM outcome_fact").fetchone()[0]
+        trade.close()
+        world = get_connection(world_db)
+        before_world = world.execute("SELECT COUNT(*) FROM settlements").fetchone()[0]
+        world.close()
+        _patch_connections(monkeypatch, trade_db, world_db, backtest_db)
+    
+>       replay_module.run_replay("2026-04-03", "2026-04-03", mode="trade_history_audit")
+
+tests/test_backtest_outcome_comparison.py:81: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+src/engine/replay.py:2649: in run_replay
+    return run_trade_history_audit(start_date, end_date)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+start_date = '2026-04-03', end_date = '2026-04-03'
+
+    def run_trade_history_audit(start_date: str, end_date: str) -> ReplaySummary:
+        """Compare actual trade-history outcomes with WU-derived outcomes."""
+        run_id = str(uuid.uuid4())[:12]
+        conn = get_trade_connection_with_world()
+        backtest_conn = get_backtest_connection()
+        init_backtest_schema(backtest_conn)
+        summary = ReplaySummary(
+            run_id=run_id,
+            mode=TRADE_HISTORY_LANE,
+            date_range=(start_date, end_date),
+            limitations={
+                "storage": "zeus_backtest.db",
+                "authority_scope": BACKTEST_AUTHORITY_SCOPE,
+                "promotion_authority": False,
+                "lane_goal": "real_trade_outcome_divergence_not_hypothetical_pnl",
+                "pnl_available": False,
+                "pnl_unavailable_reason": "trade_history_audit_reports_actual_trade_pnl_rows_not_simulated_strategy_pnl",
+                "actual_trade_outcome_source": LEGACY_OUTCOME_FACT_DIAGNOSTIC_SOURCE,
+                "actual_outcome_evidence_class": LEGACY_OUTCOME_FACT_EVIDENCE_CLASS,
+                "actual_outcome_authority_scope": BACKTEST_AUTHORITY_SCOPE,
+                "actual_outcome_learning_eligible": False,
+                "actual_outcome_promotion_eligible": False,
+            },
+        )
+        _insert_backtest_run(backtest_conn, summary, status="running")
+    
+        subject_refs = _trade_subject_rows(conn)
+        for subject_ref in subject_refs:
+            subject = resolve_trade_history_subject(conn, subject_ref)
+            if subject.position_id is None:
+                divergence_status = (
+                    "ambiguous_subject"
+                    if subject.missing_reason == "ambiguous_trade_subject"
+                    else "orphan_trade_decision"
+                )
+                _insert_backtest_outcome(
+                    backtest_conn,
+                    run_id=run_id,
+                    lane=TRADE_HISTORY_LANE,
+                    subject_id=subject.subject_id,
+                    subject_kind="position",
+                    city=None,
+                    target_date=None,
+                    truth_source=TRADE_HISTORY_DIAGNOSTIC_TRUTH_SOURCE,
+                    divergence_status=divergence_status,
+                    evidence={
+                        "aliases": list(subject.aliases),
+                        "source": subject.source,
+                        "actual_trade_outcome_source": "none",
+                        "actual_pnl_source": "none",
+                        "actual_outcome_authority_scope": BACKTEST_AUTHORITY_SCOPE,
+                        "actual_outcome_learning_eligible": False,
+                        "actual_outcome_promotion_eligible": False,
+                    },
+                    missing_reasons=[subject.missing_reason],
+                )
+                continue
+    
+            current = conn.execute(
+                """
+                SELECT position_id, city, target_date, bin_label, direction, unit,
+                       temperature_metric, decision_snapshot_id
+                FROM position_current
+                WHERE position_id = ?
+                """,
+                (subject.position_id,),
+            ).fetchone()
+            outcome = conn.execute(
+                """
+                SELECT outcome, pnl, settled_at, decision_snapshot_id
+                FROM outcome_fact
+                WHERE position_id = ?
+                """,
+                (subject.position_id,),
+            ).fetchone()
+            if current is None:
+                actual_outcome, actual_pnl, outcome_evidence, outcome_missing = (
+                    _diagnostic_outcome_fact_projection(
+                        outcome,
+                        expected_decision_snapshot_id=None,
+                    )
+                )
+                _insert_backtest_outcome(
+                    backtest_conn,
+                    run_id=run_id,
+                    lane=TRADE_HISTORY_LANE,
+                    subject_id=subject.position_id,
+                    subject_kind="position",
+                    city=None,
+                    target_date=None,
+                    truth_source=TRADE_HISTORY_DIAGNOSTIC_TRUTH_SOURCE,
+                    divergence_status="trade_unresolved",
+                    evidence={"resolved_source": subject.source, **outcome_evidence},
+                    missing_reasons=["missing_position_current", *outcome_missing],
+                )
+                continue
+    
+            actual_outcome, actual_pnl, outcome_evidence, outcome_missing = (
+                _diagnostic_outcome_fact_projection(
+                    outcome,
+                    expected_decision_snapshot_id=current["decision_snapshot_id"],
+                )
+            )
+            city_name = current["city"]
+            target_date = current["target_date"]
+            if target_date < start_date or target_date > end_date:
+                continue
+            summary.n_settlements += 1
+            city = cities_by_name.get(city_name)
+            unit = current["unit"] or (city.settlement_unit if city else "")
+            position_metric = current["temperature_metric"] or "high"
+            bin = bin_from_range_label(current["bin_label"], unit) if unit else None
+>           settlement = conn.execute(
+                """
+                SELECT settlement_value
+                FROM forecasts.settlements
+                WHERE city = ? AND target_date = ? AND temperature_metric = ?
+                  AND authority = 'VERIFIED'
+                """,
+                (city_name, target_date, position_metric),
+            ).fetchone()
+E           sqlite3.OperationalError: no such table: forecasts.settlements
+
+src/engine/replay.py:2528: OperationalError
+----------------------------- Captured stdout call -----------------------------
+2026-05-25 13:40:35,293 [src.state.snapshot_repo] INFO: PR2 migration: column already exists, skipping: tradeability_status_json
+2026-05-25 13:40:35,335 [src.state.snapshot_repo] INFO: PR2 migration: column already exists, skipping: tradeability_status_json
+------------------------------ Captured log call -------------------------------
+INFO     src.state.snapshot_repo:snapshot_repo.py:95 PR2 migration: column already exists, skipping: tradeability_status_json
+INFO     src.state.snapshot_repo:snapshot_repo.py:95 PR2 migration: column already exists, skipping: tradeability_status_json
+________ test_trade_history_audit_coverage_counts_only_requested_window ________
+
+tmp_path = PosixPath('/private/var/folders/ns/d17kspxd62sf4_x5jfg4sqvh0000gn/T/pytest-of-leofitz/pytest-8570/test_trade_history_audit_cover0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x33e02f3f0>
+
+    def test_trade_history_audit_coverage_counts_only_requested_window(tmp_path, monkeypatch):
+        trade, trade_db, world_db, backtest_db = _init_trade_world(tmp_path)
+        _insert_position_and_outcome(trade)
+        trade.execute(
+            """
+            INSERT INTO position_current
+            (position_id, phase, trade_id, market_id, city, cluster, target_date, bin_label,
+             direction, unit, size_usd, shares, cost_basis_usd, entry_price, p_posterior,
+             last_monitor_prob, last_monitor_edge, last_monitor_market_price,
+             decision_snapshot_id, entry_method, strategy_key, edge_source, discovery_mode,
+             chain_state, order_id, order_status, updated_at, temperature_metric)
+            VALUES ('pos-out', 'settled', 'pos-out', 'mkt', 'NYC', 'US-Northeast', '2026-04-10',
+                    '39-40°F', 'buy_yes', 'F', 5.0, 10.0, 5.0, 0.5, 0.6,
+                    0.6, 0.1, 0.5, 'snap-2', 'entry', 'center_buy', 'edge',
+                    'opening_hunt', 'on_chain', 'ord-2', 'filled', '2026-04-09T00:00:00Z', 'high')
+            """
+        )
+        trade.execute(
+            """
+            INSERT INTO trade_decisions
+            (market_id, bin_label, direction, size_usd, price, timestamp, forecast_snapshot_id,
+             p_raw, p_posterior, edge, ci_lower, ci_upper, kelly_fraction, status,
+             edge_source, runtime_trade_id, env)
+            VALUES ('mkt', '39-40°F', 'buy_yes', 5.0, 0.4, '2026-04-10T12:00:00+00:00', NULL,
+                    0.6, 0.6, 0.2, 0.55, 0.65, 0.0, 'entered',
+                    'center_buy', 'orphan-outside-window', 'live')
+            """
+        )
+        trade.commit()
+        trade.close()
+        _patch_connections(monkeypatch, trade_db, world_db, backtest_db)
+    
+>       summary = replay_module.run_replay("2026-04-03", "2026-04-03", mode="trade_history_audit")
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/test_backtest_outcome_comparison.py:166: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+src/engine/replay.py:2649: in run_replay
+    return run_trade_history_audit(start_date, end_date)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+start_date = '2026-04-03', end_date = '2026-04-03'
+
+    def run_trade_history_audit(start_date: str, end_date: str) -> ReplaySummary:
+        """Compare actual trade-history outcomes with WU-derived outcomes."""
+        run_id = str(uuid.uuid4())[:12]
+        conn = get_trade_connection_with_world()
+        backtest_conn = get_backtest_connection()
+        init_backtest_schema(backtest_conn)
+        summary = ReplaySummary(
+            run_id=run_id,
+            mode=TRADE_HISTORY_LANE,
+            date_range=(start_date, end_date),
+            limitations={
+                "storage": "zeus_backtest.db",
+                "authority_scope": BACKTEST_AUTHORITY_SCOPE,
+                "promotion_authority": False,
+                "lane_goal": "real_trade_outcome_divergence_not_hypothetical_pnl",
+                "pnl_available": False,
+                "pnl_unavailable_reason": "trade_history_audit_reports_actual_trade_pnl_rows_not_simulated_strategy_pnl",
+                "actual_trade_outcome_source": LEGACY_OUTCOME_FACT_DIAGNOSTIC_SOURCE,
+                "actual_outcome_evidence_class": LEGACY_OUTCOME_FACT_EVIDENCE_CLASS,
+                "actual_outcome_authority_scope": BACKTEST_AUTHORITY_SCOPE,
+                "actual_outcome_learning_eligible": False,
+                "actual_outcome_promotion_eligible": False,
+            },
+        )
+        _insert_backtest_run(backtest_conn, summary, status="running")
+    
+        subject_refs = _trade_subject_rows(conn)
+        for subject_ref in subject_refs:
+            subject = resolve_trade_history_subject(conn, subject_ref)
+            if subject.position_id is None:
+                divergence_status = (
+                    "ambiguous_subject"
+                    if subject.missing_reason == "ambiguous_trade_subject"
+                    else "orphan_trade_decision"
+                )
+                _insert_backtest_outcome(
+                    backtest_conn,
+                    run_id=run_id,
+                    lane=TRADE_HISTORY_LANE,
+                    subject_id=subject.subject_id,
+                    subject_kind="position",
+                    city=None,
+                    target_date=None,
+                    truth_source=TRADE_HISTORY_DIAGNOSTIC_TRUTH_SOURCE,
+                    divergence_status=divergence_status,
+                    evidence={
+                        "aliases": list(subject.aliases),
+                        "source": subject.source,
+                        "actual_trade_outcome_source": "none",
+                        "actual_pnl_source": "none",
+                        "actual_outcome_authority_scope": BACKTEST_AUTHORITY_SCOPE,
+                        "actual_outcome_learning_eligible": False,
+                        "actual_outcome_promotion_eligible": False,
+                    },
+                    missing_reasons=[subject.missing_reason],
+                )
+                continue
+    
+            current = conn.execute(
+                """
+                SELECT position_id, city, target_date, bin_label, direction, unit,
+                       temperature_metric, decision_snapshot_id
+                FROM position_current
+                WHERE position_id = ?
+                """,
+                (subject.position_id,),
+            ).fetchone()
+            outcome = conn.execute(
+                """
+                SELECT outcome, pnl, settled_at, decision_snapshot_id
+                FROM outcome_fact
+                WHERE position_id = ?
+                """,
+                (subject.position_id,),
+            ).fetchone()
+            if current is None:
+                actual_outcome, actual_pnl, outcome_evidence, outcome_missing = (
+                    _diagnostic_outcome_fact_projection(
+                        outcome,
+                        expected_decision_snapshot_id=None,
+                    )
+                )
+                _insert_backtest_outcome(
+                    backtest_conn,
+                    run_id=run_id,
+                    lane=TRADE_HISTORY_LANE,
+                    subject_id=subject.position_id,
+                    subject_kind="position",
+                    city=None,
+                    target_date=None,
+                    truth_source=TRADE_HISTORY_DIAGNOSTIC_TRUTH_SOURCE,
+                    divergence_status="trade_unresolved",
+                    evidence={"resolved_source": subject.source, **outcome_evidence},
+                    missing_reasons=["missing_position_current", *outcome_missing],
+                )
+                continue
+    
+            actual_outcome, actual_pnl, outcome_evidence, outcome_missing = (
+                _diagnostic_outcome_fact_projection(
+                    outcome,
+                    expected_decision_snapshot_id=current["decision_snapshot_id"],
+                )
+            )
+            city_name = current["city"]
+            target_date = current["target_date"]
+            if target_date < start_date or target_date > end_date:
+                continue
+            summary.n_settlements += 1
+            city = cities_by_name.get(city_name)
+            unit = current["unit"] or (city.settlement_unit if city else "")
+            position_metric = current["temperature_metric"] or "high"
+            bin = bin_from_range_label(current["bin_label"], unit) if unit else None
+>           settlement = conn.execute(
+                """
+                SELECT settlement_value
+                FROM forecasts.settlements
+                WHERE city = ? AND target_date = ? AND temperature_metric = ?
+                  AND authority = 'VERIFIED'
+                """,
+                (city_name, target_date, position_metric),
+            ).fetchone()
+E           sqlite3.OperationalError: no such table: forecasts.settlements
+
+src/engine/replay.py:2528: OperationalError
+----------------------------- Captured stdout call -----------------------------
+2026-05-25 13:40:35,638 [src.state.snapshot_repo] INFO: PR2 migration: column already exists, skipping: tradeability_status_json
+2026-05-25 13:40:35,680 [src.state.snapshot_repo] INFO: PR2 migration: column already exists, skipping: tradeability_status_json
+------------------------------ Captured log call -------------------------------
+INFO     src.state.snapshot_repo:snapshot_repo.py:95 PR2 migration: column already exists, skipping: tradeability_status_json
+INFO     src.state.snapshot_repo:snapshot_repo.py:95 PR2 migration: column already exists, skipping: tradeability_status_json
+=========================== short test summary info ============================
+FAILED tests/contracts/test_settlement_semantics_unit_types.py::test_mypy_rejects_plain_decimal_without_degC_d
+FAILED tests/data/test_ingest_unit_types.py::test_mypy_rejects_plain_float_as_celsius_arg
+FAILED tests/data/test_ingest_unit_types.py::test_mypy_accepts_degc_wrapped_celsius
+FAILED tests/engine/test_crossing_decision.py::TestCrossingDecisionIntegrationFlag::test_flag_off_does_not_call_crossing_decision
+FAILED tests/engine/test_crossing_decision.py::TestCrossingDecisionIntegrationFlag::test_flag_on_without_intent_gate_does_not_call_crossing_decision
+FAILED tests/engine/test_crossing_decision.py::TestCrossingDecisionIntegrationFlag::test_flag_on_with_intent_gate_calls_crossing_decision_with_intended_order_size
+FAILED tests/engine/test_evaluator_unit_types.py::test_mypy_rejects_plain_float_as_celsius_arg
+FAILED tests/engine/test_evaluator_unit_types.py::test_mypy_accepts_degc_wrapped_celsius
+FAILED tests/maintenance_worker/test_rules/test_untracked_top_level_quarantine.py::test_file_under_task_packet_skipped
+FAILED tests/state/test_p2_byte_equivalence.py::TestP2ByteEquivalence::test_world_plus_forecasts_schema_names_match_fixture
+FAILED tests/test_antibody_logs_address.py::test_t2_negrisk_market_negrisk_adapter_in_logs_does_not_fire
+FAILED tests/test_antibody_logs_address.py::test_t3_standard_market_standard_ctf_in_logs_marks_confirmed
+FAILED tests/test_antibody_logs_address.py::test_t4_no_payout_redemption_topic_does_not_fire_antibody
+FAILED tests/test_authority_gate.py::test_rebuild_calibration_requires_verified_observations
+FAILED tests/test_authority_rebuild_invariants.py::test_H2_cycle_runtime_inverse_map_matches_registry_dispatch_modes
+FAILED tests/test_b063_rescue_events_v2.py::TestEmitRescueEventIntegration::test_canonical_position_events_schema_does_not_suppress_rescue_v2
+FAILED tests/test_backfill_openmeteo_previous_runs.py::test_onboarding_pipeline_materializes_forecast_surfaces_after_source_backfill
+FAILED tests/test_backtest_outcome_comparison.py::test_divergence_row_does_not_mutate_settlement_or_trade_truth
+FAILED tests/test_backtest_outcome_comparison.py::test_trade_history_audit_coverage_counts_only_requested_window
+ERROR tests/maintenance_worker/test_bindings/test_zeus_config.py::test_config_task_allowlist_task_ids_exist_in_catalog
+!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 20 failures !!!!!!!!!!!!!!!!!!!!!!!!!!
+19 failed, 2551 passed, 53 skipped, 19 deselected, 1 xfailed, 1 error in 49.36s

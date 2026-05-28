@@ -1,0 +1,401 @@
+"""Execution certificate builders and verifier entrypoints."""
+
+from __future__ import annotations
+
+from datetime import datetime
+from collections.abc import Mapping
+from typing import Iterable
+
+from src.decision_kernel import claims
+from src.decision_kernel.canonicalization import stable_hash
+from src.decision_kernel.certificate import DecisionCertificate, ParentEdge, build_certificate
+from src.decision_kernel.verifier import (
+    verify_execution_command,
+    verify_execution_receipt,
+    verify_executor_expressibility,
+    verify_final_intent,
+    verify_live_cap_transition,
+)
+from src.events.live_order_aggregate import LiveOrderAggregateEvent
+
+
+def build_final_intent_certificate_from_actionable(
+    *,
+    actionable_cert: DecisionCertificate,
+    executable_snapshot_cert: DecisionCertificate,
+    quote_feasibility_cert: DecisionCertificate,
+    cost_model_cert: DecisionCertificate,
+    forecast_authority_cert: DecisionCertificate,
+    decision_source_context,
+    passive_maker_context,
+    decision_time: datetime,
+    order_type: str = "POST_ONLY_LIMIT",
+    time_in_force: str = "GTC",
+    tick_size: float = 0.01,
+    min_order_size: float = 1.0,
+    fee_rate: float = 0.0,
+) -> DecisionCertificate:
+    action = actionable_cert.payload
+    limit_price = float(action["c_fee_adjusted"])
+    reserved_notional = float(action.get("live_cap_reserved_notional_usd") or action.get("kelly_size_usd") or 0.0)
+    size = max(float(min_order_size), reserved_notional / limit_price)
+    notional = size * limit_price
+    executable_snapshot_hash = _required_text(executable_snapshot_cert.payload, "executable_snapshot_hash")
+    cost_basis_hash = _required_text(cost_model_cert.payload, "cost_basis_hash")
+    decision_source_context_payload = _context_payload(decision_source_context, "decision_source_context")
+    passive_maker_context_payload = _context_payload(passive_maker_context, "passive_maker_context")
+    payload = {
+        "event_id": action["event_id"],
+        "actionable_certificate_hash": actionable_cert.certificate_hash,
+        "final_intent_id": action["final_intent_id"],
+        "family_id": action["family_id"],
+        "candidate_id": action["candidate_id"],
+        "condition_id": action["condition_id"],
+        "token_id": action["token_id"],
+        "direction": action["direction"],
+        "side": _side_for_direction(str(action["direction"])),
+        "order_type": order_type,
+        "executor_order_type": time_in_force,
+        "time_in_force": time_in_force,
+        "post_only": True,
+        "maker_intent": True,
+        "limit_price": limit_price,
+        "size": size,
+        "notional_usd": notional,
+        "executable_snapshot_id": action["executable_snapshot_id"],
+        "execution_price_type": "ExecutionPrice",
+        "fee_deducted": True,
+        "executable_snapshot_hash": executable_snapshot_hash,
+        "cost_basis_hash": cost_basis_hash,
+        "cost_basis_id": f"cost_basis:{cost_basis_hash[:16]}",
+        "decision_source_context": decision_source_context_payload,
+        "passive_maker_context": passive_maker_context_payload,
+        "neg_risk": bool(action.get("neg_risk", False)),
+        "tick_size": float(tick_size),
+        "min_order_size": float(min_order_size),
+        "fee_rate": float(fee_rate),
+        "live_cap_usage_id": action["live_cap_usage_id"],
+        "source": "existing_final_intent_builder",
+        "submitted": False,
+        "venue_order_id": None,
+    }
+    return _build_cert(
+        claims.FINAL_INTENT,
+        f"final_intent:{payload['event_id']}:{payload['final_intent_id']}",
+        payload,
+        decision_time,
+        (actionable_cert, executable_snapshot_cert, quote_feasibility_cert, cost_model_cert, forecast_authority_cert),
+    )
+
+
+def build_executor_expressibility_certificate(
+    *,
+    final_intent_cert: DecisionCertificate,
+    executable_snapshot_cert: DecisionCertificate,
+    live_cap_cert: DecisionCertificate,
+    decision_time: datetime,
+    executor_native_intent_hash: str,
+    executor_name: str = "execute_final_intent",
+    executor_capability_version: str = "existing_executor_passive_limit_v1",
+) -> DecisionCertificate:
+    if not executor_native_intent_hash:
+        raise ValueError("executor_native_intent_hash required")
+    final_intent = final_intent_cert.payload
+    payload = {
+        "event_id": final_intent["event_id"],
+        "final_intent_id": final_intent["final_intent_id"],
+        "executor_name": executor_name,
+        "executor_capability_version": executor_capability_version,
+        "can_express": True,
+        "passed": True,
+        "reason_code": "OK",
+        "executor_native_intent_hash": executor_native_intent_hash,
+        "order_type": final_intent["order_type"],
+        "side": final_intent["side"],
+        "direction": final_intent["direction"],
+        "token_id": final_intent["token_id"],
+        "condition_id": final_intent["condition_id"],
+        "limit_price": final_intent["limit_price"],
+        "size": final_intent["size"],
+        "time_in_force": final_intent["time_in_force"],
+        "post_only": final_intent["post_only"],
+        "maker_intent": final_intent["maker_intent"],
+        "tick_size": final_intent["tick_size"],
+        "min_order_size": final_intent["min_order_size"],
+        "neg_risk": final_intent["neg_risk"],
+        "fee_rate": final_intent["fee_rate"],
+    }
+    return _build_cert(
+        claims.EXECUTOR_EXPRESSIBILITY,
+        f"executor_expressibility:{payload['event_id']}:{payload['final_intent_id']}",
+        payload,
+        decision_time,
+        (final_intent_cert, executable_snapshot_cert, live_cap_cert),
+    )
+
+
+def build_execution_command_certificate_from_final_intent(
+    *,
+    actionable_cert: DecisionCertificate,
+    final_intent_cert: DecisionCertificate,
+    executor_expressibility_cert: DecisionCertificate,
+    live_cap_cert: DecisionCertificate,
+    pre_submit_revalidation_cert: DecisionCertificate,
+    decision_time: datetime,
+) -> DecisionCertificate:
+    action = actionable_cert.payload
+    final_intent = final_intent_cert.payload
+    execution_command_id = (
+        f"edli_exec_cmd:{action['event_id']}:{final_intent['final_intent_id']}:"
+        f"{final_intent['token_id']}:{final_intent['direction']}"
+    )
+    idempotency_key = stable_hash(
+        {
+            "event_id": action["event_id"],
+            "causal_snapshot_id": action["causal_snapshot_id"],
+            "final_intent_id": final_intent["final_intent_id"],
+            "token_id": final_intent["token_id"],
+            "direction": final_intent["direction"],
+            "limit_price": final_intent["limit_price"],
+            "size": final_intent["size"],
+            "mode": "LIVE",
+        }
+    )
+    payload = {
+        "event_id": action["event_id"],
+        "actionable_certificate_hash": actionable_cert.certificate_hash,
+        "final_intent_id": final_intent["final_intent_id"],
+        "execution_command_id": execution_command_id,
+        "executor_name": executor_expressibility_cert.payload["executor_name"],
+        "order_type": final_intent["order_type"],
+        "side": final_intent["side"],
+        "direction": final_intent["direction"],
+        "condition_id": final_intent["condition_id"],
+        "token_id": final_intent["token_id"],
+        "limit_price": final_intent["limit_price"],
+        "size": final_intent["size"],
+        "time_in_force": final_intent["time_in_force"],
+        "post_only": final_intent["post_only"],
+        "maker": final_intent["maker_intent"],
+        "maker_intent": final_intent["maker_intent"],
+        "neg_risk": final_intent["neg_risk"],
+        "tick_size": final_intent["tick_size"],
+        "min_order_size": final_intent["min_order_size"],
+        "fee_rate": final_intent["fee_rate"],
+        "idempotency_key": idempotency_key,
+        "aggregate_id": pre_submit_revalidation_cert.payload["aggregate_id"],
+        "aggregate_pre_submit_event_hash": pre_submit_revalidation_cert.payload["aggregate_event_hash"],
+        "aggregate_execution_command_event_hash": pre_submit_revalidation_cert.payload.get(
+            "aggregate_execution_command_event_hash"
+        ),
+        "submitted": False,
+        "venue_order_id": None,
+    }
+    return _build_cert(
+        claims.EXECUTION_COMMAND,
+        f"execution_command:{payload['event_id']}:{payload['execution_command_id']}",
+        payload,
+        decision_time,
+        (actionable_cert, final_intent_cert, executor_expressibility_cert, live_cap_cert, pre_submit_revalidation_cert),
+    )
+
+
+def build_execution_receipt_certificate(
+    *,
+    execution_command_cert: DecisionCertificate,
+    decision_time: datetime,
+    status: str = "SUBMIT_DISABLED",
+    reason_code: str = "REAL_ORDER_SUBMIT_DISABLED",
+    submit_started_at: str | None = None,
+    submit_finished_at: str | None = None,
+    venue_order_id: str | None = None,
+    raw_response: Mapping[str, object] | None = None,
+    raw_response_hash: str | None = None,
+    reconciliation_followup_required: bool | None = None,
+    venue_call_started: bool | None = None,
+    venue_ack_received: bool | None = None,
+    side_effect_known: bool | None = None,
+) -> DecisionCertificate:
+    command = execution_command_cert.payload
+    response_hash = raw_response_hash or stable_hash(
+        {
+            "status": status,
+            "reason_code": reason_code,
+            "venue_order_id": venue_order_id,
+            "raw_response": dict(raw_response or {}),
+        }
+    )
+    payload = {
+        "event_id": command["event_id"],
+        "execution_command_id": command["execution_command_id"],
+        "final_intent_id": command["final_intent_id"],
+        "executor_name": command["executor_name"],
+        "status": status,
+        "submit_started_at": submit_started_at,
+        "submit_finished_at": submit_finished_at,
+        "venue_order_id": venue_order_id,
+        "raw_response_hash": response_hash,
+        "idempotency_key": command["idempotency_key"],
+        "reason_code": reason_code,
+    }
+    if reconciliation_followup_required is not None:
+        payload["reconciliation_followup_required"] = reconciliation_followup_required
+    if venue_call_started is not None:
+        payload["venue_call_started"] = venue_call_started
+    if venue_ack_received is not None:
+        payload["venue_ack_received"] = venue_ack_received
+    if side_effect_known is not None:
+        payload["side_effect_known"] = side_effect_known
+    return _build_cert(
+        claims.EXECUTION_RECEIPT,
+        f"execution_receipt:{payload['event_id']}:{payload['execution_command_id']}:{status}",
+        payload,
+        decision_time,
+        (execution_command_cert,),
+    )
+
+
+def build_live_cap_transition_certificate(
+    *,
+    live_cap_cert: DecisionCertificate,
+    execution_receipt_cert: DecisionCertificate,
+    decision_time: datetime,
+    to_status: str,
+    reason_code: str,
+    projection_status: str | None = None,
+    aggregate_event_hash: str | None = None,
+) -> DecisionCertificate:
+    live_cap = live_cap_cert.payload
+    receipt = execution_receipt_cert.payload
+    payload = {
+        "event_id": live_cap["event_id"],
+        "usage_id": live_cap["usage_id"],
+        "from_status": live_cap["reservation_status"],
+        "to_status": to_status,
+        "projection_status": projection_status or to_status,
+        "transition_reason": reason_code,
+        "final_intent_id": receipt["final_intent_id"],
+        "execution_command_id": receipt["execution_command_id"],
+        "execution_receipt_hash": execution_receipt_cert.certificate_hash,
+    }
+    if aggregate_event_hash:
+        payload["aggregate_cap_transition_event_hash"] = aggregate_event_hash
+    return _build_cert(
+        claims.LIVE_CAP_TRANSITION,
+        f"live_cap_transition:{payload['usage_id']}:{payload['to_status']}:{payload['execution_command_id']}",
+        payload,
+        decision_time,
+        (live_cap_cert, execution_receipt_cert),
+    )
+
+
+def build_pre_submit_revalidation_certificate(
+    *,
+    pre_submit_event: LiveOrderAggregateEvent,
+    final_intent_cert: DecisionCertificate,
+    live_cap_cert: DecisionCertificate,
+    decision_time: datetime,
+    execution_command_event_hash: str | None = None,
+) -> DecisionCertificate:
+    payload = {
+        **pre_submit_event.payload,
+        "aggregate_id": pre_submit_event.aggregate_id,
+        "aggregate_event_id": pre_submit_event.aggregate_event_id,
+        "aggregate_event_hash": pre_submit_event.event_hash,
+        "aggregate_event_sequence": pre_submit_event.event_sequence,
+        "aggregate_execution_command_event_hash": execution_command_event_hash,
+        "final_intent_certificate_hash": final_intent_cert.certificate_hash,
+        "live_cap_usage_id": live_cap_cert.payload["usage_id"],
+    }
+    return _build_cert(
+        claims.PRE_SUBMIT_REVALIDATION,
+        f"pre_submit_revalidation:{payload['event_id']}:{payload['final_intent_id']}:{pre_submit_event.event_hash[:16]}",
+        payload,
+        decision_time,
+        (final_intent_cert, live_cap_cert),
+    )
+
+
+def _build_cert(
+    certificate_type: str,
+    semantic_key: str,
+    payload: dict,
+    decision_time: datetime,
+    parents: Iterable[DecisionCertificate],
+) -> DecisionCertificate:
+    parent_tuple = tuple(parents)
+    return build_certificate(
+        certificate_type=certificate_type,
+        semantic_key=semantic_key,
+        claim_type=certificate_type,
+        mode="LIVE",
+        decision_time=decision_time,
+        source_available_at=decision_time,
+        agent_received_at=decision_time,
+        persisted_at=decision_time,
+        payload=payload,
+        parent_edges=tuple(
+            ParentEdge(_role(parent.certificate_type), parent.certificate_hash, parent.certificate_type)
+            for parent in parent_tuple
+        ),
+        parent_certificates=parent_tuple,
+        authority_id="edli.final_intent_executor_boundary",
+        authority_version="v1",
+        algorithm_id="edli.event_bound_execution_certificate_builder",
+        algorithm_version="v1",
+    )
+
+
+def _side_for_direction(direction: str) -> str:
+    if direction in {"buy_yes", "buy_no"}:
+        return "BUY"
+    if direction in {"sell_yes", "sell_no"}:
+        return "SELL"
+    raise ValueError(f"unsupported EDLI direction: {direction!r}")
+
+
+def _role(certificate_type: str) -> str:
+    import re
+
+    base = certificate_type.removesuffix("Certificate").replace("Evidence", "")
+    return re.sub(r"(?<!^)(?=[A-Z])", "_", base).lower()
+
+
+def _context_payload(context, field_name: str) -> dict[str, object]:
+    if context is None:
+        raise ValueError(f"{field_name} required")
+    if isinstance(context, Mapping):
+        payload = dict(context)
+    elif hasattr(context, "__dict__"):
+        payload = {
+            key: value
+            for key, value in vars(context).items()
+            if not key.startswith("_")
+        }
+    else:
+        raise ValueError(f"{field_name} required")
+    if not payload:
+        raise ValueError(f"{field_name} required")
+    return payload
+
+
+def _required_text(payload: Mapping[str, object], field: str) -> str:
+    value = str(payload.get(field) or "").strip()
+    if not value:
+        raise ValueError(f"{field} missing")
+    return value
+
+
+__all__ = [
+    "build_execution_command_certificate_from_final_intent",
+    "build_execution_receipt_certificate",
+    "build_executor_expressibility_certificate",
+    "build_final_intent_certificate_from_actionable",
+    "build_live_cap_transition_certificate",
+    "build_pre_submit_revalidation_certificate",
+    "verify_execution_command",
+    "verify_execution_receipt",
+    "verify_executor_expressibility",
+    "verify_final_intent",
+    "verify_live_cap_transition",
+]

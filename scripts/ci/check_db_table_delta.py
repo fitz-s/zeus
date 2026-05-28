@@ -81,6 +81,7 @@ def _path_is_schema_defining(path: str) -> bool:
 _SQL_RESERVED = frozenset({
     "for", "as", "from", "where", "select", "if", "not", "exists",
     "when", "and", "or", "join", "on", "into", "values",
+    "ddl", "sql",
 })
 
 
@@ -183,6 +184,11 @@ def detect_new_tables(
             name = m.group(1).lower()
             # Skip common SQLite system / temp tables
             if name.startswith("sqlite_") or name in ("temp", "tmp"):
+                continue
+            # Rebuild migrations commonly create transient *_new tables and
+            # rename them into the registered canonical table in the same
+            # transaction. They are not boot-visible ownership surfaces.
+            if name.endswith("_new"):
                 continue
             # Skip SQL reserved-word false positives (CREATE TABLE for / as ...)
             if name in _SQL_RESERVED:

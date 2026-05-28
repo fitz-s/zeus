@@ -838,6 +838,46 @@ def test_selection_family_and_hypothesis_facts_write_idempotently(tmp_path):
     assert hypothesis["recorded_at"] == "2026-04-01T00:00:02Z"
 
 
+def test_selection_family_facts_prefer_attached_world_over_trade_ghost(tmp_path):
+    from src.state.db import init_schema, log_selection_family_fact, log_selection_hypothesis_fact
+
+    trade_path = tmp_path / "trade.db"
+    world_path = tmp_path / "world.db"
+    trade_conn = get_connection(trade_path)
+    init_schema(trade_conn)
+    world_conn = get_connection(world_path)
+    init_schema(world_conn)
+    world_conn.close()
+    trade_conn.execute("ATTACH DATABASE ? AS world", (str(world_path),))
+
+    log_selection_family_fact(
+        trade_conn,
+        family_id="fam-world",
+        cycle_mode="opening_hunt",
+        decision_snapshot_id="snap-1",
+        city="NYC",
+        target_date="2026-04-01",
+        created_at="2026-04-01T00:00:00Z",
+        meta={"tested_hypotheses": 1},
+    )
+    log_selection_hypothesis_fact(
+        trade_conn,
+        hypothesis_id="hyp-world",
+        family_id="fam-world",
+        city="NYC",
+        target_date="2026-04-01",
+        range_label="70-71",
+        direction="buy_yes",
+        recorded_at="2026-04-01T00:00:00Z",
+        meta={},
+    )
+
+    assert trade_conn.execute("SELECT COUNT(*) FROM main.selection_family_fact").fetchone()[0] == 0
+    assert trade_conn.execute("SELECT COUNT(*) FROM main.selection_hypothesis_fact").fetchone()[0] == 0
+    assert trade_conn.execute("SELECT COUNT(*) FROM world.selection_family_fact").fetchone()[0] == 1
+    assert trade_conn.execute("SELECT COUNT(*) FROM world.selection_hypothesis_fact").fetchone()[0] == 1
+
+
 def test_query_data_improvement_inventory_reports_substrate_tables(tmp_path):
     from src.state.db import query_data_improvement_inventory
 
