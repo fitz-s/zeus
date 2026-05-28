@@ -358,26 +358,171 @@ def test_effective_exposure_routes_by_authority_trade_verified() -> None:
     assert exposure.avg_price == pytest.approx(0.44)
 
 
-def test_exit_triggers_and_monitor_refresh_route_via_effective_exposure_props() -> None:
-    """Static check: exit-sizing reads in exit_triggers + monitor_refresh
-    must NOT go through raw pos.shares / pos.cost_basis_usd; they must use
-    `effective_shares` / `effective_cost_basis_usd` (which delegate to
-    effective_exposure under F1) or `effective_exposure(...)` directly.
+def test_balance_only_partial_exit_updates_chain_exposure() -> None:
+    """Antibody for PR1 critic SEV-1: partial exit on a balance-only position
+    must reduce chain_shares / chain_cost_basis_usd proportionally so that
+    effective_exposure() reflects updated exposure before the next reconcile
+    cycle.
 
-    Anchor: F1 says "be surgical — only the exit/risk reads". The
-    `effective_*` properties were already in place pre-F1 but must continue
-    to route by authority post-F1.
+    Pre-fix: _apply_partial_exit_fill wrote only position.shares + position.cost_basis_usd.
+    Since effective_shares routes via chain_shares for fill_authority=venue_position_observed,
+    effective_exposure().shares would still return the pre-exit stale aggregate.
     """
-    from pathlib import Path
+    from src.state.portfolio import (
+        FILL_AUTHORITY_VENUE_POSITION_OBSERVED,
+        ENTRY_ECONOMICS_SUBMITTED_LIMIT,
+        Position,
+    )
+    from src.execution.exit_lifecycle import _apply_partial_exit_fill
 
-    repo_root = Path(__file__).resolve().parents[2]
-    for rel_path in (
-        "src/execution/exit_triggers.py",
-        "src/engine/monitor_refresh.py",
-    ):
-        src = (repo_root / rel_path).read_text(encoding="utf-8")
-        # Authority-routed accessor name must appear somewhere.
-        assert "effective_shares" in src or "effective_cost_basis_usd" in src or "effective_exposure" in src, (
-            f"{rel_path} must use effective_shares / effective_cost_basis_usd / "
-            f"effective_exposure for exit-sizing reads."
-        )
+    pos = Position(
+        trade_id="bal-only-partial",
+        market_id="m-partial",
+        city="ATL",
+        cluster="ATL",
+        target_date="2026-06-01",
+        bin_label="60-65",
+        direction="buy_yes",
+        unit="F",
+        env="test",
+        token_id="t-partial",
+        no_token_id="t-partial-no",
+        condition_id="c-partial",
+        order_id="ord-partial",
+        entry_order_id="ord-partial",
+        state="entered",
+        chain_state="synced",
+        # Submitted / legacy mirrors:
+        entry_price=0.48,
+        size_usd=9.6,
+        cost_basis_usd=9.6,
+        shares=20.0,
+        # Chain-observed economics (authoritative for this fill_authority):
+        chain_shares=20.0,
+        chain_avg_price=0.48,
+        chain_cost_basis_usd=9.6,
+        fill_authority=FILL_AUTHORITY_VENUE_POSITION_OBSERVED,
+        entry_economics_authority=ENTRY_ECONOMICS_SUBMITTED_LIMIT,
+        # Fill-grade fields empty (balance-only):
+        shares_filled=0.0,
+        filled_cost_basis_usd=0.0,
+    )
+
+    # Partial exit: sell 5 of 20 → remaining 15.
+    changed = _apply_partial_exit_fill(
+        pos,
+        filled_shares=5.0,
+        remaining_shares=15.0,
+        fill_price=0.70,
+        order_id="sell-partial-bal",
+        status="PARTIAL",
+    )
+
+    assert changed is True, "_apply_partial_exit_fill returned False unexpectedly"
+
+    # Chain fields must reflect reduced exposure (remaining_ratio = 15/20 = 0.75).
+    assert pos.chain_shares == pytest.approx(15.0), (
+        f"chain_shares={pos.chain_shares!r} — effective_exposure would return stale 20.0"
+    )
+    assert pos.chain_cost_basis_usd == pytest.approx(7.2), (
+        f"chain_cost_basis_usd={pos.chain_cost_basis_usd!r} expected 9.6 * 0.75 = 7.2"
+    )
+
+    # effective_exposure() must return updated chain values, NOT stale pre-exit aggregate.
+    exposure = pos.effective_exposure()
+    assert exposure.source_authority == "venue_position_observed", (
+        f"source_authority={exposure.source_authority!r}"
+    )
+    assert exposure.shares == pytest.approx(15.0), (
+        f"effective_exposure().shares={exposure.shares!r} — SEV-1 regression: got stale 20.0"
+    )
+    assert exposure.cost_basis_usd == pytest.approx(7.2), (
+        f"effective_exposure().cost_basis_usd={exposure.cost_basis_usd!r}"
+    )
+
+    # Submitted / fill-grade economics are NOT mutated by a balance-only partial exit.
+    assert pos.entry_price == pytest.approx(0.48), "entry_price must remain submitted value"
+    assert pos.shares_filled == pytest.approx(0.0), "shares_filled must not be touched"
+    assert pos.filled_cost_basis_usd == pytest.approx(0.0), "filled_cost_basis_usd must not be touched"
+
+
+def test_size_mismatch_sync_populates_chain_economics_additively() -> None:
+    """Antibody for PR1 critic in-spirit-F1: Rule-2 size-mismatch sync must
+    populate chain_avg_price + chain_cost_basis_usd from chain observation,
+    unconditionally, regardless of whether entry/fill fields are also updated.
+
+    This ensures VenuePositionObservedEcon is always current after a Rule-2
+    sync — callers reading chain_* fields (e.g. effective_exposure() for
+    balance-only authority) get fresh values without waiting for a full rescue.
+    """
+    from src.state.chain_reconciliation import reconcile
+    from src.state.portfolio import (
+        FILL_AUTHORITY_VENUE_CONFIRMED_FULL,
+        ENTRY_ECONOMICS_AVG_FILL_PRICE,
+        PortfolioState,
+        Position,
+    )
+
+    conn = _setup_world_db()
+
+    # An entered (non-pending) position already in the Rule-2 branch.
+    # chain_avg_price / chain_cost_basis_usd start empty.
+    pos = Position(
+        trade_id="sm-test-trade",
+        market_id="m-sm",
+        city="CHI",
+        cluster="CHI",
+        target_date="2026-06-01",
+        bin_label="70-75",
+        direction="buy_yes",
+        unit="F",
+        env="test",
+        token_id="t-sm",
+        no_token_id="t-sm-no",
+        condition_id="c-sm",
+        order_id="ord-sm",
+        entry_order_id="ord-sm",
+        state="entered",
+        chain_state="synced",
+        entry_price=0.50,
+        size_usd=10.0,
+        cost_basis_usd=10.0,
+        shares=20.0,
+        shares_filled=20.0,
+        filled_cost_basis_usd=10.0,
+        entry_price_avg_fill=0.50,
+        entry_economics_authority=ENTRY_ECONOMICS_AVG_FILL_PRICE,
+        fill_authority=FILL_AUTHORITY_VENUE_CONFIRMED_FULL,
+        # Start with no chain economics:
+        chain_avg_price=0.0,
+        chain_cost_basis_usd=0.0,
+        chain_shares=20.0,
+    )
+
+    # Chain observation with updated average price / cost.
+    from src.state.chain_reconciliation import ChainPosition
+    chain = ChainPosition(
+        token_id="t-sm",
+        condition_id="c-sm",
+        size=20.0,
+        avg_price=0.52,
+        cost=10.4,
+    )
+
+    portfolio = PortfolioState(positions=[pos])
+    reconcile(portfolio, [chain], conn=conn)
+
+    # chain_* fields must be populated from chain observation.
+    assert pos.chain_avg_price == pytest.approx(0.52), (
+        f"chain_avg_price={pos.chain_avg_price!r} — Rule-2 sync must populate chain economics"
+    )
+    assert pos.chain_cost_basis_usd == pytest.approx(10.4), (
+        f"chain_cost_basis_usd={pos.chain_cost_basis_usd!r}"
+    )
+    # Entry/fill economics remain from trade-verified fill (not overwritten by chain
+    # because _size_mismatch_eligible defaults False for a plain entered position).
+    assert pos.entry_price == pytest.approx(0.52), (
+        "Rule-2 non-eligible: entry_price updated from chain (existing behavior unchanged)"
+    )
+
+    conn.close()
