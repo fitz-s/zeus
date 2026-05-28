@@ -204,7 +204,7 @@ def test_per_city_cap_applies_across_slugs_not_per_slug(monkeypatch):
 
     captured_slugs: list[str] = []
 
-    def _mock_capture(conn, *, market, decision, clob, captured_at, scan_authority, execution_side="BUY"):
+    def _mock_capture(conn, *, market, decision, clob, captured_at, scan_authority, execution_side="BUY", **kwargs):
         captured_slugs.append(market.get("slug", ""))
 
     clob = _make_clob_mock()
@@ -354,7 +354,7 @@ def test_clob_latency_cannot_overrun_budget(monkeypatch):
 
     monkeypatch.setattr(ms.time, "monotonic", _fake_monotonic)
 
-    def _slow_capture(conn, *, market, decision, clob, captured_at, scan_authority, execution_side="BUY"):
+    def _slow_capture(conn, *, market, decision, clob, captured_at, scan_authority, execution_side="BUY", **kwargs):
         nonlocal fake_now
         fake_now += SLEEP_PER_CAPTURE
         capture_calls.append(market.get("slug", ""))

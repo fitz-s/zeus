@@ -2514,6 +2514,7 @@ def capture_executable_market_snapshot(
     captured_at: datetime,
     scan_authority: str,
     execution_side: str = "BUY",
+    prefetched_orderbook: dict | None = None,
 ) -> dict[str, str | bool]:
     """Capture and persist an executable market snapshot.
 
@@ -2577,6 +2578,18 @@ def capture_executable_market_snapshot(
     if accepting_orders is None:
         accepting_orders = _boolish_market_field(gamma_market_raw, "acceptingOrders", "accepting_orders")
 
+    # Decision (2026-05-27, FT-64): market_info stays a FRESH per-outcome CLOB
+    # read — it is NOT sourced from Gamma and NOT cached.  The fail-closed
+    # tradability guard (_build_executable_tradeability_status) reads
+    # `archived` / `enable_order_book` ONLY from raw_clob_market, and the
+    # invariant test `test_clob_archived_blocks_even_when_gamma_accepts` proves
+    # CLOB must block even when Gamma reports acceptingOrders=True &
+    # enableOrderBook=True.  Gamma's payload carries `archived`, but the system
+    # deliberately treats CLOB /markets as the settlement-authority source and
+    # Gamma as a lagging discovery surface — collapsing them is the data-
+    # provenance failure the reverted TTL cache hit.  Only the ORDERBOOK leg is
+    # batched (see prefetched_orderbook below); the proper full fix that also
+    # removes this per-outcome read is the WS market channel (follow-up).
     raw_clob_market = _fetch_clob_market_info(clob, condition_id)
     if reconstructed_tradability:
         accepting_orders = _boolish_market_field(raw_clob_market, "accepting_orders", "acceptingOrders")
@@ -2590,7 +2603,16 @@ def capture_executable_market_snapshot(
             enable_orderbook = clob_orderbook
     elif accepting_orders is not True or enable_orderbook is not True:
         raise ExecutableSnapshotCaptureError("Gamma child market is not currently tradable")
-    raw_orderbook = _fetch_orderbook_snapshot(clob, selected_token)
+    # Orderbook leg: use the event-batched book when the refresh loop prefetched
+    # it (one POST /books for all bins), else fall back to the per-token GET /book.
+    # The prefetched book is byte-identical to the fetched one (same /books vs
+    # /book response shape), so the snapshot hash / depth jsonb are unchanged —
+    # this path is purely additive and back-compatible when prefetched_orderbook
+    # is None.  The same shape validation as the per-token path is applied.
+    if prefetched_orderbook is not None:
+        raw_orderbook = _normalize_prefetched_orderbook(prefetched_orderbook, selected_token)
+    else:
+        raw_orderbook = _fetch_orderbook_snapshot(clob, selected_token)
     fee_details = _fetch_fee_details(clob, selected_token)
     _assert_clob_identity(
         raw_clob_market=raw_clob_market,
@@ -3231,6 +3253,64 @@ def _snapshot_refresh_city_key(market: dict[str, Any]) -> str:
     return slug or "_unknown"
 
 
+_BATCH_ORDERBOOK_CHUNK = 50
+
+
+def _selected_token_for_direction(outcome: dict, direction: str) -> str:
+    """Resolve which token capture will read for a (outcome, direction) pair.
+
+    Mirrors capture_executable_market_snapshot's selection EXACTLY so the
+    prefetched book is keyed by the same token capture validates against:
+    buy_no/sell_no -> no_token_id, buy_yes/sell_yes -> token_id.
+    """
+
+    d = str(direction or "").lower()
+    if d in {"buy_no", "sell_no"}:
+        return str(outcome.get("no_token_id") or "").strip()
+    if d in {"buy_yes", "sell_yes"}:
+        return str(outcome.get("token_id") or "").strip()
+    return ""
+
+
+def _prefetch_selected_orderbooks(clob: Any, selected_candidates: list[tuple]) -> dict[str, dict]:
+    """Batch-fetch orderbooks for all selected outcomes via POST /books.
+
+    Returns a ``{token_id: orderbook_dict}`` map.  Best-effort: if the batch
+    wrapper is unavailable or the call fails, returns an empty map so capture
+    falls back to per-token GET /book (back-compat / never aborts the cycle).
+    Chunked at ``_BATCH_ORDERBOOK_CHUNK`` tokens/request (the /books endpoint has
+    no documented per-call token cap; we chunk conservatively).
+    """
+
+    getter = getattr(clob, "get_orderbook_snapshots", None)
+    if not callable(getter):
+        return {}
+
+    token_ids: list[str] = []
+    seen: set[str] = set()
+    for _priority, _ordinal, _market, outcome, _condition_id, direction in selected_candidates:
+        tok = _selected_token_for_direction(outcome, direction)
+        if tok and tok not in seen:
+            seen.add(tok)
+            token_ids.append(tok)
+    if not token_ids:
+        return {}
+
+    books: dict[str, dict] = {}
+    for start in range(0, len(token_ids), _BATCH_ORDERBOOK_CHUNK):
+        chunk = token_ids[start : start + _BATCH_ORDERBOOK_CHUNK]
+        try:
+            chunk_books = getter(chunk)
+        except Exception as exc:
+            # One bad chunk must not abort the cycle; those tokens fall back to
+            # per-token GET /book inside capture.
+            logger.warning("Batch orderbook prefetch chunk failed (%d tokens): %s", len(chunk), exc)
+            continue
+        if isinstance(chunk_books, dict):
+            books.update(chunk_books)
+    return books
+
+
 def refresh_executable_market_substrate_snapshots(
     conn,
     *,
@@ -3336,8 +3416,22 @@ def refresh_executable_market_substrate_snapshots(
     }
     inserted_cities: set[str] = set()
     budget_truncated_cities: set[str] = set()
+    # Start the wall-clock budget BEFORE the batch prefetch so the batch's own
+    # latency is charged against the same envelope (advisor 2026-05-27: a
+    # 50-token POST /books can take >1s; charging it keeps the deadline honest).
     deadline = time.monotonic() + _snapshot_budget_seconds_from_env(budget_seconds)
     budget_exhausted = False
+
+    # Batch-prefetch orderbooks for all selected outcomes in ONE POST /books per
+    # chunk (vs one GET /book per outcome).  This collapses the orderbook leg of
+    # an 11-bin negRisk event from 11 sequential HTTP calls to 1, so the budget
+    # gate captures every bin instead of starving 8 of 11 (root cause of
+    # EDGE_INSUFFICIENT).  Per-bin staleness must NOT abort the event: a token
+    # missing from the batch map simply falls back / skips that one outcome
+    # (operator directive: "market event constant, bin event should not block
+    # freshness").  market_info + fee_details stay fresh per-outcome (see
+    # capture_executable_market_snapshot).
+    prefetched_books = _prefetch_selected_orderbooks(clob, selected_candidates)
     for index, (_priority, _ordinal, market, outcome, condition_id, direction) in enumerate(
         selected_candidates
     ):
@@ -3359,6 +3453,12 @@ def refresh_executable_market_substrate_snapshots(
                 "market_id": condition_id,
             },
         )
+        # Resolve the token capture will actually read (direction -> yes/no) so
+        # we hand it the matching prefetched book.  When the batch did not return
+        # this token (partial response / offline bin) we pass None and capture
+        # falls back to a fresh per-token GET /book — never aborting the event.
+        selected_token = _selected_token_for_direction(outcome, direction)
+        prefetched_book = prefetched_books.get(selected_token) if selected_token else None
         try:
             capture_executable_market_snapshot(
                 conn,
@@ -3368,6 +3468,7 @@ def refresh_executable_market_substrate_snapshots(
                 captured_at=captured,
                 scan_authority=scan_authority,
                 execution_side="BUY",
+                prefetched_orderbook=prefetched_book,
             )
             inserted += 1
             inserted_cities.add(_snapshot_refresh_city_key(market))
@@ -3458,6 +3559,22 @@ def _fetch_orderbook_snapshot(clob: Any, token_id: str) -> dict:
     if not isinstance(raw, dict) or not raw:
         raise ExecutableSnapshotCaptureError("CLOB orderbook response is empty or non-object")
     return dict(raw)
+
+
+def _normalize_prefetched_orderbook(book: Any, token_id: str) -> dict:
+    """Validate a batch-prefetched orderbook to the same contract as a fetched one.
+
+    A book pulled via POST /books has the identical response shape to GET /book,
+    so this just enforces the same "non-empty dict" guard that
+    _fetch_orderbook_snapshot enforces, guaranteeing the resulting snapshot is
+    byte-identical to the per-token path for the same book content.
+    """
+
+    if not isinstance(book, dict) or not book:
+        raise ExecutableSnapshotCaptureError(
+            f"prefetched orderbook for {token_id} is empty or non-object"
+        )
+    return dict(book)
 
 
 def _fetch_fee_details(clob: Any, token_id: str) -> dict[str, Any]:

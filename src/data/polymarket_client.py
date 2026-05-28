@@ -290,6 +290,12 @@ class PolymarketClient:
             return httpx.get(url, params=params, timeout=PUBLIC_CLOB_HTTP_TIMEOUT_SECONDS)
         return self._public_http().get(url, params=params)
 
+    def _public_post(self, path: str, *, json_body: Any):
+        url = f"{CLOB_BASE}{path}"
+        if not hasattr(self, "_public_http_client"):
+            return httpx.post(url, json=json_body, timeout=PUBLIC_CLOB_HTTP_TIMEOUT_SECONDS)
+        return self._public_http().post(url, json=json_body)
+
     def _ensure_client(self):
         """Deprecated compatibility alias for the V2 adapter boundary."""
         warnings.warn(
@@ -411,6 +417,64 @@ class PolymarketClient:
         if not isinstance(data, dict):
             raise RuntimeError(f"CLOB orderbook response for {token_id} is not an object")
         return data
+
+    def get_orderbook_snapshots(self, token_ids: list[str]) -> dict[str, dict]:
+        """Batch-fetch raw CLOB orderbook facts for many tokens in ONE request.
+
+        Uses the public ``POST /books`` endpoint (rate limit 500 req/10s, vs the
+        per-token ``GET /book`` at 1,500 req/10s).  A single 11-bin negRisk event
+        becomes one round-trip instead of eleven.
+
+        Returns a ``{token_id: orderbook_dict}`` map.  Each value has the SAME
+        response shape as :meth:`get_orderbook_snapshot` (verified live 2026-05-27:
+        ``/books`` returns a list of book dicts whose keys are identical to the
+        singular ``/book`` response — ``asks/asset_id/bids/hash/last_trade_price/
+        market/min_order_size/neg_risk/tick_size/timestamp``).  So a book pulled
+        here is byte-identical to one pulled per-token, preserving snapshot hashes.
+
+        Robustness contract:
+          - Maps each returned book by its ``asset_id`` field (NOT response
+            position — the endpoint does not guarantee ordering).
+          - Partial responses are tolerated: tokens absent from the response are
+            simply absent from the returned map (caller decides per-bin skip).
+          - Empty / non-dict / missing-asset_id entries are dropped (never raise);
+            the per-bin staleness contract lives in the caller.
+          - Bounded by the same discovery CLOB timeout as the singular path.
+
+        Note: book content here is NOT a tradability authority.  archived /
+        enable_order_book / accepting_orders still come from the per-outcome CLOB
+        ``/markets`` read; see market_scanner.capture_executable_market_snapshot.
+        """
+
+        wanted = [str(t).strip() for t in token_ids if str(t).strip()]
+        if not wanted:
+            return {}
+        # De-dupe while preserving order (negRisk YES/NO may share an event).
+        seen: set[str] = set()
+        body = []
+        for tok in wanted:
+            if tok in seen:
+                continue
+            seen.add(tok)
+            body.append({"token_id": tok})
+
+        resp = self._public_post("/books", json_body=body)
+        resp.raise_for_status()
+        payload = resp.json()
+        if not isinstance(payload, list):
+            raise RuntimeError(
+                f"CLOB batch orderbook response is not a list (got {type(payload).__name__})"
+            )
+
+        books: dict[str, dict] = {}
+        for entry in payload:
+            if not isinstance(entry, dict) or not entry:
+                continue
+            asset_id = entry.get("asset_id") or entry.get("assetId") or entry.get("token_id")
+            if asset_id in (None, ""):
+                continue
+            books[str(asset_id)] = entry
+        return books
 
     def get_clob_market_info(self, condition_id: str) -> dict:
         """Fetch raw CLOB market facts for executable snapshot capture."""

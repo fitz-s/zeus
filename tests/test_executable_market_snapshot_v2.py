@@ -1,5 +1,5 @@
 # Created: 2026-04-27
-# Lifecycle: created=2026-04-27; last_reviewed=2026-05-20; last_reused=2026-05-20
+# Lifecycle: created=2026-04-27; last_reviewed=2026-05-27; last_reused=2026-05-27
 # Purpose: U1 snapshot antibodies plus pricing-semantics contract scaffolding.
 # Reuse: Run when executable snapshots, venue_commands gating, or V2 market preflight semantics change.
 # Authority basis: docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md
@@ -2148,3 +2148,317 @@ def test_final_execution_intent_requires_cost_basis_hash():
             fee_rate=cost_basis.worst_case_fee_rate,
             neg_risk=False,
         )
+
+
+# ---------------------------------------------------------------------------
+# FT-64 (2026-05-27): batch orderbook prefetch — additive, byte-identical path.
+# Lifecycle: created=2026-05-27
+# Authority basis: docs/operations/POLYMARKET_ORDERBOOK_FRESHNESS_PATTERN_2026-05-27.md
+# Invariant guarded: prefetched orderbook path must produce a snapshot
+#   byte-identical to the per-token fetched path; per-bin staleness must not
+#   abort the event; the CLOB-archived fail-closed guard must still fire.
+# ---------------------------------------------------------------------------
+
+
+def test_batch_orderbook_wrapper_maps_by_asset_id(monkeypatch):
+    """get_orderbook_snapshots returns {token_id: book} keyed by asset_id, not position."""
+
+    captured = {}
+
+    class _Resp:
+        status_code = 200
+
+        def __init__(self, payload):
+            self._payload = payload
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self._payload
+
+    client = PolymarketClient()
+
+    def _fake_post(self, path, *, json_body):
+        captured["path"] = path
+        captured["body"] = json_body
+        # Return books out of request order to prove position-independence.
+        return _Resp([
+            {"asset_id": "tok-B", "bids": [], "asks": []},
+            {"asset_id": "tok-A", "bids": [], "asks": []},
+        ])
+
+    monkeypatch.setattr(PolymarketClient, "_public_post", _fake_post)
+
+    books = client.get_orderbook_snapshots(["tok-A", "tok-B"])
+    assert captured["path"] == "/books"
+    assert captured["body"] == [{"token_id": "tok-A"}, {"token_id": "tok-B"}]
+    assert set(books) == {"tok-A", "tok-B"}
+    assert books["tok-A"]["asset_id"] == "tok-A"
+    assert books["tok-B"]["asset_id"] == "tok-B"
+
+
+def test_batch_orderbook_wrapper_tolerates_partial_and_empty(monkeypatch):
+    """Partial responses, empty books, and missing asset_id never raise."""
+
+    class _Resp:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            # tok-A present; tok-B absent (offline bin); a junk empty entry; a
+            # missing-asset_id entry — all must be tolerated.
+            return [
+                {"asset_id": "tok-A", "bids": [], "asks": []},
+                {},
+                {"bids": [], "asks": []},
+            ]
+
+    client = PolymarketClient()
+    monkeypatch.setattr(
+        PolymarketClient, "_public_post", lambda self, path, *, json_body: _Resp()
+    )
+
+    books = client.get_orderbook_snapshots(["tok-A", "tok-B"])
+    assert set(books) == {"tok-A"}  # tok-B simply absent; no raise
+    assert client.get_orderbook_snapshots([]) == {}  # empty input short-circuits
+
+
+def test_batch_orderbook_wrapper_rejects_non_list(monkeypatch):
+    class _Resp:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"unexpected": "object"}
+
+    client = PolymarketClient()
+    monkeypatch.setattr(
+        PolymarketClient, "_public_post", lambda self, path, *, json_body: _Resp()
+    )
+    with pytest.raises(RuntimeError, match="not a list"):
+        client.get_orderbook_snapshots(["tok-A"])
+
+
+def test_prefetched_orderbook_produces_identical_snapshot(conn):
+    """Relationship invariant: prefetched book == fetched book => identical snapshot.
+
+    Capture is run twice with the SAME book content — once feeding the book via
+    prefetched_orderbook (batch path), once letting capture fetch it per-token.
+    The orderbook-derived fields of the persisted snapshot MUST be identical.
+    """
+
+    book = {
+        "asset_id": "yes-token",
+        "tick_size": "0.01",
+        "min_order_size": "5",
+        "neg_risk": False,
+        "bids": [{"price": "0.49", "size": "100"}],
+        "asks": [{"price": "0.51", "size": "100"}],
+    }
+
+    # Fetched path (prefetched_orderbook=None): clob.get_orderbook_snapshot wins.
+    fetched_ret = capture_executable_market_snapshot(
+        conn,
+        market=_market_for_capture(),
+        decision=_decision_for_capture(),
+        clob=FakeClobFacts(orderbook=dict(book)),
+        captured_at=NOW,
+        scan_authority="VERIFIED",
+    )
+    fetched = get_snapshot(conn, fetched_ret["executable_snapshot_id"])
+
+    # Prefetched path: a clob whose orderbook fetch would EXPLODE, proving the
+    # prefetched book is used instead of any per-token GET /book.
+    class _NoOrderbookFetch(FakeClobFacts):
+        def get_orderbook_snapshot(self, token_id: str) -> dict:  # pragma: no cover
+            raise AssertionError("prefetched path must not fetch per-token orderbook")
+
+    prefetched_ret = capture_executable_market_snapshot(
+        conn,
+        market=_market_for_capture(),
+        decision=_decision_for_capture(),
+        clob=_NoOrderbookFetch(),
+        captured_at=NOW,
+        scan_authority="VERIFIED",
+        prefetched_orderbook=dict(book),
+    )
+    prefetched = get_snapshot(conn, prefetched_ret["executable_snapshot_id"])
+
+    # Orderbook-derived facts must be byte-identical across the two paths.
+    assert prefetched.raw_orderbook_hash == fetched.raw_orderbook_hash
+    assert prefetched.orderbook_depth_jsonb == fetched.orderbook_depth_jsonb
+    assert prefetched.orderbook_top_bid == fetched.orderbook_top_bid
+    assert prefetched.orderbook_top_ask == fetched.orderbook_top_ask
+    assert prefetched.neg_risk == fetched.neg_risk
+    assert prefetched.min_tick_size == fetched.min_tick_size
+
+
+def test_prefetched_empty_book_raises_capture_error(conn):
+    """An empty prefetched book is rejected the same as an empty fetched book."""
+
+    with pytest.raises(ExecutableSnapshotCaptureError, match="prefetched orderbook"):
+        capture_executable_market_snapshot(
+            conn,
+            market=_market_for_capture(),
+            decision=_decision_for_capture(),
+            clob=FakeClobFacts(),
+            captured_at=NOW,
+            scan_authority="VERIFIED",
+            prefetched_orderbook={},
+        )
+
+
+def test_clob_archived_blocks_even_with_prefetched_book(conn):
+    """Fail-closed regression: prefetched book does NOT bypass the archived guard.
+
+    Gamma reports acceptingOrders/enableOrderBook True, the orderbook is fresh
+    (prefetched), but CLOB market_info says archived=True. The per-outcome CLOB
+    market read is still fresh, so the guard must still block — proving the batch
+    optimization did not collapse the cross-source authority split.
+    """
+
+    market = _market_for_capture(
+        active=False,
+        closed=True,
+        gamma_market_raw={
+            "id": "gamma-1",
+            "conditionId": "condition-1",
+            "questionID": "question-1",
+            "active": False,
+            "closed": True,
+            "acceptingOrders": True,
+            "enableOrderBook": True,
+            "clobTokenIds": ["yes-token", "no-token"],
+        },
+    )
+    market["closed"] = True
+    market["outcomes"][0]["closed"] = False
+
+    fresh_book = {
+        "asset_id": "yes-token",
+        "tick_size": "0.01",
+        "min_order_size": "5",
+        "neg_risk": False,
+        "bids": [{"price": "0.49", "size": "100"}],
+        "asks": [{"price": "0.51", "size": "100"}],
+    }
+
+    with pytest.raises(ExecutableSnapshotCaptureError, match="clob_archived"):
+        capture_executable_market_snapshot(
+            conn,
+            market=market,
+            decision=_decision_for_capture(),
+            clob=FakeClobFacts(market_info={
+                "condition_id": "condition-1",
+                "tokens": [{"token_id": "yes-token"}, {"token_id": "no-token"}],
+                "enable_order_book": True,
+                "archived": True,
+            }),
+            captured_at=NOW,
+            scan_authority="VERIFIED",
+            prefetched_orderbook=dict(fresh_book),
+        )
+
+
+def test_per_bin_missing_book_skips_bin_without_aborting_event(conn):
+    """Decision #4: one bin's missing/empty batch book must NOT abort the event.
+
+    Two bins are selected.  The batch prefetch returns a book for bin A only;
+    bin B is absent (offline bin).  capture for bin B falls back to per-token
+    GET /book, which here also fails — so bin B is counted failed while bin A
+    inserts.  The event-level refresh MUST still complete (no raise), proving
+    "market event constant, bin event should not block freshness".
+    """
+
+    from src.data.market_scanner import refresh_executable_market_substrate_snapshots
+
+    def _outcome(cid, yes_t, no_t):
+        return {
+            "condition_id": cid,
+            "market_id": cid,
+            "token_id": yes_t,
+            "no_token_id": no_t,
+            "question_id": f"q-{cid}",
+            "executable": True,
+            "active": True,
+            "closed": False,
+            "accepting_orders": True,
+            "enable_orderbook": True,
+            "market_end_at": (NOW + timedelta(days=1)).isoformat(),
+            "token_map_raw": {"YES": yes_t, "NO": no_t},
+            "gamma_market_raw": {
+                "id": f"gamma-{cid}",
+                "conditionId": cid,
+                "questionID": f"q-{cid}",
+                "active": True,
+                "closed": False,
+                "acceptingOrders": True,
+                "enableOrderBook": True,
+                "clobTokenIds": [yes_t, no_t],
+            },
+        }
+
+    markets = [
+        {
+            "event_id": "evt-1",
+            "id": "evt-1",
+            "slug": "highest-temperature-in-binskip-on-2026-05-27",
+            "city": "binskip",
+            "outcomes": [
+                _outcome("condition-A", "yesA", "noA"),
+                _outcome("condition-B", "yesB", "noB"),
+            ],
+        }
+    ]
+
+    def _book(asset_id):
+        return {
+            "asset_id": asset_id,
+            "tick_size": "0.01",
+            "min_order_size": "5",
+            "neg_risk": False,
+            "bids": [{"price": "0.49", "size": "100"}],
+            "asks": [{"price": "0.51", "size": "100"}],
+        }
+
+    class _PartialBatchClob:
+        """Batch returns bin A's YES book only; per-token fetch fails for everything
+        (so the missing bins exercise the skip-not-abort path)."""
+
+        def get_orderbook_snapshots(self, token_ids):
+            return {"yesA": _book("yesA")} if "yesA" in token_ids else {}
+
+        def get_orderbook_snapshot(self, token_id):
+            raise ExecutableSnapshotCaptureError(f"per-token book offline for {token_id}")
+
+        def get_clob_market_info(self, condition_id):
+            cid = condition_id
+            yes_t = "yesA" if cid == "condition-A" else "yesB"
+            no_t = "noA" if cid == "condition-A" else "noB"
+            return {
+                "condition_id": cid,
+                "tokens": [{"token_id": yes_t}, {"token_id": no_t}],
+                "enable_order_book": True,
+                "archived": False,
+            }
+
+        def get_fee_rate(self, token_id):
+            return 30
+
+    summary = refresh_executable_market_substrate_snapshots(
+        conn,
+        markets=markets,
+        clob=_PartialBatchClob(),
+        captured_at=NOW,
+        scan_authority="VERIFIED",
+        max_outcomes=4,
+    )
+
+    # The event was processed end-to-end (no raise).  Bin A's buy_yes inserted
+    # from the prefetched book; the missing bins (B, and A's buy_no whose noA
+    # book was not prefetched) fell back to per-token fetch and failed — counted,
+    # not aborting the event.
+    assert summary["inserted"] >= 1
+    assert summary["failed"] >= 1
+    assert summary["attempted"] == summary["inserted"] + summary["failed"]
