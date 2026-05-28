@@ -198,7 +198,7 @@ def test_v2_only_snapshot_full_shape():
         "sample_quality", "window_start", "window_end",
     ):
         assert field_name in rec, f"missing field: {field_name}"
-    assert rec["source"] == "v2"
+    assert rec["source"] == "canonical"
     assert rec["temperature_metric"] == "high"
     assert rec["cluster"] == "TestCity"
     assert rec["active_model_n_samples"] == 50
@@ -261,7 +261,7 @@ def test_v2_legacy_dedup_v2_wins():
     )
     snapshot = compute_learning_loop_state_per_bucket(conn)
     rec = snapshot["high:DupCity:DJF:tigge_v3:00:tigge_mars:full:width_normalized_density"]
-    assert rec["source"] == "v2"  # v2 wins
+    assert rec["source"] == "canonical"  # canonical wins
     assert rec["active_model_n_samples"] == 60  # v2 value, not legacy 999
 
 

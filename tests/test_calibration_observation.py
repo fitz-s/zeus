@@ -220,10 +220,10 @@ def test_v2_only_snapshot_shape():
         n_samples=120,
     )
     snapshot = compute_platt_parameter_snapshot_per_bucket(conn)
-    # Single v2 entry — key is the v2 model_key string.
+    # Single canonical entry — key is the v2 model_key string.
     assert len(snapshot) == 1
     rec = next(iter(snapshot.values()))
-    assert rec["source"] == "v2"
+    assert rec["source"] == "canonical"
     assert rec["temperature_metric"] == "high"
     assert rec["cluster"] == "TestCity"
     assert rec["season"] == "DJF"
@@ -256,7 +256,7 @@ def test_v2_legacy_dedup_v2_wins():
     # Both entries exist (different keys).
     assert len(snapshot) == 2
     sources = sorted(rec["source"] for rec in snapshot.values())
-    assert sources == ["legacy", "v2"]
+    assert sources == ["canonical", "legacy"]
     # Now simulate true dedup: insert raw legacy with bucket_key MATCHING the
     # v2 model_key string. v2-listed-first should win; legacy duplicate dropped.
     # Phase 2 (2026-05-04): v2 model_key now includes cycle/source_id/horizon_profile —
@@ -267,7 +267,7 @@ def test_v2_legacy_dedup_v2_wins():
     snapshot2 = compute_platt_parameter_snapshot_per_bucket(conn)
     rec_collision = snapshot2["high:TestCity:DJF:v1:00:tigge_mars:full:raw_probability"]
     # v2 entry has param_A=1.6 (NOT 99.0 from the planted legacy collision).
-    assert rec_collision["source"] == "v2"
+    assert rec_collision["source"] == "canonical"
     assert rec_collision["param_A"] == 1.6
 
 
