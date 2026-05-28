@@ -532,13 +532,13 @@ CREATE INDEX idx_readiness_state_status_expiry
 CREATE INDEX idx_refit_bucket_failures_ts
                 ON refit_bucket_failures(ts)
         ;
--- index: idx_rescue_events_v2_metric_causality
-CREATE INDEX idx_rescue_events_v2_metric_causality
-                ON rescue_events_v2(temperature_metric, causality_status, recorded_at)
+-- index: idx_rescue_events_metric_causality
+CREATE INDEX idx_rescue_events_metric_causality
+                ON rescue_events(temperature_metric, causality_status, recorded_at)
         ;
--- index: idx_rescue_events_v2_trade_time
-CREATE INDEX idx_rescue_events_v2_trade_time
-                ON rescue_events_v2(trade_id, recorded_at)
+-- index: idx_rescue_events_trade_time
+CREATE INDEX idx_rescue_events_trade_time
+                ON rescue_events(trade_id, recorded_at)
         ;
 -- index: idx_selection_hypothesis_family
 CREATE INDEX idx_selection_hypothesis_family
@@ -1228,8 +1228,8 @@ CREATE TABLE refit_bucket_failures (
                 error_text TEXT NOT NULL,
                 ts TEXT NOT NULL
             );
--- table: rescue_events_v2
-CREATE TABLE rescue_events_v2 (
+-- table: rescue_events
+CREATE TABLE rescue_events (
                 rescue_event_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 trade_id TEXT NOT NULL,
                 position_id TEXT,

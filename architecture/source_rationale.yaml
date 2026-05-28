@@ -2038,7 +2038,7 @@ files:
       - resolve_rescue_authority(position) -> (metric, authority, source)
       - resolve_position_metric(position) -> (metric, authority, source) — peer for non-rescue reads
       - LEARNING_AUTHORITY_REQUIRED = "VERIFIED" — anchor for downstream
-        learning consumers that filter rescue_events_v2 reads.
+        learning consumers that filter rescue_events reads.
     downstream:
     - src/engine/cycle_runner.py
     - src/engine/cycle_runtime.py

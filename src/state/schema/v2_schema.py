@@ -894,7 +894,7 @@ def apply_v2_schema(conn: sqlite3.Connection, *, forecast_tables: bool = True) -
         """)
 
         # ----------------------------------------------------------------
-        # rescue_events_v2 — B063: durable audit row for chain-rescue events.
+        # rescue_events — B063: durable audit row for chain-rescue events.
         #
         # `chain_reconciliation._emit_rescue_event` already logs an INFO line
         # and inserts a `CHAIN_RESCUE_AUDIT` row into position_events, but
@@ -918,7 +918,7 @@ def apply_v2_schema(conn: sqlite3.Connection, *, forecast_tables: bool = True) -
         # in position_events per chain_reconciliation.py:276-282).
         # ----------------------------------------------------------------
         conn.execute("""
-            CREATE TABLE IF NOT EXISTS rescue_events_v2 (
+            CREATE TABLE IF NOT EXISTS rescue_events (
                 rescue_event_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 trade_id TEXT NOT NULL,
                 position_id TEXT,
@@ -944,12 +944,12 @@ def apply_v2_schema(conn: sqlite3.Connection, *, forecast_tables: bool = True) -
             )
         """)
         conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_rescue_events_v2_trade_time
-                ON rescue_events_v2(trade_id, recorded_at)
+            CREATE INDEX IF NOT EXISTS idx_rescue_events_trade_time
+                ON rescue_events(trade_id, recorded_at)
         """)
         conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_rescue_events_v2_metric_causality
-                ON rescue_events_v2(temperature_metric, causality_status, recorded_at)
+            CREATE INDEX IF NOT EXISTS idx_rescue_events_metric_causality
+                ON rescue_events(temperature_metric, causality_status, recorded_at)
         """)
 
         # Fix D (golden-knitting-wand.md Phase 1): per-bucket failure ledger

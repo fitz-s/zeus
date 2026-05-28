@@ -820,7 +820,7 @@ categories:
   useful_regression:
     - tests/test_alpha_target_coherence.py
     - tests/test_auto_pause_entries.py
-    - tests/test_b063_rescue_events_v2.py
+    - tests/test_b063_rescue_events.py
     - tests/test_backfill_completeness_guardrails.py
     - tests/test_backfill_openmeteo_previous_runs.py
     - tests/test_bootstrap_symmetry.py

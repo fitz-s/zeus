@@ -894,7 +894,7 @@ def get_connection(
 # CI hook scripts/check_schema_version.py diffs the sqlite_master hash of
 # a fresh-init DB against tests/state/_schema_pinned_hash.txt and fails
 # the PR if SCHEMA_VERSION did not change in lockstep.
-SCHEMA_VERSION = 43  # 2026-05-28 B6 (docs/findings_2026_05_28.md §B6): drop event_version column from position_events. Prior: 42 = F1 chain_avg_price + chain_cost_basis_usd on position_current.
+SCHEMA_VERSION = 42  # 2026-05-28 F1 (docs/findings_2026_05_28.md §F1): position_current gains chain_avg_price + chain_cost_basis_usd so balance-only rescue persists chain-observed economics without overwriting submitted entry_price/cost_basis_usd/size_usd. Prior: 41 = merge #349+#352.
 
 
 def init_schema(
@@ -1393,7 +1393,7 @@ def init_schema(
             finality_confirmed_time    TEXT,
             clock_skew_estimate_ms_at_submit INTEGER,
             raw_orderbook_hash_transition_delta_ms INTEGER,
-            schema_version INTEGER NOT NULL CHECK (schema_version IN (12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43)),
+            schema_version INTEGER NOT NULL CHECK (schema_version IN (12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42)),
             source         TEXT NOT NULL CHECK (source IN ('phase0_backfill', 'live_decision', 'shadow_decision')),
             PRIMARY KEY (market_slug, temperature_metric, target_date, observation_time, decision_seq)
         );
@@ -2665,7 +2665,7 @@ def _migrate_decision_events_schema(conn: sqlite3.Connection) -> None:
             finality_confirmed_time    TEXT,
             clock_skew_estimate_ms_at_submit INTEGER,
             raw_orderbook_hash_transition_delta_ms INTEGER,
-            schema_version INTEGER NOT NULL CHECK (schema_version IN (12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43)),
+            schema_version INTEGER NOT NULL CHECK (schema_version IN (12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42)),
             source         TEXT NOT NULL CHECK (source IN ('phase0_backfill', 'live_decision', 'shadow_decision')),
             PRIMARY KEY (market_slug, temperature_metric, target_date, observation_time, decision_seq)
         )
@@ -2701,7 +2701,7 @@ def _migrate_decision_events_schema(conn: sqlite3.Connection) -> None:
             first_inclusion_block_time, finality_confirmed_time,
             clock_skew_estimate_ms_at_submit, raw_orderbook_hash_transition_delta_ms,
             CASE
-                WHEN schema_version IN (12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43)
+                WHEN schema_version IN (12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42)
                     THEN schema_version
                 ELSE 36
             END,
@@ -3458,22 +3458,6 @@ def _migrate_world_strategy_key_checks(conn: sqlite3.Connection) -> None:
             conn.execute(idx_sql)
 
 
-def _migrate_position_events_drop_event_version(conn: sqlite3.Connection) -> None:
-    """B6 (2026-05-28): drop event_version column from position_events.
-
-    event_version was always written as 1 and never branched on. SQLite ≥3.35
-    supports ALTER TABLE ... DROP COLUMN directly. Idempotent: no-op if the
-    column is already absent.
-    """
-    cols = {
-        row[1]
-        for row in conn.execute("PRAGMA table_info(position_events)").fetchall()
-    }
-    if "event_version" not in cols:
-        return  # Already dropped — idempotent
-    conn.execute("ALTER TABLE position_events DROP COLUMN event_version")
-
-
 def _migrate_trade_strategy_key_checks(conn: sqlite3.Connection) -> None:
     """Remove stale hardcoded strategy_key CHECK from trade-class tables.
 
@@ -3798,6 +3782,7 @@ _TRADE_CLASS_DDL = """
 CREATE TABLE IF NOT EXISTS position_events (
     event_id TEXT PRIMARY KEY,
     position_id TEXT NOT NULL,
+    event_version INTEGER NOT NULL DEFAULT 1 CHECK (event_version >= 1),
     sequence_no INTEGER NOT NULL CHECK (sequence_no >= 1),
     event_type TEXT NOT NULL CHECK (event_type IN (
         'POSITION_OPEN_INTENT',
@@ -4304,8 +4289,6 @@ def init_schema_trade_only(conn: sqlite3.Connection) -> None:
 
     # Create the trade runtime tables (IF NOT EXISTS — idempotent).
     conn.executescript(_TRADE_CLASS_DDL)
-    # B6 (2026-05-28): drop event_version from existing live position_events rows.
-    _migrate_position_events_drop_event_version(conn)
     _migrate_trade_strategy_key_checks(conn)
     # Executable market substrate is live execution evidence. The market
     # discovery scheduler passes this same trade connection to snapshot_repo and
@@ -6090,7 +6073,7 @@ def log_rescue_event(
 ) -> None:
     """B063: append a durable audit row for a chain-rescue event.
 
-    Writes to `rescue_events_v2` (Phase 2 schema). Unlike the existing
+    Writes to `rescue_events` (Phase 2 schema). Unlike the existing
     CHAIN_RESCUE_AUDIT row in position_events, this row carries the
     temperature_metric, causality_status, and provenance authority
     needed to distinguish a legitimate low-lane N/A_CAUSAL skip from
@@ -6118,13 +6101,13 @@ def log_rescue_event(
     _logger = logging.getLogger(__name__)
     if conn is None:
         _logger.warning(
-            "log_rescue_event: conn is None, skipping rescue_events_v2 write for trade_id=%s",
+            "log_rescue_event: conn is None, skipping rescue_events write for trade_id=%s",
             trade_id,
         )
         return
     if temperature_metric not in ("high", "low"):
         _logger.error(
-            "log_rescue_event: invalid temperature_metric=%r for trade_id=%s; skipping rescue_events_v2 write",
+            "log_rescue_event: invalid temperature_metric=%r for trade_id=%s; skipping rescue_events write",
             temperature_metric,
             trade_id,
         )
@@ -6132,7 +6115,7 @@ def log_rescue_event(
     try:
         conn.execute(
             """
-            INSERT INTO rescue_events_v2
+            INSERT INTO rescue_events
                 (trade_id, position_id, decision_snapshot_id,
                  temperature_metric, causality_status,
                  authority, authority_source,
@@ -6154,7 +6137,7 @@ def log_rescue_event(
         )
     except sqlite3.OperationalError as exc:
         _logger.warning(
-            "log_rescue_event: rescue_events_v2 write failed for trade_id=%s: %s",
+            "log_rescue_event: rescue_events write failed for trade_id=%s: %s",
             trade_id,
             exc,
         )
@@ -7701,13 +7684,79 @@ def log_outcome_fact(
     return {"status": "written", "table": "outcome_fact"}
 
 def log_trade_entry(conn: sqlite3.Connection, pos) -> None:
-    """Evidence spine: Log explicitly at entry for replay reconstruction.
-
-    F5 demotion (2026-05-28): trade_decisions is audit-only legacy export.
-    The live entry path no longer writes to trade_decisions; canonical
-    truth lives in position_events / position_current.
-    """
+    """Evidence spine: Log explicitly at entry for replay reconstruction."""
     if False: _ = pos.entry_method; _ = pos.selected_method  # Semantic Provenance Guard
+    env = getattr(pos, "env", "unknown_env") or "unknown_env"
+    status = "pending_tracked" if getattr(pos, "state", "") == "pending_tracked" else "entered"
+    timestamp = getattr(pos, "order_posted_at", "") if status == "pending_tracked" else getattr(pos, "entered_at", "")
+    filled_at = getattr(pos, "entered_at", None) if status == "entered" else None
+    fill_price = getattr(pos, "entry_price", None) if status == "entered" else None
+    if _table_exists(conn, "trade_decisions"):
+        try:
+            snapshot_fk = _local_legacy_snapshot_fk(
+                conn,
+                getattr(pos, "decision_snapshot_id", None),
+            )
+            values = (
+                pos.market_id,
+                pos.bin_label,
+                pos.direction,
+                pos.size_usd,
+                pos.entry_price,
+                timestamp,
+                snapshot_fk,
+                getattr(pos, "calibration_version", "") or None,
+                pos.p_posterior,
+                pos.p_posterior,
+                pos.edge,
+                pos.p_posterior - (pos.entry_ci_width / 2) if pos.entry_ci_width else 0.0,
+                pos.p_posterior + (pos.entry_ci_width / 2) if pos.entry_ci_width else 0.0,
+                0.0,
+                status,
+                filled_at,
+                fill_price,
+                getattr(pos, "trade_id", ""),
+                getattr(pos, "order_id", ""),
+                getattr(pos, "order_status", ""),
+                getattr(pos, "order_posted_at", ""),
+                getattr(pos, "entered_at", ""),
+                getattr(pos, "chain_state", ""),
+                getattr(pos, "strategy", ""),
+                pos.edge_source,
+                _bin_type_for_label(pos.bin_label),
+                env,
+                getattr(pos, "discovery_mode", ""),
+                getattr(pos, "market_hours_open", 0.0),
+                getattr(pos, "fill_quality", 0.0),
+                getattr(pos, "entry_method", ""),
+                getattr(pos, "selected_method", ""),
+                json.dumps(getattr(pos, "applied_validations", []) or []),
+                getattr(pos, "settlement_semantics_json", None),
+                getattr(pos, "epistemic_context_json", None),
+                getattr(pos, "edge_context_json", None),
+            )
+            placeholders = ", ".join(["?"] * len(values))
+            conn.execute(f"""
+                INSERT INTO trade_decisions (
+                    market_id, bin_label, direction, size_usd, price, timestamp,
+                    forecast_snapshot_id, calibration_model_version,
+                    p_raw, p_posterior, edge, ci_lower, ci_upper, kelly_fraction,
+                    status, filled_at, fill_price, runtime_trade_id, order_id, order_status_text, order_posted_at, entered_at_ts, chain_state,
+                    strategy, edge_source, bin_type, env, discovery_mode, market_hours_open,
+                    fill_quality, entry_method, selected_method, applied_validations_json,
+                    settlement_semantics_json, epistemic_context_json, edge_context_json
+                )
+                VALUES ({placeholders})
+            """, values)
+        except Exception as e:
+            import logging as _logging
+            _logging.getLogger(__name__).error(
+                "[LOG_TRADE_ENTRY_FAILED] position_id=%s err=%r — bridge write is mandatory; "
+                "propagating to outer SAVEPOINT for rollback",
+                getattr(pos, "trade_id", "?"),
+                e,
+            )
+            raise
 
 
 

@@ -193,7 +193,7 @@ When a `pending_tracked` position is found on chain:
 3. If baseline available → copy chain truth (price, shares, cost), set
    `state = rescue_pending_runtime_state()` → `"entered"`, emit rescue event
 4. Rescue event is dual-written: legacy `CHAIN_RESCUE_AUDIT` in
-   `position_events` + structured `rescue_events_v2` row with
+   `position_events` + structured `rescue_events` row with
    `temperature_metric`, `authority`, `authority_source` (from
    `resolve_rescue_authority()`)
 

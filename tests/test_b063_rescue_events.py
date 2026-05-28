@@ -2,11 +2,11 @@
 # Last reused/audited: 2026-05-08
 # Lifecycle: created=2026-04-17; last_reviewed=2026-05-08; last_reused=2026-05-08
 # Authority basis: object-meaning invariance Wave26 rescue audit compatibility; PR90 gitleaks fixture hygiene.
-# Purpose: Guard rescue_events_v2 schema and chain reconciliation dual-write audit compatibility.
-# Reuse: Run after rescue_events_v2 schema, chain reconciliation rescue, or rescue audit compatibility changes.
-"""B063: rescue_events_v2 audit table tests.
+# Purpose: Guard rescue_events schema and chain reconciliation dual-write audit compatibility.
+# Reuse: Run after rescue_events schema, chain reconciliation rescue, or rescue audit compatibility changes.
+"""B063: rescue_events audit table tests.
 
-Verifies the new rescue_events_v2 DDL, log_rescue_event helper, and
+Verifies the new rescue_events DDL, log_rescue_event helper, and
 chain_reconciliation._emit_rescue_event dual-write integration.
 
 Design:
@@ -25,7 +25,7 @@ import unittest
 
 
 class TestRescueEventsV2Schema(unittest.TestCase):
-    """Schema-level checks for rescue_events_v2."""
+    """Schema-level checks for rescue_events."""
 
     def _apply_schema(self) -> sqlite3.Connection:
         from src.state.schema.v2_schema import apply_v2_schema
@@ -38,23 +38,23 @@ class TestRescueEventsV2Schema(unittest.TestCase):
         conn = self._apply_schema()
         row = conn.execute(
             "SELECT name FROM sqlite_master "
-            "WHERE type='table' AND name='rescue_events_v2'"
+            "WHERE type='table' AND name='rescue_events'"
         ).fetchone()
-        self.assertIsNotNone(row, "rescue_events_v2 table was not created")
+        self.assertIsNotNone(row, "rescue_events table was not created")
 
     def test_temperature_metric_is_binary(self) -> None:
         """SD-1 invariant: CHECK (temperature_metric IN ('high','low'))."""
         conn = self._apply_schema()
         # 'high' accepted
         conn.execute(
-            "INSERT INTO rescue_events_v2 "
+            "INSERT INTO rescue_events "
             "(trade_id, temperature_metric, chain_state, reason, occurred_at) "
             "VALUES (?, ?, ?, ?, ?)",
             ("trade-h", "high", "PENDING_ENTRY", "test", "2026-04-17T00:00:00Z"),
         )
         # 'low' accepted
         conn.execute(
-            "INSERT INTO rescue_events_v2 "
+            "INSERT INTO rescue_events "
             "(trade_id, temperature_metric, chain_state, reason, occurred_at) "
             "VALUES (?, ?, ?, ?, ?)",
             ("trade-l", "low", "PENDING_ENTRY", "test", "2026-04-17T00:00:00Z"),
@@ -62,7 +62,7 @@ class TestRescueEventsV2Schema(unittest.TestCase):
         # 'unknown' REJECTED at the DB layer
         with self.assertRaises(sqlite3.IntegrityError):
             conn.execute(
-                "INSERT INTO rescue_events_v2 "
+                "INSERT INTO rescue_events "
                 "(trade_id, temperature_metric, chain_state, reason, occurred_at) "
                 "VALUES (?, ?, ?, ?, ?)",
                 ("trade-u", "unknown", "PENDING_ENTRY", "test", "2026-04-17T00:00:00Z"),
@@ -72,14 +72,14 @@ class TestRescueEventsV2Schema(unittest.TestCase):
         conn = self._apply_schema()
         for auth in ("VERIFIED", "UNVERIFIED", "RECONSTRUCTED"):
             conn.execute(
-                "INSERT INTO rescue_events_v2 "
+                "INSERT INTO rescue_events "
                 "(trade_id, temperature_metric, authority, chain_state, reason, occurred_at) "
                 "VALUES (?, ?, ?, ?, ?, ?)",
                 (f"trade-{auth}", "high", auth, "PENDING_ENTRY", "test", f"2026-04-17T0{ord(auth[0])%10}:00:00Z"),
             )
         with self.assertRaises(sqlite3.IntegrityError):
             conn.execute(
-                "INSERT INTO rescue_events_v2 "
+                "INSERT INTO rescue_events "
                 "(trade_id, temperature_metric, authority, chain_state, reason, occurred_at) "
                 "VALUES (?, ?, ?, ?, ?, ?)",
                 ("trade-bogus", "high", "BOGUS", "PENDING_ENTRY", "test", "2026-04-17T00:00:00Z"),
@@ -95,14 +95,14 @@ class TestRescueEventsV2Schema(unittest.TestCase):
             "UNKNOWN",
         ):
             conn.execute(
-                "INSERT INTO rescue_events_v2 "
+                "INSERT INTO rescue_events "
                 "(trade_id, temperature_metric, causality_status, chain_state, reason, occurred_at) "
                 "VALUES (?, ?, ?, ?, ?, ?)",
                 (f"trade-{hash(status) & 0xFFFF}", "high", status, "PENDING_ENTRY", "test", f"2026-04-17T{abs(hash(status)) % 24:02d}:00:00Z"),
             )
         with self.assertRaises(sqlite3.IntegrityError):
             conn.execute(
-                "INSERT INTO rescue_events_v2 "
+                "INSERT INTO rescue_events "
                 "(trade_id, temperature_metric, causality_status, chain_state, reason, occurred_at) "
                 "VALUES (?, ?, ?, ?, ?, ?)",
                 ("trade-bogus-cs", "high", "MADE_UP", "PENDING_ENTRY", "test", "2026-04-17T23:30:00Z"),
@@ -135,7 +135,7 @@ class TestLogRescueEventHelper(unittest.TestCase):
             authority_source="position_materialized",
         )
         conn.commit()
-        row = conn.execute("SELECT * FROM rescue_events_v2 WHERE trade_id='t-001'").fetchone()
+        row = conn.execute("SELECT * FROM rescue_events WHERE trade_id='t-001'").fetchone()
         self.assertIsNotNone(row)
         self.assertEqual(row["temperature_metric"], "low")
         self.assertEqual(row["causality_status"], "N/A_CAUSAL_DAY_ALREADY_STARTED")
@@ -162,7 +162,7 @@ class TestLogRescueEventHelper(unittest.TestCase):
         )
         conn.commit()
         count = conn.execute(
-            "SELECT COUNT(*) AS c FROM rescue_events_v2 WHERE trade_id='t-skip'"
+            "SELECT COUNT(*) AS c FROM rescue_events WHERE trade_id='t-skip'"
         ).fetchone()["c"]
         self.assertEqual(count, 0, "out-of-domain metric must not produce a row")
 
@@ -209,19 +209,19 @@ class TestLogRescueEventHelper(unittest.TestCase):
             )
         conn.commit()
         count = conn.execute(
-            "SELECT COUNT(*) AS c FROM rescue_events_v2 WHERE trade_id='t-dup'"
+            "SELECT COUNT(*) AS c FROM rescue_events WHERE trade_id='t-dup'"
         ).fetchone()["c"]
         self.assertEqual(count, 1, "duplicate insert must be a no-op")
 
 
 class TestEmitRescueEventIntegration(unittest.TestCase):
     """Integration: `_emit_rescue_event` dual-writes CHAIN_RESCUE_AUDIT
-    (to position_events) AND rescue_events_v2 row with correct
+    (to position_events) AND rescue_events row with correct
     provenance authority based on the Position's temperature_metric.
 
     Keeps the original position_events write intact (legacy consumers
     like test_live_safety_invariants continue to see CHAIN_RESCUE_AUDIT)
-    and adds the new rescue_events_v2 row with the typed metadata.
+    and adds the new rescue_events row with the typed metadata.
     """
 
     def _make_conn_with_position_events(self) -> sqlite3.Connection:
@@ -258,7 +258,7 @@ class TestEmitRescueEventIntegration(unittest.TestCase):
     def test_canonical_position_events_schema_does_not_suppress_rescue_v2(self) -> None:
         """Canonical position_events no longer has the legacy payload/event
         shape; a skipped legacy CHAIN_RESCUE_AUDIT write must not suppress
-        the structured rescue_events_v2 authority row.
+        the structured rescue_events authority row.
         """
         from src.engine.lifecycle_events import build_entry_canonical_write
         from src.state.chain_reconciliation import ChainPosition, reconcile
@@ -297,7 +297,7 @@ class TestEmitRescueEventIntegration(unittest.TestCase):
             position,
             phase_after=LifecyclePhase.PENDING_ENTRY.value,
             decision_id="dec-canonical-rescue-v2",
-            source_module="tests.test_b063_rescue_events_v2",
+            source_module="tests.test_b063_rescue_events",
         )
         append_many_and_project(conn, events, projection)
 
@@ -319,7 +319,7 @@ class TestEmitRescueEventIntegration(unittest.TestCase):
         rescue_row = conn.execute(
             """
             SELECT trade_id, authority
-            FROM rescue_events_v2
+            FROM rescue_events
             WHERE trade_id = ? AND authority = ?
             """,
             ("t-canonical-rescue-v2", "VERIFIED"),
@@ -364,7 +364,7 @@ class TestEmitRescueEventIntegration(unittest.TestCase):
         )
         conn.commit()
         row = conn.execute(
-            "SELECT * FROM rescue_events_v2 WHERE trade_id='t-verified'"
+            "SELECT * FROM rescue_events WHERE trade_id='t-verified'"
         ).fetchone()
         self.assertIsNotNone(row)
         self.assertEqual(row["temperature_metric"], "low")
@@ -402,7 +402,7 @@ class TestEmitRescueEventIntegration(unittest.TestCase):
         )
         conn.commit()
         row = conn.execute(
-            "SELECT * FROM rescue_events_v2 WHERE trade_id='t-unverified'"
+            "SELECT * FROM rescue_events WHERE trade_id='t-unverified'"
         ).fetchone()
         self.assertIsNotNone(row)
         # SD-1: concrete high tag, not tri-state.
@@ -416,7 +416,7 @@ class TestResolveRescueAuthority(unittest.TestCase):
     """Unit tests for the shared `resolve_rescue_authority` helper.
 
     This helper is the single source of truth for the authority rule;
-    logic bugs here propagate to every rescue_events_v2 row, so it has
+    logic bugs here propagate to every rescue_events row, so it has
     its own focused coverage (B063 P1 critic fix).
     """
 

@@ -38,7 +38,7 @@ def _make_stub_conn() -> sqlite3.Connection:
     - position_current with phase='pending_entry' → baseline guard passes
     - Empty venue_commands → durable-command guard returns False (skips fill-fact guard)
     - position_events with payload/env columns for _emit_rescue_event
-    - rescue_events_v2 for log_rescue_event
+    - rescue_events for log_rescue_event
     - position_history (empty) for _has_canonical_position_history
     - trade_lifecycle for update_trade_lifecycle
     """
@@ -70,7 +70,7 @@ def _make_stub_conn() -> sqlite3.Connection:
             env TEXT
         );
 
-        CREATE TABLE rescue_events_v2 (
+        CREATE TABLE rescue_events (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             trade_id TEXT,
             position_id TEXT,
