@@ -1939,7 +1939,7 @@ CREATE TABLE ensemble_snapshots (
                 CHECK (settlement_unit IS NULL OR settlement_unit IN ('F', 'C')),
             settlement_rounding_policy TEXT,
             bin_grid_id TEXT,
-            bin_schema_version TEXT,
+            bin_schema_id TEXT,
             forecast_window_start_utc TEXT,
             forecast_window_end_utc TEXT,
             forecast_window_start_local TEXT,
@@ -2285,7 +2285,7 @@ CREATE TABLE market_microstructure_snapshots (
             depth_at_best_ask               INTEGER NOT NULL DEFAULT 0,
             polymarket_end_anchor_source    TEXT NOT NULL DEFAULT 'unknown_legacy',
             bin_grid_id                     TEXT,
-            bin_schema_version              TEXT,
+            bin_schema_id              TEXT,
             schema_version                  INTEGER NOT NULL DEFAULT 5
                 CHECK (schema_version IN (5)),
             recorded_at                     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))

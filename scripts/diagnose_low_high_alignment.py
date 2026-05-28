@@ -53,7 +53,7 @@ CONTRACT_OBJECT_REQUIRED_FIELDS = (
     "settlement_unit",
     "settlement_rounding_policy",
     "bin_grid_id",
-    "bin_schema_version",
+    "bin_schema_id",
     "forecast_source_id",
     "forecast_issue_time",
     "forecast_window_start_utc",

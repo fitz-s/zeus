@@ -817,7 +817,7 @@ _LOW_CONTRACT_EVIDENCE_MARKER_FIELDS = (
     "settlement_unit",
     "settlement_rounding_policy",
     "bin_grid_id",
-    "bin_schema_version",
+    "bin_schema_id",
     "forecast_window_start_utc",
     "forecast_window_end_utc",
     "forecast_window_start_local",

@@ -111,7 +111,7 @@ def test_report_counts_persisted_low_window_evidence_classes() -> None:
                 model_version, data_version, training_allowed, causality_status,
                 authority, members_unit, city_timezone, settlement_source_type,
                 settlement_station_id, settlement_unit, settlement_rounding_policy,
-                bin_grid_id, bin_schema_version, forecast_window_start_utc,
+                bin_grid_id, bin_schema_id, forecast_window_start_utc,
                 forecast_window_end_utc, forecast_window_start_local,
                 forecast_window_end_local, forecast_window_local_day_overlap_hours,
                 forecast_window_attribution_status, contributes_to_target_extrema,

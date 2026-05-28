@@ -139,7 +139,7 @@ def _metrics(**kw: Any) -> SimpleNamespace:
         depth_at_best_ask=5,
         polymarket_end_anchor_source="gamma_explicit",
         bin_grid_id=None,
-        bin_schema_version=None,
+        bin_schema_id=None,
         raw_orderbook_hash_transition_delta_ms=None,
     )
     defaults.update(kw)

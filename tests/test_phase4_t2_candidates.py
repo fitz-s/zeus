@@ -150,7 +150,7 @@ def _make_metrics(**kwargs: Any) -> SimpleNamespace:
         depth_at_best_ask=5,
         polymarket_end_anchor_source="gamma_explicit",
         bin_grid_id=None,
-        bin_schema_version=None,
+        bin_schema_id=None,
         raw_orderbook_hash_transition_delta_ms=None,
         # FOK arb fields — data-gated defaults (2026-05-22 reframe)
         info_event_observed=False,

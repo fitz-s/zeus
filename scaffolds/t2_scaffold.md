@@ -4,7 +4,7 @@
 
 # T2 SCAFFOLD v3.1 — Day0HighNowcastSignal + one-hot daypart + fit_run_id (bin_grid_id deferred)
 
-**Status**: SCAFFOLD v3.1 (bin_grid_id/bin_schema_version deferred to Phase 2; proceeding to production)
+**Status**: SCAFFOLD v3.1 (bin_grid_id/bin_schema_id deferred to Phase 2; proceeding to production)
 **Author**: sonnet executor, worktree `phase1-t2-day0-nowcast-20260520`
 **Entry SHA**: origin/main = `649f73d865` (PR-T1-B merged; T1 complete)
 
@@ -312,7 +312,7 @@ CHECK constraint widened to `IN (3, 4)` during migration window (Fix 3).
 ## §13. Decisions locked in SCAFFOLD v3.1 (no further critic round)
 
 **#1 resolved**: Storage writer = `src/state/day0_nowcast_store.py` (mirrors T1 pattern).
-**#2 REVISED (v3.1)**: bin_grid_id/bin_schema_version DEFERRED to Phase 2.
+**#2 REVISED (v3.1)**: bin_grid_id/bin_schema_id DEFERRED to Phase 2.
   Original v3 claim ("propagated from cycle_runtime.bins") was a phantom — no propagation
   path exists at evaluator.py:2363 or monitor_refresh.py:838. bins list is built inline
   from market outcomes; Bin type has no bin_grid_id field. NOT NULL count corrected to 10.

@@ -68,7 +68,7 @@ class MicrostructureMetrics:
 
     # bin_grid_id propagated from ensemble_snapshots (F4 retrofit)
     bin_grid_id: Optional[str] = None
-    bin_schema_version: Optional[str] = None
+    bin_schema_id: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -99,7 +99,7 @@ class MarketAnalysisVNext:
         *,
         polymarket_end_anchor_source: str = "",
         bin_grid_id: Optional[str] = None,
-        bin_schema_version: Optional[str] = None,
+        bin_schema_id: Optional[str] = None,
         family_book_snapshot: "Optional[FamilyOrderBookSnapshot]" = None,
     ) -> None:
         """
@@ -111,7 +111,7 @@ class MarketAnalysisVNext:
                      'gamma_explicit' | 'f1_12z_fallback'.
             bin_grid_id: From ensemble_snapshots.bin_grid_id for this snapshot's
                      triggering cycle (F4 retrofit).
-            bin_schema_version: Companion to bin_grid_id.
+            bin_schema_id: Companion to bin_grid_id.
             family_book_snapshot: Optional caller-injected neg-risk family order-book
                      snapshot. When present, neg_risk_basket.evaluate() reads per-leg
                      depth for exact sweep-cost / profit calculation (§11.5-11.8).
@@ -120,7 +120,7 @@ class MarketAnalysisVNext:
         self._history = history
         self._polymarket_end_anchor_source = polymarket_end_anchor_source
         self._bin_grid_id = bin_grid_id
-        self._bin_schema_version = bin_schema_version
+        self._bin_schema_id = bin_schema_id
         self._family_book_snapshot = family_book_snapshot
 
     @property
@@ -175,7 +175,7 @@ class MarketAnalysisVNext:
             p_after_lower_bound=p_after_lower_bound,
             stale_quote_price=stale_quote_price,
             bin_grid_id=self._bin_grid_id,
-            bin_schema_version=self._bin_schema_version,
+            bin_schema_id=self._bin_schema_id,
         )
 
 

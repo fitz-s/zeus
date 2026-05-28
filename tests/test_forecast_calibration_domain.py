@@ -79,7 +79,7 @@ def _contract_domain(**overrides: object) -> ContractOutcomeDomain:
         "settlement_unit": "C",
         "settlement_rounding_policy": "wmo_half_up",
         "bin_grid_id": "kuala_lumpur_celsius_low_v1",
-        "bin_schema_version": "v1",
+        "bin_schema_id": "v1",
     }
     values.update(overrides)
     return ContractOutcomeDomain(**values)  # type: ignore[arg-type]

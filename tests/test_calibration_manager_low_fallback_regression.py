@@ -72,7 +72,7 @@ def _contract_domain(city: City, *, metric: str = "low") -> ContractOutcomeDomai
         settlement_unit=city.settlement_unit,  # type: ignore[arg-type]
         settlement_rounding_policy="wmo_half_up",
         bin_grid_id=f"{city.settlement_unit}_canonical_v1",
-        bin_schema_version="canonical_bin_grid_v1",
+        bin_schema_id="canonical_bin_grid_v1",
     )
 
 

@@ -207,13 +207,13 @@ Also serialized at l.2305–2306; downstream in `src/execution/fill_tracker.py` 
 
 | Field | Location | Proposed replacement |
 |-------|----------|---------------------|
-| `bin_schema_version` | `MarketAnalysisVNext` dataclass field (l.71, l.102) | `bin_schema_id` |
+| `bin_schema_id` | `MarketAnalysisVNext` dataclass field (l.71, l.102) | `bin_schema_id` |
 
 ### `src/calibration/forecast_calibration_domain.py`
 
 | Field | Location | Proposed replacement |
 |-------|----------|---------------------|
-| `bin_schema_version` | `BinGrid` dataclass (l.154) | `bin_schema_id` |
+| `bin_schema_id` | `BinGrid` dataclass (l.154) | `bin_schema_id` |
 | `data_version` | `CalibrationPairsRow` (l.223) + `CalibrationPairsKey` (l.481) | `dataset_id` |
 
 ### `src/calibration/blocked_oos.py`

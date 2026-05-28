@@ -204,7 +204,7 @@ def test_ingest_persists_contract_outcome_and_forecast_window_evidence(tmp_path:
     assert row["settlement_unit"] == "C"
     assert row["settlement_rounding_policy"] == "wmo_half_up"
     assert row["bin_grid_id"] == "C_canonical_v1"
-    assert row["bin_schema_version"] == "canonical_bin_grid_v1"
+    assert row["bin_schema_id"] == "canonical_bin_grid_v1"
     assert row["forecast_window_start_utc"] == "2026-05-08T00:00:00+00:00"
     assert row["forecast_window_end_utc"] == "2026-05-09T00:00:00+00:00"
     assert row["forecast_window_start_local"] == "2026-05-08T01:00:00+01:00"
