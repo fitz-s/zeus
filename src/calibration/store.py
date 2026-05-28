@@ -260,7 +260,7 @@ def add_calibration_pair(
             (city, target_date, temperature_metric, observation_field, range_label,
              p_raw, outcome, lead_days, season, cluster, forecast_available_at,
              settlement_value, decision_group_id, bias_corrected, authority,
-             bin_source, data_version, training_allowed, causality_status, snapshot_id{_emf_col})
+             bin_source, dataset_id, training_allowed, causality_status, snapshot_id{_emf_col})
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?{_emf_ph})
         """, (
             city, target_date,
@@ -277,7 +277,7 @@ def add_calibration_pair(
             (city, target_date, temperature_metric, observation_field, range_label,
              p_raw, outcome, lead_days, season, cluster, forecast_available_at,
              settlement_value, decision_group_id, bias_corrected, authority,
-             bin_source, data_version, training_allowed, causality_status, snapshot_id,
+             bin_source, dataset_id, training_allowed, causality_status, snapshot_id,
              cycle, source_id, horizon_profile{_emf_col})
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?{_emf_ph})
         """, (

@@ -509,7 +509,7 @@ def _snapshot_query_sql(table: str, *, source_run_id_present: bool) -> str:
             WHERE city = ?
               AND target_date = ?
               AND temperature_metric = ?
-              AND data_version = ?
+              AND dataset_id = ?
               AND source_id = ?
               AND source_transport = ?
               AND source_run_id = ?
@@ -527,7 +527,7 @@ def _snapshot_query_sql(table: str, *, source_run_id_present: bool) -> str:
             WHERE city = ?
               AND target_date = ?
               AND temperature_metric = ?
-              AND data_version = ?
+              AND dataset_id = ?
               AND source_id = ?
               AND source_transport = ?
             ORDER BY {_EXTREMA_RANK_ORDER_BY}
@@ -546,7 +546,7 @@ def _snapshot_query_sql(table: str, *, source_run_id_present: bool) -> str:
             WHERE city = ?
               AND target_date = ?
               AND temperature_metric = ?
-              AND data_version = ?
+              AND dataset_id = ?
               AND source_id = ?
               AND source_transport = ?
               AND source_run_id = ?
@@ -564,7 +564,7 @@ def _snapshot_query_sql(table: str, *, source_run_id_present: bool) -> str:
             WHERE city = ?
               AND target_date = ?
               AND temperature_metric = ?
-              AND data_version = ?
+              AND dataset_id = ?
               AND source_id = ?
               AND source_transport = ?
             ORDER BY {_EXTREMA_RANK_ORDER_BY}
@@ -583,7 +583,7 @@ def _snapshot_query_sql(table: str, *, source_run_id_present: bool) -> str:
             WHERE city = ?
               AND target_date = ?
               AND temperature_metric = ?
-              AND data_version = ?
+              AND dataset_id = ?
               AND source_id = ?
               AND source_transport = ?
               AND source_run_id = ?
@@ -601,7 +601,7 @@ def _snapshot_query_sql(table: str, *, source_run_id_present: bool) -> str:
             WHERE city = ?
               AND target_date = ?
               AND temperature_metric = ?
-              AND data_version = ?
+              AND dataset_id = ?
               AND source_id = ?
               AND source_transport = ?
             ORDER BY {_EXTREMA_RANK_ORDER_BY}

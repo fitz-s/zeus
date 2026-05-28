@@ -138,7 +138,7 @@ class ECMWFOpenDataIngest:
                     WHERE source_id = ?
                       AND authority = 'VERIFIED'
                       AND causality_status = 'OK'
-                      AND data_version LIKE ?
+                      AND dataset_id LIKE ?
                       AND datetime(recorded_at) > datetime(?)
                     """,
                     (SOURCE_ID, _DATA_VERSION_PREFIX + "%", cutoff),
@@ -404,7 +404,7 @@ def _query_metric(
               AND source_id = ?
               AND authority = 'VERIFIED'
               AND causality_status = 'OK'
-              AND data_version LIKE ?
+              AND dataset_id LIKE ?
               AND datetime(recorded_at) > datetime(?)
               AND contributes_to_target_extrema = 1
               AND COALESCE(forecast_window_attribution_status, '') IN {_pos}
@@ -418,7 +418,7 @@ def _query_metric(
                     AND s2.source_id = ?
                     AND s2.authority = 'VERIFIED'
                     AND s2.causality_status = 'OK'
-                    AND s2.data_version LIKE ?
+                    AND s2.dataset_id LIKE ?
                     AND datetime(s2.recorded_at) > datetime(?)
                     AND s2.contributes_to_target_extrema = 1
                     AND COALESCE(s2.forecast_window_attribution_status, '') IN {_pos}

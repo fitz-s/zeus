@@ -278,7 +278,7 @@ def load_bucket_residuals(
     anti-leakage seam — NOT a settlement-known-time cutoff. For rigorous historical
     rebuilds, prefer a settled_at/fact-known-time cutoff once that column is available.
     """
-    where = ["e.city = ?", "e.data_version = ?", "e.temperature_metric = ?", "e.lead_hours <= ?"]
+    where = ["e.city = ?", "e.dataset_id = ?", "e.temperature_metric = ?", "e.lead_hours <= ?"]
     params: list[object] = [city, data_version, metric, lead_max]
     if require_verified:
         where.append("e.authority = 'VERIFIED'")
@@ -639,7 +639,7 @@ def _forecast_means(
     Uses the same cycle preference as load_bucket_residuals: HIGH → 0Z cycle,
     LOW → 12Z cycle. Falls back to freshest-by-available_at when issue_time is NULL.
     """
-    where = ["e.city = ?", "e.data_version = ?", "e.temperature_metric = ?", "e.lead_hours <= ?"]
+    where = ["e.city = ?", "e.dataset_id = ?", "e.temperature_metric = ?", "e.lead_hours <= ?"]
     params: list[object] = [city, data_version, metric, lead_max]
     if require_verified:
         where.append("e.authority = 'VERIFIED'")

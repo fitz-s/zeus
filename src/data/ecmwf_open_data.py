@@ -23,7 +23,7 @@ Pipeline
    TiggeSnapshotPayload contract.
 3. Reuse the zeus repo's ``scripts/ingest_grib_to_snapshots.ingest_track``
    ingester (importable) which validates against the canonical contract,
-   asserts the data_version is allow-listed, and writes the row to
+   asserts the dataset_id is allow-listed, and writes the row to
    ``ensemble_snapshots`` with manifest_hash + provenance_json + members_unit.
 
 Data version
@@ -608,7 +608,7 @@ def _snapshot_rows_for_source_run(conn, *, source_run_id: str, data_version: str
             WHERE source_id = ?
               AND source_transport = ?
               AND source_run_id = ?
-              AND data_version = ?
+              AND dataset_id = ?
             ORDER BY city, target_date, temperature_metric, snapshot_id
             """,
             (SOURCE_ID, "ensemble_snapshots_db_reader", source_run_id, data_version),
@@ -1701,8 +1701,8 @@ def data_version_priority_for_metric(temperature_metric: str) -> tuple[str, ...]
 
         SELECT ... FROM ensemble_snapshots
          WHERE temperature_metric = ?
-           AND data_version IN (<one placeholder per priority entry>)
-         ORDER BY CASE data_version WHEN ? THEN 0 ELSE 1 END, available_at DESC
+           AND dataset_id IN (<one placeholder per priority entry>)
+         ORDER BY CASE dataset_id WHEN ? THEN 0 ELSE 1 END, available_at DESC
 
     where the bound parameters are the priority tuple followed by the
     priority tuple's first element again.

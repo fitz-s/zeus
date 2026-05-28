@@ -3192,7 +3192,7 @@ def _ensure_v2_forecast_indexes(conn: sqlite3.Connection) -> None:
                 temperature_metric,
                 source_id,
                 source_transport,
-                data_version,
+                dataset_id,
                 source_run_id
             )
     """)
@@ -3207,7 +3207,7 @@ def _ensure_v2_forecast_indexes(conn: sqlite3.Connection) -> None:
     """)
     conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_calibration_pairs_refit_core
-            ON calibration_pairs(temperature_metric, data_version, training_allowed, authority)
+            ON calibration_pairs(temperature_metric, dataset_id, training_allowed, authority)
     """)
 
 

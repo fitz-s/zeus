@@ -75,7 +75,7 @@ def count_executable_opendata_rows(conn: sqlite3.Connection, *, config: EntryFor
           AND release_calendar_key IS NOT NULL
           AND source_cycle_time IS NOT NULL
           AND source_release_time IS NOT NULL
-          AND data_version IN (?, ?, ?, ?)
+          AND dataset_id IN (?, ?, ?, ?)
         """,
         (
             config.source_id,

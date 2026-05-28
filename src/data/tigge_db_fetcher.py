@@ -121,7 +121,7 @@ def fetch_from_db(
               AND temperature_metric = ?
               AND authority = 'VERIFIED'
               AND causality_status = 'OK'
-              AND data_version LIKE ?
+              AND dataset_id LIKE ?
               AND datetime(recorded_at) > datetime(?)
               AND snapshot_id = (
                   SELECT MAX(s2.snapshot_id)
@@ -131,7 +131,7 @@ def fetch_from_db(
                     AND s2.temperature_metric = ensemble_snapshots.temperature_metric
                     AND s2.authority = 'VERIFIED'
                     AND s2.causality_status = 'OK'
-                    AND s2.data_version LIKE ?
+                    AND s2.dataset_id LIKE ?
                     AND datetime(s2.recorded_at) > datetime(?)
               )
             ORDER BY target_date ASC

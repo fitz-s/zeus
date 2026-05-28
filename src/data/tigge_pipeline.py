@@ -159,7 +159,7 @@ def _max_issue_date_in_db() -> Optional[date]:
         try:
             row = conn.execute(
                 "SELECT MAX(DATE(issue_time)) FROM ensemble_snapshots "
-                "WHERE data_version LIKE 'mx2t6_%' OR data_version LIKE 'mn2t6_%'"
+                "WHERE dataset_id LIKE 'mx2t6_%' OR dataset_id LIKE 'mn2t6_%'"
             ).fetchone()
         except Exception as exc:
             logger.warning("tigge_pipeline: MAX(issue_time) query failed: %s", exc)

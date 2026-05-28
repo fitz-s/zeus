@@ -102,7 +102,7 @@ def write_source_run(
                 fetch_finished_at, captured_at, imported_at, valid_time_start,
                 valid_time_end, target_local_date, city_id, city_timezone,
                 temperature_metric, physical_quantity, observation_field,
-                data_version, expected_members, observed_members,
+                dataset_id, expected_members, observed_members,
                 expected_steps_json, observed_steps_json, expected_count,
                 observed_count, completeness_status, partial_run,
                 raw_payload_hash, manifest_hash, status, reason_code
