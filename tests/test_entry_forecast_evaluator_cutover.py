@@ -274,7 +274,7 @@ def test_phase_c3_writer_flag_on_writes_blocked_row_when_evidence_missing(monkey
     from src.engine import evaluator as evaluator_module
     from src.engine.evaluator import _write_entry_readiness_for_candidate
     from src.state.db import init_schema
-    from src.state.schema.v2_schema import apply_v2_schema
+    from src.state.schema.v2_schema import apply_canonical_schema
     from src.types.metric_identity import HIGH_LOCALDAY_MAX
 
     monkeypatch.setenv("ZEUS_ENTRY_FORECAST_READINESS_WRITER", "1")
@@ -287,7 +287,7 @@ def test_phase_c3_writer_flag_on_writes_blocked_row_when_evidence_missing(monkey
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     init_schema(conn)
-    apply_v2_schema(conn)
+    apply_canonical_schema(conn)
 
     cfg = replace(entry_forecast_config(), rollout_mode=EntryForecastRolloutMode.LIVE)
 
@@ -330,7 +330,7 @@ def test_phase_c3_writer_flag_on_writes_live_eligible_when_all_gates_align(monke
     from src.data.live_entry_status import LiveEntryForecastStatus
     from src.engine.evaluator import _write_entry_readiness_for_candidate
     from src.state.db import init_schema
-    from src.state.schema.v2_schema import apply_v2_schema
+    from src.state.schema.v2_schema import apply_canonical_schema
     from src.types.metric_identity import HIGH_LOCALDAY_MAX
 
     target = tmp_path / "evidence.json"
@@ -357,7 +357,7 @@ def test_phase_c3_writer_flag_on_writes_live_eligible_when_all_gates_align(monke
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     init_schema(conn)
-    apply_v2_schema(conn)
+    apply_canonical_schema(conn)
 
     cfg = replace(entry_forecast_config(), rollout_mode=EntryForecastRolloutMode.LIVE)
 

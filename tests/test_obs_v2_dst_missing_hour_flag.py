@@ -42,7 +42,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from src.data.observation_instants_v2_writer import ObsV2Row, insert_rows
 from src.signal.diurnal import _is_missing_local_hour
-from src.state.schema.v2_schema import apply_v2_schema
+from src.state.schema.v2_schema import apply_canonical_schema
 
 
 # ---------------------------------------------------------------------------
@@ -164,7 +164,7 @@ def test_obs_v2_writer_persists_dst_gap_flag():
     production data was corrupted.
     """
     conn = sqlite3.connect(":memory:")
-    apply_v2_schema(conn)
+    apply_canonical_schema(conn)
 
     row = _london_dst_gap_row(is_missing_local_hour=1)
     inserted = insert_rows(conn, [row])

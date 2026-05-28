@@ -20,11 +20,11 @@ class TestPlattModelV2FamilyIsolation:
 
     def _make_conn(self) -> sqlite3.Connection:
         from src.state.db import init_schema
-        from src.state.schema.v2_schema import apply_v2_schema
+        from src.state.schema.v2_schema import apply_canonical_schema
         conn = sqlite3.connect(":memory:")
         conn.execute("PRAGMA foreign_keys = ON")
         init_schema(conn)
-        apply_v2_schema(conn)
+        apply_canonical_schema(conn)
         return conn
 
     def _base_model_row(self, temperature_metric: str, model_key: str) -> dict:
@@ -361,11 +361,11 @@ class TestBucketKeyEmfParity:
 
     def _make_conn(self) -> sqlite3.Connection:
         from src.state.db import init_schema
-        from src.state.schema.v2_schema import apply_v2_schema
+        from src.state.schema.v2_schema import apply_canonical_schema
         conn = sqlite3.connect(":memory:")
         conn.execute("PRAGMA foreign_keys = ON")
         init_schema(conn)
-        apply_v2_schema(conn)
+        apply_canonical_schema(conn)
         return conn
 
     def _bucket_key_from_formula(

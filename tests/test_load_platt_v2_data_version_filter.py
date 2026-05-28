@@ -35,7 +35,7 @@ import pytest
 
 from src.calibration.store import load_platt_model, save_platt_model
 from src.state.db import init_schema
-from src.state.schema.v2_schema import apply_v2_schema
+from src.state.schema.v2_schema import apply_canonical_schema
 from src.types.metric_identity import HIGH_LOCALDAY_MAX, LOW_LOCALDAY_MIN, MetricIdentity
 
 
@@ -46,7 +46,7 @@ def conn(tmp_path):
     c.row_factory = sqlite3.Row
     c.execute("PRAGMA journal_mode=WAL")
     init_schema(c)
-    apply_v2_schema(c)
+    apply_canonical_schema(c)
     yield c
     c.close()
 

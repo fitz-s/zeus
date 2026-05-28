@@ -50,7 +50,7 @@ from src.state.db import (
     log_forward_market_substrate,
     log_market_source_contract_topology_facts,
 )
-from src.state.schema.v2_schema import apply_v2_schema
+from src.state.schema.v2_schema import apply_canonical_schema
 from src.state.schema.book_hash_transitions_schema import ensure_table as ensure_book_hash_table
 from src.state.snapshot_repo import init_snapshot_schema, insert_snapshot
 
@@ -341,7 +341,7 @@ def _make_forward_substrate_db(tmp_path: Path, request: pytest.FixtureRequest) -
 def _make_full_linkage_conn() -> sqlite3.Connection:
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
-    apply_v2_schema(conn)
+    apply_canonical_schema(conn)
     init_snapshot_schema(conn)
     return conn
 

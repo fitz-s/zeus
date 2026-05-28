@@ -24,7 +24,7 @@ from src.state.db import (
     init_schema,
     query_portfolio_loader_view,
 )
-from src.state.schema.v2_schema import apply_v2_schema
+from src.state.schema.v2_schema import apply_canonical_schema
 from scripts import verify_truth_surfaces as truth_surfaces
 from scripts.verify_truth_surfaces import (
     build_calibration_pair_rebuild_preflight_report,
@@ -55,7 +55,7 @@ def _fresh_training_readiness_world_db(tmp_path):
     db_path = tmp_path / "world.db"
     conn = sqlite3.connect(db_path)
     init_schema(conn)
-    apply_v2_schema(conn)
+    apply_canonical_schema(conn)
     conn.commit()
     conn.close()
     return db_path
@@ -1946,7 +1946,7 @@ class TestTrainingReadinessP0:
     def test_training_readiness_fails_when_historical_forecasts_available_at_is_reconstructed(self, tmp_path):
         db_path = _fresh_training_readiness_world_db(tmp_path)
         conn = sqlite3.connect(db_path)
-        # historical_forecasts DDL was dropped from apply_v2_schema in B3 (PR3).
+        # historical_forecasts DDL was dropped from apply_canonical_schema in B3 (PR3).
         # Create the table in this test's fixture so the readiness-report check
         # can find rows to evaluate (real live DBs may still have the table from
         # earlier schema versions; this test exercises the check logic directly).

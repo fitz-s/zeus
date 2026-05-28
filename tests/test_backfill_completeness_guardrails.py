@@ -219,7 +219,7 @@ def test_obs_v2_main_writes_manifest_and_fails_on_failed_windows(
 
     monkeypatch.setattr(module, "_backfill_wu_city", fake_backfill)
     monkeypatch.setattr(
-        "src.state.schema.v2_schema.apply_v2_schema",
+        "src.state.schema.v2_schema.apply_canonical_schema",
         lambda _conn: None,
     )
     manifest = tmp_path / "obs_v2_manifest.json"
@@ -276,7 +276,7 @@ def test_obs_v2_failed_windows_are_hard_blockers_above_threshold(
 
     monkeypatch.setattr(module, "_backfill_wu_city", fake_backfill)
     monkeypatch.setattr(
-        "src.state.schema.v2_schema.apply_v2_schema",
+        "src.state.schema.v2_schema.apply_canonical_schema",
         lambda _conn: None,
     )
     manifest = tmp_path / "obs_v2_threshold_manifest.json"
@@ -331,7 +331,7 @@ def test_obs_v2_empty_windows_are_hard_blockers(
 
     monkeypatch.setattr(module, "_backfill_wu_city", fake_backfill)
     monkeypatch.setattr(
-        "src.state.schema.v2_schema.apply_v2_schema",
+        "src.state.schema.v2_schema.apply_canonical_schema",
         lambda _conn: None,
     )
     manifest = tmp_path / "obs_v2_empty_window_manifest.json"

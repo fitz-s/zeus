@@ -16,7 +16,7 @@ from src.contracts.ensemble_snapshot_provenance import (
     ECMWF_OPENDATA_LOW_DATA_VERSION,
 )
 from src.state.db import init_schema
-from src.state.schema.v2_schema import apply_v2_schema
+from src.state.schema.v2_schema import apply_canonical_schema
 from src.types.metric_identity import LOW_LOCALDAY_MIN
 
 UTC = timezone.utc
@@ -31,7 +31,7 @@ def _conn() -> sqlite3.Connection:
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     init_schema(conn)
-    apply_v2_schema(conn)
+    apply_canonical_schema(conn)
     return conn
 
 

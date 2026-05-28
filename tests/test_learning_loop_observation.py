@@ -51,7 +51,7 @@ from src.state.learning_loop_observation import (
     _days_since,
     compute_learning_loop_state_per_bucket,
 )
-from src.state.schema.v2_schema import apply_v2_schema
+from src.state.schema.v2_schema import apply_canonical_schema
 from src.types.metric_identity import HIGH_LOCALDAY_MAX, LOW_LOCALDAY_MIN
 
 
@@ -60,7 +60,7 @@ def _make_conn() -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     init_schema(conn)
-    apply_v2_schema(conn)
+    apply_canonical_schema(conn)
     return conn
 
 

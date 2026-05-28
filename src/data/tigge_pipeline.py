@@ -357,7 +357,7 @@ def _ingest_track(
             sys.path.insert(0, str(scripts_dir))
         from ingest_grib_to_snapshots import ingest_track as _ingest_track_fn  # type: ignore
         from src.state.db import get_forecasts_connection
-        from src.state.schema.v2_schema import apply_v2_schema
+        from src.state.schema.v2_schema import apply_canonical_schema
     except Exception as exc:
         logger.error("tigge_pipeline %s: import failed: %s", label, exc)
         return {"label": label, "ok": False, "error": f"import failed: {exc}"}
@@ -365,7 +365,7 @@ def _ingest_track(
     with db_writer_lock(ZEUS_FORECASTS_DB_PATH, WriteClass.BULK):
         conn = get_forecasts_connection()
         try:
-            apply_v2_schema(conn)
+            apply_canonical_schema(conn)
             try:
                 summary = _ingest_track_fn(
                     track=track,

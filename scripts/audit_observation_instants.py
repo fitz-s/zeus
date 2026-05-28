@@ -462,7 +462,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         if tbl is None:
             print(
                 "FATAL: observation_instants_v2 table missing; run "
-                "apply_v2_schema first.",
+                "apply_canonical_schema first.",
                 file=sys.stderr,
             )
             return 2

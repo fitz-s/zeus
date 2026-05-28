@@ -35,7 +35,7 @@ import pytest
 
 from src.config import cities_by_name
 from src.data.wu_hourly_client import HourlyObservation
-from src.state.schema.v2_schema import apply_v2_schema
+from src.state.schema.v2_schema import apply_canonical_schema
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -340,7 +340,7 @@ def test_obs_v2_backfill_rerun_reports_zero_rows_written(
     monkeypatch.setattr(obs_v2_backfill_module.time, "sleep", lambda _seconds: None)
     conn = sqlite3.connect(":memory:")
     try:
-        apply_v2_schema(conn)
+        apply_canonical_schema(conn)
         first = obs_v2_backfill_module._backfill_wu_city(
             conn,
             "Chicago",

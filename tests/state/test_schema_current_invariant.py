@@ -70,20 +70,20 @@ def test_rel1_no_hot_path_init_schema():
 # ---------------------------------------------------------------------------
 
 def test_rel2_pragma_unchanged_on_partial_init_failure(monkeypatch):
-    """If _apply_v2_schema raises, user_version must remain 0 (PRAGMA not yet set)."""
+    """If _apply_canonical_schema raises, user_version must remain 0 (PRAGMA not yet set)."""
     import src.state.db as _db
 
     conn = sqlite3.connect(":memory:")
 
     def _boom(c, **kwargs):
-        raise RuntimeError("simulated _apply_v2_schema failure")
+        raise RuntimeError("simulated _apply_canonical_schema failure")
 
-    monkeypatch.setattr(_db, "_apply_v2_schema", _boom, raising=False)
-    # _apply_v2_schema is imported locally inside init_schema — patch via module attr
+    monkeypatch.setattr(_db, "_apply_canonical_schema", _boom, raising=False)
+    # _apply_canonical_schema is imported locally inside init_schema — patch via module attr
     # The local import aliases it; we need to patch the module it's imported FROM.
     # Patch at the schema.v2_schema level instead.
     import src.state.schema.v2_schema as _v2
-    monkeypatch.setattr(_v2, "apply_v2_schema", _boom)
+    monkeypatch.setattr(_v2, "apply_canonical_schema", _boom)
 
     with pytest.raises(RuntimeError, match="simulated"):
         init_schema(conn)
@@ -91,7 +91,7 @@ def test_rel2_pragma_unchanged_on_partial_init_failure(monkeypatch):
     v = conn.execute("PRAGMA user_version").fetchone()[0]
     assert v == 0, (
         f"PRAGMA user_version={v} after failed init_schema; expected 0. "
-        "PRAGMA write must be placed AFTER _apply_v2_schema (§5.2 anchor)."
+        "PRAGMA write must be placed AFTER _apply_canonical_schema (§5.2 anchor)."
     )
 
 

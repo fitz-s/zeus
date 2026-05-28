@@ -70,7 +70,7 @@ from src.runtime.timeout_guard import run_with_timeout
 from src.state.canonical_write import commit_then_export
 from src.state.db import ZEUS_FORECASTS_DB_PATH, get_forecasts_connection  # K1-batch2 fix 2026-05-17: ensemble_snapshots + source_run are forecast_class
 from src.state.db_writer_lock import WriteClass, db_writer_lock  # noqa: E402
-from src.state.schema.v2_schema import apply_v2_schema
+from src.state.schema.v2_schema import apply_canonical_schema
 from src.types.metric_identity import HIGH_LOCALDAY_MAX, LOW_LOCALDAY_MIN, MetricIdentity
 
 logger = logging.getLogger(__name__)
@@ -994,7 +994,7 @@ def main(argv: list[str] | None = None) -> int:
             init_schema(conn)
         else:
             conn = get_forecasts_connection(write_class="bulk")  # K1-batch2 fix 2026-05-17
-        apply_v2_schema(conn)
+        apply_canonical_schema(conn)
 
         summary = ingest_track(
             track=args.track,

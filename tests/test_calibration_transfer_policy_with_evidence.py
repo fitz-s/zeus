@@ -24,7 +24,7 @@ from src.data.calibration_transfer_policy import (
     evaluate_calibration_transfer_policy,
     evaluate_calibration_transfer_policy_with_evidence,
 )
-from src.state.schema.v2_schema import apply_v2_schema
+from src.state.schema.v2_schema import apply_canonical_schema
 
 
 # ---------------------------------------------------------------------------
@@ -33,7 +33,7 @@ from src.state.schema.v2_schema import apply_v2_schema
 
 def _make_conn() -> sqlite3.Connection:
     conn = sqlite3.connect(":memory:")
-    apply_v2_schema(conn)
+    apply_canonical_schema(conn)
     return conn
 
 

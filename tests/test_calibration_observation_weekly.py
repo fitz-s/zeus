@@ -59,7 +59,7 @@ import argparse  # noqa: E402
 
 from src.calibration.store import save_platt_model, save_platt_model  # noqa: E402
 from src.state.db import init_schema  # noqa: E402
-from src.state.schema.v2_schema import apply_v2_schema  # noqa: E402
+from src.state.schema.v2_schema import apply_canonical_schema  # noqa: E402
 from src.types.metric_identity import HIGH_LOCALDAY_MAX, LOW_LOCALDAY_MIN  # noqa: E402
 
 
@@ -73,7 +73,7 @@ def _make_temp_db(tmp_path: Path) -> Path:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     init_schema(conn)
-    apply_v2_schema(conn)
+    apply_canonical_schema(conn)
     conn.commit()
     conn.close()
     return db_path

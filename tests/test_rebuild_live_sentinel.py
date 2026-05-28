@@ -338,7 +338,7 @@ def test_rebuild_write_mode_with_isolated_db_reaches_existing_write_seam(rebuild
         ),
         patch("sqlite3.connect", return_value=mock_conn) as connect,
         patch.object(rebuild_mod, "init_schema", return_value=None),
-        patch.object(rebuild_mod, "apply_v2_schema", return_value=None),
+        patch.object(rebuild_mod, "apply_canonical_schema", return_value=None),
         patch.object(
             rebuild_mod,
             "rebuild_all_v2",
@@ -440,7 +440,7 @@ def test_refit_write_mode_with_isolated_db_reaches_existing_write_seam(tmp_path)
             patch.object(refit_mod, "db_writer_lock", side_effect=fake_lock),
             patch("sqlite3.connect", return_value=mock_conn) as connect,
             patch.object(refit_mod, "init_schema", return_value=None),
-            patch.object(refit_mod, "apply_v2_schema", return_value=None),
+            patch.object(refit_mod, "apply_canonical_schema", return_value=None),
             patch.object(
                 refit_mod,
                 "refit_all_v2",

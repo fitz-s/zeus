@@ -15,7 +15,7 @@ These tests MUST FAIL today (2026-04-16) because:
   - The 7 v2 metric-aware tables do not exist in any DB.
 
 First commit that should turn these green: executor Phase 2 implementation commit
-(creates src/state/schema/v2_schema.py with apply_v2_schema() and all DDL).
+(creates src/state/schema/v2_schema.py with apply_canonical_schema() and all DDL).
 """
 from __future__ import annotations
 
@@ -173,14 +173,14 @@ def _make_memory_db() -> sqlite3.Connection:
 
 
 def _apply_and_get_conn() -> sqlite3.Connection:
-    """Import apply_v2_schema, apply to fresh :memory: DB, return connection.
+    """Import apply_canonical_schema, apply to fresh :memory: DB, return connection.
 
     If the import fails today, this helper raises ImportError — which causes
     all tests that call it to error (the desired RED state before Phase 2 lands).
     """
-    from src.state.schema.v2_schema import apply_v2_schema  # noqa: PLC0415
+    from src.state.schema.v2_schema import apply_canonical_schema  # noqa: PLC0415
     conn = _make_memory_db()
-    apply_v2_schema(conn)
+    apply_canonical_schema(conn)
     return conn
 
 
@@ -191,8 +191,8 @@ def _apply_and_get_conn() -> sqlite3.Connection:
 class TestApplyV2SchemaSmoke(unittest.TestCase):
     """Smoke tests: schema application creates expected tables."""
 
-    def test_apply_v2_schema_creates_all_tables(self):
-        """After apply_v2_schema(conn) on :memory:, all 8 v2 tables exist.
+    def test_apply_canonical_schema_creates_all_tables(self):
+        """After apply_canonical_schema(conn) on :memory:, all 8 v2 tables exist.
 
         Queries sqlite_master for all 8 table names.
         Fails today with ImportError because v2_schema.py does not exist.
@@ -208,7 +208,7 @@ class TestApplyV2SchemaSmoke(unittest.TestCase):
             self.assertIn(
                 table,
                 existing,
-                msg=f"Expected v2 table '{table}' not found after apply_v2_schema",
+                msg=f"Expected v2 table '{table}' not found after apply_canonical_schema",
             )
 
     def test_observation_instants_v2_has_running_min(self):
@@ -229,7 +229,7 @@ class TestApplyV2SchemaSmoke(unittest.TestCase):
             msg="observation_instants_v2 must have running_min column (v2 schema requirement)",
         )
 
-    def test_apply_v2_schema_creates_market_price_history(self):
+    def test_apply_canonical_schema_creates_market_price_history(self):
         """Phase 5C.2: v2 schema owns forward market price history DDL."""
         conn = _apply_and_get_conn()
         columns = {
@@ -364,12 +364,12 @@ class TestApplyV2SchemaSmoke(unittest.TestCase):
         self.assertEqual("cond-1", row[6])
 
     def test_market_price_history_schema_is_idempotent(self):
-        """Repeated apply_v2_schema preserves rows and foreign_keys PRAGMA."""
-        from src.state.schema.v2_schema import apply_v2_schema  # noqa: PLC0415
+        """Repeated apply_canonical_schema preserves rows and foreign_keys PRAGMA."""
+        from src.state.schema.v2_schema import apply_canonical_schema  # noqa: PLC0415
 
         conn = _make_memory_db()
         conn.execute("PRAGMA foreign_keys = ON")
-        apply_v2_schema(conn)
+        apply_canonical_schema(conn)
         conn.execute(
             """
             INSERT INTO market_price_history (
@@ -380,7 +380,7 @@ class TestApplyV2SchemaSmoke(unittest.TestCase):
             """
         )
         conn.commit()
-        apply_v2_schema(conn)
+        apply_canonical_schema(conn)
 
         self.assertEqual(
             1,
@@ -388,15 +388,15 @@ class TestApplyV2SchemaSmoke(unittest.TestCase):
         )
         self.assertEqual(1, conn.execute("PRAGMA foreign_keys").fetchone()[0])
 
-    def test_forward_market_substrate_writer_works_after_apply_v2_schema(self):
+    def test_forward_market_substrate_writer_works_after_apply_canonical_schema(self):
         """Schema owner DDL unlocks the substrate writer via _db_path (K1-A fix)."""
-        from src.state.schema.v2_schema import apply_v2_schema  # noqa: PLC0415
+        from src.state.schema.v2_schema import apply_canonical_schema  # noqa: PLC0415
         with tempfile.TemporaryDirectory(prefix="gate_a_test_") as tmp_dir:
             db_path = str(Path(tmp_dir) / "gate_a.db")
             conn = sqlite3.connect(db_path)
             try:
                 conn.row_factory = sqlite3.Row
-                apply_v2_schema(conn)
+                apply_canonical_schema(conn)
                 conn.commit()
 
                 result = log_forward_market_substrate(
@@ -444,7 +444,7 @@ class TestApplyV2SchemaSmoke(unittest.TestCase):
                 conn.close()
 
     def test_dead_tables_dropped_after_apply_v2(self):
-        """After apply_v2_schema, dead tables do NOT exist in sqlite_master.
+        """After apply_canonical_schema, dead tables do NOT exist in sqlite_master.
 
         Dead tables per D2: promotion_registry, model_eval_point,
         model_eval_run, model_skill.
@@ -462,7 +462,7 @@ class TestApplyV2SchemaSmoke(unittest.TestCase):
                 dead,
                 existing,
                 msg=(
-                    f"Dead table '{dead}' must not exist after apply_v2_schema "
+                    f"Dead table '{dead}' must not exist after apply_canonical_schema "
                     "(it should be DROPped as part of the migration)"
                 ),
             )

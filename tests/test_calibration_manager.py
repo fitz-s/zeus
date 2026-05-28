@@ -48,7 +48,7 @@ from src.calibration.effective_sample_size import (
 from src.calibration.blocked_oos import evaluate_blocked_oos_calibration, recommend_calibration_promotion
 from src.config import City
 from src.state.db import get_connection, init_schema
-from src.state.schema.v2_schema import apply_v2_schema
+from src.state.schema.v2_schema import apply_canonical_schema
 from src.types.metric_identity import HIGH_LOCALDAY_MAX
 
 
@@ -133,12 +133,12 @@ class TestStoreRoundTrip:
         """Post-C5 (2026-04-24): apply v2 schema so harvester's HIGH→v2
         route lands rows in calibration_pairs_v2 (previously the HIGH
         branch wrote to legacy calibration_pairs)."""
-        from src.state.schema.v2_schema import apply_v2_schema
+        from src.state.schema.v2_schema import apply_canonical_schema
 
         db_path = tmp_path / "test_cal.db"
         conn = get_connection(db_path)
         init_schema(conn)
-        apply_v2_schema(conn)
+        apply_canonical_schema(conn)
         return conn
 
     def test_save_and_load_model(self, tmp_path):
@@ -314,7 +314,7 @@ class TestDecisionGroupAccounting:
     def test_builds_decision_groups_from_pair_rows(self, tmp_path):
         conn = get_connection(tmp_path / "test_groups.db")
         init_schema(conn)
-        apply_v2_schema(conn)
+        apply_canonical_schema(conn)
         for target_date, forecast_available_at in [
             ("2026-01-01", "2025-12-30T00:00:00Z"),
             ("2026-01-02", "2025-12-31T00:00:00Z"),
@@ -384,7 +384,7 @@ class TestDecisionGroupAccounting:
     def test_decision_group_write_is_idempotent(self, tmp_path):
         conn = get_connection(tmp_path / "test_groups.db")
         init_schema(conn)
-        apply_v2_schema(conn)
+        apply_canonical_schema(conn)
         add_calibration_pair(
             conn,
             "NYC",
@@ -433,7 +433,7 @@ class TestDecisionGroupAccounting:
     def test_build_decision_group_for_key_targets_one_group(self, tmp_path):
         conn = get_connection(tmp_path / "test_one_group.db")
         init_schema(conn)
-        apply_v2_schema(conn)
+        apply_canonical_schema(conn)
         add_calibration_pair(
             conn,
             "NYC",
@@ -480,7 +480,7 @@ class TestDecisionGroupAccounting:
     def test_decision_groups_split_same_available_at_by_lead_days(self, tmp_path):
         conn = get_connection(tmp_path / "test_groups_by_lead.db")
         init_schema(conn)
-        apply_v2_schema(conn)
+        apply_canonical_schema(conn)
         for lead_days in (1.0, 2.0):
             for bin_idx in range(2):
                 add_calibration_pair(
@@ -544,7 +544,7 @@ class TestDecisionGroupAccounting:
     def test_maturity_shadow_exposes_pair_row_inflation(self, tmp_path):
         conn = get_connection(tmp_path / "test_maturity_shadow.db")
         init_schema(conn)
-        apply_v2_schema(conn)
+        apply_canonical_schema(conn)
         for group_idx in range(5):
             for bin_idx in range(11):
                 add_calibration_pair(
@@ -594,7 +594,7 @@ class TestDecisionGroupAccounting:
     def test_decision_group_collision_is_rejected(self, tmp_path):
         conn = get_connection(tmp_path / "test_group_collision.db")
         init_schema(conn)
-        apply_v2_schema(conn)
+        apply_canonical_schema(conn)
         group_id = _decision_group_id(
             "NYC",
             "2026-01-01",
@@ -631,7 +631,7 @@ class TestDecisionGroupAccounting:
 
         conn = get_connection(tmp_path / "test_truncated_canonical.db")
         init_schema(conn)
-        apply_v2_schema(conn)
+        apply_canonical_schema(conn)
         for group_idx in range(15):
             add_calibration_pair(
                 conn,
@@ -859,7 +859,7 @@ class TestBlockedOOSCalibration:
     def test_blocked_oos_returns_report_with_metrics(self, tmp_path):
         conn = get_connection(tmp_path / "blocked_oos.db")
         init_schema(conn)
-        apply_v2_schema(conn)
+        apply_canonical_schema(conn)
         for day, winning_idx in [("2026-01-01", 4), ("2026-01-02", 5), ("2026-01-03", 6)]:
             self._seed_group(
                 conn,
@@ -898,7 +898,7 @@ class TestBlockedOOSCalibration:
     def test_blocked_oos_falls_back_to_raw_for_immature_bucket(self, tmp_path):
         conn = get_connection(tmp_path / "blocked_oos_fallback.db")
         init_schema(conn)
-        apply_v2_schema(conn)
+        apply_canonical_schema(conn)
         self._seed_group(
             conn,
             target_date="2026-01-01",
@@ -968,7 +968,7 @@ class TestGetCalibrator:
         db_path = tmp_path / "test.db"
         conn = get_connection(db_path)
         init_schema(conn)
-        apply_v2_schema(conn)
+        apply_canonical_schema(conn)
 
         cal, level = get_calibrator(conn, NYC, "2026-01-15")
         assert cal is None
@@ -980,7 +980,7 @@ class TestGetCalibrator:
         db_path = tmp_path / "test.db"
         conn = get_connection(db_path)
         init_schema(conn)
-        apply_v2_schema(conn)
+        apply_canonical_schema(conn)
 
         # Store a pre-fitted model under K3 bucket key (city.name_season)
         from src.types.metric_identity import HIGH_LOCALDAY_MAX
@@ -1016,7 +1016,7 @@ class TestGetCalibrator:
         db_path = tmp_path / "test_stale_raw.db"
         conn = get_connection(db_path)
         init_schema(conn)
-        apply_v2_schema(conn)
+        apply_canonical_schema(conn)
         from src.types.metric_identity import HIGH_LOCALDAY_MAX
         season = season_from_date("2026-01-15", lat=NYC.lat)
         save_platt_model(
@@ -1048,12 +1048,12 @@ class TestTiggeOpendataBridge:
     """
 
     def _v2_conn(self, tmp_path, name="bridge"):
-        from src.state.schema.v2_schema import apply_v2_schema
+        from src.state.schema.v2_schema import apply_canonical_schema
 
         db_path = tmp_path / f"test_{name}.db"
         conn = get_connection(db_path)
         init_schema(conn)
-        apply_v2_schema(conn)
+        apply_canonical_schema(conn)
         return conn
 
     def _save_high_tigge_v2(self, conn, cluster, season):

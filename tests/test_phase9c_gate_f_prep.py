@@ -46,13 +46,13 @@ class TestRBZGetCalibratorMetricAware:
 
     def _make_db_with_two_metrics(self) -> sqlite3.Connection:
         """Build minimal v2-schema DB with HIGH + LOW Platt rows for same bucket."""
-        from src.state.schema.v2_schema import apply_v2_schema
+        from src.state.schema.v2_schema import apply_canonical_schema
         from src.state.db import init_schema
 
         conn = sqlite3.connect(":memory:")
         conn.row_factory = sqlite3.Row
         init_schema(conn)
-        apply_v2_schema(conn)
+        apply_canonical_schema(conn)
 
         # Insert HIGH + LOW Platt rows with DIFFERENT param_A so we can
         # disambiguate which was returned.
@@ -454,13 +454,13 @@ class TestRCBForecastRowsV2:
         """R-CB.1: when historical_forecasts has rows for the city+date+metric,
         _forecast_rows_for returns ONLY the v2 rows with matching metric."""
         from src.engine.replay import ReplayContext
-        from src.state.schema.v2_schema import apply_v2_schema
+        from src.state.schema.v2_schema import apply_canonical_schema
         from src.state.db import init_schema
 
         conn = sqlite3.connect(":memory:")
         conn.row_factory = sqlite3.Row
         init_schema(conn)
-        apply_v2_schema(conn)
+        apply_canonical_schema(conn)
 
         # v2 schema is per-row metric-partitioned (single forecast_value +
         # temperature_metric column). Seed HIGH and LOW rows for same
@@ -507,13 +507,13 @@ class TestRCBForecastRowsV2:
         """R-CB.2: when v2 is empty (Golden Window current state), legacy
         `forecasts` table is queried unchanged. Backward-compat preservation."""
         from src.engine.replay import ReplayContext
-        from src.state.schema.v2_schema import apply_v2_schema
+        from src.state.schema.v2_schema import apply_canonical_schema
         from src.state.db import init_schema
 
         conn = sqlite3.connect(":memory:")
         conn.row_factory = sqlite3.Row
         init_schema(conn)
-        apply_v2_schema(conn)
+        apply_canonical_schema(conn)
 
         # Seed ONLY legacy forecasts (v2 is empty)
         conn.execute(
@@ -554,13 +554,13 @@ class TestRCCBoundaryGateWired:
         that keeps the gate dormant until data flows (current Golden Window
         state)."""
         from src.engine.evaluator import _read_v2_snapshot_metadata
-        from src.state.schema.v2_schema import apply_v2_schema
+        from src.state.schema.v2_schema import apply_canonical_schema
         from src.state.db import init_schema
 
         conn = sqlite3.connect(":memory:")
         conn.row_factory = sqlite3.Row
         init_schema(conn)
-        apply_v2_schema(conn)
+        apply_canonical_schema(conn)
 
         meta = _read_v2_snapshot_metadata(
             conn,
@@ -679,13 +679,13 @@ class TestRCCBoundaryGateWired:
         """
         from src.engine.evaluator import _read_v2_snapshot_metadata
         from src.contracts.boundary_policy import boundary_ambiguous_refuses_signal
-        from src.state.schema.v2_schema import apply_v2_schema
+        from src.state.schema.v2_schema import apply_canonical_schema
         from src.state.db import init_schema
 
         conn = sqlite3.connect(":memory:")
         conn.row_factory = sqlite3.Row
         init_schema(conn)
-        apply_v2_schema(conn)
+        apply_canonical_schema(conn)
 
         # Insert a v2 snapshot row with boundary_ambiguous=1. Schema has
         # many NOT NULL columns (see v2_schema.py ensemble_snapshots).
@@ -839,12 +839,12 @@ class TestRCGFitFromPairsLowSkip:
         import sqlite3
         from src.calibration.manager import _fit_from_pairs
         from src.state.db import init_schema
-        from src.state.schema.v2_schema import apply_v2_schema
+        from src.state.schema.v2_schema import apply_canonical_schema
 
         conn = sqlite3.connect(":memory:")
         conn.row_factory = sqlite3.Row
         init_schema(conn)
-        apply_v2_schema(conn)
+        apply_canonical_schema(conn)
 
         result = _fit_from_pairs(
             conn, cluster="NYC", season="JJA",
@@ -865,12 +865,12 @@ class TestRCGFitFromPairsLowSkip:
         import sqlite3
         from src.calibration import manager as manager_module
         from src.state.db import init_schema
-        from src.state.schema.v2_schema import apply_v2_schema
+        from src.state.schema.v2_schema import apply_canonical_schema
 
         conn = sqlite3.connect(":memory:")
         conn.row_factory = sqlite3.Row
         init_schema(conn)
-        apply_v2_schema(conn)
+        apply_canonical_schema(conn)
 
         calls = []
 
@@ -901,12 +901,12 @@ class TestRCGFitFromPairsLowSkip:
         import sqlite3
         from src.calibration.manager import _fit_from_pairs
         from src.state.db import init_schema
-        from src.state.schema.v2_schema import apply_v2_schema
+        from src.state.schema.v2_schema import apply_canonical_schema
 
         conn = sqlite3.connect(":memory:")
         conn.row_factory = sqlite3.Row
         init_schema(conn)
-        apply_v2_schema(conn)
+        apply_canonical_schema(conn)
 
         # HIGH path with no pairs → None (Level 4). Pre-P9C.1 behavior
         # preserved (no metric guard fires for HIGH).

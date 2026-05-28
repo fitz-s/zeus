@@ -905,7 +905,7 @@ def init_schema(
     architecture/db_table_ownership.yaml. The ghost copies are safe to drop
     after the D2 90-day retain window (2026-08-09) via drop_world_ghost_tables.py.
     New forecast-class tables are created by init_schema_forecasts on zeus-forecasts.db.
-    The _v2_forecast_tables kwarg is RETIRED in P2; apply_v2_schema is always
+    The _v2_forecast_tables kwarg is RETIRED in P2; apply_canonical_schema is always
     called with forecast_tables=False here (P2 DDL refactor, 2026-05-14).
 
     # Fix (task #200, 2026-05-10): PRAGMA busy_timeout must be re-applied at the
@@ -914,7 +914,7 @@ def init_schema(
     # running its SQL. Every executescript() call in this function (there are ~6)
     # wipes the timeout, leaving subsequent conn.execute() calls with no wait budget.
     # Re-applying PRAGMA busy_timeout here covers the entire init_schema call including
-    # apply_v2_schema. Source: ZEUS_DB_BUSY_TIMEOUT_MS env var (ms), default 30 s.
+    # apply_canonical_schema. Source: ZEUS_DB_BUSY_TIMEOUT_MS env var (ms), default 30 s.
     """
     own_conn = conn is None
     if own_conn:
@@ -1054,7 +1054,7 @@ def init_schema(
         -- the operator runs the DROP migration.
 
         -- calibration_pairs bare shell dropped (B3 rename: table now owned by
-        -- apply_v2_schema/_create_calibration_pairs with canonical v2 schema).
+        -- apply_canonical_schema/_create_calibration_pairs with canonical v2 schema).
 
         -- Independent forecast-event units derived from calibration_pairs.
         -- Behavior-neutral substrate: active Platt routing still uses existing
@@ -1989,8 +1989,8 @@ def init_schema(
 
     # task #200 (2026-05-10): executescript() resets the C-level busy handler.
     # Re-apply after the last executescript() so all subsequent conn.execute()
-    # calls (ALTER loops, apply_v2_schema) wait under contention instead of
-    # failing immediately. apply_v2_schema also sets this independently as a
+    # calls (ALTER loops, apply_canonical_schema) wait under contention instead of
+    # failing immediately. apply_canonical_schema also sets this independently as a
     # belt-and-suspenders guard for callers that bypass init_schema.
     conn.execute(f"PRAGMA busy_timeout = {int(os.environ.get('ZEUS_DB_BUSY_TIMEOUT_MS', '30000'))}")
 
@@ -2428,7 +2428,7 @@ def init_schema(
 
     # idx_calibration_pairs_decision_group, idx_calibration_pairs_group_lookup,
     # idx_calibration_pairs_group_lookup_lead removed in B3 (PR3):
-    # bare calibration_pairs shell dropped; indexes now owned by apply_v2_schema.
+    # bare calibration_pairs shell dropped; indexes now owned by apply_canonical_schema.
     _ensure_calibration_decision_group_lead_key(conn)
 
     _ensure_runtime_bootstrap_support_tables(conn)
@@ -2513,8 +2513,8 @@ def init_schema(
     _ensure_phase6_evidence_tables(conn)
 
     # Phase 2: apply v2 schema (idempotent — safe to run on every boot).
-    from src.state.schema.v2_schema import apply_v2_schema as _apply_v2_schema
-    _apply_v2_schema(conn, forecast_tables=False)
+    from src.state.schema.v2_schema import apply_canonical_schema as _apply_canonical_schema
+    _apply_canonical_schema(conn, forecast_tables=False)
 
     # Zeus #64 FT-ship F2 (2026-05-26): ensure model_bias_ens exists on every
     # init_schema target so monitor_refresh + evaluator can read FT models at runtime

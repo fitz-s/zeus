@@ -32,7 +32,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.state.schema.v2_schema import apply_v2_schema  # noqa: E402
+from src.state.schema.v2_schema import apply_canonical_schema  # noqa: E402
 from src.types.metric_identity import HIGH_LOCALDAY_MAX  # noqa: E402
 
 
@@ -71,7 +71,7 @@ def ingest_env():
 
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
-    apply_v2_schema(conn)
+    apply_canonical_schema(conn)
     return conn, ingest_mod
 
 

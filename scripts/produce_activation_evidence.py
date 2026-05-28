@@ -52,7 +52,7 @@ from src.control.entry_forecast_rollout import evaluate_entry_forecast_rollout_g
 from src.data.entry_readiness_writer import ENTRY_FORECAST_STRATEGY_KEY
 from src.engine import evaluator as evaluator_module
 from src.state.db import init_schema
-from src.state.schema.v2_schema import apply_v2_schema
+from src.state.schema.v2_schema import apply_canonical_schema
 from src.types.metric_identity import HIGH_LOCALDAY_MAX
 
 UTC = timezone.utc
@@ -86,7 +86,7 @@ def _new_conn() -> sqlite3.Connection:
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     init_schema(conn)
-    apply_v2_schema(conn)
+    apply_canonical_schema(conn)
     return conn
 
 

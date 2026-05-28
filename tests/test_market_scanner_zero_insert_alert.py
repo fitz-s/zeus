@@ -21,7 +21,7 @@ from types import SimpleNamespace
 import pytest
 
 from src.data.market_scanner import _persist_market_events_to_db
-from src.state.schema.v2_schema import apply_v2_schema
+from src.state.schema.v2_schema import apply_canonical_schema
 
 
 def _make_sample_events() -> list[dict]:
@@ -60,7 +60,7 @@ def forecasts_db(tmp_path) -> Path:
     db_path = tmp_path / "zeus-forecasts.db"
     conn = sqlite3.connect(str(db_path))
     try:
-        apply_v2_schema(conn)
+        apply_canonical_schema(conn)
         conn.commit()
     finally:
         conn.close()

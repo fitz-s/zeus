@@ -1203,7 +1203,7 @@ class TestSelectionFamilySubstrate:
         # FakeDay0Signal and wrap the route lambda to dispatch on
         # inputs.temperature_metric.is_low().
         #
-        # DT7 gate: _init_schema_with_forecast_authority(conn) calls apply_v2_schema which creates
+        # DT7 gate: _init_schema_with_forecast_authority(conn) calls apply_canonical_schema which creates
         # empty ensemble_snapshots; _read_v2_snapshot_metadata on empty
         # table naturally returns {} → boundary_ambiguous_refuses_signal
         # returns False → gate passes WITHOUT stubbing. T2.g (plan row)
@@ -1427,7 +1427,7 @@ class TestSelectionFamilySubstrate:
         # FakeDay0Signal and wrap the route lambda to dispatch on
         # inputs.temperature_metric.is_low().
         #
-        # DT7 gate: _init_schema_with_forecast_authority(conn) calls apply_v2_schema which creates
+        # DT7 gate: _init_schema_with_forecast_authority(conn) calls apply_canonical_schema which creates
         # empty ensemble_snapshots; _read_v2_snapshot_metadata on empty
         # table naturally returns {} → boundary_ambiguous_refuses_signal
         # returns False → gate passes WITHOUT stubbing. T2.g (plan row)

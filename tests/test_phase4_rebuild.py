@@ -28,11 +28,11 @@ class TestINV15SourceWhitelistGate:
 
     def _make_conn(self) -> sqlite3.Connection:
         from src.state.db import init_schema
-        from src.state.schema.v2_schema import apply_v2_schema
+        from src.state.schema.v2_schema import apply_canonical_schema
         conn = sqlite3.connect(":memory:")
         conn.execute("PRAGMA foreign_keys = ON")
         init_schema(conn)
-        apply_v2_schema(conn)
+        apply_canonical_schema(conn)
         return conn
 
     def _write_pair(self, conn, *, decision_group_id: str, data_version: str,
@@ -186,11 +186,11 @@ class TestCalibrationPairsV2IdentityFields:
 
     def _make_conn(self) -> sqlite3.Connection:
         from src.state.db import init_schema
-        from src.state.schema.v2_schema import apply_v2_schema
+        from src.state.schema.v2_schema import apply_canonical_schema
         conn = sqlite3.connect(":memory:")
         conn.execute("PRAGMA foreign_keys = ON")
         init_schema(conn)
-        apply_v2_schema(conn)
+        apply_canonical_schema(conn)
         return conn
 
     def _insert_calibration_pair_v2(self, conn: sqlite3.Connection, **overrides) -> str:
@@ -324,12 +324,12 @@ class TestRebuildV2PipelineIntegration:
 
     def _make_conn(self) -> sqlite3.Connection:
         from src.state.db import init_schema
-        from src.state.schema.v2_schema import apply_v2_schema
+        from src.state.schema.v2_schema import apply_canonical_schema
         conn = sqlite3.connect(":memory:")
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON")
         init_schema(conn)
-        apply_v2_schema(conn)
+        apply_canonical_schema(conn)
         return conn
 
     def _insert_snapshot(self, conn: sqlite3.Connection) -> int:

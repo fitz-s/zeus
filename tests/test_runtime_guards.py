@@ -46,7 +46,7 @@ from src.riskguard.risk_level import RiskLevel
 from src.contracts.exceptions import ObservationUnavailableError
 import src.state.db as db_module
 from src.state.db import get_connection, init_schema, query_position_events
-from src.state.schema.v2_schema import apply_v2_schema
+from src.state.schema.v2_schema import apply_canonical_schema
 from src.state.decision_chain import CycleArtifact, NoTradeCase, query_learning_surface_summary, store_artifact
 from src.state.chain_reconciliation import ChainPosition, reconcile
 from src.state.portfolio import (
@@ -3456,7 +3456,7 @@ def test_discovery_phase_buffers_forward_market_substrate_until_after_evaluator(
     monkeypatch.setattr(db_module, "ZEUS_FORECASTS_DB_PATH", db_path)
     conn = get_connection(db_path)
     init_schema(conn)
-    apply_v2_schema(conn)
+    apply_canonical_schema(conn)
     conn.commit()
     artifact = CycleArtifact(mode=DiscoveryMode.OPENING_HUNT.value, started_at="2026-04-03T00:00:00Z")
     summary = {"candidates": 0, "no_trades": 0}
@@ -8352,7 +8352,7 @@ def _runtime_transfer_sigma(
 def test_transfer_sigma_requires_nonempty_platt_model_key() -> None:
     """Empty Platt keys are not wildcards for validated transfer evidence."""
     conn = sqlite3.connect(":memory:")
-    apply_v2_schema(conn)
+    apply_canonical_schema(conn)
     _insert_runtime_transfer_sigma_row(conn, platt_model_key="")
 
     sigma = _runtime_transfer_sigma(conn, platt_model_key="")
@@ -8363,7 +8363,7 @@ def test_transfer_sigma_requires_nonempty_platt_model_key() -> None:
 def test_transfer_sigma_uses_fully_scoped_live_evidence() -> None:
     """Positive transfer sigma requires policy, route, model key, and finite economics."""
     conn = sqlite3.connect(":memory:")
-    apply_v2_schema(conn)
+    apply_canonical_schema(conn)
     _insert_runtime_transfer_sigma_row(conn)
 
     sigma = _runtime_transfer_sigma(conn)
@@ -8405,7 +8405,7 @@ def test_transfer_sigma_rejects_wrong_or_invalid_evidence(
 ) -> None:
     """Legacy, stale, or non-finite rows cannot widen live decision uncertainty."""
     conn = sqlite3.connect(":memory:")
-    apply_v2_schema(conn)
+    apply_canonical_schema(conn)
     _insert_runtime_transfer_sigma_row(conn, **row_kwargs)
 
     sigma = _runtime_transfer_sigma(conn, **call_kwargs)
@@ -12438,7 +12438,7 @@ def test_store_ens_snapshot_links_openmeteo_valid_time_without_faking_issue_time
     db_path = tmp_path / "zeus.db"
     conn = get_connection(db_path)
     init_schema(conn)
-    apply_v2_schema(conn)
+    apply_canonical_schema(conn)
 
     fetch_time = datetime(2026, 1, 14, 6, 5, tzinfo=timezone.utc)
     # Slice A3 follow-up (PR #19 review fix, 2026-04-26): the writer requires
@@ -12506,7 +12506,7 @@ def test_store_ens_snapshot_links_openmeteo_valid_time_without_faking_issue_time
 
 
 def _seed_p_raw_snapshot(conn) -> str:
-    apply_v2_schema(conn)
+    apply_canonical_schema(conn)
     fetch_time = datetime(2026, 1, 14, 6, 5, tzinfo=timezone.utc)
     ens = type(
         "DummyEns",
@@ -12653,11 +12653,11 @@ def test_store_ens_snapshot_routes_to_attached_world_db(tmp_path):
     world_db = tmp_path / "zeus-world.db"
     trade_conn = get_connection(trade_db)
     init_schema(trade_conn)
-    apply_v2_schema(trade_conn)
+    apply_canonical_schema(trade_conn)
     trade_conn.close()
     world_conn = get_connection(world_db)
     init_schema(world_conn)
-    apply_v2_schema(world_conn)
+    apply_canonical_schema(world_conn)
     world_conn.close()
 
     conn = get_connection(trade_db)
@@ -12736,7 +12736,7 @@ def test_store_ens_snapshot_writes_v2_independent_of_legacy_table_contents(tmp_p
     db_path = tmp_path / "zeus.db"
     conn = get_connection(db_path)
     init_schema(conn)
-    apply_v2_schema(conn)
+    apply_canonical_schema(conn)
     # Legacy table still exists (DROP migration is operator-invoked); pre-populate
     # an unrelated row to confirm the writer doesn't touch or break it.
     conn.execute(
@@ -12805,7 +12805,7 @@ def test_store_ens_snapshot_reuses_v2_conflict_without_legacy_fallback(tmp_path)
     db_path = tmp_path / "zeus.db"
     conn = get_connection(db_path)
     init_schema(conn)
-    apply_v2_schema(conn)
+    apply_canonical_schema(conn)
     issue_time = "2026-01-14T00:00:00+00:00"
     conn.execute(
         """

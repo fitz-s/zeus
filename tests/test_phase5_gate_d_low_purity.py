@@ -241,13 +241,13 @@ class TestGateDLowPurityIsolation:
         )
         from src.config import cities_by_name
         from src.state.db import init_schema
-        from src.state.schema.v2_schema import apply_v2_schema
+        from src.state.schema.v2_schema import apply_canonical_schema
         from src.types.metric_identity import LOW_LOCALDAY_MIN
 
         conn = sqlite3.connect(":memory:")
         conn.row_factory = sqlite3.Row
         init_schema(conn)
-        apply_v2_schema(conn)
+        apply_canonical_schema(conn)
         conn.execute(
             """
             INSERT INTO ensemble_snapshots (
@@ -314,7 +314,7 @@ class TestGateDLowPurityIsolation:
             assert_data_version_allowed,
         )
         from src.state.db import init_schema
-        from src.state.schema.v2_schema import apply_v2_schema
+        from src.state.schema.v2_schema import apply_canonical_schema
         from src.types.metric_identity import LOW_LOCALDAY_MIN
 
         for data_version in (
@@ -325,7 +325,7 @@ class TestGateDLowPurityIsolation:
             conn = sqlite3.connect(":memory:")
             conn.row_factory = sqlite3.Row
             init_schema(conn)
-            apply_v2_schema(conn)
+            apply_canonical_schema(conn)
             conn.execute(
                 """
                 INSERT INTO ensemble_snapshots (
@@ -611,13 +611,13 @@ class TestGateDLowPurityIsolation:
     def test_R_AZ_2c3_rebuild_dry_run_evaluates_low_contract_and_observation_gates(self):
         from scripts.rebuild_calibration_pairs import METRIC_SPECS, rebuild_v2
         from src.state.db import init_schema
-        from src.state.schema.v2_schema import apply_v2_schema
+        from src.state.schema.v2_schema import apply_canonical_schema
         from src.types.metric_identity import LOW_LOCALDAY_MIN
 
         conn = sqlite3.connect(":memory:")
         conn.row_factory = sqlite3.Row
         init_schema(conn)
-        apply_v2_schema(conn)
+        apply_canonical_schema(conn)
         conn.execute(
             """
             INSERT INTO ensemble_snapshots (

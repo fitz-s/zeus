@@ -8,13 +8,13 @@ from __future__ import annotations
 import sqlite3
 from datetime import datetime, timezone
 
-from src.state.schema.v2_schema import apply_v2_schema
+from src.state.schema.v2_schema import apply_canonical_schema
 
 
 def _conn() -> sqlite3.Connection:
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
-    apply_v2_schema(conn)
+    apply_canonical_schema(conn)
     return conn
 
 

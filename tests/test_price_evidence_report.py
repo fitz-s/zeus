@@ -12,7 +12,7 @@ from decimal import Decimal
 import pytest
 
 from src.contracts.executable_market_snapshot import ExecutableMarketSnapshot
-from src.state.schema.v2_schema import apply_v2_schema
+from src.state.schema.v2_schema import apply_canonical_schema
 from src.state.snapshot_repo import init_snapshot_schema, insert_snapshot
 
 UTC = timezone.utc
@@ -21,7 +21,7 @@ UTC = timezone.utc
 def _conn(*, include_snapshot_table: bool = True) -> sqlite3.Connection:
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
-    apply_v2_schema(conn)
+    apply_canonical_schema(conn)
     if include_snapshot_table:
         init_snapshot_schema(conn)
     return conn

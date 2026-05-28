@@ -31,7 +31,7 @@ backfill workflow. Wholesale migration would balloon the change and create a
 duplicate maintenance surface for ~6 scripts. They keep their lifecycle.
 
 The ingester is in-process because (a) it must run inside the zeus venv where
-`TiggeSnapshotPayload` and `apply_v2_schema` live, and (b) `ingest_track` is a
+`TiggeSnapshotPayload` and `apply_canonical_schema` live, and (b) `ingest_track` is a
 clean importable function that already enforces the canonical-write contract.
 
 ## Source role: backfill, not live trading

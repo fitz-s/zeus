@@ -19,7 +19,7 @@ from src.data.calibration_transfer_policy import (
     CANONICAL_CALIBRATION_PAIR_BIN_SOURCE,
     _rebuild_complete_sentinel_key_for_transfer_evidence,
 )
-from src.state.schema.v2_schema import apply_v2_schema
+from src.state.schema.v2_schema import apply_canonical_schema
 from scripts.evaluate_calibration_transfer_oos import (
     DEFAULT_BRIER_DIFF_THRESHOLD,
     DEFAULT_POLICY_ID,
@@ -34,7 +34,7 @@ from scripts.evaluate_calibration_transfer_oos import (
 
 def _make_conn() -> sqlite3.Connection:
     conn = sqlite3.connect(":memory:")
-    apply_v2_schema(conn)
+    apply_canonical_schema(conn)
     conn.execute("ATTACH DATABASE ':memory:' AS world")
     _clone_main_table_to_world(conn, "platt_models")
     _clone_main_table_to_world(conn, "validated_calibration_transfers")

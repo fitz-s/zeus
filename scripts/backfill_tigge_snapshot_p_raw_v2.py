@@ -54,7 +54,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from src.contracts.ensemble_snapshot_provenance import assert_data_version_allowed
 from src.state.db import get_world_connection, init_schema
 from src.state.db_writer_lock import WriteClass, db_writer_lock  # noqa: E402
-from src.state.schema.v2_schema import apply_v2_schema
+from src.state.schema.v2_schema import apply_canonical_schema
 from src.calibration.metric_specs import CalibrationMetricSpec, METRIC_SPECS
 
 
@@ -339,7 +339,7 @@ def main() -> int:
         else:
             conn = get_world_connection(write_class="bulk")
         init_schema(conn)
-        apply_v2_schema(conn)
+        apply_canonical_schema(conn)
 
         try:
             per_metric = backfill_all_v2(

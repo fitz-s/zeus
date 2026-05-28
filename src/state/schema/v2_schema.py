@@ -1,6 +1,6 @@
 """Zeus World DB v2 schema migration.
 
-Single public function: apply_v2_schema(conn).
+Single public function: apply_canonical_schema(conn).
 
 Contract:
 - Idempotent (CREATE TABLE IF NOT EXISTS, DROP TABLE IF EXISTS).
@@ -392,7 +392,7 @@ def _create_settlement_capture_verifications(conn: sqlite3.Connection) -> None:
     """)
 
 
-def apply_v2_schema(conn: sqlite3.Connection, *, forecast_tables: bool = True) -> None:
+def apply_canonical_schema(conn: sqlite3.Connection, *, forecast_tables: bool = True) -> None:
     """Apply the Zeus World DB v2 schema to *conn*.
 
     Safe to call on both zeus-world.db and zeus_trades.db.
@@ -410,7 +410,7 @@ def apply_v2_schema(conn: sqlite3.Connection, *, forecast_tables: bool = True) -
     # handler that sqlite3.connect(timeout=N) installs, so any subsequent
     # conn.execute() on the same connection has no wait budget and fails
     # immediately on lock contention. Restoring busy_timeout here makes
-    # apply_v2_schema robust regardless of what ran on *conn* before it.
+    # apply_canonical_schema robust regardless of what ran on *conn* before it.
     # ZEUS_DB_BUSY_TIMEOUT_MS default matches db.py _db_busy_timeout_s() (30 s).
     """
     _busy_timeout_ms = int(os.environ.get("ZEUS_DB_BUSY_TIMEOUT_MS", "30000"))

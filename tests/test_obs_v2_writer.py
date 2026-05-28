@@ -32,7 +32,7 @@ from src.data.tier_resolver import (
     Tier,
     tier_for_city,
 )
-from src.state.schema.v2_schema import apply_v2_schema
+from src.state.schema.v2_schema import apply_canonical_schema
 
 
 def _valid_provenance(**overrides) -> str:
@@ -326,7 +326,7 @@ def test_rejects_bad_utc_timestamp():
 @pytest.fixture
 def mem_db() -> sqlite3.Connection:
     conn = sqlite3.connect(":memory:")
-    apply_v2_schema(conn)
+    apply_canonical_schema(conn)
     yield conn
     conn.close()
 
@@ -347,7 +347,7 @@ def test_insert_rows_empty_batch_is_noop(mem_db):
     assert n == 0
 
 
-def test_apply_v2_schema_creates_obs_v2_revision_surfaces(mem_db):
+def test_apply_canonical_schema_creates_obs_v2_revision_surfaces(mem_db):
     tables = {
         row[0]
         for row in mem_db.execute(
@@ -366,7 +366,7 @@ def test_apply_v2_schema_creates_obs_v2_revision_surfaces(mem_db):
     assert "ux_observation_revisions_payload" in indexes
 
 
-def test_apply_v2_schema_is_idempotent_with_existing_obs_v2_revision_rows(mem_db):
+def test_apply_canonical_schema_is_idempotent_with_existing_obs_v2_revision_rows(mem_db):
     mem_db.execute(
         """
         INSERT INTO observation_revisions (
@@ -383,7 +383,7 @@ def test_apply_v2_schema_is_idempotent_with_existing_obs_v2_revision_rows(mem_db
     )
     mem_db.commit()
 
-    apply_v2_schema(mem_db)
+    apply_canonical_schema(mem_db)
 
     (count,) = mem_db.execute(
         "SELECT COUNT(*) FROM observation_revisions"

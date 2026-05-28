@@ -669,8 +669,8 @@ def main(argv: Optional[list[str]] = None) -> int:
             # Ensure zeus_meta + observation_instants_v2 schema is current.
             # Cheap; idempotent; protects against running on a DB that was
             # never migrated.
-            from src.state.schema.v2_schema import apply_v2_schema
-            apply_v2_schema(conn)
+            from src.state.schema.v2_schema import apply_canonical_schema
+            apply_canonical_schema(conn)
 
             all_stats: list[BackfillStats] = []
             unsupported_cities: list[str] = []

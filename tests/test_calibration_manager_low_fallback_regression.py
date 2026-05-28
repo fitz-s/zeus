@@ -42,7 +42,7 @@ from src.contracts.ensemble_snapshot_provenance import (
     ECMWF_OPENDATA_LOW_CONTRACT_WINDOW_DATA_VERSION,
     TIGGE_LOW_CONTRACT_WINDOW_DATA_VERSION,
 )
-from src.state.schema.v2_schema import apply_v2_schema
+from src.state.schema.v2_schema import apply_canonical_schema
 from src.state.db import init_schema
 from src.types.metric_identity import LOW_LOCALDAY_MIN
 
@@ -198,7 +198,7 @@ def test_calibration_authority_result_marks_primary_exact_live_eligible():
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     init_schema(conn)
-    apply_v2_schema(conn)
+    apply_canonical_schema(conn)
     city = _city()
     season = season_from_date("2026-01-15", lat=city.lat)
     _save_low_v2_model(
@@ -232,7 +232,7 @@ def test_calibration_authority_result_blocks_pool_fallback_live_use():
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     init_schema(conn)
-    apply_v2_schema(conn)
+    apply_canonical_schema(conn)
     city = _city()
     season = season_from_date("2026-01-15", lat=city.lat)
     fallback_cluster = next(c for c in calibration_clusters() if c != city.cluster)
@@ -260,7 +260,7 @@ def test_get_calibrator_blocks_low_pool_fallback_at_live_read_seam():
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     init_schema(conn)
-    apply_v2_schema(conn)
+    apply_canonical_schema(conn)
     city = _city()
     season = season_from_date("2026-01-15", lat=city.lat)
     fallback_cluster = next(c for c in calibration_clusters() if c != city.cluster)
@@ -291,7 +291,7 @@ def test_get_calibrator_blocks_low_primary_below_live_n_eff_floor():
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     init_schema(conn)
-    apply_v2_schema(conn)
+    apply_canonical_schema(conn)
     city = _city()
     season = season_from_date("2026-01-15", lat=city.lat)
     _save_low_v2_model(
@@ -321,7 +321,7 @@ def test_calibration_authority_result_marks_low_primary_below_floor_shadow_only(
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     init_schema(conn)
-    apply_v2_schema(conn)
+    apply_canonical_schema(conn)
     city = _city()
     season = season_from_date("2026-01-15", lat=city.lat)
     _save_low_v2_model(
@@ -353,7 +353,7 @@ def test_get_calibrator_does_not_rescue_modern_low_from_legacy_data_version():
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     init_schema(conn)
-    apply_v2_schema(conn)
+    apply_canonical_schema(conn)
     city = _city()
     season = season_from_date("2026-01-15", lat=city.lat)
     _save_low_v2_model(
@@ -383,7 +383,7 @@ def test_get_calibrator_prefers_tigge_low_contract_window_model_when_present():
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     init_schema(conn)
-    apply_v2_schema(conn)
+    apply_canonical_schema(conn)
     city = _city()
     season = season_from_date("2026-01-15", lat=city.lat)
     _save_low_v2_model(
@@ -422,7 +422,7 @@ def test_get_calibrator_prefers_opendata_low_contract_window_model_when_present(
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     init_schema(conn)
-    apply_v2_schema(conn)
+    apply_canonical_schema(conn)
     city = _city()
     season = season_from_date("2026-01-15", lat=city.lat)
     _save_low_v2_model(

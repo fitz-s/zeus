@@ -242,7 +242,7 @@ class TestWorldSchemaReadyCheck:
         """The v2 schema owner must not require a caller-owned transaction commit.
 
         Pre-v2 idempotent repairs can leave a supplied connection inside a
-        transaction. ``apply_v2_schema()`` must use a nested savepoint in that
+        transaction. ``apply_canonical_schema()`` must use a nested savepoint in that
         case, not force the caller to commit unrelated writes first.
         """
         import sqlite3
@@ -261,7 +261,7 @@ class TestWorldSchemaReadyCheck:
             )
             conn.execute("INSERT INTO pre_v2_dirty_helper DEFAULT VALUES")
 
-            v2_schema.apply_v2_schema(conn, forecast_tables=False)
+            v2_schema.apply_canonical_schema(conn, forecast_tables=False)
 
             assert conn.in_transaction is True
             assert conn.execute("SELECT COUNT(*) FROM pre_v2_dirty_helper").fetchone()[0] == 1
@@ -306,7 +306,7 @@ class TestWorldSchemaReadyCheck:
             conn.execute("BEGIN")
             assert conn.execute("PRAGMA foreign_keys").fetchone() == (1,)
 
-            v2_schema.apply_v2_schema(conn, forecast_tables=False)
+            v2_schema.apply_canonical_schema(conn, forecast_tables=False)
 
             assert conn.in_transaction is True
             assert conn.execute("PRAGMA foreign_keys").fetchone() == (1,)

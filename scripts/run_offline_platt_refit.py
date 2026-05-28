@@ -49,7 +49,7 @@ def main() -> int:
         _resolve_isolated_calibration_write_db_path,
     )
     from src.state.db import init_schema  # noqa: PLC0415
-    from src.state.schema.v2_schema import apply_v2_schema  # noqa: PLC0415
+    from src.state.schema.v2_schema import apply_canonical_schema  # noqa: PLC0415
 
     write_db_path = _resolve_isolated_calibration_write_db_path(
         args.db, script_name="run_offline_platt_refit.py"
@@ -59,7 +59,7 @@ def main() -> int:
     conn.execute("PRAGMA busy_timeout = 600000")
     conn.execute("PRAGMA journal_mode=WAL")
     init_schema(conn)
-    apply_v2_schema(conn)
+    apply_canonical_schema(conn)
     try:
         per_metric = refit_all_v2(
             conn,

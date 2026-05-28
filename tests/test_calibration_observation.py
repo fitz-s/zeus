@@ -43,7 +43,7 @@ from src.state.calibration_observation import (
     compute_platt_parameter_snapshot_per_bucket,
 )
 from src.state.db import init_schema
-from src.state.schema.v2_schema import apply_v2_schema
+from src.state.schema.v2_schema import apply_canonical_schema
 from src.types.metric_identity import HIGH_LOCALDAY_MAX
 
 
@@ -55,7 +55,7 @@ def _make_conn() -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     init_schema(conn)
-    apply_v2_schema(conn)
+    apply_canonical_schema(conn)
     return conn
 
 
@@ -156,7 +156,7 @@ def test_list_active_platt_models_pre_migration_returns_empty():
     empty list, NOT a crash. Mirrors _has_authority_column posture (store.py L197)."""
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
-    # Intentionally do NOT call init_schema or apply_v2_schema_idempotent.
+    # Intentionally do NOT call init_schema or apply_canonical_schema_idempotent.
     # Both readers should silently return [] on missing table.
     assert list_active_platt_models(conn) == []
     assert list_active_platt_models(conn) == []

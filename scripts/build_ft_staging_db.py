@@ -139,13 +139,13 @@ def main() -> None:
 
     # Apply v2_schema for all OTHER tables (observation_instants_v2, platt_models_v2, etc.)
     # then override calibration_pairs_v2 with family-capable DDL
-    from src.state.schema.v2_schema import apply_v2_schema
+    from src.state.schema.v2_schema import apply_canonical_schema
 
-    apply_v2_schema(staging)
+    apply_canonical_schema(staging)
     staging.commit()
 
     # Rebuild calibration_pairs_v2 with the extended UNIQUE key
-    # (apply_v2_schema created the standard one; we need to replace it)
+    # (apply_canonical_schema created the standard one; we need to replace it)
     print("Step 2: Patching calibration_pairs_v2 with family-capable UNIQUE key...")
     staging.execute("DROP TABLE IF EXISTS calibration_pairs_v2")
     staging.execute(CALIBRATION_PAIRS_V2_DDL)

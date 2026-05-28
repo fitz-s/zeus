@@ -3541,7 +3541,7 @@ PROFILES: list[dict] = [ { 'id': 'change settlement rounding',
                                           'Phase 5C.2 forward-substrate schema owner',
                                           'Phase 5C.2 market_price_history schema owner DDL seam code-only'],
                       'weak_terms': [ 'market_price_history',
-                                      'apply_v2_schema',
+                                      'apply_canonical_schema',
                                       'v2_schema',
                                       'schema owner',
                                       'DDL seam',
@@ -3573,7 +3573,7 @@ PROFILES: list[dict] = [ { 'id': 'change settlement rounding',
                       'hours_since_open, and hours_to_resolution.',
                       'Adding this schema cannot weaken the ECONOMICS tombstone or mark economics readiness; PnL '
                       'remains blocked until real forward venue/probability/outcome substrate exists.',
-                      "apply_v2_schema must remain idempotent and must preserve the caller's foreign-key PRAGMA "
+                      "apply_canonical_schema must remain idempotent and must preserve the caller's foreign-key PRAGMA "
                       'state.'],
     'allowed_files': [ 'docs/operations/task_2026-04-29_design_simplification_audit/**',
                        'docs/reference/modules/state.md',

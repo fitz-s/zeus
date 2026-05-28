@@ -31,7 +31,7 @@ from src.contracts.ensemble_snapshot_provenance import (
 )
 from src.contracts.tigge_snapshot_payload import ProvenanceViolation, TiggeSnapshotPayload
 from src.state.db_writer_lock import WriteClass, db_writer_lock  # noqa: E402
-from src.state.schema.v2_schema import apply_v2_schema
+from src.state.schema.v2_schema import apply_canonical_schema
 from src.types.metric_identity import LOW_LOCALDAY_MIN
 
 def _default_fifty_one_raw_root() -> Path:
@@ -540,7 +540,7 @@ def main() -> int:
 
         try:
             if not dry_run:
-                apply_v2_schema(conn)
+                apply_canonical_schema(conn)
             per_source = run_backfill(
                 conn=conn,
                 json_root=Path(args.json_root),

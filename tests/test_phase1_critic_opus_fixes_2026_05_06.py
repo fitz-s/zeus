@@ -38,7 +38,7 @@ from src.data.calibration_transfer_policy import (
     evaluate_calibration_transfer_policy_with_evidence,
 )
 from src.state.db import init_schema
-from src.state.schema.v2_schema import apply_v2_schema
+from src.state.schema.v2_schema import apply_canonical_schema
 from src.types.metric_identity import HIGH_LOCALDAY_MAX, LOW_LOCALDAY_MIN
 
 
@@ -50,7 +50,7 @@ def _make_conn() -> sqlite3.Connection:
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     init_schema(conn)
-    apply_v2_schema(conn)
+    apply_canonical_schema(conn)
     return conn
 
 
@@ -432,7 +432,7 @@ class TestFixF:
         conn = sqlite3.connect(":memory:")
         conn.row_factory = sqlite3.Row
         init_schema(conn)
-        apply_v2_schema(conn)
+        apply_canonical_schema(conn)
         return conn
 
     def _write_transfer_row(self, conn, model_key: str, target_source_id: str,
@@ -538,7 +538,7 @@ class TestFixD:
         conn = sqlite3.connect(":memory:")
         conn.row_factory = sqlite3.Row
         init_schema(conn)
-        apply_v2_schema(conn)
+        apply_canonical_schema(conn)
         return conn
 
     def _insert_platt_pairs(self, conn, cluster: str, season: str, n: int = 30) -> None:
@@ -704,10 +704,10 @@ class TestFixD:
                 )
 
     def test_refit_bucket_failures_table_exists(self):
-        """Fix D: refit_bucket_failures table is created by apply_v2_schema."""
+        """Fix D: refit_bucket_failures table is created by apply_canonical_schema."""
         conn = self._make_refit_conn()
         # Table must exist after schema migration
         row = conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name='refit_bucket_failures'"
         ).fetchone()
-        assert row is not None, "refit_bucket_failures table must exist after apply_v2_schema"
+        assert row is not None, "refit_bucket_failures table must exist after apply_canonical_schema"

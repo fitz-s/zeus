@@ -53,9 +53,9 @@ def _make_conn() -> sqlite3.Connection:
 def test_report_marks_fresh_v2_schema_contract_outcome_ready() -> None:
     conn = sqlite3.connect(":memory:")
     _connect_for_tests(conn)
-    from src.state.schema.v2_schema import apply_v2_schema  # noqa: PLC0415
+    from src.state.schema.v2_schema import apply_canonical_schema  # noqa: PLC0415
 
-    apply_v2_schema(conn)
+    apply_canonical_schema(conn)
 
     report = build_report(
         conn,
@@ -76,9 +76,9 @@ def test_report_marks_fresh_v2_schema_contract_outcome_ready() -> None:
 def test_report_counts_persisted_low_window_evidence_classes() -> None:
     conn = sqlite3.connect(":memory:")
     _connect_for_tests(conn)
-    from src.state.schema.v2_schema import apply_v2_schema  # noqa: PLC0415
+    from src.state.schema.v2_schema import apply_canonical_schema  # noqa: PLC0415
 
-    apply_v2_schema(conn)
+    apply_canonical_schema(conn)
     rows = [
         (
             "FULLY_INSIDE_TARGET_LOCAL_DAY",

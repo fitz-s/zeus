@@ -602,12 +602,12 @@ class TestHarvester:
         """Post-C5 (2026-04-24): harvest_settlement default-HIGH path now
         writes to calibration_pairs_v2 (previously legacy calibration_pairs).
         """
-        from src.state.schema.v2_schema import apply_v2_schema
+        from src.state.schema.v2_schema import apply_canonical_schema
 
         db_path = tmp_path / "test.db"
         conn = get_connection(db_path)
         init_schema(conn)
-        apply_v2_schema(conn)
+        apply_canonical_schema(conn)
 
         bin_labels = ["32 or below", "33-34", "35-36", "37-38", "39-40",
                       "41-42", "43-44", "45-46", "47-48", "49-50", "51 or higher"]

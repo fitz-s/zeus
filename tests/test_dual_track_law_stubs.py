@@ -20,13 +20,13 @@ def test_settlements_metric_identity_requires_non_null_and_unique_per_metric():
     """Settlements require explicit metric identity and unique city/date/metric.
 
     Verifies:
-    1. apply_v2_schema creates the v2 tables in a fresh :memory: DB.
+    1. apply_canonical_schema creates the v2 tables in a fresh :memory: DB.
     2. Missing temperature_metric is rejected.
     3. Duplicate high rows for one city/date are rejected, while a low row for
        the same city/date remains representable under the dual-track spine.
     """
     import sqlite3
-    from src.state.schema.v2_schema import apply_v2_schema
+    from src.state.schema.v2_schema import apply_canonical_schema
     from src.state.db import init_schema
 
     conn = sqlite3.connect(":memory:")

@@ -77,7 +77,7 @@ def test_tigge_ingest_track_acquires_bulk_lock():
         event_log.append(("conn_opened",))
         return sqlite3.connect(":memory:")
 
-    def _fake_apply_v2_schema(conn):
+    def _fake_apply_canonical_schema(conn):
         pass
 
     fake_mod = _make_fake_ingest_module()
@@ -89,7 +89,7 @@ def test_tigge_ingest_track_acquires_bulk_lock():
         patch("src.data.tigge_pipeline.ZEUS_WORLD_DB_PATH", ZEUS_WORLD_DB_PATH),
         patch("src.data.tigge_pipeline.WriteClass", WriteClass),
         patch.dict("sys.modules", {"ingest_grib_to_snapshots": fake_mod}),
-        patch.object(v2_schema_mod, "apply_v2_schema", _fake_apply_v2_schema),
+        patch.object(v2_schema_mod, "apply_canonical_schema", _fake_apply_canonical_schema),
         patch("src.state.db.get_world_connection", _fake_get_world_connection),
     ):
         result = tigge_pipeline._ingest_track(

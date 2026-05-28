@@ -121,7 +121,7 @@ from src.state.db_writer_lock import (  # noqa: E402
     bulk_lock_with_chunker,
 )
 from src.state.chunk_boundary_events import emit_event
-from src.state.schema.v2_schema import apply_v2_schema
+from src.state.schema.v2_schema import apply_canonical_schema
 from src.types.market import validate_bin_topology
 from src.types.metric_identity import HIGH_LOCALDAY_MAX, LOW_LOCALDAY_MIN, MetricIdentity
 from scripts.verify_truth_surfaces import (
@@ -2138,7 +2138,7 @@ def main() -> int:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA busy_timeout = 600000")
     conn.execute("PRAGMA journal_mode=WAL")
-    # NOTE: init_schema + apply_v2_schema moved inside bulk_lock_with_chunker
+    # NOTE: init_schema + apply_canonical_schema moved inside bulk_lock_with_chunker
     # (F26 cleanup Codex finding): these DDL calls contain DROP TABLE IF EXISTS
     # and CREATE TABLE IF NOT EXISTS writes that must be inside the writer-lock
     # to prevent contention with live writers.
@@ -2159,7 +2159,7 @@ def main() -> int:
             caller_module="scripts.rebuild_calibration_pairs_v2",
             event_writer=_event_writer,
         ) as chunker:
-            # DDL inside the lock: apply_v2_schema contains DROP TABLE IF EXISTS
+            # DDL inside the lock: apply_canonical_schema contains DROP TABLE IF EXISTS
             # and CREATE TABLE IF NOT EXISTS — must run while bulk flock is held.
             # BUG FIX 2026-05-27: was calling init_schema (WORLD schema, bumps
             # user_version to SCHEMA_VERSION=37) on the FORECASTS DB connection,
@@ -2168,8 +2168,8 @@ def main() -> int:
             # which sets user_version=SCHEMA_FORECASTS_VERSION=7 and creates only
             # forecast-class tables.
             init_schema_forecasts(conn)
-            apply_v2_schema(conn)
-            # 2026-05-27: init_schema_forecasts and apply_v2_schema both call
+            apply_canonical_schema(conn)
+            # 2026-05-27: init_schema_forecasts and apply_canonical_schema both call
             # executescript() which resets the C-level busy handler, then
             # re-apply PRAGMA busy_timeout from ZEUS_DB_BUSY_TIMEOUT_MS
             # (default 30s). Re-assert our 10-min budget here so that the

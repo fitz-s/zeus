@@ -47,7 +47,7 @@ from src.calibration.platt import (
 )
 from src.config import City
 from src.state.db import get_connection, init_schema
-from src.state.schema.v2_schema import apply_v2_schema
+from src.state.schema.v2_schema import apply_canonical_schema
 
 # ---------------------------------------------------------------------------
 # Shared fixtures
@@ -65,7 +65,7 @@ def _make_conn(tmp_path: Path, name: str = "test") -> sqlite3.Connection:
     db_path = tmp_path / f"{name}.db"
     conn = get_connection(db_path)
     init_schema(conn)
-    apply_v2_schema(conn)
+    apply_canonical_schema(conn)
     return conn
 
 

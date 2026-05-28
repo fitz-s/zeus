@@ -73,7 +73,7 @@ from src.state.portfolio import (
     PortfolioState,
     Position,
 )
-from src.state.schema.v2_schema import apply_v2_schema
+from src.state.schema.v2_schema import apply_canonical_schema
 from src.types.metric_identity import HIGH_LOCALDAY_MAX, LOW_LOCALDAY_MIN
 
 
@@ -138,7 +138,7 @@ def harvester_conn():
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     init_schema(conn)
-    apply_v2_schema(conn)
+    apply_canonical_schema(conn)
     return conn
 
 
@@ -1083,7 +1083,7 @@ def test_lookup_settlement_obs_rejects_unverified_or_wrong_station_rows(harveste
 
 def test_missing_forecast_issue_time_does_not_create_training_pairs(harvester_conn):
     """F08: runtime-only snapshots without issue time must not enter training."""
-    apply_v2_schema(harvester_conn)
+    apply_canonical_schema(harvester_conn)
     city = _make_city("openmeteo_audit_only")
 
     count = harvester_mod.harvest_settlement(
@@ -1110,7 +1110,7 @@ def test_missing_forecast_issue_time_does_not_create_training_pairs(harvester_co
 
 
 def test_openmeteo_p_raw_lineage_does_not_write_tigge_training_pair(harvester_conn):
-    apply_v2_schema(harvester_conn)
+    apply_canonical_schema(harvester_conn)
     city = _make_city("openmeteo_lineage")
 
     count = harvester_mod.harvest_settlement(
@@ -1150,7 +1150,7 @@ def test_openmeteo_p_raw_lineage_does_not_write_tigge_training_pair(harvester_co
 
 
 def test_malformed_forecast_issue_time_does_not_default_to_tigge_bucket(harvester_conn):
-    apply_v2_schema(harvester_conn)
+    apply_canonical_schema(harvester_conn)
     city = _make_city("malformed_issue_time")
 
     count = harvester_mod.harvest_settlement(
@@ -1179,7 +1179,7 @@ def test_malformed_forecast_issue_time_does_not_default_to_tigge_bucket(harveste
 
 def test_snapshot_training_disallowed_blocks_direct_harvest_pairs(harvester_conn):
     """An explicit not-training snapshot cannot become calibration-pair truth."""
-    apply_v2_schema(harvester_conn)
+    apply_canonical_schema(harvester_conn)
     city = _make_city("snapshot_training_disallowed")
 
     count = harvester_mod.harvest_settlement(
@@ -1209,7 +1209,7 @@ def test_snapshot_training_disallowed_blocks_direct_harvest_pairs(harvester_conn
 
 def test_context_explicit_training_disallow_overrides_learning_ready(harvester_conn):
     """Wrapper must preserve explicit training disallow over readiness fallback."""
-    apply_v2_schema(harvester_conn)
+    apply_canonical_schema(harvester_conn)
     city = _make_city("context_training_disallowed")
     context = {
         "forecast_model_id": HIGH_LOCALDAY_MAX.data_version,
@@ -1244,7 +1244,7 @@ def test_context_explicit_training_disallow_overrides_learning_ready(harvester_c
 
 def test_snapshot_causality_not_ok_blocks_direct_harvest_pairs(harvester_conn):
     """Runtime/fallback snapshot causality cannot become training truth."""
-    apply_v2_schema(harvester_conn)
+    apply_canonical_schema(harvester_conn)
     city = _make_city("snapshot_causality_blocked")
 
     count = harvester_mod.harvest_settlement(
@@ -1275,7 +1275,7 @@ def test_snapshot_causality_not_ok_blocks_direct_harvest_pairs(harvester_conn):
 
 def test_context_causality_not_ok_blocks_learning_pairs(harvester_conn):
     """Wrapper must treat non-OK causality as non-training evidence."""
-    apply_v2_schema(harvester_conn)
+    apply_canonical_schema(harvester_conn)
     city = _make_city("context_causality_blocked")
     context = {
         "forecast_model_id": HIGH_LOCALDAY_MAX.data_version,
@@ -1311,7 +1311,7 @@ def test_context_causality_not_ok_blocks_learning_pairs(harvester_conn):
 @pytest.mark.parametrize("flag_value", ["False", "0", "true"])
 def test_serialized_training_disallow_blocks_direct_harvest_pairs(harvester_conn, flag_value):
     """Serialized flags are not authoritative training permission."""
-    apply_v2_schema(harvester_conn)
+    apply_canonical_schema(harvester_conn)
     city = _make_city(f"serialized_direct_{flag_value}")
 
     count = harvester_mod.harvest_settlement(
@@ -1342,7 +1342,7 @@ def test_serialized_training_disallow_blocks_direct_harvest_pairs(harvester_conn
 @pytest.mark.parametrize("flag_value", ["False", "0", "true"])
 def test_serialized_context_training_disallow_blocks_learning_pairs(harvester_conn, flag_value):
     """Serialized context flags cannot override the fail-closed training gate."""
-    apply_v2_schema(harvester_conn)
+    apply_canonical_schema(harvester_conn)
     city = _make_city(f"serialized_context_{flag_value}")
     context = {
         "forecast_model_id": HIGH_LOCALDAY_MAX.data_version,
@@ -1432,7 +1432,7 @@ def test_snapshot_context_missing_issue_time_is_audit_only(harvester_conn):
 
 def test_snapshot_context_prefers_v2_and_respects_training_allowed(harvester_conn):
     """DSA-13: harvester learning context reads canonical v2 before legacy."""
-    apply_v2_schema(harvester_conn)
+    apply_canonical_schema(harvester_conn)
     harvester_conn.execute(
         """
         INSERT INTO ensemble_snapshots (
@@ -1517,7 +1517,7 @@ def test_snapshot_context_prefers_v2_and_respects_training_allowed(harvester_con
 
 def test_snapshot_context_preserves_legacy_fallback_when_no_v2_row(harvester_conn):
     """DSA-13: legacy diagnostic snapshot rows remain readable if v2 has no id."""
-    apply_v2_schema(harvester_conn)
+    apply_canonical_schema(harvester_conn)
     cur = harvester_conn.execute(
         """
         INSERT INTO ensemble_snapshots (
@@ -1560,7 +1560,7 @@ def test_snapshot_context_preserves_legacy_fallback_when_no_v2_row(harvester_con
 
 def test_snapshot_context_rejects_unrelated_v2_id_collision_for_row_identity(harvester_conn):
     """DSA-13: legacy snapshot ids must not bind to unrelated v2 rows."""
-    apply_v2_schema(harvester_conn)
+    apply_canonical_schema(harvester_conn)
     harvester_conn.execute(
         """
         INSERT INTO ensemble_snapshots (

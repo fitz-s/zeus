@@ -7,7 +7,7 @@
 Covers
 ------
 - Migration is idempotent (running twice does not raise / does not double-add).
-- Fresh DBs created via ``apply_v2_schema`` already have ``ingest_backend``.
+- Fresh DBs created via ``apply_canonical_schema`` already have ``ingest_backend``.
 - Pre-2026-05-07 historical rows (legacy, no ingest_backend value supplied)
   default to ``'unknown'``.
 - New writes that pass an explicit value (``'ecds'`` / ``'webapi'``) tag
@@ -29,7 +29,7 @@ from scripts.migrate_ensemble_snapshots_add_ingest_backend import (  # noqa: E40
     TABLE_NAME,
     migrate,
 )
-from src.state.schema.v2_schema import apply_v2_schema  # noqa: E402
+from src.state.schema.v2_schema import apply_canonical_schema  # noqa: E402
 
 
 def _column_names(conn: sqlite3.Connection, table: str) -> list[str]:
@@ -39,7 +39,7 @@ def _column_names(conn: sqlite3.Connection, table: str) -> list[str]:
 def test_fresh_v2_schema_has_ingest_backend() -> None:
     """Fresh DBs built from canonical v2_schema.py carry the column."""
     conn = sqlite3.connect(":memory:")
-    apply_v2_schema(conn)
+    apply_canonical_schema(conn)
     assert COLUMN_NAME in _column_names(conn, TABLE_NAME)
     conn.close()
 
@@ -47,7 +47,7 @@ def test_fresh_v2_schema_has_ingest_backend() -> None:
 def test_migration_idempotent_on_fresh_db() -> None:
     """Running migration twice on a fresh DB is a no-op the second time."""
     conn = sqlite3.connect(":memory:")
-    apply_v2_schema(conn)
+    apply_canonical_schema(conn)
     # Fresh schema already has the column → migration is a no-op.
     result1 = migrate(conn, dry_run=False)
     assert result1["applied"] is False
@@ -136,7 +136,7 @@ def test_dry_run_does_not_modify_db() -> None:
 def test_explicit_ingest_backend_values_round_trip() -> None:
     """A row inserted with ``ingest_backend='ecds'`` reads back ``'ecds'``."""
     conn = sqlite3.connect(":memory:")
-    apply_v2_schema(conn)
+    apply_canonical_schema(conn)
 
     # Insert two rows, one ecds, one webapi.
     conn.execute(
@@ -177,7 +177,7 @@ def test_explicit_ingest_backend_values_round_trip() -> None:
 def test_default_ingest_backend_when_omitted() -> None:
     """A row inserted without specifying ingest_backend defaults to 'unknown'."""
     conn = sqlite3.connect(":memory:")
-    apply_v2_schema(conn)
+    apply_canonical_schema(conn)
     conn.execute(
         f"""
         INSERT INTO {TABLE_NAME}

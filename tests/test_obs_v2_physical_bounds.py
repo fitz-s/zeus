@@ -49,7 +49,7 @@ from src.data.observation_instants_v2_writer import (
     ObsV2Row,
     insert_rows,
 )
-from src.state.schema.v2_schema import apply_v2_schema
+from src.state.schema.v2_schema import apply_canonical_schema
 
 
 def _valid_provenance() -> str:
@@ -205,7 +205,7 @@ def test_insert_rows_integration_path_rejects_out_of_bounds():
     out-of-scope for legacy DBs).
     """
     conn = sqlite3.connect(":memory:")
-    apply_v2_schema(conn)
+    apply_canonical_schema(conn)
 
     # Construction itself raises — insert_rows is never reached.
     with pytest.raises(InvalidObsV2RowError):
@@ -222,7 +222,7 @@ def test_insert_rows_integration_path_rejects_out_of_bounds():
 def test_insert_rows_integration_path_accepts_in_bounds():
     """Control — clean row writes successfully via insert_rows()."""
     conn = sqlite3.connect(":memory:")
-    apply_v2_schema(conn)
+    apply_canonical_schema(conn)
 
     good_row = ObsV2Row(**_row_kwargs(temp_current=25.0))
     inserted = insert_rows(conn, [good_row])
@@ -282,7 +282,7 @@ def test_schema_check_rejects_raw_bypass_on_new_db():
     confirmed sqlite3 raises IntegrityError naming the CHECK constraint.
     """
     conn = sqlite3.connect(":memory:")
-    apply_v2_schema(conn)
+    apply_canonical_schema(conn)
 
     # Use raw INSERT with all required NOT NULL columns satisfied except the
     # one that violates: temp_current=88.0 with temp_unit='C'.

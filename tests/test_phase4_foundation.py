@@ -59,9 +59,9 @@ class TestCalibrationPairRequiresMetricIdentity:
         conn = sqlite3.connect(":memory:")
         # apply schema so the INSERT has a valid target
         from src.state.db import init_schema
-        from src.state.schema.v2_schema import apply_v2_schema
+        from src.state.schema.v2_schema import apply_canonical_schema
         init_schema(conn)
-        apply_v2_schema(conn)
+        apply_canonical_schema(conn)
 
         nyc = City(
             name="NYC", lat=40.7772, lon=-73.8726,
@@ -104,15 +104,15 @@ class TestEnsembleSnapshotsV2MembersUnit:
 
     def _make_conn(self) -> sqlite3.Connection:
         from src.state.db import init_schema
-        from src.state.schema.v2_schema import apply_v2_schema
+        from src.state.schema.v2_schema import apply_canonical_schema
         conn = sqlite3.connect(":memory:")
         conn.execute("PRAGMA foreign_keys = ON")
         init_schema(conn)
-        apply_v2_schema(conn)
+        apply_canonical_schema(conn)
         return conn
 
     def test_members_unit_column_exists_in_ensemble_snapshots(self):
-        """R-K pre-gate: members_unit column must exist after apply_v2_schema."""
+        """R-K pre-gate: members_unit column must exist after apply_canonical_schema."""
         conn = self._make_conn()
         cols = {row[1] for row in conn.execute("PRAGMA table_info(ensemble_snapshots)")}
         assert "members_unit" in cols, (
@@ -164,11 +164,11 @@ class TestPlattModelsV2Schema:
 
     def _make_conn(self) -> sqlite3.Connection:
         from src.state.db import init_schema
-        from src.state.schema.v2_schema import apply_v2_schema
+        from src.state.schema.v2_schema import apply_canonical_schema
         conn = sqlite3.connect(":memory:")
         conn.execute("PRAGMA foreign_keys = ON")
         init_schema(conn)
-        apply_v2_schema(conn)
+        apply_canonical_schema(conn)
         return conn
 
     def test_platt_models_has_no_city_column(self):

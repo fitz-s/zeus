@@ -28,13 +28,13 @@ class TestRescueEventsV2Schema(unittest.TestCase):
     """Schema-level checks for rescue_events."""
 
     def _apply_schema(self) -> sqlite3.Connection:
-        from src.state.schema.v2_schema import apply_v2_schema
+        from src.state.schema.v2_schema import apply_canonical_schema
         conn = sqlite3.connect(":memory:")
         conn.row_factory = sqlite3.Row
-        apply_v2_schema(conn)
+        apply_canonical_schema(conn)
         return conn
 
-    def test_table_is_created_by_apply_v2_schema(self) -> None:
+    def test_table_is_created_by_apply_canonical_schema(self) -> None:
         conn = self._apply_schema()
         row = conn.execute(
             "SELECT name FROM sqlite_master "
@@ -113,10 +113,10 @@ class TestLogRescueEventHelper(unittest.TestCase):
     """Unit tests for src.state.db.log_rescue_event."""
 
     def _conn(self) -> sqlite3.Connection:
-        from src.state.schema.v2_schema import apply_v2_schema
+        from src.state.schema.v2_schema import apply_canonical_schema
         conn = sqlite3.connect(":memory:")
         conn.row_factory = sqlite3.Row
-        apply_v2_schema(conn)
+        apply_canonical_schema(conn)
         return conn
 
     def test_writes_row_with_verified_authority(self) -> None:
@@ -179,7 +179,7 @@ class TestLogRescueEventHelper(unittest.TestCase):
         )
 
     def test_missing_table_is_logged_not_raised(self) -> None:
-        """Legacy DBs without apply_v2_schema applied must not crash the caller."""
+        """Legacy DBs without apply_canonical_schema applied must not crash the caller."""
         from src.state.db import log_rescue_event
         conn = sqlite3.connect(":memory:")
         # Deliberately NOT applying v2 schema.
@@ -225,10 +225,10 @@ class TestEmitRescueEventIntegration(unittest.TestCase):
     """
 
     def _make_conn_with_position_events(self) -> sqlite3.Connection:
-        from src.state.schema.v2_schema import apply_v2_schema
+        from src.state.schema.v2_schema import apply_canonical_schema
         conn = sqlite3.connect(":memory:")
         conn.row_factory = sqlite3.Row
-        apply_v2_schema(conn)
+        apply_canonical_schema(conn)
         # Minimal position_events table — just enough for the CHAIN_RESCUE_AUDIT
         # INSERT to succeed; matches the real schema's required columns.
         conn.execute(

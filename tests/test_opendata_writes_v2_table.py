@@ -30,7 +30,7 @@ from src.data.executable_forecast_reader import read_executable_forecast
 from src.state.readiness_repo import write_readiness_state
 from src.state.db import init_schema, init_schema_forecasts
 from src.state.source_run_repo import get_source_run
-from src.state.schema.v2_schema import apply_v2_schema
+from src.state.schema.v2_schema import apply_canonical_schema
 
 
 def test_canonical_allowlist_includes_opendata():
@@ -107,7 +107,7 @@ def test_opendata_high_payload_lands_in_v2(tmp_path: Path, monkeypatch):
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
     init_schema(conn)
-    apply_v2_schema(conn)
+    apply_canonical_schema(conn)
 
     # Build the JSON file at the location the ingester would scan.
     fifty_one_root = tmp_path / "51 source data"
@@ -214,7 +214,7 @@ def test_collect_open_ens_cycle_writes_authority_chain_readable_by_live_reader(t
     trade_conn = sqlite3.connect(str(trade_db_path))
     trade_conn.row_factory = sqlite3.Row
     init_schema(trade_conn)
-    apply_v2_schema(trade_conn)
+    apply_canonical_schema(trade_conn)
     write_readiness_state(
         trade_conn,
         readiness_id="entry-ready-london-2026-05-02",
