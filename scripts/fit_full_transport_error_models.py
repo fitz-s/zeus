@@ -122,12 +122,36 @@ def _fit_signature_hash(
     kappa: float,
     n_tig: int,
     n_opd: int,
+    *,
+    gate_set_hash: str,
+    coverage_months: str,
+    tig_residuals: list[float],
+    opd_residuals: list[float],
 ) -> str:
+    """sha256 prefix over the FULL fit identity: filters + gates + coverage + SOURCE ROWS.
+
+    SD4 / Blocker H: the signature must distinguish two rows that share
+    (city, metric, season, data versions, kappa, n) but differ in gate set, coverage
+    scope, or the actual source residuals. Without gate_set_hash + coverage + a source-row
+    digest, two rows fit under different gate generations (or different underlying data)
+    could collide on signature. ``source_digest`` hashes the SORTED, rounded residual values
+    so identical inputs map to one signature and any data change maps to a new one.
+    """
+    source_digest = hashlib.sha256(
+        json.dumps(
+            [sorted(round(float(x), 6) for x in tig_residuals),
+             sorted(round(float(x), 6) for x in opd_residuals)],
+            sort_keys=True,
+        ).encode()
+    ).hexdigest()
     payload = json.dumps(
         {
             "city": city, "metric": metric, "season": season,
             "live_data_version": live_dv, "prior_data_version": prior_dv,
             "kappa": kappa, "n_tig": n_tig, "n_opd": n_opd,
+            "gate_set_hash": gate_set_hash,
+            "coverage_months": coverage_months,
+            "source_digest": source_digest,
         },
         sort_keys=True,
     ).encode()
@@ -377,11 +401,6 @@ def fit_all(
                         kappa=kappa,
                     )
 
-                    sig_hash = _fit_signature_hash(
-                        city, metric, season,
-                        _live_dv, _prior_dv,
-                        kappa, len(tig_residuals), len(opd_residuals),
-                    )
                     error_model_key = (
                         f"{city}|{metric}|{season}"
                         f"|full_transport_v1|{_live_dv}"
@@ -406,6 +425,20 @@ def fit_all(
                         n_opd=len(opd_residuals), min_live_n=DEFAULT_MIN_LIVE_N,
                         n_paired=n_paired, min_paired_n=MIN_PAIRED_N,
                         paired_cov=paired_cov,
+                    )
+
+                    # SD4 / Blocker H: signature is computed AFTER gate_set_hash + coverage so
+                    # the fit identity includes the gate generation, the effective coverage,
+                    # and a digest of the actual source residuals. Two rows differing only in
+                    # gate set or coverage scope no longer collide on signature.
+                    sig_hash = _fit_signature_hash(
+                        city, metric, season,
+                        _live_dv, _prior_dv,
+                        kappa, len(tig_residuals), len(opd_residuals),
+                        gate_set_hash=gate_set_hash,
+                        coverage_months=coverage_months_csv,
+                        tig_residuals=tig_residuals,
+                        opd_residuals=opd_residuals,
                     )
 
                     # C-handler: insufficient prior cannot support a confident learned
