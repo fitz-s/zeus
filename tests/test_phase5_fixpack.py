@@ -555,7 +555,7 @@ class TestRebuildDataVersionAssertion:
             observation_field TEXT NOT NULL,
             fetch_time TEXT NOT NULL,
             model_version TEXT NOT NULL,
-            data_version TEXT NOT NULL,
+            dataset_id TEXT NOT NULL,
             members_unit TEXT NOT NULL DEFAULT 'degC',
             training_allowed INTEGER NOT NULL DEFAULT 1,
             issue_time TEXT,
@@ -584,7 +584,7 @@ class TestRebuildDataVersionAssertion:
             INSERT INTO ensemble_snapshots (
                 city, target_date, temperature_metric, physical_quantity,
                 observation_field, fetch_time, model_version,
-                data_version, members_unit, training_allowed,
+                dataset_id, members_unit, training_allowed,
                 issue_time, available_at, lead_hours,
                 causality_status, authority, members_json
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)

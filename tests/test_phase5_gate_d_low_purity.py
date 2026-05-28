@@ -33,7 +33,7 @@ CREATE TABLE IF NOT EXISTS ensemble_snapshots (
     target_date TEXT NOT NULL,
     temperature_metric TEXT NOT NULL,
     physical_quantity TEXT NOT NULL,
-    data_version TEXT NOT NULL,
+    dataset_id TEXT NOT NULL,
     members_unit TEXT NOT NULL DEFAULT 'degC',
     training_allowed INTEGER NOT NULL DEFAULT 1,
     issue_time TEXT,
@@ -55,7 +55,7 @@ CREATE TABLE IF NOT EXISTS calibration_pairs (
     range_label TEXT, p_raw REAL, outcome INTEGER, lead_days REAL, season TEXT,
     cluster TEXT, forecast_available_at TEXT, settlement_value REAL,
     decision_group_id TEXT, bias_corrected INTEGER, authority TEXT, bin_source TEXT,
-    data_version TEXT, training_allowed INTEGER, causality_status TEXT, snapshot_id INTEGER,
+    dataset_id TEXT, training_allowed INTEGER, causality_status TEXT, snapshot_id INTEGER,
     cycle TEXT DEFAULT '00', source_id TEXT DEFAULT 'tigge_mars',
     horizon_profile TEXT DEFAULT 'full'
 )
@@ -105,7 +105,7 @@ def _make_gate_d_db() -> sqlite3.Connection:
     # One HIGH snapshot + matching observation
     conn.execute("""
         INSERT INTO ensemble_snapshots (
-            city, target_date, temperature_metric, physical_quantity, data_version,
+            city, target_date, temperature_metric, physical_quantity, dataset_id,
             members_unit, training_allowed, issue_time, available_at, lead_hours,
             causality_status, authority, members_json
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -125,7 +125,7 @@ def _make_gate_d_db() -> sqlite3.Connection:
     # One LOW snapshot + matching observation
     conn.execute("""
         INSERT INTO ensemble_snapshots (
-            city, target_date, temperature_metric, physical_quantity, data_version,
+            city, target_date, temperature_metric, physical_quantity, dataset_id,
             members_unit, training_allowed, issue_time, available_at, lead_hours,
             causality_status, authority, members_json
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -154,7 +154,7 @@ class TestGateDLowPurityIsolation:
 
         Pre-fix: _process_snapshot_v2 has no spec param → SQL pre-filter is the only guard.
         If the SQL filter in rebuild_v2 is missing or weak, LOW rows from ensemble_snapshots
-        could be processed. Post-fix: spec param + data_version assertion makes this impossible.
+        could be processed. Post-fix: spec param + dataset_id assertion makes this impossible.
         """
         from scripts.rebuild_calibration_pairs import rebuild_v2, CalibrationMetricSpec, RebuildStatsV2
         from src.types.metric_identity import HIGH_LOCALDAY_MAX
@@ -253,7 +253,7 @@ class TestGateDLowPurityIsolation:
             INSERT INTO ensemble_snapshots (
                 city, target_date, temperature_metric, physical_quantity, observation_field,
                 issue_time, available_at, fetch_time, lead_hours, members_json,
-                model_version, data_version, training_allowed, causality_status,
+                model_version, dataset_id, training_allowed, causality_status,
                 authority, members_unit, city_timezone, settlement_source_type,
                 settlement_station_id, settlement_unit, settlement_rounding_policy,
                 bin_grid_id, bin_schema_id, forecast_window_start_utc,
@@ -331,7 +331,7 @@ class TestGateDLowPurityIsolation:
                 INSERT INTO ensemble_snapshots (
                     city, target_date, temperature_metric, physical_quantity, observation_field,
                     issue_time, available_at, fetch_time, lead_hours, members_json,
-                    model_version, data_version, training_allowed, causality_status,
+                    model_version, dataset_id, training_allowed, causality_status,
                     authority, members_unit, city_timezone, settlement_source_type,
                     settlement_station_id, settlement_unit, settlement_rounding_policy,
                     bin_grid_id, bin_schema_id, forecast_window_start_utc,
@@ -383,7 +383,7 @@ class TestGateDLowPurityIsolation:
         conn.execute(
             """
             INSERT INTO ensemble_snapshots (
-                city, target_date, temperature_metric, physical_quantity, data_version,
+                city, target_date, temperature_metric, physical_quantity, dataset_id,
                 members_unit, training_allowed, issue_time, available_at, lead_hours,
                 causality_status, authority, members_json
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -410,7 +410,7 @@ class TestGateDLowPurityIsolation:
                 city, target_date, temperature_metric, range_label, p_raw,
                 outcome, lead_days, season, cluster, forecast_available_at,
                 settlement_value, decision_group_id, authority, bin_source,
-                data_version, training_allowed, causality_status, snapshot_id
+                dataset_id, training_allowed, causality_status, snapshot_id
             ) VALUES
                 ('Chicago', '2026-06-01', 'low', 'legacy', 0.5, 1, 2.0,
                  'summer', 'Chicago', '2026-05-30T14:00:00Z', 18.0,
@@ -444,7 +444,7 @@ class TestGateDLowPurityIsolation:
             data_version_filter=ECMWF_OPENDATA_LOW_CONTRACT_WINDOW_DATA_VERSION,
         )
         remaining = conn.execute(
-            "SELECT data_version FROM calibration_pairs ORDER BY data_version"
+            "SELECT dataset_id FROM calibration_pairs ORDER BY dataset_id"
         ).fetchall()
         assert [row["data_version"] for row in remaining] == [LOW_LOCALDAY_MIN.data_version]
 
@@ -464,7 +464,7 @@ class TestGateDLowPurityIsolation:
         conn.executemany(
             """
             INSERT INTO ensemble_snapshots (
-                city, target_date, temperature_metric, physical_quantity, data_version,
+                city, target_date, temperature_metric, physical_quantity, dataset_id,
                 members_unit, training_allowed, issue_time, source_id, available_at,
                 lead_hours, causality_status, authority, members_json
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -510,7 +510,7 @@ class TestGateDLowPurityIsolation:
                 city, target_date, temperature_metric, range_label, p_raw,
                 outcome, lead_days, season, cluster, forecast_available_at,
                 settlement_value, decision_group_id, authority, bin_source,
-                data_version, training_allowed, causality_status, snapshot_id,
+                dataset_id, training_allowed, causality_status, snapshot_id,
                 cycle, source_id, horizon_profile
             ) VALUES (
                 'Chicago', ?, 'low', ?, 0.5, 1, 2.0, 'summer', 'Chicago',
@@ -623,7 +623,7 @@ class TestGateDLowPurityIsolation:
             INSERT INTO ensemble_snapshots (
                 city, target_date, temperature_metric, physical_quantity, observation_field,
                 issue_time, available_at, fetch_time, lead_hours, members_json,
-                model_version, data_version, training_allowed, causality_status,
+                model_version, dataset_id, training_allowed, causality_status,
                 authority, members_unit, city_timezone, settlement_source_type,
                 settlement_station_id, settlement_unit, settlement_rounding_policy,
                 bin_grid_id, bin_schema_id, forecast_window_start_utc,
@@ -711,7 +711,7 @@ class TestGateDLowPurityIsolation:
             conn.execute(
                 """
                 INSERT INTO ensemble_snapshots (
-                    city, target_date, temperature_metric, physical_quantity, data_version,
+                    city, target_date, temperature_metric, physical_quantity, dataset_id,
                     members_unit, training_allowed, issue_time, available_at, lead_hours,
                     causality_status, authority, members_json
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)

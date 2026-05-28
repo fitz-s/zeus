@@ -1382,7 +1382,7 @@ def test_snapshot_context_missing_issue_time_is_audit_only(harvester_conn):
         INSERT INTO ensemble_snapshots (
             city, target_date, issue_time, valid_time, available_at, fetch_time,
             lead_hours, members_json, p_raw_json, spread, is_bimodal,
-            model_version, data_version, authority, temperature_metric
+            model_version, dataset_id, authority, temperature_metric
         )
         VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
@@ -1438,7 +1438,7 @@ def test_snapshot_context_prefers_v2_and_respects_training_allowed(harvester_con
         INSERT INTO ensemble_snapshots (
             snapshot_id, city, target_date, issue_time, valid_time,
             available_at, fetch_time, lead_hours, members_json, p_raw_json,
-            spread, is_bimodal, model_version, data_version, authority,
+            spread, is_bimodal, model_version, dataset_id, authority,
             temperature_metric
         )
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -1468,7 +1468,7 @@ def test_snapshot_context_prefers_v2_and_respects_training_allowed(harvester_con
             snapshot_id, city, target_date, temperature_metric,
             physical_quantity, observation_field, issue_time, valid_time,
             available_at, fetch_time, lead_hours, members_json, p_raw_json,
-            spread, is_bimodal, model_version, data_version, training_allowed,
+            spread, is_bimodal, model_version, dataset_id, training_allowed,
             causality_status, boundary_ambiguous, provenance_json, authority,
             members_unit, unit
         )
@@ -1523,7 +1523,7 @@ def test_snapshot_context_preserves_legacy_fallback_when_no_v2_row(harvester_con
         INSERT INTO ensemble_snapshots (
             city, target_date, issue_time, valid_time, available_at, fetch_time,
             lead_hours, members_json, p_raw_json, spread, is_bimodal,
-            model_version, data_version, authority, temperature_metric
+            model_version, dataset_id, authority, temperature_metric
         )
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
@@ -1566,7 +1566,7 @@ def test_snapshot_context_rejects_unrelated_v2_id_collision_for_row_identity(har
         INSERT INTO ensemble_snapshots (
             snapshot_id, city, target_date, issue_time, valid_time,
             available_at, fetch_time, lead_hours, members_json, p_raw_json,
-            spread, is_bimodal, model_version, data_version, authority,
+            spread, is_bimodal, model_version, dataset_id, authority,
             temperature_metric
         )
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -1596,7 +1596,7 @@ def test_snapshot_context_rejects_unrelated_v2_id_collision_for_row_identity(har
             snapshot_id, city, target_date, temperature_metric,
             physical_quantity, observation_field, issue_time, valid_time,
             available_at, fetch_time, lead_hours, members_json, p_raw_json,
-            spread, is_bimodal, model_version, data_version, training_allowed,
+            spread, is_bimodal, model_version, dataset_id, training_allowed,
             causality_status, boundary_ambiguous, provenance_json, authority,
             members_unit, unit
         )

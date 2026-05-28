@@ -272,7 +272,7 @@ class TestCalibrationPairsV2IdentityFields:
         conn = self._make_conn()
         dg_id = self._insert_calibration_pair_v2(conn)
         (val,) = conn.execute(
-            "SELECT data_version FROM calibration_pairs WHERE decision_group_id=?",
+            "SELECT dataset_id FROM calibration_pairs WHERE decision_group_id=?",
             (dg_id,)
         ).fetchone()
         assert val == "tigge_mx2t6_local_calendar_day_max_v1", (
@@ -341,7 +341,7 @@ class TestRebuildV2PipelineIntegration:
             INSERT INTO ensemble_snapshots
                 (city, target_date, temperature_metric, physical_quantity, observation_field,
                  issue_time, available_at, fetch_time, lead_hours, members_json,
-                 model_version, data_version, training_allowed, causality_status,
+                 model_version, dataset_id, training_allowed, causality_status,
                  authority, members_unit)
             VALUES (?, ?, 'high', 'mx2t6_local_calendar_day_max', 'high_temp',
                     ?, ?, '2025-06-13T06:05:00', 48.0, ?,

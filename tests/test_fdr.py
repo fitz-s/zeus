@@ -87,7 +87,7 @@ def _seed_ensemble_snapshots_row(
         INSERT INTO ensemble_snapshots (
             city, target_date, temperature_metric, physical_quantity,
             observation_field, available_at, fetch_time, lead_hours,
-            members_json, model_version, data_version,
+            members_json, model_version, dataset_id,
             boundary_ambiguous, causality_status
         ) VALUES (
             ?, ?, ?, 'mx2t6_local_calendar_day_max',

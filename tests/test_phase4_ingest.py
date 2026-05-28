@@ -79,7 +79,7 @@ class TestIngestGribWritesFullProvenanceFields:
             INSERT INTO ensemble_snapshots
             (city, target_date, temperature_metric, physical_quantity, observation_field,
              issue_time, valid_time, available_at, fetch_time, lead_hours,
-             members_json, model_version, data_version, training_allowed, causality_status,
+             members_json, model_version, dataset_id, training_allowed, causality_status,
              boundary_ambiguous, ambiguous_member_count, manifest_hash, provenance_json,
              members_unit)
             VALUES
@@ -128,7 +128,7 @@ class TestIngestGribWritesFullProvenanceFields:
         conn = self._make_conn()
         self._write_test_snapshot(conn)
         (val,) = conn.execute(
-            "SELECT data_version FROM ensemble_snapshots"
+            "SELECT dataset_id FROM ensemble_snapshots"
         ).fetchone()
         assert val == "tigge_mx2t6_local_calendar_day_max_v1", (
             f"data_version must be 'tigge_mx2t6_local_calendar_day_max_v1', got {val!r} (R-L). "

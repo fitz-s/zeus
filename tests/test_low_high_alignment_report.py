@@ -25,7 +25,7 @@ def _make_conn() -> sqlite3.Connection:
             issue_time TEXT,
             source_id TEXT,
             temperature_metric TEXT,
-            data_version TEXT,
+            dataset_id TEXT,
             training_allowed INTEGER,
             causality_status TEXT
         );
@@ -108,7 +108,7 @@ def test_report_counts_persisted_low_window_evidence_classes() -> None:
             INSERT INTO ensemble_snapshots (
                 city, target_date, temperature_metric, physical_quantity, observation_field,
                 issue_time, available_at, fetch_time, lead_hours, members_json,
-                model_version, data_version, training_allowed, causality_status,
+                model_version, dataset_id, training_allowed, causality_status,
                 authority, members_unit, city_timezone, settlement_source_type,
                 settlement_station_id, settlement_unit, settlement_rounding_policy,
                 bin_grid_id, bin_schema_id, forecast_window_start_utc,
@@ -153,7 +153,7 @@ def test_report_quantifies_low_boundary_recovery_upper_bound() -> None:
     conn.executemany(
         """
         INSERT INTO ensemble_snapshots (
-            city, target_date, temperature_metric, data_version,
+            city, target_date, temperature_metric, dataset_id,
             training_allowed, causality_status
         ) VALUES (?, ?, ?, ?, ?, ?)
         """,
@@ -213,7 +213,7 @@ def test_report_exposes_quarantined_negative_a_and_no_regression_gates() -> None
     conn.execute(
         """
         INSERT INTO ensemble_snapshots (
-            city, target_date, temperature_metric, data_version,
+            city, target_date, temperature_metric, dataset_id,
             training_allowed, causality_status
         ) VALUES ('Jakarta', '2026-06-10', 'low', 'tigge_mn2t6_v1', 0, 'REJECTED_BOUNDARY_AMBIGUOUS')
         """

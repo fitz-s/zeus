@@ -108,7 +108,7 @@ def _make_db() -> sqlite3.Connection:
         INSERT INTO ensemble_snapshots (
             city, target_date, temperature_metric, physical_quantity, observation_field,
             issue_time, valid_time, available_at, fetch_time, lead_hours,
-            members_json, model_version, data_version, training_allowed,
+            members_json, model_version, dataset_id, training_allowed,
             causality_status, authority, members_unit, provenance_json
         ) VALUES (?, ?, 'low', ?, 'low_temp', ?, ?, ?, ?, ?, ?, 'ENS', ?, ?, ?, 'VERIFIED', 'degF', ?)
         """,
@@ -135,7 +135,7 @@ def _make_db() -> sqlite3.Connection:
 def _recovery_count(conn: sqlite3.Connection) -> int:
     source = LOW_RECOVERY_SOURCES["tigge_mars"]
     return conn.execute(
-        "SELECT COUNT(*) FROM ensemble_snapshots WHERE data_version = ?",
+        "SELECT COUNT(*) FROM ensemble_snapshots WHERE dataset_id = ?",
         (source.recovery_data_version,),
     ).fetchone()[0]
 
@@ -230,7 +230,7 @@ def test_low_contract_window_backfill_apply_inserts_recovery_row(tmp_path: Path)
                forecast_window_attribution_status, contributes_to_target_extrema,
                forecast_window_block_reasons_json, provenance_json
         FROM ensemble_snapshots
-        WHERE data_version = ?
+        WHERE dataset_id = ?
         """,
         (source.recovery_data_version,),
     ).fetchone()
@@ -378,7 +378,7 @@ def test_low_contract_window_backfill_preserves_non_boundary_block_reason(tmp_pa
         SELECT training_allowed, causality_status, boundary_ambiguous,
                forecast_window_attribution_status, forecast_window_block_reasons_json
         FROM ensemble_snapshots
-        WHERE data_version = ?
+        WHERE dataset_id = ?
         """,
         (source.recovery_data_version,),
     ).fetchone()
@@ -410,7 +410,7 @@ def test_low_contract_window_backfill_ambiguous_window_stays_blocked(tmp_path: P
         SELECT training_allowed, causality_status, forecast_window_attribution_status,
                forecast_window_block_reasons_json
         FROM ensemble_snapshots
-        WHERE data_version = ?
+        WHERE dataset_id = ?
         """,
         (source.recovery_data_version,),
     ).fetchone()

@@ -73,7 +73,7 @@ def _build_pre_migration_db() -> sqlite3.Connection:
             city TEXT NOT NULL,
             target_date TEXT NOT NULL,
             temperature_metric TEXT NOT NULL,
-            data_version TEXT NOT NULL,
+            dataset_id TEXT NOT NULL,
             issue_time TEXT,
             members_json TEXT NOT NULL DEFAULT '[]',
             recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -82,7 +82,7 @@ def _build_pre_migration_db() -> sqlite3.Connection:
     )
     conn.execute(
         "INSERT INTO ensemble_snapshots "
-        "(city, target_date, temperature_metric, data_version, issue_time) "
+        "(city, target_date, temperature_metric, dataset_id, issue_time) "
         "VALUES (?, ?, ?, ?, ?)",
         ("Tokyo", "2026-04-01", "high", "tigge_mx2t6_local_calendar_day_max_v1",
          "2026-04-01T00:00:00+00:00"),

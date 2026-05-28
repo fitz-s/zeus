@@ -59,7 +59,7 @@ def _insert_canonical_pair(
         (city, target_date, temperature_metric, observation_field, range_label,
          p_raw, outcome, lead_days, season, cluster, forecast_available_at,
          settlement_value, decision_group_id, bias_corrected, authority,
-         bin_source, data_version, training_allowed, causality_status, snapshot_id)
+         bin_source, dataset_id, training_allowed, causality_status, snapshot_id)
         VALUES (?, ?, ?, ?, ?, 0.1, 1, 1.5, 'summer', 'mid_continental',
                 '2026-06-15T12:00:00+00:00', 82.0, 'dgid-test', 0, 'VERIFIED',
                 ?, ?, 1, 'OK', NULL)
@@ -289,7 +289,7 @@ class TestR_BL_BackfillMetricScoped:
             (city, target_date, issue_time, lead_hours, available_at,
              temperature_metric, physical_quantity, observation_field,
              fetch_time, model_version,
-             data_version, authority,
+             dataset_id, authority,
              training_allowed, causality_status, members_json, p_raw_json,
              boundary_ambiguous, unit)
             VALUES
@@ -408,7 +408,7 @@ class TestR_BN_SchemaRefusesMinimalInsert:
                 """
                 INSERT INTO ensemble_snapshots
                 (city, target_date, temperature_metric, issue_time, available_at,
-                 lead_hours, members_json, data_version, authority, training_allowed,
+                 lead_hours, members_json, dataset_id, authority, training_allowed,
                  causality_status, physical_quantity, fetch_time, model_version)
                 VALUES
                 ('NYC', '2026-01-15', 'low',
@@ -428,7 +428,7 @@ class TestR_BN_SchemaRefusesMinimalInsert:
                 """
                 INSERT INTO ensemble_snapshots
                 (city, target_date, temperature_metric, issue_time, available_at,
-                 lead_hours, members_json, data_version, authority, training_allowed,
+                 lead_hours, members_json, dataset_id, authority, training_allowed,
                  causality_status, observation_field, fetch_time, model_version)
                 VALUES
                 ('NYC', '2026-01-15', 'high',
@@ -462,7 +462,7 @@ class TestR_BO_BackfillDataVersionContract:
             (city, target_date, issue_time, lead_hours, available_at,
              temperature_metric, physical_quantity, observation_field,
              fetch_time, model_version,
-             data_version, authority,
+             dataset_id, authority,
              training_allowed, causality_status, members_json, p_raw_json,
              boundary_ambiguous, unit)
             VALUES
@@ -481,7 +481,7 @@ class TestR_BO_BackfillDataVersionContract:
 
         # Row must not have been updated (rollback / no write)
         row = conn.execute(
-            "SELECT p_raw_json FROM ensemble_snapshots WHERE data_version = 'tigge_experimental_v99'"
+            "SELECT p_raw_json FROM ensemble_snapshots WHERE dataset_id = 'tigge_experimental_v99'"
         ).fetchone()
         assert row["p_raw_json"] is None, (
             "Backfill must NOT write p_raw to quarantined-data_version rows"

@@ -212,7 +212,7 @@ def _insert_pairs(
             pair_id,
             city, target_date, temperature_metric, observation_field, range_label,
             p_raw, outcome, lead_days, season, cluster,
-            forecast_available_at, decision_group_id, data_version,
+            forecast_available_at, decision_group_id, dataset_id,
             source_id, cycle, horizon_profile,
             training_allowed, authority, causality_status
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)

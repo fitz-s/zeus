@@ -67,7 +67,7 @@ def _insert_pair(
         INSERT INTO calibration_pairs
             (city, target_date, temperature_metric, observation_field,
              range_label, p_raw, outcome, lead_days, season, cluster,
-             forecast_available_at, data_version, decision_group_id,
+             forecast_available_at, dataset_id, decision_group_id,
              bin_source, authority, training_allowed, causality_status)
         VALUES (?, ?, ?, 'high_temp', 'low', 0.5, 0, 5.0, 'MAM', 'all',
                 '2025-01-01T12:00:00', 'tigge_mx2t6_local_calendar_day_max_v1',
@@ -91,7 +91,7 @@ def _insert_snapshot(
         INSERT INTO ensemble_snapshots
             (city, target_date, temperature_metric, physical_quantity,
              observation_field, lead_hours, members_json, model_version,
-             data_version, source_id, training_allowed, causality_status, authority,
+             dataset_id, source_id, training_allowed, causality_status, authority,
              available_at, fetch_time)
         VALUES
             (?, ?, ?, 'mx2t6_local_calendar_day_max', 'high_temp',

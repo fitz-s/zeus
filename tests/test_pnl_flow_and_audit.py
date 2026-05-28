@@ -512,7 +512,7 @@ def _insert_snapshot(
         INSERT INTO ensemble_snapshots
         (city, target_date, issue_time, valid_time, available_at, fetch_time,
          lead_hours, members_json, p_raw_json, spread, is_bimodal, model_version,
-         data_version, temperature_metric)
+         dataset_id, temperature_metric)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
@@ -546,7 +546,7 @@ def _insert_snapshot(
         (snapshot_id, city, target_date, temperature_metric, physical_quantity,
          observation_field, issue_time, valid_time, available_at, fetch_time,
          lead_hours, members_json, p_raw_json, spread, is_bimodal, model_version,
-         data_version, training_allowed, causality_status)
+         dataset_id, training_allowed, causality_status)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (

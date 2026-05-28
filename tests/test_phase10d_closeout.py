@@ -40,7 +40,7 @@ def _make_v2_snapshots_db(causality_status: str = "OK") -> sqlite3.Connection:
             lead_hours REAL NOT NULL DEFAULT 0.0,
             members_json TEXT NOT NULL DEFAULT '[]',
             model_version TEXT NOT NULL DEFAULT 'ifs',
-            data_version TEXT NOT NULL DEFAULT 'v1',
+            dataset_id TEXT NOT NULL DEFAULT 'v1',
             training_allowed INTEGER NOT NULL DEFAULT 1,
             causality_status TEXT NOT NULL DEFAULT 'OK',
             boundary_ambiguous INTEGER NOT NULL DEFAULT 0,
@@ -82,10 +82,10 @@ def _make_legacy_snapshots_db() -> sqlite3.Connection:
             spread REAL,
             is_bimodal INTEGER,
             model_version TEXT NOT NULL DEFAULT 'ifs',
-            data_version TEXT NOT NULL DEFAULT 'live_v1',
+            dataset_id TEXT NOT NULL DEFAULT 'live_v1',
             authority TEXT NOT NULL DEFAULT 'VERIFIED',
             temperature_metric TEXT NOT NULL DEFAULT 'high',
-            UNIQUE(city, target_date, issue_time, data_version)
+            UNIQUE(city, target_date, issue_time, dataset_id)
         )
     """)
     # v2 table required by _store_ens_snapshot (v1.F20 canonical write target).
@@ -106,7 +106,7 @@ def _make_legacy_snapshots_db() -> sqlite3.Connection:
             spread REAL,
             is_bimodal INTEGER NOT NULL DEFAULT 0,
             model_version TEXT NOT NULL DEFAULT 'ifs',
-            data_version TEXT NOT NULL DEFAULT 'live_v1',
+            dataset_id TEXT NOT NULL DEFAULT 'live_v1',
             training_allowed INTEGER NOT NULL DEFAULT 0,
             causality_status TEXT NOT NULL DEFAULT 'OK',
             boundary_ambiguous INTEGER NOT NULL DEFAULT 0,
@@ -116,7 +116,7 @@ def _make_legacy_snapshots_db() -> sqlite3.Connection:
             unit TEXT,
             p_raw_json TEXT,
             bias_corrected INTEGER NOT NULL DEFAULT 0,
-            UNIQUE(city, target_date, temperature_metric, issue_time, data_version)
+            UNIQUE(city, target_date, temperature_metric, issue_time, dataset_id)
         )
     """)
     conn.commit()

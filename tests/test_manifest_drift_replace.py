@@ -6,7 +6,7 @@
 Critic v2 D1+D3 BLOCKER:
 - D1: when an incoming snapshot payload's manifest_sha256 differs from the row
   already in the DB for the same (city, target_date, temperature_metric,
-  issue_time, data_version) tuple, the row was produced under a different
+  issue_time, dataset_id) tuple, the row was produced under a different
   manifest (city set / coordinate drift / spec change) and MUST be REPLACED,
   not skipped. Pure same-manifest repeats keep the legacy IGNORE behaviour so
   re-ingest stays idempotent.

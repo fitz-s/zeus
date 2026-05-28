@@ -192,7 +192,7 @@ def test_r2_canonical_rebuild_refuses_unaudited_with_nonzero_status():
         """
         INSERT INTO ensemble_snapshots (
             city, target_date, issue_time, valid_time, available_at,
-            fetch_time, lead_hours, members_json, model_version, data_version,
+            fetch_time, lead_hours, members_json, model_version, dataset_id,
             authority, temperature_metric
         )
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -275,7 +275,7 @@ def test_r2_canonical_rebuild_refuses_partial_live_replacement():
             """
             INSERT INTO ensemble_snapshots (
                 city, target_date, issue_time, valid_time, available_at,
-                fetch_time, lead_hours, members_json, model_version, data_version,
+                fetch_time, lead_hours, members_json, model_version, dataset_id,
                 authority, temperature_metric
             )
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)

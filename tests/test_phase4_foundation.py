@@ -125,7 +125,7 @@ class TestEnsembleSnapshotsV2MembersUnit:
         conn.execute("""
             INSERT INTO ensemble_snapshots
             (city, target_date, temperature_metric, physical_quantity, observation_field,
-             available_at, fetch_time, lead_hours, members_json, model_version, data_version)
+             available_at, fetch_time, lead_hours, members_json, model_version, dataset_id)
             VALUES ('NYC', '2026-04-16', 'high', 'mx2t6_local_calendar_day_max', 'high_temp',
                     '2026-04-14T12:00:00', '2026-04-14T12:00:00', 48.0, '[]', 'ecmwf_ens',
                     'tigge_mx2t6_local_calendar_day_max_v1')
@@ -145,7 +145,7 @@ class TestEnsembleSnapshotsV2MembersUnit:
             conn.execute("""
                 INSERT INTO ensemble_snapshots
                 (city, target_date, temperature_metric, physical_quantity, observation_field,
-                 available_at, fetch_time, lead_hours, members_json, model_version, data_version,
+                 available_at, fetch_time, lead_hours, members_json, model_version, dataset_id,
                  members_unit)
                 VALUES ('NYC', '2026-04-16', 'high', 'mx2t6_local_calendar_day_max', 'high_temp',
                         '2026-04-14T12:00:00', '2026-04-14T12:00:00', 48.0, '[]', 'ecmwf_ens',

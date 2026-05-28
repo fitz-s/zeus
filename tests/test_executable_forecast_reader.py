@@ -74,7 +74,7 @@ def _insert_snapshot(
         INSERT INTO ensemble_snapshots (
             city, target_date, temperature_metric, physical_quantity,
             observation_field, issue_time, valid_time, available_at, fetch_time,
-            lead_hours, members_json, model_version, data_version,
+            lead_hours, members_json, model_version, dataset_id,
             source_id, source_transport, source_run_id, release_calendar_key,
             source_cycle_time, source_release_time, source_available_at,
             training_allowed, causality_status, boundary_ambiguous,

@@ -1221,7 +1221,7 @@ def test_ensemble_snapshots_unique_constraint():
     conn.execute("""
         INSERT INTO ensemble_snapshots
         (city, target_date, issue_time, valid_time, available_at, fetch_time,
-         lead_hours, members_json, model_version, data_version, temperature_metric)
+         lead_hours, members_json, model_version, dataset_id, temperature_metric)
         VALUES (:city, :target_date, :issue_time, :valid_time, :available_at,
                 :fetch_time, :lead_hours, :members_json, :model_version, :data_version, 'high')
     """, row)
@@ -1232,7 +1232,7 @@ def test_ensemble_snapshots_unique_constraint():
         conn.execute("""
             INSERT INTO ensemble_snapshots
             (city, target_date, issue_time, valid_time, available_at, fetch_time,
-             lead_hours, members_json, model_version, data_version, temperature_metric)
+             lead_hours, members_json, model_version, dataset_id, temperature_metric)
             VALUES (:city, :target_date, :issue_time, :valid_time, :available_at,
                     :fetch_time, :lead_hours, :members_json, :model_version, :data_version, 'high')
         """, row)
@@ -1980,7 +1980,7 @@ def test_log_trade_entry_persists_replay_critical_fields(tmp_path):
         """
         INSERT INTO ensemble_snapshots
         (snapshot_id, city, target_date, issue_time, valid_time, available_at, fetch_time,
-         lead_hours, members_json, model_version, data_version, temperature_metric)
+         lead_hours, members_json, model_version, dataset_id, temperature_metric)
         VALUES (123, 'NYC', '2026-04-01', '2026-03-31T00:00:00Z', '2026-04-01T00:00:00Z',
                 '2026-03-31T01:00:00Z', '2026-03-31T01:00:00Z', 24.0, '[40.0]', 'ecmwf_ifs025', 'test', 'high')
         """
@@ -2164,7 +2164,7 @@ def test_log_trade_exit_persists_exit_reason_and_strategy(tmp_path):
         """
         INSERT INTO ensemble_snapshots
         (snapshot_id, city, target_date, issue_time, valid_time, available_at, fetch_time,
-         lead_hours, members_json, model_version, data_version, temperature_metric)
+         lead_hours, members_json, model_version, dataset_id, temperature_metric)
         VALUES (456, 'NYC', '2026-04-01', '2026-03-31T00:00:00Z', '2026-04-01T00:00:00Z',
                 '2026-03-31T01:00:00Z', '2026-03-31T01:00:00Z', 24.0, '[40.0]', 'ecmwf_ifs025', 'test', 'high')
         """

@@ -696,7 +696,7 @@ class TestRCCBoundaryGateWired:
                 (city, target_date, temperature_metric,
                  physical_quantity, observation_field,
                  available_at, fetch_time, lead_hours,
-                 members_json, model_version, data_version,
+                 members_json, model_version, dataset_id,
                  boundary_ambiguous, authority)
             VALUES
                 ('NYC', '2026-07-15', 'low',

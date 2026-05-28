@@ -71,7 +71,7 @@ def _insert_ensemble_snapshots_row(conn: sqlite3.Connection, metric: str) -> Non
         INSERT INTO ensemble_snapshots
             (city, target_date, temperature_metric, physical_quantity, observation_field,
              available_at, fetch_time, lead_hours, members_json, model_version,
-             data_version, training_allowed, causality_status, boundary_ambiguous,
+             dataset_id, training_allowed, causality_status, boundary_ambiguous,
              ambiguous_member_count, provenance_json, authority, recorded_at)
         VALUES (?, ?, ?, 'mx2t6_v2', ?, '2026-04-16T06:00:00Z', '2026-04-16T06:01:00Z',
                 24.0, '[]', 'v2', 'tigge_v2', 1, 'OK', 0, 0, '{}', 'VERIFIED',
@@ -88,7 +88,7 @@ def _insert_calibration_pairs_row(conn: sqlite3.Connection, metric: str) -> None
         INSERT INTO calibration_pairs
             (city, target_date, temperature_metric, observation_field, range_label,
              p_raw, outcome, lead_days, season, cluster, forecast_available_at,
-             bias_corrected, authority, bin_source, data_version,
+             bias_corrected, authority, bin_source, dataset_id,
              training_allowed, causality_status, recorded_at)
         VALUES (?, ?, ?, ?, 'bin_A', 0.6, 1, 1.0, 'summer', 'coastal',
                 '2026-04-15T00:00:00Z', 0, 'UNVERIFIED', 'legacy',
@@ -564,7 +564,7 @@ class TestGateADualMetricCoexistence(unittest.TestCase):
             INSERT INTO ensemble_snapshots (
                 city, target_date, temperature_metric, physical_quantity,
                 observation_field, available_at, fetch_time, lead_hours,
-                members_json, model_version, data_version,
+                members_json, model_version, dataset_id,
                 city_timezone, settlement_source_type, settlement_station_id,
                 settlement_unit, settlement_rounding_policy, bin_grid_id,
                 bin_schema_id, forecast_window_start_utc,
@@ -607,7 +607,7 @@ class TestGateADualMetricCoexistence(unittest.TestCase):
                 INSERT INTO ensemble_snapshots (
                     city, target_date, temperature_metric, physical_quantity,
                     observation_field, available_at, fetch_time, lead_hours,
-                    members_json, model_version, data_version, settlement_unit
+                    members_json, model_version, dataset_id, settlement_unit
                 )
                 VALUES (
                     'Kuala Lumpur', '2026-06-11', 'low', 'mn2t6', 'low_temp',

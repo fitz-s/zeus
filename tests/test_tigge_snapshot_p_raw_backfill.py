@@ -47,7 +47,7 @@ def test_materialize_snapshot_row_writes_replay_compatible_vector(tmp_path):
         """
         INSERT INTO ensemble_snapshots
         (snapshot_id, city, target_date, issue_time, valid_time, available_at, fetch_time,
-         lead_hours, members_json, p_raw_json, spread, is_bimodal, model_version, data_version,
+         lead_hours, members_json, p_raw_json, spread, is_bimodal, model_version, dataset_id,
          temperature_metric)
         VALUES (1, 'NYC', '2026-04-03', '2026-04-02T00:00:00Z', '2026-04-03T00:00:00Z',
                 '2026-04-02T08:00:00Z', '2026-04-02T08:05:00Z', 24.0,

@@ -1017,7 +1017,7 @@ def _seed_ensemble_snapshot(
         """
         INSERT INTO ensemble_snapshots
         (city, target_date, issue_time, valid_time, available_at, fetch_time,
-         lead_hours, members_json, model_version, data_version, authority)
+         lead_hours, members_json, model_version, dataset_id, authority)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (

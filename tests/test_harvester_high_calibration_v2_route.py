@@ -127,7 +127,7 @@ def test_low_pairs_still_land_in_v2_after_c5(harvest_conn):
     )
 
     v2_rows = harvest_conn.execute(
-        "SELECT temperature_metric, data_version FROM calibration_pairs "
+        "SELECT temperature_metric, dataset_id FROM calibration_pairs "
         "WHERE city = 'low_city' AND target_date = '2026-04-24'"
     ).fetchall()
     assert len(v2_rows) == 3
@@ -172,7 +172,7 @@ def test_v2_pair_training_allowed_respects_inv15(harvest_conn):
     _seed_high_harvest(harvest_conn, _make_city("inv15_city"))
 
     rows = harvest_conn.execute(
-        "SELECT training_allowed, data_version FROM calibration_pairs "
+        "SELECT training_allowed, dataset_id FROM calibration_pairs "
         "WHERE city = 'inv15_city'"
     ).fetchall()
     assert len(rows) > 0

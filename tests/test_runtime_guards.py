@@ -8189,7 +8189,7 @@ def _insert_runtime_transfer_sigma_row(
                     city, target_date, decision_group_id,
                     temperature_metric, observation_field, range_label,
                     p_raw, outcome, lead_days, season, cluster,
-                    forecast_available_at, data_version,
+                    forecast_available_at, dataset_id,
                     source_id, cycle, horizon_profile,
                     training_allowed, authority, causality_status, recorded_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -12744,7 +12744,7 @@ def test_store_ens_snapshot_writes_v2_independent_of_legacy_table_contents(tmp_p
         INSERT INTO ensemble_snapshots
         (snapshot_id, city, target_date, issue_time, valid_time, available_at,
          fetch_time, lead_hours, members_json, spread, is_bimodal,
-         model_version, data_version, authority, temperature_metric)
+         model_version, dataset_id, authority, temperature_metric)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
@@ -12813,7 +12813,7 @@ def test_store_ens_snapshot_reuses_v2_conflict_without_legacy_fallback(tmp_path)
         (city, target_date, temperature_metric, physical_quantity,
          observation_field, issue_time, valid_time, available_at, fetch_time,
          lead_hours, members_json, spread, is_bimodal, model_version,
-         data_version, training_allowed, causality_status, boundary_ambiguous,
+         dataset_id, training_allowed, causality_status, boundary_ambiguous,
          provenance_json, authority, members_unit, unit)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,

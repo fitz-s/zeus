@@ -268,7 +268,7 @@ def test_scan_committed_snapshots_emits_from_source_run_coverage():
         INSERT INTO source_run (
             source_run_id, source_id, track, release_calendar_key, ingest_mode, origin_mode,
             source_cycle_time, source_available_at, captured_at, target_local_date,
-            city_id, city_timezone, temperature_metric, data_version,
+            city_id, city_timezone, temperature_metric, dataset_id,
             expected_members, observed_members, expected_steps_json, observed_steps_json,
             completeness_status, status
         ) VALUES (
@@ -301,7 +301,7 @@ def test_scan_committed_snapshots_emits_from_source_run_coverage():
         INSERT INTO ensemble_snapshots (
             snapshot_id, city, target_date, temperature_metric, physical_quantity, observation_field,
             issue_time, valid_time, available_at, fetch_time, lead_hours, members_json,
-            model_version, data_version, source_id, source_transport, source_run_id,
+            model_version, dataset_id, source_id, source_transport, source_run_id,
             release_calendar_key, source_cycle_time, source_release_time, source_available_at,
             authority, causality_status, boundary_ambiguous, contributes_to_target_extrema,
             forecast_window_attribution_status, local_day_start_utc, step_horizon_hours,

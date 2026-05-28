@@ -566,7 +566,7 @@ class TestFixD:
                     (city, target_date, temperature_metric, observation_field,
                      range_label, p_raw, outcome, lead_days,
                      season, cluster, forecast_available_at,
-                     bin_source, data_version,
+                     bin_source, dataset_id,
                      cycle, source_id, horizon_profile,
                      decision_group_id, authority, training_allowed,
                      causality_status)

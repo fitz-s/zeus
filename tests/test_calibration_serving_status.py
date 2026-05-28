@@ -62,7 +62,7 @@ def _insert_producer_readiness(
                 source_run_id, source_id, track, release_calendar_key,
                 ingest_mode, origin_mode, source_cycle_time,
                 city_id, city_timezone, target_local_date, temperature_metric,
-                physical_quantity, observation_field, data_version,
+                physical_quantity, observation_field, dataset_id,
                 completeness_status, status
             ) VALUES (
                 :source_run_id, :source_id, :track, :release_calendar_key,
@@ -130,7 +130,7 @@ def _insert_verified_pair(
         INSERT INTO calibration_pairs (
             city, target_date, temperature_metric, observation_field, range_label,
             p_raw, outcome, lead_days, season, cluster, forecast_available_at,
-            decision_group_id, authority, bin_source, data_version,
+            decision_group_id, authority, bin_source, dataset_id,
             training_allowed, causality_status, cycle, source_id, horizon_profile
         ) VALUES (
             :city, '2026-05-08', 'high', 'high_temp', '60-61F',

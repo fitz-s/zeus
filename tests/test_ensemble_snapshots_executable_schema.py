@@ -52,7 +52,7 @@ def test_existing_rows_without_source_linkage_are_not_executable() -> None:
         INSERT INTO ensemble_snapshots (
             city, target_date, temperature_metric, physical_quantity,
             observation_field, issue_time, valid_time, available_at,
-            fetch_time, lead_hours, members_json, model_version, data_version
+            fetch_time, lead_hours, members_json, model_version, dataset_id
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (

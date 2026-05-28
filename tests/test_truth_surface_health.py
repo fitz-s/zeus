@@ -284,7 +284,7 @@ def _seed_minimal_ready_training_tables(conn, *, seed_observations=True):
             decision_group_id TEXT,
             authority TEXT,
             bin_source TEXT,
-            data_version TEXT,
+            dataset_id TEXT,
             training_allowed INTEGER,
             causality_status TEXT
         )
@@ -355,7 +355,7 @@ def _seed_minimal_ready_training_tables(conn, *, seed_observations=True):
             lead_hours REAL,
             members_json TEXT,
             model_version TEXT,
-            data_version TEXT,
+            dataset_id TEXT,
             training_allowed INTEGER,
             causality_status TEXT,
             authority TEXT,
@@ -369,7 +369,7 @@ def _seed_minimal_ready_training_tables(conn, *, seed_observations=True):
             city, target_date, temperature_metric, physical_quantity,
             observation_field, issue_time, valid_time, available_at,
             fetch_time, lead_hours, members_json, model_version,
-            data_version, training_allowed, causality_status, authority,
+            dataset_id, training_allowed, causality_status, authority,
             provenance_json
         ) VALUES (
             'NYC', '2026-04-23', ?, ?, ?,
@@ -483,7 +483,7 @@ def _seed_rebuild_preflight_inputs(conn):
                 city, target_date, temperature_metric, physical_quantity,
                 observation_field, issue_time, valid_time, available_at,
                 fetch_time, lead_hours, members_json, model_version,
-                data_version, training_allowed, causality_status, authority,
+                dataset_id, training_allowed, causality_status, authority,
                 provenance_json
             ) VALUES (
                 'NYC', '2026-04-23', ?, ?, ?,
@@ -534,7 +534,7 @@ def _seed_platt_refit_pairs(conn, *, n_groups=None):
                     city, target_date, temperature_metric, observation_field,
                     range_label, p_raw, outcome, lead_days, season, cluster,
                     forecast_available_at, settlement_value, decision_group_id,
-                    authority, bin_source, data_version, training_allowed,
+                    authority, bin_source, dataset_id, training_allowed,
                     causality_status
                 ) VALUES (
                     'NYC', ?, ?, ?, '70-71F', ?, ?, 1.0, 'spring',
@@ -780,7 +780,7 @@ class TestTrainingReadinessP0:
                     city, target_date, temperature_metric, physical_quantity,
                     observation_field, issue_time, valid_time, available_at,
                     fetch_time, lead_hours, members_json, model_version,
-                    data_version, training_allowed, causality_status, authority,
+                    dataset_id, training_allowed, causality_status, authority,
                     provenance_json, forecast_window_start_utc,
                     forecast_window_end_utc, forecast_window_start_local,
                     forecast_window_end_local, forecast_window_attribution_status,
@@ -825,7 +825,7 @@ class TestTrainingReadinessP0:
                 city, target_date, temperature_metric, physical_quantity,
                 observation_field, issue_time, valid_time, available_at,
                 fetch_time, lead_hours, members_json, model_version,
-                data_version, training_allowed, causality_status, authority,
+                dataset_id, training_allowed, causality_status, authority,
                 provenance_json
             ) VALUES (
                 'NYC', '2026-04-24', 'low',
@@ -929,7 +929,7 @@ class TestTrainingReadinessP0:
                 city, target_date, temperature_metric, physical_quantity,
                 observation_field, issue_time, valid_time, available_at,
                 fetch_time, lead_hours, members_json, model_version,
-                data_version, training_allowed, causality_status, authority,
+                dataset_id, training_allowed, causality_status, authority,
                 provenance_json,
                 forecast_window_start_utc, forecast_window_end_utc,
                 forecast_window_start_local, forecast_window_end_local,
@@ -984,7 +984,7 @@ class TestTrainingReadinessP0:
                 city, target_date, temperature_metric, physical_quantity,
                 observation_field, issue_time, valid_time, available_at,
                 fetch_time, lead_hours, members_json, model_version,
-                data_version, training_allowed, causality_status, authority,
+                dataset_id, training_allowed, causality_status, authority,
                 provenance_json,
                 forecast_window_attribution_status,
                 contributes_to_target_extrema, forecast_window_block_reasons_json
