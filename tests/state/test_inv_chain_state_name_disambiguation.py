@@ -82,11 +82,12 @@ def test_position_truth_module_exports_typed_facts() -> None:
     # VENUE_POSITION_OBSERVED degraded-recovery slot.
     assert FillAuthority.VENUE_POSITION_OBSERVED.value == "venue_position_observed"
 
-    # CanonicalPositionEventKind includes the new VENUE_POSITION_OBSERVED
-    # and REVIEW_REQUIRED events that PR C/D will emit.
+    # CanonicalPositionEventKind includes VENUE_POSITION_OBSERVED and
+    # REVIEW_REQUIRED. PR #352 (Part-3 F1): enum values are the exact UPPERCASE
+    # position_events wire strings (single grammar; was lowercase/aspirational).
     kinds = {k.value for k in CanonicalPositionEventKind}
-    assert "venue_position_observed" in kinds
-    assert "review_required" in kinds
+    assert "VENUE_POSITION_OBSERVED" in kinds
+    assert "REVIEW_REQUIRED" in kinds
 
 
 def test_local_intent_rejects_unknown_direction() -> None:

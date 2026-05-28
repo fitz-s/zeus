@@ -219,6 +219,29 @@ state_machines:
     invariant_tests:
       - tests/state/test_inv_training_eligibility_gate.py
       - tests/state/test_inv_rescue_authority_split.py
+  chain_only_review_state:
+    # PR D1 (Finding D1, Part-2 audit, 2026-05-27): typed review lifecycle
+    # for chain-only venue inventory (ChainOnlyFact). Derived from the
+    # existing token_suppression suppression_reason transitions +
+    # first_seen_at age — no DB schema migration. The type lives in
+    # src/contracts/position_truth.py.ChainOnlyReviewState.
+    owner: src/contracts/position_truth.py
+    description: >
+      Lifecycle status for a chain-only review-queue entry. UNRESOLVED /
+      EXPIRED / ACKNOWLEDGED all block new entries; only RESOLVED clears
+      the entry gate. EXPIRED is a 48h escalation marker, not auto-
+      resolution. CHAIN_ONLY_REVIEW_WINDOW_HOURS is the module-level
+      window constant (48.0h) registered here so the classify-change
+      semantic-diff gate (which flags ALL-CAPS module assignments as
+      state candidates) recognises it as declared.
+    states:
+      - UNRESOLVED
+      - EXPIRED
+      - ACKNOWLEDGED
+      - RESOLVED
+      - CHAIN_ONLY_REVIEW_WINDOW_HOURS
+    invariant_tests:
+      - tests/state/test_inv_chain_only_review_lifecycle.py
   shoulder_readiness:
     owner: scripts/shoulder_shadow_readiness_report.py
     description: >

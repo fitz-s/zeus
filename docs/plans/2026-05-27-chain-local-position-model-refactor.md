@@ -10,7 +10,7 @@ Eliminate multi-authority chain/local position model. Make `position_current.pha
 
 Live-money trading system. Current main carries multiple overlapping conversion systems: mutable `Position`, canonical phase fold, per-cycle chain completeness, per-position chain visibility, exit substates, order status strings, `venue_commands`, `position_events`, `position_current`, legacy `trade_decisions`. Defensive code grows; primitives keep colliding.
 
-10 findings from first-principles audit (5 P1 bugs, 4 P2 complexity debt, 1 P3 doc drift). Full text: `docs/plans/2026-05-27-chain-local-position-model-refactor-findings.md` (not yet written; source is conversation transcript).
+10 findings from first-principles audit (5 P1 bugs, 4 P2 complexity debt, 1 P3 doc drift). Full text: `docs/plans/2026-05-27-chain-local-position-model-refactor-findings.md` (persisted alongside this plan in the same PR).
 
 P0 live-money merge rule: single-purpose, self-describing, annotated tag. No bundling.
 

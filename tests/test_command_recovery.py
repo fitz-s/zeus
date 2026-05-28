@@ -388,6 +388,13 @@ def _seed_pending_entry_projection(
         "order_status": "pending",
         "updated_at": "2026-04-26T00:02:00Z",
         "temperature_metric": "high",
+        # PR #351 D0b: durable authority columns are part of
+        # CANONICAL_POSITION_CURRENT_COLUMNS (required by require_payload_fields).
+        "fill_authority": None,
+        "recovery_authority": None,
+        "chain_shares": None,
+        "chain_seen_at": None,
+        "chain_absence_at": None,
     }
     append_many_and_project(conn, events, projection)
 

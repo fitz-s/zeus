@@ -48,7 +48,13 @@ CREATE TABLE position_current (
     discovery_mode TEXT, chain_state TEXT, token_id TEXT, no_token_id TEXT,
     condition_id TEXT, order_id TEXT, order_status TEXT,
     updated_at TEXT NOT NULL,
-    temperature_metric TEXT NOT NULL
+    temperature_metric TEXT NOT NULL,
+    -- PR D0b (Finding D0/D2-wire, 2026-05-27): durable authority projection.
+    fill_authority TEXT,
+    recovery_authority TEXT,
+    chain_shares REAL,
+    chain_seen_at TEXT,
+    chain_absence_at TEXT
 )
 """
 

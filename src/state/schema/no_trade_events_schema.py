@@ -2,7 +2,7 @@
 # Last reused or audited: 2026-05-23
 # Authority basis: PHASE_2_ULTRAPLAN.md v3.1 §5.2 (sha 00c2399742) + Phase 3 T2 (2026-05-21): schema_version CHECK extended to 18 + 6 SHOULDER_* NoTradeReason members + live release proof P0-3 schema compatibility marker + Phase 3 T3 (2026-05-21): CHECK extended to 23 + live authority follow-up (2026-05-21): CHECK extended to 25 + evidence governance follow-up (2026-05-21): strategy provenance columns, v26 + P1/P2 architecture review (2026-05-22): evidence lifecycle + day0_nowcast_entry, v27 + opportunity_fact strategy-key widening, v28 + 2026-05-23 review5.23 P0-2: unified schema version authority (import from src.state.db)
 
-"""T2 — CREATE TABLE DDL for no_trade_events (world DB).
+"""T2 — schema DDL for the no_trade_events table (world DB).
 
 Per §5.2 column list:
   market_slug, target_date, temperature_metric, observation_time,
@@ -70,7 +70,7 @@ CREATE TABLE IF NOT EXISTS no_trade_events (
     event_source        TEXT,
     shadow_runtime      INTEGER NOT NULL DEFAULT 0 CHECK (shadow_runtime IN (0, 1)),
     observed_at         TEXT NOT NULL,
-    schema_version      INTEGER NOT NULL CHECK (schema_version IN (14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37)),
+    schema_version      INTEGER NOT NULL CHECK (schema_version IN (14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40)),
     schema_compatibility TEXT NOT NULL DEFAULT 'current'
         CHECK (schema_compatibility IN ('current', 'degraded')),
     PRIMARY KEY (market_slug, temperature_metric, target_date, observation_time, decision_seq)
@@ -90,7 +90,7 @@ CREATE TABLE no_trade_events_new (
     event_source        TEXT,
     shadow_runtime      INTEGER NOT NULL DEFAULT 0 CHECK (shadow_runtime IN (0, 1)),
     observed_at         TEXT NOT NULL,
-    schema_version      INTEGER NOT NULL CHECK (schema_version IN (14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37)),
+    schema_version      INTEGER NOT NULL CHECK (schema_version IN (14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40)),
     schema_compatibility TEXT NOT NULL DEFAULT 'current'
         CHECK (schema_compatibility IN ('current', 'degraded')),
     PRIMARY KEY (market_slug, temperature_metric, target_date, observation_time, decision_seq)
@@ -143,7 +143,7 @@ def _table_columns(conn: sqlite3.Connection) -> set[str]:
 
 
 def _schema_version_in_list(table_sql: str) -> set[int]:
-    """Parse the schema_version IN (...) values from the CREATE TABLE SQL."""
+    """Parse the schema_version IN (...) values from the table-definition SQL."""
     m = re.search(r"schema_version\s+INTEGER[^C]*CHECK\s*\(schema_version\s+IN\s*\(([^)]+)\)", table_sql)
     if not m:
         return set()
@@ -229,7 +229,7 @@ def _rebuild_stale_no_trade_events_table(conn: sqlite3.Connection) -> None:
             shadow_runtime,
             observed_at,
             CASE
-                WHEN schema_version IN (14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37) THEN schema_version
+                WHEN schema_version IN (14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40) THEN schema_version
                 ELSE 36
             END,
             schema_compatibility

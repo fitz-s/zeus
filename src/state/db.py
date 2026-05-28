@@ -894,7 +894,7 @@ def get_connection(
 # CI hook scripts/check_schema_version.py diffs the sqlite_master hash of
 # a fresh-init DB against tests/state/_schema_pinned_hash.txt and fails
 # the PR if SCHEMA_VERSION did not change in lockstep.
-SCHEMA_VERSION = 37  # 2026-05-25 Zeus #64: platt_models_v2 gains calibration_method TEXT NOT NULL DEFAULT 'platt' (identity_full_transport_v1 route for ECE-good ft buckets)
+SCHEMA_VERSION = 40  # 2026-05-27 PR #352 Part-3 F1/F4: position_events.event_type CHECK gains 'REVIEW_REQUIRED' (durable size-mismatch / chain-only review event); canonical wire grammar unified with src/contracts/position_truth.py::CanonicalPositionEventKind. Legacy DBs migrated via src/state/ledger.py::_ensure_review_required_event_type (table-rebuild, SQLite cannot ALTER a CHECK). Prior: 39 = PR D0b durable authority projection columns.
 
 
 def init_schema(
@@ -1393,7 +1393,7 @@ def init_schema(
             finality_confirmed_time    TEXT,
             clock_skew_estimate_ms_at_submit INTEGER,
             raw_orderbook_hash_transition_delta_ms INTEGER,
-            schema_version INTEGER NOT NULL CHECK (schema_version IN (12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37)),
+            schema_version INTEGER NOT NULL CHECK (schema_version IN (12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40)),
             source         TEXT NOT NULL CHECK (source IN ('phase0_backfill', 'live_decision', 'shadow_decision')),
             PRIMARY KEY (market_slug, temperature_metric, target_date, observation_time, decision_seq)
         );
@@ -2658,7 +2658,7 @@ def _migrate_decision_events_schema(conn: sqlite3.Connection) -> None:
             finality_confirmed_time    TEXT,
             clock_skew_estimate_ms_at_submit INTEGER,
             raw_orderbook_hash_transition_delta_ms INTEGER,
-            schema_version INTEGER NOT NULL CHECK (schema_version IN (12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37)),
+            schema_version INTEGER NOT NULL CHECK (schema_version IN (12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40)),
             source         TEXT NOT NULL CHECK (source IN ('phase0_backfill', 'live_decision', 'shadow_decision')),
             PRIMARY KEY (market_slug, temperature_metric, target_date, observation_time, decision_seq)
         )
@@ -2694,7 +2694,7 @@ def _migrate_decision_events_schema(conn: sqlite3.Connection) -> None:
             first_inclusion_block_time, finality_confirmed_time,
             clock_skew_estimate_ms_at_submit, raw_orderbook_hash_transition_delta_ms,
             CASE
-                WHEN schema_version IN (12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37)
+                WHEN schema_version IN (12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40)
                     THEN schema_version
                 ELSE 36
             END,
@@ -3795,7 +3795,9 @@ CREATE TABLE IF NOT EXISTS position_events (
         'EXIT_ORDER_REJECTED',
         'SETTLED',
         'ADMIN_VOIDED',
-        'MANUAL_OVERRIDE_APPLIED'
+        'MANUAL_OVERRIDE_APPLIED',
+        'VENUE_POSITION_OBSERVED',
+        'REVIEW_REQUIRED'
     )),
     occurred_at TEXT NOT NULL
         CHECK (occurred_at LIKE '____-__-__T%' OR occurred_at = 'QUARANTINE'),
@@ -3872,7 +3874,18 @@ CREATE TABLE IF NOT EXISTS position_current (
     order_id TEXT,
     order_status TEXT,
     updated_at TEXT NOT NULL,
-    temperature_metric TEXT NOT NULL CHECK (temperature_metric IN ('high','low'))
+    temperature_metric TEXT NOT NULL CHECK (temperature_metric IN ('high','low')),
+    -- PR D0b (Finding D0/D2-wire, Part-2 audit, 2026-05-27): durable
+    -- authority projection. NULL-default so the columns are additive on
+    -- legacy DBs via ALTER TABLE ADD COLUMN (src/state/ledger.py
+    -- _ensure_position_current_authority_columns). Downstream training
+    -- gates and crash-recovery loaders consult these fields to
+    -- distinguish balance-only recovery from trade-verified fill.
+    fill_authority TEXT,
+    recovery_authority TEXT,
+    chain_shares REAL,
+    chain_seen_at TEXT,
+    chain_absence_at TEXT
 );
 
 -- execution_fact (from architecture/2026_04_02_architecture_kernel.sql)
@@ -8609,6 +8622,12 @@ def query_strategy_health_snapshot(
 
 
 def query_position_current_status_view(conn: sqlite3.Connection | None) -> dict:
+    # PR D0 (Finding D0, Part-2 audit, 2026-05-27): use has_verified_trade_fill
+    # for the unverified_entries FILL-ECONOMICS count instead of entry_fill_verified.
+    # entry_fill_verified is now False for balance-only rescue positions (the rescue
+    # branch no longer sets it True), so the helper correctly discriminates.
+    from src.state.portfolio import has_verified_trade_fill as _has_verified_trade_fill  # noqa: PLC0415
+
     if conn is None:
         return {
             "status": "skipped_no_connection",
@@ -8644,7 +8663,8 @@ def query_position_current_status_view(conn: sqlite3.Connection | None) -> dict:
                size_usd, shares, cost_basis_usd, entry_price,
                strategy_key, chain_state, order_status,
                decision_snapshot_id, last_monitor_market_price,
-               token_id, no_token_id, condition_id
+               token_id, no_token_id, condition_id,
+               fill_authority
         FROM position_current
         ORDER BY updated_at DESC, position_id
         """
@@ -8729,7 +8749,12 @@ def query_position_current_status_view(conn: sqlite3.Connection | None) -> dict:
         exit_state_counts[exit_state] = exit_state_counts.get(exit_state, 0) + 1
         total_exposure_usd += float(fill_economics["effective_cost_basis_usd"] or 0.0)
         total_unrealized_pnl += unrealized_pnl
-        if not entry_fill_verified:
+        # PR D0: count unverified entries by fill_authority from position_current,
+        # not by entry_fill_verified (which is now False for balance-only rescue).
+        # A row lacking fill_authority (legacy NULL) falls through to the else-branch
+        # of _has_verified_trade_fill, which returns False — fail-closed.
+        row_fill_authority = str(row["fill_authority"] or "").strip()
+        if not _has_verified_trade_fill({"fill_authority": row_fill_authority}):
             unverified_entries += 1
         if phase == "day0_window":
             day0_positions += 1
@@ -8820,6 +8845,16 @@ def query_portfolio_loader_view(conn: sqlite3.Connection | None, *, temperature_
         else "NULL AS env"
     )
 
+    # PR #352 (Part-3/Part-5 audit Finding 1, 2026-05-27): the D0b durable
+    # authority columns must round-trip through the loader, else a chain-synced
+    # position loses chain_verified_at on restart and classify_chain_state()
+    # mis-reads it as CHAIN_UNKNOWN — blocking legitimate void. Guarded by
+    # column presence (legacy DBs pre-D0b project NULL) like the env expr above.
+    _authority_cols = ("fill_authority", "recovery_authority", "chain_shares", "chain_seen_at", "chain_absence_at")
+    authority_select_expr = ", ".join(
+        c if c in actual_cols else f"NULL AS {c}" for c in _authority_cols
+    )
+
     rows = conn.execute(
         f"""
         SELECT position_id, phase, trade_id, market_id, city, cluster, target_date, bin_label,
@@ -8827,7 +8862,7 @@ def query_portfolio_loader_view(conn: sqlite3.Connection | None, *, temperature_
                last_monitor_prob, last_monitor_edge, last_monitor_market_price,
                decision_snapshot_id, entry_method, strategy_key, edge_source, discovery_mode,
                chain_state, token_id, no_token_id, condition_id, order_id, order_status, updated_at,
-               temperature_metric, {position_current_env_expr}
+               temperature_metric, {position_current_env_expr}, {authority_select_expr}
         FROM position_current {where_clause}
         ORDER BY updated_at DESC, position_id
         """,
@@ -8910,6 +8945,17 @@ def query_portfolio_loader_view(conn: sqlite3.Connection | None, *, temperature_
                     or fill_economics["entry_fill_verified"]
                 ),
                 "temperature_metric": str(row["temperature_metric"] or "high"),
+                # PR #352 (Part-5 audit Finding 1): durable chain-observation +
+                # authority columns round-trip into the runtime Position so that
+                # chain_verified_at / last_chain_absence_observed_at survive
+                # restart. _position_from_projection_row maps chain_seen_at ->
+                # chain_verified_at and chain_absence_at ->
+                # last_chain_absence_observed_at. (fill_authority already flows
+                # via fill_economics above.)
+                "chain_seen_at": str(row["chain_seen_at"] or ""),
+                "chain_absence_at": str(row["chain_absence_at"] or ""),
+                "chain_shares": _finite_float_or_none(row["chain_shares"]) or 0.0,
+                "recovery_authority": str(row["recovery_authority"] or ""),
             }
         )
     return {

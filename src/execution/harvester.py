@@ -654,6 +654,68 @@ def enqueue_redeem_command(
         return {"status": "error", "command_id": None, "reason": str(exc)}
 
 
+def _snapshot_position_training_eligible(conn, snapshot_id: str) -> bool:
+    """PR D2 (Finding D2-wire / Part-2 audit, 2026-05-27): per-position
+    training gate.
+
+    Joins ensemble_snapshots-keyed learning context with the position
+    materialized from that snapshot via position_current.decision_snapshot_id,
+    then defers to the typed `is_training_eligible_position` policy
+    boundary (PR D2 in PR #347).
+
+    Fails closed on:
+      - empty / missing snapshot_id (caller-bug; refuse to write)
+      - no matching position row (snapshot not yet linked to position)
+      - position row exists but fill_authority is NULL / unrecognised /
+        non-training-eligible (e.g. venue_position_observed degraded
+        recovery, optimistic_submitted, legacy_unknown)
+      - DB query failure
+
+    Returns True iff EVERY position joined on this snapshot_id passes
+    `is_training_eligible_position`. Multiple positions per snapshot is
+    rare but possible (re-entries on the same decision snapshot); any
+    single degraded-authority position blocks the learning write for
+    that snapshot.
+    """
+    from src.state.portfolio import is_training_eligible_position
+
+    if not snapshot_id or not isinstance(snapshot_id, str):
+        return False
+    try:
+        rows = conn.execute(
+            "SELECT position_id, fill_authority "
+            "FROM position_current "
+            "WHERE decision_snapshot_id = ?",
+            (snapshot_id,),
+        ).fetchall()
+    except Exception:
+        # DB query failure is fail-closed: do not emit calibration rows
+        # against a snapshot whose position authority can't be verified.
+        return False
+    if not rows:
+        # No position joined to this snapshot — refuse defensively. A
+        # snapshot reaching the learning writer should have at least one
+        # corresponding position_current row (the snapshot was used for
+        # an entry decision). Missing row = projection drift; treat as
+        # ineligible until the operator investigates.
+        return False
+    for row in rows:
+        # Build a minimal pos-shaped stub so we route through the
+        # canonical policy helper rather than re-implementing the rule.
+        class _Stub:
+            pass
+        stub = _Stub()
+        stub.fill_authority = row[1] if len(row) > 1 else ""
+        if not is_training_eligible_position(stub):
+            logger.info(
+                "harvester_learning_write_blocked: snapshot=%s position_id=%s "
+                "fill_authority=%r not training-eligible",
+                snapshot_id, row[0] if row else "?", stub.fill_authority,
+            )
+            return False
+    return True
+
+
 def maybe_write_learning_pair(
     conn,
     city: "City",
@@ -690,6 +752,37 @@ def maybe_write_learning_pair(
     # Pre-screen: live/non-training source.
     if not _is_training_forecast_source(source_model_version):
         _emit_learning_write_blocked("live_praw_no_training_lineage")
+        return 0
+
+    # PR D2 (Finding D2-wire, Part-2 audit, 2026-05-27): per-position
+    # fill_authority gate. The snapshot context is keyed by
+    # decision_snapshot_id; PR D0b persists fill_authority on
+    # position_current, so we can join and reject training rows derived
+    # from degraded recovery (FILL_AUTHORITY_VENUE_POSITION_OBSERVED) or
+    # other non-training-eligible authorities.
+    # PR #352 (Part-3 audit, bot #5 on PR #351, 2026-05-27): position_current is
+    # canonically owned by zeus_trades.db (the world.db copy is a ghost shell).
+    # The harvester runtime passes the *forecasts* connection (which owns
+    # calibration_pairs_v2) as `conn`; querying position_current on it raises
+    # "no such table", is swallowed by the gate's fail-closed except, and would
+    # silently block EVERY calibration write in production. Acquire a read-only
+    # trades connection for the per-position authority join. INV-37: this is a
+    # single-DB READ (no cross-DB write), so no ATTACH+SAVEPOINT is required.
+    snapshot_id = context.get("decision_snapshot_id") or ""
+    try:
+        from src.state.db import get_trade_connection_read_only
+
+        _trade_conn = get_trade_connection_read_only()
+        try:
+            _eligible = _snapshot_position_training_eligible(_trade_conn, snapshot_id)
+        finally:
+            _trade_conn.close()
+    except Exception:
+        # Trades DB unreachable → fail closed (do not emit calibration rows we
+        # cannot authority-verify).
+        _eligible = False
+    if not _eligible:
+        _emit_learning_write_blocked("position_fill_authority_not_training_eligible")
         return 0
 
     # Delegate to harvest_settlement which performs the same guards again

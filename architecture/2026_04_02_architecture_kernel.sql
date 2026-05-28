@@ -25,7 +25,9 @@ CREATE TABLE IF NOT EXISTS position_events (
         'EXIT_ORDER_REJECTED',
         'SETTLED',
         'ADMIN_VOIDED',
-        'MANUAL_OVERRIDE_APPLIED'
+        'MANUAL_OVERRIDE_APPLIED',
+        'VENUE_POSITION_OBSERVED',
+        'REVIEW_REQUIRED'
     )),
     occurred_at TEXT NOT NULL
         CHECK (occurred_at LIKE '____-__-__T%' OR occurred_at = 'QUARANTINE'),
@@ -135,7 +137,17 @@ CREATE TABLE IF NOT EXISTS position_current (
     order_id TEXT,
     order_status TEXT,
     updated_at TEXT NOT NULL,
-    temperature_metric TEXT NOT NULL CHECK (temperature_metric IN ('high', 'low'))
+    temperature_metric TEXT NOT NULL CHECK (temperature_metric IN ('high', 'low')),
+    -- PR D0b (Finding D0/D2-wire, Part-2 audit, 2026-05-27): durable
+    -- authority projection. NULL-default so columns are additive on
+    -- legacy DBs via ALTER TABLE ADD COLUMN. Downstream training gates
+    -- and crash-recovery loaders consult these fields to distinguish
+    -- balance-only recovery from trade-verified fill.
+    fill_authority TEXT,
+    recovery_authority TEXT,
+    chain_shares REAL,
+    chain_seen_at TEXT,
+    chain_absence_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS strategy_health (

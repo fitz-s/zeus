@@ -546,6 +546,14 @@ def _canonical_projection() -> dict:
         "order_status": None,
         "updated_at": "2026-04-03T00:00:00Z",
         "temperature_metric": "high",
+        # PR #351 D0b: durable authority columns are part of
+        # CANONICAL_POSITION_CURRENT_COLUMNS and required by
+        # require_payload_fields. NULL is valid for a non-rescue pending entry.
+        "fill_authority": None,
+        "recovery_authority": None,
+        "chain_shares": None,
+        "chain_seen_at": None,
+        "chain_absence_at": None,
     }
 
 
@@ -2653,6 +2661,26 @@ def test_reconciliation_pending_fill_path_writes_canonical_rows_when_prior_histo
     )
     append_many_and_project(conn, entry_events, entry_projection)
 
+    # PR #352 (Part-3): PR #351's D0 split rescue into trade-verified (CHAIN_SYNCED)
+    # vs balance-only (VENUE_POSITION_OBSERVED), discriminated by a linked venue
+    # trade fact. This test asserts the trade-verified path, so it must provide
+    # the fill fact the discriminator (_pending_entry_has_linked_fill_fact) reads
+    # from venue_trade_facts — without it the rescue is balance-only.
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS venue_trade_facts (
+            venue_order_id TEXT, state TEXT, source TEXT,
+            filled_size REAL, fill_price REAL,
+            observed_at TEXT, local_sequence INTEGER
+        );
+        """
+    )
+    conn.execute(
+        "INSERT INTO venue_trade_facts (venue_order_id, state, source, filled_size, "
+        "fill_price, observed_at, local_sequence) VALUES "
+        "('ord-1', 'CONFIRMED', 'REST', 20.0, 0.5, '2026-04-03T00:00:00Z', 1)"
+    )
+
     portfolio = PortfolioState(positions=[pending_pos])
     chain_positions = [
         ChainPosition(
@@ -3060,7 +3088,12 @@ def test_reconciliation_size_correction_path_preserves_legacy_behavior_on_legacy
     conn.close()
 
 
-def test_reconciliation_size_correction_path_skips_canonical_write_without_prior_history():
+def test_reconciliation_size_correction_no_baseline_persists_durable_review():
+    """PR #352 (Part-3 F4): an unresolved size mismatch with NO canonical baseline
+    is no longer dropped (runtime-only). It is persisted durably as a
+    REVIEW_REQUIRED event + a quarantined position_current projection, so the
+    review requirement survives daemon restart. (Pre-F4 this path skipped the
+    canonical write entirely and the review was lost on reload.)"""
     from src.state.chain_reconciliation import ChainPosition, reconcile
     from src.state.db import apply_architecture_kernel_schema
     from src.state.portfolio import PortfolioState
@@ -3084,11 +3117,24 @@ def test_reconciliation_size_correction_path_skips_canonical_write_without_prior
 
     stats = reconcile(portfolio, chain_positions, conn=conn)
 
+    # Size correction itself still skipped (no canonical baseline to correct).
     assert stats["updated"] == 0
     assert stats["skipped_size_correction_missing_canonical_baseline"] == 1
+    # F4: the review is now durably persisted.
+    assert stats["review_required_persisted"] == 1
     assert portfolio.positions[0].shares == 20.0
-    assert conn.execute("SELECT COUNT(*) FROM position_events").fetchone()[0] == 0
-    assert conn.execute("SELECT COUNT(*) FROM position_current").fetchone()[0] == 0
+    event_types = [
+        r[0] for r in conn.execute(
+            "SELECT event_type FROM position_events WHERE position_id='rt-pos-1'"
+        ).fetchall()
+    ]
+    assert event_types == ["REVIEW_REQUIRED"]
+    pc = conn.execute(
+        "SELECT phase, chain_state FROM position_current WHERE position_id='rt-pos-1'"
+    ).fetchone()
+    assert pc is not None, "quarantined review projection must persist for restart survival"
+    assert pc["phase"] == "quarantined"
+    assert pc["chain_state"] == "size_mismatch_unresolved"
     conn.close()
 
 

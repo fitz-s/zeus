@@ -161,6 +161,142 @@ def _ensure_day0_window_entered_event_type(conn: sqlite3.Connection) -> None:
         conn.execute("DROP TABLE position_events_pre_day0_v1")
 
 
+def _ensure_position_current_authority_columns(conn: sqlite3.Connection) -> None:
+    """PR D0b (Finding D0/D2-wire / Part-2 audit, 2026-05-27): durable
+    authority projection columns on `position_current`.
+
+    Adds (additive, NULL-default) columns required by the typed training-
+    eligibility gate and crash-recovery loader:
+      fill_authority      TEXT
+      recovery_authority  TEXT
+      chain_shares        REAL
+      chain_seen_at       TEXT
+      chain_absence_at    TEXT
+
+    ALTER TABLE ADD COLUMN is supported by SQLite for NULL-default
+    columns without a rebuild. Idempotent: skips columns that already
+    exist (so the daemon-restart path is safe on partial migrations).
+
+    Legacy rows persist with NULL values until a future cycle rewrites
+    the projection through `build_position_current_projection`. The
+    training gate `is_training_eligible_position` fails-closed on NULL
+    fill_authority (treats it as unrecognised authority).
+    """
+    existing = table_columns(conn, "position_current")
+    if not existing:
+        # Table not yet created; kernel SQL will create it with the new
+        # columns directly.
+        return
+    additions = (
+        ("fill_authority", "TEXT"),
+        ("recovery_authority", "TEXT"),
+        ("chain_shares", "REAL"),
+        ("chain_seen_at", "TEXT"),
+        ("chain_absence_at", "TEXT"),
+    )
+    with conn:
+        for col_name, col_type in additions:
+            if col_name in existing:
+                continue
+            conn.execute(
+                f"ALTER TABLE position_current ADD COLUMN {col_name} {col_type}"
+            )
+
+
+def _ensure_venue_position_observed_event_type(conn: sqlite3.Connection) -> None:
+    """PR D0 (Finding D0 / Part-2 audit, 2026-05-27): add VENUE_POSITION_OBSERVED
+    to position_events.event_type CHECK constraint.
+
+    Same pattern as _ensure_day0_window_entered_event_type. Fresh DBs from
+    the kernel SQL get the new CHECK automatically; legacy DBs need the
+    rebuild path because SQLite cannot ALTER a CHECK constraint.
+
+    Idempotent: detects presence of 'VENUE_POSITION_OBSERVED' in existing
+    CREATE TABLE sql and skips rebuild if already migrated.
+
+    The new event type is emitted by chain reconciliation when it rescues a
+    pending entry from aggregate venue balance WITHOUT a linked venue trade
+    fact (degraded recovery; fill_authority=venue_position_observed). It
+    carries an explicit training_eligible=false signal in the payload so
+    downstream learning gates can reject it via type boundary rather than
+    snapshot-keyed scanner heuristics.
+    """
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'position_events'"
+    ).fetchone()
+    if row is None:
+        # Table not yet created (kernel script will create it with the new
+        # CHECK directly); nothing to migrate.
+        return
+    create_sql = str(row[0] if row and row[0] else "")
+    if not create_sql or "VENUE_POSITION_OBSERVED" in create_sql:
+        return  # already has the new type
+
+    # Rebuild path: identical-schema-plus-new-event-type table, copy rows,
+    # preserving PRIMARY KEY + all columns.
+    with conn:
+        conn.execute("ALTER TABLE position_events RENAME TO position_events_pre_d0_v1")
+        conn.executescript(load_architecture_kernel_sql())
+        old_columns = table_columns(conn, "position_events_pre_d0_v1")
+        new_columns = table_columns(conn, "position_events")
+        shared_columns = [c for c in new_columns if c in old_columns]
+        if shared_columns:
+            conn.execute(
+                f"""
+                INSERT INTO position_events ({", ".join(shared_columns)})
+                SELECT {", ".join(shared_columns)}
+                FROM position_events_pre_d0_v1
+                """
+            )
+        conn.execute("DROP TABLE position_events_pre_d0_v1")
+
+
+def _ensure_review_required_event_type(conn: sqlite3.Connection) -> None:
+    """PR #352 (Part-3 audit F1/F4, 2026-05-27): add REVIEW_REQUIRED to the
+    position_events.event_type CHECK constraint.
+
+    Same rebuild pattern as _ensure_venue_position_observed_event_type (SQLite
+    cannot ALTER a CHECK). Fresh DBs get the new CHECK from the kernel SQL;
+    legacy DBs are rebuilt. Idempotent: skips if 'REVIEW_REQUIRED' already
+    present in the table DDL.
+
+    Ordering note: this runs AFTER _ensure_venue_position_observed_event_type,
+    whose rebuild now loads kernel SQL that already contains REVIEW_REQUIRED —
+    so on a DB missing both, the venue rebuild adds both and this helper early-
+    returns. On a DB that already has VENUE_POSITION_OBSERVED (post-#351) but
+    not REVIEW_REQUIRED, this helper performs the rebuild.
+
+    REVIEW_REQUIRED is the durable event emitted when chain reconciliation
+    detects an unresolved chain/local size mismatch with no canonical baseline
+    to correct against — the review requirement now survives restart instead of
+    living only in a mutated runtime Position field.
+    """
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'position_events'"
+    ).fetchone()
+    if row is None:
+        return
+    create_sql = str(row[0] if row and row[0] else "")
+    if not create_sql or "REVIEW_REQUIRED" in create_sql:
+        return  # already has the new type
+
+    with conn:
+        conn.execute("ALTER TABLE position_events RENAME TO position_events_pre_f4_v1")
+        conn.executescript(load_architecture_kernel_sql())
+        old_columns = table_columns(conn, "position_events_pre_f4_v1")
+        new_columns = table_columns(conn, "position_events")
+        shared_columns = [c for c in new_columns if c in old_columns]
+        if shared_columns:
+            conn.execute(
+                f"""
+                INSERT INTO position_events ({", ".join(shared_columns)})
+                SELECT {", ".join(shared_columns)}
+                FROM position_events_pre_f4_v1
+                """
+            )
+        conn.execute("DROP TABLE position_events_pre_f4_v1")
+
+
 def apply_architecture_kernel_schema(conn: sqlite3.Connection) -> None:
     """Apply canonical architecture schema and required runtime support tables."""
     event_columns = table_columns(conn, "position_events")
@@ -192,6 +328,9 @@ def apply_architecture_kernel_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(load_architecture_kernel_sql())
     _ensure_token_suppression_reason_schema(conn)
     _ensure_day0_window_entered_event_type(conn)
+    _ensure_venue_position_observed_event_type(conn)
+    _ensure_review_required_event_type(conn)
+    _ensure_position_current_authority_columns(conn)
     # Legacy-DB column reconciliation: `CREATE TABLE IF NOT EXISTS` in the
     # kernel SQL no-ops when position_current exists from a pre-kernel
     # schema. Backfill every canonical column that the legacy table is

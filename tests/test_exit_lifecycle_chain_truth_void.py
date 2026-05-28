@@ -539,7 +539,18 @@ def _build_minimal_db() -> sqlite3.Connection:
             order_id TEXT,
             order_status TEXT,
             updated_at TEXT,
-            temperature_metric TEXT
+            temperature_metric TEXT,
+            -- PR #352 (Part-3): D0b durable authority columns are now part of
+            -- CANONICAL_POSITION_CURRENT_COLUMNS (asserted by
+            -- assert_canonical_transaction_schema) and read by the positions
+            -- summary query. This minimal fixture predated D0b; without these
+            -- columns the canonical-schema assertion and the fill_authority
+            -- SELECT both fail.
+            fill_authority TEXT,
+            recovery_authority TEXT,
+            chain_shares REAL,
+            chain_seen_at TEXT,
+            chain_absence_at TEXT
         );
         CREATE TABLE IF NOT EXISTS position_events (
             event_id TEXT PRIMARY KEY,
