@@ -230,13 +230,19 @@ def main() -> int:
     ap.add_argument("--execute", action="store_true",
                     help="actually run (default: dry-run plan only). Needs frozen source + live pause.")
     ap.add_argument("--n-mc", type=int, default=10000)
-    ap.add_argument("--workers", type=int, default=4,
-                    help="MC workers (<=4: WAL multi-writer starvation above that).")
+    ap.add_argument("--workers", type=int, default=0,
+                    help="MC compute workers. 0 (default) = auto = (CPU cores - 2). The rebuild is "
+                         "compute-in-workers / write-in-main (single writer on the isolated staging "
+                         "DB), so MC scales with cores WITHOUT WAL multi-writer contention — "
+                         "maximize cores to minimize wall-clock. Explicit value caps at CPU count.")
     ap.add_argument("--metrics", default="high,low")
     ap.add_argument("--n-per-cohort-replay", type=int, default=5,
                     help="Snapshots sampled per A-cohort during replay equivalence check.")
-    ap.add_argument("--replay-n-mc", type=int, default=1000,
-                    help="MC iterations for replay check (lower than production MC is fine).")
+    ap.add_argument("--replay-n-mc", type=int, default=0,
+                    help="MC iterations for the replay equivalence check. 0 (default) = MATCH "
+                         "production --n-mc (required for a valid FINAL reuse decision — a lower "
+                         "n_mc lets Monte-Carlo sampling noise flip A-cohort pass/fail). Set a small "
+                         "value explicitly ONLY for a non-authoritative smoke check.")
     ap.add_argument("--tol", type=float, default=1e-3,
                     help="max_abs_diff tolerance for replay PASS verdict.")
     ap.add_argument("--log-level", default="INFO")
@@ -247,9 +253,30 @@ def main() -> int:
 
     if args.db.name in {"zeus-world.db", "zeus-forecasts.db", "zeus_trades.db", "zeus-trades.db"}:
         raise SystemExit(f"SAFETY: --db must be a copy, not {args.db.name}")
-    if args.workers > 4:
-        logger.warning("workers=%d > 4 risks WAL multi-writer starvation; clamping to 4", args.workers)
-        args.workers = 4
+    # Speed: scale MC workers to cores. Single-writer arch (write-in-main) means no WAL
+    # multi-writer starvation here — the old >4 clamp was for multi-writer jobs, not this one.
+    import os as _os  # noqa: PLC0415
+    _cores = _os.cpu_count() or 4
+    if args.workers <= 0:
+        args.workers = max(1, _cores - 2)  # leave headroom for the main writer + OS
+    elif args.workers > _cores:
+        logger.warning("workers=%d > %d cores: oversubscription wastes context switches; "
+                       "clamping to %d", args.workers, _cores, _cores)
+        args.workers = _cores
+    logger.info("MC workers=%d (cores=%d, single-writer compute-parallel)", args.workers, _cores)
+
+    # BL-D / Blocker 5: the replay equivalence check that decides A-cohort REUSE must use the
+    # SAME MC law as the production pairs it compares against, else sampling noise flips pass/fail.
+    # Default (--replay-n-mc 0) -> match production --n-mc. An explicit lower value is smoke-only.
+    if args.replay_n_mc <= 0:
+        args.replay_n_mc = args.n_mc
+    elif args.execute and args.replay_n_mc < args.n_mc:
+        logger.warning(
+            "replay_n_mc=%d < production n_mc=%d: this is a SMOKE check only — its A PASS/FAIL "
+            "verdicts are NOT authoritative for final reuse (Monte-Carlo sampling noise). Re-run "
+            "with --replay-n-mc 0 (=%d) before trusting A-cohort reuse.",
+            args.replay_n_mc, args.n_mc, args.n_mc,
+        )
 
     rows = _load_manifest(args.manifest)
     by_action: dict[str, list[dict]] = defaultdict(list)
@@ -350,9 +377,16 @@ def main() -> int:
         if not months:
             logger.warning("skip cohort %s/%s/%s: unknown season", city, season, metric)
             continue
+        # BL-B / Blocker 2: scope the regen to THIS cohort's season months only, so a
+        # (city, season, metric) regen does not rebuild the city's other seasons (which may
+        # be A-pass reusable). _SEASON_MONTHS maps the season label -> its calendar months.
+        # --months is now safe at any worker count (BL-B: the parallel path month-scopes its
+        # DELETE). The rebuild is compute-in-workers / write-in-main (single writer), so MC
+        # compute scales with cores without WAL multi-writer contention — pass full --workers.
         cmd = [_PY, "scripts/rebuild_calibration_pairs_v2.py",
                "--db", str(args.db), "--city", city,
                "--temperature-metric", metric,
+               "--months", ",".join(str(m) for m in months),
                "--error-model", "full_transport_v1",
                "--n-mc", str(args.n_mc), "--workers", str(args.workers)]
         if args.execute:

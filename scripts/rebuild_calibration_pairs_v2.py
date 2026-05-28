@@ -916,6 +916,7 @@ def _fetch_eligible_snapshots_v2(
     cycle_filter: Optional[str] = None,
     source_id_filter: Optional[str] = None,
     horizon_profile_filter: Optional[str] = None,
+    months: Optional[tuple] = None,
 ) -> list[sqlite3.Row]:
     """Pull eligible snapshots from ensemble_snapshots_v2 for the given spec."""
     if spec is None:
@@ -961,6 +962,10 @@ def _fetch_eligible_snapshots_v2(
     if horizon_profile_filter:
         where += f" AND {_snapshot_horizon_profile_expr()} = ?"
         params.append(horizon_profile_filter)
+    if months:
+        placeholders = ",".join("?" * len(months))
+        where += f" AND CAST(SUBSTR(target_date, 6, 2) AS INTEGER) IN ({placeholders})"
+        params.extend(months)
     sql = f"""
         SELECT *
         FROM ensemble_snapshots_v2
@@ -1011,6 +1016,7 @@ def _scoped_pair_predicate(
     source_id_filter: Optional[str] = None,
     horizon_profile_filter: Optional[str] = None,
     error_model_family_filter: Optional[str] = None,
+    months: Optional[tuple] = None,
 ) -> tuple[str, list]:
     columns = _table_columns(conn, "calibration_pairs_v2")
     where_parts = ["bin_source = ?", "temperature_metric = ?"]
@@ -1047,6 +1053,10 @@ def _scoped_pair_predicate(
         where_parts, params, column="horizon_profile", value=horizon_profile_filter,
         default="full", columns=columns,
     )
+    if months:
+        placeholders = ",".join("?" * len(months))
+        where_parts.append(f"CAST(SUBSTR(target_date, 6, 2) AS INTEGER) IN ({placeholders})")
+        params.extend(months)
     return " AND ".join(where_parts), params
 
 
@@ -1062,6 +1072,7 @@ def _collect_pre_delete_count(
     source_id_filter: Optional[str] = None,
     horizon_profile_filter: Optional[str] = None,
     error_model_family_filter: Optional[str] = None,
+    months: Optional[tuple] = None,
 ) -> int:
     where, params = _scoped_pair_predicate(
         conn=conn,
@@ -1074,6 +1085,7 @@ def _collect_pre_delete_count(
         source_id_filter=source_id_filter,
         horizon_profile_filter=horizon_profile_filter,
         error_model_family_filter=error_model_family_filter,
+        months=months,
     )
     return conn.execute(
         f"SELECT COUNT(*) FROM calibration_pairs_v2 WHERE {where}",
@@ -1093,6 +1105,7 @@ def _delete_canonical_v2_slice(
     source_id_filter: Optional[str] = None,
     horizon_profile_filter: Optional[str] = None,
     error_model_family_filter: Optional[str] = None,
+    months: Optional[tuple] = None,
 ) -> None:
     where, params = _scoped_pair_predicate(
         conn=conn,
@@ -1105,6 +1118,7 @@ def _delete_canonical_v2_slice(
         source_id_filter=source_id_filter,
         horizon_profile_filter=horizon_profile_filter,
         error_model_family_filter=error_model_family_filter,
+        months=months,
     )
     conn.execute(
         f"DELETE FROM calibration_pairs_v2 WHERE {where}",
@@ -1533,6 +1547,7 @@ def rebuild_v2(
     mc_seed_base: Optional[int] = None,
     chunker: Optional[BulkChunker] = None,
     error_model_family: Optional[str] = None,
+    months: Optional[tuple] = None,
 ) -> RebuildStatsV2:
     """Run the v2 rebuild end-to-end, sharded per (city, metric) bucket.
 
@@ -1573,6 +1588,8 @@ def rebuild_v2(
         print(f"Source filter:     {source_id_filter}")
     if horizon_profile_filter:
         print(f"Horizon filter:    {horizon_profile_filter}")
+    if months:
+        print(f"Months filter:     {','.join(str(m) for m in months)}")
     print(f"Bin source tag:    {CANONICAL_BIN_SOURCE_V2!r}")
     print(f"MetricIdentity:    {spec.identity}")
     print(f"n_mc per snapshot: {effective_n_mc}")
@@ -1588,6 +1605,7 @@ def rebuild_v2(
         cycle_filter=cycle_filter,
         source_id_filter=source_id_filter,
         horizon_profile_filter=horizon_profile_filter,
+        months=months,
     )
     stats.snapshots_scanned = len(snapshots)
 
@@ -1617,6 +1635,7 @@ def rebuild_v2(
         source_id_filter=source_id_filter,
         horizon_profile_filter=horizon_profile_filter,
         error_model_family_filter=error_model_family,
+        months=months,
     )
     print(f"Existing canonical_v2 pairs (will delete): {stats.pre_delete_v2_pairs}")
 
@@ -1727,6 +1746,7 @@ def rebuild_v2(
             source_id_filter=source_id_filter,
             horizon_profile_filter=horizon_profile_filter,
             n_mc=effective_n_mc,
+            months=months,  # BL-B: month-scope the parallel DELETE (SELECT already scoped above)
             seed_base=mc_seed_base,
             stats=stats,
             error_model_family=error_model_family,
@@ -1757,6 +1777,7 @@ def rebuild_v2(
                     source_id_filter=source_id_filter,
                     horizon_profile_filter=horizon_profile_filter,
                     error_model_family_filter=error_model_family,
+                    months=months,
                 )
                 for snap in city_snaps:
                     try:
@@ -1909,6 +1930,7 @@ def rebuild_all_v2(
     mc_seed_base: Optional[int] = None,
     chunker: Optional[BulkChunker] = None,
     error_model_family: Optional[str] = None,
+    months: Optional[tuple] = None,
 ) -> dict[str, RebuildStatsV2]:
     """Rebuild calibration_pairs_v2 for all METRIC_SPECS.
 
@@ -1944,6 +1966,7 @@ def rebuild_all_v2(
             mc_seed_base=mc_seed_base,
             chunker=chunker,
             error_model_family=error_model_family,
+            months=months,
         )
         per_metric[spec.identity.temperature_metric] = stats
 
@@ -2150,7 +2173,39 @@ def main() -> int:
             "byte-identical to main. Currently: 'full_transport_v1'."
         ),
     )
+    parser.add_argument(
+        "--months", dest="months", default=None,
+        help=(
+            "Comma-separated calendar months (1-12) to scope the rebuild, e.g. '3,4,5' "
+            "for MAM. When set, only snapshots whose target_date falls in these months "
+            "are fetched, and only pairs in those months are deleted. "
+            "Default: None (no month filter — full-year behaviour, current default)."
+        ),
+    )
     args = parser.parse_args()
+
+    parsed_months: Optional[tuple] = None
+    if args.months is not None:
+        raw_parts = [p.strip() for p in args.months.split(",") if p.strip()]
+        if not raw_parts:
+            print("ERROR: --months value is empty; provide comma-separated ints e.g. '3,4,5'", file=sys.stderr)
+            return 1
+        month_ints = []
+        for part in raw_parts:
+            try:
+                m = int(part)
+            except ValueError:
+                print(f"ERROR: --months contains non-integer value {part!r}", file=sys.stderr)
+                return 1
+            if not (1 <= m <= 12):
+                print(f"ERROR: --months value {m} out of range 1..12", file=sys.stderr)
+                return 1
+            month_ints.append(m)
+        parsed_months = tuple(month_ints)
+
+    # BL-B: the parallel rebuild path is now month-aware (run_parallel_rebuild threads `months`
+    # into _delete_canonical_v2_slice), so --months is safe at any worker count. The SELECT is
+    # month-scoped before the parallel fan-out and the per-city DELETE is month-scoped inside it.
 
     write_db_path: Path | None = None
     if not args.dry_run:
@@ -2212,6 +2267,7 @@ def main() -> int:
                 horizon_profile_filter=args.horizon_profile,
                 n_mc=args.n_mc,
                 error_model_family=args.error_model,
+                months=parsed_months,
             )
         except Exception as e:
             print(f"ERROR: {type(e).__name__}: {e}", file=sys.stderr)
@@ -2288,6 +2344,7 @@ def main() -> int:
                     mc_seed_base=args.mc_seed_base,
                     chunker=chunker,
                     error_model_family=args.error_model,
+                    months=parsed_months,
                 )
             except Exception as e:
                 print(f"ERROR: {type(e).__name__}: {e}", file=sys.stderr)
