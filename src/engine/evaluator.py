@@ -138,6 +138,7 @@ from src.strategy.family_exclusive_dedup import (
     native_multibin_buy_no_shadow_enabled,
 )
 from src.strategy.kelly import (
+    _unified_uncertainty_budget_enabled,
     dynamic_kelly_mult,
     kelly_size,
     observed_target_day_fraction,
@@ -295,6 +296,76 @@ def _buy_entry_price_from_orderbook(token_id: str, orderbook: dict) -> dict[str,
         "ask_size": float(ask_size),
         "ask_only": False,
     }
+
+
+_ENV_EVALUATOR_EQE_ENABLED = "ZEUS_EVALUATOR_ENTRY_QUOTE_EVIDENCE_ENABLED"
+
+
+def _evaluator_eqe_enabled() -> bool:
+    """Wave 5.5 (2026-05-27) feature gate.
+
+    When OFF (default), the evaluator does NOT construct EntryQuoteEvidence
+    and MarketAnalysis falls back to the pre-Wave-5 fixed-p_market bootstrap
+    path. When ON, the evaluator fetches the full orderbook once per token,
+    constructs typed EntryQuoteEvidence with depth-walked fill_price_walk +
+    fee + cost_uncertainty, and passes per-bin arrays to MarketAnalysis so
+    the bootstrap samples c_b ~ N(all_in, σ_market) per iteration.
+
+    Activating this flag SHIFTS edge calculations by the fee amount + walks
+    depth, so live trade count may change. Pair with the matching
+    ZEUS_UNIFIED_UNCERTAINTY_BUDGET flip (Wave 6) only after replay
+    validation per architecture/market_cost_seam_executable_uncertainty_2026_05_27.md
+    §Wave 6.
+    """
+    import os
+    return os.environ.get(_ENV_EVALUATOR_EQE_ENABLED, "0") in ("1", "true", "TRUE")
+
+
+def _buy_entry_evidence_from_clob(
+    clob,
+    token_id: str,
+    *,
+    side: str,
+    target_shares: float,
+    fee_rate: float,
+    quote_age_ms: int = 0,
+):
+    """Wave 5.5: fetch the orderbook once and produce EntryQuoteEvidence.
+
+    The ``side`` parameter is REQUIRED — Copilot review of PR #348 caught
+    that hard-coding ``side="yes"`` mislabels NO-token evidence when the
+    caller passes a no_token_id (the EQE was being stamped as a YES-side
+    quote even when it represented NO-side execution context).
+
+    Returns None when the orderbook is unavailable or empty (caller falls
+    back to legacy ``_buy_entry_price_from_clob``). Never raises — wiring
+    failures must not crash the evaluator loop.
+    """
+    if side not in ("yes", "no"):
+        raise ValueError(f"side must be 'yes' or 'no', got {side!r}")
+    if not _evaluator_eqe_enabled():
+        return None
+    from src.contracts.entry_quote_evidence import (
+        entry_quote_evidence_from_orderbook,
+    )
+    orderbook_getter = getattr(clob, "get_orderbook", None)
+    if not callable(orderbook_getter):
+        return None
+    try:
+        orderbook = orderbook_getter(token_id)
+    except Exception:
+        return None
+    try:
+        return entry_quote_evidence_from_orderbook(
+            token_id=token_id,
+            side=side,
+            orderbook=orderbook,
+            target_shares=max(1.0, float(target_shares)),
+            fee_rate=max(0.0, min(0.999, float(fee_rate))),
+            quote_age_ms=int(max(0, quote_age_ms)),
+        )
+    except (ValueError, KeyError, TypeError):
+        return None
 
 
 def _buy_entry_price_from_clob(clob, token_id: str) -> dict[str, float | bool | None]:
@@ -1503,6 +1574,8 @@ def _size_at_execution_price_boundary(
     kelly_multiplier: float,
     effective_context: EffectiveKellyContext | None = None,
     allow_missing_context: bool = False,
+    market_uncertainty_in_lcb: bool = False,
+    max_executable_shares: float | None = None,
 ) -> float:
     """Size a trade at the evaluator→Kelly boundary using typed entry cost.
 
@@ -1523,10 +1596,22 @@ def _size_at_execution_price_boundary(
     graceful degrade (no haircut, WARNING logged).
     """
     # PR 7: apply microstructure haircut to kelly_multiplier before sizing.
+    # Wave 6 (INV-40, 2026-05-27): when the unified-uncertainty-budget flag is
+    # ON, the microstructure haircut's information has already entered Kelly
+    # via EntryQuoteEvidence.cost_uncertainty (spread/2 + slippage_bps/10000)
+    # → σ_market → edge_LCB. Multiplying haircut() here as well = the double-
+    # count INV-40 forbids. Flag OFF (default) preserves the legacy chain.
+    # X9 fix (Copilot review of PR #348): import moved to module top.
+    # K1 fix (PR #348 P0-1, 2026-05-27): collapse requires BOTH the global env
+    # flag AND per-edge evidence — when an edge has no σ_market in its
+    # bootstrap, the EffectiveKellyContext haircut MUST stay applied.
+    _wave6_collapse = (
+        _unified_uncertainty_budget_enabled() and bool(market_uncertainty_in_lcb)
+    )
     effective_kelly_multiplier = kelly_multiplier
-    if effective_context is not None:
+    if effective_context is not None and not _wave6_collapse:
         effective_kelly_multiplier = kelly_multiplier * effective_context.haircut()
-    else:
+    elif effective_context is None:
         from src.config import get_mode as _get_mode
         if _get_mode() == "live" and not allow_missing_context:
             # Fail-closed on live: raise so any caller that forgets context
@@ -1547,14 +1632,30 @@ def _size_at_execution_price_boundary(
                 _mode,
             )
 
-    raw_entry_price = float(entry_price)
-    ep = ExecutionPrice(
-        value=raw_entry_price,
-        price_type="implied_probability",
-        fee_deducted=False,
-        currency="probability_units",
-    )
-    ep_fee_adjusted = ep.with_taker_fee(fee_rate)
+    # Wave 2 (INV-39, 2026-05-27): DO NOT fabricate
+    # ExecutionPrice(price_type="implied_probability") at this boundary.
+    # The upstream BinEdge.entry_price (constructed at edge-scan in
+    # MarketAnalysis.find_edges) is already a typed ExecutionPrice carrying
+    # real provenance (e.g. "vwmp" from _buy_entry_price_from_clob). Fabricating
+    # implied_probability here, then immediately laundering it into
+    # "fee_adjusted" via .with_taker_fee(), defeats the D3/INV-12 contract that
+    # ExecutionPrice was created to enforce — assert_kelly_safe() would only
+    # pass because of the laundering, not because real provenance reached the
+    # boundary. See architecture/market_cost_seam_executable_uncertainty_2026_05_27.md §D5.
+    if isinstance(entry_price, ExecutionPrice):
+        ep = entry_price
+    else:
+        # Legacy float caller (test fixture / non-BinEdge path). Coerce with
+        # explicit implied_probability tag so the legacy semantic is preserved
+        # but visible; INV-38 fix in BinEdge.__post_init__ catches the BinEdge
+        # path before it reaches here.
+        ep = ExecutionPrice(
+            value=float(entry_price),
+            price_type="implied_probability",
+            fee_deducted=False,
+            currency="probability_units",
+        )
+    ep_fee_adjusted = ep if ep.fee_deducted else ep.with_taker_fee(fee_rate)
     ep_fee_adjusted.assert_kelly_safe()
 
     # DT#5 P9B (INV-21): pass the full ExecutionPrice object, not `.value`.
@@ -1566,6 +1667,26 @@ def _size_at_execution_price_boundary(
         sizing_bankroll,
         effective_kelly_multiplier,
     )
+
+    # K3 fix (PR #348 operator review, P0-4, 2026-05-27): cap the sized order
+    # to the depth-walked executable authority. The σ_market that fed edge_LCB
+    # was computed for ``EntryQuoteEvidence.depth_at_target_size`` shares; an
+    # order larger than that walks deeper into the book than the cost estimate
+    # accounted for, so its real slippage exceeds the σ_market in the CI.
+    # Capping USD size to ``max_executable_shares * price`` ensures live
+    # execution never exceeds the depth the cost evidence actually priced.
+    # None (default / legacy / no-EQE path) leaves size unchanged.
+    if max_executable_shares is not None and max_executable_shares > 0:
+        price_value = ep_fee_adjusted.value
+        if price_value > 0:
+            cap_usd = float(max_executable_shares) * price_value
+            if fee_adjusted_size > cap_usd:
+                logger.info(
+                    "[DEPTH_CAP] sized=%.4f > depth_authority=%.4f USD "
+                    "(%.1f shares @ %.4f) — capping to depth-walked authority",
+                    fee_adjusted_size, cap_usd, float(max_executable_shares), price_value,
+                )
+                fee_adjusted_size = cap_usd
 
     # P10E strict: shadow-off path removed. R10 requires fee-adjusted typed price.
     return fee_adjusted_size
@@ -4353,6 +4474,15 @@ def evaluate_candidate(
     p_market_no = np.zeros(len(bins))
     buy_no_quote_available = np.zeros(len(bins), dtype=bool)
     market_is_complete = True
+    # Wave 5.5: per-bin EntryQuoteEvidence arrays. Populated only when the
+    # evaluator-EQE feature flag is ON; otherwise stay None and MarketAnalysis
+    # falls back to the pre-Wave-5 fixed-p_market bootstrap path.
+    eqe_yes_list: list | None = (
+        [None] * len(bins) if _evaluator_eqe_enabled() else None
+    )
+    eqe_no_list: list | None = (
+        [None] * len(bins) if _evaluator_eqe_enabled() else None
+    )
     try:
         # The legacy flag name says "multibin", but the authority rule is now
         # broader: every executable buy_no needs native NO-token quote evidence.
@@ -4400,6 +4530,29 @@ def evaluate_candidate(
             bid_sz = float(yes_quote["bid_size"] or 0.0)
             ask_sz = float(yes_quote["ask_size"] or 0.0)
             p_market[idx] = float(yes_quote["price"])
+            # Wave 5.5: build typed EntryQuoteEvidence per token when the
+            # evaluator-EQE feature flag is ON. Best-effort: failure to
+            # construct (e.g. orderbook not depth-walkable, fee_rate lookup
+            # error) leaves the slot None and bootstrap falls back to the
+            # legacy fixed-p_market path for that bin.
+            if eqe_yes_list is not None:
+                try:
+                    _fee_rate = _fee_rate_for_token(clob, o.get("token_id", ""))
+                except Exception:
+                    _fee_rate = 0.05
+                # Conservative target-shares estimate: min_order_usd / best_ask.
+                # Captures the slippage a minimum-size order would face; Wave 6
+                # may iterate on this with the post-Kelly size for a re-eval.
+                _target_shares = max(
+                    1.0,
+                    float(limits.min_order_usd) / max(1e-6, float(p_market[idx])),
+                )
+                eqe_yes_list[idx] = _buy_entry_evidence_from_clob(
+                    clob, o["token_id"],
+                    side="yes",
+                    target_shares=_target_shares,
+                    fee_rate=_fee_rate,
+                )
 
             # Injection Point 7: Data completeness - record microstructure snapshot
             if callable(microstructure_sink):
@@ -4432,6 +4585,22 @@ def evaluate_candidate(
                         no_quote = _buy_entry_price_from_clob(clob, no_token_id)
                         p_market_no[idx] = float(no_quote["price"])
                         buy_no_quote_available[idx] = True
+                        # Wave 5.5: NO-side EQE (mirrors yes-side wiring).
+                        if eqe_no_list is not None:
+                            try:
+                                _no_fee_rate = _fee_rate_for_token(clob, no_token_id)
+                            except Exception:
+                                _no_fee_rate = 0.05
+                            _no_target_shares = max(
+                                1.0,
+                                float(limits.min_order_usd) / max(1e-6, float(p_market_no[idx])),
+                            )
+                            eqe_no_list[idx] = _buy_entry_evidence_from_clob(
+                                clob, no_token_id,
+                                side="no",
+                                target_shares=_no_target_shares,
+                                fee_rate=_no_fee_rate,
+                            )
                     except Exception as no_exc:
                         logger.warning(
                             "Native NO quote unavailable for %s/%s; buy_no disabled for this bin: %s",
@@ -4881,6 +5050,8 @@ def evaluate_candidate(
         bias_reference=bias_reference,
         posterior_mode=MODEL_ONLY_POSTERIOR_MODE,
         transfer_logit_sigma=_transfer_logit_sigma,
+        entry_quote_evidence_yes=eqe_yes_list,
+        entry_quote_evidence_no=eqe_no_list,
         bootstrap_probability_sampler=(
             (lambda _analysis, _n_members: day0.p_vector(bins, n_mc=1, rng=_analysis._rng))
             if is_day0_mode
@@ -5683,6 +5854,15 @@ def evaluate_candidate(
                 portfolio_heat=current_heat,
                 strategy_key=None,
                 city=city.name,
+                # Wave 6 / K1 (PR #348): the per-edge unified-budget gate must
+                # reach the ci_width haircut here too, not only the
+                # EffectiveKellyContext boundary — otherwise a Stage-2 flip
+                # collapses one duplicate haircut and leaves ci_width applied
+                # (INV-40 double-count). No-op at flag-OFF (the collapse ANDs
+                # with _unified_uncertainty_budget_enabled()).
+                market_uncertainty_in_lcb=bool(
+                    getattr(edge, "market_cost_uncertainty_applied", False)
+                ),
             )
         except ValueError as exc:
             decisions.append(EdgeDecision(
@@ -5834,6 +6014,16 @@ def evaluate_candidate(
                 kelly_multiplier=km * risk_throttle,
                 effective_context=None,
                 allow_missing_context=True,
+                # K1 (PR #348 P0-1): per-edge gate for unified-budget collapse.
+                market_uncertainty_in_lcb=bool(
+                    getattr(edge, "market_cost_uncertainty_applied", False)
+                ),
+                # K3 (PR #348 P0-4): cap to depth-walked executable authority.
+                max_executable_shares=(
+                    float(edge.entry_quote_evidence.depth_at_target_size)
+                    if getattr(edge, "entry_quote_evidence", None) is not None
+                    else None
+                ),
             )
         except ValueError as exc:
             decisions.append(EdgeDecision(
@@ -5881,7 +6071,11 @@ def evaluate_candidate(
 
         effective_min_order_usd, min_order_authority = _effective_min_order_usd_for_entry(
             tokens=tokens,
-            entry_price=edge.entry_price,
+            # Wave 2 (INV-38): coerce typed ExecutionPrice → float because
+            # _effective_min_order_usd_for_entry does Decimal(str(entry_price))
+            # which would fail silently (InvalidOperation → fallback) on the
+            # dataclass repr of a raw ExecutionPrice.
+            entry_price=float(edge.entry_price),
             fallback_min_order_usd=limits.min_order_usd,
         )
         if min_order_authority == "executable_snapshot_min_order_size":

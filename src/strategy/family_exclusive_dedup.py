@@ -66,12 +66,82 @@ _DEFAULT = "1"  # ON by default (live-money fail-safe).
 NATIVE_MULTIBIN_BUY_NO_SHADOW_FLAG = "NATIVE_MULTIBIN_BUY_NO_SHADOW"
 NATIVE_MULTIBIN_BUY_NO_LIVE_FLAG = "NATIVE_MULTIBIN_BUY_NO_LIVE"
 
+# Wave 4 (2026-05-27): Stage B family-portfolio optimizer activation.
+# Two-tier env var split so operator can promote multi-leg sizing through
+# shadow first (observability) before live (live capital). Default 1 on both
+# tiers keeps the Stage A single-leg gate behaviour as the fail-safe.
+ENV_FAMILY_PORTFOLIO_MAX_LEGS_LIVE = "ZEUS_LIVE_FAMILY_PORTFOLIO_MAX_LEGS"
+ENV_FAMILY_PORTFOLIO_MAX_LEGS_SHADOW = "ZEUS_SHADOW_FAMILY_PORTFOLIO_MAX_LEGS"
+# Hard cap on a Stage B portfolio's worst-case loss (USD). When set, the
+# optimizer rejects portfolios with ``max_loss_usd > cap`` (returns None) so
+# the caller falls back to Stage A single-leg. Default None = no cap (relies
+# on per-leg Kelly + portfolio_heat to bound exposure).
+ENV_FAMILY_PORTFOLIO_MAX_LOSS_USD = "ZEUS_FAMILY_PORTFOLIO_MAX_LOSS_USD"
+
+
+def _family_portfolio_max_legs() -> int:
+    """Mode-aware max_legs for the Stage B family portfolio optimizer.
+
+    Wave 4 (2026-05-27): operator promotes shadow → live by flipping the
+    matching env var. Defaults to 1 on both tiers (Stage A behaviour). Unknown
+    or invalid values fall back to 1 (fail-safe).
+
+    K4 fix (PR #348 operator review, P0-5, 2026-05-27): the live tier is
+    HARD-CAPPED to 1 regardless of env, until ``optimize_exclusive_outcome_portfolio``
+    ships a true full-family expected-log-growth optimiser (current
+    implementation normalises posterior over candidate legs only and uses
+    an average-edge proxy for ELG, not the proper sum over outcomes).
+    Shadow tier remains uncapped so the optimiser can run for observation.
+    """
+    mode = get_mode()
+    if mode == "shadow":
+        try:
+            return max(1, int(os.environ.get(ENV_FAMILY_PORTFOLIO_MAX_LEGS_SHADOW, "1")))
+        except (TypeError, ValueError):
+            return 1
+    # Live tier — refuse multi-leg until full-outcome ELG ships.
+    try:
+        env_legs = int(os.environ.get(ENV_FAMILY_PORTFOLIO_MAX_LEGS_LIVE, "1"))
+    except (TypeError, ValueError):
+        env_legs = 1
+    if env_legs > 1:
+        logger.warning(
+            "%s=%d refused in live mode — Stage B family optimiser is not yet "
+            "full-family ELG (P0-5 blocker, PR #348 review). Capping to 1 until "
+            "src.strategy.family_exclusive_dedup.optimize_exclusive_outcome_portfolio "
+            "ships a true full-outcome expected-log-growth solver.",
+            ENV_FAMILY_PORTFOLIO_MAX_LEGS_LIVE, env_legs,
+        )
+    return 1
+
+
+def _family_portfolio_max_loss_usd() -> float | None:
+    """Optional hard-cap on Stage B portfolio worst-case loss (USD).
+
+    Returns None when unset, disabled, or invalid (fail-open: no cap).
+    """
+    raw = os.environ.get(ENV_FAMILY_PORTFOLIO_MAX_LOSS_USD, "").strip()
+    if not raw:
+        return None
+    try:
+        cap = float(raw)
+    except (TypeError, ValueError):
+        return None
+    return cap if cap > 0.0 else None
+
 from src.contracts.no_trade_reason import NoTradeReason
 from src.config import get_mode, settings
 
 # Audit reason string for dropped bins. Stage B promotes this into the
 # NoTradeReason enum while keeping the string stable for older artifacts.
 MUTUALLY_EXCLUSIVE_FAMILY_DEDUP = "mutually_exclusive_family_dedup"
+# X2 fix (Copilot review of PR #348): audit-trail string for the Wave 4 loss-cap
+# rejection path. NoTradeReason enum bump is deferred until the next DB-migration
+# PR (SV15 CHECK constraint requires schema_version bump + re-pin) — the string
+# constant matches the MUTUALLY_EXCLUSIVE_FAMILY_DEDUP pattern so operators can
+# grep / aggregate Stage B → Stage A fall-backs from logs without waiting for
+# the enum to land. See architecture/market_cost_seam_executable_uncertainty_2026_05_27.md §Wave 4.
+FAMILY_PORTFOLIO_LOSS_CAP_EXCEEDED = "family_portfolio_loss_cap_exceeded"
 FAMILY_REJECTION_STAGE = "ANTI_CHURN"
 
 
@@ -1079,6 +1149,49 @@ def preselect_single_family_edge_before_kelly(
     if not enabled or len(edges) < 2:
         return edges, []
 
+    # Wave 4 (2026-05-27): when Stage B is activated via env (max_legs > 1),
+    # honour the multi-leg optimum here too so the pre-Kelly preselection
+    # path stays consistent with build_weather_family_decision. Stage A
+    # single-leg fallback is preserved when max_legs == 1 (default).
+    max_legs = _family_portfolio_max_legs()
+    if max_legs > 1:
+        portfolio = optimize_exclusive_outcome_portfolio(
+            edges,
+            city=city,
+            target_date=target_date,
+            temperature_metric=temperature_metric,
+            max_legs=max_legs,
+        )
+        loss_cap = _family_portfolio_max_loss_usd()
+        if portfolio is not None and (
+            loss_cap is None or float(portfolio.max_loss_usd) <= loss_cap
+        ):
+            selected_ids = {id(edge) for edge in portfolio.selected_legs}
+            kept: list[Any] = [edge for edge in edges if id(edge) in selected_ids]
+            kept_labels = ",".join(_edge_bin_label(edge) for edge in kept)
+            kept_score = float(portfolio.selection_score)
+            drops_b: list[FamilyPreselectionDrop] = []
+            for edge in edges:
+                if id(edge) in selected_ids:
+                    continue
+                drops_b.append(
+                    FamilyPreselectionDrop(
+                        edge=edge,
+                        dropped_bin=_edge_bin_label(edge),
+                        kept_bin=kept_labels,
+                        family_selection_score=_edge_family_selection_score(edge),
+                        kept_family_selection_score=kept_score,
+                    )
+                )
+                logger.info(
+                    "[FAMILY_PORTFOLIO_STAGE_B_PRE_KELLY] family=%s|%s|%s "
+                    "max_legs=%d kept=%s dropped_bin=%r",
+                    city, target_date, temperature_metric, max_legs,
+                    kept_labels, _edge_bin_label(edge),
+                )
+            return kept, drops_b
+        # Optimizer returned None OR loss cap exceeded → fall through to Stage A
+
     best = max(edges, key=_edge_preselection_key)
     best_bin = ""
     best_edge_bin = getattr(best, "bin", None)
@@ -1146,10 +1259,10 @@ def build_weather_family_decision(
         candidate_edges = executable_candidate_edges
         excluded_blocked_edges = blocked_edges
 
-    try:
-        max_legs = int(os.environ.get("ZEUS_LIVE_FAMILY_PORTFOLIO_MAX_LEGS", "1"))
-    except ValueError:
-        max_legs = 1
+    # Wave 4 (2026-05-27): mode-aware max_legs (shadow tier separate from live)
+    # so operator can observe Stage B multi-leg behaviour in shadow before
+    # promoting to live capital.
+    max_legs = _family_portfolio_max_legs()
     try:
         fallback_candidate_count = int(
             os.environ.get("ZEUS_LIVE_FAMILY_EXECUTABLE_FALLBACK_CANDIDATES", "3")
@@ -1165,6 +1278,19 @@ def build_weather_family_decision(
         max_legs=max_legs,
     )
     if portfolio is None:
+        return None
+    # Wave 4: hard-cap on worst-case family loss. When the cap is set and the
+    # optimizer's portfolio exceeds it, return None so the caller falls back
+    # to the Stage A single-leg path. Fail-open (no cap) when env unset.
+    loss_cap = _family_portfolio_max_loss_usd()
+    if loss_cap is not None and float(portfolio.max_loss_usd) > loss_cap:
+        logger.warning(
+            "[%s] city=%s target=%s metric=%s "
+            "max_loss_usd=%.4f > cap=%.4f — falling back to Stage A",
+            FAMILY_PORTFOLIO_LOSS_CAP_EXCEEDED.upper(),
+            city, target_date, temperature_metric,
+            float(portfolio.max_loss_usd), loss_cap,
+        )
         return None
     ranked_edges = sorted(candidate_edges, key=_edge_preselection_key, reverse=True)
     primary = portfolio.selected_leg

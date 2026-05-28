@@ -2169,6 +2169,13 @@ def main() -> int:
             # forecast-class tables.
             init_schema_forecasts(conn)
             apply_v2_schema(conn)
+            # 2026-05-27: init_schema_forecasts and apply_v2_schema both call
+            # executescript() which resets the C-level busy handler, then
+            # re-apply PRAGMA busy_timeout from ZEUS_DB_BUSY_TIMEOUT_MS
+            # (default 30s). Re-assert our 10-min budget here so that the
+            # first SAVEPOINT (which fires after potentially long MC compute)
+            # still has the full wait window against riskguard ticks.
+            conn.execute("PRAGMA busy_timeout = 600000")
             try:
                 per_metric = rebuild_all_v2(
                     conn,

@@ -719,6 +719,99 @@ invariants:
     basis: docs/operations/task_2026-05-11_ingest_starvation_refactor/PLAN.md S9
     added: 2026-05-11
 
+  - id: INV-38
+    zones: [K2_runtime, market_cost_seam]
+    statement: >
+      BinEdge.entry_price MUST be a typed ExecutionPrice (not bare float).
+      The execution-price provenance set upstream (vwmp / ask / depth_walked /
+      fee_adjusted) MUST be preserved into the Kelly boundary. Constructing
+      ExecutionPrice with a fabricated price_type at the Kelly seam is
+      forbidden — it defeats the D3 / INV-12 contract at its own enforcement
+      site.
+    why: >
+      market_analysis.py:409 currently coerces p_market[i] into a float
+      BinEdge.entry_price, and evaluator.py:1551 (_size_at_execution_price_boundary)
+      reconstructs ExecutionPrice(price_type="implied_probability") then
+      laundered into fee_adjusted via with_taker_fee(). assert_kelly_safe()
+      passes only because of the laundering, not because real provenance
+      reached the boundary. Upstream VWMP/depth/ask context is discarded.
+    enforced_by:
+      tests:
+        - tests/test_R2_bin_edge_executable_provenance.py::test_r2_bin_edge_entry_price_is_execution_price
+        - tests/test_R2_bin_edge_executable_provenance.py::test_r2_typed_construction_preserves_vwmp_provenance
+        - tests/test_R2_bin_edge_executable_provenance.py::test_r2_production_find_edges_stamps_vwmp_provenance
+        - tests/test_R1_edge_kelly_entry_price_identity.py::test_r1_entry_price_is_execution_price_post_wave2
+      negative_constraints: []
+    capability_tags: [K2_runtime, kelly_boundary]
+    relationship_tests:
+      - tests/test_R1_edge_kelly_entry_price_identity.py
+      - tests/test_R2_bin_edge_executable_provenance.py
+    basis: architecture/market_cost_seam_executable_uncertainty_2026_05_27.md §D5 + Wave 2
+    added: 2026-05-27
+
+  - id: INV-39
+    zones: [K2_runtime, kelly_boundary]
+    statement: >
+      _size_at_execution_price_boundary MUST NOT construct
+      ExecutionPrice(price_type="implied_probability") for BinEdge-typed
+      callers. The fabrication pattern is allowed ONLY in the explicit
+      legacy-float fallback branch (caller passes a bare float, not a typed
+      BinEdge.entry_price; that branch tags the value implied_probability so
+      the legacy semantic is visible). The forbidden pattern is the
+      pre-Wave-2 unconditional fabrication that laundered any upstream
+      provenance into "fee_adjusted" via .with_taker_fee() without going
+      through the isinstance(entry_price, ExecutionPrice) guard first.
+    why: >
+      The fabrication pattern at evaluator.py:1551 silently launders any
+      upstream price into fee_adjusted, bypassing the contract that
+      ExecutionPrice was created to enforce. Once it lands, every Kelly
+      call passes assert_kelly_safe() regardless of real provenance —
+      the contract becomes a rubber stamp.
+    enforced_by:
+      tests:
+        - tests/test_R2_bin_edge_executable_provenance.py::test_r2_production_find_edges_stamps_vwmp_provenance
+        - tests/test_R1_edge_kelly_entry_price_identity.py::test_r1_fee_adjusted_ep_retains_same_underlying_price
+      negative_constraints: []
+    capability_tags: [K2_runtime, kelly_boundary]
+    relationship_tests:
+      - tests/test_R1_edge_kelly_entry_price_identity.py
+      - tests/test_R2_bin_edge_executable_provenance.py
+    basis: architecture/market_cost_seam_executable_uncertainty_2026_05_27.md §D5 + Wave 2
+    added: 2026-05-27
+
+  - id: INV-40
+    zones: [K2_runtime, kelly_sizing]
+    statement: >
+      Every uncertainty source contributes to position-size reduction EXACTLY
+      ONCE — either via edge_LCB (soft σ entering the bootstrap CI lower bound)
+      OR via a hard {0, 1} veto multiplier (executable_mask, oracle_penalty=0,
+      strategy_phase=0, reliability_status hard-fail). Double-counting the
+      same uncertainty (CI width via both edge bootstrap AND dynamic_kelly_mult
+      haircut; spread/depth via both EffectiveKellyContext.haircut AND
+      σ_market in bootstrap; etc.) is forbidden.
+    why: >
+      Current size chain applies 15 multiplicative haircuts across
+      dynamic_kelly_mult (7), phase_aware_kelly_multiplier (4),
+      EffectiveKellyContext.haircut (1), plus oracle / observed_fraction /
+      phase_source guards. Multiple soft uncertainties appear in BOTH
+      edge_ci_lower AND the multiplier chain. 0.8^10 ≈ 0.107 collapse of
+      valid edges with no diagnostic = death by thousand gates (Fitz §1).
+    enforced_by:
+      tests:
+        - tests/test_R3_effective_kelly_haircut_not_in_dynamic_mult.py::TestFlagOffPreservesLegacyDoubleCount::test_flag_off_dynamic_mult_applies_ci_width_haircut
+        - tests/test_R3_effective_kelly_haircut_not_in_dynamic_mult.py::TestFlagOnSingleCountEnforced::test_flag_on_dynamic_mult_skips_ci_width_haircut
+        - tests/test_R3_effective_kelly_haircut_not_in_dynamic_mult.py::TestNoLegacyDoubleCountWithFlagOn::test_flag_on_ci_width_and_ekc_haircut_are_both_inactive
+        - tests/test_wave6_unified_uncertainty_budget.py::TestFlagResolution::test_off_when_prereq_eqe_flag_missing
+        - tests/test_R5_bootstrap_c_b_uncertainty_widens_ci.py::TestNoEvidencePreservesLegacy::test_no_eqe_returns_bit_identical_ci_under_fixed_seed
+        - tests/test_R5_bootstrap_c_b_uncertainty_widens_ci.py::TestSigmaMarketWidensCI::test_sigma_market_gt0_lowers_ci_lower
+      negative_constraints: []
+    capability_tags: [K2_runtime, kelly_sizing, uncertainty_budget]
+    relationship_tests:
+      - tests/test_R3_effective_kelly_haircut_not_in_dynamic_mult.py
+      - tests/test_R5_bootstrap_c_b_uncertainty_widens_ci.py
+    basis: architecture/market_cost_seam_executable_uncertainty_2026_05_27.md §D1 + Wave 5+6
+    added: 2026-05-27
+
   - id: INV-37
     zones: [K1_db_split, K2_runtime]
     statement: >
