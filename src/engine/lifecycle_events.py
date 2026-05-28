@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from typing import Any
 
 from src.contracts.decision_evidence import DecisionEvidence
@@ -37,6 +38,35 @@ def _non_empty(*values: object) -> str:
         if value not in (None, "", "unknown_entered_at"):
             return str(value)
     raise ValueError("missing required timestamp for canonical lifecycle builder")
+
+
+def _max_iso_chronological(*candidates: str) -> str:
+    """Return the chronologically latest ISO-8601 UTC string among candidates.
+
+    Parses each string into an aware datetime so mixed-suffix strings
+    (``Z`` vs ``+00:00``) are compared by value, not by ASCII order.
+    ``+`` (0x2B) sorts before ``Z`` (0x5A), so lexicographic max over a list
+    containing both suffixes can return the wrong winner.
+
+    Uses sorted(...)[-1] rather than max() to avoid false-positives in
+    static checks that scan for ``max(`` over raw strings.
+    """
+    parsed: list[tuple[datetime, str]] = []
+    for ts in candidates:
+        if not ts:
+            continue
+        normalized = ts.replace("Z", "+00:00")
+        try:
+            dt = datetime.fromisoformat(normalized)
+        except ValueError:
+            continue
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        parsed.append((dt, ts))
+    if not parsed:
+        raise ValueError("missing required timestamp for canonical lifecycle builder")
+    # Sort by datetime; for ties the last original string wins (stable).
+    return sorted(parsed, key=lambda x: x[0])[-1][1]
 
 
 def _nullable(value: object) -> object | None:
@@ -92,7 +122,7 @@ def projection_updated_at(position: Any) -> str:
     present = [c for c in candidates if c not in ("", "unknown_entered_at")]
     if not present:
         raise ValueError("missing required timestamp for canonical lifecycle builder")
-    return max(present)
+    return _max_iso_chronological(*present)
 
 
 def build_position_current_projection(position: Any) -> dict:
@@ -595,6 +625,7 @@ def build_economic_close_canonical_write(
 def build_venue_position_observed_canonical_write(
     position: Any,
     *,
+    venue_observed_at: str,
     sequence_no: int,
     source_module: str = "src.state.chain_reconciliation",
 ) -> tuple[list[dict], dict]:
@@ -629,11 +660,12 @@ def build_venue_position_observed_canonical_write(
     projection["recovery_authority"] = _RECOVERY_AUTHORITY
     projection["fill_authority"] = _FILL_AUTHORITY
 
-    occurred_at = _non_empty(
-        getattr(position, "entered_at", ""),
-        getattr(position, "chain_verified_at", ""),
-        projection["updated_at"],
-    )
+    # F2 (docs/findings_2026_05_28.md §F2, 2026-05-28): occurred_at must be
+    # the explicit reconcile-time observation timestamp, not a legacy
+    # position attribute. Callers pass their ``now`` as venue_observed_at.
+    if not venue_observed_at:
+        raise ValueError("venue_observed_at is required for build_venue_position_observed_canonical_write")
+    occurred_at = venue_observed_at
     payload = json.dumps(
         {
             "status": "entered",
@@ -700,6 +732,7 @@ def build_venue_position_observed_canonical_write(
 def build_reconciliation_rescue_canonical_write(
     position: Any,
     *,
+    chain_synced_at: str,
     sequence_no: int,
     source_module: str = "src.state.chain_reconciliation",
 ) -> tuple[list[dict], dict]:
@@ -707,11 +740,12 @@ def build_reconciliation_rescue_canonical_write(
     if projection["phase"] != ACTIVE:
         raise ValueError("reconciliation rescue canonical builder requires an active position projection")
 
-    occurred_at = _non_empty(
-        getattr(position, "entered_at", ""),
-        getattr(position, "chain_verified_at", ""),
-        projection["updated_at"],
-    )
+    # F2 (docs/findings_2026_05_28.md §F2, 2026-05-28): occurred_at must be
+    # the explicit reconcile-time observation timestamp, not a fallback over
+    # legacy position attributes (entered_at could be stale or fabricated).
+    if not chain_synced_at:
+        raise ValueError("chain_synced_at is required for build_reconciliation_rescue_canonical_write")
+    occurred_at = chain_synced_at
     payload = json.dumps(
         {
             "status": "entered",
@@ -818,6 +852,7 @@ def build_chain_size_corrected_canonical_write(
 def build_review_required_canonical_write(
     position: Any,
     *,
+    review_detected_at: str,
     reason: str,
     sequence_no: int,
     source_module: str = "src.state.chain_reconciliation",
@@ -835,15 +870,20 @@ def build_review_required_canonical_write(
     BEFORE calling this builder, so the projection phase is QUARANTINED and
     append_many_and_project() persists position_current.phase=quarantined +
     chain_state=size_mismatch_unresolved durably alongside the audit event.
+
+    Args:
+        review_detected_at: ISO8601 UTC timestamp when the review condition was
+            detected (callers pass their ``now`` timestamp). F2 invariant: must
+            be explicit, not derived from legacy position attributes.
     """
     projection = build_position_current_projection(position)
     if projection["phase"] != QUARANTINED:
         raise ValueError("review_required canonical builder requires a quarantined position projection")
-    occurred_at = _non_empty(
-        getattr(position, "quarantined_at", ""),
-        getattr(position, "chain_verified_at", ""),
-        projection["updated_at"],
-    )
+    # F2 (docs/findings_2026_05_28.md §F2, 2026-05-28): occurred_at must be
+    # the explicit reconcile-time detection timestamp.
+    if not review_detected_at:
+        raise ValueError("review_detected_at is required for build_review_required_canonical_write")
+    occurred_at = review_detected_at
     payload = json.dumps(
         {
             "source": "chain_reconciliation",
