@@ -25,3 +25,18 @@ entries:
     evidence: "python3 scripts/topology_doctor.py --tests --json failed on unrelated test-topology/law-gate debt while live-release tests were registered."
     active_task_scope: "docs/operations/task_2026-05-21_live_release_proof_p0p3"
     allowed_only_if: "The active change registers its own tests and does not add to the unrelated test-topology debt."
+
+  - failure_id: PEF-2026-05-27-D2-HARVESTER-T1-T7-T8
+    status: tracking
+    owner: calibration-learning-path
+    first_observed: "2026-05-27"
+    review_by: "2026-06-10"
+    evidence: |
+      test_T1_valid_authority_writes_pairs, test_T7_parametrized_authority_matrix[tigge_ens_v3-True-3-None],
+      test_T8_ecmwf_ens_source_writes_pairs all assert n==3 but get n==0.
+      Introduced by D2 gate (commit 6807e0e1ee) which added _snapshot_position_training_eligible
+      to maybe_write_learning_pair; the tests use decision_snapshot_id=None and no position_current
+      row is seeded, so the gate returns False (no matching rows). Tests were not updated to
+      seed a position_current row with valid fill_authority.
+    active_task_scope: "feat/ft-ship-64 PR2 (docs/findings_2026_05_28.md §F3)"
+    allowed_only_if: "Fix is seeding a valid position_current row in T1/T7/T8 fixtures (D2 remediation, not F3 scope)."

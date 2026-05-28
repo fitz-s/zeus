@@ -691,6 +691,7 @@ def _snapshot_position_training_eligible(conn, snapshot_id: str) -> bool:
     except Exception:
         # DB query failure is fail-closed: do not emit calibration rows
         # against a snapshot whose position authority can't be verified.
+        _emit_learning_write_blocked('position_fill_authority_db_query_error')
         return False
     if not rows:
         # No position joined to this snapshot — refuse defensively. A
@@ -698,6 +699,7 @@ def _snapshot_position_training_eligible(conn, snapshot_id: str) -> bool:
         # corresponding position_current row (the snapshot was used for
         # an entry decision). Missing row = projection drift; treat as
         # ineligible until the operator investigates.
+        _emit_learning_write_blocked('position_fill_authority_no_position_joined')
         return False
     for row in rows:
         raw_authority = row[1] if len(row) > 1 else None
@@ -804,11 +806,10 @@ def maybe_write_learning_pair(
             _trade_conn.close()
     except Exception:
         # Trades DB unreachable → fail closed (do not emit calibration rows we
-        # cannot authority-verify).
+        # cannot authority-verify). Inner gate was never reached so emit here.
+        _emit_learning_write_blocked('position_fill_authority_trades_db_unreachable')
         _eligible = False
     if not _eligible:
-        # F3: specific reason already emitted inside _snapshot_position_training_eligible
-        # (unmigrated, legacy_unknown, or not_training_eligible per authority value).
         return 0
 
     # Delegate to harvest_settlement which performs the same guards again
