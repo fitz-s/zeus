@@ -578,7 +578,7 @@ def _corrected_entry_identity_details(intent: ExecutionIntent) -> dict[str, str]
     snapshot_hash = _json_safe_string(getattr(intent, "executable_snapshot_hash", ""), "")
     cost_basis_id = _json_safe_string(getattr(intent, "executable_cost_basis_id", ""), "")
     cost_basis_hash = _json_safe_string(getattr(intent, "executable_cost_basis_hash", ""), "")
-    pricing_version = _json_safe_string(getattr(intent, "pricing_semantics_version", ""), "")
+    pricing_version = _json_safe_string(getattr(intent, "pricing_semantics_id", ""), "")
     snapshot_id = _json_safe_string(getattr(intent, "executable_snapshot_id", ""), "")
     has_corrected_identity = any(
         (snapshot_hash, cost_basis_id, cost_basis_hash, pricing_version)
@@ -590,7 +590,7 @@ def _corrected_entry_identity_details(intent: ExecutionIntent) -> dict[str, str]
         "snapshot_hash": snapshot_hash,
         "cost_basis_id": cost_basis_id,
         "cost_basis_hash": cost_basis_hash,
-        "pricing_semantics_version": pricing_version,
+        "pricing_semantics_id": pricing_version,
     }
 
 
@@ -613,11 +613,11 @@ def _corrected_entry_identity_component(
     snapshot_hash = details["snapshot_hash"]
     cost_basis_id = details["cost_basis_id"]
     cost_basis_hash = details["cost_basis_hash"]
-    pricing_version = details["pricing_semantics_version"]
+    pricing_version = details["pricing_semantics_id"]
     missing = [
         name
         for name, value in details.items()
-        if name != "pricing_semantics_version" and not value
+        if name != "pricing_semantics_id" and not value
     ]
     if missing:
         return _capability_component(
@@ -631,7 +631,7 @@ def _corrected_entry_identity_component(
         return _capability_component(
             "corrected_execution_identity",
             allowed=False,
-            reason="unsupported_pricing_semantics_version",
+            reason="unsupported_pricing_semantics_id",
             **details,
         )
     if len(snapshot_hash) != 64 or len(cost_basis_hash) != 64:
@@ -722,8 +722,8 @@ def _corrected_identity_from_command_events(
                 "snapshot_hash": _json_safe_string(details.get("snapshot_hash"), ""),
                 "cost_basis_id": _json_safe_string(details.get("cost_basis_id"), ""),
                 "cost_basis_hash": _json_safe_string(details.get("cost_basis_hash"), ""),
-                "pricing_semantics_version": _json_safe_string(
-                    details.get("pricing_semantics_version"),
+                "pricing_semantics_id": _json_safe_string(
+                    details.get("pricing_semantics_id"),
                     "",
                 ),
             }
@@ -1834,7 +1834,7 @@ def _legacy_entry_intent_from_final(
         executable_snapshot_hash=intent.snapshot_hash,
         executable_cost_basis_id=intent.cost_basis_id,
         executable_cost_basis_hash=intent.cost_basis_hash,
-        pricing_semantics_version=intent.pricing_semantics_version,
+        pricing_semantics_id=intent.pricing_semantics_id,
         executable_snapshot_min_tick_size=intent.tick_size,
         executable_snapshot_min_order_size=intent.min_order_size,
         executable_snapshot_neg_risk=intent.neg_risk,

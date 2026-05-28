@@ -58,7 +58,7 @@ def _insert_confirmed_trade_fact(
 
 def _corrected_exit_row(**overrides):
     row = {
-        "pricing_semantics_version": CORRECTED_ECONOMICS_COHORT,
+        "pricing_semantics_id": CORRECTED_ECONOMICS_COHORT,
         "corrected_executable_economics_eligible": True,
         "entry_economics_authority": "avg_fill_price",
         "fill_authority": "venue_confirmed_full",

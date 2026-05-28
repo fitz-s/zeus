@@ -742,7 +742,7 @@ def _attach_corrected_pricing_authority(
         )
         setattr(decision, "final_execution_intent", final_intent)
     payload = {
-        "pricing_semantics_version": cost_basis.pricing_semantics_version,
+        "pricing_semantics_id": cost_basis.pricing_semantics_id,
         "shadow_only": final_intent is None,
         "live_submit_authority": final_intent is not None,
         "field_semantics": (
@@ -2440,8 +2440,8 @@ def materialize_position(candidate, decision, result, portfolio, city, mode, *, 
         )
     except AttributeError:
         corrected_shadow = {}
-    pricing_semantics_version = str(
-        corrected_shadow.get("pricing_semantics_version")
+    pricing_semantics_id = str(
+        corrected_shadow.get("pricing_semantics_id")
         or "legacy_unclassified"
     )
     command_state = str(getattr(result, "command_state", "") or "")
@@ -2482,7 +2482,7 @@ def materialize_position(candidate, decision, result, portfolio, city, mode, *, 
         entry_economics_authority = ENTRY_ECONOMICS_AVG_FILL_PRICE
         fill_authority = FILL_AUTHORITY_VENUE_CONFIRMED_FULL
         corrected_executable_economics_eligible = (
-            pricing_semantics_version == CORRECTED_EXECUTABLE_PRICING_SEMANTICS_VERSION
+            pricing_semantics_id == CORRECTED_EXECUTABLE_PRICING_SEMANTICS_VERSION
         )
     else:
         entry_price = 0.0
@@ -2533,7 +2533,7 @@ def materialize_position(candidate, decision, result, portfolio, city, mode, *, 
         entry_cost_basis_hash=str(corrected_shadow.get("cost_basis_hash") or ""),
         entry_economics_authority=entry_economics_authority,
         fill_authority=fill_authority,
-        pricing_semantics_version=pricing_semantics_version,
+        pricing_semantics_id=pricing_semantics_id,
         execution_cost_basis_version=str(
             corrected_shadow.get("execution_cost_basis_version")
             or corrected_shadow.get("cost_basis_id")

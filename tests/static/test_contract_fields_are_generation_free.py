@@ -3,7 +3,7 @@
 # Authority basis: docs/findings_2026_05_28.md §B1 — generation-naming denylist
 """
 Test 6: Dataclass field name scan on Position (portfolio.py).
-xfail(strict=False): signal_version, calibration_version, pricing_semantics_version,
+xfail(strict=False): signal_version, calibration_version, pricing_semantics_id,
 execution_cost_basis_version exist today. PR3 B5 will rename them.
 """
 import dataclasses

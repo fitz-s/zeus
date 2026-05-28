@@ -3789,7 +3789,7 @@ digest_profiles:
         - "MarketPriorDistribution"
         - "ExecutableTradeHypothesis"
         - "FinalExecutionIntent"
-        - "pricing_semantics_version"
+        - "pricing_semantics_id"
         - "executable snapshot"
         - "market prior"
         - "cost basis"

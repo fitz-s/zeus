@@ -885,7 +885,7 @@ def _record_non_fill_progress_trade_if_present(
 def _refresh_corrected_economics_eligibility(pos: Position) -> None:
     pos.corrected_executable_economics_eligible = (
         pos.has_fill_economics_authority
-        and pos.pricing_semantics_version == CORRECTED_EXECUTABLE_PRICING_SEMANTICS_VERSION
+        and pos.pricing_semantics_id == CORRECTED_EXECUTABLE_PRICING_SEMANTICS_VERSION
     )
 
 

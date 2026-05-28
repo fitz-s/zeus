@@ -90,7 +90,7 @@ def _settlement_economics_for_position(pos) -> tuple[float, float]:
     authority = str(getattr(pos, "entry_economics_authority", "") or "")
     corrected_marked = (
         bool(getattr(pos, "corrected_executable_economics_eligible", False))
-        or str(getattr(pos, "pricing_semantics_version", "") or "")
+        or str(getattr(pos, "pricing_semantics_id", "") or "")
         == CORRECTED_EXECUTABLE_PRICING_SEMANTICS_VERSION
         or bool(str(getattr(pos, "entry_cost_basis_hash", "") or "").strip())
         or bool(str(getattr(pos, "execution_cost_basis_version", "") or "").strip())

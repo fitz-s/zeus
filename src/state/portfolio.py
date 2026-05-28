@@ -483,7 +483,7 @@ class Position:
     entry_cost_basis_hash: str = ""
     entry_economics_authority: str = ENTRY_ECONOMICS_LEGACY_UNKNOWN
     fill_authority: str = FILL_AUTHORITY_NONE
-    pricing_semantics_version: str = "legacy_unclassified"
+    pricing_semantics_id: str = "legacy_unclassified"
     execution_cost_basis_version: str = ""
     corrected_executable_economics_eligible: bool = False
     bankroll_at_entry: Optional[float] = None
@@ -2320,7 +2320,7 @@ def _track_exit(state: PortfolioState, pos: Position) -> None:
         "entry_cost_basis_hash": pos.entry_cost_basis_hash,
         "entry_economics_authority": pos.entry_economics_authority,
         "fill_authority": pos.fill_authority,
-        "pricing_semantics_version": pos.pricing_semantics_version,
+        "pricing_semantics_id": pos.pricing_semantics_id,
         "execution_cost_basis_version": pos.execution_cost_basis_version,
         "corrected_executable_economics_eligible": pos.corrected_executable_economics_eligible,
         "p_posterior": pos.p_posterior,

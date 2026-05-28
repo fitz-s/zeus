@@ -15494,7 +15494,7 @@ def test_settlement_economics_rejects_corrected_marker_without_fill_authority():
         submitted_notional_usd=11.0,
         entry_price_submitted=0.55,
         shares_submitted=20.0,
-        pricing_semantics_version=CORRECTED_EXECUTABLE_PRICING_SEMANTICS_VERSION,
+        pricing_semantics_id=CORRECTED_EXECUTABLE_PRICING_SEMANTICS_VERSION,
         corrected_executable_economics_eligible=True,
         entry_cost_basis_hash="a" * 64,
         execution_cost_basis_version=CORRECTED_EXECUTABLE_PRICING_SEMANTICS_VERSION,

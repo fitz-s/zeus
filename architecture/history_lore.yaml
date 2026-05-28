@@ -1154,7 +1154,7 @@ cards:
       Corrected live semantics are not complete until legacy BinEdge price
       fields stop carrying cross-plane authority, executor limit derivation is
       hardened against posterior/vwmp recomputation, exit symmetry is proven,
-      and reporting/backtest cohorts segregate pricing_semantics_version.
+      and reporting/backtest cohorts segregate pricing_semantics_id.
     invalidation_condition: >
       Close only after the corrected-mode implementation proves side/token/
       snapshot/cost-basis lineage end to end and rejects legacy complement

@@ -855,7 +855,7 @@ class ExecutionIntent:
     executable_snapshot_hash: str = ""
     executable_cost_basis_id: str = ""
     executable_cost_basis_hash: str = ""
-    pricing_semantics_version: str = ""
+    pricing_semantics_id: str = ""
     executable_snapshot_min_tick_size: Decimal | str | None = None
     executable_snapshot_min_order_size: Decimal | str | None = None
     executable_snapshot_neg_risk: bool | None = None
@@ -1003,7 +1003,7 @@ class ExecutableCostBasis:
     neg_risk: bool
     cost_basis_id: str = ""
     cost_basis_hash: str = ""
-    pricing_semantics_version: CorrectedPricingSemanticsVersion = (
+    pricing_semantics_id: CorrectedPricingSemanticsVersion = (
         CORRECTED_PRICING_SEMANTICS_VERSION
     )
 
@@ -1157,7 +1157,7 @@ class ExecutableCostBasis:
                 field_name,
                 _as_decimal(getattr(self, field_name), field_name),
             )
-        if self.pricing_semantics_version != CORRECTED_PRICING_SEMANTICS_VERSION:
+        if self.pricing_semantics_id != CORRECTED_PRICING_SEMANTICS_VERSION:
             raise ValueError(
                 "ExecutableCostBasis only supports corrected_executable_cost_v1"
             )
@@ -1277,7 +1277,7 @@ class ExecutableCostBasis:
             "quote_snapshot_id": self.quote_snapshot_id,
             "quote_snapshot_hash": self.quote_snapshot_hash,
             "neg_risk": str(bool(self.neg_risk)),
-            "pricing_semantics_version": self.pricing_semantics_version,
+            "pricing_semantics_id": self.pricing_semantics_id,
         }
 
     def assert_live_safe(self) -> None:
@@ -1345,7 +1345,7 @@ class ExecutableTradeHypothesis:
     order_policy: OrderPolicy
     fdr_family_id: str
     fdr_hypothesis_id: str
-    pricing_semantics_version: CorrectedPricingSemanticsVersion = (
+    pricing_semantics_id: CorrectedPricingSemanticsVersion = (
         CORRECTED_PRICING_SEMANTICS_VERSION
     )
 
@@ -1442,7 +1442,7 @@ class ExecutableTradeHypothesis:
             _as_decimal(self.payoff_probability, "payoff_probability"),
         )
         _require_unit_interval_closed(self.payoff_probability, "payoff_probability")
-        if self.pricing_semantics_version != CORRECTED_PRICING_SEMANTICS_VERSION:
+        if self.pricing_semantics_id != CORRECTED_PRICING_SEMANTICS_VERSION:
             raise ValueError(
                 "ExecutableTradeHypothesis only supports corrected_executable_cost_v1"
             )
@@ -1567,7 +1567,7 @@ class FinalExecutionIntent:
     correlation_key: str = ""
     decision_source_context: DecisionSourceContext | None = None
     passive_maker_context: PassiveMakerExecutionContext | None = None
-    pricing_semantics_version: CorrectedPricingSemanticsVersion = (
+    pricing_semantics_id: CorrectedPricingSemanticsVersion = (
         CORRECTED_PRICING_SEMANTICS_VERSION
     )
 
@@ -1645,7 +1645,7 @@ class FinalExecutionIntent:
                 field_name,
                 _as_decimal(getattr(self, field_name), field_name),
             )
-        if self.pricing_semantics_version != CORRECTED_PRICING_SEMANTICS_VERSION:
+        if self.pricing_semantics_id != CORRECTED_PRICING_SEMANTICS_VERSION:
             raise ValueError(
                 "FinalExecutionIntent only supports corrected_executable_cost_v1"
             )

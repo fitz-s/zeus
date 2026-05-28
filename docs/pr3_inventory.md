@@ -189,7 +189,7 @@ PR3 replacement per audit §B5 mapping table (`docs/findings_2026_05_28.md` §Re
 
 | Field | Location | Proposed replacement |
 |-------|----------|---------------------|
-| `pricing_semantics_version` | `Position.pricing_semantics_version: str = "legacy_unclassified"` (l.474) | `pricing_semantics_id` |
+| `pricing_semantics_id` | `Position.pricing_semantics_id: str = "legacy_unclassified"` (l.474) | `pricing_semantics_id` |
 | `execution_cost_basis_version` | `Position.execution_cost_basis_version: str = ""` (l.475) | `cost_basis_policy_id` |
 | `signal_version` | `Position.signal_version: str = "v2"` (l.491) | `signal_id` |
 | `calibration_version` | `Position.calibration_version: str = ""` (l.492) | `calibration_model_id` |
@@ -201,7 +201,7 @@ Also serialized at l.2305–2306; downstream in `src/execution/fill_tracker.py` 
 
 | Field | Location | Proposed replacement |
 |-------|----------|---------------------|
-| `pricing_semantics_version` | ExecutionIntent + 2 subclasses (l.858, l.1006, l.1348, l.1570) | `pricing_semantics_id` |
+| `pricing_semantics_id` | ExecutionIntent + 2 subclasses (l.858, l.1006, l.1348, l.1570) | `pricing_semantics_id` |
 
 ### `src/analysis/market_analysis_vnext.py`
 
