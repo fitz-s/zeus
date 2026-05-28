@@ -27,7 +27,6 @@ _PRE_MIGRATION_DDL = """
 CREATE TABLE position_events (
     event_id TEXT PRIMARY KEY,
     position_id TEXT NOT NULL,
-    event_version INTEGER NOT NULL DEFAULT 1 CHECK (event_version >= 1),
     sequence_no INTEGER NOT NULL CHECK (sequence_no >= 1),
     event_type TEXT NOT NULL CHECK (event_type IN (
         'POSITION_OPEN_INTENT','ENTRY_ORDER_POSTED','ENTRY_ORDER_FILLED',
@@ -67,7 +66,7 @@ def _load_migration():
 def _ins(event_id, position_id, seq, event_type, occurred_at):
     return (
         "INSERT INTO position_events "
-        "(event_id, position_id, event_version, sequence_no, event_type, occurred_at, "
+        "(event_id, position_id, sequence_no, event_type, occurred_at, "
         "strategy_key, source_module, payload_json, env) VALUES "
         f"('{event_id}','{position_id}',1,{seq},'{event_type}','{occurred_at}',"
         "'settlement_capture','test','{}','live')"

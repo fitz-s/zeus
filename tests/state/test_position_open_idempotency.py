@@ -65,7 +65,6 @@ _POSITION_EVENTS_DDL = """
 CREATE TABLE position_events (
     event_id TEXT PRIMARY KEY,
     position_id TEXT NOT NULL,
-    event_version INTEGER NOT NULL DEFAULT 1,
     sequence_no INTEGER NOT NULL,
     event_type TEXT NOT NULL,
     occurred_at TEXT NOT NULL,
@@ -141,7 +140,7 @@ def _insert_event(conn: sqlite3.Connection, *, position_id: str, seq: int, occur
     conn.execute(
         """
         INSERT INTO position_events (
-            event_id, position_id, event_version, sequence_no, event_type,
+            event_id, position_id, sequence_no, event_type,
             occurred_at, strategy_key, source_module, payload_json, env
         ) VALUES (?, ?, 1, ?, 'POSITION_OPEN_INTENT', ?, 'opening_inertia',
                   'test', '{}', 'live')

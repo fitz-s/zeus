@@ -10800,7 +10800,7 @@ def test_load_portfolio_reads_recent_exits_from_authoritative_settlement_rows(tm
     conn.execute(
         """
         INSERT INTO position_events (
-            event_id, position_id, event_version, sequence_no, event_type, occurred_at,
+            event_id, position_id, sequence_no, event_type, occurred_at,
             phase_before, phase_after, strategy_key, decision_id, snapshot_id, order_id,
             command_id, caused_by, idempotency_key, venue_status, source_module, payload_json,
             env

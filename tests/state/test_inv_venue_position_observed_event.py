@@ -168,7 +168,6 @@ def test_ensure_venue_position_observed_migrates_legacy_check(tmp_path: Path) ->
             CREATE TABLE position_events (
                 event_id TEXT PRIMARY KEY,
                 position_id TEXT NOT NULL,
-                event_version INTEGER NOT NULL DEFAULT 1 CHECK (event_version >= 1),
                 sequence_no INTEGER NOT NULL CHECK (sequence_no >= 1),
                 event_type TEXT NOT NULL CHECK (event_type IN (
                     'POSITION_OPEN_INTENT',

@@ -319,7 +319,6 @@ def _seed_pending_entry_projection(
 
     event_base = {
         "position_id": position_id,
-        "event_version": 1,
         "strategy_key": "opening_inertia",
         "decision_id": "dec-001",
         "snapshot_id": "snap-pos-001",
@@ -3660,13 +3659,13 @@ class TestRecoveryResolutionTable:
         conn.execute(
             """
             INSERT INTO position_events (
-                event_id, position_id, event_version, sequence_no, event_type,
+                event_id, position_id, sequence_no, event_type,
                 occurred_at, phase_before, phase_after, strategy_key, decision_id,
                 snapshot_id, order_id, command_id, caused_by, idempotency_key,
                 venue_status, source_module, payload_json, env
             )
             VALUES (
-                'pos-001:exit_rejected:retry', 'pos-001', 1, 3,
+                'pos-001:exit_rejected:retry', 'pos-001', 3,
                 'EXIT_ORDER_REJECTED', '2026-04-26T00:05:00Z', 'active',
                 'pending_exit', 'opening_inertia', 'dec-001', 'snap-pos-001',
                 NULL, NULL, 'test_retry_pending_setup',
@@ -3781,13 +3780,13 @@ class TestRecoveryResolutionTable:
         conn.execute(
             """
             INSERT INTO position_events (
-                event_id, position_id, event_version, sequence_no, event_type,
+                event_id, position_id, sequence_no, event_type,
                 occurred_at, phase_before, phase_after, strategy_key, decision_id,
                 snapshot_id, order_id, command_id, caused_by, idempotency_key,
                 venue_status, source_module, payload_json, env
             )
             VALUES (
-                'pos-001:exit_order_posted:cmd-exit', 'pos-001', 1, 3,
+                'pos-001:exit_order_posted:cmd-exit', 'pos-001', 3,
                 'EXIT_ORDER_POSTED', '2026-04-26T00:06:00Z', 'active',
                 'pending_exit', 'opening_inertia', 'dec-001', 'snap-pos-001',
                 'ord-exit', 'cmd-exit', 'test_torn_setup',

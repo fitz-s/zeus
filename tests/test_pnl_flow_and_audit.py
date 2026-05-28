@@ -802,7 +802,7 @@ def test_inv_status_reports_real_pnl(monkeypatch, tmp_path):
     conn.execute(
         """
         INSERT INTO position_events (
-            event_id, position_id, event_version, sequence_no, event_type, occurred_at,
+            event_id, position_id, sequence_no, event_type, occurred_at,
             phase_before, phase_after, strategy_key, decision_id, snapshot_id, order_id,
             command_id, caused_by, idempotency_key, venue_status, source_module, env, payload_json
         ) VALUES (?, ?, 1, 1, ?, ?, 'day0_window', 'pending_exit', ?, NULL, ?, NULL, NULL, ?, ?, NULL, 'tests', 'test', ?)
@@ -3607,7 +3607,7 @@ def test_inv_riskguard_prefers_canonical_position_events_settlement_source(monke
            "m6", "center_buy", 10.0, 25.0, 10.0, 0.40, "F", "high"))
     conn.execute("""
         INSERT INTO position_events
-        (event_id, position_id, event_version, sequence_no, event_type,
+        (event_id, position_id, sequence_no, event_type,
          occurred_at, strategy_key, source_module, env, payload_json)
         VALUES (?,?,?,?,?,?,?,?,?,?)
     """, ("rt-settle-auth:settled:1", "rt-settle-auth", 1, 1, "SETTLED",
@@ -4289,7 +4289,7 @@ def test_inv_harvester_prefers_durable_snapshot_over_open_portfolio(monkeypatch,
            "m1", "center_buy", 10.0, 10.0, 10.0, 0.40, "F", "high"))
     conn.execute("""
         INSERT INTO position_events
-        (event_id, position_id, event_version, sequence_no, event_type,
+        (event_id, position_id, sequence_no, event_type,
          occurred_at, strategy_key, snapshot_id, source_module, env, payload_json)
         VALUES (?,?,?,?,?,?,?,?,?,?,?)
     """, ("trade-durable-preferred:settled:1", "trade-durable-preferred", 1, 1, "SETTLED",
