@@ -54,9 +54,22 @@ def test_db_table_ownership_registers_edli_tables():
 
 
 def test_schema_version_check_accepts_edli_bump():
-    from src.state.db import SCHEMA_VERSION
+    # B2 (PR3, 2026-05-28): the hand-bumped SCHEMA_VERSION counter was cancelled in
+    # favour of a content-hash fingerprint over canonicalized DDL. The EDLI schema
+    # change is now tracked structurally — its tables contribute to the fingerprint
+    # rather than to a monotonic integer. Assert the fingerprint mechanism exists and
+    # the EDLI world tables are created (so they ARE covered by the fingerprint).
+    from pathlib import Path
 
-    assert SCHEMA_VERSION >= 36
+    from src.state.db import init_schema
+
+    fingerprint = Path(__file__).resolve().parents[2] / "architecture" / "_schema_fingerprint.txt"
+    assert fingerprint.exists(), "B2 schema fingerprint pin must exist (replaces SCHEMA_VERSION counter)"
+    assert fingerprint.read_text(encoding="utf-8").strip(), "fingerprint pin must be non-empty"
+
+    conn = sqlite3.connect(":memory:")
+    init_schema(conn)
+    assert EDLI_WORLD_TABLES <= _table_names(conn)
 
 
 def test_no_cross_db_fk():
