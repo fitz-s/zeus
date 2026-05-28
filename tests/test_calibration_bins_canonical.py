@@ -56,9 +56,9 @@ def _decision_group_id(
     city: str,
     target_date: str,
     forecast_available_at: str,
-    source_model_version: str = "test_calibration_bins_canonical_v1",
+    forecast_model_id: str = "test_calibration_bins_canonical_v1",
 ) -> str:
-    return compute_id(city, target_date, forecast_available_at, source_model_version)
+    return compute_id(city, target_date, forecast_available_at, forecast_model_id)
 
 
 # ---------------------------------------------------------------------------

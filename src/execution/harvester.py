@@ -201,8 +201,8 @@ def _metric_identity_for(temperature_metric: str | MetricIdentity) -> MetricIden
     return MetricIdentity.from_raw(temperature_metric)
 
 
-def _forecast_source_from_version(source_model_version: str | None) -> str:
-    version = str(source_model_version or "").strip().lower()
+def _forecast_source_from_version(forecast_model_id: str | None) -> str:
+    version = str(forecast_model_id or "").strip().lower()
     if not version:
         return ""
     if version.startswith("ecmwf_ens"):
@@ -214,8 +214,8 @@ def _forecast_source_from_version(source_model_version: str | None) -> str:
     return version.split("_", 1)[0]
 
 
-def _is_training_forecast_source(source_model_version: str | None) -> bool:
-    return _forecast_source_from_version(source_model_version) in _TRAINING_FORECAST_SOURCES
+def _is_training_forecast_source(forecast_model_id: str | None) -> bool:
+    return _forecast_source_from_version(forecast_model_id) in _TRAINING_FORECAST_SOURCES
 
 
 def _emit_learning_write_blocked(reason: str) -> None:
@@ -755,7 +755,7 @@ def maybe_write_learning_pair(
     """Authority-gated wrapper for harvest_settlement().
 
     T1C-LEARNING-AUTHORITY-GATE: refuses to write calibration pairs unless:
-      - context provides a non-empty source_model_version, AND
+      - context provides a non-empty forecast_model_id, AND
       - context provides snapshot_training_allowed=True (or snapshot_learning_ready=True)
 
     T1C-LIVE-PRAW-NOT-TRAINING-DATA: also refuses if the snapshot's source is
@@ -764,20 +764,20 @@ def maybe_write_learning_pair(
     Emits harvester_learning_write_blocked_total{reason} on each block.
     Returns the number of pairs written (0 on any block).
     """
-    source_model_version = context.get("source_model_version") or ""
+    forecast_model_id = context.get("forecast_model_id") or ""
     snapshot_training_allowed = _context_training_allowed(context)
 
     # Pre-screen: missing authority — harvest_settlement will also check, but
     # we emit the counter here so the caller's log captures the rejection.
-    if not str(source_model_version).strip() or not snapshot_training_allowed:
-        _emit_learning_write_blocked("missing_source_model_version_or_lineage")
+    if not str(forecast_model_id).strip() or not snapshot_training_allowed:
+        _emit_learning_write_blocked("missing_forecast_model_id_or_lineage")
         return 0
     if not _causality_allows_learning(context.get("snapshot_causality_status")):
         _emit_learning_write_blocked("snapshot_causality_not_ok")
         return 0
 
     # Pre-screen: live/non-training source.
-    if not _is_training_forecast_source(source_model_version):
+    if not _is_training_forecast_source(forecast_model_id):
         _emit_learning_write_blocked("live_praw_no_training_lineage")
         return 0
 
@@ -824,12 +824,12 @@ def maybe_write_learning_pair(
         lead_days=context["lead_days"],
         forecast_issue_time=context["issue_time"],
         forecast_available_at=context["available_at"],
-        source_model_version=source_model_version,
+        forecast_model_id=forecast_model_id,
         temperature_metric=temperature_metric,
         snapshot_id=context.get("decision_snapshot_id"),
         snapshot_training_allowed=snapshot_training_allowed,
         forecast_source=context.get("forecast_source", ""),
-        pair_data_version=context.get("source_model_version"),
+        pair_data_version=context.get("forecast_model_id"),
         causality_status=context.get("snapshot_causality_status") or "OK",
     )
 
@@ -1862,8 +1862,8 @@ def get_snapshot_context(
     )
     if row is None or not row["p_raw_json"]:
         return None
-    source_model_version = row["data_version"] or row["model_version"]
-    if not source_model_version:
+    forecast_model_id = row["data_version"] or row["model_version"]
+    if not forecast_model_id:
         return None
     issue_time = row["issue_time"]
     training_allowed = row["training_allowed"]
@@ -1884,9 +1884,9 @@ def get_snapshot_context(
             "lead_days": float(row["lead_hours"]) / 24.0,
             "issue_time": issue_time,
             "available_at": row["available_at"],
-            "source_model_version": source_model_version,
+            "forecast_model_id": forecast_model_id,
             "temperature_metric": str(row["temperature_metric"] or "high"),
-            "forecast_source": _forecast_source_from_version(source_model_version),
+            "forecast_source": _forecast_source_from_version(forecast_model_id),
             "snapshot_learning_ready": learning_snapshot_ready,
             "learning_blocked_reason": learning_blocked_reason,
             "snapshot_source": row["snapshot_source"],
@@ -2080,7 +2080,7 @@ def harvest_settlement(
     lead_days: float = 3.0,
     forecast_issue_time: Optional[str] = None,
     forecast_available_at: Optional[str] = None,
-    source_model_version: Optional[str] = None,
+    forecast_model_id: Optional[str] = None,
     settlement_value: Optional[float] = None,
     bias_corrected: Optional[bool] = None,
     temperature_metric: str = "high",
@@ -2114,13 +2114,13 @@ def harvest_settlement(
             bias_corrected = settings.bias_correction_enabled
         except Exception:
             bias_corrected = False
-    if p_raw_vector and not source_model_version:
+    if p_raw_vector and not forecast_model_id:
         raise ValueError(
-            "source_model_version is required when harvesting calibration pairs"
+            "forecast_model_id is required when harvesting calibration pairs"
         )
     coerced_snapshot_training_allowed = _coerce_training_allowed_flag(snapshot_training_allowed)
     if p_raw_vector and coerced_snapshot_training_allowed is False:
-        _emit_learning_write_blocked("missing_source_model_version_or_lineage")
+        _emit_learning_write_blocked("missing_forecast_model_id_or_lineage")
         return 0
     if p_raw_vector and not _causality_allows_learning(causality_status):
         _emit_learning_write_blocked("snapshot_causality_not_ok")
@@ -2130,14 +2130,14 @@ def harvest_settlement(
         if getattr(city, "temperature_metric", temperature_metric) == "low" or temperature_metric == "low"
         else temperature_metric
     )
-    resolved_forecast_source = forecast_source or _forecast_source_from_version(source_model_version)
+    resolved_forecast_source = forecast_source or _forecast_source_from_version(forecast_model_id)
     resolved_pair_data_version = (
         str(pair_data_version).strip()
         if pair_data_version not in (None, "")
         else (
             metric_identity.data_version
-            if _is_training_forecast_source(source_model_version)
-            else str(source_model_version or "").strip()
+            if _is_training_forecast_source(forecast_model_id)
+            else str(forecast_model_id or "").strip()
         )
     )
     if not resolved_pair_data_version:
@@ -2145,7 +2145,7 @@ def harvest_settlement(
     training_requested = (
         coerced_snapshot_training_allowed
         if coerced_snapshot_training_allowed is not None
-        else _is_training_forecast_source(source_model_version)
+        else _is_training_forecast_source(forecast_model_id)
     )
     resolved_snapshot_id = _coerce_snapshot_id(snapshot_id)
 
@@ -2211,7 +2211,7 @@ def harvest_settlement(
             city.name,
             target_date,
             issue_time,
-            source_model_version or "",
+            forecast_model_id or "",
         )
         # C5 routes both tracks through add_calibration_pair. The row also
         # preserves forecast-source lineage so runtime/fallback p_raw cannot be

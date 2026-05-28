@@ -232,7 +232,7 @@ Also serialized at l.2305–2306; downstream in `src/execution/fill_tracker.py` 
 
 | Field | Location | Proposed replacement |
 |-------|----------|---------------------|
-| `source_model_version` | function params + validation (l.43, l.93) | `forecast_model_id` |
+| `forecast_model_id` | function params + validation (l.43, l.93) | `forecast_model_id` |
 
 ### `src/calibration/retrain_trigger.py`
 

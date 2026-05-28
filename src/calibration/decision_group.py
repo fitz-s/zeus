@@ -2,7 +2,7 @@
 
 The **independent sample unit** for calibration is the decision group:
 
-    g = (city, target_date, issue_time, source_model_version)
+    g = (city, target_date, issue_time, forecast_model_id)
 
 All pair rows from a single ensemble snapshot at a single issue_time share
 the same underlying forecast and are NOT independent. Every statistical
@@ -40,7 +40,7 @@ def compute_id(
     city: str,
     target_date: DateLike,
     issue_time: DatetimeLike,
-    source_model_version: str,
+    forecast_model_id: str,
 ) -> str:
     """Canonical decision_group_id producer.
 
@@ -57,7 +57,7 @@ def compute_id(
             parseable by `datetime.fromisoformat`. Naive datetimes are
             rejected with `TypeError` because they are ambiguous — there
             is no correct hash for an unknown timezone.
-        source_model_version: TIGGE cycle / model version identifier. Non-empty.
+        forecast_model_id: TIGGE cycle / model version identifier. Non-empty.
 
     Returns:
         SHA-1 hex digest as a string. Stable across Python versions and
@@ -66,7 +66,7 @@ def compute_id(
     Raises:
         TypeError: `target_date` or `issue_time` is not an accepted type,
             or `issue_time` is a naive datetime.
-        ValueError: `city` or `source_model_version` is empty, or an
+        ValueError: `city` or `forecast_model_id` is empty, or an
             ISO-formatted date / datetime string fails to parse.
 
     Normalization (before hashing):
@@ -79,7 +79,7 @@ def compute_id(
         `Z` suffix. Sub-hour components are truncated to zero so that
         forecasts released within the same hour (Zeus's cycle cadence is
         ~30 minutes) hash together only if they come from the same
-        forecast cycle identified by `source_model_version`.
+        forecast cycle identified by `forecast_model_id`.
 
     Regression test (relationship test R3, TRAP A): the same logical
     snapshot reaching this function via 3 distinct code paths — direct
@@ -90,10 +90,10 @@ def compute_id(
     # --- sanity checks on the string inputs ---
     if not isinstance(city, str) or not city:
         raise ValueError(f"city must be a non-empty string, got {city!r}")
-    if not isinstance(source_model_version, str) or not source_model_version:
+    if not isinstance(forecast_model_id, str) or not forecast_model_id:
         raise ValueError(
-            f"source_model_version must be a non-empty string, got "
-            f"{source_model_version!r}"
+            f"forecast_model_id must be a non-empty string, got "
+            f"{forecast_model_id!r}"
         )
 
     # --- target_date normalization ---
@@ -151,5 +151,5 @@ def compute_id(
     time_str = utc_dt_hour.strftime("%Y-%m-%dT%H:00:00Z")
 
     # --- hash ---
-    payload = f"{city}|{date_str}|{time_str}|{source_model_version}"
+    payload = f"{city}|{date_str}|{time_str}|{forecast_model_id}"
     return hashlib.sha1(payload.encode("utf-8")).hexdigest()

@@ -362,7 +362,7 @@ def test_r3_compute_id_exists_and_rejects_naive_datetime():
             city="NYC",
             target_date=date(2024, 1, 15),
             issue_time=datetime(2024, 1, 15, 0, 0),  # naive: no tzinfo
-            source_model_version="tigge_v1",
+            forecast_model_id="tigge_v1",
         )
 
 

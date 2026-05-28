@@ -116,7 +116,7 @@ Archive cutover: 2026-04-26.
 3. `get_snapshot_context()` returns `bias_corrected` from snapshot
 4. Production caller passes snapshot's `bias_corrected` to `harvest_settlement()`
 5. `harvest_settlement()` also accepts explicit `bias_corrected` param; falls back to `settings.bias_correction_enabled` when None (for pre-migration snapshots without the column)
-6. `decision_group_id` computed upfront from `source_model_version` + `forecast_issue_time` (also from snapshot)
+6. `decision_group_id` computed upfront from `forecast_model_id` + `forecast_issue_time` (also from snapshot)
 Tests: `test_bias_corrected_persisted_through_harvest`, `test_bias_corrected_fallback_reads_settings`
 
 ---
@@ -753,7 +753,7 @@ DAY0_CAPTURE has `max_hours_to_resolution` → `min_hours_to_resolution=0` is pa
 **Location:** `src/execution/harvester.py::maybe_write_learning_pair`,
 `src/execution/harvester.py::harvest_settlement`.
 **Original problem:** Live decision p_raw could be stored as TIGGE training rows via source rebranding.
-**Structural closure:** T1C wraps `harvest_settlement()` in `maybe_write_learning_pair()` wrapper with T1C-LEARNING-AUTHORITY-GATE: gate refuses unless `snapshot_training_allowed=True`. Live p_raw (source_model_version='live_v1') cannot pass the wrapper. Caller must explicitly set training flag; default-False semantics prevent silent rebranding.
+**Structural closure:** T1C wraps `harvest_settlement()` in `maybe_write_learning_pair()` wrapper with T1C-LEARNING-AUTHORITY-GATE: gate refuses unless `snapshot_training_allowed=True`. Live p_raw (forecast_model_id='live_v1') cannot pass the wrapper. Caller must explicitly set training flag; default-False semantics prevent silent rebranding.
 **Resolved by:** T1C (commit 72e58e3a); closure verified via test_openmeteo_p_raw_lineage_does_not_write_tigge_training_pair.
 
 ---

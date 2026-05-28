@@ -4,7 +4,7 @@
 """Relationship tests: harvester learning-pair write authority gates.
 
 T1C-LEARNING-AUTHORITY-GATE: maybe_write_learning_pair() refuses to call
-harvest_settlement() unless source_model_version is non-empty AND
+harvest_settlement() unless forecast_model_id is non-empty AND
 snapshot_training_allowed is True.
 
 T1C-LIVE-PRAW-NOT-TRAINING-DATA: even when authority is nominally present,
@@ -16,9 +16,9 @@ forecast_issue_time is missing with p_raw_vector present, and now emits counter.
 
 Tests:
   T1: (smv=set, training=True) -> pairs written, no counter
-  T2: (smv=None, training=True) -> 0 pairs, reason=missing_source_model_version_or_lineage
-  T3: (smv=set, training=False) -> 0 pairs, reason=missing_source_model_version_or_lineage
-  T4: (smv=None, training=False) -> 0 pairs, reason=missing_source_model_version_or_lineage
+  T2: (smv=None, training=True) -> 0 pairs, reason=missing_forecast_model_id_or_lineage
+  T3: (smv=set, training=False) -> 0 pairs, reason=missing_forecast_model_id_or_lineage
+  T4: (smv=None, training=False) -> 0 pairs, reason=missing_forecast_model_id_or_lineage
   T5: live-praw (openmeteo) source -> 0 pairs, reason=live_praw_no_training_lineage
   T6: missing forecast_issue_time in harvest_settlement -> 0 pairs, reason=missing_forecast_issue_time
   T7: parametrize all authority cases together
@@ -78,7 +78,7 @@ def shared_conn():
 
 def _make_context(
     *,
-    source_model_version: Optional[str] = "tigge_ens_v3",
+    forecast_model_id: Optional[str] = "tigge_ens_v3",
     snapshot_training_allowed: bool = True,
     snapshot_learning_ready: bool = True,
     temperature_metric: str = "high",
@@ -89,7 +89,7 @@ def _make_context(
     forecast_source: str = "tigge",
 ) -> dict:
     return {
-        "source_model_version": source_model_version,
+        "forecast_model_id": forecast_model_id,
         "snapshot_training_allowed": snapshot_training_allowed,
         "snapshot_learning_ready": snapshot_learning_ready,
         "temperature_metric": temperature_metric,
@@ -113,9 +113,9 @@ _TARGET_DATE = "2026-05-01"
 # ---------------------------------------------------------------------------
 
 def test_T1_valid_authority_writes_pairs(shared_conn, caplog):
-    """With valid tigge source_model_version and training=True, pairs are written."""
+    """With valid tigge forecast_model_id and training=True, pairs are written."""
     city = _make_city("auth_city")
-    ctx = _make_context(source_model_version="tigge_ens_v3", snapshot_training_allowed=True)
+    ctx = _make_context(forecast_model_id="tigge_ens_v3", snapshot_training_allowed=True)
 
     with caplog.at_level(logging.WARNING, logger=HARVESTER_LOGGER):
         n = maybe_write_learning_pair(
@@ -131,13 +131,13 @@ def test_T1_valid_authority_writes_pairs(shared_conn, caplog):
 
 
 # ---------------------------------------------------------------------------
-# T2: missing source_model_version blocks
+# T2: missing forecast_model_id blocks
 # ---------------------------------------------------------------------------
 
-def test_T2_missing_source_model_version_blocks(shared_conn, caplog):
-    """None source_model_version -> 0 pairs, counter=missing_source_model_version_or_lineage."""
+def test_T2_missing_forecast_model_id_blocks(shared_conn, caplog):
+    """None forecast_model_id -> 0 pairs, counter=missing_forecast_model_id_or_lineage."""
     city = _make_city("no_smv_city")
-    ctx = _make_context(source_model_version=None, snapshot_training_allowed=True)
+    ctx = _make_context(forecast_model_id=None, snapshot_training_allowed=True)
 
     with caplog.at_level(logging.WARNING, logger=HARVESTER_LOGGER):
         n = maybe_write_learning_pair(
@@ -147,18 +147,18 @@ def test_T2_missing_source_model_version_blocks(shared_conn, caplog):
 
     assert n == 0
     reasons = [r.message for r in caplog.records if COUNTER_EVENT in r.message]
-    assert any("missing_source_model_version_or_lineage" in r for r in reasons), reasons
+    assert any("missing_forecast_model_id_or_lineage" in r for r in reasons), reasons
 
 
 # ---------------------------------------------------------------------------
-# T3: training=False blocks even when source_model_version is set
+# T3: training=False blocks even when forecast_model_id is set
 # ---------------------------------------------------------------------------
 
 def test_T3_training_false_blocks(shared_conn, caplog):
-    """snapshot_training_allowed=False -> 0 pairs, counter=missing_source_model_version_or_lineage."""
+    """snapshot_training_allowed=False -> 0 pairs, counter=missing_forecast_model_id_or_lineage."""
     city = _make_city("no_train_city")
     ctx = _make_context(
-        source_model_version="tigge_ens_v3",
+        forecast_model_id="tigge_ens_v3",
         snapshot_training_allowed=False,
         snapshot_learning_ready=False,
     )
@@ -171,7 +171,7 @@ def test_T3_training_false_blocks(shared_conn, caplog):
 
     assert n == 0
     reasons = [r.message for r in caplog.records if COUNTER_EVENT in r.message]
-    assert any("missing_source_model_version_or_lineage" in r for r in reasons), reasons
+    assert any("missing_forecast_model_id_or_lineage" in r for r in reasons), reasons
 
 
 # ---------------------------------------------------------------------------
@@ -182,7 +182,7 @@ def test_T4_both_missing_blocks(shared_conn, caplog):
     """None smv + training=False -> 0 pairs, counter emitted once."""
     city = _make_city("both_missing_city")
     ctx = _make_context(
-        source_model_version=None,
+        forecast_model_id=None,
         snapshot_training_allowed=False,
         snapshot_learning_ready=False,
     )
@@ -196,7 +196,7 @@ def test_T4_both_missing_blocks(shared_conn, caplog):
     assert n == 0
     reasons = [r.message for r in caplog.records if COUNTER_EVENT in r.message]
     assert len(reasons) >= 1
-    assert any("missing_source_model_version_or_lineage" in r for r in reasons), reasons
+    assert any("missing_forecast_model_id_or_lineage" in r for r in reasons), reasons
 
 
 # ---------------------------------------------------------------------------
@@ -211,7 +211,7 @@ def test_T5_live_praw_blocked(shared_conn, caplog):
     """
     city = _make_city("openmeteo_city")
     ctx = _make_context(
-        source_model_version="openmeteo_ecmwf_ifs025_live_v1",
+        forecast_model_id="openmeteo_ecmwf_ifs025_live_v1",
         snapshot_training_allowed=True,
         snapshot_learning_ready=True,
         forecast_source="openmeteo",
@@ -260,7 +260,7 @@ def test_T6_missing_issue_time_emits_counter(shared_conn, caplog):
             lead_days=3.0,
             forecast_issue_time=None,   # missing — should trigger the guard
             forecast_available_at="2026-05-01T06:00:00Z",
-            source_model_version="tigge_ens_v3",
+            forecast_model_id="tigge_ens_v3",
             snapshot_training_allowed=True,
             temperature_metric="high",
         )
@@ -274,25 +274,25 @@ def test_T6_missing_issue_time_emits_counter(shared_conn, caplog):
 # T7: parametrized authority matrix
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("source_model_version,snapshot_training_allowed,exp_pairs,exp_reason", [
+@pytest.mark.parametrize("forecast_model_id,snapshot_training_allowed,exp_pairs,exp_reason", [
     # Only path that writes: tigge source + training=True
     ("tigge_ens_v3",                True,  3,    None),
     # Missing smv
-    (None,                          True,  0,    "missing_source_model_version_or_lineage"),
+    (None,                          True,  0,    "missing_forecast_model_id_or_lineage"),
     # Empty smv
-    ("",                            True,  0,    "missing_source_model_version_or_lineage"),
+    ("",                            True,  0,    "missing_forecast_model_id_or_lineage"),
     # training=False
-    ("tigge_ens_v3",                False, 0,    "missing_source_model_version_or_lineage"),
+    ("tigge_ens_v3",                False, 0,    "missing_forecast_model_id_or_lineage"),
     # Both missing
-    (None,                          False, 0,    "missing_source_model_version_or_lineage"),
+    (None,                          False, 0,    "missing_forecast_model_id_or_lineage"),
 ])
 def test_T7_parametrized_authority_matrix(
-    shared_conn, caplog, source_model_version, snapshot_training_allowed, exp_pairs, exp_reason
+    shared_conn, caplog, forecast_model_id, snapshot_training_allowed, exp_pairs, exp_reason
 ):
     """Parametrized authority matrix for maybe_write_learning_pair()."""
-    city = _make_city(f"matrix_{source_model_version or 'none'}_{snapshot_training_allowed}")
+    city = _make_city(f"matrix_{forecast_model_id or 'none'}_{snapshot_training_allowed}")
     ctx = _make_context(
-        source_model_version=source_model_version,
+        forecast_model_id=forecast_model_id,
         snapshot_training_allowed=snapshot_training_allowed,
         snapshot_learning_ready=snapshot_training_allowed,
     )
@@ -321,7 +321,7 @@ def test_T8_ecmwf_ens_source_writes_pairs(shared_conn, caplog):
     """ecmwf_ens is in _TRAINING_FORECAST_SOURCES; pairs should be written."""
     city = _make_city("ecmwf_city")
     ctx = _make_context(
-        source_model_version="ecmwf_ens_tigge_v2",
+        forecast_model_id="ecmwf_ens_tigge_v2",
         snapshot_training_allowed=True,
         forecast_source="ecmwf_ens",
     )

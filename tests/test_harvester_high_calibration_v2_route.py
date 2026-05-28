@@ -69,7 +69,7 @@ def _seed_high_harvest(conn, city: City):
         lead_days=1.0,
         forecast_issue_time="2026-04-23T00:00:00Z",
         forecast_available_at="2026-04-23T00:00:00Z",
-        source_model_version="ecmwf_ens",
+        forecast_model_id="ecmwf_ens",
         settlement_value=87.0,
         temperature_metric="high",
     )
@@ -121,7 +121,7 @@ def test_low_pairs_still_land_in_v2_after_c5(harvest_conn):
         lead_days=1.0,
         forecast_issue_time="2026-04-23T00:00:00Z",
         forecast_available_at="2026-04-23T00:00:00Z",
-        source_model_version="ecmwf_ens",
+        forecast_model_id="ecmwf_ens",
         settlement_value=71.0,
         temperature_metric="low",
     )

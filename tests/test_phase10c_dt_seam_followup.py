@@ -221,7 +221,7 @@ class TestRCSHarvesterLowRouting:
             lead_days=2.0,
             forecast_issue_time="2026-03-30T00:00:00Z",
             forecast_available_at="2026-03-30T12:00:00Z",
-            source_model_version=(
+            forecast_model_id=(
                 "tigge_mn2t6_local_calendar_day_min_v1"
                 if temperature_metric == "low"
                 else "tigge_mx2t6_local_calendar_day_max_v1"

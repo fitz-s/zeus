@@ -204,7 +204,7 @@ def test_learning_writer_gate_uses_trades_connection(monkeypatch) -> None:
         "ge_20",
         ["ge_20", "lt_20"],
         {
-            "source_model_version": "ens_v3",
+            "forecast_model_id": "ens_v3",
             "snapshot_training_allowed": True,
             "snapshot_causality_status": "OK",
             "decision_snapshot_id": "snap-1",

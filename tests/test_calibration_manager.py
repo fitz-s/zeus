@@ -75,9 +75,9 @@ def _decision_group_id(
     city: str,
     target_date: str,
     issue_time: str,
-    source_model_version: str = "test_calibration_manager_v1",
+    forecast_model_id: str = "test_calibration_manager_v1",
 ) -> str:
-    return compute_id(city, target_date, issue_time, source_model_version)
+    return compute_id(city, target_date, issue_time, forecast_model_id)
 
 
 class TestBucketRouting:
@@ -214,7 +214,7 @@ class TestStoreRoundTrip:
             p_raw_vector=[0.05 * i for i in range(11)],
             lead_days=3.0,
             forecast_available_at="2026-01-14T00:00:00Z",
-            source_model_version="test_bias_corrected_v1",
+            forecast_model_id="test_bias_corrected_v1",
             forecast_issue_time="2026-01-13T12:00:00Z",
             bias_corrected=True,
         )
@@ -245,7 +245,7 @@ class TestStoreRoundTrip:
             p_raw_vector=[0.05 * i for i in range(11)],
             lead_days=2.0,
             forecast_available_at="2026-01-15T00:00:00Z",
-            source_model_version="test_bias_corrected_v1",
+            forecast_model_id="test_bias_corrected_v1",
             forecast_issue_time="2026-01-14T12:00:00Z",
             bias_corrected=False,
         )
@@ -276,7 +276,7 @@ class TestStoreRoundTrip:
             p_raw_vector=[0.5, 0.3, 0.2],
             lead_days=2.0,
             forecast_available_at="2026-01-31T00:00:00Z",
-            source_model_version="fallback_test_v1",
+            forecast_model_id="fallback_test_v1",
             forecast_issue_time="2026-01-30T12:00:00Z",
             bias_corrected=None,  # should fall back to settings
         )
@@ -750,7 +750,7 @@ class TestDecisionGroupAccounting:
             ),
         )
         # Same city/date/time/lead with a distinct source-version group_id is
-        # legal; source_model_version lives inside group_id.
+        # legal; forecast_model_id lives inside group_id.
         conn.execute(
             """
             INSERT INTO calibration_decision_group (

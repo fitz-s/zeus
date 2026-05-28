@@ -1707,7 +1707,7 @@ test_metadata:
     law_dependencies:
       - docs/operations/task_2026-05-04_zeus_may3_review_remediation/phases/T1C/phase.json
     notes: >
-      Relationship test. Parametrizes over (source_model_version, snapshot_training_allowed).
+      Relationship test. Parametrizes over (forecast_model_id, snapshot_training_allowed).
       Asserts maybe_write_learning_pair() returns 0 and emits
       harvester_learning_write_blocked_total{reason} for: missing smv, training=False,
       live-praw (openmeteo) source. Only tigge/ecmwf_ens with training=True writes pairs.

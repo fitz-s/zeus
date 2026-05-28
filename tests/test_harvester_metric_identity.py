@@ -1096,7 +1096,7 @@ def test_missing_forecast_issue_time_does_not_create_training_pairs(harvester_co
         lead_days=1.0,
         forecast_issue_time=None,
         forecast_available_at="2026-04-23T00:00:00Z",
-        source_model_version=HIGH_LOCALDAY_MAX.data_version,
+        forecast_model_id=HIGH_LOCALDAY_MAX.data_version,
         settlement_value=87.0,
         temperature_metric="high",
     )
@@ -1123,7 +1123,7 @@ def test_openmeteo_p_raw_lineage_does_not_write_tigge_training_pair(harvester_co
         lead_days=1.0,
         forecast_issue_time="2026-04-23T00:00:00Z",
         forecast_available_at="2026-04-23T00:00:00Z",
-        source_model_version="openmeteo_ecmwf_ifs025_live_v1",
+        forecast_model_id="openmeteo_ecmwf_ifs025_live_v1",
         settlement_value=87.0,
         temperature_metric="high",
         snapshot_id="123",
@@ -1163,7 +1163,7 @@ def test_malformed_forecast_issue_time_does_not_default_to_tigge_bucket(harveste
         lead_days=1.0,
         forecast_issue_time="not-a-forecast-cycle",
         forecast_available_at="2026-04-23T00:00:00Z",
-        source_model_version=HIGH_LOCALDAY_MAX.data_version,
+        forecast_model_id=HIGH_LOCALDAY_MAX.data_version,
         settlement_value=87.0,
         temperature_metric="high",
         snapshot_id="130",
@@ -1192,7 +1192,7 @@ def test_snapshot_training_disallowed_blocks_direct_harvest_pairs(harvester_conn
         lead_days=1.0,
         forecast_issue_time="2026-04-23T00:00:00Z",
         forecast_available_at="2026-04-23T00:00:00Z",
-        source_model_version=HIGH_LOCALDAY_MAX.data_version,
+        forecast_model_id=HIGH_LOCALDAY_MAX.data_version,
         settlement_value=87.0,
         temperature_metric="high",
         snapshot_training_allowed=False,
@@ -1212,7 +1212,7 @@ def test_context_explicit_training_disallow_overrides_learning_ready(harvester_c
     apply_v2_schema(harvester_conn)
     city = _make_city("context_training_disallowed")
     context = {
-        "source_model_version": HIGH_LOCALDAY_MAX.data_version,
+        "forecast_model_id": HIGH_LOCALDAY_MAX.data_version,
         "snapshot_training_allowed": False,
         "snapshot_learning_ready": True,
         "p_raw_vector": [0.2, 0.5, 0.3],
@@ -1257,7 +1257,7 @@ def test_snapshot_causality_not_ok_blocks_direct_harvest_pairs(harvester_conn):
         lead_days=1.0,
         forecast_issue_time="2026-04-23T00:00:00Z",
         forecast_available_at="2026-04-23T00:00:00Z",
-        source_model_version=HIGH_LOCALDAY_MAX.data_version,
+        forecast_model_id=HIGH_LOCALDAY_MAX.data_version,
         settlement_value=87.0,
         temperature_metric="high",
         snapshot_training_allowed=True,
@@ -1278,7 +1278,7 @@ def test_context_causality_not_ok_blocks_learning_pairs(harvester_conn):
     apply_v2_schema(harvester_conn)
     city = _make_city("context_causality_blocked")
     context = {
-        "source_model_version": HIGH_LOCALDAY_MAX.data_version,
+        "forecast_model_id": HIGH_LOCALDAY_MAX.data_version,
         "snapshot_training_allowed": True,
         "snapshot_learning_ready": True,
         "p_raw_vector": [0.2, 0.5, 0.3],
@@ -1324,7 +1324,7 @@ def test_serialized_training_disallow_blocks_direct_harvest_pairs(harvester_conn
         lead_days=1.0,
         forecast_issue_time="2026-04-23T00:00:00Z",
         forecast_available_at="2026-04-23T00:00:00Z",
-        source_model_version=HIGH_LOCALDAY_MAX.data_version,
+        forecast_model_id=HIGH_LOCALDAY_MAX.data_version,
         settlement_value=87.0,
         temperature_metric="high",
         snapshot_training_allowed=flag_value,
@@ -1345,7 +1345,7 @@ def test_serialized_context_training_disallow_blocks_learning_pairs(harvester_co
     apply_v2_schema(harvester_conn)
     city = _make_city(f"serialized_context_{flag_value}")
     context = {
-        "source_model_version": HIGH_LOCALDAY_MAX.data_version,
+        "forecast_model_id": HIGH_LOCALDAY_MAX.data_version,
         "snapshot_training_allowed": flag_value,
         "snapshot_learning_ready": True,
         "p_raw_vector": [0.2, 0.5, 0.3],
@@ -1507,7 +1507,7 @@ def test_snapshot_context_prefers_v2_and_respects_training_allowed(harvester_con
 
     assert context is not None
     assert context["snapshot_source"] == "ensemble_snapshots"
-    assert context["source_model_version"] == HIGH_LOCALDAY_MAX.data_version
+    assert context["forecast_model_id"] == HIGH_LOCALDAY_MAX.data_version
     assert context["p_raw_vector"] == [0.2, 0.5, 0.3]
     assert context["snapshot_learning_ready"] is False
     assert context["learning_blocked_reason"] == "snapshot_training_not_allowed"
@@ -1552,7 +1552,7 @@ def test_snapshot_context_preserves_legacy_fallback_when_no_v2_row(harvester_con
 
     assert context is not None
     assert context["snapshot_source"] == "ensemble_snapshots"
-    assert context["source_model_version"] == "legacy_v1"
+    assert context["forecast_model_id"] == "legacy_v1"
     assert context["snapshot_learning_ready"] is True
     assert context["learning_blocked_reason"] == ""
     assert p_raw == [0.2, 0.5, 0.3]
@@ -1653,7 +1653,7 @@ def test_snapshot_context_rejects_unrelated_v2_id_collision_for_row_identity(har
 
     assert context is not None
     assert context["snapshot_source"] == "ensemble_snapshots"
-    assert context["source_model_version"] == "legacy_v1"
+    assert context["forecast_model_id"] == "legacy_v1"
     assert context["p_raw_vector"] == [0.2, 0.5, 0.3]
     assert dropped_rows == []
     assert len(contexts) == 1

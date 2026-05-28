@@ -175,7 +175,7 @@ def build_decision_group_for_key(
         raise ValueError(
             "Multiple decision_group_id values matched "
             f"{city}/{target_date}/{forecast_available_at}; pass lead_days "
-            "and source_model_version-specific context to disambiguate"
+            "and forecast_model_id-specific context to disambiguate"
         )
     row = rows[0]
     _raise_on_group_collision(row)
