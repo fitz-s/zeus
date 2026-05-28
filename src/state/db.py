@@ -1636,7 +1636,7 @@ def init_schema(
             temperature_metric TEXT CHECK (temperature_metric IS NULL OR temperature_metric IN ('high','low')),
             physical_quantity TEXT,
             observation_field TEXT,
-            data_version TEXT,
+            dataset_id TEXT,
             expected_members INTEGER,
             observed_members INTEGER,
             expected_steps_json TEXT NOT NULL DEFAULT '[]',
@@ -1659,7 +1659,7 @@ def init_schema(
         CREATE INDEX IF NOT EXISTS idx_source_run_source_cycle
             ON source_run(source_id, track, source_cycle_time);
         CREATE INDEX IF NOT EXISTS idx_source_run_scope
-            ON source_run(city_id, city_timezone, target_local_date, temperature_metric, data_version);
+            ON source_run(city_id, city_timezone, target_local_date, temperature_metric, dataset_id);
         CREATE INDEX IF NOT EXISTS idx_source_run_status
             ON source_run(status, completeness_status, source_cycle_time);
 
@@ -2789,7 +2789,7 @@ def _create_source_run(conn: sqlite3.Connection) -> None:
                 CHECK (temperature_metric IS NULL OR temperature_metric IN ('high','low')),
             physical_quantity TEXT,
             observation_field TEXT,
-            data_version TEXT,
+            dataset_id TEXT,
             expected_members INTEGER,
             observed_members INTEGER,
             expected_steps_json TEXT NOT NULL DEFAULT '[]',
@@ -2817,7 +2817,7 @@ def _create_source_run(conn: sqlite3.Connection) -> None:
     conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_source_run_scope
             ON source_run(city_id, city_timezone, target_local_date,
-                          temperature_metric, data_version)
+                          temperature_metric, dataset_id)
     """)
     conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_source_run_status
@@ -3281,7 +3281,7 @@ def _create_market_microstructure_snapshots(conn: sqlite3.Connection) -> None:
             depth_at_best_ask               INTEGER NOT NULL DEFAULT 0,
             polymarket_end_anchor_source    TEXT NOT NULL DEFAULT 'unknown_legacy',
             bin_grid_id                     TEXT,
-            bin_schema_version              TEXT,
+            bin_schema_id              TEXT,
             schema_version                  INTEGER NOT NULL DEFAULT 5
                 CHECK (schema_version IN (5)),
             recorded_at                     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
@@ -3584,7 +3584,7 @@ def init_schema_forecasts(conn: sqlite3.Connection) -> None:
     # Guard pattern: swallow "duplicate column" on already-migrated DBs.
     for _alter_sql in (
         "ALTER TABLE day0_nowcast_runs ADD COLUMN bin_grid_id TEXT",
-        "ALTER TABLE day0_nowcast_runs ADD COLUMN bin_schema_version TEXT",
+        "ALTER TABLE day0_nowcast_runs ADD COLUMN bin_schema_id TEXT",
     ):
         try:
             conn.execute(_alter_sql)

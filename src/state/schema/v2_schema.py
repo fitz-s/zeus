@@ -124,7 +124,7 @@ def _create_ensemble_snapshots(conn: sqlite3.Connection) -> None:
             spread REAL,
             is_bimodal INTEGER,
             model_version TEXT NOT NULL,
-            data_version TEXT NOT NULL,
+            dataset_id TEXT NOT NULL,
             source_id TEXT,
             source_transport TEXT,
             source_run_id TEXT,
@@ -139,7 +139,7 @@ def _create_ensemble_snapshots(conn: sqlite3.Connection) -> None:
                 CHECK (settlement_unit IS NULL OR settlement_unit IN ('F', 'C')),
             settlement_rounding_policy TEXT,
             bin_grid_id TEXT,
-            bin_schema_version TEXT,
+            bin_schema_id TEXT,
             forecast_window_start_utc TEXT,
             forecast_window_end_utc TEXT,
             forecast_window_start_local TEXT,
@@ -168,7 +168,7 @@ def _create_ensemble_snapshots(conn: sqlite3.Connection) -> None:
             authority TEXT NOT NULL DEFAULT 'VERIFIED'
                 CHECK (authority IN ('VERIFIED', 'UNVERIFIED', 'QUARANTINED')),
             recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            UNIQUE(city, target_date, temperature_metric, issue_time, data_version)
+            UNIQUE(city, target_date, temperature_metric, issue_time, dataset_id)
         )
     """)
     conn.execute("""
@@ -204,7 +204,7 @@ def _create_ensemble_snapshots(conn: sqlite3.Connection) -> None:
         "ALTER TABLE ensemble_snapshots ADD COLUMN settlement_unit TEXT CHECK (settlement_unit IS NULL OR settlement_unit IN ('F', 'C'))",
         "ALTER TABLE ensemble_snapshots ADD COLUMN settlement_rounding_policy TEXT",
         "ALTER TABLE ensemble_snapshots ADD COLUMN bin_grid_id TEXT",
-        "ALTER TABLE ensemble_snapshots ADD COLUMN bin_schema_version TEXT",
+        "ALTER TABLE ensemble_snapshots ADD COLUMN bin_schema_id TEXT",
         "ALTER TABLE ensemble_snapshots ADD COLUMN forecast_window_start_utc TEXT",
         "ALTER TABLE ensemble_snapshots ADD COLUMN forecast_window_end_utc TEXT",
         "ALTER TABLE ensemble_snapshots ADD COLUMN forecast_window_start_local TEXT",
@@ -235,7 +235,7 @@ def _create_ensemble_snapshots(conn: sqlite3.Connection) -> None:
                 temperature_metric,
                 source_id,
                 source_transport,
-                data_version,
+                dataset_id,
                 source_run_id
             )
     """)
@@ -285,7 +285,7 @@ def _create_calibration_pairs(conn: sqlite3.Connection) -> None:
                 CHECK (authority IN ('VERIFIED', 'UNVERIFIED', 'QUARANTINED')),
             bin_source TEXT NOT NULL DEFAULT 'legacy',
             snapshot_id INTEGER REFERENCES ensemble_snapshots(snapshot_id),
-            data_version TEXT NOT NULL,
+            dataset_id TEXT NOT NULL,
             training_allowed INTEGER NOT NULL DEFAULT 1
                 CHECK (training_allowed IN (0, 1)),
             causality_status TEXT NOT NULL DEFAULT 'OK',
@@ -294,7 +294,7 @@ def _create_calibration_pairs(conn: sqlite3.Connection) -> None:
             horizon_profile TEXT NOT NULL DEFAULT 'full',
             recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(city, target_date, temperature_metric, range_label, lead_days,
-                   forecast_available_at, bin_source, data_version)
+                   forecast_available_at, bin_source, dataset_id)
         )
     """)
     # Phase 2 (2026-05-04): cycle/source_id/horizon_profile stratification —
@@ -330,7 +330,7 @@ def _create_calibration_pairs(conn: sqlite3.Connection) -> None:
     """)
     conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_calibration_pairs_refit_core
-            ON calibration_pairs(temperature_metric, data_version, training_allowed, authority)
+            ON calibration_pairs(temperature_metric, dataset_id, training_allowed, authority)
     """)
     # PHASE0-PR4: Install NOT NULL triggers on fresh DBs so the enforcement invariant
     # holds from the first INSERT, not only after the operator runs the migration script.
