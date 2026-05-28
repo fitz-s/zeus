@@ -2022,7 +2022,7 @@ tables:
 
   - name: settlements_v2
     db: world
-    schema_class: test_fixture_historical
+    schema_class: legacy_archived
     schema_version_owner: null
     created_by: tests/fixtures/before_p2_sqlite_master.sql
     pk_col: null
