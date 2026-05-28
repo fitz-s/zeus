@@ -2398,6 +2398,53 @@ def _live_yes_probabilities(
     raise ValueError(f"unsupported EDLI event type for inference: {event.event_type}")
 
 
+def _forecast_snapshot_probability_and_fdr_proof(
+    *,
+    event: OpportunityEvent,
+    family,
+    conn: sqlite3.Connection,
+    calibration_conn: sqlite3.Connection,
+    native_costs: dict[tuple[str, str], tuple[dict[str, Any] | None, ExecutionPrice | None, float, float | None, str | None]],
+    decision_time: datetime,
+    allow_latest_snapshot: bool = False,
+) -> tuple[
+    dict[str, float],
+    dict[tuple[str, str], float],
+    dict[tuple[str, str], float],
+    dict[tuple[str, str], bool],
+    dict[str, str],
+]:
+    """
+    FAIL-CLOSED STUB — codex never authored the EDLI probability + FDR inference kernel.
+
+    The full implementation requires authoring EDLI's live-money probability
+    semantics (Platt p_cal lookup, hypothesis bootstrap, FDR proof construction)
+    which is out-of-scope for rebase-resolution. Until codex provides the
+    canonical implementation, this stub returns empty mappings so:
+
+      1. Module imports succeed (event reactor tests pass)
+      2. Any production path reaching this function admits NO candidates
+         (q_by_condition empty → no executable proofs → no_submit decision)
+      3. Evidence dict explicitly documents the gap for downstream audit
+
+    Returns an empty inference result. Do not "fill in" the empty dicts with
+    placeholder probabilities — that would silently mis-trade.
+    """
+    q_by_condition: dict[str, float] = {}
+    q_lcb_by_direction: dict[tuple[str, str], float] = {}
+    generated_p_values: dict[tuple[str, str], float] = {}
+    generated_prefilter: dict[tuple[str, str], bool] = {}
+    probability_evidence: dict[str, str] = {
+        "status": "no_submit_fail_closed",
+        "reason": "edli_probability_kernel_unauthored",
+        "TODO": "codex must implement _forecast_snapshot_probability_and_fdr_proof per EDLI v1 spec",
+        "event_type": event.event_type,
+        "allow_latest_snapshot": str(allow_latest_snapshot),
+        "decision_time": decision_time.isoformat(),
+    }
+    return q_by_condition, q_lcb_by_direction, generated_p_values, generated_prefilter, probability_evidence
+
+
 def _canonical_probability_and_fdr_proof(
     *,
     event: OpportunityEvent,
@@ -2444,6 +2491,11 @@ def _canonical_probability_and_fdr_proof(
     lcb_by_direction: dict[tuple[str, str], float] = {}
     p_values: dict[tuple[str, str], float] = {}
     prefilter: dict[tuple[str, str], bool] = {}
+    # STUB: probability_rows and hypothesis_rows are placeholders pending canonical
+    # DB-backed row fetch implementation. Initialized empty so the loop raises
+    # ValueError fail-closed rather than NameError.
+    probability_rows: dict = {}
+    hypothesis_rows: dict = {}
     for candidate in family.candidates:
         condition_id = str(candidate.condition_id or "")
         range_label = candidate.bin.label
