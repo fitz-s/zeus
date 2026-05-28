@@ -13,13 +13,16 @@
 
 ## 0 — Operator Standing Directives (do not violate)
 
-1. **Goal active**: bring live to right code, right data, profitable orders. The only valid wait reasons are PR #359 + active rebuild/refit progress. No other wait justifies idle.
-2. **Live = SHADOW until M5**: daemons run, candidates compute, intents created + SUBMIT_REJECTED → no fills. FT flag OFF. After full rebuild+refit on aligned main, unshadow.
-3. **Shadow must work NOW** — operator: "live shadow will have wiring problem to fix, you should shadow the live and make sure it's working now." See §6 for current wiring break.
-4. **Worktree will be far behind main post-#359** — big file renames expected. B1-B7 patches must carry over; replay each on the new file path if renamed.
-5. **2hr heartbeat must fetch latest, not assume** — operator: "must check latest instead of just wake up." See §9.
-6. **1hr heartbeat REQUIRED during active rebuild/refit** — per memory `project_ft_ship_autonomous_workflow_2026_05_26.md`. PID alive + log frozen ≠ normal; silent ≠ normal; CPU%+RSS+log byte-delta + temp-file delta per minute required.
-7. **No new orders, no manual completion** — first live order must complete programmatically per design. Setting precedent for manual = masks cascade-liveness defects forever.
+1. **AUTONOMOUS MODE** (operator away 2026-05-28 ~05:50 CT): no AskUserQuestion, no stall. Continue self-paced. Operator: "i will be away and you are on autonomous now, do not call ask question do not stall."
+2. **TASKS ARE DOMINOS — next does not fall until current fires.** No parallel speculation on uncompleted predecessors. Each rebuild/refit/verify step waits for its predecessor's GREEN evidence (not just exit code 0). Operator: "your tasks are dominos and the next won't fall until you fire current one."
+3. **NO REBUILD BEFORE ALL FIX VERIFIED.** Rebuild = `rebuild_calibration_pairs_v2.py` (MC pair regen, hours-long). Must NOT fire until every B-fix is **verified in persisted state**, not just in unit tests. Verification list = §13. Operator: "you should not fire rebuild before all fix are veirfied."
+4. **Goal active**: bring live to right code, right data, profitable orders. The only valid wait reasons are PR #359 + active rebuild/refit progress.
+5. **Live = SHADOW until M5**: daemons run, candidates compute, intents created + SUBMIT_REJECTED → no fills. FT flag OFF.
+6. **Shadow must work NOW** — wiring break at §6 (probability_trace_fact silent). Parallel investigation while rebuild stages run, but does NOT block rebuild dominos.
+7. **Worktree will be far behind main post-#359** — big file renames expected. B1-B7 patches must carry over; replay each on the new file path if renamed.
+8. **2hr heartbeat MUST read this doc first** — operator: "make sure that heartbeat prompt ask you to read the doc." See §9. Doc is the single source of truth between heartbeat fires.
+9. **1hr-equivalent Monitor REQUIRED during any active rebuild/refit**. PID alive + log frozen ≠ normal; silent ≠ normal.
+10. **No new orders, no manual completion** — first live order must complete programmatically per design.
 
 ---
 
@@ -230,11 +233,17 @@ For reference (this part is NOT broken, do not "fix"):
 
 ---
 
-## 9 — 2-hour heartbeat (recurring via CronCreate job `a15c09ae`)
+## 9 — 2-hour heartbeat (recurring via CronCreate)
 
-Cron: `17 */2 * * *` (next fire 06:17 CT, then 08:17, 10:17, ..., 22:17, 00:17). Auto-expires 7 days — re-arm if mission > 7 days.
+Cron fires every 2hr at minute :17 (next 06:17 CT, then 08:17, ...). Auto-expires 7 days. The prompt fired by the cron is explicit:
 
-**Standing rule**: must fetch latest, not assume. Operator: "must check latest instead of just wake up."
+> **STEP 1 (mandatory)**: Read `docs/operations/ENS_B_BLOCKERS_AND_M_SERIES_CONTEXT_2026-05-28.md` §0 (directives) + §12 (domino chain) + §13 (verification probes). Do NOT assume context from prior turn.
+> **STEP 2**: Run the bash probe below; decode base64; orient against §12 domino table.
+> **STEP 3**: Identify lowest-numbered domino that is unblocked AND has not fired AND whose predecessor's GREEN evidence is recorded in this doc. Fire it. Update §12 with evidence + new status.
+> **STEP 4**: If D10 gate is still RED (any D2-D9 not GREEN), do NOT fire D11 rebuild.
+> **STEP 5**: Update doc §12, commit, push.
+
+Operator standing rule: "must check latest instead of just wake up."
 
 Script the heartbeat re-runs (paste into Bash; absolute paths):
 
@@ -307,4 +316,121 @@ grep -E '"full_transport_live_enabled"' /Users/leofitz/.openclaw/workspace-venus
 
 ---
 
-**End of doc. Resume work in §3 task table; live-shadow §6 (probability_trace_fact silent) is the immediate work front.**
+---
+
+## 12 — Domino chain (2026-05-28 05:50 CT, AUTONOMOUS MODE)
+
+Per operator: tasks are dominos. Each falls only after its predecessor's GREEN evidence. **No rebuild fires until every B-fix is verified in persisted state.**
+
+| # | Domino | Status | Evidence required to fall |
+|---|--------|--------|---------------------------|
+| D1 | HIGH producer fit on staging at sd3 | ✅ FELL 2026-05-28 05:35 CT (10s) | Log: `fitted=71 skipped=137 rows_written=71 zero_coverage=['Auckland']`. Gate stamped `deabf8f64bde27b7`. Staging `/private/tmp/scratch_ens_fit.db`. |
+| D2 | Verify B1 in persisted rows | ⏳ NEXT | SH cities (Buenos Aires, Cape Town, Sao Paulo, Wellington) must have ≥1 row under JJA/SON/DJF/MAM with calendar months consistent with SH flip. Query: §13 D2 probe. |
+| D3 | Verify B6 — every row's coverage_months ⊆ row's calendar group | ⏸️ blocked by D2 | Query §13 D3. |
+| D4 | Verify all D1 rows carry current gate_set_hash = `deabf8f64bde27b7` | ⏸️ blocked by D3 | Query §13 D4. |
+| D5 | Run audit_error_model_row_reproducibility on D1 rows | ⏸️ blocked by D4 | 100% rows must reproduce under current code; emit `same-source` artifact. |
+| D6 | LOW producer fit on staging at sd3 | ⏸️ blocked by D5 | Same script, `--metric low --commit`. |
+| D7 | Re-verify D2-D5 for LOW rows | ⏸️ blocked by D6 | Same probes, metric=low. |
+| D8 | Emit fresh `ROW_ACTION_MANIFEST_2026-05-28.csv` under sd3 | ⏸️ blocked by D7 | `scripts/audit_error_model_row_reproducibility.py` → ROW_ACTION_MANIFEST output mode. Closes BL-A / HB8. |
+| D9 | Verify manifest classifications sane | ⏸️ blocked by D8 | All rows ∈ {A,B,C,D,E}; no UNKNOWN; cohort counts reasonable. |
+| D10 | **GATE — all D1-D9 GREEN** | ⏸️ HARD STOP | Operator rule: no rebuild before all fix verified. If any D2-D9 RED: stop, log evidence, do NOT proceed. |
+| D11 | Launch MC rebuild on B∪E∪A_failed cohorts | ⏸️ blocked by D10 | `scripts/selective_refit_from_manifest.py --manifest <D8> --db /private/tmp/scratch_ens_fit.db --execute --n-mc 10000 --workers $(( $(sysctl -n hw.ncpu) - 2 ))`. Monitor armed with 1hr silence-alert. Hours-long. |
+| D12 | Verify MC outputs vs replay-equivalence | ⏸️ blocked by D11 | A-cohort PASS verdict; pair-batch manifest written; post-audit 100% servable. |
+| D13 | Wait #359 merge | parallel | Monitor `bvo7624iz`. When green: M1 rebase. |
+| D14 | M1: rebase worktree onto main, replay B-patches if renamed | ⏸️ blocked by D13 (and D12 in parallel) | Push aligned branch. |
+| D15 | M3 wiring fix: probability_trace_fact writer | parallel investigation | §6 root-cause; not in critical path of D11 — runs in background. |
+| D16 | M4 bin-bias before/after test | ⏸️ blocked by D12 + D15 | Test must show directional improvement on ≥2 of 3 metrics on ≥75% of cities. |
+| D17 | M5 unshadow live | ⏸️ blocked by D16 | Flip FT flag, kickstart live-trading, watch 4hr trade signal. |
+
+### Active monitoring
+
+| Watcher | Task ID | Cadence | Purpose |
+|---------|---------|---------|---------|
+| 2hr heartbeat cron | `a15c09ae` (in-session) | `17 */2 * * *` | Read this doc §12 first, then refetch latest state, advance lowest unblocked domino. **Prompt explicitly reads doc.** |
+| #359 PR monitor | `bvo7624iz` (persistent) | 10 min | Emits state changes. |
+| Rebuild monitor | re-armed per phase | 60 s tick | When D11 fires, new Monitor on the MC PID with silent-1hr alert. |
+
+---
+
+## 13 — Verification probes (D2-D5, D7, D9)
+
+Run each. Decode base64. Read evidence. Only mark domino GREEN with concrete row counts / specific cities listed.
+
+### D2 — B1 hemisphere-aware label persisted
+
+```bash
+OUT=$CLAUDE_JOB_DIR/d2_b1.txt
+sqlite3 -cmd "PRAGMA query_only=1;" /private/tmp/scratch_ens_fit.db "
+SELECT city, season, month, metric, coverage_months
+FROM model_bias_ens_v2
+WHERE authority='STAGING' AND error_model_family='full_transport_v1'
+  AND gate_set_hash='deabf8f64bde27b7'
+  AND city IN ('Buenos Aires','Cape Town','Sao Paulo','Wellington')
+ORDER BY city, season;" > "$OUT" 2>&1
+cat "$OUT" | base64
+```
+**GREEN**: each SH city has ≥1 row labeled JJA on coverage_months∈{1,2,12} OR SON on {3,4,5} OR DJF on {6,7,8} OR MAM on {9,10,11}.
+**RED**: any SH city shows DJF row covering (12,1,2) → B1 regressed.
+
+### D3 — coverage_months ⊆ season's calendar group (B6 evidence)
+
+```bash
+OUT=$CLAUDE_JOB_DIR/d3_b6.txt
+sqlite3 -cmd "PRAGMA query_only=1;" /private/tmp/scratch_ens_fit.db "
+SELECT season, coverage_months, COUNT(*)
+FROM model_bias_ens_v2
+WHERE authority='STAGING' AND error_model_family='full_transport_v1'
+  AND gate_set_hash='deabf8f64bde27b7'
+GROUP BY season, coverage_months
+ORDER BY season, coverage_months;" > "$OUT" 2>&1
+cat "$OUT" | base64
+```
+**GREEN**: all rows declare non-empty coverage_months ⊆ the season's calendar group (DJF→{12,1,2}, MAM→{3,4,5}, JJA→{6,7,8}, SON→{9,10,11}); no row has NULL/empty coverage.
+
+### D4 — every D1 row carries current gate hash
+
+```bash
+OUT=$CLAUDE_JOB_DIR/d4_gate.txt
+sqlite3 -cmd "PRAGMA query_only=1;" /private/tmp/scratch_ens_fit.db "
+SELECT gate_set_hash, authority, error_model_family, metric, COUNT(*)
+FROM model_bias_ens_v2
+WHERE recorded_at > datetime('now','-30 minutes')
+GROUP BY 1,2,3,4;" > "$OUT" 2>&1
+cat "$OUT" | base64
+```
+**GREEN**: all recent rows have `gate_set_hash='deabf8f64bde27b7'`.
+
+### D5 — row reproducibility audit
+
+```bash
+OUT=$CLAUDE_JOB_DIR/d5_audit.txt
+/Users/leofitz/.openclaw/workspace-venus/zeus/.venv/bin/python scripts/audit_error_model_row_reproducibility.py \
+  --world-db /private/tmp/scratch_ens_fit.db \
+  --forecasts-db /private/tmp/scratch_ens_fit.db \
+  --family full_transport_v1 2>&1 | tail -40 > "$OUT"
+cat "$OUT" | base64
+```
+**GREEN**: audit reports 100% rows REPRODUCIBLE same-source.
+**RED**: any NON_REPRODUCIBLE row.
+
+### D7 — same probes for LOW rows after D6.
+
+### D9 — manifest sanity
+
+```bash
+OUT=$CLAUDE_JOB_DIR/d9_manifest.txt
+{
+echo "=== rows total ==="
+wc -l docs/operations/ROW_ACTION_MANIFEST_2026-05-28.csv
+echo "=== by action ==="
+awk -F, 'NR>1{print $NF}' docs/operations/ROW_ACTION_MANIFEST_2026-05-28.csv | sort | uniq -c
+echo "=== UNKNOWN check ==="
+grep -c UNKNOWN docs/operations/ROW_ACTION_MANIFEST_2026-05-28.csv
+} > "$OUT" 2>&1
+cat "$OUT" | base64
+```
+**GREEN**: rows∈{A,B,C,D,E}, UNKNOWN count = 0, cohort distribution reasonable.
+
+---
+
+**End of doc. Resume at §12 lowest-unfallen domino. Read §0 directives EVERY heartbeat.**
