@@ -31,8 +31,9 @@ def conn():
             city TEXT, target_date TEXT, temperature_metric TEXT, data_version TEXT,
             members_json TEXT, members_unit TEXT, lead_hours REAL, available_at TEXT,
             contributes_to_target_extrema INTEGER, boundary_ambiguous INTEGER,
-            training_allowed INTEGER, causality_status TEXT, authority TEXT)"""
-    )
+            training_allowed INTEGER, causality_status TEXT, authority TEXT,
+            issue_time TEXT)"""
+    )  # Task #116 fix (2026-05-28): real schema has issue_time; ens_bias_repo SELECTs `e.issue_time`.
     c.execute(
         """CREATE TABLE settlements_v2(city TEXT, target_date TEXT, temperature_metric TEXT,
             settlement_value REAL, authority TEXT)"""
@@ -41,10 +42,11 @@ def conn():
 
 
 def _snap(conn, city, date, members, dv, *, unit="degC", contributes=1):
+    # issue_time defaults to target_date midnight UTC (plausible for daily snapshot tests).
     conn.execute(
-        "INSERT INTO ensemble_snapshots_v2 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO ensemble_snapshots_v2 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (city, date, "high", dv, json.dumps(members), unit, 24.0, "2026-05-10T00:00:00Z",
-         contributes, 0, 1, "OK", "VERIFIED"),
+         contributes, 0, 1, "OK", "VERIFIED", f"{date}T00:00:00+00:00"),
     )
 
 
