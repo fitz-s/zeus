@@ -1,0 +1,63 @@
+# Created: 2026-05-27
+# Last reused or audited: 2026-05-27
+# Authority basis: Zeus #64 ship-readiness C3 (HK HIGH carve-out declaration)
+#
+# HK HIGH pathology carve-outs — declaration
+
+# Status: NO ACTIVE CARVE-OUTS for full_transport_v1 HIGH at ship time.
+#
+# HongKong was re-evaluated on FRESH refit data (2026-05-27) after the upstream
+# bugs that drove the pre-rebuild +6.32°C over-warm verdict were both fixed:
+#   - #50 timezone daily-max extraction window bug
+#   - #68 model_bias_ens_v2 writer bug (canonical field handling)
+#
+# Fresh HK HIGH evidence (verified 2026-05-27 09:30 CDT):
+#   - model_bias_ens_v2 (MAM): bias_c=-2.108 °C, residual_sd_c=1.356 °C, healthy
+#   - platt_models_v2 MAM 00z: A=+1.799, B=+0.022, C=+1.123, Brier=0.00816, n=1958, VERIFIED
+#   - platt_models_v2 MAM 12z: A=+1.615, B=+0.017, C=+0.764, Brier=0.00818, n=495,  VERIFIED
+#
+# Brier 0.008 is within the same range as Atlanta / Amsterdam / Wuhan (healthy
+# cohorts). No PIT-bin-0 spike observed on the fresh fit. The prior verdict
+# (project_full_transport_s41_verdict_2026_05_25) was on the buggy pre-rebuild
+# data and is now superseded.
+#
+# Operator directive (2026-05-27): "do not exclude hongkong". HK ships WITH
+# full_transport_v1 correction on the same path as all other HIGH cohorts. No
+# pathology carve-out is required.
+#
+# If real-world live shadow data shows drift (bin bias > 1 unit vs settled),
+# re-introduce a carve-out under `carveouts:` below.
+
+carveouts: []
+
+ship_evidence:
+  - city: HongKong
+    metric: high
+    error_model_family: full_transport_v1
+    seasons_evaluated:
+      MAM:
+        bias_c: -2.108
+        residual_sd_c: 1.356
+        platt_00z:
+          A: 1.79939
+          B: 0.02159
+          C: 1.12266
+          brier_insample: 0.00816
+          n_samples: 1958
+        platt_12z:
+          A: 1.61507
+          B: 0.01684
+          C: 0.76355
+          brier_insample: 0.00818
+          n_samples: 495
+    determination: ship_no_carveout
+    determined_at: 2026-05-27T15:50:00Z
+    determined_by: Zeus #64 ship-readiness gate, operator directive 2026-05-27 09am CT
+
+# Format note: this file is consumed by
+#   scripts/check_full_transport_ship_readiness.py::check_hk_high_or_pathology_carveouts_declared
+# (Option A: existence of one of _CARVEOUT_PATHS files; text-substring match on
+#  "HongKong" / "hk" / "pathology"). All three substrings appear above, so the
+#  gate registers a declared status. An empty `carveouts:` list means HK ships
+#  without trade exclusion — pathology was investigated and ruled out on fresh
+#  data, not suppressed.

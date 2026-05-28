@@ -697,6 +697,22 @@ tables:
     created_by: init_schema
     pk_col: null
 
+  - name: model_bias_ens_v2
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: "(city, season, month, metric, live_data_version)"
+    notes: >
+      Zeus #64 FT-ship F6 (2026-05-26). ENS-product posterior-bias table for
+      full_transport_live error models. Base schema created by
+      init_ens_bias_schema() (called from init_schema). Canonical extension
+      columns (error_model_family, authority, bias_c, residual_sd_c, etc.) are
+      also applied idempotently by init_ens_bias_schema via PRAGMA-guarded ALTER.
+      authority='STAGING' rows written by fit_full_transport_error_models.py;
+      promoted to 'VERIFIED' by scripts/promote_model_bias_ens_v2.py (operator).
+      Distinct from legacy model_bias (trained on deterministic product).
+
   # ---------------------------------------------------------------------------
   # Dual-write contract: observation_instants (v1) + observation_instants_v2
   # ---------------------------------------------------------------------------

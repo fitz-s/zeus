@@ -1,8 +1,16 @@
 # Created: 2026-05-24
-# Last reused/audited: 2026-05-24
+# Last reused/audited: 2026-05-26
 # Authority basis: operator hierarchical-bias adjudication 2026-05-24 §9 + PR #334 pre-check
 #   blockers (unit->degC normalization, authority/contributor/causality/boundary filters,
 #   training-cutoff leakage guard, lineage schema, read-safety).
+# 2026-05-26 FT-ship F2: init_ens_bias_schema now also applies canonical-extension
+#   ALTERs idempotently so init_schema (world.db boot) yields a runtime-ready table
+#   without requiring a separate one-off migration call.
+#   Authority: docs/operations/FT_SHIP_EXECUTION_LEDGER_2026-05-25.md F2.
+# 2026-05-26 FT-ship F4: read_bias_model now requires error_model_family and filters
+#   AND authority = 'VERIFIED' so STAGING/LEGACY rows can never leak into the
+#   live FT path (no `is_active` column exists; authority + family are the
+#   discriminators per .schema). Authority: FT_SHIP_EXECUTION_LEDGER F4.
 """DB I/O for hierarchical ENS bias correction.
 
 - ``load_bucket_residuals``: per-bucket (forecast - actual) residuals for a forecast
@@ -96,8 +104,31 @@ def _to_c(value: float, unit: str | None) -> float:
 
 
 def init_ens_bias_schema(conn: sqlite3.Connection) -> None:
+    """Create model_bias_ens_v2 base table (idempotent) and apply all canonical
+    extension columns (PRAGMA-guarded ALTER TABLE, also idempotent).
+
+    Zeus #64 FT-ship F2 (2026-05-26): unified init so both init_schema (daemon
+    boot) and the standalone migration script reach a fully-extended schema via
+    a single call.  Re-running on an already-extended DB is a safe no-op.
+    """
     conn.execute(MODEL_BIAS_ENS_V2_SCHEMA)
     conn.commit()
+
+    # Apply canonical extension columns. SQLite has no ADD COLUMN IF NOT EXISTS,
+    # so we use PRAGMA table_info to check before each ALTER.
+    existing_cols = {r[1] for r in conn.execute("PRAGMA table_info(model_bias_ens_v2)").fetchall()}
+    for col, sql_type in _CANONICAL_EXTENSION_COLUMNS:
+        if col in existing_cols:
+            continue
+        try:
+            conn.execute(f"ALTER TABLE model_bias_ens_v2 ADD COLUMN {col} {sql_type}")
+            conn.commit()
+        except sqlite3.OperationalError as exc:
+            # Race-safe: another writer added the column between our PRAGMA check and ALTER.
+            if "duplicate column name" in str(exc).lower():
+                conn.rollback()
+            else:
+                raise
 
 
 def load_bucket_residuals(
@@ -336,19 +367,44 @@ def read_bias_model(
     metric: str,
     live_data_version: str | None = None,
     month: int | None = None,
+    error_model_family: str | None = None,
 ) -> sqlite3.Row | None:
     """Read a bias row. ``live_data_version`` is REQUIRED — there is no
-    'latest across data versions' fallback (that would serve the wrong product)."""
+    'latest across data versions' fallback (that would serve the wrong product).
+
+    Zeus #64 FT-ship F4 (2026-05-26): when ``error_model_family`` is supplied
+    the query also filters ``error_model_family = ?`` AND ``authority = 'VERIFIED'``
+    so STAGING / LEGACY rows can never leak into the live FT path.  The filter is
+    applied only when the canonical-extension columns are present (PRAGMA guard);
+    on a schema that predates F2 migration the call degrades to the base filter.
+    No ``is_active`` column exists — authority + family are the discriminators.
+    Authority: docs/operations/FT_SHIP_EXECUTION_LEDGER_2026-05-25.md F4.
+    """
     if not live_data_version:
         raise ValueError(
             "read_bias_model requires an exact live_data_version (no latest-row fallback "
             "— serving the wrong product's bias is a correctness hazard)"
         )
-    return conn.execute(
+
+    base_sql = (
         "SELECT * FROM model_bias_ens_v2 WHERE city=? AND season=? AND metric=? "
-        "AND live_data_version=? AND month=?",
-        (city, season, metric, live_data_version, (0 if month is None else int(month))),
-    ).fetchone()
+        "AND live_data_version=? AND month=?"
+    )
+    base_params: tuple = (city, season, metric, live_data_version, (0 if month is None else int(month)))
+
+    if error_model_family is not None:
+        # Check canonical columns exist before adding the filter (defensive for DBs
+        # that haven't been migrated yet — treats them as having no matching VERIFIED row).
+        existing = {r[1] for r in conn.execute("PRAGMA table_info(model_bias_ens_v2)").fetchall()}
+        if "error_model_family" not in existing or "authority" not in existing:
+            # Schema predates F2 migration — no VERIFIED rows possible.
+            return None
+        return conn.execute(
+            base_sql + " AND error_model_family=? AND authority='VERIFIED'",
+            base_params + (error_model_family,),
+        ).fetchone()
+
+    return conn.execute(base_sql, base_params).fetchone()
 
 
 _LEGACY_NULL_CONTRIBUTOR_SQL = (

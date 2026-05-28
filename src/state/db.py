@@ -894,7 +894,7 @@ def get_connection(
 # CI hook scripts/check_schema_version.py diffs the sqlite_master hash of
 # a fresh-init DB against tests/state/_schema_pinned_hash.txt and fails
 # the PR if SCHEMA_VERSION did not change in lockstep.
-SCHEMA_VERSION = 40  # 2026-05-27 PR #352 Part-3 F1/F4: position_events.event_type CHECK gains 'REVIEW_REQUIRED' (durable size-mismatch / chain-only review event); canonical wire grammar unified with src/contracts/position_truth.py::CanonicalPositionEventKind. Legacy DBs migrated via src/state/ledger.py::_ensure_review_required_event_type (table-rebuild, SQLite cannot ALTER a CHECK). Prior: 39 = PR D0b durable authority projection columns.
+SCHEMA_VERSION = 41  # 2026-05-27 merge #349+#352: FT-ship F2 (model_bias_ens_v2 in init_schema, world.db fresh-boot safe) merged with #352 Part-3 F1/F4 (position_events.event_type CHECK gains 'REVIEW_REQUIRED'). Prior: 40 = #352 durable authority projection + REVIEW_REQUIRED event type.
 
 
 def init_schema(
@@ -1393,7 +1393,7 @@ def init_schema(
             finality_confirmed_time    TEXT,
             clock_skew_estimate_ms_at_submit INTEGER,
             raw_orderbook_hash_transition_delta_ms INTEGER,
-            schema_version INTEGER NOT NULL CHECK (schema_version IN (12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40)),
+            schema_version INTEGER NOT NULL CHECK (schema_version IN (12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41)),
             source         TEXT NOT NULL CHECK (source IN ('phase0_backfill', 'live_decision', 'shadow_decision')),
             PRIMARY KEY (market_slug, temperature_metric, target_date, observation_time, decision_seq)
         );
@@ -2585,6 +2585,13 @@ def init_schema(
     from src.state.schema.v2_schema import apply_v2_schema as _apply_v2_schema
     _apply_v2_schema(conn, forecast_tables=False)
 
+    # Zeus #64 FT-ship F2 (2026-05-26): ensure model_bias_ens_v2 exists on every
+    # init_schema target so monitor_refresh + evaluator can read FT models at runtime
+    # without crashing on "no such table". Idempotent CREATE TABLE IF NOT EXISTS.
+    # Authority: docs/operations/FT_SHIP_EXECUTION_LEDGER_2026-05-25.md F2.
+    from src.calibration.ens_bias_repo import init_ens_bias_schema as _init_ens_bias_schema
+    _init_ens_bias_schema(conn)
+
     conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
     # db_chunk_boundary_events — K2 live-contention event log (Cluster B fix 2026-05-18)
@@ -2658,7 +2665,7 @@ def _migrate_decision_events_schema(conn: sqlite3.Connection) -> None:
             finality_confirmed_time    TEXT,
             clock_skew_estimate_ms_at_submit INTEGER,
             raw_orderbook_hash_transition_delta_ms INTEGER,
-            schema_version INTEGER NOT NULL CHECK (schema_version IN (12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40)),
+            schema_version INTEGER NOT NULL CHECK (schema_version IN (12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41)),
             source         TEXT NOT NULL CHECK (source IN ('phase0_backfill', 'live_decision', 'shadow_decision')),
             PRIMARY KEY (market_slug, temperature_metric, target_date, observation_time, decision_seq)
         )
@@ -2694,7 +2701,7 @@ def _migrate_decision_events_schema(conn: sqlite3.Connection) -> None:
             first_inclusion_block_time, finality_confirmed_time,
             clock_skew_estimate_ms_at_submit, raw_orderbook_hash_transition_delta_ms,
             CASE
-                WHEN schema_version IN (12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40)
+                WHEN schema_version IN (12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41)
                     THEN schema_version
                 ELSE 36
             END,

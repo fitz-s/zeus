@@ -420,7 +420,7 @@ def test_snapshot_refresh_stops_when_budget_is_exhausted(monkeypatch):
     clock = {"now": 0.0}
     captured: list[str] = []
 
-    def fake_capture(conn, *, market, decision, clob, captured_at, scan_authority, execution_side):
+    def fake_capture(conn, *, market, decision, clob, captured_at, scan_authority, execution_side, **kwargs):
         captured.append(decision.tokens["market_id"])
         clock["now"] += 2.0
 

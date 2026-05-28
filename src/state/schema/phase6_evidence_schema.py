@@ -41,7 +41,7 @@ CREATE TABLE IF NOT EXISTS evidence_tier_assignments (
     rationale      TEXT,
     operator_ref   TEXT,
     verdict_reason TEXT,
-    schema_version INTEGER NOT NULL DEFAULT 37 CHECK (schema_version IN (25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40)),
+    schema_version INTEGER NOT NULL DEFAULT 41 CHECK (schema_version IN (25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41)),
     assignment_source TEXT NOT NULL DEFAULT 'tribunal'
         CHECK (assignment_source IN ('tribunal', 'operator_override', 'migration')),
     verdict_kind   TEXT NOT NULL DEFAULT 'MIGRATION'
@@ -151,7 +151,7 @@ def _migrate_evidence_tier_assignments_schema(conn: sqlite3.Connection) -> None:
                 strategy_id,
                 CASE WHEN tier IN (0, 1, 2, 3, 4, 5, 6, 7) THEN tier ELSE 0 END,
                 assigned_at, rationale, operator_ref, verdict_reason,
-                CASE WHEN schema_version IN (25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40) THEN schema_version ELSE 29 END,
+                CASE WHEN schema_version IN (25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41) THEN schema_version ELSE 29 END,
                 assignment_source, verdict_kind,
                 effective_from, effective_until, revoked_at, revoked_by,
                 supersedes_assignment_id
@@ -169,7 +169,7 @@ def _migrate_evidence_tier_assignments_schema(conn: sqlite3.Connection) -> None:
                 strategy_id,
                 CASE WHEN tier IN (0, 1, 2, 3, 4, 5, 6, 7) THEN tier ELSE 0 END,
                 assigned_at, rationale, operator_ref, verdict_reason,
-                CASE WHEN schema_version IN (25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40) THEN schema_version ELSE 29 END,
+                CASE WHEN schema_version IN (25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41) THEN schema_version ELSE 29 END,
                 assignment_source, verdict_kind
             FROM evidence_tier_assignments
             """

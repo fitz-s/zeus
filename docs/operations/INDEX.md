@@ -232,3 +232,15 @@ operator decision in the next housekeeping pass:
 
 ## Registered full_transport ship artifacts (2026-05-25)
 - `FT_SHIP_EXECUTION_LEDGER_2026-05-25.md` — PR #342 full_transport → live ship execution ledger: task status, key paths, finished phases, open items. Authority: Zeus #64 live-ship program.
+
+## Registered full_transport refit + ship evidence (2026-05-25, PR #349)
+- `ENS_BEFORE_AFTER_LIVE_ONBOARD_2026-05-25.md` — Before/after live onboard comparison: full_transport_v1 calibration impact on live-onboarded cities.
+- `ENS_REFINEMENT_ROUTES_RESEARCH_2026-05-25.md` — ENS refinement routes research: HIGH markets 14-city proper-score analysis across candidate improvement routes.
+- `ENS_REFIT_FULLDB_HIGH_2026-05-25.md` — ENS refit validation HIGH temperature: full-DB blocked-OOS proper-score results (Brier, LogLoss, RPS, PIT) for HIGH markets.
+- `ENS_REFIT_FULLDB_LOW_2026-05-25.md` — ENS refit validation LOW temperature: full-DB blocked-OOS proper-score results for LOW markets.
+- `ENS_REFIT_MATH_ROI_2026-05-25.md` — ENS refit math/ROI consolidated report: quantified improvement metrics and economic upside estimate.
+- `ENS_REFIT_REFINEMENT_ROADMAP_2026-05-25.md` — Post-refit refinement roadmap: math-first gated improvement routes (Routes 1–6) with ship criteria.
+- `ENS_REFIT_VALIDATION_2026-05-25_results.md` — ENS refit validation results (2026-05-25): post-audit proper-score output from audit_refit_proper_scores.py.
+- `ENS_ROI_AUDIT_INDEX_2026-05-25.md` — ENS refit ROI audit document index: pointers to all evidence artifacts for the full_transport_v1 ship decision.
+- `ENS_ROUTE6_TRANSPORT_BETA_2026-05-25.md` — ENS Route 6 experiment: day-specific Δ transport β analysis and preliminary results.
+- `V1V2_SUFFIX_INVENTORY_2026-05-25.md` — v1/v2 suffix inventory: eradication feasibility analysis; live-DB + grep cross-check against db_table_ownership.yaml.

@@ -65,8 +65,22 @@ sys.path.insert(0, str(ZEUS_ROOT))
 logger = logging.getLogger(__name__)
 
 # ── data-version constants (matches onboard_cities.py) ──────────────────────
-_ENS_LIVE_DATA_VERSION = "ecmwf_opendata_mx2t3_local_calendar_day_max_v1"
-_ENS_PRIOR_DATA_VERSION = "tigge_mx2t6_local_calendar_day_max_v1"
+# Bug fix 2026-05-27: was hardcoded HIGH-only, causing --metric low to zero-cover
+# every city (script looked up HIGH residuals on LOW snapshots). Metric-aware now.
+_ENS_DATA_VERSIONS = {
+    "high": {
+        "live": "ecmwf_opendata_mx2t3_local_calendar_day_max_v1",
+        "prior": "tigge_mx2t6_local_calendar_day_max_v1",
+    },
+    "low": {
+        "live": "ecmwf_opendata_mn2t3_local_calendar_day_min_v1",
+        "prior": "tigge_mn2t6_local_calendar_day_min_v1",
+    },
+}
+# Back-compat module-level names: kept as HIGH defaults for legacy callers; the
+# fit loop below now resolves per-metric via _ENS_DATA_VERSIONS[metric].
+_ENS_LIVE_DATA_VERSION = _ENS_DATA_VERSIONS["high"]["live"]
+_ENS_PRIOR_DATA_VERSION = _ENS_DATA_VERSIONS["high"]["prior"]
 
 # ── season definitions ───────────────────────────────────────────────────────
 _SEASONS: tuple[tuple[str, tuple[int, ...]], ...] = (
@@ -196,16 +210,21 @@ def fit_all(
             for metric in metrics:
                 season_months = tuple(months)
                 bucket_label = f"{city}/{metric}/{season}"
+                # Bug fix 2026-05-27: resolve metric-aware data versions
+                # (was using HIGH-only constants → zero LOW coverage).
+                _dv = _ENS_DATA_VERSIONS[metric]
+                _live_dv = _dv["live"]
+                _prior_dv = _dv["prior"]
                 try:
                     # Probe live residuals to get n counts for signature hash
                     tig_residuals = load_bucket_residuals(
-                        conn, city=city, data_version=_ENS_PRIOR_DATA_VERSION,
+                        conn, city=city, data_version=_prior_dv,
                         metric=metric, season_months=season_months,
                         require_verified=False,
                         contributor_policy="legacy_tigge_null_passthrough",
                     )
                     opd_residuals = load_bucket_residuals(
-                        conn, city=city, data_version=_ENS_LIVE_DATA_VERSION,
+                        conn, city=city, data_version=_live_dv,
                         metric=metric, season_months=season_months,
                         contributor_policy="full_contributor_only",
                     )
@@ -218,8 +237,8 @@ def fit_all(
                     model = fit_city_predictive_error(
                         conn,
                         city=city,
-                        live_data_version=_ENS_LIVE_DATA_VERSION,
-                        prior_data_version=_ENS_PRIOR_DATA_VERSION,
+                        live_data_version=_live_dv,
+                        prior_data_version=_prior_dv,
                         season_months=season_months,
                         metric=metric,
                         kappa=kappa,
@@ -227,12 +246,12 @@ def fit_all(
 
                     sig_hash = _fit_signature_hash(
                         city, metric, season,
-                        _ENS_LIVE_DATA_VERSION, _ENS_PRIOR_DATA_VERSION,
+                        _live_dv, _prior_dv,
                         kappa, len(tig_residuals), len(opd_residuals),
                     )
                     error_model_key = (
                         f"{city}|{metric}|{season}"
-                        f"|full_transport_v1|{_ENS_LIVE_DATA_VERSION}"
+                        f"|full_transport_v1|{_live_dv}"
                     )
 
                     if dry_run:
@@ -251,8 +270,8 @@ def fit_all(
                             city=city,
                             season=season,
                             metric=metric,
-                            live_data_version=_ENS_LIVE_DATA_VERSION,
-                            prior_data_version=_ENS_PRIOR_DATA_VERSION,
+                            live_data_version=_live_dv,
+                            prior_data_version=_prior_dv,
                             posterior_bias_c=model.bias_c,
                             posterior_sd_c=model.bias_sd_c,
                             n_live=len(opd_residuals),

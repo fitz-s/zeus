@@ -115,7 +115,7 @@ from src.contracts.ensemble_snapshot_provenance import (
 )
 from src.contracts.settlement_semantics import SettlementSemantics
 from src.signal.ensemble_signal import p_raw_vector_from_maxes
-from src.state.db import init_schema, ZEUS_WORLD_DB_PATH
+from src.state.db import init_schema, init_schema_forecasts, ZEUS_WORLD_DB_PATH
 from src.state.db_writer_lock import (  # noqa: E402
     BulkChunker,
     bulk_lock_with_chunker,
@@ -265,6 +265,13 @@ class RebuildStatsV2:
     snapshots_no_observation: int = 0
     snapshots_unit_rejected: int = 0
     snapshots_processed: int = 0
+    # 2026-05-27: during a non-'none' rebuild (e.g. full_transport_v1), a
+    # snapshot whose error-model bucket is fail-open (no usable correction)
+    # would otherwise be written back as error_model_family='none', colliding
+    # with the pre-existing 'none' baseline on the 8-col UNIQUE key (which
+    # excludes error_model_family). Such snapshots are SKIPPED, not written —
+    # the 'none' baseline row already represents them. Counted here.
+    snapshots_fail_open_skipped: int = 0
     refused: bool = False
     pairs_written: int = 0
     pre_delete_v2_pairs: int = 0
@@ -280,6 +287,7 @@ class RebuildStatsV2:
             "snapshots_no_observation": self.snapshots_no_observation,
             "snapshots_unit_rejected": self.snapshots_unit_rejected,
             "snapshots_processed": self.snapshots_processed,
+            "snapshots_fail_open_skipped": self.snapshots_fail_open_skipped,
             "refused": self.refused,
             "pairs_written": self.pairs_written,
             "pre_delete_v2_pairs": self.pre_delete_v2_pairs,
@@ -1418,6 +1426,14 @@ def _process_snapshot_v2(
         p_raw_vec = p_raw_vector_from_maxes(
             member_maxes, city, sem, bins, n_mc=n_mc, rng=rng,
         )
+    # 2026-05-27 UNIQUE-collision fix (symmetric with the parallel path): during
+    # a non-'none' rebuild, a fail-open snapshot (applied_family downgraded to
+    # 'none') must NOT be written — it would collide with the pre-existing 'none'
+    # baseline row on the 8-col UNIQUE key (which excludes error_model_family).
+    # The baseline row already represents this snapshot; skip + count.
+    if applied_family != (error_model_family or "none"):
+        stats.snapshots_fail_open_skipped += 1
+        return
     _write_snapshot_pairs_v2(
         conn,
         snapshot,
@@ -1850,6 +1866,7 @@ def rebuild_v2(
     print("V2 REBUILD COMPLETE")
     print("=" * 70)
     print(f"Snapshots processed:     {stats.snapshots_processed}")
+    print(f"  fail-open skipped:     {stats.snapshots_fail_open_skipped}")
     print(f"  no matching obs:       {stats.snapshots_no_observation}")
     print(f"  unit/settlement reject:{stats.snapshots_unit_rejected}")
     print(f"Pairs written:           {stats.pairs_written}")
@@ -1953,6 +1970,7 @@ def _print_rebuild_gate_stats(stats: RebuildStatsV2) -> None:
     print(f"  no matching obs:            {stats.snapshots_no_observation}")
     print(f"  unit/settlement rejected:   {stats.snapshots_unit_rejected}")
     print(f"  snapshots passing gates:    {stats.snapshots_processed}")
+    print(f"  fail-open skipped:          {stats.snapshots_fail_open_skipped}")
     print(f"  estimated written pairs:    {stats.pairs_written}")
     if stats.contract_evidence_rejection_reasons:
         print("  contract-evidence reasons:")
@@ -2143,8 +2161,21 @@ def main() -> int:
         ) as chunker:
             # DDL inside the lock: apply_v2_schema contains DROP TABLE IF EXISTS
             # and CREATE TABLE IF NOT EXISTS — must run while bulk flock is held.
-            init_schema(conn)
+            # BUG FIX 2026-05-27: was calling init_schema (WORLD schema, bumps
+            # user_version to SCHEMA_VERSION=37) on the FORECASTS DB connection,
+            # corrupting forecasts.db user_version 7→37 and breaking live daemon
+            # boot (assert_schema_current_forecasts fails). Use init_schema_forecasts
+            # which sets user_version=SCHEMA_FORECASTS_VERSION=7 and creates only
+            # forecast-class tables.
+            init_schema_forecasts(conn)
             apply_v2_schema(conn)
+            # 2026-05-27: init_schema_forecasts and apply_v2_schema both call
+            # executescript() which resets the C-level busy handler, then
+            # re-apply PRAGMA busy_timeout from ZEUS_DB_BUSY_TIMEOUT_MS
+            # (default 30s). Re-assert our 10-min budget here so that the
+            # first SAVEPOINT (which fires after potentially long MC compute)
+            # still has the full wait window against riskguard ticks.
+            conn.execute("PRAGMA busy_timeout = 600000")
             try:
                 per_metric = rebuild_all_v2(
                     conn,
