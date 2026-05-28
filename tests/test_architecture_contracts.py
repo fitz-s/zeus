@@ -1728,6 +1728,7 @@ def test_entry_builder_emits_filled_batch_and_projection_that_append_cleanly():
         append_many_and_project,
         apply_architecture_kernel_schema,
     )
+    from src.state.lifecycle_manager import LifecyclePhase
 
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
@@ -2229,6 +2230,7 @@ def test_chain_size_corrected_builder_emits_chain_size_corrected_event_and_proje
         local_shares_before=20.0,
         sequence_no=4,
         source_module="src.state.chain_reconciliation",
+        phase_after=LifecyclePhase.ACTIVE.value,
     )
     append_many_and_project(conn, events, projection)
 
@@ -3045,6 +3047,7 @@ def test_reconciliation_size_correction_uses_canonical_current_to_avoid_repeated
         local_shares_before=20.0,
         sequence_no=4,
         source_module="src.state.chain_reconciliation",
+        phase_after=LifecyclePhase.ACTIVE.value,
     )
     append_many_and_project(conn, corrected_events, corrected_projection)
 
@@ -3826,6 +3829,7 @@ def test_harvester_settlement_path_settles_pending_exit_residual_exposure():
     from src.execution.harvester import _settle_positions
     from src.engine.lifecycle_events import build_entry_canonical_write
     from src.state.db import apply_architecture_kernel_schema, append_many_and_project
+    from src.state.lifecycle_manager import LifecyclePhase
     from src.state.portfolio import PortfolioState
 
     conn = sqlite3.connect(":memory:")
@@ -4165,16 +4169,18 @@ def test_cycle_runtime_entry_sequence_writes_legacy_on_legacy_db_and_canonical_o
 def test_cycle_runtime_entry_path_keeps_legacy_write_before_canonical_helper():
     text = (ROOT / "src/engine/cycle_runtime.py").read_text()
     marker = "log_trade_entry(conn, pos)"
-    start = text.index(marker)
-    # Canonical helper must appear after legacy write (ordering invariant).
-    # Window is 1000 chars to accommodate the SAVEPOINT guard block introduced
-    # in P10C (S6), which places _dual_write_canonical_entry_if_available
-    # immediately after the SAVEPOINT try/except for correctness reasons
-    # (with-conn inside that helper commits its own sub-transaction, which
-    # would release the SAVEPOINT if placed inside the try block).
-    snippet = text[start : start + 1000]
-    assert marker in snippet
-    assert "_dual_write_canonical_entry_if_available(" in snippet
+    canonical_helper = "_dual_write_canonical_entry_if_available("
+    # Ordering invariant: legacy write must appear before canonical helper.
+    # Use positional comparison rather than a fixed-width window; F4 inserted
+    # a phase_after derivation block between the two calls, shifting the helper
+    # past the original 1000-char window. The actual ordering constraint is
+    # index(log_trade_entry) < index(_dual_write_canonical_entry_if_available).
+    legacy_idx = text.index(marker)
+    canonical_idx = text.index(canonical_helper, legacy_idx)
+    assert legacy_idx < canonical_idx, (
+        "log_trade_entry must appear before _dual_write_canonical_entry_if_available "
+        f"in cycle_runtime.py (got legacy@{legacy_idx}, canonical@{canonical_idx})"
+    )
 
 
 def _stub_reprice_from_snapshot(conn, d, fields, ctx):
