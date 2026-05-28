@@ -476,6 +476,12 @@ class Position:
     corrected_executable_economics_eligible: bool = False
     bankroll_at_entry: Optional[float] = None
     entered_at: str = ""
+    # F2 (docs/findings_2026_05_28.md §F2, 2026-05-28): provenance tag for
+    # entered_at. "verified_entry_fill" when the timestamp came from a real
+    # venue fill fact; "reconstructed_from_chain" when it was fabricated from
+    # the reconcile-time clock (no fill fact available); "" for legacy rows
+    # that predate this field.
+    entered_at_authority: str = ""
     day0_entered_at: str = ""
     # Slice P3-fix3 (post-review critic Major #2, 2026-04-26): ENTRY-TIME
     # SNAPSHOT — frozen at construction (cycle_runtime.py:273) and NOT
