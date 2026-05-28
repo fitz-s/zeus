@@ -267,7 +267,7 @@ class TestCalibrationPairsV2IdentityFields:
         """R-M: data_version must be 'tigge_mx2t6_local_calendar_day_max_v1'.
 
         The old 'peak_window' tag is quarantined in Phase 4. Any row with the
-        old tag entering calibration_pairs_v2 is a Phase 4 scope violation.
+        old tag entering calibration_pairs is a Phase 4 scope violation.
         """
         conn = self._make_conn()
         dg_id = self._insert_calibration_pair_v2(conn)
@@ -307,7 +307,7 @@ class TestCalibrationPairsV2IdentityFields:
 # ---------------------------------------------------------------------------
 
 class TestRebuildV2PipelineIntegration:
-    """MAJOR-2 antibody: rebuild_v2() must produce calibration_pairs_v2 rows with correct
+    """MAJOR-2 antibody: rebuild_v2() must produce calibration_pairs rows with correct
     identity fields when called end-to-end (not just add_calibration_pair in isolation).
 
     This is the test that would have caught CRITICAL-1 (phantom 'source' column in SELECT)
@@ -369,7 +369,7 @@ class TestRebuildV2PipelineIntegration:
         conn.commit()
 
     def test_rebuild_v2_writes_high_track_identity_fields(self):
-        """MAJOR-2: rebuild_v2() end-to-end must produce calibration_pairs_v2 rows with
+        """MAJOR-2: rebuild_v2() end-to-end must produce calibration_pairs rows with
         temperature_metric='high', observation_field='high_temp',
         data_version='tigge_mx2t6_local_calendar_day_max_v1', training_allowed=1.
 

@@ -8240,7 +8240,7 @@ def _insert_runtime_transfer_sigma_row(
                 )
     conn.execute(
         """
-        INSERT OR REPLACE INTO platt_models_v2 (
+        INSERT OR REPLACE INTO platt_models (
             model_key, temperature_metric, cluster, season, data_version,
             input_space, param_A, param_B, param_C,
             bootstrap_params_json, n_samples, brier_insample,

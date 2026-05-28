@@ -1722,10 +1722,15 @@ def _snapshot_row_by_id(
         training_expr = _snapshot_select_expr(columns, "training_allowed", "NULL")
         causality_expr = _snapshot_select_expr(columns, "causality_status", "NULL")
         metric_expr = _snapshot_select_expr(columns, "temperature_metric", "'high'")
+        # B5 (PR3): ensemble_snapshots renamed data_version -> dataset_id. Expose a
+        # stable `data_version` read key whether the table is canonical or legacy.
+        model_version_expr = _snapshot_select_expr(columns, "model_version", "NULL")
+        data_version_expr = ("dataset_id AS data_version" if "dataset_id" in columns
+                             else _snapshot_select_expr(columns, "data_version", "NULL"))
         row = conn.execute(
             f"""
             SELECT p_raw_json, lead_hours, issue_time, available_at,
-                   model_version, data_version, snapshot_id,
+                   {model_version_expr}, {data_version_expr}, snapshot_id,
                    {training_expr},
                    {causality_expr},
                    {metric_expr},
@@ -1765,10 +1770,15 @@ def _latest_snapshot_row(
         training_expr = _snapshot_select_expr(columns, "training_allowed", "NULL")
         causality_expr = _snapshot_select_expr(columns, "causality_status", "NULL")
         metric_expr = _snapshot_select_expr(columns, "temperature_metric", "'high'")
+        # B5 (PR3): ensemble_snapshots renamed data_version -> dataset_id. Expose a
+        # stable `data_version` read key whether the table is canonical or legacy.
+        model_version_expr = _snapshot_select_expr(columns, "model_version", "NULL")
+        data_version_expr = ("dataset_id AS data_version" if "dataset_id" in columns
+                             else _snapshot_select_expr(columns, "data_version", "NULL"))
         row = conn.execute(
             f"""
             SELECT p_raw_json, lead_hours, issue_time, available_at,
-                   model_version, data_version, snapshot_id,
+                   {model_version_expr}, {data_version_expr}, snapshot_id,
                    {training_expr},
                    {causality_expr},
                    {metric_expr},

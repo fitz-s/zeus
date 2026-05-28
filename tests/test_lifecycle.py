@@ -2,7 +2,7 @@
 # Lifecycle: created=2025-10-01; last_reviewed=2026-05-08; last_reused=2026-05-08
 # Purpose: Exit-trigger + harvester lifecycle regression tests — covers
 #          position exit detection, harvest_settlement default-HIGH routing
-#          through calibration_pairs_v2 after C5 (2026-04-24), and p_raw
+#          through calibration_pairs after C5 (2026-04-24), and p_raw
 #          skip behavior when ensemble signal is absent.
 # Reuse: Referenced by regression suite; last touched 2026-05-08 for Wave28
 #        (HIGH→v2 route). Apply v2 schema in test fixtures when asserting
@@ -600,7 +600,7 @@ class TestMonitorWhaleToxicity:
 class TestHarvester:
     def test_harvest_creates_pairs(self, tmp_path):
         """Post-C5 (2026-04-24): harvest_settlement default-HIGH path now
-        writes to calibration_pairs_v2 (previously legacy calibration_pairs).
+        writes to calibration_pairs (previously legacy calibration_pairs).
         """
         from src.state.schema.v2_schema import apply_canonical_schema
 
@@ -626,7 +626,7 @@ class TestHarvester:
 
         assert count == 11
 
-        # Post-C5: HIGH default routes to calibration_pairs_v2.
+        # Post-C5: HIGH default routes to calibration_pairs.
         rows = conn.execute(
             "SELECT outcome, COUNT(*) FROM calibration_pairs GROUP BY outcome"
         ).fetchall()

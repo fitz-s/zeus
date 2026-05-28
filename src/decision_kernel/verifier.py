@@ -845,7 +845,7 @@ def _validate_forecast_authority_payload(forecast: dict) -> None:
         raise CertificateVerificationError(f"forecast.applied_validations missing required validations: {sorted(missing)}")
     if forecast.get("members_extrema_metric_identity") != forecast.get("temperature_metric"):
         raise CertificateVerificationError("forecast.members_extrema_metric_identity mismatch")
-    if forecast.get("members_json_source") != "ensemble_snapshots_v2.daily_extrema":
+    if forecast.get("members_json_source") != "ensemble_snapshots.daily_extrema":
         raise CertificateVerificationError("forecast.members_json_source is not authoritative daily extrema")
     expected_transform = _expected_members_extrema_transform(forecast.get("temperature_metric"))
     if forecast.get("members_extrema_transform") != expected_transform:

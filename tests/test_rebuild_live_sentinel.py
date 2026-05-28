@@ -13,7 +13,7 @@ Invariants asserted:
   T1E-REBUILD-COMPLETE-SENTINEL: a live rebuild scope is marked in_progress
     before bucket commits and complete only after all post-write gates pass.
   T1E-REFIT-REBUILD-COMPLETE-GATE: live Platt refit refuses to promote
-    calibration_pairs_v2 unless the exact rebuild scope is complete.
+    calibration_pairs unless the exact rebuild scope is complete.
 
 Tests:
   test_rebuild_refuses_during_live_subprocess   — sentinel present → sys.exit(1) via subprocess

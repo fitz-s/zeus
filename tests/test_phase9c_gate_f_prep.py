@@ -31,7 +31,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 
 class TestRBZGetCalibratorMetricAware:
-    """Phase 9C L3 CRITICAL fix: get_calibrator reads platt_models_v2 with
+    """Phase 9C L3 CRITICAL fix: get_calibrator reads platt_models with
     metric discrimination. Pre-P9C the function read exclusively from legacy
     platt_models (no metric column) — a LOW candidate would silently receive
     a HIGH Platt model. This is the structural CRITICAL that blocked LOW
@@ -59,7 +59,7 @@ class TestRBZGetCalibratorMetricAware:
         now = "2026-04-18T00:00:00+00:00"
         conn.execute(
             """
-            INSERT INTO platt_models_v2
+            INSERT INTO platt_models
                 (model_key, temperature_metric, cluster, season, data_version,
                  input_space, param_A, param_B, param_C, bootstrap_params_json,
                  n_samples, brier_insample, fitted_at, is_active, authority)
@@ -74,7 +74,7 @@ class TestRBZGetCalibratorMetricAware:
         )
         conn.execute(
             """
-            INSERT INTO platt_models_v2
+            INSERT INTO platt_models
                 (model_key, temperature_metric, cluster, season, data_version,
                  input_space, param_A, param_B, param_C, bootstrap_params_json,
                  n_samples, brier_insample, fitted_at, is_active, authority)
@@ -112,7 +112,7 @@ class TestRBZGetCalibratorMetricAware:
         )
         assert cal_low is not None, (
             "R-BZ.1: LOW calibrator lookup returned None despite a LOW row "
-            "existing in platt_models_v2. Pre-P9C this was guaranteed None "
+            "existing in platt_models. Pre-P9C this was guaranteed None "
             "(legacy table has no metric). Post-P9C must find the row."
         )
         assert cal_low.A == pytest.approx(4.56), (

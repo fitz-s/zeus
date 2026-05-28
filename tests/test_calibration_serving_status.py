@@ -163,7 +163,7 @@ def _insert_active_model(
 ) -> None:
     conn.execute(
         """
-        INSERT INTO platt_models_v2 (
+        INSERT INTO platt_models (
             model_key, temperature_metric, cluster, season, data_version, input_space,
             param_A, param_B, param_C, bootstrap_params_json, n_samples,
             brier_insample, fitted_at, is_active, authority, bucket_key,

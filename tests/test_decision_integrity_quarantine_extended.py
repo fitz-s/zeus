@@ -15,7 +15,7 @@ Coverage:
   2. test_promotion_readiness_excludes_quarantined_decisions: build_evidence_report
      excludes decision_events rows tagged in decision_integrity_quarantine.
   3. test_calibration_rebuild_excludes_quarantined_pairs: _fetch_pairs_for_bucket
-     (via refit_platt) excludes calibration_pairs_v2 rows tagged in quarantine.
+     (via refit_platt) excludes calibration_pairs rows tagged in quarantine.
   4. test_regret_decomposition_excludes_quarantined_rows: build_evidence_report
      excludes regret_decompositions rows whose decision_event_id is quarantined.
   5. quarantine_all_tables_for_noncontributing_forecast aggregates per-table results.
@@ -101,7 +101,7 @@ def _quarantined_ids(conn, table_name: str) -> set[str]:
 
 
 # ---------------------------------------------------------------------------
-# Tag-coverage: calibration_pairs_v2
+# Tag-coverage: calibration_pairs
 # ---------------------------------------------------------------------------
 
 @pytest.fixture()
@@ -609,7 +609,7 @@ def test_regret_decomposition_excludes_quarantined_rows():
 # ---------------------------------------------------------------------------
 
 def _make_platt_db() -> sqlite3.Connection:
-    """In-memory DB with calibration_pairs_v2 + decision_integrity_quarantine."""
+    """In-memory DB with calibration_pairs + decision_integrity_quarantine."""
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     conn.execute("""
@@ -645,7 +645,7 @@ def _make_platt_db() -> sqlite3.Connection:
 
 
 def test_calibration_rebuild_excludes_quarantined_pairs():
-    """_fetch_pairs_for_bucket excludes calibration_pairs_v2 rows tagged in quarantine."""
+    """_fetch_pairs_for_bucket excludes calibration_pairs rows tagged in quarantine."""
     import refit_platt as rp2
 
     from src.types.metric_identity import HIGH_LOCALDAY_MAX
@@ -711,7 +711,7 @@ def all_tables_db():
             recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         )
     """)
-    # calibration_pairs_v2
+    # calibration_pairs
     conn.execute("""
         CREATE TABLE calibration_pairs (
             pair_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -826,7 +826,7 @@ def test_quarantine_all_tables_aggregates(all_tables_db):
     all_tables_db.commit()
 
     result = quarantine_all_tables_for_noncontributing_forecast(all_tables_db)
-    # 6 tables: opportunity_fact, calibration_pairs_v2, probability_trace_fact,
+    # 6 tables: opportunity_fact, calibration_pairs, probability_trace_fact,
     # selection_family_fact, selection_hypothesis_fact, decision_events.
     assert result["newly_quarantined"] == 6
     assert result["per_table"]["opportunity_fact"]["newly_quarantined"] == 1

@@ -731,7 +731,7 @@ def test_forecast_certificate_records_unit_authority():
     assert result.status == "VERIFIED"
     forecast = next(cert for cert in result.certificates if cert.certificate_type == claims.FORECAST_AUTHORITY)
     assert forecast.payload["unit"] == "F"
-    assert forecast.payload["unit_authority_source"] == "ensemble_snapshots_v2.settlement_unit"
+    assert forecast.payload["unit_authority_source"] == "ensemble_snapshots.settlement_unit"
 
 
 def test_belief_certificate_unit_matches_family_bins():

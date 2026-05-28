@@ -1760,11 +1760,11 @@ def _build_no_submit_proof_bundle_from_adapter_evidence(
                 "family_id": family.family_id,
                 "condition_ids": condition_ids,
                 "candidate_count": len(tuple(family.candidates)),
-                "source_table": "market_events_v2",
+                "source_table": "market_events",
                 "event_id": event.event_id,
             },
             topology_clock,
-            "zeus.forecasts.market_events_v2",
+            "zeus.forecasts.market_events",
             algorithm_id="decision_kernel.topology.event_bound_adapter",
         ),
         family_closure=AuthorityEvidence(
@@ -2095,7 +2095,7 @@ def _forecast_authority_payload_and_clock(
         "temperature_metric": family.metric,
         "members_extrema_metric_identity": snapshot.get("temperature_metric"),
         "members_extrema_transform": _members_extrema_transform(family.metric),
-        "members_json_source": "ensemble_snapshots_v2.daily_extrema",
+        "members_json_source": "ensemble_snapshots.daily_extrema",
         "members_json_hash": members_json_hash,
         "target_local_date": family.target_date,
         "city_timezone": city_config.timezone,
@@ -2545,7 +2545,7 @@ def _canonical_probability_rows(
     allow_latest: bool,
     decision_time: datetime,
 ) -> dict[str, Any] | None:
-    table_ref = _authority_table_ref(conn, "ensemble_snapshots_v2")
+    table_ref = _authority_table_ref(conn, "ensemble_snapshots")
     if table_ref is None:
         raise ValueError("canonical probability_trace_fact table missing")
     columns = _table_ref_columns(conn, table_ref)
@@ -2815,9 +2815,9 @@ def _snapshot_unit(snapshot: dict[str, Any], payload: dict[str, object]) -> str:
 
 def _snapshot_unit_authority_source(snapshot: dict[str, Any]) -> str:
     if _nonnull(snapshot.get("settlement_unit") or snapshot.get("unit")):
-        return "ensemble_snapshots_v2.settlement_unit"
+        return "ensemble_snapshots.settlement_unit"
     if _nonnull(snapshot.get("members_unit")):
-        return "ensemble_snapshots_v2.members_unit"
+        return "ensemble_snapshots.members_unit"
     raise ValueError("FORECAST_UNIT_AUTHORITY_MISSING")
 
 
@@ -3083,7 +3083,7 @@ def _execution_price_from_snapshot(
 
 
 def _native_quote_book_from_snapshot_row(row: dict[str, Any]):
-    from src.contracts.executable_market_snapshot_v2 import fee_rate_fraction_from_details
+    from src.contracts.executable_market_snapshot import fee_rate_fraction_from_details
     from src.strategy.live_inference.executable_cost import NativeQuoteBook, QuoteLevel
 
     min_tick_size = Decimal(str(row.get("min_tick_size") or row.get("tick_size") or "0.01"))
@@ -3411,9 +3411,9 @@ def _native_cost_source_for_direction(direction: str | None) -> str | None:
 
 
 def _calibration_model_row(conn: sqlite3.Connection, *, model_key: object) -> dict[str, Any] | None:
-    if not model_key or not _table_exists(conn, "platt_models_v2"):
+    if not model_key or not _table_exists(conn, "platt_models"):
         return None
-    cur = conn.execute("SELECT * FROM platt_models_v2 WHERE model_key = ? LIMIT 1", (str(model_key),))
+    cur = conn.execute("SELECT * FROM platt_models WHERE model_key = ? LIMIT 1", (str(model_key),))
     row = cur.fetchone()
     if row is None:
         return None
@@ -3718,7 +3718,7 @@ def _event_family_market_topology_rows(
     Forecast and Day0 events are family facts, not child-token facts. They may
     legitimately lack condition/token ids, but they still must bind through the
     forecast-owned market topology table before executable snapshots can satisfy
-    the quote gate. The family universe comes from market_events_v2, not from the
+    the quote gate. The family universe comes from market_events, not from the
     subset of fresh executable snapshots, so a missing sibling cannot shrink the
     FDR denominator.
     """
@@ -3787,14 +3787,14 @@ def _market_events_table_ref(conn: sqlite3.Connection) -> str | None:
         attached = {str(row[1]) for row in conn.execute("PRAGMA database_list").fetchall()}
         if "forecasts" in attached:
             exists = conn.execute(
-                "SELECT 1 FROM forecasts.sqlite_master WHERE type='table' AND name='market_events_v2'"
+                "SELECT 1 FROM forecasts.sqlite_master WHERE type='table' AND name='market_events'"
             ).fetchone()
             if exists is not None:
-                return "forecasts.market_events_v2"
+                return "forecasts.market_events"
     except Exception:
         pass
-    if _table_exists(conn, "market_events_v2"):
-        return "market_events_v2"
+    if _table_exists(conn, "market_events"):
+        return "market_events"
     return None
 
 

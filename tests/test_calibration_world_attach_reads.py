@@ -5,7 +5,7 @@
 
 Live cycles use a trade DB connection with the world DB attached as ``world``.
 Legacy bootstrap left empty calibration tables in the trade DB, so unqualified
-``FROM platt_models_v2`` reads can silently miss authoritative world rows.
+``FROM platt_models`` reads can silently miss authoritative world rows.
 """
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ from src.config import City
 
 
 PLATT_V2_SCHEMA = """
-CREATE TABLE {schema}platt_models_v2 (
+CREATE TABLE {schema}platt_models (
     model_key TEXT PRIMARY KEY,
     temperature_metric TEXT NOT NULL,
     cluster TEXT NOT NULL,
@@ -51,7 +51,7 @@ def _attached_trade_conn(tmp_path) -> sqlite3.Connection:
     conn.execute(PLATT_V2_SCHEMA.format(schema="world."))
     conn.execute(
         """
-        INSERT INTO world.platt_models_v2 (
+        INSERT INTO world.platt_models (
             model_key, temperature_metric, cluster, season, data_version,
             input_space, param_A, param_B, param_C, bootstrap_params_json,
             n_samples, brier_insample, fitted_at, is_active, authority

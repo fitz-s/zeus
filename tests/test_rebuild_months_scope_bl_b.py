@@ -3,7 +3,7 @@
 # Authority basis: operator pre-MC re-audit Blocker 2 / BL-B
 
 """
-RELATIONSHIP tests for --months scoping in rebuild_calibration_pairs_v2.
+RELATIONSHIP tests for --months scoping in rebuild_calibration_pairs.
 
 BL-B Blocker: a per-(city, season, metric) regen must NOT delete pairs
 belonging to other seasons.  The month-scoped DELETE is the critical
@@ -13,7 +13,7 @@ antibody.  Tests here use in-memory SQLite to verify:
    DJF rows for the same city+metric+bin_source.
 
 2. _fetch_eligible_snapshots_v2(months=(3,4,5)) returns only MAM snapshots
-   from ensemble_snapshots_v2 — no DJF rows bleed through.
+   from ensemble_snapshots — no DJF rows bleed through.
 
 3. _scoped_pair_predicate(months=(3,4,5)) embeds the SUBSTR month-IN clause
    in the WHERE string and includes the month integers in params.
@@ -30,7 +30,7 @@ import pytest
 from src.state.db import init_schema_forecasts
 from src.state.schema.v2_schema import apply_v2_schema
 from src.calibration.metric_specs import METRIC_SPECS
-from scripts.rebuild_calibration_pairs_v2 import (
+from scripts.rebuild_calibration_pairs import (
     CANONICAL_BIN_SOURCE_V2,
     _delete_canonical_v2_slice,
     _fetch_eligible_snapshots_v2,
@@ -61,10 +61,10 @@ def _insert_pair(
     target_date: str,
     temperature_metric: str = "high",
 ) -> None:
-    """Insert a minimal calibration_pairs_v2 row satisfying all NOT NULL constraints."""
+    """Insert a minimal calibration_pairs row satisfying all NOT NULL constraints."""
     conn.execute(
         """
-        INSERT INTO calibration_pairs_v2
+        INSERT INTO calibration_pairs
             (city, target_date, temperature_metric, observation_field,
              range_label, p_raw, outcome, lead_days, season, cluster,
              forecast_available_at, data_version, decision_group_id,
@@ -85,10 +85,10 @@ def _insert_snapshot(
     temperature_metric: str = "high",
     data_version: str = "tigge_mx2t6_local_calendar_day_max_v1",
 ) -> None:
-    """Insert a minimal ensemble_snapshots_v2 row that passes the eligibility WHERE."""
+    """Insert a minimal ensemble_snapshots row that passes the eligibility WHERE."""
     conn.execute(
         """
-        INSERT INTO ensemble_snapshots_v2
+        INSERT INTO ensemble_snapshots
             (city, target_date, temperature_metric, physical_quantity,
              observation_field, lead_hours, members_json, model_version,
              data_version, source_id, training_allowed, causality_status, authority,
@@ -120,7 +120,7 @@ class TestMonthScopedDelete:
 
         # Sanity: both rows exist before the delete
         assert conn.execute(
-            "SELECT COUNT(*) FROM calibration_pairs_v2"
+            "SELECT COUNT(*) FROM calibration_pairs"
         ).fetchone()[0] == 2
 
         # Execute month-scoped DELETE for MAM only
@@ -133,7 +133,7 @@ class TestMonthScopedDelete:
         conn.commit()
 
         rows = conn.execute(
-            "SELECT target_date FROM calibration_pairs_v2"
+            "SELECT target_date FROM calibration_pairs"
         ).fetchall()
         remaining_dates = {r["target_date"] for r in rows}
 
@@ -158,7 +158,7 @@ class TestMonthScopedDelete:
         )
         conn.commit()
 
-        count = conn.execute("SELECT COUNT(*) FROM calibration_pairs_v2").fetchone()[0]
+        count = conn.execute("SELECT COUNT(*) FROM calibration_pairs").fetchone()[0]
         assert count == 0, "months=None must delete all city pairs (existing behaviour)"
 
     def test_months_only_deletes_target_city(self):
@@ -179,7 +179,7 @@ class TestMonthScopedDelete:
         conn.commit()
 
         rows = conn.execute(
-            "SELECT city FROM calibration_pairs_v2"
+            "SELECT city FROM calibration_pairs"
         ).fetchall()
         cities = {r["city"] for r in rows}
         assert "HongKong" in cities, "Other city's pairs must not be touched"

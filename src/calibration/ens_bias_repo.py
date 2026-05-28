@@ -151,7 +151,7 @@ _REQUIRED_PRODUCER_COLUMNS: tuple[str, ...] = (
 
 
 def assert_model_bias_schema_ready(conn: sqlite3.Connection) -> None:
-    """Fail CLOSED if model_bias_ens_v2 lacks any canonical producer column (SD5 / Blocker G).
+    """Fail CLOSED if model_bias_ens lacks any canonical producer column (SD5 / Blocker G).
 
     write_bias_model only stamps gate_set_hash / coverage_months / scale fields WHEN the
     columns exist (PRAGMA-guarded, for backward compat). That is correct for reads but
@@ -159,16 +159,16 @@ def assert_model_bias_schema_ready(conn: sqlite3.Connection) -> None:
     with NULL domain identity and 'succeed'. This preflight makes the producer refuse to run
     until init_ens_bias_schema / the canonical migration has been applied.
     """
-    existing = {r[1] for r in conn.execute("PRAGMA table_info(model_bias_ens_v2)").fetchall()}
+    existing = {r[1] for r in conn.execute("PRAGMA table_info(model_bias_ens)").fetchall()}
     if not existing:
         raise RuntimeError(
-            "assert_model_bias_schema_ready: model_bias_ens_v2 does not exist — "
+            "assert_model_bias_schema_ready: model_bias_ens does not exist — "
             "run init_ens_bias_schema(conn) before fitting."
         )
     missing = [c for c in _REQUIRED_PRODUCER_COLUMNS if c not in existing]
     if missing:
         raise RuntimeError(
-            "assert_model_bias_schema_ready: model_bias_ens_v2 is missing required "
+            "assert_model_bias_schema_ready: model_bias_ens is missing required "
             f"canonical columns {missing}; producer refuses to run (would write rows "
             "without domain identity). Apply init_ens_bias_schema / the canonical migration."
         )
@@ -185,7 +185,7 @@ def build_pair_batch_manifest(
 ) -> dict:
     """Immutable, content-addressed manifest of ONE calibration-pair rebuild batch (SD4 / Blocker F).
 
-    ``consumed_rows`` are the model_bias_ens_v2 STAGING rows the rebuild drew p_raw from — each a
+    ``consumed_rows`` are the model_bias_ens STAGING rows the rebuild drew p_raw from — each a
     mapping with city, season, metric, live_data_version, fit_signature_hash, gate_set_hash. The
     manifest records the error-model DOMAIN identity so a downstream Platt/identity fit can verify
     its pairs belong to the intended gate set and were generated from the expected sources (the

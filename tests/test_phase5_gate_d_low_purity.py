@@ -3,14 +3,14 @@
 # Authority basis: team_lead_handoff.md §"Phase 5C scope" Gate D; docs/authority/zeus_dual_track_architecture.md §6
 """Phase 5C Gate D: low-purity isolation tests — R-AZ
 
-Asserts calibration_pairs and platt_models_v2 have zero cross-metric leakage:
+Asserts calibration_pairs and platt_models have zero cross-metric leakage:
   - HIGH rebuild does not write LOW-metric rows.
   - LOW rebuild does not write HIGH-metric rows.
   - Platt model buckets do not share (temperature_metric, cluster, season) keys across metrics.
 
 R-AZ (TestGateDLowPurityIsolation): insert mixed high+low snapshot rows; run rebuild_v2
 for each spec; assert no cross-metric rows appear in calibration_pairs; assert
-platt_models_v2 model_key is scoped per metric.
+platt_models model_key is scoped per metric.
 """
 from __future__ import annotations
 
@@ -62,7 +62,7 @@ CREATE TABLE IF NOT EXISTS calibration_pairs (
 """
 
 _PLATT_MODELS_V2_DDL = """
-CREATE TABLE IF NOT EXISTS platt_models_v2 (
+CREATE TABLE IF NOT EXISTS platt_models (
     model_key TEXT PRIMARY KEY,
     temperature_metric TEXT, cluster TEXT, season TEXT, data_version TEXT,
     input_space TEXT, param_A REAL, param_B REAL, param_C REAL,
@@ -147,7 +147,7 @@ def _make_gate_d_db() -> sqlite3.Connection:
 # ---------------------------------------------------------------------------
 
 class TestGateDLowPurityIsolation:
-    """R-AZ: calibration_pairs and platt_models_v2 must have zero cross-metric leakage."""
+    """R-AZ: calibration_pairs and platt_models must have zero cross-metric leakage."""
 
     def test_R_AZ_1_high_rebuild_writes_only_high_rows(self):
         """R-AZ-1 (RED): rebuild_v2 with HIGH_SPEC must not write any temperature_metric='low' rows.
@@ -741,7 +741,7 @@ class TestGateDLowPurityIsolation:
             )
 
     def test_R_AZ_3_platt_model_keys_scoped_per_metric(self):
-        """R-AZ-3 (RED): platt_models_v2 model_key must encode temperature_metric; no shared bucket keys.
+        """R-AZ-3 (RED): platt_models model_key must encode temperature_metric; no shared bucket keys.
 
         model_key = '{temperature_metric}:{cluster}:{season}' — HIGH and LOW must never collide
         on the same model_key even if cluster+season are identical.
@@ -777,7 +777,7 @@ class TestGateDLowPurityIsolation:
         )
 
         rows = conn.execute(
-            "SELECT model_key, temperature_metric FROM platt_models_v2 ORDER BY model_key"
+            "SELECT model_key, temperature_metric FROM platt_models ORDER BY model_key"
         ).fetchall()
         keys = [row["model_key"] for row in rows]
         assert len(keys) == 2, (

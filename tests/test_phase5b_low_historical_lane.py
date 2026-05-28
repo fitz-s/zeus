@@ -788,7 +788,7 @@ class TestRefitPlattV2LowMetricIsolation:
                 source_id TEXT DEFAULT 'tigge_mars',
                 horizon_profile TEXT DEFAULT 'full'
             );
-            CREATE TABLE platt_models_v2 (
+            CREATE TABLE platt_models (
                 model_id TEXT PRIMARY KEY,
                 temperature_metric TEXT,
                 cluster TEXT,

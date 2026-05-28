@@ -42,7 +42,7 @@ def _coverage(completeness: str = "COMPLETE", readiness: str = "LIVE_ELIGIBLE", 
         "coverage_id": "cov-1",
         "source_run_id": "run-1",
         "source_id": "ecmwf-open-data",
-        "source_transport": "ensemble_snapshots_v2_db_reader",
+        "source_transport": "ensemble_snapshots_db_reader",
         "track": "ens",
         "city": "Chicago",
         "city_id": "chicago",
@@ -288,7 +288,7 @@ def test_scan_committed_snapshots_emits_from_source_run_coverage():
             observed_steps_json, snapshot_ids_json, target_window_start_utc, target_window_end_utc,
             completeness_status, readiness_status, computed_at, expires_at
         ) VALUES (
-            'cov-1', 'run-1', 'ecmwf-open-data', 'ensemble_snapshots_v2_db_reader', '2026-05-24T00', 'ens',
+            'cov-1', 'run-1', 'ecmwf-open-data', 'ensemble_snapshots_db_reader', '2026-05-24T00', 'ens',
             'chicago', 'Chicago', 'America/Chicago', '2026-05-24', 'high', 'temperature',
             'high_temp', 'v1', 51, 51, '[0,3,6]', '[0,3,6]', '[1]',
             '2026-05-24T05:00:00+00:00', '2026-05-25T05:00:00+00:00',
@@ -298,7 +298,7 @@ def test_scan_committed_snapshots_emits_from_source_run_coverage():
     )
     forecasts_conn.execute(
         """
-        INSERT INTO ensemble_snapshots_v2 (
+        INSERT INTO ensemble_snapshots (
             snapshot_id, city, target_date, temperature_metric, physical_quantity, observation_field,
             issue_time, valid_time, available_at, fetch_time, lead_hours, members_json,
             model_version, data_version, source_id, source_transport, source_run_id,
@@ -311,7 +311,7 @@ def test_scan_committed_snapshots_emits_from_source_run_coverage():
             '2026-05-24T00:00:00+00:00', '2026-05-24T06:00:00+00:00',
             '2026-05-24T04:15:00+00:00', '2026-05-24T04:16:00+00:00', 6,
             '[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51]',
-            'ecmwf', 'v1', 'ecmwf-open-data', 'ensemble_snapshots_v2_db_reader', 'run-1',
+            'ecmwf', 'v1', 'ecmwf-open-data', 'ensemble_snapshots_db_reader', 'run-1',
             '2026-05-24T00', '2026-05-24T00:00:00+00:00', '2026-05-24T03:00:00+00:00',
             '2026-05-24T04:15:00+00:00', 'VERIFIED', 'OK', 0, 1,
             'FULLY_INSIDE_TARGET_LOCAL_DAY', '2026-05-24T05:00:00+00:00', 6, 'F', 0
@@ -393,7 +393,7 @@ def test_scan_committed_snapshot_blocks_future_coverage_computed_at():
     )
     forecasts_conn.execute(
         """
-        CREATE TABLE ensemble_snapshots_v2 (
+        CREATE TABLE ensemble_snapshots (
             snapshot_id INTEGER PRIMARY KEY,
             source_run_id TEXT,
             city TEXT,
@@ -420,7 +420,7 @@ def test_scan_committed_snapshot_blocks_future_coverage_computed_at():
     forecasts_conn.execute(
         """
         INSERT INTO source_run_coverage VALUES (
-            'cov-1', 'run-1', 'ecmwf-open-data', 'ensemble_snapshots_v2_db_reader',
+            'cov-1', 'run-1', 'ecmwf-open-data', 'ensemble_snapshots_db_reader',
             '2026-05-24T00', 'ens', 'chicago', 'Chicago', 'America/Chicago',
             '2026-05-24', 'high', 'v1', 51, 51, '[0,3,6]', '[0,3,6]',
             '[1]', '2026-05-24T05:00:00+00:00', '2026-05-25T05:00:00+00:00',
@@ -431,7 +431,7 @@ def test_scan_committed_snapshot_blocks_future_coverage_computed_at():
     )
     forecasts_conn.execute(
         """
-        INSERT INTO ensemble_snapshots_v2 VALUES (
+        INSERT INTO ensemble_snapshots VALUES (
             1, 'run-1', 'Chicago', '2026-05-24', 'high',
             '2026-05-24T04:15:00+00:00', '2026-05-24T04:16:00+00:00',
             'hash-1',

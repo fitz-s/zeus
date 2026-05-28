@@ -19,7 +19,7 @@ from src.strategy.live_inference.executable_cost import (
     executable_cost,
     quote_book_from_executable_snapshot,
 )
-from src.contracts.executable_market_snapshot_v2 import ExecutableMarketSnapshotV2
+from src.contracts.executable_market_snapshot import ExecutableMarketSnapshot
 
 
 def _book(**overrides) -> NativeQuoteBook:
@@ -110,7 +110,7 @@ def test_no_depth_blocks():
 
 def test_quote_book_from_executable_snapshot_uses_snapshot_fee_tick_min_order_negrisk():
     now = datetime(2026, 5, 24, 10, 0, tzinfo=timezone.utc)
-    snapshot = ExecutableMarketSnapshotV2(
+    snapshot = ExecutableMarketSnapshot(
         snapshot_id="snap-1",
         gamma_market_id="gamma-1",
         event_id="event-1",

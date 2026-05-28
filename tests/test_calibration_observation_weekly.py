@@ -92,7 +92,7 @@ def _seed_v2_model(
     n_samples: int = 60,
     bootstrap_size: int = 30,
 ):
-    """Seed one platt_models_v2 row via canonical save_platt_model path."""
+    """Seed one platt_models row via canonical save_platt_model path."""
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
     try:
@@ -331,7 +331,7 @@ def test_bootstrap_usable_count_surfaces_in_per_bucket_snapshot(tmp_path: Path):
         now = datetime.now(timezone.utc).isoformat()
         conn.execute(
             """
-            INSERT INTO platt_models_v2
+            INSERT INTO platt_models
             (model_key, temperature_metric, cluster, season, data_version,
              input_space, param_A, param_B, param_C, bootstrap_params_json,
              n_samples, brier_insample, fitted_at, is_active, authority, recorded_at)

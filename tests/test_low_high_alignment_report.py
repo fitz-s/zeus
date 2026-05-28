@@ -30,7 +30,7 @@ def _make_conn() -> sqlite3.Connection:
             causality_status TEXT
         );
 
-        CREATE TABLE platt_models_v2 (
+        CREATE TABLE platt_models (
             model_key TEXT PRIMARY KEY,
             temperature_metric TEXT,
             cluster TEXT,
@@ -168,7 +168,7 @@ def test_report_quantifies_low_boundary_recovery_upper_bound() -> None:
     )
     conn.executemany(
         """
-        INSERT INTO platt_models_v2 (
+        INSERT INTO platt_models (
             model_key, temperature_metric, cluster, season, data_version,
             input_space, n_samples, authority, is_active, param_A,
             cycle, source_id, horizon_profile
@@ -220,7 +220,7 @@ def test_report_exposes_quarantined_negative_a_and_no_regression_gates() -> None
     )
     conn.execute(
         """
-        INSERT INTO platt_models_v2 (
+        INSERT INTO platt_models (
             model_key, temperature_metric, cluster, season, data_version,
             input_space, n_samples, authority, is_active, param_A,
             cycle, source_id, horizon_profile

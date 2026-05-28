@@ -334,7 +334,7 @@ def test_deactivate_model_matches_legacy_keyed_row():
     legacy_key = f"high:Test-Cluster:DJF:{_HIGH_TIGGE_DATA_VERSION}:width_normalized_density"
     conn.execute(
         """
-        INSERT INTO platt_models_v2
+        INSERT INTO platt_models
         (model_key, temperature_metric, cluster, season, data_version,
          input_space, param_A, param_B, param_C, bootstrap_params_json,
          n_samples, brier_insample, fitted_at, is_active, authority,
@@ -361,7 +361,7 @@ def test_deactivate_model_matches_legacy_keyed_row():
     )
     assert count == 1, f"Expected 1 row deleted, got {count}"
     row = conn.execute(
-        "SELECT COUNT(*) FROM platt_models_v2 WHERE is_active = 1"
+        "SELECT COUNT(*) FROM platt_models WHERE is_active = 1"
     ).fetchone()[0]
     assert row == 0, "Row should be deleted"
 

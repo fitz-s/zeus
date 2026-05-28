@@ -7,7 +7,7 @@
 Each test builds a tiny synthetic STAGE_DB and PROD_DB inside ``tmp_path``,
 exercises one subcommand, and asserts the expected outcome. None of these
 tests touch the real production zeus-forecasts.db. Tests target ONLY the
-calibration_pairs surface (its sibling platt_models_v2 promotion lives
+calibration_pairs surface (its sibling platt_models promotion lives
 on zeus-world.db and is covered by tests/test_promote_platt.py).
 """
 
@@ -345,12 +345,12 @@ def test_promote_creates_verifiable_backup(tmp_path, capsys):
             f"Backup must be scoped to requested data_versions; "
             f"found {other} rows with other data_versions"
         )
-        # Backup must NOT include platt_models_v2 (lives on zeus-world.db).
+        # Backup must NOT include platt_models (lives on zeus-world.db).
         platt_tables = bk.execute(
             "SELECT COUNT(*) FROM sqlite_master "
-            "WHERE type='table' AND name='platt_models_v2'"
+            "WHERE type='table' AND name='platt_models'"
         ).fetchone()[0]
-        assert platt_tables == 0, "Backup must not contain platt_models_v2"
+        assert platt_tables == 0, "Backup must not contain platt_models"
         # Provenance metadata must be written by the backup function.
         prov_row = bk.execute(
             "SELECT value FROM zeus_meta WHERE key = ?",
@@ -668,7 +668,7 @@ def test_verify_pass(tmp_path, capsys):
     assert rc == 0
     assert "calibration_pairs has" in out
     assert "All identity columns are non-NULL" in out
-    # Must NOT do a cross-DB JOIN against platt_models_v2 (K1: lives on
+    # Must NOT do a cross-DB JOIN against platt_models (K1: lives on
     # zeus-world.db).
     assert "platt_models" not in out
 

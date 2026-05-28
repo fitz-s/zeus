@@ -294,8 +294,8 @@ def _seed_minimal_ready_training_tables(conn, *, seed_observations=True):
         conn,
         n_groups=truth_surfaces.MIN_PLATT_DECISION_GROUPS,
     )
-    conn.execute("CREATE TABLE platt_models_v2 (id INTEGER)")
-    conn.execute("INSERT INTO platt_models_v2 (id) VALUES (1)")
+    conn.execute("CREATE TABLE platt_models (id INTEGER)")
+    conn.execute("INSERT INTO platt_models (id) VALUES (1)")
     conn.execute(
         """
         CREATE TABLE market_events (

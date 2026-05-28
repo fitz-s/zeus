@@ -70,7 +70,7 @@ def _make_conn(tmp_path: Path, name: str = "test") -> sqlite3.Connection:
 
 
 def _insert_identity_row(conn: sqlite3.Connection, cluster: str, season: str) -> None:
-    """Insert an identity_full_transport_v1 platt_models_v2 row directly.
+    """Insert an identity_full_transport_v1 platt_models row directly.
 
     Bypasses save_platt_model (which is a @capability-gated write function)
     to insert the identity row without triggering capability enforcement.
@@ -93,7 +93,7 @@ def _insert_identity_row(conn: sqlite3.Connection, cluster: str, season: str) ->
     now = datetime.now(timezone.utc).isoformat()
     conn.execute(
         """
-        INSERT INTO platt_models_v2
+        INSERT INTO platt_models
           (model_key, temperature_metric, cluster, season, data_version,
            input_space, param_A, param_B, param_C, bootstrap_params_json,
            n_samples, brier_insample, fitted_at, is_active, authority,

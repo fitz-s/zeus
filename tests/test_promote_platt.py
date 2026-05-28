@@ -2,12 +2,12 @@
 # Last reused or audited: 2026-05-12
 # Authority basis: K1 workload-class DB split; PR #112 Option (c) split.
 # Tests for scripts/promote_platt.py.
-"""Unit tests for the STAGE -> prod platt_models_v2 promotion script.
+"""Unit tests for the STAGE -> prod platt_models promotion script.
 
 Each test builds a tiny synthetic STAGE_DB and PROD_DB inside ``tmp_path``,
 exercises one subcommand, and asserts the expected outcome. None of these
 tests touch the real production zeus-world.db. Tests target ONLY the
-platt_models_v2 surface (its sibling calibration_pairs_v2 promotion lives
+platt_models surface (its sibling calibration_pairs promotion lives
 on zeus-forecasts.db and is covered by tests/test_promote_calibration.py).
 """
 
@@ -32,7 +32,7 @@ from scripts import promote_platt as P  # noqa: E402
 # --------------------------------------------------------------------------
 
 PLATT_SCHEMA = """
-CREATE TABLE platt_models_v2 (
+CREATE TABLE platt_models (
     model_key TEXT PRIMARY KEY,
     temperature_metric TEXT NOT NULL,
     cluster TEXT NOT NULL,
@@ -63,7 +63,7 @@ DV_LOW = "tigge_mn2t6_local_calendar_day_min_v1"
 
 
 def _build_db(path: Path, *, with_meta: bool = True) -> None:
-    """Build a tiny platt_models_v2-only DB. Stand-in for zeus-world.db."""
+    """Build a tiny platt_models-only DB. Stand-in for zeus-world.db."""
     conn = sqlite3.connect(str(path))
     conn.executescript(PLATT_SCHEMA)
     if with_meta:
@@ -82,7 +82,7 @@ def _insert_platt(
 ) -> None:
     conn.execute(
         """
-        INSERT INTO platt_models_v2
+        INSERT INTO platt_models
         (model_key, temperature_metric, cluster, season, data_version,
          param_A, param_B, bootstrap_params_json, n_samples, fitted_at)
         VALUES (?, ?, ?, ?, ?, 1.0, 0.0, '{}', 100, '2024-01-01T00:00:00Z')
@@ -259,10 +259,10 @@ def test_promote_commit_replaces_metric_rows(tmp_path, capsys):
 
     p = sqlite3.connect(str(prod))
     high_keys = {r[0] for r in p.execute(
-        "SELECT model_key FROM platt_models_v2 WHERE data_version=?", (DV_HIGH,)
+        "SELECT model_key FROM platt_models WHERE data_version=?", (DV_HIGH,)
     )}
     low_keys = {r[0] for r in p.execute(
-        "SELECT model_key FROM platt_models_v2 WHERE data_version=?", (DV_LOW,)
+        "SELECT model_key FROM platt_models WHERE data_version=?", (DV_LOW,)
     )}
     p.close()
     assert high_keys == {"new_k1", "new_k2"}, f"got {high_keys}"
@@ -295,9 +295,9 @@ def test_promote_creates_verifiable_backup(tmp_path, capsys):
     capsys.readouterr()
     assert rc == 0
 
-    # Filename must be zeus-world.db.platt_models_v2_pre_promotion_*.sql.gz
-    # (K1: world DB; the sibling script writes zeus-forecasts.db.calibration_pairs_v2_*).
-    backups = list(backup_dir.glob("zeus-world.db.platt_models_v2_pre_promotion_*.sql.gz"))
+    # Filename must be zeus-world.db.platt_models_pre_promotion_*.sql.gz
+    # (K1: world DB; the sibling script writes zeus-forecasts.db.calibration_pairs_*).
+    backups = list(backup_dir.glob("zeus-world.db.platt_models_pre_promotion_*.sql.gz"))
     assert len(backups) == 1, f"expected 1 backup, got {backups}"
     backup = backups[0]
     # Verify gzip integrity
@@ -306,8 +306,8 @@ def test_promote_creates_verifiable_backup(tmp_path, capsys):
     assert "to_be_backed_up" in content, "Backup must contain pre-promotion row"
     assert "BEGIN TRANSACTION;" in content
     assert "COMMIT;" in content
-    # Backup must NOT include calibration_pairs_v2 (lives on zeus-forecasts.db).
-    assert "calibration_pairs_v2" not in content
+    # Backup must NOT include calibration_pairs (lives on zeus-forecasts.db).
+    assert "calibration_pairs" not in content
 
 
 def test_promote_rollback_on_integrity_failure(tmp_path, capsys, monkeypatch):
@@ -328,7 +328,7 @@ def test_promote_rollback_on_integrity_failure(tmp_path, capsys, monkeypatch):
     # Capture row state before
     p = sqlite3.connect(str(prod))
     pre_high_keys = {r[0] for r in p.execute(
-        "SELECT model_key FROM platt_models_v2 WHERE data_version=?", (DV_HIGH,)
+        "SELECT model_key FROM platt_models WHERE data_version=?", (DV_HIGH,)
     )}
     p.close()
 
@@ -349,7 +349,7 @@ def test_promote_rollback_on_integrity_failure(tmp_path, capsys, monkeypatch):
     # PROD content must be unchanged (rollback worked).
     p = sqlite3.connect(str(prod))
     post_high_keys = {r[0] for r in p.execute(
-        "SELECT model_key FROM platt_models_v2 WHERE data_version=?", (DV_HIGH,)
+        "SELECT model_key FROM platt_models WHERE data_version=?", (DV_HIGH,)
     )}
     p.close()
     assert post_high_keys == pre_high_keys, (
@@ -414,7 +414,7 @@ def test_promote_refuses_when_stage_has_zero_rows(tmp_path, capsys):
     # PROD must be untouched
     p = sqlite3.connect(str(prod))
     keys = {r[0] for r in p.execute(
-        "SELECT model_key FROM platt_models_v2 WHERE data_version=?", (DV_HIGH,)
+        "SELECT model_key FROM platt_models WHERE data_version=?", (DV_HIGH,)
     )}
     p.close()
     assert keys == {"live_high"}
@@ -432,7 +432,7 @@ def test_promote_refuses_on_schema_mismatch(tmp_path, capsys):
     _insert_complete_sentinel(s, "high", DV_HIGH)
     _insert_platt(s, "new_k1", DV_HIGH)
     try:
-        s.execute("ALTER TABLE platt_models_v2 DROP COLUMN bucket_key")
+        s.execute("ALTER TABLE platt_models DROP COLUMN bucket_key")
     except sqlite3.OperationalError:
         pytest.skip("SQLite < 3.35 does not support DROP COLUMN")
     s.commit()
@@ -524,11 +524,11 @@ def test_verify_pass(tmp_path, capsys):
     rc = args.func(args)
     out = capsys.readouterr().out
     assert rc == 0
-    assert "platt_models_v2 has" in out
+    assert "platt_models has" in out
     assert "All identity columns are non-NULL" in out
-    # Must NOT do a cross-DB JOIN against calibration_pairs_v2 (K1: lives
+    # Must NOT do a cross-DB JOIN against calibration_pairs (K1: lives
     # on zeus-forecasts.db).
-    assert "calibration_pairs_v2" not in out
+    assert "calibration_pairs" not in out
 
 
 def test_verify_fail_when_empty(tmp_path, capsys):

@@ -200,7 +200,7 @@ class TestInitSchemaForecasts0ByteGuard:
     EXPECTED_FORECAST_TABLES = {
         "observations",
         # B3 (PR3, 2026-05-28): bare `settlements` dropped; settlement_outcomes is canonical
-        # (renamed from settlements_v2). Static-fallback DDL creates settlement_outcomes only.
+        # (renamed from settlement_outcomes). Static-fallback DDL creates settlement_outcomes only.
         "source_run",
         "settlement_outcomes",
         "market_events",

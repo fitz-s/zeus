@@ -31,10 +31,10 @@ import pytest
 
 
 def _make_v2_table(conn: sqlite3.Connection) -> None:
-    """Build a Phase-2-stratified platt_models_v2 table."""
+    """Build a Phase-2-stratified platt_models table."""
     conn.execute(
         """
-        CREATE TABLE platt_models_v2 (
+        CREATE TABLE platt_models (
             model_key TEXT PRIMARY KEY,
             temperature_metric TEXT NOT NULL,
             cluster TEXT NOT NULL,
@@ -88,7 +88,7 @@ def test_load_platt_model_tigge_missing_keys_uses_legacy_defaults():
     _make_v2_table(conn)
     conn.execute(
         """
-        INSERT INTO platt_models_v2
+        INSERT INTO platt_models
         (model_key, temperature_metric, cluster, season, data_version,
          input_space, param_A, param_B, param_C, bootstrap_params_json,
          n_samples, brier_insample, fitted_at, is_active, authority,
@@ -127,7 +127,7 @@ def test_load_platt_model_returns_bucket_identity():
     _make_v2_table(conn)
     conn.execute(
         """
-        INSERT INTO platt_models_v2
+        INSERT INTO platt_models
         (model_key, temperature_metric, cluster, season, data_version,
          input_space, param_A, param_B, param_C, bootstrap_params_json,
          n_samples, brier_insample, fitted_at, is_active, authority,

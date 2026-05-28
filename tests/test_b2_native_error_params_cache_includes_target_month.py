@@ -46,7 +46,7 @@ def test_cache_separates_distinct_target_months(monkeypatch, fake_city, fake_spe
     cached entry (None or params) → off-month rows misapplied OR covered months
     rejected. Test asserts read_bias_model is called once per distinct target_month.
     """
-    from scripts import rebuild_calibration_pairs_v2 as mod
+    from scripts import rebuild_calibration_pairs as mod
 
     # Spy the DB read so we can inspect target_month per call.
     calls: list[int | None] = []
@@ -105,7 +105,7 @@ def test_cache_separates_off_coverage_month_from_on_coverage(monkeypatch, fake_c
     whose target_month is outside coverage (would bypass read_bias_model's
     month-scope guard).
     """
-    from scripts import rebuild_calibration_pairs_v2 as mod
+    from scripts import rebuild_calibration_pairs as mod
 
     calls: list[int | None] = []
 

@@ -1,7 +1,7 @@
 # Lifecycle: created=2026-04-19; last_reviewed=2026-04-24; last_reused=2026-04-24
 # Purpose: Phase 10C "LOW-lane Tail + HKO Injection + DT#1 SAVEPOINT" antibodies (R-CQ..R-CX).
 # Reuse: Referenced by regression suite; R-CS-2 updated 2026-04-24 for C5
-#        (HIGH settlement routes through calibration_pairs_v2 post-fix;
+#        (HIGH settlement routes through calibration_pairs post-fix;
 #        test formerly locked in pre-C5 legacy-routing).
 # Authority basis: phase10c_contract.md v2
 
@@ -201,7 +201,7 @@ class TestRCRPersistenceAnomalyGate:
 
 
 # ---------------------------------------------------------------------------
-# R-CS — S3: harvester LOW→calibration_pairs_v2 routing
+# R-CS — S3: harvester LOW→calibration_pairs routing
 # ---------------------------------------------------------------------------
 
 
@@ -231,7 +231,7 @@ class TestRCSHarvesterLowRouting:
         )
 
     def test_r_cs_1_low_settlement_writes_to_v2(self):
-        """R-CS.1: LOW settlement → calibration_pairs_v2 row with metric=low."""
+        """R-CS.1: LOW settlement → calibration_pairs row with metric=low."""
         conn = _make_calibration_db()
         city = _make_wu_city()
 
@@ -257,12 +257,12 @@ class TestRCSHarvesterLowRouting:
 
     def test_r_cs_2_high_settlement_routes_to_v2_after_c5(self):
         """R-CS.2 (post-C5 2026-04-24): HIGH settlement routes to
-        calibration_pairs_v2 with canonical HIGH_LOCALDAY_MAX identity.
+        calibration_pairs with canonical HIGH_LOCALDAY_MAX identity.
 
         Pre-C5 behavior (documented in POST_AUDIT_HANDOFF_2026-04-24.md
         §3.1 C5): HIGH branch of harvest_settlement wrote to legacy
         `calibration_pairs` while LOW branch wrote to v2. Because
-        `refit_platt` reads only `calibration_pairs_v2`, HIGH pairs
+        `refit_platt` reads only `calibration_pairs`, HIGH pairs
         silently never reached the trainer. C5 wires HIGH through
         `add_calibration_pair_v2(metric_identity=HIGH_LOCALDAY_MAX)` to
         close this split-brain.

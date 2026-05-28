@@ -3,7 +3,7 @@
 # Lifecycle: created=2026-05-05; last_reviewed=2026-05-18; last_reused=2026-05-18
 # Authority basis: architecture/calibration_transfer_oos_design_2026-05-05.md Phase X.2
 # Purpose: Lock OOS calibration-transfer evidence eligibility and non-promotion behavior.
-# Reuse: Run when calibration_pairs_v2 eligibility, validated_calibration_transfers, or OOS transfer policy evidence changes.
+# Reuse: Run when calibration_pairs eligibility, validated_calibration_transfers, or OOS transfer policy evidence changes.
 """Tests for scripts/evaluate_calibration_transfer_oos.py (Phase X.2)."""
 from __future__ import annotations
 
@@ -128,7 +128,7 @@ def _insert_platt_model(
 ) -> None:
     conn.execute(
         """
-        INSERT INTO world.platt_models_v2 (
+        INSERT INTO world.platt_models (
             model_key, temperature_metric, cluster, season, data_version,
             input_space, param_A, param_B, param_C,
             bootstrap_params_json, n_samples, brier_insample,
@@ -149,7 +149,7 @@ def _insert_platt_model(
     )
     if input_space != "raw_probability":
         conn.execute(
-            "UPDATE world.platt_models_v2 SET input_space = ? WHERE model_key = ?",
+            "UPDATE world.platt_models SET input_space = ? WHERE model_key = ?",
             (input_space, model_key),
         )
     conn.commit()
@@ -178,7 +178,7 @@ def _insert_pairs(
     """Insert n pairs with deterministic pair_ids starting at start_pair_id.
 
     The latest 20% of decision groups are held out chronologically for OOS.
-    Uses real calibration_pairs_v2 column names: temperature_metric, target_date.
+    Uses real calibration_pairs column names: temperature_metric, target_date.
     """
     base_target_date = date.fromisoformat(target_date)
     rows = [

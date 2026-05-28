@@ -71,11 +71,11 @@ def test_linter_allows_store_py(tmp_path):
     assert violations == []
 
 
-def test_linter_does_not_confuse_calibration_pairs_v2_with_legacy_table(tmp_path):
+def test_linter_does_not_confuse_calibration_pairs_with_legacy_table(tmp_path):
     """K2_struct targets the legacy calibration_pairs table, not v2 tables."""
     file_path = tmp_path / "v2_query.py"
     file_path.write_text(
-        'conn.execute("DELETE FROM calibration_pairs_v2 WHERE target_date = ?")\n'
+        'conn.execute("DELETE FROM calibration_pairs WHERE target_date = ?")\n'
     )
     violations = _check_calibration_pairs_select(file_path, file_path.read_text())
     assert violations == []

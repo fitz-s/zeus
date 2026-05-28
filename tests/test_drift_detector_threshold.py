@@ -63,7 +63,7 @@ def _make_in_memory_db() -> sqlite3.Connection:
             temperature_metric TEXT NOT NULL DEFAULT 'high'
         );
 
-        CREATE TABLE platt_models_v2 (
+        CREATE TABLE platt_models (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             city TEXT NOT NULL,
             season TEXT NOT NULL,

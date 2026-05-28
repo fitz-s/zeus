@@ -3,7 +3,7 @@
 #          gate, fallback behavior, TestStoreRoundTrip end-to-end harvester
 #          path (HIGH→v2 after C5 2026-04-24), and decision-group accounting.
 # Reuse: Referenced by regression suite; last touched 2026-04-24 for C5
-#        (harvester HIGH default now writes calibration_pairs_v2, not
+#        (harvester HIGH default now writes calibration_pairs, not
 #        legacy table). _get_test_conn applies v2 schema to support this.
 """Tests for calibration manager: bucket routing, maturity gate, fallback.
 
@@ -131,7 +131,7 @@ class TestMaturityLevel:
 class TestStoreRoundTrip:
     def _get_test_conn(self, tmp_path):
         """Post-C5 (2026-04-24): apply v2 schema so harvester's HIGH→v2
-        route lands rows in calibration_pairs_v2 (previously the HIGH
+        route lands rows in calibration_pairs (previously the HIGH
         branch wrote to legacy calibration_pairs)."""
         from src.state.schema.v2_schema import apply_canonical_schema
 
