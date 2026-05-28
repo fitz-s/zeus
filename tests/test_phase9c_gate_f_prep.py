@@ -828,7 +828,7 @@ class TestRCGFitFromPairsLowSkip:
 
     P9C.1 fix: `_fit_from_pairs` accepts `temperature_metric` (default
     "high"), early-returns None for anything else. LOW refits MUST go
-    through scripts/refit_platt_v2.py → save_platt_model_v2 (Golden-
+    through scripts/refit_platt.py → save_platt_model_v2 (Golden-
     Window-gated). R-CG locks this invariant.
     """
 

@@ -11,7 +11,7 @@
 """Seed a lean isolated staging DB for an offline calibration rebuild/refit.
 
 The rebuild (`scripts/rebuild_calibration_pairs_v2.py`) and refit
-(`scripts/refit_platt_v2.py`) read their SOURCE tables
+(`scripts/refit_platt.py`) read their SOURCE tables
 (`ensemble_snapshots_v2`, `observations`, `settlements_v2`) and the
 predictive-error residual sources from the SAME connection they write
 `calibration_pairs_v2` / `platt_models_v2` into. To keep the live DBs

@@ -33,6 +33,6 @@ So the full_transport posteriors the offline MC applied are not in any discovera
 1. Fit + persist full_transport posteriors per `(city, metric, season)` into a live-readable `model_bias_ens_v2` (pending posterior-source probe).
 2. Wire `monitor_refresh.py:453/471` to load the PredictiveErrorModel and branch to `p_raw_vector_with_error_model` under a flag (default OFF = byte-identical).
 3. Promote ft `calibration_pairs_v2` (forecasts.db) + ft `platt_models_v2` (world.db) — selective/ECE-gated, on a copy first.
-4. Fix the sentinel reader gate (`promote_platt_models_v2.py:226`, confirmed bug — see SENTINEL_MISMATCH_PROBE) so promotion recognizes the complete refit.
+4. Fix the sentinel reader gate (`promote_platt.py:226`, confirmed bug — see SENTINEL_MISMATCH_PROBE) so promotion recognizes the complete refit.
 5. Explicit pin of the 44 shipping cohorts; **carve out HK HIGH** (pending HK provenance probe — may be a data-fix instead).
 6. Restart → fresh traces → §4.3 bin comparison.

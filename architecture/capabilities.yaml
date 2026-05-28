@@ -246,7 +246,7 @@ capabilities:
 
   # ─── seeded from source_rationale.yaml::write_routes::script_repair_write ─
   - id: script_repair_write
-    owner_module: scripts/refit_platt_v2.py
+    owner_module: scripts/refit_platt.py
     intent: >
       Write outputs from repair and refit scripts (scripts/**). Every script
       invocation must carry dry-run/apply metadata as required by the scripts
@@ -257,7 +257,7 @@ capabilities:
       protects_invariants: [INV-04]
       blocked_when: []
     hard_kernel_paths:
-      - scripts/refit_platt_v2.py
+      - scripts/refit_platt.py
     original_intent:
       intent_test: "diff touches scripts/** with write or apply semantics"
       does_not_fit: log_and_advisory

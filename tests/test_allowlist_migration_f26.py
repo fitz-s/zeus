@@ -68,15 +68,15 @@ MIGRATED_ENTRIES: frozenset[str] = frozenset(
         "scripts/audit_realtime_pnl.py",
         "scripts/bridge_oracle_to_calibration.py",
         "scripts/build_correlation_matrix.py",
-        "scripts/compare_diurnal_v1_v2.py",
+
         "scripts/deep_heartbeat.py",
         "scripts/healthcheck.py",
         "scripts/replay_parity.py",
         "scripts/venus_sensing_report.py",
         # scripts: additional read-only / ro-URI
-        "scripts/audit_observation_instants_v2.py",
+        "scripts/audit_observation_instants.py",
         "scripts/calibration_observation_weekly.py",
-        "scripts/ddd_v1_v2_replay.py",
+
         "scripts/diagnose_low_high_alignment.py",
         "scripts/diagnose_truth_surfaces.py",
         "scripts/edge_observation_weekly.py",
@@ -94,9 +94,8 @@ MIGRATED_ENTRIES: frozenset[str] = frozenset(
         # scripts: mixed (already_guarded + read_only + in_memory_only)
         "scripts/repro_antibodies.py",
         # scripts: promote (RO inspect / RW with --commit)
-        "scripts/promote_calibration_v2_stage_to_prod.py",
-        "scripts/promote_platt_models_v2.py",
-        "scripts/promote_calibration_pairs_v2.py",
+        "scripts/promote_platt.py",
+        "scripts/promote_calibration.py",
         # scripts: operator-mediated K1 migrations
         "scripts/migrate_world_to_forecasts.py",
         "scripts/migrate_world_observations_to_forecasts.py",
@@ -177,9 +176,7 @@ F26_CLEANUP_PROMOTED: frozenset[str] = frozenset(
         "scripts/backfill_tigge_snapshot_p_raw_v2.py",
         "scripts/backfill_wu_daily_all.py",
         "scripts/cleanup_ghost_positions.py",
-        "scripts/etl_forecasts_v2_from_legacy.py",
         "scripts/fill_obs_v2_dst_gaps.py",
-        "scripts/fill_obs_v2_meteostat.py",
         "scripts/force_cycle_with_healthy_gates.py",
         "scripts/hko_ingest_tick.py",
         "scripts/ingest_grib_to_snapshots.py",
@@ -188,7 +185,7 @@ F26_CLEANUP_PROMOTED: frozenset[str] = frozenset(
         "scripts/rebuild_calibration_pairs_canonical.py",
         "scripts/rebuild_calibration_pairs_v2.py",
         "scripts/rebuild_settlements.py",
-        "scripts/refit_platt_v2.py",
+        "scripts/refit_platt.py",
         # operator_invoked migration scripts (already_guarded)
         "scripts/migrate_add_authority_column.py",
         "scripts/migrate_b070_control_overrides_to_history.py",

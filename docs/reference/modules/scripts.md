@@ -56,7 +56,6 @@ Scripts may enforce or manipulate truth, but they are never themselves a constit
 ## 10. Relevant tests
 - tests/test_topology_doctor.py
 - tests/test_backfill_openmeteo_previous_runs.py
-- tests/test_etl_forecasts_v2_from_legacy.py
 - tests/test_backfill_scripts_match_live_config.py
 
 ## 11. Invariants

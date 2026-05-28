@@ -22,7 +22,7 @@ failed.
 ## CRITICAL: SQLite 单写者锁导致 live daemon 崩溃 (2026-05-04)
 
 **Status:** PARTIALLY FIXED — Wave35 prevents
-`rebuild_calibration_pairs_v2.py` and `refit_platt_v2.py` write mode from
+`rebuild_calibration_pairs_v2.py` and `refit_platt.py` write mode from
 defaulting to the canonical shared `zeus-world.db`; they now require an explicit
 isolated `--db` target and reject the live shared world DB before opening a
 write connection. Full calibration DB physical isolation and promotion tooling

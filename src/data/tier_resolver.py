@@ -22,7 +22,7 @@ Public API
   compatibility with per-city date-range schedules; it is ignored today.
 - ``cities_in_tier(tier) -> frozenset[str]`` — inverse mapping for audit.
 - ``TIER_SCHEDULE`` — the full ``dict[city_name, Tier]`` (public constant
-  for antibody A3 and ``scripts/audit_observation_instants_v2.py``).
+  for antibody A3 and ``scripts/audit_observation_instants.py``).
 - ``TIER_ALLOWED_SOURCES`` — per-tier whitelist of acceptable ``source``
   column values (antibody A2 whitelist for the v2 writer).
 - ``source_role_assessment_for_city_source`` — P1.1 training-eligibility
@@ -435,7 +435,7 @@ def cities_in_tier(tier: Tier) -> frozenset[str]:
 
     Used by:
     - ``tests/test_tier_resolver.py`` (antibody A3).
-    - ``scripts/audit_observation_instants_v2.py`` for per-tier row-count
+    - ``scripts/audit_observation_instants.py`` for per-tier row-count
       reports.
     - ``scripts/backfill_obs_v2.py`` to split the worklist by tier and
       dispatch to the right hourly client.

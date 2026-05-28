@@ -73,7 +73,6 @@ regardless of mathematical correctness.
 - `tests/test_cities_config_authoritative.py`
 - `tests/test_ensemble_client.py`
 - `tests/test_backfill_openmeteo_previous_runs.py`
-- `tests/test_etl_forecasts_v2_from_legacy.py`
 - `tests/test_backfill_scripts_match_live_config.py`
 - `tests/test_tier_resolver.py`
 - `tests/test_obs_v2_writer.py`

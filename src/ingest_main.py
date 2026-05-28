@@ -1375,9 +1375,9 @@ _CALIBRATION_STAGE_DB_ENV = "ZEUS_CALIBRATION_STAGE_DB_PATH"
 def _calibration_auto_promote_tick():
     """F9: Auto-promote calibration_pairs_v2 when the readiness gate passes.
 
-    Gate: invokes ``promote_calibration_pairs_v2.py inspect`` as a subprocess.
+    Gate: invokes ``promote_calibration.py inspect`` as a subprocess.
     If the inspect exit code is 0 (all sentinels complete), invokes
-    ``promote_calibration_pairs_v2.py promote --commit``.
+    ``promote_calibration.py promote --commit``.
 
     Guarded by two env flags:
 
@@ -1411,7 +1411,7 @@ def _calibration_auto_promote_tick():
         return
 
     venv_python = _etl_subprocess_python()
-    script = Path(__file__).parent.parent / "scripts" / "promote_calibration_pairs_v2.py"
+    script = Path(__file__).parent.parent / "scripts" / "promote_calibration.py"
     if not script.exists():
         logger.warning("[AUTO_PROMOTE] script not found at %s", script)
         return

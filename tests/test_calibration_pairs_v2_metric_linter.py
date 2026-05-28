@@ -138,7 +138,7 @@ def test_current_v2_readers_pass_lint():
     pass the new lint. Pre-fix audit identified these as already metric-
     scoped; this test pins that fact and detects future regressions."""
     expected_v2_readers = [
-        PROJECT_ROOT / "scripts" / "refit_platt_v2.py",
+        PROJECT_ROOT / "scripts" / "refit_platt.py",
         PROJECT_ROOT / "scripts" / "rebuild_calibration_pairs_v2.py",
         PROJECT_ROOT / "scripts" / "verify_truth_surfaces.py",
         PROJECT_ROOT / "scripts" / "backfill_tigge_snapshot_p_raw_v2.py",

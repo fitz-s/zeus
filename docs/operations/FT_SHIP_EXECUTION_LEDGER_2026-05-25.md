@@ -64,7 +64,7 @@ This is the single source of truth for finishing the full_transport→live ship.
 
 **Pre-staged downstream (verified READY):**
 - `state/zeus-world.db` `PRAGMA user_version=37` **already matches** `SCHEMA_VERSION=37` (db.py:897). NO migration needed. Daemon's `_startup_world_db_schema_prepare()` (src/main.py:2075) will run idempotent `init_schema()` on restart.
-- Promote: `python3 scripts/promote_platt_models_v2.py promote --stage-db state/zeus-forecasts.db --prod-db state/zeus-world.db --metrics high --commit` (subcommands inspect/promote/verify).
+- Promote: `python3 scripts/promote_platt.py promote --stage-db state/zeus-forecasts.db --prod-db state/zeus-world.db --metrics high --commit` (subcommands inspect/promote/verify).
 - Flag: `config/settings.json:195` `"full_transport_live_enabled": false` → flip to `true`.
 - Daemon restart: `launchctl kickstart -k gui/501/com.zeus.live-trading`.
 - Bin-check: `python3 scripts/replay_probability_edge_bin_sanity.py` (read-only on probability_trace_fact).
@@ -101,7 +101,7 @@ This is the single source of truth for finishing the full_transport→live ship.
 
 **Concurrent-write strategy:** SQLite WAL serializes writers. Refit's tiny platt writes + LOW rebuild's bulk pair writes both serialize cleanly. Risk: WAL growth + lock contention. Disk 90Gi free; watch WAL size. If refit hits preflight transient (as in #1), root-cause + relaunch — same playbook.
 
-**Lesson #11:** refit_platt_v2 `--rebuild-n-mc` must match rebuild's `--n-mc` (default mismatch 1000 vs 10000).
+**Lesson #11:** refit_platt `--rebuild-n-mc` must match rebuild's `--n-mc` (default mismatch 1000 vs 10000).
 **Lesson #12:** sentinels can be written non-atomically with data. Wipe sentinel + data together when rebuilding.
 
 ## WHERE WE ARE (2026-05-26 19:15 CDT — superseded; refit #2 sentinel miss; #3 launch only)
@@ -117,7 +117,7 @@ This is the single source of truth for finishing the full_transport→live ship.
 - Bridge zombies 67545, 75402 **self-cleaned** between turns — WAL drained 3.7GB → 20KB (checkpoint freed by reader exit). No kill needed.
 - launchctl shows live-trading/riskguard/data-ingest "-" PID (paused per ledger).
 
-**Lesson #11:** refit_platt_v2 `--rebuild-n-mc` MUST match the rebuild's `--n-mc`. Default differs from rebuild's documented default (`calibration_batch_rebuild_n_mc=1000` vs typical rebuild explicit `10000`). Either pass explicitly or change default. Document on next refit invocation.
+**Lesson #11:** refit_platt `--rebuild-n-mc` MUST match the rebuild's `--n-mc`. Default differs from rebuild's documented default (`calibration_batch_rebuild_n_mc=1000` vs typical rebuild explicit `10000`). Either pass explicitly or change default. Document on next refit invocation.
 
 **Lesson #12:** LOW sentinel claims complete but data only 8/51 cities. Sentinels can be written non-atomically with data. Audit LOW sentinel + decide: clear sentinel + rewipe LOW for proper rebuild.
 
@@ -147,7 +147,7 @@ This is the single source of truth for finishing the full_transport→live ship.
 
 ## WHERE WE ARE (2026-05-26 17:30 CDT — superseded)
 **HIGH BUILD DONE** 14:46:57 CDT — 51 cities, 16,973,980 HIGH pairs in prod `state/zeus-forecasts.db` (`error_model_family='full_transport_v1'`). Monitor `b67206g5l` fired.
-**HIGH FIT RUNNING** since 17:14:18 CDT — PID **61311** `refit_platt_v2.py --temperature-metric high --error-model full_transport_v1 --db state/zeus-forecasts.db --no-dry-run --force`, PPID=1 detached, log `logs/ftrefit_high_2026-05-26.log` (buffered — quiet until flush/exit). Per `db_writer_lock.py:649-674`, write mode refuses only world.db; forecasts.db IS the canonical Platt staging DB (promote step lifts to world.db via INV-37 ATTACH+SAVEPOINT).
+**HIGH FIT RUNNING** since 17:14:18 CDT — PID **61311** `refit_platt.py --temperature-metric high --error-model full_transport_v1 --db state/zeus-forecasts.db --no-dry-run --force`, PPID=1 detached, log `logs/ftrefit_high_2026-05-26.log` (buffered — quiet until flush/exit). Per `db_writer_lock.py:649-674`, write mode refuses only world.db; forecasts.db IS the canonical Platt staging DB (promote step lifts to world.db via INV-37 ATTACH+SAVEPOINT).
 **LOW BUILD CONTINUES** — PID 28447 ALIVE 6:23h elapsed, on LOW.
 **Concurrent writers OK** — both detached on prod forecasts.db; refit writes platt_models_v2 (tiny+bursty), 28447 writes calibration_pairs_v2 LOW buckets; SQLite WAL serializes writes. Monitor mild contention; no corruption risk.
 **Monitors** — a1d95f's (output/exit refit), b205l04cr (LOW-done). Don't double-arm. Task #70 in_progress. **No promote/restart** until fit reports + bin-check ≤1.
@@ -165,18 +165,18 @@ This is the single source of truth for finishing the full_transport→live ship.
 - a1d95f (agentId **a1d95fdd53c4676f5**) — STOOD DOWN; resume via SendMessage for the fit step. It owns the rebuild process knowledge.
 
 ## SUBSEQUENT TASKS — HIGH-FIRST PARALLEL (operator-directed)
-LOW markets are sparse + filter-gated (won't place orders), so ship HIGH to live-shadow ASAP; finish LOW in background. refit_platt_v2.py is metric-scoped → HIGH fit runs WHILE 28447 builds LOW.
+LOW markets are sparse + filter-gated (won't place orders), so ship HIGH to live-shadow ASAP; finish LOW in background. refit_platt.py is metric-scoped → HIGH fit runs WHILE 28447 builds LOW.
 
 **HIGH track (critical path):**
-1. **[trigger: b67206g5l] Fit HIGH** — resume a1d95f: `refit_platt_v2.py` metric=high, `--error-model full_transport_v1`, ECE-gated (identity calibrator where ECE low, learned Platt where it improves). Runs parallel to 28447's LOW build (reads stable HIGH pairs; SQLite WAL allows concurrent read+write; no conflict — different metric rows). Task #70.
+1. **[trigger: b67206g5l] Fit HIGH** — resume a1d95f: `refit_platt.py` metric=high, `--error-model full_transport_v1`, ECE-gated (identity calibrator where ECE low, learned Platt where it improves). Runs parallel to 28447's LOW build (reads stable HIGH pairs; SQLite WAL allows concurrent read+write; no conflict — different metric rows). Task #70.
 2. **Bin-check HIGH** — matched-date proper-score / bin-sanity on HIGH cohorts: p_raw bins must fall in expected intervals, HK HIGH passes pathology rule. (Smoke already showed HK calibrated; confirm across cohorts.) Task #74.
-3. **Promote HIGH** — `promote_platt_models_v2.py`: HIGH fitted models → prod **state/zeus-world.db**, additive (keyed error_model_family), explicit pin for all HIGH cohorts (NO carve-out — HK fixed). Cross-DB writes MUST use INV-37 (ATTACH+SAVEPOINT, never independent connections). Task #73.
+3. **Promote HIGH** — `promote_platt.py`: HIGH fitted models → prod **state/zeus-world.db**, additive (keyed error_model_family), explicit pin for all HIGH cohorts (NO carve-out — HK fixed). Cross-DB writes MUST use INV-37 (ATTACH+SAVEPOINT, never independent connections). Task #73.
 4. **[needs: world.db schema migrate to 37] Restart daemon SHADOW** — `launchctl kickstart -k gui/$(id -u)/com.zeus.live-trading` on the merged main code, flag `full_transport_live_enabled` ON, shadow mode. The daemon CHECKS world schema and does NOT self-migrate forecasts; before restart run init_schema/migrate to add `calibration_method` col + bump world.db to 37 (else daemon SystemExit on schema mismatch). The restart also clears the stale deployment_freshness auto-pause. Task #73/#90.
 5. **Verify HIGH shadow** — daemon must produce fresh `probability_trace_fact` rows; HIGH p_raw bins align with online weather forecast for the target date, **bin bias ≤ 1 unit**. No shadow traces = DEFECT → root-cause (don't stall). Task #74.
 6. **[OPERATOR GATE — surface here] Unshadow** — flip to live trading bounded/tiny. Then PROVE a real chain order fills. No fill = DEFECT → root-cause. Tasks #90/#91.
 
 **LOW track (background, parallel):**
-7. **[trigger: b205l04cr] Fit + promote LOW** — after LOW build done, `refit_platt_v2.py` metric=low → promote LOW models → world.db + pin LOW. LOW joins live after HIGH shadow validated. Until then LOW sparse + filter-gated → no orders (correct). Task #92.
+7. **[trigger: b205l04cr] Fit + promote LOW** — after LOW build done, `refit_platt.py` metric=low → promote LOW models → world.db + pin LOW. LOW joins live after HIGH shadow validated. Until then LOW sparse + filter-gated → no orders (correct). Task #92.
 
 ## LESSONS FROM PART A (errors hit + how to avoid — do NOT repeat)
 1. **Rebuild must WIPE ALL pairs first.** The rebuild writes BOTH `error_model_family='full_transport_v1'` AND `'none'` pairs (TIGGE snapshots without ft params → none). The per-city `--force` delete is scoped to ft_v1 only, so leftover `none` pairs (e.g. from a smoke run) cause `UNIQUE` collisions mid-run (the v2 unique key has NO error_model_family). Run #1 (PID 9138) died at 16/52 cities this way. FIX: `DELETE FROM calibration_pairs_v2` (full wipe) before any full rebuild.
@@ -246,7 +246,7 @@ full_transport → live trading: autonomous execution ledger. Read top-to-bottom
 ## FINISHED
 - Fix A — metric-aware 0Z/12Z window selection in ens_bias_repo (HK HIGH prior −3.49→+0.67). `5260dd2809` on ft-ship-64.
 - Fix B — transport MIN_PAIRED_N=5 gate in ens_error_model (HK HIGH eff −2.10→+0.10; 34 cities de-noised). `060540448e` on ft-ship-64.
-- Sentinel reader fix (promote_platt_models_v2.py:226). On ft-ship-64.
+- Sentinel reader fix (promote_platt.py:226). On ft-ship-64.
 - Ship-readiness gate (scripts/check_full_transport_ship_readiness.py, 9 booleans). On ft-ship-64.
 - Matched-date eval tool + replay-equivalence harness. On ft-ship-64.
 - Canonical error-model schema (model_bias_ens_v2 +13 fields) + writer-bug fix + posterior producer (scripts/fit_full_transport_error_models.py). On ft-ship-64.

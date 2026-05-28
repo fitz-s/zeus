@@ -131,7 +131,7 @@ def test_antibody_self_test_catches_synthetic_violation(tmp_path):
     fake_module = tmp_path / "fake_trading.py"
     fake_module.write_text(
         "from scripts.ingest.hourly_instants_tick import main\n"
-        "import scripts.refit_platt_v2\n",
+        "import scripts.refit_platt\n",
         encoding="utf-8",
     )
     imports = _collect_imports(fake_module)
@@ -139,6 +139,6 @@ def test_antibody_self_test_catches_synthetic_violation(tmp_path):
     assert "scripts.ingest.hourly_instants_tick" in found_violations, (
         "Antibody failed to detect scripts.ingest.* import"
     )
-    assert "scripts.refit_platt_v2" in found_violations, (
+    assert "scripts.refit_platt" in found_violations, (
         "Antibody failed to detect scripts.refit_* import"
     )

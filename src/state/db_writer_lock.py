@@ -660,27 +660,25 @@ SQLITE_CONNECT_ALLOWLIST: frozenset[str] = frozenset(
         "src/observability/status_summary.py",  # RO: status dashboard read-only
         "src/riskguard/discord_alerts.py",  # WRITE risk_state.db only; not in world-db BULK lock universe
         "src/control/cli/promote_entry_forecast.py",  # RO: operator CLI opens world-db with mode=ro
-        "scripts/promote_calibration_v2_stage_to_prod.py",  # RO inspect/verify; RW only with --commit
         # K1 workload-class split (2026-05-12): PR #112 Option (c) split of
         # the original single-script design. Each handles RO inspect/verify;
         # RW only with --commit, gated by BEGIN IMMEDIATE + rollback semantics.
-        "scripts/promote_platt_models_v2.py",       # RO inspect/verify; RW only with --commit (zeus-world.db)
-        "scripts/promote_calibration_pairs_v2.py",  # RO inspect/verify; RW only with --commit (zeus-forecasts.db)
+        "scripts/promote_platt.py",       # RO inspect/verify; RW only with --commit (zeus-world.db)
+        "scripts/promote_calibration.py",  # RO inspect/verify; RW only with --commit (zeus-forecasts.db)
         # --- read-only scripts: verified SELECT-only, named in PR #86 ---
         "scripts/attribution_drift_weekly.py",          # read_only (PR #86)
         "scripts/audit_divergence_exit_counterfactual.py",  # read_only (PR #86)
         "scripts/audit_realtime_pnl.py",                # read_only (PR #86)
         "scripts/bridge_oracle_to_calibration.py",      # read_only (PR #86)
         "scripts/build_correlation_matrix.py",          # read_only (PR #86)
-        "scripts/compare_diurnal_v1_v2.py",             # read_only (PR #86)
+
         "scripts/deep_heartbeat.py",                    # read_only (PR #86)
         "scripts/healthcheck.py",                       # read_only (PR #86)
         "scripts/replay_parity.py",                     # read_only (PR #86)
         "scripts/venus_sensing_report.py",              # read_only (PR #86)
         # --- additional read-only / ro-URI scripts ---
-        "scripts/audit_observation_instants_v2.py",     # read_only (SELECT-only, no INSERT/UPDATE/DELETE)
+        "scripts/audit_observation_instants.py",         # read_only (SELECT-only, no INSERT/UPDATE/DELETE)
         "scripts/calibration_observation_weekly.py",    # read_only_ro_uri
-        "scripts/ddd_v1_v2_replay.py",                  # read_only_ro_uri
         "scripts/diagnose_low_high_alignment.py",       # read_only (SELECT-only)
         "scripts/diagnose_truth_surfaces.py",           # read_only (SELECT-only, no INSERT/UPDATE/DELETE)
         "scripts/edge_observation_weekly.py",           # read_only_ro_uri
@@ -727,9 +725,7 @@ SQLITE_CONNECT_ALLOWLIST: frozenset[str] = frozenset(
         "scripts/backfill_tigge_snapshot_p_raw_v2.py",      # already_guarded: writes under db_writer_lock(BULK)
         "scripts/backfill_wu_daily_all.py",                 # already_guarded: writes under db_writer_lock(BULK)
         "scripts/cleanup_ghost_positions.py",               # already_guarded: writes under db_writer_lock(BULK)
-        "scripts/etl_forecasts_v2_from_legacy.py",          # already_guarded: writes under db_writer_lock(BULK)
         "scripts/fill_obs_v2_dst_gaps.py",                  # already_guarded: writes under db_writer_lock(BULK) when not dry_run
-        "scripts/fill_obs_v2_meteostat.py",                 # already_guarded: writes under db_writer_lock(BULK) when not dry_run
         "scripts/force_cycle_with_healthy_gates.py",        # already_guarded: writes under db_writer_lock(BULK)
         "scripts/hko_ingest_tick.py",                       # already_guarded: writes under db_writer_lock(BULK)
         "scripts/ingest_grib_to_snapshots.py",              # already_guarded: writes under db_writer_lock(BULK)
@@ -738,7 +734,7 @@ SQLITE_CONNECT_ALLOWLIST: frozenset[str] = frozenset(
         "scripts/rebuild_calibration_pairs_canonical.py",   # already_guarded: writes under db_writer_lock(BULK)
         "scripts/rebuild_calibration_pairs_v2.py",          # already_guarded: writes under bulk_lock_with_chunker (K3 retrofit)
         "scripts/rebuild_settlements.py",                   # already_guarded: writes under db_writer_lock(BULK)
-        "scripts/refit_platt_v2.py",                        # already_guarded: reads mode=ro; writes under db_writer_lock(BULK)
+        "scripts/refit_platt.py",                           # already_guarded: reads mode=ro; writes under db_writer_lock(BULK)
         # --- ENS full_transport_v1 offline staging tools (2026-05-24): isolated --db only,
         #     refuse the shared world DB via _resolve_isolated_calibration_write_db_path;
         #     single-process offline operator runs, never the live daemon path ---
@@ -758,14 +754,8 @@ SQLITE_CONNECT_ALLOWLIST: frozenset[str] = frozenset(
         "scripts/reevaluate_readiness_2026_05_07.py",       # operator_invoked: one-shot idempotent readiness repair (ran 2026-05-07, expected 0 updates)
         # --- QUARANTINED resolved: verify_truth_surfaces is read_only (0 writes) ---
         "scripts/verify_truth_surfaces.py",                 # read_only: all connects are mode=ro or SELECT-only; 0 INSERT/UPDATE/DELETE
-        # --- phase0-pr4: NOT NULL migration scripts ---
-        "scripts/audit_calibration_pairs_v2_null_groups.py",    # read_only: mode=ro preflight audit; 0 writes
-        "scripts/migrate_calibration_pairs_v2_not_null.py",     # operator_invoked: DDL-only schema migration (CREATE TRIGGER / REBUILD)
-        "scripts/rollback_calibration_pairs_v2_not_null.py",    # operator_invoked: DDL-only rollback (DROP TRIGGER / REBUILD)
         # --- PR 1 era-provenance scripts ---
         "scripts/audit_settlements_v2_era_provenance.py",       # read_only: SELECT-only, no writes
-        "scripts/backfill_settlements_v2_era_provenance.py",    # operator_invoked: --apply required; writes under SAVEPOINT
-        "scripts/rollback_settlements_v2_era_provenance.py",    # operator_invoked: --apply required; snapshot-based restoration
         "scripts/migrate_settlement_commands_in_flight_at_era_flip.py",  # operator_invoked: quarantine DDL + SAVEPOINT
         # --- PR 3+6 (2026-05-19) migration scripts ---
         "scripts/migrate_settlement_commands_polymarket_anchor.py",  # operator_invoked: DDL-only idempotent ADD COLUMN for PR3+PR6 columns

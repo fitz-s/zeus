@@ -88,7 +88,7 @@ Only list durable entry points here; use the manifest for the full catalog.
 | `ci/assert_test_quality.py` | Money-path test-quality metadata gate (created 2026-05-21) |
 | `cloud_tigge_autochain.sh` | Cloud-side TIGGE download autochain; pairs with local_post_extract_chain.sh (created 2026-05-08) |
 | `data_chain_monitor.sh` | Shell monitor for data chain health; runtime support (created 2026-05-11) |
-| `ddd_v1_v2_replay.py` | DDD v1→v2 replay diagnostic; replay correctness probe (created 2026-05-03) |
+| `ddd_replay.py` | DDD v1→v2 replay diagnostic; replay correctness probe (created 2026-05-03) |
 | `drop_world_ghost_tables.py` | Repair: drop ghost tables from zeus-world.db post K1 split per task_2026-05-14_k1_followups PLAN §2 P3 D2 (dry-run/apply; created 2026-05-14) |
 | `expire_auto_pause.sh` | Operator tool: expire auto-pause state; sister script of arm_live_mode.sh, runs only step 3 (created 2026-05-01) |
 | `force_cycle_with_healthy_gates.py` | Operator tool: force a cycle tick with all gates healthy; runtime support (created 2026-05-16) |

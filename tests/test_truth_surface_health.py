@@ -1081,14 +1081,14 @@ class TestTrainingReadinessP0:
         monkeypatch,
         capsys,
     ):
-        from scripts import refit_platt_v2
+        from scripts import refit_platt
 
         db_path = _fresh_training_readiness_world_db(tmp_path)
         monkeypatch.setattr(
-            refit_platt_v2.sys,
+            refit_platt.sys,
             "argv",
             [
-                "refit_platt_v2.py",
+                "refit_platt.py",
                 "--no-dry-run",
                 "--force",
                 "--db",
@@ -1096,7 +1096,7 @@ class TestTrainingReadinessP0:
             ],
         )
 
-        assert refit_platt_v2.main() == 1
+        assert refit_platt.main() == 1
         assert "preflight is NOT_READY" in capsys.readouterr().err
 
     def test_training_readiness_fails_when_required_truth_surfaces_are_empty(self, tmp_path):

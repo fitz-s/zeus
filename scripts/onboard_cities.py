@@ -402,10 +402,10 @@ PIPELINE_STEPS = [
     },
     {
         "id": "platt_training",
-        "name": "Refit Platt v2 models (refit_platt_v2 → promote to world.db)",
+        "name": "Refit Platt v2 models (refit_platt → promote to world.db)",
         "type": "python",
-        # Inline Python step: calls refit_platt_v2 + promote_platt_models_v2.
-        # Uses zeus-forecasts.db (refuses zeus-world.db per refit_platt_v2 safety gate).
+        # Inline Python step: calls refit_platt + promote_platt.
+        # Uses zeus-forecasts.db (refuses zeus-world.db per refit_platt safety gate).
         "uses_forecasts_db": True,
         "db_source": "zeus-forecasts.db",
     },
@@ -964,19 +964,19 @@ def _verification_tables() -> tuple[list[str], list[str]]:
 # ─────────────────────────────────────────────────────────────
 
 def _run_platt_training(city_names: list[str], dry_run: bool = False) -> None:
-    """Run refit_platt_v2.py (write to forecasts.db) then promote to world.db.
+    """Run refit_platt.py (write to forecasts.db) then promote to world.db.
 
     Two-stage:
-      1. refit_platt_v2.py --db <forecasts.db> --no-dry-run --force
+      1. refit_platt.py --db <forecasts.db> --no-dry-run --force
          Reads calibration_pairs_v2 from zeus-forecasts.db.
          Refuses zeus-world.db (safety gate in the script).
-      2. promote_platt_models_v2.py promote
+      2. promote_platt.py promote
            --stage-db <forecasts.db> --prod-db <world.db> --commit
     """
     from src.state.db import ZEUS_FORECASTS_DB_PATH, ZEUS_WORLD_DB_PATH
 
-    refit_script = PROJECT_ROOT / "scripts" / "refit_platt_v2.py"
-    promote_script = PROJECT_ROOT / "scripts" / "promote_platt_models_v2.py"
+    refit_script = PROJECT_ROOT / "scripts" / "refit_platt.py"
+    promote_script = PROJECT_ROOT / "scripts" / "promote_platt.py"
 
     for script in (refit_script, promote_script):
         if not script.exists():
@@ -1002,7 +1002,7 @@ def _run_platt_training(city_names: list[str], dry_run: bool = False) -> None:
         logger.info("  [DRY RUN] Would run: %s", " ".join(promote_cmd[-4:]))
         return
 
-    for cmd, label in [(refit_cmd, "refit_platt_v2"), (promote_cmd, "promote_platt_models_v2")]:
+    for cmd, label in [(refit_cmd, "refit_platt"), (promote_cmd, "promote_platt")]:
         logger.info("  Running: %s", label)
         try:
             result = subprocess_run_with_write_class(

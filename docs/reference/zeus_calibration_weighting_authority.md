@@ -292,7 +292,7 @@ Each cluster has ≥1k samples — defends against per-city overfitting while al
 **Production rule**:
 
 ```python
-# rebuild_calibration_pairs_v2.py + refit_platt_v2.py
+# rebuild_calibration_pairs_v2.py + refit_platt.py
 def cluster_alpha(climate_zone: str) -> float:
     return CLUSTER_ALPHA_MAP[climate_zone]   # tuned per-cluster, not per-city
 

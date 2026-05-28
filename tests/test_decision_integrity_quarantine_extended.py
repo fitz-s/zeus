@@ -3,9 +3,9 @@
 # Authority basis: docs/operations/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md §PR-E
 # Lifecycle: created=2026-05-23; last_reviewed=2026-05-23; last_reused=never
 # Purpose: Unit tests for extended quarantine functions (PR-E) and downstream
-#          exclusion filters in evidence_report + refit_platt_v2.
+#          exclusion filters in evidence_report + refit_platt.
 # Reuse: Run when any per-table quarantine function, evidence_report.py exclusion,
-#        or refit_platt_v2 exclusion changes.
+#        or refit_platt exclusion changes.
 
 """PR-E — Extended quarantine + downstream exclusion tests.
 
@@ -15,7 +15,7 @@ Coverage:
   2. test_promotion_readiness_excludes_quarantined_decisions: build_evidence_report
      excludes decision_events rows tagged in decision_integrity_quarantine.
   3. test_calibration_rebuild_excludes_quarantined_pairs: _fetch_pairs_for_bucket
-     (via refit_platt_v2) excludes calibration_pairs_v2 rows tagged in quarantine.
+     (via refit_platt) excludes calibration_pairs_v2 rows tagged in quarantine.
   4. test_regret_decomposition_excludes_quarantined_rows: build_evidence_report
      excludes regret_decompositions rows whose decision_event_id is quarantined.
   5. quarantine_all_tables_for_noncontributing_forecast aggregates per-table results.
@@ -30,7 +30,7 @@ from pathlib import Path
 
 import pytest
 
-# Add scripts/ to path so we can import refit_platt_v2 helpers.
+# Add scripts/ to path so we can import refit_platt helpers.
 _SCRIPTS_DIR = Path(__file__).parent.parent / "scripts"
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
@@ -646,7 +646,7 @@ def _make_platt_db() -> sqlite3.Connection:
 
 def test_calibration_rebuild_excludes_quarantined_pairs():
     """_fetch_pairs_for_bucket excludes calibration_pairs_v2 rows tagged in quarantine."""
-    import refit_platt_v2 as rp2
+    import refit_platt as rp2
 
     from src.types.metric_identity import HIGH_LOCALDAY_MAX
 

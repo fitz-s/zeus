@@ -9,7 +9,7 @@ Covers:
   Fix B — get_active_platt_model threads cycle/source_id/horizon_profile to load_platt_model_v2
   Fix C — _resolve_pin_for_bucket handles cycle-stratified frozen_as_of dict
   Fix F — OOS evaluator --refresh flag skips fresh rows; writes stale rows
-  Fix D — refit_platt_v2 per-bucket SAVEPOINT isolation; bad bucket rolls back individually
+  Fix D — refit_platt per-bucket SAVEPOINT isolation; bad bucket rolls back individually
 """
 from __future__ import annotations
 
@@ -528,11 +528,11 @@ class TestFixF:
 
 
 # ---------------------------------------------------------------------------
-# Fix D — per-bucket SAVEPOINT isolation in refit_platt_v2
+# Fix D — per-bucket SAVEPOINT isolation in refit_platt
 # ---------------------------------------------------------------------------
 
 class TestFixD:
-    """refit_platt_v2 per-bucket SAVEPOINT: bad bucket rolls back individually."""
+    """refit_platt per-bucket SAVEPOINT: bad bucket rolls back individually."""
 
     def _make_refit_conn(self):
         conn = sqlite3.connect(":memory:")
@@ -594,8 +594,8 @@ class TestFixD:
         for the first bucket but succeeds for the second, without fighting the DB
         schema's NOT NULL constraint on p_raw.
         """
-        import scripts.refit_platt_v2 as rfmod
-        from scripts.refit_platt_v2 import refit_v2, RefitStatsV2
+        import scripts.refit_platt as rfmod
+        from scripts.refit_platt import refit_v2, RefitStatsV2
         from src.types.metric_identity import HIGH_LOCALDAY_MAX
 
         conn = self._make_refit_conn()
@@ -646,8 +646,8 @@ class TestFixD:
         can persist on RELEASE if it began outside an explicit transaction,
         so a dry-run-side INSERT would silently mutate the DB.
         """
-        import scripts.refit_platt_v2 as rfmod
-        from scripts.refit_platt_v2 import refit_v2
+        import scripts.refit_platt as rfmod
+        from scripts.refit_platt import refit_v2
         from src.types.metric_identity import HIGH_LOCALDAY_MAX
 
         conn = self._make_refit_conn()
@@ -681,8 +681,8 @@ class TestFixD:
 
     def test_refit_strict_mode_raises_on_any_failure(self):
         """Fix D: --strict mode raises RuntimeError and rolls back all if any bucket fails."""
-        import scripts.refit_platt_v2 as rfmod
-        from scripts.refit_platt_v2 import refit_v2
+        import scripts.refit_platt as rfmod
+        from scripts.refit_platt import refit_v2
         from src.types.metric_identity import HIGH_LOCALDAY_MAX
 
         conn = self._make_refit_conn()

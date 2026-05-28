@@ -745,18 +745,18 @@ class TestB078LowLaneTruthFilesRegistry:
 
 
 # ---------------------------------------------------------------------------
-# R-AO: refit_platt_v2 low-metric isolation
+# R-AO: refit_platt low-metric isolation
 # ---------------------------------------------------------------------------
 
 
 class TestRefitPlattV2LowMetricIsolation:
-    """R-AO: refit_platt_v2 must be metric-aware; low-track refit must not emit high: bucket keys
+    """R-AO: refit_platt must be metric-aware; low-track refit must not emit high: bucket keys
     or call save/deactivate with HIGH_LOCALDAY_MAX.
 
     The current script hardcodes 'high:' bucket keys and HIGH_LOCALDAY_MAX throughout.
     Phase 5B parametrizes via METRIC_SPECS iteration. These tests anchor that contract.
 
-    Target: scripts.refit_platt_v2 — refit_v2() + _fit_bucket() (exists but hardcoded — RED)
+    Target: scripts.refit_platt — refit_v2() + _fit_bucket() (exists but hardcoded — RED)
     """
 
     def _make_calibration_db(self, tmp_path, temperature_metric: str, data_version: str):
@@ -810,11 +810,11 @@ class TestRefitPlattV2LowMetricIsolation:
         return db
 
     def test_refit_platt_low_bucket_key_prefix(self, tmp_path):
-        """R-AO (acceptance): refit_platt_v2 running for low-track spec must emit
+        """R-AO (acceptance): refit_platt running for low-track spec must emit
         bucket_keys prefixed 'low:', never 'high:'."""
         from unittest.mock import patch, MagicMock
         from src.types.metric_identity import LOW_LOCALDAY_MIN
-        from scripts.refit_platt_v2 import refit_v2
+        from scripts.refit_platt import refit_v2
 
         db = self._make_calibration_db(
             tmp_path,
@@ -827,8 +827,8 @@ class TestRefitPlattV2LowMetricIsolation:
         def fake_save(conn, *, metric_identity, cluster, season, data_version, **kwargs):
             captured_keys.append(f"{metric_identity.temperature_metric}:{cluster}:{season}:{data_version}")
 
-        with patch("scripts.refit_platt_v2.save_platt_model_v2", side_effect=fake_save), \
-             patch("scripts.refit_platt_v2.deactivate_model_v2", return_value=0):
+        with patch("scripts.refit_platt.save_platt_model_v2", side_effect=fake_save), \
+             patch("scripts.refit_platt.deactivate_model_v2", return_value=0):
             refit_v2(db, metric_identity=LOW_LOCALDAY_MIN, dry_run=False, force=True)
 
         high_keys = [k for k in captured_keys if k.startswith("high:")]
@@ -842,7 +842,7 @@ class TestRefitPlattV2LowMetricIsolation:
         during a low-track refit, never with HIGH_LOCALDAY_MAX."""
         from unittest.mock import patch, call
         from src.types.metric_identity import LOW_LOCALDAY_MIN, HIGH_LOCALDAY_MAX
-        from scripts.refit_platt_v2 import refit_v2
+        from scripts.refit_platt import refit_v2
 
         db = self._make_calibration_db(
             tmp_path,
@@ -856,8 +856,8 @@ class TestRefitPlattV2LowMetricIsolation:
             deactivate_calls.append(metric_identity)
             return 0
 
-        with patch("scripts.refit_platt_v2.deactivate_model_v2", side_effect=fake_deactivate), \
-             patch("scripts.refit_platt_v2.save_platt_model_v2", return_value=None):
+        with patch("scripts.refit_platt.deactivate_model_v2", side_effect=fake_deactivate), \
+             patch("scripts.refit_platt.save_platt_model_v2", return_value=None):
             refit_v2(db, metric_identity=LOW_LOCALDAY_MIN, dry_run=False, force=True)
 
         high_calls = [m for m in deactivate_calls if m == HIGH_LOCALDAY_MAX]
@@ -871,7 +871,7 @@ class TestRefitPlattV2LowMetricIsolation:
         during a low-track refit, never with HIGH_LOCALDAY_MAX."""
         from unittest.mock import patch
         from src.types.metric_identity import LOW_LOCALDAY_MIN, HIGH_LOCALDAY_MAX
-        from scripts.refit_platt_v2 import refit_v2
+        from scripts.refit_platt import refit_v2
 
         db = self._make_calibration_db(
             tmp_path,
@@ -884,8 +884,8 @@ class TestRefitPlattV2LowMetricIsolation:
         def fake_save(conn, *, metric_identity, **kwargs):
             save_calls.append(metric_identity)
 
-        with patch("scripts.refit_platt_v2.save_platt_model_v2", side_effect=fake_save), \
-             patch("scripts.refit_platt_v2.deactivate_model_v2", return_value=0):
+        with patch("scripts.refit_platt.save_platt_model_v2", side_effect=fake_save), \
+             patch("scripts.refit_platt.deactivate_model_v2", return_value=0):
             refit_v2(db, metric_identity=LOW_LOCALDAY_MIN, dry_run=False, force=True)
 
         high_calls = [m for m in save_calls if m == HIGH_LOCALDAY_MAX]
@@ -901,7 +901,7 @@ class TestRefitPlattV2LowMetricIsolation:
         """
         from unittest.mock import patch
         from src.types.metric_identity import HIGH_LOCALDAY_MAX
-        from scripts.refit_platt_v2 import refit_v2
+        from scripts.refit_platt import refit_v2
 
         db = self._make_calibration_db(
             tmp_path,
@@ -916,8 +916,8 @@ class TestRefitPlattV2LowMetricIsolation:
         def fake_save(conn, *, metric_identity, cluster, season, data_version, **kwargs):
             captured_keys.append(f"{metric_identity.temperature_metric}:{cluster}:{season}:{data_version}")
 
-        with patch("scripts.refit_platt_v2.save_platt_model_v2", side_effect=fake_save), \
-             patch("scripts.refit_platt_v2.deactivate_model_v2", return_value=0):
+        with patch("scripts.refit_platt.save_platt_model_v2", side_effect=fake_save), \
+             patch("scripts.refit_platt.deactivate_model_v2", return_value=0):
             refit_v2(db, metric_identity=HIGH_LOCALDAY_MAX, dry_run=False, force=True)
 
         low_keys = [k for k in captured_keys if k.startswith("low:")]
@@ -933,7 +933,7 @@ class TestRefitPlattV2LowMetricIsolation:
         Phase 5B adds it. This test fails RED until exec-emma adds the param.
         """
         import inspect
-        from scripts.refit_platt_v2 import refit_v2
+        from scripts.refit_platt import refit_v2
 
         sig = inspect.signature(refit_v2)
         assert "metric_identity" in sig.parameters, (

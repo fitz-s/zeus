@@ -122,7 +122,7 @@ fully applied. All six required release evidence items are complete:
 - **calibration_rebuilt**: `scripts/rebuild_calibration_pairs_v2.py --city
   Paris --start-date 2024-01-01 --end-date 2026-05-01 --no-dry-run --force`
   run 2026-05-03. Full LFPB calibration_pairs_v2 window rebuilt.
-  `scripts/refit_platt_v2.py --cluster Paris --no-dry-run --force` run
+  `scripts/refit_platt.py --cluster Paris --no-dry-run --force` run
   2026-05-03. All 8 platt buckets (4 seasons × high/low) refit with LFPB
   pairs.
 

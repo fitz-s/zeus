@@ -29,7 +29,7 @@ No orphan buckets, no "newest VERIFIED wins", no implicit fallback.
 2. Fix writer bug (`onboard_cities.py` `.posterior.bias` → `.bias_c`).
 3. Port posterior producer onto main: `fit_full_transport_error_models.py` (inputs: TIGGE prior residuals, OpenData live residuals, paired F25–F50 deltas, training_cutoff, bucket defs → ens_error_model_v1 rows). No throwaway sub-worktree dependency.
 4. Wire live p_raw at `monitor_refresh.py:453` (+:471): load ens_error_model_v1 row → `p_raw_vector_with_error_model`, **behind flag `full_transport_live_enabled` default OFF (byte-identical when off)**.
-5. Fix sentinel reader (`promote_platt_models_v2.py:226`: accept `data_version in wanted_dvs OR == "all"`); keep `pairs_complete` vs `platt_complete` distinct.
+5. Fix sentinel reader (`promote_platt.py:226`: accept `data_version in wanted_dvs OR == "all"`); keep `pairs_complete` vs `platt_complete` distinct.
 → critic/verify → **OPERATOR CHECKPOINT before any production byte.**
 
 **Phase 2 — canonical producer run on COPY + REPLAY-EQUIVALENCE PROOF (the rerun-decider).**

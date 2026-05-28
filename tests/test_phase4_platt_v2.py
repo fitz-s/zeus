@@ -350,7 +350,7 @@ class TestFitBucketNumericalParity:
 
 
 class TestBucketKeyEmfParity:
-    """Train-key == serve-key: the bucket_key produced by refit_platt_v2._fit_bucket
+    """Train-key == serve-key: the bucket_key produced by refit_platt._fit_bucket
     must be byte-identical to the model_key saved by save_platt_model_v2 for both
     error_model_family='none' and error_model_family='full_transport_v1'.
 
@@ -380,7 +380,7 @@ class TestBucketKeyEmfParity:
         input_space: str,
         error_model_family: str,
     ) -> str:
-        """Mirror the bucket_key formula from refit_platt_v2._fit_bucket (post-fix)."""
+        """Mirror the bucket_key formula from refit_platt._fit_bucket (post-fix)."""
         emf_suffix = f":emf={error_model_family}" if error_model_family != "none" else ""
         return (
             f"{metric}:{cluster}:{season}:{data_version}:{cycle}:"

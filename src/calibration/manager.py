@@ -783,7 +783,7 @@ def get_calibrator(
 
     Law: docs/authority/zeus_dual_track_architecture.md §4 (World DB v2 table
     family keyed on temperature_metric). Writes to platt_models_v2 landed
-    Phase 5 (save_platt_model_v2 + refit_platt_v2.py); reads were unwired
+    Phase 5 (save_platt_model_v2 + refit_platt.py); reads were unwired
     until Phase 9C.
 
     Implements hierarchical fallback (spec §3.4):
@@ -1098,7 +1098,7 @@ def _fit_from_pairs(
     violation (write-side twin of the L3 read-side fix).
 
     LOW refits must land via the dedicated v2 pipeline
-    (scripts/refit_platt_v2.py → save_platt_model_v2), which is
+    (scripts/refit_platt.py → save_platt_model_v2), which is
     Golden-Window-gated. Fast-path on-the-fly refit is unsafe for LOW
     until a metric-aware on-the-fly-to-v2 writer is added (post-dual-
     track cleanup packet).
@@ -1107,7 +1107,7 @@ def _fit_from_pairs(
         logger.debug(
             "_fit_from_pairs skipped for %s_%s (temperature_metric=%s): "
             "on-the-fly refit is HIGH-only per Phase 9C.1 two-seam law. "
-            "LOW refits must use scripts/refit_platt_v2.py.",
+            "LOW refits must use scripts/refit_platt.py.",
             cluster, season, temperature_metric,
         )
         return None

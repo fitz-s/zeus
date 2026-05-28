@@ -49,7 +49,7 @@ On HTTP 429/403/5xx, the driver retries with exponential backoff
 reached the window is logged as failed but the driver continues with
 the next city — it does not abort the whole batch. A separate
 resume command (``--resume``) can be added later; for now, the
-``audit_observation_instants_v2.py`` script identifies gaps via
+``audit_observation_instants.py`` script identifies gaps via
 row-count comparison.
 
 Safety

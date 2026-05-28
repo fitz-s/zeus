@@ -8,7 +8,7 @@
 # Reuse: Run after run_offline_calibration_rebuild.py completes.
 """Offline driver: run refit_all_v2() against an ISOLATED staging DB.
 
-Mirrors run_offline_calibration_rebuild.py. `refit_platt_v2.py main()` wraps the
+Mirrors run_offline_calibration_rebuild.py. `refit_platt.py main()` wraps the
 refit in an operator promotion preflight that guards the SHARED world DB. This
 driver calls `refit_all_v2` directly against an explicit isolated DB (refusing
 the canonical world DB). The in-function rebuild-complete sentinel gate
@@ -44,7 +44,7 @@ def main() -> int:
     ap.add_argument("--error-model", default="none")
     args = ap.parse_args()
 
-    from scripts.refit_platt_v2 import refit_all_v2  # noqa: PLC0415
+    from scripts.refit_platt import refit_all_v2  # noqa: PLC0415
     from scripts.rebuild_calibration_pairs_v2 import (  # noqa: PLC0415
         _resolve_isolated_calibration_write_db_path,
     )

@@ -107,7 +107,7 @@ def evaluate_calibration_transfer_policy_with_evidence(
 
 ## Cadence
 
-- **Post-refit hook**: `refit_platt_v2.py` writes a new Platt model → trigger OOS eval against all known target routes → write `validated_calibration_transfers` rows.
+- **Post-refit hook**: `refit_platt.py` writes a new Platt model → trigger OOS eval against all known target routes → write `validated_calibration_transfers` rows.
 - **Daily cron 06:00 UTC** (off-peak): re-evaluate stale rows (>90 days), write fresh rows.
 - **Feature flag** `ZEUS_CALIBRATION_TRANSFER_OOS_EVAL_ENABLED`: when false, fall back to legacy `evaluate_calibration_transfer_policy`. When true, new evidence-gated function is authoritative.
 

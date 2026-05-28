@@ -122,7 +122,7 @@ _SETTLEMENTS_TABLE_REF_RE = re.compile(
 # Slice A1b (PR #19 phase 4 closeout, 2026-04-26): twin pattern for
 # calibration_pairs_v2 — extends the settlements metric-predicate
 # antibody to the dual-track v2 calibration table. Phase 4 audit
-# confirmed all 5 current v2 reader sites (refit_platt_v2.py:92,113;
+# confirmed all 5 current v2 reader sites (refit_platt.py:92,113;
 # rebuild_calibration_pairs_v2.py:198,205; verify_truth_surfaces.py:1631;
 # backfill_tigge_snapshot_p_raw_v2.py:132) include WHERE temperature_
 # metric = ?. This lint ensures FUTURE readers conform.

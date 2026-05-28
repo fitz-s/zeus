@@ -2480,7 +2480,7 @@ class TestSourceContractGate:
         assert {item["status"] for item in rollback["restored"]} == {"restored"}
 
     def test_platt_refit_derives_exact_bucket_keys_from_city_date_scope(self):
-        from scripts import refit_platt_v2
+        from scripts import refit_platt
         from src.types.metric_identity import HIGH_LOCALDAY_MAX
 
         conn = sqlite3.connect(":memory:")
@@ -2503,7 +2503,7 @@ class TestSourceContractGate:
         )
 
         def insert_bucket(*, city: str, target_date: str, season: str, data_version: str) -> None:
-            for idx in range(refit_platt_v2.MIN_DECISION_GROUPS):
+            for idx in range(refit_platt.MIN_DECISION_GROUPS):
                 conn.execute(
                     """
                     INSERT INTO calibration_pairs_v2 (
@@ -2519,7 +2519,7 @@ class TestSourceContractGate:
         insert_bucket(city="London", target_date="2026-04-28", season="MAM", data_version="unaffected_same_season")
         insert_bucket(city="Paris", target_date="2026-01-15", season="DJF", data_version="outside_window")
 
-        rows = refit_platt_v2._fetch_buckets(
+        rows = refit_platt._fetch_buckets(
             conn,
             HIGH_LOCALDAY_MAX,
             city_filter="Paris",

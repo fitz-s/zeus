@@ -292,7 +292,7 @@ class TestRCSHarvesterLowRouting:
         Pre-C5 behavior (documented in POST_AUDIT_HANDOFF_2026-04-24.md
         §3.1 C5): HIGH branch of harvest_settlement wrote to legacy
         `calibration_pairs` while LOW branch wrote to v2. Because
-        `refit_platt_v2` reads only `calibration_pairs_v2`, HIGH pairs
+        `refit_platt` reads only `calibration_pairs_v2`, HIGH pairs
         silently never reached the trainer. C5 wires HIGH through
         `add_calibration_pair_v2(metric_identity=HIGH_LOCALDAY_MAX)` to
         close this split-brain.

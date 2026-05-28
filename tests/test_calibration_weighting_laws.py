@@ -40,7 +40,7 @@ LAW2_WEIGHTED_LOW_OPT_OUT_CITIES = {
 
 PRODUCTION_WEIGHTING_SOURCES = (
     PROJECT_ROOT / "scripts" / "rebuild_calibration_pairs_v2.py",
-    PROJECT_ROOT / "scripts" / "refit_platt_v2.py",
+    PROJECT_ROOT / "scripts" / "refit_platt.py",
     PROJECT_ROOT / "src" / "calibration" / "manager.py",
     PROJECT_ROOT / "src" / "calibration" / "platt.py",
     PROJECT_ROOT / "src" / "calibration" / "store.py",

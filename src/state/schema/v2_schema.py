@@ -953,7 +953,7 @@ def apply_v2_schema(conn: sqlite3.Connection, *, forecast_tables: bool = True) -
         """)
 
         # Fix D (golden-knitting-wand.md Phase 1): per-bucket failure ledger
-        # for refit_platt_v2.py. Written when per-bucket SAVEPOINT rolls back
+        # for refit_platt.py. Written when per-bucket SAVEPOINT rolls back
         # so the operator can triage which buckets failed without losing
         # the successful buckets' rows. Separate from refit logic so the table
         # is available before the first refit run.

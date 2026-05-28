@@ -43,7 +43,7 @@ import pytest
 REPO_ROOT = Path(__file__).parent.parent
 SCRIPT_PATH = REPO_ROOT / "scripts" / "rebuild_calibration_pairs_v2.py"
 _REFIT_IMPORT_MODULES = (
-    "scripts.refit_platt_v2",
+    "scripts.refit_platt",
     "src.calibration.manager",
     "src.calibration.platt",
 )
@@ -110,7 +110,7 @@ def _import_refit_mod_with_sklearn_stub():
             "sklearn.linear_model": linear_model_mod,
         },
     ):
-        mod = importlib.import_module("scripts.refit_platt_v2")
+        mod = importlib.import_module("scripts.refit_platt")
     return mod, previous_modules
 
 
@@ -362,13 +362,13 @@ def test_refit_write_target_guard_rejects_default_and_shared_world(tmp_path):
         with pytest.raises(RuntimeError, match="requires --db"):
             refit_mod._resolve_isolated_calibration_write_db_path(
                 None,
-                script_name="refit_platt_v2.py",
+                script_name="refit_platt.py",
             )
 
         with pytest.raises(RuntimeError, match="canonical shared world DB"):
             refit_mod._resolve_isolated_calibration_write_db_path(
                 str(ZEUS_WORLD_DB_PATH),
-                script_name="refit_platt_v2.py",
+                script_name="refit_platt.py",
             )
 
         shared_alias = tmp_path / "shared-world-alias.db"
@@ -380,14 +380,14 @@ def test_refit_write_target_guard_rejects_default_and_shared_world(tmp_path):
             with pytest.raises(RuntimeError, match="canonical shared world DB"):
                 refit_mod._resolve_isolated_calibration_write_db_path(
                     str(shared_alias),
-                    script_name="refit_platt_v2.py",
+                    script_name="refit_platt.py",
                 )
 
         isolated = tmp_path / "platt_stage.db"
         assert (
             refit_mod._resolve_isolated_calibration_write_db_path(
                 str(isolated),
-                script_name="refit_platt_v2.py",
+                script_name="refit_platt.py",
             )
             == isolated.resolve()
         )
@@ -400,7 +400,7 @@ def test_refit_write_mode_without_isolated_db_fails_before_connect():
     refit_mod, previous_modules = _import_refit_mod_with_sklearn_stub()
     try:
         with (
-            patch.object(sys, "argv", ["refit_platt_v2.py", "--no-dry-run", "--force"]),
+            patch.object(sys, "argv", ["refit_platt.py", "--no-dry-run", "--force"]),
             patch("sqlite3.connect", side_effect=AssertionError("must not connect")),
         ):
             assert refit_mod.main() == 1
@@ -429,7 +429,7 @@ def test_refit_write_mode_with_isolated_db_reaches_existing_write_seam(tmp_path)
                 sys,
                 "argv",
                 [
-                    "refit_platt_v2.py",
+                    "refit_platt.py",
                     "--no-dry-run",
                     "--force",
                     "--db",

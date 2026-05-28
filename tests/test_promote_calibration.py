@@ -543,7 +543,7 @@ def test_promote_refuses_on_schema_mismatch(tmp_path, capsys):
     rc = args.func(args)
     out = capsys.readouterr().out
     assert rc == 1
-    assert "schema mismatch" in out
+    assert "column set mismatch" in out
 
 
 def test_promote_null_snapshot_id_flag(tmp_path, capsys):

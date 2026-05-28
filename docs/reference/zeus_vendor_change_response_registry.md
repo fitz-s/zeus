@@ -238,7 +238,7 @@ Pre-commit invariant baseline at `.claude/hooks/pre-commit-invariant-test.sh` â€
 | Per-vendor backfill scripts (`scripts/backfill_*.py`, ~10 files) | Each scoped to one vendor |
 | `scripts/fill_obs_v2_dst_gaps.py` | Lagos-class fallback decision logic |
 | `scripts/fill_obs_v2_meteostat.py` | Bulk fallback runner |
-| `scripts/audit_observation_instants_v2.py` | Daily audit |
+| `scripts/audit_observation_instants.py` | Daily audit |
 | `scripts/source_contract_auto_convert.py` | Source-tag namespace converter |
 | `scripts/onboard_cities.py` | T4 entry point |
 | `data/oracle_error_rates.json` | Sole writer: bridge â€” co-tenancy contract |

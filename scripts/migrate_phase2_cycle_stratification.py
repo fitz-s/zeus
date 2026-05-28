@@ -6,7 +6,7 @@
 #                  + critic-opus 2026-05-05 blockers 1/2/3 (UNIQUE rebuild,
 #                    cycle well-formed assertion, platt source_id backfill).
 #                  + loop convergence + busy_timeout fixes (post-crash 00:33Z).
-#                  Run BEFORE refit_platt_v2.py with cycle-aware grouping.
+#                  Run BEFORE refit_platt.py with cycle-aware grouping.
 """Phase 2 schema migration: add cycle/source_id/horizon_profile to calibration tables.
 
 What this migrates:

@@ -2,7 +2,7 @@
 # Purpose: Phase 7A R-BH..R-BL invariants: metric-aware rebuild cutover —
 #          _delete_canonical_v2_slice metric scoping, _process_snapshot_v2
 #          write-time metric identity, rebuild_v2 main() METRIC_SPECS iteration,
-#          outer SAVEPOINT atomicity, refit_platt_v2 main() iteration,
+#          outer SAVEPOINT atomicity, refit_platt main() iteration,
 #          backfill_tigge_snapshot_p_raw_v2 metric-scoped writes.
 # Reuse: Anchors on phase7a_contract.md (commit 9a5ef84) + master plan acceptance
 #        criteria (bucket key / query / unique key 都带 metric; high/low 同城同日共存;
@@ -219,15 +219,15 @@ class TestR_BJ_OuterSavepointAtomicity:
 
 
 # ---------------------------------------------------------------------------
-# R-BK: refit_platt_v2 main() iterates METRIC_SPECS
+# R-BK: refit_platt main() iterates METRIC_SPECS
 # ---------------------------------------------------------------------------
 
 class TestR_BK_RefitPlattIteratesSpecs:
-    """R-BK: refit_platt_v2 main() must iterate METRIC_SPECS (both HIGH + LOW)."""
+    """R-BK: refit_platt main() must iterate METRIC_SPECS (both HIGH + LOW)."""
 
     def test_R_BK_1_main_iterates_both_specs(self, conn):
         """refit_all_v2 (or main) invokes refit_v2 for every METRIC_SPEC."""
-        from scripts.refit_platt_v2 import refit_all_v2, METRIC_SPECS
+        from scripts.refit_platt import refit_all_v2, METRIC_SPECS
 
         results = refit_all_v2(conn, dry_run=True, force=False)
 
@@ -241,7 +241,7 @@ class TestR_BK_RefitPlattIteratesSpecs:
     def test_R_BK_2_refit_v2_requires_explicit_metric_identity(self):
         """refit_v2 signature must require explicit `metric_identity` (no HIGH default)."""
         import inspect
-        from scripts.refit_platt_v2 import refit_v2
+        from scripts.refit_platt import refit_v2
 
         sig = inspect.signature(refit_v2)
         param = sig.parameters.get("metric_identity")

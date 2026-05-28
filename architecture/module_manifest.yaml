@@ -170,7 +170,6 @@ modules:
       - tests/test_cities_config_authoritative.py
       - tests/test_ensemble_client.py
       - tests/test_backfill_openmeteo_previous_runs.py
-      - tests/test_etl_forecasts_v2_from_legacy.py
       - tests/test_forecast_source_registry.py
       - tests/test_tigge_ingest.py
       - tests/test_backfill_scripts_match_live_config.py

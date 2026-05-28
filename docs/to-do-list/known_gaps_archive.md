@@ -951,7 +951,7 @@ state.
 scope in `zeus_meta` to `in_progress` before the first bucket commit and mark it
 `complete` only after all post-write gates pass. `assert_rebuild_complete_sentinel()`
 fails closed when the exact-scope sentinel is absent or still in-progress.
-Live `refit_platt_v2.py` checks that sentinel before it can promote
+Live `refit_platt.py` checks that sentinel before it can promote
 `calibration_pairs_v2` rows into `platt_models_v2`; dry-run remains
 non-promoting inspection. Narrow refit scopes may use a covering all-scope
 complete sentinel, but any overlapping `in_progress` sentinel blocks promotion
@@ -968,7 +968,7 @@ target cohort's `calibration_pairs_v2` source is still covered by a complete
 rebuild sentinel. Any overlapping in-progress sentinel fails closed so an old
 covering complete row cannot mask a current partial rebuild.
 **Evidence:** `scripts/rebuild_calibration_pairs_v2.py` sentinel helpers,
-`scripts/refit_platt_v2.py` live-refit gate, and
+`scripts/refit_platt.py` live-refit gate, and
 `tests/test_rebuild_live_sentinel.py` relationship tests prove
 in-progress-before-bucket, no complete marker after validation failure,
 fail-closed consumer behavior, resolved `n_mc` provenance, covering-scope

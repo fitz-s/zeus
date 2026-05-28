@@ -44,12 +44,10 @@ OGIMET_BACKFILL_PATH = REPO_ROOT / "scripts" / "backfill_ogimet_metar.py"
 OBS_V2_BACKFILL_PATH = REPO_ROOT / "scripts" / "backfill_obs_v2.py"
 HKO_DAILY_BACKFILL_PATH = REPO_ROOT / "scripts" / "backfill_hko_daily.py"
 OBS_V2_DST_GAP_FILL_PATH = REPO_ROOT / "scripts" / "fill_obs_v2_dst_gaps.py"
-OBS_V2_METEOSTAT_FILL_PATH = REPO_ROOT / "scripts" / "fill_obs_v2_meteostat.py"
 HKO_INGEST_TICK_PATH = REPO_ROOT / "scripts" / "hko_ingest_tick.py"
 OBS_V2_PRODUCER_PATHS = [
     OBS_V2_BACKFILL_PATH,
     OBS_V2_DST_GAP_FILL_PATH,
-    OBS_V2_METEOSTAT_FILL_PATH,
     HKO_INGEST_TICK_PATH,
 ]
 COMPLETENESS_GUARDED_BACKFILL_PATHS = [
@@ -105,14 +103,6 @@ def obs_v2_dst_gap_fill_module():
     return _load_module_by_path(
         OBS_V2_DST_GAP_FILL_PATH,
         "zeus_fill_obs_v2_dst_gaps_identity",
-    )
-
-
-@pytest.fixture(scope="module")
-def obs_v2_meteostat_fill_module():
-    return _load_module_by_path(
-        OBS_V2_METEOSTAT_FILL_PATH,
-        "zeus_fill_obs_v2_meteostat_identity",
     )
 
 
@@ -441,51 +431,3 @@ def test_dst_gap_fill_row_stamps_provenance_identity(
     assert provenance["parser_version"] == "obs_v2_dst_gap_fill_ogimet_v2"
     assert provenance["station_id"] == "KORD"
     assert provenance["source_url"].startswith("https://www.ogimet.com/")
-
-
-def test_meteostat_fill_row_stamps_provenance_identity(
-    obs_v2_meteostat_fill_module,
-    tmp_path,
-    monkeypatch,
-):
-    captured_rows = []
-
-    def fake_fetch_meteostat_bulk(**_kwargs):
-        return SimpleNamespace(
-            failed=False,
-            failure_reason=None,
-            raw_row_count=1,
-            observations=[_hourly_observation(city="Amsterdam", station_id="EHAM")],
-        )
-
-    def fake_insert_rows(_conn, rows):
-        captured_rows.extend(rows)
-        return len(rows)
-
-    monkeypatch.setattr(
-        obs_v2_meteostat_fill_module,
-        "fetch_meteostat_bulk",
-        fake_fetch_meteostat_bulk,
-    )
-    monkeypatch.setattr(obs_v2_meteostat_fill_module, "insert_rows", fake_insert_rows)
-    conn = sqlite3.connect(":memory:")
-    try:
-        written, raw, failure = obs_v2_meteostat_fill_module._fill_one_city(
-            conn,
-            "Amsterdam",
-            date(2026, 4, 23),
-            date(2026, 4, 23),
-            "v1.wu-native.pilot",
-            tmp_path / "meteostat-log.jsonl",
-            dry_run=False,
-        )
-    finally:
-        conn.close()
-
-    assert (written, raw, failure) == (1, 1, None)
-    provenance = json.loads(captured_rows[0].provenance_json)
-    assert provenance["payload_hash"].startswith("sha256:")
-    assert provenance["payload_scope"] == "obs_v2_meteostat_hour_bucket_source_identity"
-    assert provenance["parser_version"] == "obs_v2_meteostat_bulk_fill_v2"
-    assert provenance["station_id"] == "EHAM"
-    assert provenance["source_url"].startswith("https://bulk.meteostat.net/")

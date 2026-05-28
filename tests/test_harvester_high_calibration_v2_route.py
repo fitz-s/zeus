@@ -2,13 +2,13 @@
 # Purpose: C5 antibody — asserts that harvest_settlement routes HIGH-track
 #          calibration pairs through add_calibration_pair_v2 (canonical
 #          path) and NOT through legacy add_calibration_pair, so HIGH pairs
-#          actually reach calibration_pairs_v2 where refit_platt_v2 reads.
+#          actually reach calibration_pairs_v2 where refit_platt reads.
 # Reuse: Covers src/execution/harvester.py::harvest_settlement HIGH + LOW
 #        branches. Regression-bar: if a future refactor re-introduces a
 #        split HIGH-via-legacy / LOW-via-v2 routing (the pre-C5 bug), this
 #        test fires. Originating handoff: POST_AUDIT_HANDOFF_2026-04-24.md
-#        §3.1 C5. Related: refit_platt_v2 reads only v2 per
-#        scripts/refit_platt_v2.py:29.
+#        §3.1 C5. Related: refit_platt reads only v2 per
+#        scripts/refit_platt.py:29.
 # Authority basis: POST_AUDIT_HANDOFF_2026-04-24 §3.1 C5 + INV-14 spine +
 #   INV-15 source/data_version whitelist at src/calibration/store.py:116.
 """C5 antibody: harvester HIGH-track pairs reach calibration_pairs_v2."""

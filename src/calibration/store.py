@@ -653,7 +653,7 @@ def deactivate_model_v2(
 ) -> int:
     """Delete the existing platt_models_v2 row for a bucket before refit.
 
-    Returns the number of rows deleted (0 or 1). Called by refit_platt_v2.py
+    Returns the number of rows deleted (0 or 1). Called by refit_platt.py
     before save_platt_model_v2. Deletion (not soft-deactivation) is required
     because UNIQUE(model_key) means the old row must be removed before the
     new INSERT can succeed with the same key.
