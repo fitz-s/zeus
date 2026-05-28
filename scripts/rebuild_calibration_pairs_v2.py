@@ -222,38 +222,55 @@ def _native_error_params_for_snapshot(
     applied per snapshot so a single cached fit serves every snapshot in the
     bucket.
     """
-    from src.calibration.ens_error_model import (
-        _c_to_native_scale,
-        fit_city_predictive_error,
-    )
+    from src.calibration.ens_error_model import _c_to_native_scale, current_gate_set_hash
+    from src.calibration.ens_bias_repo import read_bias_model
 
     metric = spec.identity.temperature_metric
     season_label = season_from_date(target_date, lat=city.lat)
-    season_months = _calendar_season_months(target_date)
-    cache_key = (city.name, season_label, metric)
+    # B2 / Operator pre-MC re-audit (2026-05-28): cache_key MUST include target_month,
+    # else two snapshots in the same (city, season, metric) but different months reuse
+    # one cache entry → either a month-scope-rejected None poisons the bucket for a
+    # later covered month, OR a covered-month row's params get reused for an off-coverage
+    # month, bypassing read_bias_model's month-scope guard. Each calendar month is a
+    # distinct probe of the canonical-read contract.
+    try:
+        target_month = int(str(target_date)[5:7])
+    except (ValueError, IndexError):
+        target_month = None
+    cache_key = (city.name, season_label, metric, target_month)
     if cache_key not in cache:
+        # DOMAIN-CANONICALITY FIX (2026-05-28): read the PERSISTED canonical
+        # error-model row written by fit_full_transport_error_models.py — DO NOT
+        # re-fit here. Re-fitting on-the-fly (the old path) used min_live_n=5 while
+        # the producer wrote rows at min_live_n=20, so MC p_raw pairs diverged from
+        # the stored row → train/serve domain mismatch that re-creates the
+        # contamination. Now MC consumes the exact stored row, gated by
+        # gate_set_hash (rejects stale-gate rows) + month-scope (coverage_months).
+        # authority='STAGING' because the rebuild runs on freshly-fit, not-yet-
+        # promoted rows. Fail-open (None) when no canonical row exists for the bucket.
         versions = _ERROR_MODEL_DATA_VERSIONS.get(metric)
-        model = None
+        params: tuple[float, float] | None = None
         if versions is not None:
-            try:
-                model = fit_city_predictive_error(
-                    conn,
-                    city=city.name,
-                    live_data_version=versions["live"],
-                    prior_data_version=versions["prior"],
-                    season_months=season_months,
-                    metric=metric,
-                    min_live_n=_ERROR_MODEL_MIN_LIVE_N,
-                )
-            except ValueError:
-                # No TIGGE prior residuals for this city/season — fail open.
-                model = None
-        cache[cache_key] = model
-    model = cache[cache_key]
-    if model is None:
-        return None
-    scale = _c_to_native_scale(city.settlement_unit)
-    return (model.effective_bias_c * scale, model.total_residual_sd_c * scale)
+            row = read_bias_model(
+                conn,
+                city=city.name,
+                season=season_label,
+                metric=metric,
+                live_data_version=versions["live"],
+                month=0,  # producer writes season-level rows with month=0 sentinel
+                error_model_family=error_model_family,
+                authority="STAGING",
+                require_gate_set_hash=current_gate_set_hash(),
+                target_month=target_month,
+            )
+            if row is not None:
+                eff = row["effective_bias_c"]
+                total_sd = row["total_residual_sd_c"]
+                if eff is not None and total_sd is not None:
+                    scale = _c_to_native_scale(city.settlement_unit)
+                    params = (float(eff) * scale, float(total_sd) * scale)
+        cache[cache_key] = params
+    return cache[cache_key]
 
 
 @dataclass
@@ -905,6 +922,7 @@ def _fetch_eligible_snapshots_v2(
     cycle_filter: Optional[str] = None,
     source_id_filter: Optional[str] = None,
     horizon_profile_filter: Optional[str] = None,
+    months: Optional[tuple] = None,
 ) -> list[sqlite3.Row]:
     """Pull eligible snapshots from ensemble_snapshots_v2 for the given spec."""
     if spec is None:
@@ -950,6 +968,10 @@ def _fetch_eligible_snapshots_v2(
     if horizon_profile_filter:
         where += f" AND {_snapshot_horizon_profile_expr()} = ?"
         params.append(horizon_profile_filter)
+    if months:
+        placeholders = ",".join("?" * len(months))
+        where += f" AND CAST(SUBSTR(target_date, 6, 2) AS INTEGER) IN ({placeholders})"
+        params.extend(months)
     sql = f"""
         SELECT *
         FROM ensemble_snapshots_v2
@@ -1000,6 +1022,7 @@ def _scoped_pair_predicate(
     source_id_filter: Optional[str] = None,
     horizon_profile_filter: Optional[str] = None,
     error_model_family_filter: Optional[str] = None,
+    months: Optional[tuple] = None,
 ) -> tuple[str, list]:
     columns = _table_columns(conn, "calibration_pairs_v2")
     where_parts = ["bin_source = ?", "temperature_metric = ?"]
@@ -1036,6 +1059,10 @@ def _scoped_pair_predicate(
         where_parts, params, column="horizon_profile", value=horizon_profile_filter,
         default="full", columns=columns,
     )
+    if months:
+        placeholders = ",".join("?" * len(months))
+        where_parts.append(f"CAST(SUBSTR(target_date, 6, 2) AS INTEGER) IN ({placeholders})")
+        params.extend(months)
     return " AND ".join(where_parts), params
 
 
@@ -1051,6 +1078,7 @@ def _collect_pre_delete_count(
     source_id_filter: Optional[str] = None,
     horizon_profile_filter: Optional[str] = None,
     error_model_family_filter: Optional[str] = None,
+    months: Optional[tuple] = None,
 ) -> int:
     where, params = _scoped_pair_predicate(
         conn=conn,
@@ -1063,6 +1091,7 @@ def _collect_pre_delete_count(
         source_id_filter=source_id_filter,
         horizon_profile_filter=horizon_profile_filter,
         error_model_family_filter=error_model_family_filter,
+        months=months,
     )
     return conn.execute(
         f"SELECT COUNT(*) FROM calibration_pairs_v2 WHERE {where}",
@@ -1082,6 +1111,7 @@ def _delete_canonical_v2_slice(
     source_id_filter: Optional[str] = None,
     horizon_profile_filter: Optional[str] = None,
     error_model_family_filter: Optional[str] = None,
+    months: Optional[tuple] = None,
 ) -> None:
     where, params = _scoped_pair_predicate(
         conn=conn,
@@ -1094,6 +1124,7 @@ def _delete_canonical_v2_slice(
         source_id_filter=source_id_filter,
         horizon_profile_filter=horizon_profile_filter,
         error_model_family_filter=error_model_family_filter,
+        months=months,
     )
     conn.execute(
         f"DELETE FROM calibration_pairs_v2 WHERE {where}",
@@ -1522,6 +1553,7 @@ def rebuild_v2(
     mc_seed_base: Optional[int] = None,
     chunker: Optional[BulkChunker] = None,
     error_model_family: Optional[str] = None,
+    months: Optional[tuple] = None,
 ) -> RebuildStatsV2:
     """Run the v2 rebuild end-to-end, sharded per (city, metric) bucket.
 
@@ -1562,6 +1594,8 @@ def rebuild_v2(
         print(f"Source filter:     {source_id_filter}")
     if horizon_profile_filter:
         print(f"Horizon filter:    {horizon_profile_filter}")
+    if months:
+        print(f"Months filter:     {','.join(str(m) for m in months)}")
     print(f"Bin source tag:    {CANONICAL_BIN_SOURCE_V2!r}")
     print(f"MetricIdentity:    {spec.identity}")
     print(f"n_mc per snapshot: {effective_n_mc}")
@@ -1577,6 +1611,7 @@ def rebuild_v2(
         cycle_filter=cycle_filter,
         source_id_filter=source_id_filter,
         horizon_profile_filter=horizon_profile_filter,
+        months=months,
     )
     stats.snapshots_scanned = len(snapshots)
 
@@ -1606,6 +1641,7 @@ def rebuild_v2(
         source_id_filter=source_id_filter,
         horizon_profile_filter=horizon_profile_filter,
         error_model_family_filter=error_model_family,
+        months=months,
     )
     print(f"Existing canonical_v2 pairs (will delete): {stats.pre_delete_v2_pairs}")
 
@@ -1716,6 +1752,7 @@ def rebuild_v2(
             source_id_filter=source_id_filter,
             horizon_profile_filter=horizon_profile_filter,
             n_mc=effective_n_mc,
+            months=months,  # BL-B: month-scope the parallel DELETE (SELECT already scoped above)
             seed_base=mc_seed_base,
             stats=stats,
             error_model_family=error_model_family,
@@ -1746,6 +1783,7 @@ def rebuild_v2(
                     source_id_filter=source_id_filter,
                     horizon_profile_filter=horizon_profile_filter,
                     error_model_family_filter=error_model_family,
+                    months=months,
                 )
                 for snap in city_snaps:
                     try:
@@ -1898,6 +1936,7 @@ def rebuild_all_v2(
     mc_seed_base: Optional[int] = None,
     chunker: Optional[BulkChunker] = None,
     error_model_family: Optional[str] = None,
+    months: Optional[tuple] = None,
 ) -> dict[str, RebuildStatsV2]:
     """Rebuild calibration_pairs_v2 for all METRIC_SPECS.
 
@@ -1933,6 +1972,7 @@ def rebuild_all_v2(
             mc_seed_base=mc_seed_base,
             chunker=chunker,
             error_model_family=error_model_family,
+            months=months,
         )
         per_metric[spec.identity.temperature_metric] = stats
 
@@ -1976,6 +2016,88 @@ def _print_rebuild_gate_stats(stats: RebuildStatsV2) -> None:
         print("  contract-evidence reasons:")
         for reason, count in sorted(stats.contract_evidence_rejection_reasons.items()):
             print(f"    {count:6d}  {reason}")
+
+
+def _record_pair_batch_manifest(
+    *,
+    forecasts_conn: sqlite3.Connection,
+    city_filter: str | None,
+    temperature_metric: str,
+    data_version_filter: str | None,
+    n_mc: int | None,
+) -> str | None:
+    """SD4 / Blocker F: write an immutable pair-batch manifest after a full_transport rebuild.
+
+    Re-queries the model_bias_ens_v2 STAGING rows (world.db) the rebuild drew p_raw from — the
+    rows matching the CURRENT gate_set_hash within this run's scope — and records their domain
+    identity (gate set + fit-signature set + source snapshot) as an immutable zeus_meta row on the
+    forecasts DB. A downstream Platt/identity fit can then verify its pairs belong to the intended
+    error-model domain. Best-effort: never aborts a completed rebuild.
+    """
+    import subprocess  # noqa: PLC0415
+    from src.calibration.ens_error_model import current_gate_set_hash  # noqa: PLC0415
+    from src.calibration.ens_bias_repo import (  # noqa: PLC0415
+        build_pair_batch_manifest, write_pair_batch_manifest,
+    )
+    from src.config import calibration_batch_rebuild_n_mc  # noqa: PLC0415
+
+    cur_hash = current_gate_set_hash()
+    where = ["authority = 'STAGING'", "error_model_family = 'full_transport_v1'",
+             "gate_set_hash = ?"]
+    params: list = [cur_hash]
+    if city_filter:
+        where.append("city = ?")
+        params.append(city_filter)
+    if temperature_metric and temperature_metric != "all":
+        where.append("metric = ?")
+        params.append(temperature_metric)
+    if data_version_filter:
+        where.append("live_data_version = ?")
+        params.append(data_version_filter)
+
+    # SD4 / Blocker 3.2 (operator pre-MC re-audit): query model_bias_ens_v2 from the SAME DB the
+    # MC actually read p_raw from — the rebuild's conn (the isolated --db where the producer wrote
+    # the STAGING rows and where _native_error_params_for_snapshot reads them). Reading the shared
+    # world DB here would record the WRONG domain (old prod rows), not the rows the pairs were
+    # generated from. Same-source is the whole point of the manifest.
+    try:
+        rows = forecasts_conn.execute(
+            "SELECT city, season, metric, live_data_version, fit_signature_hash, gate_set_hash "
+            f"FROM model_bias_ens_v2 WHERE {' AND '.join(where)}",
+            params,
+        ).fetchall()
+    except sqlite3.Error as exc:
+        print("WARN: pair-batch manifest skipped — model_bias_ens_v2 not queryable on the rebuild "
+              f"DB ({exc}); the producer must have written STAGING rows to this same --db.",
+              file=sys.stderr)
+        return None
+    if not rows:
+        print("WARN: pair-batch manifest skipped — no STAGING rows match current gate_set_hash "
+              f"({cur_hash}) in scope on the rebuild DB.", file=sys.stderr)
+        return None
+
+    try:
+        commit = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=str(Path(__file__).resolve().parent.parent),
+            text=True,
+        ).strip()
+    except Exception:
+        commit = "unknown"
+
+    manifest = build_pair_batch_manifest(
+        rows,
+        error_model_family="full_transport_v1",
+        gate_set_hash=cur_hash,
+        generator_commit=commit,
+        n_mc=int(n_mc) if n_mc is not None else calibration_batch_rebuild_n_mc(),
+        scope={"city": city_filter, "metric": temperature_metric,
+               "data_version": data_version_filter},
+    )
+    pbid = write_pair_batch_manifest(forecasts_conn, manifest)
+    forecasts_conn.commit()
+    print(f"pair-batch manifest recorded: pair_batch_id={pbid} "
+          f"gate_set_hash={cur_hash} n_rows={len(rows)} n_sigs={len(manifest['fit_signature_hashes'])}")
+    return pbid
 
 
 def main() -> int:
@@ -2057,7 +2179,39 @@ def main() -> int:
             "byte-identical to main. Currently: 'full_transport_v1'."
         ),
     )
+    parser.add_argument(
+        "--months", dest="months", default=None,
+        help=(
+            "Comma-separated calendar months (1-12) to scope the rebuild, e.g. '3,4,5' "
+            "for MAM. When set, only snapshots whose target_date falls in these months "
+            "are fetched, and only pairs in those months are deleted. "
+            "Default: None (no month filter — full-year behaviour, current default)."
+        ),
+    )
     args = parser.parse_args()
+
+    parsed_months: Optional[tuple] = None
+    if args.months is not None:
+        raw_parts = [p.strip() for p in args.months.split(",") if p.strip()]
+        if not raw_parts:
+            print("ERROR: --months value is empty; provide comma-separated ints e.g. '3,4,5'", file=sys.stderr)
+            return 1
+        month_ints = []
+        for part in raw_parts:
+            try:
+                m = int(part)
+            except ValueError:
+                print(f"ERROR: --months contains non-integer value {part!r}", file=sys.stderr)
+                return 1
+            if not (1 <= m <= 12):
+                print(f"ERROR: --months value {m} out of range 1..12", file=sys.stderr)
+                return 1
+            month_ints.append(m)
+        parsed_months = tuple(month_ints)
+
+    # BL-B: the parallel rebuild path is now month-aware (run_parallel_rebuild threads `months`
+    # into _delete_canonical_v2_slice), so --months is safe at any worker count. The SELECT is
+    # month-scoped before the parallel fan-out and the per-city DELETE is month-scoped inside it.
 
     write_db_path: Path | None = None
     if not args.dry_run:
@@ -2119,6 +2273,7 @@ def main() -> int:
                 horizon_profile_filter=args.horizon_profile,
                 n_mc=args.n_mc,
                 error_model_family=args.error_model,
+                months=parsed_months,
             )
         except Exception as e:
             print(f"ERROR: {type(e).__name__}: {e}", file=sys.stderr)
@@ -2195,15 +2350,43 @@ def main() -> int:
                     mc_seed_base=args.mc_seed_base,
                     chunker=chunker,
                     error_model_family=args.error_model,
+                    months=parsed_months,
                 )
             except Exception as e:
                 print(f"ERROR: {type(e).__name__}: {e}", file=sys.stderr)
                 return 1
+
+            # SD4 / Blocker F: after a successful full_transport rebuild, record the immutable
+            # pair-batch manifest (domain identity of the pairs just generated). The operator's
+            # requirement is "必须有" (must exist) — so a missing/failed manifest FAILS the run
+            # (rc=1) loudly. The pairs are already committed; the manifest is content-addressed +
+            # idempotent, so the operator re-runs to record it. Never silently succeeds.
+            manifest_failed = False
+            if (not args.dry_run) and args.error_model == "full_transport_v1" \
+                    and not any(s.refused for s in per_metric.values()):
+                try:
+                    pbid = _record_pair_batch_manifest(
+                        forecasts_conn=conn,
+                        city_filter=args.city,
+                        temperature_metric=args.temperature_metric,
+                        data_version_filter=args.data_version,
+                        n_mc=args.n_mc,
+                    )
+                    if pbid is None:
+                        manifest_failed = True
+                        print("ERROR: pair-batch manifest NOT recorded — no STAGING rows matched "
+                              "the current gate_set_hash in scope. Pairs written WITHOUT a domain "
+                              "manifest; do NOT train Platt until resolved.", file=sys.stderr)
+                except Exception as e:  # noqa: BLE001
+                    manifest_failed = True
+                    print(f"ERROR: pair-batch manifest write FAILED: {type(e).__name__}: {e}. "
+                          "Pairs written WITHOUT a domain manifest; re-run to record (idempotent).",
+                          file=sys.stderr)
     finally:
         conn.close()
 
     any_refused = any(s.refused for s in per_metric.values())
-    return 1 if any_refused else 0
+    return 1 if (any_refused or manifest_failed) else 0
 
 
 if __name__ == "__main__":

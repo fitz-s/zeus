@@ -84,6 +84,15 @@ _CANONICAL_EXTENSION_COLUMNS: list[tuple[str, str]] = [
     ("code_commit",          "TEXT"),          # git HEAD SHA at fit time
     ("fit_signature_hash",   "TEXT"),          # sha256 of sorted inputs+params (16-char prefix)
     ("authority",            "TEXT"),          # 'STAGING' | 'VERIFIED' | 'LEGACY'
+    # gate-set + coverage identity (domain-canonicality antibody, 2026-05-28).
+    # gate_set_hash pins the active math-gate set (MIN_PAIRED_N, min_live_n,
+    # min_prior_n, residual_floor) at fit time; the reader rejects any served
+    # row whose gate_set_hash != current so a future gate change auto-quarantines
+    # stale rows (replaces version-suffix family renames — no full_transport_v2).
+    # coverage_months records the months actually present in the fit window so a
+    # season-labelled row cannot be misapplied to a month it never trained on.
+    ("gate_set_hash",        "TEXT"),          # sha256(active gate names+thresholds)[:16]
+    ("coverage_months",      "TEXT"),          # CSV of months covered, e.g. '3,4,5'
 ]
 
 _POSITIVE_CONTRIBUTOR_SQL = (
@@ -129,6 +138,111 @@ def init_ens_bias_schema(conn: sqlite3.Connection) -> None:
                 conn.rollback()
             else:
                 raise
+
+
+# Columns a canonical producer row MUST be able to stamp. If any is absent the
+# producer would 'succeed' while silently dropping gate_set_hash / coverage / scale —
+# the row then fails closed at read time or, worse, serves without its domain identity.
+_REQUIRED_PRODUCER_COLUMNS: tuple[str, ...] = (
+    "error_model_family", "authority", "bias_c", "residual_sd_c",
+    "heterogeneity_var_c2", "correction_strength", "effective_bias_c",
+    "total_residual_sd_c", "fit_signature_hash", "gate_set_hash", "coverage_months",
+)
+
+
+def assert_model_bias_schema_ready(conn: sqlite3.Connection) -> None:
+    """Fail CLOSED if model_bias_ens_v2 lacks any canonical producer column (SD5 / Blocker G).
+
+    write_bias_model only stamps gate_set_hash / coverage_months / scale fields WHEN the
+    columns exist (PRAGMA-guarded, for backward compat). That is correct for reads but
+    DANGEROUS for a production fit: on an unmigrated schema the producer would write rows
+    with NULL domain identity and 'succeed'. This preflight makes the producer refuse to run
+    until init_ens_bias_schema / the canonical migration has been applied.
+    """
+    existing = {r[1] for r in conn.execute("PRAGMA table_info(model_bias_ens_v2)").fetchall()}
+    if not existing:
+        raise RuntimeError(
+            "assert_model_bias_schema_ready: model_bias_ens_v2 does not exist — "
+            "run init_ens_bias_schema(conn) before fitting."
+        )
+    missing = [c for c in _REQUIRED_PRODUCER_COLUMNS if c not in existing]
+    if missing:
+        raise RuntimeError(
+            "assert_model_bias_schema_ready: model_bias_ens_v2 is missing required "
+            f"canonical columns {missing}; producer refuses to run (would write rows "
+            "without domain identity). Apply init_ens_bias_schema / the canonical migration."
+        )
+
+
+def build_pair_batch_manifest(
+    consumed_rows: list,
+    *,
+    error_model_family: str,
+    gate_set_hash: str,
+    generator_commit: str,
+    n_mc: int,
+    scope: dict,
+) -> dict:
+    """Immutable, content-addressed manifest of ONE calibration-pair rebuild batch (SD4 / Blocker F).
+
+    ``consumed_rows`` are the model_bias_ens_v2 STAGING rows the rebuild drew p_raw from — each a
+    mapping with city, season, metric, live_data_version, fit_signature_hash, gate_set_hash. The
+    manifest records the error-model DOMAIN identity so a downstream Platt/identity fit can verify
+    its pairs belong to the intended gate set and were generated from the expected sources (the
+    operator-accepted alternative to stamping every pair). pair_batch_id == manifest_hash
+    (content-addressed): identical inputs -> identical id (idempotent re-run), any change -> new id.
+    The manifest is never mutated in place (see write_pair_batch_manifest).
+    """
+    import hashlib  # noqa: PLC0415
+    import json  # noqa: PLC0415
+
+    def _g(r, k):
+        try:
+            return r[k]
+        except (KeyError, IndexError, TypeError):
+            return (r.get(k) if hasattr(r, "get") else None)
+
+    sig_set = sorted({str(_g(r, "fit_signature_hash")) for r in consumed_rows
+                      if _g(r, "fit_signature_hash")})
+    source_tuples = sorted(
+        [str(_g(r, "city")), str(_g(r, "season")), str(_g(r, "metric")),
+         str(_g(r, "live_data_version")), str(_g(r, "fit_signature_hash") or "")]
+        for r in consumed_rows
+    )
+    source_db_snapshot_hash = hashlib.sha256(
+        json.dumps(source_tuples, sort_keys=True).encode()
+    ).hexdigest()
+    core = {
+        "error_model_family": error_model_family,
+        "gate_set_hash": gate_set_hash,
+        "fit_signature_hashes": sig_set,
+        "generator_commit": generator_commit,
+        "n_mc": int(n_mc),
+        "source_db_snapshot_hash": source_db_snapshot_hash,
+        "scope": scope,
+        "n_consumed_rows": len(list(consumed_rows)),
+    }
+    manifest_hash = hashlib.sha256(json.dumps(core, sort_keys=True).encode()).hexdigest()
+    return {**core, "manifest_hash": manifest_hash, "pair_batch_id": manifest_hash}
+
+
+def write_pair_batch_manifest(conn: sqlite3.Connection, manifest: dict) -> str:
+    """Persist an IMMUTABLE pair-batch manifest to zeus_meta (key='pair_batch:<id>').
+
+    INSERT ... ON CONFLICT(key) DO NOTHING: identical content (same pair_batch_id) is a no-op; a
+    manifest row is never overwritten — provenance is append-only. Returns the pair_batch_id. Uses
+    zeus_meta (already a registered forecast-class meta table) so a new domain table is not required
+    on the ATTACH-replicated forecasts schema (no SCHEMA_FORECASTS_VERSION / world-pin cascade).
+    """
+    import json  # noqa: PLC0415
+
+    pbid = manifest["pair_batch_id"]
+    conn.execute(
+        "INSERT INTO zeus_meta (key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP) "
+        "ON CONFLICT(key) DO NOTHING",
+        (f"pair_batch:{pbid}", json.dumps(manifest, sort_keys=True)),
+    )
+    return pbid
 
 
 def load_bucket_residuals(
@@ -290,6 +404,8 @@ def write_bias_model(
     code_commit: str | None = None,
     fit_signature_hash: str | None = None,
     authority: str | None = None,
+    gate_set_hash: str | None = None,
+    coverage_months: str | None = None,
 ) -> None:
     """Persist one bias-model row to model_bias_ens_v2.
 
@@ -344,6 +460,15 @@ def write_bias_model(
             fit_signature_hash,
             authority,
         ]
+        # gate_set_hash + coverage_months are themselves canonical-extension columns
+        # but were added after the original F2 migration; guard each independently so
+        # a DB migrated to F2 but not yet to this column-set still writes the rest.
+        if "gate_set_hash" in _existing:
+            ext_cols += ", gate_set_hash"
+            ext_vals.append(gate_set_hash)
+        if "coverage_months" in _existing:
+            ext_cols += ", coverage_months"
+            ext_vals.append(coverage_months)
         placeholders = ",".join(["?"] * (len(base_vals) + len(ext_vals)))
         conn.execute(
             f"INSERT OR REPLACE INTO model_bias_ens_v2 ({base_cols}{ext_cols}) "
@@ -368,6 +493,10 @@ def read_bias_model(
     live_data_version: str | None = None,
     month: int | None = None,
     error_model_family: str | None = None,
+    require_gate_set_hash: str | None = None,
+    target_month: int | None = None,
+    require_coverage_months: bool = False,
+    authority: str = "VERIFIED",
 ) -> sqlite3.Row | None:
     """Read a bias row. ``live_data_version`` is REQUIRED — there is no
     'latest across data versions' fallback (that would serve the wrong product).
@@ -379,6 +508,30 @@ def read_bias_model(
     on a schema that predates F2 migration the call degrades to the base filter.
     No ``is_active`` column exists — authority + family are the discriminators.
     Authority: docs/operations/FT_SHIP_EXECUTION_LEDGER_2026-05-25.md F4.
+
+    Domain-canonicality antibody (2026-05-28):
+      * ``require_gate_set_hash``: when supplied, the row is REJECTED (returns None)
+        unless its ``gate_set_hash`` equals this value. A stale row fit under a
+        superseded gate set (e.g. pre-MIN_PAIRED_N) can never be served. This is the
+        structural fix for the pre-gate-transport-delta contamination — it replaces
+        version-suffix family renames; the family name stays stable and the gate-set
+        hash carries the probability-domain identity.
+      * ``target_month`` / ``require_coverage_months``: month-scope guard
+        (COVERAGE_MISLABELED + Blocker E). ``require_coverage_months`` is auto-forced ON
+        whenever ``require_gate_set_hash`` is supplied (a canonical read).
+          - CANONICAL read (hash required, or require_coverage_months=True): the row MUST
+            declare non-empty parseable coverage. Missing column / NULL / empty / malformed
+            coverage → REJECT (fail closed). If target_month is given, also REJECT unless
+            target_month ∈ covered set. A canonical row with no declared scope is untrusted.
+          - LEGACY read (no hash required): malformed coverage → REJECT; empty/NULL coverage
+            → 'no declared scope' → served (no-op); non-empty → REJECT unless target_month ∈
+            covered. Keeps pre-antibody season rows servable.
+        A season-labelled row whose fit window only covered one month cannot be applied to a
+        month it never trained on; a canonical row that declares no scope at all cannot be
+        applied anywhere.
+    The gate_set_hash guard fails CLOSED (missing/NULL/old column → None). For canonical
+    rows the coverage guard ALSO fails closed on empty/missing coverage; only legacy
+    (no-hash) reads keep the lenient no-op-on-empty behaviour.
     """
     if not live_data_version:
         raise ValueError(
@@ -399,12 +552,76 @@ def read_bias_model(
         if "error_model_family" not in existing or "authority" not in existing:
             # Schema predates F2 migration — no VERIFIED rows possible.
             return None
-        return conn.execute(
-            base_sql + " AND error_model_family=? AND authority='VERIFIED'",
-            base_params + (error_model_family,),
+        # authority defaults to VERIFIED (live-serving safety). The MC rebuild path
+        # passes authority='STAGING' to read the just-fit canonical rows BEFORE they
+        # are promoted — so MC p_raw is generated from the SAME persisted row the
+        # producer wrote (not an on-the-fly re-fit with divergent gates). The
+        # gate_set_hash + month-scope guards below still apply regardless of authority.
+        row = conn.execute(
+            base_sql + " AND error_model_family=? AND authority=?",
+            base_params + (error_model_family, authority),
         ).fetchone()
+        if row is None:
+            return None
+        # Antibody 1: gate-set-hash must match current. Fail closed on mismatch OR
+        # on a row that predates the column (NULL gate_set_hash = pre-antibody = stale).
+        if require_gate_set_hash is not None:
+            if "gate_set_hash" not in existing:
+                return None
+            if (row["gate_set_hash"] or "") != require_gate_set_hash:
+                return None
+        # Antibody 2: month-scope guard + Blocker E (mandatory coverage for canonical rows).
+        # require_coverage_months is auto-forced ON whenever a gate_set_hash is required:
+        # a CANONICAL row (new gate set) that declares no month scope cannot be trusted to
+        # apply to any month, so empty/NULL/missing coverage fails CLOSED — it can no longer
+        # be silently served as 'no declared scope'. Legacy reads (no hash required) keep the
+        # lenient behaviour so pre-antibody season rows without coverage remain servable.
+        _require_cov = require_coverage_months or (require_gate_set_hash is not None)
+        if _require_cov:
+            if "coverage_months" not in existing:
+                return None  # canonical read on a schema without the column → fail closed
+            covered = _parse_coverage_months(row["coverage_months"])
+            if not covered:  # None (malformed) OR empty set → canonical row must declare scope
+                return None
+            if target_month is not None and int(target_month) not in covered:
+                return None
+        elif target_month is not None and "coverage_months" in existing:
+            #  * malformed coverage (None) → fail CLOSED (reject).
+            #  * empty coverage (set()) → no declared scope → guard is a no-op (served).
+            #  * non-empty coverage → reject unless target_month is in the covered set.
+            covered = _parse_coverage_months(row["coverage_months"])
+            if covered is None:
+                return None  # malformed non-empty coverage → fail closed
+            if covered and int(target_month) not in covered:
+                return None
+        return row
 
     return conn.execute(base_sql, base_params).fetchone()
+
+
+def _parse_coverage_months(raw: object) -> set[int] | None:
+    """Parse a 'coverage_months' CSV cell into a set of ints.
+
+    Returns:
+      * empty set         when raw is empty/NULL — 'no declared scope', month guard is a no-op.
+      * set[int]          the covered months when every token parses.
+      * None              when raw is NON-empty but ANY token is malformed — the caller
+                          MUST fail CLOSED (reject the row). A malformed coverage string
+                          must never silently collapse to 'no scope' and re-enable a row
+                          for months it can't vouch for.
+    """
+    if not raw:
+        return set()
+    out: set[int] = set()
+    for tok in str(raw).split(","):
+        tok = tok.strip()
+        if not tok:
+            continue
+        try:
+            out.add(int(tok))
+        except ValueError:
+            return None  # malformed non-empty coverage → caller fails closed
+    return out
 
 
 _LEGACY_NULL_CONTRIBUTOR_SQL = (
@@ -496,3 +713,30 @@ def load_paired_delta(
     f50 = _forecast_means(conn, city, prior_data_version, metric, lead_max, season_months,
                           settled_before, _LEGACY_NULL_CONTRIBUTOR_SQL, require_verified=False)
     return [f25[d] - f50[d] for d in (set(f25) & set(f50))]
+
+
+def paired_delta_coverage(
+    conn,
+    *,
+    city: str,
+    live_data_version: str,
+    prior_data_version: str,
+    metric: str = "high",
+    lead_max: float = 48.0,
+    season_months: tuple[int, ...] | None = None,
+    settled_before: str | None = None,
+) -> tuple[int, set[int]]:
+    """(n_paired_dates, {months}) for the EXACT dates load_paired_delta pairs on.
+
+    Reuses the same _forecast_means primitives as load_paired_delta (set(f25) & set(f50))
+    so paired coverage cannot drift from the transport delta the fit actually used. The
+    count drives transport-active (n >= MIN_PAIRED_N); the months feed the effective-coverage
+    intersection (SD1 / Blocker D): if transport is active, a row must not be applied to a
+    target month its paired evidence never covered.
+    """
+    f25 = _forecast_means(conn, city, live_data_version, metric, lead_max, season_months,
+                          settled_before, _POSITIVE_CONTRIBUTOR_SQL, require_verified=True)
+    f50 = _forecast_means(conn, city, prior_data_version, metric, lead_max, season_months,
+                          settled_before, _LEGACY_NULL_CONTRIBUTOR_SQL, require_verified=False)
+    paired_dates = set(f25) & set(f50)
+    return len(paired_dates), {int(str(d)[5:7]) for d in paired_dates}
