@@ -244,6 +244,36 @@ NEW_CITIES = [
         historical_peak_hour=14.0,
         diurnal_amplitude=4.5,
     ),
+    NewCity(
+        name="Jinan",
+        lat=36.8572,
+        lon=117.0560,
+        timezone="Asia/Shanghai",
+        unit="C",
+        cluster="Jinan",
+        wu_station="ZSJN",
+        airport_name="Jinan Yaoqiang International Airport",
+        aliases=["Jinan"],
+        slug_names=["jinan"],
+        settlement_source="https://www.wunderground.com/history/daily/cn/jinan/ZSJN",
+        historical_peak_hour=15.0,
+        diurnal_amplitude=10.0,
+    ),
+    NewCity(
+        name="Zhengzhou",
+        lat=34.5197,
+        lon=113.8408,
+        timezone="Asia/Shanghai",
+        unit="C",
+        cluster="Zhengzhou",
+        wu_station="ZHCC",
+        airport_name="Zhengzhou Xinzheng International Airport",
+        aliases=["Zhengzhou"],
+        slug_names=["zhengzhou"],
+        settlement_source="https://www.wunderground.com/history/daily/cn/zhengzhou/ZHCC",
+        historical_peak_hour=15.0,
+        diurnal_amplitude=10.0,
+    ),
 ]
 
 # ─────────────────────────────────────────────────────────────
@@ -323,6 +353,11 @@ PIPELINE_STEPS = [
         "id": "historical_forecasts",
         "name": "Materialize historical forecast model skill",
         "script": "etl_historical_forecasts.py",
+        # VESTIGIAL: etl_historical_forecasts.py writes to historical_forecasts (0 rows)
+        # and model_skill (table does not exist post-K1-split). Successor is
+        # etl_forecast_skill_from_forecasts.py (step "forecast_skill", CURRENT).
+        # Marked optional so pipeline failure here is logged but non-fatal.
+        "optional": True,
     },
     {
         "id": "asos_wu_offsets",
@@ -342,6 +377,13 @@ PIPELINE_STEPS = [
         "id": "ens_backfill",
         "name": "Backfill ENS snapshots v1 from OpenMeteo (legacy p_raw lane)",
         "script": "backfill_ens.py",
+        # VESTIGIAL/BLOCKED: backfill_ens.py writes to ensemble_snapshots (unsuffixed,
+        # does not exist post-K1-split). Canonical is ensemble_snapshots_v2 in
+        # zeus-forecasts.db with ~40 columns; pre-K1 INSERT shape is incompatible.
+        # The live daemon is the canonical writer to ensemble_snapshots_v2 and will
+        # populate new cities on next operator-initiated daemon restart.
+        # Marked optional so pipeline failure here is logged but non-fatal.
+        "optional": True,
     },
     {
         "id": "ens_backfill_v2",
@@ -473,9 +515,9 @@ def discover_market_events(city_names: list[str], dry_run: bool = False):
         return
 
     from src.data.market_scanner import find_weather_markets
-    from src.state.db import get_world_connection
+    from src.state.db import get_forecasts_connection
 
-    conn = get_world_connection(write_class="bulk")
+    conn = get_forecasts_connection(write_class="bulk")
     city_set = set(city_names)
 
     try:
@@ -496,19 +538,22 @@ def discover_market_events(city_names: list[str], dry_run: bool = False):
         matched_cities.add(city.name)
 
         target_date = event.get("target_date")
-        event_id = event.get("event_id", "")
+        market_slug = event.get("slug", "")
+        temperature_metric = event.get("temperature_metric") or "high"
         for outcome in event.get("outcomes", []):
             try:
                 conn.execute("""
-                    INSERT OR IGNORE INTO market_events
-                    (market_slug, city, target_date, condition_id, token_id,
+                    INSERT OR IGNORE INTO market_events_v2
+                    (market_slug, city, target_date, temperature_metric,
+                     condition_id, token_id,
                      range_label, range_low, range_high, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
                 """, (
-                    event_id,
+                    market_slug,
                     city.name,
                     target_date,
-                    outcome.get("market_id", ""),
+                    temperature_metric,
+                    outcome.get("condition_id", ""),
                     outcome.get("token_id", ""),
                     outcome.get("title", ""),
                     outcome.get("range_low"),
@@ -837,66 +882,81 @@ def run_pipeline(
 def _print_verification(city_names: list[str]):
     """Print data coverage summary for newly onboarded cities.
 
-    V2 tables (ensemble_snapshots_v2, calibration_pairs_v2, model_bias_ens_v2,
-    settlements_v2, observation_instants_v2) live in zeus-forecasts.db (K1 split).
-    All other tables live in zeus-world.db.  Querying V2 tables via world connection
-    would silently report SKIP for every V2 surface — use the correct connection per table.
+    Post-K1-split: world-class tables are queried via get_world_connection();
+    forecast-class tables are queried via get_forecasts_connection().
     """
-    _FORECASTS_V2_TABLES = frozenset({
-        "ensemble_snapshots_v2",
-        "calibration_pairs_v2",
-        "model_bias_ens_v2",
-        "settlements_v2",
-        "observation_instants_v2",
-    })
-    try:
-        from src.state.db import get_world_connection, get_forecasts_connection
-        world_conn = get_world_connection(write_class=None)
-        forecasts_conn = get_forecasts_connection(write_class=None)
+    from src.state.db import get_world_connection, get_forecasts_connection
 
-        logger.info("\nDATA COVERAGE VERIFICATION:")
-        logger.info("-" * 60)
-        for table in _verification_tables():
-            conn = forecasts_conn if table in _FORECASTS_V2_TABLES else world_conn
+    world_tables, forecast_tables = _verification_tables()
+    placeholders = ",".join("?" * len(city_names))
+
+    logger.info("\nDATA COVERAGE VERIFICATION:")
+    logger.info("-" * 60)
+
+    try:
+        conn = get_world_connection(write_class=None)
+        for table in world_tables:
             try:
-                placeholders = ",".join("?" * len(city_names))
                 row = conn.execute(
                     f"SELECT COUNT(*) FROM {table} WHERE city IN ({placeholders})",
                     city_names,
                 ).fetchone()
                 count = row[0] if row else 0
                 status = "OK" if count > 0 else "EMPTY"
-                logger.info("  %5s %-25s %d rows", status, table, count)
+                logger.info("  %5s %-30s %d rows  [world.db]", status, table, count)
             except Exception:
-                logger.info("  %5s %-25s (table missing)", "SKIP", table)
-
-        world_conn.close()
-        forecasts_conn.close()
+                logger.info("  %5s %-30s (table missing)  [world.db]", "SKIP", table)
+        conn.close()
     except Exception as e:
-        logger.warning("Verification skipped: %s", e)
+        logger.warning("World-DB verification skipped: %s", e)
+
+    try:
+        conn = get_forecasts_connection(write_class=None)
+        for table in forecast_tables:
+            try:
+                row = conn.execute(
+                    f"SELECT COUNT(*) FROM {table} WHERE city IN ({placeholders})",
+                    city_names,
+                ).fetchone()
+                count = row[0] if row else 0
+                status = "OK" if count > 0 else "EMPTY"
+                logger.info("  %5s %-30s %d rows  [forecasts.db]", status, table, count)
+            except Exception:
+                logger.info("  %5s %-30s (table missing)  [forecasts.db]", "SKIP", table)
+        conn.close()
+    except Exception as e:
+        logger.warning("Forecasts-DB verification skipped: %s", e)
 
 
-def _verification_tables() -> list[str]:
-    return [
-        # V2 canonical tables (K1 split: zeus-forecasts.db)
-        "observation_instants_v2",
-        "ensemble_snapshots_v2",
-        "calibration_pairs_v2",
-        "model_bias_ens_v2",
-        "settlements_v2",
-        # V1 legacy tables still checked for completeness (zeus-world.db)
-        "settlements",
+def _verification_tables() -> tuple[list[str], list[str]]:
+    """Return (world_tables, forecast_tables) after K1 split.
+
+    world-class: observations, observation_instants_v2, solar_daily,
+                 temp_persistence, diurnal_curves, forecasts,
+                 forecast_skill, model_bias, asos_wu_offsets
+    forecast-class: settlements_v2, market_events_v2, ensemble_snapshots_v2,
+                    calibration_pairs_v2
+
+    Removed vestigial: historical_forecasts (0 rows), model_skill (table gone).
+    """
+    world_tables = [
         "observations",
-        "market_events",
+        "observation_instants_v2",
         "solar_daily",
         "temp_persistence",
         "diurnal_curves",
         "forecasts",
         "forecast_skill",
-        "historical_forecasts",
-        "model_skill",
+        "model_bias",
         "asos_wu_offsets",
     ]
+    forecast_tables = [
+        "settlements_v2",
+        "market_events_v2",
+        "ensemble_snapshots_v2",
+        "calibration_pairs_v2",
+    ]
+    return world_tables, forecast_tables
 
 
 # ─────────────────────────────────────────────────────────────

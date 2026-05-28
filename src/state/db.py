@@ -9167,10 +9167,20 @@ def query_token_suppression_tokens(conn: sqlite3.Connection | None) -> list[str]
     (pre-migration) or the VIEW alias created by
     migrate_b071_token_suppression_to_history.py --apply --drop-legacy (B071).
     The VIEW projects the latest row per token_id from the append-only history.
+
+    2026-05-27 fitz: ALSO include chain_only_quarantined tokens whose parent
+    market has reached a chain-terminal phase (settled/voided/admin_closed/
+    economically_closed/quarantined). Without this, reconcile_with_chain
+    Rule 3 re-quarantines these tokens every cycle from the chain API
+    response, regenerating chain-only quarantine positions in PortfolioState
+    and re-arming _has_quarantined_positions even when the load-portfolio
+    path correctly excludes them. The terminal-phase guard mirrors the one
+    in query_chain_only_quarantine_rows so both injection paths agree.
+    Skipped when position_current is absent (test envs).
     """
     if conn is None or not _table_or_view_exists(conn, "token_suppression"):
         return []
-    rows = conn.execute(
+    base = conn.execute(
         f"""
         SELECT token_id
         FROM token_suppression
@@ -9179,7 +9189,30 @@ def query_token_suppression_tokens(conn: sqlite3.Connection | None) -> list[str]
         """,
         RESOLVED_TOKEN_SUPPRESSION_REASONS,
     ).fetchall()
-    return [str(row["token_id"] or "") for row in rows if str(row["token_id"] or "")]
+    chain_terminal: list = []
+    if _table_exists(conn, "position_current"):
+        chain_terminal = conn.execute(
+            """
+            SELECT ts.token_id
+            FROM token_suppression ts
+            WHERE ts.suppression_reason = 'chain_only_quarantined'
+              AND EXISTS (
+                  SELECT 1 FROM position_current pc
+                  WHERE (pc.token_id = ts.token_id OR pc.no_token_id = ts.token_id)
+                    AND pc.phase IN ('settled', 'voided', 'admin_closed',
+                                     'economically_closed', 'quarantined')
+              )
+            ORDER BY ts.created_at ASC, ts.token_id ASC
+            """
+        ).fetchall()
+    out: list[str] = []
+    seen: set[str] = set()
+    for row in list(base) + list(chain_terminal):
+        tok = str(row["token_id"] or "")
+        if tok and tok not in seen:
+            seen.add(tok)
+            out.append(tok)
+    return out
 
 
 def query_chain_only_quarantine_rows(conn: sqlite3.Connection | None) -> list[dict]:
@@ -9188,15 +9221,49 @@ def query_chain_only_quarantine_rows(conn: sqlite3.Connection | None) -> list[di
     Reads from `token_suppression` which is either the legacy mutable table
     (pre-migration) or the VIEW alias created by B071 migration. The VIEW
     projects the latest row per token_id from the append-only history.
+
+    2026-05-27 fitz: exclude rows whose parent market has reached a runtime-
+    inactive phase (settled / voided / admin_closed / economically_closed /
+    quarantined). Per the chain-is-truth principle, once chain (or admin)
+    finalizes a market, any chain-only-quarantined token on that market
+    carries no live exposure and must not appear in the portfolio as a
+    quarantined position blocking new entries. The suppression row remains
+    in the append-only history for audit; this query filters it out of
+    runtime consumption.
+
+    Note the deliberate divergence from ``_CHAIN_TERMINAL_POSITION_PHASES``
+    in ``src/execution/exchange_reconcile.py``, which is the stricter 3-phase
+    chain-terminal set (settled / voided / admin_closed) used for drift
+    suppression. The 5-phase set here matches INACTIVE_RUNTIME_STATES and is
+    also used in ``query_token_suppression_tokens`` (Rule-3 ignored_tokens
+    path).
     """
     if conn is None or not _table_or_view_exists(conn, "token_suppression"):
         return []
+    # If position_current is absent we cannot determine terminal status —
+    # fall back to original behavior (return all rows). Tests with minimal
+    # schema land here.
+    if not _table_exists(conn, "position_current"):
+        rows = conn.execute(
+            """
+            SELECT token_id, condition_id, created_at, updated_at, evidence_json
+            FROM token_suppression
+            WHERE suppression_reason = 'chain_only_quarantined'
+            ORDER BY created_at ASC, token_id ASC
+            """
+        ).fetchall()
+        return [dict(row) for row in rows]
     rows = conn.execute(
         """
-        SELECT token_id, condition_id, created_at, updated_at, evidence_json
-        FROM token_suppression
-        WHERE suppression_reason = 'chain_only_quarantined'
-        ORDER BY created_at ASC, token_id ASC
+        SELECT ts.token_id, ts.condition_id, ts.created_at, ts.updated_at, ts.evidence_json
+        FROM token_suppression ts
+        WHERE ts.suppression_reason = 'chain_only_quarantined'
+          AND NOT EXISTS (
+              SELECT 1 FROM position_current pc
+              WHERE (pc.token_id = ts.token_id OR pc.no_token_id = ts.token_id)
+                AND pc.phase IN ('settled', 'voided', 'admin_closed', 'economically_closed', 'quarantined')
+          )
+        ORDER BY ts.created_at ASC, ts.token_id ASC
         """
     ).fetchall()
     return [dict(row) for row in rows]

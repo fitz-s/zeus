@@ -24,8 +24,9 @@ REPO_ROOT = Path(__file__).parent.parent
 
 # ==================== City config completeness ====================
 
-def test_all_51_cities_present():
-    assert len(cities_by_name) == 51
+def test_all_54_cities_present():
+    # 52 cities as of 2026-05-24 Qingdao addition + Jinan (ZSJN) + Zhengzhou (ZHCC) = 54
+    assert len(cities_by_name) == 54
 
 
 def test_every_city_has_all_critical_fields():

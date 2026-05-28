@@ -494,6 +494,30 @@
       "weighted_low_calibration_eligible": true
     },
     {
+      "name": "Jinan",
+      "aliases": [
+        "Jinan"
+      ],
+      "slug_names": [
+        "jinan"
+      ],
+      "noaa": null,
+      "lat": 36.8572,
+      "lon": 117.056,
+      "wu_station": "ZSJN",
+      "wu_pws": null,
+      "meteostat_station": null,
+      "airport_name": "Jinan Yaoqiang International Airport",
+      "country_code": "CN",
+      "settlement_source": "https://www.wunderground.com/history/daily/cn/jinan/ZSJN",
+      "timezone": "Asia/Shanghai",
+      "cluster": "Jinan",
+      "unit": "C",
+      "historical_peak_hour": 15.0,
+      "diurnal_amplitude_c": 10.0,
+      "weighted_low_calibration_eligible": false
+    },
+    {
       "name": "Jakarta",
       "aliases": [
         "Jakarta"
@@ -1332,6 +1356,30 @@
       "historical_peak_hour": 15.0,
       "diurnal_amplitude_c": 8.0,
       "weighted_low_calibration_eligible": true
+    },
+    {
+      "name": "Zhengzhou",
+      "aliases": [
+        "Zhengzhou"
+      ],
+      "slug_names": [
+        "zhengzhou"
+      ],
+      "noaa": null,
+      "lat": 34.5197,
+      "lon": 113.8408,
+      "wu_station": "ZHCC",
+      "wu_pws": null,
+      "meteostat_station": null,
+      "airport_name": "Zhengzhou Xinzheng International Airport",
+      "country_code": "CN",
+      "settlement_source": "https://www.wunderground.com/history/daily/cn/zhengzhou/ZHCC",
+      "timezone": "Asia/Shanghai",
+      "cluster": "Zhengzhou",
+      "unit": "C",
+      "historical_peak_hour": 15.0,
+      "diurnal_amplitude_c": 10.0,
+      "weighted_low_calibration_eligible": false
     }
   ],
   "_source_contract_pending_conversions": [],
