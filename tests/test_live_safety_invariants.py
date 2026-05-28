@@ -153,6 +153,7 @@ def _seed_canonical_entry_baseline(conn, position) -> None:
     """
     from src.engine.lifecycle_events import build_entry_canonical_write
     from src.state.ledger import append_many_and_project
+    from src.state.lifecycle_manager import LifecyclePhase
 
     if not getattr(position, "condition_id", ""):
         position.condition_id = "cond-1"
@@ -160,6 +161,7 @@ def _seed_canonical_entry_baseline(conn, position) -> None:
         position.market_id = position.condition_id
     events, projection = build_entry_canonical_write(
         position,
+        phase_after=LifecyclePhase.PENDING_ENTRY.value,
         decision_id=getattr(position, "decision_snapshot_id", None) or "dec-t1c-followup",
         source_module="src.test.t1c_followup_baseline",
     )
@@ -3211,8 +3213,10 @@ def test_day0_transition_emits_durable_lifecycle_event(monkeypatch, tmp_path):
     # Seed canonical entry baseline so the Day0 canonical emission is not
     # the first canonical event for this trade_id (matches production
     # reality — entries always precede day0 transitions).
+    from src.state.lifecycle_manager import LifecyclePhase
     events, projection = build_entry_canonical_write(
         pos,
+        phase_after=LifecyclePhase.ACTIVE.value,
         decision_id="decision-day0-seed",
         source_module="tests/test_day0_transition_emits_durable",
     )
@@ -3323,8 +3327,10 @@ def test_day0_canonical_emit_is_idempotent_when_monitor_replays_same_position(tm
         selected_method=EntryMethod.ENS_MEMBER_COUNTING,
         condition_id="0xday0idem00000000000000000000000000000000000000000000000000000001",
     )
+    from src.state.lifecycle_manager import LifecyclePhase
     entry_events, entry_projection = build_entry_canonical_write(
         pos,
+        phase_after=LifecyclePhase.ACTIVE.value,
         decision_id="decision-day0-idem-seed",
         source_module="tests/test_day0_canonical_emit_is_idempotent",
     )

@@ -489,8 +489,10 @@ def seed_position_baseline(c, *, position_id="pos-m5", order_id="ord-m5") -> Non
         entered_at="",
         env="live",
     )
+    from src.state.lifecycle_manager import LifecyclePhase
     events, projection = build_entry_canonical_write(
         position_obj,
+        phase_after=LifecyclePhase.PENDING_ENTRY.value,
         decision_id="dec-m5",
         source_module="tests/test_exchange_reconcile",
     )

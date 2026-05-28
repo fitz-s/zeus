@@ -41,6 +41,7 @@ from src.engine.lifecycle_events import (
     build_entry_canonical_write,
     build_entry_fill_only_canonical_write,
 )
+from src.state.lifecycle_manager import LifecyclePhase
 from src.state.portfolio import Position
 
 
@@ -83,6 +84,16 @@ def _runtime_position(
     )
 
 
+def _phase_after(position) -> str:
+    """Derive phase_after from position.state for F4-compliant builder calls."""
+    s = getattr(position, "state", "pending_tracked")
+    if s == "day0_window":
+        return LifecyclePhase.DAY0_WINDOW.value
+    if s == "entered":
+        return LifecyclePhase.ACTIVE.value
+    return LifecyclePhase.PENDING_ENTRY.value
+
+
 def _entry_evidence() -> DecisionEvidence:
     return DecisionEvidence(
         evidence_type="entry",
@@ -99,8 +110,10 @@ class TestEntryEventPayloadEnvelope:
 
     def test_accept_path_posts_envelope_on_entry_order_posted(self):
         evidence = _entry_evidence()
+        pos = _runtime_position(state="entered", chain_state="unknown")
         events, _ = build_entry_canonical_write(
-            _runtime_position(state="entered", chain_state="unknown"),
+            pos,
+            phase_after=_phase_after(pos),
             decision_id="dec-42",
             source_module="src.engine.cycle_runtime",
             decision_evidence=evidence,
@@ -117,8 +130,10 @@ class TestEntryEventPayloadEnvelope:
 
     def test_position_open_intent_does_not_carry_envelope(self):
         evidence = _entry_evidence()
+        pos = _runtime_position(state="entered", chain_state="unknown")
         events, _ = build_entry_canonical_write(
-            _runtime_position(state="entered", chain_state="unknown"),
+            pos,
+            phase_after=_phase_after(pos),
             decision_id="dec-42",
             source_module="src.engine.cycle_runtime",
             decision_evidence=evidence,
@@ -130,8 +145,10 @@ class TestEntryEventPayloadEnvelope:
 
     def test_entry_order_filled_does_not_carry_envelope(self):
         evidence = _entry_evidence()
+        pos = _runtime_position(state="entered", chain_state="unknown")
         events, _ = build_entry_canonical_write(
-            _runtime_position(state="entered", chain_state="unknown"),
+            pos,
+            phase_after=_phase_after(pos),
             decision_id="dec-42",
             source_module="src.engine.cycle_runtime",
             decision_evidence=evidence,
@@ -143,8 +160,10 @@ class TestEntryEventPayloadEnvelope:
 
     def test_rejection_path_emits_no_envelope(self):
         """No evidence passed (rejection path / test fixture) → no sidecar key."""
+        pos = _runtime_position(state="pending_tracked")
         events, _ = build_entry_canonical_write(
-            _runtime_position(state="pending_tracked"),
+            pos,
+            phase_after=_phase_after(pos),
             decision_id="dec-reject",
             source_module="src.engine.cycle_runtime",
         )
@@ -159,8 +178,10 @@ class TestRoundTripRehydration:
 
     def test_envelope_rehydrates_to_equivalent_evidence(self):
         original = _entry_evidence()
+        pos = _runtime_position(state="entered", chain_state="unknown")
         events, _ = build_entry_canonical_write(
-            _runtime_position(state="entered", chain_state="unknown"),
+            pos,
+            phase_after=_phase_after(pos),
             decision_id="dec-round-trip",
             source_module="src.engine.cycle_runtime",
             decision_evidence=original,
@@ -181,8 +202,10 @@ class TestRoundTripRehydration:
         dict-to-string re-wrapping step required on the read path.
         """
         original = _entry_evidence()
+        pos = _runtime_position(state="entered", chain_state="unknown")
         events, _ = build_entry_canonical_write(
-            _runtime_position(state="entered", chain_state="unknown"),
+            pos,
+            phase_after=_phase_after(pos),
             decision_id="dec-sql",
             source_module="src.engine.cycle_runtime",
             decision_evidence=original,
@@ -201,9 +224,11 @@ class TestIdempotency:
 
     def test_same_decision_id_emits_byte_identical_posted_payload(self):
         evidence = _entry_evidence()
+        pos = _runtime_position(state="entered", chain_state="unknown")
         runs = [
             build_entry_canonical_write(
-                _runtime_position(state="entered", chain_state="unknown"),
+                pos,
+                phase_after=_phase_after(pos),
                 decision_id="dec-same",
                 source_module="src.engine.cycle_runtime",
                 decision_evidence=evidence,
@@ -221,8 +246,10 @@ class TestBackfillReasonSentinel:
     """Legacy backfill emits decision_evidence_reason (not envelope)."""
 
     def test_backfill_emits_reason_sentinel_on_entry_order_posted(self):
+        pos = _runtime_position(state="entered", chain_state="unknown")
         events, _ = build_entry_canonical_write(
-            _runtime_position(state="entered", chain_state="unknown"),
+            pos,
+            phase_after=_phase_after(pos),
             source_module="src.execution.exit_lifecycle:backfill",
             decision_evidence_reason="backfill_legacy_position",
         )
@@ -232,8 +259,10 @@ class TestBackfillReasonSentinel:
         assert "decision_evidence_envelope" not in payload
 
     def test_backfill_reason_does_not_leak_to_sibling_events(self):
+        pos = _runtime_position(state="entered", chain_state="unknown")
         events, _ = build_entry_canonical_write(
-            _runtime_position(state="entered", chain_state="unknown"),
+            pos,
+            phase_after=_phase_after(pos),
             source_module="src.execution.exit_lifecycle:backfill",
             decision_evidence_reason="backfill_legacy_position",
         )
@@ -280,8 +309,10 @@ class TestPayloadBackwardCompatibility:
     })
 
     def test_default_call_preserves_pre_slice_key_set(self):
+        pos = _runtime_position(state="pending_tracked")
         events, _ = build_entry_canonical_write(
-            _runtime_position(state="pending_tracked"),
+            pos,
+            phase_after=_phase_after(pos),
             decision_id="dec-compat",
             source_module="src.engine.cycle_runtime",
         )

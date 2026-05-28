@@ -266,8 +266,10 @@ def test_transition_phase_is_noop_when_position_is_already_economically_closed()
         order_posted_at="2026-05-21T00:00:00+00:00",
         env="live",
     )
+    from src.state.lifecycle_manager import LifecyclePhase
     entry_events, entry_projection = build_entry_canonical_write(
         pos,
+        phase_after=LifecyclePhase.ACTIVE.value,
         decision_id="dec-closed-1",
         source_module="tests/state/test_transition_phase_invariant.py",
     )

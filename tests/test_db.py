@@ -1822,9 +1822,11 @@ def test_portfolio_loader_missing_projection_env_stays_unknown_until_builder_rej
     position = _position_from_projection_row(loader_position, current_mode="live")
     assert position.env == POSITION_ENV_UNKNOWN
     position.entered_at = "2026-04-01T00:00:00+00:00"
+    from src.state.lifecycle_manager import LifecyclePhase
     with pytest.raises(ValueError, match="position event env='unknown_env' is invalid"):
         build_entry_canonical_write(
             position,
+            phase_after=LifecyclePhase.PENDING_ENTRY.value,
             decision_id="dec-loader-missing-env",
             source_module="tests.test_db",
         )
@@ -3250,10 +3252,12 @@ def test_lifecycle_builder_rejects_position_without_explicit_env():
         state="pending_tracked",
     )
 
+    from src.state.lifecycle_manager import LifecyclePhase
     assert pos.env == POSITION_ENV_UNKNOWN
     with pytest.raises(ValueError, match="position event env='unknown_env' is invalid"):
         build_entry_canonical_write(
             pos,
+            phase_after=LifecyclePhase.PENDING_ENTRY.value,
             decision_id="dec-implicit-env",
             source_module="tests.test_db",
         )

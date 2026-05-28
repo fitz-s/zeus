@@ -77,6 +77,7 @@ def _runtime_position(
         order_posted_at="2026-04-03T00:00:00Z",
         chain_state=chain_state,
         exit_state="",
+        condition_id="cond-exit-evidence-1",
     )
 
 
@@ -152,8 +153,10 @@ def _seed_entry_event(
     from src.engine.lifecycle_events import build_entry_canonical_write
     from src.state.ledger import append_many_and_project
 
+    from src.state.lifecycle_manager import LifecyclePhase
     events, projection = build_entry_canonical_write(
         _runtime_position(trade_id=trade_id, state="entered", chain_state="unknown"),
+        phase_after=LifecyclePhase.ACTIVE.value,
         decision_id="dec-1",
         source_module="src.test",
         decision_evidence=decision_evidence,
