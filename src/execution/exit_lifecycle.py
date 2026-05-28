@@ -1955,6 +1955,18 @@ def _apply_partial_exit_fill(
     position.size_usd = original_size * remaining_ratio
     if position.cost_basis_usd > 0:
         position.cost_basis_usd = original_cost * remaining_ratio
+    # F1 (PR1 critic SEV-1): balance-only positions route effective_shares via
+    # chain_shares.  Without this block, effective_exposure() returns stale
+    # pre-exit chain aggregate until the next reconcile cycle — exit-sizing code
+    # that calls effective_exposure() between cycles would overstate exposure and
+    # re-issue exit orders the venue rejects.
+    if position.has_chain_observed_authority:
+        original_chain_shares = float(getattr(position, "chain_shares", 0.0) or 0.0)
+        original_chain_cost = float(getattr(position, "chain_cost_basis_usd", 0.0) or 0.0)
+        if original_chain_shares > 0:
+            position.chain_shares = original_chain_shares * remaining_ratio
+        if original_chain_cost > 0:
+            position.chain_cost_basis_usd = original_chain_cost * remaining_ratio
     position.exit_state = "sell_pending"
     return True
 

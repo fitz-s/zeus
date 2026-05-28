@@ -393,6 +393,9 @@ def _seed_pending_entry_projection(
         "fill_authority": None,
         "recovery_authority": None,
         "chain_shares": None,
+        # F1 (docs/findings_2026_05_28.md §F1, 2026-05-28).
+        "chain_avg_price": None,
+        "chain_cost_basis_usd": None,
         "chain_seen_at": None,
         "chain_absence_at": None,
     }

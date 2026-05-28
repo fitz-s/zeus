@@ -2203,10 +2203,19 @@ def test_chain_reconciliation_rescues_pending_tracked_fill(tmp_path):
     assert pos.entry_fill_verified is False
     assert pos.order_status == "pending"  # stays at input value for balance-only
     assert pos.entered_at != ""
+    # F1 (docs/findings_2026_05_28.md §F1, 2026-05-28): balance-only rescue
+    # preserves submitted entry economics; chain economics flow into
+    # chain_* fields. Submitted defaults from _make_position were
+    # entry_price=0.40, size_usd=10.0, shares=25.0, cost_basis_usd=10.0.
+    assert pos.entry_price == 0.40
+    assert pos.size_usd == 10.0
+    assert pos.cost_basis_usd == 10.0
     assert pos.shares == 25.0
-    assert pos.entry_price == 0.44
-    assert pos.size_usd == 11.0
-    assert pos.cost_basis_usd == 11.0
+    # Chain aggregate (chain.avg_price=0.44, chain.cost=11.0, chain.size=25.0)
+    # lands on chain_* fields.
+    assert pos.chain_avg_price == 0.44
+    assert pos.chain_cost_basis_usd == 11.0
+    assert pos.chain_shares == 25.0
     assert pos.condition_id == "cond-1"
     assert portfolio.positions == [pos]
 
@@ -2474,12 +2483,21 @@ def test_chain_reconciliation_rescue_emits_exactly_one_stage_event(tmp_path):
     assert details["to_state"] == "entered"
     assert details["source"] == "chain_reconciliation"
     assert details["reason"] == "balance_only_recovery"
-    assert details["shares"] == 25.0
-    assert details["cost_basis_usd"] == 11.0
+    # F1 (docs/findings_2026_05_28.md §F1, 2026-05-28): the event payload
+    # `shares` / `cost_basis_usd` / `size_usd` fields reflect submitted
+    # entry economics (Position.shares / .cost_basis_usd / .size_usd at
+    # emit time), NOT the chain aggregate. The chain aggregate lives on
+    # the new chain_* payload fields below.
+    assert details["shares"] == 25.0  # submitted shares from _make_position
+    assert details["cost_basis_usd"] == 10.0  # submitted notional (was 11.0 chain pre-F1)
     assert details["condition_id"] == "cond-1"
     assert details["recovery_authority"] == "balance_only"
     assert details["causality_status"] == "UNVERIFIED"
     assert details["training_eligible"] is False
+    # F1: chain economics on the event payload.
+    assert details["chain_shares"] == 25.0
+    assert details["chain_avg_price"] == 0.44
+    assert details["chain_cost_basis_usd"] == 11.0
 
 
 @pytest.mark.parametrize("exit_state", ["exit_intent", "sell_placed", "sell_pending", "retry_pending"])

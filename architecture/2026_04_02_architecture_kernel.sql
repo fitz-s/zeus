@@ -146,6 +146,13 @@ CREATE TABLE IF NOT EXISTS position_current (
     fill_authority TEXT,
     recovery_authority TEXT,
     chain_shares REAL,
+    -- F1 (docs/findings_2026_05_28.md §F1, 2026-05-28): chain-observed
+    -- economics columns. Balance-only rescue writes the chain aggregate
+    -- here instead of mutating entry_price / cost_basis_usd / size_usd /
+    -- shares. Additive on legacy DBs via
+    -- _ensure_position_current_authority_columns.
+    chain_avg_price REAL,
+    chain_cost_basis_usd REAL,
     chain_seen_at TEXT,
     chain_absence_at TEXT
 );
