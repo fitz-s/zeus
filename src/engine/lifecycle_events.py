@@ -70,17 +70,29 @@ def canonical_phase_for_position(position: Any) -> str:
 def projection_updated_at(position: Any) -> str:
     # Finding 1 (PR C0, 2026-05-27): chain_verified_at is positive-observation
     # only. last_chain_absence_observed_at carries the parallel absence-
-    # observation signal so projection "as of" still advances on absence
-    # reconciles. Both contribute to the fallback chain; ordering is most-
-    # specific signal first.
-    return _non_empty(
-        getattr(position, "last_exit_at", ""),
-        getattr(position, "chain_verified_at", ""),
-        getattr(position, "last_chain_absence_observed_at", ""),
-        getattr(position, "day0_entered_at", ""),
-        getattr(position, "entered_at", ""),
-        getattr(position, "order_posted_at", ""),
-    )
+    # observation signal.
+    #
+    # PR #352 (Part-3 audit, bot #4 on PR #350, 2026-05-27): updated_at is the
+    # projection "as of" time — the MOST RECENT thing we learned about this
+    # position, not a fixed-priority pick. The former first-non-empty ordering
+    # placed chain_verified_at before last_chain_absence_observed_at, so a later
+    # absence reconcile on a position with an older positive verification would
+    # NOT advance updated_at (the stale positive timestamp won). Take the max
+    # over all observation/lifecycle timestamps so any later observation —
+    # positive or absence — advances the projection clock. Timestamps are UTC
+    # ISO-8601 from one system, so lexicographic max == chronological max.
+    candidates = [
+        str(getattr(position, "last_exit_at", "") or ""),
+        str(getattr(position, "chain_verified_at", "") or ""),
+        str(getattr(position, "last_chain_absence_observed_at", "") or ""),
+        str(getattr(position, "day0_entered_at", "") or ""),
+        str(getattr(position, "entered_at", "") or ""),
+        str(getattr(position, "order_posted_at", "") or ""),
+    ]
+    present = [c for c in candidates if c not in ("", "unknown_entered_at")]
+    if not present:
+        raise ValueError("missing required timestamp for canonical lifecycle builder")
+    return max(present)
 
 
 def build_position_current_projection(position: Any) -> dict:
@@ -118,17 +130,26 @@ def build_position_current_projection(position: Any) -> dict:
         "updated_at": projection_updated_at(position),
         # Slice P2-C2 (PR #19 phase 2, 2026-04-26) + P2-fix2 (post-review
         # BLOCKER #1, 2026-04-26): route via resolver for audit trail
-        # (DEBUG log identifies missing-metric positions). The
-        # *_authority and *_source extension was reverted: those keys
-        # were silently dropped by upsert_position_current because they
-        # are not declared in CANONICAL_POSITION_CURRENT_COLUMNS, AND
-        # the lifecycle event payload_json builders read from raw
-        # position.* attributes (not from this projection dict). Adding
-        # the keys delivered no downstream value; persisting the
-        # authority signal requires a schema migration on
-        # position_current + payload_json builder edits, deferred to a
-        # separate packet.
+        # (DEBUG log identifies missing-metric positions). PR D0b
+        # (Finding D0/D2-wire, Part-2 audit, 2026-05-27) finally lands
+        # the authority schema migration originally deferred above:
+        # fill_authority / recovery_authority / chain_shares /
+        # chain_seen_at / chain_absence_at are now persisted on
+        # position_current, declared in CANONICAL_POSITION_CURRENT_COLUMNS,
+        # and consumed by the typed training-eligibility gate
+        # (src.state.portfolio.is_training_eligible_position) without
+        # snapshot-keyed scanner heuristics.
         "temperature_metric": _position_metric[0],
+        "fill_authority": _nullable(getattr(position, "fill_authority", "")),
+        # recovery_authority is set per-event by canonical builders
+        # (build_venue_position_observed_canonical_write sets
+        # 'balance_only'; trade-verified rescue leaves it NULL). The
+        # base projection mirrors the runtime Position attribute when
+        # the rescue path attaches it; non-rescue projections persist NULL.
+        "recovery_authority": _nullable(getattr(position, "recovery_authority", "")),
+        "chain_shares": _nullable(getattr(position, "chain_shares", None)),
+        "chain_seen_at": _nullable(getattr(position, "chain_verified_at", "")),
+        "chain_absence_at": _nullable(getattr(position, "last_chain_absence_observed_at", "")),
     }
 
 
@@ -565,6 +586,102 @@ def build_economic_close_canonical_write(
     return [event], projection
 
 
+def build_venue_position_observed_canonical_write(
+    position: Any,
+    *,
+    sequence_no: int,
+    source_module: str = "src.state.chain_reconciliation",
+) -> tuple[list[dict], dict]:
+    """Canonical event for balance-only rescue (Finding D0 / Part-2 audit, 2026-05-27).
+
+    Emitted when chain reconciliation detects a held venue balance for a
+    pending entry but CANNOT link the balance to a venue trade fact. Distinct
+    from `build_reconciliation_rescue_canonical_write` (trade-verified rescue):
+    the payload carries `fill_authority=venue_position_observed`,
+    `recovery_authority=balance_only`, `causality_status=UNVERIFIED`,
+    `training_eligible=false` so downstream consumers reading position_events
+    can distinguish degraded recovery from verified fill at the event-grammar
+    level. The position still folds to ACTIVE so monitor/exit can manage
+    exposure; the authority signal lives in the event payload + the runtime
+    Position.fill_authority field. A later cycle that obtains a real venue
+    trade fact appends a separate verified ENTRY_ORDER_FILLED / CHAIN_SYNCED
+    event upgrading the authority.
+    """
+    projection = build_position_current_projection(position)
+    if projection["phase"] != ACTIVE:
+        raise ValueError("venue_position_observed canonical builder requires an active position projection")
+
+    # PR #352 (Part-3 bot #6 + Part-5 Finding 2 on PR #351, 2026-05-27): THIS
+    # builder is, by definition, the balance-only degraded-recovery event, so it
+    # OWNS the authority truth — it must not trust the runtime Position attribute
+    # for a field it semantically defines. Force both the durable projection AND
+    # the event payload from the same local constants so they can never diverge
+    # (the prior code read getattr(position,"fill_authority",...) for the payload
+    # while forcing the projection — an empty/wrong attribute would split them).
+    _FILL_AUTHORITY = "venue_position_observed"
+    _RECOVERY_AUTHORITY = "balance_only"
+    projection["recovery_authority"] = _RECOVERY_AUTHORITY
+    projection["fill_authority"] = _FILL_AUTHORITY
+
+    occurred_at = _non_empty(
+        getattr(position, "entered_at", ""),
+        getattr(position, "chain_verified_at", ""),
+        projection["updated_at"],
+    )
+    payload = json.dumps(
+        {
+            "status": "entered",
+            "source": "chain_reconciliation",
+            "reason": "balance_only_recovery",
+            "from_state": "pending_tracked",
+            "to_state": "entered",
+            "entry_order_id": getattr(position, "entry_order_id", "") or getattr(position, "order_id", ""),
+            "entry_method": getattr(position, "entry_method", ""),
+            "selected_method": getattr(position, "selected_method", "") or getattr(position, "entry_method", ""),
+            "applied_validations": list(getattr(position, "applied_validations", []) or []),
+            "entry_fill_verified": getattr(position, "entry_fill_verified", False),
+            "shares": getattr(position, "shares", None),
+            "cost_basis_usd": getattr(position, "cost_basis_usd", None),
+            "size_usd": getattr(position, "size_usd", None),
+            "condition_id": getattr(position, "condition_id", ""),
+            "rescue_condition_id": getattr(position, "condition_id", ""),
+            "order_status": getattr(position, "order_status", ""),
+            "chain_state": getattr(position, "chain_state", ""),
+            # PR D0 additions — explicit degraded-recovery signal. Sourced from
+            # the same local constants as the projection (Part-5 Finding 2) so
+            # payload and durable projection authority can never disagree.
+            "fill_authority": _FILL_AUTHORITY,
+            "recovery_authority": _RECOVERY_AUTHORITY,
+            "causality_status": "UNVERIFIED",
+            "training_eligible": False,
+        },
+        default=str,
+        sort_keys=True,
+    )
+    event = {
+        "event_id": f"{getattr(position, 'trade_id')}:venue_position_observed:{sequence_no}",
+        "position_id": getattr(position, "trade_id"),
+        "event_version": 1,
+        "sequence_no": sequence_no,
+        "event_type": "VENUE_POSITION_OBSERVED",
+        "occurred_at": occurred_at,
+        "phase_before": PENDING_ENTRY,
+        "phase_after": fold_lifecycle_phase(PENDING_ENTRY, ACTIVE).value,
+        "strategy_key": _strategy_key(position),
+        "decision_id": None,
+        "snapshot_id": _nullable(getattr(position, "decision_snapshot_id", "")),
+        "order_id": _nullable(getattr(position, "order_id", "")),
+        "command_id": None,
+        "caused_by": "balance_only_recovery",
+        "idempotency_key": f"{getattr(position, 'trade_id')}:venue_position_observed:{sequence_no}",
+        "venue_status": _nullable(getattr(position, "order_status", "")),
+        "source_module": source_module,
+        "env": _position_env(position),
+        "payload_json": payload,
+    }
+    return [event], projection
+
+
 def build_reconciliation_rescue_canonical_write(
     position: Any,
     *,
@@ -676,6 +793,73 @@ def build_chain_size_corrected_canonical_write(
         "caused_by": "chain_size_corrected",
         "idempotency_key": f"{getattr(position, 'trade_id')}:chain_size_corrected:{sequence_no}",
         "venue_status": None,
+        "source_module": source_module,
+        "env": _position_env(position),
+        "payload_json": payload,
+    }
+    return [event], projection
+
+
+def build_review_required_canonical_write(
+    position: Any,
+    *,
+    reason: str,
+    sequence_no: int,
+    source_module: str = "src.state.chain_reconciliation",
+) -> tuple[list[dict], dict]:
+    """PR #352 (Part-3 audit Finding 4, 2026-05-27): durable REVIEW_REQUIRED event.
+
+    Emitted when chain reconciliation detects an unresolved chain/local size
+    mismatch but has NO canonical baseline to write a CHAIN_SIZE_CORRECTED
+    against. Before this builder, that branch only mutated the runtime Position
+    (state=QUARANTINED, chain_state=size_mismatch_unresolved) and bumped a stats
+    counter — nothing was persisted, so on daemon restart position_current still
+    showed the position as active and the review requirement was lost.
+
+    The caller sets the runtime Position to the quarantined/size-mismatch state
+    BEFORE calling this builder, so the projection phase is QUARANTINED and
+    append_many_and_project() persists position_current.phase=quarantined +
+    chain_state=size_mismatch_unresolved durably alongside the audit event.
+    """
+    projection = build_position_current_projection(position)
+    if projection["phase"] != QUARANTINED:
+        raise ValueError("review_required canonical builder requires a quarantined position projection")
+    occurred_at = _non_empty(
+        getattr(position, "quarantined_at", ""),
+        getattr(position, "chain_verified_at", ""),
+        projection["updated_at"],
+    )
+    payload = json.dumps(
+        {
+            "source": "chain_reconciliation",
+            "reason": reason,
+            "review_state": "unresolved",
+            "chain_state": getattr(position, "chain_state", ""),
+            "local_shares": getattr(position, "shares", None),
+            "chain_shares": getattr(position, "chain_shares", None),
+            "condition_id": getattr(position, "condition_id", ""),
+            "token_id": getattr(position, "token_id", ""),
+        },
+        default=str,
+        sort_keys=True,
+    )
+    event = {
+        "event_id": f"{getattr(position, 'trade_id')}:review_required:{sequence_no}",
+        "position_id": getattr(position, "trade_id"),
+        "event_version": 1,
+        "sequence_no": sequence_no,
+        "event_type": "REVIEW_REQUIRED",
+        "occurred_at": occurred_at,
+        "phase_before": None,
+        "phase_after": fold_lifecycle_phase(None, QUARANTINED).value,
+        "strategy_key": _strategy_key(position),
+        "decision_id": None,
+        "snapshot_id": _nullable(getattr(position, "decision_snapshot_id", "")),
+        "order_id": _nullable(getattr(position, "order_id", "")),
+        "command_id": None,
+        "caused_by": reason,
+        "idempotency_key": f"{getattr(position, 'trade_id')}:review_required:{sequence_no}",
+        "venue_status": _nullable(getattr(position, "order_status", "")),
         "source_module": source_module,
         "env": _position_env(position),
         "payload_json": payload,

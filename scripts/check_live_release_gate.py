@@ -403,6 +403,13 @@ def _write_fixture_files(root: Path) -> argparse.Namespace:
     # World DB
     conn = sqlite3.connect(str(world_db))
     init_schema(conn)
+    # PR D0b (2026-05-27): init_schema sets `PRAGMA user_version = SCHEMA_VERSION`
+    # but leaves an open transaction (in_transaction=True); without an explicit
+    # commit the PRAGMA write is rolled back on close() and the fixture world.db
+    # reopens with user_version=0, failing _check_world_schema. Production
+    # callers commit explicitly (per the world-DB migration contract); the
+    # fixture must too. Surfaced when SCHEMA_VERSION bumped 37→39.
+    conn.commit()
     conn.close()
 
     # Forecasts DB — must exist with current schema and a LIVE_ELIGIBLE readiness row

@@ -1123,6 +1123,42 @@ tables:
       strings/f-strings with NoTradeReason enum refs + reason_detail capture.
       Production — no_trade_events table writes from cycle_runtime evaluate_cycle path via NoTradeReason enum (PR #222, commit ce4862a4d2).
 
+  - name: no_trade_events_new
+    db: world
+    schema_class: legacy_archived
+    schema_version_owner: SCHEMA_VERSION
+    created_by: "src/state/schema/no_trade_events_schema.py (rebuild-pattern transient table; renamed to no_trade_events at end of migration)"
+    pk_col: "[market_slug, temperature_metric, target_date, observation_time, decision_seq]"
+    notes: >
+      Transient rebuild table used by the no_trade_events schema_version
+      CHECK-extension migration (SQLite cannot ALTER a CHECK constraint, so
+      the migration creates no_trade_events_new with the widened CHECK,
+      copies rows, drops the old table, and renames). Never live outside a
+      migration transaction — so it is classed legacy_archived: the
+      check_db_table_delta gate (scans CREATE TABLE in changed
+      src/state/schema/** files) treats it as declared/known, while the
+      assert_db_matches_registry on-disk coherence check excludes
+      legacy_archived entries (no expectation that the transient table
+      persists). Catalogued 2026-05-27 (PR D0b) when the schema_version
+      CHECK list was extended to include 38/39.
+
+  - name: evidence_tier_assignments_new
+    db: world
+    schema_class: legacy_archived
+    schema_version_owner: SCHEMA_VERSION
+    created_by: "src/state/schema/phase6_evidence_schema.py (rebuild-pattern transient table; renamed to evidence_tier_assignments at end of migration)"
+    pk_col: null
+    notes: >
+      Transient rebuild table used by the evidence_tier_assignments schema
+      migration (_migrate_evidence_tier_assignments_schema). Same rebuild
+      pattern as no_trade_events_new: created with the current column set +
+      widened schema_version CHECK, rows copied, old table dropped, then
+      renamed. Never live outside a migration transaction, so classed
+      legacy_archived — known to the check_db_table_delta gate, excluded from
+      assert_db_matches_registry on-disk coherence. Catalogued 2026-05-27
+      (PR #352 Part-5) when the schema_version CHECK list was extended to 40
+      and the gate re-scanned the touched phase6_evidence_schema.py.
+
   - name: tail_stress_scenarios
     db: world
     schema_class: world_class

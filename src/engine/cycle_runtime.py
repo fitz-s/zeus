@@ -4665,7 +4665,7 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
         # lines emit, the daemon is loading a stale cycle_runtime module from a
         # different path than what we're editing.
         try:
-            deps.logger.info(
+            deps.logger.debug(
                 "DEBUG_LOOP_REACH city=%s tgt=%s mode=%s",
                 getattr(candidate, "city", "?"),
                 getattr(candidate, "target_date", "?"),
@@ -4727,7 +4727,7 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                 _dbg_n = len(decisions) if decisions else 0
                 _dbg_reasons = [str(getattr(_d, "rejection_reason_enum", None) or "?") for _d in (decisions or [])][:3]
                 _dbg_should_trade = [bool(getattr(_d, "should_trade", False)) for _d in (decisions or [])]
-                deps.logger.info(
+                deps.logger.debug(
                     "DEBUG_49DROP city=%s tgt=%s n=%d should_trade=%s reasons=%s",
                     getattr(candidate, "city", "?"),
                     getattr(candidate, "target_date", "?"),

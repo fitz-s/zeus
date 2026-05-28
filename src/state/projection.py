@@ -40,6 +40,18 @@ CANONICAL_POSITION_CURRENT_COLUMNS = (
     "order_status",
     "updated_at",
     "temperature_metric",
+    # PR D0b (Finding D0/D2-wire, Part-2 audit, 2026-05-27): durable
+    # authority projection. NULL on legacy rows (ALTER TABLE ADD COLUMN
+    # default). Populated by build_position_current_projection() from
+    # Position.fill_authority / .chain_shares / .chain_verified_at /
+    # .last_chain_absence_observed_at. recovery_authority is derived at
+    # rescue time and persisted alongside; for non-rescue projections it
+    # stays NULL.
+    "fill_authority",
+    "recovery_authority",
+    "chain_shares",
+    "chain_seen_at",
+    "chain_absence_at",
 )
 
 
@@ -214,41 +226,23 @@ def upsert_position_current(conn: sqlite3.Connection, projection: dict) -> None:
                 existing_position_id=existing,
                 token_id=str(candidate_token),
             )
+    # PR #352 (Part-3 audit, bot #7 on PR #351 + Part-4 Finding 1, 2026-05-27):
+    # the ON CONFLICT update set is GENERATED from CANONICAL_POSITION_CURRENT_COLUMNS
+    # (minus the position_id conflict key), not hand-maintained. The original
+    # hand-written list omitted the D0b authority columns (fill_authority,
+    # recovery_authority, chain_shares, chain_seen_at, chain_absence_at), so the
+    # rescue path — which UPDATEs an existing pending-entry row — wrote authority
+    # on first INSERT only and left it stale on every conflict, defeating the
+    # durable-authority guarantee. Generating the set makes that drift category
+    # impossible: any future canonical column is updated on conflict automatically.
+    _update_cols = [c for c in CANONICAL_POSITION_CURRENT_COLUMNS if c != "position_id"]
+    _update_set = ",\n            ".join(f"{c}=excluded.{c}" for c in _update_cols)
     conn.execute(
         f"""
         INSERT INTO position_current ({", ".join(CANONICAL_POSITION_CURRENT_COLUMNS)})
         VALUES ({", ".join(["?"] * len(CANONICAL_POSITION_CURRENT_COLUMNS))})
         ON CONFLICT(position_id) DO UPDATE SET
-            phase=excluded.phase,
-            trade_id=excluded.trade_id,
-            market_id=excluded.market_id,
-            city=excluded.city,
-            cluster=excluded.cluster,
-            target_date=excluded.target_date,
-            bin_label=excluded.bin_label,
-            direction=excluded.direction,
-            unit=excluded.unit,
-            size_usd=excluded.size_usd,
-            shares=excluded.shares,
-            cost_basis_usd=excluded.cost_basis_usd,
-            entry_price=excluded.entry_price,
-            p_posterior=excluded.p_posterior,
-            last_monitor_prob=excluded.last_monitor_prob,
-            last_monitor_edge=excluded.last_monitor_edge,
-            last_monitor_market_price=excluded.last_monitor_market_price,
-            decision_snapshot_id=excluded.decision_snapshot_id,
-            entry_method=excluded.entry_method,
-            strategy_key=excluded.strategy_key,
-            edge_source=excluded.edge_source,
-            discovery_mode=excluded.discovery_mode,
-            chain_state=excluded.chain_state,
-            token_id=excluded.token_id,
-            no_token_id=excluded.no_token_id,
-            condition_id=excluded.condition_id,
-            order_id=excluded.order_id,
-            order_status=excluded.order_status,
-            updated_at=excluded.updated_at,
-            temperature_metric=excluded.temperature_metric
+            {_update_set}
         """,
         ordered_values(projection, CANONICAL_POSITION_CURRENT_COLUMNS),
     )

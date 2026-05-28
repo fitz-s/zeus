@@ -323,7 +323,10 @@ class TestF4EvidenceTierLifecycle:
             ).fetchall()
         ]
 
-        assert schema_versions == [27, 37]  # old row stays at 27; new row at current SCHEMA_VERSION=37
+        from src.state.db import SCHEMA_VERSION
+        # old row stays at 27; new row stamps the live SCHEMA_VERSION (PR #352: 40).
+        # Reference the constant so future bumps don't re-break this assertion.
+        assert schema_versions == [27, SCHEMA_VERSION]
 
     def test_revoked_row_excluded_from_current_assignment(self) -> None:
         conn = _make_tier_db()
@@ -769,7 +772,11 @@ class TestF6StrategyKeyCheckMigration:
         )
 
         old_versions = "14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27"
-        current_versions = f"{old_versions}, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37"
+        # PR #352: SCHEMA_VERSION advanced to 40; no_trade_events CHECK extended
+        # to match. This must mirror the live CREATE_TABLE_SQL list exactly or
+        # the .replace() below silently mangles the CHECK (drops 28-37, leaving
+        # a malformed range that rejects the SCHEMA_VERSION insert).
+        current_versions = f"{old_versions}, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40"
         conn = sqlite3.connect(":memory:")
         # Build a v27-only table by replacing the full current version list.
         conn.executescript(CREATE_TABLE_SQL.replace(current_versions, old_versions))

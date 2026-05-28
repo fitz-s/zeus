@@ -28,9 +28,9 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 
-from src.contracts.position_truth import ChainOnlyFact
+from src.contracts.position_truth import CHAIN_ONLY_REVIEW_WINDOW_HOURS, ChainOnlyFact
 from src.contracts.semantic_types import LifecycleState
-from src.state.chain_state import ChainState, classify_chain_state
+from src.state.chain_state import ChainSnapshotCompleteness, classify_chain_state
 from src.state.lifecycle_manager import (
     enter_chain_quarantined_runtime_state,
     phase_for_runtime_position,
@@ -169,7 +169,7 @@ class ChainPositionView:
     snapshot, never from live API calls mid-cycle. Prevents inconsistent reads
     when chain state changes during a cycle.
 
-    Fix D (Option 4b): The `state: ChainState` field has been removed.
+    Fix D (Option 4b): The `state: ChainSnapshotCompleteness` field has been removed.
     Classification is a per-reconcile-call fact computed by classify_chain_state()
     inside reconcile(), not something cached on the view. No external caller
     outside reconcile() was found to read a `.state` field on this view.
@@ -427,11 +427,28 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
         if not _canonical_rescue_baseline_available(getattr(position, "trade_id", "")):
             return False
 
-        from src.engine.lifecycle_events import build_reconciliation_rescue_canonical_write
+        # PR D0 (Finding D0 / Part-2 audit, 2026-05-27): emit distinct
+        # canonical event grammar for balance-only vs trade-verified rescue.
+        # When the position has no linked venue trade fact (legacy /
+        # pre-command-journal pending rows that still reach rescue), emit
+        # VENUE_POSITION_OBSERVED with recovery_authority=balance_only +
+        # training_eligible=false in the payload. Trade-verified rescues
+        # continue to emit CHAIN_SYNCED via the original builder.
+        from src.engine.lifecycle_events import (
+            build_reconciliation_rescue_canonical_write,
+            build_venue_position_observed_canonical_write,
+        )
         from src.state.db import append_many_and_project
 
+        has_trade_fact = _pending_entry_has_linked_fill_fact(position)
+        builder = (
+            build_reconciliation_rescue_canonical_write
+            if has_trade_fact
+            else build_venue_position_observed_canonical_write
+        )
+
         try:
-            events, projection = build_reconciliation_rescue_canonical_write(
+            events, projection = builder(
                 position,
                 sequence_no=_next_canonical_sequence_no(getattr(position, "trade_id", "")),
                 source_module="src.state.chain_reconciliation",
@@ -488,6 +505,40 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
                 f"canonical reconciliation size-correction dual-write failed for {position.trade_id}: {exc}"
             ) from exc
 
+        return True
+
+    def _append_canonical_review_required(position: Position, *, reason: str) -> bool:
+        """PR #352 (Part-3 audit Finding 4): persist a durable REVIEW_REQUIRED
+        event + quarantined projection for an unresolved size mismatch.
+
+        The caller has already set position.state=QUARANTINED and
+        chain_state=size_mismatch_unresolved, so the projection phase is
+        QUARANTINED. append_many_and_project writes position_current.phase=
+        quarantined durably — the review requirement now survives daemon restart
+        instead of living only in the in-memory Position. Best-effort: if no
+        connection or the write fails, the runtime quarantine still stands (the
+        next reconcile cycle re-detects and re-attempts the durable write).
+        """
+        if conn is None:
+            return False
+        from src.engine.lifecycle_events import build_review_required_canonical_write
+        from src.state.db import append_many_and_project
+
+        try:
+            events, projection = build_review_required_canonical_write(
+                position,
+                reason=reason,
+                sequence_no=_next_canonical_sequence_no(getattr(position, "trade_id", "")),
+                source_module="src.state.chain_reconciliation",
+            )
+            append_many_and_project(conn, events, projection)
+        except Exception as exc:
+            logger.warning(
+                "REVIEW_REQUIRED canonical write failed for %s: %s (runtime quarantine stands; "
+                "next reconcile cycle retries)",
+                getattr(position, "trade_id", "?"), exc,
+            )
+            return False
         return True
 
     def _already_logged_rescue_event(position) -> bool:
@@ -722,12 +773,12 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
     # the chain API returns a non-None response, so the fetch itself is fresh.
     # CHAIN_UNKNOWN reachability inside reconcile is exclusively via the
     # empty-chain-with-recent-local-verified branch of classify_chain_state.
-    chain_state: ChainState = classify_chain_state(
+    chain_state: ChainSnapshotCompleteness = classify_chain_state(
         fetched_at=now,  # API responded (non-None) — use current timestamp
         chain_positions=chain_positions,
         portfolio=portfolio,
     )
-    if chain_state == ChainState.CHAIN_UNKNOWN:
+    if chain_state == ChainSnapshotCompleteness.CHAIN_UNKNOWN:
         logger.warning(
             "INCOMPLETE CHAIN RESPONSE: classify_chain_state=CHAIN_UNKNOWN. "
             "Skipping Rule 2 (void) to prevent false PHANTOM kills.",
@@ -751,7 +802,7 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
     # token, not the per-lot size. Comparing chain.size vs pos.effective_shares
     # for an aggregate-backed lot would trigger false quarantine (bot PR #141).
     aggregate_backed_set: set[str] = set()
-    if chain_state != ChainState.CHAIN_UNKNOWN:
+    if chain_state != ChainSnapshotCompleteness.CHAIN_UNKNOWN:
         _token_to_positions: dict[str, list] = {}
         for _p in portfolio.positions:
             _tid = _p.token_id if _p.direction == "buy_yes" else _p.no_token_id
@@ -881,24 +932,30 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
                 else:
                     _cnt_inc("cost_basis_chain_mutation_blocked_total", labels={"field": "shares"})
                     logger.warning("telemetry_counter event=cost_basis_chain_mutation_blocked_total field=shares")
-            rescued.entry_fill_verified = True
-            rescued.order_status = "filled"
-            # PR C3 (Finding 5, 2026-05-27): discriminate rescue authority by
-            # whether the position has a linked venue trade fact. With trade
-            # fact = full venue confirmation; without = degraded recovery
-            # against aggregate chain balance only. Downstream training gates
-            # (Finding 9, PR D) must reject venue_position_observed authority.
-            # Note: the gate at the top of this branch already skipped
-            # commanded pending entries that lack a fill fact, so a missing
-            # fill fact here means the position was pre-command-journal legacy.
+            # PR D0 (Finding D0, Part-2 audit, 2026-05-27): discriminate rescue
+            # authority by whether the position has a linked venue trade fact.
+            # Only set entry_fill_verified=True and order_status="filled" for
+            # trade-verified rescue (linked fill fact present). Balance-only
+            # recovery (fill_authority=FILL_AUTHORITY_VENUE_POSITION_OBSERVED)
+            # must NOT flip entry_fill_verified=True — downstream gates must use
+            # has_tradable_exposure() for EXPOSURE checks and
+            # has_verified_trade_fill() for fill-economics checks instead.
+            #
+            # PR C3 note: gate at top of this branch already skipped commanded
+            # pending entries that lack a fill fact, so a missing fill fact here
+            # means the position was pre-command-journal legacy.
             if _pending_entry_has_linked_fill_fact(pos):
                 rescued.fill_authority = FILL_AUTHORITY_VENUE_CONFIRMED_FULL
+                rescued.entry_fill_verified = True
+                rescued.order_status = "filled"
             else:
                 rescued.fill_authority = FILL_AUTHORITY_VENUE_POSITION_OBSERVED
+                # entry_fill_verified stays False for balance-only rescue.
+                # order_status stays at its current value (not forced to "filled").
                 logger.warning(
                     "RESCUE_DEGRADED_AUTHORITY: trade_id=%s token=%s — chain balance present "
                     "but no linked venue trade fact; setting fill_authority=%s. Position is "
-                    "tradable but NOT eligible for training/learning rows.",
+                    "tradable (has_tradable_exposure) but NOT fill-verified or training-eligible.",
                     getattr(rescued, "trade_id", "?"),
                     tid,
                     FILL_AUTHORITY_VENUE_POSITION_OBSERVED,
@@ -951,7 +1008,7 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
             continue
 
         if chain is None:
-            if chain_state == ChainState.CHAIN_UNKNOWN:
+            if chain_state == ChainSnapshotCompleteness.CHAIN_UNKNOWN:
                 continue  # Don't void — API response is suspect
             if (
                 getattr(pos, "entry_fill_verified", False)
@@ -985,7 +1042,7 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
             # Rule 2: Local but NOT on chain → VOID — but ONLY when the
             # chain snapshot reaching this line is CHAIN_EMPTY (fresh,
             # complete, authoritative). CHAIN_UNKNOWN is short-circuited
-            # earlier via `if chain_state == ChainState.CHAIN_UNKNOWN:
+            # earlier via `if chain_state == ChainSnapshotCompleteness.CHAIN_UNKNOWN:
             # continue` — see the gate above. Reaching this point with a
             # missing/stale snapshot is a contract violation.
             logger.warning("PHANTOM: %s not on chain → voiding", pos.trade_id)
@@ -1072,6 +1129,7 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
                     # carry the canonical LifecycleState.QUARANTINED.value.
                     corrected.state = LifecycleState.QUARANTINED.value
                     corrected.chain_state = "size_mismatch_unresolved"
+                    corrected.quarantined_at = corrected.quarantined_at or now
                     if not _size_mismatch_eligible:
                         corrected.shares = local_shares
                     else:
@@ -1080,6 +1138,17 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
                     stats["skipped_size_correction_missing_canonical_baseline"] = (
                         stats.get("skipped_size_correction_missing_canonical_baseline", 0) + 1
                     )
+                    # PR #352 (Part-3 audit Finding 4): persist the review
+                    # requirement durably. Without this, position_current stays
+                    # 'active' on disk and the quarantine/review is lost on the
+                    # next daemon restart — unresolved size mismatch is live
+                    # exposure risk and must survive process lifetime.
+                    if _append_canonical_review_required(
+                        corrected, reason="size_mismatch_unresolved_no_canonical_baseline"
+                    ):
+                        stats["review_required_persisted"] = (
+                            stats.get("review_required_persisted", 0) + 1
+                        )
                 else:
                     stats["updated"] += 1
             pos.chain_state = corrected.chain_state
@@ -1091,6 +1160,7 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
             pos.size_usd = corrected.size_usd
             pos.shares = corrected.shares
             pos.state = corrected.state
+            pos.quarantined_at = getattr(corrected, "quarantined_at", getattr(pos, "quarantined_at", ""))
             stats["synced"] += 1
 
     # Rule 3: Chain but NOT local → QUARANTINE (skip ignored tokens)
@@ -1182,5 +1252,35 @@ def check_quarantine_timeouts(portfolio: PortfolioState) -> int:
             )
             pos.chain_state = "quarantine_expired"
             expired += 1
+
+    # PR #352 (Part-3 audit, Copilot #350 finding): ChainOnlyFact 48h review
+    # escalation consumer. Chain-only inventory is NOT a local Position, so the
+    # position "exit evaluation" above does not apply — there is nothing to
+    # exit. Instead, its review_state escalates UNRESOLVED -> EXPIRED at the 48h
+    # window and is surfaced here for operator attention; `blocks_entry` remains
+    # True until the operator RESOLVES the suppression row. Prior to this, the
+    # 48h ChainOnlyFact lifecycle the README references had no consumer beyond
+    # the entry gate. Read-only escalation (the fact's review_state is derived);
+    # resolution is operator-driven via the suppression row.
+    for fact in getattr(portfolio, "chain_only_facts", None) or []:
+        if not getattr(fact, "blocks_entry", True):
+            continue  # RESOLVED — nothing to escalate
+        first_seen = str(getattr(fact, "first_seen_at", "") or "")
+        try:
+            seen_dt = datetime.fromisoformat(first_seen.replace("Z", "+00:00"))
+        except ValueError:
+            logger.warning(
+                "CHAIN_ONLY_REVIEW MISSING/BAD TIMESTAMP: token=%s first_seen=%r — operator review required (entry blocked)",
+                getattr(fact, "token_id", "?"), first_seen,
+            )
+            continue
+        hours_seen = (now - seen_dt).total_seconds() / 3600
+        if hours_seen > CHAIN_ONLY_REVIEW_WINDOW_HOURS:
+            logger.warning(
+                "CHAIN_ONLY_REVIEW EXPIRED: token=%s held %.0fh review_state=%s — operator review required (entry remains blocked)",
+                getattr(fact, "token_id", "?"),
+                hours_seen,
+                getattr(getattr(fact, "review_state", None), "value", "?"),
+            )
 
     return expired

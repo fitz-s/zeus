@@ -179,6 +179,36 @@ class VenuePositionFact:
 # --------------------------------------------------------------------------- #
 
 
+class ChainOnlyReviewState(str, Enum):
+    """Lifecycle status for a `ChainOnlyFact` (Finding D1, Part-2 audit, 2026-05-27).
+
+    Replaces the implicit "any chain_only suppression row blocks entries
+    forever" semantics with a typed lifecycle that mirrors the operator
+    workflow:
+
+      UNRESOLVED   — chain-only token detected; entry gate fires.
+      EXPIRED      — chain-only persisted past the 48h review window;
+                     entry gate continues to fire but the row is flagged
+                     for operator escalation. (Auto-expiry NEVER clears
+                     the fact — only operator action does.)
+      ACKNOWLEDGED — operator has reviewed and chosen to keep the fact
+                     active (e.g. waiting for redeem); equivalent to
+                     UNRESOLVED for gating purposes but reduces noise in
+                     ops dashboards.
+      RESOLVED     — operator cleared the fact (suppression_reason flipped
+                     to "operator_quarantine_clear") or the token settled
+                     (`settled_position`). Entry gate does NOT fire.
+    """
+
+    UNRESOLVED = "unresolved"
+    EXPIRED = "expired"
+    ACKNOWLEDGED = "acknowledged"
+    RESOLVED = "resolved"
+
+
+CHAIN_ONLY_REVIEW_WINDOW_HOURS: float = 48.0
+
+
 @dataclass(frozen=True)
 class ChainOnlyFact:
     """Venue token inventory with NO matching local intent (Finding 3).
@@ -190,6 +220,12 @@ class ChainOnlyFact:
     These tokens are review queue entries, not tradable positions. They
     block entry only via an explicit review gate, not by polluting the
     runtime portfolio.
+
+    PR D1 (Finding D1, Part-2 audit, 2026-05-27): adds `review_state` so
+    the entry gate and operator dashboards can discriminate unresolved
+    (entry-blocking) from resolved/expired (informational) facts.
+    `review_state` is derived from the underlying `suppression_reason` +
+    `first_seen_at` age by `src.state.portfolio._chain_only_fact_from_row`.
     """
 
     token_id: str
@@ -199,10 +235,24 @@ class ChainOnlyFact:
     cost_basis: float
     first_seen_at: str
     last_seen_at: str
+    # PR D1: lifecycle status; default UNRESOLVED so legacy producers
+    # that don't populate this field still block entries (fail-safe).
+    review_state: ChainOnlyReviewState = ChainOnlyReviewState.UNRESOLVED
 
     @property
     def is_review_required(self) -> bool:
         return True
+
+    @property
+    def blocks_entry(self) -> bool:
+        """True iff this fact should block new entries this cycle.
+
+        UNRESOLVED + EXPIRED + ACKNOWLEDGED all block. Only RESOLVED clears.
+        Expiry is an escalation marker, NOT auto-resolution — leaving an
+        expired chain-only fact in place is a stronger operator signal,
+        not a weaker one.
+        """
+        return self.review_state != ChainOnlyReviewState.RESOLVED
 
 
 @dataclass(frozen=True)
@@ -322,25 +372,45 @@ class CanonicalPositionEventKind(str, Enum):
     Each value names an event row that may appear in `position_events`.
     Producers must NOT invent new strings; readers must NOT accept strings
     outside this enum.
+
+    PR #352 (Part-3 audit Finding 1, 2026-05-27): this enum is the SINGLE wire
+    vocabulary for `position_events.event_type`. Values are the exact UPPERCASE
+    wire strings the DB CHECK accepts and the runtime builders emit — there is
+    no lowercase variant. `tests/state/test_inv_position_event_wire_grammar.py`
+    asserts in CI that `{k.value} == position_events.event_type CHECK set` and
+    that every event_type literal emitted by src/engine/lifecycle_events.py is a
+    member here, so a wire string added in one place without the others fails
+    the build. (The earlier lowercase/aspirational member set was unused.)
     """
 
-    POSITION_OPEN_INTENT = "position_open_intent"
-    ENTRY_ORDER_POSTED = "entry_order_posted"
-    ENTRY_ORDER_FILLED = "entry_order_filled"
-    VENUE_POSITION_OBSERVED = "venue_position_observed"  # NEW (PR B) — degraded recovery
-    CHAIN_SIZE_CORRECTED = "chain_size_corrected"
-    EXIT_INTENT_CREATED = "exit_intent_created"
-    EXIT_ORDER_FILLED = "exit_order_filled"
-    SETTLEMENT_RECORDED = "settlement_recorded"
-    REDEEM_REQUESTED = "redeem_requested"
-    ADMIN_VOIDED = "admin_voided"
-    REVIEW_REQUIRED = "review_required"  # NEW (PR B) — replaces ad-hoc quarantine strings
+    POSITION_OPEN_INTENT = "POSITION_OPEN_INTENT"
+    ENTRY_ORDER_POSTED = "ENTRY_ORDER_POSTED"
+    ENTRY_ORDER_FILLED = "ENTRY_ORDER_FILLED"
+    ENTRY_ORDER_VOIDED = "ENTRY_ORDER_VOIDED"
+    ENTRY_ORDER_REJECTED = "ENTRY_ORDER_REJECTED"
+    DAY0_WINDOW_ENTERED = "DAY0_WINDOW_ENTERED"
+    CHAIN_SYNCED = "CHAIN_SYNCED"
+    CHAIN_SIZE_CORRECTED = "CHAIN_SIZE_CORRECTED"
+    CHAIN_QUARANTINED = "CHAIN_QUARANTINED"
+    MONITOR_REFRESHED = "MONITOR_REFRESHED"
+    EXIT_INTENT = "EXIT_INTENT"
+    EXIT_ORDER_POSTED = "EXIT_ORDER_POSTED"
+    EXIT_ORDER_FILLED = "EXIT_ORDER_FILLED"
+    EXIT_ORDER_VOIDED = "EXIT_ORDER_VOIDED"
+    EXIT_ORDER_REJECTED = "EXIT_ORDER_REJECTED"
+    SETTLED = "SETTLED"
+    ADMIN_VOIDED = "ADMIN_VOIDED"
+    MANUAL_OVERRIDE_APPLIED = "MANUAL_OVERRIDE_APPLIED"
+    VENUE_POSITION_OBSERVED = "VENUE_POSITION_OBSERVED"  # PR B — degraded recovery
+    REVIEW_REQUIRED = "REVIEW_REQUIRED"  # PR #352 F4 — durable size-mismatch / chain-only review
 
 
 __all__ = [
     "FillAuthority",
     "CausalityStatus",
     "RecoveryAuthority",
+    "ChainOnlyReviewState",
+    "CHAIN_ONLY_REVIEW_WINDOW_HOURS",
     "LocalIntent",
     "VenueOrderFact",
     "VenueTradeFact",

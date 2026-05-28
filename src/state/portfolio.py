@@ -30,8 +30,12 @@ from src.contracts import (
     compute_forward_edge,
     ExpiringAssumption,
 )
-from src.contracts.position_truth import ChainOnlyFact
-from src.contracts.semantic_types import ChainState, Direction, DirectionAlias, ExitState, LifecycleState
+from src.contracts.position_truth import (
+    CHAIN_ONLY_REVIEW_WINDOW_HOURS,
+    ChainOnlyFact,
+    ChainOnlyReviewState,
+)
+from src.contracts.semantic_types import VenueVisibilityStatus, Direction, DirectionAlias, ExitState, LifecycleState
 from src.contracts.settlement_outcome import SettlementOutcome
 from src.contracts.hold_value import HoldValue
 from src.strategy.correlation import get_correlation
@@ -287,6 +291,62 @@ def is_training_eligible_position(pos: object) -> bool:
     return authority in TRAINING_ELIGIBLE_FILL_AUTHORITIES
 
 
+# PR D0 (Finding D0, Part-2 audit, 2026-05-27): split entry_fill_verified as rescue
+# authority into two orthogonal derivations from fill_authority.
+#
+#   has_verified_trade_fill(pos) — True iff a real venue trade fact confirmed the
+#     fill. Use this for fill-economics accuracy gates (learning rows, cost-basis
+#     trust, unverified-entry counts). False for balance-only recovery.
+#
+#   has_tradable_exposure(pos) — True iff the position carries real capital at risk
+#     that riskguard/exit EXPOSURE gates must manage. True for both trade-verified
+#     AND balance-only (venue_position_observed) fills. False for unsubmitted
+#     or pending entries with no venue confirmation at all.
+#
+# Both are pure derivations from fill_authority — NO new schema columns.
+# entry_fill_verified remains on the Position for normal fill path (fill_tracker.py)
+# but must NOT be relied on to distinguish the two categories above.
+
+
+def has_verified_trade_fill(pos: object) -> bool:
+    """Return True iff a venue trade fact confirmed this position's fill.
+
+    Used by fill-economics gates: unverified-entry counts, learning-row writers,
+    cost-basis trust logic. Returns False for balance-only recovery
+    (FILL_AUTHORITY_VENUE_POSITION_OBSERVED) and for any unconfirmed authority.
+
+    Accepts both Position objects (attribute access) and plain dicts
+    (key access) so callers in db.py can use it directly on fill_economics dicts.
+    """
+    if isinstance(pos, dict):
+        authority = str(pos.get("fill_authority", "") or "").strip()
+    else:
+        authority = str(getattr(pos, "fill_authority", "") or "").strip()
+    return authority in FILL_GRADE_FILL_AUTHORITIES
+
+
+def has_tradable_exposure(pos: object) -> bool:
+    """Return True iff this position carries real capital at risk.
+
+    EXPOSURE gates (riskguard, exit coordinator) must use this, not
+    entry_fill_verified, to decide whether to manage a position. True for:
+      - All FILL_GRADE_FILL_AUTHORITIES (trade-verified fills)
+      - FILL_AUTHORITY_VENUE_POSITION_OBSERVED (balance-only recovery — real
+        capital is held on-chain even though no trade fact was linked)
+
+    False for unconfirmed/pending entries (FILL_AUTHORITY_NONE,
+    FILL_AUTHORITY_OPTIMISTIC_SUBMITTED, legacy_unknown).
+
+    Accepts both Position objects (attribute access) and plain dicts
+    (key access) so callers in db.py can use it directly on fill_economics dicts.
+    """
+    if isinstance(pos, dict):
+        authority = str(pos.get("fill_authority", "") or "").strip()
+    else:
+        authority = str(getattr(pos, "fill_authority", "") or "").strip()
+    return authority in FILL_GRADE_FILL_AUTHORITIES or authority == FILL_AUTHORITY_VENUE_POSITION_OBSERVED
+
+
 def _finite_float_or_zero(value: object) -> float:
     try:
         result = float(value or 0.0)
@@ -410,7 +470,7 @@ class Position:
     nested_fills: list = field(default_factory=list)
 
     # Chain reconciliation (Blueprint v2 §5)
-    chain_state: str = ChainState.UNKNOWN.value
+    chain_state: str = VenueVisibilityStatus.UNKNOWN.value
     chain_shares: float = 0.0
     # `chain_verified_at` is a POSITIVE observation timestamp ONLY: it records
     # when the venue/chain confirmed this position is held (rescue, size
@@ -501,8 +561,8 @@ class Position:
             self.direction = Direction(self.direction)
         if not isinstance(self.state, LifecycleState):
             self.state = LifecycleState(self.state)
-        if not isinstance(self.chain_state, ChainState):
-            self.chain_state = ChainState(self.chain_state)
+        if not isinstance(self.chain_state, VenueVisibilityStatus):
+            self.chain_state = VenueVisibilityStatus(self.chain_state)
         if not isinstance(self.exit_state, ExitState):
             self.exit_state = ExitState(self.exit_state)
         if self.pre_exit_state:
@@ -1418,6 +1478,20 @@ def _position_from_projection_row(row: dict, *, current_mode: str) -> Position:
         last_monitor_market_price=row.get("last_monitor_market_price"),
         admin_exit_reason=str(row.get("admin_exit_reason") or ""),
         entry_fill_verified=bool(row.get("entry_fill_verified", False)),
+        # PR #352 (Part-5 audit Finding 1): the durable projection stores chain
+        # observation timestamps under chain_seen_at / chain_absence_at; the
+        # runtime Position carries them as chain_verified_at /
+        # last_chain_absence_observed_at. Without this translation a chain-synced
+        # position reloads with empty chain_verified_at and classify_chain_state()
+        # mis-reads it as CHAIN_UNKNOWN — blocking a legitimate void after
+        # restart. Prefer the legacy runtime name if present, else the durable
+        # projection column.
+        chain_verified_at=str(row.get("chain_verified_at") or row.get("chain_seen_at") or ""),
+        last_chain_absence_observed_at=str(
+            row.get("last_chain_absence_observed_at") or row.get("chain_absence_at") or ""
+        ),
+        chain_shares=float(row.get("chain_shares") or 0.0),
+        fill_authority=str(row.get("fill_authority") or FILL_AUTHORITY_NONE),
     )
     for field_name in {f.name for f in fields(Position)}:
         if field_name in payload:
@@ -1478,6 +1552,10 @@ def _chain_only_fact_from_row(row: dict) -> ChainOnlyFact:
     )
     last_seen = str(row.get("updated_at") or first_seen)
     condition_id = str(row.get("condition_id") or evidence.get("condition_id") or "")
+    review_state = _derive_chain_only_review_state(
+        suppression_reason=str(row.get("suppression_reason") or "chain_only_quarantined"),
+        first_seen_at=first_seen,
+    )
     return ChainOnlyFact(
         token_id=token_id,
         condition_id=condition_id,
@@ -1486,7 +1564,48 @@ def _chain_only_fact_from_row(row: dict) -> ChainOnlyFact:
         cost_basis=cost,
         first_seen_at=first_seen,
         last_seen_at=last_seen,
+        review_state=review_state,
     )
+
+
+def _derive_chain_only_review_state(
+    *,
+    suppression_reason: str,
+    first_seen_at: str,
+    now: Optional[datetime] = None,
+) -> ChainOnlyReviewState:
+    """PR D1 (Finding D1, Part-2 audit, 2026-05-27): derive review lifecycle
+    state for a chain-only token from its underlying suppression row +
+    elapsed time since first detection.
+
+    Existing token_suppression schema already encodes the operator-side
+    transitions via `suppression_reason`:
+      `chain_only_quarantined`     → unresolved (or expired after 48h)
+      `operator_quarantine_clear`  → resolved (operator cleared)
+      `settled_position`           → resolved (token settled, no longer chain-only)
+
+    The 48h review window is a SOFT escalation marker — it does NOT clear
+    the fact, it flips UNRESOLVED → EXPIRED so ops dashboards can surface
+    chain-only inventory that has lingered past triage SLA. Only operator
+    action (suppression_reason flip) actually resolves the fact.
+    """
+    if suppression_reason in ("operator_quarantine_clear", "settled_position"):
+        return ChainOnlyReviewState.RESOLVED
+    if suppression_reason != "chain_only_quarantined":
+        # Defensive: any future / unknown reason is treated as unresolved so the
+        # gate fail-safe holds.
+        return ChainOnlyReviewState.UNRESOLVED
+    if not first_seen_at:
+        return ChainOnlyReviewState.UNRESOLVED
+    try:
+        first_seen_dt = datetime.fromisoformat(first_seen_at.replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return ChainOnlyReviewState.UNRESOLVED
+    _now = now if now is not None else datetime.now(timezone.utc)
+    hours_elapsed = (_now - first_seen_dt).total_seconds() / 3600.0
+    if hours_elapsed > CHAIN_ONLY_REVIEW_WINDOW_HOURS:
+        return ChainOnlyReviewState.EXPIRED
+    return ChainOnlyReviewState.UNRESOLVED
 
 
 # PR E2 (Finding 3, 2026-05-27): the legacy `_chain_only_quarantine_position_from_row`
