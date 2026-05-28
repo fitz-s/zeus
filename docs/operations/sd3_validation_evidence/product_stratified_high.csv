@@ -1,0 +1,21 @@
+city,season,n_tigge,n_opd,bias_tigge,bias_opd,opd_raw_mae,opd_corr_TIGGEbias_mae,opd_corr_OPDloo_mae,transfer_improve(raw-corrTIGGE),A1_tigge_oos_rmse_raw,A1_tigge_oos_rmse_corr,transfer_verdict
+Austin,MAM,40,15,0.45,-0.27,1.38,1.49,1.5,-0.11,1.93,1.98,TIGGE_HURTS_OPD
+Busan,MAM,33,16,-3.9,-0.12,1.3,3.78,1.37,-2.49,4.33,1.88,TIGGE_HURTS_OPD
+Hong Kong,MAM,41,0,0.69,n/a,n/a,n/a,n/a,n/a,1.48,1.33,NO_OPD_ROWS
+Istanbul,MAM,34,13,-2.54,-0.48,0.97,2.06,0.91,-1.09,3.09,1.81,TIGGE_HURTS_OPD
+Jakarta,SON,33,12,-3.84,-1.08,1.24,2.77,0.85,-1.53,3.93,0.85,TIGGE_HURTS_OPD
+Jeddah,MAM,25,17,-7.35,1.72,2.05,9.06,1.57,-7.02,7.64,2.17,TIGGE_HURTS_OPD
+London,DJF,115,0,-0.6,n/a,n/a,n/a,n/a,n/a,0.97,0.76,NO_OPD_ROWS
+London,JJA,92,0,-0.12,n/a,n/a,n/a,n/a,n/a,1.15,1.16,NO_OPD_ROWS
+London,MAM,154,16,-0.22,0.03,0.97,0.94,1.04,0.03,1.38,1.38,NEUTRAL
+London,SON,91,0,-0.69,n/a,n/a,n/a,n/a,n/a,1.09,0.84,NO_OPD_ROWS
+NYC,DJF,76,0,-2.04,n/a,n/a,n/a,n/a,n/a,2.66,1.73,NO_OPD_ROWS
+NYC,JJA,92,0,0.48,n/a,n/a,n/a,n/a,n/a,1.68,1.61,NO_OPD_ROWS
+NYC,MAM,151,18,-0.17,-0.76,1.21,1.13,1.1,0.07,2.0,2.0,TIGGE_HELPS_OPD
+NYC,SON,90,0,-0.51,n/a,n/a,n/a,n/a,n/a,1.52,1.48,NO_OPD_ROWS
+Paris,DJF,9,0,-1.43,n/a,n/a,n/a,n/a,n/a,1.58,0.69,NO_OPD_ROWS
+Paris,MAM,44,17,-0.95,-1.33,1.36,0.93,0.96,0.43,1.37,1.0,TIGGE_HELPS_OPD
+San Francisco,MAM,40,14,-3.48,-4.55,4.55,1.62,1.36,2.92,3.75,1.43,TIGGE_HELPS_OPD
+Seoul,DJF,74,0,-0.88,n/a,n/a,n/a,n/a,n/a,1.69,1.44,NO_OPD_ROWS
+Seoul,MAM,57,15,-1.62,1.31,1.96,3.2,1.59,-1.23,2.01,1.19,TIGGE_HURTS_OPD
+Shanghai,MAM,52,16,-3.15,-0.84,1.37,2.32,1.15,-0.94,3.84,2.23,TIGGE_HURTS_OPD

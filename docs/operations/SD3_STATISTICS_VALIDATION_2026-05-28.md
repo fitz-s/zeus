@@ -1,5 +1,12 @@
 # SD3 Statistics Validation — Full Methodology, Results, Failure-Mode Diagnosis
 
+> **CORRECTION (2026-05-28, post-operator-review): Test A here is PRODUCT-MIXED and is NOT decisive for live.**
+> The evidence ledger is 89 % TIGGE + 11 % OpenData; Test A's per-bucket bias ≈ the TIGGE bias.
+> Applying it to the live OpenData product HURTS on balance (mean −1.00 °C; 7/11 buckets worse).
+> See `SD3_PRODUCT_LINEAGE_VALIDATION_2026-05-28.md` for the transfer test. Read §5.2/§0 below as
+> "decisive for the TIGGE/mixed historical bias", NOT "authorizes live". Only SF MAM survives as a
+> product-consistent live candidate.
+
 - Created: 2026-05-28
 - Author: autonomous session 866db2ea (Opus)
 - Authority basis: operator directive 2026-05-28 — "继续完成 sd3 测试 + 完整文档报告；正确拿到统计数据是开启 live 最重要的一步；写出怎么做/做了什么/结果是什么；让我能判断是数据没处理对、数学漏了一步、还是统计方法错了；写下你的猜测。"
