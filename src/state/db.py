@@ -7560,79 +7560,13 @@ def log_outcome_fact(
     return {"status": "written", "table": "outcome_fact"}
 
 def log_trade_entry(conn: sqlite3.Connection, pos) -> None:
-    """Evidence spine: Log explicitly at entry for replay reconstruction."""
+    """Evidence spine: Log explicitly at entry for replay reconstruction.
+
+    F5 demotion (2026-05-28): trade_decisions is audit-only legacy export.
+    The live entry path no longer writes to trade_decisions; canonical
+    truth lives in position_events / position_current.
+    """
     if False: _ = pos.entry_method; _ = pos.selected_method  # Semantic Provenance Guard
-    env = getattr(pos, "env", "unknown_env") or "unknown_env"
-    status = "pending_tracked" if getattr(pos, "state", "") == "pending_tracked" else "entered"
-    timestamp = getattr(pos, "order_posted_at", "") if status == "pending_tracked" else getattr(pos, "entered_at", "")
-    filled_at = getattr(pos, "entered_at", None) if status == "entered" else None
-    fill_price = getattr(pos, "entry_price", None) if status == "entered" else None
-    if _table_exists(conn, "trade_decisions"):
-        try:
-            snapshot_fk = _local_legacy_snapshot_fk(
-                conn,
-                getattr(pos, "decision_snapshot_id", None),
-            )
-            values = (
-                pos.market_id,
-                pos.bin_label,
-                pos.direction,
-                pos.size_usd,
-                pos.entry_price,
-                timestamp,
-                snapshot_fk,
-                getattr(pos, "calibration_version", "") or None,
-                pos.p_posterior,
-                pos.p_posterior,
-                pos.edge,
-                pos.p_posterior - (pos.entry_ci_width / 2) if pos.entry_ci_width else 0.0,
-                pos.p_posterior + (pos.entry_ci_width / 2) if pos.entry_ci_width else 0.0,
-                0.0,
-                status,
-                filled_at,
-                fill_price,
-                getattr(pos, "trade_id", ""),
-                getattr(pos, "order_id", ""),
-                getattr(pos, "order_status", ""),
-                getattr(pos, "order_posted_at", ""),
-                getattr(pos, "entered_at", ""),
-                getattr(pos, "chain_state", ""),
-                getattr(pos, "strategy", ""),
-                pos.edge_source,
-                _bin_type_for_label(pos.bin_label),
-                env,
-                getattr(pos, "discovery_mode", ""),
-                getattr(pos, "market_hours_open", 0.0),
-                getattr(pos, "fill_quality", 0.0),
-                getattr(pos, "entry_method", ""),
-                getattr(pos, "selected_method", ""),
-                json.dumps(getattr(pos, "applied_validations", []) or []),
-                getattr(pos, "settlement_semantics_json", None),
-                getattr(pos, "epistemic_context_json", None),
-                getattr(pos, "edge_context_json", None),
-            )
-            placeholders = ", ".join(["?"] * len(values))
-            conn.execute(f"""
-                INSERT INTO trade_decisions (
-                    market_id, bin_label, direction, size_usd, price, timestamp,
-                    forecast_snapshot_id, calibration_model_version,
-                    p_raw, p_posterior, edge, ci_lower, ci_upper, kelly_fraction,
-                    status, filled_at, fill_price, runtime_trade_id, order_id, order_status_text, order_posted_at, entered_at_ts, chain_state,
-                    strategy, edge_source, bin_type, env, discovery_mode, market_hours_open,
-                    fill_quality, entry_method, selected_method, applied_validations_json,
-                    settlement_semantics_json, epistemic_context_json, edge_context_json
-                )
-                VALUES ({placeholders})
-            """, values)
-        except Exception as e:
-            import logging as _logging
-            _logging.getLogger(__name__).error(
-                "[LOG_TRADE_ENTRY_FAILED] position_id=%s err=%r — bridge write is mandatory; "
-                "propagating to outer SAVEPOINT for rollback",
-                getattr(pos, "trade_id", "?"),
-                e,
-            )
-            raise
 
 
 
