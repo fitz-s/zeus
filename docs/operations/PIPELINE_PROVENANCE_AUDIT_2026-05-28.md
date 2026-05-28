@@ -113,6 +113,25 @@ A rebuild fits `residual = forecast − settlement`. If the OpenData `forecast` 
 
 ---
 
+## 8b — Operator-grade verification (I checked the two load-bearing claims myself)
+
+Per provenance discipline (trust but verify agent claims before action):
+
+**D1 — CONFIRMED on the live product.** `ensemble_snapshots_v2` for `ecmwf_opendata_mx2t3_…` stores forecast windows with a **6 h minimum width** (min 6 h, max 24 h over 10,795 rows) and a uniform anomalous `step_horizon_hours=144`. A genuine 3-hourly product should produce 3 h single-step windows. The 6 h floor is the direct footprint of `STEP_HOURS=6` (D1). NOTE: the daily-max VALUE is probably ~preserved (max-of-3h-maxes ≈ daily max), so the corruption is concentrated in **window-attribution metadata** (`forecast_window_*`, `contributes_to_target_extrema`, `boundary_ambiguous`) — which is exactly what calibration cycle/window gating consumes. Severity: high for calibration provenance, lower for the served point forecast.
+
+**D2 — OVERSTATED by the agent; corrected here.** The live 3-hourly product IS ingested and is adequate for current markets:
+
+| data_version | rows | target span | max lead |
+|---|---|---|---|
+| ecmwf_opendata_mx2t3 (HIGH, 3h, LIVE) | 11,418 | 2026-05-06 → 06-03 | 144 h (6 d) |
+| ecmwf_opendata_mn2t3 (LOW, 3h, LIVE) | 9,314 | 2026-05-15 → 06-03 | 144 h |
+| ecmwf_opendata_mx2t6 (HIGH, 6h) | 1,342 | 2026-05-08 → 05-17 | 240 h |
+| ecmwf_opendata_mn2t6 (LOW, 6h) | 508 | — | 240 h |
+
+The **23,918 un-ingested JSON are the `open_ens_mx2t6` (6 h) variant** (leads to 10 d), a *separate, redundant* extraction — NOT the live 3 h product. So "live OpenData largely un-ingested" is **false**: the live mx2t3 product is present (≈11.4k HIGH rows, leads to 6 d, covering the ≤2-day markets we trade). Corrected D2: the un-ingested 6 h files are genuinely unused but **not** a live blocker; the real D2-class issue is that the **mx2t3 live rows are mis-windowed by D1**, and OpenData history is simply short (live since 2026-05-06), which is why the product-lineage transfer test had small OpenData n — not because of a missing ingest.
+
+**Revised priority:** D1 (fix the 3 h window extraction + re-extract live mx2t3 since 2026-05-06) is the single highest-value fix. D2 downgrades to "wire the 6 h long-lead variant only if we later trade leads >6 d." D3 (Platt product split) and D4 (lead pooling) unchanged.
+
 ## 8 — Reproduction / evidence
 - Sub-audits: `/Users/leofitz/.claude/jobs/866db2ea/audit_{datasets,extraction,calibration_keying,inference_selection,blindspots}.md`.
 - D1 confirm: `grep -n STEP_HOURS "51 source data/scripts/extract_open_ens_localday.py" "51 source data/scripts/tigge_local_calendar_day_common.py"`.
