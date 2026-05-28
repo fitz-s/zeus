@@ -17,6 +17,14 @@ All columns are nullable. No backfill needed — pre-PR-6 rows will have NULL
 These columns are also added idempotently via v2_schema.py::_create_ensemble_snapshots()
 which runs on every db init. This script is for manual one-shot production migration.
 
+Migration semantic policy: additive-only / idempotent.
+  - Only ADD COLUMN operations; no DROP, no RENAME, no data backfill.
+  - Each ALTER is guarded by PRAGMA table_info — re-runs are no-ops.
+  - Columns added with no DEFAULT; legacy rows remain NULL.
+  - Safe to run against shared production DBs (schema-only, no row writes).
+  - Rollback: columns are nullable and ignored by readers that don't use them;
+    no migration rollback script required for additive-only schema changes.
+
 Usage:
     python scripts/migrate_ensemble_snapshots_alpha_proxy.py [--dry-run] [--db <path>]
 
