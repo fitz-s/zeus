@@ -209,6 +209,67 @@ segments:
     future_object_rules:
       new_db_column: requires_migration_semantic_test
       new_authority_default: forbidden_without_explicit_policy
+  edli_event_sourcing:
+    invariant_ids: [MP-SCH-001, MP-SCH-002, MP-ECO-001]
+    files:
+      - src/events/**
+      - src/state/schema/opportunity_events_schema.py
+      - src/state/schema/opportunity_event_processing_schema.py
+      - src/state/schema/event_dead_letters_schema.py
+      - src/state/schema/execution_feasibility_evidence_schema.py
+      - src/state/schema/no_trade_regret_events_schema.py
+      - src/state/schema/edli_live_cap_usage_schema.py
+      - src/state/schema/edli_live_order_events_schema.py
+      - src/state/schema/edli_live_profit_audit_schema.py
+      - src/events/live_cap.py
+      - src/events/live_order_aggregate.py
+      - src/events/live_profit_audit.py
+      - scripts/check_edli_live_canary_gate.py
+      - src/decision_kernel/claims.py
+      - src/decision_kernel/verifier.py
+      - src/decision_kernel/ledger.py
+    relationship_tests:
+      - tests/events/test_opportunity_event.py
+      - tests/events/test_event_store_idempotency.py
+      - tests/state/test_edli_table_ownership.py
+      - tests/events/test_day0_extreme_updated_trigger.py
+      - tests/strategy/live_inference/test_day0_absorbing_boundary.py
+      - tests/strategy/live_inference/test_live_bin_inference.py
+      - tests/strategy/live_inference/test_executable_cost.py
+      - tests/strategy/live_inference/test_trade_score.py
+      - tests/events/test_market_channel_ingestor.py
+      - tests/events/test_reactor.py
+      - tests/events/test_live_cap.py
+      - tests/events/test_live_order_aggregate.py
+      - tests/events/test_live_profit_audit.py
+      - tests/scripts/test_check_edli_live_canary_gate.py
+      - tests/engine/test_event_reactor_no_bypass.py
+      - tests/strategy/live_inference/test_no_trade_regret.py
+      - tests/analysis/test_event_opportunity_report.py
+      - tests/money_path/test_edli_online_invariants.py
+      - tests/money_path/test_edli_live_canary.py
+      - tests/money_path/test_edli_order_lifecycle.py
+    future_object_rules:
+      new_event_type: requires_idempotency_and_replay_order_test
+      mutable_event_fact: forbidden_without_explicit_policy
+  edli_live_bridge_authority:
+    invariant_ids: [MP-ORD-003, MP-SIDE-001, MP-SIDE-002, MP-EXT-002]
+    files:
+      - src/main.py
+      - src/engine/event_reactor_adapter.py
+      - src/events/live_order_aggregate.py
+      - src/events/live_cap.py
+      - src/events/triggers/user_channel_ingestor.py
+      - tests/money_path/test_edli_live_canary.py
+      - tests/events/test_live_order_aggregate.py
+      - tests/events/test_reactor.py
+    relationship_tests:
+      - tests/money_path/test_edli_live_canary.py
+      - tests/events/test_live_order_aggregate.py
+      - tests/events/test_reactor.py
+    future_object_rules:
+      new_pre_submit_state: requires_authority_and_fail_closed_test
+      live_order_aggregate_mutation: requires_replay_projection_test
   economic_semantics:
     invariant_ids: [MP-ECO-001, MP-ECO-002]
     files:

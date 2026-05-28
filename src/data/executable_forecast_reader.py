@@ -924,9 +924,18 @@ def _evaluate_candidate(
     # carries the contributes/attribution columns the snapshot dataclass drops).
     snapshot_row = _snapshot_row_for_classification(conn, snapshot, source_id, source_transport)
     eligibility = classify_forecast_extrema_authority(snapshot_row).eligibility
-    candidate_validations: tuple[str, ...] = ()
+    candidate_validations: tuple[str, ...] = (
+        "source_run_completeness_status",
+        "coverage_completeness_status",
+        "coverage_readiness_status",
+        "required_steps_observed",
+        "expected_members_observed",
+        "causality_status_ok",
+        "authority_verified",
+        "available_at_not_future",
+    )
     if eligibility == ForecastExtremaEligibility.LEGACY_NULL_PASSTHROUGH:
-        candidate_validations = (LEGACY_NULL_PASSTHROUGH_VALIDATION,)
+        candidate_validations = (*candidate_validations, LEGACY_NULL_PASSTHROUGH_VALIDATION)
 
     producer_readiness_id = f"producer_readiness:{coverage['coverage_id']}"
     evidence = ExecutableForecastEvidence(

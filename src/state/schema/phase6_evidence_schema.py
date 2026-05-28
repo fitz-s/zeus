@@ -41,7 +41,7 @@ CREATE TABLE IF NOT EXISTS evidence_tier_assignments (
     rationale      TEXT,
     operator_ref   TEXT,
     verdict_reason TEXT,
-    schema_version INTEGER NOT NULL DEFAULT 42 CHECK (schema_version IN (25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42)),
+    schema_version INTEGER NOT NULL DEFAULT 55 CHECK (schema_version IN (25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55)),
     assignment_source TEXT NOT NULL DEFAULT 'tribunal'
         CHECK (assignment_source IN ('tribunal', 'operator_override', 'migration')),
     verdict_kind   TEXT NOT NULL DEFAULT 'MIGRATION'
@@ -102,7 +102,7 @@ def ensure_tables(conn: sqlite3.Connection) -> None:
 
 
 def _migrate_evidence_tier_assignments_schema(conn: sqlite3.Connection) -> None:
-    _CURRENT_SCHEMA_VERSION = 42  # B2: frozen row-provenance value; db.SCHEMA_VERSION counter cancelled
+    _CURRENT_SCHEMA_VERSION = 55  # B2: frozen row-provenance value at #358 main bump; db.SCHEMA_VERSION counter cancelled
     row = conn.execute(
         "SELECT sql FROM sqlite_master WHERE type='table' AND name='evidence_tier_assignments'"
     ).fetchone()
@@ -151,7 +151,7 @@ def _migrate_evidence_tier_assignments_schema(conn: sqlite3.Connection) -> None:
                 strategy_id,
                 CASE WHEN tier IN (0, 1, 2, 3, 4, 5, 6, 7) THEN tier ELSE 0 END,
                 assigned_at, rationale, operator_ref, verdict_reason,
-                CASE WHEN schema_version IN (25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42) THEN schema_version ELSE 29 END,
+                CASE WHEN schema_version IN (25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55) THEN schema_version ELSE 29 END,
                 assignment_source, verdict_kind,
                 effective_from, effective_until, revoked_at, revoked_by,
                 supersedes_assignment_id
@@ -169,7 +169,7 @@ def _migrate_evidence_tier_assignments_schema(conn: sqlite3.Connection) -> None:
                 strategy_id,
                 CASE WHEN tier IN (0, 1, 2, 3, 4, 5, 6, 7) THEN tier ELSE 0 END,
                 assigned_at, rationale, operator_ref, verdict_reason,
-                CASE WHEN schema_version IN (25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42) THEN schema_version ELSE 29 END,
+                CASE WHEN schema_version IN (25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55) THEN schema_version ELSE 29 END,
                 assignment_source, verdict_kind
             FROM evidence_tier_assignments
             """

@@ -2489,6 +2489,31 @@ def init_schema(
     from src.state.schema.no_trade_events_schema import migrate_no_trade_events_schema as _migrate_no_trade_events_schema
     _migrate_no_trade_events_schema(conn)
 
+
+# EDLI v1 (2026-05-24): event-triggered no-trade regret ledger.
+    from src.state.schema.no_trade_regret_events_schema import ensure_table as _ensure_no_trade_regret_events_table
+    _ensure_no_trade_regret_events_table(conn)
+
+    # EDLI v1 (2026-05-24): durable accepted no-submit receipt ledger.
+    from src.state.schema.edli_no_submit_receipts_schema import ensure_table as _ensure_edli_no_submit_receipts_table
+    _ensure_edli_no_submit_receipts_table(conn)
+
+    # EDLI v1 (2026-05-24): durable tiny live-cap usage ledger.
+    from src.state.schema.edli_live_cap_usage_schema import ensure_table as _ensure_edli_live_cap_usage_table
+    _ensure_edli_live_cap_usage_table(conn)
+
+    # EDLI full-live split (2026-05-25): live-order aggregate event log + projection.
+    from src.state.schema.edli_live_order_events_schema import ensure_tables as _ensure_edli_live_order_events_tables
+    _ensure_edli_live_order_events_tables(conn)
+
+    # EDLI live promotion (2026-05-26): event-bound realized-edge audit projection.
+    from src.state.schema.edli_live_profit_audit_schema import ensure_table as _ensure_edli_live_profit_audit_table
+    _ensure_edli_live_profit_audit_table(conn)
+
+    # EDLI redemption (2026-05-25): proof-carrying decision certificate ledger.
+    from src.state.schema.decision_certificates_schema import ensure_tables as _ensure_decision_certificate_tables
+    _ensure_decision_certificate_tables(conn)
+
     # 2026-05-21 live authority follow-up: decision_events CHECK constraints
     # must admit shadow_decision / unknown_legacy before PRAGMA user_version is
     # stamped current. CREATE TABLE IF NOT EXISTS cannot upgrade stale CHECKs.
