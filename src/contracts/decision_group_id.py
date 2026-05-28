@@ -75,7 +75,7 @@ def decision_group_id_v1_hash(
     ------------
     The field order, separator, and digest-char count are frozen at v1.
     Any change to the algorithm requires a new version prefix ("dgid_v2_")
-    and a full-table rehash of calibration_pairs_v2.
+    and a full-table rehash of calibration_pairs.
 
     Args:
         market_id:             Polymarket condition ID; pass as-is (no stripping).

@@ -1376,7 +1376,7 @@ _CALIBRATION_STAGE_DB_ENV = "ZEUS_CALIBRATION_STAGE_DB_PATH"
 
 @_scheduler_job("ingest_calibration_auto_promote")
 def _calibration_auto_promote_tick():
-    """F9: Auto-promote calibration_pairs_v2 when the readiness gate passes.
+    """F9: Auto-promote calibration_pairs when the readiness gate passes.
 
     Gate: invokes ``promote_calibration.py inspect`` as a subprocess.
     If the inspect exit code is 0 (all sentinels complete), invokes
@@ -1389,7 +1389,7 @@ def _calibration_auto_promote_tick():
       Default OFF to prevent accidental production writes before the gate is
       verified.
     * ``ZEUS_CALIBRATION_STAGE_DB_PATH`` — absolute path to the STAGE_DB that
-      was produced by ``rebuild_calibration_pairs_v2.py``.  Must be set when
+      was produced by ``rebuild_calibration_pairs.py``.  Must be set when
       ENABLED=true; tick aborts with a warning if unset.
 
     Runs on default executor (subprocess writes to zeus-forecasts.db via

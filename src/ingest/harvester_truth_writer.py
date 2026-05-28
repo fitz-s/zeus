@@ -421,7 +421,7 @@ def _write_settlement_truth(
     """Write canonical-authority settlement truth to settlements table.
 
     This is an ingest-side copy of harvester.py:_write_settlement_truth.
-    Writes ONLY to forecasts_conn (settlements, settlements_v2, market_events).
+    Writes ONLY to forecasts_conn (settlements, settlement_outcomes, market_events).
     Does NOT commit -- caller owns transaction boundary.
 
     pm_bin_unit: the unit of pm_bin_lo/pm_bin_hi as parsed from the market question
@@ -661,7 +661,7 @@ def _write_settlement_truth(
             }
         logger.info(
             "harvester_truth_writer write: %s %s → authority=%s settlement_value=%s "
-            "winning_bin=%s reason=%s settlements_v2=%s market_events=%s",
+            "winning_bin=%s reason=%s settlement_outcomes=%s market_events=%s",
             city.name, target_date, authority, settlement_value, winning_bin, reason,
             settlement_v2_result.get("status"), market_events_result.get("status"),
         )

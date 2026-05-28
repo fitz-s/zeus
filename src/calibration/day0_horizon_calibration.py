@@ -27,7 +27,7 @@ day0_nowcast_runs.fit_run_id FK references that table — avoids repeating coeff
 per nowcast row (coefficients change rarely; storing per-run = waste).
 fit_artifact_id (semantic, e.g., "hpf_v1") is stable across re-runs of the same algorithm.
 
-Training data source: calibration_pairs_v2 (forecasts DB), filtered to Day0 rows
+Training data source: calibration_pairs (forecasts DB), filtered to Day0 rows
 with valid hours_remaining <= 6 and known daypart.
 
 fit_day0_horizon_platt() uses scipy.optimize.minimize (L-BFGS-B) to fit the
@@ -158,7 +158,7 @@ def fit_day0_horizon_platt(
 ) -> HorizonPlattFit:
     """Fit the horizon-aware Platt model to historical Day0 nowcast data.
 
-    Training data source: calibration_pairs_v2 (forecasts DB), filtered to
+    Training data source: calibration_pairs (forecasts DB), filtered to
     Day0 rows with hours_remaining <= 6 and known daypart.
 
     Args:

@@ -790,7 +790,7 @@ def maybe_write_learning_pair(
     # PR #352 (Part-3 audit, bot #5 on PR #351, 2026-05-27): position_current is
     # canonically owned by zeus_trades.db (the world.db copy is a ghost shell).
     # The harvester runtime passes the *forecasts* connection (which owns
-    # calibration_pairs_v2) as `conn`; querying position_current on it raises
+    # calibration_pairs) as `conn`; querying position_current on it raises
     # "no such table", is swallowed by the gate's fail-closed except, and would
     # silently block EVERY calibration write in production. Acquire a read-only
     # trades connection for the per-position authority join. INV-37: this is a
@@ -1606,7 +1606,7 @@ def _write_settlement_truth(
                 "table": "market_events",
             }
         logger.info(
-            "harvester_live write: %s %s → authority=%s settlement_value=%s winning_bin=%s reason=%s settlements_v2=%s market_events=%s",
+            "harvester_live write: %s %s → authority=%s settlement_value=%s winning_bin=%s reason=%s settlement_outcomes=%s market_events=%s",
             city.name, target_date, authority, settlement_value, winning_bin, reason,
             settlement_v2_result.get("status"), market_events_result.get("status"),
         )
@@ -2150,7 +2150,7 @@ def harvest_settlement(
     resolved_snapshot_id = _coerce_snapshot_id(snapshot_id)
 
     # Phase 2.6 (2026-05-04): derive cycle/source_id/horizon_profile from the
-    # forecast issue_time + data_version so calibration_pairs_v2 rows land in
+    # forecast issue_time + data_version so calibration_pairs rows land in
     # the correct stratified bucket.
     #
     # Object-meaning invariant (Wave7): schema/helper defaults are not source

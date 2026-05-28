@@ -103,7 +103,7 @@ def conn():
         )
     """)
     c.execute("""
-        CREATE TABLE platt_models_v2 (
+        CREATE TABLE platt_models (
             model_key TEXT PRIMARY KEY, temperature_metric TEXT,
             cluster TEXT, season TEXT, data_version TEXT,
             input_space TEXT DEFAULT 'width_normalized_density',
@@ -163,7 +163,7 @@ def test_fetch_directional_coverage_filters_by_source(conn):
 
 def test_fetch_n_platt_samples_returns_n(conn):
     conn.execute(
-        """INSERT INTO platt_models_v2
+        """INSERT INTO platt_models
            (model_key, temperature_metric, cluster, season, data_version,
             n_samples, fitted_at)
            VALUES (?,?,?,?,?,?,?)""",
@@ -349,7 +349,7 @@ def test_paris_no_longer_fail_closed_after_workstream_a(tmp_path, monkeypatch):
         )
     """)
     c.execute("""
-        CREATE TABLE platt_models_v2 (
+        CREATE TABLE platt_models (
             model_key TEXT PRIMARY KEY, temperature_metric TEXT,
             cluster TEXT, season TEXT, data_version TEXT,
             input_space TEXT DEFAULT 'width_normalized_density',
@@ -417,7 +417,7 @@ def test_rail2_discount_when_partial_cov(conn, floors_and_nstar):
         )
     # Seed a Platt model so n_platt > N*=100 (no small-sample amp)
     conn.execute(
-        """INSERT INTO platt_models_v2
+        """INSERT INTO platt_models
            (model_key, temperature_metric, cluster, season, data_version,
             n_samples, fitted_at)
            VALUES (?,?,?,?,?,?,?)""",
@@ -449,7 +449,7 @@ def test_rail2_zero_discount_when_full_cov(conn, floors_and_nstar):
             ("NYC", "2026-05-02", str(h), "wu_icao_history", "v1.wu-native", 25.0, 18.0),
         )
     conn.execute(
-        """INSERT INTO platt_models_v2
+        """INSERT INTO platt_models
            (model_key, temperature_metric, cluster, season, data_version,
             n_samples, fitted_at)
            VALUES (?,?,?,?,?,?,?)""",
@@ -474,7 +474,7 @@ def test_rail2_zero_discount_when_full_cov(conn, floors_and_nstar):
 def test_future_target_zero_observation_rows_defer_density_discount(conn, floors_and_nstar):
     """Future opening candidates must not treat target-day WU absence as an outage."""
     conn.execute(
-        """INSERT INTO platt_models_v2
+        """INSERT INTO platt_models
            (model_key, temperature_metric, cluster, season, data_version,
             n_samples, fitted_at)
            VALUES (?,?,?,?,?,?,?)""",
@@ -535,7 +535,7 @@ def test_cycle_source_id_stored_in_diagnostic(conn, floors_and_nstar):
             ("NYC", "2026-05-02", str(h), "wu_icao_history", "v1.wu-native", 25.0, 18.0),
         )
     conn.execute(
-        """INSERT INTO platt_models_v2
+        """INSERT INTO platt_models
            (model_key, temperature_metric, cluster, season, data_version,
             n_samples, fitted_at)
            VALUES (?,?,?,?,?,?,?)""",
@@ -579,7 +579,7 @@ def test_cycle_mismatch_not_silently_swallowed(conn, floors_and_nstar):
             ("NYC", "2026-05-02", str(h), "wu_icao_history", "v1.wu-native", 25.0, 18.0),
         )
     conn.execute(
-        """INSERT INTO platt_models_v2
+        """INSERT INTO platt_models
            (model_key, temperature_metric, cluster, season, data_version,
             n_samples, fitted_at)
            VALUES (?,?,?,?,?,?,?)""",

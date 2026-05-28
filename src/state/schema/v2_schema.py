@@ -27,7 +27,7 @@ import sqlite3
 def _create_settlement_outcomes(conn: sqlite3.Connection) -> None:
     """Create settlement_outcomes table + indexes. Idempotent. K1 forecast-class table.
 
-    B3cont (2026-05-28): collapsed from settlements_v2 (dead bare settlements shell dropped).
+    B3cont (2026-05-28): collapsed from settlement_outcomes (dead bare settlements shell dropped).
     """
     conn.execute("""
         CREATE TABLE IF NOT EXISTS settlement_outcomes (
@@ -63,7 +63,7 @@ def _create_settlement_outcomes(conn: sqlite3.Connection) -> None:
 def _create_market_events(conn: sqlite3.Connection) -> None:
     """Create market_events table + indexes. Idempotent. K1 forecast-class table.
 
-    Collapsed from market_events_v2 in B3cont (PR3): dead v1 shell on world.db
+    Collapsed from market_events in B3cont (PR3): dead v1 shell on world.db
     had 0 rows; v2 was the only live table (17,256 rows on zeus-forecasts.db).
     """
     conn.execute("""
@@ -246,7 +246,7 @@ def _create_calibration_pairs(conn: sqlite3.Connection) -> None:
 
     K1 forecast-class table (moves to zeus-forecasts.db). Architect refinement:
     UNIQUE on the full dedup key. Phase 2 ALTERs for cycle/source_id/horizon_profile.
-    Collapsed from calibration_pairs_v2 (B3 rename — bare shell dropped).
+    Collapsed from calibration_pairs_v2 (B3 rename — bare v2 shell dropped).
     """
     conn.execute("""
         CREATE TABLE IF NOT EXISTS calibration_pairs (
@@ -267,12 +267,12 @@ def _create_calibration_pairs(conn: sqlite3.Connection) -> None:
             settlement_value REAL,
             -- PHASE0-PR4: decision_group_id NOT NULL enforcement is LIVE (PR 4 production).
             -- Canonical enforcement: TRIGGER-mode (default, disk-safe).
-            --   scripts/migrate_calibration_pairs_v2_not_null.py --apply --mode trigger
+            --   scripts/migrate_calibration_pairs_not_null.py --apply --mode trigger
             --   Two BEFORE INSERT + BEFORE UPDATE triggers per table enforce NOT NULL.
             --   Idempotent (CREATE TRIGGER IF NOT EXISTS). Zero disk overhead.
             --   PRAGMA table_info still shows notnull=0 (column DDL unchanged).
             -- Optional canonical DDL rebuild (requires ~50 GiB free disk):
-            --   scripts/migrate_calibration_pairs_v2_not_null.py --apply --mode rebuild
+            --   scripts/migrate_calibration_pairs_not_null.py --apply --mode rebuild
             --   Produces notnull=1 in PRAGMA table_info but requires disk headroom.
             --   BLOCKED at current 22 GiB free — operator-coordinated separately.
             -- Preflight confirmed: 0 NULL rows as of 2026-05-17. See:
@@ -401,7 +401,7 @@ def apply_canonical_schema(conn: sqlite3.Connection, *, forecast_tables: bool = 
     Args:
         forecast_tables: When True (default), create the 4 forecast-class v2
             tables (settlement_outcomes, market_events, ensemble_snapshots,
-            calibration_pairs_v2). Set to False for init_schema_world_only so
+            calibration_pairs). Set to False for init_schema_world_only so
             world conn does not recreate tables that live on zeus-forecasts.db
             post-K1 migration. K1 split 2026-05-11.
 
@@ -445,7 +445,7 @@ def apply_canonical_schema(conn: sqlite3.Connection, *, forecast_tables: bool = 
         if forecast_tables:
             # ----------------------------------------------------------------
             # settlement_outcomes  (K1 forecast-class: moves to zeus-forecasts.db)
-            # B3cont (2026-05-28): collapsed from settlements_v2.
+            # B3cont (2026-05-28): collapsed from settlement_outcomes.
             # ----------------------------------------------------------------
             _create_settlement_outcomes(conn)
             # Phase 7 T1 — ALTER for existing settlement_outcomes rows on migrated DBs.
@@ -565,15 +565,15 @@ def apply_canonical_schema(conn: sqlite3.Connection, *, forecast_tables: bool = 
             )
         """)
         # Phase 2 (2026-05-04): cycle/source_id/horizon_profile stratification —
-        # idempotent ALTER for legacy DBs. Mirror of the calibration_pairs_v2
+        # idempotent ALTER for legacy DBs. Mirror of the calibration_pairs
         # block above; defaults match scripts/migrate_phase2_cycle_stratification.py.
-        # error_model_family (2026-05-24): mirror of the calibration_pairs_v2
+        # error_model_family (2026-05-24): mirror of the calibration_pairs
         # column. A Platt model fit on pairs built under family F MUST advertise
         # F so the live serving guard (assert_bias_state_consistent) can refuse a
         # train/serve mismatch (live bias-correction enabled while the active
         # Platt was fit on a different family's input space). Concatenated into
         # model_key in save_platt_model. Not in UNIQUE (same rationale as
-        # calibration_pairs_v2): SQLite cannot ALTER an existing UNIQUE.
+        # calibration_pairs): SQLite cannot ALTER an existing UNIQUE.
         for alter_sql in [
             "ALTER TABLE platt_models ADD COLUMN cycle TEXT NOT NULL DEFAULT '00'",
             "ALTER TABLE platt_models ADD COLUMN source_id TEXT NOT NULL DEFAULT 'tigge_mars'",
@@ -826,7 +826,7 @@ def apply_canonical_schema(conn: sqlite3.Connection, *, forecast_tables: bool = 
         """)
 
         # ----------------------------------------------------------------
-        # historical_forecasts_v2 — DROPPED in B3 (PR3).
+        # historical_forecasts — DROPPED in B3 (PR3).
         # No writers existed (no INSERT in src/ as of PR-S4b audit 2026-05-18).
         # Readers in replay.py / status_summary.py / verify_truth_surfaces.py
         # are guarded by _table_exists(); they will skip gracefully on live DBs

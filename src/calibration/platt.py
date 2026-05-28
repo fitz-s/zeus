@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
 #     OPERATIONAL JUSTIFICATION: 144M+ logit calls; 0.01 clamp yields stable
 #     logit range [-4.6, +4.6] vs [-13.8, +13.8] at 1e-6. Tighter clamp
 #     increases gradient magnitudes in rare tail samples, destabilising lbfgs.
-#     Refit of all 91M calibration_pairs_v2 rows would be required to change.
+#     Refit of all 91M calibration_pairs rows would be required to change.
 #
 #     INVARIANT: INV-eps-spec-conformance — test_inv_eps_spec_conformance.py
 #     must fail (and alert) if P_CLAMP_LOW drifts from this documented value
@@ -276,7 +276,7 @@ class IdentityCalibrator:
     """Identity calibrator: p_cal = p_raw (no Platt transform).
 
     Zeus #64 (2026-05-25): explicit certified route for full_transport buckets
-    where ECE is already low — persisted as a platt_models_v2 row with
+    where ECE is already low — persisted as a platt_models row with
     calibration_method='identity_full_transport_v1'.  The identity transform is
     the mathematically correct calibration when the ensemble is already well-
     calibrated; a missing-Platt fallback is NOT the same thing (missing = blocked,

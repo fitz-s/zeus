@@ -197,7 +197,7 @@ def fetch_n_platt_samples(
     *,
     data_version: Optional[str] = None,
 ) -> int:
-    """Read n_samples from the active platt_models_v2 row for this bucket.
+    """Read n_samples from the active platt_models row for this bucket.
 
     Returns 0 when no eligible row exists — caller treats as small-sample.
     Mirrors the loader's filter semantics (is_active=1, authority='VERIFIED'),
@@ -207,7 +207,7 @@ def fetch_n_platt_samples(
     if data_version is not None:
         row = conn.execute(
             """
-            SELECT n_samples FROM platt_models_v2
+            SELECT n_samples FROM platt_models
             WHERE temperature_metric = ?
               AND cluster = ?
               AND season = ?
@@ -221,7 +221,7 @@ def fetch_n_platt_samples(
     else:
         row = conn.execute(
             """
-            SELECT n_samples FROM platt_models_v2
+            SELECT n_samples FROM platt_models
             WHERE temperature_metric = ?
               AND cluster = ?
               AND season = ?

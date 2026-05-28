@@ -774,14 +774,14 @@ def get_calibrator(
     blind and read exclusively from legacy `platt_models` table — a LOW
     candidate would silently receive a HIGH Platt model. Post-P9C:
 
-      1. Try platt_models_v2 filtered by (temperature_metric, cluster, season,
+      1. Try platt_models filtered by (temperature_metric, cluster, season,
          data_version, cycle, source_id, horizon_profile)
       2. If v2 miss, fall back to legacy platt_models (HIGH historical continuity)
       3. Remaining hierarchical fallback (pool clusters / seasons / global) is
          preserved; v2 lookup is tried first at each tier.
 
     Law: docs/authority/zeus_dual_track_architecture.md §4 (World DB v2 table
-    family keyed on temperature_metric). Writes to platt_models_v2 landed
+    family keyed on temperature_metric). Writes to platt_models landed
     Phase 5 (save_platt_model_v2 + refit_platt.py); reads were unwired
     until Phase 9C.
 
@@ -1106,7 +1106,7 @@ def _fit_from_pairs(
     # PHASE0-PR4-SCAFFOLD typing seam: decision_group_ids are raw str from DB.
     # Post-PR4 production: cast to DecisionGroupId via decision_group_id_v1_hash
     # OR load typed via a typed accessor that returns DecisionGroupId (not raw str).
-    # The NOT NULL constraint on calibration_pairs_v2.decision_group_id will land
+    # The NOT NULL constraint on calibration_pairs.decision_group_id will land
     # in the PR 4 implementation phase; until then, the None-guard below is live.
     # INV-group-id-type: callers of ExtendedPlattCalibrator.fit() must supply
     # DecisionGroupId-typed arrays once the NewType is wired end-to-end.

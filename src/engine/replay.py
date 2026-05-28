@@ -356,7 +356,7 @@ class ReplayContext:
             "forecasts.settlements" if _table_exists(self.conn, "forecasts", "settlements")
             else ("settlements" if _table_exists(self.conn, "", "settlements") else "")
         )
-        self._settlements_v2_table = _first_existing_forecast_authority_table(
+        self._settlement_outcomes_table = _first_existing_forecast_authority_table(
             self.conn, "settlement_outcomes"
         )
         self._calibration_pairs_table = _first_existing_forecast_authority_table(
@@ -2101,8 +2101,8 @@ def run_wu_settlement_sweep(
 ) -> ReplaySummary:
     """Run a WU settlement-value sweep into the derived backtest DB.
 
-    Reads from settlements_v2 (VERIFIED rows, HIGH+LOW) and calibration_pairs_v2.
-    settlements_v2 has 3,290 VERIFIED rows (HIGH+LOW combined); the v1 settlements
+    Reads from settlement_outcomes (VERIFIED rows, HIGH+LOW) and calibration_pairs.
+    settlement_outcomes has 3,290 VERIFIED rows (HIGH+LOW combined); the v1 settlements
     table has the deprecated corpus and is not read here.
     """
     run_id = str(uuid.uuid4())[:12]
@@ -2111,16 +2111,16 @@ def run_wu_settlement_sweep(
         conn,
         allow_snapshot_only_reference=allow_snapshot_only_reference,
     )
-    if not ctx._settlements_v2_table or not ctx._calibration_pairs_table:
+    if not ctx._settlement_outcomes_table or not ctx._calibration_pairs_table:
         conn.close()
         raise ReplayPreflightError(
-            "wu_settlement_sweep requires forecasts settlements_v2 and "
+            "wu_settlement_sweep requires forecasts settlement_outcomes and "
             "calibration_pairs authority tables."
         )
     rows = conn.execute(
         f"""
         SELECT city, target_date, settlement_value, winning_bin, temperature_metric
-        FROM {ctx._settlements_v2_table}
+        FROM {ctx._settlement_outcomes_table}
         WHERE target_date >= ? AND target_date <= ?
           AND authority = 'VERIFIED'
           AND settlement_value IS NOT NULL

@@ -328,7 +328,7 @@ def get_trade_connection_with_world_optional(
         except sqlite3.OperationalError as exc:
             logger.warning("ATTACH world failed (non-fatal): %r", exc)
     # K1 (2026-05-11): also ATTACH forecasts DB so cross-DB joins on
-    # ensemble_snapshots / settlements / settlements_v2 / market_events
+    # ensemble_snapshots / settlements / settlement_outcomes / market_events
     # remain possible from trade-conn query paths (evaluator, replay).
     if "forecasts" not in attached:
         try:
@@ -1027,7 +1027,7 @@ def init_schema(
         );
 
         -- market_events DDL removed in B3cont (PR3): dead v1 shell (0 rows).
-        -- Canonical table is market_events on zeus-forecasts.db (collapsed from market_events_v2).
+        -- Canonical table is market_events on zeus-forecasts.db (collapsed from market_events).
         -- Live DB migration: pr3_b3_live_table_rename.py (operator-run, not committed).
 
         -- Inherited: historical prices for baseline backtesting
@@ -3120,7 +3120,7 @@ def _ensure_v2_forecast_indexes(conn: sqlite3.Connection) -> None:
     settlement_outcomes, market_events.
     """
     # settlement_outcomes (mirror src/state/schema/v2_schema.py — _create_settlement_outcomes)
-    # B3cont (2026-05-28): renamed from settlements_v2.
+    # B3cont (2026-05-28): renamed from settlement_outcomes.
     conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_settlement_outcomes_city_date_metric
             ON settlement_outcomes(city, target_date, temperature_metric)
@@ -3596,7 +3596,7 @@ def init_schema_forecasts(conn: sqlite3.Connection) -> None:
 
     # Phase 7 T1 — SCHEMA_FORECASTS_VERSION 6 (2026-05-21).
     # Add outcome_type column to settlement_outcomes; guard for already-migrated DBs.
-    # B3cont (2026-05-28): table renamed from settlements_v2.
+    # B3cont (2026-05-28): table renamed from settlement_outcomes.
     try:
         conn.execute("ALTER TABLE settlement_outcomes ADD COLUMN outcome_type INTEGER")
     except sqlite3.OperationalError as _exc:
@@ -5514,7 +5514,7 @@ def log_settlement_v2(
 ) -> dict:
     """Mirror harvester settlement truth into settlement_outcomes.
 
-    B3cont (2026-05-28): table renamed from settlements_v2.
+    B3cont (2026-05-28): table renamed from settlement_outcomes.
     The helper is intentionally substrate-only: it never opens a default DB,
     never creates/migrates tables, never commits, and never infers missing
     market identity.

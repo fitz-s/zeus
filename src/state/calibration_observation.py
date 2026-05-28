@@ -10,7 +10,7 @@ measurement-substrate-first pattern repeated.
 
 K1 contract (mirrors src/state/edge_observation.py + attribution_drift.py + ws_poll_reaction.py):
   - Read-only projection. NO write path. NO JSON persistence. NO caches.
-  - Reads canonical surfaces directly via src.calibration.store.list_active_platt_models_v2
+  - Reads canonical surfaces directly via src.calibration.store.list_active_platt_models
     + list_active_platt_models_legacy (BATCH 1 read-side additions to store.py;
     pure SELECT, mirror load_platt_model[_v2] read filters: is_active=1 AND
     authority='VERIFIED').
@@ -23,14 +23,14 @@ operator decision):
   PATH A "per-bucket-key snapshot" was chosen (PATH B decision-log JOIN
   attribution deferred as future enhancement; PATH C extending the writer
   to add strategy_key column is OUT-OF-SCOPE per dispatch
-  "ANY mutation of platt_models_v2 ... tables (writer-side change)").
+  "ANY mutation of platt_models ... tables (writer-side change)").
 
   - The dispatch's "(city, target_date, strategy_key)" framing was the
     EVALUATION-TIME identity; PERSISTENCE-TIME identity at HEAD is BUCKET-
     KEYED only:
       * platt_models (legacy): UNIQUE on bucket_key TEXT (= f"{cluster}_{season}"
         per src/calibration/manager.py:73)
-      * platt_models_v2: UNIQUE on (temperature_metric, cluster, season,
+      * platt_models: UNIQUE on (temperature_metric, cluster, season,
         data_version, input_space, is_active) per
         src/state/schema/v2_schema.py:227-249
     Neither table carries strategy_key. Neither carries city as a separate
@@ -51,7 +51,7 @@ operator decision):
 
 UPSTREAM-CLIPPING INVARIANT (LOW-NUANCE-WP-2-1 carry-forward, WS_POLL
 critic 24th cycle precedent):
-  list_active_platt_models_v2 + _legacy filter to authority='VERIFIED' at
+  list_active_platt_models + _legacy filter to authority='VERIFIED' at
   the source (the read function's WHERE clause). By the time per-bucket
   dicts reach compute_platt_parameter_snapshot_per_bucket here,
   authority is GUARANTEED to be 'VERIFIED'. If a future caller bypasses
@@ -271,7 +271,7 @@ def compute_platt_parameter_snapshot_per_bucket(
 ) -> dict[str, dict[str, Any]]:
     """Compute per-bucket-key Platt parameter snapshot for the current window.
 
-    K1-compliant read-only. Reads list_active_platt_models_v2 +
+    K1-compliant read-only. Reads list_active_platt_models +
     list_active_platt_models_legacy (canonical store.py readers; pure
     SELECT; is_active=1 + authority='VERIFIED' filter applied at the
     source). Returns a dict keyed by bucket_key (v2 model_key for v2

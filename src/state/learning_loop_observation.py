@@ -13,7 +13,7 @@ K1 contract (mirrors src/state/edge_observation.py + attribution_drift.py +
 ws_poll_reaction.py + calibration_observation.py):
   - Read-only projection. NO write path. NO JSON persistence. NO caches.
   - Reads canonical surfaces directly:
-    * src.calibration.store.list_active_platt_models_v2 / _legacy
+    * src.calibration.store.list_active_platt_models / _legacy
       (CALIBRATION_HARDENING BATCH 1 read-side additions)
     * src.calibration.retrain_trigger.list_recent_retrain_versions
       (LEARNING_LOOP BATCH 1 read-side addition; pure SELECT on
@@ -31,7 +31,7 @@ boot §1 KEY OPEN QUESTION #1):
   limitations stated (verbatim):
     "HEAD substrate has no append-only Platt history table. Each
      historical-window snapshot returns the CURRENTLY-active fit (because
-     the platt_models_v2 UNIQUE constraint is on (..., is_active=1) — prior
+     the platt_models UNIQUE constraint is on (..., is_active=1) — prior
      fits are deactivated, not preserved)."
 
   THAT WAS WRONG. The append-only history exists at
@@ -45,7 +45,7 @@ boot §1 KEY OPEN QUESTION #1):
     - UPDATE only sets retired_at on prior live row (never DELETEs)
 
   This was exactly the failure mode that LOW-CITATION-CALIBRATION-3-1
-  cycle-29 sustained discipline note warned about: I cited "platt_models_v2
+  cycle-29 sustained discipline note warned about: I cited "platt_models
   UNIQUE on is_active=1 means no append-only history" without grep-tracing
   the FULL retrain pipeline. The history I needed was in retrain_trigger.py,
   one module away from where I was looking.
@@ -86,7 +86,7 @@ Per-bucket snapshot fields (per BATCH 1 boot §2):
       last_retrain_promoted_at + end_date
 
   Active model stage (read via src.calibration.store; reuse CALIBRATION
-  BATCH 1 list_active_platt_models_v2):
+  BATCH 1 list_active_platt_models):
     - active_model_fitted_at: str | None — ISO of currently-active model
     - active_model_n_samples: int — n_samples of currently-active model
 
@@ -320,7 +320,7 @@ def compute_learning_loop_state_per_bucket(
     """Compute per-bucket-key learning-loop pipeline state for the current window.
 
     K1-compliant read-only. Reads:
-      - list_active_platt_models_v2 + _legacy from src.calibration.store
+      - list_active_platt_models + _legacy from src.calibration.store
         (CALIBRATION BATCH 1; pure-SELECT bucket enumeration)
       - get_pairs_count + get_decision_group_count from src.calibration.store
         (pre-existing K1 readers)

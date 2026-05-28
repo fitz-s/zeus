@@ -1306,7 +1306,7 @@ def _check_persistence_anomaly(
 
     LOW metric gate: legacy settlements has no metric column; LOW lookups would
     cross-compare against HIGH historical values. Defer to metric-aware query
-    when settlements_v2 populated (P10D).
+    when settlement_outcomes populated (P10D).
     """
     if temperature_metric is not None:
         is_low = (
@@ -1351,7 +1351,7 @@ def _check_persistence_anomaly(
         if not deltas:
             logger.warning(
                 "PERSISTENCE_FALLBACK_TRIGGERED: all 3 recent settlement days NULL "
-                "in forecasts.settlements_v2 for %s/%s — returning 1.0 (no discount)",
+                "in forecasts.settlement_outcomes for %s/%s — returning 1.0 (no discount)",
                 city_name, target_date,
             )
             return 1.0

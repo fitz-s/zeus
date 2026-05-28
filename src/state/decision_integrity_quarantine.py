@@ -10,7 +10,7 @@ with reason QUARANTINED_NON_CONTRIBUTING_FORECAST_EXTREMA.
 
 Tables quarantined (all via forecast-snapshot linkage):
   - opportunity_fact           — direct: snapshot_id TEXT → ensemble_snapshots
-  - calibration_pairs_v2       — direct: snapshot_id INTEGER → ensemble_snapshots
+  - calibration_pairs       — direct: snapshot_id INTEGER → ensemble_snapshots
   - probability_trace_fact     — direct: decision_snapshot_id TEXT (CAST) → ensemble_snapshots
   - selection_family_fact      — direct: decision_snapshot_id TEXT (CAST) → ensemble_snapshots
   - selection_hypothesis_fact  — indirect: family_id → selection_family_fact → ensemble_snapshots
@@ -628,7 +628,7 @@ def quarantine_all_tables_for_noncontributing_forecast(
     ATTACHed (or be an in-memory test DB with all tables co-located).
 
     IMPORTANT — K1 DB-split production usage:
-        calibration_pairs_v2 lives in zeus-forecasts.db (forecasts DB).
+        calibration_pairs lives in zeus-forecasts.db (forecasts DB).
         decision_integrity_quarantine lives in zeus_trades.db (trade DB).
         World tables (opportunity_fact, decision_events, probability_trace_fact,
         selection_family_fact, selection_hypothesis_fact) live in zeus-world.db.
@@ -638,7 +638,7 @@ def quarantine_all_tables_for_noncontributing_forecast(
         intended for in-memory integration tests and operator one-shots where
         all tables are co-located.
 
-    Raises ValueError if 'forecasts' is not attached/present (calibration_pairs_v2
+    Raises ValueError if 'forecasts' is not attached/present (calibration_pairs
     cannot be quarantined without it and would silently no-op).
 
     INV-37: caller supplies conn; never auto-opens.

@@ -33,7 +33,7 @@ _TRAINING_ALLOWED_SOURCES = frozenset({"tigge", "ecmwf_ens"})
 _CALIBRATION_READ_TABLES = frozenset({
     "calibration_pairs",
     "platt_models",
-    # platt_models_v2 removed B3cont: table renamed to platt_models (canonical).
+    # platt_models removed B3cont: table renamed to platt_models (canonical).
 })
 
 
@@ -42,8 +42,8 @@ def _qualified_calibration_read_table(conn: sqlite3.Connection, table_name: str)
 
     Live cycle connections are trade DB handles with the world DB attached as
     ``world``. Legacy/bootstrap left empty calibration tables in the trade DB,
-    so unqualified reads can silently hit ``main.platt_models_v2`` and miss
-    the populated authoritative rows in ``world.platt_models_v2``. Prefer the
+    so unqualified reads can silently hit ``main.platt_models`` and miss
+    the populated authoritative rows in ``world.platt_models``. Prefer the
     attached world table whenever it exists; plain world-DB and test
     connections continue to read their main schema.
     """
@@ -86,11 +86,11 @@ def _table_info(conn: sqlite3.Connection, table_ref: str) -> list[sqlite3.Row]:
 
 
 def _v2_table_has_stratification(conn: sqlite3.Connection, table_ref: str) -> bool:
-    """True iff platt_models_v2 has cycle/source_id/horizon_profile columns.
+    """True iff platt_models has cycle/source_id/horizon_profile columns.
 
     Thin wrapper around ``has_columns`` (PROPOSALS_2026-05-04 P2 — moved
     out of inline form during PR #59).  ``table_ref`` may be qualified
-    (``"world.platt_models_v2"``); split into bare-table-name + attached
+    (``"world.platt_models"``); split into bare-table-name + attached
     DB before delegation.
 
     The migration script ``migrate_phase2_cycle_stratification.py``
@@ -513,7 +513,7 @@ def save_platt_model(
     horizon_profile: str = "full",
     error_model_family: str = "none",
 ) -> None:
-    """Save a fitted Platt model to platt_models (canonical; B3cont rename from platt_models_v2).
+    """Save a fitted Platt model to platt_models (canonical; B3cont rename from platt_models).
 
     Requires metric_identity (4A.4 — no legacy default). Derives model_key
     from (temperature_metric, cluster, season, data_version, cycle, source_id,
@@ -571,7 +571,7 @@ def deactivate_model(
     horizon_profile: str = "full",
     error_model_family: str = "none",
 ) -> int:
-    """Delete the existing platt_models row for a bucket before refit (B3cont: renamed from platt_models_v2).
+    """Delete the existing platt_models row for a bucket before refit (B3cont: renamed from platt_models).
 
     Returns the number of rows deleted (0 or 1). Called by refit_platt.py
     before save_platt_model. Deletion (not soft-deactivation) is required
@@ -634,7 +634,7 @@ def load_platt_model(
     source_id: Optional[str] = None,
     horizon_profile: Optional[str] = None,
 ) -> Optional[dict]:
-    """Load a fitted Platt model from platt_models_v2 (Phase 9C L3 CRITICAL fix).
+    """Load a fitted Platt model from platt_models (Phase 9C L3 CRITICAL fix).
 
     Read-side counterpart to save_platt_model_v2 (P5). Pre-P9C: get_calibrator
     read exclusively from legacy platt_models table, bypassing metric
@@ -642,7 +642,7 @@ def load_platt_model(
     model. This function closes that gap at the read seam.
 
     2026-04-30 (post-architect-audit BLOCKER #1 fix): added explicit
-    ``data_version`` filter. The UNIQUE constraint on platt_models_v2 includes
+    ``data_version`` filter. The UNIQUE constraint on platt_models includes
     data_version (v2_schema.py:302) and save_platt_model_v2 keys on it
     (store.py:445-452), so multiple data_versions per (metric, cluster, season)
     can coexist. Pre-fix, the SELECT picked ``ORDER BY fitted_at DESC LIMIT 1``
@@ -671,7 +671,7 @@ def load_platt_model(
     caller (get_calibrator) falls back to legacy or on-the-fly fit.
 
     Args:
-        conn: SQLite connection (must have platt_models_v2 table applied).
+        conn: SQLite connection (must have platt_models table applied).
         temperature_metric: "high" | "low" — matches CHECK constraint at
             v2_schema.py:229-230.
         cluster: per K3, equals the city name (one-cluster-per-city).
@@ -891,7 +891,7 @@ def load_platt_model(
 
 
 def list_active_platt_models(conn: sqlite3.Connection) -> list[dict]:
-    """List all currently-active platt_models_v2 rows.
+    """List all currently-active platt_models rows.
 
     K1-compliant pure-SELECT lister — counterpart to single-bucket
     load_platt_model_v2 (L515). Returns one dict per (temperature_metric,
@@ -902,7 +902,7 @@ def list_active_platt_models(conn: sqlite3.Connection) -> list[dict]:
 
     Returns: list of dicts, each carrying the full v2 row shape for
     parameter monitoring. Empty list when no active VERIFIED rows exist
-    (including when the platt_models_v2 table has not yet been created on
+    (including when the platt_models table has not yet been created on
     a pre-migration DB — the SELECT returns 0 rows in either case).
 
     Used by src.state.calibration_observation.compute_platt_parameter_snapshot_per_bucket

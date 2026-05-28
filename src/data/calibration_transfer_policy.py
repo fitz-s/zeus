@@ -46,7 +46,7 @@ _, _, MIN_SOURCE_PLATT_SAMPLES = calibration_maturity_thresholds()
 MIN_TRANSFER_LEAD_DAYS = 1.0
 MAX_TRANSFER_LEAD_DAYS = 7.0
 TRANSFER_OOS_HOLDOUT_FRACTION = 0.2
-CALIBRATION_PAIRS_REBUILD_COMPLETE_META_PREFIX = "calibration_pairs_v2_rebuild_complete"
+CALIBRATION_PAIRS_REBUILD_COMPLETE_META_PREFIX = "calibration_pairs_rebuild_complete"
 CANONICAL_CALIBRATION_PAIR_BIN_SOURCE = "canonical_v2"
 
 # Maps OpenData forecast data_version → TIGGE calibration data_version.
@@ -152,7 +152,7 @@ def _rebuild_complete_sentinel_key_for_transfer_evidence(
 ) -> str:
     """Return the zeus_meta rebuild sentinel key for transfer target evidence.
 
-    This mirrors scripts/rebuild_calibration_pairs_v2.py without importing a
+    This mirrors scripts/rebuild_calibration_pairs.py without importing a
     script module from the runtime policy path.
     """
 
@@ -235,7 +235,7 @@ def calibration_pairs_rebuild_complete_for_transfer_evidence(
 ) -> bool:
     """Return True only when target OOS cohort rows have complete rebuild evidence.
 
-    Transfer evidence consumes all eligible ``calibration_pairs_v2`` rows for
+    Transfer evidence consumes all eligible ``calibration_pairs`` rows for
     the target route. A partial city/date/data_version rebuild cannot authorize
     that aggregate cohort. Any overlapping incomplete sentinel fails closed so
     an old all-scope complete row cannot mask a current partial rebuild.
@@ -436,7 +436,7 @@ def source_platt_transfer_evidence_valid(
                    source_id, cycle, horizon_profile, season, cluster,
                    temperature_metric, fitted_at, recorded_at, is_active,
                    param_A, param_B, param_C
-              FROM platt_models_v2
+              FROM platt_models
              WHERE model_key = ?
              LIMIT 1
             """,
@@ -535,7 +535,7 @@ def target_transfer_cohort_evidence_valid(
         model = conn.execute(
             """
             SELECT param_A, param_B, param_C
-              FROM platt_models_v2
+              FROM platt_models
              WHERE model_key = ?
                AND is_active = 1
              LIMIT 1

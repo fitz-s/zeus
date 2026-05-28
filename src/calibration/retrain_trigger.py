@@ -520,7 +520,7 @@ def trigger_retrain(
 #
 # K1 contract: pure SELECT, no INSERT/UPDATE/DELETE, no JSON persistence.
 # Sibling-coherent with CALIBRATION_HARDENING BATCH 1 canonical-read additions
-# (list_active_platt_models_v2 / list_active_platt_models_legacy in store.py).
+# (list_active_platt_models / list_active_platt_models_legacy in store.py).
 # Critic-harness 30th cycle should pay particular attention to this surface
 # since src/calibration/retrain_trigger.py is HIGH per src/calibration/AGENTS.md
 # L19 (operator-gated retrain promotion seam — live calibration promotion
@@ -577,7 +577,7 @@ def list_recent_retrain_versions(
         ).fetchall()
     except sqlite3.OperationalError:
         # Pre-first-retrain DB without calibration_params_versions table —
-        # mirrors store.py:list_active_platt_models_v2 graceful-empty posture.
+        # mirrors store.py:list_active_platt_models graceful-empty posture.
         return []
     out: list[dict[str, Any]] = []
     for row in rows:

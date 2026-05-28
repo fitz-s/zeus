@@ -284,7 +284,7 @@ FILL_AUTHORITY_RANK = {
 # PR D2 (Finding 9, 2026-05-27): authorities that MAY produce training rows.
 # `is_training_eligible_position(pos)` is the type-boundary that downstream
 # learning/calibration writers must consult before writing a row to
-# `calibration_pairs_v2`. Authorities outside this set carry insufficient
+# `calibration_pairs`. Authorities outside this set carry insufficient
 # causality / fill provenance to support model fitting.
 #
 # References the FILL_AUTHORITY_* constants by name (not bare string literals)

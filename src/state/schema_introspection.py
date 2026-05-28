@@ -42,7 +42,7 @@ def has_columns(
         *cols: column names that must all be present.  An empty
             ``cols`` argument trivially returns True (no requirements).
         attached: optional attached-DB name (e.g., ``"world"`` for
-            ``world.platt_models_v2``).  When provided, queries
+            ``world.platt_models``).  When provided, queries
             ``PRAGMA <attached>.table_info(<table>)``.
 
     Returns:
