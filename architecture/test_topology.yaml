@@ -78,6 +78,10 @@ test_trust_policy:
     tests/test_entry_forecast_shadow.py: {created: "2026-05-03", last_used: "2026-05-03"}
     tests/test_ensemble_snapshots_v2_executable_schema.py: {created: "2026-05-03", last_used: "2026-05-03"}
     tests/test_ensemble_snapshots_bias_corrected_schema.py: {created: "2026-04-26", last_used: "2026-04-26"}
+    # End-to-end sign / window / transport invariant audit for the FT-ship
+    # hierarchical bias-correction layer. Authority: operator critique 2026-05-27
+    # + docs/operations/INVARIANT_SIGN_PROOF_2026-05-27.md.
+    tests/test_invariant_sign_convention.py: {created: "2026-05-27", last_used: "2026-05-27"}
     tests/test_evaluator_explicit_n_mc.py: {created: "2026-04-30", last_used: "2026-05-08"}
     tests/test_evaluator_strategy_key_failclosed.py: {created: "2026-05-02", last_used: "2026-05-21"}
     tests/test_evaluator_metric_normalizer_failclosed.py: {created: "2026-04-26", last_used: "2026-04-26"}
