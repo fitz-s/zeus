@@ -774,11 +774,12 @@ class TestF6StrategyKeyCheckMigration:
         old_versions = "14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27"
         # PR #352: SCHEMA_VERSION advanced to 40; no_trade_events CHECK extended
         # to match. Post-PR #352 (origin/main HEAD 2026-05-27): list extended
-        # to 41. This must mirror the live CREATE_TABLE_SQL list exactly or
+        # to 41. PR1/auth-econ-split: advanced to 42 (chain economics cols).
+        # This must mirror the live CREATE_TABLE_SQL list exactly or
         # the .replace() below silently mangles the CHECK (e.g. dropping the
-        # entire 14..40 prefix while leaving a stranded ", 41" — yielding
-        # CHECK (14..27, 41) which then rejects the SCHEMA_VERSION insert).
-        current_versions = f"{old_versions}, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41"
+        # entire 14..40 prefix while leaving a stranded ", 42" — yielding
+        # CHECK (14..27, 42) which then rejects the SCHEMA_VERSION insert).
+        current_versions = f"{old_versions}, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42"
         conn = sqlite3.connect(":memory:")
         # Build a v27-only table by replacing the full current version list.
         conn.executescript(CREATE_TABLE_SQL.replace(current_versions, old_versions))
