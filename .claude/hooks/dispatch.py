@@ -809,22 +809,35 @@ def _run_advisory_check_pr_open_monitor_arm(
         output = tool_response
 
     import re
-    # 2026-05-27 fix (round 3): false-positive elimination.
-    # Round-1 regex (`gh\s+pr\s+(create|ready)`) matched any substring so
-    # `git commit -m "... gh pr create ..."` fired. Round-2 anchored to
-    # shell separators (`\n;&|`) but STILL fired on multi-line heredocs and
-    # Python source containing "gh pr create" in string literals. Round-3
-    # uses two complementary signals; either is sufficient:
-    #   STRONG: tool_response output contains a GitHub PR URL (the PR was
-    #           actually opened — unambiguous).
-    #   WEAK:   command begins literally with `gh pr (create|ready)` after
-    #           leading whitespace stripping (the FIRST tokens of the
-    #           command, not buried in a heredoc / quoted -m body).
-    # Both signals together: zero false-positive on commit-message bodies
-    # and heredocs while catching every real `gh pr create` invocation.
-    strong_signal = bool(re.search(r"https?://[^\s]+/pull/\d+", output))
-    weak_signal = bool(re.match(r"\s*gh\s+pr\s+(create|ready)\b", command))
-    if not (strong_signal or weak_signal):
+    # 2026-05-27 fix (round 4 — Copilot finding F2 on PR #356):
+    # Round-3 was "strong OR weak" which over-fired on any Bash whose output
+    # printed a GitHub PR URL (e.g. `gh pr view 353 --json url`). Round-4
+    # requires the command itself to actually invoke `gh pr (create|ready)`
+    # as its leading command — optionally prefixed by inline env-var
+    # assignments (e.g. `ZEUS_PR_ALLOW_TINY=1 gh pr create ...`). A bare
+    # PR-URL in output without a real `gh pr create|ready` invocation no
+    # longer triggers the sentinel.
+    # Resolution chain:
+    #   1. Command-shape gate (REQUIRED): leading-token match below.
+    #   2. PR# extraction (best effort): regex stdout → `gh pr list --head
+    #      $(branch)` fallback.
+    #
+    # Leading-token pattern accepts:
+    #   "gh pr create ..."                                       → match
+    #   "gh pr ready 100"                                        → match
+    #   "ZEUS_PR_ALLOW_TINY=1 gh pr create ..."                  → match
+    #   "FOO=1 BAR=2 gh pr ready 100"                            → match
+    # Rejects:
+    #   "git commit -m '... gh pr create ...'"                   → no match
+    #   "gh pr view 353 --json url"                              → no match
+    #   "gh pr list --head ... | jq '... pull/\\(.[0].number)'"  → no match
+    #   heredocs with "gh pr create" in test data                → no match
+    leading_command_pattern = (
+        r"\s*"                              # leading whitespace
+        r"(?:[A-Z_][A-Z0-9_]*=\S+\s+)*"     # zero+ env-var assignments
+        r"gh\s+pr\s+(create|ready)\b"       # the actual command
+    )
+    if not re.match(leading_command_pattern, command):
         return None
 
     pr_num: str | None = None

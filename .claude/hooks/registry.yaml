@@ -269,6 +269,27 @@ hooks:
       ritual_signal_emitted: true
     owner_module: .claude/hooks/dispatch.py
 
+  - id: pr_monitor_arm_ack
+    event: PostToolUse
+    matcher: "Monitor"
+    intent: >
+      Ack the monitor-arm sentinel when the agent actually invokes the
+      Monitor tool with `python3 scripts/pr_monitor.py <N>` (or `gh pr
+      {view,checks,comments,review} <N>` / `PR=<N>`). Deletes the matching
+      state/.monitor_arm_pending/<N>.lock + .lastfire so the sticky 2nd-tier
+      reminder (monitor_arm_overdue_advisor) stops re-firing. Without this
+      ack path, the sentinel lives forever and the agent gets the reminder
+      on every Bash even AFTER it armed the Monitor. Antibody for the
+      2026-05-27 "PR opened in subagent → orchestrator never acks" loop.
+      ADVISORY: clears sentinel state only; never blocks; fail-open on any
+      exception.
+    blocked_when: []
+    severity: ADVISORY
+    sunset_date: 2026-08-27
+    telemetry:
+      ritual_signal_emitted: true
+    owner_module: .claude/hooks/dispatch.py
+
   - id: pre_branch_create_in_primary
     event: PreToolUse
     matcher: "Bash"
