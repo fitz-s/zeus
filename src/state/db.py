@@ -9222,13 +9222,21 @@ def query_chain_only_quarantine_rows(conn: sqlite3.Connection | None) -> list[di
     (pre-migration) or the VIEW alias created by B071 migration. The VIEW
     projects the latest row per token_id from the append-only history.
 
-    2026-05-27 fitz: exclude rows whose parent market has reached chain-terminal
-    phase (settled / voided / admin_closed). Per the chain-is-truth principle,
-    once chain finalizes a market, any chain-only-quarantined token on that
-    market carries no live exposure and must not appear in the portfolio
-    as a quarantined position blocking new entries. The suppression row
-    remains in the append-only history for audit; this query filters it out
-    of runtime consumption.
+    2026-05-27 fitz: exclude rows whose parent market has reached a runtime-
+    inactive phase (settled / voided / admin_closed / economically_closed /
+    quarantined). Per the chain-is-truth principle, once chain (or admin)
+    finalizes a market, any chain-only-quarantined token on that market
+    carries no live exposure and must not appear in the portfolio as a
+    quarantined position blocking new entries. The suppression row remains
+    in the append-only history for audit; this query filters it out of
+    runtime consumption.
+
+    Note the deliberate divergence from ``_CHAIN_TERMINAL_POSITION_PHASES``
+    in ``src/execution/exchange_reconcile.py``, which is the stricter 3-phase
+    chain-terminal set (settled / voided / admin_closed) used for drift
+    suppression. The 5-phase set here matches INACTIVE_RUNTIME_STATES and is
+    also used in ``query_token_suppression_tokens`` (Rule-3 ignored_tokens
+    path).
     """
     if conn is None or not _table_or_view_exists(conn, "token_suppression"):
         return []
