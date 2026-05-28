@@ -163,7 +163,29 @@ When writing recency / health probes, use these column names — wrong names giv
 
 ---
 
-## 6 — WIRING BREAK: probability_trace_fact silent (M3 work) — PROGRESS 05:50 CT
+## 6 — Trace writer status (RETRACTED + CORRECTED 2026-05-28 06:25 CT)
+
+**Initial "WIRING BREAK probability_trace_fact silent" claim was WRONG.** Apology + retraction.
+
+**Correction**: Initial silence diagnosis came from querying the LEGACY destination DB (`zeus_trades.db`). PR-S4b (2026-05-18, commit `f5290060c98`) correctly REDIRECTED trace writes from zeus_trades.db (where they accidentally landed when callers passed cycle-rooted conn) to `zeus-world.db` (canonical destination). The 33,203 rows in zeus_trades.db are pre-PR-S4b historical. Current `zeus-world.db.probability_trace_fact` (verified 2026-05-28 06:25 CT):
+
+| query | value |
+|-------|-------|
+| `COUNT(*) WHERE recorded_at > datetime('now','-2 hours')` | **173 rows** |
+| Total | 5759 |
+| Last write | 2026-05-28T06:10:11 UTC (5 min before query) |
+| Distribution (24h, mode/trace_status) | opening_hunt:complete=305 / pre_vector_unavailable=89 / degraded_decision_context=22 ; imminent_open_capture:complete=46 / pre_vector_unavailable=22 / degraded_decision_context=4 ; day0_capture:complete=1 |
+
+**Trace writer is HEALTHY. M3 shadow acceptance criterion met.** Task #151 (M3) marked completed; #120 (silent investigation) closed.
+
+**F7b (#105) remains valid**: all 5759 world.db rows have `p_raw_domain=NULL`. Writer doesn't bind column even though it exists in schema. Fix gated by `settlement_write` capability on src/state/db.py — needs operator ARCH_PLAN_EVIDENCE. Not blocking M5 (audit-annotation only).
+
+**Self-correction lesson**: always verify the writer's CURRENT destination per docstring before declaring silence. PR-S4b's docstring at `log_probability_trace_fact` literally says "rows to land in zeus_trades.db instead of zeus-world.db" — that's the BUG IT FIXED. Historical rows in the legacy destination can mislead. Memory: `project_trace_writer_pr_s4b_commit_omission_2026_05_28.md` (records the wrong path + retraction).
+
+---
+
+### Historical investigation (kept for record; conclusions superseded above)
+
 
 **Architecture mapped (2026-05-28 05:50 CT)**:
 - Writer: `src/state/db.py:6424 log_probability_trace_fact` → `_log_probability_trace_fact_inner` :6453. Returns `{status: "written"|"skipped_missing_table"|"skipped_missing_decision_id"|...}`.
