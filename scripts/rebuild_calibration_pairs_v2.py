@@ -222,38 +222,49 @@ def _native_error_params_for_snapshot(
     applied per snapshot so a single cached fit serves every snapshot in the
     bucket.
     """
-    from src.calibration.ens_error_model import (
-        _c_to_native_scale,
-        fit_city_predictive_error,
-    )
+    from src.calibration.ens_error_model import _c_to_native_scale, current_gate_set_hash
+    from src.calibration.ens_bias_repo import read_bias_model
 
     metric = spec.identity.temperature_metric
     season_label = season_from_date(target_date, lat=city.lat)
-    season_months = _calendar_season_months(target_date)
     cache_key = (city.name, season_label, metric)
     if cache_key not in cache:
+        # DOMAIN-CANONICALITY FIX (2026-05-28): read the PERSISTED canonical
+        # error-model row written by fit_full_transport_error_models.py — DO NOT
+        # re-fit here. Re-fitting on-the-fly (the old path) used min_live_n=5 while
+        # the producer wrote rows at min_live_n=20, so MC p_raw pairs diverged from
+        # the stored row → train/serve domain mismatch that re-creates the
+        # contamination. Now MC consumes the exact stored row, gated by
+        # gate_set_hash (rejects stale-gate rows) + month-scope (coverage_months).
+        # authority='STAGING' because the rebuild runs on freshly-fit, not-yet-
+        # promoted rows. Fail-open (None) when no canonical row exists for the bucket.
         versions = _ERROR_MODEL_DATA_VERSIONS.get(metric)
-        model = None
+        params: tuple[float, float] | None = None
         if versions is not None:
             try:
-                model = fit_city_predictive_error(
-                    conn,
-                    city=city.name,
-                    live_data_version=versions["live"],
-                    prior_data_version=versions["prior"],
-                    season_months=season_months,
-                    metric=metric,
-                    min_live_n=_ERROR_MODEL_MIN_LIVE_N,
-                )
-            except ValueError:
-                # No TIGGE prior residuals for this city/season — fail open.
-                model = None
-        cache[cache_key] = model
-    model = cache[cache_key]
-    if model is None:
-        return None
-    scale = _c_to_native_scale(city.settlement_unit)
-    return (model.effective_bias_c * scale, model.total_residual_sd_c * scale)
+                target_month = int(str(target_date)[5:7])
+            except (ValueError, IndexError):
+                target_month = None
+            row = read_bias_model(
+                conn,
+                city=city.name,
+                season=season_label,
+                metric=metric,
+                live_data_version=versions["live"],
+                month=0,  # producer writes season-level rows with month=0 sentinel
+                error_model_family=error_model_family,
+                authority="STAGING",
+                require_gate_set_hash=current_gate_set_hash(),
+                target_month=target_month,
+            )
+            if row is not None:
+                eff = row["effective_bias_c"]
+                total_sd = row["total_residual_sd_c"]
+                if eff is not None and total_sd is not None:
+                    scale = _c_to_native_scale(city.settlement_unit)
+                    params = (float(eff) * scale, float(total_sd) * scale)
+        cache[cache_key] = params
+    return cache[cache_key]
 
 
 @dataclass

@@ -390,6 +390,7 @@ def read_bias_model(
     error_model_family: str | None = None,
     require_gate_set_hash: str | None = None,
     target_month: int | None = None,
+    authority: str = "VERIFIED",
 ) -> sqlite3.Row | None:
     """Read a bias row. ``live_data_version`` is REQUIRED — there is no
     'latest across data versions' fallback (that would serve the wrong product).
@@ -435,9 +436,14 @@ def read_bias_model(
         if "error_model_family" not in existing or "authority" not in existing:
             # Schema predates F2 migration — no VERIFIED rows possible.
             return None
+        # authority defaults to VERIFIED (live-serving safety). The MC rebuild path
+        # passes authority='STAGING' to read the just-fit canonical rows BEFORE they
+        # are promoted — so MC p_raw is generated from the SAME persisted row the
+        # producer wrote (not an on-the-fly re-fit with divergent gates). The
+        # gate_set_hash + month-scope guards below still apply regardless of authority.
         row = conn.execute(
-            base_sql + " AND error_model_family=? AND authority='VERIFIED'",
-            base_params + (error_model_family,),
+            base_sql + " AND error_model_family=? AND authority=?",
+            base_params + (error_model_family, authority),
         ).fetchone()
         if row is None:
             return None
