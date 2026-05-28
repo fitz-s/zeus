@@ -4268,10 +4268,10 @@ def evaluate_candidate(
         pass
     if _phase2_data_version is not None:
         from src.types.metric_identity import (
-            source_family_from_data_version,
+            source_family_from_dataset_id,
             source_family_from_source_id,
         )
-        _dv_family = source_family_from_data_version(_phase2_data_version)
+        _dv_family = source_family_from_dataset_id(_phase2_data_version)
         if _dv_family is None:
             _unknown_src_family_detail = (
                 f"forecast data_version {_phase2_data_version!r} does not "

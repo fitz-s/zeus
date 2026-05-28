@@ -159,7 +159,7 @@ _LOW_PHYSICAL_QUANTITY_BY_SOURCE_FAMILY: dict[str, str] = {
 }
 
 
-def source_family_from_data_version(data_version: str) -> str | None:
+def source_family_from_dataset_id(data_version: str) -> str | None:
     """Reverse-lookup helper: data_version → source_family.
 
     Returns None if the data_version doesn't match any registered source.
@@ -191,7 +191,7 @@ def physical_quantity_for_data_version(
     accumulation params; callers that pinned physical_quantity to
     spec.identity (TIGGE-canonical) silently rejected all OpenData rows.
     """
-    sf = source_family_from_data_version(data_version)
+    sf = source_family_from_dataset_id(data_version)
     if sf is None:
         return None
     if temperature_metric == "high":

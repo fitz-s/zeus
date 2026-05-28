@@ -268,7 +268,7 @@ respectively). All map to `dataset_id` / `source_snapshot_id`.
 
 ### `src/types/metric_identity.py`
 
-`data_version: str` in `MetricIdentity` dataclass (l.27); `source_family_from_data_version`
+`data_version: str` in `MetricIdentity` dataclass (l.27); `source_family_from_dataset_id`
 helper (l.162). All → `dataset_id`.
 
 ### `src/state/db.py`
