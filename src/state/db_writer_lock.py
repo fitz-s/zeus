@@ -732,7 +732,7 @@ SQLITE_CONNECT_ALLOWLIST: frozenset[str] = frozenset(
         "scripts/nuke_rebuild_projections.py",              # already_guarded: writes under db_writer_lock(BULK)
         "scripts/obs_v2_live_tick.py",                      # already_guarded: writes under db_writer_lock(BULK) when not dry_run
         "scripts/rebuild_calibration_pairs_canonical.py",   # already_guarded: writes under db_writer_lock(BULK)
-        "scripts/rebuild_calibration_pairs_v2.py",          # already_guarded: writes under bulk_lock_with_chunker (K3 retrofit)
+        "scripts/rebuild_calibration_pairs.py",          # already_guarded: writes under bulk_lock_with_chunker (K3 retrofit)
         "scripts/rebuild_settlements.py",                   # already_guarded: writes under db_writer_lock(BULK)
         "scripts/refit_platt.py",                           # already_guarded: reads mode=ro; writes under db_writer_lock(BULK)
         # --- ENS full_transport_v1 offline staging tools (2026-05-24): isolated --db only,
@@ -755,7 +755,7 @@ SQLITE_CONNECT_ALLOWLIST: frozenset[str] = frozenset(
         # --- QUARANTINED resolved: verify_truth_surfaces is read_only (0 writes) ---
         "scripts/verify_truth_surfaces.py",                 # read_only: all connects are mode=ro or SELECT-only; 0 INSERT/UPDATE/DELETE
         # --- PR 1 era-provenance scripts ---
-        "scripts/audit_settlements_v2_era_provenance.py",       # read_only: SELECT-only, no writes
+        "scripts/audit_settlements_era_provenance.py",       # read_only: SELECT-only, no writes
         "scripts/migrate_settlement_commands_in_flight_at_era_flip.py",  # operator_invoked: quarantine DDL + SAVEPOINT
         # --- PR 3+6 (2026-05-19) migration scripts ---
         "scripts/migrate_settlement_commands_polymarket_anchor.py",  # operator_invoked: DDL-only idempotent ADD COLUMN for PR3+PR6 columns

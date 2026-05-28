@@ -368,7 +368,7 @@ def _compare_snapshot(
         logging.warning("Snapshot %d: bad members_json: %s", snapshot_id, exc)
         return None
 
-    # members_json is already in settlement_unit (verified by rebuild_calibration_pairs_v2 unit checks)
+    # members_json is already in settlement_unit (verified by rebuild_calibration_pairs unit checks)
     members_unit = snap["members_unit"] or city.settlement_unit
 
     grid = grid_for_city(city)

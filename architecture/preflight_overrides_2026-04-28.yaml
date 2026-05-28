@@ -11,7 +11,7 @@ drift_residual:
   signed_at: 2026-04-28T15:30Z
   resolution: downgrade_authority_to_QUARANTINED
   effect:
-  - exclude_from_training (rebuild_calibration_pairs_v2 filters VERIFIED)
+  - exclude_from_training (rebuild_calibration_pairs filters VERIFIED)
   - clear Gate 3+4 (predicate keys on authority=VERIFIED)
   - preserve row data + provenance for audit
   evidence_log: docs/operations/task_2026-04-28_obs_provenance_preflight/evidence/gate34_fill_quarantine_apply_2026-04-28.json
@@ -176,7 +176,7 @@ hko_canonical:
   resolution: downgrade_HK_observations_to_QUARANTINED
   effect:
   - "821 HK observations rows authority VERIFIED \u2192 QUARANTINED"
-  - HK rows excluded from rebuild_calibration_pairs_v2._fetch_verified_observation
+  - HK rows excluded from rebuild_calibration_pairs._fetch_verified_observation
   - "Gate 2 (hko_requires_fresh_source_audit) clears \u2014 predicate filters VERIFIED"
   - HKO remains canonical SETTLEMENT source via SettlementSemantics (live trading)
   - 0 HK non-HKO settlements found needing quarantine (policy already aligned)
@@ -198,5 +198,5 @@ hko_canonical:
       block is removed or the released_at field is cleared.
     effect:
       - hko_requires_fresh_source_audit gate flips from BLOCKER to ADVISORY
-      - gate still emits count for audit; does not block rebuild_calibration_pairs_v2
+      - gate still emits count for audit; does not block rebuild_calibration_pairs
     plan_evidence: docs/operations/task_2026-05-03_ddd_implementation_plan/phase1_results/E8_audit/10_paris_resync_plan.md

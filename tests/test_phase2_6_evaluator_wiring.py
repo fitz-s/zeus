@@ -130,13 +130,13 @@ def test_evaluator_threads_temperature_metric_to_fetch_ensemble():
 
 
 _REBUILD_PATH = (
-    Path(__file__).resolve().parents[1] / "scripts" / "rebuild_calibration_pairs_v2.py"
+    Path(__file__).resolve().parents[1] / "scripts" / "rebuild_calibration_pairs.py"
 )
 _REBUILD_SRC = _REBUILD_PATH.read_text(encoding="utf-8")
 
 
 def test_rebuild_script_passes_cycle_source_id_horizon_profile():
-    """rebuild_calibration_pairs_v2.py must pass stratification kwargs.
+    """rebuild_calibration_pairs.py must pass stratification kwargs.
 
     Without these, every rebuild row falls into the schema-default branch
     of add_calibration_pair_v2 (cycle='00', source_id='tigge_mars',

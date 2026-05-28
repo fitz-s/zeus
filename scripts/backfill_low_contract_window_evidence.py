@@ -7,7 +7,7 @@ Default mode is a read-only dry run.  Apply mode is intentionally explicit:
 ``--apply --force`` is required before this script inserts rows.  The script
 does not mutate old LOW rows.  It copies matched legacy LOW snapshots into a
 new contract-window data_version and attaches the evidence needed by
-``rebuild_calibration_pairs_v2.py``.
+``rebuild_calibration_pairs.py``.
 """
 from __future__ import annotations
 

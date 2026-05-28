@@ -14,7 +14,7 @@ PURPOSE:
       - MISSING_PROVENANCE: provenance_json is NULL, '{}', or empty
 
 USAGE:
-    python scripts/audit_settlements_v2_era_provenance.py [--output OUTFILE]
+    python scripts/audit_settlements_era_provenance.py [--output OUTFILE]
 
     Options:
       --output PATH   Write JSON report to PATH (default: stdout)

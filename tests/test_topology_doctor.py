@@ -4479,7 +4479,7 @@ def test_runtime_route_card_surfaces_script_manifest_provenance_for_bridge():
     digest = topology_doctor.build_digest(
         "A downstream evaluator import is blocked because topology says my script change is script-health, "
         "but I think it is a semantic pricing path issue.",
-        ["src/engine/evaluator.py", "scripts/rebuild_calibration_pairs_v2.py"],
+        ["src/engine/evaluator.py", "scripts/rebuild_calibration_pairs.py"],
         intent="evaluator script import bridge",
         write_intent="edit",
     )
@@ -4487,10 +4487,10 @@ def test_runtime_route_card_surfaces_script_manifest_provenance_for_bridge():
 
     assert digest["profile"] == "evaluator script import bridge"
     assert "src/engine/evaluator.py" in digest["admission"]["admitted_files"]
-    assert "scripts/rebuild_calibration_pairs_v2.py" in digest["admission"]["out_of_scope_files"]
-    assert card["blocked_file_reasons"]["scripts/rebuild_calibration_pairs_v2.py"]
+    assert "scripts/rebuild_calibration_pairs.py" in digest["admission"]["out_of_scope_files"]
+    assert card["blocked_file_reasons"]["scripts/rebuild_calibration_pairs.py"]
     assert any(
-        note.get("path") == "scripts/rebuild_calibration_pairs_v2.py"
+        note.get("path") == "scripts/rebuild_calibration_pairs.py"
         and note.get("kind") == "script_manifest"
         and note.get("canonical_command")
         for note in card["provenance_notes"]

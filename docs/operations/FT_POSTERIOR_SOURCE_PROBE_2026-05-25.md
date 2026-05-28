@@ -17,7 +17,7 @@ run_offline_platt_refit.py --db /tmp/ens_refit/full.db --error-model full_transp
 run_offline_calibration_rebuild.py --db /tmp/ens_refit/full.db --error-model full_transport_v1
 ```
 
-**Mechanism** (`rebuild_calibration_pairs_v2.py` in the sub-worktree, lines 200–250):
+**Mechanism** (`rebuild_calibration_pairs.py` in the sub-worktree, lines 200–250):
 
 `_native_error_params_for_snapshot()` is called per-snapshot when `error_model_family='full_transport_v1'`.
 It calls `fit_city_predictive_error()` from `src/calibration/ens_error_model.py` directly
@@ -27,7 +27,7 @@ needed by `fit_city_predictive_error`. The resulting `PredictiveErrorModel` is *
 `(city, season_label, metric)`** for the lifetime of the rebuild call (cache lives in RAM,
 not persisted).
 
-**Data versions used** (sub-worktree `rebuild_calibration_pairs_v2.py:162–177`):
+**Data versions used** (sub-worktree `rebuild_calibration_pairs.py:162–177`):
 - `high` live: `ecmwf_opendata_mx2t3_local_calendar_day_max_v1`
 - `high` prior: `tigge_mx2t6_local_calendar_day_max_v1`
 - `low` live: `ecmwf_opendata_mn2t3_local_calendar_day_min_v1`
@@ -39,9 +39,9 @@ converted to native unit (×1.8 for degF cities), and injected into `p_raw_vecto
 via `extra_member_sigma` and a pre-MC member shift. The resulting corrected `p_raw` is then
 written to `calibration_pairs_v2` with `error_model_family='full_transport_v1'`.
 
-**There is no `--error-model-family` flag on main-branch `rebuild_calibration_pairs_v2.py`.**
+**There is no `--error-model-family` flag on main-branch `rebuild_calibration_pairs.py`.**
 The sub-worktree added this flag and the associated plumbing. The main-branch script
-(`scripts/rebuild_calibration_pairs_v2.py:111, 1239`) uses plain `p_raw_vector_from_maxes`
+(`scripts/rebuild_calibration_pairs.py:111, 1239`) uses plain `p_raw_vector_from_maxes`
 with no error model.
 
 ---
@@ -95,7 +95,7 @@ correction — but only because the pairs that trained them were already correct
 **fit_city_predictive_error callers** (production code only, confirmed by grep):
 - `scripts/onboard_cities.py:998` — called during city onboarding, but broken at runtime
   (`.posterior` attribute error, see above). No live invocations have succeeded.
-- Sub-worktree `rebuild_calibration_pairs_v2.py:233` — called during offline staging
+- Sub-worktree `rebuild_calibration_pairs.py:233` — called during offline staging
   rebuild only; not on the main branch; not a live production path.
 
 **write_bias_model callers**:

@@ -10,7 +10,7 @@
 # Reuse: Run once per refit cycle before run_offline_calibration_rebuild.py.
 """Seed a lean isolated staging DB for an offline calibration rebuild/refit.
 
-The rebuild (`scripts/rebuild_calibration_pairs_v2.py`) and refit
+The rebuild (`scripts/rebuild_calibration_pairs.py`) and refit
 (`scripts/refit_platt.py`) read their SOURCE tables
 (`ensemble_snapshots`, `observations`, `settlements_v2`) and the
 predictive-error residual sources from the SAME connection they write

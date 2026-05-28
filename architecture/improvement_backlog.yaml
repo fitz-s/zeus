@@ -298,7 +298,7 @@ entries:
       live/replay/harvester callers could avoid schema-default TIGGE
       materialization, but the shared persistence helper
       src/calibration/store.py::add_calibration_pair_v2 and the dangerous
-      repair script scripts/rebuild_calibration_pairs_v2.py were not admitted
+      repair script scripts/rebuild_calibration_pairs.py were not admitted
       by available object-meaning/source/replay/script routes. Future profiles
       should admit the common helper and active long-lived repair script when
       the invariant failure is a schema/helper default that can relabel an

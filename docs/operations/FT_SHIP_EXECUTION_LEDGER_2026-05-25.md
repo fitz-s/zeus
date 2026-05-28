@@ -135,7 +135,7 @@ This is the single source of truth for finishing the full_transport→live ship.
 
 **LOW REBUILD DEFERRED** — per ledger rule "WIPE ALL pairs before any rebuild" + per memory `feedback_newcity_no_partial_calibration`, LOW cannot be additively repaired on top of 8/51 partial cities (UNIQUE-key collisions inevitable). Plan: wipe LOW ft_v1, rebuild after refit completes (avoid re-contending forecasts.db). Operator HIGH-first plan stands: LOW markets sparse + filter-gated → won't block live HIGH shipping. New task added.
 
-**Lesson #10:** rebuild launcher must redirect stdout BEFORE eval — the broken `setsid` line ate the entire script output for 7 hours of compute. Next LOW launch: `nohup python3 -u rebuild_calibration_pairs_v2.py ... >> $LOG 2>&1 &` (proven format from refit relaunch 31745). No `setsid`. Verify log grows in first 60s.
+**Lesson #10:** rebuild launcher must redirect stdout BEFORE eval — the broken `setsid` line ate the entire script output for 7 hours of compute. Next LOW launch: `nohup python3 -u rebuild_calibration_pairs.py ... >> $LOG 2>&1 &` (proven format from refit relaunch 31745). No `setsid`. Verify log grows in first 60s.
 
 ## WHERE WE ARE (2026-05-26 18:16 CDT — superseded; refit relaunched after preflight crash)
 
@@ -156,7 +156,7 @@ This is the single source of truth for finishing the full_transport→live ship.
 **PART A (code) = DONE.** PR **#342 MERGED to main** 17:33 UTC. main now carries the entire ship: Fix A (metric-aware 0Z/12Z bias window, ens_bias_repo), Fix B (MIN_PAIRED_N=5 transport gate, ens_error_model), live wiring (monitor_refresh `_load_ft_error_model`, flag `full_transport_live_enabled` default OFF), identity-calibrator route (platt.py IdentityCalibrator + manager get_calibrator), preflight mx2t3/mn2t3 rename fix, schema_version 37, ship-readiness gate. Opus-reviewed ACCEPT, all CI green, 24 bot threads resolved.
 
 **PART B (data) = IN PROGRESS.** Rebuilding all calibration pairs on prod through the corrected code.
-- **Rebuild PID 28447** — detached (ppid=1, survives), `rebuild_calibration_pairs_v2.py --no-dry-run --force --db state/zeus-forecasts.db --error-model full_transport_v1 --temperature-metric all --n-mc 10000 --workers 12`. Log: `logs/ftrebuild_full2_2026-05-26.log`. Does HIGH metric fully, THEN LOW. At 12:22: HIGH ~23/52 cities, 0 collisions, disk 116G. **ETA HIGH ~14:30, full (incl LOW) ~16:00 CDT.**
+- **Rebuild PID 28447** — detached (ppid=1, survives), `rebuild_calibration_pairs.py --no-dry-run --force --db state/zeus-forecasts.db --error-model full_transport_v1 --temperature-metric all --n-mc 10000 --workers 12`. Log: `logs/ftrebuild_full2_2026-05-26.log`. Does HIGH metric fully, THEN LOW. At 12:22: HIGH ~23/52 cities, 0 collisions, disk 116G. **ETA HIGH ~14:30, full (incl LOW) ~16:00 CDT.**
 - **Smoke already validated correctness**: HK HIGH p_raw mass centered 25-30°C (real range), tracks settlements tightly (28°C p=0.143/out=0.152) → Fix A+B working, the −2.1/+6.3 contamination is gone.
 
 ## MONITORS ARMED (auto-trigger next steps; do not duplicate)

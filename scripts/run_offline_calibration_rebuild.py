@@ -8,7 +8,7 @@
 # Reuse: Run after seed_isolated_calibration_db.py; before run_offline_platt_refit.py.
 """Offline driver: run rebuild_all_v2() against an ISOLATED staging DB.
 
-`rebuild_calibration_pairs_v2.py main()` wraps the rebuild in an operator
+`rebuild_calibration_pairs.py main()` wraps the rebuild in an operator
 promotion preflight (`_assert_rebuild_preflight_ready`) + bulk writer lock that
 guard the SHARED world DB. For an isolated, single-purpose staging rebuild
 (no promotion), this driver invokes the same library function
@@ -57,7 +57,7 @@ def main() -> int:
     ap.add_argument("--error-model", default=None)
     args = ap.parse_args()
 
-    from scripts.rebuild_calibration_pairs_v2 import (  # noqa: PLC0415
+    from scripts.rebuild_calibration_pairs import (  # noqa: PLC0415
         _resolve_isolated_calibration_write_db_path,
         rebuild_all_v2,
     )

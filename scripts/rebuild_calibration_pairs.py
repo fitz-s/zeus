@@ -28,13 +28,13 @@ Key differences from the legacy script:
 USAGE:
 
     # Dry-run (default, safe):
-    python scripts/rebuild_calibration_pairs_v2.py
+    python scripts/rebuild_calibration_pairs.py
 
     # Isolated write (requires --db plus --no-dry-run --force):
-    python scripts/rebuild_calibration_pairs_v2.py --db /tmp/calibration_stage.db --no-dry-run --force
+    python scripts/rebuild_calibration_pairs.py --db /tmp/calibration_stage.db --no-dry-run --force
 
     # Single city (development):
-    python scripts/rebuild_calibration_pairs_v2.py --dry-run --city NYC --n-mc 1000
+    python scripts/rebuild_calibration_pairs.py --dry-run --city NYC --n-mc 1000
 
 SAFETY GATES:
 - ``--dry-run`` is the default. ``--no-dry-run`` alone does not write — ``--force``
@@ -914,7 +914,7 @@ def _fetch_eligible_snapshots_v2(
         )
     if data_version_filter and not spec.allows_data_version(data_version_filter):
         raise DataVersionQuarantinedError(
-            f"rebuild_calibration_pairs_v2: --data-version={data_version_filter!r} "
+            f"rebuild_calibration_pairs: --data-version={data_version_filter!r} "
             f"is not allowed for {spec.identity.temperature_metric} spec "
             f"{spec.allowed_data_versions!r}."
         )
@@ -1172,14 +1172,14 @@ def _pre_compute_snapshot_v2(
     # Per-spec cross-check: write-time defense against cross-metric contamination (R-AU).
     if not spec.allows_data_version(data_version):
         raise DataVersionQuarantinedError(
-            f"rebuild_calibration_pairs_v2: snapshot data_version={data_version!r} "
+            f"rebuild_calibration_pairs: snapshot data_version={data_version!r} "
             f"does not match spec.allowed_data_versions={spec.allowed_data_versions!r}. "
             "Cross-metric contamination refused."
         )
 
     # Quarantine guard (belt-and-suspenders: eligibility query already filters
     # training_allowed=1, but data_version quarantine is a write-time contract)
-    assert_data_version_allowed(data_version, context="rebuild_calibration_pairs_v2")
+    assert_data_version_allowed(data_version, context="rebuild_calibration_pairs")
 
     contract_evidence_rejection = _low_contract_evidence_rejection(snapshot, spec=spec)
     if contract_evidence_rejection is not None:
@@ -1213,7 +1213,7 @@ def _pre_compute_snapshot_v2(
     try:
         settlement_value = sem.assert_settlement_value(
             float(obs["observed_value"]),
-            context="rebuild_calibration_pairs_v2",
+            context="rebuild_calibration_pairs",
         )
     except Exception as e:
         stats.snapshots_unit_rejected += 1
@@ -1463,10 +1463,10 @@ def _dry_run_evaluate_snapshot_v2(
 
     if not spec.allows_data_version(data_version):
         raise DataVersionQuarantinedError(
-            f"rebuild_calibration_pairs_v2 dry-run: snapshot data_version={data_version!r} "
+            f"rebuild_calibration_pairs dry-run: snapshot data_version={data_version!r} "
             f"does not match spec.allowed_data_versions={spec.allowed_data_versions!r}."
         )
-    assert_data_version_allowed(data_version, context="rebuild_calibration_pairs_v2.dry_run")
+    assert_data_version_allowed(data_version, context="rebuild_calibration_pairs.dry_run")
 
     contract_evidence_rejection = _low_contract_evidence_rejection(snapshot, spec=spec)
     if contract_evidence_rejection is not None:
@@ -1487,7 +1487,7 @@ def _dry_run_evaluate_snapshot_v2(
         sem = SettlementSemantics.for_city(city)
         settlement_value = sem.assert_settlement_value(
             float(obs["observed_value"]),
-            context="rebuild_calibration_pairs_v2.dry_run",
+            context="rebuild_calibration_pairs.dry_run",
         )
         validate_members_vs_observation(member_maxes, city, settlement_value)
     except Exception:
@@ -1693,7 +1693,7 @@ def rebuild_v2(
     print(f"Rebuild sentinel: {sentinel_key} -> in_progress")
 
     if workers and workers > 1:
-        from scripts._rebuild_calibration_pairs_v2_parallel import (  # noqa: PLC0415
+        from scripts._rebuild_calibration_pairs_parallel import (  # noqa: PLC0415
             run_parallel_rebuild,
         )
         print(
@@ -2064,7 +2064,7 @@ def main() -> int:
         try:
             write_db_path = _resolve_isolated_calibration_write_db_path(
                 args.db_path,
-                script_name="rebuild_calibration_pairs_v2.py",
+                script_name="rebuild_calibration_pairs.py",
             )
         except Exception as e:
             print(f"ERROR: {type(e).__name__}: {e}", file=sys.stderr)
@@ -2156,7 +2156,7 @@ def main() -> int:
         with bulk_lock_with_chunker(
             write_db_path,
             conn,
-            caller_module="scripts.rebuild_calibration_pairs_v2",
+            caller_module="scripts.rebuild_calibration_pairs",
             event_writer=_event_writer,
         ) as chunker:
             # DDL inside the lock: apply_canonical_schema contains DROP TABLE IF EXISTS

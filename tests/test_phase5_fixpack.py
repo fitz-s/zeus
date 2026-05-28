@@ -531,7 +531,7 @@ class TestObservationClientLazyImport:
 class TestRebuildDataVersionAssertion:
     """R-AU: _process_snapshot_v2 must cross-check row data_version against spec.allowed_data_version.
 
-    Anchors: exec-emma §1 'rebuild_calibration_pairs_v2.py — data_version sourced from
+    Anchors: exec-emma §1 'rebuild_calibration_pairs.py — data_version sourced from
     snapshot row, not from MetricIdentity'. Current code at line 216 calls
     assert_data_version_allowed (quarantine-BLOCK only). The per-spec cross-check
     row["data_version"] == spec.allowed_data_version is ABSENT inside _process_snapshot_v2.
@@ -634,7 +634,7 @@ class TestRebuildDataVersionAssertion:
         with pytest.raises((DataVersionQuarantinedError, AssertionError, ValueError)):
             assert_data_version_allowed(
                 "tigge_experimental_v99",
-                context="rebuild_calibration_pairs_v2",
+                context="rebuild_calibration_pairs",
             )
 
     def test_R_AU_3_per_spec_cross_metric_rejected(self):
@@ -651,7 +651,7 @@ class TestRebuildDataVersionAssertion:
         _process_snapshot_v2. Pre-fix → fails. Post-fix → passes.
         """
         import inspect
-        from scripts.rebuild_calibration_pairs_v2 import _process_snapshot_v2
+        from scripts.rebuild_calibration_pairs import _process_snapshot_v2
 
         sig = inspect.signature(_process_snapshot_v2)
         assert "spec" in sig.parameters, (
@@ -669,7 +669,7 @@ class TestRebuildDataVersionAssertion:
         a DataVersionQuarantinedError / AssertionError from the spec cross-check is a failure.
         """
         import sqlite3
-        from scripts.rebuild_calibration_pairs_v2 import (
+        from scripts.rebuild_calibration_pairs import (
             _process_snapshot_v2,
             CalibrationMetricSpec,
             RebuildStatsV2,

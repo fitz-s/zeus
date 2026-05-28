@@ -5,7 +5,7 @@ Last reused or audited: 2026-05-25
 Authority basis: ENS_REFIT_REFINEMENT_ROADMAP_2026-05-25.md §4 (audit battery); operator
 math-ROI directive 2026-05-25. Consumes ENS_REFIT_FULLDB_HIGH/LOW_2026-05-25.md (§4.1),
 ENS_ROUTE6_TRANSPORT_BETA_2026-05-25.md, scripts/audit_refit_proper_scores.py,
-scripts/rebuild_calibration_pairs_v2.py (commit d973d0d00b), src/calibration/ens_error_model.py.
+scripts/rebuild_calibration_pairs.py (commit d973d0d00b), src/calibration/ens_error_model.py.
 DB: /private/tmp/ens_refit/full.db (read-only, 33 GB; trade tables empty).
 
 > Bottom line up front. (1) There is NO ungated p_raw variant in the DB and NO production
@@ -35,7 +35,7 @@ The SNR gate is NOT a runtime route-to-raw switch. It is a continuous confidence
   widens the MC draw by `total_residual_sd · scale` via `p_raw_vector_from_maxes(extra_member_sigma=…)`.
 
 The seeder that produced `error_model_family='full_transport_v1'` (commit d973d0d00b,
-`scripts/rebuild_calibration_pairs_v2.py` + `_parallel.py`) fits one `PredictiveErrorModel` per
+`scripts/rebuild_calibration_pairs.py` + `_parallel.py`) fits one `PredictiveErrorModel` per
 (city, season, metric) via `fit_city_predictive_error` → `predictive_error_from_posterior`. So
 **the §4.1 `full_transport_v1` p_raw is the SNR-GATED path by construction.** There is no λ=1
 ("ungated") family in `calibration_pairs_v2` — only `none` (raw) and `full_transport_v1` (gated).

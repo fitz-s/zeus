@@ -1742,12 +1742,12 @@ test_metadata:
       - T1E-REBUILD-SENTINEL-REFUSES
       - T1E-REBUILD-TRANSACTION-SHARDED
     source_under_test:
-      - scripts/rebuild_calibration_pairs_v2.py
+      - scripts/rebuild_calibration_pairs.py
     law_dependencies:
       - docs/operations/task_2026-05-04_zeus_may3_review_remediation/phases/T1E/phase.json
     notes: >
       Tests T1E rebuild sentinel and transaction-sharding invariants.
-      Asserts rebuild_calibration_pairs_v2.py exits non-zero when
+      Asserts rebuild_calibration_pairs.py exits non-zero when
       .zeus/rebuild_lock.do_not_run_during_live exists; sqlite3.connect is
       never called. Asserts rebuild_v2 shards commits per (city, metric)
       bucket: conn.commit() call count >= city_count for a single metric spec.
@@ -1765,7 +1765,7 @@ test_metadata:
     source_under_test:
       - config/cities.json
       - src/config.py
-      - scripts/rebuild_calibration_pairs_v2.py
+      - scripts/rebuild_calibration_pairs.py
       - scripts/refit_platt.py
       - src/data/calibration_transfer_policy.py
     law_dependencies:

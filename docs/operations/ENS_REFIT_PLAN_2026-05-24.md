@@ -19,7 +19,7 @@ NO live DB writes, NO daemon restart, NO `bias_correction_enabled` flip.
 - `src/calibration/store.py`: thread `error_model_family` through
   `add_calibration_pair_v2` (graceful degrade if column absent) and concat into
   `save_platt_model_v2` model_key.
-- `scripts/rebuild_calibration_pairs_v2.py` + `_rebuild_calibration_pairs_v2_parallel.py`:
+- `scripts/rebuild_calibration_pairs.py` + `_rebuild_calibration_pairs_parallel.py`:
   `--error-model full_transport_v1` CLI flag. When set, fit a bucket
   `PredictiveErrorModel` per (city, season, metric) via
   `fit_city_predictive_error`, convert effective_bias_c / total_residual_sd_c to

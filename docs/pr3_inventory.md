@@ -103,7 +103,7 @@ Top 40 files by total forbidden-token-line count. Columns: occurrences of `versi
 | tests/test_truth_surface_health.py | 66 | 180 | 95 | 0 | 0 | 43 | 0 | 384 |
 | src/state/db.py | 98 | 124 | 103 | 30 | 1 | 26 | 0 | 382 |
 | scripts/verify_truth_surfaces.py | 63 | 173 | 47 | 0 | 0 | 43 | 0 | 326 |
-| scripts/rebuild_calibration_pairs_v2.py | 107 | 109 | 11 | 2 | 0 | 92 | 0 | 321 |
+| scripts/rebuild_calibration_pairs.py | 107 | 109 | 11 | 2 | 0 | 92 | 0 | 321 |
 | tests/test_phase5_gate_d_low_purity.py | 80 | 90 | 4 | 3 | 0 | 77 | 0 | 254 |
 | architecture/topology.yaml | 22 | 159 | 57 | 1 | 0 | 1 | 0 | 240 |
 | src/calibration/manager.py | 75 | 41 | 46 | 0 | 0 | 74 | 0 | 236 |

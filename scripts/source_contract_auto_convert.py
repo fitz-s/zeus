@@ -437,7 +437,7 @@ def _workspace_locator(
             },
             {
                 "id": "calibration_pairs_rebuild",
-                "path": "scripts/rebuild_calibration_pairs_v2.py",
+                "path": "scripts/rebuild_calibration_pairs.py",
                 "look_for": ["rebuild_all_v2", "--city", "--dry-run", "--no-dry-run", "--force"],
                 "purpose": "calibration pair rebuild helper",
                 "access": "run_dry_only_from_allowed_command",
@@ -930,7 +930,7 @@ def _command_plan(city: str, metrics: list[str], date_scope: dict[str, Any]) -> 
             "mode": "dry_run",
             "command": [
                 python_bin,
-                "scripts/rebuild_calibration_pairs_v2.py",
+                "scripts/rebuild_calibration_pairs.py",
                 "--dry-run",
                 "--city",
                 city,
@@ -952,7 +952,7 @@ def _command_plan(city: str, metrics: list[str], date_scope: dict[str, Any]) -> 
             "mode": "apply",
             "command": [
                 python_bin,
-                "scripts/rebuild_calibration_pairs_v2.py",
+                "scripts/rebuild_calibration_pairs.py",
                 "--no-dry-run",
                 "--force",
                 "--city",

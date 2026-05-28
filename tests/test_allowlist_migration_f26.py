@@ -183,7 +183,7 @@ F26_CLEANUP_PROMOTED: frozenset[str] = frozenset(
         "scripts/nuke_rebuild_projections.py",
         "scripts/obs_v2_live_tick.py",
         "scripts/rebuild_calibration_pairs_canonical.py",
-        "scripts/rebuild_calibration_pairs_v2.py",
+        "scripts/rebuild_calibration_pairs.py",
         "scripts/rebuild_settlements.py",
         "scripts/refit_platt.py",
         # operator_invoked migration scripts (already_guarded)

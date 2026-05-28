@@ -234,7 +234,7 @@ def backfill_v2(
         # MAJOR-2 fix: belt-and-suspenders contract gate before any UPDATE.
         # Even though the SELECT filters authority='VERIFIED' + training_allowed=1,
         # the explicit data_version allowlist is the contract this script inherits
-        # from rebuild_calibration_pairs_v2's P5-era pattern.
+        # from rebuild_calibration_pairs's P5-era pattern.
         assert_data_version_allowed(data_version, context="backfill_tigge_snapshot_p_raw_v2")
 
         bins = typed_bins_for_city_date_metric(

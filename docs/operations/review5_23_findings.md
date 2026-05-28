@@ -105,7 +105,7 @@ Raw `observed_high` float compared to integer settlement bin boundaries. Settlem
 ### P1-3 — P_raw Monte Carlo is not exactly replayable because RNG seed is implicit
 
 **Severity:** P1 statistical/replay blocker
-**Files:** src/signal/ensemble_signal.py, src/engine/evaluator.py, scripts/rebuild_calibration_pairs_v2.py
+**Files:** src/signal/ensemble_signal.py, src/engine/evaluator.py, scripts/rebuild_calibration_pairs.py
 **Money path:** forecast signal → calibration → edge → sizing → learning/replay
 
 `p_raw_vector_from_maxes()` uses `np.random.default_rng()` with no seed. Runtime high MC count reduces variance but does not make decisions replayable. Near-threshold decisions can flip across evaluations.

@@ -45,7 +45,7 @@ def main() -> int:
     args = ap.parse_args()
 
     from scripts.refit_platt import refit_all_v2  # noqa: PLC0415
-    from scripts.rebuild_calibration_pairs_v2 import (  # noqa: PLC0415
+    from scripts.rebuild_calibration_pairs import (  # noqa: PLC0415
         _resolve_isolated_calibration_write_db_path,
     )
     from src.state.db import init_schema  # noqa: PLC0415

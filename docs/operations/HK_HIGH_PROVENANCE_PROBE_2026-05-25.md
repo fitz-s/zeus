@@ -192,7 +192,7 @@ bad prior is overridden; for HK it is not.
 
 `src/calibration/ens_error_model.py:216-220` — `fit_city_predictive_error` calls
 `fit_bucket(tig, [], ...)` for the prior, then builds a `LiveResidual` only if
-`len(opd) >= min_live_n` (min_live_n=5 at `scripts/rebuild_calibration_pairs_v2.py:177`).
+`len(opd) >= min_live_n` (min_live_n=5 at `scripts/rebuild_calibration_pairs.py:177`).
 
 **For HK HIGH:**
 - OpenData (`ecmwf_opendata_mx2t3_local_calendar_day_max_v1`) date range: 2026-05-06 onward.

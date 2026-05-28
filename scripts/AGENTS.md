@@ -68,7 +68,7 @@ Only list durable entry points here; use the manifest for the full catalog.
 | `check_identity_column_defaults.py` | Enforcement check for identity-column DEFAULT violations per INV-14 and SYNTHESIS K-D (created 2026-05-01) |
 | `check_invariant_test_citations.py` | Enforcement scan verifying all test files carry invariant citation headers per SYNTHESIS K-A two-ring rule (created 2026-05-01) |
 | `migrate_observations_k1.py` | Repair script: migrates live state/zeus-world.db::observations from legacy single-atom to K1 dual-atom shape (dry-run/apply; created 2026-05-01) |
-| `_rebuild_calibration_pairs_v2_parallel.py` | Compute-in-workers + write-in-main parallel orchestrator for rebuild_calibration_pairs_v2; imported lazily when --workers>1 (created 2026-05-11) |
+| `_rebuild_calibration_pairs_parallel.py` | Compute-in-workers + write-in-main parallel orchestrator for rebuild_calibration_pairs; imported lazily when --workers>1 (created 2026-05-11) |
 | `archive_may_batch_2026-05-16.py` | One-off archival batch script for May 2026 packet cleanup (created 2026-05-16; delete_by: 2026-06-16) |
 | `archive_migration_2026-05-16.py` | One-off archive migration script for 2026-05-16 packet reorganization (created 2026-05-16; delete_by: 2026-06-16) |
 | `authority_inventory_v2.py` | Authority inventory v2 per task_2026-05-15_p9_authority_inventory_v2 SCAFFOLD; diagnostic report writer (created 2026-05-15) |

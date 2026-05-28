@@ -22,7 +22,7 @@ If the session compacts and monitors die, restart them from this doc. They are s
 
 **Recovery recipe to complete Phase 1**:
 1. Pause `com.zeus.data-ingest` daemon.
-2. Run `scripts/rebuild_calibration_pairs_v2.py` with NO `--city` filter (all 49 cities). Date range 2026-02-01..2026-05-02. Should produce ~3.5M cycle='12' pairs (49 cities × ~70k each).
+2. Run `scripts/rebuild_calibration_pairs.py` with NO `--city` filter (all 49 cities). Date range 2026-02-01..2026-05-02. Should produce ~3.5M cycle='12' pairs (49 cities × ~70k each).
 3. Restart daemon.
 4. Verify pair distribution: `SELECT cycle, COUNT(DISTINCT city), COUNT(*) FROM calibration_pairs_v2 GROUP BY cycle;` — expect cycle='12' city count = 49.
 5. Investigate refit discovery: read `scripts/refit_platt.py:240-260` for any WHERE filter excluding cycle='12'. Fix if present.

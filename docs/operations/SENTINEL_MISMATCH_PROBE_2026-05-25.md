@@ -6,7 +6,7 @@
 
 ## The Two Sides of the Contract
 
-### WRITER side — `scripts/rebuild_calibration_pairs_v2.py`
+### WRITER side — `scripts/rebuild_calibration_pairs.py`
 
 `_rebuild_sentinel_payload()` at L438-474 emits the following JSON shape
 when a full-scope rebuild finishes:
@@ -213,8 +213,8 @@ represented in the final fallback check at L233-237.
 
 | File | Role |
 |------|------|
-| `scripts/rebuild_calibration_pairs_v2.py` L438-474 | Writer: emits sentinel payload with `status`, `completed`, `scope.data_version=null` |
-| `scripts/rebuild_calibration_pairs_v2.py` L244-272 | Writer: encodes `null` data_version as `"all"` in the key |
+| `scripts/rebuild_calibration_pairs.py` L438-474 | Writer: emits sentinel payload with `status`, `completed`, `scope.data_version=null` |
+| `scripts/rebuild_calibration_pairs.py` L244-272 | Writer: encodes `null` data_version as `"all"` in the key |
 | `scripts/promote_platt.py` L221-228 | Reader: `full_complete` filter — the bug is here |
 | `scripts/promote_platt.py` L196-202 | Reader: `relevant` filter — correctly accepts `"all"` |
 | `/private/tmp/ens_refit/full.db` zeus_meta | Ground truth: two sentinels, both `data_version=all` in key, `null` in payload scope |

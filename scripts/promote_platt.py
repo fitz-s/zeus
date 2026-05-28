@@ -2,7 +2,7 @@
 # Last reused or audited: 2026-05-12
 # Authority basis: K1 workload-class DB split; PR #112 Option (c) split.
 # STAGE_DB -> production zeus-world.db promotion of platt_models_v2
-# artifacts produced by scripts/refit_platt.py / scripts/rebuild_calibration_pairs_v2.py
+# artifacts produced by scripts/refit_platt.py / scripts/rebuild_calibration_pairs.py
 # (which co-emits Platt models). All mutations are gated by --commit;
 # default behavior is dry-run with full backup + rollback semantics.
 """Promote platt_models_v2 artifacts from a STAGE_DB to production zeus-world.db.

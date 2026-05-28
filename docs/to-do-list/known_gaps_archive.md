@@ -941,8 +941,8 @@ carry it in Zeus `known_gaps.md`.
 
 ### [CLOSED — 2026-05-08] T1E rebuilt calibration scope now carries an exact completion sentinel
 
-**Original active heading:** `T1E C-3 — rebuild_calibration_pairs_v2 partial-commit semantic (LOW)`.
-**Original problem:** `scripts/rebuild_calibration_pairs_v2.py` commits each
+**Original active heading:** `T1E C-3 — rebuild_calibration_pairs partial-commit semantic (LOW)`.
+**Original problem:** `scripts/rebuild_calibration_pairs.py` commits each
 `(city, metric)` bucket independently. An interrupted rebuild could leave
 already-committed buckets beside missing buckets, and a downstream opener had no
 authoritative exact-scope marker distinguishing complete from partial rebuilt DB
@@ -967,7 +967,7 @@ existing `validated_calibration_transfers` row into `LIVE_ELIGIBLE` unless the
 target cohort's `calibration_pairs_v2` source is still covered by a complete
 rebuild sentinel. Any overlapping in-progress sentinel fails closed so an old
 covering complete row cannot mask a current partial rebuild.
-**Evidence:** `scripts/rebuild_calibration_pairs_v2.py` sentinel helpers,
+**Evidence:** `scripts/rebuild_calibration_pairs.py` sentinel helpers,
 `scripts/refit_platt.py` live-refit gate, and
 `tests/test_rebuild_live_sentinel.py` relationship tests prove
 in-progress-before-bucket, no complete marker after validation failure,

@@ -206,7 +206,7 @@ def _assert_rebuild_complete_for_refit_source(
 ) -> dict[str, object]:
     """Fail closed before live refit can promote partial rebuilt pairs."""
 
-    from scripts.rebuild_calibration_pairs_v2 import (
+    from scripts.rebuild_calibration_pairs import (
         assert_no_overlapping_incomplete_rebuild_sentinel,
         assert_rebuild_complete_sentinel,
     )

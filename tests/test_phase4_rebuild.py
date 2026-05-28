@@ -379,7 +379,7 @@ class TestRebuildV2PipelineIntegration:
         import sys
         from pathlib import Path
         sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
-        from rebuild_calibration_pairs_v2 import METRIC_SPECS, rebuild_v2
+        from rebuild_calibration_pairs import METRIC_SPECS, rebuild_v2
 
         conn = self._make_conn()
         self._insert_snapshot(conn)
