@@ -1832,6 +1832,23 @@ files:
     why: Represents selection family for statistical testing.
     downstream:
     - src/engine/evaluator.py
+  src/strategy/exit_observation_constraint.py:
+    zone: K3_extension
+    authority_role: observation_constraint_contract
+    why: D1 pure-math layer — SettlementProgressConstraint dataclass encodes per-bin feasibility from live observation authority for the family exit optimizer.
+    downstream:
+    - src/strategy/exit_constrained_posterior.py
+    - src/strategy/exit_family_optimizer.py
+  src/strategy/exit_constrained_posterior.py:
+    zone: K3_extension
+    authority_role: exit_constrained_posterior_contract
+    why: D2 pure-math layer — projects p_family through D1 feasibility mask; renormalizes on both deterministic and advisory paths so p_obs is always a probability vector.
+    downstream:
+    - src/strategy/exit_family_optimizer.py
+  src/strategy/exit_family_optimizer.py:
+    zone: K3_extension
+    authority_role: exit_family_optimizer
+    why: D3 pure-math layer — computes family-level exit decisions (SELL_FULL / HOLD / HOLD_NO_BID) over typed leg inputs using observation-constrained posterior; D3 part 2 (cycle_runtime wiring) deferred to integration PR.
   src/backtest/__init__.py:
     zone: package_marker
     authority_role: package_marker

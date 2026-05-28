@@ -84,6 +84,10 @@ Prefer these over prose when they exist:
 | `scripts/ci/` | CI-only enforcement helpers for semantic diff classification, invariant coverage, and test quality gates |
 | `tests/money_path/` | Deterministic money-path relationship/model tests selected by semantic CI |
 | `architecture/agent_pr_discipline_2026_05_09.md` | Agent PR discipline: 300-LOC threshold, auto-reviewer cost economics, author detection, bypass protocol |
+| `architecture/exit_strategy_audit_2026_05_27.md` | Pre-merge audit of D1+D2+D3 exit-strategy pure-math layer; graded findings A1..A3 (2026-05-27) |
+| `architecture/exit_strategy_integration_plan_2026_05_27.md` | Integration plan for D3 part 2 — cycle_runtime wiring deferred to follow-up PR (2026-05-27) |
+| `architecture/pr_exit_strategy_premerge_critic_2026_05_27.md` | Pre-merge critic pass 1 findings for PR #353 (2026-05-27) |
+| `architecture/pr_exit_strategy_premerge_critic_pass2_2026_05_27.md` | Pre-merge critic pass 2 findings for PR #353; direction-flip SEV-1 catch (2026-05-27) |
 
 ## Do not default-read
 

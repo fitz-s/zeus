@@ -563,6 +563,11 @@ test_trust_policy:
     tests/test_wave3_entry_quote_evidence.py: {created: "2026-05-27", last_used: "2026-05-27"}
     tests/test_wave4_family_portfolio_activation.py: {created: "2026-05-27", last_used: "2026-05-27"}
     tests/test_wave6_unified_uncertainty_budget.py: {created: "2026-05-27", last_used: "2026-05-27"}
+    # PR #353 exit-strategy D1+D2+D3 pure-math layer tests (2026-05-27).
+    tests/test_exit_observation_constraint.py: {created: "2026-05-27", last_used: "2026-05-27"}
+    tests/test_exit_constrained_posterior.py: {created: "2026-05-27", last_used: "2026-05-27"}
+    tests/test_exit_family_optimizer.py: {created: "2026-05-27", last_used: "2026-05-27"}
+    tests/test_exit_strategy_relationship.py: {created: "2026-05-27", last_used: "2026-05-27"}
 
 categories:
   core_law_antibody:
