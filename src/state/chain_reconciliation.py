@@ -1117,6 +1117,14 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
             corrected.chain_verified_at = now
             corrected.condition_id = corrected.condition_id or chain.condition_id
             _size_mismatch_eligible = getattr(pos, "corrected_executable_economics_eligible", False)
+            # F1 (PR1 critic in-spirit): chain economics always populate chain_*
+            # fields so VenuePositionObservedEcon is current regardless of whether
+            # the entry/fill fields are also updated.  Entry/fill mutation is
+            # controlled by the existing _size_mismatch_eligible opt-in gate.
+            if chain.avg_price > 0:
+                corrected.chain_avg_price = chain.avg_price
+            if chain.cost > 0:
+                corrected.chain_cost_basis_usd = chain.cost
             if chain.avg_price > 0:
                 if not _size_mismatch_eligible:
                     corrected.entry_price = chain.avg_price
@@ -1192,6 +1200,8 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
                     stats["updated"] += 1
             pos.chain_state = corrected.chain_state
             pos.chain_shares = corrected.chain_shares
+            pos.chain_avg_price = corrected.chain_avg_price
+            pos.chain_cost_basis_usd = corrected.chain_cost_basis_usd
             pos.chain_verified_at = corrected.chain_verified_at
             pos.condition_id = corrected.condition_id
             pos.entry_price = corrected.entry_price
