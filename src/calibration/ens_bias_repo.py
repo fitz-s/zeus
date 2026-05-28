@@ -390,6 +390,7 @@ def read_bias_model(
     error_model_family: str | None = None,
     require_gate_set_hash: str | None = None,
     target_month: int | None = None,
+    require_coverage_months: bool = False,
     authority: str = "VERIFIED",
 ) -> sqlite3.Row | None:
     """Read a bias row. ``live_data_version`` is REQUIRED — there is no
@@ -410,16 +411,22 @@ def read_bias_model(
         structural fix for the pre-gate-transport-delta contamination — it replaces
         version-suffix family renames; the family name stays stable and the gate-set
         hash carries the probability-domain identity.
-      * ``target_month``: month-scope guard (COVERAGE_MISLABELED). When supplied:
-          - malformed coverage_months (unparseable) → REJECT (fail closed);
-          - empty/NULL coverage_months → 'no declared scope' → row IS served (no-op);
-          - non-empty coverage_months → REJECT unless target_month ∈ covered set.
-        A season-labelled row whose fit window only covered one month cannot be
-        applied to a month it never trained on.
-    The gate_set_hash guard fails CLOSED (missing/NULL/old column → None). The
-    month guard is intentionally a no-op for rows with NO declared coverage (empty),
-    and fails closed only for malformed coverage — so legacy season-level rows
-    without coverage remain servable while corrupt coverage never re-enables a row.
+      * ``target_month`` / ``require_coverage_months``: month-scope guard
+        (COVERAGE_MISLABELED + Blocker E). ``require_coverage_months`` is auto-forced ON
+        whenever ``require_gate_set_hash`` is supplied (a canonical read).
+          - CANONICAL read (hash required, or require_coverage_months=True): the row MUST
+            declare non-empty parseable coverage. Missing column / NULL / empty / malformed
+            coverage → REJECT (fail closed). If target_month is given, also REJECT unless
+            target_month ∈ covered set. A canonical row with no declared scope is untrusted.
+          - LEGACY read (no hash required): malformed coverage → REJECT; empty/NULL coverage
+            → 'no declared scope' → served (no-op); non-empty → REJECT unless target_month ∈
+            covered. Keeps pre-antibody season rows servable.
+        A season-labelled row whose fit window only covered one month cannot be applied to a
+        month it never trained on; a canonical row that declares no scope at all cannot be
+        applied anywhere.
+    The gate_set_hash guard fails CLOSED (missing/NULL/old column → None). For canonical
+    rows the coverage guard ALSO fails closed on empty/missing coverage; only legacy
+    (no-hash) reads keep the lenient no-op-on-empty behaviour.
     """
     if not live_data_version:
         raise ValueError(
@@ -458,11 +465,25 @@ def read_bias_model(
                 return None
             if (row["gate_set_hash"] or "") != require_gate_set_hash:
                 return None
-        # Antibody 2: month-scope guard.
-        #  * malformed coverage (None) → fail CLOSED (reject).
-        #  * empty coverage (set()) → no declared scope → guard is a no-op (served).
-        #  * non-empty coverage → reject unless target_month is in the covered set.
-        if target_month is not None and "coverage_months" in existing:
+        # Antibody 2: month-scope guard + Blocker E (mandatory coverage for canonical rows).
+        # require_coverage_months is auto-forced ON whenever a gate_set_hash is required:
+        # a CANONICAL row (new gate set) that declares no month scope cannot be trusted to
+        # apply to any month, so empty/NULL/missing coverage fails CLOSED — it can no longer
+        # be silently served as 'no declared scope'. Legacy reads (no hash required) keep the
+        # lenient behaviour so pre-antibody season rows without coverage remain servable.
+        _require_cov = require_coverage_months or (require_gate_set_hash is not None)
+        if _require_cov:
+            if "coverage_months" not in existing:
+                return None  # canonical read on a schema without the column → fail closed
+            covered = _parse_coverage_months(row["coverage_months"])
+            if not covered:  # None (malformed) OR empty set → canonical row must declare scope
+                return None
+            if target_month is not None and int(target_month) not in covered:
+                return None
+        elif target_month is not None and "coverage_months" in existing:
+            #  * malformed coverage (None) → fail CLOSED (reject).
+            #  * empty coverage (set()) → no declared scope → guard is a no-op (served).
+            #  * non-empty coverage → reject unless target_month is in the covered set.
             covered = _parse_coverage_months(row["coverage_months"])
             if covered is None:
                 return None  # malformed non-empty coverage → fail closed
@@ -587,3 +608,30 @@ def load_paired_delta(
     f50 = _forecast_means(conn, city, prior_data_version, metric, lead_max, season_months,
                           settled_before, _LEGACY_NULL_CONTRIBUTOR_SQL, require_verified=False)
     return [f25[d] - f50[d] for d in (set(f25) & set(f50))]
+
+
+def paired_delta_coverage(
+    conn,
+    *,
+    city: str,
+    live_data_version: str,
+    prior_data_version: str,
+    metric: str = "high",
+    lead_max: float = 48.0,
+    season_months: tuple[int, ...] | None = None,
+    settled_before: str | None = None,
+) -> tuple[int, set[int]]:
+    """(n_paired_dates, {months}) for the EXACT dates load_paired_delta pairs on.
+
+    Reuses the same _forecast_means primitives as load_paired_delta (set(f25) & set(f50))
+    so paired coverage cannot drift from the transport delta the fit actually used. The
+    count drives transport-active (n >= MIN_PAIRED_N); the months feed the effective-coverage
+    intersection (SD1 / Blocker D): if transport is active, a row must not be applied to a
+    target month its paired evidence never covered.
+    """
+    f25 = _forecast_means(conn, city, live_data_version, metric, lead_max, season_months,
+                          settled_before, _POSITIVE_CONTRIBUTOR_SQL, require_verified=True)
+    f50 = _forecast_means(conn, city, prior_data_version, metric, lead_max, season_months,
+                          settled_before, _LEGACY_NULL_CONTRIBUTOR_SQL, require_verified=False)
+    paired_dates = set(f25) & set(f50)
+    return len(paired_dates), {int(str(d)[5:7]) for d in paired_dates}

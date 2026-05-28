@@ -118,8 +118,10 @@ def test_month_inside_coverage_is_served(conn):
     assert row is not None
 
 
-def test_empty_coverage_is_noop_guard(conn):
-    # Empty coverage_months = no declared scope → month guard is a no-op (row served).
+def test_canonical_read_rejects_empty_coverage(conn):
+    # SD1 / Blocker E: a CANONICAL read (require_gate_set_hash supplied auto-forces
+    # require_coverage_months) must REJECT a row that declares no month scope. A
+    # canonical row with empty coverage cannot be trusted to apply to any month.
     cur = current_gate_set_hash()
     _write(conn, gate_set_hash=cur, coverage_months="")
     row = read_bias_model(
@@ -127,7 +129,19 @@ def test_empty_coverage_is_noop_guard(conn):
         live_data_version=LIVE_DV, error_model_family="full_transport_v1",
         require_gate_set_hash=cur, target_month=7,
     )
-    assert row is not None, "empty coverage must not block (no declared scope)"
+    assert row is None, "canonical read must fail closed on empty coverage (Blocker E)"
+
+
+def test_legacy_read_serves_empty_coverage(conn):
+    # Backward-compat: a LEGACY read (no gate-hash requirement) keeps the lenient
+    # no-op-on-empty behaviour so pre-antibody season rows without coverage stay servable.
+    _write(conn, gate_set_hash="anything", coverage_months="")
+    row = read_bias_model(
+        conn, city=CITY, season=SEASON, metric=METRIC,
+        live_data_version=LIVE_DV, error_model_family="full_transport_v1",
+        target_month=7,
+    )
+    assert row is not None, "legacy read (no hash) must still serve empty-coverage rows"
 
 
 def test_backward_compat_no_hash_required_serves_row(conn):

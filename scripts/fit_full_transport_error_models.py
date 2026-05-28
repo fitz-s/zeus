@@ -142,24 +142,33 @@ def _discover_cities(conn: sqlite3.Connection) -> list[str]:
     return [r[0] for r in rows]
 
 
-def _observed_coverage_months(
+def _coverage_months_set(
     conn: sqlite3.Connection,
     *,
     city: str,
     data_version: str,
     metric: str,
     season_months: tuple[int, ...],
-    settled_before: str,
-) -> str:
-    """CSV of distinct target-date months actually present in the prior fit slice.
+    settled_before: str | None,
+    contributor_policy: str,
+) -> set[int] | None:
+    """Set of distinct target-date months present in ONE source's settled fit slice.
 
-    Mirrors the contributor / lead / cutoff filters used by load_bucket_residuals
-    (legacy_tigge_null_passthrough population) so the recorded coverage matches the
-    data the fit actually saw. Returns e.g. '3,4,5' or '' if none. Used to stamp
-    coverage_months on the row for the reader's month-scope guard.
+    Mirrors load_bucket_residuals' filters so recorded coverage matches the data the fit
+    actually saw. ``contributor_policy`` selects the extrema filter:
+      * legacy_tigge_null_passthrough → NULL contributes_to_target_extrema allowed (prior);
+      * full_contributor_only        → only contributes_to_target_extrema=1 (live).
+    Returns the month set, or None on a SQL error (caller fails CLOSED → stamps 'invalid').
     """
     if not season_months:
-        return ""
+        return set()
+    if contributor_policy == "legacy_tigge_null_passthrough":
+        contrib_sql = ("(e.contributes_to_target_extrema IS NULL "
+                       "OR e.contributes_to_target_extrema = 1)")
+    elif contributor_policy == "full_contributor_only":
+        contrib_sql = "e.contributes_to_target_extrema = 1"
+    else:
+        raise ValueError(f"unknown contributor_policy: {contributor_policy!r}")
     ph = ",".join("?" for _ in season_months)
     try:
         rows = conn.execute(
@@ -171,24 +180,88 @@ def _observed_coverage_months(
              AND s.temperature_metric = e.temperature_metric
             WHERE e.city = ? AND e.data_version = ? AND e.temperature_metric = ?
               AND e.lead_hours <= 48
-              AND (e.contributes_to_target_extrema IS NULL
-                   OR e.contributes_to_target_extrema = 1)
+              AND {contrib_sql}
               AND COALESCE(e.boundary_ambiguous, 0) = 0
               AND (? IS NULL OR e.target_date < ?)
               AND CAST(SUBSTR(e.target_date, 6, 2) AS INTEGER) IN ({ph})
-            ORDER BY m
             """,
             [city, data_version, metric, settled_before, settled_before, *season_months],
         ).fetchall()
-        return ",".join(str(int(r[0])) for r in rows)
+        return {int(r[0]) for r in rows}
     except sqlite3.Error as exc:
-        # Do NOT return "" — an empty coverage cell reads as 'no declared scope',
-        # which would silently DISABLE the reader's month-scope guard for this row.
-        # Stamp a malformed sentinel so read_bias_model fails CLOSED on it (the row
-        # is never served until re-fit with valid coverage). Surface the error.
-        logger.warning("coverage-months probe failed for %s/%s/%s: %s — stamping 'invalid'",
-                       city, metric, season_months, exc)
+        logger.warning("coverage-months probe failed for %s/%s/%s (%s): %s",
+                       city, metric, season_months, contributor_policy, exc)
+        return None
+
+
+def _intersect_active_coverage(
+    prior_cov: set[int],
+    live_cov: set[int] | None,
+    paired_cov: set[int] | None,
+    *,
+    live_active: bool,
+    paired_active: bool,
+) -> set[int]:
+    """Effective coverage = prior ∩ (live if live_active) ∩ (paired if paired_active).
+
+    Pure set logic (SD1 / Blocker D + Stat 4): the months where the row's posterior actually
+    has support from EVERY source that influenced it. A source that did NOT influence the fit
+    (inactive) imposes no constraint. Activeness comes from FIT-TIME counts, never the
+    persisted weight_live (which is hardcoded 0.0 and lies about live participation).
+    """
+    eff = set(prior_cov)
+    if live_active and live_cov is not None:
+        eff &= live_cov
+    if paired_active and paired_cov is not None:
+        eff &= paired_cov
+    return eff
+
+
+def _effective_coverage_months(
+    conn: sqlite3.Connection,
+    *,
+    city: str,
+    metric: str,
+    season_months: tuple[int, ...],
+    prior_dv: str,
+    live_dv: str,
+    settled_before: str | None,
+    n_opd: int,
+    min_live_n: int,
+    n_paired: int,
+    min_paired_n: int,
+    paired_cov: set[int] | None,
+) -> str:
+    """CSV of effective-coverage months (intersection of ACTIVE sources), or 'invalid'.
+
+    Stamped onto coverage_months for the reader's month-scope guard. 'invalid' (on any SQL
+    error) makes the reader fail CLOSED until the row is re-fit. An empty effective set is
+    returned as '' — a canonical reader (require_coverage_months, auto-forced under
+    require_gate_set_hash) then treats a row with no covered month as unservable (Blocker E).
+    """
+    prior_cov = _coverage_months_set(
+        conn, city=city, data_version=prior_dv, metric=metric,
+        season_months=season_months, settled_before=settled_before,
+        contributor_policy="legacy_tigge_null_passthrough",
+    )
+    if prior_cov is None:
         return "invalid"
+    live_active = n_opd >= min_live_n
+    live_cov: set[int] | None = None
+    if live_active:
+        live_cov = _coverage_months_set(
+            conn, city=city, data_version=live_dv, metric=metric,
+            season_months=season_months, settled_before=settled_before,
+            contributor_policy="full_contributor_only",
+        )
+        if live_cov is None:
+            return "invalid"
+    paired_active = n_paired >= min_paired_n
+    eff = _intersect_active_coverage(
+        prior_cov, live_cov, paired_cov,
+        live_active=live_active, paired_active=paired_active,
+    )
+    return ",".join(str(m) for m in sorted(eff))
 
 
 def _apply_canonical_migration(conn: sqlite3.Connection) -> None:
@@ -230,9 +303,11 @@ def fit_all(
     )
     from src.calibration.ens_error_model import (  # noqa: PLC0415
         fit_city_predictive_error, current_gate_set_hash, MIN_PRIOR_N,
-        conservative_identity_model,
+        MIN_PAIRED_N, DEFAULT_MIN_LIVE_N, conservative_identity_model,
     )
-    from src.calibration.ens_bias_repo import load_bucket_residuals  # noqa: PLC0415
+    from src.calibration.ens_bias_repo import (  # noqa: PLC0415
+        load_bucket_residuals, paired_delta_coverage,
+    )
 
     if not dry_run:
         # Both schema helpers write to DB — must not run on the read-only dry-run connection.
@@ -308,13 +383,25 @@ def fit_all(
                         f"|full_transport_v1|{_live_dv}"
                     )
 
-                    # Coverage months actually present in the prior fit window. A
-                    # season-labelled row that only covered one month must declare it
-                    # so the reader's month-scope guard can reject misapplication
-                    # (COVERAGE_MISLABELED antibody, 2026-05-28).
-                    coverage_months_csv = _observed_coverage_months(
-                        conn, city=city, data_version=_prior_dv, metric=metric,
-                        season_months=season_months, settled_before=today_str,
+                    # Effective coverage = months where the posterior has support from
+                    # EVERY ACTIVE source (SD1 / Blocker D + Stat 4). prior is always active;
+                    # live counts only when n_opd >= DEFAULT_MIN_LIVE_N; paired/transport only
+                    # when n_paired >= MIN_PAIRED_N. settled_before=None matches the fit's
+                    # internal loaders exactly so coverage/activeness cannot drift from the
+                    # data fit_city_predictive_error actually used. A season-labelled row whose
+                    # live/paired evidence covered only one month must declare it so the
+                    # reader's month-scope guard rejects misapplication (COVERAGE_MISLABELED).
+                    n_paired, paired_cov = paired_delta_coverage(
+                        conn, city=city, live_data_version=_live_dv,
+                        prior_data_version=_prior_dv, metric=metric,
+                        season_months=season_months, settled_before=None,
+                    )
+                    coverage_months_csv = _effective_coverage_months(
+                        conn, city=city, metric=metric, season_months=season_months,
+                        prior_dv=_prior_dv, live_dv=_live_dv, settled_before=None,
+                        n_opd=len(opd_residuals), min_live_n=DEFAULT_MIN_LIVE_N,
+                        n_paired=n_paired, min_paired_n=MIN_PAIRED_N,
+                        paired_cov=paired_cov,
                     )
 
                     # C-handler: insufficient prior cannot support a confident learned
