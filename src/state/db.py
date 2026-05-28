@@ -8622,6 +8622,12 @@ def query_strategy_health_snapshot(
 
 
 def query_position_current_status_view(conn: sqlite3.Connection | None) -> dict:
+    # PR D0 (Finding D0, Part-2 audit, 2026-05-27): use has_verified_trade_fill
+    # for the unverified_entries FILL-ECONOMICS count instead of entry_fill_verified.
+    # entry_fill_verified is now False for balance-only rescue positions (the rescue
+    # branch no longer sets it True), so the helper correctly discriminates.
+    from src.state.portfolio import has_verified_trade_fill as _has_verified_trade_fill  # noqa: PLC0415
+
     if conn is None:
         return {
             "status": "skipped_no_connection",
@@ -8657,7 +8663,8 @@ def query_position_current_status_view(conn: sqlite3.Connection | None) -> dict:
                size_usd, shares, cost_basis_usd, entry_price,
                strategy_key, chain_state, order_status,
                decision_snapshot_id, last_monitor_market_price,
-               token_id, no_token_id, condition_id
+               token_id, no_token_id, condition_id,
+               fill_authority
         FROM position_current
         ORDER BY updated_at DESC, position_id
         """
@@ -8742,7 +8749,12 @@ def query_position_current_status_view(conn: sqlite3.Connection | None) -> dict:
         exit_state_counts[exit_state] = exit_state_counts.get(exit_state, 0) + 1
         total_exposure_usd += float(fill_economics["effective_cost_basis_usd"] or 0.0)
         total_unrealized_pnl += unrealized_pnl
-        if not entry_fill_verified:
+        # PR D0: count unverified entries by fill_authority from position_current,
+        # not by entry_fill_verified (which is now False for balance-only rescue).
+        # A row lacking fill_authority (legacy NULL) falls through to the else-branch
+        # of _has_verified_trade_fill, which returns False — fail-closed.
+        row_fill_authority = str(row["fill_authority"] or "").strip()
+        if not _has_verified_trade_fill({"fill_authority": row_fill_authority}):
             unverified_entries += 1
         if phase == "day0_window":
             day0_positions += 1

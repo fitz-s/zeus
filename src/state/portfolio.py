@@ -291,6 +291,62 @@ def is_training_eligible_position(pos: object) -> bool:
     return authority in TRAINING_ELIGIBLE_FILL_AUTHORITIES
 
 
+# PR D0 (Finding D0, Part-2 audit, 2026-05-27): split entry_fill_verified as rescue
+# authority into two orthogonal derivations from fill_authority.
+#
+#   has_verified_trade_fill(pos) — True iff a real venue trade fact confirmed the
+#     fill. Use this for fill-economics accuracy gates (learning rows, cost-basis
+#     trust, unverified-entry counts). False for balance-only recovery.
+#
+#   has_tradable_exposure(pos) — True iff the position carries real capital at risk
+#     that riskguard/exit EXPOSURE gates must manage. True for both trade-verified
+#     AND balance-only (venue_position_observed) fills. False for unsubmitted
+#     or pending entries with no venue confirmation at all.
+#
+# Both are pure derivations from fill_authority — NO new schema columns.
+# entry_fill_verified remains on the Position for normal fill path (fill_tracker.py)
+# but must NOT be relied on to distinguish the two categories above.
+
+
+def has_verified_trade_fill(pos: object) -> bool:
+    """Return True iff a venue trade fact confirmed this position's fill.
+
+    Used by fill-economics gates: unverified-entry counts, learning-row writers,
+    cost-basis trust logic. Returns False for balance-only recovery
+    (FILL_AUTHORITY_VENUE_POSITION_OBSERVED) and for any unconfirmed authority.
+
+    Accepts both Position objects (attribute access) and plain dicts
+    (key access) so callers in db.py can use it directly on fill_economics dicts.
+    """
+    if isinstance(pos, dict):
+        authority = str(pos.get("fill_authority", "") or "").strip()
+    else:
+        authority = str(getattr(pos, "fill_authority", "") or "").strip()
+    return authority in FILL_GRADE_FILL_AUTHORITIES
+
+
+def has_tradable_exposure(pos: object) -> bool:
+    """Return True iff this position carries real capital at risk.
+
+    EXPOSURE gates (riskguard, exit coordinator) must use this, not
+    entry_fill_verified, to decide whether to manage a position. True for:
+      - All FILL_GRADE_FILL_AUTHORITIES (trade-verified fills)
+      - FILL_AUTHORITY_VENUE_POSITION_OBSERVED (balance-only recovery — real
+        capital is held on-chain even though no trade fact was linked)
+
+    False for unconfirmed/pending entries (FILL_AUTHORITY_NONE,
+    FILL_AUTHORITY_OPTIMISTIC_SUBMITTED, legacy_unknown).
+
+    Accepts both Position objects (attribute access) and plain dicts
+    (key access) so callers in db.py can use it directly on fill_economics dicts.
+    """
+    if isinstance(pos, dict):
+        authority = str(pos.get("fill_authority", "") or "").strip()
+    else:
+        authority = str(getattr(pos, "fill_authority", "") or "").strip()
+    return authority in FILL_GRADE_FILL_AUTHORITIES or authority == FILL_AUTHORITY_VENUE_POSITION_OBSERVED
+
+
 def _finite_float_or_zero(value: object) -> float:
     try:
         result = float(value or 0.0)

@@ -932,24 +932,30 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
                 else:
                     _cnt_inc("cost_basis_chain_mutation_blocked_total", labels={"field": "shares"})
                     logger.warning("telemetry_counter event=cost_basis_chain_mutation_blocked_total field=shares")
-            rescued.entry_fill_verified = True
-            rescued.order_status = "filled"
-            # PR C3 (Finding 5, 2026-05-27): discriminate rescue authority by
-            # whether the position has a linked venue trade fact. With trade
-            # fact = full venue confirmation; without = degraded recovery
-            # against aggregate chain balance only. Downstream training gates
-            # (Finding 9, PR D) must reject venue_position_observed authority.
-            # Note: the gate at the top of this branch already skipped
-            # commanded pending entries that lack a fill fact, so a missing
-            # fill fact here means the position was pre-command-journal legacy.
+            # PR D0 (Finding D0, Part-2 audit, 2026-05-27): discriminate rescue
+            # authority by whether the position has a linked venue trade fact.
+            # Only set entry_fill_verified=True and order_status="filled" for
+            # trade-verified rescue (linked fill fact present). Balance-only
+            # recovery (fill_authority=FILL_AUTHORITY_VENUE_POSITION_OBSERVED)
+            # must NOT flip entry_fill_verified=True — downstream gates must use
+            # has_tradable_exposure() for EXPOSURE checks and
+            # has_verified_trade_fill() for fill-economics checks instead.
+            #
+            # PR C3 note: gate at top of this branch already skipped commanded
+            # pending entries that lack a fill fact, so a missing fill fact here
+            # means the position was pre-command-journal legacy.
             if _pending_entry_has_linked_fill_fact(pos):
                 rescued.fill_authority = FILL_AUTHORITY_VENUE_CONFIRMED_FULL
+                rescued.entry_fill_verified = True
+                rescued.order_status = "filled"
             else:
                 rescued.fill_authority = FILL_AUTHORITY_VENUE_POSITION_OBSERVED
+                # entry_fill_verified stays False for balance-only rescue.
+                # order_status stays at its current value (not forced to "filled").
                 logger.warning(
                     "RESCUE_DEGRADED_AUTHORITY: trade_id=%s token=%s — chain balance present "
                     "but no linked venue trade fact; setting fill_authority=%s. Position is "
-                    "tradable but NOT eligible for training/learning rows.",
+                    "tradable (has_tradable_exposure) but NOT fill-verified or training-eligible.",
                     getattr(rescued, "trade_id", "?"),
                     tid,
                     FILL_AUTHORITY_VENUE_POSITION_OBSERVED,

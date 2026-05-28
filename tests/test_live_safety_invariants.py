@@ -2197,8 +2197,11 @@ def test_chain_reconciliation_rescues_pending_tracked_fill(tmp_path):
     assert stats["rescued_pending"] == 1
     assert pos.state == "entered"
     assert pos.chain_state == "synced"
-    assert pos.entry_fill_verified is True
-    assert pos.order_status == "filled"
+    # PR D0 fix: balance-only rescue (no linked trade fact) must NOT set
+    # entry_fill_verified=True or order_status="filled". The position is
+    # tradable (has_tradable_exposure) but fill_authority=venue_position_observed.
+    assert pos.entry_fill_verified is False
+    assert pos.order_status == "pending"  # stays at input value for balance-only
     assert pos.entered_at != ""
     assert pos.shares == 25.0
     assert pos.entry_price == 0.44
@@ -2397,7 +2400,7 @@ def test_chain_reconciliation_rescue_updates_trade_lifecycle_row(tmp_path):
     assert details["from_state"] == "pending_tracked"
     assert details["to_state"] == "entered"
     assert details["entry_order_id"] == "buy_123"
-    assert details["entry_fill_verified"] is True  # back-compat — runtime bool still set
+    assert details["entry_fill_verified"] is False  # PR D0: balance-only rescue does NOT set entry_fill_verified=True
     assert details["chain_state"] == "synced"
     assert details["condition_id"] == "cond-1"
     assert details["recovery_authority"] == "balance_only"
