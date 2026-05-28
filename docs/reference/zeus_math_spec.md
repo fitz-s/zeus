@@ -950,9 +950,9 @@ i.e. the bootstrap-side widening is at least as large as the multiplicative shri
 
 **Activation gates.**
 1. `ZEUS_EVALUATOR_ENTRY_QUOTE_EVIDENCE_ENABLED=1` — evaluator constructs EntryQuoteEvidence per token and passes per-bin arrays to MarketAnalysis. σ_market enters `_bootstrap_bin`.
-2. `ZEUS_UNIFIED_UNCERTAINTY_BUDGET=1` — `dynamic_kelly_mult` skips ci_width haircuts; `_size_at_execution_price_boundary` skips EffectiveKellyContext multiplier. Single-count enforced.
+2. `ZEUS_UNIFIED_UNCERTAINTY_BUDGET=1` — the collapse is gated **per-edge, not merely globally** (PR #348 P0-1 + pre-merge SEV-1). For an edge to skip its soft haircuts BOTH must hold: (a) this global flag is ON, AND (b) `BinEdge.market_cost_uncertainty_applied == True` — i.e. σ_market actually entered THAT edge's bootstrap (EQE present with `cost_uncertainty > 0`). The per-edge boolean is forwarded as `market_uncertainty_in_lcb` to every haircut site: `dynamic_kelly_mult` (ci_width haircut — evaluator + replay) and `_size_at_execution_price_boundary` (EffectiveKellyContext multiplier — cycle_runtime W2/W3/W4, the live microstructure boundary). An edge whose EQE construction failed keeps its legacy soft haircuts even under the global flag, so EQE-missing edges never lose uncertainty. Single-count enforced per-edge.
 
-Flipping (2) without (1) is unsafe (removes multipliers without widening edge_LCB). The evaluator-wiring flag must lead. The plan doc §Wave 5.5 + §Wave 6 documents the staged promotion.
+Flipping (2) without (1) is unsafe (removes multipliers without widening edge_LCB). The evaluator-wiring flag must lead. The plan doc §Wave 5.5 + §Wave 6 documents the staged promotion. The seam wiring (every haircut call site forwards the per-edge gate) is pinned by the AST contract `tests/test_pr348_unified_budget_seam_wiring.py`.
 
 **Acceptance for §15.8 being closed:** R3 GREEN under flag ON; replay before/after on stored decision_log: average `size_unified / size_legacy ∈ [1.0, 1.2]` (compensating widening matches removed haircuts within tolerance); zero `MissingEffectiveContextError` raises under flag ON in shadow.
 
