@@ -391,7 +391,7 @@ def _backup_prod_tables(
     """
     backup_dir.mkdir(parents=True, exist_ok=True)
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    final = backup_dir / f"zeus-world.db.platt_models_v2_pre_promotion_{ts}.sql.gz"
+    final = backup_dir / f"zeus-world.db.platt_models_pre_promotion_{ts}.sql.gz"
     tmp = final.with_suffix(final.suffix + ".tmp")
 
     requested_dvs: list[str] = []
@@ -401,7 +401,7 @@ def _backup_prod_tables(
     conn = _ro_connect(prod_path)
     try:
         with gzip.open(tmp, "wt", encoding="utf-8") as gz:
-            gz.write("-- Zeus platt_models_v2 pre-promotion backup\n")
+            gz.write("-- Zeus platt_models pre-promotion backup\n")
             gz.write(f"-- Generated: {datetime.now(timezone.utc).isoformat()}\n")
             gz.write(f"-- Source PROD: {prod_path}\n")
             gz.write(f"-- Metrics: {','.join(metrics)}\n")
@@ -433,7 +433,7 @@ def _backup_prod_tables(
     # Verify gzip integrity
     with gzip.open(final, "rb") as fh:
         head = fh.read(64)
-    if not head.startswith(b"-- Zeus platt_models_v2 pre-promotion"):
+    if not head.startswith(b"-- Zeus platt_models pre-promotion"):
         raise RuntimeError(f"Backup integrity check failed: bad header in {final}")
     return final
 

@@ -70,7 +70,7 @@ def _save_one(
     )
     conn.execute(
         """
-        UPDATE platt_models_v2
+        UPDATE platt_models
         SET fitted_at = ?, recorded_at = ?, is_active = ?
         WHERE temperature_metric = 'high'
           AND cluster = ? AND season = 'DJF'
@@ -84,7 +84,7 @@ def _save_one(
 def _read_model_key(conn, cluster: str) -> str:
     return conn.execute(
         """
-        SELECT model_key FROM platt_models_v2
+        SELECT model_key FROM platt_models
         WHERE temperature_metric = 'high' AND cluster = ? AND season = 'DJF'
         """,
         (cluster,),

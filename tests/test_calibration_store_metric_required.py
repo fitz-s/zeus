@@ -30,7 +30,7 @@ from src.calibration.store import (
     get_pairs_count,
     get_pairs_for_bucket,
 )
-from src.state.db import init_schema
+from src.state.db import init_schema, init_schema_forecasts
 
 
 def _seeded_conn() -> sqlite3.Connection:
@@ -42,24 +42,26 @@ def _seeded_conn() -> sqlite3.Connection:
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     init_schema(conn)
+    init_schema_forecasts(conn)
     rows = [
-        ("NYC", "2026-01-05", "30-31°F", 0.42, 1, 1.5,
+        ("NYC", "2026-01-05", "high", "high_temp", "30-31°F", 0.42, 1, 1.5,
          "DJF", "US-Northeast", "2026-01-04T12:00:00Z",
-         30.5, "dg1", 0, "VERIFIED", "canonical_v1"),
-        ("NYC", "2026-01-12", "32-33°F", 0.55, 0, 1.5,
+         30.5, "dg1", 0, "VERIFIED", "canonical_v1", "tigge_mx2t6_local_calendar_day_max_v1"),
+        ("NYC", "2026-01-12", "high", "high_temp", "32-33°F", 0.55, 0, 1.5,
          "DJF", "US-Northeast", "2026-01-11T12:00:00Z",
-         32.5, "dg2", 0, "VERIFIED", "canonical_v1"),
-        ("BOS", "2026-01-20", "28-29°F", 0.48, 1, 1.0,
+         32.5, "dg2", 0, "VERIFIED", "canonical_v1", "tigge_mx2t6_local_calendar_day_max_v1"),
+        ("BOS", "2026-01-20", "high", "high_temp", "28-29°F", 0.48, 1, 1.0,
          "DJF", "US-Northeast", "2026-01-19T12:00:00Z",
-         28.5, "dg3", 0, "VERIFIED", "canonical_v1"),
+         28.5, "dg3", 0, "VERIFIED", "canonical_v1", "tigge_mx2t6_local_calendar_day_max_v1"),
     ]
     conn.executemany(
         """
         INSERT INTO calibration_pairs
-        (city, target_date, range_label, p_raw, outcome, lead_days,
+        (city, target_date, temperature_metric, observation_field, range_label,
+         p_raw, outcome, lead_days,
          season, cluster, forecast_available_at, settlement_value,
-         decision_group_id, bias_corrected, authority, bin_source)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         decision_group_id, bias_corrected, authority, bin_source, dataset_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         rows,
     )

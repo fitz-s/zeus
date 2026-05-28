@@ -246,10 +246,10 @@ def _merge_calibration_counts(
     else:
         rows = conn.execute(
             f"""
-                 SELECT temperature_metric, cluster, season, data_version, cycle, source_id, horizon_profile,
+                 SELECT temperature_metric, cluster, season, dataset_id, cycle, source_id, horizon_profile,
                    SUM(CASE WHEN authority = 'VERIFIED' AND training_allowed = 1 THEN 1 ELSE 0 END) AS verified_pair_count
             FROM {pairs_table}
-                 GROUP BY temperature_metric, cluster, season, data_version, cycle, source_id, horizon_profile
+                 GROUP BY temperature_metric, cluster, season, dataset_id, cycle, source_id, horizon_profile
             """
         ).fetchall()
         for row in rows:

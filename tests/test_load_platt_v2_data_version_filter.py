@@ -71,7 +71,7 @@ def _save_dummy(conn, *, metric_identity: MetricIdentity, fitted_at: str, A: flo
     )
     conn.execute(
         """
-        UPDATE platt_models_v2
+        UPDATE platt_models
         SET fitted_at = ?
         WHERE temperature_metric = ?
           AND cluster = 'NYC'
