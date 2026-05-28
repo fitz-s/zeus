@@ -1,5 +1,8 @@
 # Created: 2026-05-28
 # Last reused or audited: 2026-05-28
+# Lifecycle: created=2026-05-28; last_reviewed=2026-05-28; last_reused=never
+# Purpose: Manifest-driven selective full_transport refit/MC-regen driver (dry-run default).
+# Reuse: Requires isolated staging DB copy + frozen source + live pause for --execute. Never targets a prod DB.
 # Authority basis: operator adjudication 2026-05-27/28 — selective (NOT full) rebuild
 #   driven by the row-action manifest. p_raw is cohort-local: only cohorts whose
 #   error-model params changed need MC regeneration. See
@@ -97,7 +100,7 @@ def main() -> int:
     logging.basicConfig(level=getattr(logging, args.log_level.upper()),
                         format="%(asctime)s %(levelname)s %(message)s")
 
-    if args.db.name in {"zeus-world.db", "zeus-forecasts.db", "zeus_trades.db"}:
+    if args.db.name in {"zeus-world.db", "zeus-forecasts.db", "zeus_trades.db", "zeus-trades.db"}:
         raise SystemExit(f"SAFETY: --db must be a copy, not {args.db.name}")
     if args.workers > 4:
         logger.warning("workers=%d > 4 risks WAL multi-writer starvation; clamping to 4", args.workers)
@@ -137,7 +140,17 @@ def main() -> int:
 
     # ---- Step 2: replay-equivalence for A rows (decide reuse vs regen) ----
     logger.info("STEP 2 — replay-equivalence for %d A cohorts (reuse if pass)", len(replay))
+    # NOTE: replay is scoped by (city, metric); the replay harness filters per
+    # (city, season, metric) bucket internally. A cohort here is one
+    # (city, season, metric) row, so the same city+metric may appear for multiple
+    # seasons — de-dup the replay invocation per (city, metric) to avoid redundant
+    # runs while still covering every A-row's season inside the harness.
+    seen_replay: set[tuple[str, str]] = set()
     for r in replay:
+        key = (r["city"], r["metric"])
+        if key in seen_replay:
+            continue
+        seen_replay.add(key)
         cmd = [_PY, "scripts/replay_equivalence_full_transport.py",
                "--db", str(args.db), "--recompute",
                "--city", r["city"], "--metric", r["metric"]]

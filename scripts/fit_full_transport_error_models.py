@@ -181,8 +181,14 @@ def _observed_coverage_months(
             [city, data_version, metric, settled_before, settled_before, *season_months],
         ).fetchall()
         return ",".join(str(int(r[0])) for r in rows)
-    except sqlite3.Error:
-        return ""
+    except sqlite3.Error as exc:
+        # Do NOT return "" — an empty coverage cell reads as 'no declared scope',
+        # which would silently DISABLE the reader's month-scope guard for this row.
+        # Stamp a malformed sentinel so read_bias_model fails CLOSED on it (the row
+        # is never served until re-fit with valid coverage). Surface the error.
+        logger.warning("coverage-months probe failed for %s/%s/%s: %s — stamping 'invalid'",
+                       city, metric, season_months, exc)
+        return "invalid"
 
 
 def _apply_canonical_migration(conn: sqlite3.Connection) -> None:

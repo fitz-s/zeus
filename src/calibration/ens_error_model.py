@@ -197,8 +197,8 @@ def fit_predictive_error_bucket(
     tigge_residuals: list[float],
     opendata_residuals: list[float],
     *,
-    min_live_n: int = 20,
-    residual_floor_c: float = 0.5,
+    min_live_n: int = DEFAULT_MIN_LIVE_N,
+    residual_floor_c: float = DEFAULT_RESIDUAL_FLOOR_C,
     paired_delta_abs: float | None = None,
 ) -> PredictiveErrorModel:
     """Fit location (via #334 fit_bucket) AND scale (residual SD) for one bucket.
@@ -235,10 +235,10 @@ def fit_city_predictive_error(
     season_months: tuple[int, ...] | None = None,
     metric: str = "high",
     lead_max: float = 48.0,
-    min_live_n: int = 20,
+    min_live_n: int = DEFAULT_MIN_LIVE_N,
     settled_before: str | None = None,
     kappa: float = 1.0,
-    residual_floor_c: float = 0.5,
+    residual_floor_c: float = DEFAULT_RESIDUAL_FLOOR_C,
 ) -> PredictiveErrorModel:
     """Capstone DB-wired pipeline (location+scale+gate+transport) for one city/season.
 

@@ -1,5 +1,8 @@
 # Created: 2026-05-27
-# Last reused or audited: 2026-05-27
+# Last reused or audited: 2026-05-28
+# Lifecycle: created=2026-05-27; last_reviewed=2026-05-28; last_reused=never
+# Purpose: Read-only reproducibility gate — recompute every model_bias_ens_v2 row via current code and classify vs stored.
+# Reuse: Read-only (both DBs mode=ro). Safe to re-run any time; allowlisted in db_writer_lock.
 # Authority basis: operator audit 2026-05-27 — row reproducibility gate for full_transport_v1
 #   stored rows. Recompute every stored model_bias_ens_v2 row using CURRENT code + CURRENT
 #   DB and classify each row vs its stored value. Production rows that do not REPRODUCE
@@ -57,10 +60,14 @@ _SEASON_MONTHS: dict[str, tuple[int, ...]] = {
 TOL_BIAS_C = 0.05
 TOL_SD_C = 0.10
 
-# Min counts (from ens_error_model.py constants)
-MIN_LIVE_N = 20  # default for fit_city_predictive_error
-MIN_PAIRED_N = 5  # from ens_error_model.MIN_PAIRED_N
-MIN_PRIOR_N = 2  # below this the fit is statistically degenerate
+# Min counts — sourced from ens_error_model (single source of truth, not duplicated)
+# so a threshold change there is reflected here automatically. Imported at module
+# load; ZEUS_ROOT is on sys.path (set above) before this import runs.
+from src.calibration.ens_error_model import (  # noqa: E402
+    MIN_PAIRED_N,
+    MIN_PRIOR_N,
+    DEFAULT_MIN_LIVE_N as MIN_LIVE_N,
+)
 
 
 def _current_commit() -> str:

@@ -410,12 +410,16 @@ def read_bias_model(
         structural fix for the pre-gate-transport-delta contamination — it replaces
         version-suffix family renames; the family name stays stable and the gate-set
         hash carries the probability-domain identity.
-      * ``target_month``: when supplied AND the row has a non-empty ``coverage_months``,
-        the row is REJECTED unless ``target_month`` is in its covered set. A
-        season-labelled row whose fit window only covered one month cannot be applied
-        to a month it never trained on (COVERAGE_MISLABELED guard).
-    Both guards fail CLOSED (return None) so a missing/old column degrades to "no
-    servable row" rather than silently serving a stale one.
+      * ``target_month``: month-scope guard (COVERAGE_MISLABELED). When supplied:
+          - malformed coverage_months (unparseable) → REJECT (fail closed);
+          - empty/NULL coverage_months → 'no declared scope' → row IS served (no-op);
+          - non-empty coverage_months → REJECT unless target_month ∈ covered set.
+        A season-labelled row whose fit window only covered one month cannot be
+        applied to a month it never trained on.
+    The gate_set_hash guard fails CLOSED (missing/NULL/old column → None). The
+    month guard is intentionally a no-op for rows with NO declared coverage (empty),
+    and fails closed only for malformed coverage — so legacy season-level rows
+    without coverage remain servable while corrupt coverage never re-enables a row.
     """
     if not live_data_version:
         raise ValueError(
@@ -454,9 +458,14 @@ def read_bias_model(
                 return None
             if (row["gate_set_hash"] or "") != require_gate_set_hash:
                 return None
-        # Antibody 2: month-scope guard. Only enforced when the row declares coverage.
+        # Antibody 2: month-scope guard.
+        #  * malformed coverage (None) → fail CLOSED (reject).
+        #  * empty coverage (set()) → no declared scope → guard is a no-op (served).
+        #  * non-empty coverage → reject unless target_month is in the covered set.
         if target_month is not None and "coverage_months" in existing:
             covered = _parse_coverage_months(row["coverage_months"])
+            if covered is None:
+                return None  # malformed non-empty coverage → fail closed
             if covered and int(target_month) not in covered:
                 return None
         return row
@@ -464,19 +473,28 @@ def read_bias_model(
     return conn.execute(base_sql, base_params).fetchone()
 
 
-def _parse_coverage_months(raw: object) -> set[int]:
-    """Parse a 'coverage_months' CSV cell into a set of ints. Empty/NULL -> empty set
-    (interpreted as 'no declared scope', so the month guard is a no-op for that row)."""
+def _parse_coverage_months(raw: object) -> set[int] | None:
+    """Parse a 'coverage_months' CSV cell into a set of ints.
+
+    Returns:
+      * empty set         when raw is empty/NULL — 'no declared scope', month guard is a no-op.
+      * set[int]          the covered months when every token parses.
+      * None              when raw is NON-empty but ANY token is malformed — the caller
+                          MUST fail CLOSED (reject the row). A malformed coverage string
+                          must never silently collapse to 'no scope' and re-enable a row
+                          for months it can't vouch for.
+    """
     if not raw:
         return set()
     out: set[int] = set()
     for tok in str(raw).split(","):
         tok = tok.strip()
-        if tok:
-            try:
-                out.add(int(tok))
-            except ValueError:
-                continue
+        if not tok:
+            continue
+        try:
+            out.add(int(tok))
+        except ValueError:
+            return None  # malformed non-empty coverage → caller fails closed
     return out
 
 

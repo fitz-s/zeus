@@ -1,5 +1,8 @@
 # Created: 2026-05-28
 # Last reused or audited: 2026-05-28
+# Lifecycle: created=2026-05-28; last_reviewed=2026-05-28; last_reused=never
+# Purpose: Relationship tests for gate_set_hash + coverage_months read-time guards (domain-canonicality antibody).
+# Reuse: Pure in-memory sqlite fixtures; no external DB. Re-run freely.
 # Authority basis: operator adjudication 2026-05-27/28 — domain-canonicality antibody.
 #   Relationship tests for the gate_set_hash + coverage_months read-time guards that
 #   make the pre-gate-transport-delta contamination category structurally impossible.
