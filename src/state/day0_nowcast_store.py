@@ -92,7 +92,7 @@ def write_platt_fit(
             conn.execute(
                 """
                 INSERT OR IGNORE INTO day0_horizon_platt_fits (
-                    fit_run_id, fit_version,
+                    fit_run_id, fit_artifact_id,
                     alpha, beta,
                     gamma_morning, gamma_afternoon, gamma_post_peak,
                     delta, epsilon,
@@ -104,7 +104,7 @@ def write_platt_fit(
                 )
                 """,
                 (
-                    fit.fit_run_id, fit.fit_version,
+                    fit.fit_run_id, fit.fit_artifact_id,
                     float(fit.alpha), float(fit.beta),
                     float(fit.gamma_morning), float(fit.gamma_afternoon), float(fit.gamma_post_peak),
                     float(fit.delta), float(fit.epsilon),
@@ -219,10 +219,10 @@ def write_nowcast_run(
 
 def read_latest_platt_fit(
     *,
-    fit_version: str = "hpf_v1",
+    fit_artifact_id: str = "hpf_v1",
     conn: Optional[sqlite3.Connection] = None,
 ):
-    """Return the most-recently written HorizonPlattFit for the given fit_version.
+    """Return the most-recently written HorizonPlattFit for the given fit_artifact_id.
 
     Returns None when no fit row exists (e.g. before first calibration run).
     conn=None -> get_forecasts_connection_read_only().
@@ -239,10 +239,10 @@ def read_latest_platt_fit(
         row = conn.execute(
             """
             SELECT * FROM day0_horizon_platt_fits
-            WHERE fit_version = ?
+            WHERE fit_artifact_id = ?
             ORDER BY rowid DESC LIMIT 1
             """,
-            (fit_version,),
+            (fit_artifact_id,),
         ).fetchone()
         if row is None:
             return None
@@ -255,7 +255,7 @@ def read_latest_platt_fit(
             gamma_post_peak=float(r["gamma_post_peak"]),
             delta=float(r["delta"]),
             epsilon=float(r["epsilon"]),
-            fit_version=r.get("fit_version", fit_version),
+            fit_artifact_id=r.get("fit_artifact_id", fit_artifact_id),
             fit_run_id=r["fit_run_id"],
             fit_date=r.get("fit_date") or None,
             n_obs=r.get("n_obs"),

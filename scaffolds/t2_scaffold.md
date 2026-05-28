@@ -159,13 +159,13 @@ CREATE INDEX IF NOT EXISTS idx_day0_nowcast_runs_event_id
 Coefficients change rarely. Storing per nowcast_run row = waste.
 Separate table: one row per fit execution, referenced via `fit_run_id`.
 
-`fit_version` is stable across re-runs of the same algorithm ("hpf_v1").
+`fit_artifact_id` is stable across re-runs of the same algorithm ("hpf_v1").
 `fit_run_id` is a per-execution UUID4 (non-deterministic = better: no hash stability issues).
 
 ```sql
 CREATE TABLE IF NOT EXISTS day0_horizon_platt_fits (
     fit_run_id          TEXT PRIMARY KEY,          -- uuid4 per fit execution
-    fit_version         TEXT NOT NULL,             -- semantic version, e.g. "hpf_v1"
+    fit_artifact_id         TEXT NOT NULL,             -- semantic version, e.g. "hpf_v1"
     alpha               REAL NOT NULL,
     beta                REAL NOT NULL,
     -- One-hot daypart (pre_sunrise is reference category, no coefficient)

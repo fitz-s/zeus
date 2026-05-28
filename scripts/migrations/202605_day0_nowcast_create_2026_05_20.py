@@ -27,7 +27,7 @@ def up(conn):
     conn.execute("""
         CREATE TABLE IF NOT EXISTS day0_horizon_platt_fits (
             fit_run_id          TEXT PRIMARY KEY,
-            fit_version         TEXT NOT NULL,
+            fit_artifact_id         TEXT NOT NULL,
             alpha               REAL NOT NULL,
             beta                REAL NOT NULL,
             gamma_morning       REAL NOT NULL,

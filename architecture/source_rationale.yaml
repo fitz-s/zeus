@@ -1598,7 +1598,7 @@ files:
   src/calibration/day0_horizon_calibration.py:
     zone: K3_extension
     authority_role: day0_horizon_platt_calibration
-    why: "T2 Day0Nowcast: HorizonPlattFit dataclass (alpha/beta/gamma_morning/gamma_afternoon/gamma_post_peak/delta/epsilon) + fit_day0_horizon_platt() fitter via scipy L-BFGS-B. One-hot daypart encoding (pre_sunrise=reference). fit_run_id=uuid4, fit_version=hpf_v1. Training data from calibration_pairs_v2."
+    why: "T2 Day0Nowcast: HorizonPlattFit dataclass (alpha/beta/gamma_morning/gamma_afternoon/gamma_post_peak/delta/epsilon) + fit_day0_horizon_platt() fitter via scipy L-BFGS-B. One-hot daypart encoding (pre_sunrise=reference). fit_run_id=uuid4, fit_artifact_id=hpf_v1. Training data from calibration_pairs_v2."
     downstream:
     - src/signal/day0_high_nowcast_signal.py
     - src/state/day0_nowcast_store.py

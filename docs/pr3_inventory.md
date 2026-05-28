@@ -226,7 +226,7 @@ Also serialized at l.2305–2306; downstream in `src/execution/fill_tracker.py` 
 
 | Field | Location | Proposed replacement |
 |-------|----------|---------------------|
-| `fit_version` | dataclass field `str = "hpf_v1"` (l.93) | `fit_artifact_id` |
+| `fit_artifact_id` | dataclass field `str = "hpf_v1"` (l.93) | `fit_artifact_id` |
 
 ### `src/calibration/decision_group.py`
 

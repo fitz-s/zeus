@@ -25,7 +25,7 @@ temperature_metric_indicator: 0=low, 1=high (single cross-metric fit)
 Coefficients stored in day0_horizon_platt_fits table (forecasts DB, one row per fit run).
 day0_nowcast_runs.fit_run_id FK references that table — avoids repeating coefficients
 per nowcast row (coefficients change rarely; storing per-run = waste).
-fit_version (semantic, e.g., "hpf_v1") is stable across re-runs of the same algorithm.
+fit_artifact_id (semantic, e.g., "hpf_v1") is stable across re-runs of the same algorithm.
 
 Training data source: calibration_pairs_v2 (forecasts DB), filtered to Day0 rows
 with valid hours_remaining <= 6 and known daypart.
@@ -70,7 +70,7 @@ class HorizonPlattFit:
         gamma_post_peak: coefficient on is_post_peak.
         delta: coefficient on temperature_metric_indicator (0=low, 1=high).
         epsilon: intercept.
-        fit_version: semantic version tag e.g. "hpf_v1". Stable across re-runs of
+        fit_artifact_id: semantic version tag e.g. "hpf_v1". Stable across re-runs of
             the same algorithm. Stored in day0_horizon_platt_fits for cross-version
             validation queries.
         fit_run_id: per-execution UUID (uuid4). PK in day0_horizon_platt_fits.
@@ -90,7 +90,7 @@ class HorizonPlattFit:
     delta: float
     epsilon: float
 
-    fit_version: str = "hpf_v1"
+    fit_artifact_id: str = "hpf_v1"
     fit_run_id: str = ""
     fit_date: str = ""
     n_obs: int = 0
@@ -175,7 +175,7 @@ def fit_day0_horizon_platt(
 
     Returns:
         HorizonPlattFit with fitted (α, β, γ_morning, γ_afternoon, γ_post_peak, δ, ε)
-        and fit_run_id (uuid4) + fit_version ("hpf_v1").
+        and fit_run_id (uuid4) + fit_artifact_id ("hpf_v1").
 
     Raises:
         ValueError: if observations and outcomes have different lengths or contain
@@ -247,7 +247,7 @@ def fit_day0_horizon_platt(
         gamma_post_peak=float(g_post_peak),
         delta=float(delta),
         epsilon=float(epsilon),
-        fit_version="hpf_v1",
+        fit_artifact_id="hpf_v1",
         fit_run_id=str(uuid.uuid4()),
         fit_date=fit_date,
         n_obs=n,
