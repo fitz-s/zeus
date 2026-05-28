@@ -32,6 +32,7 @@ from src.contracts.position_truth import CHAIN_ONLY_REVIEW_WINDOW_HOURS, ChainOn
 from src.contracts.semantic_types import LifecycleState
 from src.state.chain_state import ChainSnapshotCompleteness, classify_chain_state
 from src.state.lifecycle_manager import (
+    LifecyclePhase,
     enter_chain_quarantined_runtime_state,
     phase_for_runtime_position,
     rescue_pending_runtime_state,
@@ -444,17 +445,27 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
 
         try:
             if has_trade_fact:
+                # F4 (docs/findings_2026_05_28.md §F4, 2026-05-28): trade-verified
+                # rescue is the verified entry-fill recovery — pending_entry →
+                # ACTIVE. Pass phase_after explicitly; the canonical projection's
+                # phase no longer reads pos.state/exit_state/chain_state strings.
                 events, projection = build_reconciliation_rescue_canonical_write(
                     position,
                     chain_synced_at=now,
                     sequence_no=_next_canonical_sequence_no(getattr(position, "trade_id", "")),
+                    phase_after=LifecyclePhase.ACTIVE.value,
                     source_module="src.state.chain_reconciliation",
                 )
             else:
+                # F4: balance-only rescue — exposure exists on chain but no
+                # verified fill fact. Folds to ACTIVE so monitor/exit can manage
+                # the exposure; authority degradation lives in the event payload
+                # (fill_authority=venue_position_observed, training_eligible=false).
                 events, projection = build_venue_position_observed_canonical_write(
                     position,
                     venue_observed_at=now,
                     sequence_no=_next_canonical_sequence_no(getattr(position, "trade_id", "")),
+                    phase_after=LifecyclePhase.ACTIVE.value,
                     source_module="src.state.chain_reconciliation",
                 )
             append_many_and_project(conn, events, projection)
@@ -497,10 +508,21 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
         from src.state.db import append_many_and_project
 
         try:
+            # F4 (docs/findings_2026_05_28.md §F4, 2026-05-28): size-correction
+            # does NOT transition the canonical phase — pass the position's
+            # *current* phase explicitly. expected_phase here is the same
+            # value the size-correction baseline gate checked above (day0_window
+            # if the position has entered the day0 window, else active).
+            current_phase = (
+                LifecyclePhase.DAY0_WINDOW.value
+                if expected_phase == "day0_window"
+                else LifecyclePhase.ACTIVE.value
+            )
             events, projection = build_chain_size_corrected_canonical_write(
                 position,
                 local_shares_before=local_shares_before,
                 sequence_no=_next_canonical_sequence_no(getattr(position, "trade_id", "")),
+                phase_after=current_phase,
                 source_module="src.state.chain_reconciliation",
             )
             append_many_and_project(conn, events, projection)
@@ -529,11 +551,16 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
         from src.state.db import append_many_and_project
 
         try:
+            # F4 (docs/findings_2026_05_28.md §F4, 2026-05-28): unresolved
+            # size mismatch always quarantines the position. Pass phase_after
+            # explicitly so canonical position_current.phase is QUARANTINED
+            # regardless of any prior runtime pos.state string mutation.
             events, projection = build_review_required_canonical_write(
                 position,
                 review_detected_at=now,
                 reason=reason,
                 sequence_no=_next_canonical_sequence_no(getattr(position, "trade_id", "")),
+                phase_after=LifecyclePhase.QUARANTINED.value,
                 source_module="src.state.chain_reconciliation",
             )
             append_many_and_project(conn, events, projection)

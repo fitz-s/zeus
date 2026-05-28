@@ -1,7 +1,7 @@
 """Portfolio state management. Spec §6.4.
 
 Atomic JSON + SQL mirror. Positions are projection-cache adapters; canonical
-truth is `position_events` + `position_current` (see PR #352, F1 in
+truth is `position_events` + `position_current` (see PR #352, F1+F4 in
 docs/findings_2026_05_28.md). The `Position` dataclass is a runtime view that
 combines submitted-intent economics, verified fill economics, and chain-
 observed economics into a single object — but each economics object has its
@@ -10,6 +10,18 @@ own authority field on `position_current` and event payloads. The legacy
 remain as derived/compatibility views and MUST NOT be mutated by chain-
 balance rescue after F1: balance-only rescue writes the chain aggregate into
 ``chain_avg_price`` / ``chain_cost_basis_usd`` / ``chain_shares`` only.
+
+F4 (docs/findings_2026_05_28.md §F4, 2026-05-28): the runtime ``state`` /
+``exit_state`` / ``chain_state`` fields on ``Position`` are **projection-side
+mirrors**, not money-path authority. Canonical ``position_current.phase`` is
+set by event builders (``build_*_canonical_write`` in
+``src.engine.lifecycle_events``) receiving an explicit ``phase_after`` from
+their callers and writing it through ``append_many_and_project``. Direct
+in-memory mutation of ``Position.state`` cannot change ``position_current.phase``
+unless a builder receives a legal phase transition and the projection is
+persisted. ``phase_for_runtime_position`` / ``canonical_phase_for_position``
+remain available as legacy adapters for reading legacy serialized rows; they
+are not consulted by the money-path canonical event builders.
 
 Provides exposure queries for risk limit enforcement.
 """

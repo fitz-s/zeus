@@ -99,9 +99,13 @@ def _seed_canonical_pending_baseline(conn, pos):
     `_canonical_rescue_baseline_available` returns True."""
     from src.engine.lifecycle_events import build_entry_canonical_write
     from src.state.ledger import append_many_and_project
+    from src.state.lifecycle_manager import LifecyclePhase
 
+    # F4 (docs/findings_2026_05_28.md §F4, 2026-05-28): builder requires
+    # explicit phase_after. This seeds a pending-entry baseline.
     events, projection = build_entry_canonical_write(
         pos,
+        phase_after=LifecyclePhase.PENDING_ENTRY.value,
         decision_id="dec-f1",
         source_module="tests.f1_setup",
     )
