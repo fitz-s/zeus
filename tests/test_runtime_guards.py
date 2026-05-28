@@ -3488,7 +3488,7 @@ def test_discovery_phase_buffers_forward_market_substrate_until_after_evaluator(
     def _evaluate_before_forward_flush(candidate, conn_arg, *args, **kwargs):
         del candidate, args, kwargs
         observed["same_conn_events_during_eval"] = conn_arg.execute(
-            "SELECT COUNT(*) FROM market_events_v2"
+            "SELECT COUNT(*) FROM market_events"
         ).fetchone()[0]
         observed["same_conn_prices_during_eval"] = conn_arg.execute(
             "SELECT COUNT(*) FROM market_price_history"
@@ -3496,7 +3496,7 @@ def test_discovery_phase_buffers_forward_market_substrate_until_after_evaluator(
         read_conn = get_connection(db_path)
         try:
             observed["external_events_during_eval"] = read_conn.execute(
-                "SELECT COUNT(*) FROM market_events_v2"
+                "SELECT COUNT(*) FROM market_events"
             ).fetchone()[0]
             observed["external_prices_during_eval"] = read_conn.execute(
                 "SELECT COUNT(*) FROM market_price_history"
@@ -3532,7 +3532,7 @@ def test_discovery_phase_buffers_forward_market_substrate_until_after_evaluator(
     )
 
     observed["same_conn_events_after_flush"] = conn.execute(
-        "SELECT COUNT(*) FROM market_events_v2"
+        "SELECT COUNT(*) FROM market_events"
     ).fetchone()[0]
     observed["same_conn_prices_after_flush"] = conn.execute(
         "SELECT COUNT(*) FROM market_price_history"
@@ -3540,7 +3540,7 @@ def test_discovery_phase_buffers_forward_market_substrate_until_after_evaluator(
     read_conn = get_connection(db_path)
     try:
         observed["external_events_before_commit"] = read_conn.execute(
-            "SELECT COUNT(*) FROM market_events_v2"
+            "SELECT COUNT(*) FROM market_events"
         ).fetchone()[0]
         observed["external_prices_before_commit"] = read_conn.execute(
             "SELECT COUNT(*) FROM market_price_history"
@@ -3620,7 +3620,7 @@ def test_discovery_phase_forward_market_substrate_invalid_schema_degrades(monkey
     db_path = tmp_path / "forward-substrate-invalid-schema.db"
     monkeypatch.setattr(db_module, "ZEUS_FORECASTS_DB_PATH", db_path)
     conn = get_connection(db_path)
-    conn.execute("CREATE TABLE market_events_v2 (market_slug TEXT)")
+    conn.execute("CREATE TABLE market_events (market_slug TEXT)")
     conn.execute("CREATE TABLE market_price_history (token_id TEXT)")
     conn.commit()
     artifact = CycleArtifact(mode=DiscoveryMode.OPENING_HUNT.value, started_at="2026-04-03T00:00:00Z")

@@ -2002,13 +2002,13 @@ CREATE INDEX idx_ens_v2_source_run
 CREATE INDEX idx_ensemble_snapshots_lookup
             ON ensemble_snapshots(city, target_date, temperature_metric, available_at)
     ;
--- index: idx_market_events_v2_city_date_metric
-CREATE INDEX idx_market_events_v2_city_date_metric
-            ON market_events_v2(city, target_date, temperature_metric)
+-- index: idx_market_events_city_date_metric
+CREATE INDEX idx_market_events_city_date_metric
+            ON market_events(city, target_date, temperature_metric)
     ;
--- index: idx_market_events_v2_open
-CREATE INDEX idx_market_events_v2_open
-            ON market_events_v2(city, target_date, temperature_metric)
+-- index: idx_market_events_open
+CREATE INDEX idx_market_events_open
+            ON market_events(city, target_date, temperature_metric)
             WHERE outcome IS NULL
     ;
 -- index: idx_observations_city_date
@@ -2040,8 +2040,8 @@ CREATE INDEX idx_source_run_source_cycle
 CREATE INDEX idx_source_run_status
             ON source_run(status, completeness_status, source_cycle_time)
     ;
--- table: market_events_v2
-CREATE TABLE market_events_v2 (
+-- table: market_events
+CREATE TABLE market_events (
             event_id INTEGER PRIMARY KEY AUTOINCREMENT,
             market_slug TEXT NOT NULL,
             city TEXT NOT NULL,

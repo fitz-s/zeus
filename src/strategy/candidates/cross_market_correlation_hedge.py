@@ -18,7 +18,7 @@ evaluation until data actually feeds the cache. SHADOW-only.
 
 Gate conditions:
   CORR_HEDGE_REGIME_UNAVAILABLE:
-    1. City cannot be resolved from market_events_v2 for this market_slug.
+    1. City cannot be resolved from market_events for this market_slug.
     2. regime_tag_for() returns WeatherRegimeTag.UNKNOWN.
     3. regime_correlation_cache has no row for this regime (cache unfed).
     4. City not in stored matrix or fewer than 2 cities stored.
@@ -108,13 +108,13 @@ def _portfolio_objective(
 
 
 def _resolve_city(market_slug: str, conn: sqlite3.Connection) -> Optional[str]:
-    """Return the canonical city string for market_slug from market_events_v2.
+    """Return the canonical city string for market_slug from market_events.
 
     Returns None if the market is not found. INV-37: uses caller-supplied conn.
     """
     try:
         row = conn.execute(
-            "SELECT city FROM market_events_v2 WHERE market_slug = ? LIMIT 1",
+            "SELECT city FROM market_events WHERE market_slug = ? LIMIT 1",
             (market_slug,),
         ).fetchone()
     except Exception:

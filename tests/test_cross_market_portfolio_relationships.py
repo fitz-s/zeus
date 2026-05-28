@@ -59,11 +59,11 @@ def _world_conn() -> sqlite3.Connection:
 
 
 def _conn_with_market_events(city: str = "NYC") -> sqlite3.Connection:
-    """World DB with market_events_v2 row for NYC."""
+    """World DB with market_events row for NYC."""
     conn = _world_conn()
     try:
         conn.execute(
-            "INSERT INTO market_events_v2 (market_slug, city) VALUES (?, ?)",
+            "INSERT INTO market_events (market_slug, city) VALUES (?, ?)",
             ("test-mkt-NYC-high-2026-06-15", city),
         )
         conn.commit()
@@ -91,7 +91,7 @@ def _minimal_conn(city: str = "NYC") -> sqlite3.Connection:
     """Minimal in-memory DB with only the tables the candidate needs."""
     conn = sqlite3.connect(":memory:")
     conn.execute("""
-        CREATE TABLE IF NOT EXISTS market_events_v2 (
+        CREATE TABLE IF NOT EXISTS market_events (
             market_slug TEXT PRIMARY KEY,
             city TEXT NOT NULL
         )
@@ -150,7 +150,7 @@ def _minimal_conn(city: str = "NYC") -> sqlite3.Connection:
     conn.execute(_regime_cache_ddl())
     if city:
         conn.execute(
-            "INSERT INTO market_events_v2 (market_slug, city) VALUES (?, ?)",
+            "INSERT INTO market_events (market_slug, city) VALUES (?, ?)",
             ("test-mkt-NYC-high-2026-06-15", city),
         )
     conn.commit()

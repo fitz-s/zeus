@@ -197,7 +197,7 @@ def get_forecasts_connection(
 
     Owns: ensemble_snapshots, source_run, source_run_coverage,
           producer readiness_state, job_run for forecast-live work,
-          observations, settlements, settlements_v2, market_events_v2,
+          observations, settlements, settlements_v2, market_events,
           calibration_pairs_v2.
     Lock files: state/zeus-forecasts.db.writer-lock.{bulk,live}.
 
@@ -328,7 +328,7 @@ def get_trade_connection_with_world_optional(
         except sqlite3.OperationalError as exc:
             logger.warning("ATTACH world failed (non-fatal): %r", exc)
     # K1 (2026-05-11): also ATTACH forecasts DB so cross-DB joins on
-    # ensemble_snapshots / settlements / settlements_v2 / market_events_v2
+    # ensemble_snapshots / settlements / settlements_v2 / market_events
     # remain possible from trade-conn query paths (evaluator, replay).
     if "forecasts" not in attached:
         try:
@@ -1029,21 +1029,9 @@ def init_schema(
             recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
 
-        -- Inherited: market structure and token IDs
-        CREATE TABLE IF NOT EXISTS market_events (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            market_slug TEXT NOT NULL,
-            city TEXT NOT NULL,
-            target_date TEXT NOT NULL,
-            condition_id TEXT,
-            token_id TEXT,
-            range_label TEXT,
-            range_low REAL,
-            range_high REAL,
-            outcome TEXT,
-            created_at TEXT,
-            UNIQUE(market_slug, condition_id)
-        );
+        -- market_events DDL removed in B3cont (PR3): dead v1 shell (0 rows).
+        -- Canonical table is market_events on zeus-forecasts.db (collapsed from market_events_v2).
+        -- Live DB migration: pr3_b3_live_table_rename.py (operator-run, not committed).
 
         -- Inherited: historical prices for baseline backtesting
         -- city/target_date/range_label carried over from legacy predecessor for bin mapping
@@ -1577,8 +1565,7 @@ def init_schema(
             ON observation_instants(source, city, target_date);
         CREATE INDEX IF NOT EXISTS idx_token_price_token
             ON token_price_log(token_id, timestamp);
-        CREATE INDEX IF NOT EXISTS idx_market_events_slug
-            ON market_events(market_slug);
+        -- idx_market_events_slug removed in B3cont (PR3): bare market_events shell dropped.
         -- v1.F20: idx_ensemble_city_date removed (ensemble_snapshots table dropped).
         CREATE INDEX IF NOT EXISTS idx_calibration_bucket
             ON calibration_pairs(cluster, season);
@@ -3200,7 +3187,7 @@ _FORECAST_TABLES = (
     "settlements",
     "calibration_pairs_v2",
     "settlements_v2",
-    "market_events_v2",
+    "market_events",
     # T2 Day0Nowcast — SCHEMA_FORECASTS_VERSION 4 (2026-05-19)
     "day0_horizon_platt_fits",
     "day0_nowcast_runs",
@@ -3230,7 +3217,7 @@ def _ensure_v2_forecast_indexes(conn: sqlite3.Connection) -> None:
     index is added to v2_schema.py, mirror it here in the same PR.
 
     Tables covered: ensemble_snapshots, calibration_pairs_v2,
-    settlements_v2, market_events_v2.
+    settlements_v2, market_events.
     """
     # settlements_v2 (mirror src/state/schema/v2_schema.py:49-56)
     conn.execute("""
@@ -3241,14 +3228,14 @@ def _ensure_v2_forecast_indexes(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_settlements_v2_settled_at
             ON settlements_v2(settled_at)
     """)
-    # market_events_v2 (mirror src/state/schema/v2_schema.py:80-89)
+    # market_events (mirror src/state/schema/v2_schema.py:80-89)
     conn.execute("""
-        CREATE INDEX IF NOT EXISTS idx_market_events_v2_city_date_metric
-            ON market_events_v2(city, target_date, temperature_metric)
+        CREATE INDEX IF NOT EXISTS idx_market_events_city_date_metric
+            ON market_events(city, target_date, temperature_metric)
     """)
     conn.execute("""
-        CREATE INDEX IF NOT EXISTS idx_market_events_v2_open
-            ON market_events_v2(city, target_date, temperature_metric)
+        CREATE INDEX IF NOT EXISTS idx_market_events_open
+            ON market_events(city, target_date, temperature_metric)
             WHERE outcome IS NULL
     """)
     # ensemble_snapshots (mirror src/state/schema/v2_schema.py:166-229)
@@ -3555,7 +3542,7 @@ def init_schema_forecasts(conn: sqlite3.Connection) -> None:
     (derived from registry P2):
       ensemble_snapshots, source_run, source_run_coverage,
       producer readiness_state, job_run, observations, settlements,
-      calibration_pairs_v2, settlements_v2, market_events_v2
+      calibration_pairs_v2, settlements_v2, market_events
 
     Sets PRAGMA user_version = SCHEMA_FORECASTS_VERSION as the final step.
 
@@ -3635,12 +3622,12 @@ def init_schema_forecasts(conn: sqlite3.Connection) -> None:
             _create_source_run(conn)
             from src.state.schema.v2_schema import (
                 _create_settlements_v2,
-                _create_market_events_v2,
+                _create_market_events,
                 _create_ensemble_snapshots,
                 _create_calibration_pairs_v2,
             )
             _create_settlements_v2(conn)
-            _create_market_events_v2(conn)
+            _create_market_events(conn)
             _create_ensemble_snapshots(conn)
             _create_calibration_pairs_v2(conn)
     else:
@@ -3661,12 +3648,12 @@ def init_schema_forecasts(conn: sqlite3.Connection) -> None:
 
         from src.state.schema.v2_schema import (
             _create_settlements_v2,
-            _create_market_events_v2,
+            _create_market_events,
             _create_ensemble_snapshots,
             _create_calibration_pairs_v2,
         )
         _create_settlements_v2(conn)
-        _create_market_events_v2(conn)
+        _create_market_events(conn)
         _create_ensemble_snapshots(conn)
         _create_calibration_pairs_v2(conn)
 
@@ -4700,7 +4687,7 @@ _FULL_LINKAGE_PRICE_REQUIRED_COLUMNS = (
     "condition_id",
 )
 _FORWARD_MARKET_REQUIRED_TABLES = (
-    "market_events_v2",
+    "market_events",
     "market_price_history",
 )
 _MARKET_SOURCE_CONTRACT_TOPOLOGY_TABLES = ("market_topology_state",)
@@ -4792,7 +4779,7 @@ _SETTLEMENT_V2_COLUMNS = (
 )
 _MARKET_EVENT_OUTCOME_VALUES = frozenset({"YES", "NO"})
 _MARKET_EVENT_OUTCOME_UPDATE_SQL = """
-    UPDATE market_events_v2
+    UPDATE market_events
     SET outcome = ?
     WHERE market_slug = ?
       AND condition_id = ?
@@ -4876,7 +4863,7 @@ def _insert_forward_market_event(conn: sqlite3.Connection, values: dict) -> str:
         SELECT market_slug, city, target_date, temperature_metric, condition_id,
                token_id, range_label, range_low, range_high, outcome, created_at,
                recorded_at
-        FROM market_events_v2
+        FROM market_events
         WHERE market_slug = ? AND condition_id = ?
         """,
         (values["market_slug"], values["condition_id"]),
@@ -4894,7 +4881,7 @@ def _insert_forward_market_event(conn: sqlite3.Connection, values: dict) -> str:
 
     conn.execute(
         """
-        INSERT INTO market_events_v2 (
+        INSERT INTO market_events (
             market_slug, city, target_date, temperature_metric, condition_id,
             token_id, range_label, range_low, range_high, outcome, created_at,
             recorded_at
@@ -5100,7 +5087,7 @@ def log_forward_market_substrate(
 
     K1-A fix (2026-05-17): opens its own forecasts connection rather than
     accepting an opaque conn from callers. Callers that passed the cycle
-    trades-rooted conn were silently writing market_events_v2 rows to
+    trades-rooted conn were silently writing market_events rows to
     zeus_trades.db (MAIN) instead of zeus-forecasts.db. Decision A2.
 
     _db_path: override for testing; defaults to ZEUS_FORECASTS_DB_PATH.
@@ -5132,7 +5119,7 @@ def log_forward_market_substrate(
             }
 
         required_columns = {
-            "market_events_v2": set(_FORWARD_MARKET_EVENT_COLUMNS),
+            "market_events": set(_FORWARD_MARKET_EVENT_COLUMNS),
             "market_price_history": set(_FORWARD_PRICE_HISTORY_COLUMNS),
         }
         missing_columns = {
@@ -5744,7 +5731,7 @@ def _market_event_outcome_public_result(result: dict) -> dict:
     return {key: value for key, value in result.items() if key != "update_values"}
 
 
-def _prepare_market_event_outcome_v2_update(
+def _prepare_market_event_outcome_update(
     conn: sqlite3.Connection | None,
     *,
     market_slug: str | None,
@@ -5755,7 +5742,7 @@ def _prepare_market_event_outcome_v2_update(
     token_id: str | None,
     outcome: str,
 ) -> dict:
-    table = "market_events_v2"
+    table = "market_events"
     if conn is None:
         return {"status": "skipped_no_connection", "table": table}
     if not _table_exists(conn, table):
@@ -5812,7 +5799,7 @@ def _prepare_market_event_outcome_v2_update(
         row = conn.execute(
             """
             SELECT city, target_date, temperature_metric, token_id, outcome
-            FROM market_events_v2
+            FROM market_events
             WHERE market_slug = ? AND condition_id = ?
             """,
             (clean_market_slug, clean_condition_id),
@@ -5877,7 +5864,7 @@ def _prepare_market_event_outcome_v2_update(
     }
 
 
-def log_market_event_outcome_v2(
+def log_market_event_outcome(
     conn: sqlite3.Connection | None,
     *,
     market_slug: str | None,
@@ -5888,13 +5875,13 @@ def log_market_event_outcome_v2(
     token_id: str | None,
     outcome: str,
 ) -> dict:
-    """Write a resolved child-market outcome onto existing market_events_v2 substrate.
+    """Write a resolved child-market outcome onto existing market_events substrate.
 
     This helper updates only an exact scanner-produced row. It never creates
     tables, inserts missing market identities, opens a default DB, commits, or
     overwrites a conflicting resolved outcome.
     """
-    prepared = _prepare_market_event_outcome_v2_update(
+    prepared = _prepare_market_event_outcome_update(
         conn,
         market_slug=market_slug,
         city=city,
@@ -5915,13 +5902,13 @@ def log_market_event_outcome_v2(
     except sqlite3.OperationalError as exc:
         return {
             "status": "skipped_invalid_schema",
-            "table": "market_events_v2",
+            "table": "market_events",
             "schema_error": str(exc),
         }
-    return {"status": "written", "table": "market_events_v2"}
+    return {"status": "written", "table": "market_events"}
 
 
-def log_market_event_outcomes_v2(
+def log_market_event_outcomes(
     conn: sqlite3.Connection | None,
     *,
     market_slug: str | None,
@@ -5930,8 +5917,8 @@ def log_market_event_outcomes_v2(
     temperature_metric: str,
     outcomes: Iterable[dict],
 ) -> dict:
-    """Batch-update market_events_v2 outcomes using exact child identities."""
-    table = "market_events_v2"
+    """Batch-update market_events outcomes using exact child identities."""
+    table = "market_events"
     counts = {
         "written": 0,
         "unchanged": 0,
@@ -5954,7 +5941,7 @@ def log_market_event_outcomes_v2(
                 "missing_fields": ("outcome",),
             }
         else:
-            result = _prepare_market_event_outcome_v2_update(
+            result = _prepare_market_event_outcome_update(
                 conn,
                 market_slug=market_slug,
                 city=city,
@@ -6000,17 +5987,17 @@ def log_market_event_outcomes_v2(
 
     if prepared_updates:
         try:
-            conn.execute("SAVEPOINT market_events_v2_outcome_batch")
+            conn.execute("SAVEPOINT market_events_outcome_batch")
             for result in prepared_updates:
                 conn.execute(
                     _MARKET_EVENT_OUTCOME_UPDATE_SQL,
                     result["update_values"],
                 )
-            conn.execute("RELEASE SAVEPOINT market_events_v2_outcome_batch")
+            conn.execute("RELEASE SAVEPOINT market_events_outcome_batch")
         except sqlite3.OperationalError as exc:
             try:
-                conn.execute("ROLLBACK TO SAVEPOINT market_events_v2_outcome_batch")
-                conn.execute("RELEASE SAVEPOINT market_events_v2_outcome_batch")
+                conn.execute("ROLLBACK TO SAVEPOINT market_events_outcome_batch")
+                conn.execute("RELEASE SAVEPOINT market_events_outcome_batch")
             except sqlite3.OperationalError:
                 pass
             counts["skipped_invalid_schema"] += 1

@@ -53,7 +53,7 @@ def _make_world_conn() -> sqlite3.Connection:
             provenance_json TEXT NOT NULL DEFAULT '{}',
             recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
-        CREATE TABLE IF NOT EXISTS market_events_v2 (
+        CREATE TABLE IF NOT EXISTS market_events (
             event_id INTEGER PRIMARY KEY,
             market_slug TEXT NOT NULL, city TEXT NOT NULL,
             target_date TEXT NOT NULL, temperature_metric TEXT NOT NULL,

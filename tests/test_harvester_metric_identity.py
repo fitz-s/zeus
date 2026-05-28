@@ -1,7 +1,7 @@
 # Created: 2026-04-24
 # Last reused/audited: 2026-05-18
 # Lifecycle: created=2026-04-24; last_reviewed=2026-05-18; last_reused=2026-05-18
-# Authority basis: POST_AUDIT_HANDOFF_2026-04-24 §3.1 C6; task_2026-04-29 Phase 1B F08 learning guard; task_2026-04-29 Phase 5C.4 settlements_v2 producer; task_2026-04-29 Phase 5C.5 market_events_v2 outcome producer
+# Authority basis: POST_AUDIT_HANDOFF_2026-04-24 §3.1 C6; task_2026-04-29 Phase 1B F08 learning guard; task_2026-04-29 Phase 5C.4 settlements_v2 producer; task_2026-04-29 Phase 5C.5 market_events outcome producer
 # Purpose: INV-14 identity spine antibody for harvester settlement writes —
 #          pins temperature_metric / physical_quantity / observation_field to
 #          canonical HIGH_LOCALDAY_MAX.* so regression to the legacy literal
@@ -66,7 +66,7 @@ except ModuleNotFoundError:
 from src.backtest.economics import check_economics_readiness
 from src.config import City
 from src.execution import harvester as harvester_mod
-from src.state.db import init_schema, log_market_event_outcome_v2, log_settlement_v2
+from src.state.db import init_schema, log_market_event_outcome, log_settlement_v2
 from src.state.portfolio import (
     ENTRY_ECONOMICS_OPTIMISTIC_MATCH_PRICE,
     FILL_AUTHORITY_OPTIMISTIC_SUBMITTED,
@@ -108,7 +108,7 @@ def _insert_market_event_v2(
 ) -> None:
     conn.execute(
         """
-        INSERT INTO market_events_v2 (
+        INSERT INTO market_events (
             market_slug, city, target_date, temperature_metric,
             condition_id, token_id, range_label, range_low, range_high,
             outcome, created_at, recorded_at
@@ -515,7 +515,7 @@ def test_resolved_gamma_child_identity_requires_exactly_one_winner():
     assert harvester_mod._find_winning_bin(event) == (None, None)
 
 
-def test_harvester_verified_settlement_updates_market_events_v2_by_identity(harvester_conn):
+def test_harvester_verified_settlement_updates_market_events_by_identity(harvester_conn):
     """Phase 5C.5: VERIFIED settlement writes YES/NO outcomes by exact child id."""
     city = _make_city("v2_outcome_city")
     market_slug = "highest-temperature-in-v2-outcome-city-on-april-24-2026"
@@ -574,14 +574,14 @@ def test_harvester_verified_settlement_updates_market_events_v2_by_identity(harv
     )
 
     assert result["authority"] == "VERIFIED"
-    assert result["market_events_v2"]["status"] == "written"
-    assert result["market_events_v2"]["written"] == 2
+    assert result["market_events"]["status"] == "written"
+    assert result["market_events"]["written"] == 2
     rows = {
         row["condition_id"]: row["outcome"]
         for row in harvester_conn.execute(
             """
             SELECT condition_id, outcome
-            FROM market_events_v2
+            FROM market_events
             WHERE market_slug = ?
             """,
             (market_slug,),
@@ -594,7 +594,7 @@ def test_harvester_verified_settlement_updates_market_events_v2_by_identity(harv
     assert "economics_engine_not_implemented" in readiness.blockers
 
 
-def test_harvester_market_events_v2_update_requires_existing_child_identity(harvester_conn):
+def test_harvester_market_events_update_requires_existing_child_identity(harvester_conn):
     """The outcome producer does not insert missing child markets by label."""
     city = _make_city("v2_outcome_missing")
     market_slug = "highest-temperature-in-v2-outcome-missing-on-april-24-2026"
@@ -625,15 +625,15 @@ def test_harvester_market_events_v2_update_requires_existing_child_identity(harv
     )
 
     assert result["authority"] == "VERIFIED"
-    assert result["market_events_v2"]["status"] == "skipped_no_updates"
-    assert result["market_events_v2"]["skipped_missing_market_event"] == 1
+    assert result["market_events"]["status"] == "skipped_no_updates"
+    assert result["market_events"]["skipped_missing_market_event"] == 1
     assert harvester_conn.execute(
-        "SELECT COUNT(*) FROM market_events_v2 WHERE market_slug = ?",
+        "SELECT COUNT(*) FROM market_events WHERE market_slug = ?",
         (market_slug,),
     ).fetchone()[0] == 0
 
 
-def test_harvester_market_events_v2_batch_is_all_or_nothing(harvester_conn):
+def test_harvester_market_events_batch_is_all_or_nothing(harvester_conn):
     """One bad child identity must not leave a partially resolved market family."""
     city = _make_city("v2_outcome_atomic")
     market_slug = "highest-temperature-in-v2-outcome-atomic-on-april-24-2026"
@@ -679,13 +679,13 @@ def test_harvester_market_events_v2_batch_is_all_or_nothing(harvester_conn):
     )
 
     assert result["authority"] == "VERIFIED"
-    assert result["market_events_v2"]["status"] == "skipped_no_updates"
-    assert result["market_events_v2"]["written"] == 0
-    assert result["market_events_v2"]["skipped_missing_market_event"] == 1
+    assert result["market_events"]["status"] == "skipped_no_updates"
+    assert result["market_events"]["written"] == 0
+    assert result["market_events"]["skipped_missing_market_event"] == 1
     outcome = harvester_conn.execute(
         """
         SELECT outcome
-        FROM market_events_v2
+        FROM market_events
         WHERE market_slug = ? AND condition_id = ?
         """,
         (market_slug, "cond-present"),
@@ -693,11 +693,11 @@ def test_harvester_market_events_v2_batch_is_all_or_nothing(harvester_conn):
     assert outcome is None
 
 
-def test_log_market_event_outcome_v2_skips_missing_table_without_creating_schema():
+def test_log_market_event_outcome_skips_missing_table_without_creating_schema():
     """Capability-absent path is explicit and has no DDL side effect."""
     conn = sqlite3.connect(":memory:")
 
-    result = log_market_event_outcome_v2(
+    result = log_market_event_outcome(
         conn,
         market_slug="market-slug",
         city="NoSchema",
@@ -708,13 +708,13 @@ def test_log_market_event_outcome_v2_skips_missing_table_without_creating_schema
         outcome="YES",
     )
 
-    assert result == {"status": "skipped_missing_table", "table": "market_events_v2"}
+    assert result == {"status": "skipped_missing_table", "table": "market_events"}
     assert conn.execute(
         "SELECT COUNT(*) FROM sqlite_master WHERE type='table'"
     ).fetchone()[0] == 0
 
 
-def test_harvester_market_events_v2_update_refuses_token_mismatch(harvester_conn):
+def test_harvester_market_events_update_refuses_token_mismatch(harvester_conn):
     """condition_id alone is insufficient; YES token identity must also match."""
     city = _make_city("v2_outcome_mismatch")
     market_slug = "highest-temperature-in-v2-outcome-mismatch-on-april-24-2026"
@@ -752,12 +752,12 @@ def test_harvester_market_events_v2_update_refuses_token_mismatch(harvester_conn
     )
 
     assert result["authority"] == "VERIFIED"
-    assert result["market_events_v2"]["status"] == "conflicted"
-    assert result["market_events_v2"]["refused_identity_mismatch"] == 1
+    assert result["market_events"]["status"] == "conflicted"
+    assert result["market_events"]["refused_identity_mismatch"] == 1
     outcome = harvester_conn.execute(
         """
         SELECT outcome
-        FROM market_events_v2
+        FROM market_events
         WHERE market_slug = ? AND condition_id = ?
         """,
         (market_slug, "cond-winner"),
@@ -765,8 +765,8 @@ def test_harvester_market_events_v2_update_refuses_token_mismatch(harvester_conn
     assert outcome is None
 
 
-def test_harvester_quarantined_settlement_does_not_write_market_events_v2_outcome(harvester_conn):
-    """market_events_v2 has no authority column, so quarantined settlement cannot resolve it."""
+def test_harvester_quarantined_settlement_does_not_write_market_events_outcome(harvester_conn):
+    """market_events has no authority column, so quarantined settlement cannot resolve it."""
     city = _make_city("v2_outcome_quarantine")
     market_slug = "highest-temperature-in-v2-outcome-quarantine-on-april-24-2026"
     _insert_market_event_v2(
@@ -803,11 +803,11 @@ def test_harvester_quarantined_settlement_does_not_write_market_events_v2_outcom
     )
 
     assert result["authority"] == "QUARANTINED"
-    assert result["market_events_v2"]["status"] == "skipped_unverified_settlement"
+    assert result["market_events"]["status"] == "skipped_unverified_settlement"
     outcome = harvester_conn.execute(
         """
         SELECT outcome
-        FROM market_events_v2
+        FROM market_events
         WHERE market_slug = ? AND condition_id = ?
         """,
         (market_slug, "cond-winner"),

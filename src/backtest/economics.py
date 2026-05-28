@@ -1,7 +1,7 @@
 """ECONOMICS purpose tombstone and readiness contract.
 
 Per packet 2026-04-27 §01 §3.C: the ECONOMICS lane is structurally
-impossible until upstream data unblocks (market_events_v2 populated +
+impossible until upstream data unblocks (market_events populated +
 parity contracts pass). Rather than emit `pnl_available: False`
 limitation flags from a loop that runs anyway, we refuse to run.
 
@@ -20,7 +20,7 @@ from src.state.venue_command_repo import trade_fact_has_positive_fill_economics
 
 
 REQUIRED_ECONOMICS_TABLES: tuple[str, ...] = (
-    "market_events_v2",
+    "market_events",
     "market_price_history",
     "executable_market_snapshots",
     "venue_trade_facts",
@@ -238,12 +238,12 @@ def check_economics_readiness(conn: Connection | None) -> EconomicsReadiness:
         except Exception:
             blockers.append("invalid_schema:selection_hypothesis_fact.selected_post_fdr")
 
-    if "market_events_v2" in existing_tables:
+    if "market_events" in existing_tables:
         try:
-            if _count_rows(conn, "market_events_v2", "COALESCE(outcome, '') <> ''") <= 0:
+            if _count_rows(conn, "market_events", "COALESCE(outcome, '') <> ''") <= 0:
                 blockers.append("no_market_event_outcomes")
         except Exception:
-            blockers.append("invalid_schema:market_events_v2.outcome")
+            blockers.append("invalid_schema:market_events.outcome")
 
     if "outcome_fact" in existing_tables:
         try:
@@ -276,7 +276,7 @@ def check_economics_readiness(conn: Connection | None) -> EconomicsReadiness:
 def _tombstone_message(readiness: EconomicsReadiness) -> str:
     return (
         "ECONOMICS purpose is tombstoned. It requires populated "
-        "market_events_v2 + market_price_history + parity contracts "
+        "market_events + market_price_history + parity contracts "
         "(market_price_linkage='full', Sizing.KELLY_BOOTSTRAP, "
         "Selection.BH_FDR). Readiness blockers: "
         f"{readiness.blocker_summary()}. See unblock plan at "

@@ -57,10 +57,14 @@ def _create_settlements_v2(conn: sqlite3.Connection) -> None:
     """)
 
 
-def _create_market_events_v2(conn: sqlite3.Connection) -> None:
-    """Create market_events_v2 table + indexes. Idempotent. K1 forecast-class table."""
+def _create_market_events(conn: sqlite3.Connection) -> None:
+    """Create market_events table + indexes. Idempotent. K1 forecast-class table.
+
+    Collapsed from market_events_v2 in B3cont (PR3): dead v1 shell on world.db
+    had 0 rows; v2 was the only live table (17,256 rows on zeus-forecasts.db).
+    """
     conn.execute("""
-        CREATE TABLE IF NOT EXISTS market_events_v2 (
+        CREATE TABLE IF NOT EXISTS market_events (
             event_id INTEGER PRIMARY KEY AUTOINCREMENT,
             market_slug TEXT NOT NULL,
             city TEXT NOT NULL,
@@ -79,13 +83,13 @@ def _create_market_events_v2(conn: sqlite3.Connection) -> None:
         )
     """)
     conn.execute("""
-        CREATE INDEX IF NOT EXISTS idx_market_events_v2_city_date_metric
-            ON market_events_v2(city, target_date, temperature_metric)
+        CREATE INDEX IF NOT EXISTS idx_market_events_city_date_metric
+            ON market_events(city, target_date, temperature_metric)
     """)
     # Architect refinement: partial index on open markets
     conn.execute("""
-        CREATE INDEX IF NOT EXISTS idx_market_events_v2_open
-            ON market_events_v2(city, target_date, temperature_metric)
+        CREATE INDEX IF NOT EXISTS idx_market_events_open
+            ON market_events(city, target_date, temperature_metric)
             WHERE outcome IS NULL
     """)
 
@@ -392,7 +396,7 @@ def apply_v2_schema(conn: sqlite3.Connection, *, forecast_tables: bool = True) -
 
     Args:
         forecast_tables: When True (default), create the 4 forecast-class v2
-            tables (settlements_v2, market_events_v2, ensemble_snapshots,
+            tables (settlements_v2, market_events, ensemble_snapshots,
             calibration_pairs_v2). Set to False for init_schema_world_only so
             world conn does not recreate tables that live on zeus-forecasts.db
             post-K1 migration. K1 split 2026-05-11.
@@ -449,9 +453,10 @@ def apply_v2_schema(conn: sqlite3.Connection, *, forecast_tables: bool = True) -
                     raise
 
             # ----------------------------------------------------------------
-            # market_events_v2  (K1 forecast-class: moves to zeus-forecasts.db)
+            # market_events  (K1 forecast-class: moves to zeus-forecasts.db)
+            # Collapsed from market_events in B3cont (PR3).
             # ----------------------------------------------------------------
-            _create_market_events_v2(conn)
+            _create_market_events(conn)
 
         # ----------------------------------------------------------------
         # market_price_history

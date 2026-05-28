@@ -28,7 +28,7 @@ FORECAST_ONLY_TABLES = {
     "source_run",
     "source_run_coverage",
     "readiness_state",
-    "market_events_v2",
+    "market_events",
     "ensemble_snapshots",
     "job_run",
 }
@@ -118,7 +118,7 @@ def test_log_forward_market_substrate_does_not_accept_positional_conn():
     """K-A regression: log_forward_market_substrate must be keyword-only (no positional conn).
 
     Callers that pass the cycle trades-rooted conn as a positional argument would
-    silently route INSERT INTO market_events_v2 to trades.db MAIN (0-row shell).
+    silently route INSERT INTO market_events to trades.db MAIN (0-row shell).
     Decision A2 fix: function opens its own forecasts conn; conn param removed.
     """
     import ast

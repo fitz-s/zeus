@@ -1318,7 +1318,7 @@ def test_user_channel_auto_derive_prefers_persisted_ids_and_skips_boot_gamma_sca
     import src.data.market_scanner as market_scanner
 
     monkeypatch.delenv("ZEUS_USER_CHANNEL_BOOT_GAMMA_SCAN", raising=False)
-    monkeypatch.setattr(main, "_market_events_v2_user_channel_condition_ids", lambda now=None: ["cond-persisted"])
+    monkeypatch.setattr(main, "_market_events_user_channel_condition_ids", lambda now=None: ["cond-persisted"])
     monkeypatch.setattr(
         market_scanner,
         "find_weather_markets",
@@ -1333,7 +1333,7 @@ def test_user_channel_auto_derive_returns_empty_without_boot_gamma_opt_in(monkey
     import src.data.market_scanner as market_scanner
 
     monkeypatch.delenv("ZEUS_USER_CHANNEL_BOOT_GAMMA_SCAN", raising=False)
-    monkeypatch.setattr(main, "_market_events_v2_user_channel_condition_ids", lambda now=None: [])
+    monkeypatch.setattr(main, "_market_events_user_channel_condition_ids", lambda now=None: [])
     monkeypatch.setattr(
         market_scanner,
         "find_weather_markets",

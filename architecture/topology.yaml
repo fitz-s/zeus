@@ -266,7 +266,7 @@ state_surfaces:
     authority_role: canonical_truth
     forbidden_misread: >
       Forecast-class DB (K1 split 2026-05-11). Contains schema_class=FORECAST_CLASS tables:
-      observations, settlements, settlements_v2, source_run, market_events_v2,
+      observations, settlements, settlements_v2, source_run, market_events,
       ensemble_snapshots, calibration_pairs_v2. Do not write to this DB via a separate
       independent connection while also writing world.db — that violates INV-37.
       Use get_forecasts_connection() for reads and get_forecasts_connection_with_world()
@@ -4004,7 +4004,7 @@ digest_profiles:
       weak_terms:
         - "run_economics"
         - "BacktestPurpose.ECONOMICS"
-        - "market_events_v2"
+        - "market_events"
         - "market_price_history"
         - "forward substrate"
         - "venue_trade_facts"
@@ -4042,7 +4042,7 @@ digest_profiles:
       - "tests/test_digest_profile_matching.py"
     required_law:
       - "ECONOMICS is promotion-authoritative only when market-price linkage, Kelly sizing, BH-FDR selection, and point-in-time provenance are all full live parity."
-      - "Missing or empty market_events_v2, market_price_history, venue_trade_facts, position_lots, probability_trace_fact, decision snapshots, or selection-family facts must fail closed."
+      - "Missing or empty market_events, market_price_history, venue_trade_facts, position_lots, probability_trace_fact, decision snapshots, or selection-family facts must fail closed."
       - "Diagnostic replay, simulated venue, shadow, read-only live, and legacy diagnostic evidence can block promotion but cannot authorize capital scale-up without promotion-grade economics."
       - "ECONOMICS must consume confirmed venue/fill facts for learning/economics; optimistic exposure is not confirmed PnL truth."
       - "No fake PnL, reconstructed timing, live side effects, production DB mutation, or strategy promotion is authorized in this readiness slice."
@@ -4113,8 +4113,8 @@ digest_profiles:
       - "Phase 5C.4 settlements_v2 producer"
       - "settlements_v2 producer"
       - "settlement outcome substrate producer"
-      - "Phase 5C.5 market_events_v2 outcome producer"
-      - "market_events_v2 outcome producer"
+      - "Phase 5C.5 market_events outcome producer"
+      - "market_events outcome producer"
       - "Phase 5C.5 fixes"
       - "Phase 5C.5 remediation"
       - "Phase 5C.5 re-review"
@@ -4133,7 +4133,7 @@ digest_profiles:
       - "log_executable_snapshot_market_price_linkage"
       - "upstream forward-substrate production"
       - "forward substrate production for DSA-19"
-      - "market_events_v2 market_price_history producer"
+      - "market_events market_price_history producer"
       - "forward market substrate production"
       - "market source-proof persistence"
       - "market source proof facts"
@@ -4152,8 +4152,8 @@ digest_profiles:
         - "Phase 5C.4 settlements_v2 producer"
         - "settlements_v2 producer"
         - "settlement outcome substrate producer"
-        - "Phase 5C.5 market_events_v2 outcome producer"
-        - "market_events_v2 outcome producer"
+        - "Phase 5C.5 market_events outcome producer"
+        - "market_events outcome producer"
         - "Phase 5C.5 fixes"
         - "Phase 5C.5 remediation"
         - "Phase 5C.5 re-review"
@@ -4172,13 +4172,13 @@ digest_profiles:
         - "log_executable_snapshot_market_price_linkage"
         - "upstream forward-substrate production"
         - "forward substrate production for DSA-19"
-        - "market_events_v2 market_price_history producer"
+        - "market_events market_price_history producer"
         - "forward market substrate production"
         - "market source-proof persistence"
         - "market source proof facts"
         - "source_contract audit facts"
       weak_terms:
-        - "market_events_v2"
+        - "market_events"
         - "market_price_history"
         - "executable_market_snapshots"
         - "venue_trade_facts"
@@ -4286,7 +4286,7 @@ digest_profiles:
     required_law:
       - "Forward substrate producers may write only point-in-time market, probability, selection, execution, and outcome facts that were observed before or at the recorded decision boundary."
       - "Producer work cannot compute PnL, weaken the ECONOMICS tombstone, authorize capital scale-up, or mark strategy promotion readiness."
-      - "Gamma/CLOB facts for market_events_v2, market_price_history, and executable_market_snapshots must not be guessed; missing identity, price, fee, tick, order-size, neg-risk, orderbook, or authority facts fail closed."
+      - "Gamma/CLOB facts for market_events, market_price_history, and executable_market_snapshots must not be guessed; missing identity, price, fee, tick, order-size, neg-risk, orderbook, or authority facts fail closed."
       - "Trade/fill facts must preserve optimistic versus CONFIRMED finality; MATCHED may not become confirmed economics or learning truth."
       - "docs/operations/AGENTS.md may be touched only as the operations packet registry companion for this packet's evidence files."
       - "No live venue submit/cancel/redeem side effects, production DB mutation, live cutover, schema migration, or credentialed WS activation is authorized by this profile."
@@ -4349,7 +4349,7 @@ digest_profiles:
       - "python3 scripts/topology_doctor.py --map-maintenance --map-maintenance-mode closeout"
       - "python3 scripts/topology_doctor.py --planning-lock --changed-files <files> --plan-evidence docs/operations/task_2026-04-29_design_simplification_audit/simplification_plan.md"
     downstream:
-      - "future market_events_v2 writer"
+      - "future market_events writer"
       - "future market_price_history writer"
       - "future settlements_v2 writer"
       - "src/backtest/economics.py"
@@ -4454,7 +4454,7 @@ digest_profiles:
       - "future promotion-grade economics implementation"
     stop_conditions:
       - "Stop and plan if the slice would write or migrate any production DB rather than changing code-owned DDL and in-memory tests."
-      - "Stop and plan if the schema change expands beyond market_price_history or changes market_events_v2, settlements_v2, outcome_fact, lifecycle, calibration, FDR, Kelly, or execution semantics."
+      - "Stop and plan if the schema change expands beyond market_price_history or changes market_events, settlements_v2, outcome_fact, lifecycle, calibration, FDR, Kelly, or execution semantics."
       - "Stop and plan if the schema is treated as CLOB VWMP/orderbook truth, settlement truth, PnL readiness, or live deployment evidence."
   - id: "source boundary evidence recording"
     match:

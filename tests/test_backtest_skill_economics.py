@@ -151,7 +151,7 @@ def test_economics_tombstone_raises():
     with pytest.raises(PurposeContractViolation) as excinfo:
         run_economics("2026-04-01", "2026-04-27")
     assert "ECONOMICS purpose is tombstoned" in str(excinfo.value)
-    assert "market_events_v2" in str(excinfo.value)
+    assert "market_events" in str(excinfo.value)
     assert "02_blocker_handling_plan.md" in str(excinfo.value)
 
 
@@ -171,7 +171,7 @@ def test_economics_readiness_reports_missing_connection():
 
 def test_economics_readiness_reports_missing_and_empty_substrate():
     conn = sqlite3.connect(":memory:")
-    conn.execute("CREATE TABLE market_events_v2 (id INTEGER PRIMARY KEY, outcome TEXT)")
+    conn.execute("CREATE TABLE market_events (id INTEGER PRIMARY KEY, outcome TEXT)")
     _create_venue_trade_facts_table(conn)
     conn.execute("INSERT INTO venue_trade_facts (state) VALUES ('MATCHED')")
 
@@ -179,9 +179,9 @@ def test_economics_readiness_reports_missing_and_empty_substrate():
     conn.close()
 
     assert readiness.ready is False
-    assert readiness.count_for("market_events_v2") == 0
+    assert readiness.count_for("market_events") == 0
     assert readiness.count_for("market_price_history") is None
-    assert "empty_table:market_events_v2" in readiness.blockers
+    assert "empty_table:market_events" in readiness.blockers
     assert "missing_table:market_price_history" in readiness.blockers
     assert "no_confirmed_venue_trade_facts" in readiness.blockers
     assert "economics_engine_not_implemented" in readiness.blockers
@@ -242,7 +242,7 @@ def test_economics_readiness_reports_invalid_trade_fact_schema_without_empty_sub
 
 def test_economics_readiness_requires_neg_risk_snapshot_fact():
     conn = sqlite3.connect(":memory:")
-    conn.execute("CREATE TABLE market_events_v2 (id INTEGER PRIMARY KEY, outcome TEXT)")
+    conn.execute("CREATE TABLE market_events (id INTEGER PRIMARY KEY, outcome TEXT)")
     conn.execute("CREATE TABLE market_price_history (id INTEGER PRIMARY KEY)")
     conn.execute(
         "CREATE TABLE executable_market_snapshots ("
@@ -256,7 +256,7 @@ def test_economics_readiness_requires_neg_risk_snapshot_fact():
     conn.execute("CREATE TABLE selection_hypothesis_fact (selected_post_fdr INTEGER)")
     conn.execute("CREATE TABLE settlements_v2 (id INTEGER PRIMARY KEY)")
     conn.execute("CREATE TABLE outcome_fact (decision_snapshot_id TEXT, outcome INTEGER)")
-    conn.execute("INSERT INTO market_events_v2 (outcome) VALUES ('YES')")
+    conn.execute("INSERT INTO market_events (outcome) VALUES ('YES')")
     conn.execute("INSERT INTO market_price_history DEFAULT VALUES")
     conn.execute(
         "INSERT INTO executable_market_snapshots "
@@ -310,7 +310,7 @@ def test_economics_readiness_does_not_accept_legacy_outcome_fact_as_resolution_a
 
 def test_economics_readiness_full_substrate_still_blocks_until_engine_implemented():
     conn = sqlite3.connect(":memory:")
-    conn.execute("CREATE TABLE market_events_v2 (id INTEGER PRIMARY KEY, outcome TEXT)")
+    conn.execute("CREATE TABLE market_events (id INTEGER PRIMARY KEY, outcome TEXT)")
     conn.execute(
         "CREATE TABLE market_price_history ("
         "id INTEGER PRIMARY KEY, market_price_linkage TEXT, source TEXT, "
@@ -328,7 +328,7 @@ def test_economics_readiness_full_substrate_still_blocks_until_engine_implemente
     conn.execute("CREATE TABLE selection_hypothesis_fact (selected_post_fdr INTEGER)")
     conn.execute("CREATE TABLE settlements_v2 (id INTEGER PRIMARY KEY)")
     conn.execute("CREATE TABLE outcome_fact (decision_snapshot_id TEXT, outcome INTEGER)")
-    conn.execute("INSERT INTO market_events_v2 (outcome) VALUES ('YES')")
+    conn.execute("INSERT INTO market_events (outcome) VALUES ('YES')")
     conn.execute(
         "INSERT INTO market_price_history "
         "(market_price_linkage, source, best_bid, best_ask, raw_orderbook_hash) "

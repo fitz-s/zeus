@@ -335,10 +335,10 @@ scripts:
     class: etl_writer
     lifecycle: long_lived
     owner_packet: task_2026-04-01_uma_resolution_backfill
-    created_for: "One-shot 90-day UMA OO SettlementResolved backfill for condition_ids in market_events_v2"
+    created_for: "One-shot 90-day UMA OO SettlementResolved backfill for condition_ids in market_events"
     status: active
     authority_scope: ingest_write
-    reuse_when: "One-shot 90-day UMA OO SettlementResolved backfill for condition_ids in market_events_v2. Idempotent on (condition_id, tx_hash) primary key."
+    reuse_when: "One-shot 90-day UMA OO SettlementResolved backfill for condition_ids in market_events. Idempotent on (condition_id, tx_hash) primary key."
     do_not_use_when: "Polygon RPC URL not configured in settings. uma_resolution already fully populated for window."
     canonical_command: "python3 scripts/backfill_uma_resolution_2026.py [--from-date YYYY-MM-DD] [--to-date YYYY-MM-DD]"
     delete_policy: retain_until_superseded

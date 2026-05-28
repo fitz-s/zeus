@@ -170,7 +170,7 @@ def test_user_channel_auto_derive_uses_market_events_fallback_when_scanner_empty
     monkeypatch,
     tmp_path,
 ):
-    """Relationship: M3 WS boot reads canonical market_events_v2 when live scan is empty."""
+    """Relationship: M3 WS boot reads canonical market_events when live scan is empty."""
 
     from src import main as zeus_main
 
@@ -178,7 +178,7 @@ def test_user_channel_auto_derive_uses_market_events_fallback_when_scanner_empty
     setup = sqlite3.connect(db_path)
     setup.execute(
         """
-        CREATE TABLE market_events_v2 (
+        CREATE TABLE market_events (
             condition_id TEXT,
             target_date TEXT,
             recorded_at TEXT
@@ -187,7 +187,7 @@ def test_user_channel_auto_derive_uses_market_events_fallback_when_scanner_empty
     )
     setup.executemany(
         """
-        INSERT INTO market_events_v2 (condition_id, target_date, recorded_at)
+        INSERT INTO market_events (condition_id, target_date, recorded_at)
         VALUES (?, ?, ?)
         """,
         [
@@ -229,7 +229,7 @@ def test_user_channel_auto_derive_bad_fallback_age_env_still_fails_soft(
     setup = sqlite3.connect(db_path)
     setup.execute(
         """
-        CREATE TABLE market_events_v2 (
+        CREATE TABLE market_events (
             condition_id TEXT,
             target_date TEXT,
             recorded_at TEXT
@@ -238,7 +238,7 @@ def test_user_channel_auto_derive_bad_fallback_age_env_still_fails_soft(
     )
     setup.execute(
         """
-        INSERT INTO market_events_v2 (condition_id, target_date, recorded_at)
+        INSERT INTO market_events (condition_id, target_date, recorded_at)
         VALUES (?, ?, ?)
         """,
         ("0xaaa", "2026-05-20", "2026-05-18 05:24:44"),
@@ -277,7 +277,7 @@ def test_user_channel_auto_derive_scans_gamma_by_default_when_persisted_ids_miss
     setup = sqlite3.connect(db_path)
     setup.execute(
         """
-        CREATE TABLE market_events_v2 (
+        CREATE TABLE market_events (
             condition_id TEXT,
             target_date TEXT,
             recorded_at TEXT
@@ -318,7 +318,7 @@ def test_user_channel_auto_derive_respects_disabled_boot_gamma_scan(
     setup = sqlite3.connect(db_path)
     setup.execute(
         """
-        CREATE TABLE market_events_v2 (
+        CREATE TABLE market_events (
             condition_id TEXT,
             target_date TEXT,
             recorded_at TEXT

@@ -31,6 +31,8 @@ def _load_migration():
 _migration = _load_migration()
 
 # Minimal DDL for market_events_v2 matching the pre-K1 world.db schema
+# (Note: the migration script drops market_events_v2 from world.db, which
+# is the old name before B3cont collapsed it to market_events on forecasts.db.)
 _CREATE_MARKET_EVENTS_V2 = """
 CREATE TABLE market_events_v2 (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

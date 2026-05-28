@@ -232,7 +232,7 @@ package_defaults:
     note: |
       Typed backtest purpose contracts (SKILL/ECONOMICS/DIAGNOSTIC) and
       decision-time truth provenance. Does NOT carry promotion authority.
-      ECONOMICS purpose is tombstoned until market_events_v2 + parity gates
+      ECONOMICS purpose is tombstoned until market_events + parity gates
       pass; SKILL/DIAGNOSTIC are runnable today.
   src/observability:
     zone: K2_runtime
@@ -1870,7 +1870,7 @@ files:
   src/backtest/economics.py:
     zone: K3_extension
     authority_role: backtest_economics_tombstone
-    why: ECONOMICS purpose tombstone — refuses to run until market_events_v2 + parity contracts unblock.
+    why: ECONOMICS purpose tombstone — refuses to run until market_events + parity contracts unblock.
     hazards:
     - DERIVED_ONLY
     - NO_WRITE_PATH

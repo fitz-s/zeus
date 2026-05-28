@@ -298,7 +298,7 @@ def _seed_minimal_ready_training_tables(conn, *, seed_observations=True):
     conn.execute("INSERT INTO platt_models_v2 (id) VALUES (1)")
     conn.execute(
         """
-        CREATE TABLE market_events_v2 (
+        CREATE TABLE market_events (
             market_slug TEXT,
             condition_id TEXT,
             token_id TEXT,
@@ -310,7 +310,7 @@ def _seed_minimal_ready_training_tables(conn, *, seed_observations=True):
     )
     conn.execute(
         """
-        INSERT INTO market_events_v2 (
+        INSERT INTO market_events (
             market_slug, condition_id, token_id, city, target_date, temperature_metric
         ) VALUES (
             'market-slug', 'condition-id', 'token-id',
@@ -669,7 +669,7 @@ class TestTrainingReadinessP0:
             "ensemble_snapshots",
             "calibration_pairs_v2",
             "platt_models_v2",
-            "market_events_v2",
+            "market_events",
             "market_price_history",
             "settlements_v2",
             "observation_instants_v2",
@@ -1106,7 +1106,7 @@ class TestTrainingReadinessP0:
             "forecasts",
             "calibration_pairs_v2",
             "platt_models_v2",
-            "market_events_v2",
+            "market_events",
             "market_price_history",
         ]:
             conn.execute(f"CREATE TABLE {table} (id INTEGER)")
@@ -1573,9 +1573,9 @@ class TestTrainingReadinessP0:
         db_path = tmp_path / "missing-market-identity-columns-world.db"
         conn = sqlite3.connect(db_path)
         _seed_minimal_ready_training_tables(conn, seed_observations=True)
-        conn.execute("DROP TABLE market_events_v2")
-        conn.execute("CREATE TABLE market_events_v2 (id INTEGER)")
-        conn.execute("INSERT INTO market_events_v2 (id) VALUES (1)")
+        conn.execute("DROP TABLE market_events")
+        conn.execute("CREATE TABLE market_events (id INTEGER)")
+        conn.execute("INSERT INTO market_events (id) VALUES (1)")
         conn.execute("DROP TABLE market_price_history")
         conn.execute("CREATE TABLE market_price_history (id INTEGER)")
         conn.execute("INSERT INTO market_price_history (id) VALUES (1)")
@@ -1586,14 +1586,14 @@ class TestTrainingReadinessP0:
 
         assert report["ready"] is False
         assert "missing_market_identity_columns" in _blocker_codes(report)
-        assert report["checks"]["market_events_v2.market_identity_present"]["status"] == "FAIL"
+        assert report["checks"]["market_events.market_identity_present"]["status"] == "FAIL"
         assert report["checks"]["market_price_history.market_identity_present"]["status"] == "FAIL"
 
     def test_training_readiness_fails_when_market_identity_values_are_empty(self, tmp_path):
         db_path = tmp_path / "empty-market-identity-world.db"
         conn = sqlite3.connect(db_path)
         _seed_minimal_ready_training_tables(conn, seed_observations=True)
-        conn.execute("UPDATE market_events_v2 SET condition_id=''")
+        conn.execute("UPDATE market_events SET condition_id=''")
         conn.execute("UPDATE market_price_history SET token_id=NULL")
         conn.commit()
         conn.close()
@@ -1602,7 +1602,7 @@ class TestTrainingReadinessP0:
 
         assert report["ready"] is False
         assert "missing_market_identity" in _blocker_codes(report)
-        assert report["checks"]["market_events_v2.market_identity_present"]["count"] == 1
+        assert report["checks"]["market_events.market_identity_present"]["count"] == 1
         assert report["checks"]["market_price_history.market_identity_present"]["count"] == 1
 
     def test_training_readiness_fails_when_observation_instants_v2_source_role_is_fallback(self, tmp_path):
@@ -2063,7 +2063,7 @@ class TestP4Readiness:
             "p4_metric_layer_decision_missing",
             "p4_market_rule_acceptance_contract_missing",
             "p4_tigge_manifest_missing",
-            "p4_market_events_v2_empty",
+            "p4_market_events_empty",
             "p4_settlements_v2_empty",
             "p4_ensemble_snapshots_empty",
             "p4_calibration_pairs_v2_empty",
@@ -2109,7 +2109,7 @@ class TestP4Readiness:
         assert report["status"] == "READY"
         assert report["blockers"] == []
         assert report["checks"]["p4.4_5_b.metric_layer_decision_present"]["status"] == "PASS"
-        assert report["checks"]["market_events_v2.p4_market_identity_present"]["status"] == "PASS"
+        assert report["checks"]["market_events.p4_market_identity_present"]["status"] == "PASS"
         assert report["checks"]["p4.4_8.k2_daily_obs_ok"]["status"] == "PASS"
         assert report["checks"]["p4.4_8.k2_forecasts_daily_row_count_verified"]["status"] == "PASS"
 

@@ -164,15 +164,16 @@ tables:
       (DERIVED_FROM_DISSEMINATION) row. latest_event_time is event-time plane; computed_at is
       write-time provenance only.
 
-  - name: market_events_v2
+  - name: market_events
     db: forecasts
     schema_class: forecast_class
     schema_version_owner: SCHEMA_FORECASTS_VERSION
     created_by: init_schema_forecasts
     pk_col: null
     notes: >
-      K1-split 2026-05-11. v2 market events (apply_v2_schema via init_schema_forecasts).
-      Ghost copy on world.db declared legacy_archived below.
+      K1-split 2026-05-11. Collapsed from market_events_v2 in B3cont (PR3): dead v1 shell
+      on world.db had 0 rows; v2 was the only live table (17,256 rows on zeus-forecasts.db).
+      Ghost copy on world.db declared legacy_archived below (drop after 2026-08-09).
 
   - name: ensemble_snapshots
     db: forecasts
@@ -663,11 +664,15 @@ tables:
 
   - name: market_events
     db: world
-    schema_class: world_class
-    schema_version_owner: SCHEMA_VERSION
+    schema_class: legacy_archived
+    schema_version_owner: null
     created_by: init_schema
     pk_col: null
-    notes: Pre-v2 market events (legacy on world.db). v2 is market_events_v2 on forecasts.db.
+    notes: >
+      Dead v1 shell — 0 rows. DDL dropped from init_schema in B3cont (PR3).
+      Canonical table is market_events on forecasts.db (collapsed from market_events_v2).
+      Drop bare shell from live world.db via pr3_b3_live_table_rename.py (operator-run).
+      Drop after 2026-08-09.
 
   - name: market_price_history
     db: world

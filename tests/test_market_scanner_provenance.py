@@ -231,7 +231,7 @@ def _complete_release_evidence(prefix: str = "docs/operations/source_transition"
 
 
 _FORWARD_SUBSTRATE_DDL = """
-        CREATE TABLE market_events_v2 (
+        CREATE TABLE market_events (
             event_id INTEGER PRIMARY KEY AUTOINCREMENT,
             market_slug TEXT NOT NULL,
             city TEXT NOT NULL,
@@ -3122,7 +3122,7 @@ class TestExecutableConditionIdsForUserChannelWS:
         assert result.status == "failed"
         assert result.inserted == 0
         assert result.event_count == 1
-        assert "market_events_v2" in (result.error or "")
+        assert "market_events" in (result.error or "")
 
     def test_market_events_persistence_duplicate_only_is_not_failed(self, tmp_path):
         event = _gamma_temperature_event()
@@ -3479,7 +3479,7 @@ class TestForwardMarketSubstrateProducer:
         ):
             conn.execute(
                 """
-                INSERT INTO market_events_v2 (
+                INSERT INTO market_events (
                     market_slug, city, target_date, temperature_metric,
                     condition_id, token_id, range_label, range_low,
                     range_high, recorded_at
@@ -3527,7 +3527,7 @@ class TestForwardMarketSubstrateProducer:
         conn = _make_persisted_substrate_conn()
         conn.execute(
             """
-            INSERT INTO market_events_v2 (
+            INSERT INTO market_events (
                 market_slug, city, target_date, temperature_metric,
                 condition_id, token_id, range_label, range_low,
                 range_high, recorded_at
@@ -3558,7 +3558,7 @@ class TestForwardMarketSubstrateProducer:
         ):
             conn.execute(
                 """
-                INSERT INTO market_events_v2 (
+                INSERT INTO market_events (
                     market_slug, city, target_date, temperature_metric,
                     condition_id, token_id, range_label, range_low,
                     range_high, recorded_at
@@ -3596,7 +3596,7 @@ class TestForwardMarketSubstrateProducer:
         ):
             conn.execute(
                 """
-                INSERT INTO market_events_v2 (
+                INSERT INTO market_events (
                     market_slug, city, target_date, temperature_metric,
                     condition_id, token_id, range_label, range_low,
                     range_high, recorded_at
@@ -3690,7 +3690,7 @@ class TestForwardMarketSubstrateProducer:
         ):
             conn.execute(
                 """
-                INSERT INTO market_events_v2 (
+                INSERT INTO market_events (
                     market_slug, city, target_date, temperature_metric,
                     condition_id, token_id, range_label, range_low,
                     range_high, recorded_at
@@ -3762,7 +3762,7 @@ class TestForwardMarketSubstrateProducer:
         ):
             conn.execute(
                 """
-                INSERT INTO market_events_v2 (
+                INSERT INTO market_events (
                     market_slug, city, target_date, temperature_metric,
                     condition_id, token_id, range_label, range_low,
                     range_high, recorded_at
@@ -3812,7 +3812,7 @@ class TestForwardMarketSubstrateProducer:
         ):
             conn.execute(
                 """
-                INSERT INTO market_events_v2 (
+                INSERT INTO market_events (
                     market_slug, city, target_date, temperature_metric,
                     condition_id, token_id, range_label, range_low,
                     range_high, recorded_at
@@ -3846,7 +3846,7 @@ class TestForwardMarketSubstrateProducer:
         held = next(o for o in snapshot.events if o["condition_id"] == "cond-mid")
         assert held["executable"] is False
         assert held["price"] is None
-        assert held["source_contract"]["source"] == "market_events_v2_static_topology"
+        assert held["source_contract"]["source"] == "market_events_static_topology"
 
     def test_get_sibling_outcomes_uses_persisted_authority_without_legacy_scan(self, monkeypatch):
         monkeypatch.setattr(
@@ -3886,7 +3886,7 @@ class TestForwardMarketSubstrateProducer:
         conn = _make_persisted_substrate_conn()
         conn.execute(
             """
-            INSERT INTO market_events_v2 (
+            INSERT INTO market_events (
                 market_slug, city, target_date, temperature_metric,
                 condition_id, token_id, range_label, range_low,
                 range_high, recorded_at
@@ -3921,7 +3921,7 @@ class TestForwardMarketSubstrateProducer:
         ):
             forecasts_conn.execute(
                 """
-                INSERT INTO market_events_v2 (
+                INSERT INTO market_events (
                     market_slug, city, target_date, temperature_metric,
                     condition_id, token_id, range_label, range_low,
                     range_high, recorded_at
@@ -4213,7 +4213,7 @@ class TestForwardMarketSubstrateProducer:
             SELECT market_slug, city, target_date, temperature_metric,
                    condition_id, token_id, range_label, range_low, range_high,
                    outcome
-            FROM market_events_v2
+            FROM market_events
             ORDER BY condition_id
             """
         ).fetchall()
@@ -4232,7 +4232,7 @@ class TestForwardMarketSubstrateProducer:
 
         readiness = check_economics_readiness(conn)
         assert readiness.ready is False
-        assert "empty_table:market_events_v2" not in readiness.blockers
+        assert "empty_table:market_events" not in readiness.blockers
         assert "empty_table:market_price_history" not in readiness.blockers
         assert "no_full_market_price_linkage_rows" in readiness.blockers
         assert "missing_table:venue_trade_facts" in readiness.blockers
@@ -4357,7 +4357,7 @@ class TestForwardMarketSubstrateProducer:
         )
 
         assert result["status"] == "skipped_missing_tables"
-        assert set(result["missing_tables"]) == {"market_events_v2", "market_price_history"}
+        assert set(result["missing_tables"]) == {"market_events", "market_price_history"}
         check_conn = sqlite3.connect(db_path)
         try:
             assert check_conn.execute(
@@ -4379,7 +4379,7 @@ class TestForwardMarketSubstrateProducer:
         )
 
         assert result["status"] == "refused_degraded_authority"
-        assert conn.execute("SELECT COUNT(*) FROM market_events_v2").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM market_events").fetchone()[0] == 0
         assert conn.execute("SELECT COUNT(*) FROM market_price_history").fetchone()[0] == 0
 
     def test_forward_substrate_refuses_missing_identity_or_range_facts(self, tmp_path, request):
@@ -4417,7 +4417,7 @@ class TestForwardMarketSubstrateProducer:
 
         assert result["status"] == "skipped_no_valid_rows"
         assert result["outcomes_skipped_missing_facts"] == 2
-        assert conn.execute("SELECT COUNT(*) FROM market_events_v2").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM market_events").fetchone()[0] == 0
         assert conn.execute("SELECT COUNT(*) FROM market_price_history").fetchone()[0] == 0
 
     def test_forward_substrate_is_idempotent_and_does_not_overwrite_conflicts(self, tmp_path, request):
@@ -4440,7 +4440,7 @@ class TestForwardMarketSubstrateProducer:
         assert second["status"] == "unchanged"
         assert second["market_events_unchanged"] == 2
         assert second["price_rows_unchanged"] == 4
-        assert conn.execute("SELECT COUNT(*) FROM market_events_v2").fetchone()[0] == 2
+        assert conn.execute("SELECT COUNT(*) FROM market_events").fetchone()[0] == 2
         assert conn.execute("SELECT COUNT(*) FROM market_price_history").fetchone()[0] == 4
 
         conflicting = _forward_market()
@@ -4465,11 +4465,11 @@ class TestForwardMarketSubstrateProducer:
         assert stored_price == 0.31
 
     def test_forward_substrate_does_not_append_prices_for_resolved_events(self, tmp_path, request):
-        """A resolved market_events_v2 row is not unresolved scanner substrate."""
+        """A resolved market_events row is not unresolved scanner substrate."""
         db_path, conn = _make_forward_substrate_db(tmp_path, request)
         conn.execute(
             """
-            INSERT INTO market_events_v2 (
+            INSERT INTO market_events (
                 market_slug, city, target_date, temperature_metric,
                 condition_id, token_id, range_label, range_low, range_high,
                 outcome, created_at, recorded_at
@@ -4504,7 +4504,7 @@ class TestForwardMarketSubstrateProducer:
 
         assert result["status"] == "skipped_no_valid_rows"
         assert result["outcomes_skipped_with_outcome_fact"] == 1
-        assert conn.execute("SELECT COUNT(*) FROM market_events_v2").fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM market_events").fetchone()[0] == 1
         assert conn.execute("SELECT COUNT(*) FROM market_price_history").fetchone()[0] == 0
 
     def test_forward_substrate_treats_legacy_range_label_outcome_as_unresolved(
@@ -4518,7 +4518,7 @@ class TestForwardMarketSubstrateProducer:
         db_path, conn = _make_forward_substrate_db(tmp_path, request)
         conn.execute(
             """
-            INSERT INTO market_events_v2 (
+            INSERT INTO market_events (
                 market_slug, city, target_date, temperature_metric,
                 condition_id, token_id, range_label, range_low, range_high,
                 outcome, created_at, recorded_at
@@ -4555,7 +4555,7 @@ class TestForwardMarketSubstrateProducer:
         assert result["market_events_unchanged"] == 1
         assert result["price_rows_inserted"] == 2
         assert result["outcomes_skipped_with_outcome_fact"] == 0
-        assert conn.execute("SELECT COUNT(*) FROM market_events_v2").fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM market_events").fetchone()[0] == 1
         assert conn.execute("SELECT COUNT(*) FROM market_price_history").fetchone()[0] == 2
 
     def test_forward_substrate_does_not_conflict_on_missing_existing_created_at(
@@ -4565,7 +4565,7 @@ class TestForwardMarketSubstrateProducer:
         db_path, conn = _make_forward_substrate_db(tmp_path, request)
         conn.execute(
             """
-            INSERT INTO market_events_v2 (
+            INSERT INTO market_events (
                 market_slug, city, target_date, temperature_metric,
                 condition_id, token_id, range_label, range_low, range_high,
                 outcome, created_at, recorded_at
@@ -4602,7 +4602,7 @@ class TestForwardMarketSubstrateProducer:
         assert result["market_events_unchanged"] == 1
         assert result["market_events_conflicted"] == 0
         assert result["price_rows_inserted"] == 2
-        assert conn.execute("SELECT COUNT(*) FROM market_events_v2").fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM market_events").fetchone()[0] == 1
         assert conn.execute("SELECT COUNT(*) FROM market_price_history").fetchone()[0] == 2
 
     def test_forward_substrate_conflicts_on_different_existing_created_at(
@@ -4612,7 +4612,7 @@ class TestForwardMarketSubstrateProducer:
         db_path, conn = _make_forward_substrate_db(tmp_path, request)
         conn.execute(
             """
-            INSERT INTO market_events_v2 (
+            INSERT INTO market_events (
                 market_slug, city, target_date, temperature_metric,
                 condition_id, token_id, range_label, range_low, range_high,
                 outcome, created_at, recorded_at
@@ -4648,7 +4648,7 @@ class TestForwardMarketSubstrateProducer:
         assert result["status"] == "written_with_conflicts"
         assert result["market_events_conflicted"] == 1
         assert result["price_rows_inserted"] == 0
-        assert conn.execute("SELECT COUNT(*) FROM market_events_v2").fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM market_events").fetchone()[0] == 1
         assert conn.execute("SELECT COUNT(*) FROM market_price_history").fetchone()[0] == 0
 
     def test_forward_substrate_does_not_append_prices_for_event_identity_conflicts(self, tmp_path, request):
@@ -4680,7 +4680,7 @@ class TestForwardMarketSubstrateProducer:
         assert conflict["status"] == "written_with_conflicts"
         assert conflict["market_events_conflicted"] == 1
         assert conflict["price_rows_inserted"] == 0
-        assert conn.execute("SELECT COUNT(*) FROM market_events_v2").fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM market_events").fetchone()[0] == 1
         assert conn.execute("SELECT COUNT(*) FROM market_price_history").fetchone()[0] == 2
         assert conn.execute(
             """

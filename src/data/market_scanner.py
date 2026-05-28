@@ -85,7 +85,7 @@ class MarketSnapshot:
 
 @dataclass(frozen=True)
 class MarketEventsPersistenceResult:
-    """Outcome of persisting parsed Gamma market topology to market_events_v2."""
+    """Outcome of persisting parsed Gamma market topology to market_events."""
 
     status: Literal["written", "duplicate_only", "failed"]
     inserted: int
@@ -685,7 +685,7 @@ def _persist_market_events_to_db(
     results: list[dict],
     db_path: str | Path | None = None,
 ) -> MarketEventsPersistenceResult:
-    """Upsert scanned market events into market_events_v2.
+    """Upsert scanned market events into market_events.
 
     Uses INSERT OR IGNORE so repeated scans are idempotent — existing rows
     keyed on (market_slug, condition_id) are never overwritten.
@@ -722,7 +722,7 @@ def _persist_market_events_to_db(
                     range_high = outcome.get("range_high")
                     cursor = conn.execute(
                         """
-                        INSERT OR IGNORE INTO market_events_v2
+                        INSERT OR IGNORE INTO market_events
                             (market_slug, city, target_date, temperature_metric,
                              condition_id, token_id, range_label, range_low,
                              range_high, outcome, created_at)
@@ -746,7 +746,7 @@ def _persist_market_events_to_db(
                         inserted += 1
                     else:
                         logger.debug(
-                            "market_events_v2 INSERT ignored for condition_id=%s",
+                            "market_events INSERT ignored for condition_id=%s",
                             condition_id,
                         )
             conn.commit()
@@ -758,7 +758,7 @@ def _persist_market_events_to_db(
         finally:
             conn.close()
     except Exception as exc:
-        logger.warning("market_events_v2 persistence failed: %s", exc)
+        logger.warning("market_events persistence failed: %s", exc)
         return MarketEventsPersistenceResult(
             status="failed",
             inserted=inserted,
@@ -773,7 +773,7 @@ def _persist_market_events_to_db(
 
 
 def get_last_market_events_persistence_result() -> MarketEventsPersistenceResult | None:
-    """Return the last market_events_v2 persistence outcome for scheduler health."""
+    """Return the last market_events persistence outcome for scheduler health."""
 
     return _LAST_MARKET_EVENTS_PERSISTENCE_RESULT
 
@@ -1092,7 +1092,7 @@ def _read_static_market_event_sibling_outcomes(
                 "executable": False,
                 "source_contract": {
                     "status": "MATCH",
-                    "source": "market_events_v2_static_topology",
+                    "source": "market_events_static_topology",
                 },
             }
         )
@@ -2886,7 +2886,7 @@ def _open_forecasts_market_events_connection(db_path: str | Path | None = None):
         conn.row_factory = sqlite3.Row
         return conn
     except sqlite3.Error as exc:
-        logger.warning("forecasts market_events_v2 read-open failed: %s", exc)
+        logger.warning("forecasts market_events read-open failed: %s", exc)
         return None
 
 
@@ -2914,12 +2914,12 @@ def _market_event_rows_for_snapshot_conditions(
     try:
         placeholders = ",".join("?" for _ in condition_ids)
         for source in sources:
-            if not _table_exists(source, "market_events_v2"):
+            if not _table_exists(source, "market_events"):
                 continue
             market_event_rows = source.execute(
                 f"""
                 SELECT market_slug
-                  FROM market_events_v2
+                  FROM market_events
                  WHERE condition_id IN ({placeholders})
                  GROUP BY market_slug
                 """,
@@ -2932,7 +2932,7 @@ def _market_event_rows_for_snapshot_conditions(
             rows = source.execute(
                 f"""
                 SELECT *
-                  FROM market_events_v2
+                  FROM market_events
                  WHERE market_slug IN ({slug_placeholders})
                  ORDER BY market_slug, range_low IS NOT NULL, range_low, range_high, condition_id
                 """,

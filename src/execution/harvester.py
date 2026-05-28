@@ -41,7 +41,7 @@ from src.state.db import (
     get_forecasts_connection,
     get_trade_connection,
     get_world_connection,
-    log_market_event_outcomes_v2,
+    log_market_event_outcomes,
     log_settlement_event,
     log_settlement_v2,
     query_authoritative_settlement_rows,
@@ -1210,7 +1210,7 @@ def _extract_resolved_market_outcomes(event: dict) -> list[ResolvedMarketOutcome
 
     Settled Gamma events are no longer tradable, so this intentionally does not
     call the active-market tradability filter from market_scanner. Each returned
-    row is keyed by the YES token, because market_events_v2 stores one row per
+    row is keyed by the YES token, because market_events stores one row per
     temperature bin with the YES token as `token_id`.
     """
     resolved: list[ResolvedMarketOutcome] = []
@@ -1583,7 +1583,7 @@ def _write_settlement_truth(
                 recorded_at=settled_at,
             )
         if authority == "VERIFIED" and resolved_market_outcomes:
-            market_events_v2_result = log_market_event_outcomes_v2(
+            market_events_result = log_market_event_outcomes(
                 conn,
                 market_slug=event_slug or None,
                 city=city.name,
@@ -1595,20 +1595,20 @@ def _write_settlement_truth(
                 ],
             )
         elif resolved_market_outcomes:
-            market_events_v2_result = {
+            market_events_result = {
                 "status": "skipped_unverified_settlement",
-                "table": "market_events_v2",
+                "table": "market_events",
                 "authority": authority,
             }
         else:
-            market_events_v2_result = {
+            market_events_result = {
                 "status": "skipped_no_resolved_market_identity",
-                "table": "market_events_v2",
+                "table": "market_events",
             }
         logger.info(
-            "harvester_live write: %s %s → authority=%s settlement_value=%s winning_bin=%s reason=%s settlements_v2=%s market_events_v2=%s",
+            "harvester_live write: %s %s → authority=%s settlement_value=%s winning_bin=%s reason=%s settlements_v2=%s market_events=%s",
             city.name, target_date, authority, settlement_value, winning_bin, reason,
-            settlement_v2_result.get("status"), market_events_v2_result.get("status"),
+            settlement_v2_result.get("status"), market_events_result.get("status"),
         )
     except Exception as exc:
         logger.warning(
@@ -1622,7 +1622,7 @@ def _write_settlement_truth(
         "winning_bin": winning_bin,
         "reason": reason,
         "settlement_v2": settlement_v2_result,
-        "market_events_v2": market_events_v2_result,
+        "market_events": market_events_result,
     }
 
 

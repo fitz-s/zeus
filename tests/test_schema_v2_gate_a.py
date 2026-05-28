@@ -56,7 +56,7 @@ def _insert_settlements_row(conn: sqlite3.Connection, metric: str) -> None:
 def _insert_market_events_row(conn: sqlite3.Connection, metric: str) -> None:
     conn.execute(
         """
-        INSERT INTO market_events_v2
+        INSERT INTO market_events
             (market_slug, city, target_date, temperature_metric, recorded_at)
         VALUES (?, ?, ?, ?, '2026-04-16T00:00:00Z')
         """,
@@ -148,7 +148,7 @@ def _insert_day0_metric_fact_row(conn: sqlite3.Connection, metric: str) -> None:
 # existed and _table_exists guards all readers (replay.py, status_summary.py).
 TABLE_INSERTERS = {
     "settlements_v2": _insert_settlements_row,
-    "market_events_v2": _insert_market_events_row,
+    "market_events": _insert_market_events_row,
     "ensemble_snapshots": _insert_ensemble_snapshots_row,
     "calibration_pairs_v2": _insert_calibration_pairs_row,
     "platt_models_v2": _insert_platt_models_row,

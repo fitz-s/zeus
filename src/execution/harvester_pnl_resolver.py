@@ -7,7 +7,7 @@ Writes trade.decision_log via store_settlement_records() and settles positions
 via _settle_positions() — both are trading-side operations.
 
 Design invariants:
-- Does NOT write to settlements, settlements_v2, market_events_v2, or any forecast table.
+- Does NOT write to settlements, settlements_v2, market_events, or any forecast table.
 - If forecasts.settlements has no new rows, returns awaiting_truth_writer status.
 - Feature-flagged: ZEUS_HARVESTER_LIVE_ENABLED must equal "1" or function is a no-op.
 - May import from src.execution.harvester (trading side, no circular reference).

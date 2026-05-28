@@ -174,11 +174,11 @@ class TestCrossMarketCorrelationHedgeRelationship:
     """R-tests: cross_market_correlation_hedge enter→decision_events, no_trade→no_trade_events."""
 
     def _make_enter_conn_and_context(self) -> tuple[sqlite3.Connection, CandidateContext]:
-        """Build an in-memory conn seeded with market_events_v2 + regime_correlation_cache."""
+        """Build an in-memory conn seeded with market_events + regime_correlation_cache."""
         conn = _make_conn()
-        # Seed market_events_v2 so city can be resolved.
+        # Seed market_events so city can be resolved.
         conn.execute(
-            """CREATE TABLE IF NOT EXISTS market_events_v2 (
+            """CREATE TABLE IF NOT EXISTS market_events (
                 market_slug TEXT, city TEXT, target_date TEXT,
                 temperature_metric TEXT, condition_id TEXT,
                 token_id TEXT, range_label TEXT, range_low REAL, range_high REAL,
@@ -186,7 +186,7 @@ class TestCrossMarketCorrelationHedgeRelationship:
             )"""
         )
         conn.execute(
-            "INSERT INTO market_events_v2 (market_slug, city) VALUES (?, ?)",
+            "INSERT INTO market_events (market_slug, city) VALUES (?, ?)",
             ("test-market-NYC-high-2026-06-15", "New York"),
         )
         # Seed regime_correlation_cache with a 2-city matrix.
@@ -246,7 +246,7 @@ class TestCrossMarketCorrelationHedgeRelationship:
     def test_no_trade_path_writes_no_trade_events_row_with_correct_reason(self):
         """No-trade path: UNKNOWN regime (in-memory conn) → CORR_HEDGE_REGIME_UNAVAILABLE."""
         conn = _make_conn()
-        # No market_events_v2 table — city resolution fails; emit CORR_HEDGE_REGIME_UNAVAILABLE.
+        # No market_events table — city resolution fails; emit CORR_HEDGE_REGIME_UNAVAILABLE.
         candidate = CrossMarketCorrelationHedge()
         analysis = SimpleNamespace(metrics=_make_metrics())
         ctx = _make_context(conn, analysis)
@@ -269,12 +269,12 @@ class TestCrossMarketCorrelationHedgeRelationship:
         """UNKNOWN regime fallback: regime_tag_for returns UNKNOWN → no_trade, no exception raised."""
         conn = _make_conn()
         conn.execute(
-            """CREATE TABLE IF NOT EXISTS market_events_v2 (
+            """CREATE TABLE IF NOT EXISTS market_events (
                 market_slug TEXT, city TEXT
             )"""
         )
         conn.execute(
-            "INSERT INTO market_events_v2 (market_slug, city) VALUES (?, ?)",
+            "INSERT INTO market_events (market_slug, city) VALUES (?, ?)",
             ("test-market-NYC-high-2026-06-15", "New York"),
         )
         conn.commit()

@@ -95,7 +95,7 @@ def compute_realized_pnl(
     # as the position direction.  The resolution mapping is:
     #   side='YES' → win when winning_bin does NOT start with 'no_' prefix (YES won)
     #   side='NO'  → win when winning_bin starts with 'no_' (NO won)
-    # This is a thin v1 approximation; callers should refine once market_events_v2
+    # This is a thin v1 approximation; callers should refine once market_events
     # range labels are wired.
 
     # For Track L-2 v1 we use a simpler convention: the settlement_value field
@@ -113,7 +113,7 @@ def compute_realized_pnl(
     # Without a reliable mapping, v1 uses a POSITIVE=WIN direction:
     #   For 'YES' positions: settled_payoff = 1.0 if we assume market went in our favour.
     # Since we cannot know from winning_bin alone which direction won without the full
-    # market_events_v2 join, we implement the minimal correct v1:
+    # market_events join, we implement the minimal correct v1:
     #   - If winning_bin is None → skip (market not yet settled)
     #   - Realised payoff for YES: 1.0 if winning_bin does NOT contain 'no' as first word
     #   - Realised payoff for NO: 1.0 if winning_bin starts with 'no'
