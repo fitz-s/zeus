@@ -1,41 +1,50 @@
-# ENS B-Blockers + M-Series Mission Context — 2026-05-28
+# ENS Mission Context — 2026-05-28
 
-**Audience**: any session (live or background) resuming this work after compaction or a restart.
-**Authority**: operator pre-MC re-audit (2026-05-28) + operator live-shadow pivot (2026-05-28 ~05:30 CT).
+**Single resume-from-anywhere reference for the FT-domain canonicality + MC rebuild + live unshadow mission.**
+
+**Audience**: any session (live or background) resuming after compaction, restart, heartbeat, or operator handoff.
+**Authority**: operator pre-MC re-audit (2026-05-28 ~04:30 CT) + operator live-shadow pivot (2026-05-28 ~05:30 CT) + operator restated Hard Blockers (2026-05-28 ~05:35 CT).
 **Worktree**: `/Users/leofitz/.openclaw/workspace-venus/zeus/.claude/worktrees/ens-bias-hierarchical`
 **Branch**: `feat/ft-domain-canonical-refit`
-**HEAD at write-time**: `3ce02984b3` (B1+B2+B3+B6+B7 patches)
-**Active gate**: `_GATE_SET_VERSION = "ftgate-2026-05-28-sd3"`
+**HEAD at write-time**: `23a64622bd` (B1-B7 + context doc v1).
+**Active gate**: `_GATE_SET_VERSION = "ftgate-2026-05-28-sd3"` (B1+B6 bumped sd2→sd3).
 
 ---
 
-## 1 — What just shipped (durable, do not redo)
+## 0 — Operator Standing Directives (do not violate)
 
-PR #358, commit `3ce02984b3`, closes the operator's pre-MC re-audit:
-
-| ID | Defect | Fix | Files | Tests |
-|----|--------|-----|-------|-------|
-| **B1** | Producer iterated calendar `_SEASONS`; reader uses `season_from_date(... lat=city.lat)` with `_SH_FLIP` → 4 SH cities (Buenos Aires, Cape Town, Sao Paulo, Wellington) had VERIFIED rows orphaned. | New `_iter_seasons_for_city(city)` in `scripts/fit_full_transport_error_models.py` yields `(label, months)` with label flipped per `city.lat`. Producer loop iterates the hemisphere-aware helper. | `scripts/fit_full_transport_error_models.py` | `tests/test_b1_producer_hemisphere_aware_season.py` |
-| **B2** | `_native_error_params_for_snapshot` cache_key was `(city.name, season_label, metric)` — first snapshot's None poisoned later covered-month snapshots OR a covered-month row got reused for off-coverage months, bypassing `read_bias_model` month-scope guard. | Cache_key now `(city.name, season_label, metric, target_month)`. | `scripts/rebuild_calibration_pairs_v2.py` | `tests/test_b2_native_error_params_cache_includes_target_month.py` |
-| **B3** | A-cohort replay used `error_model_source="recompute"` (MIN_LIVE_N=5) vs producer (MIN_LIVE_N=20). `_load_error_model_from_db` ran raw SELECT with no family/authority/gate/month filter. | Switched selective driver to `db` mode; `_load_error_model_from_db` rewritten to call `read_bias_model(error_model_family='full_transport_v1', authority='STAGING', require_gate_set_hash=current_gate_set_hash(), target_month=<per_snapshot>)`. `_evaluate_cohort` defers acquisition to per-snapshot in db mode. | `scripts/replay_equivalence_full_transport.py`, `scripts/selective_refit_from_manifest.py` | `tests/test_b3_replay_uses_persisted_staging.py` |
-| **B6** | Producer wrote `training_cutoff=today_str` but loaders received `settled_before=None`. Stored cutoff was a label only — two-row reproducibility could not reproduce. | Threaded `today_str` into all 4 loaders (`load_bucket_residuals`, `fit_city_predictive_error`, `paired_delta_coverage`, `_effective_coverage_months`). | `scripts/fit_full_transport_error_models.py` | `tests/test_b6_training_cutoff_threaded_to_loaders.py` |
-| **B7** | `compute_final_regen(... gate_changed=True)` silently returned `set(all_cohorts)` → selective rebuild degraded to full reproduce when manifest itself was stale under the new gate. | Raises `SystemExit` with explicit "regenerate ROW_ACTION_MANIFEST under current gate" guidance. | `scripts/selective_refit_from_manifest.py` | `tests/test_b7_gate_changed_aborts_selective_refit.py` |
-
-**Already-shipped pre-B work (do not redo, in same PR #358):** SD1–SD6 + BL-B + BL-C + BL-D + BL-E. See completed task IDs #126-#130, #141-#144.
-
-**B4, B5**: already closed in PR #358 before B-batch (BL-C task #142, BL-B task #141).
-
-**`_GATE_SET_VERSION` bump**: sd2 → sd3. B1 + B6 change the fit-time semantics encoded in every stored row, so the gate hash MUST advance — pre-sd3 STAGING rows are no longer reproducible under the new contract. Stats unchanged (MIN_PRIOR_N=5, MIN_PAIRED_N=5, DEFAULT_MIN_LIVE_N=20, CONSERVATIVE_RESIDUAL_FLOOR_C=3.0). **Do not touch any stat threshold** — each change re-bumps the hash and re-invalidates the manifest that gets regenerated downstream.
-
-**Regression**: 65/65 B+SD+BL tests green; 109/112 ens/ft/replay tests green (3 pre-existing carveout-yaml fails in `test_check_full_transport_ship_readiness.py` unrelated, predate B-batch).
+1. **Goal active**: bring live to right code, right data, profitable orders. The only valid wait reasons are PR #359 + active rebuild/refit progress. No other wait justifies idle.
+2. **Live = SHADOW until M5**: daemons run, candidates compute, intents created + SUBMIT_REJECTED → no fills. FT flag OFF. After full rebuild+refit on aligned main, unshadow.
+3. **Shadow must work NOW** — operator: "live shadow will have wiring problem to fix, you should shadow the live and make sure it's working now." See §6 for current wiring break.
+4. **Worktree will be far behind main post-#359** — big file renames expected. B1-B7 patches must carry over; replay each on the new file path if renamed.
+5. **2hr heartbeat must fetch latest, not assume** — operator: "must check latest instead of just wake up." See §9.
+6. **1hr heartbeat REQUIRED during active rebuild/refit** — per memory `project_ft_ship_autonomous_workflow_2026_05_26.md`. PID alive + log frozen ≠ normal; silent ≠ normal; CPU%+RSS+log byte-delta + temp-file delta per minute required.
+7. **No new orders, no manual completion** — first live order must complete programmatically per design. Setting precedent for manual = masks cascade-liveness defects forever.
 
 ---
 
-## 2 — Operator's working-state pivot (2026-05-28 ~05:30 CT)
+## 1 — Operator Hard Blockers (HB1-HB8) → My B-fixes + BL-A status
 
-**Verbatim**: "在rebuild和refit完成前live只能shadow运行，你必须等到pr359 merge之后对齐main，然后基于最新的main进行对应的代码修改，有大量文件改名，然后再跑rebuild和refit，你必须设置monitor等待他们结束，同时在rebuild和refit期间必须有1小时heartbeat... 在最新的数据上restart shadow live，查看bin bias对于主流天气预报的区别是否改善，用测试证明前后区别，然后再正确的unshadow live让live在正确代码上运行."
+This is the **definitive mapping** so no future session re-fixes what is already shipped.
 
-**Distilled into M-series task graph (#150-#155)**:
+| Operator HB | Defect | Status | Implementing fix | Commit |
+|-------------|--------|--------|------------------|--------|
+| **HB1** | Southern Hemisphere season label mismatch (producer iterated calendar `_SEASONS`, reader applies `_SH_FLIP` per `lat<0` → BA/Cape Town/Sao Paulo/Wellington VERIFIED rows orphaned). | ✅ FIXED | **B1**: `_iter_seasons_for_city(city)` in `scripts/fit_full_transport_error_models.py`. Producer loop iterates hemisphere-aware. Tests: `tests/test_b1_producer_hemisphere_aware_season.py`. | `3ce02984b3` |
+| **HB2** | `_native_error_params_for_snapshot` cache_key omits target_month → fails open or reuses across-month rows, bypassing `read_bias_model` month-scope guard. | ✅ FIXED | **B2**: `cache_key = (city.name, season_label, metric, target_month)` in `scripts/rebuild_calibration_pairs_v2.py`. Tests: `tests/test_b2_native_error_params_cache_includes_target_month.py`. | `3ce02984b3` |
+| **HB3** | Replay equivalence runs in recompute-mode (`_MIN_LIVE_N_RECOMPUTE=5`) vs producer (`DEFAULT_MIN_LIVE_N=20`) → A-cohort verdict invalid (compares against the WRONG model). | ✅ FIXED | **B3**: `selective_refit_from_manifest._run_replay_for_a_cohorts` dispatches `error_model_source="db"`; `_load_error_model_from_db` rewritten to call `read_bias_model(error_model_family='full_transport_v1', authority='STAGING', require_gate_set_hash=current_gate_set_hash(), target_month=<per_snapshot>)`. `_evaluate_cohort` defers acquisition to per-snapshot in db mode. Tests: `tests/test_b3_replay_uses_persisted_staging.py`. | `3ce02984b3` |
+| **HB4** | Per-snapshot DB read missing — replay must load model PER SNAPSHOT target_month, not once per cohort. | ✅ FIXED in B3 | Same commit as HB3 — `_evaluate_cohort` db-mode iterates `for row in sampled` and calls `_load_error_model_from_db(..., target_month=<int(snap.target_date[5:7])>)` per snapshot. | `3ce02984b3` |
+| **HB5** | Season/month-scoped rebuild missing → cohort regen leaked to other seasons. | ✅ FIXED in BL-B | `rebuild_calibration_pairs_v2.py` added `--months`; sequential + parallel delete paths month-scoped. `selective_refit_from_manifest` passes `--months <calendar group>` per cohort. Task #141. | Earlier #358 commit `9b95e831ce` |
+| **HB6** | (a) Pair-batch manifest queried wrong DB + best-effort failure; (b) producer wrote `training_cutoff=today_str` but loaders received `settled_before=None`. | ✅ FIXED (both) | **(a)** BL-C task #142 — manifest queries `forecasts_conn` (the rebuild's `--db`), abort `rc=1` on failure. **(b)** **B6**: thread `today_str` into all 4 loaders (`load_bucket_residuals`, `fit_city_predictive_error`, `paired_delta_coverage`, `_effective_coverage_months`). Tests: `tests/test_b6_training_cutoff_threaded_to_loaders.py`. | `3962ceac07` + `3ce02984b3` |
+| **HB7** | `compute_final_regen(... gate_changed=True)` silently returned `set(all_cohorts)` → degraded selective rebuild to full reproduce when manifest itself was stale under the new gate. | ✅ FIXED | **B7**: `raise SystemExit("regenerate ROW_ACTION_MANIFEST under current gate ...")`. Tests: `tests/test_b7_gate_changed_aborts_selective_refit.py`. | `3ce02984b3` |
+| **HB8** | `ROW_ACTION_MANIFEST_2026-05-27.csv` was generated under old gate (sd2 + pre-MIN_PRIOR_N=5). Under sd3 several rows would re-classify (Denver/LA DJF HIGH n_prior=2, Shanghai/Tokyo MAM LOW, Qingdao MAM HIGH). CSV is HISTORICAL EVIDENCE, not execution input. | ⏸️ PENDING (BL-A #140) | Cannot pre-generate — must run audit script + producer on the aligned post-#359 worktree under sd3 to emit fresh manifest. Then feed into `selective_refit_from_manifest --execute`. | (none yet) |
+
+**Stats locked unchanged** (operator: do not touch — each change re-bumps gate hash and re-invalidates manifest): `MIN_PRIOR_N=5`, `MIN_PAIRED_N=5`, `DEFAULT_MIN_LIVE_N=20`, `CONSERVATIVE_RESIDUAL_FLOOR_C=3.0`, `_GATE_SET_VERSION="ftgate-2026-05-28-sd3"`.
+
+**Regression at HEAD `3ce02984b3`**: 65/65 B+SD+BL tests green; 109/112 ens/ft/replay tests green (3 pre-existing carveout-yaml fails in `test_check_full_transport_ship_readiness.py` unrelated, predate B-batch).
+
+---
+
+## 2 — Mission task graph: M0-M5
 
 ```
                           [M0 #150] monitor PR #359 open + merge
@@ -47,145 +56,193 @@ PR #358, commit `3ce02984b3`, closes the operator's pre-MC re-audit:
                                        |
                                        v
                           [M2 #153] rebuild + refit at sd3
-                              (Monitor + 1hr heartbeat REQUIRED)
+                              (Monitor + 1hr heartbeat REQUIRED;
+                               includes BL-A manifest regen → producer → selective_refit)
                                        |
                                        v
    [M3 #151] live SHADOW    +    [M4 #154] before/after bin-bias test
-   (parallel during M0-M2          (vs mainstream forecast, must prove
-    wait; candidates flow,          DIRECTIONAL IMPROVEMENT)
-    NO orders submitted)                |
+   (NOW eligible — runs            (vs mainstream forecast, must prove
+    in parallel during              DIRECTIONAL IMPROVEMENT)
+    M0-M2 wait)                          |
                                        v
                           [M5 #155] unshadow live
                               (only after M4 GREEN; post-unshadow
-                               4h zero-trade = DEFECT, not expected)
+                               4h zero-trade = DEFECT cascade)
 ```
 
-Live trading stays in SHADOW until M5. FT flag stays OFF until M5.
+---
+
+## 3 — Full task ledger (every task, every state)
+
+### 3.1 — Active M-series + BL-A
+
+| ID | Subject | Status | Action |
+|----|---------|--------|--------|
+| #150 | M0: Monitor PR #359 open + merge | 🔵 in_progress | Monitor task `bvo7624iz` armed (persistent, 10-min poll on branch `claude/refactor-auth-econ-split-pr3`, SHA `844d82294e`). Emits `#359 state:` on transition NO_PR_YET→OPEN→MERGED. |
+| #152 | M1: Align worktree to latest main | ⏸️ blocked by #150 | Post-#359: `git fetch origin main && git rebase origin/main`. Big renames expected — verify B1-B7 patched files (`scripts/fit_full_transport_error_models.py`, `scripts/rebuild_calibration_pairs_v2.py`, `scripts/replay_equivalence_full_transport.py`, `scripts/selective_refit_from_manifest.py`, `src/calibration/ens_error_model.py`) still exist or replay edits onto new paths. |
+| #153 | M2: Rebuild + refit at sd3 | ⏸️ blocked by #152 | Sequence: (a) `scripts/audit_error_model_row_reproducibility.py` → fresh `ROW_ACTION_MANIFEST_<date>.csv` under sd3 (this closes BL-A #140). (b) `scripts/fit_full_transport_error_models.py --metric high --commit --db <staging>` then `--metric low`. (c) `scripts/rebuild_calibration_pairs_v2.py --no-dry-run --force --db <staging> --error-model full_transport_v1 --temperature-metric <m> --n-mc 10000 --workers $(( $(sysctl -n hw.ncpu) - 2 ))`. (d) `scripts/selective_refit_from_manifest.py --manifest <fresh> --db <staging> --execute --n-mc 10000`. (e) `scripts/audit_error_model_row_reproducibility.py` post-audit. Monitor MUST be armed with 1hr heartbeat over the entire phase. |
+| #140 | BL-A: Regenerate ROW_ACTION_MANIFEST under sd3 (= HB8) | ⏸️ pending, runs inside M2 step (a) | Old `docs/operations/ROW_ACTION_MANIFEST_2026-05-27.csv` is HISTORICAL EVIDENCE only — operator confirmed must NOT be used as execution input. |
+| #151 | M3: Live shadow — confirm wiring works | 🟢 ELIGIBLE NOW (parallel) | See §6 — wiring break found 2026-05-28 05:26 CT: probability_trace_fact silent (0 rows in 24h vs 44 decisions firing). Root-cause + fix REQUIRED before M5. |
+| #154 | M4: Bin-bias before/after test | ⏸️ blocked by #153 + #151 | Operator: "用测试证明前后区别". Test must compare (pre-sd3 rows + plain p_raw) vs (post-sd3 rows + ft-corrected p_raw) against mainstream forecast (open-meteo + TIGGE consensus). Metric: bin-bias mean (signed) + RPS + ECE. Must show DIRECTIONAL IMPROVEMENT in ≥2 of 3 metrics on ≥75% of cities. **Open**: exact baseline definition pending operator confirm. |
+| #155 | M5: Unshadow live on sd3 + main-aligned code | ⏸️ blocked by #154 | Flip `config/settings.json:195 "full_transport_live_enabled": true`; `launchctl kickstart -k gui/$UID/com.zeus.live-trading`. Per memory: 4h post-unshadow zero-trade = DEFECT (daemon → candidates → gates → edge → bias cascade). |
+
+### 3.2 — Carry-over R-series (subsumed by M-series, kept for traceability)
+
+| ID | Subject | Status | Disposition |
+|----|---------|--------|-------------|
+| #131 | R1: Merge PR #358 → main | ⏸️ operator-gated | Operator authorization required. CI was GREEN at last push; new commit `23a64622bd` re-runs CI. Once #359 lands first per operator pivot, #358 rebases onto new main then merges. |
+| #132 | R2: Deploy main → world.db canonical migration | ⏸️ subsumed by M2 + post-merge ops | Schema migration of `gate_set_hash` + `coverage_months` columns will happen automatically via boot init_schema on post-merge daemon restart. |
+| #133 | R3: Run mc_entry_gate.py P0-P3 PASS | ⏸️ runs as part of M2 | `scripts/mc_entry_gate.py` is the go/no-go gate before M2 starts; must show PASS for P0 (schema), P1 (hash determinism), P2 (coverage), P3 (insufficient-prior). |
+| #134 | R4: Small-sample iso producer + MC | ⏸️ optional smoke before M2 | Operator may want a 5-city dry run before full M2 to verify pipeline works on new schema. Skip if M2 monitor is armed properly. |
+| #135 | R5: Full STAGING reproduce + row audit 100% servable | ⏸️ subsumed by M2 step (e) | M2's final audit step closes R5. Blocked on disk free (14 GiB free / 99% full at write-time — must clean before M2). |
+| #136 | R6: selective_refit + MC + pair-batch manifest + post-MC audit | ⏸️ subsumed by M2 | M2 steps (c)+(d)+(e). |
+| #137 | R7: Promote STAGING→VERIFIED + DELETE stale-gate VERIFIED rows | ⏸️ post-M2, pre-M5 | After M2 produces fresh sd3 STAGING rows: `scripts/promote_model_bias_ens_v2.py promote --commit`. Stale-gate (pre-sd3) VERIFIED rows on world.db must be DELETEd before unshadow — live reader does not enforce gate_set_hash filter on VERIFIED reads (task #138 / R8). |
+| #138 | R8: DECISION — wire gate_set_hash + target_month into live entry reader | ⏸️ operator-gated, pre-M5 | `src/engine/evaluator.py:3211` live reader currently does not pass `require_gate_set_hash` / `target_month` to `read_bias_model`. Adding it is a live-money entry change → operator sign-off required. Without it, R7 stale-row DELETE is the only defense. |
+| #139 | R9: Live trading unblock (-pr3 reconcile/DATA_DEGRADED) | ⏸️ parked, other session | Not in this worktree's critical path. Memory `feedback_live_root_multisession_collision_2026_05_28.md`: 15 unresolved exchange_reconcile_findings (confirmed_journal_size=0, settled/redeem dust). |
+
+### 3.3 — Misc pending / in-flight tasks
+
+| ID | Subject | Status | Disposition |
+|----|---------|--------|-------------|
+| #29 | Stale `test_market_phase_dispatch` 3 fails | ⏸️ pending | Low priority. Semantic, not fixture. Park until post-M5. |
+| #63 | Contingent refinement roadmap | ⏸️ pending | Each candidate must beat full_transport baseline under blocked OOS. Post-M5 follow-up. |
+| #64 | REBUILD PARENT: full_transport canonical refit | 🔵 in_progress | This is the parent for M2 + all R-series. Will complete when M2 closes. |
+| #105 | F7b: trace writer must tag p_raw_domain | ⏸️ pending | Should land BEFORE M5 unshadow — trace evidence needs to declare which domain (sd2 vs sd3) produced its p_raw. Touches `src/state/db.py:6557`. |
+| #107 | promote_model_bias_ens_v2 missing conn.commit bug | ⏸️ pending | Must fix before R7 / M2 promote phase. Single-line fix expected. |
+| #109 | P0 DEFECT: market scanner ingests 1 of 11 sub-markets per event | 🔵 in_progress | High-priority candidate-coverage issue. **Affects M3 shadow** — partial market coverage = partial candidates = trace evidence misses 90% of markets. |
+| #110 | Per-outcome HTTP overhead in `capture_executable_market_snapshot` | ⏸️ pending | Performance, not correctness. Park unless M3 shadow shows excessive latency. |
+| #116 | `test_ens_predictive_pipeline.py` fixture: missing issue_time column | ⏸️ pending | Test-only. Fix when convenient. |
+| #120 | Investigate why probability_trace_fact writer is silent | 🔵 in_progress | **CRITICAL for M3** — see §6. Root-cause + fix is part of shadow-works-now. |
+| #121 | portfolio_quarantined blocker (post-RiskGuard fix) | ⏸️ pending | RiskGuard state machine investigation. Tangential to shadow, required for M5 fill-path. |
+| #124 | Post-restart: verify candidates flow + trace fires + first order | 🔵 in_progress | Superseded by M3. Subsumed. |
+
+### 3.4 — Completed (do NOT redo, listed for sanity)
+
+B1-B7 (#145-#149), SD1-SD6 (#126-#130), BL-B/C/D/E (#141-#144), #106 forecast-live false-alarm closed, plus the pre-2026-05-26 completion set (#17-#88 etc.). Full ledger lives in TaskList.
 
 ---
 
-## 3 — Where each task stands RIGHT NOW
+## 4 — Current live shadow state (verified 2026-05-28 05:26 CT)
 
-State as of 2026-05-28 05:33 CT (re-verify on resume — see §7 heartbeat).
+| Surface | State |
+|---------|-------|
+| `com.zeus.forecast-live` (PID 85201) | ALIVE, 06:22h uptime, 200 MB RSS, ingesting `mn2t6_low` track at 05:23 (loop_progress in `zeus-forecast-live.log`) |
+| `com.zeus.live-trading` (PID 74152) | ALIVE, 04:15h uptime, 400 MB RSS, polling Polymarket clob orders + auth (HTTPx GETs at 05:25) |
+| `com.zeus.riskguard-live` (PID 85199) | ALIVE, 06:22h uptime, 110 MB RSS |
+| `com.zeus.venue-heartbeat` (PID 99805) | ALIVE, 2-18:57h uptime, 36 MB RSS |
+| `com.zeus.heartbeat-sensor`, `com.zeus.calibration-transfer-eval` | Not running (status=`-`); may be on-demand |
+| `ensemble_snapshots_v2` freshness | ECMWF mx2t3 + mn2t3: 362 rows each, issue_time 2026-05-28T00:00:00 UTC = today 00z run ✓ |
+| `decision_log` 2h activity | `opening_hunt`: 38 decisions (last 10:25 UTC). `imminent_open_capture`: 6 decisions (last 04:13 UTC). Decisions FIRE. |
+| `execution_fact` posted_at 4h | 9 orders posted, last 05:53 UTC (~midnight CT) — these are existing positions, not new submissions |
+| `venue_command_events` 4h | INTENT_CREATED=10, SUBMIT_REQUESTED=10, SUBMIT_REJECTED=10. **All submissions rejected = shadow gate working** ✓ |
+| `venue_trade_facts` fills 4h | 0 fills ✓ |
+| `probability_trace_fact` | 33203 rows total, **0 rows in last 24h** ❌ Wiring break — see §6 |
+| `config/settings.json:195 "full_transport_live_enabled"` | `false` (shadow) ✓ |
 
-| Task | Status | Blocker / next action |
-|------|--------|-----------------------|
-| **B1-B7** (#145-#149) | ✅ Completed | Shipped in `3ce02984b3` on PR #358. |
-| **R1** (#131) Merge PR #358 | ⏸️ Operator-gated | Operator authorization required. PR #358 CI was GREEN at last push; new commit `3ce02984b3` will re-run CI. |
-| **R2-R8** (#132-#138) | ⏸️ Superseded / re-sequenced under M-series | M-series is the new master sequence per operator pivot. R-series tasks remain on the list for traceability; R7 (delete stale-gate VERIFIED rows) merges naturally into M2's rebuild phase. R8 (live reader enforcement of gate + month) requires operator decision before M5. |
-| **R9** (#139) Live unblock | ⏸️ Parked on -pr3 reconcile/DATA_DEGRADED | Other session. Not in this worktree's critical path. |
-| **BL-A** (#140) Regen ROW_ACTION_MANIFEST under current gate | ⏸️ Pending | Required BEFORE M2 — manifest from sd2 is stale under sd3. Regenerate after #359 merges + main alignment (so the audit script runs against post-rename layout). |
-| **M0** (#150) Monitor PR #359 | 🔵 In flight | Monitor task `bvo7624iz` armed (persistent, 10-min poll). Will emit `#359 state: NO_PR_YET` → `OPEN:null` → `MERGED:<ts>`. Branch `claude/refactor-auth-econ-split-pr3` (SHA `844d82294e`) exists on origin but no PR opened yet. |
-| **M1** (#152) Rebase to main | ⏸️ Blocked by M0 | Big renames expected. B1-B7 patched files: `scripts/fit_full_transport_error_models.py`, `scripts/rebuild_calibration_pairs_v2.py`, `scripts/replay_equivalence_full_transport.py`, `scripts/selective_refit_from_manifest.py`, `src/calibration/ens_error_model.py`. Verify each path still exists post-rename; if renamed, replay the B-edits onto the new file. |
-| **M2** (#153) Rebuild + refit | ⏸️ Blocked by M1 | Run `scripts/fit_full_transport_error_models.py --metric high --commit` then `scripts/fit_full_transport_error_models.py --metric low --commit` on an isolated staging DB (not prod). Then `scripts/rebuild_calibration_pairs_v2.py --no-dry-run --force --db <staging> --error-model full_transport_v1 --temperature-metric <high|low> --n-mc 10000 --workers <CPU-2>`. Then `scripts/selective_refit_from_manifest.py --manifest <fresh manifest> --db <staging> --execute`. **MUST set Monitor with 1hr heartbeat** during this — per memory `project_ft_ship_autonomous_workflow_2026_05_26.md`: PID alive + log frozen ≠ normal; silent ≠ normal; CPU%+RSS+log-byte+temp-file delta per minute required. |
-| **M3** (#151) Live shadow | 🟢 Eligible now (parallel to M0/M1 wait) | forecast-live daemon (PID 85201) confirmed alive + ingesting at 05:13 (`zeus-forecast-live.log` loop_progress). live-trading (74152) + riskguard (85199) alive. FT flag OFF. Need: confirm probability_trace_fact writer not silent (task #120 in_progress — verify recent rows on `zeus_trades.db` `.probability_trace_fact`). Need: confirm candidates flow to evaluator (not just ingest). Then formally declare shadow-active. |
-| **M4** (#154) Bin-bias test | ⏸️ Blocked by M2 + M3 | Write test: (a) pre-sd3 rows + plain p_raw vs (b) post-sd3 rows + ft-corrected p_raw, compare bin-bias against mainstream forecast (open-meteo + TIGGE consensus). Metric: bin-bias mean (signed), RPS, ECE. Must show DIRECTIONAL IMPROVEMENT in ≥2 of 3 metrics on ≥75% of cities. Open question: exact baseline definition — operator decision. |
-| **M5** (#155) Unshadow | ⏸️ Blocked by M4 | Flip `config/settings.json:195 "full_transport_live_enabled": true`. Restart monitor + live-trading. Per memory: 4h post-unshadow zero-trade = DEFECT cascade (daemon → candidates → gates → edge → bias). |
-
-**Other in-flight tasks (background, not on critical path)**:
-- #109 (in_progress) P0: market scanner ingests 1 of 11 sub-markets per event.
-- #110 (pending) Per-outcome HTTP overhead in capture_executable_market_snapshot.
-- #116 (pending) test_ens_predictive_pipeline.py fixture: missing issue_time column.
-- #120 (in_progress) probability_trace_fact silent writer investigation — **convert this into hard verification for M3**.
-- #121 (pending) portfolio_quarantined blocker (post-RiskGuard fix).
-- #124 (in_progress) Post-restart: candidates flow + trace fires + first order — superseded by M3.
-- #105 (pending) F7b: trace writer must tag p_raw_domain — should land before M3 unshadow.
-- #107 (pending) promote_model_bias_ens_v2 missing conn.commit — feeds M2 promote phase.
-- #29 (pending) test_market_phase_dispatch 3 fails — stale, not critical.
+**Net**: shadow is "working" in the safe sense (orders not landing, no fills), but the **trace evidence channel is silent** — we cannot audit what the shadow is doing.
 
 ---
 
-## 4 — How to resume work
+## 5 — Schema column reference (verified 2026-05-28; many drifted from prior memory)
 
-**On any resume (compaction recovery, new session, heartbeat fire)**, run §7 heartbeat script first. Do **not** skip — operator's standing rule: "must check latest instead of just wake up." The state in this doc is a snapshot; the heartbeat refreshes it.
+When writing recency / health probes, use these column names — wrong names give SQLite "no such column" errors that masquerade as "nothing recent."
 
-Then:
-1. Read the heartbeat output.
-2. Compare against §3 table above.
-3. Identify the lowest-ID task that is BOTH unblocked AND not-in-progress; advance it.
-4. If a Monitor event fired during the wait (look for `#359 state:` entries), act on it — Monitor's persistent task `bvo7624iz` watches PR #359.
-5. If M2 (rebuild/refit) is in flight, additional 1hr heartbeat to it is required (above and beyond the universal 2hr heartbeat scheduled in §7).
-
----
-
-## 5 — Key invariants and gotchas — read before any edit
-
-**From accumulated memory (do not violate):**
-- **`launchctl list` STATUS column = LAST exit code, not current health.** Verify daemon via PID column + `ps -p <PID>` + log byte-delta. `feedback_launchctl_status_is_last_exit_not_current.md`.
-- **Live root is multi-session.** Other session can flip HEAD to `claude/refactor-auth-econ-split-pr3` mid-flight. `git rev-parse HEAD` BEFORE any live daemon restart. Memory: `feedback_live_root_multisession_collision_2026_05_28.md`.
-- **No partial calibration on new cities.** Strict order: register+blacklist → full historical TIGGE + ECMWF ingest → calibration once at full depth → Platt → 14-day shadow. Jinan/Zhengzhou warnings in forecast-live.err are expected pre-onboarding. Memory: `feedback_newcity_no_partial_calibration.md`.
-- **Disk currently 14 GiB free / 99% full.** Blocker for full STAGING reproduce; clean before M2 OR scope staging DB.
-- **Cross-DB writes adhere to INV-37** — ATTACH + SAVEPOINT, never independent connections.
-- **Never write to production DBs from the producer.** `scripts/fit_full_transport_error_models.py::_refuse_prod_db` is the antibody (BL-E). Always run on isolated staging copy.
-- **Auto-mode denies unaudited writes (correct guardrail).** Plan write phases as a programmatic sequence with operator pre-authorization.
-
-**M2-specific:**
-- BULK lock serial across forecasts.db; LOW + HIGH cannot rebuild concurrently. Sequence: HIGH fit → HIGH MC rebuild → HIGH selective_refit → LOW fit → LOW MC rebuild → LOW selective_refit → audit.
-- The rebuild is compute-in-workers / write-in-main (single writer). Workers = `CPU_count - 2` (12 on a 14-core box). No WAL multi-writer contention.
-- Replay equivalence runs at production `--n-mc` to validate A-cohort reuse (BL-D fix).
-
-**M3-specific:**
-- Shadow = daemon alive + candidates compute + probability_trace_fact writes + NO orders submitted.
-- The `live-trading` daemon's submission path is governed by kill-switch + `full_transport_live_enabled` flag. FT flag OFF + no kill-switch arm means plain p_raw flows but orders may STILL submit — confirm by reading `chain_orders` (or its current-schema equivalent) emptiness over the shadow window.
-- `probability_trace_fact` columns (verified 2026-05-28): `trace_id`, `decision_id`, `decision_snapshot_id`, `candidate_id`, `city`, `target_date`, `range_label`, `direction`, `mode`, `strategy_key`, `discovery_mode`, `entry_method`, `selected_method`, `trace_status`, `missing_reason_json`, `bin_labels_json`, `p_raw_json`, `p_cal_json`, `p_market_json`, `p_posterior_json` (world-DB only). **No `captured_at` column** — use `decision_id` join + `decision_log` if temporal queries needed.
-
-**M4-specific:**
-- Baseline-definition decision is operator-gated. Until they clarify, default to (open-meteo `tt2m_max` daily) as mainstream baseline + measure bin-bias = (P(stored bin) − P(observed bin)). Compare pre-sd3 vs post-sd3 distributions.
+| Table | DB | Key timestamp column |
+|-------|----|---------------------|
+| `ensemble_snapshots_v2` | zeus-forecasts.db | **`issue_time`** (ISO TEXT). Not `snapshot_ts_utc`. Also `valid_time`, `available_at`, `fetch_time`. |
+| `decision_log` | zeus_trades.db | **`started_at`**, **`completed_at`**, **`timestamp`** (ISO TEXT). Not `created_at`. Cols: `id`, `mode`, `started_at`, `completed_at`, `artifact_json`, `timestamp`, `env`. |
+| `probability_trace_fact` | zeus_trades.db (+ world.db mirror) | **`recorded_at`** (ISO TEXT). Not `captured_at`. Has `p_raw_json`, `p_cal_json`, `p_market_json`, `p_posterior_json`, `rejection_stage`, `availability_status`, `market_phase*`, `settlement_day_entry_utc`. |
+| `venue_trade_facts` | zeus_trades.db | **`observed_at`**, **`ingested_at`**, **`venue_timestamp`**. Not `submitted_at`. State machine: `state` column. |
+| `venue_command_events` | zeus_trades.db | **`occurred_at`** (ISO TEXT). Not `ts`. `event_type` enumerates: INTENT_CREATED, SUBMIT_REQUESTED, SUBMIT_REJECTED. |
+| `execution_fact` | zeus_trades.db | **`posted_at`**, **`filled_at`**, **`voided_at`** (ISO TEXT). |
+| `control_overrides` | zeus_trades.db | Schema drifted — no `name` column. Use `pragma table_info` before querying. |
+| `model_bias_ens_v2` | zeus-world.db + scratch staging | `recorded_at`, `training_cutoff` (ISO TEXT). New canonical extension cols: `gate_set_hash`, `coverage_months`, `error_model_family`, `authority`, `fit_signature_hash`. |
 
 ---
 
-## 6 — Quick command reference (use absolute paths)
+## 6 — WIRING BREAK: probability_trace_fact silent (M3 work)
 
+**Discovered 2026-05-28 05:26 CT.** Operator's warned wiring problem confirmed.
+
+**Symptom**: 33203 rows total in `probability_trace_fact`. **0 rows in last 24h**. Meanwhile `decision_log` has 44 decisions in 2h. So evaluator IS deciding, but the trace writer at `src/state/db.py:6557` is not being invoked OR is being invoked + erroring silently.
+
+**Candidate root-causes (probe in order)**:
+1. The writer call site upstream of `db.py:6557` was unwired by a recent refactor (likely the same chain/local refactor that landed #347/#352).
+2. The writer is called but errors with a column / FK / CHECK violation that's caught + swallowed.
+3. The writer is gated by a flag that flipped OFF.
+4. Schema drift between `zeus_trades.db` and `zeus-world.db` (the table exists in both per `.schema probability_trace_fact` dumps; differing column sets — world.db has `p_posterior_json`, but does the writer write both?).
+
+**Probe sequence**:
 ```bash
-# Verify worktree HEAD (NEVER `cd` away from worktree absolute path)
 cd /Users/leofitz/.openclaw/workspace-venus/zeus/.claude/worktrees/ens-bias-hierarchical
-git rev-parse HEAD                            # expected post-B: 3ce02984b3 or newer
-
-# Active PR state
-gh pr view 358 --json state,url,statusCheckRollup
-gh pr list --state all --head "claude/refactor-auth-econ-split-pr3" --json number,state
-
-# Daemon liveness (PID column matters; STATUS is historical)
-launchctl list | grep com.zeus
-ps -p <PID> -o pid,etime,rss,command
-
-# Disk
-df -h /Users/leofitz/.openclaw/workspace-venus/zeus/state
-
-# Run regression sweep before any commit
-/Users/leofitz/.openclaw/workspace-venus/zeus/.venv/bin/python -m pytest \
-  tests/test_b1_producer_hemisphere_aware_season.py \
-  tests/test_b2_native_error_params_cache_includes_target_month.py \
-  tests/test_b3_replay_uses_persisted_staging.py \
-  tests/test_b6_training_cutoff_threaded_to_loaders.py \
-  tests/test_b7_gate_changed_aborts_selective_refit.py \
-  tests/test_selective_refit_replay_consumption_sd3.py \
-  tests/test_effective_coverage_sd1.py \
-  tests/test_insufficient_prior_conservative_sigma.py \
-  tests/test_producer_schema_preflight_sd5.py \
-  tests/test_pair_batch_domain_sd4.py \
-  tests/test_mc_entry_gate_sd6.py \
-  tests/test_rebuild_months_scope_bl_b.py \
-  tests/test_producer_no_prod_write_bl_e.py \
-  --no-header -q
+# Locate caller(s) of the write function:
+grep -rnE "write_probability_trace|emit_probability_trace|probability_trace_fact" src/ | grep -v __pycache__ | head -20
+# Search the live-trading log for trace-write errors:
+grep -iE "trace.*fact|probability_trace|INSERT INTO probability" /Users/leofitz/.openclaw/workspace-venus/zeus/logs/zeus-live.log | tail -20
+# Search for swallowed exceptions:
+grep -iE "trace.*exception|trace.*error" /Users/leofitz/.openclaw/workspace-venus/zeus/logs/zeus-live.log | tail -10
 ```
+
+**Fix policy**: structural, antibody-protected. Add a relationship test: "every completed evaluator decision producing a candidate must write a probability_trace_fact row." Then root-cause the wiring break.
+
+**Acceptance for M3-done**: probe shows ≥1 trace row per decision over a 30-min observation window post-fix.
 
 ---
 
-## 7 — 2-hour heartbeat: refresh latest state, then orient
+## 7 — Live ingest + decision wiring (currently healthy)
 
-This MD is a snapshot. The heartbeat fires every 2hr and forces a fresh fetch
-before any "still waiting" claim. Per operator's explicit standing rule:
-"must check latest instead of just wake up." Silent ≠ normal; PID alive + log
-frozen ≠ normal.
+For reference (this part is NOT broken, do not "fix"):
+- forecast-live: `src.ingest.forecast_live_daemon` runs ECMWF open-data poller (every 5 min), TIGGE-MARS once a day, GFS open-data, ingest pipelines write `ensemble_snapshots_v2`.
+- live-trading: `src.main` runs evaluator + monitor_refresh + venue submission loop. Pulls existing chain orders, evaluates new candidates against bins, fires INTENT_CREATED → SUBMIT_REQUESTED → SUBMIT_REJECTED in shadow mode.
+- riskguard: `src.riskguard.riskguard` tick-loop computes risk metrics + can fire kill switches.
+- evaluator writes `decision_log` (via `src/state/decision_chain.py:211, 252`).
+- **Missing edge**: decision_log → probability_trace_fact. See §6.
 
-Script the heartbeat fires:
+---
+
+## 8 — Key invariants and gotchas — read before any edit
+
+**Daemon liveness:**
+- `launchctl list` STATUS column = LAST exit code, not current health. Verify via PID column + `ps -p <PID>` + log byte-delta. Memory: `feedback_launchctl_status_is_last_exit_not_current.md`.
+- `STATUS=1` with PID present and log writing = daemon respawned after earlier exit, currently healthy.
+
+**Multi-session collisions:**
+- Live root is shared with another session. Other session can flip HEAD to `claude/refactor-auth-econ-split-pr3` mid-flight. ALWAYS `git rev-parse HEAD` BEFORE any live daemon restart. Memory: `feedback_live_root_multisession_collision_2026_05_28.md`.
+
+**Data integrity:**
+- **Never write to production DBs from the producer**. `scripts/fit_full_transport_error_models.py::_refuse_prod_db` is the antibody (BL-E, samefile + basename defense). Always run on isolated staging copy.
+- **No partial calibration on new cities**. Strict order: register+blacklist → full historical ECMWF + TIGGE ingest → calibration once at full depth → Platt → 14-day shadow. Jinan/Zhengzhou warnings in forecast-live.err are expected pre-onboarding. Memory: `feedback_newcity_no_partial_calibration.md`.
+- **Cross-DB writes adhere to INV-37** — ATTACH + SAVEPOINT, never independent connections.
+- **DB authority**: zeus-world.db (canonical truth, world schema), zeus-forecasts.db (calibration + ensemble), zeus_trades.db (live trading). Don't cross-write outside ATTACH transactions.
+
+**Code-graph + provenance:**
+- Existing files are LEGACY-until-audited. Any reuse needs a provenance audit comment. New scripts carry `# Created:` + `# Last reused or audited:` + `# Authority basis:` headers.
+
+**Disk:**
+- Currently 14 GiB free / 99% full. Blocker for full STAGING reproduce. Clean before M2 OR scope staging DB to smaller subset.
+
+**Cache + stale state:**
+- `omc update ≥4.14` rewrites `ANTHROPIC_DEFAULT_SONNET_MODEL` to self-ref. Restore concrete `cc/claude-sonnet-4-6`. Memory: `feedback_omc_update_clobbers_sonnet_env_var.md`.
+
+**Auto-mode + governance:**
+- Auto-mode denies unaudited writes (correct guardrail). Plan write phases as a programmatic sequence with operator pre-authorization.
+- PR open requires ≥300 self-authored LOC (hook enforced). ZEUS_PR_ALLOW_TINY=1 only with documented justification.
+
+---
+
+## 9 — 2-hour heartbeat (recurring via CronCreate job `a15c09ae`)
+
+Cron: `17 */2 * * *` (next fire 06:17 CT, then 08:17, 10:17, ..., 22:17, 00:17). Auto-expires 7 days — re-arm if mission > 7 days.
+
+**Standing rule**: must fetch latest, not assume. Operator: "must check latest instead of just wake up."
+
+Script the heartbeat re-runs (paste into Bash; absolute paths):
 
 ```bash
 OUT=$CLAUDE_JOB_DIR/heartbeat_$(date +%s).txt
 {
 echo "=== TS ==="; date
-echo "=== PR #358 + #359 state ==="
+echo "=== PR #358 + #359 ==="
 gh pr view 358 --json state,statusCheckRollup,mergedAt --jq '{s:.state,m:.mergedAt,checks:([.statusCheckRollup[]?|.conclusion]|group_by(.)|map({k:.[0],n:length}))}'
 gh pr list --state all --head "claude/refactor-auth-econ-split-pr3" --json number,state,mergedAt
 echo "=== main HEAD ==="
@@ -194,46 +251,60 @@ echo "=== worktree HEAD + ahead/behind ==="
 cd /Users/leofitz/.openclaw/workspace-venus/zeus/.claude/worktrees/ens-bias-hierarchical
 git rev-parse --short HEAD
 git fetch origin main --quiet
-git rev-list --count HEAD..origin/main
-git rev-list --count origin/main..HEAD
-echo "=== daemons ==="
+git rev-list --count HEAD..origin/main; git rev-list --count origin/main..HEAD
+echo "=== daemons (PID column matters) ==="
 launchctl list | grep com.zeus
 echo "=== active rebuild/refit PIDs ==="
 pgrep -afl "rebuild_calibration_pairs_v2|fit_full_transport|selective_refit_from_manifest|refit_platt_v2"
-echo "=== log byte delta (forecast-live last hour) ==="
-LATEST=/Users/leofitz/.openclaw/workspace-venus/zeus/logs/zeus-forecast-live.log
-[ -f "$LATEST" ] && { stat -f "%Sm %z" "$LATEST"; }
+echo "=== forecast-live log byte-delta ==="
+stat -f "%Sm %z" /Users/leofitz/.openclaw/workspace-venus/zeus/logs/zeus-forecast-live.log
+echo "=== probability_trace_fact recency (M3 wiring check) ==="
+sqlite3 -cmd "PRAGMA query_only=1;" /Users/leofitz/.openclaw/workspace-venus/zeus/state/zeus_trades.db \
+"SELECT COUNT(*), MAX(recorded_at) FROM probability_trace_fact WHERE recorded_at > datetime('now','-2 hours');"
+echo "=== decision_log 2h ==="
+sqlite3 -cmd "PRAGMA query_only=1;" /Users/leofitz/.openclaw/workspace-venus/zeus/state/zeus_trades.db \
+"SELECT mode, COUNT(*), MAX(started_at) FROM decision_log WHERE started_at > datetime('now','-2 hours') GROUP BY mode;"
+echo "=== venue_command_events 2h ==="
+sqlite3 -cmd "PRAGMA query_only=1;" /Users/leofitz/.openclaw/workspace-venus/zeus/state/zeus_trades.db \
+"SELECT event_type, COUNT(*) FROM venue_command_events WHERE occurred_at > datetime('now','-2 hours') GROUP BY event_type;"
+echo "=== fills 4h (zero = shadow OK) ==="
+sqlite3 -cmd "PRAGMA query_only=1;" /Users/leofitz/.openclaw/workspace-venus/zeus/state/zeus_trades.db \
+"SELECT COUNT(*) FROM venue_trade_facts WHERE observed_at > datetime('now','-4 hours');"
 echo "=== disk ==="
 df -h /Users/leofitz/.openclaw/workspace-venus/zeus/state | head -2
 echo "=== FT flag ==="
-grep -nE 'full_transport_live_enabled' /Users/leofitz/.openclaw/workspace-venus/zeus/config/settings.json | head -1
+grep -E '"full_transport_live_enabled"' /Users/leofitz/.openclaw/workspace-venus/zeus/config/settings.json | head -1
 } > "$OUT" 2>&1
 /bin/cat "$OUT" | base64
 ```
 
-**Then orient against §3 table and act**.
+**Orient against §3 task table**, identify lowest-ID unblocked task that is NOT in_progress, advance it. If active rebuild/refit silent for >2hr (PID alive + no log byte-delta): DEFECT cascade, do not normalize.
 
 ---
 
-## 8 — Failure modes that demand immediate cascade (do not normalize)
+## 10 — Failure modes that demand immediate cascade
 
-- **M2 rebuild silent for >2hr** (PID alive + no log byte-delta): silent-death suspect. Sample stack via `/usr/bin/sample`; root-cause; do NOT claim "still running."
-- **Post-M5 unshadow 4h zero-trade**: DEFECT cascade — check daemon → candidates → gates → edge → bias.
-- **#359 merged + my worktree fails to rebase cleanly**: do NOT force-push; isolate conflicts on a new branch, ask operator before reconciling.
-- **#359 merged + post-rename, B1-B7 patches don't apply**: re-apply edits manually, re-run B-test suite to confirm, push. Antibody preserved.
-- **Disk falls below 5 GiB**: HALT M2; clean before proceeding (operator memory: `project_deep_housekeeping_2026_05_23.md`).
-- **forecast-live PID disappears (not just status=1)**: actual death. Read `zeus-forecast-live.err`, root-cause; do not `launchctl kickstart` blindly.
-- **Live SHADOW emits orders during M3 wait**: structural failure of the FT-flag-OFF + kill-switch contract. Pause live-trading immediately, root-cause.
-
----
-
-## 9 — Living document policy
-
-- Each heartbeat that materially changes state → update §3 inline (one line per task).
-- B-series antibody once-only: do not re-do.
-- If operator changes direction, replace §2 entirely; preserve §1 (history).
-- Memory: any new feedback worth surviving compaction → `~/.claude/projects/-Users-leofitz--openclaw-workspace-venus-zeus/memory/`, link from MEMORY.md.
+| Trigger | Action |
+|---------|--------|
+| M2 rebuild silent >2hr (PID alive + no log byte-delta) | Suspect silent-death. `/usr/bin/sample <PID>`; root-cause; do NOT claim "still running." |
+| Post-M5 unshadow 4h zero-trade | DEFECT cascade — check daemon → candidates → gates → edge → bias. |
+| #359 merged + worktree rebase conflicts | Do NOT force-push. Isolate conflicts on new branch, ask operator before reconciling. |
+| #359 merged + B1-B7 patches don't apply (renames) | Re-apply edits manually, re-run B-test suite to confirm green, push. Antibody preserved. |
+| Disk falls < 5 GiB | HALT M2; clean before proceeding (memory `project_deep_housekeeping_2026_05_23.md`). |
+| forecast-live PID disappears (not just status=1) | Actual death. Read `zeus-forecast-live.err`, root-cause; do not `launchctl kickstart` blindly. |
+| Live SHADOW emits ANY fills during M3 wait | Structural failure of FT-flag-OFF + kill-switch contract. Pause live-trading immediately, root-cause. |
+| `probability_trace_fact` remains silent | M3 cannot be declared done. Block M5. |
+| Operator answers a probe that contradicts in-context state | Trust operator; re-verify; if conflict persists, surface explicitly. Don't silently re-trust prior context. |
 
 ---
 
-**End of doc. Resume work in §3 task table.**
+## 11 — Living document policy
+
+- Each heartbeat that changes state materially → update §3 + §4 inline.
+- B-series antibody once-only: do not re-do (§1 is read-only for past commits).
+- If operator changes direction, replace §2 + §0 ENTIRELY; preserve §1 (history).
+- New memory worth surviving compaction → `~/.claude/projects/-Users-leofitz--openclaw-workspace-venus-zeus/memory/`, link from MEMORY.md.
+
+---
+
+**End of doc. Resume work in §3 task table; live-shadow §6 (probability_trace_fact silent) is the immediate work front.**
