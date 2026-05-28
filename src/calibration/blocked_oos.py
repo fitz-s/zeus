@@ -153,7 +153,7 @@ def evaluate_blocked_oos_calibration(
     test_end: str,
     run_id: str | None = None,
     model_name: str = "extended_platt",
-    model_version: str = "blocked_oos_v1",
+    model_artifact_id: str = "blocked_oos_v1",
     write: bool = True,  # retained for API compat; no longer writes to DB
     created_at: str | None = None,
 ) -> dict:
@@ -216,7 +216,7 @@ def evaluate_blocked_oos_calibration(
         "shadow_only": True,
         "run_id": run_id,
         "model_name": model_name,
-        "model_version": model_version,
+        "model_version": model_artifact_id,
         "train_start": train_start,
         "train_end": train_end,
         "test_start": test_start,
