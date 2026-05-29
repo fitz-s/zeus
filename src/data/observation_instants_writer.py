@@ -2,10 +2,12 @@
 # Last reused/audited: 2026-04-25
 # Authority basis: plan v3 antibodies A1/A2/A6 (.omc/plans/observation-
 #                  instants-migration-iter3.md L119-124); step2 Phase 0 file #3.
-"""Typed writer for observation_instants_v2 with A1/A2/A6 enforcement.
+"""Typed writer for observation_instants with A1/A2/A6 enforcement.
 
 This module is the single entry point for any row that will be written
-to ``observation_instants_v2`` going forward (pilot, fleet, HK accumulator).
+to ``observation_instants`` going forward (pilot, fleet, HK accumulator).
+(Consolidated 2026-05-29 from observation_instants_v2_writer; the v2 suffix
+is gone now that the v1 subset and v2 superset have merged into one table.)
 It refuses to write rows that would silently undermine the migration:
 
 A1 (missing-provenance rejection)
@@ -116,7 +118,7 @@ class InvalidObsV2RowError(ValueError):
 
 @dataclass(frozen=True)
 class ObsV2Row:
-    """One row of observation_instants_v2 data, validated at construction.
+    """One row of observation_instants data, validated at construction.
 
     All fields are positional+keyword safe. Validation runs in
     ``__post_init__`` and raises ``InvalidObsV2RowError`` on any failure.
@@ -414,7 +416,7 @@ _INSERT_COLUMNS: tuple[str, ...] = (
     "source_role",
 )
 _INSERT_SQL = f"""
-    INSERT INTO observation_instants_v2 (
+    INSERT INTO observation_instants (
         {", ".join(_INSERT_COLUMNS)}
     ) VALUES (
         {", ".join("?" for _ in _INSERT_COLUMNS)}
@@ -422,7 +424,7 @@ _INSERT_SQL = f"""
 """
 _SELECT_EXISTING_SQL = f"""
     SELECT id, {", ".join(_INSERT_COLUMNS)}
-    FROM observation_instants_v2
+    FROM observation_instants
     WHERE city = ? AND source = ? AND utc_timestamp = ?
 """
 _REVISION_INSERT_SQL = """
@@ -438,7 +440,7 @@ _REVISION_INSERT_SQL = """
         ?
     )
 """
-_REVISION_WRITER = "src.data.observation_instants_v2_writer.insert_rows"
+_REVISION_WRITER = "src.data.observation_instants_writer.insert_rows"
 _MATERIAL_COMPARISON_EXEMPT_COLUMNS: frozenset[str] = frozenset({"imported_at"})
 
 
@@ -587,7 +589,7 @@ def _insert_revision(
     conn.execute(
         _REVISION_INSERT_SQL,
         (
-            "observation_instants_v2",
+            "observation_instants",
             incoming["city"],
             incoming["target_date"],
             incoming["source"],

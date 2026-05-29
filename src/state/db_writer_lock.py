@@ -712,6 +712,7 @@ SQLITE_CONNECT_ALLOWLIST: frozenset[str] = frozenset(
         "scripts/drop_world_ghost_tables.py",            # operator_invoked: drops LEGACY_ARCHIVED ghost copies; --dry-run by default
         # --- Audit PR-I migration scripts ---
         "scripts/migrations/202605_add_redeem_operator_required_state.py",  # operator_invoked: --dry-run mode; daemon never imports
+        "scripts/migrations/202605_consolidate_observation_instants_v2.py",  # operator_invoked: --dry-run default + SAVEPOINT; daemon never imports
         "scripts/migrations/__main__.py",                # operator_invoked: migration runner CLI; daemon never imports
         "scripts/migrations/202605_position_current_bridge_required_trigger.py",  # operator_invoked: idempotent; --dry-run mode
         # -------------------------------------------------------------------
@@ -732,7 +733,7 @@ SQLITE_CONNECT_ALLOWLIST: frozenset[str] = frozenset(
         "scripts/hko_ingest_tick.py",                       # already_guarded: writes under db_writer_lock(BULK)
         "scripts/ingest_grib_to_snapshots.py",              # already_guarded: writes under db_writer_lock(BULK)
         "scripts/nuke_rebuild_projections.py",              # already_guarded: writes under db_writer_lock(BULK)
-        "scripts/obs_v2_live_tick.py",                      # already_guarded: writes under db_writer_lock(BULK) when not dry_run
+        "scripts/obs_live_tick.py",                         # already_guarded: writes under db_writer_lock(BULK) when not dry_run
         "scripts/rebuild_calibration_pairs_canonical.py",   # already_guarded: writes under db_writer_lock(BULK)
         "scripts/rebuild_calibration_pairs.py",          # already_guarded: writes under bulk_lock_with_chunker (K3 retrofit)
         "scripts/rebuild_settlements.py",                   # already_guarded: writes under db_writer_lock(BULK)

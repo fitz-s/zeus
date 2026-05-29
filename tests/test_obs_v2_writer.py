@@ -3,12 +3,12 @@
 # Last reused/audited: 2026-05-20
 # Authority basis: plan v3 antibodies A1/A2; P1 obs_v2 provenance identity packet;
 #                  2026-05-20 live tick payload hash material-extrema repair.
-# Purpose: Pin observation_instants_v2 writer provenance and source-role semantics.
+# Purpose: Pin observation_instants writer provenance and source-role semantics.
 # Reuse: Inspect P1.2 packet, tier_resolver registry, and test topology first.
 # Authority basis: plan v3 antibodies A1/A2 (.omc/plans/observation-instants-
 #                  migration-iter3.md L119-120); step2 Phase 0 file #9.
 """Antibody A1 (missing provenance) + A2 (source-tier consistency) for the
-observation_instants_v2 writer.
+observation_instants writer.
 
 HK-specific A6 lives in ``tests/test_hk_rejects_vhhh_source.py`` so the
 regression for the exact VHHH/WU category error is pinned separately.
@@ -21,7 +21,7 @@ from pathlib import Path
 
 import pytest
 
-from src.data.observation_instants_v2_writer import (
+from src.data.observation_instants_writer import (
     InvalidObsV2RowError,
     ObsV2Row,
     insert_rows,
@@ -92,7 +92,7 @@ def _source_semantics(
     row = conn.execute(
         """
         SELECT source_role, training_allowed, causality_status
-        FROM observation_instants_v2
+        FROM observation_instants
         WHERE city=? AND source=?
         """,
         (city, source),
@@ -336,7 +336,7 @@ def test_insert_rows_writes_expected_row(mem_db):
     n = insert_rows(mem_db, [row])
     assert n == 1
     (count,) = mem_db.execute(
-        "SELECT COUNT(*) FROM observation_instants_v2 WHERE city=?",
+        "SELECT COUNT(*) FROM observation_instants WHERE city=?",
         (row.city,),
     ).fetchone()
     assert count == 1
@@ -362,7 +362,7 @@ def test_apply_canonical_schema_creates_obs_v2_revision_surfaces(mem_db):
     }
 
     assert "observation_revisions" in tables
-    assert "idx_observation_revisions_obs_v2_lookup" in indexes
+    assert "idx_observation_revisions_obs_lookup" in indexes
     assert "ux_observation_revisions_payload" in indexes
 
 
@@ -374,7 +374,7 @@ def test_apply_canonical_schema_is_idempotent_with_existing_obs_v2_revision_rows
             existing_row_id, existing_payload_hash, incoming_payload_hash,
             reason, writer, existing_row_json, incoming_row_json
         ) VALUES (
-            'observation_instants_v2', 'Chicago', '2024-01-15',
+            'observation_instants', 'Chicago', '2024-01-15',
             'wu_icao_history', '2024-01-15T14:00:00+00:00',
             1, 'sha256:old', 'sha256:new',
             'payload_hash_mismatch', 'unit-test', '{}', '{}'
@@ -406,12 +406,12 @@ def test_insert_rows_duplicate_payload_hash_is_noop(mem_db):
     )
     assert insert_rows(mem_db, [r1]) == 1
     (first_id,) = mem_db.execute(
-        "SELECT id FROM observation_instants_v2"
+        "SELECT id FROM observation_instants"
     ).fetchone()
     assert insert_rows(mem_db, [r2]) == 0
 
     row = mem_db.execute(
-        "SELECT id, temp_current, imported_at FROM observation_instants_v2"
+        "SELECT id, temp_current, imported_at FROM observation_instants"
     ).fetchone()
     (revision_count,) = mem_db.execute(
         "SELECT COUNT(*) FROM observation_revisions"
@@ -429,11 +429,11 @@ def test_insert_rows_changed_payload_hash_records_revision_without_overwrite(mem
     assert insert_rows(mem_db, [r2]) == 0
 
     (count,) = mem_db.execute(
-        "SELECT COUNT(*) FROM observation_instants_v2"
+        "SELECT COUNT(*) FROM observation_instants"
     ).fetchone()
     assert count == 1
     current = mem_db.execute(
-        "SELECT temp_current, provenance_json FROM observation_instants_v2"
+        "SELECT temp_current, provenance_json FROM observation_instants"
     ).fetchone()
     assert current[0] == 30.0
     assert json.loads(current[1])["payload_hash"] == "sha256:" + "a" * 64
@@ -443,7 +443,7 @@ def test_insert_rows_changed_payload_hash_records_revision_without_overwrite(mem
         SELECT existing_payload_hash, incoming_payload_hash,
                existing_row_json, incoming_row_json
         FROM observation_revisions
-        WHERE table_name='observation_instants_v2'
+        WHERE table_name='observation_instants'
         """
     ).fetchone()
     assert revision is not None
@@ -463,7 +463,7 @@ def test_insert_rows_rejects_reused_payload_hash_with_changed_material_fields(me
         insert_rows(mem_db, [r2])
 
     (temp,) = mem_db.execute(
-        "SELECT temp_current FROM observation_instants_v2"
+        "SELECT temp_current FROM observation_instants"
     ).fetchone()
     (revision_count,) = mem_db.execute(
         "SELECT COUNT(*) FROM observation_revisions"
@@ -474,7 +474,7 @@ def test_insert_rows_rejects_reused_payload_hash_with_changed_material_fields(me
 
 def test_live_tick_payload_hash_changes_with_hourly_extrema_material_values():
     """RELATIONSHIP: changed WU extrema -> changed obs_v2 payload_hash."""
-    from scripts.obs_v2_live_tick import _hourly_obs_to_v2_row
+    from scripts.obs_live_tick import _hourly_obs_to_v2_row
     from src.data.wu_hourly_client import HourlyObservation
 
     base = dict(
@@ -532,7 +532,7 @@ def test_insert_rows_rolls_back_revision_history_on_failure(mem_db):
         insert_rows(mem_db, [r2])
 
     (temp,) = mem_db.execute(
-        "SELECT temp_current FROM observation_instants_v2"
+        "SELECT temp_current FROM observation_instants"
     ).fetchone()
     (revision_count,) = mem_db.execute(
         "SELECT COUNT(*) FROM observation_revisions"
@@ -546,7 +546,7 @@ def test_obs_v2_writer_source_contains_no_insert_or_replace():
         Path(__file__).resolve().parents[1]
         / "src"
         / "data"
-        / "observation_instants_v2_writer.py"
+        / "observation_instants_writer.py"
     ).read_text(encoding="utf-8")
     assert "INSERT OR REPLACE" not in source.upper()
 
@@ -555,7 +555,7 @@ def test_insert_rows_round_trip_preserves_provenance(mem_db):
     row = _make_row()
     insert_rows(mem_db, [row])
     (auth, dv, prov) = mem_db.execute(
-        "SELECT authority, data_version, provenance_json FROM observation_instants_v2"
+        "SELECT authority, data_version, provenance_json FROM observation_instants"
     ).fetchone()
     assert auth == "VERIFIED"
     assert dv == "v1.wu-native.pilot"
@@ -676,7 +676,7 @@ def test_view_stays_empty_until_zeus_meta_flips(mem_db):
     ).fetchone()
     assert view_count == 0, "VIEW must be empty pre-cutover"
     (table_count,) = mem_db.execute(
-        "SELECT COUNT(*) FROM observation_instants_v2"
+        "SELECT COUNT(*) FROM observation_instants"
     ).fetchone()
     assert table_count == 1, "Base table has the row"
 

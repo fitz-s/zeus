@@ -48,9 +48,9 @@ def _make_yaml(daemon_writer: str | None) -> str:
 
 def _make_ingest_source(has_decorator: bool, has_add_job: bool) -> str:
     """Return minimal ingest_main.py source text."""
-    # Note: ingest_k2_obs_v2_tick is the decorator name, ingest_k2_obs_v2 is the add_job ID
-    decorator_line = '@_scheduler_job("ingest_k2_obs_v2_tick")' if has_decorator else ""
-    add_job_line = '_scheduler.add_job(fn, id="ingest_k2_obs_v2")' if has_add_job else "pass"
+    # Note: ingest_k2_obs_tick is the decorator name, ingest_k2_obs is the add_job ID
+    decorator_line = '@_scheduler_job("ingest_k2_obs_tick")' if has_decorator else ""
+    add_job_line = '_scheduler.add_job(fn, id="ingest_k2_obs")' if has_add_job else "pass"
     
     return textwrap.dedent(f"""\
         def _scheduler_job(name):
@@ -59,7 +59,7 @@ def _make_ingest_source(has_decorator: bool, has_add_job: bool) -> str:
             return decorator
 
         {decorator_line}
-        def _ingest_k2_obs_v2_tick(context):
+        def _ingest_k2_obs_tick(context):
             pass
 
         def init():
@@ -77,7 +77,7 @@ class TestA5BootCheckWriterRegistry:
     def test_happy_path(self, tmp_path, monkeypatch):
         """Happy path: every writable table has decorator + add_job → passes."""
         yaml_path = tmp_path / "db_table_ownership.yaml"
-        yaml_path.write_text(_make_yaml("ingest_k2_obs_v2_tick"))
+        yaml_path.write_text(_make_yaml("ingest_k2_obs_tick"))
 
         import src.state.table_registry as reg_mod
         monkeypatch.setattr(reg_mod, "_REGISTRY_PATH", yaml_path)
@@ -89,7 +89,7 @@ class TestA5BootCheckWriterRegistry:
     def test_red_path_missing_decorator(self, tmp_path, monkeypatch):
         """Red path: registry declares daemon_writer but no matching @_scheduler_job → raises."""
         yaml_path = tmp_path / "db_table_ownership.yaml"
-        yaml_path.write_text(_make_yaml("ingest_k2_obs_v2_tick"))
+        yaml_path.write_text(_make_yaml("ingest_k2_obs_tick"))
 
         import src.state.table_registry as reg_mod
         monkeypatch.setattr(reg_mod, "_REGISTRY_PATH", yaml_path)
@@ -99,12 +99,12 @@ class TestA5BootCheckWriterRegistry:
             assert_writer_jobs_registered(ingest_main_source=source)
 
         msg = str(exc_info.value)
-        assert "no @_scheduler_job('ingest_k2_obs_v2_tick')" in msg
+        assert "no @_scheduler_job('ingest_k2_obs_tick')" in msg
 
     def test_red_path_missing_add_job(self, tmp_path, monkeypatch):
         """Red path: decorator present but no _scheduler.add_job → raises."""
         yaml_path = tmp_path / "db_table_ownership.yaml"
-        yaml_path.write_text(_make_yaml("ingest_k2_obs_v2_tick"))
+        yaml_path.write_text(_make_yaml("ingest_k2_obs_tick"))
 
         import src.state.table_registry as reg_mod
         monkeypatch.setattr(reg_mod, "_REGISTRY_PATH", yaml_path)
@@ -114,7 +114,7 @@ class TestA5BootCheckWriterRegistry:
             assert_writer_jobs_registered(ingest_main_source=source)
 
         msg = str(exc_info.value)
-        assert "no _scheduler.add_job(..., id='ingest_k2_obs_v2')" in msg
+        assert "no _scheduler.add_job(..., id='ingest_k2_obs')" in msg
 
     def test_meta_real_yaml_shape_check(self):
         """Verify the boot-check can parse the REAL production YAML shape."""

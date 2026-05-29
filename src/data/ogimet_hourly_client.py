@@ -3,7 +3,7 @@
 # Authority basis: plan v3 Phase 0 file #5 (.omc/plans/observation-instants-
 #                  migration-iter3.md L86-93); step2_phase0_pilot_plan.md.
 #                  F3 PR 2/3: typed temperature boundary per Path A (src/types/temperature.py).
-"""Ogimet METAR hourly-observation client for observation_instants_v2 backfill.
+"""Ogimet METAR hourly-observation client for observation_instants backfill.
 
 Wraps ``https://www.ogimet.com/cgi-bin/getmetar`` which mirrors NOAA METAR
 bulletins (including off-hour SPECI at extremes) for any ICAO station.

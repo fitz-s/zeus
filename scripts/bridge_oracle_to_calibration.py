@@ -17,7 +17,7 @@ Usage:
     .venv/bin/python scripts/bridge_oracle_to_calibration.py [--dry-run]
 
 Architecture:
-    settlements + world.observation_instants_v2 / world.daily_observation_revisions
+    settlements + world.observation_instants / world.daily_observation_revisions
                                       →  canonical daily settlement values
     oracle_snapshot_listener.py  →  raw/oracle_shadow_snapshots/{city}/{date}.json
                                            ↓
@@ -217,12 +217,12 @@ def _canonical_observation_daily_metric(
     target_date: str,
     temperature_metric: str,
 ) -> dict | None:
-    """Read the canonical verified daily metric from ``world.observation_instants_v2``.
+    """Read the canonical verified daily metric from ``world.observation_instants``.
 
     The old bridge treated sparse shadow snapshots as the authority surface,
     which made normal cities look ``INSUFFICIENT_SAMPLE`` even when the K1 DBs
     already held many verified settlement/observation days. This helper uses
-    the current canonical ``world.observation_instants_v2`` table first and keeps the existing
+    the current canonical ``world.observation_instants`` table first and keeps the existing
     primary/fallback source coverage rule.
     """
     if temperature_metric not in {"high", "low"}:
@@ -243,7 +243,7 @@ def _canonical_observation_daily_metric(
                     MAX(CASE WHEN temp_unit IS NOT NULL AND temp_unit <> '' THEN temp_unit END),
                     'F'
                 ) AS temp_unit
-            FROM world.observation_instants_v2
+            FROM world.observation_instants
             WHERE city = ?
               AND target_date = ?
               AND source = ?
@@ -386,7 +386,7 @@ def _metric_observation_support(
         SELECT target_date, MAX(hours) AS best_hours
           FROM (
                 SELECT target_date, source, COUNT(DISTINCT utc_timestamp) AS hours
-                  FROM world.observation_instants_v2
+                  FROM world.observation_instants
                  WHERE city = ?
                    AND source IN ({placeholders})
                    AND authority = 'VERIFIED'
@@ -485,7 +485,7 @@ def bridge(dry_run: bool = False) -> dict:
         snapshots = _load_snapshots()
         if not snapshots:
             logger.info("No shadow snapshots found in %s", oracle_snapshot_dir())
-            logger.info("Falling back to canonical observation_instants_v2 evidence")
+            logger.info("Falling back to canonical observation_instants evidence")
 
         # Coverage check helper (closure over conn — must be inside with block)
         def _get_day_coverage(city: str, target_date: str) -> tuple[int, int]:
@@ -497,7 +497,7 @@ def bridge(dry_run: bool = False) -> dict:
             # Count distinct hours for primary source
             p_count = conn.execute("""
                 SELECT COUNT(DISTINCT utc_timestamp)
-                FROM world.observation_instants_v2
+                FROM world.observation_instants
                 WHERE city = ? AND target_date = ? AND source = ?
                   AND authority = 'VERIFIED'
             """, (city, target_date, primary_source)).fetchone()[0]
@@ -509,7 +509,7 @@ def bridge(dry_run: bool = False) -> dict:
                 f_max = conn.execute(f"""
                     SELECT MAX(h) FROM (
                         SELECT COUNT(DISTINCT utc_timestamp) as h
-                        FROM world.observation_instants_v2
+                        FROM world.observation_instants
                         WHERE city = ? AND target_date = ? AND source IN ({placeholders})
                           AND authority = 'VERIFIED'
                         GROUP BY source

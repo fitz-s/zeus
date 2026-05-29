@@ -55,7 +55,7 @@ TIME_SEMANTICS_ALLOWED_FILES = {
     # `local_hour` column and DST flags.  They may transport these values but
     # must not perform signal-time inference with them; the inference layer
     # remains diurnal/day0/solar.
-    "observation_instants_v2_writer.py",
+    "observation_instants_writer.py",
     "wu_hourly_client.py",
     # forecast_calibration_domain.py uses local_hour inside key() as a
     # structural composite calibration key (join key plumbing), not for
@@ -576,7 +576,7 @@ def _check_legacy_hourly_observations_select(py_file: Path, content: str) -> lis
         violations.append(
             f"{py_file}:{lineno}:\n"
             "  [ERROR] P0_unsafe_table: legacy hourly_observations compatibility surface is forbidden.\n"
-            "  Use observation_instants_v2/current or a DST-aware derived surface instead.\n"
+            "  Use observation_instants/current or a DST-aware derived surface instead.\n"
             f"  Line: {line.rstrip()}\n"
         )
         violation_lines.add(lineno)
@@ -591,7 +591,7 @@ def _check_legacy_hourly_observations_select(py_file: Path, content: str) -> lis
         violations.append(
             f"{py_file}:{start_lineno}:\n"
             "  [ERROR] P0_unsafe_table: legacy hourly_observations compatibility surface is forbidden.\n"
-            "  Use observation_instants_v2/current or a DST-aware derived surface instead.\n"
+            "  Use observation_instants/current or a DST-aware derived surface instead.\n"
             f"  Line: {line.rstrip()}\n"
         )
         violation_lines.add(start_lineno)

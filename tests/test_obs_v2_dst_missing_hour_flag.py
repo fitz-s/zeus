@@ -12,7 +12,7 @@
 #   §5 K3.B5-backfill row.
 """B5 antibody — DST is_missing_local_hour flag end-to-end pin.
 
-Pre-this-slice: writer field accepts the flag (src/data/observation_instants_v2_writer.py:138);
+Pre-this-slice: writer field accepts the flag (src/data/observation_instants_writer.py:138);
 all callers compute it via `_is_missing_local_hour` (wu_hourly_client:331,
 ogimet_hourly_client:402, hourly_instants_append:153, daily_obs_append:668);
 historical backfill is handled by `scripts/fill_obs_dst_gaps.py`. None
@@ -40,7 +40,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.data.observation_instants_v2_writer import ObsV2Row, insert_rows
+from src.data.observation_instants_writer import ObsV2Row, insert_rows
 from src.signal.diurnal import _is_missing_local_hour
 from src.state.schema.v2_schema import apply_canonical_schema
 
@@ -171,7 +171,7 @@ def test_obs_v2_writer_persists_dst_gap_flag():
     assert inserted == 1, f"Expected 1 row inserted, got {inserted}"
 
     cursor = conn.execute(
-        "SELECT is_missing_local_hour FROM observation_instants_v2 "
+        "SELECT is_missing_local_hour FROM observation_instants "
         "WHERE city = ? AND utc_timestamp = ?",
         ("London", "2025-03-30T01:30:00+00:00"),
     )

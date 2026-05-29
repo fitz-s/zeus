@@ -2,14 +2,14 @@
 # Created: 2026-05-17
 # Lifecycle: created=2026-05-17; last_reviewed=2026-05-20; last_reused=2026-05-20
 # Last reused or audited: 2026-05-20
-# Purpose: Live rolling-window writer for observation_instants_v2 WU/OGIMET hourly rows.
+# Purpose: Live rolling-window writer for observation_instants WU/OGIMET hourly rows.
 # Reuse: Run when ingest_main obs_v2 live-tick, hourly payload identity, or obs_v2 writer relationships change.
 # Authority basis: docs/archive/2026-Q2/task_2026-05-17_post_karachi_remediation/F44_INVESTIGATION.md
-#   Root cause H2: observation_instants_v2 had no live-tick writer. This script provides the
+#   Root cause H2: observation_instants had no live-tick writer. This script provides the
 #   rolling-window live ingest for WU_ICAO and OGIMET_METAR cities. HKO_NATIVE (Hong Kong)
 #   is handled by the existing scripts/hko_ingest_tick.py --project-only path.
 #   2026-05-20 live stability: payload_hash includes hourly extrema material values.
-"""Live rolling-window ingest for observation_instants_v2.
+"""Live rolling-window ingest for observation_instants.
 
 Fetches the last N days of hourly observations for all non-HKO cities
 and writes through the typed v2 writer (A1/A2/A6 enforcement).
@@ -23,16 +23,16 @@ Usage
 ::
 
     # Default: last 7 days, all cities (WU_ICAO + OGIMET_METAR)
-    python scripts/obs_v2_live_tick.py
+    python scripts/obs_live_tick.py
 
     # Specify look-back window (useful for catch-up after outage)
-    python scripts/obs_v2_live_tick.py --days-back 14
+    python scripts/obs_live_tick.py --days-back 14
 
     # Dry run (fetch + validate, no writes)
-    python scripts/obs_v2_live_tick.py --dry-run
+    python scripts/obs_live_tick.py --dry-run
 
     # Restrict to specific cities for debugging
-    python scripts/obs_v2_live_tick.py --cities Karachi London
+    python scripts/obs_live_tick.py --cities Karachi London
 
 Source-tier routing
 -------------------
@@ -64,7 +64,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from src.config import cities_by_name  # noqa: E402
-from src.data.observation_instants_v2_writer import (  # noqa: E402
+from src.data.observation_instants_writer import (  # noqa: E402
     InvalidObsV2RowError,
     ObsV2Row,
     insert_rows,
@@ -386,7 +386,7 @@ def _append_log(log_path: Path, result: TickResult, *, start_date: date, end_dat
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Live rolling-window ingest for observation_instants_v2")
+    parser = argparse.ArgumentParser(description="Live rolling-window ingest for observation_instants")
     parser.add_argument("--days-back", type=int, default=DEFAULT_DAYS_BACK,
                         help="Look-back window in days (default: %(default)s)")
     parser.add_argument("--cities", nargs="+", metavar="CITY",

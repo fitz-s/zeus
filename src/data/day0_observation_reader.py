@@ -9,14 +9,14 @@ WIRED into production.  ``read_day0_observed_extrema_v2`` has zero callers outsi
 this module.  The LIVE production observed-so-far path is
 ``src.data.observation_client`` (get_current_observation), which computes
 ``high_so_far = max(...)`` over the selected WU rows (already MAX-correct, reading
-the live Weather Underground API rather than ``observation_instants_v2.running_max``).
+the live Weather Underground API rather than ``observation_instants.running_max``).
 A repo-wide grep confirms NO production reader performs the
 ``ORDER BY utc_timestamp DESC LIMIT 1`` + ``running_max`` anti-pattern this helper
 guards against.  Therefore Root C is NOT a production code path today; this reader
 is retained as a correct, tested fallback for any future consumer that reads from
-``observation_instants_v2`` directly.  Do NOT claim Root C covers production.
+``observation_instants`` directly.  Do NOT claim Root C covers production.
 
-Root C fix: observation_instants_v2.running_max is a PER-HOUR BUCKET maximum
+Root C fix: observation_instants.running_max is a PER-HOUR BUCKET maximum
 (non-monotonic across the day).  The live writer stores the hourly max for that
 observation window, NOT a cumulative day-so-far monotone.  The naive approach of
 reading the latest row's running_max gives the WRONG answer whenever the peak
@@ -79,7 +79,7 @@ class Day0ObservedExtrema:
     Attributes
     ----------
     city:
-        City name as stored in observation_instants_v2.
+        City name as stored in observation_instants.
     target_date:
         Local calendar date string 'YYYY-MM-DD'.
     chosen_source:
@@ -123,7 +123,7 @@ _EXTREMA_SQL = """
         MAX(running_max) AS agg_high,
         MIN(running_min) AS agg_low,
         COUNT(*) AS n_rows
-    FROM observation_instants_v2
+    FROM observation_instants
     WHERE city = ?
       AND target_date = ?
       AND source = ?
@@ -133,7 +133,7 @@ _EXTREMA_SQL = """
 
 _CURRENT_TEMP_SQL = """
     SELECT temp_current
-    FROM observation_instants_v2
+    FROM observation_instants
     WHERE city = ?
       AND target_date = ?
       AND source = ?
@@ -171,9 +171,9 @@ def read_day0_observed_extrema_v2(
     Parameters
     ----------
     conn:
-        SQLite connection to zeus-world.db (must have observation_instants_v2).
+        SQLite connection to zeus-world.db (must have observation_instants).
     city:
-        City name as stored in observation_instants_v2.
+        City name as stored in observation_instants.
     target_date:
         Local calendar date string 'YYYY-MM-DD'.
     timezone_name:

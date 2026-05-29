@@ -8,7 +8,7 @@ If anyone re-runs `enrich_observation_instants_v2_provenance.py.BROKEN-DO-NOT-RU
 or writes equivalent fabricated provenance, this test fires.
 
 Specifically detects the two synth signatures used this session:
-  - observation_instants_v2.provenance_json contains
+  - observation_instants.provenance_json contains
         parser_version="legacy:enrich_2026-04-28"
     or  source_url LIKE 'legacy://obs_v2/%'
     or  source_file LIKE 'legacy://obs_v2/%'
@@ -32,7 +32,16 @@ CANDIDATE_DB_PATHS = (
 
 def _find_live_db() -> Path | None:
     """Return the first candidate db that exists, has size > 1 MB, and has the
-    settlements + observation_instants_v2 tables."""
+    settlements + observation_instants tables WITH the consolidated provenance
+    schema (provenance_json column on observation_instants).
+
+    Consolidation (2026-05-29): provenance_json moved onto the canonical
+    observation_instants when observation_instants_v2 merged into it. A live DB
+    that has NOT yet had the operator migration applied still carries the legacy
+    subset observation_instants (no provenance_json) — this antibody requires the
+    post-migration schema, so an un-migrated live DB is skipped (CI-safe), exactly
+    as a missing DB is skipped. The provenance-marker invariant is meaningless on
+    a DB whose observation_instants lacks the provenance column."""
     for p in CANDIDATE_DB_PATHS:
         if not p.exists():
             continue
@@ -47,8 +56,18 @@ def _find_live_db() -> Path | None:
                         "SELECT name FROM sqlite_master WHERE type='table'"
                     )
                 }
-                if {"observation_instants_v2", "observations"}.issubset(tables):
-                    return p
+                if not {"observation_instants", "observations"}.issubset(tables):
+                    continue
+                obs_cols = {
+                    row[1]
+                    for row in conn.execute("PRAGMA table_info(observation_instants)")
+                }
+                if "provenance_json" not in obs_cols:
+                    # Pre-consolidation live DB: provenance_json still on the
+                    # separate observation_instants_v2. Skip until the operator
+                    # migration (scripts/migrations/) merges them.
+                    continue
+                return p
             finally:
                 conn.close()
         except sqlite3.Error:
@@ -65,13 +84,13 @@ def live_db_path() -> Path:
 
 
 def test_no_legacy_enrich_marker_in_obs_v2(live_db_path: Path) -> None:
-    """observation_instants_v2.provenance_json must not carry the synth marker."""
+    """observation_instants.provenance_json must not carry the synth marker."""
     conn = sqlite3.connect(f"file:{live_db_path}?mode=ro", uri=True)
     try:
         row = conn.execute(
             """
             SELECT COUNT(*)
-            FROM observation_instants_v2
+            FROM observation_instants
             WHERE provenance_json IS NOT NULL
               AND json_valid(provenance_json) = 1
               AND json_extract(provenance_json, '$.parser_version') = ?
@@ -81,7 +100,7 @@ def test_no_legacy_enrich_marker_in_obs_v2(live_db_path: Path) -> None:
     finally:
         conn.close()
     assert row[0] == 0, (
-        f"{row[0]} observation_instants_v2 rows carry the synthetic "
+        f"{row[0]} observation_instants rows carry the synthetic "
         f"parser_version='legacy:enrich_2026-04-28' marker. "
         f"Either enrich_observation_instants_v2_provenance.py.BROKEN-DO-NOT-RUN "
         f"was re-run, or another writer is fabricating provenance. "
@@ -90,13 +109,13 @@ def test_no_legacy_enrich_marker_in_obs_v2(live_db_path: Path) -> None:
 
 
 def test_no_legacy_source_url_in_obs_v2(live_db_path: Path) -> None:
-    """observation_instants_v2.provenance_json must not carry legacy:// source URLs."""
+    """observation_instants.provenance_json must not carry legacy:// source URLs."""
     conn = sqlite3.connect(f"file:{live_db_path}?mode=ro", uri=True)
     try:
         row = conn.execute(
             """
             SELECT COUNT(*)
-            FROM observation_instants_v2
+            FROM observation_instants
             WHERE provenance_json IS NOT NULL
               AND json_valid(provenance_json) = 1
               AND (
@@ -108,7 +127,7 @@ def test_no_legacy_source_url_in_obs_v2(live_db_path: Path) -> None:
     finally:
         conn.close()
     assert row[0] == 0, (
-        f"{row[0]} observation_instants_v2 rows carry synthetic "
+        f"{row[0]} observation_instants rows carry synthetic "
         f"'legacy://obs_v2/...' source_url or source_file. Synthesis is forbidden."
     )
 

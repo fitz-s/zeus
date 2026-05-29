@@ -38,7 +38,7 @@ FORECAST_LIVE_PROVENANCE: frozenset[str] = frozenset({
 DAILY_OBSERVATION_PROVENANCE: frozenset[str] = frozenset({
     "source", "station_id", "target_date", "fetched_at",
 })
-# V2 hourly observation-instant rows (`observation_instants_v2`) — distinct schema (R3 F11):
+# V2 hourly observation-instant rows (`observation_instants`) — distinct schema (R3 F11):
 # utc_timestamp/imported_at/authority/data_version, NOT the daily fetched_at.
 OBSERVATION_INSTANT_V2_PROVENANCE: frozenset[str] = frozenset({
     "source", "station_id", "target_date", "utc_timestamp", "imported_at",

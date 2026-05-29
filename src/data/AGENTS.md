@@ -26,8 +26,8 @@ regardless of mathematical correctness.
 | `forecast_ingest_protocol.py` | Typed forecast bundle protocol | MEDIUM |
 | `release_calendar.py` | Source safe-fetch/backfill-only calendar query layer | HIGH — wrong release timing poisons readiness |
 | `tigge_client.py` | TIGGE ingest stub; construction allowed, fetch operator-gated/dormant | HIGH — source activation seam |
-| `hourly_instants_append.py` | Legacy hourly observation path | HIGH — extrema preservation |
-| `observation_instants_v2_writer.py` | V2 hourly write contract | HIGH — version/source tagging |
+| `hourly_instants_append.py` | OpenMeteo/rebuild hourly observation path (writes UNVERIFIED rows to canonical observation_instants) | HIGH — extrema preservation |
+| `observation_instants_writer.py` | Native-source hourly write contract (A1/A2/A6 gated) for canonical observation_instants | HIGH — version/source tagging |
 | `forecasts_append.py` | Forecast write family (TIGGE ENS) | HIGH — signal source |
 | `market_scanner.py` | Venue discovery path (Polymarket markets) | MEDIUM |
 | `polymarket_client.py` | Market data client and legacy compatibility wrapper; live V2 placement delegates to `src/venue/polymarket_v2_adapter.py` | HIGH — compatibility seam during R3 |

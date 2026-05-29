@@ -294,7 +294,7 @@ scripts:
     module_owner: data
     write_targets: [stdout, temp]
     required_helpers: [src.data.tier_resolver]
-    read_from: [observation_instants_v2]
+    read_from: [observation_instants]
     required_tests: [tests/test_tier_resolver.py, tests/test_obs_v2_writer.py, tests/test_hk_rejects_vhhh_source.py]
     notes: "Read-only Phase 0 Gate 0→1 auditor; returns 0 iff tier_violations + source_tier_mismatches + openmeteo_rows + authority_unverified_rows all 0 AND every non-HK city has >=min_expected rows for the given data_version."
   audit_divergence_exit_counterfactual.py: {class: diagnostic}
@@ -365,25 +365,25 @@ scripts:
     class: etl_writer
     module_owner: data
     packet: docs/operations/task_2026-04-21_gate_f_data_backfill
-    required_helpers: [src.data.tier_resolver, src.data.observation_instants_v2_writer, src.data.wu_hourly_client, src.data.ogimet_hourly_client, scripts.backfill_completeness]
+    required_helpers: [src.data.tier_resolver, src.data.observation_instants_writer, src.data.wu_hourly_client, src.data.ogimet_hourly_client, scripts.backfill_completeness]
     external_inputs: [WU historical.json, Ogimet METAR]
     target_db: state/zeus-world.db
-    write_targets: [observation_instants_v2]
+    write_targets: [observation_instants]
     observability: [state/obs_v2_backfill_log.jsonl, state/backfill_manifest_obs_v2_*.json]
     required_tests: [tests/test_tier_resolver.py, tests/test_obs_v2_writer.py, tests/test_hourly_clients_parse.py, tests/test_backfill_completeness_guardrails.py, tests/test_backfill_scripts_match_live_config.py]
     do_not_use_when: "current_source_validity or current_data_state is stale for obs_v2 routing work"
-  obs_v2_live_tick.py:
+  obs_live_tick.py:
     class: etl_writer
     module_owner: data
     packet: docs/archive/2026-Q2/task_2026-05-17_post_karachi_remediation
-    required_helpers: [src.data.tier_resolver, src.data.observation_instants_v2_writer, src.data.wu_hourly_client, src.data.ogimet_hourly_client, src.state.db_writer_lock]
+    required_helpers: [src.data.tier_resolver, src.data.observation_instants_writer, src.data.wu_hourly_client, src.data.ogimet_hourly_client, src.state.db_writer_lock]
     external_inputs: [WU historical.json, Ogimet METAR]
     target_db: state/zeus-world.db
-    write_targets: [observation_instants_v2]
+    write_targets: [observation_instants]
     observability: [state/obs_v2_live_tick_log.jsonl]
     required_tests: [tests/test_obs_v2_writer.py]
-    notes: "Hourly rolling live writer invoked by src.ingest_main._k2_obs_v2_tick; payload_hash must cover material extrema values so revised source facts enter revision history instead of same-hash material conflicts."
-  fill_obs_dst_gaps.py: {class: etl_writer, required_helpers: [src.data.tier_resolver, src.data.observation_instants_v2_writer, src.data.ogimet_hourly_client], external_inputs: [Ogimet METAR], target_db: state/zeus-world.db, write_targets: [observation_instants_v2], observability: [state/obs_v2_dst_fill_log.jsonl], notes: "Targeted gap-fill for Tier 1 WU cities on DST-spring-forward days where WU archive has silent upstream holes. Uses Ogimet as authoritative NOAA-METAR mirror."}
+    notes: "Hourly rolling live writer invoked by src.ingest_main._k2_obs_tick; payload_hash must cover material extrema values so revised source facts enter revision history instead of same-hash material conflicts."
+  fill_obs_dst_gaps.py: {class: etl_writer, required_helpers: [src.data.tier_resolver, src.data.observation_instants_writer, src.data.ogimet_hourly_client], external_inputs: [Ogimet METAR], target_db: state/zeus-world.db, write_targets: [observation_instants], observability: [state/obs_v2_dst_fill_log.jsonl], notes: "Targeted gap-fill for Tier 1 WU cities on DST-spring-forward days where WU archive has silent upstream holes. Uses Ogimet as authoritative NOAA-METAR mirror."}
 
   backfill_ogimet_metar.py:
     class: etl_writer
@@ -460,7 +460,7 @@ scripts:
     required_tests: []
     reason: "Reports highest evidence-backed completion state plus exact blockers for forecast-live authority chain. Prevents operators/agents from confusing code presence with live data readiness. Salvaged from closed PR #134."
 
-  hko_ingest_tick.py: {class: etl_writer, dangerous_if_run: true, apply_flag: implicit, target_db: state/zeus-world.db, unguarded_write_rationale: "Standalone HKO accumulator tick + observation_instants_v2 projection; idempotent via ON CONFLICT / UNIQUE constraints. Designed for cron invocation independent of trading daemon."}
+  hko_ingest_tick.py: {class: etl_writer, dangerous_if_run: true, apply_flag: implicit, target_db: state/zeus-world.db, unguarded_write_rationale: "Standalone HKO accumulator tick + observation_instants projection; idempotent via ON CONFLICT / UNIQUE constraints. Designed for cron invocation independent of trading daemon."}
   check_data_pipeline_live_e2e.py:
     # Created: 2026-05-15
     # Last reused or audited: 2026-05-15

@@ -127,7 +127,7 @@ _BASELINE_PER_FILE: dict[str, int] = {
     "src/data/market_scanner.py": 2,
     "src/data/daily_observation_writer.py": 6,
     "src/data/ingest_status_writer.py": 2,
-    "src/data/observation_instants_v2_writer.py": 4,
+    "src/data/observation_instants_writer.py": 4,
     "src/data/solar_append.py": 4,
     "src/engine/cycle_runtime.py": 4,
     "src/engine/ddd_wiring.py": 1,

@@ -143,12 +143,12 @@ assert CANONICAL_DATA_VERSIONS is CANONICAL_ENSEMBLE_DATA_VERSIONS, (
 # ``assert_data_version_allowed`` below for the pattern).
 #
 # Observation data_version catalog (observation_instants_v2 writer at
-# ``src/data/observation_instants_v2_writer.py``).
+# ``src/data/observation_instants_writer.py``).
 #
 # AUTHORITY TIERS (con-nyx T2-S4 finding 1, 2026-04-24):
 #   - PRODUCTION-GROUNDED: ``v1.wu-native`` (verified via grep of
 #     ``src/state/schema/v2_schema.py::338,344,365`` +
-#     ``src/data/observation_instants_v2_writer.py::154``). Live DB has
+#     ``src/data/observation_instants_writer.py::154``). Live DB has
 #     1,813,662 rows carrying this value.
 #   - ASPIRATIONAL: ``v1.hko-native``, ``v1.ogimet-native``,
 #     ``v1.meteostat-native``, ``v1.openmeteo-native`` — no production

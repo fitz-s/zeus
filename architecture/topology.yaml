@@ -8183,7 +8183,7 @@ digest_profiles:
       - "src/data/tier_resolver.py"
       - "src/data/rebuild_validators.py"
       - "src/data/hole_scanner.py"
-      - "src/data/observation_instants_v2_writer.py"
+      - "src/data/observation_instants_writer.py"
       - "src/types/observation_atom.py"
       - "tests/test_ingestion_guard.py"
       - "tests/test_observation_atom.py"

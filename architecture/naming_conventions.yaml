@@ -87,7 +87,7 @@ file_naming:
         onboard_cities.py: established ETL/operator onboarding entrypoint
         hko_ingest_tick.py: established HKO accumulator tick helper retained under runtime/ops naming
         oracle_snapshot_listener.py: oracle snapshot runtime listener retained under cron/operator naming
-        obs_v2_live_tick.py: established ingest_main scheduler helper for observation_instants_v2 rolling live writes; name retained to match obs_v2 table/operator terminology
+        obs_live_tick.py: established ingest_main scheduler helper for observation_instants rolling live writes (renamed from obs_v2_live_tick.py in the 2026-05-29 observation_instants consolidation; obs_v2_* log/parser-version artifact strings retained for operator log-tail continuity)
         parse_change_log.py: established utility entrypoint
         post_sequential_fillback.sh: K2 post-backfill fillback orchestrator; post_ prefix is the natural name for a "runs after <x>" ops wrapper
         resume_backfills_sequential.sh: K2 sequential backfill orchestrator; resume_ prefix reflects its role as a restart wrapper

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # Lifecycle: created=2026-04-23; last_reviewed=2026-04-25; last_reused=2026-04-25
-# Purpose: Ingest HKO accumulator readings and project them into observation_instants_v2.
+# Purpose: Ingest HKO accumulator readings and project them into observation_instants.
 # Reuse: Keep HKO source identity separate from WU/VHHH and preserve writer provenance identity.
 # Created: 2026-04-23
 # Last reused/audited: 2026-04-25
@@ -20,7 +20,7 @@ This closes two gaps:
    This script runs one accumulator tick *without* importing or
    triggering any trading path.
 2. **Projection gap**: accumulator rows live in ``hko_hourly_accumulator``
-   but are never written to ``observation_instants_v2``. Plan v3 L95
+   but are never written to ``observation_instants``. Plan v3 L95
    specified accumulator-forward-only for HK via ``source=
    'hko_hourly_accumulator'`` + ``authority='ICAO_STATION_NATIVE'`` +
    ``data_version='v1.wu-native'`` + provenance ``hourly_history_gap_
@@ -64,7 +64,7 @@ if str(_REPO_ROOT) not in sys.path:
 # Intentionally NOT importing from src.main, src.engine, src.execution —
 # this script must not pull in the trading daemon's import graph.
 from src.data.daily_obs_append import _accumulate_hko_reading  # noqa: E402
-from src.data.observation_instants_v2_writer import (  # noqa: E402
+from src.data.observation_instants_writer import (  # noqa: E402
     InvalidObsV2RowError,
     ObsV2Row,
     insert_rows,
@@ -103,7 +103,7 @@ def _accumulator_rows_missing_from_v2(
         SELECT a.target_date, a.hour_utc, a.temperature, a.fetched_at
         FROM hko_hourly_accumulator a
         WHERE NOT EXISTS (
-            SELECT 1 FROM observation_instants_v2 v
+            SELECT 1 FROM observation_instants v
             WHERE v.city = ?
               AND v.source = 'hko_hourly_accumulator'
               AND v.data_version = ?
@@ -281,7 +281,7 @@ def tick_accumulator(
 
 def _parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="Standalone HKO accumulator tick + observation_instants_v2 projection",
+        description="Standalone HKO accumulator tick + observation_instants projection",
     )
     p.add_argument(
         "--data-version", default="v1.wu-native",

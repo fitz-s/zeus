@@ -220,7 +220,7 @@ claims:
         locator: historical_hourly_source
       - kind: machine_manifest
         path: architecture/source_rationale.yaml
-        locator: observation_instants_v2_writer
+        locator: observation_instants_writer
       - kind: machine_manifest
         path: architecture/task_boot_profiles.yaml
         locator: hourly_source_and_extrema

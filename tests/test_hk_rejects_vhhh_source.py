@@ -26,7 +26,7 @@ import json
 
 import pytest
 
-from src.data.observation_instants_v2_writer import (
+from src.data.observation_instants_writer import (
     InvalidObsV2RowError,
     ObsV2Row,
 )
