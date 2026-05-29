@@ -36,6 +36,7 @@ import pytest
 from src.data.forecast_target_contract import (
     aggregation_window_hours_for_data_version,
     build_forecast_target_scope,
+    evaluate_horizon_coverage,
 )
 
 UTC = timezone.utc
@@ -149,36 +150,84 @@ def test_tigge_scope_stays_6h_stride_no_global_flip() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Relationship 3: OpenData required step set caps at 144h (Polymarket 5-day
-# market cap; beyond-144h ECMWF steps are no longer consumed). The contract
-# must not require steps > 144h for OpenData, so a snapshot that covers
-# 3..144h is not penalised for missing >144h fields.
+# Relationship 3: the requirement is HONEST; the 144h cap lives on the FETCH
+# list (STEP_HOURS) + the coverage GATE, NOT on the requirement. An over-horizon
+# target (window genuinely needs steps > 144h) must produce an honest required
+# set that the coverage gate BLOCKS — never a silently-truncated set that reads
+# as COMPLETE/LIVE_ELIGIBLE.
+#
+# SEV-1 antibody (wave-critic 2026-05-29): the prior contract capped the
+# REQUIREMENT itself (`required_period_end_steps(max_step_hours=144)`), which
+# truncated Western-hemisphere D+5 windows to <=144 and let the coverage gate
+# read them as COMPLETE — a silent fail-open on a live-money path. The fix moves
+# the cap off the requirement: the requirement is always honest, and
+# evaluate_horizon_coverage(required, live_max=144) blocks anything the fetch
+# cannot cover. East vs West asymmetry is the load-bearing case: Eastern cities'
+# D+5 local day ends ~135h UTC (covered); Western cities' D+5 local day extends
+# to ~151-153h UTC (NOT covered at 144h) -> must BLOCK, not silently pass.
 # ---------------------------------------------------------------------------
 
+# What STEP_HOURS actually fetches (3h grid 3..144).
+LIVE_MAX_OPENDATA = OPENDATA_MAX_STEP_HOURS
 
-def test_opendata_required_steps_cap_at_144h() -> None:
-    # A far-horizon target (D+10 from 00z) would, on an uncapped scan, request
-    # steps well beyond 144h. With the 5-day market cap, OpenData must not ask
-    # for any step > 144h.
+
+def test_eastern_d5_within_cap_is_live_eligible() -> None:
+    # Tokyo (UTC+9): a D+5 LOCAL day ends ~135h UTC — within the 144h fetch cap.
     scope = build_forecast_target_scope(
         city_id="TOKYO",
         city_name="Tokyo",
         city_timezone="Asia/Tokyo",
-        target_local_date=date(2026, 6, 11),  # ~D+10 from 2026-06-01 00z
-        temperature_metric="high",
+        target_local_date=date(2026, 6, 6),  # ~D+5 from 2026-06-01 00z
+        temperature_metric="low",
         source_cycle_time=_issue(2026, 6, 1, 0),
-        data_version=OPENDATA_HIGH_DV,
+        data_version=OPENDATA_LOW_DV,
     )
-    over_horizon = [s for s in scope.required_step_hours if s > OPENDATA_MAX_STEP_HOURS]
-    assert not over_horizon, (
-        f"OpenData required steps must cap at {OPENDATA_MAX_STEP_HOURS}h "
-        f"(Polymarket 5-day cap); got over-horizon steps {sorted(over_horizon)}."
+    assert max(scope.required_step_hours) <= OPENDATA_MAX_STEP_HOURS, (
+        f"Tokyo D+5 should fit within {OPENDATA_MAX_STEP_HOURS}h; "
+        f"got max {max(scope.required_step_hours)}"
     )
+    decision = evaluate_horizon_coverage(
+        required_steps=scope.required_step_hours,
+        live_max_step_hours=LIVE_MAX_OPENDATA,
+    )
+    assert decision.status == "LIVE_ELIGIBLE", decision.reason_codes
+
+
+def test_western_d5_over_cap_blocks_not_silently_complete() -> None:
+    # SEV-1 antibody. Seattle (America/Los_Angeles = UTC-7 in June): a D+5 LOCAL
+    # day extends to ~151-153h UTC (the negative UTC offset pushes the local day
+    # later in UTC). The 144h fetch cap does NOT cover it. The requirement MUST
+    # be honest (max > 144) so the coverage gate BLOCKS — it must never silently
+    # truncate to <=144 and read as LIVE_ELIGIBLE.
+    scope = build_forecast_target_scope(
+        city_id="SEATTLE",
+        city_name="Seattle",
+        city_timezone="America/Los_Angeles",
+        target_local_date=date(2026, 6, 6),  # ~D+5 from 2026-06-01 00z
+        temperature_metric="low",
+        source_cycle_time=_issue(2026, 6, 1, 0),
+        data_version=OPENDATA_LOW_DV,
+    )
+    over = [s for s in scope.required_step_hours if s > OPENDATA_MAX_STEP_HOURS]
+    assert over, (
+        "Western D+5 requirement was silently truncated to <=144h — the coverage "
+        "gate cannot see the uncovered tail and will fail OPEN (the SEV-1 bug). "
+        f"required={scope.required_step_hours}"
+    )
+    decision = evaluate_horizon_coverage(
+        required_steps=scope.required_step_hours,
+        live_max_step_hours=LIVE_MAX_OPENDATA,
+    )
+    assert decision.status == "BLOCKED", (
+        f"Western D+5 must BLOCK at the {OPENDATA_MAX_STEP_HOURS}h cap, got "
+        f"{decision.status}: {decision.reason_codes}"
+    )
+    assert "SOURCE_RUN_HORIZON_OUT_OF_RANGE" in decision.reason_codes
 
 
 def test_tigge_required_steps_not_capped_at_144h() -> None:
-    # TIGGE is the historical archive on its own (full) range — the 144h cap
-    # is OpenData-only and must NOT shrink TIGGE coverage.
+    # TIGGE is the historical archive on its own (full) range — uncapped. The
+    # requirement was never OpenData-capped; this stays true after the fix.
     scope = build_forecast_target_scope(
         city_id="TOKYO",
         city_name="Tokyo",
@@ -189,6 +238,5 @@ def test_tigge_required_steps_not_capped_at_144h() -> None:
         data_version=TIGGE_HIGH_DV,
     )
     assert any(s > OPENDATA_MAX_STEP_HOURS for s in scope.required_step_hours), (
-        "TIGGE D+10 scope must still request steps beyond 144h "
-        "(OpenData 144h cap must not apply to the TIGGE archive)."
+        "TIGGE D+10 scope must still request steps beyond 144h."
     )

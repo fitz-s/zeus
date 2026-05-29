@@ -166,61 +166,68 @@ def test_score_dates_disjoint_from_fit_dates():
 # ---------------------------------------------------------------------------
 
 def test_leakage_is_detectable_not_absorbed():
-    """A scoring path that ignores fold boundaries absorbs leakage silently.
+    """Fold-ISOLATION antibody: a per-fold-UNIQUE bias must NOT be self-corrected.
 
-    The FIT→SCORE boundary test: compare opendata_bias candidate logloss when scored
-    with bias fit EXCLUDING fold-0 dates (correct, OOS) vs when fold-0's biased rows
-    are injected into fold-1's train dates (leakage).
+    The earlier version of this test only asserted "aggregate scores change when the
+    dataset changes" — true of ANY dataset edit, leak or not. It stayed GREEN under
+    the wave-critic's sed-break (mutating the train split to `train_indices = all`),
+    so it did not actually guard the FIT→SCORE boundary. This version discriminates.
 
-    The biased fold (fold-0 dates, ~85°F members / 80°F settlement) has residuals
-    ~+15°F (warm-biased). When these rows contaminate another fold's training data,
-    the bias estimate for that fold shifts — changing the candidate's logloss on the
-    test fold. If leakage is absorbed silently, cand scores are identical (bad).
+    Construction: bias is ANTI-CORRELATED across folds — fold-0 rows run warm
+    (+BIAS), fold-1 rows run cold (−BIAS), assigned by the ACTUAL date_blocked_folds
+    partition (not by date, so the partitioner's choice can't escape it).
 
-    RED: run_scoring raises NotImplementedError.
-    GREEN: opendata_bias candidate logloss differs between clean and leaked runs.
+    - Correct OOS (train = folds != test): the bias for the test fold is fit on the
+      OTHER fold, whose bias is the OPPOSITE sign. Applying it to the test fold
+      DOUBLES the error → opendata_bias is strictly WORSE than raw.
+    - Leak (train = ALL rows incl test fold): the two opposite-sign folds cancel to
+      ~0 bias → opendata_bias collapses to ≈ raw (no mis-correction).
+
+    Discriminator: opendata_bias logloss must be meaningfully WORSE than raw.
+    Under the leak mutation it becomes ≈ raw → this test goes RED. (Verified by
+    sed-break against `train_indices = list(range(len(...)))`.)
     """
-    # Clean run: proper OOS fold partition
-    manifest_clean = run_scoring(_ROWS, CITY_F, TARGET_PRODUCT, k_folds=_K)
-
-    # Leaked run: inject warm-biased fold-0 rows into fold-1 dates.
-    # This contaminates fold-1's training data with fold-0's distribution.
-    # The bias estimated for fold-1 train rows will be pulled toward +15 (warm bias).
-    fold1_dates = {
-        r["target_date"] for r, f in zip(_ROWS, _FOLD_ASSIGNMENTS) if f == 1
-    }
-    fold1_date_for_inject = sorted(fold1_dates)[0]
-    fold0_rows = [r for r, f in zip(_ROWS, _FOLD_ASSIGNMENTS) if f == 0]
-    # Clone fold-0 warm-biased rows with a fold-1 date → leaks +15°F bias into fold-1 training
-    leaked_extra = [
-        {**r, "target_date": fold1_date_for_inject} for r in fold0_rows
+    BIAS = 3.0          # °F per-fold bias magnitude (anti-correlated across folds)
+    MEMBER_SIGMA = 4.0  # member spread — keeps the winning bin off the logloss
+    #                     floor so raw (error≈BIAS) and cand (error≈2·BIAS under
+    #                     OOS mis-correction) are cleanly separable, not both ≈ −log(eps).
+    rng = np.random.default_rng(7)
+    dates = [
+        "2026-01-05", "2026-01-15", "2026-01-25",
+        "2026-02-05", "2026-02-15", "2026-02-25",
     ]
-    leaked_rows = _ROWS + leaked_extra
+    fold_asn = date_blocked_folds(dates, k=2)
+    rows = []
+    for d, f in zip(dates, fold_asn):
+        settlement = 70.0
+        signed_bias = BIAS if f == 0 else -BIAS  # anti-correlated by ACTUAL fold
+        members = (rng.normal(0.0, MEMBER_SIGMA, 20) + settlement + signed_bias).tolist()
+        rows.append({
+            "target_date": d,
+            "settlement_value_c": float(settlement),
+            "members_json": json.dumps(members),
+            "members_unit": "F",
+        })
 
-    manifest_leaked = run_scoring(leaked_rows, CITY_F, TARGET_PRODUCT, k_folds=_K)
-
-    # GREEN: opendata_bias candidate logloss must DIFFER between clean and leaked runs.
-    # The bias estimate changes when warm-biased rows contaminate training → candidate
-    # scores on held-out folds must change.
-    cand_clean = manifest_clean["candidate_metrics"].get("opendata_bias", {})
-    cand_leaked = manifest_leaked["candidate_metrics"].get("opendata_bias", {})
-
-    assert cand_clean and cand_leaked, (
-        "opendata_bias candidate absent from one or both manifests — "
-        f"clean keys: {list(manifest_clean['candidate_metrics'].keys())}, "
-        f"leaked keys: {list(manifest_leaked['candidate_metrics'].keys())}"
+    manifest = run_scoring(rows, CITY_F, TARGET_PRODUCT, k_folds=2)
+    raw_ll = manifest["raw_metrics"].get("logloss")
+    cand = manifest["candidate_metrics"].get("opendata_bias", {})
+    assert cand, (
+        "opendata_bias candidate absent — "
+        f"keys: {list(manifest['candidate_metrics'].keys())}"
     )
+    cand_ll = cand.get("logloss")
+    assert raw_ll is not None and cand_ll is not None
 
-    diffs = [
-        abs(cand_clean[m] - cand_leaked[m]) > 1e-12
-        for m in ("logloss", "rps", "brier")
-        if m in cand_clean and m in cand_leaked
-    ]
-    assert any(diffs), (
-        "Leakage was silently absorbed — injecting warm-biased fold-0 rows into "
-        "fold-1 training dates produced identical opendata_bias candidate scores. "
-        f"clean={cand_clean}, leaked={cand_leaked}. "
-        "The scoring path must be sensitive to which rows are in each training fold."
+    # Leak-free: the OTHER fold's opposite-sign bias mis-corrects the test fold →
+    # candidate strictly worse than raw. If the fit leaked the test fold, the
+    # anti-correlated folds cancel and cand ≈ raw → assertion fails (RED).
+    assert cand_ll > raw_ll * 1.10, (
+        "FOLD ISOLATION BROKEN: opendata_bias is NOT worse than raw on an "
+        "anti-correlated per-fold bias. Under correct OOS the other fold's "
+        f"opposite bias MUST mis-correct the test fold. cand_ll={cand_ll:.4f} "
+        f"raw_ll={raw_ll:.4f}. If ~equal, the fit is leaking test-fold rows "
+        "into its own training set."
     )
 
 
