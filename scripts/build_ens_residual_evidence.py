@@ -222,6 +222,11 @@ def build_evidence(conn: sqlite3.Connection, *, metric: str, lead_max: float,
 
     accept_cycle=None uses the metric-strict cycle; pass an explicit "00"/"12"/"ALL" to
     override (for --compare-cycles diagnostics).
+
+    PRECONDITION: the source DB must carry the CANONICAL schema (table `ensemble_snapshots`
+    with the `dataset_id` lineage column, `settlement_outcomes`) — the B3cont/B5 rename
+    migration. A pre-migration DB (legacy `ensemble_snapshots_v2` / `data_version`) raises
+    OperationalError here; that is fail-loud by design, run after the migration lands.
     """
     where = ["e.temperature_metric = ?", "e.lead_hours <= ?",
              "e.authority = 'VERIFIED'", "s.authority = 'VERIFIED'",
@@ -269,6 +274,17 @@ def build_evidence(conn: sqlite3.Connection, *, metric: str, lead_max: float,
         if strict_cycle != "ALL" and hh != strict_cycle:
             rejected_cycle += 1
             continue
+        # Passing the single joined row `r` as BOTH forecast and settlement makes the metric +
+        # unit dims of pair_residual TAUTOLOGICAL here: metric is enforced by the SQL JOIN
+        # (s.temperature_metric = e.temperature_metric) and the settlement unit is the forecast's
+        # CLAIM (D-S1: settlement_outcomes has no unit column). The gate's REAL added coverage
+        # over the loose JOIN is STATION + AUTHORITY identity. Do NOT weaken the JOIN's metric
+        # condition on the assumption the gate re-checks it — it does not.
+        # Coverage gap (P2 SEV-2, latent): a forecast whose settlement_source_type normalizes to
+        # a DIFFERENT authority token than the settlement's provenance data_version (e.g. a
+        # 'noaa'-claimed forecast settled via 'ogimet') drops here. That is the gate working as a
+        # provenance check — but until the source-family vocabulary is reconciled at ingest, it
+        # also drops genuine pairs for non-wu_icao cities. Drops are per-row warned + counted.
         rkey = _pair_or_drop(r, r, claimed_unit=r.get("settlement_unit"))
         if rkey is None:
             rejected_pairing += 1

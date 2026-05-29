@@ -2,7 +2,14 @@
 
 Single resume reference. Read §0 + §7 first.
 
-- Worktree: `.claude/worktrees/stat-whole-refactor`  ·  Branch: `stat-whole-refactor`  ·  HEAD: `cb57aaa0d3`
+> **Session-2 update (2026-05-29 cont.):** P2 pair_residual loop wiring (D-J1 drop) and
+> P4 analytic Gaussian-mixture p_raw are now BUILT + TDD'd + committed
+> (`b62b025898` P2, `67968ec915` P4; under a wave-level opus critic at time of writing).
+> Both are offline/additive — no live serving wired. See §2/§4 marked **[S2 DONE]**.
+> Remaining highest-leverage: D-S1 settlement-schema columns, P5 run-selection, P3
+> production-serving integration (DORMANT). 121 redesign/signal tests green.
+
+- Worktree: `.claude/worktrees/stat-whole-refactor`  ·  Branch: `stat-whole-refactor`  ·  HEAD: `67968ec915`
 - Base: merged current with `origin/main` (PR #359 canonicalization in). Collection: 0 errors. 68 new contract/stat tests green.
 - Python: `/Users/leofitz/.openclaw/workspace-venus/zeus/.venv/bin/python`; run pytest from the worktree root.
 
@@ -62,9 +69,11 @@ Session commits (newest first): `cb57aaa0d3 3d12b7f852 c9cc3a2440 c293e04a73 a95
 2. `model_bias_ens` table lead/cycle/product re-key (schema migration) so the serving key carries them.
 3. Serving-twin lead-awareness (Cons-A): `src/engine/evaluator.py:3296` `_resolve_ft_error_model_for_entry` + `src/engine/monitor_refresh.py:343` `_resolve_ft_error_model` (byte-twins, divergence warned at evaluator.py:43-45 but unenforced) — thread `forecast_lead_bucket`, RAISE on miss (fail-closed, not fail-open to raw), de-duplicate via shared helper or CI grep.
 
-**P2 remaining:** route `build_evidence`'s loop through `pair_residual` (replace the loose city+date+metric join — drops/logs wrong-station pairs). Spec: `P2_LEDGER_SEAM_FINDINGS_2026-05-29.md` §wiring-plan step 4. Also D-S1: add `settlement_unit`+`settlement_station` columns to `settlement_outcomes` (makes unit/station verifiable not heuristic).
+**P2 loop — [S2 DONE]** (`b62b025898`): `build_evidence` now routes every candidate through `_pair_or_drop`→`pair_residual` (loose join gated; wrong-station dropped fail-closed) and reads canonical `e.dataset_id AS data_version` (the prior `e.data_version` errored on the canonical schema — column renamed in B5). Dict-by-column access replaced the 23-col positional unpack. `tests/test_build_evidence_{pairing_gate,integration}.py`.
+**P2 remaining:** D-S1 — add `settlement_unit`+`settlement_station` columns to `settlement_outcomes` (settlement-side migration; makes unit/station verifiable not heuristic). Also `ens_bias_repo.py:167` still selects stale `e.data_version` (dormant serving path) — fix when that path reactivates.
 
-**P4 — analytic p_raw** (#8): replace 10k MC (`ensemble_signal.py:254`) with Gaussian-mixture CDF; equivalence-gate on **p_cal + logit(p_raw)** (not p_raw alone — Platt was trained on MC p_raw, Cons-D); don't retire MC until p_cal equivalence holds.
+**P4 analytic p_raw — [S2 DONE as additive draft]** (`67968ec915`): `analytic_p_raw_vector_from_maxes` (`ensemble_signal.py:268`) = closed-form Gaussian-mixture CDF over the rounding preimage, equivalence-proven vs the 10k MC (`tests/test_analytic_p_raw_equivalence.py`, 16 tests; p_raw atol 2e-3, logit atol 1.5e-2 [clamp-bounded], identity p_cal). **ADDITIVE — MC stays the live generator.**
+**P4 retirement (remaining, overlaps P5):** before swapping analytic into live serving, re-run the equivalence gate against the **real active Platt** once an OpenData Platt exists (full Cons-D: gate on p_cal + logit(p_raw), not p_raw alone — Platt was trained on MC p_raw). No OpenData Platt today (p_cal=p_raw), so IdentityCalibrator currently reflects production.
 
 **P5 — run the selection** (#9): once depth/FT allow, run the OOS candidate selection on the corrected lead-matched base; expect raw-fallback dominant.
 
