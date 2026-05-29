@@ -329,7 +329,7 @@ def run_backfill(*, rpc_url: str, from_block: int, to_block: int, dry_run: bool 
 
                 pm_bin_lo, pm_bin_hi = _parse_bin_bounds(ad_text)
 
-                # Derive market_slug — required by log_settlement_v2 identity check.
+                # Derive market_slug — required by log_settlement identity check.
                 # Use a stable canonical form: city_slug-date-metric
                 city_slug = city_name.lower().replace(" ", "_")
                 event_slug = f"uma_backfill_{city_slug}_{target_date}_{temperature_metric}"

@@ -66,7 +66,7 @@ except ModuleNotFoundError:
 from src.backtest.economics import check_economics_readiness
 from src.config import City
 from src.execution import harvester as harvester_mod
-from src.state.db import init_schema, log_market_event_outcome, log_settlement_v2
+from src.state.db import init_schema, log_market_event_outcome, log_settlement
 from src.state.portfolio import (
     ENTRY_ECONOMICS_OPTIMISTIC_MATCH_PRICE,
     FILL_AUTHORITY_OPTIMISTIC_SUBMITTED,
@@ -932,11 +932,11 @@ def test_harvester_settlement_outcomes_mirror_is_idempotent(harvester_conn):
     assert provenance["decision_time_snapshot_id"] == "2026-04-24T18:00:00Z"
 
 
-def test_log_settlement_v2_skips_missing_table_without_creating_schema():
+def test_log_settlement_skips_missing_table_without_creating_schema():
     """Capability-absent path is explicit and has no DDL side effect."""
     conn = sqlite3.connect(":memory:")
 
-    result = log_settlement_v2(
+    result = log_settlement(
         conn,
         city="NoSchema",
         target_date="2026-04-24",

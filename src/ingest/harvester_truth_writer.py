@@ -78,7 +78,7 @@ from src.contracts.settlement_semantics import SettlementSemantics
 from src.contracts.exceptions import SettlementPrecisionError
 from src.state.db import (
     log_market_event_outcomes,
-    log_settlement_v2,
+    log_settlement,
 )
 from src.state.settlement_writers import dispatch_era_basis, write_settlement_v2_with_era_provenance
 from src.types.metric_identity import MetricIdentity
@@ -617,7 +617,7 @@ def _write_settlement_truth(
                 _settlement_dict, _era_result.era_basis, conn=conn
             )
         else:
-            settlement_v2_result = log_settlement_v2(
+            settlement_v2_result = log_settlement(
                 conn,
                 city=city.name,
                 target_date=target_date,

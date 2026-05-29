@@ -35,7 +35,7 @@ operator decision):
         src/state/schema/v2_schema.py:227-249
     Neither table carries strategy_key. Neither carries city as a separate
     column (cluster ≈ city per K3 / "one-cluster-per-city" per
-    load_platt_model_v2 docstring). Neither carries target_date (Platt's
+    load_platt_model docstring). Neither carries target_date (Platt's
     lead_days is an INPUT FEATURE, not a key).
   - `strategy_key` is therefore NOT in the return shape. A future
     PATH B packet that JOINs against trade_decisions.calibration_model_version

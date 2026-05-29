@@ -75,7 +75,7 @@ def test_r1_4_settlement_write_uses_attach_savepoint():
     settlement = _minimal_settlement()
 
     with mock.patch("src.state.db.get_forecasts_connection_with_world", _fake_get_conn), \
-         mock.patch("src.state.db.log_settlement_v2", return_value={"status": "written"}) as mock_log, \
+         mock.patch("src.state.db.log_settlement", return_value={"status": "written"}) as mock_log, \
          mock.patch("sqlite3.connect") as mock_sqlite_connect:
 
         write_settlement_v2_with_era_provenance(settlement, ERA_BASIS_UMA_OO_V2)
@@ -83,7 +83,7 @@ def test_r1_4_settlement_write_uses_attach_savepoint():
         # CRITICAL: bare sqlite3.connect() must NOT be called
         mock_sqlite_connect.assert_not_called()
 
-        # log_settlement_v2 (i.e. the writer) must be called
+        # log_settlement (i.e. the writer) must be called
         mock_log.assert_called_once()
 
     # SAVEPOINT era_dispatch must be issued
@@ -119,7 +119,7 @@ def test_r1_4_exception_triggers_savepoint_rollback():
     settlement = _minimal_settlement()
 
     with mock.patch("src.state.db.get_forecasts_connection_with_world", _fake_get_conn), \
-         mock.patch("src.state.db.log_settlement_v2", side_effect=RuntimeError("simulated write failure")):
+         mock.patch("src.state.db.log_settlement", side_effect=RuntimeError("simulated write failure")):
 
         with pytest.raises(RuntimeError, match="simulated write failure"):
             write_settlement_v2_with_era_provenance(settlement, ERA_BASIS_UMA_OO_V2)
@@ -147,7 +147,7 @@ def test_r1_4_caller_provided_conn_skips_savepoint():
     settlement = _minimal_settlement()
 
     with mock.patch("src.state.db.get_forecasts_connection_with_world") as mock_get_conn, \
-         mock.patch("src.state.db.log_settlement_v2", return_value={"status": "written"}):
+         mock.patch("src.state.db.log_settlement", return_value={"status": "written"}):
 
         write_settlement_v2_with_era_provenance(settlement, ERA_BASIS_UMA_OO_V2, conn=fake_conn)
 

@@ -109,7 +109,7 @@ _BASELINE_PER_FILE: dict[str, int] = {
     # 2026-05-24 (PR #337 full_transport_v1 refit): store.py grew from 15 → 19.
     # Four new f-string SQL sites added in add_calibration_pair_v2 (2 branches, each
     # conditionally inserts error_model_family column from an internal whitelist
-    # {'none', 'full_transport_v1'}) and save_platt_model_v2 / deactivate_model_v2
+    # {'none', 'full_transport_v1'}) and save_platt_model / deactivate_model_v2
     # (same pattern). The _emf_col/_emf_ph/_emf_val construction is purely internal;
     # no user-controlled identifier is interpolated. Per scanner contract → bump.
     "src/calibration/store.py": 19,

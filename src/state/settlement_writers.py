@@ -148,13 +148,13 @@ def write_settlement_v2_with_era_provenance(
             get_forecasts_connection_with_world().
 
     Returns:
-        The dict returned by log_settlement_v2 (e.g. {"status": "written", ...} or
+        The dict returned by log_settlement (e.g. {"status": "written", ...} or
         {"status": "refused_missing_identity", ...}). Callers MUST check status.
 
     Raises:
         ValueError: if settlement is missing required fields or era basis is inconsistent.
     """
-    from src.state.db import get_forecasts_connection_with_world, log_settlement_v2
+    from src.state.db import get_forecasts_connection_with_world, log_settlement
 
     def _execute(active_conn: Any) -> dict[str, Any]:
         uma_row: dict[str, Any] | None = None
@@ -185,7 +185,7 @@ def write_settlement_v2_with_era_provenance(
         merged_provenance = dict(settlement.get("provenance", {}))
         merged_provenance.update(provenance)
 
-        return log_settlement_v2(
+        return log_settlement(
             active_conn,
             city=settlement["city"],
             target_date=settlement["target_date"],

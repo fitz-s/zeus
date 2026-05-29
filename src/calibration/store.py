@@ -348,7 +348,7 @@ def get_pairs_for_bucket(
             "get_pairs_for_bucket reads legacy `calibration_pairs`, which "
             "is HIGH-only by Phase 9C L3 convention (no temperature_metric "
             "column). LOW reads must use calibration_pairs via the v2 "
-            "lookup API (load_platt_model_v2 / dedicated v2 readers)."
+            "lookup API (load_platt_model / dedicated v2 readers)."
         )
     table = _qualified_calibration_read_table(conn, "calibration_pairs")
     if authority_filter == 'any':
@@ -636,14 +636,14 @@ def load_platt_model(
 ) -> Optional[dict]:
     """Load a fitted Platt model from platt_models (Phase 9C L3 CRITICAL fix).
 
-    Read-side counterpart to save_platt_model_v2 (P5). Pre-P9C: get_calibrator
+    Read-side counterpart to save_platt_model (P5). Pre-P9C: get_calibrator
     read exclusively from legacy platt_models table, bypassing metric
     discrimination — a LOW candidate would silently receive a HIGH Platt
     model. This function closes that gap at the read seam.
 
     2026-04-30 (post-architect-audit BLOCKER #1 fix): added explicit
     ``data_version`` filter. The UNIQUE constraint on platt_models includes
-    data_version (v2_schema.py:302) and save_platt_model_v2 keys on it
+    data_version (v2_schema.py:302) and save_platt_model keys on it
     (store.py:445-452), so multiple data_versions per (metric, cluster, season)
     can coexist. Pre-fix, the SELECT picked ``ORDER BY fitted_at DESC LIMIT 1``
     — newest wins regardless of data_version. That made model selection
@@ -765,7 +765,7 @@ def load_platt_model(
             cycle is None or source_id is None or horizon_profile is None
         ):
             raise ValueError(
-                "load_platt_model_v2: OpenData data_version "
+                "load_platt_model: OpenData data_version "
                 f"{data_version!r} requires all three stratification keys "
                 f"(cycle, source_id, horizon_profile); got "
                 f"cycle={cycle!r}, source_id={source_id!r}, "
@@ -894,11 +894,11 @@ def list_active_platt_models(conn: sqlite3.Connection) -> list[dict]:
     """List all currently-active platt_models rows.
 
     K1-compliant pure-SELECT lister — counterpart to single-bucket
-    load_platt_model_v2 (L515). Returns one dict per (temperature_metric,
+    load_platt_model (L515). Returns one dict per (temperature_metric,
     cluster, season, data_version, input_space) bucket where is_active=1
     AND authority='VERIFIED'. Inactive + UNVERIFIED + QUARANTINED rows are
     excluded so the result reflects only what the live evaluator would
-    actually consult via load_platt_model_v2.
+    actually consult via load_platt_model.
 
     Returns: list of dicts, each carrying the full v2 row shape for
     parameter monitoring. Empty list when no active VERIFIED rows exist
@@ -963,7 +963,7 @@ class PlattModelView:
 
     Field naming convention: ``param_A``/``param_B``/``param_C`` (typed-view
     canonical shape). This deliberately differs from the raw dict returned
-    by ``load_platt_model_v2``, which uses bare ``"A"``/``"B"``/``"C"`` keys.
+    by ``load_platt_model``, which uses bare ``"A"``/``"B"``/``"C"`` keys.
     The typed-view layer prefixes them to make ``A`` (matrix-style) vs
     ``param_A`` (named coefficient) explicit at call sites.
 
@@ -986,11 +986,11 @@ class PlattModelView:
     def as_dict(self) -> dict[str, Any]:
         """Return the canonical PlattModelView dict shape (param_A/B/C keys).
 
-        NOT the same as ``load_platt_model_v2``'s raw dict shape (A/B/C keys).
+        NOT the same as ``load_platt_model``'s raw dict shape (A/B/C keys).
         PR #65 Copilot follow-up 2026-05-06: docstring previously claimed
-        compatibility with load_platt_model_v2 callers — incorrect; the keys
+        compatibility with load_platt_model callers — incorrect; the keys
         differ deliberately. Callers that need the raw dict shape should
-        call ``load_platt_model_v2`` directly; callers that have a typed
+        call ``load_platt_model`` directly; callers that have a typed
         ``PlattModelView`` and want a serialisable dict should use this
         method and consume ``param_A/B/C``.
         """
@@ -1025,7 +1025,7 @@ def get_active_platt_model(
 
     Fix B (golden-knitting-wand.md Phase 1): added cycle/source_id/horizon_profile
     keyword params so callers can pass phase-2 stratification keys. Without these,
-    load_platt_model_v2 silently defaults to (cycle=None, source_id=None,
+    load_platt_model silently defaults to (cycle=None, source_id=None,
     horizon_profile=None) which resolves to schema defaults (00z TIGGE full) —
     a 12z OpenData call would receive the 00z TIGGE Platt instead of the
     cycle-matched bucket. Same bug pattern sonnet fixed at manager.py:391-394.
@@ -1055,7 +1055,7 @@ def get_active_platt_model(
     if raw is None:
         return None
 
-    # load_platt_model_v2 returns keys "A", "B", "C" (not "param_A"/"param_B"/"param_C").
+    # load_platt_model returns keys "A", "B", "C" (not "param_A"/"param_B"/"param_C").
     return PlattModelView(
         param_A=raw["A"],
         param_B=raw["B"],

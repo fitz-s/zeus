@@ -5516,7 +5516,7 @@ def append_source_contract_audit_events(
 
 
 @capability("settlement_write", lease=True)
-def log_settlement_v2(
+def log_settlement(
     conn: sqlite3.Connection | None,
     *,
     city: str,

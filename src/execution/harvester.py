@@ -43,7 +43,7 @@ from src.state.db import (
     get_world_connection,
     log_market_event_outcomes,
     log_settlement_event,
-    log_settlement_v2,
+    log_settlement,
     query_authoritative_settlement_rows,
     query_settlement_events,
     record_token_suppression,
@@ -1568,7 +1568,7 @@ def _write_settlement_truth(
                 _settlement_dict, _era_result.era_basis, conn=conn
             )
         else:
-            settlement_v2_result = log_settlement_v2(
+            settlement_v2_result = log_settlement(
                 conn,
                 city=city.name,
                 target_date=target_date,
