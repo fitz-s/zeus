@@ -30,7 +30,7 @@ from dataclasses import dataclass
 from datetime import datetime
 
 from src.contracts.ensemble_snapshot_provenance import validate_members_unit
-from src.contracts.forecast_target import ForecastTarget
+from src.contracts.forecast_target import ForecastTarget, normalize_settlement_authority
 
 _PRODUCT_TOKEN_RE = re.compile(r"(m[xn]2t[36])")
 
@@ -112,7 +112,9 @@ class ForecastObject:
             target_local_date=str(_require(row, "target_date", human="target_local_date")),
             settlement_station=str(_require(row, "settlement_station_id", human="settlement_station")),
             settlement_unit=str(_require(row, "settlement_unit")),
-            settlement_authority=str(_require(row, "settlement_source_type", human="settlement_authority")),
+            settlement_authority=normalize_settlement_authority(
+                str(_require(row, "settlement_source_type", human="settlement_authority"))
+            ),
         )
 
         return cls(

@@ -22,6 +22,7 @@ pinned — two of those differing is two different payout truths.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, fields
 
 # Dimensions that define the random variable. Order is the message order.
@@ -65,6 +66,35 @@ class ForecastTarget:
     settlement_station: str
     settlement_unit: str
     settlement_authority: str
+
+
+# Settlement authority is represented two ways across the boundary: the forecast snapshot
+# stores the source TYPE ("wu_icao"); the settlement row stores the versioned data_version
+# ("wu_icao_history_v1") in provenance. Both must reduce to one canonical token so a true
+# pair matches. Method/version suffixes for the known settlement families (see
+# ensemble_snapshot_provenance.CANONICAL_SETTLEMENT_DATA_VERSIONS) are stripped to the base.
+# NOTE: this is a string-normalization heuristic pending a first-class settlement_unit/
+# settlement_authority schema column (P2 D-S1) that would make the authority verifiable.
+_AUTH_VERSION_RE = re.compile(r"_v\d+$")
+_AUTH_METHOD_SUFFIXES: tuple[str, ...] = (
+    "_history",       # wu_icao_history
+    "_daily_api",     # hko_daily_api
+    "_metar",         # ogimet_metar
+    "_no_collector",  # cwa_no_collector
+)
+
+
+def normalize_settlement_authority(raw: str) -> str:
+    """Reduce a settlement authority string to its canonical source token.
+
+    'wu_icao_history_v1' -> 'wu_icao' ; 'hko_daily_api_v1' -> 'hko' ;
+    'ogimet_metar_v1' -> 'ogimet' ; 'wu_icao' -> 'wu_icao' (already canonical).
+    """
+    s = _AUTH_VERSION_RE.sub("", str(raw).strip())
+    for suffix in _AUTH_METHOD_SUFFIXES:
+        if s.endswith(suffix):
+            return s[: -len(suffix)]
+    return s
 
 
 def assert_same_target(

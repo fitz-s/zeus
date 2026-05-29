@@ -20,10 +20,16 @@ ledger emits carries a single well-defined random variable and an honest source_
 
 from __future__ import annotations
 
+import json
+import re
 from dataclasses import dataclass
 
 from src.contracts.forecast_object import ForecastObject
-from src.contracts.forecast_target import ForecastTarget, assert_same_target
+from src.contracts.forecast_target import (
+    ForecastTarget,
+    assert_same_target,
+    normalize_settlement_authority,
+)
 
 # Lineage classes. "paired_delta" (a TIGGE<->OpenData same-window paired residual) is
 # a two-forecast construction produced elsewhere; a single forecast<->settlement
@@ -49,12 +55,80 @@ def source_kind_for_data_version(data_version: str) -> str:
     )
 
 
+class SettlementIncompleteError(ValueError):
+    """Raised when a settlement row lacks a field needed to define its target identity
+    (authority, station). The row is refused rather than paired on a partial identity.
+    """
+
+
+_STATION_RE = re.compile(r"^[A-Za-z0-9]{3,8}$")
+
+
+def _station_from_settlement_source(source: str) -> str:
+    """Extract the settlement station from settlement_source.
+
+    Settlement rows store the station inside the source URL
+    ('https://www.wunderground.com/history/daily/us/il/chicago/KORD' -> 'KORD').
+    settlement_outcomes has no first-class station column (P2 D-S1); this parse is the
+    interim. Raises if a plausible station code cannot be recovered (fail-closed).
+    """
+    if not source or "/" not in source:
+        raise SettlementIncompleteError(
+            f"settlement refused: cannot recover station from settlement_source={source!r} "
+            f"(expected a URL whose last path segment is the station code). "
+            f"settlement_outcomes lacks a station column (D-S1)."
+        )
+    segment = source.rstrip("/").rsplit("/", 1)[-1].strip()
+    if not _STATION_RE.match(segment):
+        raise SettlementIncompleteError(
+            f"settlement refused: last path segment {segment!r} of settlement_source is not a "
+            f"plausible station code."
+        )
+    return segment
+
+
 @dataclass(frozen=True)
 class SettlementObject:
     """The settlement outcome that is a forecast's payout truth."""
 
     target: ForecastTarget
     settlement_value: float
+
+    @classmethod
+    def from_settlement_row(cls, row: dict, *, claimed_unit: str) -> "SettlementObject":
+        """Build a SettlementObject from a settlement_outcomes row dict.
+
+        Derives identity that IS recoverable from the row — city/metric/date (columns),
+        authority (provenance_json.data_version, normalized), station (settlement_source
+        URL). The UNIT is NOT a settlement column (D-S1), so it is supplied as the
+        forecast's claimed_unit; pair_residual matches the verifiable dims and converts
+        with this unit. Raises SettlementIncompleteError on any unrecoverable field.
+        """
+        def _req(key: str, human: str | None = None):
+            v = row.get(key)
+            if v is None or (isinstance(v, str) and v == ""):
+                raise SettlementIncompleteError(
+                    f"settlement refused: required field {human or key!r} missing/empty."
+                )
+            return v
+
+        raw_prov = _req("provenance_json", "provenance_json")
+        prov = json.loads(raw_prov) if isinstance(raw_prov, str) else dict(raw_prov)
+        data_version = prov.get("data_version")
+        if not data_version:
+            raise SettlementIncompleteError(
+                "settlement refused: provenance_json has no data_version (the authority)."
+            )
+
+        target = ForecastTarget(
+            city=str(_req("city")),
+            metric=str(_req("temperature_metric", "metric")),
+            target_local_date=str(_req("target_date", "target_local_date")),
+            settlement_station=_station_from_settlement_source(str(_req("settlement_source"))),
+            settlement_unit=str(claimed_unit),
+            settlement_authority=normalize_settlement_authority(str(data_version)),
+        )
+        return cls(target=target, settlement_value=float(_req("settlement_value")))
 
 
 @dataclass(frozen=True)
