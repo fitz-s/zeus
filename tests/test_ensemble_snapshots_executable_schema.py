@@ -39,8 +39,8 @@ def test_ensemble_snapshots_has_executable_lookup_indexes() -> None:
 
     indexes = {row["name"] for row in conn.execute("PRAGMA index_list(ensemble_snapshots)")}
 
-    assert "idx_ens_v2_source_run" in indexes
-    assert "idx_ens_v2_entry_lookup" in indexes
+    assert "idx_ens_source_run" in indexes
+    assert "idx_ens_entry_lookup" in indexes
 
 
 def test_existing_rows_without_source_linkage_are_not_executable() -> None:

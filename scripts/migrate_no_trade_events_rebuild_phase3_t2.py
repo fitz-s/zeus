@@ -4,6 +4,9 @@
 # Lifecycle: created=2026-05-21; last_reviewed=2026-05-21; last_reused=never
 # Purpose: SCAFFOLD migration for no_trade_events table-rebuild + tail_stress_scenarios creation (Phase 3 T2)
 # Reuse: SCAFFOLD — run() raises NotImplementedError; T2 production pass owns execution; review _ROLLBACK SQL before running
+# WRITER_LOCK_DEFER_REVIEW=2026-05-29
+# Justification: Real DML (INSERT+DROP+RENAME+user_version) on zeus-world.db; operator-invoked DAEMON-DOWN one-shot — no concurrent daemon writer by invariant. Ops-doc mandates daemon stopped.
+# Ops-doc entry: docs/archive/2026-Q2/task_2026-05-17_post_karachi_remediation/F22_WRITER_LOCK_FIX.md
 
 """Phase 3 T2 — Table-rebuild migration for no_trade_events (world DB).
 

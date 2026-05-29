@@ -47,7 +47,6 @@ if str(_REPO_ROOT) not in sys.path:
 
 from src.state.db import (  # noqa: E402
     ZEUS_FORECASTS_DB_PATH,
-    ZEUS_WORLD_DB_PATH,
 )
 from src.state.db_writer_lock import WriteClass, db_writer_lock  # noqa: E402
 
@@ -153,52 +152,19 @@ def migrate_forecasts(db_path: Path, execute: bool) -> None:
             conn.close()
 
 
-def wipe_model_bias_ens(db_path: Path, execute: bool) -> None:
-    with db_writer_lock(db_path, WriteClass.BULK):
-        conn = sqlite3.connect(str(db_path))
-        try:
-            n = conn.execute("SELECT COUNT(*) FROM model_bias_ens").fetchone()[0]
-            print(f"[world] model_bias_ens currently holds {n} rows (will be WIPED)")
-            if not execute:
-                print("[world] DRY-RUN — no delete. Re-run with --execute to apply.")
-                return
-            conn.execute(f"SAVEPOINT {_SAVEPOINT}")
-            try:
-                conn.execute("DELETE FROM model_bias_ens")
-                conn.execute(f"RELEASE SAVEPOINT {_SAVEPOINT}")
-                conn.commit()
-            except Exception:
-                conn.execute(f"ROLLBACK TO SAVEPOINT {_SAVEPOINT}")
-                conn.execute(f"RELEASE SAVEPOINT {_SAVEPOINT}")
-                raise
-            left = conn.execute("SELECT COUNT(*) FROM model_bias_ens").fetchone()[0]
-            print(f"[world] model_bias_ens wiped; {left} rows remain (expect 0). "
-                  f"Serving falls back to raw (dormant-safe).")
-        finally:
-            conn.close()
-
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--execute", action="store_true",
                     help="apply changes (default is dry-run)")
-    ap.add_argument("--skip-wipe", action="store_true",
-                    help="skip the model_bias_ens wipe (only rename data_version values)")
-    ap.add_argument("--skip-rename", action="store_true",
-                    help="skip the data_version value rename (only wipe model_bias_ens)")
     args = ap.parse_args()
 
-    world = Path(ZEUS_WORLD_DB_PATH)
     forecasts = Path(ZEUS_FORECASTS_DB_PATH)
-    print(f"world.db     = {world}")
     print(f"forecasts.db = {forecasts}")
     print(f"mode         = {'EXECUTE' if args.execute else 'DRY-RUN'}")
     print("-" * 70)
 
-    if not args.skip_wipe:
-        wipe_model_bias_ens(world, args.execute)
-    if not args.skip_rename:
-        migrate_forecasts(forecasts, args.execute)
+    migrate_forecasts(forecasts, args.execute)
     print("-" * 70)
     print("DONE." if args.execute else "DRY-RUN complete. Re-run with --execute to apply.")
 
