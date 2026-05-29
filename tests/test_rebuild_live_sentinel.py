@@ -488,8 +488,8 @@ def test_rebuild_shards_transactions_commit_per_city(rebuild_mod):
         pass
 
     rows = [
-        FakeRow({"city": city_a, "data_version": high_spec.allowed_data_version, "snapshot_id": "sa"}),
-        FakeRow({"city": city_b, "data_version": high_spec.allowed_data_version, "snapshot_id": "sb"}),
+        FakeRow({"city": city_a, "dataset_id": high_spec.allowed_data_version, "snapshot_id": "sa"}),
+        FakeRow({"city": city_b, "dataset_id": high_spec.allowed_data_version, "snapshot_id": "sb"}),
     ]
 
     with (
@@ -548,7 +548,7 @@ def test_rebuild_all_v2_no_outer_savepoint(rebuild_mod):
 
     city_a = available_cities[0]
     high_spec = next(s for s in METRIC_SPECS if s.identity.temperature_metric == "high")
-    rows = [{"city": city_a, "data_version": high_spec.allowed_data_version, "snapshot_id": "s1"}]
+    rows = [{"city": city_a, "dataset_id": high_spec.allowed_data_version, "snapshot_id": "s1"}]
 
     class FakeRow(dict):
         pass
@@ -611,7 +611,7 @@ def test_rebuild_marks_scope_in_progress_then_complete(rebuild_mod):
         pass
 
     rows = [
-        FakeRow({"city": city_a, "data_version": high_spec.allowed_data_version, "snapshot_id": "s-ok"}),
+        FakeRow({"city": city_a, "dataset_id": high_spec.allowed_data_version, "snapshot_id": "s-ok"}),
     ]
 
     def successful_process(_conn, _snap, city, *, spec, n_mc, rng, stats,
@@ -659,7 +659,7 @@ def test_rebuild_validation_failure_leaves_scope_in_progress_not_complete(rebuil
         pass
 
     rows = [
-        FakeRow({"city": city_a, "data_version": high_spec.allowed_data_version, "snapshot_id": "s-zero"}),
+        FakeRow({"city": city_a, "dataset_id": high_spec.allowed_data_version, "snapshot_id": "s-zero"}),
     ]
 
     with (

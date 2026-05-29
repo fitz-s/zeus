@@ -2529,7 +2529,7 @@ class TestSourceContractGate:
             season_filter=["MAM"],
         )
 
-        assert [(row["season"], row["data_version"]) for row in rows] == [
+        assert [(row["season"], row["dataset_id"]) for row in rows] == [
             ("MAM", "affected_v1")
         ]
 

@@ -69,17 +69,21 @@ def test_inv_book_hash_transitions_completeness() -> None:
     try:
         # Count distinct raw_orderbook_hash values per market in last 24h.
         # executable_market_snapshots.raw_orderbook_hash is TEXT NOT NULL.
-        hash_counts = conn.execute(
-            """
-            SELECT event_slug AS market_slug, COUNT(DISTINCT raw_orderbook_hash) AS distinct_count
-            FROM executable_market_snapshots
-            WHERE captured_at >= :cutoff
-              AND raw_orderbook_hash IS NOT NULL
-            GROUP BY event_slug
-            HAVING COUNT(DISTINCT raw_orderbook_hash) > 1
-            """,
-            {"cutoff": _cutoff_iso},
-        ).fetchall()
+        # No such table means the live DB pre-dates this substrate; skip.
+        try:
+            hash_counts = conn.execute(
+                """
+                SELECT event_slug AS market_slug, COUNT(DISTINCT raw_orderbook_hash) AS distinct_count
+                FROM executable_market_snapshots
+                WHERE captured_at >= :cutoff
+                  AND raw_orderbook_hash IS NOT NULL
+                GROUP BY event_slug
+                HAVING COUNT(DISTINCT raw_orderbook_hash) > 1
+                """,
+                {"cutoff": _cutoff_iso},
+            ).fetchall()
+        except sqlite3.OperationalError:
+            pytest.skip("executable_market_snapshots not in live DB — substrate pre-dates antibody")
 
         if not hash_counts:
             pytest.skip(

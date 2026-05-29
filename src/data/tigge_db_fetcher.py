@@ -115,7 +115,7 @@ def fetch_from_db(
                 members_json,
                 members_unit,
                 snapshot_id,
-                data_version
+                dataset_id
             FROM ensemble_snapshots
             WHERE city = ?
               AND temperature_metric = ?

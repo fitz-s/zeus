@@ -398,7 +398,7 @@ class ReplayContext:
         base_columns = (
             "snapshot_id", "members_json", "p_raw_json", "lead_hours", "spread",
             "is_bimodal", "model_version", "issue_time", "valid_time",
-            "available_at", "fetch_time", "data_version",
+            "available_at", "fetch_time", "dataset_id AS data_version",
         )
         for table, source in (
             (self._snapshot_v2_table, "ensemble_snapshots"),
@@ -406,7 +406,7 @@ class ReplayContext:
             if not table:
                 continue
             columns = self._columns_for(table)
-            if not set(base_columns).issubset(columns):
+            if not {c.split(" AS ")[0] for c in base_columns}.issubset(columns):
                 continue
             metric_sql, metric_params, metric_supported = _metric_filter_sql(
                 columns,

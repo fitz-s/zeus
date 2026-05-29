@@ -50,7 +50,7 @@ from src.data.executable_forecast_reader import _snapshot_query_sql  # type: ign
 # ---------------------------------------------------------------------------
 
 _COMMON_COLS = (
-    "snapshot_id, city, target_date, temperature_metric, data_version, "
+    "snapshot_id, city, target_date, temperature_metric, dataset_id, "
     "source_id, source_transport, source_cycle_time, available_at, "
     "contributes_to_target_extrema, forecast_window_attribution_status, "
     "boundary_ambiguous, members_json"

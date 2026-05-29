@@ -127,7 +127,7 @@ def test_store_snapshot_p_raw_round_trip_with_fresh_schema():
     # Insert a v2 snapshot row so we have something to UPDATE.
     conn.execute("""
         INSERT INTO forecasts.ensemble_snapshots
-        (city, target_date, available_at, fetch_time, model_version, data_version,
+        (city, target_date, available_at, fetch_time, model_version, dataset_id,
          temperature_metric, provenance_json)
         VALUES ('NYC', '2026-04-15', '2026-04-15T12:00:00Z', '2026-04-15T12:00:00Z',
                 'ecmwf_ens', 'tigge_mx2t6_local_calendar_day_max_v1', 'high', '{}')
@@ -162,7 +162,7 @@ def _attach_forecasts_snapshot_table(conn: sqlite3.Connection) -> None:
             available_at TEXT NOT NULL,
             fetch_time TEXT NOT NULL,
             model_version TEXT NOT NULL,
-            data_version TEXT NOT NULL,
+            dataset_id TEXT NOT NULL,
             temperature_metric TEXT NOT NULL,
             provenance_json TEXT,
             p_raw_json TEXT,
@@ -185,7 +185,7 @@ def test_store_snapshot_p_raw_uses_attached_forecasts_v2_without_legacy_projecti
     conn.execute("""
         INSERT INTO forecasts.ensemble_snapshots
         (snapshot_id, city, target_date, available_at, fetch_time,
-         model_version, data_version, temperature_metric, provenance_json)
+         model_version, dataset_id, temperature_metric, provenance_json)
         VALUES (777, 'London', '2026-05-17', '2026-05-15T09:55:00+00:00',
                 '2026-05-15T09:56:00+00:00', 'ecmwf_ens',
                 'ecmwf_opendata_mx2t3_local_calendar_day_max_v1', 'high', '{}')
@@ -213,7 +213,7 @@ def test_read_v2_snapshot_metadata_prefers_attached_forecasts_schema():
     conn.execute("""
         INSERT INTO forecasts.ensemble_snapshots
         (snapshot_id, city, target_date, available_at, fetch_time,
-         model_version, data_version, temperature_metric, boundary_ambiguous,
+         model_version, dataset_id, temperature_metric, boundary_ambiguous,
          causality_status)
         VALUES (888, 'London', '2026-05-17', '2026-05-15T09:55:00+00:00',
                 '2026-05-15T09:56:00+00:00', 'ecmwf_ens',

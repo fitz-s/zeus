@@ -187,7 +187,7 @@ class TestClassifyForecastExtremaAuthority:
             "contributes_to_target_extrema": None,
             "forecast_window_attribution_status": None,
             "boundary_ambiguous": 0,
-            "data_version": ECMWF_OPENDATA_HIGH_DATA_VERSION,
+            "dataset_id": ECMWF_OPENDATA_HIGH_DATA_VERSION,
         }
         auth = classify_forecast_extrema_authority(row)
         assert auth.eligibility == ForecastExtremaEligibility.UNKNOWN
@@ -198,7 +198,7 @@ class TestClassifyForecastExtremaAuthority:
             "contributes_to_target_extrema": None,
             "forecast_window_attribution_status": None,
             "boundary_ambiguous": 0,
-            "data_version": "ecmwf_opendata_mx2t6_local_calendar_day_max_v1",
+            "dataset_id": "ecmwf_opendata_mx2t6_local_calendar_day_max_v1",
         }
         auth = classify_forecast_extrema_authority(row)
         assert auth.eligibility == ForecastExtremaEligibility.LEGACY_NULL_PASSTHROUGH

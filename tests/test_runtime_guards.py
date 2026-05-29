@@ -2164,6 +2164,11 @@ def test_reconcile_pending_positions_sets_verified_entry_but_keeps_chain_local(m
         entry_price=0.40,
     )
     db_module.log_trade_entry(conn, pending)
+    # log_trade_entry is a no-op (F5); synthesizer reconstructs from position_current.
+    # Seed position_current so synthesize_missing_bridge can find the position.
+    from src.state.projection import upsert_position_current
+    from src.engine.lifecycle_events import build_position_current_projection
+    upsert_position_current(conn, build_position_current_projection(pending))
     conn.commit()
     conn.close()
 
