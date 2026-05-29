@@ -73,6 +73,7 @@ def _cycle_from_iso(ts: str) -> str:
 class ForecastObject:
     """A forecast random variable plus the settlement target it claims."""
 
+    data_version: str
     product: str
     cycle: str
     lead_hours: float
@@ -115,6 +116,7 @@ class ForecastObject:
         )
 
         return cls(
+            data_version=str(data_version),
             product=product,
             cycle=cycle,
             lead_hours=float(_require(row, "lead_hours")),
