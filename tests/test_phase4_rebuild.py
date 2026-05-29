@@ -285,7 +285,7 @@ class TestCalibrationPairsV2IdentityFields:
         conn = self._make_conn()
         dg_id = self._insert_calibration_pair_v2(conn)
         row = conn.execute(
-            """SELECT temperature_metric, observation_field, data_version, training_allowed
+            """SELECT temperature_metric, observation_field, dataset_id, training_allowed
                FROM calibration_pairs WHERE decision_group_id=?""",
             (dg_id,)
         ).fetchone()
@@ -401,7 +401,7 @@ class TestRebuildV2PipelineIntegration:
         assert not stats.refused, f"rebuild_v2 refused: stats={stats.as_dict()}"
 
         rows = conn.execute(
-            """SELECT temperature_metric, observation_field, data_version, training_allowed
+            """SELECT temperature_metric, observation_field, dataset_id, training_allowed
                FROM calibration_pairs
                WHERE city=? AND target_date=?""",
             (self._CITY_NAME, self._TARGET_DATE),
@@ -412,7 +412,7 @@ class TestRebuildV2PipelineIntegration:
         )
 
         for row in rows:
-            tm, of, dv, ta = row["temperature_metric"], row["observation_field"], row["data_version"], row["training_allowed"]
+            tm, of, dv, ta = row["temperature_metric"], row["observation_field"], row["dataset_id"], row["training_allowed"]
             assert tm == "high", f"temperature_metric must be 'high', got {tm!r} (MAJOR-2)"
             assert of == "high_temp", f"observation_field must be 'high_temp', got {of!r} (MAJOR-2)"
             assert dv == self._DATA_VERSION, f"data_version must be {self._DATA_VERSION!r}, got {dv!r} (MAJOR-2)"

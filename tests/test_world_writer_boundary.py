@@ -100,12 +100,24 @@ ALLOWLISTED_WRITE_MODULES: frozenset[str] = frozenset(
         # ---------------------------------------------------------------------------
         "scripts/backfill_london_f_to_c_2026_05_08.py",
         "scripts/evaluate_calibration_transfer_oos.py",
-        "scripts/migrate_phase2_cycle_stratification.py",
+        # scripts/migrate_phase2_cycle_stratification.py removed — file deleted (B3 cleanup)
         "scripts/migrations/202605_add_redeem_operator_required_state.py",
         "scripts/promote_calibration.py",
         "scripts/promote_platt.py",
         "scripts/refit_platt.py",
         "src/data/ecmwf_open_data.py",
+        # ---------------------------------------------------------------------------
+        # B3 (2026-05-28): new allowlist entries triggered by table renames.
+        # Post-B3 'forecasts' is both a schema prefix AND a world table name;
+        # these files use 'forecasts' as schema prefix only (not world-table DML).
+        # Also: calibration/staging scripts that write forecast-class tables via
+        # ATTACH to zeus-forecasts.db (not world-DB writes).
+        # ---------------------------------------------------------------------------
+        "scripts/build_ft_staging_db.py",
+        "scripts/migrate_no_trade_events_rebuild_phase3_t2.py",
+        "scripts/seed_isolated_calibration_db.py",
+        "src/calibration/ens_bias_repo.py",
+        "src/contracts/settlement_capture_verifier.py",
         # ---------------------------------------------------------------------------
         # T2 Day0Nowcast writer — forecasts-DB only (2026-05-19)
         # INV-37: writes only to zeus-forecasts.db, no world-DB DML.
@@ -123,6 +135,9 @@ ALLOWLISTED_WRITE_MODULES: frozenset[str] = frozenset(
 )
 
 # World-DB table names that must not be written outside the allowlist.
+# B3 (2026-05-28): ensemble_snapshots, calibration_pairs, platt_models removed —
+# these are forecast-class tables (zeus-forecasts.db) post-K1/B3 rename and are no
+# longer world-DB tables.  The duplicate ensemble_snapshots entry also removed.
 WORLD_DB_TABLES: tuple[str, ...] = (
     "observations",
     "observation_instants_v2",
@@ -130,10 +145,6 @@ WORLD_DB_TABLES: tuple[str, ...] = (
     "solar_daily",
     "data_coverage",
     "settlements",
-    "ensemble_snapshots",
-    "ensemble_snapshots",
-    "calibration_pairs",
-    "platt_models",
     "model_bias",
     "forecast_skill",
 )

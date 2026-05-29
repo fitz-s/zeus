@@ -183,7 +183,8 @@ def test_source_run_mismatch_between_snapshot_and_producer_readiness_blocks_shad
     assert decision.source_run_id == "source-run-1"
 
 
-def test_calibration_transfer_defaults_entry_forecast_to_shadow_only() -> None:
+def test_calibration_transfer_defaults_entry_forecast_to_shadow_only(monkeypatch) -> None:
+    monkeypatch.delenv("ZEUS_CALIBRATION_TRANSFER_OOS_EVAL_ENABLED", raising=False)
     conn = _conn()
     _insert_snapshot(conn, linked=True)
     _insert_producer_readiness(conn)
@@ -201,7 +202,8 @@ def test_calibration_transfer_defaults_entry_forecast_to_shadow_only() -> None:
     assert decision.calibration_data_version == "tigge_mx2t6_local_calendar_day_max_v1"
 
 
-def test_rollout_blocked_keeps_promoted_calibration_shadow_only() -> None:
+def test_rollout_blocked_keeps_promoted_calibration_shadow_only(monkeypatch) -> None:
+    monkeypatch.delenv("ZEUS_CALIBRATION_TRANSFER_OOS_EVAL_ENABLED", raising=False)
     conn = _conn()
     _insert_snapshot(conn, linked=True)
     _insert_producer_readiness(conn)
@@ -237,7 +239,8 @@ def test_expired_producer_readiness_blocks_shadow_boundary() -> None:
     assert decision.reason_codes == ("PRODUCER_READINESS_EXPIRED",)
 
 
-def test_live_rollout_and_promoted_calibration_still_requires_rollout_gate() -> None:
+def test_live_rollout_and_promoted_calibration_still_requires_rollout_gate(monkeypatch) -> None:
+    monkeypatch.delenv("ZEUS_CALIBRATION_TRANSFER_OOS_EVAL_ENABLED", raising=False)
     conn = _conn()
     _insert_snapshot(conn, linked=True)
     _insert_producer_readiness(conn)
@@ -255,12 +258,13 @@ def test_live_rollout_and_promoted_calibration_still_requires_rollout_gate() -> 
     assert decision.reason_codes == ("ENTRY_FORECAST_ROLLOUT_GATE_REQUIRED",)
 
 
-def test_live_rollout_with_passing_rollout_decision_returns_live_eligible() -> None:
+def test_live_rollout_with_passing_rollout_decision_returns_live_eligible(monkeypatch) -> None:
     """Phase B6: when caller provides a rollout decision that permits
     live submission, the shadow function returns LIVE_ELIGIBLE so the
     ``live_eligible`` property is reachable. Without this branch the
     property is unreachable and the dataclass field is dead code.
     """
+    monkeypatch.delenv("ZEUS_CALIBRATION_TRANSFER_OOS_EVAL_ENABLED", raising=False)
 
     from src.control.entry_forecast_rollout import EntryForecastRolloutDecision
 

@@ -22,6 +22,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+import src.calibration.manager as _mgr_module
 from src.calibration.manager import (
     bucket_key,
     season_from_date,
@@ -981,6 +982,7 @@ class TestGetCalibrator:
         conn = get_connection(db_path)
         init_schema(conn)
         apply_canonical_schema(conn)
+        _mgr_module._PIN_CONFIG_CACHE = {"frozen_as_of": None, "model_keys": {}}
 
         # Store a pre-fitted model under K3 bucket key (city.name_season)
         from src.types.metric_identity import HIGH_LOCALDAY_MAX
@@ -1083,6 +1085,7 @@ class TestTiggeOpendataBridge:
         """HIGH + ecmwf_opendata + only TIGGE Platt present → returns the
         TIGGE-keyed calibrator, not None. Reproduces production state today:
         1197 tigge_* rows, 0 ecmwf_opendata_* rows."""
+        _mgr_module._PIN_CONFIG_CACHE = {"frozen_as_of": None, "model_keys": {}}
         conn = self._v2_conn(tmp_path, "high_bridge")
         season = season_from_date("2026-01-15", lat=NYC.lat)
         self._save_high_tigge_v2(conn, NYC.cluster, season)

@@ -216,13 +216,17 @@ class TestFixE:
                     (city, target_date, cluster, season,
                      p_raw, outcome, lead_days,
                      bin_source, range_label,
-                     forecast_available_at, decision_group_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     forecast_available_at, decision_group_id,
+                     temperature_metric, observation_field, dataset_id,
+                     training_allowed, causality_status)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 ("TestCity", "2026-01-01", cluster, season,
                  p_raw, outcome, lead_days,
                  "canonical_v1", f"L{i % F_CANONICAL_GRID.n_bins}",
-                 now, group_id),
+                 now, group_id,
+                 "high", "high_temp", HIGH_LOCALDAY_MAX.data_version,
+                 1, "OK"),
             )
         conn.commit()
 
@@ -433,6 +437,31 @@ class TestFixF:
         conn.row_factory = sqlite3.Row
         init_schema(conn)
         apply_canonical_schema(conn)
+        conn.execute("ATTACH ':memory:' AS world")
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS world.validated_calibration_transfers (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                policy_id TEXT NOT NULL,
+                source_id TEXT NOT NULL,
+                target_source_id TEXT NOT NULL,
+                source_cycle TEXT NOT NULL,
+                target_cycle TEXT NOT NULL,
+                horizon_profile TEXT NOT NULL,
+                season TEXT NOT NULL,
+                cluster TEXT NOT NULL,
+                metric TEXT NOT NULL,
+                n_pairs INTEGER NOT NULL,
+                brier_source REAL NOT NULL,
+                brier_target REAL NOT NULL,
+                brier_diff REAL NOT NULL,
+                brier_diff_threshold REAL NOT NULL,
+                status TEXT NOT NULL,
+                evidence_window_start TEXT NOT NULL,
+                evidence_window_end TEXT NOT NULL,
+                platt_model_key TEXT NOT NULL,
+                evaluated_at TEXT NOT NULL
+            )
+        """)
         return conn
 
     def _write_transfer_row(self, conn, model_key: str, target_source_id: str,
@@ -440,7 +469,7 @@ class TestFixF:
                             policy_id: str = "OOS_BRIER_DIFF_v1") -> None:
         conn.execute(
             """
-            INSERT INTO validated_calibration_transfers (
+            INSERT INTO world.validated_calibration_transfers (
                 policy_id, source_id, target_source_id,
                 source_cycle, target_cycle, horizon_profile,
                 season, cluster, metric,

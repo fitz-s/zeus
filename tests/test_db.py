@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from src.state.db import get_connection, init_schema
+from src.state.db import get_connection, init_schema, init_schema_forecasts
 
 
 def _create_opportunity_fact_table(conn):
@@ -245,6 +245,7 @@ def test_init_schema_creates_all_tables():
 
     conn = get_connection(db_path)
     init_schema(conn)
+    init_schema_forecasts(conn)
 
     cursor = conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
@@ -1205,6 +1206,7 @@ def test_ensemble_snapshots_unique_constraint():
 
     conn = get_connection(db_path)
     init_schema(conn)
+    init_schema_forecasts(conn)
 
     row = {
         "city": "NYC", "target_date": "2026-01-15",
@@ -1221,9 +1223,11 @@ def test_ensemble_snapshots_unique_constraint():
     conn.execute("""
         INSERT INTO ensemble_snapshots
         (city, target_date, issue_time, valid_time, available_at, fetch_time,
-         lead_hours, members_json, model_version, dataset_id, temperature_metric)
+         lead_hours, members_json, model_version, dataset_id, temperature_metric,
+         physical_quantity, observation_field)
         VALUES (:city, :target_date, :issue_time, :valid_time, :available_at,
-                :fetch_time, :lead_hours, :members_json, :model_version, :data_version, 'high')
+                :fetch_time, :lead_hours, :members_json, :model_version, :data_version, 'high',
+                'mx2t6_local_calendar_day_max', 'high_temp')
     """, row)
     conn.commit()
 
@@ -1232,9 +1236,11 @@ def test_ensemble_snapshots_unique_constraint():
         conn.execute("""
             INSERT INTO ensemble_snapshots
             (city, target_date, issue_time, valid_time, available_at, fetch_time,
-             lead_hours, members_json, model_version, dataset_id, temperature_metric)
+             lead_hours, members_json, model_version, dataset_id, temperature_metric,
+             physical_quantity, observation_field)
             VALUES (:city, :target_date, :issue_time, :valid_time, :available_at,
-                    :fetch_time, :lead_hours, :members_json, :model_version, :data_version, 'high')
+                    :fetch_time, :lead_hours, :members_json, :model_version, :data_version, 'high',
+                    'mx2t6_local_calendar_day_max', 'high_temp')
         """, row)
 
     conn.close()
@@ -1976,13 +1982,16 @@ def test_log_trade_entry_persists_replay_critical_fields(tmp_path):
     db_path = tmp_path / "test.db"
     conn = get_connection(db_path)
     init_schema(conn)
+    init_schema_forecasts(conn)
     conn.execute(
         """
         INSERT INTO ensemble_snapshots
         (snapshot_id, city, target_date, issue_time, valid_time, available_at, fetch_time,
-         lead_hours, members_json, model_version, dataset_id, temperature_metric)
+         lead_hours, members_json, model_version, dataset_id, temperature_metric,
+         physical_quantity, observation_field)
         VALUES (123, 'NYC', '2026-04-01', '2026-03-31T00:00:00Z', '2026-04-01T00:00:00Z',
-                '2026-03-31T01:00:00Z', '2026-03-31T01:00:00Z', 24.0, '[40.0]', 'ecmwf_ifs025', 'test', 'high')
+                '2026-03-31T01:00:00Z', '2026-03-31T01:00:00Z', 24.0, '[40.0]', 'ecmwf_ifs025', 'test', 'high',
+                'mx2t6_local_calendar_day_max', 'high_temp')
         """
     )
 

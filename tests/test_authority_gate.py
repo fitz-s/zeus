@@ -32,6 +32,8 @@ def _make_db(init_world: bool = True) -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode=WAL")
     if init_world:
         init_schema(conn)
+        from src.state.schema.v2_schema import apply_canonical_schema
+        apply_canonical_schema(conn)
         # K4: add authority columns to tables that init_schema doesn't include yet
         _add_authority_columns(conn)
     return conn
@@ -48,6 +50,12 @@ def _add_authority_columns(conn: sqlite3.Connection) -> None:
         ("settlements", "UNVERIFIED"),
         ("platt_models", "UNVERIFIED"),
     ]:
+        # Check table exists (forecast-class tables may not be in world-only DBs)
+        exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
+        ).fetchone()
+        if not exists:
+            continue
         info = conn.execute(f"PRAGMA table_info({table})").fetchall()
         cols = {row[1] for row in info}
         if "authority" not in cols:
@@ -63,28 +71,38 @@ def _seed_calibration_pairs(
     city: str = "NYC",
     authority: str = "UNVERIFIED",
     n: int = 20,
+    start_index: int = 0,
 ) -> None:
     """Seed calibration_pairs rows with given authority."""
     season = "JJA"
     cluster = city  # K3: cluster == city
     for i in range(n):
+        idx = start_index + i
+        # Spread dates across months to avoid UNIQUE constraint on same (date, metric, lead)
+        month = 7 + idx // 28
+        day = (idx % 28) + 1
+        date_str = f"2025-{month:02d}-{day:02d}"
         conn.execute(
             """
             INSERT INTO calibration_pairs
-            (city, target_date, range_label, p_raw, outcome, lead_days,
-             season, cluster, forecast_available_at, bias_corrected, authority)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
+            (city, target_date, temperature_metric, observation_field,
+             range_label, p_raw, outcome, lead_days,
+             season, cluster, forecast_available_at, dataset_id,
+             decision_group_id, bias_corrected, authority)
+            VALUES (?, ?, 'high', 'high_temp', ?, ?, ?, ?, ?, ?, ?,
+                    'tigge_mx2t6_local_calendar_day_max_v1', ?, 0, ?)
             """,
             (
                 city,
-                f"2025-07-{i+1:02d}",
+                date_str,
                 "85-86F",
                 0.3,
-                i % 2,
-                float(i % 5 + 1),
+                idx % 2,
+                float(idx % 5 + 1),
                 season,
                 cluster,
-                f"2025-07-{i+1:02d}T06:00:00Z",
+                f"{date_str}T06:00:00Z",
+                f"dg_{city}_{idx}",
                 authority,
             ),
         )
@@ -140,6 +158,8 @@ def _seed_ensemble_snapshots(
     n: int = 3,
 ) -> None:
     """Seed ensemble_snapshots rows."""
+    # B3/B5 (2026-05-28): temperature_metric, observation_field are NOT NULL;
+    # physical_quantity is NOT NULL; dataset_id replaces data_version.
     members = json.dumps([85.0 + j * 0.5 for j in range(51)])
     for i in range(n):
         conn.execute(
@@ -147,8 +167,9 @@ def _seed_ensemble_snapshots(
             INSERT OR IGNORE INTO ensemble_snapshots
             (city, target_date, issue_time, valid_time, available_at,
              fetch_time, lead_hours, members_json, model_version,
-             dataset_id, authority)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'ecmwf_tigge', 'v1', ?)
+             dataset_id, temperature_metric, physical_quantity, observation_field, authority)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'ecmwf_tigge', 'v1',
+                    'high', 'mx2t6_local_calendar_day_max', 'high_temp', ?)
             """,
             (
                 city,
@@ -195,8 +216,8 @@ def test_get_pairs_for_bucket_returns_verified_rows():
     from src.calibration.store import get_pairs_for_bucket
 
     conn = _make_db()
-    _seed_calibration_pairs(conn, authority="VERIFIED", n=8)
-    _seed_calibration_pairs(conn, authority="UNVERIFIED", n=5)
+    _seed_calibration_pairs(conn, authority="VERIFIED", n=8, start_index=0)
+    _seed_calibration_pairs(conn, authority="UNVERIFIED", n=5, start_index=8)
 
     result = get_pairs_for_bucket(conn, "NYC", "JJA")
     assert len(result) == 8, (
@@ -310,7 +331,9 @@ def test_rebuild_calibration_requires_verified_observations(tmp_path):
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
     from src.state.db import init_schema
+    from src.state.schema.v2_schema import apply_canonical_schema
     init_schema(conn)
+    apply_canonical_schema(conn)
     _add_authority_columns(conn)
 
     # Seed VERIFIED snapshots for NYC
@@ -525,12 +548,14 @@ def test_blocked_oos_filters_unverified():
         conn.execute(
             """
             INSERT INTO calibration_pairs
-            (city, target_date, range_label, p_raw, outcome, lead_days,
-             season, cluster, forecast_available_at, bias_corrected, authority)
-            VALUES ('NYC', ?, '85-86F', 0.3, 0, 3.0, 'JJA', 'NYC',
-                    '2025-06-28T12:00:00', 0, ?)
+            (city, target_date, temperature_metric, observation_field,
+             range_label, p_raw, outcome, lead_days,
+             season, cluster, forecast_available_at, dataset_id,
+             decision_group_id, bias_corrected, authority)
+            VALUES ('NYC', ?, 'high', 'high_temp', '85-86F', 0.3, 0, 3.0, 'JJA', 'NYC',
+                    '2025-06-28T12:00:00', 'ecmwf_opendata_high_v1', ?, 0, ?)
             """,
-            (date, authority),
+            (date, f"dg_NYC_{date}", authority),
         )
     conn.commit()
 
@@ -544,8 +569,8 @@ def test_blocked_oos_filters_unverified():
 def test_get_pairs_count_filters_unverified():
     """get_pairs_count returns only VERIFIED rows by default."""
     conn = _make_db()
-    _seed_calibration_pairs(conn, city="NYC", authority="VERIFIED", n=5)
-    _seed_calibration_pairs(conn, city="NYC", authority="UNVERIFIED", n=3)
+    _seed_calibration_pairs(conn, city="NYC", authority="VERIFIED", n=5, start_index=0)
+    _seed_calibration_pairs(conn, city="NYC", authority="UNVERIFIED", n=3, start_index=5)
 
     from src.calibration.store import get_pairs_count
     verified_count = get_pairs_count(conn, cluster="NYC", season="JJA")
@@ -557,8 +582,8 @@ def test_get_pairs_count_filters_unverified():
 def test_build_decision_groups_filters_unverified():
     """build_decision_groups returns only VERIFIED rows by default."""
     conn = _make_db()
-    _seed_calibration_pairs(conn, city="NYC", authority="VERIFIED", n=4)
-    _seed_calibration_pairs(conn, city="NYC", authority="UNVERIFIED", n=6)
+    _seed_calibration_pairs(conn, city="NYC", authority="VERIFIED", n=4, start_index=0)
+    _seed_calibration_pairs(conn, city="NYC", authority="UNVERIFIED", n=6, start_index=4)
 
     from src.calibration.effective_sample_size import build_decision_groups
     groups = build_decision_groups(conn, authority_filter="VERIFIED")
@@ -609,12 +634,22 @@ def test_save_platt_model_writes_verified(tmp_path):
     conn.commit()
 
     from src.calibration.store import save_platt_model
+    from src.types.metric_identity import MetricIdentity
+    mi = MetricIdentity(
+        temperature_metric="high",
+        physical_quantity="high_temp",
+        observation_field="high_temp",
+        data_version="tigge_mx2t6_local_calendar_day_max_v1",
+    )
     save_platt_model(
         conn,
-        bucket_key="NYC_JJA",
-        A=-1.2,
-        B=0.5,
-        C=0.0,
+        metric_identity=mi,
+        cluster="NYC",
+        season="JJA",
+        data_version="tigge_mx2t6_local_calendar_day_max_v1",
+        param_A=-1.2,
+        param_B=0.5,
+        param_C=0.0,
         bootstrap_params=[(-1.0, 0.4, 0.0), (-1.3, 0.6, 0.0)],
         n_samples=100,
         brier_insample=0.18,
@@ -622,7 +657,7 @@ def test_save_platt_model_writes_verified(tmp_path):
     conn.commit()
 
     row = conn.execute(
-        "SELECT authority FROM platt_models WHERE bucket_key = 'NYC_JJA'"
+        "SELECT authority FROM platt_models WHERE model_key LIKE '%NYC%JJA%'"
     ).fetchone()
     conn.close()
     assert row is not None, "save_platt_model did not write a row"
@@ -649,38 +684,65 @@ def test_load_platt_model_skips_unverified(tmp_path):
         )
     conn.commit()
 
-    import json as _json
-    now = "2025-07-01T12:00:00+00:00"
-    bootstrap = _json.dumps([[-1.0, 0.4, 0.0]])
+    from src.types.metric_identity import MetricIdentity
+    from src.calibration.store import save_platt_model, load_platt_model
 
-    # Insert UNVERIFIED row for bucket_key 'NYC_DJF'
-    conn.execute(
-        "INSERT INTO platt_models "
-        "(bucket_key, param_A, param_B, param_C, bootstrap_params_json, "
-        " n_samples, fitted_at, is_active, input_space, authority) "
-        "VALUES ('NYC_DJF', -1.0, 0.4, 0.0, ?, 50, ?, 1, 'raw_probability', 'UNVERIFIED')",
-        (bootstrap, now),
+    mi_high = MetricIdentity(
+        temperature_metric="high",
+        physical_quantity="high_temp",
+        observation_field="high_temp",
+        data_version="tigge_mx2t6_local_calendar_day_max_v1",
     )
-    # Insert VERIFIED row for bucket_key 'NYC_JJA'
-    conn.execute(
-        "INSERT INTO platt_models "
-        "(bucket_key, param_A, param_B, param_C, bootstrap_params_json, "
-        " n_samples, fitted_at, is_active, input_space, authority) "
-        "VALUES ('NYC_JJA', -1.2, 0.5, 0.0, ?, 80, ?, 1, 'raw_probability', 'VERIFIED')",
-        (bootstrap, now),
+    # Write UNVERIFIED row for NYC/DJF
+    save_platt_model(
+        conn,
+        metric_identity=mi_high,
+        cluster="NYC",
+        season="DJF",
+        data_version="tigge_mx2t6_local_calendar_day_max_v1",
+        param_A=-1.0,
+        param_B=0.4,
+        bootstrap_params=[[-1.0, 0.4, 0.0]],
+        n_samples=50,
+        authority="UNVERIFIED",
+    )
+    # Write VERIFIED row for NYC/JJA
+    save_platt_model(
+        conn,
+        metric_identity=mi_high,
+        cluster="NYC",
+        season="JJA",
+        data_version="tigge_mx2t6_local_calendar_day_max_v1",
+        param_A=-1.2,
+        param_B=0.5,
+        bootstrap_params=[[-1.0, 0.4, 0.0]],
+        n_samples=80,
+        authority="VERIFIED",
     )
     conn.commit()
 
-    from src.calibration.store import load_platt_model
-
     # UNVERIFIED bucket must return None
-    unverified_result = load_platt_model(conn, "NYC_DJF")
+    unverified_result = load_platt_model(
+        conn,
+        temperature_metric="high",
+        cluster="NYC",
+        season="DJF",
+        data_version="tigge_mx2t6_local_calendar_day_max_v1",
+        input_space="raw_probability",
+    )
     assert unverified_result is None, (
         f"load_platt_model must return None for UNVERIFIED row, got {unverified_result}"
     )
 
     # VERIFIED bucket must return the model
-    verified_result = load_platt_model(conn, "NYC_JJA")
+    verified_result = load_platt_model(
+        conn,
+        temperature_metric="high",
+        cluster="NYC",
+        season="JJA",
+        data_version="tigge_mx2t6_local_calendar_day_max_v1",
+        input_space="raw_probability",
+    )
     conn.close()
     assert verified_result is not None, (
         "load_platt_model must return model for VERIFIED row"

@@ -30,6 +30,7 @@ def conn():
         """CREATE TABLE ensemble_snapshots(
             city TEXT, target_date TEXT, temperature_metric TEXT, dataset_id TEXT,
             members_json TEXT, members_unit TEXT, lead_hours REAL, available_at TEXT,
+            issue_time TEXT,
             contributes_to_target_extrema INTEGER, boundary_ambiguous INTEGER,
             training_allowed INTEGER, causality_status TEXT, authority TEXT)"""
     )
@@ -42,7 +43,11 @@ def conn():
 
 def _snap(conn, city, date, members, dv, *, unit="degC", contributes=1):
     conn.execute(
-        "INSERT INTO ensemble_snapshots VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO ensemble_snapshots "
+        "(city, target_date, temperature_metric, dataset_id, members_json, members_unit, "
+        "lead_hours, available_at, contributes_to_target_extrema, boundary_ambiguous, "
+        "training_allowed, causality_status, authority) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (city, date, "high", dv, json.dumps(members), unit, 24.0, "2026-05-10T00:00:00Z",
          contributes, 0, 1, "OK", "VERIFIED"),
     )

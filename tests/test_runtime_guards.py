@@ -12477,7 +12477,7 @@ def test_store_ens_snapshot_links_openmeteo_valid_time_without_faking_issue_time
         """
         SELECT issue_time, valid_time, available_at, fetch_time, p_raw_json,
                temperature_metric, physical_quantity, observation_field,
-               data_version, training_allowed, causality_status, authority,
+               dataset_id, training_allowed, causality_status, authority,
                members_unit, unit
         FROM ensemble_snapshots
         WHERE snapshot_id = ? AND city = ? AND target_date = ?
@@ -12496,7 +12496,7 @@ def test_store_ens_snapshot_links_openmeteo_valid_time_without_faking_issue_time
     assert v2_row["temperature_metric"] == HIGH_LOCALDAY_MAX.temperature_metric
     assert v2_row["physical_quantity"] == HIGH_LOCALDAY_MAX.physical_quantity
     assert v2_row["observation_field"] == HIGH_LOCALDAY_MAX.observation_field
-    assert v2_row["data_version"] == HIGH_LOCALDAY_MAX.data_version
+    assert v2_row["dataset_id"] == HIGH_LOCALDAY_MAX.data_version
     assert v2_row["training_allowed"] == 0
     assert v2_row["causality_status"] == "UNKNOWN"
     assert v2_row["authority"] == "VERIFIED"
@@ -12699,7 +12699,7 @@ def test_store_ens_snapshot_routes_to_attached_world_db(tmp_path):
     ).fetchone()[0]
     world_v2_row = conn.execute(
         """
-        SELECT p_raw_json, data_version, training_allowed, causality_status,
+        SELECT p_raw_json, dataset_id, training_allowed, causality_status,
                temperature_metric, physical_quantity, observation_field,
                members_unit, unit
         FROM world.ensemble_snapshots
@@ -12714,7 +12714,7 @@ def test_store_ens_snapshot_routes_to_attached_world_db(tmp_path):
     assert main_v2_count == 0
     assert world_v2_row is not None
     assert json.loads(world_v2_row["p_raw_json"]) == [0.2, 0.3, 0.5]
-    assert world_v2_row["data_version"] == HIGH_LOCALDAY_MAX.data_version
+    assert world_v2_row["dataset_id"] == HIGH_LOCALDAY_MAX.data_version
     assert world_v2_row["training_allowed"] == 1
     assert world_v2_row["causality_status"] == "OK"
     assert world_v2_row["temperature_metric"] == HIGH_LOCALDAY_MAX.temperature_metric
@@ -12744,8 +12744,9 @@ def test_store_ens_snapshot_writes_v2_independent_of_legacy_table_contents(tmp_p
         INSERT INTO ensemble_snapshots
         (snapshot_id, city, target_date, issue_time, valid_time, available_at,
          fetch_time, lead_hours, members_json, spread, is_bimodal,
-         model_version, dataset_id, authority, temperature_metric)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         model_version, dataset_id, authority, temperature_metric,
+         physical_quantity, observation_field)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             1,
@@ -12763,6 +12764,8 @@ def test_store_ens_snapshot_writes_v2_independent_of_legacy_table_contents(tmp_p
             HIGH_LOCALDAY_MAX.data_version,
             "VERIFIED",
             HIGH_LOCALDAY_MAX.temperature_metric,
+            HIGH_LOCALDAY_MAX.physical_quantity,
+            HIGH_LOCALDAY_MAX.observation_field,
         ),
     )
     conn.commit()
@@ -12935,7 +12938,7 @@ def test_ecmwf_open_data_collector_marks_rows_unverified_non_executable(monkeypa
     # v1.F20: legacy ensemble_snapshots removed; query v2 instead.
     rows = conn.execute(
         """
-        SELECT city, target_date, data_version, model_version, p_raw_json, authority
+        SELECT city, target_date, dataset_id, model_version, p_raw_json, authority
         FROM ensemble_snapshots
         ORDER BY target_date
         """
@@ -12948,7 +12951,7 @@ def test_ecmwf_open_data_collector_marks_rows_unverified_non_executable(monkeypa
     assert result["degradation_level"] == "DIAGNOSTIC_NON_EXECUTABLE"
     assert result["authority"] == "UNVERIFIED"
     assert [row["target_date"] for row in rows] == ["2026-03-31", "2026-04-01"]
-    assert all(row["data_version"] == DATA_VERSION for row in rows)
+    assert all(row["dataset_id"] == DATA_VERSION for row in rows)
     assert all(row["p_raw_json"] is None for row in rows)
     assert all(row["authority"] == "UNVERIFIED" for row in rows)
     with pytest.raises(SourceNotEnabled, match="entry_primary"):
@@ -15157,6 +15160,7 @@ def test_discovery_phase_buffers_telemetry_before_candidate_external_io(tmp_path
 
 
 def test_live_discovery_phase_truncates_candidate_evaluation_on_backpressure(monkeypatch, tmp_path):
+    monkeypatch.setenv("ZEUS_LIVE_MARKET_SUBSTRATE_READER", "0")
     conn = get_connection(tmp_path / "discovery-backpressure.db")
     init_schema(conn)
     conn.commit()

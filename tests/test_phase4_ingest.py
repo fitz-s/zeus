@@ -324,7 +324,7 @@ class TestIngestJsonFileIntegration:
 
         assert status == "written", f"Expected 'written', got {status!r}"
         row = conn.execute(
-            "SELECT temperature_metric, physical_quantity, observation_field, data_version, "
+            "SELECT temperature_metric, physical_quantity, observation_field, dataset_id, "
             "training_allowed, causality_status, boundary_ambiguous, manifest_hash, "
             "provenance_json, members_unit FROM ensemble_snapshots"
         ).fetchone()

@@ -56,36 +56,42 @@ class TestRBZGetCalibratorMetricAware:
 
         # Insert HIGH + LOW Platt rows with DIFFERENT param_A so we can
         # disambiguate which was returned.
+        # recorded_at must be set explicitly to a value before the config
+        # frozen_as_of cutoff (config/settings.json calibration.pin.frozen_as_of
+        # pins to a live-deployment timestamp); CURRENT_TIMESTAMP would be after
+        # the cutoff and cause load_platt_model to exclude the row.
         now = "2026-04-18T00:00:00+00:00"
         conn.execute(
             """
             INSERT INTO platt_models
                 (model_key, temperature_metric, cluster, season, data_version,
                  input_space, param_A, param_B, param_C, bootstrap_params_json,
-                 n_samples, brier_insample, fitted_at, is_active, authority)
+                 n_samples, brier_insample, fitted_at, is_active, authority,
+                 recorded_at)
             VALUES
                 ('high:NYC:JJA:v1:width_normalized_density',
                  'high', 'NYC', 'JJA',
                  'tigge_mx2t6_local_calendar_day_max_v1',
                  'width_normalized_density',
-                 1.23, 0.5, 0.0, '[]', 200, 0.10, ?, 1, 'VERIFIED')
+                 1.23, 0.5, 0.0, '[]', 200, 0.10, ?, 1, 'VERIFIED', ?)
             """,
-            (now,),
+            (now, now),
         )
         conn.execute(
             """
             INSERT INTO platt_models
                 (model_key, temperature_metric, cluster, season, data_version,
                  input_space, param_A, param_B, param_C, bootstrap_params_json,
-                 n_samples, brier_insample, fitted_at, is_active, authority)
+                 n_samples, brier_insample, fitted_at, is_active, authority,
+                 recorded_at)
             VALUES
                 ('low:NYC:JJA:v1:width_normalized_density',
                  'low', 'NYC', 'JJA',
                  'tigge_mn2t6_local_calendar_day_min_v1',
                  'width_normalized_density',
-                 4.56, 0.7, 0.0, '[]', 200, 0.15, ?, 1, 'VERIFIED')
+                 4.56, 0.7, 0.0, '[]', 200, 0.15, ?, 1, 'VERIFIED', ?)
             """,
-            (now,),
+            (now, now),
         )
         conn.commit()
         return conn
@@ -296,7 +302,7 @@ class TestRCAMonitorLowMetricContinuity:
             def spread(self):
                 return TemperatureDelta(1.0, "F")
 
-        def get_calibrator(conn, city_arg, target_date_arg, *, temperature_metric=None):
+        def get_calibrator(conn, city_arg, target_date_arg, *, temperature_metric=None, **kwargs):
             captured["calibrator_metric"] = temperature_metric
             return None, 4
 

@@ -28,7 +28,7 @@ import pytest
 # Production imports — must not fail; failures indicate broken PYTHONPATH
 # ---------------------------------------------------------------------------
 from src.state.db import init_schema_forecasts
-from src.state.schema.v2_schema import apply_v2_schema
+from src.state.schema.v2_schema import apply_canonical_schema as apply_v2_schema
 from src.calibration.metric_specs import METRIC_SPECS
 from scripts.rebuild_calibration_pairs import (
     CANONICAL_BIN_SOURCE_V2,

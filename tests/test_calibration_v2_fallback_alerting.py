@@ -40,6 +40,7 @@ from src.calibration import manager as mgr_module
 from src.calibration.manager import get_calibrator
 from src.config import City
 from src.state.db import init_schema
+from src.state.schema.v2_schema import apply_canonical_schema
 
 
 def _city() -> City:
@@ -78,15 +79,12 @@ def test_v2_miss_with_legacy_hit_logs_fallback_warning(monkeypatch, caplog):
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     init_schema(conn)
+    apply_canonical_schema(conn)
     city = _city()
 
     monkeypatch.setattr(
         mgr_module, "load_platt_model",
         lambda conn, *, temperature_metric, cluster, season, data_version=None, **_kwargs: None,
-    )
-    monkeypatch.setattr(
-        mgr_module, "load_platt_model",
-        lambda conn, bk: _populated_legacy_model(),
     )
 
     with caplog.at_level(logging.WARNING, logger="src.calibration.manager"):
@@ -133,15 +131,12 @@ def test_both_v2_and_legacy_miss_no_fallback_warning(monkeypatch, caplog):
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     init_schema(conn)
+    apply_canonical_schema(conn)
     city = _city()
 
     monkeypatch.setattr(
         mgr_module, "load_platt_model",
         lambda conn, *, temperature_metric, cluster, season, data_version=None, **_kwargs: None,
-    )
-    monkeypatch.setattr(
-        mgr_module, "load_platt_model",
-        lambda conn, bk: None,
     )
 
     with caplog.at_level(logging.WARNING, logger="src.calibration.manager"):
@@ -170,15 +165,12 @@ def test_repeated_fallback_for_same_bucket_logs_only_once(monkeypatch, caplog):
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     init_schema(conn)
+    apply_canonical_schema(conn)
     city = _city()
 
     monkeypatch.setattr(
         mgr_module, "load_platt_model",
         lambda conn, *, temperature_metric, cluster, season, data_version=None, **_kwargs: None,
-    )
-    monkeypatch.setattr(
-        mgr_module, "load_platt_model",
-        lambda conn, bk: _populated_legacy_model(),
     )
 
     with caplog.at_level(logging.WARNING, logger="src.calibration.manager"):
@@ -202,6 +194,7 @@ def test_low_metric_does_not_attempt_legacy_fallback(monkeypatch, caplog):
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     init_schema(conn)
+    apply_canonical_schema(conn)
     city = _city()
 
     monkeypatch.setattr(
@@ -209,8 +202,8 @@ def test_low_metric_does_not_attempt_legacy_fallback(monkeypatch, caplog):
         lambda conn, *, temperature_metric, cluster, season, data_version=None, **_kwargs: None,
     )
     legacy_calls: list[str] = []
-    def _record_legacy(conn, bk):
-        legacy_calls.append(bk)
+    def _record_legacy(conn, *, temperature_metric, cluster, season, data_version=None, **_kwargs):
+        legacy_calls.append(cluster)
         return None
     monkeypatch.setattr(mgr_module, "load_platt_model", _record_legacy)
 

@@ -81,14 +81,14 @@ def test_high_pairs_land_in_calibration_pairs(harvest_conn):
     assert count == 3, f"expected 3 pairs for 3 bins, got {count}"
 
     v2_rows = harvest_conn.execute(
-        "SELECT city, target_date, temperature_metric, data_version, training_allowed "
+        "SELECT city, target_date, temperature_metric, dataset_id, training_allowed "
         "FROM calibration_pairs WHERE city = 'testville' AND target_date = '2026-04-24'"
     ).fetchall()
 
     assert len(v2_rows) == 3, f"expected 3 v2 rows; got {len(v2_rows)}"
     for row in v2_rows:
         assert row["temperature_metric"] == HIGH_LOCALDAY_MAX.temperature_metric
-        assert row["data_version"] == HIGH_LOCALDAY_MAX.data_version
+        assert row["dataset_id"] == HIGH_LOCALDAY_MAX.data_version
         assert row["training_allowed"] == 1, (
             "INV-15: data_version starts with 'tigge' → training_allowed "
             "must resolve to True"
@@ -133,7 +133,7 @@ def test_low_pairs_still_land_in_v2_after_c5(harvest_conn):
     assert len(v2_rows) == 3
     for row in v2_rows:
         assert row["temperature_metric"] == LOW_LOCALDAY_MIN.temperature_metric
-        assert row["data_version"] == LOW_LOCALDAY_MIN.data_version
+        assert row["dataset_id"] == LOW_LOCALDAY_MIN.data_version
 
 
 def test_legacy_add_calibration_pair_no_longer_imported_in_harvester():
@@ -180,4 +180,4 @@ def test_v2_pair_training_allowed_respects_inv15(harvest_conn):
         # _resolve_training_allowed: empty source skips src_ok check; dv
         # starts with 'tigge' → dv_ok; result = requested (True).
         assert row["training_allowed"] == 1
-        assert row["data_version"].startswith("tigge")
+        assert row["dataset_id"].startswith("tigge")

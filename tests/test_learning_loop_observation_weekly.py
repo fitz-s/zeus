@@ -61,6 +61,7 @@ DEFAULT_LOW_PAIRS_READY = _mod.DEFAULT_LOW_PAIRS_READY
 from src.calibration.store import save_platt_model  # noqa: E402
 from src.state.db import init_schema  # noqa: E402
 from src.state.schema.v2_schema import apply_canonical_schema  # noqa: E402
+from src.types.metric_identity import HIGH_LOCALDAY_MAX  # noqa: E402
 from src.types.metric_identity import HIGH_LOCALDAY_MAX, LOW_LOCALDAY_MIN  # noqa: E402
 
 
@@ -110,20 +111,29 @@ def _seed_calibration_pairs(
     decision_group_prefix: str = "dg",
 ):
     """Insert N canonical_v1 VERIFIED calibration pairs."""
+    # B3/B5 (2026-05-28): temperature_metric, observation_field, dataset_id
+    # are NOT NULL in canonical calibration_pairs. Use distinct target_date
+    # per row to avoid UNIQUE constraint on (city, target_date, temperature_metric,
+    # range_label, lead_days, forecast_available_at, bin_source, dataset_id).
     conn = sqlite3.connect(str(db_path))
     try:
         for i in range(n_pairs):
+            target_date = f"2026-{(i % 12) + 1:02d}-{(i // 12) + 1:02d}"
             conn.execute(
                 """
                 INSERT INTO calibration_pairs
                 (city, target_date, range_label, p_raw, outcome, lead_days,
                  season, cluster, forecast_available_at, settlement_value,
-                 decision_group_id, bias_corrected, bin_source, authority)
-                VALUES ('TestCity', '2026-04-23', '50-51°F', 0.5, 1, 1.0,
+                 decision_group_id, bias_corrected, bin_source, authority,
+                 temperature_metric, observation_field, dataset_id)
+                VALUES ('TestCity', ?, '50-51°F', 0.5, 1, 1.0,
                         ?, ?, '2026-04-22T12:00:00+00:00', 50.0,
-                        ?, 0, 'canonical_v1', 'VERIFIED')
+                        ?, 0, 'canonical_v1', 'VERIFIED', ?, ?, ?)
                 """,
-                (season, cluster, f"{decision_group_prefix}-{i}"),
+                (target_date, season, cluster, f"{decision_group_prefix}-{i}",
+                 HIGH_LOCALDAY_MAX.temperature_metric,
+                 HIGH_LOCALDAY_MAX.observation_field,
+                 HIGH_LOCALDAY_MAX.data_version),
             )
         conn.commit()
     finally:

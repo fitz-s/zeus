@@ -20,13 +20,14 @@ import scripts.run_replay as cli_module
 from scripts.run_replay import _format_total_pnl, _pnl_available
 
 
-def _seed_market_events(conn, city: str, target_date: str, labels: tuple[str, ...]) -> None:
+def _seed_market_events(conn, city: str, target_date: str, labels: tuple[str, ...], temperature_metric: str = "high") -> None:
+    # B3 (2026-05-28): market_events.temperature_metric is NOT NULL.
     for index, label in enumerate(labels, start=1):
         conn.execute(
             """
             INSERT INTO market_events
-            (market_slug, city, target_date, condition_id, token_id, range_label)
-            VALUES (?, ?, ?, ?, ?, ?)
+            (market_slug, city, target_date, condition_id, token_id, range_label, temperature_metric)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 f"{city.lower()}-{target_date}-{index}",
@@ -35,6 +36,7 @@ def _seed_market_events(conn, city: str, target_date: str, labels: tuple[str, ..
                 f"condition-{city.lower()}-{target_date}-{index}",
                 f"token-{city.lower()}-{target_date}-{index}",
                 label,
+                temperature_metric,
             ),
         )
 
@@ -76,13 +78,15 @@ def _seed_trade_history_fixture(
 
     forecasts = get_connection(forecasts_db)
     init_schema_forecasts(forecasts)
+    # B3: settlements renamed to settlement_outcomes in forecast-class schema.
+    # authority defaults to 'VERIFIED' so no explicit _mark_settlements_verified needed.
     forecasts.execute(
         """
-        INSERT INTO settlements (city, target_date, winning_bin, settlement_value, temperature_metric)
-        VALUES ('NYC', '2026-04-03', '39-40°F', 40.0, 'high')
+        INSERT INTO settlement_outcomes
+            (city, target_date, temperature_metric, winning_bin, settlement_value, authority)
+        VALUES ('NYC', '2026-04-03', 'high', '39-40°F', 40.0, 'VERIFIED')
         """
     )
-    _mark_settlements_verified(forecasts)
     forecasts.commit()
     forecasts.close()
 
@@ -122,6 +126,7 @@ def test_run_replay_allows_snapshot_only_reference_opt_in(tmp_path, monkeypatch)
     db_path = tmp_path / "zeus.db"
     conn = get_connection(db_path)
     init_schema(conn)
+    init_schema_forecasts(conn)  # B3: forecast-class tables (ensemble_snapshots, calibration_pairs, etc.)
     conn.execute(
         """
         INSERT INTO settlements (city, target_date, winning_bin, settlement_value, temperature_metric)
@@ -133,16 +138,22 @@ def test_run_replay_allows_snapshot_only_reference_opt_in(tmp_path, monkeypatch)
         """
         INSERT INTO ensemble_snapshots
         (snapshot_id, city, target_date, issue_time, valid_time, available_at, fetch_time,
-         lead_hours, members_json, p_raw_json, spread, is_bimodal, model_version, dataset_id, temperature_metric)
+         lead_hours, members_json, p_raw_json, spread, is_bimodal, model_version, dataset_id,
+         temperature_metric, physical_quantity, observation_field)
         VALUES (31, 'Paris', '2026-04-03', '2026-04-02T00:00:00Z', '2026-04-03T00:00:00Z',
-                '2026-04-02T08:00:00Z', '2026-04-02T08:05:00Z', 24.0, '[12.0]', '[1.0]', 2.0, 0, 'ecmwf', 'v1', 'high')
+                '2026-04-02T08:00:00Z', '2026-04-02T08:05:00Z', 24.0, '[12.0]', '[1.0]', 2.0, 0,
+                'ecmwf', 'v1', 'high', 'mx2t6_local_calendar_day_max', 'high_temp')
         """
     )
     conn.execute(
         """
         INSERT INTO calibration_pairs
-        (city, target_date, range_label, p_raw, outcome, lead_days, season, cluster, forecast_available_at, settlement_value)
-        VALUES ('Paris', '2026-04-03', '12°C', 1.0, 1, 1.0, 'MAM', 'Paris', '2026-04-02T08:00:00Z', 12.0)
+        (city, target_date, range_label, p_raw, outcome, lead_days, season, cluster,
+         forecast_available_at, settlement_value,
+         temperature_metric, observation_field, dataset_id, decision_group_id)
+        VALUES ('Paris', '2026-04-03', '12°C', 1.0, 1, 1.0, 'MAM', 'Paris',
+                '2026-04-02T08:00:00Z', 12.0,
+                'high', 'high_temp', 'tigge_v1', 'dg-snapshot-ref-1')
         """
     )
     _seed_market_events(conn, "London", "2026-04-03", ("12°C",))
@@ -173,6 +184,7 @@ def test_counterfactual_replay_does_not_auto_enable_snapshot_only_reference(tmp_
     db_path = tmp_path / "counterfactual-strict.db"
     conn = get_connection(db_path)
     init_schema(conn)
+    init_schema_forecasts(conn)  # B3: forecast-class tables
     conn.execute(
         """
         INSERT INTO settlements (city, target_date, winning_bin, settlement_value, temperature_metric)
@@ -184,16 +196,22 @@ def test_counterfactual_replay_does_not_auto_enable_snapshot_only_reference(tmp_
         """
         INSERT INTO ensemble_snapshots
         (snapshot_id, city, target_date, issue_time, valid_time, available_at, fetch_time,
-         lead_hours, members_json, p_raw_json, spread, is_bimodal, model_version, dataset_id, temperature_metric)
+         lead_hours, members_json, p_raw_json, spread, is_bimodal, model_version, dataset_id,
+         temperature_metric, physical_quantity, observation_field)
         VALUES (32, 'Paris', '2026-04-03', '2026-04-02T00:00:00Z', '2026-04-03T00:00:00Z',
-                '2026-04-02T08:00:00Z', '2026-04-02T08:05:00Z', 24.0, '[12.0]', '[1.0]', 2.0, 0, 'ecmwf', 'v1', 'high')
+                '2026-04-02T08:00:00Z', '2026-04-02T08:05:00Z', 24.0, '[12.0]', '[1.0]', 2.0, 0,
+                'ecmwf', 'v1', 'high', 'mx2t6_local_calendar_day_max', 'high_temp')
         """
     )
     conn.execute(
         """
         INSERT INTO calibration_pairs
-        (city, target_date, range_label, p_raw, outcome, lead_days, season, cluster, forecast_available_at, settlement_value)
-        VALUES ('Paris', '2026-04-03', '12°C', 1.0, 1, 1.0, 'MAM', 'Paris', '2026-04-02T08:00:00Z', 12.0)
+        (city, target_date, range_label, p_raw, outcome, lead_days, season, cluster,
+         forecast_available_at, settlement_value,
+         temperature_metric, observation_field, dataset_id, decision_group_id)
+        VALUES ('Paris', '2026-04-03', '12°C', 1.0, 1, 1.0, 'MAM', 'Paris',
+                '2026-04-02T08:00:00Z', 12.0,
+                'high', 'high_temp', 'tigge_v1', 'dg-counterfactual-1')
         """
     )
     conn.commit()
@@ -225,6 +243,7 @@ def test_run_replay_snapshot_only_can_fallback_to_forecast_rows(tmp_path, monkey
     db_path = tmp_path / "forecast-fallback.db"
     conn = get_connection(db_path)
     init_schema(conn)
+    init_schema_forecasts(conn)  # B3: forecast-class tables
     conn.execute(
         """
         INSERT INTO settlements (city, target_date, winning_bin, settlement_value, temperature_metric)
@@ -235,10 +254,14 @@ def test_run_replay_snapshot_only_can_fallback_to_forecast_rows(tmp_path, monkey
     conn.execute(
         """
         INSERT INTO calibration_pairs
-        (city, target_date, range_label, p_raw, outcome, lead_days, season, cluster, forecast_available_at, settlement_value)
+        (city, target_date, range_label, p_raw, outcome, lead_days, season, cluster,
+         forecast_available_at, settlement_value,
+         temperature_metric, observation_field, dataset_id, decision_group_id)
         VALUES
-        ('Ankara', '2026-04-03', '20°C', 0.5, 1, 1.0, 'MAM', 'Ankara', '2026-04-02T08:00:00Z', 20.0),
-        ('Ankara', '2026-04-03', '21°C', 0.5, 0, 1.0, 'MAM', 'Ankara', '2026-04-02T08:00:00Z', 20.0)
+        ('Ankara', '2026-04-03', '20°C', 0.5, 1, 1.0, 'MAM', 'Ankara',
+         '2026-04-02T08:00:00Z', 20.0, 'high', 'high_temp', 'tigge_v1', 'dg-ankara-1'),
+        ('Ankara', '2026-04-03', '21°C', 0.5, 0, 1.0, 'MAM', 'Ankara',
+         '2026-04-02T08:00:00Z', 20.0, 'high', 'high_temp', 'tigge_v1', 'dg-ankara-2')
         """
     )
     conn.execute(
@@ -286,6 +309,7 @@ def test_run_replay_shadow_signal_fallback_uses_legacy_diagnostic_source(tmp_pat
     db_path = tmp_path / "shadow-signal-fallback.db"
     conn = get_connection(db_path)
     init_schema(conn)
+    init_schema_forecasts(conn)  # B3: forecast-class tables
     conn.execute(
         """
         INSERT INTO settlements (city, target_date, winning_bin, settlement_value, temperature_metric)
@@ -297,22 +321,25 @@ def test_run_replay_shadow_signal_fallback_uses_legacy_diagnostic_source(tmp_pat
         """
         INSERT INTO ensemble_snapshots
         (snapshot_id, city, target_date, issue_time, valid_time, available_at, fetch_time,
-         lead_hours, members_json, p_raw_json, spread, is_bimodal, model_version, dataset_id, temperature_metric)
+         lead_hours, members_json, p_raw_json, spread, is_bimodal, model_version, dataset_id,
+         temperature_metric, physical_quantity, observation_field)
         VALUES (51, 'Dallas', '2026-04-05', '2026-04-04T00:00:00Z', '2026-04-05T00:00:00Z',
                 '2026-04-04T08:00:00Z', '2026-04-04T08:05:00Z', 24.0,
-                '[39.0, 42.0]', '[0.1, 0.9]', 2.0, 0, 'ecmwf', 'v1', 'high')
+                '[39.0, 42.0]', '[0.1, 0.9]', 2.0, 0, 'ecmwf', 'v1', 'high',
+                'mx2t6_local_calendar_day_max', 'high_temp')
         """
     )
     conn.execute(
         """
         INSERT INTO calibration_pairs
         (city, target_date, range_label, p_raw, outcome, lead_days, season, cluster,
-         forecast_available_at, settlement_value)
+         forecast_available_at, settlement_value,
+         temperature_metric, observation_field, dataset_id, decision_group_id)
         VALUES
         ('Dallas', '2026-04-05', '39-40°F', 0.1, 0, 1.0, 'MAM', 'Dallas',
-         '2026-04-04T08:00:00Z', 42.0),
+         '2026-04-04T08:00:00Z', 42.0, 'high', 'high_temp', 'tigge_v1', 'dg-dallas-1'),
         ('Dallas', '2026-04-05', '41-42°F', 0.9, 1, 1.0, 'MAM', 'Dallas',
-         '2026-04-04T08:00:00Z', 42.0)
+         '2026-04-04T08:00:00Z', 42.0, 'high', 'high_temp', 'tigge_v1', 'dg-dallas-2')
         """
     )
     conn.execute(
@@ -421,6 +448,7 @@ def test_market_events_preflight_matches_bins_semantically(tmp_path):
     db_path = tmp_path / "semantic-market-label.db"
     conn = get_connection(db_path)
     init_schema(conn)
+    init_schema_forecasts(conn)  # B3: market_events in forecast-class schema
     conn.execute(
         """
         INSERT INTO settlements (city, target_date, winning_bin, settlement_value, temperature_metric)
@@ -455,6 +483,7 @@ def test_replay_without_market_price_linkage_cannot_generate_pnl(tmp_path, monke
     db_path = tmp_path / "unpriced-replay.db"
     conn = get_connection(db_path)
     init_schema(conn)
+    init_schema_forecasts(conn)  # B3: forecast-class tables
     conn.execute(
         """
         INSERT INTO settlements (city, target_date, winning_bin, settlement_value, temperature_metric)
@@ -466,22 +495,25 @@ def test_replay_without_market_price_linkage_cannot_generate_pnl(tmp_path, monke
         """
         INSERT INTO ensemble_snapshots
         (snapshot_id, city, target_date, issue_time, valid_time, available_at, fetch_time,
-         lead_hours, members_json, p_raw_json, spread, is_bimodal, model_version, dataset_id, temperature_metric)
+         lead_hours, members_json, p_raw_json, spread, is_bimodal, model_version, dataset_id,
+         temperature_metric, physical_quantity, observation_field)
         VALUES (41, 'Paris', '2026-04-04', '2026-04-03T00:00:00Z', '2026-04-04T00:00:00Z',
                 '2026-04-03T08:00:00Z', '2026-04-03T08:05:00Z', 24.0, '[12.0, 13.0]',
-                '[0.9, 0.1]', 1.0, 0, 'ecmwf', 'v1', 'high')
+                '[0.9, 0.1]', 1.0, 0, 'ecmwf', 'v1', 'high',
+                'mx2t6_local_calendar_day_max', 'high_temp')
         """
     )
     conn.execute(
         """
         INSERT INTO calibration_pairs
         (city, target_date, range_label, p_raw, outcome, lead_days, season, cluster,
-         forecast_available_at, settlement_value)
+         forecast_available_at, settlement_value,
+         temperature_metric, observation_field, dataset_id, decision_group_id)
         VALUES
         ('Paris', '2026-04-04', '12°C', 0.9, 1, 1.0, 'MAM', 'Paris',
-         '2026-04-03T08:00:00Z', 12.0),
+         '2026-04-03T08:00:00Z', 12.0, 'high', 'high_temp', 'tigge_v1', 'dg-unpriced-1'),
         ('Paris', '2026-04-04', '13°C', 0.1, 0, 1.0, 'MAM', 'Paris',
-         '2026-04-03T08:00:00Z', 12.0)
+         '2026-04-03T08:00:00Z', 12.0, 'high', 'high_temp', 'tigge_v1', 'dg-unpriced-2')
         """
     )
     conn.commit()
@@ -540,6 +572,7 @@ def test_replay_alpha_uses_trade_decision_market_hours_open(tmp_path, monkeypatc
     db_path = tmp_path / "market-hours-open.db"
     conn = get_connection(db_path)
     init_schema(conn)
+    init_schema_forecasts(conn)  # B3: forecast-class tables
     conn.execute(
         """
         INSERT INTO settlements (city, target_date, winning_bin, settlement_value, temperature_metric)
@@ -551,22 +584,25 @@ def test_replay_alpha_uses_trade_decision_market_hours_open(tmp_path, monkeypatc
         """
         INSERT INTO ensemble_snapshots
         (snapshot_id, city, target_date, issue_time, valid_time, available_at, fetch_time,
-         lead_hours, members_json, p_raw_json, spread, is_bimodal, model_version, dataset_id, temperature_metric)
+         lead_hours, members_json, p_raw_json, spread, is_bimodal, model_version, dataset_id,
+         temperature_metric, physical_quantity, observation_field)
         VALUES (51, 'Paris', '2026-04-05', '2026-04-04T00:00:00Z', '2026-04-05T00:00:00Z',
                 '2026-04-04T08:00:00Z', '2026-04-04T08:05:00Z', 24.0, '[12.0, 13.0]',
-                '[0.9, 0.1]', 1.0, 0, 'ecmwf', 'v1', 'high')
+                '[0.9, 0.1]', 1.0, 0, 'ecmwf', 'v1', 'high',
+                'mx2t6_local_calendar_day_max', 'high_temp')
         """
     )
     conn.execute(
         """
         INSERT INTO calibration_pairs
         (city, target_date, range_label, p_raw, outcome, lead_days, season, cluster,
-         forecast_available_at, settlement_value)
+         forecast_available_at, settlement_value,
+         temperature_metric, observation_field, dataset_id, decision_group_id)
         VALUES
         ('Paris', '2026-04-05', '12°C', 0.9, 1, 1.0, 'MAM', 'Paris',
-         '2026-04-04T08:00:00Z', 12.0),
+         '2026-04-04T08:00:00Z', 12.0, 'high', 'high_temp', 'tigge_v1', 'dg-mhopen-1'),
         ('Paris', '2026-04-05', '13°C', 0.1, 0, 1.0, 'MAM', 'Paris',
-         '2026-04-04T08:00:00Z', 12.0)
+         '2026-04-04T08:00:00Z', 12.0, 'high', 'high_temp', 'tigge_v1', 'dg-mhopen-2')
         """
     )
     _seed_market_events(conn, "Paris", "2026-04-05", ("12°C", "13°C"))
@@ -610,6 +646,7 @@ def test_replay_alpha_uses_no_trade_market_hours_open(tmp_path, monkeypatch):
     db_path = tmp_path / "no-trade-market-hours-open.db"
     conn = get_connection(db_path)
     init_schema(conn)
+    init_schema_forecasts(conn)  # B3: forecast-class tables
     conn.execute(
         """
         INSERT INTO settlements (city, target_date, winning_bin, settlement_value, temperature_metric)
@@ -621,22 +658,25 @@ def test_replay_alpha_uses_no_trade_market_hours_open(tmp_path, monkeypatch):
         """
         INSERT INTO ensemble_snapshots
         (snapshot_id, city, target_date, issue_time, valid_time, available_at, fetch_time,
-         lead_hours, members_json, p_raw_json, spread, is_bimodal, model_version, dataset_id, temperature_metric)
+         lead_hours, members_json, p_raw_json, spread, is_bimodal, model_version, dataset_id,
+         temperature_metric, physical_quantity, observation_field)
         VALUES (61, 'Paris', '2026-04-06', '2026-04-05T00:00:00Z', '2026-04-06T00:00:00Z',
                 '2026-04-05T08:00:00Z', '2026-04-05T08:05:00Z', 24.0, '[12.0, 13.0]',
-                '[0.9, 0.1]', 1.0, 0, 'ecmwf', 'v1', 'high')
+                '[0.9, 0.1]', 1.0, 0, 'ecmwf', 'v1', 'high',
+                'mx2t6_local_calendar_day_max', 'high_temp')
         """
     )
     conn.execute(
         """
         INSERT INTO calibration_pairs
         (city, target_date, range_label, p_raw, outcome, lead_days, season, cluster,
-         forecast_available_at, settlement_value)
+         forecast_available_at, settlement_value,
+         temperature_metric, observation_field, dataset_id, decision_group_id)
         VALUES
         ('Paris', '2026-04-06', '12°C', 0.9, 1, 1.0, 'MAM', 'Paris',
-         '2026-04-05T08:00:00Z', 12.0),
+         '2026-04-05T08:00:00Z', 12.0, 'high', 'high_temp', 'tigge_v1', 'dg-notrade-1'),
         ('Paris', '2026-04-06', '13°C', 0.1, 0, 1.0, 'MAM', 'Paris',
-         '2026-04-05T08:00:00Z', 12.0)
+         '2026-04-05T08:00:00Z', 12.0, 'high', 'high_temp', 'tigge_v1', 'dg-notrade-2')
         """
     )
     _seed_market_events(conn, "Paris", "2026-04-06", ("12°C", "13°C"))
@@ -702,6 +742,7 @@ def test_replay_alpha_legacy_no_trade_without_market_hours_uses_fallback(tmp_pat
     db_path = tmp_path / "legacy-no-trade-market-hours.db"
     conn = get_connection(db_path)
     init_schema(conn)
+    init_schema_forecasts(conn)  # B3: forecast-class tables
     conn.execute(
         """
         INSERT INTO settlements (city, target_date, winning_bin, settlement_value, temperature_metric)
@@ -713,22 +754,25 @@ def test_replay_alpha_legacy_no_trade_without_market_hours_uses_fallback(tmp_pat
         """
         INSERT INTO ensemble_snapshots
         (snapshot_id, city, target_date, issue_time, valid_time, available_at, fetch_time,
-         lead_hours, members_json, p_raw_json, spread, is_bimodal, model_version, dataset_id, temperature_metric)
+         lead_hours, members_json, p_raw_json, spread, is_bimodal, model_version, dataset_id,
+         temperature_metric, physical_quantity, observation_field)
         VALUES (71, 'Paris', '2026-04-07', '2026-04-06T00:00:00Z', '2026-04-07T00:00:00Z',
                 '2026-04-06T08:00:00Z', '2026-04-06T08:05:00Z', 24.0, '[12.0, 13.0]',
-                '[0.9, 0.1]', 1.0, 0, 'ecmwf', 'v1', 'high')
+                '[0.9, 0.1]', 1.0, 0, 'ecmwf', 'v1', 'high',
+                'mx2t6_local_calendar_day_max', 'high_temp')
         """
     )
     conn.execute(
         """
         INSERT INTO calibration_pairs
         (city, target_date, range_label, p_raw, outcome, lead_days, season, cluster,
-         forecast_available_at, settlement_value)
+         forecast_available_at, settlement_value,
+         temperature_metric, observation_field, dataset_id, decision_group_id)
         VALUES
         ('Paris', '2026-04-07', '12°C', 0.9, 1, 1.0, 'MAM', 'Paris',
-         '2026-04-06T08:00:00Z', 12.0),
+         '2026-04-06T08:00:00Z', 12.0, 'high', 'high_temp', 'tigge_v1', 'dg-legacy-1'),
         ('Paris', '2026-04-07', '13°C', 0.1, 0, 1.0, 'MAM', 'Paris',
-         '2026-04-06T08:00:00Z', 12.0)
+         '2026-04-06T08:00:00Z', 12.0, 'high', 'high_temp', 'tigge_v1', 'dg-legacy-2')
         """
     )
     _seed_market_events(conn, "Paris", "2026-04-07", ("12°C", "13°C"))
@@ -793,6 +837,7 @@ def test_replay_records_provenance_counts_and_hours_since_open_fallback(tmp_path
     db_path = tmp_path / "replay-provenance.db"
     conn = get_connection(db_path)
     init_schema(conn)
+    init_schema_forecasts(conn)  # B3: forecast-class tables
     conn.execute(
         """
         INSERT INTO settlements (city, target_date, winning_bin, settlement_value, temperature_metric)
@@ -806,30 +851,32 @@ def test_replay_records_provenance_counts_and_hours_since_open_fallback(tmp_path
         """
         INSERT INTO ensemble_snapshots
         (snapshot_id, city, target_date, issue_time, valid_time, available_at, fetch_time,
-         lead_hours, members_json, p_raw_json, spread, is_bimodal, model_version, dataset_id, temperature_metric)
+         lead_hours, members_json, p_raw_json, spread, is_bimodal, model_version, dataset_id,
+         temperature_metric, physical_quantity, observation_field)
         VALUES
         (81, 'Paris', '2026-04-08', '2026-04-07T00:00:00Z', '2026-04-08T00:00:00Z',
          '2026-04-07T08:00:00Z', '2026-04-07T08:05:00Z', 24.0, '[12.0, 13.0]',
-         '[0.9, 0.1]', 1.0, 0, 'ecmwf', 'v1', 'high'),
+         '[0.9, 0.1]', 1.0, 0, 'ecmwf', 'v1', 'high', 'mx2t6_local_calendar_day_max', 'high_temp'),
         (82, 'Paris', '2026-04-09', '2026-04-08T00:00:00Z', '2026-04-09T00:00:00Z',
          '2026-04-08T08:00:00Z', '2026-04-08T08:05:00Z', 24.0, '[12.0, 13.0]',
-         '[0.9, 0.1]', 1.0, 0, 'ecmwf', 'v1', 'high')
+         '[0.9, 0.1]', 1.0, 0, 'ecmwf', 'v1', 'high', 'mx2t6_local_calendar_day_max', 'high_temp')
         """
     )
     conn.execute(
         """
         INSERT INTO calibration_pairs
         (city, target_date, range_label, p_raw, outcome, lead_days, season, cluster,
-         forecast_available_at, settlement_value)
+         forecast_available_at, settlement_value,
+         temperature_metric, observation_field, dataset_id, decision_group_id)
         VALUES
         ('Paris', '2026-04-08', '12°C', 0.9, 1, 1.0, 'MAM', 'Paris',
-         '2026-04-07T08:00:00Z', 12.0),
+         '2026-04-07T08:00:00Z', 12.0, 'high', 'high_temp', 'tigge_v1', 'dg-prov-1'),
         ('Paris', '2026-04-08', '13°C', 0.1, 0, 1.0, 'MAM', 'Paris',
-         '2026-04-07T08:00:00Z', 12.0),
+         '2026-04-07T08:00:00Z', 12.0, 'high', 'high_temp', 'tigge_v1', 'dg-prov-2'),
         ('Paris', '2026-04-09', '12°C', 0.9, 1, 1.0, 'MAM', 'Paris',
-         '2026-04-08T08:00:00Z', 12.0),
+         '2026-04-08T08:00:00Z', 12.0, 'high', 'high_temp', 'tigge_v1', 'dg-prov-3'),
         ('Paris', '2026-04-09', '13°C', 0.1, 0, 1.0, 'MAM', 'Paris',
-         '2026-04-08T08:00:00Z', 12.0)
+         '2026-04-08T08:00:00Z', 12.0, 'high', 'high_temp', 'tigge_v1', 'dg-prov-4')
         """
     )
     _seed_market_events(conn, "Paris", "2026-04-08", ("12°C", "13°C"))
@@ -1323,10 +1370,12 @@ def test_wu_settlement_sweep_v2_corpus_produces_settlements(tmp_path, monkeypatc
         INSERT INTO calibration_pairs
             (city, target_date, temperature_metric, observation_field,
              range_label, p_raw, outcome, lead_days, season, cluster,
-             forecast_available_at, dataset_id, bias_corrected, authority)
+             forecast_available_at, dataset_id, bias_corrected, authority,
+             decision_group_id)
         VALUES ('Paris', '2026-04-10', 'high', 'high_temp',
                 '12°C', 0.85, 1, 1.0, 'MAM', 'Paris',
-                '2026-04-09T08:00:00Z', 'v2', 0, 'VERIFIED')
+                '2026-04-09T08:00:00Z', 'v2', 0, 'VERIFIED',
+                'dg-t6-high-1')
         """
     )
 
@@ -1356,10 +1405,12 @@ def test_wu_settlement_sweep_v2_corpus_produces_settlements(tmp_path, monkeypatc
         INSERT INTO calibration_pairs
             (city, target_date, temperature_metric, observation_field,
              range_label, p_raw, outcome, lead_days, season, cluster,
-             forecast_available_at, dataset_id, bias_corrected, authority)
+             forecast_available_at, dataset_id, bias_corrected, authority,
+             decision_group_id)
         VALUES ('Paris', '2026-04-10', 'low', 'low_temp',
                 '1°C', 0.20, 0, 1.0, 'MAM', 'Paris',
-                '2026-04-09T08:00:00Z', 'v2', 0, 'VERIFIED')
+                '2026-04-09T08:00:00Z', 'v2', 0, 'VERIFIED',
+                'dg-t6-low-1')
         """
     )
     conn.commit()

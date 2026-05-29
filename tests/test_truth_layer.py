@@ -30,11 +30,8 @@ def test_strategy_tracker_summary_exposes_only_trade_count_and_pnl(monkeypatch):
         ],
     )
     tracker = StrategyTracker()
-    tracker.record_trade({
-        "trade_id": "ignored-legacy-shim",
-        "strategy": "opening_inertia",
-        "pnl": 99.0,
-    })
+    # record_trade is a removed shim (K1 post-split); writes are no-ops and the method
+    # no longer exists. Reads project from query_authoritative_settlement_rows (monkeypatched above).
 
     summary = tracker.summary(conn=object())
 
@@ -48,12 +45,8 @@ def test_strategy_tracker_summary_exposes_only_trade_count_and_pnl(monkeypatch):
 
 def test_strategy_tracker_rejects_unknown_strategy_instead_of_defaulting():
     tracker = StrategyTracker()
-
-    tracker.record_trade({
-        "trade_id": "bad1",
-        "strategy": "mystery_strategy",
-        "pnl": 1.0,
-    })
+    # record_trade is a removed shim; unknown strategies are silently dropped via
+    # the query path. Verify summary still returns zero for all known strategies.
 
     assert tracker.summary()["opening_inertia"] == {"trades": 0, "pnl": 0}
     assert tracker.summary()["settlement_capture"] == {"trades": 0, "pnl": 0}

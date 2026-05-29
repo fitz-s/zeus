@@ -215,12 +215,12 @@ class TestGateDLowPurityIsolation:
         assert len(low_eligible) == 1, f"LOW spec got {len(low_eligible)} snapshots, want 1"
 
         # Structural invariant #2: no cross-metric leakage — LOW eligibility excludes HIGH.
-        low_temp_metrics = {row["data_version"] for row in low_eligible}
+        low_temp_metrics = {row["dataset_id"] for row in low_eligible}
         assert low_temp_metrics == {LOW_LOCALDAY_MIN.data_version}, (
             f"LOW spec eligible snapshots include non-LOW data_versions: {low_temp_metrics}. "
             "Cross-metric leakage at the eligibility-filter seam."
         )
-        high_temp_metrics = {row["data_version"] for row in high_eligible}
+        high_temp_metrics = {row["dataset_id"] for row in high_eligible}
         assert high_temp_metrics == {HIGH_LOCALDAY_MAX.data_version}, (
             f"HIGH spec eligible snapshots include non-HIGH data_versions: {high_temp_metrics}."
         )
@@ -434,7 +434,7 @@ class TestGateDLowPurityIsolation:
             spec=low_spec,
             data_version_filter=ECMWF_OPENDATA_LOW_CONTRACT_WINDOW_DATA_VERSION,
         )
-        assert {row["data_version"] for row in recovery_eligible} == {
+        assert {row["dataset_id"] for row in recovery_eligible} == {
             ECMWF_OPENDATA_LOW_CONTRACT_WINDOW_DATA_VERSION
         }
 
@@ -446,7 +446,7 @@ class TestGateDLowPurityIsolation:
         remaining = conn.execute(
             "SELECT dataset_id FROM calibration_pairs ORDER BY dataset_id"
         ).fetchall()
-        assert [row["data_version"] for row in remaining] == [LOW_LOCALDAY_MIN.data_version]
+        assert [row["dataset_id"] for row in remaining] == [LOW_LOCALDAY_MIN.data_version]
 
     def test_R_AZ_2c2_rebuild_stratification_filters_scope_fetch_and_delete(self):
         from scripts.rebuild_calibration_pairs import (
@@ -577,7 +577,7 @@ class TestGateDLowPurityIsolation:
         )
         remaining = conn.execute(
             """
-            SELECT target_date, data_version, cycle, source_id, horizon_profile
+            SELECT target_date, dataset_id, cycle, source_id, horizon_profile
             FROM calibration_pairs
             ORDER BY target_date
             """
@@ -585,7 +585,7 @@ class TestGateDLowPurityIsolation:
         assert [
             (
                 row["target_date"],
-                row["data_version"],
+                row["dataset_id"],
                 row["cycle"],
                 row["source_id"],
                 row["horizon_profile"],

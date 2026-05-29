@@ -25,7 +25,7 @@ import pytest
 
 from src.contracts.weather_regime_tag import WeatherRegimeTag
 from src.state.db import init_schema
-SCHEMA_VERSION = 42  # B2: frozen row-provenance value; counter cancelled
+SCHEMA_VERSION = 43  # B2: frozen row-provenance value; counter cancelled (bumped to 43 by B3/PR3 #359)
 from src.strategy.regime_correlation_store import RegimeCorrelationStore
 
 

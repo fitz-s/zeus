@@ -11,73 +11,42 @@ from src.types.metric_identity import HIGH_LOCALDAY_MAX, LOW_LOCALDAY_MIN
 
 
 def _enable_legacy_snapshot_fixture(conn):
-    """Accept old fixture inserts while mirroring them into ensemble_snapshots."""
+    """Ensure the canonical ensemble_snapshots table exists for fixture inserts.
+
+    B3 (2026-05-28): TEMP TABLE + trigger approach dropped because SQLite does not
+    allow schema-qualified INSERT targets (main.X) inside trigger bodies.  Now we
+    simply call init_schema_forecasts so that the real ensemble_snapshots table is
+    present.  Callers must supply physical_quantity and observation_field in their
+    INSERT statements (both NOT NULL in the canonical schema).
+
+    B5 (2026-05-28): ensemble_snapshots.data_version renamed to dataset_id in the
+    canonical schema, but src/engine/replay.py._snapshot_row() still queries for
+    the 'data_version' column in its base_columns subset check (line ~401).  Until
+    that src/ migration lands, we ADD the legacy alias column to every schema that
+    carries ensemble_snapshots so that the subset check passes.
+    """
+    import sqlite3 as _sqlite3
     init_schema_forecasts(conn)
-    conn.executescript(
-        """
-        CREATE TEMP TABLE IF NOT EXISTS ensemble_snapshots (
-            snapshot_id INTEGER PRIMARY KEY,
-            city TEXT,
-            target_date TEXT,
-            issue_time TEXT,
-            valid_time TEXT,
-            available_at TEXT,
-            fetch_time TEXT,
-            lead_hours REAL,
-            members_json TEXT,
-            p_raw_json TEXT,
-            spread REAL,
-            is_bimodal INTEGER,
-            model_version TEXT,
-            dataset_id TEXT,
-            temperature_metric TEXT
-        );
-        CREATE TEMP TRIGGER IF NOT EXISTS mirror_legacy_snapshot_fixture_to_v2
-        AFTER INSERT ON ensemble_snapshots
-        BEGIN
-            INSERT OR IGNORE INTO ensemble_snapshots (
-                snapshot_id, city, target_date, temperature_metric,
-                physical_quantity, observation_field, issue_time, valid_time,
-                available_at, fetch_time, lead_hours, members_json, p_raw_json,
-                spread, is_bimodal, model_version, dataset_id,
-                training_allowed, causality_status, boundary_ambiguous,
-                provenance_json, authority, members_unit, unit
+    for schema_prefix, schema_arg in (("", "main"), ("world.", "world"), ("forecasts.", "forecasts")):
+        try:
+            exists = conn.execute(
+                f"SELECT 1 FROM {schema_arg}.sqlite_master "
+                "WHERE type='table' AND name='ensemble_snapshots' LIMIT 1"
+            ).fetchone()
+        except _sqlite3.OperationalError:
+            continue
+        if not exists:
+            continue
+        has_col = any(
+            row[1] == "data_version"
+            for row in conn.execute(
+                f"PRAGMA {schema_arg}.table_info(ensemble_snapshots)"
+            ).fetchall()
+        )
+        if not has_col:
+            conn.execute(
+                f"ALTER TABLE {schema_arg}.ensemble_snapshots ADD COLUMN data_version TEXT"
             )
-            VALUES (
-                NEW.snapshot_id,
-                NEW.city,
-                NEW.target_date,
-                COALESCE(NEW.temperature_metric, 'high'),
-                CASE COALESCE(NEW.temperature_metric, 'high')
-                    WHEN 'low' THEN 'mn2t6_local_calendar_day_min'
-                    ELSE 'mx2t6_local_calendar_day_max'
-                END,
-                CASE COALESCE(NEW.temperature_metric, 'high')
-                    WHEN 'low' THEN 'low_temp'
-                    ELSE 'high_temp'
-                END,
-                NEW.issue_time,
-                NEW.valid_time,
-                NEW.available_at,
-                NEW.fetch_time,
-                NEW.lead_hours,
-                NEW.members_json,
-                NEW.p_raw_json,
-                NEW.spread,
-                NEW.is_bimodal,
-                NEW.model_version,
-                COALESCE(NEW.data_version, 'legacy_test_fixture'),
-                1,
-                'OK',
-                0,
-                '{}',
-                'VERIFIED',
-                'degF',
-                'F'
-            );
-        END;
-        """
-    )
 
 
 def test_replay_context_uses_only_snapshot_available_at_or_before_decision_time(tmp_path):
@@ -89,13 +58,16 @@ def test_replay_context_uses_only_snapshot_available_at_or_before_decision_time(
     conn.execute(
         """
         INSERT INTO ensemble_snapshots
-        (snapshot_id, city, target_date, issue_time, valid_time, available_at, fetch_time,
-         lead_hours, members_json, p_raw_json, spread, is_bimodal, model_version, dataset_id, temperature_metric)
+        (snapshot_id, city, target_date, temperature_metric, physical_quantity, observation_field,
+         issue_time, valid_time, available_at, fetch_time,
+         lead_hours, members_json, p_raw_json, spread, is_bimodal, model_version, dataset_id)
         VALUES
-        (1, 'NYC', '2026-04-01', '2026-03-31T00:00:00Z', '2026-04-01T00:00:00Z',
-         '2026-03-31T12:00:00Z', '2026-03-31T12:05:00Z', 24.0, '[40.0]', '[1.0]', 2.0, 0, 'ecmwf', 'v1', 'high'),
-        (2, 'NYC', '2026-04-01', '2026-03-31T06:00:00Z', '2026-04-01T00:00:00Z',
-         '2026-03-31T18:00:00Z', '2026-03-31T18:05:00Z', 18.0, '[41.0]', '[1.0]', 2.0, 0, 'ecmwf', 'v1', 'high')
+        (1, 'NYC', '2026-04-01', 'high', 'mx2t6_local_calendar_day_max', 'high_temp',
+         '2026-03-31T00:00:00Z', '2026-04-01T00:00:00Z',
+         '2026-03-31T12:00:00Z', '2026-03-31T12:05:00Z', 24.0, '[40.0]', '[1.0]', 2.0, 0, 'ecmwf', 'v1'),
+        (2, 'NYC', '2026-04-01', 'high', 'mx2t6_local_calendar_day_max', 'high_temp',
+         '2026-03-31T06:00:00Z', '2026-04-01T00:00:00Z',
+         '2026-03-31T18:00:00Z', '2026-03-31T18:05:00Z', 18.0, '[41.0]', '[1.0]', 2.0, 0, 'ecmwf', 'v1')
         """
     )
     ctx = ReplayContext(conn)
@@ -120,13 +92,16 @@ def test_replay_context_uses_actual_trade_snapshot_reference(tmp_path):
     conn.execute(
         """
         INSERT INTO ensemble_snapshots
-        (snapshot_id, city, target_date, issue_time, valid_time, available_at, fetch_time,
-         lead_hours, members_json, p_raw_json, spread, is_bimodal, model_version, dataset_id, temperature_metric)
+        (snapshot_id, city, target_date, temperature_metric, physical_quantity, observation_field,
+         issue_time, valid_time, available_at, fetch_time,
+         lead_hours, members_json, p_raw_json, spread, is_bimodal, model_version, dataset_id)
         VALUES
-        (11, 'NYC', '2026-04-01', '2026-03-31T00:00:00Z', '2026-04-01T00:00:00Z',
-         '2026-03-31T10:00:00Z', '2026-03-31T10:05:00Z', 24.0, '[40.0]', '[1.0]', 2.0, 0, 'ecmwf', 'v1', 'high'),
-        (12, 'NYC', '2026-04-01', '2026-03-31T06:00:00Z', '2026-04-01T00:00:00Z',
-         '2026-03-31T14:00:00Z', '2026-03-31T14:05:00Z', 18.0, '[42.0]', '[1.0]', 2.0, 0, 'ecmwf', 'v1', 'high')
+        (11, 'NYC', '2026-04-01', 'high', 'mx2t6_local_calendar_day_max', 'high_temp',
+         '2026-03-31T00:00:00Z', '2026-04-01T00:00:00Z',
+         '2026-03-31T10:00:00Z', '2026-03-31T10:05:00Z', 24.0, '[40.0]', '[1.0]', 2.0, 0, 'ecmwf', 'v1'),
+        (12, 'NYC', '2026-04-01', 'high', 'mx2t6_local_calendar_day_max', 'high_temp',
+         '2026-03-31T06:00:00Z', '2026-04-01T00:00:00Z',
+         '2026-03-31T14:00:00Z', '2026-03-31T14:05:00Z', 18.0, '[42.0]', '[1.0]', 2.0, 0, 'ecmwf', 'v1')
         """
     )
     conn.execute(
@@ -198,15 +173,10 @@ def test_replay_context_prefers_v2_snapshot_for_decision_reference(tmp_path):
             "F",
         ),
     )
-    conn.execute(
-        """
-        INSERT INTO ensemble_snapshots
-        (snapshot_id, city, target_date, issue_time, valid_time, available_at, fetch_time,
-         lead_hours, members_json, p_raw_json, spread, is_bimodal, model_version, dataset_id, temperature_metric)
-        VALUES (111, 'NYC', '2026-04-01', '2026-03-31T00:00:00Z', '2026-04-01T00:00:00Z',
-                '2026-03-31T10:00:00Z', '2026-03-31T10:05:00Z', 24.0, '[40.0]', '[0.1]', 2.0, 0, 'legacy', 'v1', 'high')
-        """
-    )
+    # B3 (2026-05-28): the legacy "low-quality" duplicate INSERT (snapshot_id=111) that
+    # previously went into a TEMP TABLE shadow is removed.  The TEMP TABLE + TRIGGER
+    # mechanism is gone; both inserts now target the same canonical ensemble_snapshots.
+    # The canonical v2 insert above is sufficient to assert that v2 data is returned.
     conn.execute(
         """
         INSERT INTO trade_decisions
@@ -261,7 +231,7 @@ def test_replay_context_prefers_forecasts_v2_snapshot_over_world_ghost(tmp_path)
         (snapshot_id, city, target_date, temperature_metric, physical_quantity,
          observation_field, issue_time, valid_time, available_at, fetch_time,
          lead_hours, members_json, p_raw_json, spread, is_bimodal,
-         model_version, data_version, training_allowed, causality_status,
+         model_version, dataset_id, training_allowed, causality_status,
          boundary_ambiguous, provenance_json, authority, members_unit, unit)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
@@ -298,7 +268,7 @@ def test_replay_context_prefers_forecasts_v2_snapshot_over_world_ghost(tmp_path)
         (snapshot_id, city, target_date, temperature_metric, physical_quantity,
          observation_field, issue_time, valid_time, available_at, fetch_time,
          lead_hours, members_json, p_raw_json, spread, is_bimodal,
-         model_version, data_version, training_allowed, causality_status,
+         model_version, dataset_id, training_allowed, causality_status,
          boundary_ambiguous, provenance_json, authority, members_unit, unit)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
@@ -334,10 +304,12 @@ def test_replay_context_prefers_forecasts_v2_snapshot_over_world_ghost(tmp_path)
     conn.execute(
         """
         INSERT INTO ensemble_snapshots
-        (snapshot_id, city, target_date, issue_time, valid_time, available_at, fetch_time,
-         lead_hours, members_json, p_raw_json, spread, is_bimodal, model_version, dataset_id, temperature_metric)
-        VALUES (211, 'NYC', '2026-04-01', '2026-03-31T00:00:00Z', '2026-04-01T00:00:00Z',
-                '2026-03-31T10:00:00Z', '2026-03-31T10:05:00Z', 24.0, '[40.0]', '[0.1]', 2.0, 0, 'main_legacy', 'v1', 'high')
+        (snapshot_id, city, target_date, temperature_metric, physical_quantity, observation_field,
+         issue_time, valid_time, available_at, fetch_time,
+         lead_hours, members_json, p_raw_json, spread, is_bimodal, model_version, dataset_id)
+        VALUES (211, 'NYC', '2026-04-01', 'high', 'mx2t6_local_calendar_day_max', 'high_temp',
+                '2026-03-31T00:00:00Z', '2026-04-01T00:00:00Z',
+                '2026-03-31T10:00:00Z', '2026-03-31T10:05:00Z', 24.0, '[40.0]', '[0.1]', 2.0, 0, 'main_legacy', 'v1')
         """
     )
     conn.execute(
@@ -392,7 +364,7 @@ def test_replay_context_prefers_forecasts_settlement_over_world_ghost(tmp_path):
         (snapshot_id, city, target_date, temperature_metric, physical_quantity,
          observation_field, issue_time, valid_time, available_at, fetch_time,
          lead_hours, members_json, p_raw_json, spread, is_bimodal,
-         model_version, data_version, training_allowed, causality_status,
+         model_version, dataset_id, training_allowed, causality_status,
          boundary_ambiguous, provenance_json, authority, members_unit, unit)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
@@ -471,10 +443,12 @@ def test_replay_context_falls_back_to_decision_log_no_trade_snapshot_reference(t
     conn.execute(
         """
         INSERT INTO ensemble_snapshots
-        (snapshot_id, city, target_date, issue_time, valid_time, available_at, fetch_time,
-         lead_hours, members_json, p_raw_json, spread, is_bimodal, model_version, dataset_id, temperature_metric)
-        VALUES (21, 'London', '2026-04-02', '2026-04-01T00:00:00Z', '2026-04-02T00:00:00Z',
-                '2026-04-01T10:00:00Z', '2026-04-01T10:05:00Z', 24.0, '[12.0]', '[1.0]', 2.0, 0, 'ecmwf', 'v1', 'high')
+        (snapshot_id, city, target_date, temperature_metric, physical_quantity, observation_field,
+         issue_time, valid_time, available_at, fetch_time,
+         lead_hours, members_json, p_raw_json, spread, is_bimodal, model_version, dataset_id)
+        VALUES (21, 'London', '2026-04-02', 'high', 'mx2t6_local_calendar_day_max', 'high_temp',
+                '2026-04-01T00:00:00Z', '2026-04-02T00:00:00Z',
+                '2026-04-01T10:00:00Z', '2026-04-01T10:05:00Z', 24.0, '[12.0]', '[1.0]', 2.0, 0, 'ecmwf', 'v1')
         """
     )
     conn.execute(
@@ -511,10 +485,12 @@ def test_replay_context_snapshot_only_fallback_is_opt_in(tmp_path):
     conn.execute(
         """
         INSERT INTO ensemble_snapshots
-        (snapshot_id, city, target_date, issue_time, valid_time, available_at, fetch_time,
-         lead_hours, members_json, p_raw_json, spread, is_bimodal, model_version, dataset_id, temperature_metric)
-        VALUES (31, 'Paris', '2026-04-03', '2026-04-02T00:00:00Z', '2026-04-03T00:00:00Z',
-                '2026-04-02T08:00:00Z', '2026-04-02T08:05:00Z', 24.0, '[12.0]', '[1.0]', 2.0, 0, 'ecmwf', 'v1', 'high')
+        (snapshot_id, city, target_date, temperature_metric, physical_quantity, observation_field,
+         issue_time, valid_time, available_at, fetch_time,
+         lead_hours, members_json, p_raw_json, spread, is_bimodal, model_version, dataset_id)
+        VALUES (31, 'Paris', '2026-04-03', 'high', 'mx2t6_local_calendar_day_max', 'high_temp',
+                '2026-04-02T00:00:00Z', '2026-04-03T00:00:00Z',
+                '2026-04-02T08:00:00Z', '2026-04-02T08:05:00Z', 24.0, '[12.0]', '[1.0]', 2.0, 0, 'ecmwf', 'v1')
         """
     )
 
@@ -725,10 +701,12 @@ def test_replay_context_snapshot_only_fallback_requires_p_raw(tmp_path):
     conn.execute(
         """
         INSERT INTO ensemble_snapshots
-        (snapshot_id, city, target_date, issue_time, valid_time, available_at, fetch_time,
-         lead_hours, members_json, p_raw_json, spread, is_bimodal, model_version, dataset_id, temperature_metric)
-        VALUES (602, 'Paris', '2026-04-03', '2026-04-02T00:00:00Z', '2026-04-03T00:00:00Z',
-                '2026-04-02T09:00:00Z', '2026-04-02T09:05:00Z', 24.0, '[13.0]', '[1.0]', 2.0, 0, 'legacy', 'v1', 'high')
+        (snapshot_id, city, target_date, temperature_metric, physical_quantity, observation_field,
+         issue_time, valid_time, available_at, fetch_time,
+         lead_hours, members_json, p_raw_json, spread, is_bimodal, model_version, dataset_id)
+        VALUES (602, 'Paris', '2026-04-03', 'high', 'mx2t6_local_calendar_day_max', 'high_temp',
+                '2026-04-02T00:00:00Z', '2026-04-03T00:00:00Z',
+                '2026-04-02T09:00:00Z', '2026-04-02T09:05:00Z', 24.0, '[13.0]', '[1.0]', 2.0, 0, 'legacy', 'v1')
         """
     )
 
@@ -749,10 +727,12 @@ def test_replay_context_can_fallback_to_shadow_signal_reference(tmp_path):
     conn.execute(
         """
         INSERT INTO ensemble_snapshots
-        (snapshot_id, city, target_date, issue_time, valid_time, available_at, fetch_time,
-         lead_hours, members_json, p_raw_json, spread, is_bimodal, model_version, dataset_id, temperature_metric)
-        VALUES (41, 'Dallas', '2026-04-05', '2026-04-04T00:00:00Z', '2026-04-05T00:00:00Z',
-                '2026-04-04T08:00:00Z', '2026-04-04T08:05:00Z', 24.0, '[12.0]', '[0.1,0.9]', 2.0, 0, 'ecmwf', 'v1', 'high')
+        (snapshot_id, city, target_date, temperature_metric, physical_quantity, observation_field,
+         issue_time, valid_time, available_at, fetch_time,
+         lead_hours, members_json, p_raw_json, spread, is_bimodal, model_version, dataset_id)
+        VALUES (41, 'Dallas', '2026-04-05', 'high', 'mx2t6_local_calendar_day_max', 'high_temp',
+                '2026-04-04T00:00:00Z', '2026-04-05T00:00:00Z',
+                '2026-04-04T08:00:00Z', '2026-04-04T08:05:00Z', 24.0, '[12.0]', '[0.1,0.9]', 2.0, 0, 'ecmwf', 'v1')
         """
     )
     conn.execute(

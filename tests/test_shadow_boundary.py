@@ -38,10 +38,13 @@ class TestShadowModuleMarkers:
 class TestShadowReturnDicts:
     def test_blocked_oos_report_carries_shadow_only(self, tmp_path):
         from src.calibration.blocked_oos import evaluate_blocked_oos_calibration
-        from src.state.db import get_connection, init_schema
+        from src.state.db import get_connection, init_schema, init_schema_forecasts
 
         conn = get_connection(tmp_path / "shadow_test.db")
         init_schema(conn)
+        # B3 (2026-05-28): calibration_pairs moved to forecast-class (zeus-forecasts.db).
+        # blocked_oos._fetch_rows queries calibration_pairs; need forecasts schema init.
+        init_schema_forecasts(conn)
         report = evaluate_blocked_oos_calibration(
             conn,
             train_start="2025-01-01",
@@ -58,10 +61,12 @@ class TestShadowReturnDicts:
             evaluate_blocked_oos_calibration,
             recommend_calibration_promotion,
         )
-        from src.state.db import get_connection, init_schema
+        from src.state.db import get_connection, init_schema, init_schema_forecasts
 
         conn = get_connection(tmp_path / "shadow_test2.db")
         init_schema(conn)
+        # B3 (2026-05-28): calibration_pairs moved to forecast-class.
+        init_schema_forecasts(conn)
         report = evaluate_blocked_oos_calibration(
             conn,
             train_start="2025-01-01",

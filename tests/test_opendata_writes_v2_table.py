@@ -146,12 +146,12 @@ def test_opendata_high_payload_lands_in_v2(tmp_path: Path, monkeypatch):
 
     assert summary["written"] == 1, summary
     rows = conn.execute(
-        "SELECT data_version, temperature_metric, city, target_date "
+        "SELECT dataset_id, temperature_metric, city, target_date "
         "FROM ensemble_snapshots"
     ).fetchall()
     assert len(rows) == 1
     row = rows[0]
-    assert row["data_version"] == ECMWF_OPENDATA_HIGH_DATA_VERSION
+    assert row["dataset_id"] == ECMWF_OPENDATA_HIGH_DATA_VERSION
     assert row["temperature_metric"] == "high"
     assert row["city"] == "London"
     assert row["target_date"] == target

@@ -137,6 +137,7 @@ def test_explicit_ingest_backend_values_round_trip() -> None:
     """A row inserted with ``ingest_backend='ecds'`` reads back ``'ecds'``."""
     conn = sqlite3.connect(":memory:")
     apply_canonical_schema(conn)
+    migrate(conn, dry_run=False)  # adds ingest_backend via ALTER TABLE
 
     # Insert two rows, one ecds, one webapi.
     conn.execute(
@@ -144,7 +145,7 @@ def test_explicit_ingest_backend_values_round_trip() -> None:
         INSERT INTO {TABLE_NAME}
             (city, target_date, temperature_metric, physical_quantity,
              observation_field, available_at, fetch_time, lead_hours,
-             members_json, model_version, data_version, ingest_backend)
+             members_json, model_version, dataset_id, ingest_backend)
         VALUES (?, ?, 'high', 'temp_max', 'high_temp', ?, ?, 24.0, '[]',
                 'ecmwf_ens', 'tigge_mx2t6_local_calendar_day_max_v1', ?)
         """,
@@ -156,7 +157,7 @@ def test_explicit_ingest_backend_values_round_trip() -> None:
         INSERT INTO {TABLE_NAME}
             (city, target_date, temperature_metric, physical_quantity,
              observation_field, available_at, fetch_time, lead_hours,
-             members_json, model_version, data_version, ingest_backend)
+             members_json, model_version, dataset_id, ingest_backend)
         VALUES (?, ?, 'high', 'temp_max', 'high_temp', ?, ?, 24.0, '[]',
                 'ecmwf_ens', 'tigge_mx2t6_local_calendar_day_max_v1', ?)
         """,
@@ -178,12 +179,13 @@ def test_default_ingest_backend_when_omitted() -> None:
     """A row inserted without specifying ingest_backend defaults to 'unknown'."""
     conn = sqlite3.connect(":memory:")
     apply_canonical_schema(conn)
+    migrate(conn, dry_run=False)  # adds ingest_backend via ALTER TABLE
     conn.execute(
         f"""
         INSERT INTO {TABLE_NAME}
             (city, target_date, temperature_metric, physical_quantity,
              observation_field, available_at, fetch_time, lead_hours,
-             members_json, model_version, data_version)
+             members_json, model_version, dataset_id)
         VALUES (?, ?, 'high', 'temp_max', 'high_temp', ?, ?, 24.0, '[]',
                 'ecmwf_ens', 'tigge_mx2t6_local_calendar_day_max_v1')
         """,

@@ -36,6 +36,8 @@ import pytest
 
 from src.calibration.store import add_calibration_pair, infer_bin_width_from_label
 from src.calibration.decision_group import compute_id
+from src.state.schema.v2_schema import apply_canonical_schema
+from src.types.metric_identity import HIGH_LOCALDAY_MAX
 from src.contracts.calibration_bins import (
     C_CANONICAL_GRID,
     F_CANONICAL_GRID,
@@ -129,6 +131,7 @@ def mem_db() -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     init_schema(conn)
+    apply_canonical_schema(conn)
     yield conn
     conn.close()
 
@@ -353,6 +356,9 @@ def test_R7_delete_canonical_slice_cleans_linked_groups_preserves_legacy(mem_db)
         decision_group_id="NYC|2025-06-15|canon",
         bin_source="canonical_v1",
         city_obj=NYC_F,
+        metric_identity=HIGH_LOCALDAY_MAX,
+        training_allowed=True,
+        data_version=HIGH_LOCALDAY_MAX.data_version,
     )
     add_calibration_pair(
         mem_db,
@@ -368,6 +374,9 @@ def test_R7_delete_canonical_slice_cleans_linked_groups_preserves_legacy(mem_db)
         decision_group_id="Chicago|2025-06-15|legacy",
         bin_source="legacy",
         city_obj=CHICAGO_F,
+        metric_identity=HIGH_LOCALDAY_MAX,
+        training_allowed=True,
+        data_version=HIGH_LOCALDAY_MAX.data_version,
     )
     mem_db.executemany(
         """
@@ -462,6 +471,9 @@ def test_R9_delete_scope_never_matches_legacy_rows(mem_db):
         ),
         bin_source="legacy",
         city_obj=PARIS_C,
+        metric_identity=HIGH_LOCALDAY_MAX,
+        training_allowed=True,
+        data_version=HIGH_LOCALDAY_MAX.data_version,
     )
     add_calibration_pair(
         mem_db,
@@ -482,6 +494,9 @@ def test_R9_delete_scope_never_matches_legacy_rows(mem_db):
         ),
         bin_source="canonical_v1",
         city_obj=PARIS_C,
+        metric_identity=HIGH_LOCALDAY_MAX,
+        training_allowed=True,
+        data_version=HIGH_LOCALDAY_MAX.data_version,
     )
     mem_db.commit()
 
@@ -1016,12 +1031,14 @@ def _seed_ensemble_snapshot(
     conn.execute(
         """
         INSERT INTO ensemble_snapshots
-        (city, target_date, issue_time, valid_time, available_at, fetch_time,
+        (city, target_date, temperature_metric, physical_quantity, observation_field,
+         issue_time, valid_time, available_at, fetch_time,
          lead_hours, members_json, model_version, dataset_id, authority)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             city, target_date,
+            "high", "2m_temperature_daily_max", "high_temp",
             f"{target_date}T00:00:00Z",
             f"{target_date}T12:00:00Z",
             f"{target_date}T00:00:00Z",

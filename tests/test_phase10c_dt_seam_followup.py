@@ -295,9 +295,9 @@ class TestRCSHarvesterLowRouting:
             f"R-CS.2 post-C5: expected metric='high', got "
             f"{rows_v2[0]['temperature_metric']!r}"
         )
-        assert rows_v2[0]["data_version"] == "tigge_mx2t6_local_calendar_day_max_v1", (
+        assert rows_v2[0]["dataset_id"] == "tigge_mx2t6_local_calendar_day_max_v1", (
             f"R-CS.2 post-C5: expected canonical HIGH data_version; got "
-            f"{rows_v2[0]['data_version']!r}"
+            f"{rows_v2[0]['dataset_id']!r}"
         )
 
 

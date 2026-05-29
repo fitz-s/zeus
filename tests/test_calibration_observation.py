@@ -72,19 +72,33 @@ def _insert_legacy_raw(
     fitted_at: str | None = None,
 ):
     """Direct insert into platt_models bypassing save_platt_model (lets us
-    set is_active=0 + authority='UNVERIFIED' to test the filter)."""
+    set is_active=0 + authority='UNVERIFIED' to test the filter).
+
+    B3 canonical schema: platt_models now requires model_key (PK), cluster,
+    season, data_version as NOT NULL. Derive sensible defaults from bucket_key
+    so legacy tests that pass only bucket_key still work.
+    """
     if fitted_at is None:
         fitted_at = datetime.now(timezone.utc).isoformat()
     import json
+    # Derive cluster/season from bucket_key (format "City_SEASON") for legacy compat.
+    parts = bucket_key.rsplit("_", 1)
+    cluster = parts[0] if len(parts) == 2 else bucket_key
+    season = parts[1] if len(parts) == 2 else "DJF"
+    data_version = "tigge_hres_v1"
+    model_key = f"high:{cluster}:{season}:{data_version}:raw_probability:{is_active}"
     conn.execute(
         """
         INSERT OR REPLACE INTO platt_models
-        (bucket_key, param_A, param_B, param_C, bootstrap_params_json,
-         n_samples, brier_insample, fitted_at, is_active, input_space, authority)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        (model_key, bucket_key, temperature_metric, cluster, season, data_version,
+         param_A, param_B, param_C,
+         bootstrap_params_json, n_samples, brier_insample, fitted_at,
+         is_active, input_space, authority, recorded_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (bucket_key, A, B, C, json.dumps([(A, B, C)] * 10),
-         n_samples, None, fitted_at, is_active, "raw_probability", authority),
+        (model_key, bucket_key, "high", cluster, season, data_version,
+         A, B, C, json.dumps([(A, B, C)] * 10),
+         n_samples, None, fitted_at, is_active, "raw_probability", authority, fitted_at),
     )
 
 
@@ -177,8 +191,8 @@ def test_legacy_only_snapshot_shape():
     field shape contract. v2-only fields (temperature_metric, cluster, season,
     data_version) are None on legacy."""
     conn = _make_conn()
-    save_platt_model(conn, "TestCity_DJF", 1.5, 0.3, 0.0,
-                     [(1.5, 0.3, 0.0)] * 10, 50)
+    _insert_legacy_raw(conn, bucket_key="TestCity_DJF", A=1.5, B=0.3, C=0.0,
+                       n_samples=50)
     snapshot = compute_platt_parameter_snapshot_per_bucket(conn)
     assert "TestCity_DJF" in snapshot
     rec = snapshot["TestCity_DJF"]
@@ -243,8 +257,8 @@ def test_v2_legacy_dedup_v2_wins():
     # bucket-equivalence — that level of dedup is out-of-scope for BATCH 1
     # (would require model_key↔bucket_key bridge logic that lives in
     # manager.py, not here).
-    save_platt_model(conn, "TestCity_DJF", 1.5, 0.3, 0.0,
-                     [(1.5, 0.3, 0.0)] * 10, 50)
+    _insert_legacy_raw(conn, bucket_key="TestCity_DJF", A=1.5, B=0.3, C=0.0,
+                       n_samples=50)
     save_platt_model(
         conn, metric_identity=HIGH_LOCALDAY_MAX, cluster="TestCity",
         season="DJF", data_version="v1", param_A=1.6, param_B=0.25, param_C=0.0,
@@ -303,7 +317,7 @@ def test_sample_quality_boundaries():
     conn = _make_conn()
     for bucket_key, n in [("b9", 9), ("b10", 10), ("b29", 29), ("b30", 30),
                            ("b99", 99), ("b100", 100)]:
-        save_platt_model(conn, bucket_key, 1.0, 0.0, 0.0, [(1.0, 0.0, 0.0)], n)
+        _insert_legacy_raw(conn, bucket_key=bucket_key, A=1.0, B=0.0, C=0.0, n_samples=n)
     snapshot = compute_platt_parameter_snapshot_per_bucket(conn)
     assert snapshot["b9"]["sample_quality"] == "insufficient"
     assert snapshot["b10"]["sample_quality"] == "low"

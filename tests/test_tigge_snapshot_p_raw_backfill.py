@@ -16,6 +16,7 @@ from scripts.backfill_tigge_snapshot_p_raw import (
 )
 from src.config import cities_by_name
 from src.state.db import get_connection, init_schema
+from src.state.schema.v2_schema import apply_canonical_schema
 from src.types import Bin
 
 
@@ -79,20 +80,23 @@ def test_backfill_typed_bins_match_replay_union_order_for_mixed_sources(tmp_path
     db_path = tmp_path / "world.db"
     conn = get_connection(db_path)
     init_schema(conn)
+    apply_canonical_schema(conn)
     conn.execute(
         """
         INSERT INTO calibration_pairs
-        (city, target_date, range_label, p_raw, outcome, lead_days, season, cluster, forecast_available_at, settlement_value)
+        (city, target_date, range_label, p_raw, outcome, lead_days, season, cluster, forecast_available_at, settlement_value,
+         temperature_metric, observation_field, dataset_id, training_allowed, causality_status, decision_group_id)
         VALUES
-        ('NYC', '2026-04-03', '39-40°F', 0.0, 1, 1.0, 'MAM', 'US-Northeast', '2026-04-02T08:00:00Z', 40.0)
+        ('NYC', '2026-04-03', '39-40°F', 0.0, 1, 1.0, 'MAM', 'US-Northeast', '2026-04-02T08:00:00Z', 40.0,
+         'high', 'high_temp', 'tigge_mx2t6_local_calendar_day_max_v1', 1, 'OK', 'dg-backfill-test-001')
         """
     )
     conn.execute(
         """
         INSERT INTO market_events
-        (market_slug, city, target_date, condition_id, token_id, range_label, range_low, range_high, outcome, created_at)
+        (market_slug, city, target_date, temperature_metric, condition_id, token_id, range_label, range_low, range_high, outcome, created_at)
         VALUES
-        ('m1', 'NYC', '2026-04-03', 'cond-1', 'tok-1', '41-42°F', 41, 42, 'YES', '2026-04-02T08:00:00Z')
+        ('m1', 'NYC', '2026-04-03', 'high', 'cond-1', 'tok-1', '41-42°F', 41, 42, 'YES', '2026-04-02T08:00:00Z')
         """
     )
 
