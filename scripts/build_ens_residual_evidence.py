@@ -47,6 +47,9 @@ import statistics
 import sys
 from pathlib import Path
 
+from src.contracts.residual_key import source_kind_for_data_version
+from src.contracts.residual_value import residual_celsius
+
 logger = logging.getLogger(__name__)
 
 # Refuse canonical DBs as source (mirrors fit_full_transport_error_models guard): the ledger
@@ -104,6 +107,62 @@ def _cycle_for_metric(metric: str) -> str:
     return _HIGH_CYCLE if metric == "high" else _LOW_CYCLE
 
 
+def _strict_evidence_row(e: dict, *, metric: str, lat: dict) -> dict | None:
+    """Build one STRICT-ledger output row from an evidence dict ``e``.
+
+    Returns None when the ensemble mean is None (bad members_json).
+    Uses residual_celsius (each side converted by its own unit) and
+    source_kind_for_data_version (derived lineage, not hardcoded 'prior').
+    Raises ValueError from source_kind_for_data_version on an unrecognised
+    data_version lineage.
+    """
+    try:
+        parsed = json.loads(e["members_json"])
+        members_list = [float(x) for x in (
+            parsed.values() if isinstance(parsed, dict) else parsed
+        ) if x is not None]
+    except (json.JSONDecodeError, TypeError, ValueError):
+        members_list = []
+    if not members_list:
+        return None
+
+    em = _to_celsius(statistics.mean(members_list), e["members_unit"])
+    mo = int(str(e["target_date"])[5:7])
+    seas = _season(mo, lat.get(e["city"]))
+    residual = residual_celsius(
+        members_list,
+        e["members_unit"],
+        e["settlement_value_c"],
+        e["settlement_unit"],
+    )
+    sk = source_kind_for_data_version(e["data_version"])
+    return {
+        "city": e["city"],
+        "metric": metric,
+        "season": seas,
+        "month": mo,
+        "target_date": e["target_date"],
+        "source_kind": sk,
+        "data_version": e["data_version"],
+        "snapshot_id": e["snapshot_id"],
+        "settlement_id": e["settlement_id"],
+        "issue_time": e["issue_time"],
+        "cycle": e["cycle"],
+        "lead_hours": e["lead_hours"],
+        "contributes_to_target_extrema": e["contributes_to_target_extrema"],
+        "boundary_ambiguous": e["boundary_ambiguous"],
+        "members_unit": e["members_unit"],
+        "ensemble_mean_c": round(em, 3),
+        "settlement_value_c": round(
+            _to_celsius(e["settlement_value_c"], e["settlement_unit"]), 3
+        ),
+        "settlement_value_native": round(e["settlement_value_c"], 3),
+        "settlement_unit": e["settlement_unit"],
+        "residual_c": round(residual, 3),
+        "selection_reason": f"cycle_strict_{_cycle_for_metric(metric)}_only",
+    }
+
+
 def build_evidence(conn: sqlite3.Connection, *, metric: str, lead_max: float,
                    cities: list[str] | None, accept_cycle: str | None) -> list[dict]:
     """Return one evidence row per (city, target_date) for the accepted cycle.
@@ -124,7 +183,7 @@ def build_evidence(conn: sqlite3.Connection, *, metric: str, lead_max: float,
         SELECT e.city, e.target_date, e.snapshot_id, e.issue_time, e.lead_hours,
                e.available_at, e.members_json, e.members_unit, e.data_version,
                e.contributes_to_target_extrema, e.boundary_ambiguous,
-               s.settlement_id, s.settlement_value
+               s.settlement_id, s.settlement_value, e.settlement_unit
         FROM ensemble_snapshots_v2 e
         JOIN settlements_v2 s
           ON s.city = e.city AND s.target_date = e.target_date
@@ -141,7 +200,7 @@ def build_evidence(conn: sqlite3.Connection, *, metric: str, lead_max: float,
     rejected_cycle = 0
     for r in rows:
         (city, td, snap_id, issue, lead, av, mj, mu, dv, contrib, bamb,
-         set_id, sv) = r
+         set_id, sv, su) = r
         hh = str(issue)[11:13] if issue else "NULL"
         if strict_cycle != "ALL" and hh != strict_cycle:
             rejected_cycle += 1
@@ -155,7 +214,7 @@ def build_evidence(conn: sqlite3.Connection, *, metric: str, lead_max: float,
                 "available_at": av, "members_json": mj, "members_unit": mu,
                 "data_version": dv, "contributes_to_target_extrema": contrib,
                 "boundary_ambiguous": bamb, "settlement_id": set_id,
-                "settlement_value_c": float(sv),
+                "settlement_value_c": float(sv), "settlement_unit": su,
             }
 
     logger.info("metric=%s cycle=%s: %d candidate rows, %d kept (one per date), %d rejected by cycle",
@@ -216,27 +275,9 @@ def main() -> int:
                             cities=cities, accept_cycle=None)
         out_rows = []
         for e in ev:
-            em = _ensemble_mean_c(e["members_json"], e["members_unit"])
-            if em is None:
-                continue
-            mo = int(str(e["target_date"])[5:7])
-            seas = _season(mo, lat.get(e["city"]))
-            settle_c = _to_celsius(e["settlement_value_c"], e["members_unit"])
-            out_rows.append({
-                "city": e["city"], "metric": args.metric, "season": seas, "month": mo,
-                "target_date": e["target_date"], "source_kind": "prior",
-                "data_version": e["data_version"], "snapshot_id": e["snapshot_id"],
-                "settlement_id": e["settlement_id"], "issue_time": e["issue_time"],
-                "cycle": e["cycle"], "lead_hours": e["lead_hours"],
-                "contributes_to_target_extrema": e["contributes_to_target_extrema"],
-                "boundary_ambiguous": e["boundary_ambiguous"],
-                "members_unit": e["members_unit"],
-                "ensemble_mean_c": round(em, 3),
-                "settlement_value_c": round(settle_c, 3),
-                "settlement_value_native": round(e["settlement_value_c"], 3),
-                "residual_c": round(em - settle_c, 3),
-                "selection_reason": f"cycle_strict_{_cycle_for_metric(args.metric)}_only",
-            })
+            row = _strict_evidence_row(e, metric=args.metric, lat=lat)
+            if row is not None:
+                out_rows.append(row)
         out_rows.sort(key=lambda r: (r["city"], r["season"], r["target_date"]))
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
