@@ -273,7 +273,7 @@ def _standalone(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     if args.db_path:
-        conn = sqlite3.connect(args.db_path)
+        conn = sqlite3.connect(args.db_path)  # WRITER_LOCK_DEFER_REVIEW=2026-05-29 operator-invoked migration; daemon lock unavailable in standalone path
     else:
         from src.state.db import get_world_connection
 

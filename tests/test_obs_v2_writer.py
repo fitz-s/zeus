@@ -362,7 +362,7 @@ def test_apply_canonical_schema_creates_obs_v2_revision_surfaces(mem_db):
     }
 
     assert "observation_revisions" in tables
-    assert "idx_observation_revisions_obs_v2_lookup" in indexes
+    assert "idx_observation_revisions_obs_lookup" in indexes
     assert "ux_observation_revisions_payload" in indexes
 
 
