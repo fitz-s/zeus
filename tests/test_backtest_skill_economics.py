@@ -382,15 +382,19 @@ def test_run_skill_rejects_diagnostic_contract():
 
 
 def test_run_skill_rejects_promotion_authority_skill_contract():
-    """SKILL with promotion_authority=True is structurally invalid."""
-    bad = PurposeContract(
-        purpose=BacktestPurpose.SKILL,
-        permitted_outputs=SKILL_CONTRACT.permitted_outputs,
-        parity=SKILL_PARITY,
-        promotion_authority=True,
-    )
+    """SKILL with promotion_authority=True is structurally invalid.
+
+    TRIBUNAL PR H made this UNCONSTRUCTABLE: PurposeContract.__post_init__ refuses a
+    SKILL/DIAGNOSTIC contract that claims promotion_authority, so the bad state is
+    rejected at construction (earlier + stronger than the prior run_skill-time check).
+    """
     with pytest.raises(PurposeContractViolation) as excinfo:
-        run_skill("2026-04-01", "2026-04-27", contract=bad)
+        PurposeContract(
+            purpose=BacktestPurpose.SKILL,
+            permitted_outputs=SKILL_CONTRACT.permitted_outputs,
+            parity=SKILL_PARITY,
+            promotion_authority=True,
+        )
     assert "promotion_authority" in str(excinfo.value)
 
 
