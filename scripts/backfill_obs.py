@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 # Lifecycle: created=2026-04-21; last_reviewed=2026-04-25; last_reused=2026-04-25
-# Purpose: Build and write observation_instants_v2 hourly backfill rows through the typed writer.
+# Purpose: Build and write observation_instants hourly backfill rows through the typed writer.
 # Reuse: Re-run topology and current source/data state before changing source or provenance semantics.
 # Created: 2026-04-21
 # Last reused/audited: 2026-04-25
 # Authority basis: plan v3 Phase 0 file #6 (.omc/plans/observation-instants-
 #                  migration-iter3.md L86-93); step2_phase0_pilot_plan.md.
-"""Multi-tier backfill driver for observation_instants_v2.
+"""Multi-tier backfill driver for observation_instants.
 
 Per-city tier resolution dispatches to the matching hourly client
 (``wu_hourly_client`` or ``ogimet_hourly_client``), attaches plan-v3
 provenance (``authority`` + ``data_version`` + ``provenance_json``),
-and writes through ``observation_instants_v2_writer.insert_rows`` which
+and writes through ``observation_instants_writer.insert_rows`` which
 enforces A1/A2/A6 row-by-row.
 
 Default usage (Phase 0 pilot)
@@ -84,7 +84,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from src.config import cities_by_name  # noqa: E402
-from src.data.observation_instants_v2_writer import (  # noqa: E402
+from src.data.observation_instants_writer import (  # noqa: E402
     InvalidObsV2RowError,
     ObsV2Row,
     insert_rows,
@@ -571,7 +571,7 @@ def _backfill_ogimet_city(
 
 def _parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="observation_instants_v2 multi-tier backfill driver",
+        description="observation_instants multi-tier backfill driver",
     )
     city_group = p.add_mutually_exclusive_group(required=True)
     city_group.add_argument(
@@ -666,7 +666,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     with db_writer_lock(args.db, WriteClass.BULK):
         conn = sqlite3.connect(str(args.db))
         try:
-            # Ensure zeus_meta + observation_instants_v2 schema is current.
+            # Ensure zeus_meta + observation_instants schema is current.
             # Cheap; idempotent; protects against running on a DB that was
             # never migrated.
             from src.state.schema.v2_schema import apply_canonical_schema

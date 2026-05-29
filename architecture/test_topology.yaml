@@ -1568,7 +1568,7 @@ test_metadata:
       - architecture/city_truth_contract.yaml
     notes: >
       Antibody for source-tier routing mistakes and wrong city/provider family
-      assumptions in observation_instants_v2.
+      assumptions in observation_instants.
   tests/test_obs_v2_writer.py:
     modules: [data]
     category: core_law_antibody
@@ -1588,7 +1588,7 @@ test_metadata:
       - docs/operations/current_source_validity.md
     notes: >
       Protects P3 reader-side gates so canonical diurnal analytics do not
-      consume observation_instants_v2 rows that are not reader-safe.
+      consume observation_instants rows that are not reader-safe.
   tests/test_hk_rejects_vhhh_source.py:
     modules: [data]
     category: antibody_impossibility
@@ -3116,7 +3116,7 @@ test_metadata:
     law_dependencies:
       - docs/operations/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md
     notes: >
-      Root C antibody: observation_instants_v2.running_max is non-monotonic (per-hour
+      Root C antibody: observation_instants.running_max is non-monotonic (per-hour
       bucket max). high_so_far must be MAX(running_max) over all qualifying rows, not
       the running_max of the latest row. Amsterdam 2026-05-22 concrete case: peak=25.0
       at 15:00 local, latest row=17.0 at 23:00 — naive reader returns 17.0 (wrong).

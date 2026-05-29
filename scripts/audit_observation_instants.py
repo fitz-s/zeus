@@ -3,7 +3,7 @@
 # Last reused/audited: 2026-04-21
 # Authority basis: plan v3 Phase 0 file #7 (.omc/plans/observation-instants-
 #                  migration-iter3.md L86-93, L121-122, L164-168).
-"""Row-count + invariant audit for observation_instants_v2.
+"""Row-count + invariant audit for observation_instants.
 
 Read-only inspection. Never modifies the DB. Emits a JSON report
 keyed by the Phase 0 Gate 0→1 acceptance criteria so
@@ -99,7 +99,7 @@ def _all_cities_for_data_version(
     conn: sqlite3.Connection, data_version: str
 ) -> list[str]:
     rows = conn.execute(
-        "SELECT DISTINCT city FROM observation_instants_v2 "
+        "SELECT DISTINCT city FROM observation_instants "
         "WHERE data_version = ? ORDER BY city",
         (data_version,),
     ).fetchall()
@@ -110,7 +110,7 @@ def _per_city_rowcounts(
     conn: sqlite3.Connection, data_version: str
 ) -> dict[str, int]:
     rows = conn.execute(
-        "SELECT city, COUNT(*) FROM observation_instants_v2 "
+        "SELECT city, COUNT(*) FROM observation_instants "
         "WHERE data_version = ? GROUP BY city ORDER BY city",
         (data_version,),
     ).fetchall()
@@ -136,7 +136,7 @@ def _tier_violations(
         allowed = sorted(ALLOWED_SOURCES_BY_CITY[city])
         placeholders = ",".join(["?"] * len(allowed))
         sql = (
-            f"SELECT source, COUNT(*) FROM observation_instants_v2 "
+            f"SELECT source, COUNT(*) FROM observation_instants "
             f"WHERE data_version = ? AND city = ? "
             f"  AND source NOT IN ({placeholders}) "
             f"GROUP BY source"
@@ -181,7 +181,7 @@ def _source_tier_mismatches(
         allowed = ALLOWED_SOURCES_BY_CITY[city]
         placeholders = ",".join(["?"] * len(allowed))
         sql = (
-            f"SELECT source, COUNT(*) FROM observation_instants_v2 "
+            f"SELECT source, COUNT(*) FROM observation_instants "
             f"WHERE data_version = ? AND city = ? "
             f"  AND source NOT IN ({placeholders}) "
             f"GROUP BY source"
@@ -203,7 +203,7 @@ def _authority_unverified_rows(
     conn: sqlite3.Connection, data_version: str
 ) -> int:
     (count,) = conn.execute(
-        "SELECT COUNT(*) FROM observation_instants_v2 "
+        "SELECT COUNT(*) FROM observation_instants "
         "WHERE data_version = ? AND authority IN ('UNVERIFIED', 'QUARANTINED')",
         (data_version,),
     ).fetchone()
@@ -212,7 +212,7 @@ def _authority_unverified_rows(
 
 def _openmeteo_rows(conn: sqlite3.Connection, data_version: str) -> int:
     (count,) = conn.execute(
-        "SELECT COUNT(*) FROM observation_instants_v2 "
+        "SELECT COUNT(*) FROM observation_instants "
         "WHERE data_version = ? AND source LIKE '%openmeteo%'",
         (data_version,),
     ).fetchone()
@@ -277,7 +277,7 @@ def _dates_under_threshold(
     """
     sql = f"""
         SELECT city, target_date, COUNT(DISTINCT utc_timestamp) AS hours
-        FROM observation_instants_v2
+        FROM observation_instants
         WHERE data_version = ?
           AND city != 'Hong Kong'
         GROUP BY city, target_date
@@ -348,7 +348,7 @@ def _build_report(
 
 def _format_human(report: dict[str, Any]) -> str:
     lines = []
-    lines.append(f"observation_instants_v2 audit — data_version={report['data_version']}")
+    lines.append(f"observation_instants audit — data_version={report['data_version']}")
     lines.append("=" * 72)
     lines.append(f"Total rows:  {report['total_rows']:>10,}")
     lines.append(f"City count:  {report['city_count']:>10}")
@@ -406,7 +406,7 @@ def _format_human(report: dict[str, Any]) -> str:
 
 def _parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="observation_instants_v2 row-count + invariant audit",
+        description="observation_instants row-count + invariant audit",
     )
     p.add_argument(
         "--data-version",
@@ -457,11 +457,11 @@ def main(argv: Optional[list[str]] = None) -> int:
         # Confirm schema exists before querying.
         (tbl,) = conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table' "
-            "AND name='observation_instants_v2' LIMIT 1"
+            "AND name='observation_instants' LIMIT 1"
         ).fetchone() or (None,)
         if tbl is None:
             print(
-                "FATAL: observation_instants_v2 table missing; run "
+                "FATAL: observation_instants table missing; run "
                 "apply_canonical_schema first.",
                 file=sys.stderr,
             )

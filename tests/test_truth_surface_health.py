@@ -413,7 +413,7 @@ def _seed_minimal_ready_training_tables(conn, *, seed_observations=True):
     )
     conn.execute(
         """
-        CREATE TABLE observation_instants_v2 (
+        CREATE TABLE observation_instants (
             authority TEXT,
             data_version TEXT,
             training_allowed INTEGER,
@@ -424,7 +424,7 @@ def _seed_minimal_ready_training_tables(conn, *, seed_observations=True):
     )
     conn.execute(
         """
-        INSERT INTO observation_instants_v2 (
+        INSERT INTO observation_instants (
             authority, data_version, training_allowed, source_role,
             causality_status
         ) VALUES ('VERIFIED', 'v1.wu-native', 1, 'historical_hourly', 'OK')
@@ -444,7 +444,7 @@ def _seed_minimal_ready_training_tables(conn, *, seed_observations=True):
 def _seed_safe_observation_instant(conn):
     conn.execute(
         """
-        INSERT INTO observation_instants_v2 (
+        INSERT INTO observation_instants (
             city, target_date, source, timezone_name, local_timestamp,
             utc_timestamp, utc_offset_minutes, time_basis, temp_unit,
             imported_at, authority, data_version, training_allowed,
@@ -672,7 +672,7 @@ class TestTrainingReadinessP0:
             "market_events",
             "market_price_history",
             "settlement_outcomes",
-            "observation_instants_v2",
+            "observation_instants",
             "observations",
         ]:
             assert checks[table]["status"] == "FAIL"
@@ -900,7 +900,7 @@ class TestTrainingReadinessP0:
         _seed_rebuild_preflight_inputs(conn)
         conn.execute(
             """
-            UPDATE observation_instants_v2
+            UPDATE observation_instants
             SET source_role = 'fallback', causality_status = 'UNKNOWN'
             """
         )
@@ -910,8 +910,8 @@ class TestTrainingReadinessP0:
         report = build_calibration_pair_rebuild_preflight_report(db_path)
 
         blockers = _blocker_codes(report)
-        assert "observation_instants_v2.training_role_unsafe" in blockers
-        assert "observation_instants_v2.causality_unsafe" in blockers
+        assert "observation_instants.training_role_unsafe" in blockers
+        assert "observation_instants.causality_unsafe" in blockers
 
     def test_rebuild_preflight_accepts_opendata_mx2t3_data_version(self, tmp_path):
         """2026-05-25 rename-propagation antibody: ecmwf_opendata_mx2t3_... (in
@@ -1150,7 +1150,7 @@ class TestTrainingReadinessP0:
         conn.execute("CREATE TABLE settlement_outcomes (market_slug TEXT)")
         conn.execute("INSERT INTO settlement_outcomes (market_slug) VALUES ('market-slug')")
         conn.execute(
-            "CREATE TABLE observation_instants_v2 (training_allowed INTEGER, source_role TEXT)"
+            "CREATE TABLE observation_instants (training_allowed INTEGER, source_role TEXT)"
         )
         conn.execute("CREATE TABLE observations (authority TEXT, provenance_metadata TEXT)")
         conn.commit()
@@ -1159,10 +1159,10 @@ class TestTrainingReadinessP0:
         report = build_training_readiness_report(db_path)
 
         assert report["ready"] is False
-        assert report["checks"]["observation_instants_v2"]["status"] == "FAIL"
+        assert report["checks"]["observation_instants"]["status"] == "FAIL"
         assert report["checks"]["observations"]["status"] == "FAIL"
         blockers = {(item["code"], item["table"]) for item in report["blockers"]}
-        assert ("empty_required_table", "observation_instants_v2") in blockers
+        assert ("empty_required_table", "observation_instants") in blockers
         assert ("empty_required_table", "observations") in blockers
 
     def test_training_readiness_fails_when_observations_lack_provenance_columns(self, tmp_path):
@@ -1186,9 +1186,9 @@ class TestTrainingReadinessP0:
         db_path = tmp_path / "no-training-eligible-observations-world.db"
         conn = sqlite3.connect(db_path)
         _seed_minimal_ready_training_tables(conn, seed_observations=True)
-        conn.execute("DELETE FROM observation_instants_v2")
+        conn.execute("DELETE FROM observation_instants")
         conn.execute(
-            "INSERT INTO observation_instants_v2 (training_allowed, source_role) VALUES (0, 'historical_hourly')"
+            "INSERT INTO observation_instants (training_allowed, source_role) VALUES (0, 'historical_hourly')"
         )
         conn.commit()
         conn.close()
@@ -1197,7 +1197,7 @@ class TestTrainingReadinessP0:
 
         assert report["ready"] is False
         assert "empty_training_eligible_observations" in _blocker_codes(report)
-        check = report["checks"]["observation_instants_v2.training_eligible_present"]
+        check = report["checks"]["observation_instants.training_eligible_present"]
         assert check["status"] == "FAIL"
         assert check["count"] == 0
 
@@ -1205,10 +1205,10 @@ class TestTrainingReadinessP0:
         db_path = tmp_path / "unknown-source-role-world.db"
         conn = sqlite3.connect(db_path)
         _seed_minimal_ready_training_tables(conn, seed_observations=True)
-        conn.execute("DELETE FROM observation_instants_v2")
+        conn.execute("DELETE FROM observation_instants")
         conn.execute(
             """
-            INSERT INTO observation_instants_v2 (
+            INSERT INTO observation_instants (
                 training_allowed, source_role, causality_status
             ) VALUES (1, 'banana', 'OK')
             """
@@ -1220,17 +1220,17 @@ class TestTrainingReadinessP0:
 
         assert report["ready"] is False
         assert "empty_training_eligible_observations" in _blocker_codes(report)
-        assert "observation_instants_v2.training_role_unsafe" in _blocker_codes(report)
-        assert report["checks"]["observation_instants_v2.training_role_unsafe"]["count"] == 1
+        assert "observation_instants.training_role_unsafe" in _blocker_codes(report)
+        assert report["checks"]["observation_instants.training_role_unsafe"]["count"] == 1
 
     def test_training_readiness_fails_when_source_role_is_settlement_truth(self, tmp_path):
         db_path = tmp_path / "settlement-truth-source-role-world.db"
         conn = sqlite3.connect(db_path)
         _seed_minimal_ready_training_tables(conn, seed_observations=True)
-        conn.execute("DELETE FROM observation_instants_v2")
+        conn.execute("DELETE FROM observation_instants")
         conn.execute(
             """
-            INSERT INTO observation_instants_v2 (
+            INSERT INTO observation_instants (
                 training_allowed, source_role, causality_status
             ) VALUES (1, 'settlement_truth', 'OK')
             """
@@ -1242,8 +1242,8 @@ class TestTrainingReadinessP0:
 
         assert report["ready"] is False
         assert "empty_training_eligible_observations" in _blocker_codes(report)
-        assert "observation_instants_v2.training_role_unsafe" in _blocker_codes(report)
-        assert report["checks"]["observation_instants_v2.training_role_unsafe"]["count"] == 1
+        assert "observation_instants.training_role_unsafe" in _blocker_codes(report)
+        assert report["checks"]["observation_instants.training_role_unsafe"]["count"] == 1
 
     def test_training_readiness_fails_when_observations_have_no_verified_rows(self, tmp_path):
         db_path = tmp_path / "no-verified-observations-world.db"
@@ -1375,14 +1375,14 @@ class TestTrainingReadinessP0:
         assert report["ready"] is False
         checks = report["checks"]
         for check_id in [
-            "observation_instants_v2.training_role_unsafe",
-            "observation_instants_v2.causality_unsafe",
+            "observation_instants.training_role_unsafe",
+            "observation_instants.causality_unsafe",
             "historical_forecasts.available_at_not_reconstructed",
             "observations.provenance_present",
         ]:
             assert checks[check_id]["status"] == "FAIL"
         blockers = {(item["code"], item["table"]) for item in report["blockers"]}
-        assert ("missing_table", "observation_instants_v2") in blockers
+        assert ("missing_table", "observation_instants") in blockers
         assert ("missing_table", "historical_forecasts") in blockers
         assert ("missing_table", "observations") in blockers
 
@@ -1610,7 +1610,7 @@ class TestTrainingReadinessP0:
         conn = sqlite3.connect(db_path)
         conn.execute(
             """
-            INSERT INTO observation_instants_v2 (
+            INSERT INTO observation_instants (
                 city, target_date, source, timezone_name, local_timestamp,
                 utc_timestamp, utc_offset_minutes, time_basis, temp_unit,
                 imported_at, training_allowed, source_role
@@ -1626,8 +1626,8 @@ class TestTrainingReadinessP0:
 
         report = build_training_readiness_report(db_path)
 
-        assert "observation_instants_v2.training_role_unsafe" in _blocker_codes(report)
-        check = report["checks"]["observation_instants_v2.training_role_unsafe"]
+        assert "observation_instants.training_role_unsafe" in _blocker_codes(report)
+        check = report["checks"]["observation_instants.training_role_unsafe"]
         assert check["status"] == "FAIL"
         assert check["count"] == 1
 
@@ -1636,7 +1636,7 @@ class TestTrainingReadinessP0:
         conn = sqlite3.connect(db_path)
         conn.execute(
             """
-            INSERT INTO observation_instants_v2 (
+            INSERT INTO observation_instants (
                 city, target_date, source, timezone_name, local_timestamp,
                 utc_timestamp, utc_offset_minutes, time_basis, temp_unit,
                 imported_at, training_allowed, source_role
@@ -1652,8 +1652,8 @@ class TestTrainingReadinessP0:
 
         report = build_training_readiness_report(db_path)
 
-        assert "observation_instants_v2.training_role_unsafe" in _blocker_codes(report)
-        check = report["checks"]["observation_instants_v2.training_role_unsafe"]
+        assert "observation_instants.training_role_unsafe" in _blocker_codes(report)
+        check = report["checks"]["observation_instants.training_role_unsafe"]
         assert check["status"] == "FAIL"
         assert check["count"] == 1
 
@@ -1665,7 +1665,7 @@ class TestTrainingReadinessP0:
         conn = sqlite3.connect(db_path)
         _seed_minimal_ready_training_tables(conn, seed_observations=True)
         conn.execute(
-            "UPDATE observation_instants_v2 SET authority = ?",
+            "UPDATE observation_instants SET authority = ?",
             (authority,),
         )
         conn.commit()
@@ -1673,8 +1673,8 @@ class TestTrainingReadinessP0:
 
         report = build_training_readiness_report(db_path)
 
-        assert "observation_instants_v2.reader_identity_unsafe" in _blocker_codes(report)
-        check = report["checks"]["observation_instants_v2.reader_identity_unsafe"]
+        assert "observation_instants.reader_identity_unsafe" in _blocker_codes(report)
+        check = report["checks"]["observation_instants.reader_identity_unsafe"]
         assert check["status"] == "FAIL"
         assert check["count"] == 1
 
@@ -1686,7 +1686,7 @@ class TestTrainingReadinessP0:
         conn = sqlite3.connect(db_path)
         _seed_minimal_ready_training_tables(conn, seed_observations=True)
         conn.execute(
-            "UPDATE observation_instants_v2 SET data_version = ?",
+            "UPDATE observation_instants SET data_version = ?",
             (data_version,),
         )
         conn.commit()
@@ -1694,22 +1694,22 @@ class TestTrainingReadinessP0:
 
         report = build_training_readiness_report(db_path)
 
-        assert "observation_instants_v2.reader_identity_unsafe" in _blocker_codes(report)
-        check = report["checks"]["observation_instants_v2.reader_identity_unsafe"]
+        assert "observation_instants.reader_identity_unsafe" in _blocker_codes(report)
+        check = report["checks"]["observation_instants.reader_identity_unsafe"]
         assert check["status"] == "FAIL"
         assert check["count"] == 1
 
     def test_training_readiness_fails_when_observation_instants_v2_lacks_source_role_columns(self, tmp_path):
         db_path = tmp_path / "legacy-world.db"
         conn = sqlite3.connect(db_path)
-        conn.execute("CREATE TABLE observation_instants_v2 (city TEXT)")
+        conn.execute("CREATE TABLE observation_instants (city TEXT)")
         conn.commit()
         conn.close()
 
         report = build_training_readiness_report(db_path)
 
         assert "missing_source_role_columns" in _blocker_codes(report)
-        check = report["checks"]["observation_instants_v2.training_role_unsafe"]
+        check = report["checks"]["observation_instants.training_role_unsafe"]
         assert check["status"] == "FAIL"
 
     @pytest.mark.parametrize("causality_status", [None, "", "STALE", "N/A_CAUSAL_DAY_STARTED"])
@@ -1719,10 +1719,10 @@ class TestTrainingReadinessP0:
         db_path = tmp_path / "unsafe-causality-world.db"
         conn = sqlite3.connect(db_path)
         _seed_minimal_ready_training_tables(conn, seed_observations=True)
-        conn.execute("DELETE FROM observation_instants_v2")
+        conn.execute("DELETE FROM observation_instants")
         conn.execute(
             """
-            INSERT INTO observation_instants_v2 (
+            INSERT INTO observation_instants (
                 training_allowed, source_role, causality_status
             ) VALUES (1, 'historical_hourly', ?)
             """,
@@ -1734,8 +1734,8 @@ class TestTrainingReadinessP0:
         report = build_training_readiness_report(db_path)
 
         assert report["ready"] is False
-        assert "observation_instants_v2.causality_unsafe" in _blocker_codes(report)
-        check = report["checks"]["observation_instants_v2.causality_unsafe"]
+        assert "observation_instants.causality_unsafe" in _blocker_codes(report)
+        check = report["checks"]["observation_instants.causality_unsafe"]
         assert check["status"] == "FAIL"
         assert check["count"] == 1
 
@@ -1743,10 +1743,10 @@ class TestTrainingReadinessP0:
         db_path = tmp_path / "missing-causality-world.db"
         conn = sqlite3.connect(db_path)
         _seed_minimal_ready_training_tables(conn, seed_observations=True)
-        conn.execute("DROP TABLE observation_instants_v2")
+        conn.execute("DROP TABLE observation_instants")
         conn.execute(
             """
-            CREATE TABLE observation_instants_v2 (
+            CREATE TABLE observation_instants (
                 training_allowed INTEGER,
                 source_role TEXT
             )
@@ -1754,7 +1754,7 @@ class TestTrainingReadinessP0:
         )
         conn.execute(
             """
-            INSERT INTO observation_instants_v2 (
+            INSERT INTO observation_instants (
                 training_allowed, source_role
             ) VALUES (1, 'historical_hourly')
             """
@@ -1765,8 +1765,8 @@ class TestTrainingReadinessP0:
         report = build_training_readiness_report(db_path)
 
         assert report["ready"] is False
-        assert "observation_instants_v2.causality_unsafe" in _blocker_codes(report)
-        check = report["checks"]["observation_instants_v2.causality_unsafe"]
+        assert "observation_instants.causality_unsafe" in _blocker_codes(report)
+        check = report["checks"]["observation_instants.causality_unsafe"]
         assert check["status"] == "FAIL"
         assert check["count"] == 1
 
@@ -1781,7 +1781,7 @@ class TestTrainingReadinessP0:
 
         assert report["ready"] is True
         assert "payload_identity_missing" not in _blocker_codes(report)
-        check = report["checks"]["observation_instants_v2.payload_identity_present"]
+        check = report["checks"]["observation_instants.payload_identity_present"]
         assert check["status"] == "PASS"
         assert check["count"] == 0
 
@@ -1791,10 +1791,10 @@ class TestTrainingReadinessP0:
         db_path = tmp_path / "incomplete-json-payload-contract-world.db"
         conn = sqlite3.connect(db_path)
         _seed_minimal_ready_training_tables(conn, seed_observations=True)
-        conn.execute("ALTER TABLE observation_instants_v2 ADD COLUMN provenance_json TEXT")
+        conn.execute("ALTER TABLE observation_instants ADD COLUMN provenance_json TEXT")
         conn.execute(
             """
-            UPDATE observation_instants_v2
+            UPDATE observation_instants
             SET provenance_json = '{"tier":"WU_ICAO","station_id":"KORD","payload_hash":"sha256:x"}'
             """
         )
@@ -1805,7 +1805,7 @@ class TestTrainingReadinessP0:
 
         assert report["ready"] is False
         assert "payload_identity_missing" in _blocker_codes(report)
-        check = report["checks"]["observation_instants_v2.payload_identity_present"]
+        check = report["checks"]["observation_instants.payload_identity_present"]
         assert check["status"] == "FAIL"
         assert check["count"] == 1
 
@@ -1815,10 +1815,10 @@ class TestTrainingReadinessP0:
         db_path = tmp_path / "json-payload-contract-world.db"
         conn = sqlite3.connect(db_path)
         _seed_minimal_ready_training_tables(conn, seed_observations=True)
-        conn.execute("ALTER TABLE observation_instants_v2 ADD COLUMN provenance_json TEXT")
+        conn.execute("ALTER TABLE observation_instants ADD COLUMN provenance_json TEXT")
         conn.execute(
             """
-            UPDATE observation_instants_v2
+            UPDATE observation_instants
             SET provenance_json = '{
                 "tier":"WU_ICAO",
                 "station_id":"KORD",
@@ -1835,7 +1835,7 @@ class TestTrainingReadinessP0:
 
         assert report["ready"] is True
         assert "payload_identity_missing" not in _blocker_codes(report)
-        check = report["checks"]["observation_instants_v2.payload_identity_present"]
+        check = report["checks"]["observation_instants.payload_identity_present"]
         assert check["status"] == "PASS"
         assert check["count"] == 0
 
@@ -1849,10 +1849,10 @@ class TestTrainingReadinessP0:
             "source_file",
             "station_registry_hash",
         ):
-            conn.execute(f"ALTER TABLE observation_instants_v2 ADD COLUMN {column} TEXT")
+            conn.execute(f"ALTER TABLE observation_instants ADD COLUMN {column} TEXT")
         conn.execute(
             """
-            UPDATE observation_instants_v2
+            UPDATE observation_instants
             SET payload_hash = '',
                 parser_version = 'parser-v1',
                 source_file = 'observations/raw.json',
@@ -1866,7 +1866,7 @@ class TestTrainingReadinessP0:
 
         assert report["ready"] is False
         assert "payload_identity_missing" in _blocker_codes(report)
-        check = report["checks"]["observation_instants_v2.payload_identity_present"]
+        check = report["checks"]["observation_instants.payload_identity_present"]
         assert check["status"] == "FAIL"
         assert check["count"] == 1
 
@@ -1882,10 +1882,10 @@ class TestTrainingReadinessP0:
             "station_registry_version",
             "station_registry_hash",
         ):
-            conn.execute(f"ALTER TABLE observation_instants_v2 ADD COLUMN {column} TEXT")
+            conn.execute(f"ALTER TABLE observation_instants ADD COLUMN {column} TEXT")
         conn.execute(
             """
-            UPDATE observation_instants_v2
+            UPDATE observation_instants
             SET payload_hash = 'payload-hash',
                 parser_version = 'parser-v1',
                 source_url = '',
@@ -1901,7 +1901,7 @@ class TestTrainingReadinessP0:
 
         assert report["ready"] is True
         assert "payload_identity_missing" not in _blocker_codes(report)
-        check = report["checks"]["observation_instants_v2.payload_identity_present"]
+        check = report["checks"]["observation_instants.payload_identity_present"]
         assert check["status"] == "PASS"
         assert check["count"] == 0
 

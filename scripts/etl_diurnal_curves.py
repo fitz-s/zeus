@@ -8,7 +8,7 @@
 """ETL: Aggregate DST-safe intraday observations -> diurnal_curves/diurnal_peak_prob.
 
 Source: `observation_instants_current` VIEW (Phase 2 atomic cutover indirection
-over `observation_instants_v2`). Pre-Phase-2 flip the VIEW returns 0 rows,
+over `observation_instants`). Pre-Phase-2 flip the VIEW returns 0 rows,
 which this script treats as a fail-closed condition. Post-flip the VIEW returns
 the active `data_version` corpus (currently `v1.wu-native`, station-native).
 This script then applies the P3 reader gate locally: only reader-safe authority,
@@ -17,7 +17,7 @@ feed canonical diurnal analytics.
 
 Temperature source: `COALESCE(temp_current, running_max)`. Legacy
 `observation_instants` populated `temp_current` (single hourly snapshot);
-`observation_instants_v2` populates `running_max`/`running_min` per hour
+`observation_instants` populates `running_max`/`running_min` per hour
 (extremum-preserving aggregation that captures intra-hour SPECI peaks). Using
 COALESCE keeps this script correct across both shapes and aligns the diurnal
 sample with settlement semantics (daily high is the running max of hourly
@@ -117,7 +117,7 @@ def run_etl() -> dict:
         print(
             "ERROR: observation_instants_current is empty. "
             "Check zeus_meta.observation_data_version (Phase 2 cutover) and "
-            "observation_instants_v2 population."
+            "observation_instants population."
         )
         zeus.close()
         return {"stored": 0, "error": "no observation_instants_current"}

@@ -394,42 +394,47 @@ def _k2_hole_scanner_tick():
             forecasts_conn.close()
 
 
-@_scheduler_job("ingest_k2_obs_v2_tick")
-def _k2_obs_v2_tick():
-    """Rolling 7-day live ingest for observation_instants_v2 (F44 fix).
+@_scheduler_job("ingest_k2_obs_tick")
+def _k2_obs_tick():
+    """Rolling 7-day live ingest for observation_instants (F44 fix).
 
     Fetches recent hourly observations for all WU_ICAO + OGIMET_METAR cities
-    via the source-tier-correct clients and writes through the typed v2 writer.
+    via the source-tier-correct clients and writes through the typed obs writer.
     HKO_NATIVE (Hong Kong) is handled by hko_ingest_tick.py --project-only.
 
     Runs hourly at minute=15, offset from hourly_instants (:07) and other ticks.
-    Advisory lock 'obs_v2' prevents concurrent runs from ingest_main restart.
+    Advisory lock 'obs' prevents concurrent runs from ingest_main restart.
+
+    Renamed from _k2_obs_v2_tick / 'obs_v2' lock in the 2026-05-29
+    observation_instants consolidation. Boot-guard lockstep: decorator id,
+    add_job id (ingest_k2_obs), table_registry.get_job_id_matches mapping, and
+    the db_table_ownership.yaml daemon_writer field all move together.
     """
     from src.data.dual_run_lock import acquire_lock
     from pathlib import Path
 
-    with acquire_lock("obs_v2") as acquired:
+    with acquire_lock("obs") as acquired:
         if not acquired:
-            logger.info("ingest k2_obs_v2_tick skipped_lock_held")
+            logger.info("ingest k2_obs_tick skipped_lock_held")
             return
         import sys as _sys
         _REPO_ROOT = Path(__file__).resolve().parent.parent
         if str(_REPO_ROOT) not in _sys.path:
             _sys.path.insert(0, str(_REPO_ROOT))
-        from scripts.obs_v2_live_tick import run_live_tick
+        from scripts.obs_live_tick import run_live_tick
         # run_live_tick opens its own db_writer_lock connection to world.db.
         # Do NOT create a second get_world_connection here.
         results = run_live_tick(days_back=7, db_path=_REPO_ROOT / "state" / "zeus-world.db")
         written = sum(r.rows_written for r in results if not r.skipped_hko)
         failed = [r.city for r in results if r.failure_reason]
-        logger.info("K2 obs_v2_tick: written=%d failed=%s", written, failed or "none")
+        logger.info("K2 obs_tick: written=%d failed=%s", written, failed or "none")
 
 
 @_scheduler_job("ingest_k2_hko_tick")
 def _k2_hko_tick():
     """HKO hourly accumulator fetch + v2 projection for Hong Kong.
 
-    Runs hourly at minute=30, offset from obs_v2 (:15) and harvester (:45).
+    Runs hourly at minute=30, offset from obs (:15) and harvester (:45).
     Decoupled from the trading daemon per operator directive 2026-04-23
     ("daemon-live和polymarket数据/天气数据采集本不应该混为一谈").
 
@@ -1475,7 +1480,7 @@ def _ingest_main_job_specs() -> list[tuple]:
             max_instances=1, coalesce=True, misfire_grace_time=3600)),
         (_k2_hole_scanner_tick, "cron", dict(hour=4, minute=0, id="ingest_k2_hole_scanner",
             max_instances=1, coalesce=True, misfire_grace_time=3600)),
-        (_k2_obs_v2_tick, "cron", dict(minute=15, id="ingest_k2_obs_v2",
+        (_k2_obs_tick, "cron", dict(minute=15, id="ingest_k2_obs",
             max_instances=1, coalesce=True, misfire_grace_time=3600)),
         (_k2_hko_tick, "cron", dict(minute=30, id="ingest_k2_hko_tick",
             max_instances=1, coalesce=True, misfire_grace_time=3600)),

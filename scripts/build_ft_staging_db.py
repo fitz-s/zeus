@@ -11,7 +11,7 @@ Build ft_staging DB for full_transport_v1 pair generation.
 Creates a fresh staging forecasts DB with:
 - calibration_pairs_v2 UNIQUE key extended to include error_model_family
   (prevents ft_v1 rows from colliding with 'none' rows)
-- ensemble_snapshots, observations, observation_instants_v2, zeus_meta
+- ensemble_snapshots, observations, observation_instants, zeus_meta
   copied read-only from prod zeus-forecasts.db
 """
 from __future__ import annotations
@@ -30,7 +30,7 @@ STAGING_DB = ZEUS_ROOT / "state" / "ft_staging_2026-05-26.db"
 COPY_TABLES = [
     "ensemble_snapshots",
     "observations",
-    "observation_instants_v2",
+    "observation_instants",
     "zeus_meta",
 ]
 
@@ -137,7 +137,7 @@ def main() -> None:
     staging.execute("PRAGMA journal_mode=WAL")
     staging.execute("PRAGMA synchronous=NORMAL")
 
-    # Apply v2_schema for all OTHER tables (observation_instants_v2, platt_models_v2, etc.)
+    # Apply v2_schema for all OTHER tables (observation_instants, platt_models_v2, etc.)
     # then override calibration_pairs_v2 with family-capable DDL
     from src.state.schema.v2_schema import apply_canonical_schema
 

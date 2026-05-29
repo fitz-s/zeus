@@ -40,7 +40,7 @@ ALLOWLISTED_WRITE_MODULES: frozenset[str] = frozenset(
         # Supporting writers
         "src/data/hole_scanner.py",
         "src/data/daily_observation_writer.py",
-        "src/data/observation_instants_v2_writer.py",
+        "src/data/observation_instants_writer.py",
         # Harvester — cross-DB writer; legacy allowlisted (Phase 1.5 split adds new writer below)
         "src/execution/harvester.py",
         # Phase 1.5: ingest-side settlement truth writer (owns world.settlements writes)

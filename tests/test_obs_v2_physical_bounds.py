@@ -4,7 +4,7 @@
 #          88°C class of poison-data failure (workbook N1.8). Bounds enforced
 #          at writer level (load-bearing — covers all DBs) and at schema
 #          CREATE TABLE level (new DBs only — SQLite ALTER cannot add CHECK).
-# Reuse: Covers src/data/observation_instants_v2_writer.py temperature-bounds
+# Reuse: Covers src/data/observation_instants_writer.py temperature-bounds
 #        validation + src/state/schema/v2_schema.py CREATE TABLE CHECK.
 #        Production-path integration test (test #8) exercises insert_rows()
 #        end-to-end. If a future refactor weakens bounds OR drops the writer
@@ -44,7 +44,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.data.observation_instants_v2_writer import (
+from src.data.observation_instants_writer import (
     InvalidObsV2RowError,
     ObsV2Row,
     insert_rows,
@@ -101,7 +101,7 @@ def test_physical_bounds_constants_typed_and_in_canonical_range():
     sensor report it') silently re-admits poison data like Warsaw 88°C.
     This test fires on any drift.
     """
-    from src.data.observation_instants_v2_writer import (
+    from src.data.observation_instants_writer import (
         _PHYSICAL_TEMP_BOUNDS_C,
         _PHYSICAL_TEMP_BOUNDS_F,
     )
@@ -214,7 +214,7 @@ def test_insert_rows_integration_path_rejects_out_of_bounds():
 
     # Confirm DB stayed clean.
     count = conn.execute(
-        "SELECT COUNT(*) FROM observation_instants_v2"
+        "SELECT COUNT(*) FROM observation_instants"
     ).fetchone()[0]
     assert count == 0
 
@@ -228,7 +228,7 @@ def test_insert_rows_integration_path_accepts_in_bounds():
     inserted = insert_rows(conn, [good_row])
     assert inserted == 1
     count = conn.execute(
-        "SELECT COUNT(*) FROM observation_instants_v2"
+        "SELECT COUNT(*) FROM observation_instants"
     ).fetchone()[0]
     assert count == 1
 
@@ -246,7 +246,7 @@ def test_schema_check_matches_writer_constants():
     bump (-90 → -100) silently leaves the schema at -90 and breaks parity.
     Catches missed-edit drift via simple substring check.
     """
-    from src.data.observation_instants_v2_writer import (
+    from src.data.observation_instants_writer import (
         _PHYSICAL_TEMP_BOUNDS_C,
         _PHYSICAL_TEMP_BOUNDS_F,
     )
@@ -289,7 +289,7 @@ def test_schema_check_rejects_raw_bypass_on_new_db():
     with pytest.raises(sqlite3.IntegrityError, match=r"(?i)CHECK"):
         conn.execute(
             """
-            INSERT INTO observation_instants_v2 (
+            INSERT INTO observation_instants (
                 city, target_date, source, timezone_name, local_timestamp,
                 utc_timestamp, utc_offset_minutes, time_basis, temp_unit,
                 imported_at, authority, data_version, provenance_json,

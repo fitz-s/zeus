@@ -86,7 +86,7 @@ def _make_in_memory_world_conn() -> sqlite3.Connection:
             data_version TEXT, settled_at TEXT,
             range_label TEXT, winning_bin TEXT
         );
-        CREATE TABLE IF NOT EXISTS observation_instants_v2 (
+        CREATE TABLE IF NOT EXISTS observation_instants (
             city TEXT, target_date TEXT, max_temp_c REAL, min_temp_c REAL,
             source TEXT, authority TEXT, data_version TEXT, utc_timestamp TEXT
         );

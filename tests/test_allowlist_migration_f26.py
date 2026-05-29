@@ -181,7 +181,7 @@ F26_CLEANUP_PROMOTED: frozenset[str] = frozenset(
         "scripts/hko_ingest_tick.py",
         "scripts/ingest_grib_to_snapshots.py",
         "scripts/nuke_rebuild_projections.py",
-        "scripts/obs_v2_live_tick.py",
+        "scripts/obs_live_tick.py",
         "scripts/rebuild_calibration_pairs_canonical.py",
         "scripts/rebuild_calibration_pairs.py",
         "scripts/rebuild_settlements.py",

@@ -31,7 +31,7 @@ def mock_db(tmp_path):
         )
     """)
     conn.execute("""
-        CREATE TABLE world.observation_instants_v2 (
+        CREATE TABLE world.observation_instants (
             city TEXT,
             target_date TEXT,
             source TEXT,
@@ -97,7 +97,7 @@ def _insert_verified_hours(conn, city, target_date, source, count=22):
     for i in range(count):
         conn.execute(
             """
-            INSERT INTO world.observation_instants_v2
+            INSERT INTO world.observation_instants
                 (city, target_date, source, utc_timestamp, authority, temp_current, running_max, running_min, temp_unit)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
@@ -120,7 +120,7 @@ def _insert_verified_high_hours(conn, city, target_date, source, high, *, unit="
         value = float(high) if i == count - 1 else float(high) - 3.0
         conn.execute(
             """
-            INSERT INTO world.observation_instants_v2
+            INSERT INTO world.observation_instants
                 (city, target_date, source, utc_timestamp, authority, temp_current, running_max, running_min, temp_unit)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
@@ -143,7 +143,7 @@ def _insert_verified_low_hours(conn, city, target_date, source, low, *, unit="F"
         value = float(low) if i == 0 else float(low) + 3.0
         conn.execute(
             """
-            INSERT INTO world.observation_instants_v2
+            INSERT INTO world.observation_instants
                 (city, target_date, source, utc_timestamp, authority, temp_current, running_max, running_min, temp_unit)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
@@ -224,9 +224,9 @@ def test_bridge_coverage_filtering(
     """)
 
     # Case 1: Day with primary_hours < 22 and no verified fallback -> SKIPPED
-    conn.execute("DELETE FROM world.observation_instants_v2")
+    conn.execute("DELETE FROM world.observation_instants")
     for i in range(21):
-        conn.execute("INSERT INTO world.observation_instants_v2 (city, target_date, source, utc_timestamp, authority) VALUES (?, ?, ?, ?, ?)",
+        conn.execute("INSERT INTO world.observation_instants (city, target_date, source, utc_timestamp, authority) VALUES (?, ?, ?, ?, ?)",
                      ('Chicago', '2026-05-01', 'wu_icao_history', f'2026-05-01T{i:02d}:00:00Z', 'VERIFIED'))
     conn.commit()
 
@@ -236,7 +236,7 @@ def test_bridge_coverage_filtering(
 
     # Case 2: Day with primary_hours < 22 but verified fallback >= 22 hours -> COUNTED
     for i in range(22):
-        conn.execute("INSERT INTO world.observation_instants_v2 (city, target_date, source, utc_timestamp, authority) VALUES (?, ?, ?, ?, ?)",
+        conn.execute("INSERT INTO world.observation_instants (city, target_date, source, utc_timestamp, authority) VALUES (?, ?, ?, ?, ?)",
                      ('Chicago', '2026-05-01', 'ogimet_metar_kord', f'2026-05-01T{i:02d}:00:00Z', 'VERIFIED'))
     conn.commit()
 
@@ -245,10 +245,10 @@ def test_bridge_coverage_filtering(
     assert stats["cities"] == 1
 
     # Case 3: Day with primary_hours >= 22 but UNVERIFIED authority -> SKIPPED
-    conn.execute("DELETE FROM world.observation_instants_v2 WHERE source = 'ogimet_metar_kord'")
-    conn.execute("DELETE FROM world.observation_instants_v2")
+    conn.execute("DELETE FROM world.observation_instants WHERE source = 'ogimet_metar_kord'")
+    conn.execute("DELETE FROM world.observation_instants")
     for i in range(22):
-        conn.execute("INSERT INTO world.observation_instants_v2 (city, target_date, source, utc_timestamp, authority) VALUES (?, ?, ?, ?, ?)",
+        conn.execute("INSERT INTO world.observation_instants (city, target_date, source, utc_timestamp, authority) VALUES (?, ?, ?, ?, ?)",
                      ('Chicago', '2026-05-01', 'wu_icao_history', f'2026-05-01T{i:02d}:00:00Z', 'UNVERIFIED'))
     conn.commit()
 
@@ -257,9 +257,9 @@ def test_bridge_coverage_filtering(
     assert stats["cities"] == 0
 
     # Case 4: Day with VERIFIED primary_hours >= 22 -> COUNTED (regression)
-    conn.execute("DELETE FROM world.observation_instants_v2")
+    conn.execute("DELETE FROM world.observation_instants")
     for i in range(22):
-        conn.execute("INSERT INTO world.observation_instants_v2 (city, target_date, source, utc_timestamp, authority) VALUES (?, ?, ?, ?, ?)",
+        conn.execute("INSERT INTO world.observation_instants (city, target_date, source, utc_timestamp, authority) VALUES (?, ?, ?, ?, ?)",
                      ('Chicago', '2026-05-01', 'wu_icao_history', f'2026-05-01T{i:02d}:00:00Z', 'VERIFIED'))
     conn.commit()
 
@@ -464,7 +464,7 @@ def test_bridge_writes_low_metric_from_canonical_observation_history(
 ):
     """Relationship: LOW canonical evidence must not collapse to metric-unsupported.
 
-    Settlements and observation_instants_v2 carry enough low-track truth for
+    Settlements and observation_instants carry enough low-track truth for
     normal cities. The bridge must write a low metric record so the evaluator
     sees penalty/no-penalty evidence rather than a structural zero multiplier.
     """
@@ -633,7 +633,7 @@ def test_bridge_uses_daily_observation_revisions_when_hourly_and_legacy_daily_ar
     mock_helper.side_effect = fake_ctx
 
     city = "Hong Kong"
-    conn.execute("DELETE FROM world.observation_instants_v2")
+    conn.execute("DELETE FROM world.observation_instants")
     conn.execute("DELETE FROM observations")
     for day in range(1, 11):
         target_date = f"2026-04-{day:02d}"

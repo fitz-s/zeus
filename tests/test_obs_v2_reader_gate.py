@@ -3,7 +3,7 @@
 # Purpose: Protect P3 obs_v2 reader gates for canonical diurnal analytics.
 # Reuse: Run with tests/test_truth_surface_health.py when changing obs_v2 read predicates.
 # Last reused/audited: 2026-04-25
-# Authority basis: P3 4.5.B-lite observation_instants_v2 reader gate packet.
+# Authority basis: P3 4.5.B-lite observation_instants reader gate packet.
 """Regression coverage for obs_v2 reader-gate consumers."""
 from __future__ import annotations
 
@@ -93,7 +93,7 @@ def _seed_instant(
     target_date = f"2026-01-{day:02d}"
     conn.execute(
         """
-        INSERT INTO observation_instants_v2 (
+        INSERT INTO observation_instants (
             city, target_date, source, timezone_name, local_hour,
             local_timestamp, utc_timestamp, utc_offset_minutes,
             time_basis, temp_current, running_max, temp_unit, station_id,

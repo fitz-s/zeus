@@ -155,7 +155,7 @@ TABLE_INSERTERS = {
     "day0_metric_fact": _insert_day0_metric_fact_row,
 }
 
-ALL_V2_TABLES = list(TABLE_INSERTERS.keys()) + ["observation_instants_v2"]
+ALL_V2_TABLES = list(TABLE_INSERTERS.keys()) + ["observation_instants"]
 
 DEAD_TABLES = [
     "promotion_registry",
@@ -212,21 +212,22 @@ class TestApplyV2SchemaSmoke(unittest.TestCase):
             )
 
     def test_observation_instants_v2_has_running_min(self):
-        """PRAGMA table_info(observation_instants_v2) shows a running_min column.
+        """PRAGMA table_info(observation_instants) shows a running_min column.
 
-        running_min is the schema v2's reason to exist versus v1 — confirms the
-        DDL refinement from the architect opener (dual-track obs support).
-        Fails today with ImportError.
+        running_min is the canonical (former-v2 superset) schema's reason to exist
+        versus the old subset — confirms the DDL refinement from the architect
+        opener (dual-track obs support) survived the 2026-05-29 consolidation that
+        merged observation_instants_v2 into observation_instants.
         """
         conn = _apply_and_get_conn()
         columns = {
             row[1]
-            for row in conn.execute("PRAGMA table_info(observation_instants_v2)")
+            for row in conn.execute("PRAGMA table_info(observation_instants)")
         }
         self.assertIn(
             "running_min",
             columns,
-            msg="observation_instants_v2 must have running_min column (v2 schema requirement)",
+            msg="observation_instants must have running_min column (canonical superset requirement)",
         )
 
     def test_apply_canonical_schema_creates_market_price_history(self):

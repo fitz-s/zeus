@@ -47,7 +47,7 @@ Scope explicitly EXCLUDES:
   `"UNVERIFIED"` only.
 - Grammar F/G (forecast authority_tier; entry_economics_authority).
 - Schema-extended dialects (`ICAO_STATION_NATIVE` for
-  `observation_instants_v2`; `RECONSTRUCTED` for `rescue_events`).
+  `observation_instants`; `RECONSTRUCTED` for `rescue_events`).
   These are real lane-specific 5th members but are NOT canonical
   truth-file authority — they live only in their respective writer
   paths' allowlists.

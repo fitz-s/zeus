@@ -514,14 +514,17 @@ def assert_writer_jobs_registered(ingest_main_source: str | None = None) -> None
     missing_decorator: list[str] = []
 
     # Map job IDs to decorators/add_job IDs
-    # Note: daemon_writer: ingest_k2_obs_v2_tick corresponds to decorator
-    # ingest_k2_obs_v2_tick AND _scheduler.add_job(..., id="ingest_k2_obs_v2")
+    # Note: daemon_writer: ingest_k2_obs_tick corresponds to decorator
+    # ingest_k2_obs_tick AND _scheduler.add_job(..., id="ingest_k2_obs")
+    # (Renamed from ingest_k2_obs_v2_tick in the 2026-05-29 observation_instants
+    # consolidation — lockstep with ingest_main.py decorator/add_job + the
+    # db_table_ownership.yaml daemon_writer field.)
     def get_job_id_matches(job_id: str) -> tuple[str, str]:
         # Normalizes job IDs to decorator vs add_job ID
-        # Decorator: ingest_k2_obs_v2_tick
-        # add_job ID: ingest_k2_obs_v2
-        if job_id == "ingest_k2_obs_v2_tick":
-            return "ingest_k2_obs_v2_tick", "ingest_k2_obs_v2"
+        # Decorator: ingest_k2_obs_tick
+        # add_job ID: ingest_k2_obs
+        if job_id == "ingest_k2_obs_tick":
+            return "ingest_k2_obs_tick", "ingest_k2_obs"
         return job_id, job_id
 
     # Registry vs Code
@@ -555,7 +558,7 @@ def assert_writer_jobs_registered(ingest_main_source: str | None = None) -> None
         if add_id in telemetry_jobs:
             continue
         # Reverse map to dec_id
-        dec_id = "ingest_k2_obs_v2_tick" if add_id == "ingest_k2_obs_v2" else add_id
+        dec_id = "ingest_k2_obs_tick" if add_id == "ingest_k2_obs" else add_id
         if dec_id not in registered_decorators:
             missing_decorator.append(
                 f"  _scheduler.add_job(..., id='{add_id}') is present but no matching "

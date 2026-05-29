@@ -1,13 +1,21 @@
 # Created: 2026-05-18
-# Last reused or audited: 2026-05-18
+# Last reused or audited: 2026-05-29
 # Authority basis: /Users/leofitz/.claude/jobs/9ea6f95c/briefs/f44_recurrence_prevention.md §Slice 3
-"""Tests for observation_instants_v2 freshness lane in write_ingest_status.
+#   + OBS_V2_CONSOLIDATION_PLAN.md (observation_instants_v2 merged into observation_instants)
+"""Tests for the observation_instants freshness lane in write_ingest_status.
 
-Covers (per F44 recurrence-prevention brief):
-  - Both v1 and v2 `rows_last_day` keys are present and non-zero when rows exist.
-  - `observation_instants_v2_max_imported_at` matches the most-recent v2 row.
-  - Backwards compat: all existing v1 keys still present in output.
-  - v2 lane returns 0 / None gracefully when the table is empty.
+Consolidation (2026-05-29): the former observation_instants (v1 subset) and
+observation_instants_v2 (superset) merged into ONE canonical table
+``observation_instants``. write_ingest_status now emits a SINGLE
+``observation_instants`` table-stats entry carrying both the utc_timestamp-based
+freshness counts and the imported_at-based counts + max_imported_at, plus a
+top-level ``observation_instants_max_imported_at`` key (renamed from
+``observation_instants_v2_max_imported_at``).
+
+Covers:
+  - rows_last_day (utc_timestamp) and max_imported_at present + correct when rows exist.
+  - Backwards compat: all required table keys still present in output.
+  - Empty table returns 0 / None gracefully.
 """
 from __future__ import annotations
 
@@ -37,19 +45,10 @@ def _make_world_db() -> sqlite3.Connection:
     """Create an in-memory world DB with the minimal table surface needed."""
     conn = sqlite3.connect(":memory:")
 
-    # observation_instants (v1) — minimal schema
+    # observation_instants — canonical (consolidated superset). Carries both the
+    # utc_timestamp freshness column and imported_at; one table, no _v2 split.
     conn.execute("""
         CREATE TABLE observation_instants (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            city TEXT NOT NULL,
-            utc_timestamp TEXT NOT NULL,
-            imported_at TEXT
-        )
-    """)
-
-    # observation_instants_v2 — minimal schema matching production
-    conn.execute("""
-        CREATE TABLE observation_instants_v2 (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             city TEXT NOT NULL,
             target_date TEXT NOT NULL,
@@ -122,17 +121,10 @@ def _make_world_db() -> sqlite3.Connection:
     return conn
 
 
-def _insert_v1_row(conn: sqlite3.Connection, city: str, utc_ts: str) -> None:
-    conn.execute(
-        "INSERT INTO observation_instants (city, utc_timestamp) VALUES (?, ?)",
-        (city, utc_ts),
-    )
-
-
-def _insert_v2_row(conn: sqlite3.Connection, city: str, utc_ts: str, imported_at: str) -> None:
+def _insert_obs_row(conn: sqlite3.Connection, city: str, utc_ts: str, imported_at: str) -> None:
     conn.execute(
         """
-        INSERT INTO observation_instants_v2
+        INSERT INTO observation_instants
             (city, target_date, source, timezone_name, local_timestamp, utc_timestamp,
              utc_offset_minutes, time_basis, temp_unit, imported_at)
         VALUES (?, '2026-05-18', 'wu_icao_history', 'America/Chicago', '2026-05-18T12:00:00',
@@ -147,16 +139,15 @@ def _insert_v2_row(conn: sqlite3.Connection, city: str, utc_ts: str, imported_at
 # ---------------------------------------------------------------------------
 
 class TestIngestStatusV2Rollup:
-    """Rollup tick emits correct v2 keys alongside v1 keys."""
+    """Rollup tick emits correct observation_instants freshness keys (single table)."""
 
-    def test_both_v1_v2_rows_reported(self, tmp_path):
-        """Insert v1 and v2 rows; rollup emits both *_rows_24h as non-zero."""
+    def test_obs_rows_reported(self, tmp_path):
+        """Insert canonical obs rows; rollup emits non-zero rows_last_day."""
         conn = _make_world_db()
         now = _now_iso()
 
-        _insert_v1_row(conn, "chicago", now)
-        _insert_v1_row(conn, "london", now)
-        _insert_v2_row(conn, "chicago", now, now)
+        _insert_obs_row(conn, "chicago", now, now)
+        _insert_obs_row(conn, "london", now, now)
 
         conn.commit()
 
@@ -166,30 +157,29 @@ class TestIngestStatusV2Rollup:
         assert out_path.exists(), "ingest_status.json should have been written"
         payload = json.loads(out_path.read_text())
 
-        # v1 rows present
-        v1_day = payload["tables"]["observation_instants"]["rows_last_day"]
-        assert v1_day >= 2, f"Expected ≥2 v1 rows in last day, got {v1_day}"
+        # canonical observation_instants rows present (utc_timestamp-based count)
+        obs_day = payload["tables"]["observation_instants"]["rows_last_day"]
+        assert obs_day >= 2, f"Expected ≥2 obs rows in last day, got {obs_day}"
+        # import-based count also reported on the same single entry
+        obs_day_import = payload["tables"]["observation_instants"]["rows_last_day_by_import"]
+        assert obs_day_import >= 2, f"Expected ≥2 obs rows by import, got {obs_day_import}"
 
-        # v2 rows present
-        v2_day = payload["tables"]["observation_instants_v2"]["rows_last_day"]
-        assert v2_day >= 1, f"Expected ≥1 v2 rows in last day, got {v2_day}"
-
-    def test_v2_max_imported_at_matches_latest_row(self, tmp_path):
-        """observation_instants_v2_max_imported_at matches the most-recent row."""
+    def test_max_imported_at_matches_latest_row(self, tmp_path):
+        """observation_instants_max_imported_at matches the most-recent row."""
         conn = _make_world_db()
 
         older = _hours_ago(3)
         newer = _hours_ago(1)
 
-        _insert_v2_row(conn, "chicago", _hours_ago(3), older)
-        _insert_v2_row(conn, "london", _hours_ago(1), newer)
+        _insert_obs_row(conn, "chicago", _hours_ago(3), older)
+        _insert_obs_row(conn, "london", _hours_ago(1), newer)
         conn.commit()
 
         write_ingest_status(conn, state_dir=tmp_path)
         payload = json.loads((tmp_path / "ingest_status.json").read_text())
 
-        reported = payload.get("observation_instants_v2_max_imported_at")
-        assert reported is not None, "observation_instants_v2_max_imported_at must be present"
+        reported = payload.get("observation_instants_max_imported_at")
+        assert reported is not None, "observation_instants_max_imported_at must be present"
         assert reported == newer, (
             f"Expected max_imported_at={newer!r}, got {reported!r}"
         )
@@ -219,36 +209,40 @@ class TestIngestStatusV2Rollup:
             assert "rows_last_day" in tbl
             assert "holes_by_city_count" in tbl
 
-    def test_v2_new_keys_present(self, tmp_path):
-        """New v2 keys are present in the output even when v2 table is empty."""
+    def test_freshness_keys_present(self, tmp_path):
+        """Freshness keys present in the output even when the table is empty."""
         conn = _make_world_db()
         conn.commit()
 
         write_ingest_status(conn, state_dir=tmp_path)
         payload = json.loads((tmp_path / "ingest_status.json").read_text())
 
-        # New v2 table entry
-        assert "observation_instants_v2" in payload["tables"], (
-            "observation_instants_v2 must appear in tables dict"
+        # Single canonical table entry
+        assert "observation_instants" in payload["tables"], (
+            "observation_instants must appear in tables dict"
         )
-        v2 = payload["tables"]["observation_instants_v2"]
-        assert "rows_last_hour" in v2
-        assert "rows_last_day" in v2
-        assert "holes_by_city_count" in v2
+        obs = payload["tables"]["observation_instants"]
+        assert "rows_last_hour" in obs
+        assert "rows_last_day" in obs
+        assert "max_imported_at" in obs
+        assert "holes_by_city_count" in obs
 
-        # New top-level freshness key (may be None if empty)
-        assert "observation_instants_v2_max_imported_at" in payload
+        # Top-level freshness key (may be None if empty)
+        assert "observation_instants_max_imported_at" in payload
+        # The split-brain _v2 key is GONE post-consolidation.
+        assert "observation_instants_v2_max_imported_at" not in payload
+        assert "observation_instants_v2" not in payload["tables"]
 
-    def test_v2_empty_table_returns_zero_and_none(self, tmp_path):
-        """v2 table with zero rows: rows_last_day=0, max_imported_at=None."""
+    def test_empty_table_returns_zero_and_none(self, tmp_path):
+        """Empty table: rows_last_day=0, max_imported_at=None."""
         conn = _make_world_db()
         conn.commit()
 
         write_ingest_status(conn, state_dir=tmp_path)
         payload = json.loads((tmp_path / "ingest_status.json").read_text())
 
-        v2_day = payload["tables"]["observation_instants_v2"]["rows_last_day"]
-        assert v2_day == 0, f"Expected 0 rows for empty v2 table, got {v2_day}"
+        obs_day = payload["tables"]["observation_instants"]["rows_last_day"]
+        assert obs_day == 0, f"Expected 0 rows for empty table, got {obs_day}"
 
-        max_ts = payload["observation_instants_v2_max_imported_at"]
-        assert max_ts is None, f"Expected None for empty v2 max_imported_at, got {max_ts!r}"
+        max_ts = payload["observation_instants_max_imported_at"]
+        assert max_ts is None, f"Expected None for empty max_imported_at, got {max_ts!r}"
