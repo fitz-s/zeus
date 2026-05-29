@@ -113,6 +113,27 @@ def _mock_settlement_truth_status(monkeypatch):
             "issue": None,
         },
     )
+    # run_validation reads state/assumptions.json which doesn't exist in CI/test
+    # environments. Patch it so assumption mismatch never blocks healthy predicate
+    # in tests that exercise check() holistically.
+    import scripts.validate_assumptions as _va
+    monkeypatch.setattr(
+        _va,
+        "run_validation",
+        lambda: {"valid": True, "checks": ["mocked"], "mismatches": []},
+    )
+
+
+@pytest.fixture(autouse=True)
+def _mock_scheduler_business_liveness_status(monkeypatch):
+    # _scheduler_business_liveness_status reads scheduler_health.json from disk.
+    # Missing file → ok=False → healthy=False for all tests calling check().
+    # Mock to "ok" so the predicate does not gate healthy in the test harness.
+    monkeypatch.setattr(
+        healthcheck,
+        "_scheduler_business_liveness_status",
+        lambda: {"ok": True, "modes": {}, "issue": None},
+    )
 
 
 def _write_risk_state(path, *, checked_at=None, details=None):

@@ -171,14 +171,23 @@ class TestR_BI_MainIteratesMetricSpecs:
 
 
 # ---------------------------------------------------------------------------
-# R-BJ: outer SAVEPOINT atomicity across METRIC_SPECS iteration
+# R-BJ: per-bucket SAVEPOINT independence across METRIC_SPECS iteration
 # ---------------------------------------------------------------------------
 
 class TestR_BJ_OuterSavepointAtomicity:
-    """R-BJ: LOW-side failure rolls back HIGH writes under outer SAVEPOINT."""
+    """R-BJ: B3cont — outer SAVEPOINT removed from rebuild_all_v2.
 
-    def test_R_BJ_1_low_failure_rolls_back_high(self, conn):
-        """If LOW rebuild raises, HIGH writes also roll back — no orphan state."""
+    rebuild_calibration_pairs.py:1945 docstring: "No outer SAVEPOINT — each
+    bucket is independently atomic." When LOW fails, HIGH writes that already
+    committed in their own per-bucket SAVEPOINT are NOT rolled back. This is
+    the new canonical behavior; operators inspect the DB on metric-level failure.
+    """
+
+    def test_R_BJ_1_low_failure_does_not_roll_back_high(self, conn):
+        """B3cont: outer SAVEPOINT removed (scripts/rebuild_calibration_pairs.py:1945).
+        HIGH commits via its own per-bucket SAVEPOINT; LOW failure does not touch it.
+        After LOW raises, the HIGH row on 2026-06-16 persists (count == 1).
+        """
         from scripts.rebuild_calibration_pairs import (
             METRIC_SPECS, rebuild_all_v2,
         )
@@ -207,9 +216,10 @@ class TestR_BJ_OuterSavepointAtomicity:
         remaining_2026_06_16 = conn.execute(
             "SELECT COUNT(*) FROM calibration_pairs WHERE target_date = '2026-06-16'"
         ).fetchone()[0]
-        assert remaining_2026_06_16 == 0, (
-            "HIGH-side write on 2026-06-16 must be rolled back when LOW fails — "
-            "outer SAVEPOINT atomicity invariant"
+        assert remaining_2026_06_16 == 1, (
+            "B3cont: outer SAVEPOINT removed (rebuild_calibration_pairs.py:1945). "
+            "HIGH bucket committed independently; LOW failure does NOT roll it back. "
+            "Per-bucket SAVEPOINT design — each metric is independently atomic."
         )
 
         preserved_legacy = conn.execute(
