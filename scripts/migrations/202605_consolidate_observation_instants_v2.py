@@ -42,6 +42,25 @@ Migration semantic policy:
   surviving v2 rows — it is the zeus_meta-join lineage tag, NOT the calibration
   dataset_id rename. Legacy-only rows get the schema default 'v1'.
 
+  running_min NULL on legacy-only rows — contract:
+    Legacy rows carry no running_min column. Migrated legacy-only rows get
+    running_min=NULL. The canonical table's physical-bounds CHECK allows NULL
+    (all three temperature columns are nullable). The downstream reader
+    (day0_observation_reader) uses MIN(running_min) aggregation over a source;
+    SQL MIN ignores NULLs so a mix of NULL and real rows produces the real minimum
+    correctly. If ALL rows in a source window have running_min=NULL, MIN returns
+    NULL; this surfaces as Day0ObservedExtrema.low_so_far=None, and all downstream
+    consumers (evaluator, day0_low_nowcast_signal, observation_client) check for
+    None and fail-closed (reject LOW-metric markets). No silent NULL propagation.
+
+  Legacy-row pre-validation (SEV-2a antibody):
+    The canonical table's physical-bounds CHECK is (temp_unit='C' AND ...) OR
+    (temp_unit='F' AND ...). A legacy row with temp_unit=NULL fails BOTH arms →
+    the CHECK fires → INSERT OR IGNORE would silently drop that row. To make such
+    drops AUDITABLE, up() calls _validate_legacy_rows_before_merge() BEFORE the
+    SAVEPOINT, which raises ValueError listing all violators. Operator must
+    investigate and clean those rows before re-running --execute.
+
 Idempotent: re-running after a successful apply is a no-op (the v2 table is gone
 and the canonical table already exists with the superset shape). Dry-run prints
 row-count receipts without mutating anything.
@@ -108,6 +127,62 @@ def _has_superset_shape(conn: sqlite3.Connection) -> bool:
     return {"authority", "data_version", "provenance_json", "running_min"}.issubset(cols)
 
 
+def _validate_legacy_rows_before_merge(conn: sqlite3.Connection) -> None:
+    """Pre-flight: assert every legacy-only row can pass the canonical CHECK.
+
+    The canonical table enforces:
+        (temp_unit = 'C' AND temp values within [-90, 60]) OR
+        (temp_unit = 'F' AND temp values within [-130, 140])
+
+    A legacy row with temp_unit=NULL (or an unknown unit) fails BOTH arms.
+    If INSERT OR IGNORE ran without this pre-check, that row would be SILENTLY
+    DROPPED — identical behaviour to a UNIQUE-conflict drop, making the two loss
+    categories indistinguishable and breaking the row-count receipt invariant.
+
+    We only need to validate legacy-only rows (those not also in v2): overlapping
+    keys are dropped intentionally by the v2-wins UNIQUE conflict, which is the
+    correct auditable discard.
+
+    Raises ValueError listing every violating (city, source, utc_timestamp) triplet.
+    """
+    if not _table_exists(conn, "observation_instants"):
+        return  # nothing to validate
+    # Legacy-only rows: present in legacy but absent in v2 (by natural key).
+    violators = conn.execute(
+        """
+        SELECT city, source, utc_timestamp, temp_unit, temp_current, running_max
+        FROM observation_instants l
+        WHERE NOT EXISTS (
+            SELECT 1 FROM observation_instants_v2 v
+            WHERE v.city = l.city AND v.source = l.source
+              AND v.utc_timestamp = l.utc_timestamp
+        )
+        AND NOT (
+            (l.temp_unit = 'C'
+                AND (l.temp_current IS NULL OR l.temp_current BETWEEN -90 AND 60)
+                AND (l.running_max   IS NULL OR l.running_max   BETWEEN -90 AND 60))
+            OR
+            (l.temp_unit = 'F'
+                AND (l.temp_current IS NULL OR l.temp_current BETWEEN -130 AND 140)
+                AND (l.running_max   IS NULL OR l.running_max   BETWEEN -130 AND 140))
+        )
+        """
+    ).fetchall()
+    if violators:
+        details = "\n".join(
+            f"  city={r[0]!r} source={r[1]!r} utc={r[2]!r} "
+            f"temp_unit={r[3]!r} temp_current={r[4]} running_max={r[5]}"
+            for r in violators[:20]
+        )
+        suffix = f"\n  ... and {len(violators) - 20} more" if len(violators) > 20 else ""
+        raise ValueError(
+            f"observation_instants consolidation ABORTED: {len(violators)} legacy-only "
+            f"row(s) would be silently dropped by the CHECK constraint (temp_unit NULL "
+            f"or temperature out-of-bounds). Investigate and clean these rows before "
+            f"re-running --execute.\n{details}{suffix}"
+        )
+
+
 def compute_receipts(conn: sqlite3.Connection) -> dict[str, int]:
     """Pre-merge row-count receipts (read-only)."""
     legacy = _row_count(conn, "observation_instants")
@@ -164,6 +239,12 @@ def up(conn: sqlite3.Connection) -> None:
             "observation_instants_v2 is absent but observation_instants lacks the "
             "superset shape — DB is in an unexpected state; inspect before retrying."
         )
+
+    # SEV-2a pre-flight: fail-loud on legacy-only rows that would be silently
+    # dropped by the canonical CHECK constraint (temp_unit NULL or out-of-bounds).
+    # Must run BEFORE the SAVEPOINT so the error surfaces cleanly to the operator
+    # without an open SAVEPOINT to roll back.
+    _validate_legacy_rows_before_merge(conn)
 
     conn.execute("SAVEPOINT obs_v2_consolidation")
     try:

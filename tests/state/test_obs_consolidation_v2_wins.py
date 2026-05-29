@@ -206,3 +206,104 @@ def test_no_v2_table_after_migration(migrated_conn: sqlite3.Connection):
         "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='observation_instants_v2'"
     ).fetchone()[0]
     assert exists == 0, "observation_instants_v2 must be dropped by the consolidation"
+
+
+# ---------------------------------------------------------------------------
+# SEV-2a antibody tests: legacy-only row auditable merge path
+# ---------------------------------------------------------------------------
+
+_CITY2 = "Chicago"
+_SOURCE2 = "wu_icao_history"
+_UTC2 = "2025-07-01T06:00:00+00:00"
+_TARGET_DATE2 = "2025-07-01"
+
+
+def _build_premigration_world_with_legacy_only(conn: sqlite3.Connection) -> None:
+    """Pre-migration world with NO overlap: one legacy-only row, nothing in v2."""
+    _build_premigration_world(conn)  # creates tables + London overlap rows
+    # Add a legacy-only row (city2 not present in v2 at all).
+    conn.execute(
+        """
+        INSERT INTO observation_instants
+            (city, target_date, source, timezone_name, local_hour, local_timestamp,
+             utc_timestamp, utc_offset_minutes, time_basis, temp_current, running_max,
+             temp_unit, imported_at)
+        VALUES (?, ?, ?, 'America/Chicago', 1.0, '2025-07-01T01:00:00-05:00', ?, -300,
+                'utc_hour_aligned', 22.5, 23.0, 'C', '2025-07-01T07:00:00+00:00')
+        """,
+        (_CITY2, _TARGET_DATE2, _SOURCE2, _UTC2),
+    )
+    conn.commit()
+
+
+def test_legacy_only_row_migrates_cleanly():
+    """A valid legacy-only row (not present in v2) migrates with authority=UNVERIFIED.
+
+    This exercises the happy path of the legacy-only INSERT OR IGNORE: a row that
+    is not in v2 and passes the physical-bounds CHECK lands in the canonical table
+    with authority='UNVERIFIED' and running_min=NULL (correct — legacy had no min).
+    """
+    mig = _load_migration()
+    conn = sqlite3.connect(":memory:")
+    _build_premigration_world_with_legacy_only(conn)
+
+    receipts = mig.compute_receipts(conn)
+    assert receipts["legacy_only_keys_migrate_unverified"] == 1, receipts
+
+    mig.up(conn)
+    conn.commit()
+
+    rows = conn.execute(
+        "SELECT authority, data_version, running_min FROM observation_instants "
+        "WHERE city = ? AND source = ? AND utc_timestamp = ?",
+        (_CITY2, _SOURCE2, _UTC2),
+    ).fetchall()
+    assert len(rows) == 1, f"legacy-only row missing after migration: {rows}"
+    authority, data_version, running_min = rows[0]
+    assert authority == "UNVERIFIED", f"expected UNVERIFIED for legacy-only, got {authority!r}"
+    assert data_version == "v1", f"expected 'v1' for legacy-only, got {data_version!r}"
+    assert running_min is None, f"expected running_min=NULL for legacy-only, got {running_min}"
+
+
+def test_bounds_violating_legacy_only_row_fails_loud():
+    """A legacy-only row with out-of-bounds temperature must NOT be silently dropped.
+
+    The canonical table CHECK requires temperatures within physical bounds for the
+    declared temp_unit (e.g., Celsius: -90..60). A legacy-only row with
+    running_max=200.0 'C' passes the legacy DDL (no CHECK there) but would fail
+    the canonical CHECK. INSERT OR IGNORE would silently discard it — the pre-
+    validation in up() must detect this BEFORE the SAVEPOINT and raise ValueError
+    naming the violating row, making the data loss auditable.
+
+    (Note: the legacy DDL has temp_unit TEXT NOT NULL, so NULL temp_unit cannot be
+    stored in the legacy table. Out-of-bounds values are the realistic violation
+    category — e.g., an ETL bug that stored raw Fahrenheit in a column declared C.)
+    """
+    mig = _load_migration()
+    conn = sqlite3.connect(":memory:")
+    _build_premigration_world(conn)
+    # Inject a legacy-only row with out-of-bounds running_max (200°C > 60°C limit).
+    conn.execute(
+        """
+        INSERT INTO observation_instants
+            (city, target_date, source, timezone_name, local_hour, local_timestamp,
+             utc_timestamp, utc_offset_minutes, time_basis, temp_current, running_max,
+             temp_unit, imported_at)
+        VALUES ('Tokyo', '2025-08-01', 'wu_icao_history', 'Asia/Tokyo',
+                9.0, '2025-08-01T09:00:00+09:00', '2025-08-01T00:00:00+00:00', 540,
+                'utc_hour_aligned', 28.0, 200.0, 'C', '2025-08-01T01:00:00+00:00')
+        """,
+    )
+    conn.commit()
+
+    with pytest.raises(ValueError, match="silently dropped"):
+        mig.up(conn)
+
+    # The migration must have left the DB fully intact (no partial rename).
+    tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    assert "observation_instants_v2" in tables, (
+        "observation_instants_v2 must still exist — migration must not have renamed anything"
+    )
+    assert "observation_instants" in tables, (
+        "legacy observation_instants must still exist — migration must not have renamed it"
+    )
