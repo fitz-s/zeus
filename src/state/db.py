@@ -4493,6 +4493,120 @@ def init_backtest_schema(conn: Optional[sqlite3.Connection] = None) -> None:
             ON backtest_outcome_comparison(divergence_status);
         CREATE INDEX IF NOT EXISTS idx_backtest_outcome_run
             ON backtest_outcome_comparison(run_id);
+
+        -- PR E: replay/backtest output tables
+        -- promotion_authority defaults to 0 on replay_subjects and replay_skill_results;
+        -- these rows are diagnostic-only until explicit promotion gates are wired.
+
+        CREATE TABLE IF NOT EXISTS replay_runs (
+            run_id TEXT PRIMARY KEY,
+            purpose TEXT,
+            started_at TEXT,
+            completed_at TEXT,
+            status TEXT,
+            code_version TEXT,
+            schema_fingerprint TEXT,
+            date_range_start TEXT,
+            date_range_end TEXT,
+            temperature_metric_scope TEXT,
+            strategy_scope_json TEXT,
+            authority_envelope_json TEXT,
+            limitations_json TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS replay_subjects (
+            replay_subject_id TEXT PRIMARY KEY,
+            run_id TEXT,
+            purpose TEXT,
+            city TEXT,
+            target_local_date TEXT,
+            temperature_metric TEXT,
+            forecast_object_id TEXT,
+            settlement_object_id TEXT,
+            outcome_set_id TEXT,
+            bin_grid_id TEXT,
+            decision_snapshot_id TEXT,
+            decision_event_id TEXT,
+            market_slug TEXT,
+            condition_id TEXT,
+            strategy_key TEXT,
+            decision_time TEXT,
+            point_in_time_provenance TEXT,
+            promotion_authority INTEGER NOT NULL DEFAULT 0,  -- diagnostic_non_promotion until gates wired
+            learning_eligible INTEGER
+        );
+
+        CREATE TABLE IF NOT EXISTS forecast_probability_vectors (
+            forecast_object_id TEXT PRIMARY KEY,
+            replay_subject_id TEXT,
+            dataset_id TEXT,
+            source_id TEXT,
+            source_run_id TEXT,
+            cycle TEXT,
+            lead_hours REAL,
+            lead_bucket TEXT,
+            bin_grid_id TEXT,
+            bin_schema_id TEXT,
+            ordered_bin_ids_json TEXT,
+            ordered_labels_json TEXT,
+            p_raw_json TEXT,
+            p_cal_json TEXT,
+            p_market_json TEXT,
+            p_posterior_json TEXT,
+            normalization_status TEXT,
+            available_at TEXT,
+            fetch_time TEXT,
+            authority TEXT,
+            provenance_json TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS settlement_resolution_truth (
+            settlement_object_id TEXT PRIMARY KEY,
+            city TEXT,
+            target_local_date TEXT,
+            temperature_metric TEXT,
+            settlement_value REAL,
+            settlement_unit TEXT,
+            settlement_rounding_policy TEXT,
+            settlement_source TEXT,
+            settled_at TEXT,
+            market_slug TEXT,
+            condition_id TEXT,
+            winning_bin_id_derived TEXT,
+            stored_winning_bin_evidence TEXT,
+            winning_asset_id TEXT,
+            winning_token_id TEXT,
+            resolution_status TEXT,
+            authority TEXT,
+            evidence_class TEXT,
+            learning_eligible INTEGER,
+            promotion_eligible INTEGER,
+            provenance_json TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS replay_skill_results (
+            skill_result_id TEXT PRIMARY KEY,
+            run_id TEXT,
+            replay_subject_id TEXT,
+            forecast_object_id TEXT,
+            settlement_object_id TEXT,
+            p_vector_json TEXT,
+            y_vector_json TEXT,
+            winner_bin_id TEXT,
+            p_winner REAL,
+            categorical_log_loss REAL,
+            multiclass_brier REAL,
+            ranked_probability_score REAL,
+            top1_hit INTEGER,
+            top3_hit INTEGER,
+            winner_rank INTEGER,
+            reciprocal_rank REAL,
+            group_integrity_status TEXT,
+            group_exclusion_reason TEXT,
+            promotion_authority INTEGER NOT NULL DEFAULT 0,  -- diagnostic_non_promotion until gates wired
+            learning_eligible INTEGER,
+            limitations_json TEXT
+        );
     """)
     conn.commit()
     if own_conn:
