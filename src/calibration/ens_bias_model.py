@@ -323,3 +323,69 @@ def transport_bias_prior(
     sd_d = math.sqrt(var_d)
     v0 = sd50 * sd50 + var_d + kappa * sd50 * sd_d
     return BiasPrior(mu_t=b50 + d_mean, v0=max(v0, 1e-12))
+
+
+# Evidence-product tag for a TIGGE-derived candidate. TIGGE extrema are the 6h product
+# (mx2t6), a DIFFERENT random variable from live OpenData 3h (mx2t3); tagging it distinctly
+# lets the accept-gate refuse it for an OpenData target (asym SEV-1-B).
+TIGGE_EVIDENCE_PRODUCT = "tigge_mx2t6"
+
+
+@dataclass(frozen=True)
+class BiasCandidate:
+    """One product-tagged bias candidate for the accept-gate.
+
+    bias : the (forecast - actual) correction in degC (subtracted pre-MC; 0.0 = raw identity).
+    evidence_product : the product its evidence was computed on. The gate selects a candidate
+        only if this equals the serving target_product — so a TIGGE candidate cannot serve
+        OpenData.
+    n : number of residual samples behind the estimate (0 for raw).
+    """
+
+    name: str
+    bias: float
+    evidence_product: str
+    n: int
+
+
+def build_candidate_biases(
+    *,
+    target_product: str,
+    opendata_residuals: list[float],
+    tigge_residuals: list[float],
+    trim: float = 0.1,
+) -> dict[str, BiasCandidate]:
+    """Emit the product-segregated candidate set for one bucket.
+
+    REPLACES "the TIGGE→OpenData shrinkage posterior IS the OpenData estimate" (which, at thin
+    live n, leans toward the harmful TIGGE prior). Instead:
+      - ``raw``          : zero bias, tagged with the target product (the baseline; always eligible).
+      - ``opendata_bias``: OpenData-ONLY mean (no TIGGE shrinkage), tagged target_product
+                           (eligible to serve the target).
+      - ``tigge_prior``  : TIGGE-only mean, tagged TIGGE_EVIDENCE_PRODUCT (cross-product → the
+                           accept-gate refuses it for an OpenData target; it may only enter via a
+                           transfer candidate that is independently OOS-validated ON the target).
+
+    The actual adoption still requires clearing the OOS gate (oos_gate LCB + BH-FDR); at the
+    current ~12-18-sample live depth nothing clears it, so raw is served — by design.
+    """
+    candidates: dict[str, BiasCandidate] = {
+        "raw": BiasCandidate(
+            name="raw", bias=0.0, evidence_product=target_product, n=len(opendata_residuals)
+        )
+    }
+    if opendata_residuals:
+        candidates["opendata_bias"] = BiasCandidate(
+            name="opendata_bias",
+            bias=robust_mean(opendata_residuals, trim),
+            evidence_product=target_product,
+            n=len(opendata_residuals),
+        )
+    if tigge_residuals:
+        candidates["tigge_prior"] = BiasCandidate(
+            name="tigge_prior",
+            bias=robust_mean(tigge_residuals, trim),
+            evidence_product=TIGGE_EVIDENCE_PRODUCT,
+            n=len(tigge_residuals),
+        )
+    return candidates
