@@ -1,18 +1,18 @@
 # Created: 2026-05-17
 # Last reused or audited: 2026-05-17
 # Authority basis: docs/archive/2026-Q2/task_2026-05-17_post_karachi_remediation/F44_INVESTIGATION.md
-#   Antibody for F44: observation_instants_v2 writer dead since 2026-05-10.
+#   Antibody for F44: observation_instants writer dead since 2026-05-10.
 #   These tests catch the "dead-writer" category permanently by asserting
 #   MAX(target_date) is within a defined SLA window.
 #   CI-runnable, no live DB dependency — parametrized over a fixture DB.
-"""Antibody tests for observation_instants_v2 freshness SLA.
+"""Antibody tests for observation_instants freshness SLA.
 
 F44 root cause: no live-tick writer existed. The table was populated only by
 one-time backfill scripts. These tests catch the dead-writer category by:
 
 1. Asserting MAX(target_date) within 48h SLA on a fixture DB.
 2. Asserting the new obs_v2_live_tick module imports cleanly.
-3. Asserting that ingest_main.py registers an 'ingest_k2_obs_v2' scheduler job.
+3. Asserting that ingest_main.py registers an 'ingest_k2_obs' scheduler job.
 4. Asserting the live-tick script does NOT write openmeteo_archive_hourly rows
    (source-tier violation; would be rejected by A2 but we catch it at design time).
 """
@@ -32,11 +32,11 @@ import pytest
 
 @pytest.fixture()
 def fresh_v2_db(tmp_path: Path) -> Path:
-    """Fixture DB with observation_instants_v2 containing fresh rows (today)."""
+    """Fixture DB with observation_instants containing fresh rows (today)."""
     db_path = tmp_path / "test_world.db"
     conn = sqlite3.connect(str(db_path))
     conn.execute("""
-        CREATE TABLE observation_instants_v2 (
+        CREATE TABLE observation_instants (
             city TEXT NOT NULL,
             target_date TEXT NOT NULL,
             source TEXT NOT NULL,
@@ -48,7 +48,7 @@ def fresh_v2_db(tmp_path: Path) -> Path:
     """)
     today = date.today().isoformat()
     conn.execute(
-        "INSERT INTO observation_instants_v2 (city, target_date, source, utc_timestamp, authority, data_version, imported_at)"
+        "INSERT INTO observation_instants (city, target_date, source, utc_timestamp, authority, data_version, imported_at)"
         " VALUES (?, ?, ?, ?, ?, ?, ?)",
         ("Karachi", today, "wu_icao_history", f"{today}T12:00:00+00:00", "VERIFIED", "v1.wu-native", f"{today}T12:00:00+00:00"),
     )
@@ -63,7 +63,7 @@ def stale_v2_db(tmp_path: Path) -> Path:
     db_path = tmp_path / "stale_world.db"
     conn = sqlite3.connect(str(db_path))
     conn.execute("""
-        CREATE TABLE observation_instants_v2 (
+        CREATE TABLE observation_instants (
             city TEXT NOT NULL,
             target_date TEXT NOT NULL,
             source TEXT NOT NULL,
@@ -75,7 +75,7 @@ def stale_v2_db(tmp_path: Path) -> Path:
     """)
     stale_date = (date.today() - timedelta(days=7)).isoformat()
     conn.execute(
-        "INSERT INTO observation_instants_v2 (city, target_date, source, utc_timestamp, authority, data_version, imported_at)"
+        "INSERT INTO observation_instants (city, target_date, source, utc_timestamp, authority, data_version, imported_at)"
         " VALUES (?, ?, ?, ?, ?, ?, ?)",
         ("Karachi", stale_date, "wu_icao_history", f"{stale_date}T12:00:00+00:00", "VERIFIED", "v1.wu-native", f"{stale_date}T12:00:00+00:00"),
     )
@@ -90,7 +90,7 @@ def empty_v2_db(tmp_path: Path) -> Path:
     db_path = tmp_path / "empty_world.db"
     conn = sqlite3.connect(str(db_path))
     conn.execute("""
-        CREATE TABLE observation_instants_v2 (
+        CREATE TABLE observation_instants (
             city TEXT NOT NULL,
             target_date TEXT NOT NULL,
             source TEXT NOT NULL,
@@ -113,10 +113,10 @@ SLA_HOURS = 48  # maximum acceptable staleness
 
 
 def _max_target_date(db_path: Path) -> date | None:
-    """Return MAX(target_date) from observation_instants_v2, or None if empty."""
+    """Return MAX(target_date) from observation_instants, or None if empty."""
     conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     try:
-        row = conn.execute("SELECT MAX(target_date) FROM observation_instants_v2").fetchone()
+        row = conn.execute("SELECT MAX(target_date) FROM observation_instants").fetchone()
         if row and row[0]:
             return date.fromisoformat(row[0])
         return None
@@ -128,7 +128,7 @@ def _check_freshness(db_path: Path, *, sla_hours: int = SLA_HOURS) -> tuple[bool
     """Return (is_fresh, message) for the given DB."""
     max_date = _max_target_date(db_path)
     if max_date is None:
-        return False, "observation_instants_v2 is empty (zero rows)"
+        return False, "observation_instants is empty (zero rows)"
     today = date.today()
     staleness_days = (today - max_date).days
     staleness_hours = staleness_days * 24
@@ -136,7 +136,7 @@ def _check_freshness(db_path: Path, *, sla_hours: int = SLA_HOURS) -> tuple[bool
         return False, (
             f"MAX(target_date)={max_date} is {staleness_days}d ({staleness_hours}h) old, "
             f"exceeds {sla_hours}h SLA. "
-            f"Root cause: observation_instants_v2 writer not running (F44 category)."
+            f"Root cause: observation_instants writer not running (F44 category)."
         )
     return True, f"MAX(target_date)={max_date} is {staleness_days}d old, within {sla_hours}h SLA"
 
@@ -169,9 +169,9 @@ def test_exactly_48h_boundary_is_fresh(tmp_path: Path) -> None:
     """Exactly at SLA boundary (2 days ago) should pass."""
     db_path = tmp_path / "boundary.db"
     conn = sqlite3.connect(str(db_path))
-    conn.execute("CREATE TABLE observation_instants_v2 (city TEXT, target_date TEXT, source TEXT, utc_timestamp TEXT, authority TEXT, data_version TEXT, imported_at TEXT)")
+    conn.execute("CREATE TABLE observation_instants (city TEXT, target_date TEXT, source TEXT, utc_timestamp TEXT, authority TEXT, data_version TEXT, imported_at TEXT)")
     boundary_date = (date.today() - timedelta(days=2)).isoformat()
-    conn.execute("INSERT INTO observation_instants_v2 VALUES (?, ?, ?, ?, ?, ?, ?)",
+    conn.execute("INSERT INTO observation_instants VALUES (?, ?, ?, ?, ?, ?, ?)",
                  ("London", boundary_date, "wu_icao_history", f"{boundary_date}T00:00:00+00:00", "VERIFIED", "v1.wu-native", f"{boundary_date}T00:00:00+00:00"))
     conn.commit()
     conn.close()
@@ -183,9 +183,9 @@ def test_beyond_48h_boundary_is_stale(tmp_path: Path) -> None:
     """Three days ago (>48h) should fail."""
     db_path = tmp_path / "beyond.db"
     conn = sqlite3.connect(str(db_path))
-    conn.execute("CREATE TABLE observation_instants_v2 (city TEXT, target_date TEXT, source TEXT, utc_timestamp TEXT, authority TEXT, data_version TEXT, imported_at TEXT)")
+    conn.execute("CREATE TABLE observation_instants (city TEXT, target_date TEXT, source TEXT, utc_timestamp TEXT, authority TEXT, data_version TEXT, imported_at TEXT)")
     old_date = (date.today() - timedelta(days=3)).isoformat()
-    conn.execute("INSERT INTO observation_instants_v2 VALUES (?, ?, ?, ?, ?, ?, ?)",
+    conn.execute("INSERT INTO observation_instants VALUES (?, ?, ?, ?, ?, ?, ?)",
                  ("London", old_date, "wu_icao_history", f"{old_date}T00:00:00+00:00", "VERIFIED", "v1.wu-native", f"{old_date}T00:00:00+00:00"))
     conn.commit()
     conn.close()
@@ -203,7 +203,7 @@ def test_obs_v2_live_tick_imports_cleanly() -> None:
     Catches regressions where the module's imports are broken (e.g. a
     refactor renames a function the tick depends on).
     """
-    from scripts.obs_v2_live_tick import run_live_tick, TickResult, DATA_VERSION
+    from scripts.obs_live_tick import run_live_tick, TickResult, DATA_VERSION
     assert callable(run_live_tick), "run_live_tick must be callable"
     assert DATA_VERSION.startswith("v1."), f"DATA_VERSION must match v1.* pattern, got {DATA_VERSION!r}"
 
@@ -217,7 +217,7 @@ def test_obs_v2_live_tick_does_not_use_openmeteo_source() -> None:
     dual-write from hourly_instants_append.py).
     """
     import ast
-    tick_path = Path(__file__).resolve().parent.parent / "scripts" / "obs_v2_live_tick.py"
+    tick_path = Path(__file__).resolve().parent.parent / "scripts" / "obs_live_tick.py"
     source_text = tick_path.read_text()
     assert "openmeteo_archive_hourly" not in source_text, (
         "obs_v2_live_tick.py must not reference 'openmeteo_archive_hourly'. "
@@ -231,19 +231,19 @@ def test_obs_v2_live_tick_does_not_use_openmeteo_source() -> None:
 # ---------------------------------------------------------------------------
 
 def test_ingest_main_registers_obs_v2_job() -> None:
-    """ingest_main.py must register 'ingest_k2_obs_v2' as a scheduler job.
+    """ingest_main.py must register 'ingest_k2_obs' as a scheduler job.
 
     Catches regressions where the scheduler wiring is accidentally removed.
     This is the F44 fix — if this assertion fails, the writer is dead again.
     """
     ingest_main_path = Path(__file__).resolve().parent.parent / "src" / "ingest_main.py"
     source_text = ingest_main_path.read_text()
-    assert "ingest_k2_obs_v2" in source_text, (
-        "ingest_main.py must register 'ingest_k2_obs_v2' scheduler job. "
-        "This is the F44 fix. If this job is missing, observation_instants_v2 "
+    assert "ingest_k2_obs" in source_text, (
+        "ingest_main.py must register 'ingest_k2_obs' scheduler job. "
+        "This is the F44 fix. If this job is missing, observation_instants "
         "will go stale (same root cause: no live-tick writer)."
     )
-    assert "_k2_obs_v2_tick" in source_text, (
-        "ingest_main.py must define _k2_obs_v2_tick function. "
+    assert "_k2_obs_tick" in source_text, (
+        "ingest_main.py must define _k2_obs_tick function. "
         "This is the F44 fix entry point."
     )

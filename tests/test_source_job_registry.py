@@ -182,5 +182,5 @@ def test_all_source_ids_includes_primary_and_secondaries() -> None:
     assert set(scan.all_source_ids) == {"polymarket_gamma", "polymarket_clob"}
     daily = JOB_REGISTRY["ingest_k2_daily_obs"]
     assert daily.all_source_ids == ("wu_icao_history",)
-    obs = JOB_REGISTRY["ingest_k2_obs_v2"]
+    obs = JOB_REGISTRY["ingest_k2_obs"]
     assert set(obs.all_source_ids) == {"wu_icao_history", "ogimet_metar"}

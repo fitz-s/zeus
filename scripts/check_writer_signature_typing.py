@@ -63,7 +63,7 @@ _P1_BASELINE_VIOLATIONS: frozenset[str] = frozenset({
     # Do not grow this set.
     "src/calibration/effective_sample_size.py::write_decision_groups",
     "src/calibration/retrain_trigger.py::_insert_version",
-    "src/calibration/store.py::save_platt_model",  # canonical (was save_platt_model_v2)
+    "src/calibration/store.py::save_platt_model",
     "src/data/daily_obs_append.py::_write_atom_with_coverage",
     "src/data/daily_obs_append.py::append_hko_months",
     "src/data/daily_obs_append.py::append_ogimet_city",
@@ -77,8 +77,8 @@ _P1_BASELINE_VIOLATIONS: frozenset[str] = frozenset({
     "src/data/forecasts_append.py::append_forecasts_window",
     "src/data/hourly_instants_append.py::_write_row",
     "src/data/hourly_instants_append.py::append_hourly_window",
-    "src/data/observation_instants_v2_writer.py::_insert_revision",
-    "src/data/observation_instants_v2_writer.py::insert_rows",
+    "src/data/observation_instants_writer.py::_insert_revision",
+    "src/data/observation_instants_writer.py::insert_rows",
     "src/data/solar_append.py::_write_row_with_coverage",
     "src/data/solar_append.py::append_solar_window",
     "src/engine/cycle_runtime.py::_dual_write_canonical_entry_if_available",

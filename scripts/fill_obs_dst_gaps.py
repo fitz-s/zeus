@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 # Lifecycle: created=2026-04-22; last_reviewed=2026-04-25; last_reused=2026-04-25
-# Purpose: Fill observation_instants_v2 WU DST/pilot-boundary gaps through Ogimet fallback rows.
+# Purpose: Fill observation_instants WU DST/pilot-boundary gaps through Ogimet fallback rows.
 # Reuse: Verify source-role fallback law and writer provenance identity before changing row construction.
 # Created: 2026-04-22
 # Last reused/audited: 2026-04-25
 # Authority basis: critic 2026-04-22 C1 finding; plan v3 extremum-preservation
 #                  contract.
-"""Fill observation_instants_v2 gaps on WU DST-spring-forward days via Ogimet.
+"""Fill observation_instants gaps on WU DST-spring-forward days via Ogimet.
 
 WU Underground's historical API has silent upstream gaps on DST-spring-
 forward days: KORD 2024-03-10 returned 2 observations instead of 23,
@@ -57,7 +57,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from src.config import cities_by_name  # noqa: E402
-from src.data.observation_instants_v2_writer import (  # noqa: E402
+from src.data.observation_instants_writer import (  # noqa: E402
     InvalidObsV2RowError,
     ObsV2Row,
     insert_rows,
@@ -97,7 +97,7 @@ def _find_gaps(
     rows = conn.execute(
         """
         SELECT city, target_date, COUNT(DISTINCT utc_timestamp) AS h
-        FROM observation_instants_v2
+        FROM observation_instants
         WHERE data_version = ? AND city != 'Hong Kong'
         GROUP BY city, target_date
         HAVING h < ?
@@ -298,7 +298,7 @@ def _sha256_json(payload: dict) -> str:
 
 def _parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="Fill observation_instants_v2 DST-day gaps via Ogimet",
+        description="Fill observation_instants DST-day gaps via Ogimet",
     )
     p.add_argument("--data-version", required=True)
     p.add_argument(

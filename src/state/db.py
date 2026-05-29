@@ -1405,32 +1405,16 @@ def init_schema(
         );
 
 
-        -- DST-safe hourly observation timeline
-        CREATE TABLE IF NOT EXISTS observation_instants (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            city TEXT NOT NULL,
-            target_date TEXT NOT NULL,
-            source TEXT NOT NULL,
-            timezone_name TEXT NOT NULL,
-            local_hour REAL,
-            local_timestamp TEXT NOT NULL,
-            utc_timestamp TEXT NOT NULL,
-            utc_offset_minutes INTEGER NOT NULL,
-            dst_active INTEGER NOT NULL DEFAULT 0,
-            is_ambiguous_local_hour INTEGER NOT NULL DEFAULT 0,
-            is_missing_local_hour INTEGER NOT NULL DEFAULT 0,
-            time_basis TEXT NOT NULL,
-            temp_current REAL,
-            running_max REAL,
-            delta_rate_per_h REAL,
-            temp_unit TEXT NOT NULL,
-            station_id TEXT,
-            observation_count INTEGER,
-            raw_response TEXT,
-            source_file TEXT,
-            imported_at TEXT NOT NULL,
-            UNIQUE(city, source, utc_timestamp)
-        );
+        -- DST-safe hourly observation timeline.
+        -- CONSOLIDATION 2026-05-29: the legacy subset DDL for observation_instants
+        -- (22 cols) was DELETED here. The canonical superset (32 cols: authority,
+        -- data_version, provenance_json, running_min, identity-spine, +bounds CHECK)
+        -- is now the ONLY definition of observation_instants and lives in
+        -- src/state/schema/v2_schema.py (applied via apply_canonical_schema, called
+        -- from init_schema). Defining a subset here would shadow the superset under
+        -- CREATE TABLE IF NOT EXISTS (init_schema runs this executescript BEFORE
+        -- apply_canonical_schema), so it MUST stay deleted. Indexes moved to
+        -- v2_schema.py as well (idx_observation_instants_city_ts).
 
         -- Daily sunrise/sunset context for Day0 and DST-aware timing
         CREATE TABLE IF NOT EXISTS solar_daily (
@@ -1526,10 +1510,9 @@ def init_schema(
             ON daily_observation_revisions(
                 city, target_date, source, incoming_combined_payload_hash, reason
             );
-        CREATE INDEX IF NOT EXISTS idx_observation_instants_city_date
-            ON observation_instants(city, target_date, utc_timestamp);
-        CREATE INDEX IF NOT EXISTS idx_observation_instants_source
-            ON observation_instants(source, city, target_date);
+        -- idx_observation_instants_* moved to v2_schema.py with the canonical
+        -- (superset) table DDL in the 2026-05-29 consolidation. See note at the
+        -- former observation_instants subset DDL site above.
         CREATE INDEX IF NOT EXISTS idx_token_price_token
             ON token_price_log(token_id, timestamp);
         -- idx_market_events_slug removed in B3cont (PR3): bare market_events shell dropped.
@@ -5533,7 +5516,7 @@ def append_source_contract_audit_events(
 
 
 @capability("settlement_write", lease=True)
-def log_settlement_v2(
+def log_settlement(
     conn: sqlite3.Connection | None,
     *,
     city: str,

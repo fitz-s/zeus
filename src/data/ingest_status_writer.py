@@ -147,20 +147,19 @@ def write_ingest_status(
     # Per-table row counts
     table_stats: dict[str, dict[str, Any]] = {}
 
-    # observation_instants
+    # observation_instants (canonical — consolidated 2026-05-29 from the former
+    # observation_instants v1 subset + observation_instants_v2 superset, now ONE
+    # table). Includes both the utc_timestamp-based freshness counts that the v1
+    # entry reported and the imported_at-based counts + max_imported_at that the
+    # v2 entry reported.
+    obs_max_imported_at = _max_col_value(world_conn, "observation_instants", "imported_at")
     table_stats["observation_instants"] = {
         "rows_last_hour": _rows_in_period(world_conn, "observation_instants", "utc_timestamp", 1),
         "rows_last_day": _rows_in_period(world_conn, "observation_instants", "utc_timestamp", 24),
+        "rows_last_hour_by_import": _rows_in_period(world_conn, "observation_instants", "imported_at", 1),
+        "rows_last_day_by_import": _rows_in_period(world_conn, "observation_instants", "imported_at", 24),
+        "max_imported_at": obs_max_imported_at,
         "holes_by_city_count": _holes_by_city_count(world_conn, "observation_instants"),
-    }
-
-    # observation_instants_v2
-    obs_v2_max_imported_at = _max_col_value(world_conn, "observation_instants_v2", "imported_at")
-    table_stats["observation_instants_v2"] = {
-        "rows_last_hour": _rows_in_period(world_conn, "observation_instants_v2", "imported_at", 1),
-        "rows_last_day": _rows_in_period(world_conn, "observation_instants_v2", "imported_at", 24),
-        "max_imported_at": obs_v2_max_imported_at,
-        "holes_by_city_count": _holes_by_city_count(world_conn, "observation_instants_v2"),
     }
 
     # forecasts
@@ -194,7 +193,7 @@ def write_ingest_status(
 
     payload = {
         "written_at": _now_iso(),
-        "observation_instants_v2_max_imported_at": obs_v2_max_imported_at,
+        "observation_instants_max_imported_at": obs_max_imported_at,
         "tables": table_stats,
         "last_quarantine_reason": last_quarantine,
         "source_health_written_at": source_health.get("written_at") if source_health else None,

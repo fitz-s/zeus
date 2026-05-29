@@ -96,7 +96,7 @@ def conn():
     c = sqlite3.connect(":memory:")
     c.row_factory = sqlite3.Row
     c.execute("""
-        CREATE TABLE observation_instants_v2 (
+        CREATE TABLE observation_instants (
             city TEXT, target_date TEXT, local_hour TEXT,
             source TEXT, data_version TEXT,
             running_max REAL, running_min REAL
@@ -119,7 +119,7 @@ def test_fetch_directional_coverage_full_day(conn):
     # Insert 7 hours covering window 12..18 around peak=15
     for h in range(12, 19):
         conn.execute(
-            "INSERT INTO observation_instants_v2 VALUES (?,?,?,?,?,?,?)",
+            "INSERT INTO observation_instants VALUES (?,?,?,?,?,?,?)",
             ("NYC", "2026-05-02", str(h), "wu_icao_history", "v1.wu-native", 25.0, 18.0),
         )
     cov = fetch_directional_coverage(
@@ -132,7 +132,7 @@ def test_fetch_directional_coverage_partial(conn):
     # 3 hours of 7
     for h in (12, 14, 16):
         conn.execute(
-            "INSERT INTO observation_instants_v2 VALUES (?,?,?,?,?,?,?)",
+            "INSERT INTO observation_instants VALUES (?,?,?,?,?,?,?)",
             ("NYC", "2026-05-02", str(h), "wu_icao_history", "v1.wu-native", 25.0, 18.0),
         )
     cov = fetch_directional_coverage(
@@ -152,7 +152,7 @@ def test_fetch_directional_coverage_filters_by_source(conn):
     # 7 rows from wrong source → cov=0 for canonical source
     for h in range(12, 19):
         conn.execute(
-            "INSERT INTO observation_instants_v2 VALUES (?,?,?,?,?,?,?)",
+            "INSERT INTO observation_instants VALUES (?,?,?,?,?,?,?)",
             ("NYC", "2026-05-02", str(h), "openmeteo_archive_hourly", "v1.wu-native", 25.0, 18.0),
         )
     cov = fetch_directional_coverage(
@@ -342,7 +342,7 @@ def test_paris_no_longer_fail_closed_after_workstream_a(tmp_path, monkeypatch):
     # The point of THIS test is: it should NOT raise DDDFailClosed.
     c = sqlite3.connect(":memory:")
     c.execute("""
-        CREATE TABLE observation_instants_v2 (
+        CREATE TABLE observation_instants (
             city TEXT, target_date TEXT, local_hour TEXT,
             source TEXT, data_version TEXT,
             running_max REAL, running_min REAL
@@ -412,7 +412,7 @@ def test_rail2_discount_when_partial_cov(conn, floors_and_nstar):
     """4/7 coverage on NYC (floor 1.0) → shortfall ≈ 0.43 → discount = 0.09 cap."""
     for h in (12, 13, 14, 15):  # 4 of 7 hours
         conn.execute(
-            "INSERT INTO observation_instants_v2 VALUES (?,?,?,?,?,?,?)",
+            "INSERT INTO observation_instants VALUES (?,?,?,?,?,?,?)",
             ("NYC", "2026-05-02", str(h), "wu_icao_history", "v1.wu-native", 25.0, 18.0),
         )
     # Seed a Platt model so n_platt > N*=100 (no small-sample amp)
@@ -445,7 +445,7 @@ def test_rail2_zero_discount_when_full_cov(conn, floors_and_nstar):
     """7/7 coverage → cov=1.0 = floor → shortfall=0, discount=0."""
     for h in range(12, 19):
         conn.execute(
-            "INSERT INTO observation_instants_v2 VALUES (?,?,?,?,?,?,?)",
+            "INSERT INTO observation_instants VALUES (?,?,?,?,?,?,?)",
             ("NYC", "2026-05-02", str(h), "wu_icao_history", "v1.wu-native", 25.0, 18.0),
         )
     conn.execute(
@@ -531,7 +531,7 @@ def test_cycle_source_id_stored_in_diagnostic(conn, floors_and_nstar):
     # Seed enough coverage to avoid Rail 1 — we want to reach a result at all.
     for h in range(12, 19):
         conn.execute(
-            "INSERT INTO observation_instants_v2 VALUES (?,?,?,?,?,?,?)",
+            "INSERT INTO observation_instants VALUES (?,?,?,?,?,?,?)",
             ("NYC", "2026-05-02", str(h), "wu_icao_history", "v1.wu-native", 25.0, 18.0),
         )
     conn.execute(
@@ -575,7 +575,7 @@ def test_cycle_mismatch_not_silently_swallowed(conn, floors_and_nstar):
     # Seed full coverage so Rail 1 does not fire on either call.
     for h in range(12, 19):
         conn.execute(
-            "INSERT INTO observation_instants_v2 VALUES (?,?,?,?,?,?,?)",
+            "INSERT INTO observation_instants VALUES (?,?,?,?,?,?,?)",
             ("NYC", "2026-05-02", str(h), "wu_icao_history", "v1.wu-native", 25.0, 18.0),
         )
     conn.execute(

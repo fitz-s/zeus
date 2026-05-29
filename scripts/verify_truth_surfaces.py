@@ -825,14 +825,14 @@ def _add_required_identity_check(
 
 
 def _add_payload_identity_check(report: dict, cur: sqlite3.Cursor) -> None:
-    check_id = "observation_instants_v2.payload_identity_present"
-    table = "observation_instants_v2"
+    check_id = "observation_instants.payload_identity_present"
+    table = "observation_instants"
     if not _table_exists(cur, table):
         _add_missing_table_check(
             report,
             check_id=check_id,
             table=table,
-            detail="observation_instants_v2 table is missing",
+            detail="observation_instants table is missing",
         )
         return
 
@@ -865,7 +865,7 @@ def _add_payload_identity_check(report: dict, cur: sqlite3.Cursor) -> None:
                 check_id=check_id,
                 status=PASS if met else FAIL,
                 detail=(
-                    "training-allowed observation_instants_v2 rows missing "
+                    "training-allowed observation_instants rows missing "
                     f"provenance_json payload identity={count}"
                 ),
                 count=count,
@@ -910,7 +910,7 @@ def _add_payload_identity_check(report: dict, cur: sqlite3.Cursor) -> None:
     report["checks"][check_id] = _check_entry(
         check_id=check_id,
         status=PASS if met else FAIL,
-        detail=f"training-allowed observation_instants_v2 rows missing payload identity={count}",
+        detail=f"training-allowed observation_instants rows missing payload identity={count}",
         count=count,
         threshold=0,
         met=met,
@@ -925,14 +925,14 @@ def _add_observation_reader_identity_check(
     report: dict,
     cur: sqlite3.Cursor,
 ) -> None:
-    check_id = "observation_instants_v2.reader_identity_unsafe"
-    table = "observation_instants_v2"
+    check_id = "observation_instants.reader_identity_unsafe"
+    table = "observation_instants"
     if not _table_exists(cur, table):
         _add_missing_table_check(
             report,
             check_id=check_id,
             table=table,
-            detail="observation_instants_v2 table is missing",
+            detail="observation_instants table is missing",
         )
         return
 
@@ -959,7 +959,7 @@ def _add_observation_reader_identity_check(
             """,
         )
         detail = (
-            "training-allowed observation_instants_v2 rows with unsafe "
+            "training-allowed observation_instants rows with unsafe "
             f"reader authority/data_version={count}"
         )
         code = check_id
@@ -967,7 +967,7 @@ def _add_observation_reader_identity_check(
         count = _count(cur, table)
         missing = ", ".join(sorted(required_columns - columns))
         detail = (
-            "observation_instants_v2 lacks reader identity columns: "
+            "observation_instants lacks reader identity columns: "
             f"{missing or 'unknown'}"
         )
         code = "missing_reader_identity_columns"
@@ -1363,18 +1363,18 @@ def _add_low_contract_evidence_preflight_check(
 
 
 def _add_observation_instants_safety_checks(report: dict, cur: sqlite3.Cursor) -> None:
-    table = "observation_instants_v2"
+    table = "observation_instants"
     if not _table_exists(cur, table):
         for check_id in (
-            "observation_instants_v2.training_role_unsafe",
-            "observation_instants_v2.causality_unsafe",
-            "observation_instants_v2.reader_identity_unsafe",
+            "observation_instants.training_role_unsafe",
+            "observation_instants.causality_unsafe",
+            "observation_instants.reader_identity_unsafe",
         ):
             _add_missing_table_check(
                 report,
                 check_id=check_id,
                 table=table,
-                detail="observation_instants_v2 table is missing",
+                detail="observation_instants table is missing",
             )
         _add_payload_identity_check(report, cur)
         return
@@ -1398,17 +1398,17 @@ def _add_observation_instants_safety_checks(report: dict, cur: sqlite3.Cursor) -
             """,
         )
         role_detail = (
-            "training-allowed observation_instants_v2 rows with unsafe "
+            "training-allowed observation_instants rows with unsafe "
             f"source_role={role_count}"
         )
-        role_code = "observation_instants_v2.training_role_unsafe"
+        role_code = "observation_instants.training_role_unsafe"
     else:
         role_count = _count(cur, table)
-        role_detail = "observation_instants_v2 lacks training_allowed/source_role columns"
+        role_detail = "observation_instants lacks training_allowed/source_role columns"
         role_code = "missing_source_role_columns"
     role_met = role_count == 0
-    report["checks"]["observation_instants_v2.training_role_unsafe"] = _check_entry(
-        check_id="observation_instants_v2.training_role_unsafe",
+    report["checks"]["observation_instants.training_role_unsafe"] = _check_entry(
+        check_id="observation_instants.training_role_unsafe",
         status=PASS if role_met else FAIL,
         detail=role_detail,
         count=role_count,
@@ -1434,7 +1434,7 @@ def _add_observation_instants_safety_checks(report: dict, cur: sqlite3.Cursor) -
             """,
         )
         causality_detail = (
-            "training-allowed observation_instants_v2 rows with unsafe "
+            "training-allowed observation_instants rows with unsafe "
             f"causality_status={causality_count}"
         )
     elif "training_allowed" in columns:
@@ -1444,15 +1444,15 @@ def _add_observation_instants_safety_checks(report: dict, cur: sqlite3.Cursor) -
             "COALESCE(training_allowed, 0) = 1",
         )
         causality_detail = (
-            "observation_instants_v2 lacks causality_status column for "
+            "observation_instants lacks causality_status column for "
             f"training_allowed rows={causality_count}"
         )
     else:
         causality_count = _count(cur, table)
-        causality_detail = "observation_instants_v2 lacks training_allowed/causality_status columns"
+        causality_detail = "observation_instants lacks training_allowed/causality_status columns"
     causality_met = causality_count == 0
-    report["checks"]["observation_instants_v2.causality_unsafe"] = _check_entry(
-        check_id="observation_instants_v2.causality_unsafe",
+    report["checks"]["observation_instants.causality_unsafe"] = _check_entry(
+        check_id="observation_instants.causality_unsafe",
         status=PASS if causality_met else FAIL,
         detail=causality_detail,
         count=causality_count,
@@ -1462,7 +1462,7 @@ def _add_observation_instants_safety_checks(report: dict, cur: sqlite3.Cursor) -
     if not causality_met:
         report["blockers"].append(
             {
-                "code": "observation_instants_v2.causality_unsafe",
+                "code": "observation_instants.causality_unsafe",
                 "table": table,
                 "count": causality_count,
             }
@@ -2476,11 +2476,11 @@ def _p4_lane_for_generic_blocker(blocker: dict) -> tuple[str, str] | None:
     if code.startswith("p4_") and blocker.get("lane") in P4_ALLOWED_LANES:
         return code, str(blocker["lane"])
     table = str(blocker.get("table") or "")
-    if code.startswith("observation_instants_v2") or code in {
+    if code.startswith("observation_instants") or code in {
         "payload_identity_missing",
         "missing_source_role_columns",
         "missing_reader_identity_columns",
-    } or table == "observation_instants_v2":
+    } or table == "observation_instants":
         return "p4_observation_instants_reader_inputs_not_ready", "4.5.B-full"
     if code in {
         "empty_rebuild_eligible_snapshots",
@@ -2757,7 +2757,7 @@ def build_training_readiness_report(world_db: Path = SHARED_DB) -> dict:
             "settlement_outcomes",    # B3: renamed from settlements_v2
         ):
             _add_count_min_check(report, cur, table=table)
-        for table in ("observation_instants_v2", "observations"):
+        for table in ("observation_instants", "observations"):
             _add_count_min_check(
                 report,
                 cur,
@@ -2804,26 +2804,26 @@ def build_training_readiness_report(world_db: Path = SHARED_DB) -> dict:
         )
         _add_legacy_settlement_evidence_checks(report, cur)
 
-        if _table_exists(cur, "observation_instants_v2"):
-            columns = _columns(cur, "observation_instants_v2")
+        if _table_exists(cur, "observation_instants"):
+            columns = _columns(cur, "observation_instants")
             if {"training_allowed", "source_role"}.issubset(columns):
                 quoted_roles = ", ".join(
                     f"'{role}'" for role in sorted(ELIGIBLE_OBSERVATION_SOURCE_ROLES)
                 )
                 eligible_count = _count(
                     cur,
-                    "observation_instants_v2",
+                    "observation_instants",
                     f"""
                     COALESCE(training_allowed, 0) = 1
                     AND source_role IN ({quoted_roles})
                     """,
                 )
                 eligible_met = eligible_count >= 1
-                checks["observation_instants_v2.training_eligible_present"] = _check_entry(
-                    check_id="observation_instants_v2.training_eligible_present",
+                checks["observation_instants.training_eligible_present"] = _check_entry(
+                    check_id="observation_instants.training_eligible_present",
                     status=PASS if eligible_met else FAIL,
                     detail=(
-                        "training-eligible observation_instants_v2 rows="
+                        "training-eligible observation_instants rows="
                         f"{eligible_count}, required>=1"
                     ),
                     count=eligible_count,
@@ -2834,13 +2834,13 @@ def build_training_readiness_report(world_db: Path = SHARED_DB) -> dict:
                     blockers.append(
                         {
                             "code": "empty_training_eligible_observations",
-                            "table": "observation_instants_v2",
+                            "table": "observation_instants",
                             "count": eligible_count,
                         }
                     )
                 count = _count(
                     cur,
-                    "observation_instants_v2",
+                    "observation_instants",
                     f"""
                     COALESCE(training_allowed, 0) = 1
                     AND (
@@ -2851,16 +2851,16 @@ def build_training_readiness_report(world_db: Path = SHARED_DB) -> dict:
                     """,
                 )
                 detail = (
-                    "training-allowed observation_instants_v2 rows with unsafe "
+                    "training-allowed observation_instants rows with unsafe "
                     f"source_role={count}"
                 )
-                code = "observation_instants_v2.training_role_unsafe"
+                code = "observation_instants.training_role_unsafe"
             else:
                 count = -1
-                detail = "observation_instants_v2 lacks training_allowed/source_role columns"
+                detail = "observation_instants lacks training_allowed/source_role columns"
                 code = "missing_source_role_columns"
-                checks["observation_instants_v2.training_eligible_present"] = _check_entry(
-                    check_id="observation_instants_v2.training_eligible_present",
+                checks["observation_instants.training_eligible_present"] = _check_entry(
+                    check_id="observation_instants.training_eligible_present",
                     status=FAIL,
                     detail=detail,
                     count=0,
@@ -2870,13 +2870,13 @@ def build_training_readiness_report(world_db: Path = SHARED_DB) -> dict:
                 blockers.append(
                     {
                         "code": "empty_training_eligible_observations",
-                        "table": "observation_instants_v2",
+                        "table": "observation_instants",
                         "count": 0,
                     }
                 )
             met = count == 0
-            checks["observation_instants_v2.training_role_unsafe"] = _check_entry(
-                check_id="observation_instants_v2.training_role_unsafe",
+            checks["observation_instants.training_role_unsafe"] = _check_entry(
+                check_id="observation_instants.training_role_unsafe",
                 status=PASS if met else FAIL,
                 detail=detail,
                 count=max(count, 0),
@@ -2887,24 +2887,24 @@ def build_training_readiness_report(world_db: Path = SHARED_DB) -> dict:
                 blockers.append(
                     {
                         "code": code,
-                        "table": "observation_instants_v2",
+                        "table": "observation_instants",
                         "count": max(count, 0),
                     }
                 )
         else:
             _add_missing_table_check(
                 report,
-                check_id="observation_instants_v2.training_role_unsafe",
-                table="observation_instants_v2",
-                detail="observation_instants_v2 table is missing",
+                check_id="observation_instants.training_role_unsafe",
+                table="observation_instants",
+                detail="observation_instants table is missing",
             )
 
-        if _table_exists(cur, "observation_instants_v2"):
-            columns = _columns(cur, "observation_instants_v2")
+        if _table_exists(cur, "observation_instants"):
+            columns = _columns(cur, "observation_instants")
             if {"training_allowed", "causality_status"}.issubset(columns):
                 count = _count(
                     cur,
-                    "observation_instants_v2",
+                    "observation_instants",
                     """
                     COALESCE(training_allowed, 0) = 1
                     AND (
@@ -2915,25 +2915,25 @@ def build_training_readiness_report(world_db: Path = SHARED_DB) -> dict:
                     """,
                 )
                 detail = (
-                    "training-allowed observation_instants_v2 rows with unsafe "
+                    "training-allowed observation_instants rows with unsafe "
                     f"causality_status={count}"
                 )
             elif "training_allowed" in columns:
                 count = _count(
                     cur,
-                    "observation_instants_v2",
+                    "observation_instants",
                     "COALESCE(training_allowed, 0) = 1",
                 )
                 detail = (
-                    "observation_instants_v2 lacks causality_status column for "
+                    "observation_instants lacks causality_status column for "
                     f"training_allowed rows={count}"
                 )
             else:
                 count = 0
-                detail = "observation_instants_v2 lacks training_allowed/causality_status columns"
+                detail = "observation_instants lacks training_allowed/causality_status columns"
             met = count == 0
-            checks["observation_instants_v2.causality_unsafe"] = _check_entry(
-                check_id="observation_instants_v2.causality_unsafe",
+            checks["observation_instants.causality_unsafe"] = _check_entry(
+                check_id="observation_instants.causality_unsafe",
                 status=PASS if met else FAIL,
                 detail=detail,
                 count=count,
@@ -2943,17 +2943,17 @@ def build_training_readiness_report(world_db: Path = SHARED_DB) -> dict:
             if not met:
                 blockers.append(
                     {
-                        "code": "observation_instants_v2.causality_unsafe",
-                        "table": "observation_instants_v2",
+                        "code": "observation_instants.causality_unsafe",
+                        "table": "observation_instants",
                         "count": count,
                     }
                 )
         else:
             _add_missing_table_check(
                 report,
-                check_id="observation_instants_v2.causality_unsafe",
-                table="observation_instants_v2",
-                detail="observation_instants_v2 table is missing",
+                check_id="observation_instants.causality_unsafe",
+                table="observation_instants",
+                detail="observation_instants table is missing",
             )
 
         _add_payload_identity_check(report, cur)

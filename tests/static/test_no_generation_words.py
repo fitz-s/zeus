@@ -10,7 +10,7 @@ docs/scaffolds/ (119), config/ (71), other (219). Breakdown:
     suffixes in calibration constants
   - tests/: authority-basis comments citing vnext plan paths, _v2 in test names,
     ECMWF_OPENDATA_HIGH_DATA_VERSION constant (live contract name — do not rename)
-  - docs/scaffolds/: historical scaffold refs to observation_instants_v2 (intentional §C),
+  - docs/scaffolds/: historical scaffold refs to observation_instants (intentional §C),
     vnext phase plan paths
   - config/: source_release_calendar.yaml schema_version field, provenance_registry.yaml
     legacy comments

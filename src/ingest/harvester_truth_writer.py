@@ -78,9 +78,9 @@ from src.contracts.settlement_semantics import SettlementSemantics
 from src.contracts.exceptions import SettlementPrecisionError
 from src.state.db import (
     log_market_event_outcomes,
-    log_settlement_v2,
+    log_settlement,
 )
-from src.state.settlement_writers import dispatch_era_basis, write_settlement_v2_with_era_provenance
+from src.state.settlement_writers import dispatch_era_basis, write_settlement_with_era_provenance
 from src.types.metric_identity import MetricIdentity
 
 logger = logging.getLogger(__name__)
@@ -571,7 +571,7 @@ def _write_settlement_truth(
     if reason is not None:
         provenance["quarantine_reason"] = reason
 
-    settlement_v2_result: dict = {}
+    settlement_result: dict = {}
     market_events_result: dict = {}
     try:
         conn.execute(
@@ -613,11 +613,11 @@ def _write_settlement_truth(
             "recorded_at": settled_at,
         }
         if _era_result.is_admittable():
-            settlement_v2_result = write_settlement_v2_with_era_provenance(
+            settlement_result = write_settlement_with_era_provenance(
                 _settlement_dict, _era_result.era_basis, conn=conn
             )
         else:
-            settlement_v2_result = log_settlement_v2(
+            settlement_result = log_settlement(
                 conn,
                 city=city.name,
                 target_date=target_date,
@@ -663,7 +663,7 @@ def _write_settlement_truth(
             "harvester_truth_writer write: %s %s → authority=%s settlement_value=%s "
             "winning_bin=%s reason=%s settlement_outcomes=%s market_events=%s",
             city.name, target_date, authority, settlement_value, winning_bin, reason,
-            settlement_v2_result.get("status"), market_events_result.get("status"),
+            settlement_result.get("status"), market_events_result.get("status"),
         )
     except Exception as exc:
         logger.warning(
@@ -676,7 +676,7 @@ def _write_settlement_truth(
         "settlement_value": settlement_value,
         "winning_bin": winning_bin,
         "reason": reason,
-        "settlement_v2": settlement_v2_result,
+        "settlement_result": settlement_result,
         "market_events": market_events_result,
     }
 

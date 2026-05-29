@@ -2241,7 +2241,7 @@ cards:
     antibodies:
       schema:
         - settlements table INV-14 columns + UNIQUE(city, target_date, temperature_metric)
-        - observation_instants_v2 32-col with INV-14 spine extension
+        - observation_instants 32-col with INV-14 spine extension
       tests:
         - tests/test_settlements_unique_migration.py
     residual_risk: >

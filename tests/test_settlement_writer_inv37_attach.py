@@ -7,7 +7,7 @@
 Relationship test R-1.4: INV-37 ATTACH+SAVEPOINT compliance.
 
 RELATIONSHIP INVARIANT (cross-module):
-    When write_settlement_v2_with_era_provenance() writes a settlement involving
+    When write_settlement_with_era_provenance() writes a settlement involving
     both forecasts.db (settlement_outcomes) and world.db (uma_resolution / era_watermark),
     it MUST:
       1. Obtain the connection via get_forecasts_connection_with_world() — which
@@ -26,7 +26,7 @@ from unittest import mock
 
 import pytest
 
-from src.state.settlement_writers import ERA_BASIS_UMA_OO_V2, write_settlement_v2_with_era_provenance
+from src.state.settlement_writers import ERA_BASIS_UMA_OO_V2, write_settlement_with_era_provenance
 
 
 def _minimal_settlement() -> dict:
@@ -47,7 +47,7 @@ def _minimal_settlement() -> dict:
 
 
 def test_r1_4_settlement_write_uses_attach_savepoint():
-    """R-1.4: write_settlement_v2_with_era_provenance() must use ATTACH+SAVEPOINT
+    """R-1.4: write_settlement_with_era_provenance() must use ATTACH+SAVEPOINT
     (via get_forecasts_connection_with_world()), never bare sqlite3.connect().
 
     Assertion contract:
@@ -75,15 +75,15 @@ def test_r1_4_settlement_write_uses_attach_savepoint():
     settlement = _minimal_settlement()
 
     with mock.patch("src.state.db.get_forecasts_connection_with_world", _fake_get_conn), \
-         mock.patch("src.state.db.log_settlement_v2", return_value={"status": "written"}) as mock_log, \
+         mock.patch("src.state.db.log_settlement", return_value={"status": "written"}) as mock_log, \
          mock.patch("sqlite3.connect") as mock_sqlite_connect:
 
-        write_settlement_v2_with_era_provenance(settlement, ERA_BASIS_UMA_OO_V2)
+        write_settlement_with_era_provenance(settlement, ERA_BASIS_UMA_OO_V2)
 
         # CRITICAL: bare sqlite3.connect() must NOT be called
         mock_sqlite_connect.assert_not_called()
 
-        # log_settlement_v2 (i.e. the writer) must be called
+        # log_settlement (i.e. the writer) must be called
         mock_log.assert_called_once()
 
     # SAVEPOINT era_dispatch must be issued
@@ -96,7 +96,7 @@ def test_r1_4_settlement_write_uses_attach_savepoint():
 
 
 def test_r1_4_exception_triggers_savepoint_rollback():
-    """R-1.4 (error path): when an exception occurs inside write_settlement_v2_with_era_provenance(),
+    """R-1.4 (error path): when an exception occurs inside write_settlement_with_era_provenance(),
     ROLLBACK TO SAVEPOINT era_dispatch must be issued before re-raising the exception.
     No partial writes must remain in the DB (atomicity guarantee).
     """
@@ -119,10 +119,10 @@ def test_r1_4_exception_triggers_savepoint_rollback():
     settlement = _minimal_settlement()
 
     with mock.patch("src.state.db.get_forecasts_connection_with_world", _fake_get_conn), \
-         mock.patch("src.state.db.log_settlement_v2", side_effect=RuntimeError("simulated write failure")):
+         mock.patch("src.state.db.log_settlement", side_effect=RuntimeError("simulated write failure")):
 
         with pytest.raises(RuntimeError, match="simulated write failure"):
-            write_settlement_v2_with_era_provenance(settlement, ERA_BASIS_UMA_OO_V2)
+            write_settlement_with_era_provenance(settlement, ERA_BASIS_UMA_OO_V2)
 
     # ROLLBACK TO SAVEPOINT must be issued on error path
     rollback_sqls = [s for s in executed_sql if "ROLLBACK" in s.upper() and "era_dispatch" in s]
@@ -147,9 +147,9 @@ def test_r1_4_caller_provided_conn_skips_savepoint():
     settlement = _minimal_settlement()
 
     with mock.patch("src.state.db.get_forecasts_connection_with_world") as mock_get_conn, \
-         mock.patch("src.state.db.log_settlement_v2", return_value={"status": "written"}):
+         mock.patch("src.state.db.log_settlement", return_value={"status": "written"}):
 
-        write_settlement_v2_with_era_provenance(settlement, ERA_BASIS_UMA_OO_V2, conn=fake_conn)
+        write_settlement_with_era_provenance(settlement, ERA_BASIS_UMA_OO_V2, conn=fake_conn)
 
         # When conn is provided, get_forecasts_connection_with_world must NOT be called
         mock_get_conn.assert_not_called()

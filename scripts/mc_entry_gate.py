@@ -7,7 +7,7 @@
 #   not asserted) and are printed as the operator runbook.
 """MC entry gate — verify the domain-canonicality antibodies are wired before an MC rebuild.
 
-P0  schema       model_bias_ens_v2 can hold a full canonical row (assert_model_bias_schema_ready)
+P0  schema       model_bias_ens can hold a full canonical row (assert_model_bias_schema_ready)
 P1  gate hash    current_gate_set_hash() is deterministic 16-char (the active gate generation)
 P2  coverage     a CANONICAL read rejects empty coverage + out-of-scope target month (Blocker E/D)
 P3  insufficiency conservative_identity_model floors residual to CONSERVATIVE_RESIDUAL_FLOOR_C,
@@ -60,7 +60,7 @@ def _gate_p0_schema(world_db: str) -> tuple[bool, str]:
         return False, f"cannot open world DB {world_db}: {exc}"
     try:
         assert_model_bias_schema_ready(conn)
-        return True, f"model_bias_ens_v2 schema ready ({world_db})"
+        return True, f"model_bias_ens schema ready ({world_db})"
     except Exception as exc:  # noqa: BLE001
         return False, str(exc)
     finally:

@@ -66,7 +66,7 @@ except ModuleNotFoundError:
 from src.backtest.economics import check_economics_readiness
 from src.config import City
 from src.execution import harvester as harvester_mod
-from src.state.db import init_schema, log_market_event_outcome, log_settlement_v2
+from src.state.db import init_schema, log_market_event_outcome, log_settlement
 from src.state.portfolio import (
     ENTRY_ECONOMICS_OPTIMISTIC_MATCH_PRICE,
     FILL_AUTHORITY_OPTIMISTIC_SUBMITTED,
@@ -391,7 +391,7 @@ def test_harvester_settlement_mirrors_verified_to_settlement_outcomes(harvester_
     )
 
     assert result["authority"] == "VERIFIED"
-    assert result["settlement_v2"]["status"] == "written"
+    assert result["settlement_result"]["status"] == "written"
     row = harvester_conn.execute(
         """
         SELECT city, target_date, temperature_metric, market_slug, winning_bin,
@@ -835,8 +835,8 @@ def test_harvester_settlement_without_market_slug_skips_settlement_outcomes(harv
     )
 
     assert result["authority"] == "VERIFIED"
-    assert result["settlement_v2"]["status"] == "refused_missing_identity"
-    assert result["settlement_v2"]["missing_fields"] == ("market_slug",)
+    assert result["settlement_result"]["status"] == "refused_missing_identity"
+    assert result["settlement_result"]["missing_fields"] == ("market_slug",)
     legacy_count = harvester_conn.execute(
         "SELECT COUNT(*) FROM settlements WHERE city = ? AND target_date = ?",
         (city.name, "2026-04-24"),
@@ -932,11 +932,11 @@ def test_harvester_settlement_outcomes_mirror_is_idempotent(harvester_conn):
     assert provenance["decision_time_snapshot_id"] == "2026-04-24T18:00:00Z"
 
 
-def test_log_settlement_v2_skips_missing_table_without_creating_schema():
+def test_log_settlement_skips_missing_table_without_creating_schema():
     """Capability-absent path is explicit and has no DDL side effect."""
     conn = sqlite3.connect(":memory:")
 
-    result = log_settlement_v2(
+    result = log_settlement(
         conn,
         city="NoSchema",
         target_date="2026-04-24",
@@ -957,7 +957,7 @@ def test_log_settlement_v2_skips_missing_table_without_creating_schema():
     ).fetchone()[0] == 0
 
 
-def test_harvester_settlement_v2_missing_unique_key_does_not_abort_legacy_write(harvester_conn):
+def test_harvester_settlement_missing_unique_key_does_not_abort_legacy_write(harvester_conn):
     """Malformed v2 schema cannot block the legacy settlement truth write."""
     city = _make_city("v2_bad_unique")
     harvester_conn.execute("DROP TABLE settlement_outcomes")
@@ -996,8 +996,8 @@ def test_harvester_settlement_v2_missing_unique_key_does_not_abort_legacy_write(
     )
 
     assert result["authority"] == "VERIFIED"
-    assert result["settlement_v2"]["status"] == "skipped_invalid_schema"
-    assert result["settlement_v2"]["missing_unique_key"] == (
+    assert result["settlement_result"]["status"] == "skipped_invalid_schema"
+    assert result["settlement_result"]["missing_unique_key"] == (
         "city",
         "target_date",
         "temperature_metric",

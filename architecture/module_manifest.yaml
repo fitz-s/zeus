@@ -208,7 +208,7 @@ modules:
       - src/data/daily_observation_writer.py
       - src/data/observation_client.py
       - src/data/hourly_instants_append.py
-      - src/data/observation_instants_v2_writer.py
+      - src/data/observation_instants_writer.py
       - src/data/tier_resolver.py
       - src/data/forecast_source_registry.py
       - src/data/forecast_ingest_protocol.py

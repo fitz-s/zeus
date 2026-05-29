@@ -289,7 +289,7 @@ sources:
         - "quota guard: src/data/openmeteo_quota.py::quota_tracker [VERIFIED openmeteo_client.py:14]"
       target_tables:
         - "observation_instants (hourly, legacy)"
-        - "observation_instants_v2 (hourly, current) [VERIFIED hourly_instants_append.py:1]"
+        - "observation_instants (hourly, current) [VERIFIED hourly_instants_append.py:1]"
         - "solar_daily [VERIFIED solar_append.py:51]"
       source_tag_code: "openmeteo_archive_hourly [VERIFIED hourly_instants_append.py:65]; openmeteo_archive_solar [VERIFIED solar_append.py:51]"
       source_health_probe: "_probe_open_meteo_archive in src/data/source_health_probe.py:71"
@@ -402,7 +402,7 @@ sources:
         - "source_health probe: src/data/source_health_probe.py::_probe_wu_pws() [VERIFIED source_health_probe.py:113]"
       target_tables:
         - "observations (daily high/low per city × local_date)"
-        - "observation_instants_v2 (hourly per city × utc_hour)"
+        - "observation_instants (hourly per city × utc_hour)"
       source_tag_code: "wu_icao_history [VERIFIED daily_obs_append.py:126; wu_hourly_client.py:63]"
       data_version_pattern: "wu_icao_history_v1 [VERIFIED ingest/harvester_truth_writer.py:44]"
       settlement_authority: >
@@ -465,7 +465,7 @@ sources:
       ingest_path:
         - "hourly backfill: src/data/wu_hourly_client.py calls src/data/meteostat_bulk_client.py [VERIFIED wu_hourly_client.py:42]"
         - "created: src/data/meteostat_bulk_client.py (Created 2026-04-22) [VERIFIED meteostat_bulk_client.py:1]"
-      target_table: "observation_instants_v2 (via wu_hourly_client routing)"
+      target_table: "observation_instants (via wu_hourly_client routing)"
       role: "Historical fill for sparse WU ICAO stations; NOT a live feed"
       failure_modes:
         - "HTTP 200 with empty CSV: station not in Meteostat catalog"
@@ -521,7 +521,7 @@ sources:
         - "client: src/data/ogimet_hourly_client.py::fetch_ogimet_hourly() [VERIFIED ogimet_hourly_client.py:1]"
         - "backfill: scripts/backfill_ogimet_metar.py [INFERRED from ogimet_hourly_client.py:80 METAR_TEMP_RE comment]"
         - "source_health probe: src/data/source_health_probe.py::_probe_ogimet() [VERIFIED source_health_probe.py:214]"
-      target_table: "observation_instants_v2"
+      target_table: "observation_instants"
       source_tag_code: "ogimet_metar [INFERRED from tier_resolver.py OGIMET_METAR tier]"
       data_version_pattern: "ogimet_metar_v1 [VERIFIED ingest/harvester_truth_writer.py:47]"
       settlement_authority: >
@@ -577,7 +577,7 @@ sources:
         HQ by 1-3°C due to urban heat island — HK must NEVER use WU lane.
         [VERIFIED] daily_obs_append.py:15-17.
         Anti-pattern A6: "HK must route hko_hourly_accumulator, never VHHH"
-        [VERIFIED] source_rationale.yaml src/data/observation_instants_v2_writer.py entry.
+        [VERIFIED] source_rationale.yaml src/data/observation_instants_writer.py entry.
 
     zeus_consumption:
       transport: "httpx.get with retry (2 retries, 3s backoff) [VERIFIED daily_obs_append.py:284-285]"

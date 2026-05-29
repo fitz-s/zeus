@@ -26,7 +26,7 @@ ERROR-MODEL SOURCE
     canonical ens_error_model_v1 producer runs and persists rows.
 
 --error-model-db PATH: load error-model params from a persisted
-    ens_error_model_v1 (or model_bias_ens_v2) table in the supplied DB.
+    ens_error_model_v1 (or model_bias_ens) table in the supplied DB.
     (Future mode; requires the Phase-1 producer to have run.)
 
 SAFETY
@@ -276,7 +276,7 @@ def _load_error_model_from_db(
     *,
     target_month: int | None = None,
 ) -> object:
-    """Load error-model params from the persisted canonical model_bias_ens_v2 row,
+    """Load error-model params from the persisted canonical model_bias_ens row,
     via `read_bias_model` so the canonical-contract filters apply.
 
     B3 / Operator pre-MC re-audit (2026-05-28): pre-fix this function ran a bare SELECT
@@ -655,7 +655,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--error-model-db",
         default=None,
-        help="Path to a DB with ens_error_model_v1 or model_bias_ens_v2 table. "
+        help="Path to a DB with ens_error_model_v1 or model_bias_ens table. "
              "When omitted, --recompute mode is used.",
     )
     p.add_argument(

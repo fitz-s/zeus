@@ -37,7 +37,7 @@ Other statuses set by load/reload paths:
     JSON parse error during reload         → MALFORMED          (mult prev × 0.7)
 
 LOW track is evidence-bearing when the bridge writes a ``low`` record from
-canonical observation_instants_v2 + settlements. A missing low record remains
+canonical observation_instants + settlements. A missing low record remains
 MISSING, but LOW is not a permanent metric-level ban.
 
 Reload error handling

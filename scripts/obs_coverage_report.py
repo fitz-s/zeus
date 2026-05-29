@@ -16,7 +16,7 @@ Two-layer diagnosis:
   1. Gate-level (source_health.json via evaluate_freshness): did the fetch
      succeed? This is what the actual freshness gate checks — per-source,
      GLOBAL (staleness of any gated source disables day0 for ALL cities).
-  2. DB-level (observation_instants_v2 in zeus-world.db): did obs actually
+  2. DB-level (observation_instants in zeus-world.db): did obs actually
      land per-city? Catches "probe green, no rows landing" silent failures.
 
 Per-city verdict (refinement of the global gate decision):
@@ -59,7 +59,7 @@ from src.control.freshness_gate import (
     evaluate_freshness,
 )
 
-# ── Source family → DB source name prefix (for observation_instants_v2) ──────
+# ── Source family → DB source name prefix (for observation_instants) ──────
 # open_meteo_archive and noaa are probe-only (reachability checks, no DB rows).
 # Their freshness is global: staleness disables day0 for ALL cities.
 DB_SOURCE_PREFIX: dict[str, str] = {
@@ -136,7 +136,7 @@ def run_report(state_dir: Path, db_path: Path, lookback_hours: int) -> None:
         source_fresh = {src: False for src in FRESHNESS_BUDGETS}
 
     # ── 2. DB-level: per-city latest import per source family ─────────────────
-    print("DB-LEVEL OBS COVERAGE (observation_instants_v2, zeus-world.db)")
+    print("DB-LEVEL OBS COVERAGE (observation_instants, zeus-world.db)")
     print(f"  Lookback window: {lookback_hours}h (cutoff {lookback_cutoff.strftime('%Y-%m-%dT%H:%MZ')})\n")
 
     # Query latest import per city per source-family prefix
@@ -152,7 +152,7 @@ def run_report(state_dir: Path, db_path: Path, lookback_hours: int) -> None:
             rows = cur.execute(
                 """
                 SELECT city, MAX(imported_at) AS latest
-                FROM observation_instants_v2
+                FROM observation_instants
                 WHERE source LIKE ?
                 GROUP BY city
                 """,

@@ -87,19 +87,19 @@ def _run(cmd: list[str], *, execute: bool) -> int:
 
 
 def _read_stored_gate_hash(db_path: Path) -> Optional[str]:
-    """Return the gate_set_hash stamped on the most recent model_bias_ens_v2 row,
+    """Return the gate_set_hash stamped on the most recent model_bias_ens row,
     or None if the DB has no rows or the column does not yet exist."""
     if not db_path.exists():
         return None
     try:
         conn = sqlite3.connect(str(db_path))
         conn.row_factory = sqlite3.Row
-        existing_cols = {r[1] for r in conn.execute("PRAGMA table_info(model_bias_ens_v2)").fetchall()}
+        existing_cols = {r[1] for r in conn.execute("PRAGMA table_info(model_bias_ens)").fetchall()}
         if "gate_set_hash" not in existing_cols:
             conn.close()
             return None
         row = conn.execute(
-            "SELECT gate_set_hash FROM model_bias_ens_v2 "
+            "SELECT gate_set_hash FROM model_bias_ens "
             "WHERE gate_set_hash IS NOT NULL ORDER BY recorded_at DESC LIMIT 1"
         ).fetchone()
         conn.close()

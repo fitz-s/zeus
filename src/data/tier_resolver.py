@@ -3,7 +3,7 @@
 # Authority basis: plan v3 (.omc/plans/observation-instants-migration-iter3.md)
 #                  step2 (docs/operations/task_2026-04-21_gate_f_data_backfill/
 #                         step2_phase0_pilot_plan.md)
-"""Deterministic tier resolution for observation_instants_v2 source routing.
+"""Deterministic tier resolution for observation_instants source routing.
 
 Maps every Zeus city to exactly one of three tiers based on its
 ``settlement_source_type`` field in ``config/cities.json``. Tier choice
@@ -52,7 +52,7 @@ from src.config import cities_by_name
 
 
 class Tier(Enum):
-    """Hourly-observation source tier for observation_instants_v2.
+    """Hourly-observation source tier for observation_instants.
 
     Phase 0 exposes exactly three tiers. There is deliberately no
     ``OPENMETEO_GRID`` member — plan v3 rejects grid-snap routing (5-15 km

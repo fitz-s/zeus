@@ -239,7 +239,7 @@ def test_monitor_refresh_temp_persistence_query_uses_world_qualifier():
 WORLD_ONLY_TABLES_UNDER_K1 = {
     "temp_persistence",                  # F102 — world_class, ETL writes to zeus-world.db
     "validated_calibration_transfers",   # F41 — world_class
-    "observation_instants_v2",           # F43 — 1.8M rows in world.db
+    "observation_instants",              # F43 — canonical (2026-05-29 consolidation merged observation_instants_v2 superset in); ~2.8M rows in world.db
     "platt_models",                   # F43 — 1.4K rows in world.db
     "data_coverage",                     # F43 — world-class (cross-DB write target post-K1)
     "daily_observation_revisions",       # F43 — world-class

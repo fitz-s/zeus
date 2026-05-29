@@ -2,7 +2,7 @@
 # Last reused/audited: 2026-04-21
 # Authority basis: plan v3 Phase 0 file #4 (.omc/plans/observation-instants-
 #                  migration-iter3.md L86-93); step2_phase0_pilot_plan.md.
-"""WU ICAO hourly-observation client for observation_instants_v2 backfill.
+"""WU ICAO hourly-observation client for observation_instants backfill.
 
 Wraps the Weather Underground private v1 endpoint
 ``api.weather.com/v1/location/{ICAO}:9:{CC}/observations/historical.json``
@@ -67,7 +67,7 @@ WU_HOURLY_SOURCE = "wu_icao_history"
 class HourlyObservation:
     """One UTC-hour bucket of observations, extremum-preserving.
 
-    Fields map to ``observation_instants_v2`` columns via the backfill
+    Fields map to ``observation_instants`` columns via the backfill
     driver's ``_hourly_obs_to_v2_row`` translator. Critically, this
     struct carries the **maximum and minimum** observed temperature
     across the bucket's [HH:00, HH+1:00) window, NOT a single

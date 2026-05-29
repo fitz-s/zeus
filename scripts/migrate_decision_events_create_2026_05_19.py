@@ -1,8 +1,15 @@
 # Created: 2026-05-19
-# Last reused or audited: 2026-05-19
+# Last reused or audited: 2026-05-29
 # Authority basis: PHASE_1_ULTRAPLAN.md §4.2 (Path D natural-key schema, v3)
 # SCAFFOLD: migration script — production execution pending T1 production pass
+# Writer-lock: db_writer_lock(BULK) wraps the sqlite3.connect write path (main() opens
+# ZEUS_WORLD_DB_PATH directly with no --apply gate; daemon also writes zeus-world.db).
 """Create decision_events + AFTER INSERT TRIGGER (backstop) + indices on world DB.
+
+Migration semantic policy: additive-only / idempotent.
+  - Only CREATE TABLE/TRIGGER/INDEX IF NOT EXISTS; no DROP, no data writes.
+  - Safe to re-run: all statements are guarded by IF NOT EXISTS.
+  - Runs under db_writer_lock(BULK) to prevent race with live daemon.
 
 Idempotent (IF NOT EXISTS).  Does NOT bump SCHEMA_VERSION (src/state/db.py owns).
 
@@ -101,40 +108,47 @@ _CREATE_INDICES = [
 ]
 
 
+import sqlite3
+import sys
+import pathlib
+
+_REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from src.state.db_writer_lock import WriteClass, db_writer_lock  # noqa: E402
+
+
 def main() -> None:
     """Apply decision_events CREATE TABLE, AFTER INSERT TRIGGER, and 3 indices to world DB.
 
     Idempotent (IF NOT EXISTS). Does NOT bump SCHEMA_VERSION — src/state/db.py owns that
     via init_schema(). This script is a standalone migration path for production deployments
     where the DB already exists and init_schema() must not be re-run in full.
+    Wrapped in db_writer_lock(BULK): main() always opens ZEUS_WORLD_DB_PATH directly.
     """
-    import sqlite3
-
-    # Import the canonical world DB path (avoids hardcoding)
-    import sys
-    import pathlib
-    sys.path.insert(0, str(pathlib.Path(__file__).parent.parent))
     from src.state.db import ZEUS_WORLD_DB_PATH  # noqa: PLC0415
 
     db_path = ZEUS_WORLD_DB_PATH
     print(f"Applying decision_events schema to: {db_path}")
 
-    conn = sqlite3.connect(str(db_path))
-    try:
-        conn.execute(_CREATE_TABLE)
-        print("  CREATE TABLE decision_events: OK")
+    with db_writer_lock(db_path, WriteClass.BULK):
+        conn = sqlite3.connect(str(db_path))
+        try:
+            conn.execute(_CREATE_TABLE)
+            print("  CREATE TABLE decision_events: OK")
 
-        conn.execute(_CREATE_TRIGGER)
-        print("  CREATE TRIGGER decision_events_event_id_backstop: OK")
+            conn.execute(_CREATE_TRIGGER)
+            print("  CREATE TRIGGER decision_events_event_id_backstop: OK")
 
-        for stmt in _CREATE_INDICES:
-            conn.execute(stmt)
-        print(f"  CREATE INDEX x{len(_CREATE_INDICES)}: OK")
+            for stmt in _CREATE_INDICES:
+                conn.execute(stmt)
+            print(f"  CREATE INDEX x{len(_CREATE_INDICES)}: OK")
 
-        conn.commit()
-        print("Done. decision_events schema applied idempotently.")
-    finally:
-        conn.close()
+            conn.commit()
+            print("Done. decision_events schema applied idempotently.")
+        finally:
+            conn.close()
 
 
 if __name__ == "__main__":

@@ -7,7 +7,7 @@ Relationship tests R-1.1 and R-1.2: ResolutionEra dispatch correctness.
 
 RELATIONSHIP INVARIANT (cross-module):
     When execution/harvester.py or ingest/harvester_truth_writer.py processes
-    a market and calls write_settlement_v2_with_era_provenance(), the era
+    a market and calls write_settlement_with_era_provenance(), the era
     assigned in the resulting provenance_json MUST match the era determined
     solely by the market's settled_at date vs ERA_CUTOVER_DATE.
 """

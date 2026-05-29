@@ -157,7 +157,7 @@ obs_v2_unreproducible:
   - docs/operations/task_2026-04-28_obs_provenance_preflight/evidence/gate5_fill_quarantine_apply_2026-04-28.json
   - docs/operations/task_2026-04-28_obs_provenance_preflight/evidence/gate5_ogimet_quarantine_apply_2026-04-28.json
   row_predicate:
-    table: observation_instants_v2
+    table: observation_instants
     where: training_allowed=1 AND (payload_hash IS NULL OR parser_version IS NULL)
     estimated_count: 322
   rows_affected: 322

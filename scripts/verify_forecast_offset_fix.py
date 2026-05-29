@@ -78,7 +78,7 @@ SQL_NEW = """
 # Observed daily high: MAX(running_max) over all hourly rows for the day
 SQL_OBS = """
     SELECT MAX(running_max) AS obs_high
-    FROM observation_instants_v2
+    FROM observation_instants
     WHERE city = ? AND target_date = ?
 """
 

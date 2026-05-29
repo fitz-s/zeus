@@ -483,18 +483,15 @@ CREATE INDEX idx_market_topology_scope
 -- index: idx_market_topology_status_expiry
 CREATE INDEX idx_market_topology_status_expiry
             ON market_topology_state(status, expires_at);
--- index: idx_observation_instants_city_date
-CREATE INDEX idx_observation_instants_city_date
-            ON observation_instants(city, target_date, utc_timestamp);
--- index: idx_observation_instants_source
-CREATE INDEX idx_observation_instants_source
-            ON observation_instants(source, city, target_date);
--- index: idx_observation_instants_v2_city_ts
-CREATE INDEX idx_observation_instants_v2_city_ts
-                ON observation_instants_v2(city, target_date, utc_timestamp)
+-- index: idx_observation_instants_city_ts
+-- (Consolidation 2026-05-29: the legacy idx_observation_instants_city_date and
+--  idx_observation_instants_source indexes were dropped with the legacy subset
+--  DDL; the canonical superset table carries idx_observation_instants_city_ts.)
+CREATE INDEX idx_observation_instants_city_ts
+                ON observation_instants(city, target_date, utc_timestamp)
         ;
--- index: idx_observation_revisions_obs_v2_lookup
-CREATE INDEX idx_observation_revisions_obs_v2_lookup
+-- index: idx_observation_revisions_obs_lookup
+CREATE INDEX idx_observation_revisions_obs_lookup
                 ON observation_revisions(table_name, city, source, utc_timestamp, recorded_at)
         ;
 -- index: idx_observations_city_date
@@ -726,33 +723,10 @@ CREATE TABLE model_bias (
             UNIQUE(city, season, source)
         );
 -- table: observation_instants
+-- (Consolidation 2026-05-29: this is now the CANONICAL superset — the former
+--  observation_instants subset + observation_instants_v2 superset merged into
+--  one table. The separate observation_instants_v2 entry was removed.)
 CREATE TABLE observation_instants (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            city TEXT NOT NULL,
-            target_date TEXT NOT NULL,
-            source TEXT NOT NULL,
-            timezone_name TEXT NOT NULL,
-            local_hour REAL,
-            local_timestamp TEXT NOT NULL,
-            utc_timestamp TEXT NOT NULL,
-            utc_offset_minutes INTEGER NOT NULL,
-            dst_active INTEGER NOT NULL DEFAULT 0,
-            is_ambiguous_local_hour INTEGER NOT NULL DEFAULT 0,
-            is_missing_local_hour INTEGER NOT NULL DEFAULT 0,
-            time_basis TEXT NOT NULL,
-            temp_current REAL,
-            running_max REAL,
-            delta_rate_per_h REAL,
-            temp_unit TEXT NOT NULL,
-            station_id TEXT,
-            observation_count INTEGER,
-            raw_response TEXT,
-            source_file TEXT,
-            imported_at TEXT NOT NULL,
-            UNIQUE(city, source, utc_timestamp)
-        );
--- table: observation_instants_v2
-CREATE TABLE observation_instants_v2 (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 city TEXT NOT NULL,
                 target_date TEXT NOT NULL,

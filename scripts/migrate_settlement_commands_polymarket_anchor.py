@@ -6,6 +6,12 @@
 # Reuse: Run once per DB instance; check --dry-run output before --apply; idempotent on re-run (duplicate column errors silently skipped).
 """PR 3 migration: add polymarket_end_anchor_source to settlement_commands.
 
+Migration semantic policy: additive-only / idempotent.
+  - Only ALTER TABLE ADD COLUMN (idempotent: duplicate-column errors skipped).
+  - No DROP, no DML writes.
+  - Default path is dry-run; --no-dry-run required to apply.
+  - bare sqlite3.connect() only in --db override path (operator supplies path, daemon-DOWN assumed).
+
 Adds a single TEXT NOT NULL column with DEFAULT 'gamma_explicit' to
 settlement_commands in world.db. Also adds PR 6 settlement_commands columns
 and wrap_unwrap_commands chain-finality columns in one idempotent pass.

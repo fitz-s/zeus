@@ -3,10 +3,10 @@
 # Authority basis: docs/operations/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md §PR-C
 # Lifecycle: created=2026-05-22; last_reviewed=2026-05-22; last_reused=never
 # Purpose: Regression antibody for Root C — high_so_far must be MAX(running_max) not latest row's value.
-# Reuse: Run when day0_observation_reader.read_day0_high_so_far or observation_instants_v2 schema changes.
+# Reuse: Run when day0_observation_reader.read_day0_high_so_far or observation_instants schema changes.
 """Tests for src/data/day0_observation_reader.py — Root C regression antibody.
 
-Root C: observation_instants_v2.running_max = per-hour bucket max (non-monotonic).
+Root C: observation_instants.running_max = per-hour bucket max (non-monotonic).
 The naive approach (latest row's running_max) returns the wrong value whenever
 the daily peak occurred before the last observation.
 
@@ -36,11 +36,11 @@ from src.data.day0_observation_reader import (
 
 
 # ---------------------------------------------------------------------------
-# Fixture: minimal in-memory DB with observation_instants_v2 schema
+# Fixture: minimal in-memory DB with observation_instants schema
 # ---------------------------------------------------------------------------
 
 _CREATE_TABLE = """
-    CREATE TABLE observation_instants_v2 (
+    CREATE TABLE observation_instants (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         city TEXT NOT NULL,
         target_date TEXT NOT NULL,
@@ -78,7 +78,7 @@ _CREATE_TABLE = """
 
 
 def _make_conn() -> sqlite3.Connection:
-    """Return an in-memory connection with observation_instants_v2 created."""
+    """Return an in-memory connection with observation_instants created."""
     conn = sqlite3.connect(":memory:")
     conn.execute(_CREATE_TABLE)
     conn.commit()
@@ -124,7 +124,7 @@ def _insert(conn: sqlite3.Connection, **kwargs: object) -> None:
     cols = list(defaults.keys())
     placeholders = ", ".join("?" for _ in cols)
     conn.execute(
-        f"INSERT INTO observation_instants_v2 ({', '.join(cols)}) VALUES ({placeholders})",
+        f"INSERT INTO observation_instants ({', '.join(cols)}) VALUES ({placeholders})",
         [defaults[c] for c in cols],
     )
     conn.commit()

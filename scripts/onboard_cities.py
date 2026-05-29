@@ -367,7 +367,7 @@ PIPELINE_STEPS = [
     },
     {
         "id": "obs_instants_v2",
-        "name": "Backfill observation_instants_v2 (≥365d, data_version=v1.wu-native)",
+        "name": "Backfill observation_instants (≥365d, data_version=v1.wu-native)",
         "script": "backfill_obs.py",
         "city_flag": "--cities",
         # --start / --end / --data-version injected dynamically via extra_args_factory
@@ -423,7 +423,7 @@ PIPELINE_STEPS = [
     },
     {
         "id": "compute_ddd_floor",
-        "name": "Compute v2_city_floors.json entry from observation_instants_v2 p05",
+        "name": "Compute v2_city_floors.json entry from observation_instants p05",
         "type": "python",
     },
 ]
@@ -690,7 +690,7 @@ def compute_solar_daily(cities: list[NewCity], days: int = 440, dry_run: bool = 
 # Extra-args factories for steps that need dynamic date/path args
 # ─────────────────────────────────────────────────────────────
 
-# Number of lookback days for observation_instants_v2 backfill.
+# Number of lookback days for observation_instants backfill.
 _OBS_V2_BACKFILL_DAYS = 400
 
 
@@ -931,7 +931,7 @@ def _print_verification(city_names: list[str]):
 def _verification_tables() -> tuple[list[str], list[str]]:
     """Return (world_tables, forecast_tables) after K1 split.
 
-    world-class: observations, observation_instants_v2, solar_daily,
+    world-class: observations, observation_instants, solar_daily,
                  temp_persistence, diurnal_curves, forecasts,
                  forecast_skill, model_bias, asos_wu_offsets
     forecast-class: settlements_v2, market_events_v2, ensemble_snapshots,
@@ -941,7 +941,7 @@ def _verification_tables() -> tuple[list[str], list[str]]:
     """
     world_tables = [
         "observations",
-        "observation_instants_v2",
+        "observation_instants",
         "solar_daily",
         "temp_persistence",
         "diurnal_curves",
@@ -1191,7 +1191,7 @@ def _run_compute_ddd_floor(city_names: list[str], dry_run: bool = False) -> None
     Algorithm (matches existing floor_method in _metadata):
       final_floor = max(p05_directional_coverage, SAFETY_MINIMUM_FLOOR)
 
-    Coverage is sampled from observation_instants_v2 over ≥365 recent dates
+    Coverage is sampled from observation_instants over ≥365 recent dates
     per city, using the canonical settlement source and data_version.
     """
     floors_path = PROJECT_ROOT / "src" / "oracle" / "ddd_artifacts" / "v2_city_floors.json"
@@ -1238,7 +1238,7 @@ def _run_compute_ddd_floor(city_names: list[str], dry_run: bool = False) -> None
                 row = conn.execute(
                     f"""
                     SELECT COUNT(DISTINCT CAST(local_hour AS INTEGER)) AS hrs
-                    FROM observation_instants_v2
+                    FROM observation_instants
                     WHERE city = ?
                       AND source = 'wu_icao_history'
                       AND data_version = 'v1.wu-native'

@@ -2029,7 +2029,7 @@ def _record_pair_batch_manifest(
 ) -> str | None:
     """SD4 / Blocker F: write an immutable pair-batch manifest after a full_transport rebuild.
 
-    Re-queries the model_bias_ens_v2 STAGING rows (world.db) the rebuild drew p_raw from — the
+    Re-queries the model_bias_ens STAGING rows (world.db) the rebuild drew p_raw from — the
     rows matching the CURRENT gate_set_hash within this run's scope — and records their domain
     identity (gate set + fit-signature set + source snapshot) as an immutable zeus_meta row on the
     forecasts DB. A downstream Platt/identity fit can then verify its pairs belong to the intended
@@ -2056,7 +2056,7 @@ def _record_pair_batch_manifest(
         where.append("live_data_version = ?")
         params.append(data_version_filter)
 
-    # SD4 / Blocker 3.2 (operator pre-MC re-audit): query model_bias_ens_v2 from the SAME DB the
+    # SD4 / Blocker 3.2 (operator pre-MC re-audit): query model_bias_ens from the SAME DB the
     # MC actually read p_raw from — the rebuild's conn (the isolated --db where the producer wrote
     # the STAGING rows and where _native_error_params_for_snapshot reads them). Reading the shared
     # world DB here would record the WRONG domain (old prod rows), not the rows the pairs were
@@ -2064,11 +2064,11 @@ def _record_pair_batch_manifest(
     try:
         rows = forecasts_conn.execute(
             "SELECT city, season, metric, live_data_version, fit_signature_hash, gate_set_hash "
-            f"FROM model_bias_ens_v2 WHERE {' AND '.join(where)}",
+            f"FROM model_bias_ens WHERE {' AND '.join(where)}",
             params,
         ).fetchall()
     except sqlite3.Error as exc:
-        print("WARN: pair-batch manifest skipped — model_bias_ens_v2 not queryable on the rebuild "
+        print("WARN: pair-batch manifest skipped — model_bias_ens not queryable on the rebuild "
               f"DB ({exc}); the producer must have written STAGING rows to this same --db.",
               file=sys.stderr)
         return None

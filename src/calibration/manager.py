@@ -763,7 +763,7 @@ def get_calibrator(
     Phase 2 (2026-05-04, may4math.md F1 + critic-opus BLOCKER 3): added
     cycle/source_id/horizon_profile keyword params for cycle-stratified Platt
     bucket selection. When all three are None (default), legacy behavior is
-    preserved — load_platt_model_v2 hits the schema-default bucket (00z TIGGE
+    preserved — load_platt_model hits the schema-default bucket (00z TIGGE
     full horizon). Production callers (evaluator) MUST thread non-None values
     derived from the forecast's actual provenance (issue_time → cycle,
     data_version → source_id, registry → horizon_profile) so that 12z OpenData
@@ -782,7 +782,7 @@ def get_calibrator(
 
     Law: docs/authority/zeus_dual_track_architecture.md §4 (World DB v2 table
     family keyed on temperature_metric). Writes to platt_models landed
-    Phase 5 (save_platt_model_v2 + refit_platt.py); reads were unwired
+    Phase 5 (save_platt_model + refit_platt.py); reads were unwired
     until Phase 9C.
 
     Implements hierarchical fallback (spec §3.4):
@@ -801,7 +801,7 @@ def get_calibrator(
     cluster = city.cluster
 
     # 2026-04-30 BLOCKER #1 fix: resolve canonical data_version for the metric
-    # so load_platt_model_v2 filters by it. Pre-fix the SELECT picked newest
+    # so load_platt_model filters by it. Pre-fix the SELECT picked newest
     # by fitted_at regardless of data_version — invariant-by-coincidence under
     # today's single-version-per-metric world; future metric upgrades would
     # silently shift runtime to the new fit. The data_version constants live
@@ -1026,7 +1026,7 @@ def _model_data_to_calibrator(
     """Reconstruct calibrator from stored model data.
 
     Codex P1 #6 (2026-05-04): also attach the bucket identity attrs from
-    load_platt_model_v2 — evaluator's transfer gate reads these via
+    load_platt_model — evaluator's transfer gate reads these via
     ``getattr(cal, '_bucket_*', None)`` to construct the actual
     calibrator_domain instead of hardcoding TIGGE.  Legacy
     load_platt_model populates them as None (no Phase 2 stratification on
@@ -1079,7 +1079,7 @@ def _fit_from_pairs(
     violation (write-side twin of the L3 read-side fix).
 
     LOW refits must land via the dedicated v2 pipeline
-    (scripts/refit_platt.py → save_platt_model_v2), which is
+    (scripts/refit_platt.py → save_platt_model), which is
     Golden-Window-gated. Fast-path on-the-fly refit is unsafe for LOW
     until a metric-aware on-the-fly-to-v2 writer is added (post-dual-
     track cleanup packet).
@@ -1149,7 +1149,7 @@ def _fit_from_pairs(
     # Fix E (golden-knitting-wand.md Phase 1): set _bucket_* attrs so evaluator
     # σ-query at evaluator.py:2778 reads a non-empty bucket_model_key instead of
     # the empty string it gets from unconfigured fit-path calibrators.
-    # Defaults (None → "00"/"tigge_mars"/"full") mirror the save_platt_model_v2
+    # Defaults (None → "00"/"tigge_mars"/"full") mirror the save_platt_model
     # template so model_key is consistent with what would be written to DB.
     from src.types.metric_identity import HIGH_LOCALDAY_MAX, LOW_LOCALDAY_MIN  # lazy — avoids circular at module level
     _eff_cycle = cycle if cycle is not None else "00"

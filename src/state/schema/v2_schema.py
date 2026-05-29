@@ -427,7 +427,7 @@ def apply_canonical_schema(conn: sqlite3.Connection, *, forecast_tables: bool = 
 
     try:
         if nested_transaction:
-            conn.execute("SAVEPOINT zeus_v2_schema")
+            conn.execute("SAVEPOINT zeus_schema")
         else:
             conn.execute("PRAGMA foreign_keys = OFF")
             conn.execute("BEGIN")
@@ -635,17 +635,20 @@ def apply_canonical_schema(conn: sqlite3.Connection, *, forecast_tables: bool = 
         """)
 
         # ----------------------------------------------------------------
-        # observation_instants_v2
+        # observation_instants  (CANONICAL — superset of the former legacy
+        # observation_instants subset; consolidated 2026-05-29 from
+        # observation_instants_v2. The legacy subset DDL in db.py:1409 is
+        # DELETED so this is the single source of truth for the table.)
         # Architect refinement: running_min column for low-track obs support
         # ----------------------------------------------------------------
         # B4 (2026-04-26): physical-bounds CHECK on temp columns. Applies to
         # NEW DBs only — SQLite ALTER cannot add CHECK retroactively (db.py
         # comment at L330-333 same pattern). Writer-level validation in
-        # observation_instants_v2_writer._validate() is the load-bearing
+        # observation_instants_writer._validate() is the load-bearing
         # antibody for legacy DBs. Bounds: -90/60 °C inclusive, -130/140 °F
         # inclusive. NULL passes through (fields are nullable per schema).
         conn.execute("""
-            CREATE TABLE IF NOT EXISTS observation_instants_v2 (
+            CREATE TABLE IF NOT EXISTS observation_instants (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 city TEXT NOT NULL,
                 target_date TEXT NOT NULL,
@@ -688,14 +691,14 @@ def apply_canonical_schema(conn: sqlite3.Connection, *, forecast_tables: bool = 
             )
         """)
         conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_observation_instants_v2_city_ts
-                ON observation_instants_v2(city, target_date, utc_timestamp)
+            CREATE INDEX IF NOT EXISTS idx_observation_instants_city_ts
+                ON observation_instants(city, target_date, utc_timestamp)
         """)
         conn.execute("""
             CREATE TABLE IF NOT EXISTS observation_revisions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 table_name TEXT NOT NULL
-                    CHECK (table_name IN ('observation_instants_v2', 'observations')),
+                    CHECK (table_name IN ('observation_instants', 'observations')),
                 city TEXT NOT NULL,
                 target_date TEXT,
                 source TEXT NOT NULL,
@@ -712,7 +715,7 @@ def apply_canonical_schema(conn: sqlite3.Connection, *, forecast_tables: bool = 
             )
         """)
         conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_observation_revisions_obs_v2_lookup
+            CREATE INDEX IF NOT EXISTS idx_observation_revisions_obs_lookup
                 ON observation_revisions(table_name, city, source, utc_timestamp, recorded_at)
         """)
         conn.execute("""
@@ -732,7 +735,7 @@ def apply_canonical_schema(conn: sqlite3.Connection, *, forecast_tables: bool = 
         # Pairs with Gap A closure in step1_schema_audit.md.
         #
         # A4/C7 (2026-04-24, data-readiness-tail forensic closure): extend
-        # observation_instants_v2 with INV-14 identity spine (temperature_metric
+        # observation_instants with INV-14 identity spine (temperature_metric
         # + physical_quantity + observation_field) + training_allowed +
         # causality_status + source_role. Previously only authority +
         # data_version + provenance_json were present. Per critic-opus P0.2
@@ -743,15 +746,15 @@ def apply_canonical_schema(conn: sqlite3.Connection, *, forecast_tables: bool = 
         # on ALTER path (SQLite limitation); writer-side enforcement catches
         # future INSERTs; existing 1.8M rows remain NULL until backfill.
         for alter_sql in [
-            "ALTER TABLE observation_instants_v2 ADD COLUMN authority TEXT NOT NULL DEFAULT 'UNVERIFIED'",
-            "ALTER TABLE observation_instants_v2 ADD COLUMN data_version TEXT NOT NULL DEFAULT 'v1'",
-            "ALTER TABLE observation_instants_v2 ADD COLUMN provenance_json TEXT NOT NULL DEFAULT '{}'",
-            "ALTER TABLE observation_instants_v2 ADD COLUMN temperature_metric TEXT",
-            "ALTER TABLE observation_instants_v2 ADD COLUMN physical_quantity TEXT",
-            "ALTER TABLE observation_instants_v2 ADD COLUMN observation_field TEXT",
-            "ALTER TABLE observation_instants_v2 ADD COLUMN training_allowed INTEGER DEFAULT 1",
-            "ALTER TABLE observation_instants_v2 ADD COLUMN causality_status TEXT DEFAULT 'OK'",
-            "ALTER TABLE observation_instants_v2 ADD COLUMN source_role TEXT",
+            "ALTER TABLE observation_instants ADD COLUMN authority TEXT NOT NULL DEFAULT 'UNVERIFIED'",
+            "ALTER TABLE observation_instants ADD COLUMN data_version TEXT NOT NULL DEFAULT 'v1'",
+            "ALTER TABLE observation_instants ADD COLUMN provenance_json TEXT NOT NULL DEFAULT '{}'",
+            "ALTER TABLE observation_instants ADD COLUMN temperature_metric TEXT",
+            "ALTER TABLE observation_instants ADD COLUMN physical_quantity TEXT",
+            "ALTER TABLE observation_instants ADD COLUMN observation_field TEXT",
+            "ALTER TABLE observation_instants ADD COLUMN training_allowed INTEGER DEFAULT 1",
+            "ALTER TABLE observation_instants ADD COLUMN causality_status TEXT DEFAULT 'OK'",
+            "ALTER TABLE observation_instants ADD COLUMN source_role TEXT",
         ]:
             try:
                 conn.execute(alter_sql)
@@ -801,28 +804,31 @@ def apply_canonical_schema(conn: sqlite3.Connection, *, forecast_tables: bool = 
         conn.execute("""
             CREATE VIEW observation_instants_current AS
                 SELECT o.*
-                FROM observation_instants_v2 o
+                FROM observation_instants o
                 JOIN zeus_meta m
                   ON m.key = 'observation_data_version'
                  AND o.data_version = m.value
         """)
 
         # ----------------------------------------------------------------
-        # observation_hourly_extrema_v2 (PR-C compatibility view)
+        # observation_hourly_extrema (PR-C compatibility view)
         # Aliases running_max / running_min to hour_bucket_max / hour_bucket_min
         # so call-sites can make the non-monotonic semantics explicit without
         # any schema migration on the live table.  The original column names
         # are preserved (no DROP / RENAME); this view is additive-only.
         # Created AFTER the ADD COLUMN block so o.* includes all columns.
+        # Consolidation 2026-05-29: dropped the legacy _v2-suffixed alias view
+        # too, so no stale view points at the now-renamed table.
         # ----------------------------------------------------------------
         conn.execute("DROP VIEW IF EXISTS observation_hourly_extrema_v2")
+        conn.execute("DROP VIEW IF EXISTS observation_hourly_extrema")
         conn.execute("""
-            CREATE VIEW observation_hourly_extrema_v2 AS
+            CREATE VIEW observation_hourly_extrema AS
                 SELECT
                     o.*,
                     o.running_max AS hour_bucket_max,
                     o.running_min AS hour_bucket_min
-                FROM observation_instants_v2 o
+                FROM observation_instants o
         """)
 
         # ----------------------------------------------------------------
@@ -954,15 +960,15 @@ def apply_canonical_schema(conn: sqlite3.Connection, *, forecast_tables: bool = 
         """)
 
         if nested_transaction:
-            conn.execute("RELEASE SAVEPOINT zeus_v2_schema")
+            conn.execute("RELEASE SAVEPOINT zeus_schema")
         else:
             conn.execute("COMMIT")
 
     except Exception:
         try:
             if nested_transaction:
-                conn.execute("rollback to savepoint zeus_v2_schema")
-                conn.execute("release savepoint zeus_v2_schema")
+                conn.execute("rollback to savepoint zeus_schema")
+                conn.execute("release savepoint zeus_schema")
             else:
                 conn.execute("rollback")
         except Exception:

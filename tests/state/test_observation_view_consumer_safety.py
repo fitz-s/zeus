@@ -7,10 +7,10 @@
 Background
 ----------
 The VIEW ``observation_instants_current`` was designed as an atomic cutover
-indirection over ``observation_instants_v2``. It JOINs ``zeus_meta`` on
+indirection over ``observation_instants``. It JOINs ``zeus_meta`` on
 ``observation_data_version = m.value``. The default value inserted by
 ``init_schema`` is ``'v0'`` (v2_schema.py:660), which matches ZERO rows in
-``observation_instants_v2`` (no rows carry ``data_version='v0'``).
+``observation_instants`` (no rows carry ``data_version='v0'``).
 
 Consequence: any runtime code that reads ``observation_instants_current``
 before the operator has run the activation UPDATE will see ``cov=0`` for
@@ -31,10 +31,10 @@ that the VIEW is used. Until then it guards the pre-activation safety.
 
 REGRESSION INJECTION PROOF
 ---------------------------
-sed -i '' 's/FROM observation_instants_v2/FROM observation_instants_current/'
+sed -i '' 's/FROM observation_instants/FROM observation_instants_current/'
   src/engine/ddd_wiring.py
 -> test_no_runtime_reads_from_inactive_view fails immediately.
-Restore: sed -i '' 's/FROM observation_instants_current/FROM observation_instants_v2/'
+Restore: sed -i '' 's/FROM observation_instants_current/FROM observation_instants/'
 """
 from __future__ import annotations
 
@@ -76,7 +76,7 @@ class TestObservationViewConsumerSafety:
         silently sets cov=0 for every city, halting all DDD decisions.
 
         REGRESSION INJECTION:
-          sed 's/FROM observation_instants_v2/FROM observation_instants_current/'
+          sed 's/FROM observation_instants/FROM observation_instants_current/'
             src/engine/ddd_wiring.py
           -> this test fails immediately.
         """
@@ -108,7 +108,7 @@ class TestObservationViewConsumerSafety:
             "— returns zero rows). This would cause cov=0 for every city, silently halting "
             "all DDD-gated trade decisions.\n\n"
             "Violations found:\n" + "\n".join(f"  {v}" for v in violations) + "\n\n"
-            "To fix: restore direct reads from observation_instants_v2 until the operator "
+            "To fix: restore direct reads from observation_instants until the operator "
             "activation migration runs (UPDATE zeus_meta SET value='v1.wu-native' WHERE "
             "key='observation_data_version') and a downstream consumer audit is complete."
         )
