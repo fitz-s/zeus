@@ -130,7 +130,7 @@ def typed_bins_for_city_date_metric(
     rows = conn.execute(
         """
         SELECT DISTINCT range_label
-        FROM calibration_pairs_v2
+        FROM calibration_pairs
         WHERE city = ?
           AND target_date = ?
           AND temperature_metric = ?

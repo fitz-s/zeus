@@ -798,7 +798,7 @@ def _settlement_truth_status(db_path: Path | None = None) -> dict:
         conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
         row = conn.execute(
             "SELECT COUNT(*) AS count, MAX(settled_at) AS max_settled_at, "
-            "MAX(recorded_at) AS max_recorded_at FROM settlements_v2"
+            "MAX(recorded_at) AS max_recorded_at FROM settlement_outcomes"
         ).fetchone()
         conn.close()
     except Exception as exc:

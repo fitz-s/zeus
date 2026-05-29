@@ -454,60 +454,14 @@ class TestRCBForecastRowsV2:
     historical_forecasts WITH metric filter when v2 has data; else falls
     back to legacy `forecasts` table. Before P9C the function was
     legacy-only — any v2 data was unreachable even once Golden Window lifts.
+
+    B3 (PR3) drops historical_forecasts entirely
+    (src/state/schema/v2_schema.py:829 — "historical_forecasts — DROPPED in B3").
+    The test_v2_populated_query_filters_by_metric scenario (INSERT into
+    historical_forecasts) is now impossible; the table is never created by
+    apply_canonical_schema. Canonical behavior is legacy-forecasts fallback
+    (test_v2_empty_falls_back_to_legacy below).
     """
-
-    def test_v2_populated_query_filters_by_metric(self):
-        """R-CB.1: when historical_forecasts has rows for the city+date+metric,
-        _forecast_rows_for returns ONLY the v2 rows with matching metric."""
-        from src.engine.replay import ReplayContext
-        from src.state.schema.v2_schema import apply_canonical_schema
-        from src.state.db import init_schema
-
-        conn = sqlite3.connect(":memory:")
-        conn.row_factory = sqlite3.Row
-        init_schema(conn)
-        apply_canonical_schema(conn)
-
-        # v2 schema is per-row metric-partitioned (single forecast_value +
-        # temperature_metric column). Seed HIGH and LOW rows for same
-        # (city, target_date); expect translated downstream to (forecast_high=95.0)
-        # / (forecast_low=32.0) via _forecast_rows_for's legacy-shape shim.
-        now = "2026-07-10T00:00:00+00:00"
-        conn.execute(
-            """
-            INSERT INTO historical_forecasts
-                (city, target_date, source, temperature_metric,
-                 forecast_value, temp_unit, lead_days, available_at)
-            VALUES
-                ('NYC', '2026-07-15', 'TIGGE_ECMWF', 'high',
-                 95.0, 'F', 5, ?)
-            """,
-            (now,),
-        )
-        conn.execute(
-            """
-            INSERT INTO historical_forecasts
-                (city, target_date, source, temperature_metric,
-                 forecast_value, temp_unit, lead_days, available_at)
-            VALUES
-                ('NYC', '2026-07-15', 'TIGGE_ECMWF', 'low',
-                 32.0, 'F', 5, ?)
-            """,
-            (now,),
-        )
-        conn.commit()
-
-        ctx = ReplayContext(conn)
-        low_rows = ctx._forecast_rows_for("NYC", "2026-07-15", temperature_metric="low")
-        assert len(low_rows) == 1, (
-            f"R-CB.1: expected 1 LOW row from v2; got {len(low_rows)}"
-        )
-        assert low_rows[0]["forecast_low"] == 32.0, (
-            f"R-CB.1: v2 LOW row's forecast_low must be 32.0; got {low_rows[0]['forecast_low']}"
-        )
-        assert low_rows[0]["forecast_high"] is None, (
-            f"R-CB.1: LOW row's forecast_high is NULL in v2 (metric-partitioned)"
-        )
 
     def test_v2_empty_falls_back_to_legacy(self):
         """R-CB.2: when v2 is empty (Golden Window current state), legacy

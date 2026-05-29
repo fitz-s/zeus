@@ -6542,7 +6542,7 @@ def _snapshot_identity_matches(
         and row["city"] == city.name
         and row["target_date"] == target_date
         and row["temperature_metric"] == temperature_metric
-        and row["data_version"] == data_version
+        and row["dataset_id"] == data_version
         and row["model_version"] == model_version
         and row["issue_time"] == issue_time
         and row["valid_time"] == valid_time
@@ -6645,12 +6645,12 @@ def _store_ens_snapshot(conn, city, target_date, ens, ens_result) -> str:
                 INSERT INTO {v2_table}
                 (city, target_date, temperature_metric, physical_quantity, observation_field,
                  issue_time, valid_time, available_at, fetch_time, lead_hours, members_json,
-                 spread, is_bimodal, model_version, data_version, training_allowed,
+                 spread, is_bimodal, model_version, dataset_id, training_allowed,
                  causality_status, boundary_ambiguous, provenance_json, authority,
                  members_unit, unit,
                  first_member_observed_time, run_complete_time, raw_orderbook_hash_transition_delta_ms)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(city, target_date, temperature_metric, issue_time, data_version)
+                ON CONFLICT(city, target_date, temperature_metric, issue_time, dataset_id)
                 DO UPDATE SET
                     physical_quantity = excluded.physical_quantity,
                     observation_field = excluded.observation_field,
@@ -6704,7 +6704,7 @@ def _store_ens_snapshot(conn, city, target_date, ens, ens_result) -> str:
                 WHERE city = ?
                   AND target_date = ?
                   AND temperature_metric = ?
-                  AND data_version = ?
+                  AND dataset_id = ?
                   AND model_version = ?
                   AND available_at = ?
                   AND fetch_time = ?
@@ -6857,7 +6857,7 @@ def _store_snapshot_p_raw(
             )
         v2_row = conn.execute(f"""
             SELECT city, target_date, issue_time, valid_time, available_at,
-                   fetch_time, model_version, data_version, temperature_metric,
+                   fetch_time, model_version, dataset_id, temperature_metric,
                    provenance_json
             FROM {v2_table}
             WHERE snapshot_id = ?
