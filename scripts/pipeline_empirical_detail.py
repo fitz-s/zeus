@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # Created: 2026-05-28
+# Last reused or audited: 2026-05-29
 # Authority basis: operator directive 2026-05-28 — detailed end-to-end pipeline audit with
 #   empirical per-step/per-product/per-city evidence. READ-ONLY.
 # Purpose: produce the GRANULAR evidence the synthesis lacked:
@@ -9,6 +10,8 @@
 #      and its daily-max mean — shows "多个不同步长结果" + the selected one.
 #   4. Bias-by-lead within a (city,season): does the pooled 0-48h bias hide a lead gradient?
 #   5. Unit handling per city.
+# Lifecycle: created=2026-05-28; last_reviewed=2026-05-29; last_reused=never
+# Reuse: Inspect hardcoded DB and output path constants; READ-ONLY on forecasts DB, writes only to file.
 import json
 import sqlite3
 import statistics

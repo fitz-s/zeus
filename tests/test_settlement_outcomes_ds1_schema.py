@@ -4,6 +4,9 @@
 #   gains first-class nullable settlement_station + settlement_unit columns so the pairing
 #   contract derives station/unit from VERIFIED columns instead of the heuristic URL parse
 #   (un-blocks Hong Kong) and the forecast's unverifiable unit CLAIM (de-tautologizes the gate).
+# Lifecycle: created=2026-05-29; last_reviewed=2026-05-29; last_reused=never
+# Purpose: Schema + migration contract for D-S1 settlement_outcomes columns — canonical schema carries both nullable columns, migration adds them idempotently.
+# Reuse: Run after any change to init_schema_forecasts settlement_outcomes DDL or the D-S1 migration script.
 """Schema + migration contract for the D-S1 settlement_outcomes columns.
 
 Two structural guarantees:

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # Created: 2026-05-28
+# Last reused or audited: 2026-05-29
 # Authority basis: operator critique 2026-05-28 — Test A mixed TIGGE+OpenData residuals;
 #   live product is OpenData. Must stratify by product lineage and test transfer.
 # Purpose: READ-ONLY. From the clean 12-city HIGH evidence ledger, stratify residuals by
@@ -9,6 +10,8 @@
 #     A2  OpenData-only leave-one-date-out OOS: does the live product carry the same bias?
 #     A3  TRANSFER: does the TIGGE-derived bias improve OpenData rows (the live question)?
 #   Products have disjoint dates, so A3 is naturally out-of-product. Writes CSV + summary.
+# Lifecycle: created=2026-05-28; last_reviewed=2026-05-29; last_reused=never
+# Reuse: Inspect hardcoded CSV input/output paths and confirm evidence ledger was built with cycle-strict extraction (dataset_id column, not data_version).
 import csv
 import sys
 from collections import defaultdict

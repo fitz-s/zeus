@@ -5,6 +5,9 @@
 #   blend); TIGGE is a separately product-tagged candidate the accept-gate refuses for an
 #   OpenData target. Replaces "the posterior blend IS the OpenData estimate" — that blend, at
 #   thin live n, leans toward the TIGGE prior that hurts 7/11 buckets.
+# Lifecycle: created=2026-05-29; last_reviewed=2026-05-29; last_reused=never
+# Purpose: Assert build_candidate_biases emits product-segregated candidates with honest evidence_product tags, not a TIGGE-shrunk blend serving OpenData.
+# Reuse: Run after any change to build_candidate_biases, BiasCandidate, or product-tagging logic.
 """Product-segregated candidate construction for the bias model.
 
 The estimator emits a candidate SET with honest evidence-product tags, not a single blended

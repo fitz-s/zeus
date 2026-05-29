@@ -5,6 +5,9 @@
 #   plus the largest trading-city UTC offset). This RETIRES fix/#134's D+10/282h
 #   contract: steps 150-282 are no longer fetched. This file is the NEW antibody that
 #   makes any step > OPENDATA_MAX_STEP_HOURS UNCONSTRUCTABLE — STEP_HOURS is DERIVED
+# Lifecycle: created=2026-05-08; last_reviewed=2026-05-29; last_reused=2026-05-29
+# Purpose: STEP_HOURS coverage contract for the 5-day-cap regime — no step exceeds OPENDATA_MAX_STEP_HOURS=144 and fetch list covers completeness expectations.
+# Reuse: Run after any change to STEP_HOURS list, OPENDATA_MAX_STEP_HOURS constant, or completeness expected_steps logic.
 #   from the cap constant, so re-adding a >144h tail fails the coupling assertion.
 """STEP_HOURS coverage contract tests for ecmwf_open_data — 5-day-cap regime.
 

@@ -4,6 +4,9 @@
 #   3h-OpenData are DIFFERENT random variables; a correction proven on one must not serve the
 #   other). The accept-gate antibody against "sd3 renamed": a candidate may be selected ONLY if
 #   its OOS evidence was computed on the SAME product it will serve.
+# Lifecycle: created=2026-05-29; last_reviewed=2026-05-29; last_reused=never
+# Purpose: Antibody asserting choose_candidate refuses cross-product evidence — a TIGGE-proven candidate cannot serve an OpenData target.
+# Reuse: Run after any change to choose_candidate or evidence_product tagging in score_error_model_candidates.
 """Product-segregation invariant for the candidate accept-gate.
 
 The legacy ledger collapsed products; the asymmetry critic showed TIGGE→OpenData transfer

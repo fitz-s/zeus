@@ -4,6 +4,9 @@
 #   Relationship test (Fitz methodology: relationship tests BEFORE implementation). The
 #   cross-module invariant pinned here: a correction enters the live-bound selection ONLY IF,
 #   on held-out data, it beats raw on >=2/3 proper scores AND its bootstrap improvement LCB>0
+# Lifecycle: created=2026-05-28; last_reviewed=2026-05-29; last_reused=2026-05-28
+# Purpose: Relationship-first invariants for choose_candidate selection rule — clear-winner chosen, raw-wins-all uses raw, partial-win uses raw, product segregation enforced.
+# Reuse: Run after any change to choose_candidate logic in score_error_model_candidates.
 #   AND it does not catastrophically regress any cohort. Otherwise raw identity is chosen.
 #   This is the antibody: "promote a correction that did not beat raw OOS" must be unwritable.
 import importlib.util

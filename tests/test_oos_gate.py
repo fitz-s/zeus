@@ -4,6 +4,9 @@
 #   improvement gate must respect: S4 date-blocked folds (no same-date leakage), S3 daily
 #   autocorrelation (IID bootstrap is anticonservative -> moving-block bootstrap + AR(1)
 #   n_eff), S2 a real bootstrap LCB (none existed; n_bootstrap=0), S1 multiple-comparison
+# Lifecycle: created=2026-05-29; last_reviewed=2026-05-29; last_reused=never
+# Purpose: Statistical correctness tests for OOS gate inputs — date-blocked folds, moving-block bootstrap LCB, AR(1) n_eff, BH-FDR.
+# Reuse: Run after any change to oos_gate.py functions (date_blocked_folds, moving_block_bootstrap_lcb, effective_sample_size, bh_fdr_accept).
 #   control across the bucket×candidate family (BH-FDR).
 """Statistical correctness of the candidate OOS accept-gate inputs.
 

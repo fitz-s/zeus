@@ -4,6 +4,9 @@
 #   scripts/migrations/202605_rename_ensemble_snapshots_data_version_to_dataset_id.py —
 #   bridges the LIVE forecasts DB (ensemble_snapshots.data_version) up to the canonical
 #   B5 shape (ensemble_snapshots.dataset_id) without altering v2_schema or the pinned
+# Lifecycle: created=2026-05-29; last_reviewed=2026-05-29; last_reused=never
+# Purpose: Relationship test asserting the data_version->dataset_id rename migration leaves a DB indistinguishable from a freshly-initialized canonical forecasts DB.
+# Reuse: Run after any change to the rename migration or init_schema_forecasts ensemble_snapshots DDL.
 #   fingerprint.
 """Relationship test for the ensemble_snapshots data_version→dataset_id rename migration.
 

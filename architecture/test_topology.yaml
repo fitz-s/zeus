@@ -605,6 +605,25 @@ test_trust_policy:
     tests/test_exit_constrained_posterior.py: {created: "2026-05-27", last_used: "2026-05-27"}
     tests/test_exit_family_optimizer.py: {created: "2026-05-27", last_used: "2026-05-27"}
     tests/test_exit_strategy_relationship.py: {created: "2026-05-27", last_used: "2026-05-27"}
+    # stat-whole-refactor wave (PR #361): residual-ledger seam, pairing contracts, OOS gate, migration antibodies.
+    tests/test_aggregation_window_product_derived.py: {created: "2026-05-29", last_used: "2026-05-29"}
+    tests/test_analytic_p_raw_equivalence.py: {created: "2026-05-29", last_used: "2026-05-29"}
+    tests/test_build_evidence_integration.py: {created: "2026-05-29", last_used: "2026-05-29"}
+    tests/test_build_evidence_pairing_gate.py: {created: "2026-05-29", last_used: "2026-05-29"}
+    tests/test_candidate_product_segregation.py: {created: "2026-05-29", last_used: "2026-05-29"}
+    tests/test_ens_bias_candidates.py: {created: "2026-05-29", last_used: "2026-05-29"}
+    tests/test_forecast_object_contract.py: {created: "2026-05-29", last_used: "2026-05-29"}
+    tests/test_forecast_target_contract.py: {created: "2026-05-29", last_used: "2026-05-29"}
+    tests/test_migration_rename_dataset_id.py: {created: "2026-05-29", last_used: "2026-05-29"}
+    tests/test_no_temporal_leakage_relationships.py: {created: "2026-05-29", last_used: "2026-05-29"}
+    tests/test_oos_gate.py: {created: "2026-05-29", last_used: "2026-05-29"}
+    tests/test_oos_validation_harness.py: {created: "2026-05-29", last_used: "2026-05-29"}
+    tests/test_residual_key_contract.py: {created: "2026-05-29", last_used: "2026-05-29"}
+    tests/test_residual_value_contract.py: {created: "2026-05-29", last_used: "2026-05-29"}
+    tests/test_settlement_outcomes_ds1_schema.py: {created: "2026-05-29", last_used: "2026-05-29"}
+    tests/test_settlement_pairing_contract.py: {created: "2026-05-29", last_used: "2026-05-29"}
+    tests/test_strict_evidence_row.py: {created: "2026-05-29", last_used: "2026-05-29"}
+    tests/test_t4_selection_rule_invariants.py: {created: "2026-05-28", last_used: "2026-05-29"}
 
 categories:
   core_law_antibody:

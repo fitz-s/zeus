@@ -1,6 +1,9 @@
 # Created: 2026-05-29
 # Last reused or audited: 2026-05-29
 # Authority basis: HANDOFF_STAT_REFACTOR_2026-05-29 §4 #14
+# Lifecycle: created=2026-05-29; last_reviewed=2026-05-29; last_reused=never
+# Purpose: End-to-end tests for oos_validation_harness in EQUIVALENCE and IMPROVEMENT modes on synthetic fixtures.
+# Reuse: Run after any change to oos_validation_harness.py, run_equivalence_report, or run_improvement_report.
 """End-to-end tests for the OOS before/after validation harness.
 
 Covers:

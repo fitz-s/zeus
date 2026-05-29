@@ -1748,3 +1748,200 @@ scripts:
     unguarded_write_rationale: "Read-only SELECT; writes only to stdout and docs file."
     required_helpers: []
     required_tests: []
+
+  # stat-whole-refactor wave (PR #361): residual-ledger seam, OOS gate, candidate selection.
+  scripts/build_ens_residual_evidence.py:
+    class: diagnostic_report_writer
+    status: active
+    lifecycle: stat_whole_refactor_2026_05_29
+    packet: docs/operations/HANDOFF_STAT_REFACTOR_2026-05-29.md
+    authority_scope: read_only
+    dangerous_if_run: false
+    dry_run_default: true
+    apply_flag: null
+    target_db: state/zeus-forecasts.db
+    read_targets: [state/zeus-forecasts.db]
+    write_targets: [stdout, docs/operations/ENS_RESIDUAL_EVIDENCE_*.csv]
+    canonical_command: "python scripts/build_ens_residual_evidence.py --db PATH --output-dir DIR [--metric {high,low}]"
+    external_inputs: []
+    delete_policy: retain_until_superseded
+    reuse_when: >
+      Build cycle-strict (HIGH=0Z, LOW=12Z) per-sample residual evidence ledger with VERIFIED
+      settlement pairs. Required input for score_error_model_candidates.py.
+      READ-ONLY on source DB; writes CSV sidecar only.
+    do_not_use_when: "DB absent or dataset_id column not yet migrated (B5 rename migration required)."
+    promotion_barrier: "Evidence-generation tool; output is input to candidate selection, not live authority."
+    unguarded_write_rationale: "READ-ONLY on DB; writes only CSV sidecar."
+    required_helpers: [src.contracts.residual_key.pair_residual, src.contracts.residual_value.residual_celsius]
+    required_tests: [tests/test_build_evidence_integration.py, tests/test_build_evidence_pairing_gate.py, tests/test_strict_evidence_row.py]
+
+  scripts/capture_before_fixture.py:
+    class: diagnostic_report_writer
+    status: active
+    lifecycle: stat_whole_refactor_2026_05_29
+    packet: docs/operations/HANDOFF_STAT_REFACTOR_2026-05-29.md
+    authority_scope: read_only
+    dangerous_if_run: false
+    dry_run_default: true
+    apply_flag: null
+    target_db: state/zeus-forecasts.db
+    read_targets: [state/zeus-forecasts.db]
+    write_targets: [docs/operations/before_after_fixture_2026-05-29/fixture.parquet, docs/operations/before_after_fixture_2026-05-29/fixture_meta.json]
+    canonical_command: "python scripts/capture_before_fixture.py --db PATH --output-dir DIR [--smoke N]"
+    external_inputs: []
+    delete_policy: retain_until_superseded
+    reuse_when: >
+      Freeze current production p_raw output as immutable before-baseline for Phase-5 equivalence testing.
+      NEVER writes to DB; PRAGMA query_only=ON enforced.
+    do_not_use_when: "Before-fixture already captured for this run (will overwrite)."
+    promotion_barrier: "Diagnostic fixture only; not live authority."
+    unguarded_write_rationale: "READ-ONLY on DB; writes only parquet + json sidecar."
+    required_helpers: [src.signal.ensemble_signal.p_raw_vector_from_maxes]
+    required_tests: [tests/test_oos_validation_harness.py]
+
+  scripts/oos_bias_crossfit.py:
+    class: diagnostic_report_writer
+    status: active
+    lifecycle: stat_whole_refactor_2026_05_29
+    packet: docs/operations/HANDOFF_STAT_REFACTOR_2026-05-29.md
+    authority_scope: read_only
+    dangerous_if_run: false
+    dry_run_default: true
+    apply_flag: null
+    target_db: null
+    read_targets: [docs/operations/ENS_RESIDUAL_EVIDENCE_*.csv]
+    write_targets: [stdout, docs/operations/phase2_oos_bias_high.csv]
+    canonical_command: "python scripts/oos_bias_crossfit.py"
+    external_inputs: []
+    delete_policy: retain_until_superseded
+    reuse_when: >
+      Cross-fitted (blocked-by-target_date) OOS test of LOCATION bias correction on clean evidence ledger.
+      Answers: does subtracting fold-trained bias_hat reduce OOS errors vs raw?
+    do_not_use_when: "Evidence ledger CSV absent or not built with cycle-strict extraction."
+    promotion_barrier: "Read-only diagnostic; does not write DB truth."
+    unguarded_write_rationale: "READ-ONLY on input CSV; writes only output CSV."
+    required_helpers: []
+    required_tests: []
+
+  scripts/oos_validation_harness.py:
+    class: diagnostic_report_writer
+    status: active
+    lifecycle: stat_whole_refactor_2026_05_29
+    packet: docs/operations/HANDOFF_STAT_REFACTOR_2026-05-29.md
+    authority_scope: read_only
+    dangerous_if_run: false
+    dry_run_default: true
+    apply_flag: null
+    target_db: null
+    read_targets: [docs/operations/before_after_fixture_2026-05-29/]
+    write_targets: [stdout]
+    canonical_command: "python scripts/oos_validation_harness.py {equivalence,improvement} --fixture-rows N"
+    external_inputs: []
+    delete_policy: retain_until_superseded
+    reuse_when: >
+      OOS before/after validation in EQUIVALENCE (analytic vs MC p_raw) or IMPROVEMENT
+      (candidate selection manifest on fixture rows) mode. Importable as a module.
+    do_not_use_when: "Before-fixture absent (EQUIVALENCE mode) or score_error_model_candidates.run_scoring not yet wired (IMPROVEMENT mode raises NotImplementedError on stubs)."
+    promotion_barrier: "Diagnostic harness; output does not authorize live strategy changes."
+    unguarded_write_rationale: "READ-ONLY; writes only to stdout."
+    required_helpers: [src.signal.ensemble_signal.p_raw_vector_from_maxes, scripts.score_error_model_candidates.run_scoring]
+    required_tests: [tests/test_oos_validation_harness.py]
+
+  scripts/pipeline_empirical_detail.py:
+    class: diagnostic_report_writer
+    status: active
+    lifecycle: stat_whole_refactor_2026_05_29
+    packet: docs/operations/HANDOFF_STAT_REFACTOR_2026-05-29.md
+    authority_scope: read_only
+    dangerous_if_run: false
+    dry_run_default: true
+    apply_flag: null
+    target_db: state/zeus-forecasts.db
+    read_targets: [state/zeus-forecasts.db]
+    write_targets: [stdout, docs/operations/pipeline_empirical_detail.txt]
+    canonical_command: "python scripts/pipeline_empirical_detail.py"
+    external_inputs: []
+    delete_policy: retain_until_superseded
+    reuse_when: >
+      Granular end-to-end pipeline audit: row inventory by data_version/cycle/metric,
+      step-handling test (mx2t3 vs mx2t6), multi-lead demonstration, bias-by-lead,
+      unit handling per city. READ-ONLY.
+    do_not_use_when: "Hardcoded DB/output path constants point to absent paths."
+    promotion_barrier: "Read-only diagnostic; does not write DB truth."
+    unguarded_write_rationale: "READ-ONLY on DB; writes only to file."
+    required_helpers: []
+    required_tests: []
+
+  scripts/product_lineage_transfer.py:
+    class: diagnostic_report_writer
+    status: active
+    lifecycle: stat_whole_refactor_2026_05_29
+    packet: docs/operations/HANDOFF_STAT_REFACTOR_2026-05-29.md
+    authority_scope: read_only
+    dangerous_if_run: false
+    dry_run_default: true
+    apply_flag: null
+    target_db: null
+    read_targets: [docs/operations/ENS_RESIDUAL_EVIDENCE_*.csv]
+    write_targets: [stdout, docs/operations/product_stratified_high.csv]
+    canonical_command: "python scripts/product_lineage_transfer.py"
+    external_inputs: []
+    delete_policy: retain_until_superseded
+    reuse_when: >
+      Stratify residuals by product lineage (TIGGE prior vs OpenData live) and test
+      bias-transfer. Answers A1/A2/A3 per (city, season) bucket. READ-ONLY on CSV.
+    do_not_use_when: "Evidence ledger CSV absent or not built with cycle-strict extraction."
+    promotion_barrier: "Read-only diagnostic; does not write DB truth."
+    unguarded_write_rationale: "READ-ONLY on input CSV; writes only output CSV."
+    required_helpers: []
+    required_tests: []
+
+  scripts/score_error_model_candidates.py:
+    class: diagnostic_report_writer
+    status: active
+    lifecycle: stat_whole_refactor_2026_05_29
+    packet: docs/operations/HANDOFF_STAT_REFACTOR_2026-05-29.md
+    authority_scope: read_only
+    dangerous_if_run: false
+    dry_run_default: true
+    apply_flag: null
+    target_db: null
+    read_targets: [docs/operations/ENS_RESIDUAL_EVIDENCE_*.csv]
+    write_targets: [stdout]
+    canonical_command: "python scripts/score_error_model_candidates.py (or import run_scoring)"
+    external_inputs: []
+    delete_policy: retain_until_superseded
+    reuse_when: >
+      Candidate model selection: choose_candidate accept-gate + run_scoring emitting
+      candidate_selection_manifest. READ-ONLY. Nothing here decides live trading.
+      Accept rule: beats raw on >=2/3 proper scores AND bootstrap LCB(improvement)>0
+      AND no catastrophic cohort regression.
+    do_not_use_when: "Evidence ledger absent or not product-segregated (cycle-strict extraction required)."
+    promotion_barrier: "Emits candidate_selection_manifest only; manifest is evidence, not live authority."
+    unguarded_write_rationale: "READ-ONLY; writes only to stdout."
+    required_helpers: [src.calibration.oos_gate.bh_fdr_accept, src.calibration.oos_gate.date_blocked_folds]
+    required_tests: [tests/test_t4_selection_rule_invariants.py, tests/test_candidate_product_segregation.py, tests/test_no_temporal_leakage_relationships.py]
+
+  scripts/score_raw_vs_sd3_bins.py:
+    class: diagnostic_report_writer
+    status: active
+    lifecycle: stat_whole_refactor_2026_05_29
+    packet: docs/operations/HANDOFF_STAT_REFACTOR_2026-05-29.md
+    authority_scope: read_only
+    dangerous_if_run: false
+    dry_run_default: true
+    apply_flag: null
+    target_db: state/zeus-forecasts.db
+    read_targets: [state/zeus-forecasts.db]
+    write_targets: [stdout, docs/operations/score_12city_high.csv]
+    canonical_command: "python scripts/score_raw_vs_sd3_bins.py"
+    external_inputs: []
+    delete_policy: retain_until_superseded
+    reuse_when: >
+      Bin-level proper-score comparison raw vs sd3(full_transport_v1), HIGH metric, 12 cities.
+      Corroborates that SHIPPED sd3 model is bad (CONTAMINATED ft_v1 baked in). READ-ONLY.
+    do_not_use_when: "Hardcoded ROOT/DB/CITIES constants point to absent paths; audit_refit_proper_scores.py must be accessible."
+    promotion_barrier: "Read-only corroboration diagnostic; does not write DB truth."
+    unguarded_write_rationale: "READ-ONLY on DB; writes only to CSV output."
+    required_helpers: [scripts.audit_refit_proper_scores]
+    required_tests: []

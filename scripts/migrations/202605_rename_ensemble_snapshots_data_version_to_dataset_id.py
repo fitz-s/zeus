@@ -21,6 +21,8 @@
 #   then --execute) BEFORE restarting the daemon on the new code. Dead/un-fixed offline scripts
 #   that still SELECT `data_version` from ensemble_snapshots will break post-rename, but they are
 #   dead (moot) — see the slice report's DEAD list.
+# Purpose: Rename ensemble_snapshots.data_version to dataset_id in the LIVE forecasts DB to match the canonical B5 schema shape.
+# Reuse: Run dry-run first; run BEFORE daemon restart on new code; idempotent if column already renamed; target DB must be zeus-forecasts.db.
 """Rename ensemble_snapshots.data_version → dataset_id (LIVE → canonical bridge).
 
 Migration semantic policy:

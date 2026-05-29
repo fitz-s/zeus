@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 # Created: 2026-05-28
+# Last reused or audited: 2026-05-29
 # Authority basis: operator redesign 2026-05-28 — Principle 1 (raw dominates unless OOS-proven).
 # Purpose: READ-ONLY. Cross-fitted (blocked-by-target_date) OOS test of the LOCATION (bias)
 #   correction on the CLEAN evidence ledger. Question: does subtracting the fold-trained
 #   bias_hat reduce |ensemble_mean - settlement| OUT-OF-SAMPLE vs raw (no correction)?
 #   This isolates "real stable offset" from "noise" before any bin-level proper-score MC.
 #   Per (city, season): K-fold by date; bias_hat = mean(train residual); score OOS errors.
+# Lifecycle: created=2026-05-28; last_reviewed=2026-05-29; last_reused=never
+# Reuse: Inspect CSV path constants (hardcoded) and confirm evidence ledger was built with cycle-strict extraction before interpreting OOS results.
 import csv
 import sys
 from collections import defaultdict

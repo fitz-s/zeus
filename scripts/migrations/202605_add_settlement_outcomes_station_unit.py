@@ -14,6 +14,8 @@
 #   mandates for a multi-statement schema change).
 # Runner interface: def up(conn: sqlite3.Connection) -> None
 # Standalone operator receipts: python scripts/migrations/202605_add_settlement_outcomes_station_unit.py [--execute]
+# Purpose: Add nullable settlement_station + settlement_unit columns to settlement_outcomes so pairing derives station/unit from VERIFIED columns instead of heuristics.
+# Reuse: Run dry-run first; verify target DB is zeus-forecasts.db and is backed up; idempotent on re-run.
 """Add nullable settlement_station + settlement_unit columns to settlement_outcomes (D-S1).
 
 Migration semantic policy:

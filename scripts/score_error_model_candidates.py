@@ -7,6 +7,9 @@
 #   Accept rule (operator, verbatim): "Accept candidate only if: candidate beats raw on at
 #   least 2 of 3 proper scores AND bootstrap LCB(improvement) > 0 AND no catastrophic cohort
 #   regression. If none pass: use raw identity."
+# Lifecycle: created=2026-05-28; last_reviewed=2026-05-29; last_reused=never
+# Purpose: Candidate model selection gate — emits a candidate_selection_manifest; never touches live trading.
+# Reuse: Inspect OOS evidence ledger source (must be cycle-strict, product-segregated) and bootstrap parameters before relying on manifest.
 """Candidate model selection — the accept-gate that makes "promote a correction that did not
 beat raw OOS" structurally unwritable.
 
@@ -416,6 +419,8 @@ def score_bucket(
         for d in common_dates:
             raw_ll = raw_date_scores[d].get("logloss", 0.0)
             cand_ll = cand_date_scores[d].get("logloss", 0.0)
+            # raw_ll > 0 guard: when raw is near-perfect (logloss~0) skip the 2x test, else any
+            # positive cand_ll would falsely trip catastrophe (cand_ll > 2*0). raw_ll>>0 on real grids.
             if raw_ll > 0 and cand_ll > 2.0 * raw_ll:
                 catas = True
                 break
@@ -426,7 +431,7 @@ def score_bucket(
     # For candidates not accepted by BH, set LCB to -inf (conservative)
     for cname in list(improvement_lcb.keys()):
         if cname not in bh_accepted:
-            improvement_lcb[cname] = min(improvement_lcb.get(cname, float("-inf")), float("-inf"))
+            improvement_lcb[cname] = float("-inf")  # BH-rejected -> conservative -inf (min(x,-inf) was always -inf)
 
     return (candidate_metrics, raw_metrics, improvement_lcb, catastrophic, candidate_products_map)
 

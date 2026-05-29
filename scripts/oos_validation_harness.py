@@ -2,6 +2,9 @@
 # Created: 2026-05-29
 # Last reused or audited: 2026-05-29
 # Authority basis: HANDOFF_STAT_REFACTOR_2026-05-29 §4 #14
+# Lifecycle: created=2026-05-29; last_reviewed=2026-05-29; last_reused=never
+# Purpose: Thin orchestration harness for OOS before/after validation in EQUIVALENCE and IMPROVEMENT modes.
+# Reuse: Inspect that before-fixture parquet is from capture_before_fixture.py and score_error_model_candidates.run_scoring is importable before running IMPROVEMENT mode.
 """OOS Before/After Validation Harness — thin orchestration over P4 equivalence + scorer logic.
 
 Two modes:

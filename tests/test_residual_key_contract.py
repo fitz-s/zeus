@@ -3,6 +3,9 @@
 # Authority basis: TRIBUNAL redesign P1 (residual-pairing seam) + CRITIC_SYNTHESIS_2026-05-29
 #   §2 (C1: source_kind='prior' hardcoded -> lineage collapse; lineage must be DERIVED) and
 #   the target-equality antibody (forecast_target.assert_same_target).
+# Lifecycle: created=2026-05-29; last_reviewed=2026-05-29; last_reused=never
+# Purpose: Relationship test asserting pair_residual constructs ResidualKey only on target-match and carries DERIVED source_kind (not hardcoded 'prior').
+# Reuse: Run after any change to pair_residual, source_kind_for_data_version, or ResidualKey construction.
 """pair_residual: a residual key is constructible ONLY when a ForecastObject and a
 SettlementObject describe the same random variable (assert_same_target), and it carries
 a DERIVED source_kind (tigge_prior vs opendata_live) — never the hardcoded 'prior' that

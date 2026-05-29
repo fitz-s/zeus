@@ -4,6 +4,9 @@
 #   End-to-end relationship test of build_evidence on the REAL canonical forecasts schema
 #   (init_schema_forecasts) — the only layer that catches (a) the dataset_id column rename
 #   and (b) the SQL column wiring, which dict-fixture unit tests cannot.
+# Lifecycle: created=2026-05-29; last_reviewed=2026-05-29; last_reused=never
+# Purpose: Integration test of build_evidence against canonical schema — catches dataset_id column rename and pair_residual D-J1 wrong-station drop.
+# Reuse: Run after any change to build_evidence SQL, pair_residual gate, or init_schema_forecasts DDL.
 """build_evidence against the canonical ensemble_snapshots / settlement_outcomes schema.
 
 Two structural guarantees the legacy loose JOIN lacked:

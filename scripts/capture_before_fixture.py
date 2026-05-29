@@ -1,4 +1,10 @@
 #!/usr/bin/env python3
+# Created: 2026-05-29
+# Last reused or audited: 2026-05-29
+# Authority basis: TRIBUNAL_DRAFT2_RESPONSE §2c + E_phase0_fixture_scope.md §4
+# Lifecycle: created=2026-05-29; last_reviewed=2026-05-29; last_reused=never
+# Purpose: Freeze the current production pipeline's p_raw output as the immutable before-baseline for Phase-5 equivalence testing.
+# Reuse: Inspect fixture_meta.json for snapshot grain and p_cal=p_raw invariant before relying on the parquet as a before-baseline.
 """Capture Phase-0 'before' fixture for before/after validation harness.
 
 Created: 2026-05-29

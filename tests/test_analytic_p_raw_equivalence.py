@@ -3,6 +3,9 @@
 # Authority basis: TRIBUNAL P4 analytic p_raw, CRITIC_SYNTHESIS Cons-D
 #   (docs/operations/TRIBUNAL_DRAFT2_RESPONSE_2026-05-29.md §3d,
 #    docs/operations/CRITIC_SYNTHESIS_2026-05-29.md §2c Cons-D)
+# Lifecycle: created=2026-05-29; last_reviewed=2026-05-29; last_reused=never
+# Purpose: Prove analytic_p_raw_vector_from_maxes matches MC p_raw within sampling noise across all live market rounding policies.
+# Reuse: Run after any change to analytic CDF implementation or p_raw_vector_from_maxes MC path; verify P_RAW_ATOL/LOGIT_ATOL tolerances still hold.
 """Equivalence harness: analytic_p_raw_vector_from_maxes vs MC p_raw_vector_from_maxes.
 
 Goal (P4): prove the analytic Gaussian-mixture CDF computes the same p_raw

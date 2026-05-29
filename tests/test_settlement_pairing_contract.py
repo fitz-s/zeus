@@ -4,6 +4,9 @@
 #   ledger JOIN matched (city,target_date,metric) only — pairing wrong-station settlements.
 #   This is the cross-module relationship test: a forecast snapshot row + a settlement row
 #   form a residual ONLY when their full targets reconcile (incl station + normalized authority).
+# Lifecycle: created=2026-05-29; last_reviewed=2026-05-29; last_reused=never
+# Purpose: Relationship contract across the forecast↔settlement boundary — wrong-station settlement is refused (D-J1); authority normalization is required.
+# Reuse: Run after any change to pair_residual, normalize_settlement_authority, or SettlementObject construction.
 """Relationship contract across the forecast↔settlement boundary, on REAL row shapes.
 
 The forecast snapshot claims its settlement target via settlement_source_type ("wu_icao");

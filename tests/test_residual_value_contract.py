@@ -4,6 +4,10 @@
 #   mis-scale). Live defect: build_ens_residual_evidence.py:204/224 converts the SETTLEMENT
 #   value with members_unit, not the settlement's own unit. Masked today only because
 #   members_unit == settlement unit for sampled rows (both degF); corrupts ~50C when a
+# Lifecycle: created=2026-05-29; last_reviewed=2026-05-29; last_reused=never
+# Purpose: Relationship invariant asserting residual_celsius converts each side (members and settlement) by its OWN unit — not a shared members_unit.
+# Reuse: Run after any change to residual_celsius or unit-conversion logic in the residual computation path.
+
 #   city has degC members + degF settlement (units ARE mixed across sources).
 """Relationship invariant: a residual must be computed in ONE consistent unit, with
 each side converted by ITS OWN unit. ensemble members and the settlement value can be

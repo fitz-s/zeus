@@ -5,6 +5,9 @@
 #   "in the last 3 hours"); ECMWF Open Data step144 mn2t3 GRIB field verified
 #   lengthOfTimeRange=3 (2026-05-29). TIGGE mx2t6/mn2t6 stay 6h. Polymarket
 #   markets capped at 5 days => OpenData required step set caps at 144h.
+# Lifecycle: created=2026-05-29; last_reviewed=2026-05-29; last_reused=never
+# Purpose: Relationship contract asserting aggregation window is derived from product token (mx2t3->3h, mx2t6->6h), not a global scalar.
+# Reuse: Run after any change to build_forecast_target_scope period_hours derivation or product-to-window mapping.
 """Relationship contract: the temperature-aggregation window must be derived
 from the *product* (data_version param token), not from a single TIGGE-era
 scalar shared across 3h and 6h products.

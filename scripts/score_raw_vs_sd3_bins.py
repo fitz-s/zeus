@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # Created: 2026-05-28
+# Last reused or audited: 2026-05-29
 # Authority basis: operator redesign 2026-05-28 — sd3 proper-score test, 12-city scope.
 # Purpose: READ-ONLY. Bin-level proper-score comparison raw(none) vs sd3(full_transport_v1),
 #   HIGH metric, 12 cities. UNPAIRED per-city aggregate (the §4.1 method) — one distribution
@@ -8,6 +9,8 @@
 #   NOTE: sd3 here = CONTAMINATED stored ft_v1 (12z window + settlement-unit bug baked in at
 #   fit time). This corroborates that the SHIPPED sd3 model is bad; the CLEAN candidate is
 #   tested separately at temperature level (phase2_oos_bias.py).
+# Lifecycle: created=2026-05-28; last_reviewed=2026-05-29; last_reused=never
+# Reuse: Inspect hardcoded DB/ROOT/CITIES constants; confirm audit_refit_proper_scores.py path is accessible before running.
 from __future__ import annotations
 
 import csv

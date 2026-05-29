@@ -3,6 +3,9 @@
 # Authority basis: TRIBUNAL redesign P1 (ForecastObject contract); CRITIC_SYNTHESIS_2026-05-29
 #   §2a (product segregation: mx2t3 6h-vs-3h are different RVs) + Cons-SEV-1.C (unit) +
 #   the writer/reader seam enforcement. Relationship/fail-closed tests precede impl.
+# Lifecycle: created=2026-05-29; last_reviewed=2026-05-29; last_reused=never
+# Purpose: Fail-closed contract for ForecastObject.from_snapshot_row — rows missing product/target/unit are unconstructable as typed RV objects.
+# Reuse: Run after any change to ForecastObject.from_snapshot_row, ForecastTarget, or MembersUnitInvalidError.
 """ForecastObject.from_snapshot_row: a forecast row becomes a typed random-variable
 object ONLY when every RV-defining field is present and valid. A row missing its
 product (data_version), settlement target, or members unit is unconstructable as a

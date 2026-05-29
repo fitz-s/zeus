@@ -1,6 +1,9 @@
 # Created: 2026-05-07
 # Last reused or audited: 2026-05-18
 # Authority basis: backtest_v2_port_2026_05_07.md §D2+D3, T1-T5+T7
+# Lifecycle: created=2026-05-07; last_reviewed=2026-05-29; last_reused=2026-05-18
+# Purpose: Antibody tests for the selection_coverage replay mode — FDR-path, familywise hypothesis scanning, T1-T5+T7.
+# Reuse: Run after any change to run_replay, scan_full_hypothesis_family, or apply_familywise_fdr.
 """Tests for the selection_coverage replay mode.
 
 T2 is the critical FDR-path antibody — must be written first and must

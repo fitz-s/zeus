@@ -4,6 +4,9 @@
 #   CRITIC_SYNTHESIS_2026-05-29 §2 (lineage collapse, unit mis-scale, target-equality
 #   completeness Cons-SEV-2-E). Relationship tests precede implementation per
 #   ~/.claude/CLAUDE.md ("relationship tests -> implementation -> function tests").
+# Lifecycle: created=2026-05-29; last_reviewed=2026-05-29; last_reused=never
+# Purpose: Relationship contract asserting a residual binds forecast and settlement only when targets match across all RV-defining dimensions (city, metric, date, station, unit).
+# Reuse: Run after any change to ForecastTarget, assert_same_target, or ForecastTargetMismatchError.
 """Relationship contract: a residual binds a forecast random variable to a
 settlement outcome ONLY when their targets are identical across every dimension
 that defines the random variable.

@@ -11,6 +11,8 @@
 # Purpose: Emit an auditable per-sample residual evidence ledger with CYCLE-STRICT extraction
 #   (HIGH -> 0Z cycle only, LOW -> 12Z cycle only). Every bias_c must be a deterministic aggregate
 #   of retained, window-proven evidence rows. READ-ONLY on the source DB; writes a CSV sidecar.
+# Lifecycle: created=2026-05-28; last_reviewed=2026-05-29; last_reused=never
+# Reuse: Inspect cycle-strict extraction rules and pair_residual gate before relying on output; verify dataset_id column exists in target DB.
 """Residual evidence ledger builder.
 
 For each (city, metric, target_date) with a VERIFIED settlement, select the cycle-valid

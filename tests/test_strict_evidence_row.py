@@ -2,6 +2,9 @@
 # Last reused or audited: 2026-05-29
 # Authority basis: P2_LEDGER_SEAM_FINDINGS_2026-05-29 §"Exact wiring plan" steps 1-3;
 #   residual_value.residual_celsius + residual_key.source_kind_for_data_version antibodies.
+# Lifecycle: created=2026-05-29; last_reviewed=2026-05-29; last_reused=never
+# Purpose: Relationship tests for _strict_evidence_row — source_kind derived correctly, mixed-unit residual correct, no hardcoded 'prior' lineage.
+# Reuse: Run after any change to _strict_evidence_row, residual_celsius, or source_kind_for_data_version.
 """Relationship tests for _strict_evidence_row.
 
 These tests verify the cross-module invariants BEFORE the pure-function extraction is

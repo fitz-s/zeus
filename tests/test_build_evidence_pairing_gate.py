@@ -5,6 +5,9 @@
 #   wrong-station / wrong-RV settlement is DROPPED (fail-closed), never emitted with a
 #   collapsed lineage (D-J1). This is the pure-helper layer; a DB-integration test proves
 #   build_evidence calls it end-to-end on the canonical schema.
+# Lifecycle: created=2026-05-29; last_reviewed=2026-05-29; last_reused=never
+# Purpose: Relationship test for _pair_or_drop — wrong-station settlement returns None, not a collapsed-lineage evidence row.
+# Reuse: Run after any change to _pair_or_drop, pair_residual, or ResidualKey construction.
 """Relationship test for the build_evidence pairing gate (_pair_or_drop).
 
 Cross-module invariant: a forecast snapshot row + its TRUE settlement row form a keyed

@@ -4,6 +4,9 @@
 #   docstring. Relationship tests for the NO TEMPORAL LEAKAGE invariant — the cross-module
 #   boundary that must hold between build_candidate_biases (fit), date_blocked_folds, and
 #   the proper scoring path. Written RED-first per Fitz TDD protocol before scoring impl.
+# Lifecycle: created=2026-05-29; last_reviewed=2026-05-29; last_reused=never
+# Purpose: RED-first relationship tests asserting OOS proper scores use date-disjoint folds — no same-date train/test leakage.
+# Reuse: Run after implementing score_bucket / run_scoring to confirm these move from RED to GREEN.
 """Relationship tests: NO TEMPORAL LEAKAGE.
 
 The load-bearing cross-module invariant:
