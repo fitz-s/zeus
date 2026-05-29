@@ -1783,6 +1783,65 @@ tables:
       K1 2026-05-11 archive snapshot of settlements.
       Authoritative on forecasts.db. Excluded. Drop after 2026-08-09.
 
+  - name: asos_wu_offsets
+    db: world
+    schema_class: legacy_archived
+    schema_version_owner: SCHEMA_VERSION
+    created_by: observation_client
+    pk_col: null
+    notes: >
+      ASOS/WU station offset cache, read/written by src/data/observation_client.py.
+      Declared 2026-05-29 to satisfy assert_db_matches_registry after live canonical reconcile.
+
+  - name: ensemble_snapshots_v2_archived_2026_05_11
+    db: world
+    schema_class: legacy_archived
+    schema_version_owner: SCHEMA_VERSION
+    created_by: migration_script_k1_archive
+    pk_col: null
+    notes: >
+      K1 2026-05-11 archive snapshot of ensemble_snapshots_v2. Excluded. Drop after 2026-08-09.
+
+  - name: ensemble_snapshots_v2
+    db: trade
+    schema_class: legacy_archived
+    schema_version_owner: SCHEMA_VERSION
+    created_by: k1_split_residual
+    pk_col: null
+    notes: >
+      K1 trade-DB residual ghost of ensemble_snapshots_v2; declared 2026-05-29 to satisfy
+      assert_db_matches_registry(TRADE) after the live canonical reconcile. Not read by canonical code.
+
+  - name: historical_forecasts_v2
+    db: trade
+    schema_class: legacy_archived
+    schema_version_owner: SCHEMA_VERSION
+    created_by: k1_split_residual
+    pk_col: null
+    notes: >
+      K1 trade-DB residual ghost of historical_forecasts_v2; declared 2026-05-29 to satisfy
+      assert_db_matches_registry(TRADE) after the live canonical reconcile. Not read by canonical code.
+
+  - name: rescue_events_v2
+    db: trade
+    schema_class: legacy_archived
+    schema_version_owner: SCHEMA_VERSION
+    created_by: k1_split_residual
+    pk_col: null
+    notes: >
+      K1 trade-DB residual ghost of rescue_events_v2; declared 2026-05-29 to satisfy
+      assert_db_matches_registry(TRADE) after the live canonical reconcile. Not read by canonical code.
+
+  - name: settlements_v2
+    db: trade
+    schema_class: legacy_archived
+    schema_version_owner: SCHEMA_VERSION
+    created_by: k1_split_residual
+    pk_col: null
+    notes: >
+      K1 trade-DB residual ghost of settlements_v2; declared 2026-05-29 to satisfy
+      assert_db_matches_registry(TRADE) after the live canonical reconcile. Not read by canonical code.
+
   - name: settlements_v2_archived_2026_05_11
     db: world
     schema_class: legacy_archived
