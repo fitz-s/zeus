@@ -15,7 +15,7 @@ from zoneinfo import ZoneInfo
 
 import numpy as np
 from scipy.signal import argrelextrema
-from scipy.stats import gaussian_kde
+from scipy.stats import gaussian_kde, norm as _scipy_norm
 
 from src.contracts.settlement_semantics import SettlementSemantics
 from src.config import (
@@ -259,6 +259,158 @@ def p_raw_vector_from_maxes(
 
     p = p / (float(n_members) * n_mc)
 
+    total = p.sum()
+    if total > 0:
+        p = p / total
+    return p
+
+
+def analytic_p_raw_vector_from_maxes(
+    member_maxes: np.ndarray,
+    city: City,
+    settlement_semantics: SettlementSemantics,
+    bins: list[Bin],
+    *,
+    extra_member_sigma: float = 0.0,
+) -> np.ndarray:
+    """Analytic Gaussian-mixture CDF equivalent of ``p_raw_vector_from_maxes``.
+
+    Replaces the 10k Monte-Carlo simulation with exact closed-form integration
+    of the same physical model: each ensemble member m_i adds instrument noise
+    N(0, effective_sigma), the sum is rounded per ``settlement_semantics``, and
+    the result is bucketed into ``bins``.
+
+    Instead of sampling, this function integrates the normal CDF (Φ) directly
+    over each bin's rounding preimage.  For a continuous value x and rounding
+    rule r, the preimage of integer t is the interval of x values that round to t:
+      - wmo_half_up (floor(x + 0.5)):   x ∈ [t - 0.5, t + 0.5)
+      - oracle_truncate / floor (floor(x)): x ∈ [t, t + 1)
+      - ceil (ceil(x)):                 x ∈ (t - 1, t]
+
+    For precision ≠ 1.0 the above edges are scaled by the precision step size,
+    but all current Zeus markets use precision=1.0.
+
+    For a bin covering integer values {a, a+1, ..., b} (inclusive both ends,
+    matching ``bin_counts_from_array``), the bin probability telescopes:
+      P(bin | m_i) = Φ((preimage_high(b) - m_i) / σ) - Φ((preimage_low(a) - m_i) / σ)
+    where preimage_high(b) and preimage_low(a) are the upper / lower CDF
+    evaluation points derived from the rounding rule.
+
+    The mixture probability is the simple average across all members:
+      p_bin = (1 / n_members) * Σ_i P(bin | m_i)
+
+    The vector is renormalized to sum to 1.0 (same normalization as the MC path).
+
+    Authority: TRIBUNAL P4 §3d + CRITIC_SYNTHESIS §2c Cons-D.
+    Equivalence is verified by ``tests/test_analytic_p_raw_equivalence.py``.
+    DO NOT retire the MC path (``p_raw_vector_from_maxes``) until the equivalence
+    tests pass under every settlement rounding policy.
+
+    Args:
+        member_maxes: per-member daily max temperatures, shape (n_members,),
+            already in ``city.settlement_unit``.  No unit conversion is
+            performed here; conversion must happen upstream (same contract as
+            the MC function).
+        city: city config — used for instrument sigma lookup.
+        settlement_semantics: per-market rounding rules.  Supported rules:
+            ``wmo_half_up``, ``oracle_truncate``, ``floor``, ``ceil``.
+        bins: bin partition.  Shoulder bins (low=None or high=None) are
+            treated as open-ended intervals mapped to ±∞.
+        extra_member_sigma: optional additional uncertainty to combine with the
+            instrument sigma in quadrature (same semantics as the MC function).
+
+    Returns:
+        np.ndarray shape (n_bins,), sums to 1.0.
+    """
+    if extra_member_sigma < 0 or not np.isfinite(extra_member_sigma):
+        raise ValueError("extra_member_sigma must be a finite, non-negative standard deviation")
+
+    member_maxes = np.asarray(member_maxes, dtype=float)
+    if member_maxes.ndim != 1 or len(member_maxes) == 0:
+        raise ValueError("member_maxes must be a non-empty one-dimensional array")
+    if not np.isfinite(member_maxes).all():
+        raise ValueError("member_maxes must contain only finite values")
+
+    sig = sigma_instrument_for_city(city)
+    effective_sigma = float(np.hypot(sig.value, extra_member_sigma))
+    n_members = len(member_maxes)
+    n_bins = len(bins)
+    prec = settlement_semantics.precision
+    rule = settlement_semantics.rounding_rule
+
+    # Derive the CDF evaluation edges for one integer settlement value t.
+    # Returns (cdf_low, cdf_high) such that:
+    #   P(round(x) == t | x ~ N(m, sigma)) = Φ((cdf_high - m) / sigma) - Φ((cdf_low - m) / sigma)
+    # "cdf_low" is the lower boundary (inclusive start of preimage);
+    # "cdf_high" is the upper boundary (exclusive end, but CDF is continuous).
+    if rule == "wmo_half_up":
+        # floor(x + 0.5) == t  ⟺  x ∈ [t - 0.5*prec, t + 0.5*prec)
+        def _low(t: float) -> float:
+            return t - 0.5 * prec
+
+        def _high(t: float) -> float:
+            return t + 0.5 * prec
+
+    elif rule in ("floor", "oracle_truncate"):
+        # floor(x / prec) * prec == t  ⟺  x ∈ [t, t + prec)
+        def _low(t: float) -> float:
+            return t
+
+        def _high(t: float) -> float:
+            return t + prec
+
+    elif rule == "ceil":
+        # ceil(x / prec) * prec == t  ⟺  x ∈ (t - prec, t]
+        # CDF is right-continuous: Φ(t) - Φ(t - prec) is exact.
+        def _low(t: float) -> float:
+            return t - prec
+
+        def _high(t: float) -> float:
+            return t
+
+    else:
+        raise ValueError(f"Unsupported rounding rule: {rule!r}")
+
+    # Precompute the CDF evaluation boundaries for each bin.
+    # For a bin [a, b] (integer endpoints, inclusive on both ends):
+    #   P(bin) = Φ(_high(b) - m) / σ) - Φ((_low(a) - m) / σ)
+    # Shoulder bins (None endpoint) map to ±∞ → Φ(+∞)=1, Φ(−∞)=0.
+    neg_inf = float("-inf")
+    pos_inf = float("inf")
+
+    bin_lo_cdf = np.empty(n_bins)  # lower CDF evaluation point
+    bin_hi_cdf = np.empty(n_bins)  # upper CDF evaluation point
+    for i, b in enumerate(bins):
+        low = b.low   # None → open low shoulder
+        high = b.high  # None → open high shoulder
+
+        # Lower CDF cutoff: -∞ if shoulder, else _low(a)
+        if low is None or (isinstance(low, float) and low == neg_inf):
+            bin_lo_cdf[i] = neg_inf
+        else:
+            bin_lo_cdf[i] = _low(float(low))
+
+        # Upper CDF cutoff: +∞ if shoulder, else _high(b)
+        if high is None or (isinstance(high, float) and high == pos_inf):
+            bin_hi_cdf[i] = pos_inf
+        else:
+            bin_hi_cdf[i] = _high(float(high))
+
+    # Vectorised computation across members × bins.
+    # Shape: (n_members, n_bins)
+    # For each member m_i and bin j:
+    #   P = Φ((bin_hi_cdf[j] - m_i) / sigma) - Φ((bin_lo_cdf[j] - m_i) / sigma)
+    m = member_maxes[:, np.newaxis]          # (n_members, 1)
+    lo = bin_lo_cdf[np.newaxis, :]           # (1, n_bins)
+    hi = bin_hi_cdf[np.newaxis, :]           # (1, n_bins)
+
+    z_hi = (hi - m) / effective_sigma        # (n_members, n_bins)
+    z_lo = (lo - m) / effective_sigma        # (n_members, n_bins)
+
+    # scipy.stats.norm.cdf handles ±∞ correctly: cdf(+∞)=1, cdf(−∞)=0
+    p = (_scipy_norm.cdf(z_hi) - _scipy_norm.cdf(z_lo)).mean(axis=0)  # (n_bins,)
+
+    # Renormalize (same guard as MC path)
     total = p.sum()
     if total > 0:
         p = p / total

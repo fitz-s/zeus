@@ -28,6 +28,17 @@ def _create_settlement_outcomes(conn: sqlite3.Connection) -> None:
     """Create settlement_outcomes table + indexes. Idempotent. K1 forecast-class table.
 
     B3cont (2026-05-28): collapsed from settlement_outcomes (dead bare settlements shell dropped).
+
+    D-S1 (TRIBUNAL P2, 2026-05-29): first-class settlement identity columns. Pre-D-S1 the
+    forecast↔settlement pairing contract parsed the station from the settlement_source URL
+    (which FAILS for HKO's climat.htm — no station code in the URL) and took the settlement
+    UNIT from the forecast's unverifiable CLAIM (making the pairing gate's unit dimension
+    tautological — it could never catch a degC/degF mis-scale). ``settlement_station`` and
+    ``settlement_unit`` make both VERIFIED truth. Both are NULLABLE: NULL = not-yet-backfilled,
+    and the contract falls back to the URL/claim heuristic on NULL so legacy rows behave
+    exactly as before (never fail-closed on a missing column). The unit CHECK mirrors the
+    ensemble_snapshots {'F','C'} vocabulary so assert_same_target compares like-for-like.
+    Live forecasts DB is migrated by scripts/migrations/202605_add_settlement_outcomes_station_unit.py.
     """
     conn.execute("""
         CREATE TABLE IF NOT EXISTS settlement_outcomes (
@@ -46,6 +57,9 @@ def _create_settlement_outcomes(conn: sqlite3.Connection) -> None:
             provenance_json TEXT NOT NULL DEFAULT '{}',
             recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             outcome_type INTEGER,
+            settlement_station TEXT,
+            settlement_unit TEXT
+                CHECK (settlement_unit IS NULL OR settlement_unit IN ('F', 'C')),
             UNIQUE(city, target_date, temperature_metric)
         )
     """)

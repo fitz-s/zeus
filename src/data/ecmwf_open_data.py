@@ -72,6 +72,7 @@ from src.contracts.ensemble_snapshot_provenance import (
     TIGGE_LOW_CONTRACT_WINDOW_DATA_VERSION,
 )
 from src.data.forecast_target_contract import (
+    OPENDATA_MAX_STEP_HOURS,
     build_forecast_target_scope,
     evaluate_horizon_coverage,
     evaluate_producer_coverage,
@@ -117,26 +118,22 @@ from ingest_grib_to_snapshots import (  # type: ignore  # noqa: E402
 #       only available via MARS, which Zeus does not use.
 # Period-aligned params: mx2t3/mn2t3 valid at every disseminated step;
 #       mx2t6/mn2t6 (deprecated 2026-05-07) were valid only at 6h multiples.
-# We request 3h steps through 144h, then 6h steps through 282h.
-# 282h is the LOW D+10 authority ceiling from
-#   architecture/zeus_grid_resolution_authority_2026_05_07.yaml (LOW 282h horizon).
-# Only requesting disseminated steps avoids silent "No index entries" fetch failures.
+# We request 3h-native steps through OPENDATA_MAX_STEP_HOURS (144h) and NO further.
 #
-# Authority: architecture/zeus_grid_resolution_authority_2026_05_07.yaml A1+3h (stride)
-#            LOW 282h horizon (covers UTC-positive cities at D+10 boundary)
-# ECMWF Open Data `enfo` stream no longer serves mx2t6/mn2t6 (6h aggregations).
-# The stream now serves mx2t3/mn2t3 (3h aggregations) as the native product.
-# We fetch 3h-native and let calibration learn the 3h→6h envelope mapping
+# 5-day cap (2026-05-29): Polymarket retired all weather markets beyond 5 days.
+# D+5 plus the largest trading-city UTC offset lands at ≤144h, so steps 150-282
+# are never traded. The previous 282h tail (fix/#134, LOW D+10 authority) is
+# RETIRED — fetching it wasted bandwidth and left a fail-closed >144h coverage
+# path that no live market exercised. STEP_HOURS is now DERIVED from the cap
+# constant so the tail is unconstructable: re-adding it would break the coupling
+# antibody in tests/test_ecmwf_open_data_step_hours.py.
+#
+# Authority: src/data/forecast_target_contract.OPENDATA_MAX_STEP_HOURS (=144),
+#            architecture/zeus_grid_resolution_authority_2026_05_07.yaml A1+3h (stride).
+# ECMWF Open Data `enfo` stream serves mx2t3/mn2t3 (3h aggregations) at 3h stride
+# through 144h. We fetch 3h-native and let calibration learn the 3h→6h envelope
 # downstream. We do NOT re-aggregate to 6h at fetch time (forbidden_patterns).
-STEP_HOURS = (
-    list(range(3, 147, 3))    # 3, 6, …, 144 — 3h stride (A1+3h native grid)
-    + list(range(150, 285, 6))  # 150, 156, …, 282 — 6h stride (published ENS beyond 144h)
-)
-# Authority: source_release_calendar.yaml ecmwf_open_data live_max_step_hours=282.
-# Grid: ECMWF Open Data ENS serves 3h steps 0–144h and 6h steps 150–360h for cf/pf.
-# 282h covers D+10 for all cities including UTC+12 (max required step ≈ 252h).
-# Raised from 276 → 282 (fix/#134) to unblock 100 BLOCKED readiness rows for
-# 2026-05-13/14 requiring steps 228–252h. Closes #134.
+STEP_HOURS = list(range(3, OPENDATA_MAX_STEP_HOURS + 3, 3))  # 3, 6, …, 144 (A1+3h native grid)
 
 # Track config — local to this module so the daemon's ingest knob is one
 # clean dict rather than two parallel param lists.

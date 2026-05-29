@@ -16,6 +16,41 @@ UTC = timezone.utc
 LIVE_ELIGIBLE = "LIVE_ELIGIBLE"
 BLOCKED = "BLOCKED"
 
+# Polymarket weather markets cap at 5 days, so ECMWF Open Data forecast steps
+# beyond 144h are no longer consumed. The OpenData required step set therefore
+# caps at the 3h-dissemination ceiling of 144h. TIGGE (the historical archive)
+# is on its own full range and is NOT capped here.
+OPENDATA_MAX_STEP_HOURS = 144
+
+
+def aggregation_window_hours_for_data_version(data_version: str) -> int:
+    """Map a forecast product (by data_version param token) to its physical
+    temperature-aggregation window in hours. Fail-closed on unknown products.
+
+    This is the single source of truth that makes the *wrong* aggregation window
+    UNCONSTRUCTABLE: the window is keyed on the product token, never on a shared
+    scalar. ECMWF definitions (architecture/data_sources_registry_2026_05_08.yaml
+    :86,91; ECMWF Open Data step144 mn2t3 field verified lengthOfTimeRange=3 on
+    2026-05-29):
+        mx2t3 / mn2t3 -> 3h  (ECMWF Open Data, "min/max 2m temp in the last 3h")
+        mx2t6 / mn2t6 -> 6h  (TIGGE archive,    "min/max 2m temp in the last 6h")
+
+    Note: a data_version *string* carrying a legacy ``mx2t6``/``mn2t6`` token is
+    treated as 6h here; the live Open Data versions are ``ecmwf_opendata_mx2t3_*``
+    / ``ecmwf_opendata_mn2t3_*`` (3h tokens), so the live path resolves to 3h.
+    Token precedence checks the 3h tokens first.
+    """
+    dv = str(data_version)
+    if "mx2t3" in dv or "mn2t3" in dv:
+        return 3
+    if "mx2t6" in dv or "mn2t6" in dv:
+        return 6
+    raise ValueError(
+        f"aggregation_window_hours_for_data_version: unknown product, cannot "
+        f"derive aggregation window from data_version {data_version!r}. "
+        f"Register the product's param token (m[xn]2t3 -> 3h, m[xn]2t6 -> 6h)."
+    )
+
 
 @dataclass(frozen=True)
 class TargetLocalDayWindow:
@@ -75,6 +110,22 @@ def required_period_end_steps(
     target_window_end_utc: datetime,
     period_hours: int = 6,
 ) -> tuple[int, ...]:
+    """Period-end step set covering the target window — the HONEST requirement.
+
+    ``period_hours`` is the product's aggregation window (3h for OpenData
+    mx2t3/mn2t3, 6h for TIGGE mx2t6/mn2t6).
+
+    This returns the steps the target window genuinely needs, with NO horizon
+    cap. The 144h Open Data fetch ceiling (Polymarket 5-day market window) lives
+    on the FETCH list (``ecmwf_open_data.STEP_HOURS``) and on the coverage GATE
+    (``evaluate_horizon_coverage(required, live_max_step_hours=...)``), never on
+    the requirement itself. Capping the requirement would silently truncate a
+    window whose true horizon exceeds the cap (e.g. Western-hemisphere D+5 local
+    days, which extend to ~151-153h UTC) and make the coverage gate read an
+    uncoverable window as COMPLETE — a silent fail-open on the live path. Keeping
+    the requirement honest makes that truncation unconstructable: the gate sees
+    ``max(required) > live_max`` and BLOCKS with SOURCE_RUN_HORIZON_OUT_OF_RANGE.
+    """
     if period_hours <= 0:
         raise ValueError("period_hours must be positive")
     source_cycle_utc = _to_utc(source_cycle_time, "source_cycle_time")
@@ -112,11 +163,17 @@ def build_forecast_target_scope(
         city_timezone=city_timezone,
         target_local_date=target_local_date,
     )
+    # Aggregation window is PRODUCT-DERIVED: OpenData mx2t3/mn2t3 are 3h products;
+    # TIGGE mx2t6/mn2t6 are 6h. This makes the wrong (6h-on-3h-product) window
+    # unconstructable. The horizon cap is NOT applied here — the requirement is
+    # honest; the 144h Open Data fetch ceiling lives on STEP_HOURS + the coverage
+    # gate, so an over-horizon window BLOCKS instead of silently reading complete.
+    period_hours = aggregation_window_hours_for_data_version(data_version)
     required_steps = required_period_end_steps(
         source_cycle_time=source_cycle_utc,
         target_window_start_utc=window.start_utc,
         target_window_end_utc=window.end_utc,
-        period_hours=6,
+        period_hours=period_hours,
     )
     return ForecastTargetScope(
         city_id=city_id,

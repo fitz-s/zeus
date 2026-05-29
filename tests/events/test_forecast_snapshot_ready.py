@@ -230,13 +230,17 @@ def test_future_coverage_computed_at_blocks_even_when_snapshot_available():
     assert result.reason == "COVERAGE_COMPUTED_AT_IN_FUTURE"
 
 
-def test_00z_12z_step_set_differs_from_06z_18z_after_cycle_50r1():
+def test_all_cycles_cap_at_144_under_5day_horizon():
+    """5-day cap (2026-05-29): Polymarket retired >5-day markets, so all four cycles
+    now share the same 0..144h candidate grid. The former 0/12 long tail (150-360h)
+    is no longer fetched and must not be expected (else fallback completeness is
+    permanently fail-closed)."""
     steps_00 = ecmwf_open_data_expected_steps(0)
     steps_06 = ecmwf_open_data_expected_steps(6)
-    assert max(steps_00) == 360
+    assert max(steps_00) == 144
     assert max(steps_06) == 144
-    assert 150 in steps_00
-    assert 150 not in steps_06
+    assert 150 not in steps_00
+    assert steps_00 == steps_06
 
 
 def test_forecast_emit_failure_does_not_rollback_ingest_commit():

@@ -678,6 +678,11 @@ SQLITE_CONNECT_ALLOWLIST: frozenset[str] = frozenset(
         "scripts/venus_sensing_report.py",              # read_only (PR #86)
         # --- additional read-only / ro-URI scripts ---
         "scripts/audit_observation_instants.py",         # read_only (SELECT-only, no INSERT/UPDATE/DELETE)
+        "scripts/audit_observation_instants_v2.py",     # read_only (SELECT-only, no INSERT/UPDATE/DELETE)
+        "scripts/build_ens_residual_evidence.py",        # read_only_ro_uri (T2/T3 residual-evidence ledger; mode=ro + query_only, refuses canonical DBs, writes CSV only)
+        "scripts/capture_before_fixture.py",             # read_only (query_only=ON, SELECT-only; Phase-0 before/after baseline capture, TRIBUNAL 2026-05-29)
+        "scripts/score_raw_vs_sd3_bins.py",              # read_only_ro_uri (sd3 validation Test B; mode=ro + query_only, SELECT-only, writes CSV only)
+        "scripts/pipeline_empirical_detail.py",          # read_only_ro_uri (pipeline empirical audit; mode=ro + query_only, SELECT-only, writes txt only)
         "scripts/calibration_observation_weekly.py",    # read_only_ro_uri
         "scripts/diagnose_low_high_alignment.py",       # read_only (SELECT-only)
         "scripts/diagnose_truth_surfaces.py",           # read_only (SELECT-only, no INSERT/UPDATE/DELETE)
@@ -714,6 +719,8 @@ SQLITE_CONNECT_ALLOWLIST: frozenset[str] = frozenset(
         "scripts/migrations/202605_add_redeem_operator_required_state.py",  # operator_invoked: --dry-run mode; daemon never imports
         "scripts/migrations/202605_consolidate_observation_instants_v2.py",  # operator_invoked: --dry-run default + SAVEPOINT; daemon never imports
         "scripts/migrations/202605_collapse_dataversion_integers.py",  # operator_invoked: db_writer_lock(BULK)+SAVEPOINT, --dry-run default; daemon never imports
+        "scripts/migrations/202605_add_settlement_outcomes_station_unit.py",  # operator_invoked: --dry-run default + SAVEPOINT; daemon never imports (D-S1)
+        "scripts/migrations/202605_rename_ensemble_snapshots_data_version_to_dataset_id.py",  # operator_invoked: --dry-run default + SAVEPOINT RENAME COLUMN; :memory: canonical ref + --db-path standalone; daemon never imports (Stage-C #26)
         "scripts/migrations/__main__.py",                # operator_invoked: migration runner CLI; daemon never imports
         "scripts/migrations/202605_position_current_bridge_required_trigger.py",  # operator_invoked: idempotent; --dry-run mode
         # -------------------------------------------------------------------

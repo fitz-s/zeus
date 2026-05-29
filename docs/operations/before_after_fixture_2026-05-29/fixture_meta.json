@@ -1,0 +1,26 @@
+{
+  "capture_ts": "2026-05-29T05:24:48.405346+00:00",
+  "code_commit": "08e6600d2f646ef24d8309d70187d343260eb870",
+  "n_rows": 5,
+  "n_pairs": 5,
+  "n_cities": 1,
+  "n_failed": 0,
+  "n_identity_cal": 5,
+  "smoke_mode": true,
+  "smoke_n": 5,
+  "date_range": {
+    "min_target_date": "2026-05-06",
+    "max_target_date": "2026-05-10"
+  },
+  "fixture_format": "jsonl",
+  "fixture_file": "docs/operations/before_after_fixture_2026-05-29/fixture.jsonl",
+  "file_sha256": "93daa3a4da8422344dcd1fc59c66fcbd781c20e9f9972968b6d013dfe98baabe",
+  "content_digest_sha256": "e158512f9235164fc676761769b93fa5eadcba7ff7fe47b23475e9d33e0ce26c",
+  "pre_flight": {
+    "error_model_family_non_null_count": 0
+  },
+  "calibration_note": "get_calibrator returns (None, 4) for all ecmwf_opendata HIGH rows. Production path: p_cal = p_raw (calibrate_and_normalize not called). calibrator_type='None_level4' on all rows. No Platt models exist for ecmwf_opendata source in platt_models_v2.",
+  "p_raw_note": "Recomputed via p_raw_vector_from_maxes with n_mc=None (\u2192 ensemble_n_mc()), rng=None (deterministic SHA-256 seed), extra_member_sigma=0.0. members_json contains per-member daily calendar-day maxes already extracted at ingest.",
+  "data_version_filter": "ecmwf_opendata_mx2t3_local_calendar_day_max_v1",
+  "authority": "TRIBUNAL_DRAFT2_RESPONSE \u00a72c + E_phase0_fixture_scope.md \u00a74"
+}

@@ -43,7 +43,8 @@ class TestRCLReplayLegacyWhereMetricAware:
         conn = sqlite3.connect(":memory:")
         conn.row_factory = sqlite3.Row
         # ReplayContext.__init__ checks for ensemble_snapshots (legacy removed by v1.F20)
-        conn.execute("CREATE TABLE ensemble_snapshots (snapshot_id INTEGER PRIMARY KEY, city TEXT, target_date TEXT, temperature_metric TEXT, available_at TEXT, fetch_time TEXT, p_raw_json TEXT, members_json TEXT, model_version TEXT, data_version TEXT, issue_time TEXT, valid_time TEXT, lead_hours REAL, spread REAL, is_bimodal INTEGER)")
+        # B5: canonical ensemble_snapshots carries dataset_id (renamed from data_version).
+        conn.execute("CREATE TABLE ensemble_snapshots (snapshot_id INTEGER PRIMARY KEY, city TEXT, target_date TEXT, temperature_metric TEXT, available_at TEXT, fetch_time TEXT, p_raw_json TEXT, members_json TEXT, model_version TEXT, dataset_id TEXT, issue_time TEXT, valid_time TEXT, lead_hours REAL, spread REAL, is_bimodal INTEGER)")
         conn.execute("""
             CREATE TABLE forecasts (
                 city TEXT,

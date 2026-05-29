@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable
 
+from src.data.forecast_target_contract import OPENDATA_MAX_STEP_HOURS
 from src.events.event_writer import EventWriter, EventWriteResult
 from src.events.opportunity_event import (
     ForecastSnapshotReadyPayload,
@@ -30,12 +31,17 @@ class ForecastSnapshotClassification:
 
 
 def ecmwf_open_data_expected_steps(cycle_hour: int) -> tuple[int, ...]:
-    """Return current ECMWF Open Data step set for atmospheric ensemble cycles."""
+    """Return the OpenData candidate step grid Zeus fetches, capped at the 5-day horizon.
 
-    if cycle_hour in {0, 12}:
-        return tuple(range(0, 145, 3)) + tuple(range(150, 361, 6))
-    if cycle_hour in {6, 18}:
-        return tuple(range(0, 145, 3))
+    5-day cap (2026-05-29): Polymarket retired markets beyond 5 days, so Zeus fetches
+    only the 3h-native grid through OPENDATA_MAX_STEP_HOURS (144h). The former 0/12
+    long tail (150-360h) is no longer fetched; demanding it here would leave the
+    completeness path fail-closed. All four cycles now share the same 0..144h grid.
+    Callers window-filter this candidate grid to the target market's window.
+    """
+
+    if cycle_hour in {0, 12, 6, 18}:
+        return tuple(range(0, OPENDATA_MAX_STEP_HOURS + 1, 3))
     raise ValueError(f"unsupported ECMWF cycle hour: {cycle_hour}")
 
 
