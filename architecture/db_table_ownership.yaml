@@ -460,7 +460,7 @@ tables:
 
   - name: settlement_commands_era_quarantine
     db: world
-    schema_class: world_class
+    schema_class: legacy_archived
     schema_version_owner: SCHEMA_VERSION
     created_by: "migrate_settlement_commands_in_flight_at_era_flip.py (operator one-shot migration)"
     pk_col: id
@@ -468,7 +468,10 @@ tables:
       Holds settlement_commands rows quarantined at era-flip transition.
       Writer: migrate_settlement_commands_in_flight_at_era_flip.py inserts/updates
       via get_forecasts_connection_with_world() (DML — INSERT + UPDATE settlement_commands
-      SET status='ERA_QUARANTINED'). Catalogued 2026-05-29 (PR #360 db_table_delta_gate fix).
+      SET status='ERA_QUARANTINED'). Classed legacy_archived: created on-demand by an
+      operator migration script, NOT by init_schema — assert_db_matches_registry must
+      not require it on disk. Still known to check_db_table_delta gate.
+      Catalogued 2026-05-29 (PR #360 db_table_delta_gate fix).
 
   - name: settlement_schema_migrations
     db: world
