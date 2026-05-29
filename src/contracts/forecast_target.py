@@ -54,8 +54,10 @@ class ForecastTarget:
         target_local_date: local calendar day the contract settles on (ISO date str).
         settlement_station: the station whose observation IS the payout truth
             (e.g. "KORD"). Two stations in the same city are two different RVs.
-        settlement_unit: unit the settlement is measured/rounded in ("degC"/"degF").
-            A forecast compared in the wrong unit silently mis-scales (Cons-SEV-1.C).
+        settlement_unit: unit the settlement is measured/rounded in ("F"/"C" — the
+            settlement vocabulary enforced by the ensemble_snapshots and settlement_outcomes
+            CHECKs; distinct from ensemble ``members_unit`` which is "degC"/"degF"). A forecast
+            compared in the wrong unit silently mis-scales (Cons-SEV-1.C).
         settlement_authority: the source-authority data_version that owns the truth
             (e.g. "wu_icao_history_v1"). Different authority = different truth basis.
     """

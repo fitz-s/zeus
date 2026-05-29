@@ -165,3 +165,36 @@ def test_settlement_unit_column_agreeing_emitted_end_to_end():
     _settle(conn, settlement_unit="F")
     out = build_evidence(conn, metric="high", lead_max=48.0, cities=None, accept_cycle=None)
     assert len(out) == 1
+
+
+# Pre-D-S1 settlement_outcomes (no settlement_station / settlement_unit columns) — what an
+# un-migrated live forecasts DB carries. build_evidence must detect the columns' ABSENCE (PRAGMA)
+# and OMIT them from the SELECT rather than OperationalError.
+_LEGACY_SETTLEMENT_DDL = """
+    CREATE TABLE settlement_outcomes (
+        settlement_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        city TEXT NOT NULL, target_date TEXT NOT NULL,
+        temperature_metric TEXT NOT NULL CHECK (temperature_metric IN ('high', 'low')),
+        market_slug TEXT, winning_bin TEXT, settlement_value REAL, settlement_source TEXT,
+        settled_at TEXT,
+        authority TEXT NOT NULL DEFAULT 'UNVERIFIED'
+            CHECK (authority IN ('VERIFIED', 'UNVERIFIED', 'QUARANTINED')),
+        provenance_json TEXT NOT NULL DEFAULT '{}',
+        recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, outcome_type INTEGER,
+        UNIQUE(city, target_date, temperature_metric)
+    )
+"""
+
+
+def test_build_evidence_graceful_on_pre_ds1_db_missing_columns():
+    """Graceful degradation (the has_ds1_settlement_cols PRAGMA branch): a pre-D-S1 forecasts DB
+    has NO settlement_station/settlement_unit columns. build_evidence must detect their absence
+    and OMIT them from the SELECT — returning rows via the URL/claim heuristic, NOT raising
+    OperationalError (settlement_unit's CHECK blocks a DROP COLUMN, so rebuild the legacy table)."""
+    conn = _conn()
+    conn.execute("DROP TABLE settlement_outcomes")
+    conn.execute(_LEGACY_SETTLEMENT_DDL)
+    _snap(conn)
+    _settle(conn)  # legacy columns only — no station/unit
+    out = build_evidence(conn, metric="high", lead_max=48.0, cities=None, accept_cycle=None)
+    assert len(out) == 1  # heuristic fallback path, no OperationalError
