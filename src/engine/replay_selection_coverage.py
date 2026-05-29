@@ -229,11 +229,15 @@ def _score_one_snapshot(
     }
 
     # -- Load snapshot
+    # Canonical lineage column is `dataset_id` (renamed from data_version, B5);
+    # alias it back to data_version so the row-dict key consumed downstream by
+    # _replay_calibration_lookup_keys (snapshot.get("data_version")) stays stable.
+    # Mirrors src/engine/replay.py:401 base_columns ("dataset_id AS data_version").
     snapshot_row = ctx.conn.execute(
         f"""
         SELECT snapshot_id, members_json, p_raw_json, lead_hours, spread,
                is_bimodal, model_version, issue_time, valid_time,
-               available_at, fetch_time, data_version
+               available_at, fetch_time, dataset_id AS data_version
         FROM {ctx._snapshot_v2_table or ctx._snapshot_legacy_table}
         WHERE snapshot_id = ? AND city = ? AND target_date = ?
         LIMIT 1

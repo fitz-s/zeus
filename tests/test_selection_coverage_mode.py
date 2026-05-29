@@ -43,7 +43,7 @@ def _make_in_memory_db(cities: list[dict]) -> sqlite3.Connection:
             model_version TEXT,
             members_json TEXT,
             p_raw_json TEXT,
-            data_version TEXT,
+            dataset_id TEXT,
             temperature_metric TEXT
         );
         CREATE TABLE calibration_pairs (
@@ -97,7 +97,7 @@ def _insert_snapshot(conn, city, target_date, snapshot_id, p_raw, lead_hours=72.
     conn.execute(
         """INSERT INTO ensemble_snapshots
            (snapshot_id, city, target_date, available_at, fetch_time, issue_time, valid_time,
-            lead_hours, spread, is_bimodal, model_version, members_json, p_raw_json, data_version, temperature_metric)
+            lead_hours, spread, is_bimodal, model_version, members_json, p_raw_json, dataset_id, temperature_metric)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             snapshot_id, city, target_date,
@@ -214,7 +214,7 @@ class TestT1Dispatch:
                 model_version TEXT,
                 members_json TEXT,
                 p_raw_json TEXT,
-                data_version TEXT,
+                dataset_id TEXT,
                 temperature_metric TEXT
             );
             CREATE TABLE calibration_pairs (
@@ -248,7 +248,7 @@ class TestT1Dispatch:
             INSERT INTO ensemble_snapshots
             (snapshot_id, city, target_date, available_at, fetch_time, issue_time,
              valid_time, lead_hours, spread, is_bimodal, model_version, members_json,
-             p_raw_json, data_version, temperature_metric)
+             p_raw_json, dataset_id, temperature_metric)
             VALUES (3101, 'Amsterdam', '2025-06-01', '2025-05-31T12:00:00Z',
                     '2025-05-31T12:00:00Z', '2025-05-31T00:00:00',
                     '2025-06-01T12:00:00', 72.0, 3.0, 0, 'ecmwf',

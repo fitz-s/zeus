@@ -720,6 +720,7 @@ SQLITE_CONNECT_ALLOWLIST: frozenset[str] = frozenset(
         "scripts/migrations/202605_consolidate_observation_instants_v2.py",  # operator_invoked: --dry-run default + SAVEPOINT; daemon never imports
         "scripts/migrations/202605_collapse_dataversion_integers.py",  # operator_invoked: db_writer_lock(BULK)+SAVEPOINT, --dry-run default; daemon never imports
         "scripts/migrations/202605_add_settlement_outcomes_station_unit.py",  # operator_invoked: --dry-run default + SAVEPOINT; daemon never imports (D-S1)
+        "scripts/migrations/202605_rename_ensemble_snapshots_data_version_to_dataset_id.py",  # operator_invoked: --dry-run default + SAVEPOINT RENAME COLUMN; :memory: canonical ref + --db-path standalone; daemon never imports (Stage-C #26)
         "scripts/migrations/__main__.py",                # operator_invoked: migration runner CLI; daemon never imports
         "scripts/migrations/202605_position_current_bridge_required_trigger.py",  # operator_invoked: idempotent; --dry-run mode
         # -------------------------------------------------------------------

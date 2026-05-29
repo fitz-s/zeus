@@ -57,7 +57,7 @@ ALL_CITIES = FAR_EAST_CITIES + CONTROL_CITIES
 SQL_ALL_CYCLES = """
     SELECT snapshot_id, source_run_id, source_cycle_time, available_at,
            contributes_to_target_extrema, forecast_window_attribution_status,
-           boundary_ambiguous, members_json, data_version
+           boundary_ambiguous, members_json, dataset_id
     FROM ensemble_snapshots
     WHERE city = ?
       AND target_date = ?
