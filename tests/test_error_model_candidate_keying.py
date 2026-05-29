@@ -126,15 +126,17 @@ def test_score_bucket_accepts_uniform_lead_bucket_rows():
 # 3. run_scoring manifest records cycle + lead_bucket
 # ---------------------------------------------------------------------------
 
-def test_run_scoring_manifest_includes_cycle_and_lead_bucket():
-    """run_scoring should propagate cycle and lead_bucket into the returned manifest."""
-    # We can't run a real score_bucket without DB/grid infrastructure, but we can
-    # verify the manifest dict structure by monkey-patching score_bucket to return
-    # a stub result.
+def test_run_scoring_manifest_includes_lead_bucket():
+    """run_scoring propagates lead_bucket into the returned manifest.
+
+    cycle is NOT a separate dimension (#363 fix): metric already encodes the
+    HIGH->0z / LOW->12z cycle preference inside load_bucket_residuals, so the
+    manifest records lead_bucket for provenance but no cycle field.
+    """
     import scripts.score_error_model_candidates as mod
 
     # Stub out score_bucket to avoid infrastructure deps
-    def _stub_score_bucket(rows, city, target_product, *, k_folds=5, cycle=None, lead_bucket=None):
+    def _stub_score_bucket(rows, city, target_product, *, k_folds=5, lead_bucket=None):
         cand_metrics = {}
         raw_metrics = _raw_metrics()
         improvement_lcb = {}
@@ -149,13 +151,12 @@ def test_run_scoring_manifest_includes_cycle_and_lead_bucket():
             evidence_rows=[],
             city=_make_city_stub(),
             target_product="mx2t3",
-            cycle="00z",
             lead_bucket="L24_48",
         )
     finally:
         mod.score_bucket = original
 
-    assert manifest["cycle"] == "00z"
+    assert "cycle" not in manifest  # cycle is not a manifest dimension
     assert manifest["lead_bucket"] == "L24_48"
 
 
@@ -166,19 +167,18 @@ def test_run_scoring_manifest_includes_cycle_and_lead_bucket():
 def test_manifests_differ_by_lead_bucket():
     import scripts.score_error_model_candidates as mod
 
-    def _stub_score_bucket(rows, city, target_product, *, k_folds=5, cycle=None, lead_bucket=None):
+    def _stub_score_bucket(rows, city, target_product, *, k_folds=5, lead_bucket=None):
         return {}, _raw_metrics(), {}, {}, {}
 
     original = mod.score_bucket
     mod.score_bucket = _stub_score_bucket
     try:
-        m1 = mod.run_scoring([], _make_city_stub(), "mx2t3", cycle="00z", lead_bucket="L00_24")
-        m2 = mod.run_scoring([], _make_city_stub(), "mx2t3", cycle="00z", lead_bucket="L24_48")
+        m1 = mod.run_scoring([], _make_city_stub(), "mx2t3", lead_bucket="L00_24")
+        m2 = mod.run_scoring([], _make_city_stub(), "mx2t3", lead_bucket="L24_48")
     finally:
         mod.score_bucket = original
 
     assert m1["lead_bucket"] != m2["lead_bucket"]
-    assert m1["cycle"] == m2["cycle"]
 
 
 # ---------------------------------------------------------------------------

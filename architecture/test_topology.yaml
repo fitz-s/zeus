@@ -28,6 +28,16 @@ test_trust_policy:
   # Machine-readable registry: 122 tests with valid lifecycle headers.
   # Tests not in this list require audit before running.
   trusted_tests:
+    tests/test_multiclass_skill_scoring.py: {created: "2026-05-29", last_used: "2026-05-29"}
+    tests/test_settlement_resolution_contract.py: {created: "2026-05-29", last_used: "2026-05-29"}
+    tests/test_selection_coverage_settlement_truth.py: {created: "2026-05-29", last_used: "2026-05-29"}
+    tests/test_replay_schema_fingerprint.py: {created: "2026-05-29", last_used: "2026-05-29"}
+    tests/test_economics_fill_simulator.py: {created: "2026-05-29", last_used: "2026-05-29"}
+    tests/test_model_bias_keying.py: {created: "2026-05-29", last_used: "2026-05-29"}
+    tests/test_error_model_candidate_keying.py: {created: "2026-05-29", last_used: "2026-05-29"}
+    tests/test_raw_fallback_serving_gate.py: {created: "2026-05-29", last_used: "2026-05-29"}
+    tests/test_inter_cycle_spread_recorded.py: {created: "2026-05-29", last_used: "2026-05-29"}
+    tests/test_replay_learning_authority.py: {created: "2026-05-29", last_used: "2026-05-29"}
     tests/test_alpha_target_coherence.py: {created: "2026-04-07", last_used: "2026-04-23"}
     tests/events/test_opportunity_event.py: {created: "2026-05-24", last_used: "2026-05-24"}
     tests/events/test_event_candidate_binding.py: {created: "2026-05-24", last_used: "2026-05-24"}

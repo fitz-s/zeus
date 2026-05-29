@@ -96,14 +96,16 @@ _CANONICAL_EXTENSION_COLUMNS: list[tuple[str, str]] = [
     # season-labelled row cannot be misapplied to a month it never trained on.
     ("gate_set_hash",        "TEXT"),          # sha256(active gate names+thresholds)[:16]
     ("coverage_months",      "TEXT"),          # CSV of months covered, e.g. '3,4,5'
-    # TRIBUNAL Findings 1+5 (2026-05-29): lead/cycle granularity.
+    # TRIBUNAL Findings 1+5 (2026-05-29): lead_bucket granularity.
     # lead_bucket: coarse lead-hour segment (L00_24/L24_48/L48_96/L96_plus).
     #   Short-lead (L00_24) has sign-flip vs long-lead; pooling all ≤48h was wrong.
-    # cycle: issue-time cycle ('00z'/'12z'). HIGH/LOW already had cycle preference
-    #   in snapshot selection; this stamps it explicitly in the row identity so
-    #   the reader can refuse cross-cycle serving.
+    # cycle NOT added as a separate extension column: load_bucket_residuals already
+    #   implements metric-aware cycle selection internally (HIGH→0z preferred,
+    #   LOW→12z preferred). Adding 'cycle' as a key dim would require filtering at
+    #   the SQL layer to be honest — which would break the metric-preference fallback.
+    #   The metric dimension already encodes cycle preference; a separate cycle key
+    #   would be redundant at best, and dishonest if unenforced. Removed per #363 fix.
     ("lead_bucket",          "TEXT"),          # e.g. 'L00_24', 'L24_48', 'L48_96', 'L96_plus'
-    ("cycle",                "TEXT"),          # e.g. '00z', '12z'
 ]
 
 _POSITIVE_CONTRIBUTOR_SQL = (
@@ -263,7 +265,7 @@ def load_bucket_residuals(
     data_version: str,
     metric: str = "high",
     lead_bucket_filter: str | None = None,
-    lead_max: float | None = None,
+    lead_max: float = 48.0,
     season_months: tuple[int, ...] | None = None,
     settled_before: str | None = None,
     require_verified: bool = True,
@@ -458,9 +460,9 @@ def write_bias_model(
     authority: str | None = None,
     gate_set_hash: str | None = None,
     coverage_months: str | None = None,
-    # TRIBUNAL Findings 1+5 (2026-05-29): lead/cycle granularity extension columns.
+    # TRIBUNAL Findings 1+5 (2026-05-29): lead_bucket extension column.
+    # cycle NOT included — see _CANONICAL_EXTENSION_COLUMNS comment for rationale.
     lead_bucket: str | None = None,   # 'L00_24' | 'L24_48' | 'L48_96' | 'L96_plus'
-    cycle: str | None = None,         # '00z' | '12z'
 ) -> None:
     """Persist one bias-model row to model_bias_ens.
 
@@ -524,13 +526,10 @@ def write_bias_model(
         if "coverage_months" in _existing:
             ext_cols += ", coverage_months"
             ext_vals.append(coverage_months)
-        # TRIBUNAL Findings 1+5 (2026-05-29): lead_bucket + cycle extension columns.
+        # TRIBUNAL Findings 1+5 (2026-05-29): lead_bucket extension column.
         if "lead_bucket" in _existing:
             ext_cols += ", lead_bucket"
             ext_vals.append(lead_bucket)
-        if "cycle" in _existing:
-            ext_cols += ", cycle"
-            ext_vals.append(cycle)
         placeholders = ",".join(["?"] * (len(base_vals) + len(ext_vals)))
         conn.execute(
             f"INSERT OR REPLACE INTO model_bias_ens ({base_cols}{ext_cols}) "
@@ -787,7 +786,7 @@ def load_paired_delta(
     live_data_version: str,
     prior_data_version: str,
     metric: str = "high",
-    lead_max: float | None = None,
+    lead_max: float = 48.0,
     lead_bucket_filter: str | None = None,
     season_months: tuple[int, ...] | None = None,
     settled_before: str | None = None,
@@ -815,7 +814,7 @@ def paired_delta_coverage(
     live_data_version: str,
     prior_data_version: str,
     metric: str = "high",
-    lead_max: float | None = None,
+    lead_max: float = 48.0,
     lead_bucket_filter: str | None = None,
     season_months: tuple[int, ...] | None = None,
     settled_before: str | None = None,

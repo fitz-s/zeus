@@ -152,34 +152,35 @@ def test_keys_differ_by_lead_bucket():
 
 
 # ---------------------------------------------------------------------------
-# 7. Two keys differing only in cycle are DISTINCT
+# 7. cycle is NOT a key/column dimension (#363 fix)
 # ---------------------------------------------------------------------------
 
-def test_keys_differ_by_cycle():
-    base = dict(city="Tokyo", metric="high", season="MAM",
-                live_dv="ecmwf_opendata_mx2t3_local_calendar_day_max", lb="L24_48")
-    key_00z = _make_error_model_key(**base, cycle="00z")
-    key_12z = _make_error_model_key(**base, cycle="12z")
-    assert key_00z != key_12z
+def test_cycle_is_not_a_key_dimension():
+    """cycle was DROPPED from the identity (#363): the metric dimension already
+    encodes cycle preference (HIGH->0z, LOW->12z) via load_bucket_residuals'
+    metric-aware snapshot selection. A separate cycle key would require SQL-level
+    cycle filtering to be honest; claiming it without enforcing it is forbidden."""
+    from src.calibration.ens_bias_repo import _CANONICAL_EXTENSION_COLUMNS
+    col_names = [c[0] for c in _CANONICAL_EXTENSION_COLUMNS]
+    assert "cycle" not in col_names, "cycle must NOT be an extension column (not enforced as a filter)"
 
 
 # ---------------------------------------------------------------------------
-# 8. _CANONICAL_EXTENSION_COLUMNS contains lead_bucket and cycle
+# 8. _CANONICAL_EXTENSION_COLUMNS contains lead_bucket
 # ---------------------------------------------------------------------------
 
-def test_extension_columns_include_lead_bucket_and_cycle():
+def test_extension_columns_include_lead_bucket():
     from src.calibration.ens_bias_repo import _CANONICAL_EXTENSION_COLUMNS
     col_names = [c[0] for c in _CANONICAL_EXTENSION_COLUMNS]
     assert "lead_bucket" in col_names, "lead_bucket missing from _CANONICAL_EXTENSION_COLUMNS"
-    assert "cycle" in col_names, "cycle missing from _CANONICAL_EXTENSION_COLUMNS"
 
 
 # ---------------------------------------------------------------------------
-# 9. write_bias_model accepts lead_bucket + cycle without error (schema guard)
+# 9. write_bias_model accepts lead_bucket without error (schema guard)
 # ---------------------------------------------------------------------------
 
-def test_write_bias_model_accepts_lead_bucket_and_cycle():
-    """write_bias_model must accept lead_bucket + cycle kwargs and write them when columns exist."""
+def test_write_bias_model_accepts_lead_bucket():
+    """write_bias_model must accept the lead_bucket kwarg and write it when the column exists."""
     from src.calibration.ens_bias_repo import init_ens_bias_schema, write_bias_model
 
     conn = sqlite3.connect(":memory:")
@@ -200,19 +201,17 @@ def test_write_bias_model_accepts_lead_bucket_and_cycle():
         weight_live=0.5,
         estimator="test",
         error_model_family="full_transport_v1",
-        error_model_key="TestCity|high|JJA|full_transport_v1|ecmwf_opendata_mx2t3_local_calendar_day_max|L24_48|00z",
+        error_model_key="TestCity|high|JJA|full_transport_v1|ecmwf_opendata_mx2t3_local_calendar_day_max|L24_48",
         authority="STAGING",
         lead_bucket="L24_48",
-        cycle="00z",
     )
     conn.commit()
 
     row = conn.execute(
-        "SELECT lead_bucket, cycle FROM model_bias_ens WHERE city='TestCity'"
+        "SELECT lead_bucket FROM model_bias_ens WHERE city='TestCity'"
     ).fetchone()
     assert row is not None
     assert row["lead_bucket"] == "L24_48"
-    assert row["cycle"] == "00z"
     conn.close()
 
 
