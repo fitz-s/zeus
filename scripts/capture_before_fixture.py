@@ -87,8 +87,8 @@ SELECT
     se.settlement_value,
     se.winning_bin,
     se.unit AS settlement_obs_unit
-FROM ensemble_snapshots_v2 s
-JOIN settlements se
+FROM ensemble_snapshots s  -- canonical DDL (v2_schema.py:108); live-root DB lags with _v2 tables — operator migrates separately
+JOIN settlement_outcomes se
     ON s.city = se.city
     AND s.target_date = se.target_date
     AND s.temperature_metric = se.temperature_metric
@@ -155,8 +155,8 @@ def _verify_error_model_family(conn: sqlite3.Connection) -> dict:
     """Assert 100% single-path (error_model_family NULL) per spec §1 / E_phase0_fixture_scope §1c."""
     try:
         cur = conn.execute("""
-            SELECT COUNT(*) FROM ensemble_snapshots_v2 s
-            JOIN settlements se ON s.city=se.city AND s.target_date=se.target_date
+            SELECT COUNT(*) FROM ensemble_snapshots s
+            JOIN settlement_outcomes se ON s.city=se.city AND s.target_date=se.target_date
                 AND s.temperature_metric=se.temperature_metric
             WHERE s.temperature_metric='high'
               AND s.data_version='ecmwf_opendata_mx2t3_local_calendar_day_max_v1'

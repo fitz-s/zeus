@@ -21,7 +21,7 @@ they coincide, so it works today. But units ARE mixed across sources (OpenData m
 own unit. Replace the `_to_celsius(settle, members_unit)` calls.
 
 **D-J1 — loose JOIN collapses settlement target (lineage bug).**
-`build_evidence` JOINs `settlements_v2 ON s.city=e.city AND s.target_date=e.target_date AND
+`build_evidence` JOINs `settlement_outcomes ON s.city=e.city AND s.target_date=e.target_date AND
 s.temperature_metric=e.temperature_metric` (`:129-131`) — NO station, NO source/authority,
 NO unit. A forecast is paired to a settlement of a different station/authority whenever a
 city has >1. Masked today (one WU station + one authority per city) but structurally the
@@ -73,7 +73,7 @@ code path that assumes a single global members unit corrupts silently.
    — raises on a loose-join mismatch (D-J1). Emit the ResidualKey dims (product/cycle/lead).
 5. **window provenance** (C1b): add `forecast_window_start_utc/end_utc` (already on snapshot)
    + `source_run_id`, `available_at` (available_at already selected) to the row.
-6. **naming** (#16): script uses stale `ensemble_snapshots_v2` / `settlements_v2`; canonical
+6. **naming** (#16): script uses stale `ensemble_snapshots` / `settlement_outcomes`; canonical
    is `ensemble_snapshots` / `settlement_outcomes`. Sweep when building on pr3-schema-stable.
 
 Relationship test to add (CLAUDE.md cross-module invariant): a forecast row + its TRUE

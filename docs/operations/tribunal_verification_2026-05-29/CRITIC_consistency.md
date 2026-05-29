@@ -33,7 +33,7 @@ contract makes the bad-residual category *unconstructable*. Each has a concrete 
 
 ### SEV-1.B — Contract enforced only at `ingest_grib_to_snapshots` leaves ≥2 independent live writers to the SAME table that bypass it
 - Confidence: HIGH
-- DRAFT2 §3b: "a single `ForecastObject.from_snapshot_row(row)` constructor ... called at the writer before INSERT." There is no single writer. The production table is `ensemble_snapshots` (DDL `src/state/schema/v2_schema.py:108`; NOTE: the docs call it `ensemble_snapshots_v2` everywhere — that string is only a label in evidence scripts + a temp fixture table at `replay_equivalence_full_transport.py:804`; see SEV-3.G). Independent `INSERT INTO ensemble_snapshots` sites that do NOT route through `ingest_grib_to_snapshots`:
+- DRAFT2 §3b: "a single `ForecastObject.from_snapshot_row(row)` constructor ... called at the writer before INSERT." There is no single writer. The production table is `ensemble_snapshots` (DDL `src/state/schema/v2_schema.py:108`; NOTE: the docs call it `ensemble_snapshots` everywhere — that string is only a label in evidence scripts + a temp fixture table at `replay_equivalence_full_transport.py:804`; see SEV-3.G). Independent `INSERT INTO ensemble_snapshots` sites that do NOT route through `ingest_grib_to_snapshots`:
   - `scripts/backfill_ens.py:132` — its OWN raw INSERT, and it computes p_raw via a DIFFERENT path: `ens.p_raw_vector(bins, n_mc=2000)` with `np.random.seed(42)` (`backfill_ens.py:127-129`). That is **2000 MC draws + a fixed legacy seed**, not the production 10k deterministic-sha256 path (`ensemble_signal.py:215-244`). It also writes only 13 columns — no `source_cycle_time`, no window-provenance, no `contributes_to_target_extrema`.
   - `scripts/backfill_low_contract_window_evidence.py:381` — dynamic-column `INSERT OR IGNORE INTO ensemble_snapshots`, no contract constructor.
   - (Also `scripts/seed_isolated_calibration_db.py:139`, `scripts/backfill_tigge_snapshot_p_raw*.py` UPDATE p_raw_json directly.)
@@ -84,11 +84,11 @@ contract makes the bad-residual category *unconstructable*. Each has a concrete 
 
 ## SEV-3 FINDINGS (correctness-adjacent / hygiene)
 
-### SEV-3.H — Pervasive `ensemble_snapshots_v2` naming in BOTH plans + evidence A/B/C is a phantom; production table is `ensemble_snapshots`
+### SEV-3.H — Pervasive `ensemble_snapshots` naming in BOTH plans + evidence A/B/C is a phantom; production table is `ensemble_snapshots`
 - Confidence: HIGH
-- `ensemble_snapshots_v2` as a real table appears ONLY as a temp/fixture in `scripts/replay_equivalence_full_transport.py:804`. The live DDL is `ensemble_snapshots` (`v2_schema.py:108`); every production writer/reader uses the unsuffixed name. The docs (A_source_extraction §C2 "INSERT/UPDATE to ensemble_snapshots_v2", B-doc title refs, C-doc O1) name a table that is not the one the contract must own.
-- Why it matters for consistency: a chokepoint spec that names the wrong table is a grep-trap; an executor wiring "the writer to ensemble_snapshots_v2" will find only the fixture and miss the real funnel. Memory note (grep-gate before contract lock) applies: line/table refs rot.
-- Fix: Global replace `ensemble_snapshots_v2` → `ensemble_snapshots` in both plans + A/B/C, with a one-line note that `_v2` was the superseded logical name (the DDL is the v2 schema *module*, but the table is unsuffixed).
+- `ensemble_snapshots` as a real table appears ONLY as a temp/fixture in `scripts/replay_equivalence_full_transport.py:804`. The live DDL is `ensemble_snapshots` (`v2_schema.py:108`); every production writer/reader uses the unsuffixed name. The docs (A_source_extraction §C2 "INSERT/UPDATE to ensemble_snapshots", B-doc title refs, C-doc O1) name a table that is not the one the contract must own.
+- Why it matters for consistency: a chokepoint spec that names the wrong table is a grep-trap; an executor wiring "the writer to ensemble_snapshots" will find only the fixture and miss the real funnel. Memory note (grep-gate before contract lock) applies: line/table refs rot.
+- Fix: Global replace `ensemble_snapshots` → `ensemble_snapshots` in both plans + A/B/C, with a one-line note that `_v2` was the superseded logical name (the DDL is the v2 schema *module*, but the table is unsuffixed).
 
 ### SEV-3.I — `contributes_to_target_extrema` precomputed-at-ingest, trusted-at-read is named as defect #4 but the contract does NOT make it rederivable; the target tuple stores `contributes` as data, not as a checkable function of the window
 - Confidence: MEDIUM

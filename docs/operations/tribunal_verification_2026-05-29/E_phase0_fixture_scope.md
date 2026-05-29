@@ -39,7 +39,7 @@ where `cal` comes from `get_calibrator(conn, city, target_date, temperature_metr
 ### 1b. Monitor path (existing positions, re-evaluation)
 `src/engine/monitor_refresh.py:500-680` — same `p_raw_vector_from_maxes` + `calibrate_and_normalize` but uses live members from forecast reader result, not stored members_json.
 
-### 1c. What is already stored in ensemble_snapshots_v2
+### 1c. What is already stored in ensemble_snapshots
 - `members_json`: 100% populated for eligible rows (all 6,167 joined rows) — sufficient to recompute p_raw without re-fetching ECMWF.
 - `p_raw_json`: **sparsely populated** — only 248 of 6,167 joined rows (4%) have stored p_raw_json. P_raw is NOT a reliable stored artifact; it must be recomputed from members_json.
 - `bin_grid_id`: populated on 6,167/6,167 of joined rows — bin grid recoverable for the replay.
@@ -61,7 +61,7 @@ Query criteria:
 - `temperature_metric = 'high'`
 - `data_version = 'ecmwf_opendata_mx2t3_local_calendar_day_max_v1'`
 - `authority = 'VERIFIED'`, `causality_status = 'OK'`, `boundary_ambiguous = 0`
-- Joined to `settlements` on `(city, target_date, temperature_metric)` with `authority = 'VERIFIED'` and `settlement_value IS NOT NULL`
+- Joined to `settlement_outcomes` on `(city, target_date, temperature_metric)` with `authority = 'VERIFIED'` and `settlement_value IS NOT NULL`
 
 ### Results
 
@@ -115,7 +115,7 @@ For each qualifying (city, target_date) pair:
 
 | Field | Source | Notes |
 |-------|--------|-------|
-| `snapshot_id` | `ensemble_snapshots_v2.snapshot_id` | primary key, immutable |
+| `snapshot_id` | `ensemble_snapshots.snapshot_id` | primary key, immutable |
 | `city`, `target_date`, `temperature_metric` | snapshot | join key |
 | `members_json` | snapshot | raw member array, basis for p_raw recompute |
 | `members_unit` | snapshot | degC for all current mx2t3 rows |

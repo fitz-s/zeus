@@ -86,7 +86,7 @@ Only genuine critic imprecision: `backfill_ens.py` bypass is low active-risk (--
 | Equivalence test | p_raw \|Δ\|≈0 | **p_cal + logit(p_raw)**; \|Δ\|≤derived-rounding-bound (not ≈0 across the staircase); don't retire MC until p_cal equivalence holds |
 | Contract target tuple | city/metric/date/product/cycle/lead/window | + **unit, settlement station/source/authority, bin_grid_id**; DST-correct local-day (not `floor(lead_hours/24)`) |
 | Chokepoint | writer + reader | + **serving bias-lookup site (locate), lead-aware fail-closed**; writer inventory + quarantine stale (`backfill_ens`) |
-| Naming | `ensemble_snapshots_v2` | `ensemble_snapshots` (canonical) — sweep all docs |
+| Naming | `ensemble_snapshots` | `ensemble_snapshots` (canonical) — sweep all docs |
 | Near-term scope | contract + ledger + raw serving + selector dormant | same, but selector is dormant **by data necessity** (n≈801, no fitted candidate), not just policy |
 
 HONEST LIMIT (elevated to a hard gate label per stat-critic + Draft-2 §5): until the gate is built and coverage-validated, **the only defensible served model is raw identity.** Improvement-mode certifies *not-worse + structurally-correct*, never profit, for the foreseeable data horizon.

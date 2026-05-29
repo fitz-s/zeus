@@ -99,7 +99,7 @@ DB rows in the live DB.
 Cite:
 - `ingest_grib_to_snapshots.py:349–351` — window derived from selected_step_ranges
 - `ingest_grib_to_snapshots.py:472` — `contributes_to_target_extrema` write
-- `ingest_grib_to_snapshots.py:662, 694–714` — INSERT/UPDATE to ensemble_snapshots_v2
+- `ingest_grib_to_snapshots.py:662, 694–714` — INSERT/UPDATE to ensemble_snapshots
 
 ---
 
@@ -110,7 +110,7 @@ Cite:
 
 At ingest: `ingest_grib_to_snapshots._contract_evidence_fields` (lines 366–474) classifies
 attribution and writes `contributes_to_target_extrema = 1 if contributes else 0` (line 472)
-into `ensemble_snapshots_v2` at INSERT/UPDATE time (lines 694–714).
+into `ensemble_snapshots` at INSERT/UPDATE time (lines 694–714).
 
 At read time: `src/data/executable_forecast_reader.py:33` uses the stored column verbatim:
 ```sql

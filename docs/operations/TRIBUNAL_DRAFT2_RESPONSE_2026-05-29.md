@@ -66,7 +66,7 @@ Resolution (verified feasible): `ens_bias_model.py:1-325` is **already an empiri
 Adding hierarchy levels does NOT fix this by itself — it inherits the wrong shrinkage target. The estimator is a *candidate generator*; the accept-gate is the *serving authority*. This separation is what stops the redesign quietly re-arming the bug it exists to kill.
 
 ### 3b. Name the enforcement chokepoint (else it's doc, not antibody)
-- Writer seam: `scripts/ingest_grib_to_snapshots.py` (writes `ensemble_snapshots_v2`).
+- Writer seam: `scripts/ingest_grib_to_snapshots.py` (writes `ensemble_snapshots`).
 - Reader seam: `src/data/executable_forecast_reader.py` (serves to the decision path).
 - Mechanism: a single `ForecastObject.from_snapshot_row(row)` constructor that **RAISES** if product/cycle/lead_bucket/window/contributes can't be resolved; called at the writer before INSERT and at the reader before serving. `SettlementObject.from_settlement_row(...)`. A residual is constructible **only** via `Residual(forecast, settlement)` which asserts `forecast.target == settlement.target`. That assertion is the antibody — it makes a TIGGE-prior-tagged-OpenData row or a lead-mismatched residual *unconstructable*, not merely discouraged.
 
