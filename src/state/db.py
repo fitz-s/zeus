@@ -6671,6 +6671,33 @@ def query_probability_trace_completeness(conn: sqlite3.Connection | None) -> dic
 
 
 
+def _attached_table_exists(conn: sqlite3.Connection, schema: str, table: str) -> bool:
+    if schema not in {"world", "forecasts"}:
+        return False
+    row = conn.execute(
+        f"SELECT 1 FROM {schema}.sqlite_master WHERE type = 'table' AND name = ?",
+        (table,),
+    ).fetchone()
+    return row is not None
+
+
+def _selection_fact_table_ref(conn: sqlite3.Connection, table: str) -> str | None:
+    # B-series restore: selection_family_fact / selection_hypothesis_fact are
+    # world_class (db_table_ownership.yaml) — writes MUST route to world.<table>
+    # when world.db is ATTACHed, else they land in the wrong DB (INV-37/K1).
+    if table not in {"selection_family_fact", "selection_hypothesis_fact"}:
+        return None
+    try:
+        attached = {str(row[1]) for row in conn.execute("PRAGMA database_list").fetchall()}
+        if "world" in attached and _attached_table_exists(conn, "world", table):
+            return f"world.{table}"
+    except sqlite3.Error:
+        pass
+    if _table_exists(conn, table):
+        return table
+    return None
+
+
 def log_selection_family_fact(
     conn: sqlite3.Connection | None,
     *,
@@ -6687,13 +6714,14 @@ def log_selection_family_fact(
 ) -> dict:
     if conn is None:
         return {"status": "skipped_no_connection", "table": "selection_family_fact"}
-    if not _table_exists(conn, "selection_family_fact"):
+    table_ref = _selection_fact_table_ref(conn, "selection_family_fact")
+    if table_ref is None:
         return {"status": "skipped_missing_table", "table": "selection_family_fact"}
     if not family_id:
         return {"status": "skipped_missing_family_id", "table": "selection_family_fact"}
     conn.execute(
-        """
-        INSERT INTO selection_family_fact (
+        f"""
+        INSERT INTO {table_ref} (
             family_id, cycle_mode, decision_snapshot_id, city, target_date,
             strategy_key, discovery_mode, created_at, meta_json, decision_time_status
         )
@@ -6750,7 +6778,8 @@ def log_selection_hypothesis_fact(
 ) -> dict:
     if conn is None:
         return {"status": "skipped_no_connection", "table": "selection_hypothesis_fact"}
-    if not _table_exists(conn, "selection_hypothesis_fact"):
+    table_ref = _selection_fact_table_ref(conn, "selection_hypothesis_fact")
+    if table_ref is None:
         return {"status": "skipped_missing_table", "table": "selection_hypothesis_fact"}
     if not hypothesis_id:
         return {"status": "skipped_missing_hypothesis_id", "table": "selection_hypothesis_fact"}
@@ -6758,8 +6787,8 @@ def log_selection_hypothesis_fact(
         return {"status": "skipped_missing_family_id", "table": "selection_hypothesis_fact"}
     direction_value = direction if direction in {"buy_yes", "buy_no"} else "unknown"
     conn.execute(
-        """
-        INSERT INTO selection_hypothesis_fact (
+        f"""
+        INSERT INTO {table_ref} (
             hypothesis_id, family_id, decision_id, candidate_id, city, target_date,
             range_label, direction, p_value, q_value, ci_lower, ci_upper, edge,
             tested, passed_prefilter, selected_post_fdr, rejection_stage,
